@@ -55,7 +55,6 @@ pub(crate) fn pending_migration(root: &Path) -> Option<PathBuf> {
 ///
 /// The engine's entry point is what prints it, so a build without the engine
 /// has nobody to say it.
-#[cfg(feature = "pm-pnpm")]
 pub(crate) fn migration_hint(foreign: &Path) -> String {
     format!(
         "nub: {} is another package manager's lockfile and was not read — \
@@ -96,13 +95,10 @@ pub(crate) fn run_pm_migrate(cwd: &Path) -> Result<i32> {
     // A pnpm-incumbent project keeps pnpm's lockfile name; everything else
     // gets nub's. Without the engine there is no pnpm identity to detect and
     // nub's own is the only lockfile this build writes.
-    #[cfg(feature = "pm-pnpm")]
     let target = match super::project_identity::detect(&root) {
         super::project_identity::ProjectIdentity::Pnpm => "pnpm",
         super::project_identity::ProjectIdentity::Nub => "nub",
     };
-    #[cfg(not(feature = "pm-pnpm"))]
-    let target = "nub";
     let written = migrate_lockfile(&root, &from, target)?;
     std::fs::remove_file(&from).with_context(|| format!("removing {}", from.display()))?;
     println!(
@@ -136,7 +132,6 @@ pub(crate) fn migrate_lockfile(root: &Path, from: &Path, target: &str) -> Result
              rerun the migration."
         );
     }
-    #[cfg(feature = "pm-pnpm")]
     if super::pnpm_engine::selected() {
         return engine_import(root, target);
     }
@@ -151,7 +146,6 @@ pub(crate) fn migrate_lockfile(root: &Path, from: &Path, target: &str) -> Result
 ///
 /// `--dir` is how the command line says which project, because a migration
 /// runs at the workspace root and the process may sit in a member.
-#[cfg(feature = "pm-pnpm")]
 fn engine_import(root: &Path, target: &str) -> Result<PathBuf> {
     let argv = vec![
         std::ffi::OsString::from("nub"),

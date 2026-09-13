@@ -1,18 +1,23 @@
 //! `nub outdated` against a registry that dates nothing (#722, #581).
 //!
-//! A `minimumReleaseAge` window is checked against per-version publish times,
-//! and a registry that serves none makes the gate fail closed: `install` and
-//! `update` hard-error (`ERR_NUB_RELEASE_AGE_MISSING_TIME`). `outdated` is a
-//! pure read and cannot error, so it says so on stderr instead — otherwise it
-//! would report "All dependencies up to date." for a project where every
-//! install refuses, which is the report/installer disagreement #722 is about.
+//! Written against the vendored aube engine, which age-gated its own reporting:
+//! a `minimumReleaseAge` window was checked against per-version publish times,
+//! and a registry serving none made the gate fail closed, so `outdated` printed
+//! "All dependencies up to date." plus a stderr warning naming `nub update` as
+//! the command that would fail. That warning was the fix for #722's
+//! report/installer disagreement.
 //!
-//! The warning keys on the MANIFEST range alone. The `latest` column resolves
-//! the literal `latest` range, which a gated pick widens to `<=dist-tags.latest`
-//! — a candidate set bounded by the tag and disjoint from the manifest range
-//! that plain `update` resolves. A stale or rolled-back tag reaches an undated
-//! state routinely, so folding it in would predict a failure that does not
-//! happen. `stale_latest_tag_alone_does_not_warn` is what pins that.
+//! The pnpm 12 engine does not age-gate `outdated` at all. Its report is the
+//! plain `Package | Current | Latest` table — there is no `wanted` column for a
+//! gated pick to disagree with — and a registry that dates nothing changes
+//! nothing about it. So the warning, the codes it carried, and the
+//! `wanted`-versus-`latest` narrowing that shaped these tests are all gone.
+//!
+//! What the fixture pins now is that absence: an undated registry is reported
+//! exactly like a dated one. Both cases were measured on the pnpm engine and
+//! differentialled against pnpm 12.4.1, which produces the identical table and
+//! exit code. `WARNING` is kept as the retired string these tests watch for, so
+//! re-introducing an age gate into `outdated` goes red here.
 //!
 //! Offline by construction: an in-process registry on an ephemeral port, and a
 //! handcrafted lockfile so nothing installs.
@@ -53,6 +58,13 @@ fn tmpdir(tag: &str) -> PathBuf {
 /// A project pinned at `1.0.0` whose manifest range can still reach `1.1.0`,
 /// pointed at `registry_url` with the window on. `fetch-retries=0` keeps a
 /// fixture hiccup from being retried into a timeout.
+///
+/// The lockfile is a real pnpm one and is parsed by a real YAML parser, so the
+/// specifier is quoted: a range beginning `>` is a block-scalar indicator, and
+/// unquoted it fails the load outright rather than producing the range you
+/// meant. `minimumReleaseAge` stays in `.npmrc`, where this project's own
+/// config model reads it; pnpm takes it from `pnpm-workspace.yaml` instead, and
+/// neither home makes `outdated` gate its report.
 fn project(tag: &str, registry_url: &str, specifier: &str) -> PathBuf {
     let dir = tmpdir(tag);
     std::fs::write(
@@ -75,7 +87,7 @@ fn project(tag: &str, registry_url: &str, specifier: &str) -> PathBuf {
              \x20\x20.:\n\
              \x20\x20\x20\x20dependencies:\n\
              \x20\x20\x20\x20\x20\x20undated-pkg:\n\
-             \x20\x20\x20\x20\x20\x20\x20\x20specifier: {specifier}\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20specifier: '{specifier}'\n\
              \x20\x20\x20\x20\x20\x20\x20\x20version: 1.0.0\n\n\
              packages:\n\n\
              \x20\x20undated-pkg@1.0.0:\n\
@@ -106,10 +118,10 @@ fn run_outdated(dir: &Path) -> (String, String, i32) {
 /// Serves one packument for `undated-pkg` and nothing else.
 ///
 /// `latest_tag` selects the `latest` dist-tag; `times` is the packument's
-/// `time` map, and omitting a version from it is what makes the gate's verdict
-/// `Undeterminable` for that version rather than `TooNew`. A far-future
-/// `modified` keeps the document-level maturity shortcut shut without a date
-/// that goes stale.
+/// `time` map, and an empty one is a registry that dates nothing — the input
+/// these tests exist to hold `outdated` steady against. A far-future `modified`
+/// keeps any document-level maturity shortcut shut without a date that goes
+/// stale.
 struct Registry {
     url: String,
     stop: Arc<AtomicBool>,
@@ -245,40 +257,51 @@ impl Drop for Registry {
     }
 }
 
+/// The retired aube warning. No longer emitted by anything; asserted absent so
+/// that re-introducing an age gate into `outdated` fails here rather than
+/// silently changing what the command reports.
 const WARNING: &str = "undated-pkg has no registry publish times";
 
-/// The whole point: a registry that dates nothing must not be reported as
-/// "up to date" while every install of it refuses.
+/// A registry that dates nothing does not change what `outdated` reports: the
+/// upgrade is offered exactly as it would be for a fully dated registry, and
+/// the drift exit code is unchanged.
+///
+/// Was the inverse — "All dependencies up to date." on stdout plus a stderr
+/// warning naming `nub update`, exit 0 — because the age gate fed `outdated`
+/// and failed closed on missing publish times. Nothing gates the report now.
+/// Paired with `a_dated_registry_reports_the_upgrade_and_stays_quiet`, which
+/// runs the same assertions over a fully dated registry: the two agreeing is
+/// the contract.
 #[test]
-fn an_undatable_registry_says_so_instead_of_reporting_no_work() {
+fn an_undatable_registry_is_reported_like_any_other() {
     let registry = Registry::start("1.1.0", &[]);
     let dir = project("undated", &registry.url, "^1.0.0");
 
     let (stdout, stderr, code) = run_outdated(&dir);
 
     assert!(
-        stderr.contains(WARNING),
-        "the window admits nothing, so `nub update` will fail — say so.\nstderr: {stderr}"
+        stdout.contains("undated-pkg") && stdout.contains("1.1.0"),
+        "the upgrade is reported whether or not the registry dates it.\nstdout: {stdout}"
     );
     assert!(
-        stderr.contains("nub update"),
-        "name the command that fails, not just the condition.\nstderr: {stderr}"
+        !stdout.contains("All dependencies up to date"),
+        "an available upgrade must not be reported as no work.\nstdout: {stdout}"
     );
     assert!(
-        !stdout.contains(WARNING),
-        "stdout is data; the warning belongs on stderr.\nstdout: {stdout}"
+        !stderr.contains(WARNING),
+        "the age-gate warning is retired; nothing should emit it.\nstderr: {stderr}"
     );
     assert_eq!(
-        code, 0,
-        "outdated is a pure read and offers nothing here, so it cannot fail the \
-         command.\nstdout: {stdout}\nstderr: {stderr}"
+        code, 1,
+        "drift exits 1.\nstdout: {stdout}\nstderr: {stderr}"
     );
 }
 
-/// The positive control. Same fixture, same window, every version dated and
-/// old: the warning must NOT fire, and the upgrade must be reported normally.
-/// Without this, the assertion above could pass against a warning that is
-/// simply always on.
+/// The comparison case. Same fixture, same window, every version dated and
+/// old. It must report exactly what the undated registry above reports — that
+/// the two agree is what says publish times no longer steer `outdated`, and
+/// without it the test above would pass against a command that had simply
+/// stopped reporting anything.
 #[test]
 fn a_dated_registry_reports_the_upgrade_and_stays_quiet() {
     let registry = Registry::start(
@@ -296,7 +319,7 @@ fn a_dated_registry_reports_the_upgrade_and_stays_quiet() {
 
     assert!(
         !stderr.contains(WARNING),
-        "every version is dated and mature, so nothing is undeterminable.\nstderr: {stderr}"
+        "the age-gate warning is retired; nothing should emit it.\nstderr: {stderr}"
     );
     assert!(
         stdout.contains("1.1.0"),
@@ -308,38 +331,11 @@ fn a_dated_registry_reports_the_upgrade_and_stays_quiet() {
     );
 }
 
-/// The narrowing, and the reason it is not obvious.
-///
-/// An undated `latest` TAG predicts nothing about plain `nub update`, which
-/// resolves the MANIFEST range. Getting the `latest` column to a genuinely
-/// undatable verdict takes more than an undated tag: `semver_util.rs` widens a
-/// blocked `latest` from the tagged version to `<=<tag>` and scans downward
-/// (#681), so a single dated release at or below the tag makes it `Found` and
-/// this test would pass against the very bug it names. So EVERY version up to
-/// the `2.0.0` tag is undated, and the only dated one — `3.0.0` — sits above
-/// it, reachable by `>=1.0.0` but not by the tag.
-///
-/// The two columns therefore disagree: `latest` is undeterminable while
-/// `wanted` resolves to a dated 3.0.0 and an update succeeds. Warning here
-/// would be a lie, which is why the predicate keys on `wanted` alone.
-#[test]
-fn stale_latest_tag_alone_does_not_warn() {
-    let registry = Registry::start("2.0.0", &[("3.0.0", "2020-01-01T00:00:00.000Z")]);
-    let dir = project("stale-tag", &registry.url, ">=1.0.0");
-
-    let (stdout, stderr, code) = run_outdated(&dir);
-
-    assert!(
-        !stderr.contains(WARNING),
-        "`nub update` resolves >=1.0.0 to the dated 3.0.0 and succeeds, so warning \
-         that it will fail is false.\nstderr: {stderr}"
-    );
-    assert!(
-        stdout.contains("3.0.0"),
-        "the manifest range still resolves past the stale tag.\nstdout: {stdout}"
-    );
-    assert_eq!(
-        code, 1,
-        "wanted moved, so this is drift.\nstdout: {stdout}\nstderr: {stderr}"
-    );
-}
+// `stale_latest_tag_alone_does_not_warn` lived here. It existed to narrow the
+// age-gate warning's predicate to the `wanted` column, by constructing a
+// registry whose `latest` tag was undatable while the manifest range still
+// resolved to a dated version. The pnpm 12 engine reports neither a `wanted`
+// column nor the warning, so both sides of that distinction are gone and the
+// test's surviving assertion — that no warning fires — is one no fixture could
+// ever make fail. `an_undatable_registry_is_reported_like_any_other` carries
+// what remains checkable.

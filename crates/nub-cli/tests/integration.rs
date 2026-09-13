@@ -9649,35 +9649,66 @@ fn run_npm_aliases_map_to_canonical_flags() {
 
 // ── PM-management verbs (A2 passthrough disabled) ────────────────────────────
 
-/// A deliberately-excluded engine verb (`deploy`) errors non-zero with its
-/// honest status ("not yet supported") and a real-PM fallback. Nothing is
-/// dispatched — stdout stays empty.
+/// `deploy` is not one of nub's own verbs, so it routes to the engine and the
+/// engine's own answer is the answer — and which BRAND that answer carries is
+/// decided by the project's incumbent, not by the verb.
+///
+/// It used to be a deliberately-excluded verb that errored "not yet supported"
+/// and pointed at `pnpm deploy`. That exclusion is gone: every verb nub does
+/// not own itself reaches the engine unchanged, so the old refusal would now
+/// be nub inventing a failure the engine does not have.
+///
+/// Both halves run on one fixture differing only by the lockfile, which is
+/// what makes this discriminating — a single-identity version would pass on a
+/// build that had lost the profile entirely.
 #[test]
-fn bareword_pm_verb_errors_with_the_real_pm_command() {
-    let dir = unique_test_cache();
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("package.json"), r#"{"name":"app"}"#).unwrap();
-    std::fs::write(dir.join("pnpm-lock.yaml"), "").unwrap(); // lockfile → pnpm
-    let out = Command::new(nub_binary())
-        .args(["deploy", "out"])
-        .current_dir(&dir)
-        .output()
-        .expect("spawn nub deploy");
-    let stderr = String::from_utf8_lossy(&out.stderr);
+fn an_engine_verb_carries_the_incumbents_brand() {
+    let run = |tag: &str, pnpm_incumbent: bool| {
+        let dir = unique_test_cache().join(tag);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("package.json"), r#"{"name":"app"}"#).unwrap();
+        if pnpm_incumbent {
+            std::fs::write(dir.join("pnpm-lock.yaml"), "").unwrap();
+        }
+        let out = Command::new(nub_binary())
+            .args(["deploy", "out"])
+            .current_dir(&dir)
+            .output()
+            .expect("spawn nub deploy");
+        assert_ne!(
+            out.status.code(),
+            Some(0),
+            "a deploy outside a workspace is an error"
+        );
+        String::from_utf8_lossy(&out.stderr).to_string()
+    };
+
+    // Under pnpm's incumbency nub is pnpm, down to the error code: verified
+    // byte-identical against real pnpm 12.4.1 on this same fixture.
+    let as_pnpm = run("pnpm-incumbent", true);
     assert!(
-        stderr.contains("not yet supported") && stderr.contains("pnpm deploy"),
-        "the error must state the status and the real-PM fallback: {stderr}"
+        as_pnpm.contains("ERR_PNPM_CANNOT_DEPLOY"),
+        "a pnpm-incumbent project must get pnpm's own code verbatim: {as_pnpm}"
     );
-    assert_ne!(
-        out.status.code(),
-        Some(0),
-        "an excluded PM verb is an error, not a dispatch"
+
+    // Everywhere else the engine speaks as nub.
+    let as_nub = run("nub-incumbent", false);
+    assert!(
+        as_nub.contains("ERR_NUB_CANNOT_DEPLOY"),
+        "a nub-incumbent project must get the rebranded code: {as_nub}"
     );
     assert!(
-        out.stdout.is_empty(),
-        "nothing may be forwarded to a PM: {}",
-        String::from_utf8_lossy(&out.stdout)
+        !as_nub.contains("ERR_PNPM_"),
+        "no engine-branded code may reach a nub-incumbent project: {as_nub}"
     );
+
+    // The engine's own prose is the same either way — only the brand moves.
+    for stderr in [&as_pnpm, &as_nub] {
+        assert!(
+            stderr.contains("A deploy is only possible from inside a workspace"),
+            "the engine's own diagnosis must survive the rebrand: {stderr}"
+        );
+    }
 }
 
 /// A verb nub has never heard of (`frobnicate`) errors with the generic

@@ -1004,7 +1004,9 @@ pub enum Command {
     /// it carries the workspace fan-out flags `nub exec` has PLUS the npx
     /// fetch-path flags (`-p`, `--no-install`, `-q`, …) that only make sense
     /// when a tool may be fetched. Hidden from `nub`'s own subcommand list —
-    /// it is reachable only as the `nubx` argv0.
+    /// the spellings a user types are the `nubx` argv0 and the `nub dlx` /
+    /// `nub x` / `nub create` verbs, which [`run_dlx_family`] rewrites onto
+    /// this grammar.
     #[usage(hide)]
     Nubx {
         /// Binary (or package, with `-p`) name to execute.
@@ -1881,7 +1883,6 @@ const SUBCOMMANDS: &[&str] = &[
 /// runs before the engine is asked what a command line names, which is
 /// what keeps `nub upgrade` nub's self-update: the engine reads `upgrade`
 /// as a spelling of its own `update`.
-#[cfg(feature = "pm-pnpm")]
 fn host_owned_subcommand(verb: &str) -> bool {
     SUBCOMMANDS.contains(&verb) && !matches!(verb, "install" | "i" | "ci")
 }
@@ -1897,7 +1898,6 @@ fn host_owned_subcommand(verb: &str) -> bool {
 /// pnpm's own spelling, ahead of the verb — where pnpm reads them too.
 /// `--silent` is pnpm's shorthand for `--reporter=silent`, and a
 /// `--reporter` written beside it overrides it, as it does for pnpm.
-#[cfg(feature = "pm-pnpm")]
 fn engine_argv(
     rest: &[String],
     silent: bool,
@@ -2596,7 +2596,6 @@ fn run_nub() -> Result<i32> {
     // leading flag as a Node flag. nub's own verbs are settled first, so
     // `nub upgrade` stays nub's self-update rather than the engine's
     // spelling of `update`.
-    #[cfg(feature = "pm-pnpm")]
     if !rest.first().is_some_and(|verb| host_owned_subcommand(verb))
         && let Some(argv) = crate::pm_engine::engine_takes(engine_argv(
             &rest,
@@ -2987,6 +2986,14 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
         // args after the verb. Report the user's actual typed spelling so
         // usage/errors still read `nub install …`.
         return crate::pm_engine::dispatch_verb(spec, &subcommand, &add_argv[1..], &pm);
+    }
+
+    // `dlx`, its `x` alias, and `create` are NUB's fetch-and-run path, not a
+    // package manager's: they are three spellings of what `nubx` already
+    // implements, and routing them anywhere else is what kept the vendored
+    // engine reachable for verbs nub owns outright.
+    if matches!(subcommand.as_str(), "dlx" | "x" | "create") {
+        return run_dlx_family(&subcommand, &rest[1..]);
     }
 
     // Verbs registered to the embedded PM engine (the aube verb surface minus
@@ -3641,6 +3648,89 @@ fn run_nubx() -> Result<i32> {
     let mut rest = vec!["nubx".to_string()];
     rest.extend(args);
     dispatch_subcommand(rest)
+}
+
+/// `nub dlx` / `nub x` / `nub create`, rewritten onto the `nubx` grammar that
+/// already implements them.
+///
+/// The one semantic difference is the consent gate, and it falls out of which
+/// spelling the user typed: `nubx eslint` may reach the registry by ACCIDENT —
+/// the tool was simply not installed — so that path asks first. Typing `dlx` or
+/// `create` IS the request to fetch, so there is nothing left to ask, and both
+/// carry `--yes` on the user's behalf.
+fn run_dlx_family(verb: &str, args: &[String]) -> Result<i32> {
+    // `--help` is the command's own only BEFORE the subject; after it the flag
+    // belongs to the tool being run, exactly as `nubx` reads it. Answered here
+    // so `nub create --help` prints a page instead of the missing-template
+    // error the scan below would otherwise raise.
+    for arg in args {
+        if arg == "--" || !arg.starts_with('-') {
+            break;
+        }
+        if arg == "--help" || arg == "-h" {
+            print_dlx_help(verb);
+            return Ok(0);
+        }
+    }
+
+    let mut rewritten = vec!["nubx".to_string(), "--yes".to_string()];
+    if verb == "create" {
+        // The template is the first positional; anything before it is a flag
+        // of nub's own, and `--` ends the scan the way it does everywhere else.
+        let template = args
+            .iter()
+            .position(|arg| arg == "--" || !arg.starts_with('-'))
+            .filter(|&i| args[i] != "--");
+        let Some(template) = template else {
+            bail!("nub create: missing template name\nUsage: nub create <template> [args...]");
+        };
+        rewritten.extend(args[..template].iter().cloned());
+        rewritten.push(create_package_name(&args[template]));
+        rewritten.extend(args[template + 1..].iter().cloned());
+    } else {
+        rewritten.extend(args.iter().cloned());
+    }
+    // Arm the registry tier, exactly as the `nubx` entry point does.
+    NUBX_DLX_FALLBACK.store(true, Ordering::Relaxed);
+    dispatch_subcommand(rewritten)
+}
+
+/// One page for the four spellings of the fetch-and-run command, titled with
+/// the one the user typed.
+///
+/// The flags are identical, so the page is the `nubx` grammar's own rather
+/// than four copies that would drift apart; only the usage line moves, since
+/// `Usage: nub nubx` in answer to `nub dlx --help` names a command the user
+/// did not run.
+fn print_dlx_help(verb: &str) {
+    let words = [
+        std::ffi::OsString::from("nubx"),
+        std::ffi::OsString::from("--help"),
+    ];
+    if let usage_rs::embedded::Outcome::Exit(exit) = Cli::embedded_outcome(&words) {
+        let text = exit.text.replace("nub nubx", &format!("nub {verb}"));
+        println!("{}", text.trim_end());
+    }
+}
+
+/// The package `nub create <template>` actually runs, following pnpm's rule:
+/// `foo` is `create-foo`, and a scoped `@scope/foo` is `@scope/create-foo`. A
+/// version suffix rides along, and a name that already carries the prefix is
+/// left alone so `nub create create-vite` does not become `create-create-vite`.
+fn create_package_name(template: &str) -> String {
+    let (name, version) = match template.rfind('@') {
+        // A leading `@` is the scope sigil, not a version separator.
+        Some(at) if at > 0 => (&template[..at], &template[at..]),
+        _ => (template, ""),
+    };
+    let (scope, bare) = match name.strip_prefix('@').and_then(|s| s.split_once('/')) {
+        Some((scope, bare)) => (format!("@{scope}/"), bare),
+        None => (String::new(), name),
+    };
+    if bare.starts_with("create-") || bare == "create" {
+        return template.to_string();
+    }
+    format!("{scope}create-{bare}{version}")
 }
 
 fn run_as_node() -> Result<i32> {
@@ -9418,6 +9508,10 @@ fn run_help(command: Option<&str>, verbose: bool) {
     // verb listing). Route through the same entry points the live commands use so
     // `nub help node` and `nub node --help` agree.
     match cmd {
+        "dlx" | "x" | "create" => {
+            print_dlx_help(cmd);
+            return;
+        }
         "node" => {
             let _ = run_node(&["--help".to_string()]);
             return;
@@ -9435,6 +9529,24 @@ fn run_help(command: Option<&str>, verbose: bool) {
             return;
         }
         _ => {}
+    }
+
+    // An engine verb's help belongs to the ENGINE, and it has to come from the
+    // same front door `nub <verb> --help` goes through. `help` is one of nub's
+    // own verbs, so the intercept in `run` settles it before ever asking the
+    // engine what `help add` names — which left this path rendering nub's page
+    // while `nub add --help` rendered the engine's. Real pnpm 12.4.1 prints
+    // byte-identical help for `pnpm help add` and `pnpm add --help`, so the two
+    // forms disagreeing is a divergence, not a cosmetic difference.
+    if let Some(argv) = crate::pm_engine::engine_takes(engine_argv(
+        &[cmd.to_string(), "--help".to_string()],
+        false,
+        None,
+        None,
+        None,
+    )) {
+        let _ = crate::pm_engine::run_pnpm_engine(argv);
+        return;
     }
 
     // Engine verbs (`add`/`remove`/`why`/…): dispatch the verb's own `--help` so
@@ -15214,5 +15326,27 @@ mod tests {
             );
         }
         assert_eq!(parse_verify_deps_env(""), None);
+    }
+
+    /// pnpm's `create` mapping, which is the one part of the dlx family that
+    /// is not a straight rewrite. The scoped forms are what make it worth a
+    /// test: the scope sigil and the version separator are the same character.
+    #[test]
+    fn create_maps_the_template_onto_its_create_package() {
+        assert_eq!(create_package_name("vite"), "create-vite");
+        assert_eq!(create_package_name("vite@latest"), "create-vite@latest");
+        assert_eq!(create_package_name("@scope/app"), "@scope/create-app");
+        assert_eq!(
+            create_package_name("@scope/app@1.2.3"),
+            "@scope/create-app@1.2.3"
+        );
+        // Already prefixed: `nub create create-vite` runs `create-vite`, not
+        // `create-create-vite`.
+        assert_eq!(create_package_name("create-vite"), "create-vite");
+        assert_eq!(
+            create_package_name("@scope/create-app"),
+            "@scope/create-app"
+        );
+        assert_eq!(create_package_name("create"), "create");
     }
 }

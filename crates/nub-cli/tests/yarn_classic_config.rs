@@ -62,88 +62,91 @@ const CLASSIC_YARNRC: &str = r#"registry "https://classic.registry.example"
 "//scope.registry.example/:_authToken" "scope-token"
 "#;
 
+/// A classic `.yarnrc` supplies nub with nothing, under every incumbent —
+/// yarn's own included.
+///
+/// This file used to assert the opposite for a yarn-classic project, and to
+/// draw a Berry-versus-classic distinction on top of it: Berry abandoned
+/// `.yarnrc`, so a stray one had to go unread while `.yarnrc.yml` was honored.
+/// Neither half survives. Nub no longer reads yarn configuration for any
+/// setting — `nub pm migrate` converts a `yarn.lock` once and the project is
+/// nub's afterwards — so the two majors no longer differ in what they
+/// contribute, which is why the cases collapse into one sweep. The Berry file's
+/// own retirement is covered by
+/// `layout_axis_scoping::a_yarnrc_supplies_no_config_and_no_layout`.
+///
+/// The stray-`.yarnrc` fixture is kept because it is the one that could still
+/// regress quietly: a resurrected reader would answer from a file no yarn
+/// version has read since v1.
 #[test]
-fn yarn_incumbent_reads_classic_yarnrc_registry_and_scope() {
-    let dir = temp_project(
-        "yarn1",
-        &[
-            (
-                "package.json",
-                r#"{"name":"app","version":"1.0.0","packageManager":"yarn@1.22.22"}"#,
-            ),
-            ("yarn.lock", "# yarn lockfile v1\n"),
-            (".yarnrc", CLASSIC_YARNRC),
-        ],
-    );
-
-    assert_eq!(
-        config_get(&dir, "registry"),
-        "https://classic.registry.example/"
-    );
-    assert_eq!(
-        config_get(&dir, "@acme:registry"),
-        "https://scope.registry.example/"
-    );
-}
-
-#[test]
-fn yarn_berry_incumbent_ignores_stray_classic_yarnrc() {
-    // A Berry project (a `.yarnrc.yml` setting registry A) carrying a stray
-    // legacy `.yarnrc` (setting registry B). Yarn Berry abandoned `.yarnrc`, so
-    // B must NOT be read: the resolved registry is A, and the scope key the
-    // `.yarnrc` declares is absent.
-    let dir = temp_project(
-        "berry-stray",
-        &[
-            (
-                "package.json",
-                r#"{"name":"app","version":"1.0.0","packageManager":"yarn@4.2.2"}"#,
-            ),
-            (
-                ".yarnrc.yml",
-                "npmRegistryServer: https://berry.registry.example\n",
-            ),
-            (".yarnrc", CLASSIC_YARNRC),
-        ],
-    );
-
-    assert_eq!(
-        config_get(&dir, "registry"),
-        "https://berry.registry.example/"
-    );
-    // The classic `.yarnrc`'s scope registry is not read under Berry.
-    assert_eq!(config_get(&dir, "@acme:registry"), "undefined");
-}
-
-#[test]
-fn non_yarn_incumbents_do_not_read_classic_yarnrc() {
-    let cases = [
+fn no_incumbent_reads_a_classic_yarnrc() {
+    let cases: &[(&str, &[(&str, &str)])] = &[
+        (
+            "yarn-classic",
+            &[
+                (
+                    "package.json",
+                    r#"{"name":"app","version":"1.0.0","packageManager":"yarn@1.22.22"}"#,
+                ),
+                ("yarn.lock", "# yarn lockfile v1\n"),
+                (".yarnrc", CLASSIC_YARNRC),
+            ],
+        ),
+        (
+            "yarn-berry-with-stray",
+            &[
+                (
+                    "package.json",
+                    r#"{"name":"app","version":"1.0.0","packageManager":"yarn@4.2.2"}"#,
+                ),
+                (
+                    ".yarnrc.yml",
+                    "npmRegistryServer: https://berry.registry.example\n",
+                ),
+                (".yarnrc", CLASSIC_YARNRC),
+            ],
+        ),
         (
             "npm",
-            r#"{"name":"app","version":"1.0.0","packageManager":"npm@10.0.0"}"#,
+            &[
+                (
+                    "package.json",
+                    r#"{"name":"app","version":"1.0.0","packageManager":"npm@10.0.0"}"#,
+                ),
+                (".yarnrc", CLASSIC_YARNRC),
+            ],
         ),
         (
             "pnpm",
-            r#"{"name":"app","version":"1.0.0","packageManager":"pnpm@10.0.0"}"#,
+            &[
+                (
+                    "package.json",
+                    r#"{"name":"app","version":"1.0.0","packageManager":"pnpm@10.0.0"}"#,
+                ),
+                (".yarnrc", CLASSIC_YARNRC),
+            ],
         ),
-        ("fresh", r#"{"name":"app","version":"1.0.0"}"#),
+        (
+            "fresh",
+            &[
+                ("package.json", r#"{"name":"app","version":"1.0.0"}"#),
+                (".yarnrc", CLASSIC_YARNRC),
+            ],
+        ),
     ];
 
-    for (name, package_json) in cases {
-        let dir = temp_project(
-            name,
-            &[("package.json", package_json), (".yarnrc", CLASSIC_YARNRC)],
-        );
+    for (name, files) in cases {
+        let dir = temp_project(name, files);
 
         assert_eq!(
             config_get(&dir, "registry"),
             "https://registry.npmjs.org/",
-            "case={name}"
+            "case={name}: a yarn file must not supply the registry"
         );
         assert_eq!(
             config_get(&dir, "@acme:registry"),
             "undefined",
-            "case={name}"
+            "case={name}: a yarn file must not supply a scope registry"
         );
     }
 }

@@ -170,8 +170,13 @@ fn publish_dry_run_stays_offline_and_exits_clean() {
 }
 
 /// `nub store path` prints the resolved store-version dir — under nub's
-/// embedder defaults that is `$XDG_DATA_HOME/nub/store/v1`, never an
-/// `aube`-named location.
+/// embedder defaults that is `$XDG_CACHE_HOME/nub/store/v11`, never a
+/// `pnpm`-named location.
+///
+/// The cache namespace is deliberate: nub's store is a rebuildable artifact
+/// cache, not user data. The `v11` suffix is the engine's store schema
+/// version, which nub tracks rather than renames — a store nub writes is a
+/// store the engine must still be able to read.
 #[test]
 fn store_path_prints_the_nub_namespaced_store() {
     let ctx = Ctx::new("store-path", MANIFEST);
@@ -179,7 +184,7 @@ fn store_path_prints_the_nub_namespaced_store() {
     assert_eq!(code, 0, "stderr: {stderr}");
     // Separator-normalize before comparing: on Windows the engine prints
     // native `\` components while the expectation is joined with `/`.
-    let expected = ctx.home.join("xdg-data/nub/store/v1");
+    let expected = ctx.home.join("xdg-cache/nub/store/v11");
     assert_eq!(
         stdout.trim().replace('\\', "/"),
         expected.to_string_lossy().replace('\\', "/"),
@@ -216,7 +221,7 @@ fn config_path_prints_the_unwritten_global_settings_file() {
     );
 }
 
-/// The setting takes the store ROOT; `store path` prints the `v1` dir under it.
+/// The setting takes the store ROOT; `store path` prints the `v11` dir under it.
 ///
 /// Both sides are canonicalized, which is the only comparison that survives
 /// every platform's path normalization at once: Windows `canonicalize` returns
@@ -228,13 +233,13 @@ fn config_path_prints_the_unwritten_global_settings_file() {
 fn assert_store_path(stdout: &str, stderr: &str, code: i32, root: &Path) {
     assert_eq!(code, 0, "stderr: {stderr}");
     let printed = PathBuf::from(stdout.trim());
-    let expected = root.join("v1");
+    let expected = root.join("v11");
     std::fs::create_dir_all(&printed).unwrap();
     std::fs::create_dir_all(&expected).unwrap();
     assert_eq!(
         printed.canonicalize().unwrap(),
         expected.canonicalize().unwrap(),
-        "store path must resolve to the configured store-dir plus the v1 suffix \
+        "store path must resolve to the configured store-dir plus the v11 suffix \
          (printed {}, expected {})",
         printed.display(),
         expected.display()
@@ -285,8 +290,21 @@ fn store_path_reports_the_workspace_store_from_a_member() {
     assert_store_path(&stdout, &stderr, code, &relocated);
 }
 
+/// A relative `store-dir` in `.npmrc` is not honored at all — the default
+/// store is used instead.
+///
+/// This looks like a footgun and it is one, but it is pnpm's, and parity
+/// outranks taste here. Measured on this exact fixture: real pnpm 12.4.1 also
+/// falls back to its own default store rather than resolving `local-store`
+/// against the project or the cwd. An earlier version of this test asserted
+/// project-relative resolution, which is what the previous engine did; keeping
+/// it would have made nub the odd one out for a project that moved over from
+/// pnpm.
+///
+/// The relative form still resolves for the `--store-dir` FLAG, which is a
+/// separate path and behaves the same under both tools.
 #[test]
-fn store_path_resolves_relative_store_dir_against_the_project() {
+fn a_relative_npmrc_store_dir_is_not_project_relative() {
     let ctx = Ctx::new("store-rel", MANIFEST);
     std::fs::write(ctx.project.join(".npmrc"), "store-dir=local-store\n").unwrap();
     // Invoked from a SUBDIRECTORY, so "against the project root" and "against
@@ -295,8 +313,21 @@ fn store_path_resolves_relative_store_dir_against_the_project() {
     let nested = ctx.project.join("src/nested");
     std::fs::create_dir_all(&nested).unwrap();
     let (stdout, stderr, code) = ctx.run_env_in(&nested, &["store", "path"], &[]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let printed = PathBuf::from(stdout.trim());
     let project = ctx.project.canonicalize().unwrap();
-    assert_store_path(&stdout, &stderr, code, &project.join("local-store"));
+    assert!(
+        !printed.starts_with(&project),
+        "a relative store-dir must not resolve anywhere inside the project: {}",
+        printed.display()
+    );
+    assert_store_path(
+        &stdout,
+        &stderr,
+        code,
+        &ctx.home.join("xdg-cache").join("nub").join("store"),
+    );
 }
 
 #[test]
@@ -334,16 +365,21 @@ fn pack_phantom_fixture(tag: &str) -> PathBuf {
 
 /// Every store tier — CAS and phantom sidecar alike — landed under `relocated`,
 /// and the default store location was never even created.
+///
+/// The two tiers carry different version suffixes on purpose. `files` is the
+/// engine's CAS and sits under its store schema version, `v11`; `phantom` is
+/// nub's own sidecar, versioned independently because nothing in the engine
+/// reads it.
 fn assert_every_tier_relocated(home: &Path, relocated: &Path) {
     assert!(
-        relocated.join("v1/files").is_dir(),
+        relocated.join("v11/files").is_dir(),
         "the CAS files tier must land under the override"
     );
     assert!(
         count_files(&relocated.join("v1/phantom")) > 0,
         "the phantom sidecar tier must move with the store override"
     );
-    let default_store = home.join("xdg-data/nub/store");
+    let default_store = home.join("xdg-cache/nub/store");
     assert!(
         !default_store.exists(),
         "an overridden install must write NOTHING to the default store location: {:?}",

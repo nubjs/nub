@@ -1,4 +1,4 @@
-//! Which package manager's rules a project runs under (feature `pm-pnpm`).
+//! Which package manager's rules a project runs under.
 //!
 //! Every project is exactly one of two things, and the answer decides which
 //! configuration nub reads and which names the engine writes:

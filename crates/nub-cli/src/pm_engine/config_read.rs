@@ -3,27 +3,32 @@
 //!
 //! One key space spans two homes — `.npmrc`, which every Node package manager
 //! shares, and `nub.jsonc`, which is nub's own — so a reader that consulted
-//! only one of them would report a value the install does not use. The merged
 //! only one of them would report a value the install does not use. The
 //! `nub.jsonc` tier is lowered by the install's OWN code
 //! ([`super::host_settings::supplied_settings`]), so a curated key cannot mean
 //! one thing to the install and another to `config get`.
 //!
-//! What is reported is what a user SUPPLIED — the config files, `nub.jsonc`,
-//! and `npm_config_*`. nub's effective defaults are not: an unset key reports
-//! `undefined`, which is what `pnpm config get` and `npm config get` both
-//! print, and `config list --all` is where defaults belong.
+//! The merged view reports what an install would ACT ON, so it opens with the
+//! defaults nub itself applies ([`super::nub_config_defaults`]) and lets each
+//! file override them: `minimumReleaseAge` reads `1440` in a project that has
+//! never configured it, because that is the quarantine the next install
+//! applies. A key nothing defaults and nobody set reports `undefined`, which is
+//! what `pnpm config get` and `npm config get` both print.
 //!
-//! Three sources aube's reader had are gone on purpose, not by omission. The
-//! previous engine's own `config.toml` no longer exists; pnpm's global
-//! `config.yaml` and `pnpm-workspace.yaml` are pnpm-named files a nub project
-//! does not read (A1.3). What a pnpm-incumbent project keeps in its workspace
-//! yaml is read by the engine itself, under pnpm's own rules.
+//! Under a pnpm incumbent the branded files join the chain ([`branded_yaml`]):
+//! that project's own `pnpm-workspace.yaml`, and pnpm's global `config.yaml`
+//! for the majors that keep settings there. Reading the incumbent's own files
+//! is what compatibility means — the brand boundary governs a NUB project,
+//! where neither is read. LAYOUT settings are dropped from both whatever the
+//! incumbent, because nub takes the `node_modules` layout from `nub.jsonc`,
+//! `.npmrc` or the command line alone. The previous engine's `config.toml`
+//! went with that engine and has no successor.
 //!
-//! The scope flags select which files answer: `--global` the user's `.npmrc`
-//! alone, `--local` the project's, neither the merged view.
+//! The scope flags select which sources answer: `--global` the user's `.npmrc`
+//! plus pnpm's global config, `--local` the project's files, neither the merged
+//! view. Neither scope reports defaults or `npm_config_*` — each names a FILE,
+//! so answering one from elsewhere would answer a question nobody asked.
 
-#[cfg(feature = "pm-pnpm")]
 use super::host_settings::{self, Raw};
 use super::present;
 use anyhow::{Result, anyhow, bail};
@@ -325,7 +330,6 @@ pub(crate) fn npmrc_path(location: Location) -> Result<PathBuf> {
 ///
 /// Parsed by the same reader the install uses, so a line one of them accepts
 /// and the other rejects cannot exist.
-#[cfg(feature = "pm-pnpm")]
 fn entries_of(text: &str) -> Vec<(String, String)> {
     host_settings::npmrc_entries(text)
         .into_iter()
@@ -341,37 +345,6 @@ fn entries_of(text: &str) -> Vec<(String, String)> {
 
 /// The same flattening, without the engine's reader. Reachable only in the
 /// transitional build that has no engine at all.
-#[cfg(not(feature = "pm-pnpm"))]
-fn entries_of(text: &str) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with(['#', ';', '[']) {
-            continue;
-        }
-        let (key, value) = match line.split_once('=') {
-            Some((key, value)) => (key.trim(), value.trim()),
-            None => (line, "true"),
-        };
-        let value = value
-            .strip_prefix('"')
-            .and_then(|inner| inner.strip_suffix('"'))
-            .unwrap_or(value);
-        if let Some(base) = key.strip_suffix("[]") {
-            match out.iter_mut().rfind(|(existing, _)| existing == base) {
-                Some((_, existing)) => {
-                    existing.push(',');
-                    existing.push_str(value);
-                }
-                None => out.push((base.to_owned(), value.to_owned())),
-            }
-        } else {
-            out.push((key.to_owned(), value.to_owned()));
-        }
-    }
-    out
-}
-
 fn read_npmrc(path: &Path) -> Vec<(String, String)> {
     std::fs::read_to_string(path)
         .map(|t| entries_of(&t))
@@ -401,6 +374,16 @@ pub(crate) fn read_project_entries() -> Vec<(String, String)> {
     out
 }
 
+/// The `npm_config_*` overlay, which belongs to the merged view and to no
+/// file. `--local` and `--global` each name a FILE, so an environment value
+/// under either would answer a question that was not asked.
+fn env_entries() -> Vec<(String, String)> {
+    super::host_settings::env_settings()
+        .into_iter()
+        .filter_map(|(key, value)| Some((canonical_list_key(&key), render(value)?)))
+        .collect()
+}
+
 /// Every source, lowest precedence first, so a later duplicate wins.
 ///
 /// Built explicitly rather than by concatenating the two scope readers: pnpm's
@@ -426,6 +409,8 @@ pub(crate) fn read_merged() -> Vec<(String, String)> {
     out.extend(branded_yaml(BrandedSource::GlobalConfig));
     out.extend(branded_yaml(BrandedSource::WorkspaceYaml));
     out.extend(nub_jsonc_entries(&root));
+    // Last because it is highest.
+    out.extend(env_entries());
     out
 }
 
@@ -536,15 +521,9 @@ fn branded_yaml_path(source: BrandedSource) -> Option<PathBuf> {
 /// Whether the project containing the working directory declares pnpm as its
 /// package manager. Always false in the transitional build with no engine at
 /// all, which by construction has no pnpm-incumbent path.
-#[cfg(feature = "pm-pnpm")]
 fn pnpm_incumbent() -> bool {
     use super::project_identity::{ProjectIdentity, detect};
     std::env::current_dir().is_ok_and(|cwd| detect(&cwd) == ProjectIdentity::Pnpm)
-}
-
-#[cfg(not(feature = "pm-pnpm"))]
-fn pnpm_incumbent() -> bool {
-    false
 }
 
 /// A YAML scalar as `config get` prints it. A mapping or a nested sequence has
@@ -569,7 +548,6 @@ fn yaml_scalar(value: &serde_yaml::Value) -> Option<String> {
 /// rather than re-derived here, so the two cannot disagree about what a
 /// curated key means — `install.linker: "global"` is `nodeLinker` plus
 /// `enableGlobalVirtualStore` in exactly one place.
-#[cfg(feature = "pm-pnpm")]
 fn nub_jsonc_entries(_root: &Path) -> Vec<(String, String)> {
     // The config verbs dispatch through `lookup_verb` and RETURN before the
     // parser match that initializes the snapshot for every other route, so on
@@ -593,14 +571,8 @@ fn nub_jsonc_entries(_root: &Path) -> Vec<(String, String)> {
         .collect()
 }
 
-#[cfg(not(feature = "pm-pnpm"))]
-fn nub_jsonc_entries(_root: &Path) -> Vec<(String, String)> {
-    Vec::new()
-}
-
 /// A supplied value as `config get` prints it. A map or a nested structure has
 /// no one-line spelling, so it is reported through `--json` only.
-#[cfg(feature = "pm-pnpm")]
 fn render(value: Value) -> Option<String> {
     match value {
         Value::String(s) => Some(s),

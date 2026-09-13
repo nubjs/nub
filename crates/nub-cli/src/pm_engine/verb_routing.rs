@@ -1,4 +1,4 @@
-//! Which command lines the pnpm engine takes (feature `pm-pnpm`).
+//! Which command lines the pnpm engine takes.
 //!
 //! nub keeps a handful of verbs and gives the engine every other one it
 //! serves, the long tail included, so the routing table is the list of

@@ -93,7 +93,6 @@ static NATIVE_CONFIG_SEED: LazyLock<RwLock<Vec<String>>> =
 
 /// The package NAMES this project ejects before any scan: what it asked for
 /// in its own configuration, plus the ones nub always ejects.
-#[cfg(feature = "pm-pnpm")]
 pub(super) fn configured_eject_names() -> Vec<String> {
     let configured = NATIVE_CONFIG_SEED
         .read()

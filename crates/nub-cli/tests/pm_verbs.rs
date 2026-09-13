@@ -825,9 +825,15 @@ fn link_by_path_symlinks_the_local_package() {
     );
 }
 
-/// Wired verbs own their `--help` at the nub layer: rendered from aube's own
-/// args surface, rebranded, exit 0. (`dlx --help` takes a bespoke path — the
-/// trailing var-arg swallows the flag — and must land on the same contract.)
+/// Every verb owns its `--help` at the nub layer: rendered, rebranded, exit 0,
+/// and titled with the spelling the user typed.
+///
+/// The three verbs cover the three routes there are. `add` is the engine's, so
+/// its page comes from the engine. `dlx` and `create` are nub's own — they
+/// share one grammar with `nubx` and one page, retitled per verb, because
+/// answering `nub dlx --help` with `Usage: nub nubx` names a command the user
+/// did not run. Both also take a bespoke path in that their trailing var-arg
+/// would otherwise swallow the flag before the parser settles it.
 #[test]
 fn verb_help_is_rebranded_and_exits_zero() {
     let dir = pm_tmpdir("help");

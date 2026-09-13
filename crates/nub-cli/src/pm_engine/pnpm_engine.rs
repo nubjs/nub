@@ -1,14 +1,17 @@
-//! The pnpm 12 engine, embedded in-process (feature `pm-pnpm`).
+//! The pnpm 12 engine, embedded in-process.
 //!
-//! Selected by `NUB_PM_ENGINE` while aube and pnpm coexist, so the default
-//! binary and every existing path stay untouched. nub's PM grammar is pnpm's,
-//! so `nub install …` is `pnpm install …` to the engine's parser.
+//! This is the engine a PM command runs on: the project's identity chooses how
+//! it is configured, and `NUB_PM_ENGINE` exists only to pin that choice for a
+//! differential. nub's PM grammar is pnpm's, so `nub install …` is
+//! `pnpm install …` to the engine's parser.
 //!
-//! `NUB_PM_ENGINE=auto` lets the project's identity choose, which is what
-//! project routing grows into. The two forced values stay beside it because a
-//! differential needs them: `pnpm` runs the engine under pnpm's own rules on a
-//! fixture nub would claim, and `pnpm-nub` under nub's (`nub.lock`,
-//! `node_modules/.store`, and the settings nub resolves) on one pnpm would.
+//! The variable used to be what selected the engine at all, back when the
+//! vendored one was still the default. Unset now means this engine. The two
+//! forced values remain because a differential needs them: `pnpm` runs it under
+//! pnpm's own rules on a fixture nub would claim, and `pnpm-nub` under nub's
+//! (`nub.lock`, `node_modules/.store`, and the settings nub resolves) on one
+//! pnpm would. Any other value still falls through to the vendored engine,
+//! which is what keeps both arms runnable until `vendor/aube` goes.
 
 use super::host_settings;
 use super::project_identity::{self, ProjectIdentity};
@@ -29,6 +32,10 @@ const NUB: Embedder = Embedder {
     // `pnpm-workspace.yaml`.
     workspaces_from_package_manifest: true,
     lockfile_basename: "nub.lock",
+    // Read-only, and paired with the retirement below: a project last
+    // installed before the rename still holds `lock.yaml`, and the engine has
+    // to resolve from it or every such project reports no lockfile at all.
+    lockfile_legacy_basenames: &[LEGACY_LOCKFILE],
     virtual_store_dirname: ".store",
     // A nub project's configuration is `nub.jsonc`, `package.json` and
     // `.npmrc`, never pnpm's files; `profile` supplies what nub resolved.
@@ -183,8 +190,16 @@ enum Selection {
 }
 
 /// The selection this invocation asked for, if the engine is selected at all.
+///
+/// Unset means the engine, so it is what a nub install actually runs on.
+/// `NUB_PM_ENGINE=aube` — or any other value — still falls through to the old
+/// engine, which is what keeps both arms runnable as a differential control
+/// until `vendor/aube` goes.
 fn selection() -> Option<Selection> {
-    match std::env::var_os("NUB_PM_ENGINE")?.to_str()? {
+    let Some(asked) = std::env::var_os("NUB_PM_ENGINE") else {
+        return Some(Selection::Auto);
+    };
+    match asked.to_str()? {
         "pnpm" => Some(Selection::Forced(ProjectIdentity::Pnpm)),
         "pnpm-nub" => Some(Selection::Forced(ProjectIdentity::Nub)),
         "auto" => Some(Selection::Auto),
@@ -508,6 +523,9 @@ pub(crate) fn run(argv: Vec<std::ffi::OsString>) -> Result<i32> {
     // the install is about to write nub's lockfile, after which no project
     // still looks virgin.
     let stamp = project_is_virgin(embedder, command.as_deref(), &cwd);
+    // Also asked before, and for a third reason: the answer is a COMPARISON
+    // against the lockfile as it stands now.
+    let legacy = legacy_lockfile_pending(embedder, command.as_deref(), &cwd);
     match pnpm_cli::run(argv, embedder) {
         Ok(()) => {
             if let Some(foreign) = pending {
@@ -515,6 +533,9 @@ pub(crate) fn run(argv: Vec<std::ffi::OsString>) -> Result<i32> {
             }
             if stamp {
                 super::install_family::stamp_virgin_dev_engines(&cwd);
+            }
+            if let Some(pending) = legacy {
+                pending.retire(embedder, &cwd);
             }
             Ok(0)
         }
@@ -543,6 +564,65 @@ pub(crate) fn run(argv: Vec<std::ffi::OsString>) -> Result<i32> {
 /// still holding another package manager's lockfile has just had it ignored,
 /// so this is where saying so belongs — not on a command that only reads.
 const RESOLVING_COMMANDS: [&str; 6] = ["install", "add", "remove", "update", "ci", "dedupe"];
+
+/// nub's PRIOR lockfile name, still read during the rename transition and
+/// retired the next time a real write lands.
+///
+/// Spelled here rather than borrowed from the previous engine's alignment
+/// module, which carries it only so that engine's writer can honor it: that
+/// writer retired the file through a `lockfile_legacy_basenames` profile
+/// field, and the pnpm engine has no equivalent, so under the engine the
+/// retirement is the host's job and belongs beside the host's other
+/// after-the-run work.
+const LEGACY_LOCKFILE: &str = "lock.yaml";
+
+/// A legacy lockfile this command might retire, captured before the run.
+struct LegacyLockfile {
+    path: PathBuf,
+    /// nub's current lockfile bytes, or `None` when it does not exist yet.
+    wanted_before: Option<Vec<u8>>,
+}
+
+impl LegacyLockfile {
+    /// Retire the legacy name, but only if the run really rewrote the lockfile.
+    ///
+    /// The comparison IS the rule, and it is what the three no-write cases
+    /// need: a no-op install resolves to the same graph and writes nothing, a
+    /// `--frozen-lockfile` op refuses to write by definition, and `ci` never
+    /// writes at all — none of them may take the legacy file with them, and
+    /// none of them can be told apart from a real install by its name alone.
+    fn retire(self, embedder: Embedder, cwd: &Path) {
+        let Ok(after) = std::fs::read(cwd.join(embedder.lockfile_basename)) else {
+            return;
+        };
+        if self.wanted_before.is_none_or(|before| before != after) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// The legacy lockfile sitting beside nub's own, when this command could
+/// retire it.
+///
+/// Nothing to do under pnpm's own incumbency: `lock.yaml` is nub's prior name
+/// and a pnpm project's lockfile is pnpm's, which nub must leave exactly where
+/// it found it.
+fn legacy_lockfile_pending(
+    embedder: Embedder,
+    command: Option<&str>,
+    cwd: &Path,
+) -> Option<LegacyLockfile> {
+    if embedder.program_name == Embedder::PNPM.program_name
+        || !command.is_some_and(|name| RESOLVING_COMMANDS.contains(&name))
+    {
+        return None;
+    }
+    let path = cwd.join(LEGACY_LOCKFILE);
+    path.is_file().then(|| LegacyLockfile {
+        wanted_before: std::fs::read(cwd.join(embedder.lockfile_basename)).ok(),
+        path,
+    })
+}
 
 /// The commands that may leave nub's mark on a project's manifest.
 ///

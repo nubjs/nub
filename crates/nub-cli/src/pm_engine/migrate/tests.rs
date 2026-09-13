@@ -1,4 +1,3 @@
-#[cfg(feature = "pm-pnpm")]
 use super::migration_hint;
 use super::pending_migration;
 use std::path::PathBuf;
@@ -69,7 +68,6 @@ fn no_lockfile_is_no_migration() {
 
 /// The hint names the file it did not read and the command that reads it.
 /// It is one line: an install that succeeded must not end in a paragraph.
-#[cfg(feature = "pm-pnpm")]
 #[test]
 fn the_hint_names_the_file_and_the_command() {
     let hint = migration_hint(std::path::Path::new("/p/yarn.lock"));

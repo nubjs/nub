@@ -535,15 +535,12 @@ mod config_model {
 /// pnpm ignores both files for scalars, so nub writing or reporting one would
 /// name a value that project never acts on.
 pub(super) fn pnpm_v11_scalar_home() -> bool {
-    #[cfg(feature = "pm-pnpm")]
     let pnpm_incumbent = std::env::current_dir().is_ok_and(|cwd| {
         matches!(
             super::project_identity::detect(&cwd),
             super::project_identity::ProjectIdentity::Pnpm
         )
     });
-    #[cfg(not(feature = "pm-pnpm"))]
-    let pnpm_incumbent = false;
     project_scalar_home(pnpm_incumbent) == config_model::ScalarHome::PnpmWorkspaceYaml
 }
 

@@ -57,7 +57,6 @@ mod config_read;
 pub mod config_scope;
 mod duplicate_home;
 mod expo_compat;
-#[cfg(feature = "pm-pnpm")]
 mod host_settings;
 pub mod identity;
 pub mod info_family;
@@ -68,22 +67,16 @@ pub mod min_release_age;
 pub mod output;
 pub mod phantom_closure;
 pub mod platform_flags;
-#[cfg(feature = "pm-pnpm")]
 mod pnpm_engine;
-#[cfg(feature = "pm-pnpm")]
 mod project_identity;
-#[cfg(feature = "pm-pnpm")]
 pub(crate) use pnpm_engine::run as run_pnpm_engine;
-#[cfg(feature = "pm-pnpm")]
 mod verb_routing;
-#[cfg(feature = "pm-pnpm")]
 pub(crate) use verb_routing::engine_takes;
 pub mod present;
 pub mod publish_family;
 mod remix_compat;
 use nub_core::resource_limits;
 pub mod migrate;
-#[cfg(feature = "pm-pnpm")]
 pub mod phantom_hooks;
 pub mod store_config_family;
 pub mod unsupported_config;

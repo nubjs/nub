@@ -1,4 +1,4 @@
-//! The settings a nub-incumbent project hands the engine (feature `pm-pnpm`).
+//! The settings a nub-incumbent project hands the engine.
 //!
 //! Under nub's profile the engine reads none of pnpm's own configuration, so
 //! what a pnpm project keeps in `pnpm-workspace.yaml` reaches the engine from
@@ -92,21 +92,35 @@ pub(crate) fn supplied_settings(install: &InstallConfig) -> Map<String, Value> {
     for (key, value) in install.settings.iter().flatten() {
         out.insert(key.clone(), value.clone());
     }
-    out.extend(env_settings());
     out
 }
 
 /// The `npm_config_*` variables that name a setting, plus nub's own cache knob.
 ///
-/// Highest precedence, which is why it is folded in last here and why omitting
-/// it once made `config get cache-dir` print `undefined` while the install was
-/// already acting on the environment value (nubjs/nub#654).
-fn env_settings() -> Map<String, Value> {
+/// Its own tier, belonging to the merged view and to no file: `config get
+/// --local` asks what the project's own file says, so an environment value there
+/// would answer a question nobody asked. In the merged view it ranks highest,
+/// and omitting it once made `config get cache-dir` print `undefined` while the
+/// install was already acting on the value (nubjs/nub#654).
+pub(crate) fn env_settings() -> Map<String, Value> {
+    let known = known_keys();
     let mut out = Map::new();
     for (name, value) in std::env::vars() {
-        if let Some(key) = setting_key_of_var(&name) {
-            out.insert(key.to_owned(), Value::String(value));
+        let Some(key) = setting_key_of_var(&name) else {
+            continue;
+        };
+        // The same two steps [`lift`] takes, and for the same reason: the
+        // variable's tail is snake_case (`npm_config_cache_dir` carries
+        // `cache_dir`), which names no setting until it is camel-cased, and a
+        // tail that still names none after that is somebody else's variable.
+        // Skipping either step reported `cache_dir` as a free-form key and
+        // left `config get cache-dir` answering `undefined` while the install
+        // was already using the value.
+        let setting = to_camel_case(key);
+        if !known.contains(&setting) {
+            continue;
         }
+        out.insert(setting, Value::String(value));
     }
     if let Ok(dir) = std::env::var("NUB_CACHE_DIR")
         && !dir.is_empty()

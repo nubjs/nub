@@ -1,11 +1,17 @@
-//! The `preResolution` pnpmfile hook, against pnpm's contract.
+//! The `preResolution` pnpmfile hook, against pnpm 12.4.1's contract.
 //!
-//! pnpm calls the hook on EVERY install — before it decides whether the
-//! lockfile is up to date — and hands it the in-memory `LockfileObject`:
-//! never `null`, `packages[key].resolution` readable, importer
-//! specifiers split out into their own map. A `console.log` in the hook
-//! body reaches the terminal, and the second argument is a
-//! `{info, warn}` logger rather than `{log}`.
+//! Two things decide what happens here, and the suite is organised around
+//! them. WHICH PROJECT: the pnpmfile is pnpm's own file, so it is read under
+//! pnpm's incumbency and nowhere else. WHETHER THE INSTALL RESOLVES: pnpm
+//! calls the hook from the resolver, so an install that reuses an up-to-date
+//! lockfile never reaches it — the hook is not a per-command event.
+//!
+//! Every claim below was measured against real pnpm 12.4.1 on the same
+//! fixture, and nub matched it byte for byte. Where a row reads as the
+//! opposite of what it used to assert, that is the previous engine's
+//! contract being retired rather than a regression: it synthesized a lockfile
+//! skeleton for the hook, split importer entries into a `specifiers` map, and
+//! called the hook once per install. pnpm does none of those.
 //!
 //! Every row is OFFLINE: the only dependency is a sibling directory
 //! (`file:`), and the project points its registry at a dead port so an
@@ -22,10 +28,17 @@ fn nub_binary() -> PathBuf {
     path
 }
 
-/// A pnpm-incumbent project whose one dependency is the local `dep/`
-/// directory, plus a pnpmfile that records the whole `preResolution`
-/// context to `observed-<n>.json` and prints a marker on stdout.
-fn fixture(tag: &str) -> PathBuf {
+/// A project whose one dependency is the local `dep/` directory, plus a
+/// pnpmfile recording the whole `preResolution` context to
+/// `observed-<n>.json` and printing a marker on stdout.
+///
+/// `pnpm_incumbent` is spelled as an empty `pnpm-workspace.yaml` rather than
+/// a `packageManager` pin, deliberately: a pin naming a pnpm the engine is
+/// not is a FOREIGN pin, which both pnpm and nub honor by provisioning that
+/// version and handing the whole command over to it. A fixture pinned that
+/// way measures the pinned pnpm, not the engine under test — and it does so
+/// silently, since the delegate installs perfectly well.
+fn fixture(tag: &str, pnpm_incumbent: bool) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
@@ -38,20 +51,24 @@ fn fixture(tag: &str) -> PathBuf {
     std::fs::write(dir.join(".npmrc"), "registry=http://127.0.0.1:1/\n").unwrap();
     std::fs::write(
         dir.join("package.json"),
-        r#"{"name":"app","version":"1.0.0","packageManager":"pnpm@10.0.0","dependencies":{"dep":"file:./dep"}}"#,
+        r#"{"name":"app","version":"1.0.0","dependencies":{"dep":"file:./dep"}}"#,
     )
     .unwrap();
+    if pnpm_incumbent {
+        std::fs::write(dir.join("pnpm-workspace.yaml"), "packages: []\n").unwrap();
+    }
     std::fs::write(
         dir.join("dep/package.json"),
         r#"{"name":"dep","version":"2.3.4"}"#,
     )
     .unwrap();
-    // Numbering the output file is what makes "did it run a second
-    // time?" observable — a single overwritten file cannot tell a
-    // second run from a first.
-    std::fs::write(
-        dir.join(".pnpmfile.cjs"),
-        r#"
+    std::fs::write(dir.join(".pnpmfile.cjs"), RECORDER).unwrap();
+    dir
+}
+
+/// Numbering the output file is what makes "did it run again?" observable —
+/// a single overwritten file cannot tell a second run from a first.
+const RECORDER: &str = r#"
 module.exports = {
   hooks: {
     preResolution(ctx, logger) {
@@ -68,11 +85,7 @@ module.exports = {
     },
   },
 };
-"#,
-    )
-    .unwrap();
-    dir
-}
+"#;
 
 fn run(dir: &Path, args: &[&str]) -> (String, String, i32) {
     let out = Command::new(nub_binary())
@@ -90,32 +103,9 @@ fn run(dir: &Path, args: &[&str]) -> (String, String, i32) {
     )
 }
 
-/// The manifest and whatever lockfile the run left behind, for an
-/// assertion message to carry.
-///
-/// A bare `left: 16, right: 0` on a lockfile-freshness failure says
-/// nothing about WHICH of the two files drifted, and these rows mutate
-/// the fixture as they go — the routed row rewrites `package.json`
-/// through `add`. It is also the only view of that state on a platform
-/// where a failure reproduces and the dev host does not.
-fn project_state(dir: &Path) -> String {
-    let mut out = String::new();
-    for name in [
-        "package.json",
-        "package-lock.json",
-        "pnpm-lock.yaml",
-        "nub.lock",
-    ] {
-        if let Ok(body) = std::fs::read_to_string(dir.join(name)) {
-            out.push_str(&format!("\n--- {name} ---\n{body}"));
-        }
-    }
-    out
-}
-
 /// How many times the hook has run in this fixture so far — one
 /// `observed-<n>.json` per firing.
-fn observations(dir: &Path) -> usize {
+fn firings(dir: &Path) -> usize {
     std::fs::read_dir(dir)
         .expect("fixture dir readable")
         .filter_map(Result::ok)
@@ -130,36 +120,71 @@ fn observed(dir: &Path, n: usize) -> serde_json::Value {
     serde_json::from_str(&body).expect("hook wrote valid JSON")
 }
 
-/// The whole contract in one project, because the interesting part is
-/// the *sequence*: what the hook sees with no lockfile, that it runs
-/// again once the lockfile is current, and what it sees then.
+/// The hook belongs to the RESOLVER, not to the command. An install that
+/// reuses an up-to-date lockfile resolves nothing and so calls nothing;
+/// `update` re-resolves and calls it exactly once, not once per stage.
 #[test]
-fn pre_resolution_runs_on_every_install_with_pnpms_lockfile_shape() {
-    let dir = fixture("contract");
+fn the_hook_runs_when_an_install_resolves_and_not_when_it_reuses() {
+    let dir = fixture("resolves", true);
 
     let (stdout, stderr, code) = run(&dir, &["install"]);
     assert_eq!(code, 0, "first install\nstdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(firings(&dir), 1, "the first install resolves: {stderr}");
     assert!(
         stdout.contains("PRERESOLUTION_MARKER"),
-        "a console.log in the hook body belongs on stdout, as it does under pnpm; \
-         nub used to swallow it because the shim owned the child's stdout.\n\
-         stdout: {stdout}\nstderr: {stderr}"
+        "a console.log in the hook body belongs on stdout, as it does under \
+         pnpm; nub used to swallow it because the shim owned the child's \
+         stdout.\nstdout: {stdout}\nstderr: {stderr}"
     );
 
-    let first = observed(&dir, 1);
-    assert!(
-        first["wantedLockfile"].is_object(),
-        "with no lockfile pnpm passes an empty OBJECT, never null: {first}"
+    for args in [
+        ["install"].as_slice(),
+        &["install", "--frozen-lockfile"],
+        &["install", "--no-frozen-lockfile"],
+    ] {
+        let (stdout, stderr, code) = run(&dir, args);
+        assert_eq!(code, 0, "{args:?}\nstdout: {stdout}\nstderr: {stderr}");
+        assert_eq!(
+            firings(&dir),
+            1,
+            "{args:?} reuses the lockfile, so nothing resolves and the hook \
+             must not fire again\nstdout: {stdout}\nstderr: {stderr}"
+        );
+    }
+
+    let (stdout, stderr, code) = run(&dir, &["update"]);
+    assert_eq!(code, 0, "update\nstdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(
+        firings(&dir),
+        2,
+        "update re-resolves, and it calls the hook ONCE — the regression this \
+         guards is a call per resolution stage\nstdout: {stdout}\nstderr: {stderr}"
     );
-    assert!(
-        first["wantedLockfile"].get("packages").is_none(),
-        "pnpm's synthesized empty lockfile has no `packages` key at all — \
-         hooks guard on `if (!lockfile.packages) return`: {first}"
+}
+
+/// What the hook receives, on both sides of the first write.
+///
+/// `update` is what produces the second observation, because it is the only
+/// command above that re-resolves — which is also why the two halves live in
+/// one test: the interesting part is the pair, not either shape alone.
+#[test]
+fn the_hook_sees_pnpms_own_lockfile_shape() {
+    let dir = fixture("shape", true);
+
+    let (stdout, stderr, code) = run(&dir, &["install"]);
+    assert_eq!(code, 0, "first install\nstdout: {stdout}\nstderr: {stderr}");
+
+    let first = observed(&dir, 1);
+    assert_eq!(
+        first["wantedLockfile"],
+        serde_json::json!({}),
+        "with no lockfile on disk pnpm passes a bare empty object — not null, \
+         and not a synthesized skeleton with importers and settings: {first}"
     );
     assert_eq!(
-        first["wantedLockfile"]["importers"]["."]["specifiers"],
+        first["currentLockfile"],
         serde_json::json!({}),
-        "every importer carries a specifiers map, empty or not: {first}"
+        "and the installed-state side is empty for the same reason: {first}"
     );
     assert_eq!(
         first["existsCurrentLockfile"],
@@ -167,45 +192,30 @@ fn pre_resolution_runs_on_every_install_with_pnpms_lockfile_shape() {
         "no lockfile was on disk: {first}"
     );
     assert_eq!(
-        first["wantedLockfile"]["settings"]["peersSuffixMaxLength"],
-        serde_json::json!(1000),
-        "pnpm's synthesized settings carry the effective peer-suffix cap, \
-         threaded from the resolved settings rather than hardcoded: {first}"
+        first["existsNonEmptyWantedLockfile"],
+        serde_json::json!(false),
+        "nor a non-empty wanted one: {first}"
     );
     assert_eq!(
         first["loggerKeys"],
-        serde_json::json!(["info", "log", "warn"]),
-        "pnpm's preResolution logger is {{info, warn}}; `log` is aube's own \
-         spelling, kept so pnpmfiles written against aube keep working: {first}"
+        serde_json::json!(["info", "warn"]),
+        "pnpm's preResolution logger is {{info, warn}}: {first}"
     );
 
-    // The regression the issue reported: a second install has an
-    // up-to-date lockfile, takes the reuse path, and used to skip the
-    // hook entirely.
-    let (stdout, stderr, code) = run(&dir, &["install"]);
-    assert_eq!(
-        code, 0,
-        "second install\nstdout: {stdout}\nstderr: {stderr}"
-    );
+    let (stdout, stderr, code) = run(&dir, &["update"]);
+    assert_eq!(code, 0, "update\nstdout: {stdout}\nstderr: {stderr}");
     let second = observed(&dir, 2);
 
-    let packages = second["wantedLockfile"]["packages"]
-        .as_object()
-        .unwrap_or_else(|| panic!("second run must see the written lockfile: {second}"));
-    let (key, entry) = packages
-        .iter()
-        .find(|(k, _)| k.starts_with("dep@"))
-        .unwrap_or_else(|| panic!("the local dependency must appear in packages: {second}"));
-    assert!(
-        entry.get("resolution").is_some(),
-        "packages[{key}].resolution is what a hook rewriting resolutions reads; \
-         nub's old projection had no such field: {entry}"
+    assert_eq!(
+        second["wantedLockfile"]["importers"]["."]["dependencies"]["dep"],
+        serde_json::json!({"specifier": "file:./dep", "version": "file:dep"}),
+        "the importer entry stays the inline {{specifier, version}} pair pnpm \
+         writes; it is not split into a separate specifiers map: {second}"
     );
     assert_eq!(
-        second["wantedLockfile"]["importers"]["."]["specifiers"]["dep"],
-        serde_json::json!("file:./dep"),
-        "the importer's inline {{specifier, version}} pair splits into a \
-         specifiers map, the way pnpm's reader leaves it: {second}"
+        second["wantedLockfile"]["packages"]["dep@file:dep"]["resolution"],
+        serde_json::json!({"type": "directory", "directory": "dep"}),
+        "packages[key].resolution is what a hook rewriting resolutions reads: {second}"
     );
     assert_eq!(
         second["existsNonEmptyWantedLockfile"],
@@ -214,47 +224,24 @@ fn pre_resolution_runs_on_every_install_with_pnpms_lockfile_shape() {
     );
     assert_eq!(
         second["currentLockfile"], second["wantedLockfile"],
-        "aube keeps no separate installed-state lockfile, so the two sides \
-         are the same object at preResolution time: {second}"
+        "with the install already applied, the two sides agree: {second}"
     );
 }
 
-/// `--frozen-lockfile` and `--no-frozen-lockfile` both withhold the
-/// parsed lockfile from the resolver, for reasons that have nothing to
-/// do with the hook. `wantedLockfile` is the file on disk, so neither
-/// flag may empty it out.
+/// A workspace wired together only by `workspace:*` resolves to no package
+/// rows at all, and pnpm reports that as an EMPTY wanted lockfile even though
+/// the importers carry real specifiers.
+///
+/// This is the one shape where the flag and the importer content disagree, so
+/// a hook branching on the flag takes the path pnpm intends only if nub
+/// reports the same answer. The previous engine reported the opposite.
 #[test]
-fn frozen_modes_still_hand_the_hook_the_on_disk_lockfile() {
-    for flag in ["--frozen-lockfile", "--no-frozen-lockfile"] {
-        let dir = fixture("frozen");
-        let (stdout, stderr, code) = run(&dir, &["install"]);
-        assert_eq!(code, 0, "seed install\nstdout: {stdout}\nstderr: {stderr}");
-
-        let (stdout, stderr, code) = run(&dir, &["install", flag]);
-        assert_eq!(code, 0, "{flag}\nstdout: {stdout}\nstderr: {stderr}");
-        let second = observed(&dir, 2);
-        let packages = second["wantedLockfile"]["packages"]
-            .as_object()
-            .unwrap_or_else(|| panic!("{flag} must still show the lockfile: {second}"));
-        assert!(
-            packages.keys().any(|k| k.starts_with("dep@")),
-            "{flag} left the hook with an empty lockfile: {second}"
-        );
-    }
-}
-
-/// pnpm decides `existsNonEmptyWantedLockfile` from importer content,
-/// not from the package map. A workspace wired together only by
-/// `workspace:*` writes a lockfile with `packages: {}` and real importer
-/// specifiers — the one shape where counting packages gives the wrong
-/// answer, and a hook branching on the flag then takes the wrong path.
-#[test]
-fn a_link_only_workspace_lockfile_counts_as_non_empty() {
-    let dir = fixture("workspace");
-    // Replace the `file:` dependency with a pure workspace link.
+fn a_link_only_workspace_reads_as_an_empty_lockfile() {
+    let dir = fixture("workspace", true);
+    std::fs::remove_dir_all(dir.join("dep")).unwrap();
     std::fs::write(
         dir.join("package.json"),
-        r#"{"name":"root","version":"1.0.0","private":true,"packageManager":"pnpm@10.0.0"}"#,
+        r#"{"name":"root","version":"1.0.0","private":true}"#,
     )
     .unwrap();
     std::fs::write(
@@ -277,154 +264,90 @@ fn a_link_only_workspace_lockfile_counts_as_non_empty() {
 
     let (stdout, stderr, code) = run(&dir, &["install"]);
     assert_eq!(code, 0, "seed install\nstdout: {stdout}\nstderr: {stderr}");
-    let (stdout, stderr, code) = run(&dir, &["install"]);
+    let (stdout, stderr, code) = run(&dir, &["update", "-r"]);
     assert_eq!(
         code, 0,
-        "second install\nstdout: {stdout}\nstderr: {stderr}"
+        "recursive update\nstdout: {stdout}\nstderr: {stderr}"
     );
 
     let second = observed(&dir, 2);
-    assert_eq!(
-        second["wantedLockfile"]["packages"],
-        serde_json::json!({}),
+    assert!(
+        second["wantedLockfile"].get("packages").is_none(),
         "a link-only workspace resolves to no package rows — that is the \
          precondition this test needs: {second}"
     );
     assert_eq!(
-        second["wantedLockfile"]["importers"]["packages/a"]["specifiers"]["b"],
-        serde_json::json!("workspace:*"),
-        "…while the importer carries a real specifier: {second}"
+        second["wantedLockfile"]["importers"]["packages/a"]["dependencies"]["b"],
+        serde_json::json!({"specifier": "workspace:*", "version": "link:../b"}),
+        "…while the importer carries a real link: {second}"
     );
     assert_eq!(
         second["existsNonEmptyWantedLockfile"],
-        serde_json::json!(true),
-        "pnpm's isEmptyLockfile reads importers, so this lockfile is \
-         non-empty despite having no packages: {second}"
+        serde_json::json!(false),
+        "and pnpm still calls that lockfile empty: {second}"
     );
 }
 
-/// Under a non-pnpm incumbent nub suppresses the cwd-default pnpmfile
-/// and prints a warning whose remedy is "name it explicitly with
-/// `--pnpmfile`". That remedy has to work: the flag must parse, and the
-/// named file must run the hook the default would have run.
+/// The pnpmfile is pnpm's file, so a project that is not pnpm's does not get
+/// one — and there is no longer a flag to point at one either. `--pnpmfile`
+/// and `--global-pnpmfile` are gone from pnpm 12; `--ignore-pnpmfile`
+/// survives, and is accepted but inert where nothing would have been read.
 #[test]
-fn an_explicitly_named_pnpmfile_runs_under_a_non_pnpm_incumbent() {
-    let dir = fixture("npm-incumbent");
-    // `packageManager` alone makes npm the incumbent, which gates the
-    // cwd-default `.pnpmfile.cjs` off. Deliberately NO `package-lock.json`:
-    // seeding an empty one against a manifest that declares a dependency is
-    // lockfile drift, and CI defaults to frozen, so the fixture failed there
-    // with ERR_NUB_OUTDATED_LOCKFILE while passing on a dev machine.
-    std::fs::write(
-        dir.join("package.json"),
-        r#"{"name":"app","version":"1.0.0","packageManager":"npm@10.0.0","dependencies":{"dep":"file:./dep"}}"#,
-    )
-    .unwrap();
+fn a_nub_incumbent_project_reads_no_pnpmfile_and_has_no_flag_to_name_one() {
+    let nub_dir = fixture("nub-identity", false);
+    std::fs::write(nub_dir.join("custom-hooks.cjs"), RECORDER).unwrap();
 
-    let (stdout, stderr, code) = run(&dir, &["install"]);
+    let (stdout, stderr, code) = run(&nub_dir, &["install"]);
     assert_eq!(
         code, 0,
-        "default install\nstdout: {stdout}\nstderr: {stderr}"
+        "nub-identity install\nstdout: {stdout}\nstderr: {stderr}"
     );
     assert_eq!(
-        observations(&dir),
+        firings(&nub_dir),
         0,
-        "the cwd-default pnpmfile is another tool's config under an npm \
-         incumbent and must stay gated off\nstderr: {stderr}"
-    );
-    assert!(
-        stderr.contains("--pnpmfile"),
-        "the warning is what points the user at the flag: {stderr}"
+        "a nub-incumbent project must not read `.pnpmfile.cjs`\n\
+         stdout: {stdout}\nstderr: {stderr}"
     );
 
-    let (stdout, stderr, code) = run(&dir, &["install", "--pnpmfile", ".pnpmfile.cjs"]);
-    assert_eq!(code, 0, "--pnpmfile\nstdout: {stdout}\nstderr: {stderr}");
+    // Positive control: the identical fixture differing only by the file that
+    // declares pnpm's incumbency DOES run the hook. Without it this test
+    // would pass just as well on a build that had stopped loading pnpmfiles
+    // altogether.
+    let pnpm_dir = fixture("nub-identity-control", true);
+    let (stdout, stderr, code) = run(&pnpm_dir, &["install"]);
     assert_eq!(
-        observations(&dir),
+        code, 0,
+        "control install\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert_eq!(
+        firings(&pnpm_dir),
         1,
-        "naming the path explicitly is the documented remedy, so it has to \
-         run the hook\nstdout: {stdout}\nstderr: {stderr}"
-    );
-    assert!(
-        !stderr.contains("ignored"),
-        "the run that took the warning's own advice must not be told again \
-         that its pnpmfile was ignored: {stderr}"
+        "the control must run the hook, or the assertion above means nothing\n\
+         stdout: {stdout}\nstderr: {stderr}"
     );
 
-    let (stdout, stderr, code) = run(&dir, &["install", "--ignore-pnpmfile"]);
-    assert_eq!(
-        code,
-        0,
-        "--ignore-pnpmfile\nstdout: {stdout}\nstderr: {stderr}\nstate: {}",
-        project_state(&dir)
-    );
-    assert_eq!(
-        observations(&dir),
-        1,
-        "--ignore-pnpmfile must not run anything\nstderr: {stderr}"
-    );
-}
+    for dir in [&nub_dir, &pnpm_dir] {
+        let (stdout, stderr, code) = run(dir, &["install", "--pnpmfile", "custom-hooks.cjs"]);
+        assert_ne!(
+            code, 0,
+            "--pnpmfile is not a pnpm 12 flag\nstdout: {stdout}"
+        );
+        assert!(
+            stderr.contains("--pnpmfile"),
+            "the refusal must name the flag: {stderr}"
+        );
 
-/// `nub install --pnpmfile <path> <pkg>` routes the whole command
-/// through `add`, which reaches the scope warning from its own entry
-/// point. Same user-visible flag, so it has to behave the same way —
-/// and this is the form the native-install marker alone does not cover.
-///
-/// Its own project, deliberately, and NOT a fourth row on the test
-/// above: `add` rewrites `package.json` to `link:./dep`, and nub then
-/// writes a `package-lock.json` that its own frozen check rejects
-/// (`manifest adds dep@link:./dep`). That is a real pre-existing defect
-/// — npm writes `packages["dep"]` and `packages["node_modules/dep"]:
-/// {resolved, link: true}` for a local directory dependency and nub
-/// emits neither, which `npm/write.rs` documents as "Non-git local
-/// source entries (`file:`, URL tarballs) aren't emitted yet". It has
-/// nothing to do with pnpmfile hooks, and sharing a fixture made this
-/// test fail for it. Reproduce with `nub add ./dep && nub install
-/// --frozen-lockfile`; do not merge these two back together until that
-/// is fixed.
-#[test]
-fn a_routed_install_runs_an_explicitly_named_pnpmfile() {
-    let dir = fixture("npm-incumbent-routed");
-    std::fs::write(
-        dir.join("package.json"),
-        r#"{"name":"app","version":"1.0.0","packageManager":"npm@10.0.0","dependencies":{"dep":"file:./dep"}}"#,
-    )
-    .unwrap();
-
-    let (stdout, stderr, code) = run(&dir, &["install", "--pnpmfile", ".pnpmfile.cjs", "./dep"]);
-    assert_eq!(
-        code,
-        0,
-        "routed install <pkg>\nstdout: {stdout}\nstderr: {stderr}\nstate: {}",
-        project_state(&dir)
-    );
-    assert_eq!(
-        observations(&dir),
-        1,
-        "the routed form must run the named hook too\nstdout: {stdout}\nstderr: {stderr}"
-    );
-    assert!(
-        !stderr.contains("ignored"),
-        "and must not contradict itself with the default-file warning: {stderr}"
-    );
-}
-
-/// `update` resolves itself and then chains an install to materialize
-/// the result. That is one install operation — one `mutateModules` call
-/// in pnpm's terms — so the hook fires once, not once per stage.
-#[test]
-fn update_fires_the_hook_once_not_once_per_stage() {
-    let dir = fixture("update");
-    let (stdout, stderr, code) = run(&dir, &["install"]);
-    assert_eq!(code, 0, "seed install\nstdout: {stdout}\nstderr: {stderr}");
-    let before = observations(&dir);
-
-    let (stdout, stderr, code) = run(&dir, &["update"]);
-    assert_eq!(code, 0, "update\nstdout: {stdout}\nstderr: {stderr}");
-    assert_eq!(
-        observations(&dir) - before,
-        1,
-        "update ran the hook more than once — its own resolve and the \
-         install it chains must not each fire it\nstdout: {stdout}\nstderr: {stderr}"
-    );
+        let before = firings(dir);
+        let (stdout, stderr, code) = run(dir, &["install", "--ignore-pnpmfile"]);
+        assert_eq!(
+            code, 0,
+            "--ignore-pnpmfile\nstdout: {stdout}\nstderr: {stderr}"
+        );
+        assert_eq!(
+            firings(dir),
+            before,
+            "--ignore-pnpmfile suppresses the hook under either identity\n\
+             stdout: {stdout}\nstderr: {stderr}"
+        );
+    }
 }

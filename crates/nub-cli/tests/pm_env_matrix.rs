@@ -102,12 +102,30 @@ fn fixture(tag: &str) -> Fixture {
 /// A cache directory holding one packument named after its own leaf, so a
 /// `cache list` naming it identifies WHICH directory the engine resolved
 /// rather than merely that it resolved one.
+///
+/// The layout is the engine's, and it is not free to guess: metadata lives at
+/// `<cacheDir>/v11/metadata/<urlencoded-registry>/<package>.jsonl`, where
+/// `v11` is the cache schema version and the registry directory is the
+/// registry URL with `:` and `/` percent-encoded. A seed in any other shape
+/// reads as an empty cache, which is indistinguishable from an override that
+/// never took effect.
 fn seeded_cache(root: &Path, leaf: &str) -> PathBuf {
     let dir = root.join(leaf);
-    std::fs::create_dir_all(dir.join("packuments-v1")).unwrap();
-    std::fs::write(dir.join("packuments-v1").join(format!("{leaf}.json")), "{}").unwrap();
+    let metadata = dir.join("v11").join("metadata").join(SEEDED_REGISTRY_DIR);
+    std::fs::create_dir_all(&metadata).unwrap();
+    std::fs::write(metadata.join(format!("{leaf}.jsonl")), "{}\n").unwrap();
     dir
 }
+
+/// The registry directory every seed above is written under.
+///
+/// It has to match the registry the fixture's `.npmrc` pins: `cache list`
+/// reports only the registry it resolved, so a seed seeded under any other
+/// name is invisible and reads exactly like an override that never took.
+/// This is the measured encoding of `http://127.0.0.1:1/` — taken from the
+/// path the engine itself names in an offline resolve failure, not derived,
+/// because `://` and the port colon do not encode the same way.
+const SEEDED_REGISTRY_DIR: &str = "http%3A+127.0.0.1+1";
 
 /// `.npmrc` takes forward slashes on every platform; a Windows path written
 /// raw would land backslashes in an ini value.
@@ -149,13 +167,23 @@ fn run(fx: &Fixture, env: &[(&str, &str)], args: &[&str]) -> (String, i32) {
 }
 
 /// Which seeded cache directory the engine resolved, as named by `cache list`.
+///
+/// `cache list` prints one `<urlencoded-registry>/<package>.jsonl` line per
+/// cached packument. Only the package half identifies the directory — each
+/// seed is named after its own leaf — so the registry prefix and the
+/// extension come off and the rows below read as directory names.
 fn cached_names(fx: &Fixture, env: &[(&str, &str)]) -> Vec<String> {
     let (stdout, _) = run(fx, env, &["cache", "list"]);
     stdout
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .map(str::to_string)
+        .map(|line| {
+            line.rsplit_once('/')
+                .map_or(line, |(_registry, package)| package)
+                .trim_end_matches(".jsonl")
+                .to_string()
+        })
         .collect()
 }
 

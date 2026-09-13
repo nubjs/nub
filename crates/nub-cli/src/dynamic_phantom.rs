@@ -199,7 +199,6 @@ pub(crate) fn scan_and_cache_files(dir: &Path, fingerprint: &str, files: &[(Stri
 /// each engine keys a different sidecar. That costs a cold scan once and
 /// nothing else: a verdict is a pure function of the bytes, and the two
 /// engines do not share a store to begin with.
-#[cfg(feature = "pm-pnpm")]
 pub(crate) fn content_fingerprint<'a>(
     entries: impl Iterator<Item = (&'a str, &'a str, bool)>,
 ) -> String {

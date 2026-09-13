@@ -38,9 +38,9 @@ fn run_with_xdg_config(dir: &Path, xdg_config: &Path, args: &[&str]) -> (String,
         .current_dir(dir)
         .env_clear()
         .env("PATH", path)
-        // The fixture pins a differing `nub@<v>` to exercise nub identity, not the
-        // self-shim — opt out so a PM verb doesn't try to provision that nub.
-        // (env_clear above drops the ambient value, so set it explicitly.)
+        // One fixture pins a differing `nub@<v>` to exercise nub identity, not
+        // the self-shim — opt out so a PM verb doesn't try to provision that
+        // nub. (env_clear above drops the ambient value, so set it explicitly.)
         .env("NUB_SELF_SHIM", "0")
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", xdg_config)
@@ -61,193 +61,141 @@ fn config_get(dir: &Path, xdg_config: &Path, key: &str) -> String {
     stdout.trim().to_string()
 }
 
+/// Every shape a bunfig can state a setting in: the registry as a table and as
+/// a bare string, a scope with a URL and a url-less one carrying only a token,
+/// plus the two non-registry settings that used to be mapped.
+const PROJECT_BUNFIG: &str = r#"
+[install]
+registry = { url = "https://project.registry.example/", token = "project-token" }
+linker = "hoisted"
+minimumReleaseAge = 3600
+
+[install.scopes]
+"@acme" = "https://scope.registry.example/"
+"@urlless" = { token = "urlless-token" }
+"#;
+
+const GLOBAL_BUNFIG: &str = r#"
+[install]
+registry = "https://global.registry.example/"
+linker = "hoisted"
+minimumReleaseAge = 3600
+"#;
+
+/// A `bunfig.toml` supplies nub with nothing, under every incumbent — bun's own
+/// included, and whether the file is the project's or the global one.
+///
+/// Two of these cases used to assert the opposite: a bun incumbent mapped the
+/// bunfig's registry, its scopes (including a url-less scope, which fell back
+/// to the default registry) and `minimumReleaseAge` into nub's own view. Nub no
+/// longer reads bun configuration for any setting — `nub pm migrate` converts a
+/// bun lockfile once and the project is nub's afterwards — so bun incumbency no
+/// longer differs from any other, and the cases collapse into one sweep.
+///
+/// The two claims that never depended on reading the file for config are kept
+/// and are why this is not simply a deletion: the bunfig's `linker` must not
+/// direct layout, and its `minimumReleaseAge` must not move the release-age
+/// floor. Both are asserted as inequalities rather than against nub's own
+/// defaults, which differ per incumbent and are not what this test is about.
 #[test]
-fn bun_incumbent_reads_project_and_global_bunfig_install_subset() {
-    let dir = temp_project(
-        "bun",
-        &[
-            (
-                "package.json",
-                r#"{"name":"app","version":"1.0.0","packageManager":"bun@1.2.0"}"#,
-            ),
-            (
-                "bunfig.toml",
-                r#"
-                [install]
-                registry = { url = "https://project.registry.example/", token = "project-token" }
-
-                [install.scopes]
-                "@acme" = "https://scope.registry.example/"
-                "#,
-            ),
-        ],
-    );
-    let xdg_config = dir.join("xdg-config");
-    std::fs::create_dir_all(&xdg_config).unwrap();
-    std::fs::write(
-        xdg_config.join(".bunfig.toml"),
-        r#"
-        [install]
-        registry = "https://global.registry.example/"
-        linker = "hoisted"
-        minimumReleaseAge = 3600
-        "#,
-    )
-    .unwrap();
-
-    assert_eq!(
-        config_get(&dir, &xdg_config, "registry"),
-        "https://project.registry.example/"
-    );
-    assert_eq!(
-        config_get(&dir, &xdg_config, "@acme:registry"),
-        "https://scope.registry.example/"
-    );
-    // The global bunfig IS read for a bun incumbent — `minimumReleaseAge` is
-    // resolution config, and 3600 bunfig seconds arriving as 60 engine minutes
-    // could come from nowhere else.
-    assert_eq!(config_get(&dir, &xdg_config, "minimumReleaseAge"), "60");
-    // Its unsupported `linker` is not mapped, so the setting stays at Nub's
-    // default instead of the bunfig's `hoisted`.
-    assert_eq!(config_get(&dir, &xdg_config, "nodeLinker"), "isolated");
-}
-
-#[test]
-fn bun_incumbent_maps_url_less_scope_auth_to_default_registry() {
-    let dir = temp_project(
-        "bun-url-less-scope",
-        &[
-            (
-                "package.json",
-                r#"{"name":"app","version":"1.0.0","packageManager":"bun@1.2.0"}"#,
-            ),
-            (
-                "bunfig.toml",
-                r#"
-                [install]
-                registry = { url = "https://default.registry.example/", token = "default-token" }
-
-                [install.scopes]
-                "@acme" = { token = "scope-token" }
-                "#,
-            ),
-        ],
-    );
-    let xdg_config = dir.join("xdg-config");
-    std::fs::create_dir_all(&xdg_config).unwrap();
-
-    assert_eq!(
-        config_get(&dir, &xdg_config, "@acme:registry"),
-        "https://default.registry.example/"
-    );
-}
-
-#[test]
-fn nub_identity_does_not_read_project_or_global_bunfig() {
-    let dir = temp_project(
-        "nub",
-        &[
-            (
-                "package.json",
-                r#"{"name":"app","version":"1.0.0","packageManager":"nub@0.0.1"}"#,
-            ),
-            (
-                "nub.lock",
-                "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n",
-            ),
-            (
-                "bunfig.toml",
-                r#"
-                [install]
-                registry = "https://must-not-read.project.example/"
-                minimumReleaseAge = 3600
-                "#,
-            ),
-        ],
-    );
-    let xdg_config = dir.join("xdg-config");
-    std::fs::create_dir_all(&xdg_config).unwrap();
-    std::fs::write(
-        xdg_config.join(".bunfig.toml"),
-        r#"
-        [install]
-        registry = "https://must-not-read.global.example/"
-        "#,
-    )
-    .unwrap();
-
-    assert_eq!(
-        config_get(&dir, &xdg_config, "registry"),
-        "https://registry.npmjs.org/"
-    );
-    // Resolution config in the bunfig is ignored too, not just the registry:
-    // under a bun incumbent 3600 bunfig seconds arrive as 60 engine minutes, so
-    // anything else proves the file went unread. (Asserting the exact value
-    // would pin nub's own default, which is not what this test is about.)
-    assert_ne!(
-        config_get(&dir, &xdg_config, "minimumReleaseAge"),
-        "60",
-        "the bunfig's minimumReleaseAge must not be read under nub identity"
-    );
-}
-
-#[test]
-fn non_bun_incumbents_do_not_read_project_or_global_bunfig() {
-    let cases = [
+fn no_incumbent_reads_a_project_or_global_bunfig() {
+    let cases: &[(&str, &[(&str, &str)])] = &[
+        (
+            "bun",
+            &[
+                (
+                    "package.json",
+                    r#"{"name":"app","version":"1.0.0","packageManager":"bun@1.2.0"}"#,
+                ),
+                ("bunfig.toml", PROJECT_BUNFIG),
+            ],
+        ),
+        (
+            "nub",
+            &[
+                (
+                    "package.json",
+                    r#"{"name":"app","version":"1.0.0","packageManager":"nub@0.0.1"}"#,
+                ),
+                (
+                    "nub.lock",
+                    "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n",
+                ),
+                ("bunfig.toml", PROJECT_BUNFIG),
+            ],
+        ),
         (
             "npm",
-            r#"{"name":"app","version":"1.0.0","packageManager":"npm@10.0.0"}"#,
+            &[
+                (
+                    "package.json",
+                    r#"{"name":"app","version":"1.0.0","packageManager":"npm@10.0.0"}"#,
+                ),
+                ("bunfig.toml", PROJECT_BUNFIG),
+            ],
         ),
         (
             "yarn",
-            r#"{"name":"app","version":"1.0.0","packageManager":"yarn@4.0.0"}"#,
+            &[
+                (
+                    "package.json",
+                    r#"{"name":"app","version":"1.0.0","packageManager":"yarn@4.0.0"}"#,
+                ),
+                ("bunfig.toml", PROJECT_BUNFIG),
+            ],
         ),
         (
             "pnpm",
-            r#"{"name":"app","version":"1.0.0","packageManager":"pnpm@10.0.0"}"#,
+            &[
+                (
+                    "package.json",
+                    r#"{"name":"app","version":"1.0.0","packageManager":"pnpm@10.0.0"}"#,
+                ),
+                ("bunfig.toml", PROJECT_BUNFIG),
+            ],
         ),
-        ("fresh", r#"{"name":"app","version":"1.0.0"}"#),
+        (
+            "fresh",
+            &[
+                ("package.json", r#"{"name":"app","version":"1.0.0"}"#),
+                ("bunfig.toml", PROJECT_BUNFIG),
+            ],
+        ),
     ];
 
-    for (name, package_json) in cases {
-        let dir = temp_project(
-            name,
-            &[
-                ("package.json", package_json),
-                (
-                    "bunfig.toml",
-                    r#"
-                    [install]
-                    registry = "https://must-not-read.project.example/"
-                    linker = "isolated"
-
-                    [install.scopes]
-                    "@acme" = "https://must-not-read.scope.example/"
-                    "#,
-                ),
-            ],
-        );
+    for (name, files) in cases {
+        let dir = temp_project(name, files);
         let xdg_config = dir.join("xdg-config");
         std::fs::create_dir_all(&xdg_config).unwrap();
-        std::fs::write(
-            xdg_config.join(".bunfig.toml"),
-            r#"
-            [install]
-            registry = "https://must-not-read.global.example/"
-            linker = "hoisted"
-            "#,
-        )
-        .unwrap();
+        std::fs::write(xdg_config.join(".bunfig.toml"), GLOBAL_BUNFIG).unwrap();
 
         assert_eq!(
             config_get(&dir, &xdg_config, "registry"),
             "https://registry.npmjs.org/",
-            "case={name}"
+            "case={name}: neither bunfig may supply the registry"
         );
         assert_eq!(
             config_get(&dir, &xdg_config, "@acme:registry"),
             "undefined",
-            "case={name}"
+            "case={name}: a bunfig scope must not supply a scope registry"
+        );
+        assert_eq!(
+            config_get(&dir, &xdg_config, "@urlless:registry"),
+            "undefined",
+            "case={name}: a url-less bunfig scope must not map to any registry"
+        );
+        // 3600 bunfig SECONDS arriving as 60 engine MINUTES could come from
+        // nowhere else, so that one value is the discriminator for the file
+        // having been read at all.
+        assert_ne!(
+            config_get(&dir, &xdg_config, "minimumReleaseAge"),
+            "60",
+            "case={name}: a bunfig must not move the release-age floor"
+        );
+        assert_ne!(
+            config_get(&dir, &xdg_config, "nodeLinker"),
+            "hoisted",
+            "case={name}: a bunfig's linker must not direct the node_modules layout"
         );
     }
 }

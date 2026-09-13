@@ -1,13 +1,29 @@
 //! End-to-end (through the binary) tests for the install abort-eagerly policy:
-//! a lockfile source nub can't resolve, or a Yarn PnP project, aborts at PLAN
-//! time — before any `node_modules` write — with a precise, branded refusal,
-//! instead of a silent reclassify→404 / downgrade. The reader-level behavior
-//! lives in `vendor/aube/crates/aube-lockfile`; these assert the nub surface:
-//! the rebranded code, a non-zero exit, an untouched tree, and the optional
-//! carve-out (warn + proceed, not abort).
+//! a dependency nub can't resolve aborts at PLAN time — before any
+//! `node_modules` write — with a precise, rebranded refusal, instead of a
+//! silent reclassify→404 / downgrade, and an OPTIONAL one warns and proceeds
+//! rather than aborting.
 //!
-//! All three are hermetic — the fatals abort before any fetch, and the
-//! optional case has nothing left to install — so none need `#[ignore]`.
+//! These were written against the vendored aube engine, which enforced the
+//! policy in its foreign-lockfile READER: it parsed a `yarn.lock`/`bun.lock`,
+//! and an entry whose source it could not resolve raised
+//! `ERR_NUB_LOCKFILE_UNSUPPORTED_SOURCE` (exit 14), with a sibling refusal for
+//! a Yarn PnP project. Nub no longer reads another package manager's lockfile
+//! at all, so both of those codes are unreachable and the reader they lived in
+//! is gone. The POLICY survives, relocated to the engine's own resolver: an
+//! unresolvable spec in the MANIFEST fails the dependency-tree resolve, exits
+//! non-zero, and leaves the tree untouched.
+//!
+//! Every fixture below was run on both engines (`NUB_PM_ENGINE=aube` and the
+//! default) and differentialled against pnpm 12.4.1, which produces the same
+//! refusals byte for byte with `ERR_PNPM_*` in place of `ERR_NUB_*`. That
+//! rewrite is the only difference, which is why the no-brand-leak assertions
+//! below now watch for `ERR_PNPM_`.
+//!
+//! Still hermetic: `exotic:bar` is rejected by spec classification before any
+//! network call — confirmed by re-running each fixture with `registry` pointed
+//! at a dead port and getting the identical refusal — and the optional and PnP
+//! cases have nothing left to install. So none needs `#[ignore]`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -57,143 +73,120 @@ fn write(dir: &Path, files: &[(&str, &str)]) {
     }
 }
 
-const GIT_DEP_PKG: &str =
-    r#"{"name":"t","version":"1.0.0","dependencies":{"foo":"user/repo#abc123"}}"#;
-const GIT_DEP_LOCK: &str = "# yarn lockfile v1\n\n\"foo@user/repo#abc123\":\n  version \"1.0.0\"\n  resolved \"https://codeload.github.com/user/repo/tar.gz/abc123\"\n";
+/// A manifest whose only dependency carries a protocol no resolver claims.
+/// Spec classification rejects it before any network call, which is what makes
+/// every fixture built on it hermetic.
+const UNRESOLVABLE_PKG: &str =
+    r#"{"name":"t","version":"1.0.0","dependencies":{"foo":"exotic:bar"}}"#;
 
+/// Each foreign lockfile pins a plain, perfectly resolvable `foo@1.0.0`. That
+/// is the point: an engine that still read one would install `1.0.0` instead
+/// of refusing, so a refusal naming the MANIFEST's `exotic:bar` is positive
+/// evidence the lockfile was never consulted.
+const YARN_LOCK_PINNING_FOO: &str = "# yarn lockfile v1\n\nfoo@^1.0.0:\n  version \"1.0.0\"\n  resolved \"https://registry.npmjs.org/foo/-/foo-1.0.0.tgz\"\n";
+const BUN_LOCK_PINNING_FOO: &str = r#"{
+  "lockfileVersion": 1,
+  "workspaces": { "": { "dependencies": { "foo": "^1.0.0" } } },
+  "packages": { "foo": ["foo@1.0.0", {}] }
+}"#;
+
+/// An unresolvable dependency aborts the install before the tree is touched,
+/// and no foreign lockfile sitting beside it changes that.
+///
+/// Was two tests, one per lockfile flavor, because aube gave yarn and bun
+/// separate readers and each had to refuse its own unsupported source. Neither
+/// file is read now, so both flavors take one code path and a second copy would
+/// assert nothing the first did not.
 #[test]
-fn install_aborts_on_unresolvable_yarn_lock_source() {
-    for verb in ["install", "ci"] {
-        let dir = tmpdir("git");
+fn install_aborts_on_an_unresolvable_spec_no_foreign_lockfile_rescues_it() {
+    for (lockfile, body) in [
+        ("yarn.lock", YARN_LOCK_PINNING_FOO),
+        ("bun.lock", BUN_LOCK_PINNING_FOO),
+    ] {
+        let dir = tmpdir("unresolvable");
         write(
             &dir,
-            &[("package.json", GIT_DEP_PKG), ("yarn.lock", GIT_DEP_LOCK)],
+            &[("package.json", UNRESOLVABLE_PKG), (lockfile, body)],
         );
-        let (out, code) = run(&dir, &[verb]);
-        assert_ne!(code, 0, "`nub {verb}` must abort on an unresolvable source");
+        let (out, code) = run(&dir, &["install"]);
+        assert_ne!(
+            code, 0,
+            "`nub install` beside {lockfile} must abort on an unresolvable spec; got:\n{out}"
+        );
         assert!(
-            out.contains("ERR_NUB_LOCKFILE_UNSUPPORTED_SOURCE"),
-            "`nub {verb}` output should carry the rebranded code; got:\n{out}"
+            out.contains("ERR_NUB_SPEC_NOT_SUPPORTED_BY_ANY_RESOLVER"),
+            "the refusal beside {lockfile} should carry the rebranded code; got:\n{out}"
         );
-        // The refusal names the offending entry and protocol. miette wraps the
-        // rendered diagnostic at terminal width (CI's width differs from a dev
-        // box's), so match against a whitespace-flattened copy — the entry key
-        // and protocol token carry no internal whitespace, so a wrap can only
-        // have split them across a newline + indent.
+        // The refusal names the offending spec. miette wraps the rendered
+        // diagnostic at terminal width (CI's width differs from a dev box's),
+        // so match against a whitespace-flattened copy — the spec carries no
+        // internal whitespace, so a wrap can only have split it across a
+        // newline + indent.
         let flat: String = out.split_whitespace().collect();
         assert!(
-            flat.contains("foo@user/repo#abc123") && flat.contains("git"),
-            "`nub {verb}` should name the offending entry and protocol; got:\n{out}"
+            flat.contains("foo@exotic:bar"),
+            "the refusal should name the manifest's spec, not {lockfile}'s pin; got:\n{out}"
         );
-        // No brand leak — the engine's `aube` code must be rewritten.
-        assert!(!out.contains("ERR_AUBE_LOCKFILE_UNSUPPORTED_SOURCE"));
+        assert!(
+            !flat.contains("foo@1.0.0"),
+            "{lockfile} pins foo@1.0.0; naming it would mean the lockfile was read; got:\n{out}"
+        );
+        // No brand leak — the engine's `pnpm` codes must be rewritten.
+        assert!(!out.contains("ERR_PNPM_"), "brand leak; got:\n{out}");
         // Genuinely pre-mutation: no node_modules was created.
         assert!(
             !dir.join("node_modules").exists(),
-            "`nub {verb}` must abort before writing node_modules"
+            "`nub install` must abort before writing node_modules"
         );
     }
 }
 
+/// A Yarn PnP project installs an ordinary `node_modules` tree.
+///
+/// Was an abort (`ERR_NUB_PNP_UNSUPPORTED`). That refusal existed because nub
+/// honored the project's `yarn.lock` while being unable to reproduce yarn's PnP
+/// layout, so installing would have silently diverged from the incumbent. Nub
+/// no longer reads the `yarn.lock` or any yarn-branded config, `.yarnrc.yml`
+/// included, so there is no incumbent layout left to diverge from and nothing
+/// to refuse. pnpm 12.4.1 installs this fixture identically.
 #[test]
-fn install_aborts_on_yarn_pnp() {
-    for verb in ["install", "ci"] {
-        let dir = tmpdir("pnp");
-        write(
-            &dir,
-            &[
-                ("package.json", r#"{"name":"t","version":"1.0.0"}"#),
-                ("yarn.lock", "# yarn lockfile v1\n"),
-                (".yarnrc.yml", "nodeLinker: pnp\n"),
-            ],
-        );
-        let (out, code) = run(&dir, &[verb]);
-        assert_ne!(code, 0, "`nub {verb}` must abort on a Yarn PnP project");
-        assert!(
-            out.contains("ERR_NUB_PNP_UNSUPPORTED"),
-            "`nub {verb}` should refuse PnP with the branded code; got:\n{out}"
-        );
-        assert!(!dir.join("node_modules").exists());
-    }
-}
-
-#[test]
-fn install_proceeds_on_optional_unresolvable_source() {
-    // decision #3: an OPTIONAL unresolvable dep warns and the install proceeds
-    // (matching the incumbent's tolerance of a missing optional), instead of
-    // aborting. With nothing else to install, the run completes offline.
-    let dir = tmpdir("opt");
+fn a_yarn_pnp_project_installs_a_node_modules_tree() {
+    let dir = tmpdir("pnp");
     write(
         &dir,
         &[
-            (
-                "package.json",
-                r#"{"name":"t","version":"1.0.0","optionalDependencies":{"foo":"user/repo#abc123"}}"#,
-            ),
-            (
-                "yarn.lock",
-                "# yarn lockfile v1\n\n\"foo@user/repo#abc123\":\n  version \"1.0.0\"\n  resolved \"x\"\n",
-            ),
+            ("package.json", r#"{"name":"t","version":"1.0.0"}"#),
+            ("yarn.lock", "# yarn lockfile v1\n"),
+            (".yarnrc.yml", "nodeLinker: pnp\n"),
         ],
     );
     let (out, code) = run(&dir, &["install"]);
     assert_eq!(
         code, 0,
-        "an optional unresolvable dep must not abort; got:\n{out}"
+        "PnP config must not divert the install; got:\n{out}"
     );
     assert!(
-        out.contains("WARN_NUB_LOCKFILE_UNSUPPORTED_SOURCE"),
-        "the optional skip should warn; got:\n{out}"
+        !out.contains("ERR_NUB_PNP_UNSUPPORTED"),
+        "the retired PnP refusal must not come back; got:\n{out}"
     );
+    assert!(
+        dir.join("node_modules").exists(),
+        "a node_modules tree is what nub installs; got:\n{out}"
+    );
+    // Nub's own lockfile, not yarn's, and not a PnP runtime file.
+    assert!(dir.join("nub.lock").exists(), "got:\n{out}");
+    assert!(!dir.join(".pnp.cjs").exists(), "got:\n{out}");
 }
 
-const BUN_EXOTIC_PKG: &str =
-    r#"{"name":"t","version":"1.0.0","dependencies":{"foo":"exotic:bar"}}"#;
-const BUN_EXOTIC_LOCK: &str = r#"{
-  "lockfileVersion": 1,
-  "workspaces": { "": { "dependencies": { "foo": "exotic:bar" } } },
-  "packages": { "foo": ["foo@exotic:bar", {}] }
-}"#;
-
+/// An OPTIONAL unresolvable dependency is skipped and the install proceeds,
+/// matching every incumbent's tolerance of a missing optional.
+///
+/// The carve-out survived the engine change; only its wording moved. Was
+/// `WARN_NUB_LOCKFILE_UNSUPPORTED_SOURCE` from aube's reader. The engine says
+/// it the way pnpm 12.4.1 does, verbatim, on a successful run.
 #[test]
-fn install_aborts_on_unresolvable_bun_lock_source() {
-    // The bun twin of the yarn case: an unknown-protocol bun.lock entry is
-    // a plan-time fatal, not a silent reclassify-to-registry that 404s
-    // mid-install. (No real bun protocol triggers this today — the fixture
-    // is the future-proof/defense-in-depth path.)
-    for verb in ["install", "ci"] {
-        let dir = tmpdir("bun");
-        write(
-            &dir,
-            &[
-                ("package.json", BUN_EXOTIC_PKG),
-                ("bun.lock", BUN_EXOTIC_LOCK),
-            ],
-        );
-        let (out, code) = run(&dir, &[verb]);
-        assert_ne!(code, 0, "`nub {verb}` must abort on an unresolvable source");
-        assert!(
-            out.contains("ERR_NUB_LOCKFILE_UNSUPPORTED_SOURCE"),
-            "`nub {verb}` output should carry the rebranded code; got:\n{out}"
-        );
-        let flat: String = out.split_whitespace().collect();
-        assert!(
-            flat.contains("foo@exotic:bar") && flat.contains("exotic"),
-            "`nub {verb}` should name the offending entry and protocol; got:\n{out}"
-        );
-        assert!(!out.contains("ERR_AUBE_LOCKFILE_UNSUPPORTED_SOURCE"));
-        assert!(
-            !dir.join("node_modules").exists(),
-            "`nub {verb}` must abort before writing node_modules"
-        );
-    }
-}
-
-#[test]
-fn ci_proceeds_on_optional_unresolvable_bun_lock_source() {
-    // The optional carve-out on the bun reader: warn + skip, recorded as a
-    // consciously-skipped optional so the frozen drift check tolerates it.
-    let dir = tmpdir("bun-opt");
+fn install_proceeds_on_an_optional_unresolvable_spec() {
+    let dir = tmpdir("opt");
     write(
         &dir,
         &[
@@ -201,23 +194,61 @@ fn ci_proceeds_on_optional_unresolvable_bun_lock_source() {
                 "package.json",
                 r#"{"name":"t","version":"1.0.0","optionalDependencies":{"foo":"exotic:bar"}}"#,
             ),
-            (
-                "bun.lock",
-                r#"{
-  "lockfileVersion": 1,
-  "workspaces": { "": { "optionalDependencies": { "foo": "exotic:bar" } } },
-  "packages": { "foo": ["foo@exotic:bar", {}] }
-}"#,
-            ),
+            ("yarn.lock", "# yarn lockfile v1\n"),
         ],
     );
-    let (out, code) = run(&dir, &["ci"]);
+    let (out, code) = run(&dir, &["install"]);
     assert_eq!(
         code, 0,
         "an optional unresolvable dep must not abort; got:\n{out}"
     );
+    // Flattened for the same wrapping reason as the abort case above.
+    let flat: String = out.split_whitespace().collect();
     assert!(
-        out.contains("WARN_NUB_LOCKFILE_UNSUPPORTED_SOURCE"),
-        "the optional skip should warn; got:\n{out}"
+        flat.contains("foo@exotic:bar") && flat.contains("Excludingitfrominstallation"),
+        "the optional skip should name the dep and say it was excluded; got:\n{out}"
+    );
+    // Skipped, not quietly installed from somewhere.
+    assert!(
+        !dir.join("node_modules").join("foo").exists(),
+        "the unresolvable optional must not land in the tree; got:\n{out}"
+    );
+}
+
+/// `nub ci` is the headless install, so it needs nub's OWN lockfile. A foreign
+/// one lying beside it is not a substitute — it is not read, so the project has
+/// no lockfile at all as far as `ci` is concerned, and `ci` refuses rather than
+/// resolving fresh.
+///
+/// Was: aube's bun reader drove `ci` straight off `bun.lock`, so this fixture
+/// installed successfully. Reaching a green `nub ci` here now takes a `nub
+/// install` (or `nub pm migrate`) first.
+///
+/// Only the code is asserted, deliberately. The message it carries still names
+/// `pnpm-lock.yaml`, a file that never exists in a project nub installed — a
+/// rebranding gap in the engine's copy, not a contract to pin.
+#[test]
+fn ci_refuses_when_only_a_foreign_lockfile_is_present() {
+    let dir = tmpdir("bun-ci");
+    write(
+        &dir,
+        &[
+            ("package.json", UNRESOLVABLE_PKG),
+            ("bun.lock", BUN_LOCK_PINNING_FOO),
+        ],
+    );
+    let (out, code) = run(&dir, &["ci"]);
+    assert_ne!(
+        code, 0,
+        "`nub ci` must not install off another package manager's lockfile; got:\n{out}"
+    );
+    assert!(
+        out.contains("ERR_NUB_NO_LOCKFILE"),
+        "`nub ci` should report the missing lockfile; got:\n{out}"
+    );
+    assert!(!out.contains("ERR_PNPM_"), "brand leak; got:\n{out}");
+    assert!(
+        !dir.join("node_modules").exists(),
+        "`nub ci` must refuse before writing node_modules"
     );
 }

@@ -1,6 +1,14 @@
 //! Info-family verbs (`list`/`why`/`outdated`/`audit`/`peers`, …) through
-//! the embedded aube engine, end-to-end through the binary. The wiring under
-//! test lives in `crates/nub-cli/src/pm_engine/info_family.rs`.
+//! the embedded pnpm 12 engine, end-to-end through the binary. The wiring
+//! under test lives in `crates/nub-cli/src/pm_engine/info_family.rs`.
+//!
+//! Every verb here is an ENGINE verb, so the contract is pnpm 12's behavior
+//! with the embedder's rebrand over it — and the rebrand is scoped by project
+//! IDENTITY. A pnpm-incumbent project (a `pnpm-lock.yaml` or a
+//! `pnpm-workspace.yaml`) must be indistinguishable from pnpm, `ERR_PNPM_*`
+//! codes included; everything else is nub-incumbent, speaks `ERR_NUB_*`, and
+//! names `nub.lock` as its lockfile. Several fixtures below are one file away
+//! from flipping identity, so each states the one it means.
 //!
 //! The lockfile-reading verbs are offline-testable against a handcrafted
 //! `pnpm-lock.yaml` (the engine reads the graph straight from the lockfile).
@@ -74,6 +82,32 @@ fn assert_no_engine_branding(streams: &[(&str, &str)]) {
             "engine branding leaked on {name}: {s}"
         );
     }
+}
+
+/// The same boundary for the pnpm engine, and it only holds under NUB
+/// identity — under pnpm identity the `pnpm` spelling is the contract, not a
+/// leak. A1.7 exempts real on-disk names, so this is only exact for a fixture
+/// that has no pnpm-named file in it; every caller below is one.
+fn assert_no_pnpm_branding(streams: &[(&str, &str)]) {
+    for (name, s) in streams {
+        assert!(
+            !s.to_lowercase().contains("pnpm"),
+            "pnpm branding leaked on {name} under nub identity: {s}"
+        );
+    }
+}
+
+/// Whether `dir` resolves as a workspace, read off `deploy`'s two refusals:
+/// `CANNOT_DEPLOY` is "not in a workspace", `CANNOT_DEPLOY_MANY` is "in one,
+/// but it has more than one project". A cheap probe that needs no install,
+/// and the only one that answers for a member directory.
+fn in_workspace(dir: &Path) -> bool {
+    let (_, stderr, _) = run_nub(dir, &["deploy", "out"]);
+    assert!(
+        stderr.contains("CANNOT_DEPLOY"),
+        "the workspace probe expects one of deploy's two refusals: {stderr}"
+    );
+    stderr.contains("CANNOT_DEPLOY_MANY")
 }
 
 /// A single-dep project with a handcrafted pnpm v9 lockfile — enough for
@@ -152,11 +186,27 @@ fn lockfile_read_verbs_work_offline_and_stay_brand_clean() {
     );
 }
 
-/// The no-lockfile pre-flight: the engine's own handling of this case is a
-/// direct branded eprintln, so nub short-circuits it — same message shape,
-/// nub spelling, exit 0 (matching the engine's exit behavior).
+/// The never-installed project, on a nub-incumbent fixture.
+///
+/// OLD CONTRACT (aube): aube handled this case with a direct branded
+/// `eprintln`, so nub short-circuited ahead of it — both verbs printed a
+/// hand-written `Run \`nub install\`…` hint on stderr and exited 0.
+///
+/// NEW CONTRACT: the short-circuit is gone, because the engine's own handling
+/// is correct and A1.6 routes these verbs to it unchanged. The two verbs
+/// diverge, and that divergence is pnpm's:
+///   - `list` is a valid query against an empty graph, so it prints the real
+///     empty listing on stdout and exits 0.
+///   - `outdated` cannot answer without a lockfile, so it errors and exits 1.
+///
+/// MEASURED against pnpm 12.4.1 on an identical fixture: byte-identical on
+/// both verbs once the identity-correct brand is substituted
+/// (`ERR_PNPM_OUTDATED_NO_LOCKFILE` / `pnpm install`). The nub-identity
+/// rebrand is therefore what this pins. The error body is line-wrapped by the
+/// diagnostic renderer at a width the fixture's path length decides, so it is
+/// asserted in fragments that survive the wrap rather than as one sentence.
 #[test]
-fn missing_lockfile_reports_the_nub_install_hint_and_exits_zero() {
+fn missing_lockfile_defers_to_the_engine_and_rebrands_for_nub_identity() {
     let dir = pm_tmpdir("nolock");
     std::fs::write(
         dir.join("package.json"),
@@ -164,41 +214,66 @@ fn missing_lockfile_reports_the_nub_install_hint_and_exits_zero() {
     )
     .unwrap();
 
+    // `list`: the real empty listing, not a short-circuit note.
     let (stdout, stderr, code) = run_nub(&dir, &["list"]);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        stderr.contains("Run `nub install` to populate node_modules"),
-        "list must speak the rebranded hint: {stderr}"
+        stdout.contains("nolock@1.0.0") && stdout.contains("0 packages"),
+        "list must print the engine's empty listing: {stdout}"
     );
-
-    let (stdout, stderr, code) = run_nub(&dir, &["outdated"]);
-    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        stderr.contains("Run `nub install` first."),
-        "outdated must speak the rebranded hint: {stderr}"
+        !stderr.contains("No lockfile found"),
+        "nub's own no-lockfile short-circuit must not fire: {stderr}"
     );
     assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
+    assert_no_pnpm_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
+
+    // `outdated`: the engine's error, rebranded for nub identity, exit 1.
+    let (stdout, stderr, code) = run_nub(&dir, &["outdated"]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("ERR_NUB_OUTDATED_NO_LOCKFILE"),
+        "the error code must rebrand under nub identity: {stderr}"
+    );
+    assert!(
+        stderr.contains("No lockfile in directory"),
+        "outdated must speak the engine's own diagnostic: {stderr}"
+    );
+    assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
+    assert_no_pnpm_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
 }
 
-/// The `--filter requires a workspace root (…)` error names the workspace
-/// markers the engine looks for. The engine's own phrasing lists
-/// `aube-workspace.yaml` — a brand leak in nub's public output (the
-/// conformance sweep hit it on `nub list -r` across 5/6 fixtures). nub's
-/// embedder has no branded workspace yaml, so the error must name only
-/// `pnpm-workspace.yaml`, with zero `aube` on either stream. Exercised across
-/// the verbs that share the workspace-root resolver (list/why).
+/// `--filter` on a project that is not a workspace, on a nub-incumbent
+/// fixture.
+///
+/// OLD CONTRACT (aube): nub ran its own pre-flight ahead of the engine and
+/// failed the command with `--filter requires a workspace root (…)`. That
+/// check existed to replace aube's phrasing, which named `aube-workspace.yaml`
+/// and leaked the engine's brand into nub's output.
+///
+/// NEW CONTRACT: there is nothing to rebrand, so the pre-flight is gone and
+/// the filter is simply a selector that matches no project — a silent no-op at
+/// exit 0. That is not an obviously-right behavior, so it is pinned against
+/// the reference rather than reasoned about: MEASURED identical to pnpm 12.4.1
+/// on the same fixture for all three verb shapes, and identical again for a
+/// matching and a non-matching filter inside a real workspace.
+///
+/// The regression this guards is a nub-side pre-flight coming back: it would
+/// fail the command where pnpm succeeds, on a path A1.6 routes to the engine
+/// unchanged.
 #[test]
-fn filter_workspace_root_error_is_brand_clean() {
+fn filter_on_a_non_workspace_is_a_silent_no_op() {
     let dir = pm_tmpdir("filter-nonws");
     std::fs::write(
         dir.join("package.json"),
         r#"{"name":"app","version":"1.0.0"}"#,
     )
     .unwrap();
-    // A lockfile so the no-lockfile pre-flight doesn't short-circuit before the
-    // --filter workspace-root check fires.
+    // `nub.lock`, not `pnpm-lock.yaml`: a pnpm-named lockfile would make this
+    // a pnpm-incumbent project and put the `pnpm` spelling legitimately back
+    // in range of the brand assertion below.
     std::fs::write(
-        dir.join("pnpm-lock.yaml"),
+        dir.join("nub.lock"),
         "lockfileVersion: '9.0'\n\nimporters:\n  .:\n    dependencies: {}\n",
     )
     .unwrap();
@@ -208,22 +283,39 @@ fn filter_workspace_root_error_is_brand_clean() {
         vec!["list", "-r", "--filter", "foo"],
         vec!["why", "react", "--filter", "foo"],
     ] {
-        let (stdout, stderr, _code) = run_nub(&dir, &verb);
+        let (stdout, stderr, code) = run_nub(&dir, &verb);
+        assert_eq!(code, 0, "{verb:?}: stdout: {stdout}\nstderr: {stderr}");
         assert!(
-            stderr.contains("pnpm-workspace.yaml"),
-            "{verb:?} must name pnpm-workspace.yaml as the workspace marker: {stderr}"
+            !stderr.contains("--filter requires a workspace root"),
+            "nub's own --filter pre-flight must not fire: {stderr}"
         );
         assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
+        assert_no_pnpm_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
     }
 }
 
-/// `--json` must ALWAYS emit parseable JSON on stdout — never empty-stdout +
-/// a prose stderr note — in the never-installed (no-lockfile) state, so
-/// `nub list --json | jq` / `nub outdated --json | jq` behave like pnpm's,
-/// which emit the empty shape (an importer-header array for `list`, `{}` for
-/// `outdated`). Regression for D2.
+/// `--json` in the never-installed (no-lockfile) state, on a nub-incumbent
+/// fixture.
+///
+/// OLD CONTRACT (D2): `--json` must ALWAYS put parseable JSON on stdout, so
+/// `nub list --json | jq` and `nub outdated --json | jq` both work before the
+/// first install — an importer-header array for `list`, `{}` for `outdated`.
+/// `--format json` was accepted as the long spelling of `--json`.
+///
+/// NEW CONTRACT: `list` keeps the guarantee, `outdated` does not, and
+/// `--format` is not a flag at all. D2 was written against what pnpm did at
+/// the time; A1.6 routes all three to the engine unchanged, so pnpm 12 is now
+/// what decides. MEASURED against pnpm 12.4.1 on an identical fixture, all
+/// three identical:
+///   - `list --json` → the same importer array, now also carrying `private`.
+///   - `list --format json` → rejected by the parser, exit 2, `--format` gone
+///     from pnpm's `list` (it suggests `--sort`).
+///   - `outdated --json` → the no-lockfile error, exit 1, no JSON at all.
+///
+/// So the surviving JSON guarantee is `list`'s alone, and it is the one worth
+/// pinning: it is what a caller pipes into `jq` on a fresh checkout.
 #[test]
-fn json_queries_emit_parseable_empty_shape_without_a_lockfile() {
+fn list_json_emits_the_empty_importer_shape_without_a_lockfile() {
     let dir = pm_tmpdir("nolock-json");
     std::fs::write(
         dir.join("package.json"),
@@ -239,26 +331,32 @@ fn json_queries_emit_parseable_empty_shape_without_a_lockfile() {
     assert_eq!(v[0]["name"], "nolock-json", "importer name: {stdout}");
     assert_eq!(v[0]["version"], "2.3.4", "importer version: {stdout}");
     assert!(v[0]["path"].is_string(), "importer path: {stdout}");
-
-    // `--format json` (the long spelling) goes through the same path.
-    let (stdout, _, code) = run_nub(&dir, &["list", "--format", "json"]);
-    assert_eq!(code, 0);
-    assert!(
-        serde_json::from_str::<serde_json::Value>(stdout.trim()).is_ok(),
-        "list --format json must be parseable JSON: {stdout}"
-    );
-
-    // outdated --json: the empty object.
-    let (stdout, stderr, code) = run_nub(&dir, &["outdated", "--json"]);
-    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(stdout.trim())
-            .expect("outdated --json must be parseable JSON"),
-        serde_json::json!({}),
-        "outdated --json empty shape must be {{}}: {stdout}"
-    );
-
     assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
+    assert_no_pnpm_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
+
+    // `--format json` is not pnpm 12 grammar. The rejection is the parser's,
+    // so what matters is that it is spelled in the host's name.
+    let (stdout, stderr, code) = run_nub(&dir, &["list", "--format", "json"]);
+    assert_eq!(code, 2, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("unexpected argument '--format'") && stderr.contains("Usage: nub list"),
+        "the rejection must be rendered in nub's name: {stderr}"
+    );
+
+    // `outdated --json` has no lockfile to report on, so it errors rather than
+    // emitting an empty document.
+    let (stdout, stderr, code) = run_nub(&dir, &["outdated", "--json"]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.trim().is_empty(),
+        "outdated --json must not emit a document it cannot fill: {stdout}"
+    );
+    assert!(
+        stderr.contains("ERR_NUB_OUTDATED_NO_LOCKFILE"),
+        "the error code must rebrand under nub identity: {stderr}"
+    );
+    assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
+    assert_no_pnpm_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
 }
 
 /// The path verbs print the resolved project locations without any install,
@@ -309,95 +407,162 @@ fn tag_leaf(dir: &Path) -> String {
     dir.file_name().unwrap().to_string_lossy().into_owned()
 }
 
-/// The workspace-yaml brand toggle: an `aube-workspace.yaml` on disk is
-/// another tool's state and must not change what nub reads. The probe rides
-/// the workspace-root walk — from a member directory with no lockfile of
-/// its own, `nub list` resolves the workspace root (which holds a lockfile)
-/// only if the yaml is honored. With the toggle, the member is a standalone
-/// project and the no-lockfile short-circuit fires; an identical fixture
-/// keyed by `pnpm-workspace.yaml` resolves the root and runs the engine.
+/// Which file declares a workspace, per identity.
+///
+/// OLD CONTRACT: an `aube-workspace.yaml` on disk was another tool's state and
+/// must not change what nub reads, while `pnpm-workspace.yaml` must. The probe
+/// rode nub's no-lockfile short-circuit from a member directory.
+///
+/// That test is gone twice over: there is no aube and so no
+/// `aube-workspace.yaml`, and the short-circuit it observed through no longer
+/// exists. What replaced it is a real per-identity split, which is what this
+/// pins instead. nub's embedder sets `workspaces_from_package_manifest`, so a
+/// nub-incumbent project declares members in the neutral
+/// `package.json#workspaces`; a pnpm-incumbent one uses
+/// `pnpm-workspace.yaml`, exactly as pnpm does. The two are not
+/// interchangeable, and the cross cells are the point: neither file works
+/// under the other identity.
+///
+/// Note the fixtures cannot be varied by yaml alone — planting a
+/// `pnpm-workspace.yaml` is itself a pnpm-incumbency signal — so identity and
+/// declaration move together, and the lockfile name carries the identity.
+///
+/// MEASURED, with pnpm 12.4.1 agreeing on both pnpm-identity rows.
 #[test]
-fn aube_workspace_yaml_is_not_consulted_for_workspace_discovery() {
-    let fixture = |yaml_name: &str| {
-        let root = pm_tmpdir(&format!("wsyaml-{}", &yaml_name[..4]));
-        std::fs::write(root.join(yaml_name), "packages:\n  - 'pkgs/*'\n").unwrap();
+fn workspace_members_are_declared_per_identity() {
+    // `(tag, lockfile name, yaml?, neutral workspaces field?)` → the member.
+    let fixture = |tag: &str, lock_name: &str, yaml: bool, neutral: bool| {
+        let root = pm_tmpdir(&format!("wsdecl-{tag}"));
+        let field = if neutral {
+            r#","workspaces":["pkgs/*"]"#
+        } else {
+            ""
+        };
         std::fs::write(
-            root.join("pnpm-lock.yaml"),
+            root.join("package.json"),
+            format!(r#"{{"name":"root","version":"1.0.0"{field}}}"#),
+        )
+        .unwrap();
+        if yaml {
+            std::fs::write(
+                root.join("pnpm-workspace.yaml"),
+                "packages:\n  - 'pkgs/*'\n",
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            root.join(lock_name),
             "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n\n  pkgs/app: {}\n",
         )
         .unwrap();
         let member = root.join("pkgs/app");
         std::fs::create_dir_all(&member).unwrap();
-        std::fs::write(member.join("package.json"), r#"{"name":"app"}"#).unwrap();
+        std::fs::write(
+            member.join("package.json"),
+            r#"{"name":"app","version":"1.0.0"}"#,
+        )
+        .unwrap();
         member
     };
 
-    let (_, stderr, code) = run_nub(&fixture("aube-workspace.yaml"), &["list"]);
-    assert_eq!(code, 0, "stderr: {stderr}");
+    // nub identity: the neutral field declares the workspace…
     assert!(
-        stderr.contains("No lockfile found"),
-        "aube-workspace.yaml must not promote the member into a workspace: {stderr}"
+        in_workspace(&fixture("nub-neutral", "nub.lock", false, true)),
+        "package.json#workspaces must declare a nub project's members"
+    );
+    // …and nothing else does. This is the negative control that proves the
+    // probe discriminates rather than always answering yes.
+    assert!(
+        !in_workspace(&fixture("nub-bare", "nub.lock", false, false)),
+        "a nub project with no workspaces field is a single project"
     );
 
-    let (_, stderr, code) = run_nub(&fixture("pnpm-workspace.yaml"), &["list"]);
-    assert_eq!(code, 0, "stderr: {stderr}");
+    // pnpm identity: the yaml declares the workspace and the neutral field is
+    // ignored — pnpm's own rule, mirrored.
     assert!(
-        !stderr.contains("No lockfile found"),
-        "pnpm-workspace.yaml must resolve the root's lockfile: {stderr}"
+        in_workspace(&fixture("pnpm-yaml", "pnpm-lock.yaml", true, false)),
+        "pnpm-workspace.yaml must declare a pnpm project's members"
+    );
+    assert!(
+        !in_workspace(&fixture("pnpm-neutral", "pnpm-lock.yaml", false, true)),
+        "pnpm ignores package.json#workspaces, so a pnpm project must too"
     );
 }
 
-/// Role-gating: the pnpm-specific config surface (`pnpm-workspace.yaml`, the
-/// `package.json#pnpm.*` namespace) is OFF for an npm/yarn/bun incumbent. A
-/// yarn project someone copied a pnpm tutorial's workspace yaml into must not
-/// silently adopt its `packages` glob — under nub identity that yaml is already
-/// ignored, and a non-pnpm compat role gets the same treatment. The same
-/// fixture keyed to a pnpm project still resolves the root (the pnpm surface is
-/// live for the pnpm role). Rides the workspace-root walk like the
-/// `aube-workspace.yaml` probe above: from a member with no lockfile, the
-/// member is standalone unless the yaml is honored.
+/// The `packageManager` pin naming a PM that is not us.
+///
+/// OLD CONTRACT: a "yarn role" existed beside a "pnpm role", and the
+/// pnpm-specific config surface was gated OFF for it — a yarn project someone
+/// copied a pnpm tutorial's `pnpm-workspace.yaml` into must not adopt its
+/// `packages` glob.
+///
+/// That test could not do what it said. Its yarn fixture planted a
+/// `pnpm-workspace.yaml`, which IS a pnpm-incumbency signal, so the project it
+/// built was pnpm-incumbent and the gate under test was never reached. A1.5
+/// then removed the yarn role outright.
+///
+/// NEW CONTRACT, and the live question the old one was circling: the engine
+/// refuses to run when the pin names another PM. nub switches that check OFF
+/// under its own identity — a `packageManager` pin is not nub's to enforce,
+/// and nub provisions the runtime itself (`manage_package_manager_versions` is
+/// false) — and mirrors pnpm's behavior under pnpm identity, where the refusal
+/// and its `pnpm`-spelled help text are the contract rather than a leak.
+///
+/// MEASURED: the pnpm-identity refusal is byte-identical to pnpm 12.4.1's,
+/// `ERR_PNPM_OTHER_PM_EXPECTED` included. The two fixtures differ by one file.
 #[test]
-fn pnpm_workspace_yaml_is_gated_off_for_a_non_pnpm_role() {
-    // `(pm, lockfile_name, lockfile_body)` — the yarn role vs. the pnpm role,
-    // both carrying an otherwise-promoting `pnpm-workspace.yaml`.
-    let fixture = |pm: &str, lock_name: &str, lock_body: &str| {
-        let root = pm_tmpdir(&format!("rolegate-{}", &pm[..3]));
+fn a_foreign_package_manager_pin_is_enforced_only_under_pnpm_identity() {
+    // The same yarn pin either way; `pnpm_incumbent` adds the one file that
+    // hands the project to pnpm's rules.
+    let fixture = |tag: &str, pnpm_incumbent: bool| {
+        let root = pm_tmpdir(&format!("pingate-{tag}"));
         std::fs::write(
             root.join("package.json"),
-            format!(r#"{{"name":"root","packageManager":"{pm}"}}"#),
+            r#"{"name":"root","version":"1.0.0","packageManager":"yarn@4.0.0"}"#,
         )
         .unwrap();
-        std::fs::write(root.join(lock_name), lock_body).unwrap();
-        std::fs::write(
-            root.join("pnpm-workspace.yaml"),
-            "packages:\n  - 'pkgs/*'\n",
-        )
-        .unwrap();
-        let member = root.join("pkgs/app");
-        std::fs::create_dir_all(&member).unwrap();
-        std::fs::write(member.join("package.json"), r#"{"name":"app"}"#).unwrap();
-        member
+        std::fs::write(root.join("yarn.lock"), "# yarn\n").unwrap();
+        if pnpm_incumbent {
+            std::fs::write(
+                root.join("pnpm-workspace.yaml"),
+                "packages:\n  - 'pkgs/*'\n",
+            )
+            .unwrap();
+        }
+        root
     };
 
-    // Yarn role: the stray yaml is not read, so the member stands alone.
-    let (_, stderr, code) = run_nub(&fixture("yarn@4.0.0", "yarn.lock", "# yarn\n"), &["list"]);
-    assert_eq!(code, 0, "stderr: {stderr}");
+    // nub identity: the pin is inert, so an ordinary query just runs. A1.5
+    // also makes the yarn.lock a foreign file nub ignores rather than adopts.
+    let dir = fixture("nub", false);
+    let (stdout, stderr, code) = run_nub(&dir, &["list"]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        stderr.contains("No lockfile found"),
-        "a yarn project's stray pnpm-workspace.yaml must not promote the member: {stderr}"
+        !stderr.contains("OTHER_PM_EXPECTED"),
+        "a packageManager pin must not gate a nub-identity project: {stderr}"
     );
+    assert!(
+        stdout.contains("root@1.0.0"),
+        "the query must run to completion: {stdout}"
+    );
+    assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
+    assert_no_pnpm_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
 
-    // pnpm role: the yaml is live, so the member resolves the workspace root.
-    let pnpm_lock = "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n\n  pkgs/app: {}\n";
-    let (_, stderr, code) = run_nub(
-        &fixture("pnpm@9.0.0", "pnpm-lock.yaml", pnpm_lock),
-        &["list"],
+    // pnpm identity: pnpm's refusal, mirrored whole. The `pnpm` spellings in
+    // the help text are pnpm's own output on a project that asked for pnpm's
+    // rules, so `assert_no_pnpm_branding` deliberately does not apply.
+    let dir = fixture("pnpm", true);
+    let (stdout, stderr, code) = run_nub(&dir, &["list"]);
+    assert_ne!(
+        code, 0,
+        "the pin must gate a pnpm-identity project: {stdout}"
     );
-    assert_eq!(code, 0, "stderr: {stderr}");
     assert!(
-        !stderr.contains("No lockfile found"),
-        "a pnpm project's pnpm-workspace.yaml must still resolve the root: {stderr}"
+        stderr.contains("ERR_PNPM_OTHER_PM_EXPECTED")
+            && stderr.contains("This project is configured to use yarn"),
+        "the refusal must match pnpm's: {stderr}"
     );
+    assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
 }
 
 /// Per-verb `--help` renders (engine verbs bypass nub's top-level clap), is
@@ -417,11 +582,42 @@ fn verb_help_is_rendered_and_rebranded() {
     );
 }
 
-/// The audit write gate: `--fix=update` would rewrite the lockfile, which is
-/// refused on yarn projects (write-tier policy), byte-preserving yarn.lock.
+/// `audit --fix=update` in a repo whose only lockfile is a foreign
+/// `yarn.lock`.
+///
+/// OLD CONTRACT: nub ran a write-tier gate that refused the command outright
+/// with `refusing to modify yarn.lock`, because yarn.lock write fidelity was
+/// unproven in the embedded engine.
+///
+/// NEW CONTRACT: A1.5 removes yarn incumbency, so there is no yarn project and
+/// no write tier to gate. This is a nub-incumbent project that happens to have
+/// a foreign file in it — MEASURED: the fixture reports `ERR_NUB_CANNOT_DEPLOY`
+/// on the identity probe. nub ignores the yarn.lock, finds no lockfile of its
+/// own, and refuses for that reason instead. The yarn.lock is still left
+/// untouched, which is the half of the old contract that survives.
+///
+/// FAILING ON PURPOSE — the lockfile name in the diagnostic is wrong, and the
+/// assertion below states the correct name rather than the current one. Under
+/// nub identity the lockfile is `nub.lock` (`pnpm_engine.rs`'s embedder sets
+/// `lockfile_basename`), so `No pnpm-lock.yaml found` names a file nub never
+/// writes. A1.7's on-disk-filename exemption does not cover it: there is no
+/// such file and there never would be. The string is a compile-time literal in
+/// the engine's `AuditError` (`cli/src/cli_args/audit/report.rs`), so the
+/// process-wide rebrand cannot reach it; upstream's TypeScript interpolated
+/// `WANTED_LOCKFILE` here and the Rust port hardcoded it.
+///
+/// The same hardcoding has a worse effect one layer down, not covered here
+/// because it needs the network: `audit/fix.rs` re-reads the post-update
+/// lockfile through `Lockfile::load_wanted_from_dir`, which resolves
+/// `Lockfile::FILE_NAME` rather than the embedder's basename. On a
+/// nub-incumbent project the update therefore succeeds, writes `nub.lock`, and
+/// then fails looking for a `pnpm-lock.yaml` — so `--fix=update` cannot exit 0
+/// under nub identity at all. The audit pre-flight itself is embedder-aware
+/// (it reads `nub.lock` fine), so only the `fix.rs` call site is wrong.
+///
 /// Fires pre-network, so this is offline-safe.
 #[test]
-fn audit_fix_update_refuses_to_touch_yarn_lock() {
+fn audit_fix_update_leaves_a_foreign_yarn_lock_alone() {
     let dir = pm_tmpdir("yarnaudit");
     std::fs::write(
         dir.join("package.json"),
@@ -437,15 +633,23 @@ fn audit_fix_update_refuses_to_touch_yarn_lock() {
     std::fs::write(dir.join("yarn.lock"), yarn_lock).unwrap();
 
     let (stdout, stderr, code) = run_nub(&dir, &["audit", "--fix=update"]);
-    assert_ne!(code, 0, "the yarn write gate must refuse: {stdout}{stderr}");
+    assert_ne!(
+        code, 0,
+        "a project with no lockfile cannot audit: {stdout}{stderr}"
+    );
     assert!(
-        stderr.contains("refusing to modify yarn.lock"),
-        "the gate must name the refusal: {stderr}"
+        stderr.contains("ERR_NUB_AUDIT_NO_LOCKFILE"),
+        "the error code must rebrand under nub identity: {stderr}"
+    );
+    assert!(
+        stderr.contains("No nub.lock found"),
+        "the diagnostic must name nub's own lockfile, not one nub never \
+         writes: {stderr}"
     );
     assert_eq!(
         std::fs::read_to_string(dir.join("yarn.lock")).unwrap(),
         yarn_lock,
-        "yarn.lock must be byte-identical after the refusal"
+        "a foreign yarn.lock must be byte-identical after the refusal"
     );
 }
 
