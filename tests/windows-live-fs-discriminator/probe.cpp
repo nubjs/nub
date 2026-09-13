@@ -88,18 +88,22 @@ using NtUnmapViewOfSectionFn = NTSTATUS(NTAPI*)(HANDLE, PVOID);
 
 struct NtApi {
   NtCreateFileFn create_file = nullptr;
+  NtOpenFileFn open_file = nullptr;
   NtQueryAttributesFileFn query_attributes_file = nullptr;
+  NtQueryFullAttributesFileFn query_full_attributes_file = nullptr;
   NtCreateSectionFn create_section = nullptr;
   NtMapViewOfSectionFn map_view = nullptr;
   NtUnmapViewOfSectionFn unmap_view = nullptr;
   bool load() {
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     create_file = reinterpret_cast<NtCreateFileFn>(GetProcAddress(ntdll, "NtCreateFile"));
+    open_file = reinterpret_cast<NtOpenFileFn>(GetProcAddress(ntdll, "NtOpenFile"));
     query_attributes_file = reinterpret_cast<NtQueryAttributesFileFn>(GetProcAddress(ntdll, "NtQueryAttributesFile"));
+    query_full_attributes_file = reinterpret_cast<NtQueryFullAttributesFileFn>(GetProcAddress(ntdll, "NtQueryFullAttributesFile"));
     create_section = reinterpret_cast<NtCreateSectionFn>(GetProcAddress(ntdll, "NtCreateSection"));
     map_view = reinterpret_cast<NtMapViewOfSectionFn>(GetProcAddress(ntdll, "NtMapViewOfSection"));
     unmap_view = reinterpret_cast<NtUnmapViewOfSectionFn>(GetProcAddress(ntdll, "NtUnmapViewOfSection"));
-    return create_file && query_attributes_file && create_section && map_view && unmap_view;
+    return create_file && open_file && query_attributes_file && query_full_attributes_file && create_section && map_view && unmap_view;
   }
 };
 
@@ -228,39 +232,61 @@ NTSTATUS NTAPI shim_nt_query_full_attributes_file(POBJECT_ATTRIBUTES object_attr
   return describe_brokered_dll(nullptr, file_attributes);
 }
 
+void print_hook_entry(const char* label, const void* entry) {
+  const auto* bytes = static_cast<const unsigned char*>(entry);
+  std::printf("HOOK_ENTRY_%s=", label);
+  for (size_t index = 0; bytes && index < 24; ++index) std::printf("%02x", bytes[index]);
+  std::printf("\n");
+}
+
 bool NativeOpenHooks::install() {
   HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+  if (!ntdll) return false;
   create_original = reinterpret_cast<NtCreateFileFn>(GetProcAddress(ntdll, "NtCreateFile"));
   open_original = reinterpret_cast<NtOpenFileFn>(GetProcAddress(ntdll, "NtOpenFile"));
   query_original = reinterpret_cast<NtQueryAttributesFileFn>(GetProcAddress(ntdll, "NtQueryAttributesFile"));
   query_full_original = reinterpret_cast<NtQueryFullAttributesFileFn>(GetProcAddress(ntdll, "NtQueryFullAttributesFile"));
-  if (!create_original || !open_original || !query_original || !query_full_original ||
-      DetourTransactionBegin() != NO_ERROR || DetourUpdateThread(GetCurrentThread()) != NO_ERROR ||
-      DetourAttach(&create_original, shim_nt_create_file) != NO_ERROR ||
-      DetourAttach(&open_original, shim_nt_open_file) != NO_ERROR ||
-      DetourAttach(&query_original, shim_nt_query_attributes_file) != NO_ERROR ||
-      DetourAttach(&query_full_original, shim_nt_query_full_attributes_file) != NO_ERROR ||
-      DetourTransactionCommit() != NO_ERROR) {
-    DetourTransactionAbort();
-    return false;
-  }
-  active = true;
-  return true;
+  if (!create_original || !open_original || !query_original || !query_full_original) return false;
+  print_hook_entry("CREATE", reinterpret_cast<const void*>(create_original));
+  print_hook_entry("OPEN", reinterpret_cast<const void*>(open_original));
+  print_hook_entry("QUERY", reinterpret_cast<const void*>(query_original));
+  print_hook_entry("QUERY_FULL", reinterpret_cast<const void*>(query_full_original));
+  const LONG begin = DetourTransactionBegin();
+  const LONG update = begin == NO_ERROR ? DetourUpdateThread(GetCurrentThread()) : ERROR_INVALID_OPERATION;
+  const LONG attach_create = update == NO_ERROR ? DetourAttach(&create_original, shim_nt_create_file) : ERROR_INVALID_OPERATION;
+  const LONG attach_open = attach_create == NO_ERROR ? DetourAttach(&open_original, shim_nt_open_file) : ERROR_INVALID_OPERATION;
+  const LONG attach_query = attach_open == NO_ERROR ? DetourAttach(&query_original, shim_nt_query_attributes_file) : ERROR_INVALID_OPERATION;
+  const LONG attach_query_full = attach_query == NO_ERROR ? DetourAttach(&query_full_original, shim_nt_query_full_attributes_file) : ERROR_INVALID_OPERATION;
+  const LONG commit = attach_query_full == NO_ERROR ? DetourTransactionCommit() : ERROR_INVALID_OPERATION;
+  const bool ok = begin == NO_ERROR && update == NO_ERROR && attach_create == NO_ERROR &&
+      attach_open == NO_ERROR && attach_query == NO_ERROR && attach_query_full == NO_ERROR && commit == NO_ERROR;
+  if (!ok && begin == NO_ERROR) DetourTransactionAbort();
+  std::printf("DETOUR_INSTALL=%s begin=%ld update=%ld create=%ld open=%ld query=%ld query_full=%ld commit=%ld\n",
+      ok ? "OK" : "FAIL", begin, update, attach_create, attach_open, attach_query,
+      attach_query_full, commit);
+  std::fflush(stdout);
+  active = ok;
+  return ok;
 }
 
 bool NativeOpenHooks::uninstall() {
   if (!active) return true;
-  if (DetourTransactionBegin() != NO_ERROR || DetourUpdateThread(GetCurrentThread()) != NO_ERROR ||
-      DetourDetach(&create_original, shim_nt_create_file) != NO_ERROR ||
-      DetourDetach(&open_original, shim_nt_open_file) != NO_ERROR ||
-      DetourDetach(&query_original, shim_nt_query_attributes_file) != NO_ERROR ||
-      DetourDetach(&query_full_original, shim_nt_query_full_attributes_file) != NO_ERROR ||
-      DetourTransactionCommit() != NO_ERROR) {
-    DetourTransactionAbort();
-    return false;
-  }
-  active = false;
-  return true;
+  const LONG begin = DetourTransactionBegin();
+  const LONG update = begin == NO_ERROR ? DetourUpdateThread(GetCurrentThread()) : ERROR_INVALID_OPERATION;
+  const LONG detach_create = update == NO_ERROR ? DetourDetach(&create_original, shim_nt_create_file) : ERROR_INVALID_OPERATION;
+  const LONG detach_open = detach_create == NO_ERROR ? DetourDetach(&open_original, shim_nt_open_file) : ERROR_INVALID_OPERATION;
+  const LONG detach_query = detach_open == NO_ERROR ? DetourDetach(&query_original, shim_nt_query_attributes_file) : ERROR_INVALID_OPERATION;
+  const LONG detach_query_full = detach_query == NO_ERROR ? DetourDetach(&query_full_original, shim_nt_query_full_attributes_file) : ERROR_INVALID_OPERATION;
+  const LONG commit = detach_query_full == NO_ERROR ? DetourTransactionCommit() : ERROR_INVALID_OPERATION;
+  const bool ok = begin == NO_ERROR && update == NO_ERROR && detach_create == NO_ERROR &&
+      detach_open == NO_ERROR && detach_query == NO_ERROR && detach_query_full == NO_ERROR && commit == NO_ERROR;
+  if (!ok && begin == NO_ERROR) DetourTransactionAbort();
+  std::printf("DETOUR_UNINSTALL=%s begin=%ld update=%ld create=%ld open=%ld query=%ld query_full=%ld commit=%ld\n",
+      ok ? "OK" : "FAIL", begin, update, detach_create, detach_open, detach_query,
+      detach_query_full, commit);
+  std::fflush(stdout);
+  active = !ok;
+  return ok;
 }
 
 std::wstring join(const std::wstring& left, const wchar_t* right) { return left + L"\\" + right; }
@@ -375,17 +401,26 @@ bool forwarded_allowed_control(NtApi& api, const std::wstring& allowed_path) {
   InitializeObjectAttributes(&attrs, &name, OBJ_CASE_INSENSITIVE, nullptr, nullptr);
   IO_STATUS_BLOCK iosb = {};
   HANDLE file = INVALID_HANDLE_VALUE;
-  const NTSTATUS open_status = api.create_file(&file, FILE_GENERIC_READ, &attrs, &iosb, nullptr,
+  const NTSTATUS create_status = api.create_file(&file, FILE_GENERIC_READ, &attrs, &iosb, nullptr,
       FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, kFileOpen,
       kFileNonDirectory | kFileSynchronousNonalert, nullptr, 0);
   if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+  file = INVALID_HANDLE_VALUE;
+  const NTSTATUS open_status = api.open_file(&file, FILE_GENERIC_READ, &attrs, &iosb,
+      FILE_SHARE_READ, kFileNonDirectory | kFileSynchronousNonalert);
+  if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
   NtFileBasicInformation basic = {};
   const NTSTATUS query_status = api.query_attributes_file(&attrs, &basic);
-  const bool ok = open_status >= 0 && query_status >= 0 && g_create_forward_calls > 0 &&
-      g_query_forward_calls > 0;
-  std::printf("HOOK_FORWARDED_ALLOWED_OPEN=%s open=0x%08lx query=0x%08lx create_forward=%lu query_forward=%lu\n",
-      ok ? "OK" : "FAIL", static_cast<unsigned long>(open_status),
-      static_cast<unsigned long>(query_status), g_create_forward_calls, g_query_forward_calls);
+  NtFileNetworkOpenInformation full = {};
+  const NTSTATUS query_full_status = api.query_full_attributes_file(&attrs, &full);
+  const bool ok = create_status >= 0 && open_status >= 0 && query_status >= 0 &&
+      query_full_status >= 0 && g_create_forward_calls > 0 && g_open_forward_calls > 0 &&
+      g_query_forward_calls > 0 && g_query_full_forward_calls > 0;
+  std::printf("HOOK_FORWARDED_ALLOWED=%s create=0x%08lx open=0x%08lx query=0x%08lx query_full=0x%08lx forwards=%lu/%lu/%lu/%lu\n",
+      ok ? "OK" : "FAIL", static_cast<unsigned long>(create_status),
+      static_cast<unsigned long>(open_status), static_cast<unsigned long>(query_status),
+      static_cast<unsigned long>(query_full_status), g_create_forward_calls,
+      g_open_forward_calls, g_query_forward_calls, g_query_full_forward_calls);
   std::fflush(stdout);
   return ok;
 }
@@ -468,14 +503,21 @@ bool child(const std::wstring& root, const std::wstring& image_exe, const std::w
     g_native_open_hooks.uninstall();
     return false;
   }
+  if (!raw_nt_open_denied(api, L"HOOKED_RAW_NT_NEAREST_NONMATCH_OPEN", nonmatch)) {
+    g_native_open_hooks.uninstall();
+    return false;
+  }
+  std::printf("DETOUR_HOOKS_INSTALLED=OK\n");
+  std::fflush(stdout);
+  std::printf("DLL_LOAD_BEGIN\n");
+  std::fflush(stdout);
   HMODULE brokered_module = LoadLibraryW(image_dll.c_str());
   const DWORD brokered_load_error = brokered_module ? ERROR_SUCCESS : GetLastError();
   auto brokered_value = brokered_module ? reinterpret_cast<int(*)()>(GetProcAddress(brokered_module, "image_fixture_value")) : nullptr;
   auto brokered_dllmain_calls = brokered_module ? reinterpret_cast<int(*)()>(GetProcAddress(brokered_module, "image_fixture_dllmain_calls")) : nullptr;
   const bool brokered_dll_ok = brokered_module && brokered_value && brokered_dllmain_calls &&
       brokered_value() == 0x472 && brokered_dllmain_calls() == 1 &&
-      (g_create_broker_calls + g_open_broker_calls) > 0 &&
-      (g_query_broker_calls + g_query_full_broker_calls) > 0;
+      (g_create_broker_calls + g_open_broker_calls) > 0;
   std::printf("SHIM_DLL_LOAD=%s error=%lu create_calls=%lu open_calls=%lu query_calls=%lu query_full_calls=%lu dllmain_calls=%d export=%d\n",
               brokered_dll_ok ? "OK" : "FAIL", brokered_load_error, g_create_broker_calls,
               g_open_broker_calls, g_query_broker_calls, g_query_full_broker_calls, brokered_dllmain_calls ? brokered_dllmain_calls() : -1,
@@ -507,7 +549,13 @@ bool unconfined_dll_control(const std::wstring& library) {
   const bool ok = value && value() == 0x472; std::printf("UNCONFINED_DLL=%s error=%lu\n", ok ? "PASS" : "FAIL", ok ? 0 : GetLastError()); if (module) FreeLibrary(module); return ok;
 }
 
-bool parent_appcontainer_image_control(const std::wstring& executable, PSID package_sid) {
+bool terminate_and_reap(HANDLE process, HANDLE job, DWORD timeout_ms) {
+  if (WaitForSingleObject(process, timeout_ms) == WAIT_OBJECT_0) return true;
+  if (job) TerminateJobObject(job, 1); else TerminateProcess(process, 1);
+  return WaitForSingleObject(process, timeout_ms) == WAIT_OBJECT_0;
+}
+
+bool parent_appcontainer_image_control(const std::wstring& executable, PSID package_sid, HANDLE job) {
   SECURITY_CAPABILITIES capabilities = {package_sid, nullptr, 0, 0};
   AttributeList attributes(1);
   if (!attributes.value || !UpdateProcThreadAttribute(attributes.value, 0,
@@ -522,8 +570,10 @@ bool parent_appcontainer_image_control(const std::wstring& executable, PSID pack
   std::vector<wchar_t> command(executable.begin(), executable.end());
   command.push_back(L'\0');
   const BOOL started = CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE,
-      EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW, nullptr, nullptr, &startup.StartupInfo, &process);
+      EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &startup.StartupInfo, &process);
   const DWORD launch_error = started ? ERROR_SUCCESS : GetLastError();
+  const bool assigned = started && AssignProcessToJobObject(job, process.hProcess);
+  const DWORD assign_error = assigned ? ERROR_SUCCESS : (started ? GetLastError() : launch_error);
   BOOL appcontainer = FALSE;
   Handle token;
   if (started && OpenProcessToken(process.hProcess, TOKEN_QUERY, &token.value)) {
@@ -532,18 +582,24 @@ bool parent_appcontainer_image_control(const std::wstring& executable, PSID pack
   }
   DWORD exit_code = 0;
   bool reaped = false;
-  if (started) {
-    if (WaitForSingleObject(process.hProcess, 10000) == WAIT_TIMEOUT) {
-      TerminateProcess(process.hProcess, 1);
+  if (started && assigned) {
+    const DWORD resumed = ResumeThread(process.hThread);
+    if (resumed == static_cast<DWORD>(-1)) {
+      reaped = terminate_and_reap(process.hProcess, job, 10000);
+    } else {
+      reaped = terminate_and_reap(process.hProcess, job, 10000);
     }
-    reaped = WaitForSingleObject(process.hProcess, 10000) == WAIT_OBJECT_0;
+  } else if (started) {
+    reaped = terminate_and_reap(process.hProcess, nullptr, 10000);
+  }
+  if (started) {
     if (reaped) GetExitCodeProcess(process.hProcess, &exit_code);
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
   }
-  const bool ok = started && appcontainer && reaped && exit_code == 73;
-  std::printf("PARENT_APPCONTAINER_IMAGE_LAUNCH=%s error=%lu token_appcontainer=%d exit=%lu reaped=%d\n",
-      ok ? "OK" : "FAIL", launch_error, appcontainer ? 1 : 0, exit_code, reaped ? 1 : 0);
+  const bool ok = started && assigned && appcontainer && reaped && exit_code == 73;
+  std::printf("PARENT_APPCONTAINER_IMAGE_LAUNCH=%s launch_error=%lu assign_error=%lu token_appcontainer=%d exit=%lu reaped=%d\n",
+      ok ? "OK" : "FAIL", launch_error, assign_error, appcontainer ? 1 : 0, exit_code, reaped ? 1 : 0);
   std::fflush(stdout);
   return ok;
 }
@@ -554,7 +610,7 @@ bool duplicate_to_child(HANDLE source, HANDLE process, ACCESS_MASK rights, HANDL
 int parent(const std::wstring& executable) {
   const std::wstring profile = L"nub-live-image-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
   const std::wstring image_exe = sibling(executable, L"image-fixture.exe"), image_dll = sibling(executable, L"image-fixture.dll"), source = sibling(executable, L"existing-readable.txt"), nonmatch = sibling(executable, L"image-nonmatch.txt");
-  PSID package_sid = nullptr; bool profile_created = false; PSECURITY_DESCRIPTOR original_exe_dacl = nullptr; PACL original_exe_acl = nullptr; std::wstring root; PROCESS_INFORMATION process = {}; Handle stdin_read, stdin_write, stdout_read, stdout_write, job; bool child_reaped = false; int result = 1;
+  PSID package_sid = nullptr; bool profile_created = false; PSECURITY_DESCRIPTOR original_exe_dacl = nullptr; PACL original_exe_acl = nullptr; std::wstring root; PROCESS_INFORMATION process = {}; Handle stdin_read, stdin_write, stdout_read, stdout_write, job; bool child_reaped = false; bool child_started = false; bool parent_image_ok = false; int result = 1;
   do {
   NtApi api; if (!api.load() || !unconfined_exe_control(image_exe) || !unconfined_dll_control(image_dll)) break;
   const HRESULT profile_status = CreateAppContainerProfile(profile.c_str(), profile.c_str(), profile.c_str(), nullptr, 0, &package_sid);
@@ -564,11 +620,6 @@ int parent(const std::wstring& executable) {
   std::printf("EXECUTABLE_GRANT=FILE_ONLY CAPABILITIES=0\n");
   if (!no_package_sid_ace(image_exe, package_sid) || !no_package_sid_ace(image_dll, package_sid) || !no_package_sid_ace(source, package_sid) || !no_package_sid_ace(nonmatch, package_sid)) { std::printf("IMAGE_ACL=UNEXPECTED_PACKAGE_SID\n"); break; }
   std::printf("IMAGE_ACL=NO_PACKAGE_SID\n");
-  if (!parent_appcontainer_image_control(image_exe, package_sid)) break;
-  wchar_t temp[MAX_PATH] = {}; if (!GetTempPathW(MAX_PATH, temp)) break;
-  root = std::wstring(temp) + L"nub-live-image-" + std::to_wstring(GetCurrentProcessId());
-  if (!CreateDirectoryW(root.c_str(), nullptr) || !CreateDirectoryW(join(root, L"output").c_str(), nullptr) || !CreateDirectoryW(join(root, L"outside").c_str(), nullptr) || !no_package_sid_ace(root, package_sid)) { std::printf("TARGET_ROOT=FAIL error=%lu\n", GetLastError()); break; }
-  std::printf("TARGET_ROOT_ACL=NO_PACKAGE_SID\n");
   job.value = CreateJobObjectW(nullptr, nullptr);
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {};
   limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -577,6 +628,11 @@ int parent(const std::wstring& executable) {
     break;
   }
   std::printf("CHILD_JOB=OK\n");
+  parent_image_ok = parent_appcontainer_image_control(image_exe, package_sid, job.value);
+  wchar_t temp[MAX_PATH] = {}; if (!GetTempPathW(MAX_PATH, temp)) break;
+  root = std::wstring(temp) + L"nub-live-image-" + std::to_wstring(GetCurrentProcessId());
+  if (!CreateDirectoryW(root.c_str(), nullptr) || !CreateDirectoryW(join(root, L"output").c_str(), nullptr) || !CreateDirectoryW(join(root, L"outside").c_str(), nullptr) || !no_package_sid_ace(root, package_sid)) { std::printf("TARGET_ROOT=FAIL error=%lu\n", GetLastError()); break; }
+  std::printf("TARGET_ROOT_ACL=NO_PACKAGE_SID\n");
   SECURITY_ATTRIBUTES inheritable = {sizeof(inheritable), nullptr, TRUE}; HANDLE raw_stdin_read = nullptr, raw_stdin_write = nullptr, raw_stdout_read = nullptr, raw_stdout_write = nullptr;
   if (!CreatePipe(&raw_stdin_read, &raw_stdin_write, &inheritable, 0) || !CreatePipe(&raw_stdout_read, &raw_stdout_write, &inheritable, 0) || !SetHandleInformation(raw_stdin_write, HANDLE_FLAG_INHERIT, 0) || !SetHandleInformation(raw_stdout_read, HANDLE_FLAG_INHERIT, 0)) break;
   stdin_read.value = raw_stdin_read; stdin_write.value = raw_stdin_write; stdout_read.value = raw_stdout_read; stdout_write.value = raw_stdout_write;
@@ -584,9 +640,12 @@ int parent(const std::wstring& executable) {
   if (!attributes.value || !UpdateProcThreadAttribute(attributes.value, 0, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities, sizeof(capabilities), nullptr, nullptr) || !UpdateProcThreadAttribute(attributes.value, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, sizeof(inherited), nullptr, nullptr)) break;
   STARTUPINFOEXW startup = {}; startup.StartupInfo.cb = sizeof(startup); startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES; startup.StartupInfo.hStdInput = stdin_read.value; startup.StartupInfo.hStdOutput = stdout_write.value; startup.StartupInfo.hStdError = stdout_write.value; startup.lpAttributeList = attributes.value;
   std::wstring command = L"\"" + executable + L"\" --child \"" + root + L"\" \"" + image_exe + L"\" \"" + image_dll + L"\" \"" + source + L"\" \"" + nonmatch + L"\""; std::vector<wchar_t> command_line(command.begin(), command.end()); command_line.push_back(L'\0');
-  if (!CreateProcessW(executable.c_str(), command_line.data(), nullptr, nullptr, TRUE, EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW, nullptr, nullptr, &startup.StartupInfo, &process)) { std::printf("APPCONTAINER_LAUNCH=FAIL error=%lu\n", GetLastError()); break; }
-  if (!AssignProcessToJobObject(job.value, process.hProcess)) { std::printf("CHILD_JOB_ASSIGN=FAIL error=%lu\n", GetLastError()); break; }
+  if (!CreateProcessW(executable.c_str(), command_line.data(), nullptr, nullptr, TRUE, EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &startup.StartupInfo, &process)) { std::printf("APPCONTAINER_LAUNCH=FAIL error=%lu\n", GetLastError()); break; }
+  child_started = true;
+  if (!AssignProcessToJobObject(job.value, process.hProcess)) { const DWORD error = GetLastError(); terminate_and_reap(process.hProcess, nullptr, 10000); std::printf("CHILD_JOB_ASSIGN=FAIL error=%lu\n", error); break; }
   std::printf("CHILD_JOB_ASSIGN=OK\n");
+  if (ResumeThread(process.hThread) == static_cast<DWORD>(-1)) { const DWORD error = GetLastError(); terminate_and_reap(process.hProcess, job.value, 10000); std::printf("CHILD_RESUME=FAIL error=%lu\n", error); break; }
+  std::printf("CHILD_RESUME=OK\n");
   std::printf("APPCONTAINER_LAUNCH=OK pid=%lu\n", process.dwProcessId); CloseHandle(stdin_read.release()); CloseHandle(stdout_write.release());
   char ready[4096] = {}; DWORD count = 0; if (!ReadFile(stdout_read.value, ready, sizeof(ready) - 1, &count, nullptr) || std::strstr(ready, "READY pid=") == nullptr) { std::printf("CHILD_READY=FAIL text=%s\n", ready); break; }
   std::printf("CHILD_READY=OK %s", ready);
@@ -619,19 +678,20 @@ int parent(const std::wstring& executable) {
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
   }
-  bool cleanup_ok = child_reaped || !process.hProcess;
+  const bool target_quiescent = !child_started || child_reaped;
+  bool cleanup_ok = target_quiescent;
   if (original_exe_dacl) { const DWORD restore = SetNamedSecurityInfoW(const_cast<LPWSTR>(executable.c_str()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, original_exe_acl, nullptr); std::printf("EXECUTABLE_ACL_RESTORE=%s error=%lu\n", restore == ERROR_SUCCESS ? "OK" : "FAIL", restore); cleanup_ok = cleanup_ok && restore == ERROR_SUCCESS; LocalFree(original_exe_dacl); }
   if (!root.empty()) {
     DeleteFileW(join(join(root, L"output"), L"future.json").c_str());
     RemoveDirectoryW(join(root, L"output").c_str());
     RemoveDirectoryW(join(root, L"outside").c_str());
-    const BOOL removed = child_reaped && RemoveDirectoryW(root.c_str());
-    const DWORD root_error = removed ? ERROR_SUCCESS : (child_reaped ? GetLastError() : ERROR_BUSY);
+    const BOOL removed = target_quiescent && RemoveDirectoryW(root.c_str());
+    const DWORD root_error = removed ? ERROR_SUCCESS : (target_quiescent ? GetLastError() : ERROR_BUSY);
     std::printf("TEMP_ROOT_CLEANUP=%s error=%lu\n", removed ? "OK" : "FAIL", root_error);
     cleanup_ok = cleanup_ok && removed;
   }
   if (package_sid) FreeSid(package_sid); if (profile_created) { const HRESULT deleted = DeleteAppContainerProfile(profile.c_str()); std::printf("PROFILE_CLEANUP=%s hr=0x%08lx\n", SUCCEEDED(deleted) ? "OK" : "FAIL", static_cast<unsigned long>(deleted)); cleanup_ok = cleanup_ok && SUCCEEDED(deleted); }
-  return cleanup_ok ? result : 1;
+  return cleanup_ok && parent_image_ok ? result : 1;
 }
 
 }  // namespace

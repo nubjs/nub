@@ -39,7 +39,12 @@ jobs:
           if errorlevel 1 exit /b 1
           cl /nologo /std:c++17 /W4 /WX /MT /LD /EHsc tests\windows-live-fs-discriminator\image_fixture_dll.cpp /Fe:out\image-fixture.dll
           if errorlevel 1 exit /b 1
-          cl /nologo /std:c++17 /W4 /WX /MT /EHsc /Icrates\nub-sandbox\native\detours tests\windows-live-fs-discriminator\probe.cpp crates\nub-sandbox\native\detours\detours.cpp crates\nub-sandbox\native\detours\modules.cpp crates\nub-sandbox\native\detours\disasm.cpp crates\nub-sandbox\native\detours\image.cpp crates\nub-sandbox\native\detours\creatwth.cpp crates\nub-sandbox\native\detours\disolx86.cpp crates\nub-sandbox\native\detours\disolx64.cpp crates\nub-sandbox\native\detours\disolia64.cpp crates\nub-sandbox\native\detours\disolarm.cpp crates\nub-sandbox\native\detours\disolarm64.cpp /Fe:out\live-fs-probe.exe /link advapi32.lib userenv.lib ole32.lib
+          mkdir out\detours
+          cl /nologo /std:c++17 /W0 /MT /EHsc /Icrates\nub-sandbox\native\detours /c crates\nub-sandbox\native\detours\detours.cpp crates\nub-sandbox\native\detours\modules.cpp crates\nub-sandbox\native\detours\disasm.cpp crates\nub-sandbox\native\detours\image.cpp crates\nub-sandbox\native\detours\creatwth.cpp crates\nub-sandbox\native\detours\disolx86.cpp crates\nub-sandbox\native\detours\disolx64.cpp crates\nub-sandbox\native\detours\disolia64.cpp crates\nub-sandbox\native\detours\disolarm.cpp crates\nub-sandbox\native\detours\disolarm64.cpp /Foout\detours\
+          if errorlevel 1 exit /b 1
+          lib /nologo /OUT:out\detours.lib out\detours\detours.obj out\detours\modules.obj out\detours\disasm.obj out\detours\image.obj out\detours\creatwth.obj out\detours\disolx86.obj out\detours\disolx64.obj out\detours\disolia64.obj out\detours\disolarm.obj out\detours\disolarm64.obj
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /W4 /WX /MT /EHsc /Icrates\nub-sandbox\native\detours tests\windows-live-fs-discriminator\probe.cpp out\detours.lib /Fe:out\live-fs-probe.exe /link advapi32.lib userenv.lib ole32.lib
           "@ | Set-Content out\build.cmd
           cmd /c out\build.cmd *> reports\build.log
           if ($LASTEXITCODE -ne 0) { Get-Content reports\build.log; exit $LASTEXITCODE }
