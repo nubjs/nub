@@ -1,0 +1,123 @@
+name: Windows relay fixture process reuse 270771
+
+on:
+  push:
+    branches: [windows-relay-process-reuse-270771]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  fixtures:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            artifact: windows-relay-fixture-only-270771-windows-2022
+            artifact_id: 10309014118
+          - runner: windows-11-arm
+            artifact: windows-relay-fixture-only-270771-windows-11-arm
+            artifact_id: 10308674843
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - name: Downloading exact prior-run artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          github-token: ${{ github.token }}
+          repository: nubjs/nub
+          run-id: 34730318004
+          name: ${{ matrix.artifact }}
+          path: saved
+      - id: verify
+        name: Verifying source binding and artifact hashes
+        shell: pwsh
+        run: |
+          $record = Get-Content saved/fixture-binaries.json -Raw | ConvertFrom-Json
+          Copy-Item saved/fixture-binaries.json source-fixture-binaries.json
+          if ($record.source -ne 'b3f289430da2b5860acf82cdda87fd480a395924') { throw "Unexpected artifact source $($record.source)" }
+          $actual = @{}
+          foreach ($item in $record.binaries) {
+            $path = Join-Path saved ("binaries/{0}.exe" -f $item.target)
+            $hash = (Get-FileHash -Algorithm SHA256 $path).Hash.ToLowerInvariant()
+            if ($hash -ne $item.sha256) { throw "Hash mismatch for $($item.target)" }
+            $actual[$item.target] = $path
+          }
+          $actual | ConvertTo-Json | Set-Content -Encoding utf8 reports-artifact-paths.json
+      - id: ordinary_user
+        name: Running saved fixtures as ordinary user
+        if: ${{ always() && steps.verify.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $paths = Get-Content reports-artifact-paths.json -Raw | ConvertFrom-Json
+          $name = 'sbx' + [guid]::NewGuid().ToString('N').Substring(0, 10)
+          $stage = Join-Path $env:PUBLIC $name
+          $password = ConvertTo-SecureString ([guid]::NewGuid().ToString('N') + '!aA1') -AsPlainText -Force
+          $user = $null; $process = $null; $exitCode = 1
+          try {
+            $user = New-LocalUser -Name $name -Password $password -AccountNeverExpires -PasswordNeverExpires
+            Add-LocalGroupMember -Group (Get-LocalGroup -SID 'S-1-5-32-545') -Member $name
+            New-Item -ItemType Directory -Force $stage | Out-Null
+            Copy-Item $paths.windows_relay_fixture (Join-Path $stage 'windows_relay_fixture.exe')
+            Copy-Item $paths.broker_session_fixture (Join-Path $stage 'broker_session_fixture.exe')
+          @'
+          param([string]$Stage)
+          $ErrorActionPreference = 'Stop'
+          $profileRoot = [Environment]::GetFolderPath('UserProfile')
+          if (!$profileRoot -or $profileRoot -like '*systemprofile*') { throw 'A normal user profile is required' }
+          $env:USERPROFILE = $profileRoot; $env:HOME = $profileRoot
+          $env:APPDATA = [IO.Path]::Combine($profileRoot, 'AppData', 'Roaming')
+          $env:LOCALAPPDATA = [IO.Path]::Combine($profileRoot, 'AppData', 'Local')
+          $env:TEMP = [IO.Path]::Combine($env:LOCALAPPDATA, 'Temp'); $env:TMP = $env:TEMP
+          [void][IO.Directory]::CreateDirectory($env:TEMP)
+          $owned = [IO.Path]::Combine($profileRoot, 'sandbox-native-relay-probe')
+          [void][IO.Directory]::CreateDirectory($owned)
+          foreach ($file in @('windows_relay_fixture.exe', 'broker_session_fixture.exe')) { [IO.File]::Copy([IO.Path]::Combine($Stage, $file), [IO.Path]::Combine($owned, $file), $true) }
+          whoami /all
+          Write-Host "STANDARD_USER_FIXTURE_PROFILE=$profileRoot"
+          foreach ($name in @('windows_relay_fixture', 'broker_session_fixture')) {
+            $stream = [IO.File]::OpenRead([IO.Path]::Combine($owned, "$name.exe")); $sha = [Security.Cryptography.SHA256]::Create()
+            try { $digest = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() } finally { $stream.Dispose(); $sha.Dispose() }
+            Write-Host "STANDARD_USER_STAGED_BINARY_SHA256=${name}:$digest"
+          }
+          function Run-Fixture([string]$label) {
+            $exe=[IO.Path]::Combine($owned,"$label.exe"); $out=[IO.Path]::Combine($owned,"$label.stdout.log"); $err=[IO.Path]::Combine($owned,"$label.stderr.log")
+            $info=New-Object Diagnostics.ProcessStartInfo; $info.FileName=$exe; $info.WorkingDirectory=$owned; $info.UseShellExecute=$false; $info.RedirectStandardOutput=$true; $info.RedirectStandardError=$true
+            $proc=New-Object Diagnostics.Process; $proc.StartInfo=$info
+            try { if(!$proc.Start()){throw "Could not start $label"}; $outTask=$proc.StandardOutput.ReadToEndAsync(); $errTask=$proc.StandardError.ReadToEndAsync(); if(!$proc.WaitForExit(120000)){ $proc.Kill(); $proc.WaitForExit(30000); throw "$label timed out" }; if(![Threading.Tasks.Task]::WaitAll(@($outTask,$errTask),30000)){throw "$label output drain timed out"}; [IO.File]::WriteAllText($out,$outTask.Result); [IO.File]::WriteAllText($err,$errTask.Result); return @{code=$proc.ExitCode;out=$out;err=$err;text=$outTask.Result+$errTask.Result} } finally { if($proc){$proc.Dispose()} }
+          }
+          $relay=Run-Fixture 'windows_relay_fixture'; $broker=Run-Fixture 'broker_session_fixture'
+          foreach ($path in @($relay.out,$relay.err,$broker.out,$broker.err)) { [IO.File]::Copy($path,[IO.Path]::Combine($Stage,[IO.Path]::GetFileName($path)),$true); Write-Host "FIXTURE_LOG=$([IO.Path]::GetFileName($path))"; [Console]::Out.WriteLine([IO.File]::ReadAllText($path)) }
+          Write-Host "FIXTURE_EXIT=windows_relay_fixture:$($relay.code)"; Write-Host "FIXTURE_EXIT=broker_session_fixture:$($broker.code)"
+          if ($relay.code -ne 0 -or $broker.code -ne 0) { exit 1 }
+          if (!$relay.text.Contains('WINDOWS_PARENT_RELAY_OK')) { exit 1 }
+          if (!$broker.text.Contains('BROKER_NATIVE_SESSION_OK')) { exit 1 }
+          '@ | Set-Content -Encoding ascii (Join-Path $stage 'run-fixtures.ps1')
+            icacls $stage /grant "${name}:(OI)(CI)RX" /T | Tee-Object stage-acl.log
+            if ($LASTEXITCODE -ne 0) { throw 'Granting staged artifact access failed' }
+            $credential = New-Object System.Management.Automation.PSCredential("$env:COMPUTERNAME\$name", $password)
+            Start-Service seclogon
+            $process = Start-Process powershell.exe -Credential $credential -LoadUserProfile -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',"$stage\run-fixtures.ps1",$stage) -WorkingDirectory $stage -PassThru -RedirectStandardOutput standard-user-fixtures.log -RedirectStandardError standard-user-fixtures-error.log
+            if (!$process.WaitForExit(1200000)) { taskkill /PID $process.Id /T /F | Out-Null; throw 'Fixture batch exceeded deadline' }
+            $process.WaitForExit(); $exitCode = $process.ExitCode
+            Get-Content standard-user-fixtures.log -ErrorAction Continue; Get-Content standard-user-fixtures-error.log -ErrorAction Continue
+            New-Item -ItemType Directory -Force fixture-logs | Out-Null
+            Get-ChildItem $stage -Filter '*.log' | Copy-Item -Destination fixture-logs
+          } finally {
+            $cleanup=@{user=$name;errors=@()}; if ($user) { try { Get-CimInstance Win32_UserProfile -Filter "SID='$($user.SID.Value)'" | Remove-CimInstance } catch {$cleanup.errors += $_.Exception.Message}; try {Remove-LocalUser -Name $name} catch {$cleanup.errors += $_.Exception.Message} }; try {if(Test-Path $stage){Remove-Item -Recurse -Force $stage}} catch {$cleanup.errors += $_.Exception.Message}; $cleanup|ConvertTo-Json -Depth 3|Set-Content -Encoding utf8 standard-user-fixtures-cleanup.json; if($cleanup.errors.Count){$exitCode=1}
+          }
+          exit $exitCode
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-relay-process-reuse-270771-${{ matrix.runner }}
+          path: |
+            reports-artifact-paths.json
+            source-fixture-binaries.json
+            stage-acl.log
+            fixture-logs/
+            standard-user-fixtures.log
+            standard-user-fixtures-error.log
+            standard-user-fixtures-cleanup.json
