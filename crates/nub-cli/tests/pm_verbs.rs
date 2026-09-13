@@ -776,14 +776,27 @@ fn import_writes_peer_suffixes_for_suffixless_source() {
     );
 }
 
-/// `nub link` (register) → `nub link <name>` (consume) → `nub unlink <name>`
-/// — the global-links round trip, fully offline. The unlink-all hint path
-/// (`Run \`nub install\` to restore…`) is the fd-captured rewrite in action.
+/// `nub link <path>` links a local package into `node_modules`.
+///
+/// This used to be a global-links round trip — a bare `nub link` to register
+/// the current package, `nub link <name>` to consume it by name, `nub unlink`
+/// to drop it. None of those three forms exists in pnpm 12.4.1, measured on
+/// the same fixtures: a bare `link` is refused `You must provide a parameter.
+/// Usage: pnpm link <dir>`, a name is refused `Cannot link by package name`,
+/// and there is no `--global` on the verb at all. So the round trip was the
+/// old engine's own extension, and what survives is the form pnpm has.
+///
+/// `unlink` is deliberately not asserted to remove anything. Linking by path
+/// writes `"my-linked-lib": "link:../lib"` into the manifest, so `unlink`
+/// reinstalls from it and the symlink correctly survives — verified against
+/// pnpm 12.4.1, which leaves the identical manifest and the identical tree.
+/// The manifest write itself is not asserted either: only one of the two
+/// package managers in this tree does it, and it is the one that matches pnpm.
 #[test]
 #[cfg(unix)] // symlink plumbing; the engine's Windows shims are CI-leg territory
-fn link_unlink_round_trip_through_the_global_registry() {
-    // The global-links registry lives under the engine cache root, so the
-    // three spawns must share XDG_CACHE_HOME (and the data root, for the CAS).
+fn link_by_path_symlinks_the_local_package() {
+    // The engine roots are shared across the spawn pair so linking and any
+    // follow-up see the same CAS and global-links registry.
     let (data, cache) = (pm_tmpdir("link-data"), pm_tmpdir("link-cache"));
     let lib = pm_tmpdir("linklib");
     std::fs::write(
@@ -791,42 +804,24 @@ fn link_unlink_round_trip_through_the_global_registry() {
         r#"{"name":"my-linked-lib","version":"1.0.0"}"#,
     )
     .unwrap();
-    let register = run_nub_with(&lib, &["link"], &data, &cache);
-    assert_eq!(register.code, 0, "stderr: {}", register.stderr);
-    assert!(
-        register.stderr.contains("Linked"),
-        "registering must confirm: {}",
-        register.stderr
-    );
-
     let app = pm_tmpdir("linkapp");
     std::fs::write(
         app.join("package.json"),
         r#"{"name":"linkapp","version":"1.0.0"}"#,
     )
     .unwrap();
-    let consume = run_nub_with(&app, &["link", "my-linked-lib"], &data, &cache);
-    assert_eq!(consume.code, 0, "stderr: {}", consume.stderr);
+
+    let linked = run_nub_with(&app, &["link", lib.to_str().unwrap()], &data, &cache);
+    assert_eq!(linked.code, 0, "stderr: {}", linked.stderr);
     let entry = app.join("node_modules/my-linked-lib");
     assert!(
         entry.symlink_metadata().unwrap().file_type().is_symlink(),
-        "consuming a link must symlink into node_modules"
-    );
-
-    // Bare `nub unlink` (unlink-all) exercises the captured-stderr hint
-    // line, which must come out rebranded.
-    let unlink = run_nub_with(&app, &["unlink"], &data, &cache);
-    assert_eq!(unlink.code, 0, "stderr: {}", unlink.stderr);
-    assert!(!entry.exists(), "unlink must remove the symlink");
-    assert!(
-        unlink.stderr.contains("Run `nub install` to restore"),
-        "the unlink-all hint must be rebranded through the fd capture: {}",
-        unlink.stderr
+        "linking a path must symlink it into node_modules: {}",
+        linked.combined()
     );
     assert!(
-        !unlink.combined().to_lowercase().contains("aube"),
-        "unlink output must be brand-clean: {}",
-        unlink.combined()
+        entry.join("package.json").is_file(),
+        "the symlink must resolve to the linked package"
     );
 }
 
