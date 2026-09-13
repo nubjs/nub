@@ -304,7 +304,7 @@ fn drive(
                     last_id = frame.id;
                     // The peer supplies no destination: this is the command's parent proxy.
                     match TcpStream::connect_timeout(
-                        &([127, 0, 0, 1], *port).into(),
+                        &(std::net::Ipv4Addr::LOCALHOST, *port).into(),
                         Duration::from_secs(1),
                     ) {
                         Ok(socket) => {
@@ -406,7 +406,7 @@ pub(crate) fn serve() -> io::Result<()> {
     let output = unsafe { OwnedHandle::from_raw_handle(output) };
     let input = pipe::Pipe::new(input, stop.clone())?;
     let output = pipe::Pipe::new(output, stop.clone())?;
-    let listener = TcpListener::bind(([127, 0, 0, 1], 0))?;
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
     run(input, output, Side::Helper(listener), stop)
 }
 
@@ -454,7 +454,7 @@ pub(super) mod tests {
     }
 
     fn sockets() -> (TcpStream, TcpStream) {
-        let listener = TcpListener::bind(([127, 0, 0, 1], 0)).unwrap();
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         let first = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let second = listener.accept().unwrap().0;
         (first, second)
@@ -491,7 +491,7 @@ pub(super) mod tests {
             let parent = start(parent, Side::Parent { port, ready });
             let helper = start(
                 helper,
-                Side::Helper(TcpListener::bind(([127, 0, 0, 1], 0)).unwrap()),
+                Side::Helper(TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap()),
             );
             let port = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
             Self {
@@ -504,7 +504,7 @@ pub(super) mod tests {
 
     #[test]
     fn relays_multiple_credit_windows_and_half_close() {
-        let listener = TcpListener::bind(([127, 0, 0, 1], 0)).unwrap();
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         let relay = TestRelay::start(listener.local_addr().unwrap().port());
         let payload = vec![0x5a; PAYLOAD * WINDOW * 3 + 7];
         let expected = payload.clone();
@@ -518,7 +518,7 @@ pub(super) mod tests {
             assert_eq!(received, expected);
             socket.write_all(&received).unwrap();
         });
-        let mut client = TcpStream::connect(([127, 0, 0, 1], relay.port)).unwrap();
+        let mut client = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, relay.port)).unwrap();
         client
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
@@ -532,9 +532,9 @@ pub(super) mod tests {
 
     #[test]
     fn cancellation_joins_idle_transport_readers() {
-        let listener = TcpListener::bind(([127, 0, 0, 1], 0)).unwrap();
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         let relay = TestRelay::start(listener.local_addr().unwrap().port());
-        let _client = TcpStream::connect(([127, 0, 0, 1], relay.port)).unwrap();
+        let _client = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, relay.port)).unwrap();
         let (done, completed) = mpsc::channel();
         let worker = thread::spawn(move || {
             drop(relay);
@@ -558,7 +558,8 @@ pub(super) mod tests {
         let proxy = EgressProxy::start(Arc::new(StaticDecider::new(policy)), None).unwrap();
         let relay = TestRelay::start(proxy.port());
         for (token, status) in [("wrong-command-token", "407"), (proxy.token(), "403")] {
-            let mut socket = TcpStream::connect(([127, 0, 0, 1], relay.port)).unwrap();
+            let mut socket =
+                TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, relay.port)).unwrap();
             socket
                 .set_read_timeout(Some(Duration::from_secs(10)))
                 .unwrap();
@@ -629,7 +630,7 @@ pub(super) mod tests {
     #[test]
     fn parent_rejects_stream_limit_and_reused_ids() {
         for reused in [false, true] {
-            let listener = TcpListener::bind(([127, 0, 0, 1], 0)).unwrap();
+            let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
             let (input, frames) = mpsc::sync_channel(STREAMS + 2);
             input
                 .send(Ok(Frame {
@@ -675,7 +676,8 @@ pub(super) mod tests {
         let second_relay = TestRelay::start(second.port());
         drop(first_relay);
         drop(first);
-        let mut socket = TcpStream::connect(([127, 0, 0, 1], second_relay.port)).unwrap();
+        let mut socket =
+            TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, second_relay.port)).unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();

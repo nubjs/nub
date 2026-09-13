@@ -28,7 +28,7 @@ mod fixture {
     const VALUE: &str = "synthetic-relay-fixture-credential";
 
     fn request(token: &str, port: u16, target: &str) -> (TcpStream, String) {
-        let mut socket = TcpStream::connect(([127, 0, 0, 1], port)).unwrap();
+        let mut socket = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(20)))
             .unwrap();
@@ -126,7 +126,7 @@ mod fixture {
             ScopeCapabilities::approved(),
             ambient,
         );
-        let listener = TcpListener::bind(([127, 0, 0, 1], 0)).unwrap();
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         let upstream_port = listener.local_addr().unwrap().port();
         let upstream = std::thread::spawn(move || {
             for _ in 0..2 {

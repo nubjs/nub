@@ -167,7 +167,7 @@ fn upstream(
         PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.key_pair.serialize_der())),
     )
     .unwrap();
-    let listener = TcpListener::bind(([127, 0, 0, 1], 0)).unwrap();
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     listener.set_nonblocking(true).unwrap();
     let handle = std::thread::spawn(move || {
@@ -252,7 +252,7 @@ fn parent() {
     }
     let (good_port, good_upstream) = upstream(good, Some(secret), 2);
     let (bad_port, bad_upstream) = upstream(bad, None, 3);
-    let direct = TcpStream::connect(([127, 0, 0, 1], bad_port)).unwrap();
+    let direct = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, bad_port)).unwrap();
     assert!(
         tls_request(direct, control_config, "direct-control")
             .unwrap()
