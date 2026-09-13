@@ -210,6 +210,7 @@ fn fixture(root: &Path, exe: &Path) -> FsRuleSet {
         ("/app/math.so".to_owned(), FsAccess::Read),
         ("/app/*.dat".to_owned(), FsAccess::ReadWrite),
         ("/app/shared-read".to_owned(), FsAccess::Read),
+        ("/app/mapped-read".to_owned(), FsAccess::Read),
     ];
     for path in libraries {
         copy(&path, &raw.join(path.strip_prefix("/").unwrap()));
@@ -223,6 +224,15 @@ fn fixture(root: &Path, exe: &Path) -> FsRuleSet {
     fs::hard_link(raw.join("app/shared.dat"), raw.join("app/shared-read")).unwrap();
     fs::hard_link(raw.join("app/shared.dat"), raw.join("app/omitted-hardlink")).unwrap();
     fs::write(raw.join("app/held.dat"), b"old").unwrap();
+    let mut page = vec![0; 4096];
+    page[..8].copy_from_slice(b"initial!");
+    fs::write(raw.join("app/mmap.dat"), &page).unwrap();
+    fs::write(raw.join("app/mapped-alias.dat"), &page).unwrap();
+    fs::hard_link(
+        raw.join("app/mapped-alias.dat"),
+        raw.join("app/mapped-read"),
+    )
+    .unwrap();
     FsRuleSet {
         entries: grants
             .into_iter()
@@ -265,6 +275,121 @@ fn denied<T>(result: io::Result<T>, label: &str) {
 fn replace_held(raw: &Path) {
     fs::rename(raw.join("app/held.dat"), raw.join("app/held-hidden")).unwrap();
     fs::write(raw.join("app/held.dat"), b"replacement").unwrap();
+}
+
+struct Mapping(*mut libc::c_void);
+
+impl Mapping {
+    fn new(file: &File, protection: i32, flags: i32) -> io::Result<Self> {
+        // Fixture files are a full page and remain live for the mapping's use.
+        let address = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                4096,
+                protection,
+                flags,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if address == libc::MAP_FAILED {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(Self(address))
+        }
+    }
+
+    fn prefix(&self) -> [u8; 8] {
+        // Read through the actual mapping each time, including after another
+        // descriptor changes its backing inode; no snapshot or file reread.
+        std::array::from_fn(|index| unsafe {
+            std::ptr::read_volatile(self.0.cast::<u8>().add(index))
+        })
+    }
+
+    unsafe fn write_prefix(&mut self, bytes: &[u8; 8]) {
+        // Caller must have constructed this mapping with PROT_WRITE.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.0.cast::<u8>(), bytes.len());
+        }
+    }
+}
+
+impl Drop for Mapping {
+    fn drop(&mut self) {
+        assert_eq!(unsafe { libc::munmap(self.0, 4096) }, 0);
+    }
+}
+
+fn exercise_mappings(app: &Path, projected: bool) {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(app.join("mmap.dat"))
+        .unwrap();
+    let mut private =
+        Mapping::new(&file, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE).unwrap();
+    assert_eq!(private.prefix(), *b"initial!");
+    unsafe {
+        private.write_prefix(b"private!");
+    }
+    assert_eq!(private.prefix(), *b"private!");
+    assert_eq!(&fs::read(app.join("mmap.dat")).unwrap()[..8], b"initial!");
+    drop(private);
+    let mut shared =
+        Mapping::new(&file, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED).unwrap();
+    assert_eq!(shared.prefix(), *b"initial!");
+    unsafe {
+        shared.write_prefix(b"shared!!");
+    }
+    assert_eq!(unsafe { libc::msync(shared.0, 4096, libc::MS_SYNC) }, 0);
+    assert_eq!(&fs::read(app.join("mmap.dat")).unwrap()[..8], b"shared!!");
+    drop(shared);
+    println!("MMAP_PRIVATE_SHARED_MSYNC_OK projected={projected}");
+
+    let read_only = File::open(app.join("mapped-read")).unwrap();
+    // A read-only descriptor cannot create a writable shared map in either arm.
+    denied(
+        Mapping::new(
+            &read_only,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+        ),
+        "writable shared map through read-only handle",
+    );
+    let writable_alias = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(app.join("mapped-read"));
+    if projected {
+        denied(writable_alias, "read-only alias writable mapping open");
+    } else {
+        let writable_alias = writable_alias.unwrap();
+        drop(
+            Mapping::new(
+                &writable_alias,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+            )
+            .unwrap(),
+        );
+    }
+
+    let alias = Mapping::new(&read_only, libc::PROT_READ, libc::MAP_SHARED).unwrap();
+    assert_eq!(alias.prefix(), *b"initial!");
+    let mut writer = OpenOptions::new()
+        .write(true)
+        .open(app.join("mapped-alias.dat"))
+        .unwrap();
+    writer.write_all(b"changed!").unwrap();
+    // An ordinary sequential write must be visible through the prefaulted
+    // read-only alias. No msync, invalidation call, sleep, or reopen repairs it.
+    assert_eq!(
+        alias.prefix(),
+        *b"changed!",
+        "prefaulted mapped hardlink alias must observe ordinary writes"
+    );
+    println!("MMAP_ALIAS_COHERENCE_OK projected={projected}");
 }
 
 fn exercise(base: &Path, projected: bool) {
@@ -383,7 +508,16 @@ fn verify_backing(root: &Path) {
     );
 }
 
-fn provider(root: &Path, owner_loss: bool) {
+fn verify_mapped_backing(root: &Path) {
+    let app = root.join("raw/app");
+    assert_eq!(&fs::read(app.join("mmap.dat")).unwrap()[..8], b"shared!!");
+    assert_eq!(
+        &fs::read(app.join("mapped-read")).unwrap()[..8],
+        b"changed!"
+    );
+}
+
+fn provider(root: &Path, owner_loss: bool, mappings: bool) {
     unsafe {
         libc::alarm(20);
         libc::umask(0);
@@ -435,7 +569,9 @@ fn provider(root: &Path, owner_loss: bool) {
     let server = std::thread::spawn(move || projection.serve(fuse.into()));
     let mut cmd = helper(
         Path::new("/app/run"),
-        if owner_loss {
+        if mappings {
+            "mapping-command"
+        } else if owner_loss {
             "owner-command"
         } else {
             "command"
@@ -464,17 +600,25 @@ fn provider(root: &Path, owner_loss: bool) {
             }
         }
     }
-    event(&mut output, "HELD");
-    replace_held(&root.join("raw"));
-    command
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"replaced\n")
-        .unwrap();
-    event(&mut output, "PROJECTED_EXEC_DLOPEN_IO_OK");
+    if mappings {
+        event(&mut output, "MAPPINGS_OK");
+    } else {
+        event(&mut output, "HELD");
+        replace_held(&root.join("raw"));
+        command
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"replaced\n")
+            .unwrap();
+        event(&mut output, "PROJECTED_EXEC_DLOPEN_IO_OK");
+    }
     assert!(wait(&mut command).success());
-    verify_backing(root);
+    if mappings {
+        verify_mapped_backing(root);
+    } else {
+        verify_backing(root);
+    }
     checked(unsafe { libc::umount2(target.as_ptr(), 0) }).expect("normal direct unmount");
     server.join().unwrap().unwrap();
     fs::remove_dir(&mountpoint).unwrap();
@@ -544,7 +688,7 @@ fn reap_owned(pid: libc::pid_t) {
     panic!("owned command {pid} did not terminate within five seconds");
 }
 
-fn supervisor(root: &Path) {
+fn supervisor(root: &Path, mappings: bool) {
     unsafe {
         libc::alarm(75);
     }
@@ -556,15 +700,24 @@ fn supervisor(root: &Path) {
     assert!(caps().iter().all(|c| c.effective == 0 && c.permitted == 0));
     checked(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) }).unwrap();
     let exe = std::env::current_exe().unwrap();
-    for role in ["raw", "normal", "owner"] {
+    let roles: &[&str] = if mappings {
+        &["raw", "normal"]
+    } else {
+        &["raw", "normal", "owner"]
+    };
+    for &role in roles {
         let case = root.join(role);
         fs::create_dir(&case).unwrap();
         let rules = fixture(&case, &exe);
         fs::write(case.join("rules.json"), serde_json::to_vec(&rules).unwrap()).unwrap();
         let mut cmd = if role == "raw" {
-            helper(&case.join("raw/app/run"), "raw", &case.join("raw"))
+            helper(
+                &case.join("raw/app/run"),
+                if mappings { "mapping-raw" } else { "raw" },
+                &case.join("raw"),
+            )
         } else {
-            helper(&exe, role, &case)
+            helper(&exe, if mappings { "mapping-normal" } else { role }, &case)
         };
         if role != "raw" {
             namespace_launch(&mut cmd);
@@ -594,17 +747,32 @@ fn supervisor(root: &Path) {
             event(
                 &mut output,
                 if role == "raw" {
-                    "RAW_EXEC_DLOPEN_IO_OK"
+                    if mappings {
+                        "MAPPINGS_OK"
+                    } else {
+                        "RAW_EXEC_DLOPEN_IO_OK"
+                    }
                 } else {
                     "NORMAL_UNMOUNT_BACKING_OK"
                 },
             );
             assert!(wait(&mut child).success(), "{role}");
-            verify_backing(&case);
+            if mappings {
+                verify_mapped_backing(&case);
+            } else {
+                verify_backing(&case);
+            }
         }
         fs::remove_dir_all(&case).unwrap();
     }
-    println!("MOUNT_PROBE_OK");
+    println!(
+        "{}",
+        if mappings {
+            "MMAP_PROBE_OK"
+        } else {
+            "MOUNT_PROBE_OK"
+        }
+    );
 }
 
 #[test]
@@ -616,10 +784,21 @@ fn projection_mount_helper() {
     // libtest prints its test-name prefix before calling this function.
     println!();
     match role.as_str() {
-        "supervisor" => supervisor(&root),
+        "supervisor" => supervisor(&root, false),
+        "mapping-supervisor" => supervisor(&root, true),
         "raw" => exercise(&root, false),
-        "normal" => provider(&root, false),
-        "owner" => provider(&root, true),
+        "normal" => provider(&root, false, false),
+        "owner" => provider(&root, true, false),
+        "mapping-normal" => provider(&root, false, true),
+        "mapping-raw" => {
+            exercise_mappings(&root.join("app"), false);
+            println!("MAPPINGS_OK");
+        }
+        "mapping-command" => {
+            audit_command();
+            exercise_mappings(&root.join("app"), true);
+            println!("MAPPINGS_OK");
+        }
         "command" => {
             audit_command();
             exercise(&root, true);
@@ -642,9 +821,19 @@ fn projection_mount_helper() {
 #[test]
 #[ignore = "requires an ordinary Linux user with direct user namespaces and /dev/fuse"]
 fn mounted_projection_enforces_paths_and_owns_commands() {
+    run_mount_probe("supervisor", "MOUNT_PROBE_OK");
+}
+
+#[test]
+#[ignore = "requires an ordinary Linux user with direct user namespaces and /dev/fuse"]
+fn mounted_projection_preserves_mapping_semantics() {
+    run_mount_probe("mapping-supervisor", "MMAP_PROBE_OK");
+}
+
+fn run_mount_probe(role: &str, marker: &str) {
     let root = tempfile::tempdir().unwrap();
     let log = root.path().join("probe.log");
-    let mut cmd = helper(&std::env::current_exe().unwrap(), "supervisor", root.path());
+    let mut cmd = helper(&std::env::current_exe().unwrap(), role, root.path());
     let parent = unsafe { libc::getpid() };
     unsafe {
         cmd.pre_exec(move || {
@@ -685,8 +874,5 @@ fn mounted_projection_enforces_paths_and_owns_commands() {
         status.is_some_and(|status| status.success()),
         "mounted projection failed: {status:?}\n{output}"
     );
-    assert!(
-        output.contains("MOUNT_PROBE_OK"),
-        "missing mounted acceptance marker"
-    );
+    assert!(output.contains(marker), "missing mounted acceptance marker");
 }
