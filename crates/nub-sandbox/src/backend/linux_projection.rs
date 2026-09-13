@@ -18,7 +18,9 @@ use std::path::Path;
 use crate::policy::FsRuleSet;
 
 pub(crate) use filesystem::Projection;
-pub(crate) use native_open::{NativeOpenClient, NativeOpenRequest, NativeOpenService};
+pub(crate) use native_open::{
+    NativeOpenClient, NativeOpenLiveness, NativeOpenRequest, NativeOpenService,
+};
 
 impl Projection {
     /// Acquire a fixed resolved policy and a backing root owned by the provider.
