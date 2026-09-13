@@ -485,9 +485,14 @@ fn pnpmfile_honored_under_pnpm_incumbent_without_warning() {
     let dir = project(
         "pnpmfile-pnpm",
         &[
+            // Incumbency comes from the LOCKFILE, not from a version pin. A
+            // `packageManager: pnpm@<other version>` is an instruction rather
+            // than a label — it says to fetch that pnpm and hand the command
+            // to it — so the pin made this fixture measure delegation and
+            // never reach the pnpmfile it is named for.
             (
                 "package.json",
-                r#"{"name":"app","version":"1.0.0","packageManager":"pnpm@9.9.9"}"#,
+                r#"{"name":"app","version":"1.0.0"}"#,
             ),
             ("pnpm-lock.yaml", EMPTY_LOCK),
             (".pnpmfile.cjs", hook),
