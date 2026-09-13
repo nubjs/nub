@@ -9,7 +9,7 @@ use super::super::{Prepared, PreparedSignalTarget, SupervisedPlan};
 use super::*;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
 
 const RENAME_NOREPLACE: u32 = 1;
 const RENAME_EXCHANGE: u32 = 2;
@@ -62,6 +62,7 @@ fn namespace_fixture(root: &Path, exe: &Path) -> FsRuleSet {
             FsAccess::ReadWrite,
         ),
         rule("/app/namespace/read-only.locked", FsAccess::Read),
+        rule("/app/namespace/metadata-read.locked", FsAccess::Read),
         // `/app` remains traversal-only: this exact future leaf must not grant
         // authority to its siblings or parent directory.
         rule("/app/exact-leaf.json", FsAccess::ReadWrite),
@@ -81,11 +82,20 @@ fn namespace_fixture(root: &Path, exe: &Path) -> FsRuleSet {
         ("held.json", b"held-old".as_slice()),
         ("target.json", b"target".as_slice()),
         ("read-only.locked", b"read-only".as_slice()),
+        ("metadata-read.locked", b"metadata-read".as_slice()),
         ("nearest.txt", b"nearest-canary".as_slice()),
         ("directory-neighbor.txt", b"directory-canary".as_slice()),
     ] {
         fs::write(namespace.join(name), bytes).unwrap();
     }
+    let read = File::open(namespace.join("metadata-read.locked")).unwrap();
+    read.set_permissions(fs::Permissions::from_mode(0o644))
+        .unwrap();
+    read.set_times(
+        fs::FileTimes::new()
+            .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_001)),
+    )
+    .unwrap();
     rules
 }
 
@@ -147,6 +157,139 @@ fn read_at(directory: &File, name: &std::ffi::CStr) -> io::Result<Vec<u8>> {
 fn case_marker(case: &str, projected: bool) {
     println!("NAMESPACE_CASE {case} projected={projected}");
     io::stdout().flush().unwrap();
+}
+
+fn namespace_metadata(namespace: &Path, directory: &File, projected: bool) {
+    let fresh = namespace.join("metadata.json");
+    create(&fresh, b"metadata").unwrap();
+    fs::set_permissions(&fresh, fs::Permissions::from_mode(0o640)).unwrap();
+    assert_eq!(fs::metadata(&fresh).unwrap().mode() & 0o777, 0o640);
+    // A read-only descriptor at a RW-granted path retains ordinary metadata
+    // authority. A descriptor from an R-only grant does not.
+    let file = File::open(&fresh).unwrap();
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+        .unwrap();
+    checked(unsafe { libc::fchown(file.as_raw_fd(), libc::getuid(), libc::getgid()) }).unwrap();
+    let modified = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_123);
+    file.set_times(fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    assert_eq!(file.metadata().unwrap().mtime(), 1_700_000_123);
+    assert_eq!(file.metadata().unwrap().mode() & 0o777, 0o600);
+    // Metadata ownership does not imply read permission: a fresh path and a
+    // retained descriptor both allow the owner to repair a mode-000 object.
+    fs::set_permissions(&fresh, fs::Permissions::from_mode(0)).unwrap();
+    let fresh_path = CString::new(fresh.as_os_str().as_bytes()).unwrap();
+    let times = [
+        libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_OMIT,
+        },
+        libc::timespec {
+            tv_sec: 1_700_000_123,
+            tv_nsec: 0,
+        },
+    ];
+    checked(unsafe {
+        libc::fchownat(
+            libc::AT_FDCWD,
+            fresh_path.as_ptr(),
+            libc::getuid(),
+            libc::getgid(),
+            0,
+        )
+    })
+    .unwrap();
+    checked(unsafe { libc::utimensat(libc::AT_FDCWD, fresh_path.as_ptr(), times.as_ptr(), 0) })
+        .unwrap();
+    file.set_times(fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    fs::set_permissions(&fresh, fs::Permissions::from_mode(0o600)).unwrap();
+    let metadata = fs::metadata(&fresh).unwrap();
+    assert_eq!(metadata.mode() & 0o777, 0o600);
+    assert_eq!((metadata.uid(), metadata.gid()), unsafe {
+        (libc::getuid(), libc::getgid())
+    });
+
+    let renamed = namespace.join("directory-renamed.dir");
+    fs::set_permissions(&renamed, fs::Permissions::from_mode(0o750)).unwrap();
+    assert_eq!(fs::metadata(&renamed).unwrap().mode() & 0o777, 0o750);
+    directory
+        .set_permissions(fs::Permissions::from_mode(0o700))
+        .unwrap();
+    directory
+        .set_times(fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    assert_eq!(fs::metadata(&renamed).unwrap().mode() & 0o777, 0o700);
+    assert_eq!(fs::metadata(&renamed).unwrap().mtime(), 1_700_000_123);
+    fs::set_permissions(&renamed, fs::Permissions::from_mode(0)).unwrap();
+    let renamed_path = CString::new(renamed.as_os_str().as_bytes()).unwrap();
+    checked(unsafe {
+        libc::fchownat(
+            libc::AT_FDCWD,
+            renamed_path.as_ptr(),
+            libc::getuid(),
+            libc::getgid(),
+            0,
+        )
+    })
+    .unwrap();
+    checked(unsafe { libc::utimensat(libc::AT_FDCWD, renamed_path.as_ptr(), times.as_ptr(), 0) })
+        .unwrap();
+    directory
+        .set_times(fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    directory
+        .set_permissions(fs::Permissions::from_mode(0o700))
+        .unwrap();
+    assert_eq!(fs::metadata(&renamed).unwrap().mode() & 0o777, 0o700);
+    assert_eq!(fs::metadata(&renamed).unwrap().mtime(), 1_700_000_123);
+
+    let read_path = namespace.join("metadata-read.locked");
+    let read = File::open(&read_path).unwrap();
+    let before = read.metadata().unwrap();
+    for (label, result) in [
+        (
+            "R path chmod",
+            fs::set_permissions(&read_path, fs::Permissions::from_mode(0o600)),
+        ),
+        (
+            "R handle chmod",
+            read.set_permissions(fs::Permissions::from_mode(0o600)),
+        ),
+        (
+            "R handle chown",
+            checked(unsafe { libc::fchown(read.as_raw_fd(), libc::getuid(), libc::getgid()) }),
+        ),
+        (
+            "R handle utimens",
+            read.set_times(fs::FileTimes::new().set_modified(modified)),
+        ),
+    ] {
+        if projected {
+            match result {
+                Err(error)
+                    if matches!(
+                        error.raw_os_error(),
+                        Some(libc::EACCES | libc::EPERM | libc::EROFS)
+                    ) => {}
+                other => panic!("{label}: expected policy denial, got {other:?}"),
+            }
+        } else {
+            result.unwrap();
+        }
+    }
+    let after = read.metadata().unwrap();
+    if projected {
+        assert_eq!(after.mode(), before.mode());
+        assert_eq!((after.uid(), after.gid()), (before.uid(), before.gid()));
+        assert_eq!(
+            (after.mtime(), after.mtime_nsec()),
+            (before.mtime(), before.mtime_nsec())
+        );
+    } else {
+        assert_eq!(after.mtime(), 1_700_000_123);
+    }
+    case_marker("metadata", projected);
 }
 
 fn namespace_command(root: &Path, projected: bool) {
@@ -296,6 +439,8 @@ fn namespace_command(root: &Path, projected: bool) {
     );
     case_marker("directory_exchange", projected);
 
+    namespace_metadata(&namespace, &directory, projected);
+
     let mut held = OpenOptions::new()
         .read(true)
         .write(true)
@@ -393,6 +538,25 @@ fn verify_backing(
 ) {
     let app = backing_root.join("app");
     let namespace = app.join("namespace");
+    let metadata_file = fs::metadata(namespace.join("metadata.json")).unwrap();
+    assert_eq!(metadata_file.mode() & 0o777, 0o600);
+    assert_eq!(metadata_file.mtime(), 1_700_000_123);
+    let metadata_directory = fs::metadata(namespace.join("directory-renamed.dir")).unwrap();
+    assert_eq!(metadata_directory.mode() & 0o777, 0o700);
+    assert_eq!(metadata_directory.mtime(), 1_700_000_123);
+    let metadata_read = fs::metadata(namespace.join("metadata-read.locked")).unwrap();
+    assert_eq!(
+        metadata_read.mode() & 0o777,
+        if projected { 0o644 } else { 0o600 }
+    );
+    assert_eq!(
+        metadata_read.mtime(),
+        if projected {
+            1_700_000_001
+        } else {
+            1_700_000_123
+        }
+    );
     assert_eq!(
         fs::read(namespace.join("future.json")).unwrap(),
         b"shared-through-link"
@@ -649,10 +813,7 @@ fn namespace_native_provider(root: &Path) {
         ca_bundle: None,
         projected: None,
     }
-    .with_test_projection(ProjectedLaunch {
-        root: view_c.clone(),
-        opener: stats.clone(),
-    });
+    .with_test_projection(ProjectedLaunch::at_path(&view_c, stats.clone()).unwrap());
     let mut ready_target = None;
     let mut child = Prepared::test_supervised(plan)
         .spawn_with_signal_target(|target| {

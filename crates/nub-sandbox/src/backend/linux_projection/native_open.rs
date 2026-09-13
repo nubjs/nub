@@ -1,5 +1,9 @@
 use super::backing::error;
 use super::filesystem::{EXPORT_IOCTL, Projection};
+#[path = "native_open_process.rs"]
+mod native_open_process;
+
+use native_open_process::{RawOpenProcess, RawOpenStart, RawOpenTermination};
 use std::ffi::CString;
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -459,6 +463,8 @@ impl NativeOpenClient {
 pub(crate) struct NativeOpenService {
     client: NativeOpenClient,
     worker: Option<JoinHandle<()>>,
+    terminator: Option<RawOpenTermination>,
+    projection: Projection,
     #[cfg(test)]
     gate: Arc<Mutex<Option<OpenGate>>>,
 }
@@ -510,46 +516,59 @@ impl NativeOpenService {
             .open(mount)?;
         let mount = mount_id(&root)?;
         let root_inode = root.metadata()?.ino();
+        Self::start_with_root(projection, root, mount, root_inode, None)
+    }
+
+    /// The bootstrap owner supplies held namespace descriptors when a projection lives outside
+    /// the caller's namespace. Tests that already create their view in this namespace pass
+    /// `None`; production acquisition will retain and borrow its `NamespacePair` here.
+    pub(super) fn start_with_root(
+        projection: Projection,
+        root: File,
+        mount: u64,
+        root_inode: u64,
+        namespaces: Option<&super::namespace::NamespacePair>,
+    ) -> io::Result<Self> {
         let (send, jobs) = mpsc::sync_channel::<Job>(1);
+        let sender = Arc::new(Mutex::new(Some(send)));
         let capacity = Arc::new(QueueCapacity::one()?);
         let counters = Arc::new(Counters::default());
+        // The worker owns these descriptors before it forks. `PR_SET_PDEATHSIG` is tied to the
+        // creating thread, so creation must happen in this persistent worker—not the acquiring
+        // caller that happens to invoke `native_opener`.
+        let raw_start = RawOpenStart::new(root, namespaces)?;
         let worker_counters = Arc::clone(&counters);
         #[cfg(test)]
         let gate = Arc::new(Mutex::new(None));
         #[cfg(test)]
         let worker_gate = Arc::clone(&gate);
-        let (ready, startup) = mpsc::sync_channel(1);
-        let worker = std::thread::Builder::new()
+        let worker_projection = projection.clone();
+        let worker_sender = Arc::clone(&sender);
+        let (startup, started) = mpsc::sync_channel::<io::Result<RawOpenTermination>>(1);
+        let worker = match std::thread::Builder::new()
             .name("projection-open".into())
             .spawn(move || {
-                let setup = (|| {
-                    // Only this trusted thread changes root/cwd/umask. The FUSE
-                    // server must retain its own host root and trusted procfs.
-                    if unsafe { libc::unshare(libc::CLONE_FS) } < 0
-                        || unsafe { libc::fchdir(root.as_raw_fd()) } < 0
-                        || unsafe { libc::chroot(c".".as_ptr()) } < 0
-                        || unsafe { libc::chdir(c"/".as_ptr()) } < 0
-                    {
-                        return Err(io::Error::last_os_error());
+                let mut process = match RawOpenProcess::start(raw_start) {
+                    Ok(process) => process,
+                    Err(error) => {
+                        let _ = startup.send(Err(error));
+                        return;
                     }
-                    unsafe { super::super::linux_landlock::drop_all_capabilities() }?;
-                    let tid = unsafe { libc::syscall(libc::SYS_gettid) } as u32;
-                    projection.register_export(tid)?;
-                    worker_counters.tid.store(tid, Ordering::Release);
-                    Ok(())
-                })();
-                if setup.is_err() {
-                    let _ = ready.send(setup);
+                };
+                let terminator = match process.termination_handle() {
+                    Ok(terminator) => terminator,
+                    Err(error) => {
+                        let _ = startup.send(Err(error));
+                        return;
+                    }
+                };
+                if let Err(error) = worker_projection.register_export(process.tid()) {
+                    let _ = startup.send(Err(error));
                     return;
                 }
-                struct Registration(Projection);
-                impl Drop for Registration {
-                    fn drop(&mut self) {
-                        self.0.unregister_export();
-                    }
-                }
-                let _registration = Registration(projection.clone());
-                if ready.send(Ok(())).is_err() {
+                worker_counters.tid.store(process.tid(), Ordering::Release);
+                if startup.send(Ok(terminator)).is_err() {
+                    worker_projection.unregister_export();
                     return;
                 }
                 for job in jobs {
@@ -571,39 +590,53 @@ impl NativeOpenService {
                     let opened = if !worker_may_open(&cancelled, liveness) {
                         Err(error(libc::ECANCELED))
                     } else {
-                        open_projected(&projection, &request, &worker_counters)
+                        open_projected(&worker_projection, &request, &worker_counters, &mut process)
                     };
+                    let process_failed = native_process_failed(&opened);
                     if !cancelled.load(Ordering::Acquire) {
                         let _ = result.send(opened);
                         let one = 1u64;
                         unsafe { libc::write(ready.as_raw_fd(), (&one as *const u64).cast(), 8) };
                     }
+                    if process_failed {
+                        if let Ok(mut sender) = worker_sender.lock() {
+                            sender.take();
+                        }
+                        break;
+                    }
                 }
-            })?;
-        match startup.recv() {
-            Ok(Ok(())) => Ok(Self {
-                client: NativeOpenClient {
-                    sender: Arc::new(Mutex::new(Some(send))),
-                    capacity,
-                    mount,
-                    root_inode,
-                    counters,
-                },
-                worker: Some(worker),
-                #[cfg(test)]
-                gate,
-            }),
+                worker_projection.unregister_export();
+            }) {
+            Ok(worker) => worker,
+            Err(error) => {
+                return Err(error);
+            }
+        };
+        let terminator = match started.recv() {
+            Ok(Ok(terminator)) => terminator,
             Ok(Err(error)) => {
-                drop(send);
                 let _ = worker.join();
-                Err(error)
+                return Err(error);
             }
             Err(error) => {
-                drop(send);
                 let _ = worker.join();
-                Err(io::Error::other(error))
+                return Err(io::Error::other(error));
             }
-        }
+        };
+        Ok(Self {
+            client: NativeOpenClient {
+                sender,
+                capacity,
+                mount,
+                root_inode,
+                counters,
+            },
+            worker: Some(worker),
+            terminator: Some(terminator),
+            projection,
+            #[cfg(test)]
+            gate,
+        })
     }
 
     pub(crate) fn client(&self) -> NativeOpenClient {
@@ -635,15 +668,29 @@ impl NativeOpenService {
     }
 
     fn stop(&mut self) -> io::Result<()> {
-        self.client
-            .sender
-            .lock()
-            .map_err(|_| error(libc::EIO))?
-            .take();
-        if let Some(worker) = self.worker.take() {
-            worker.join().map_err(|_| error(libc::EIO))?;
+        let sender_poisoned = match self.client.sender.lock() {
+            Ok(mut sender) => {
+                sender.take();
+                false
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().take();
+                true
+            }
+        };
+        if let Some(mut terminator) = self.terminator.take() {
+            terminator.terminate();
         }
-        Ok(())
+        let joined: io::Result<()> = self
+            .worker
+            .take()
+            .map_or(Ok(()), |worker| worker.join().map_err(|_| error(libc::EIO)));
+        self.projection.unregister_export();
+        if sender_poisoned {
+            Err(error(libc::EIO))
+        } else {
+            joined
+        }
     }
 }
 
@@ -669,71 +716,20 @@ fn open_projected(
     projection: &Projection,
     request: &NativeOpenRequest,
     counters: &Counters,
+    process: &mut RawOpenProcess,
 ) -> io::Result<File> {
-    let dirfd = request
-        .directory
-        .as_ref()
-        .map_or(libc::AT_FDCWD, AsRawFd::as_raw_fd);
-    unsafe { libc::umask(request.umask) };
-    let flags = request.flags | libc::O_CLOEXEC as u64;
-    let fd = if let Some(resolve) = request.resolve {
-        #[repr(C)]
-        struct OpenHow {
-            flags: u64,
-            mode: u64,
-            resolve: u64,
-        }
-        let how = OpenHow {
-            flags,
-            mode: request.mode,
-            resolve,
-        };
-        unsafe {
-            libc::syscall(
-                libc::SYS_openat2,
-                dirfd,
-                request.path.as_ptr(),
-                &how,
-                size_of::<OpenHow>(),
-            ) as i32
-        }
-    } else {
-        unsafe {
-            libc::openat(
-                dirfd,
-                request.path.as_ptr(),
-                flags as i32,
-                request.mode as libc::mode_t,
-            )
-        }
-    };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let file = unsafe { File::from_raw_fd(fd) };
-    counters.opened.fetch_add(1, Ordering::Relaxed);
-    if flags & libc::O_PATH as u64 != 0 || file.metadata()?.is_dir() {
-        return Ok(file);
-    }
-    if !file.metadata()?.is_file() {
-        return Err(error(libc::EACCES));
-    }
-    projection.arm_export()?;
-    // No provider lock is held during this synchronous FUSE callback. Only
-    // the kernel-supplied resolver TID and exact open fh can fill the slot.
-    let rc = unsafe { libc::ioctl(file.as_raw_fd(), EXPORT_IOCTL, 0) };
-    let error = io::Error::last_os_error();
-    let exported = projection.take_export();
-    if rc < 0 {
-        return Err(error);
-    }
-    let exported = exported?;
-    counters.exported.fetch_add(1, Ordering::Relaxed);
-    Ok(exported)
+    process.open(request, projection, counters)
 }
 
 fn worker_may_open(cancelled: &AtomicBool, liveness: NativeOpenLiveness) -> bool {
     !cancelled.load(Ordering::Acquire) && liveness()
+}
+
+fn native_process_failed(result: &io::Result<File>) -> bool {
+    matches!(
+        result.as_ref().err().and_then(io::Error::raw_os_error),
+        Some(libc::EPIPE | libc::ECONNRESET)
+    )
 }
 
 #[cfg(test)]

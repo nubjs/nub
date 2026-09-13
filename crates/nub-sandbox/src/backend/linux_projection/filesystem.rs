@@ -15,7 +15,8 @@ use fuser::{
 };
 
 use super::backing::{
-    Backing, child_path, directory_names, error, read_link, reopen_regular, same_object,
+    Backing, child_path, directory_names, error, read_link, reopen_regular,
+    require_metadata_support, same_object, set_mode, set_owner, set_times,
 };
 use super::rules::Rules;
 use crate::policy::FsAccess;
@@ -113,6 +114,7 @@ pub(crate) struct Projection(Arc<Mutex<State>>);
 
 impl Projection {
     pub(super) fn new(rules: Rules, backing: Backing) -> io::Result<Self> {
+        require_metadata_support()?;
         let root = Arc::new(Node {
             path: PathBuf::from("/"),
             pin: backing.pin(Path::new("/"))?,
@@ -630,6 +632,57 @@ impl State {
         self.attr(ino, handle)
     }
 
+    fn metadata_target(&self, ino: u64, handle: Option<u64>) -> io::Result<File> {
+        if let Some(handle) = handle {
+            let handle = self.handle(ino, handle)?;
+            if handle.authority != FsAccess::ReadWrite {
+                return Err(error(libc::EACCES));
+            }
+            return match &handle.kind {
+                // Keep existing-handle operations bound to the object the
+                // handle already names, including after a rename or unlink.
+                HandleKind::File { file, .. } => file.try_clone(),
+                HandleKind::Directory(_) => handle.node.pin.try_clone(),
+            };
+        }
+
+        let node = self.node(ino)?;
+        self.require_write(&node.path)?;
+        // This re-resolves the policy spelling and compares it with the inode
+        // pin before every fresh metadata operation.
+        self.current(&node)
+    }
+
+    fn setattr(
+        &mut self,
+        ino: u64,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        atime: Option<TimeOrNow>,
+        mtime: Option<TimeOrNow>,
+        handle: Option<u64>,
+    ) -> io::Result<FileAttr> {
+        if mode.is_some() || uid.is_some() || gid.is_some() || atime.is_some() || mtime.is_some() {
+            let target = self.metadata_target(ino, handle)?;
+            // chown can clear set-id bits, so apply the requested mode after it.
+            if uid.is_some() || gid.is_some() {
+                set_owner(&target, uid.unwrap_or(u32::MAX), gid.unwrap_or(u32::MAX))?;
+            }
+            if let Some(mode) = mode {
+                set_mode(&target, mode & 0o7777)?;
+            }
+            if atime.is_some() || mtime.is_some() {
+                set_times(&target, &requested_times(atime, mtime)?)?;
+            }
+        }
+        if let Some(size) = size {
+            self.truncate(ino, handle, size)?;
+        }
+        self.attr(ino, handle)
+    }
+
     fn opendir(&mut self, ino: u64) -> io::Result<u64> {
         let node = self.node(ino)?;
         self.current(&node)?;
@@ -724,6 +777,55 @@ fn timestamp(seconds: i64, nanos: i64) -> SystemTime {
         UNIX_EPOCH.checked_sub(delta)
     }
     .unwrap_or(UNIX_EPOCH)
+}
+
+fn requested_time(time: TimeOrNow) -> io::Result<libc::timespec> {
+    match time {
+        TimeOrNow::Now => Ok(libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_NOW,
+        }),
+        TimeOrNow::SpecificTime(time) => match time.duration_since(UNIX_EPOCH) {
+            Ok(duration) => Ok(libc::timespec {
+                tv_sec: i64::try_from(duration.as_secs()).map_err(|_| error(libc::EOVERFLOW))?,
+                tv_nsec: i64::from(duration.subsec_nanos()),
+            }),
+            Err(error_before_epoch) => {
+                let duration = error_before_epoch.duration();
+                let seconds =
+                    i64::try_from(duration.as_secs()).map_err(|_| error(libc::EOVERFLOW))?;
+                let nanos = i64::from(duration.subsec_nanos());
+                if nanos == 0 {
+                    Ok(libc::timespec {
+                        tv_sec: -seconds,
+                        tv_nsec: 0,
+                    })
+                } else {
+                    Ok(libc::timespec {
+                        tv_sec: seconds
+                            .checked_neg()
+                            .and_then(|n| n.checked_sub(1))
+                            .ok_or_else(|| error(libc::EOVERFLOW))?,
+                        tv_nsec: 1_000_000_000 - nanos,
+                    })
+                }
+            }
+        },
+    }
+}
+
+fn requested_times(
+    atime: Option<TimeOrNow>,
+    mtime: Option<TimeOrNow>,
+) -> io::Result<[libc::timespec; 2]> {
+    let omitted = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: libc::UTIME_OMIT,
+    };
+    Ok([
+        atime.map(requested_time).transpose()?.unwrap_or(omitted),
+        mtime.map(requested_time).transpose()?.unwrap_or(omitted),
+    ])
 }
 
 fn attributes(ino: u64, meta: &Metadata, access: Option<FsAccess>) -> io::Result<FileAttr> {
@@ -1028,12 +1130,7 @@ impl Filesystem for Projection {
         flags: Option<BsdFileFlags>,
         reply: ReplyAttr,
     ) {
-        if mode.is_some()
-            || uid.is_some()
-            || gid.is_some()
-            || atime.is_some()
-            || mtime.is_some()
-            || ctime.is_some()
+        if ctime.is_some()
             || crtime.is_some()
             || chgtime.is_some()
             || bkuptime.is_some()
@@ -1042,9 +1139,8 @@ impl Filesystem for Projection {
             reply.error(fuser::Errno::EOPNOTSUPP);
             return;
         }
-        let result = self.state().and_then(|mut state| match size {
-            Some(size) => state.truncate(ino.0, fh.map(|h| h.0), size),
-            None => state.attr(ino.0, fh.map(|h| h.0)),
+        let result = self.state().and_then(|mut state| {
+            state.setattr(ino.0, mode, uid, gid, size, atime, mtime, fh.map(|h| h.0))
         });
         match result {
             Ok(attr) => reply.attr(&TTL, &attr),

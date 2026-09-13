@@ -1,0 +1,41 @@
+name: Sandbox Linux projection
+
+on:
+  push:
+    branches: [sandbox-linux-projection-focused]
+
+permissions:
+  contents: read
+
+jobs:
+  focused:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - name: Recording source and runner identity
+        run: |
+          mkdir -p projection-evidence
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD > projection-evidence/checkout-commit.txt
+          git archive --format=tar.gz HEAD > projection-evidence/source.tar.gz
+          sha256sum projection-evidence/source.tar.gz > projection-evidence/source-archive.sha256
+          printf '%s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}" > projection-evidence/runner-image.txt
+          id > projection-evidence/runner-prerequisites.txt
+          uname -a >> projection-evidence/runner-prerequisites.txt
+          for file in /proc/sys/user/max_user_namespaces /proc/sys/kernel/unprivileged_userns_clone /proc/sys/kernel/apparmor_restrict_unprivileged_userns; do
+            if test -r "$file"; then printf '%s=' "$file" >> projection-evidence/runner-prerequisites.txt; cat "$file" >> projection-evidence/runner-prerequisites.txt; fi
+          done
+          ls -l /dev/fuse >> projection-evidence/runner-prerequisites.txt 2>&1 || true
+      - name: Installing the Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal
+      - name: Running the focused native and namespace gates
+        run: bash scripts/sandbox-linux-namespace-gate.sh "$PWD" "$PWD/projection-evidence" "$GITHUB_SHA" "$PWD/scripts/sandbox-linux-native-gate.sh"
+      - name: Preserving source and runtime evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: linux-projection-${{ github.sha }}
+          path: projection-evidence

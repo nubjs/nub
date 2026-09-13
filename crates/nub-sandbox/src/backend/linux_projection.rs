@@ -7,8 +7,13 @@
 
 mod backing;
 mod filesystem;
+mod namespace;
 mod native_open;
 mod rules;
+
+#[cfg(test)]
+#[path = "linux_projection/namespace_tests.rs"]
+mod namespace_tests;
 
 use std::fs::File;
 use std::io;
@@ -18,6 +23,7 @@ use std::path::Path;
 use crate::policy::FsRuleSet;
 
 pub(crate) use filesystem::Projection;
+pub(crate) use namespace::NamespacePair;
 pub(crate) use native_open::{
     NativeOpenClient, NativeOpenLiveness, NativeOpenRequest, NativeOpenService,
 };

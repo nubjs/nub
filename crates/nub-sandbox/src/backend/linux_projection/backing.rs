@@ -70,6 +70,120 @@ pub(super) fn reopen_regular(pin: &File, flags: i32) -> io::Result<File> {
     }
 }
 
+fn is_path_descriptor(file: &File) -> io::Result<bool> {
+    // SAFETY: file is a live descriptor; F_GETFL takes no variadic argument.
+    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(flags & libc::O_PATH != 0)
+    }
+}
+
+const FCHMODAT2: libc::c_long = 452;
+const EMPTY_PATH_NOFOLLOW: libc::c_int = libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW;
+
+fn chmod_path_descriptor(pin: &File, mode: u32) -> io::Result<()> {
+    // SAFETY: pin is a live descriptor and the empty C string remains live.
+    let result = unsafe {
+        libc::syscall(
+            FCHMODAT2,
+            pin.as_raw_fd(),
+            c"".as_ptr(),
+            mode,
+            EMPTY_PATH_NOFOLLOW,
+        )
+    };
+    if result < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// Require Linux's fchmodat2 empty-path form before exposing projection.
+///
+/// The invalid descriptor makes this an operation-free probe: a supported
+/// kernel must reject it with EBADF before resolving or changing any file.
+pub(super) fn require_metadata_support() -> io::Result<()> {
+    // SAFETY: -1 is deliberately invalid and the empty C string remains live.
+    let result = unsafe { libc::syscall(FCHMODAT2, -1, c"".as_ptr(), 0, EMPTY_PATH_NOFOLLOW) };
+    if result < 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EBADF) {
+            Ok(())
+        } else {
+            Err(error)
+        }
+    } else {
+        Err(error(libc::EOPNOTSUPP))
+    }
+}
+
+pub(super) fn set_mode(pin: &File, mode: u32) -> io::Result<()> {
+    if is_path_descriptor(pin)? {
+        // fchmodat2 is Linux 6.6+. AT_EMPTY_PATH preserves the O_PATH pin's
+        // exact identity without requiring read permission merely to chmod.
+        // Both supported Nub Linux architectures use syscall number 452.
+        chmod_path_descriptor(pin, mode)
+    } else {
+        // SAFETY: pin is a live ordinary descriptor and mode is from FUSE.
+        if unsafe { libc::fchmod(pin.as_raw_fd(), mode) } < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+pub(super) fn set_owner(pin: &File, uid: u32, gid: u32) -> io::Result<()> {
+    if is_path_descriptor(pin)? {
+        // Empty-path fchownat operates on this exact O_PATH object, including
+        // a symlink, without reopening procfs or requiring read access.
+        let result =
+            unsafe { libc::fchownat(pin.as_raw_fd(), c"".as_ptr(), uid, gid, EMPTY_PATH_NOFOLLOW) };
+        if result < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    } else {
+        // SAFETY: pin is a live descriptor and uid/gid are supplied by FUSE.
+        if unsafe { libc::fchown(pin.as_raw_fd(), uid, gid) } < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+pub(super) fn set_times(pin: &File, times: &[libc::timespec; 2]) -> io::Result<()> {
+    if is_path_descriptor(pin)? {
+        // Empty-path utimensat targets this exact O_PATH object, including a
+        // symlink, without reopening procfs or requiring read access.
+        let result = unsafe {
+            libc::utimensat(
+                pin.as_raw_fd(),
+                c"".as_ptr(),
+                times.as_ptr(),
+                EMPTY_PATH_NOFOLLOW,
+            )
+        };
+        if result < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    } else {
+        // SAFETY: pin and the fixed two-element timespec array remain live.
+        if unsafe { libc::futimens(pin.as_raw_fd(), times.as_ptr()) } < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
 impl Backing {
     pub(super) fn new(root: File) -> io::Result<Self> {
         if !root.metadata()?.is_dir() {

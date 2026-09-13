@@ -2639,7 +2639,6 @@ enum LaunchMode {
     #[cfg(test)]
     Projected {
         setup: ProjectedLaunch,
-        root: std::fs::File,
     },
 }
 
@@ -2668,25 +2667,12 @@ pub(super) fn spawn_supervised_projected_with_ready(
             "projected test launches do not import descriptors or procfs",
         ));
     }
-    let root_fd = unsafe {
-        libc::open(
-            projection.root.as_ptr(),
-            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
-        )
-    };
-    if root_fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let root = unsafe { std::fs::File::from_raw_fd(root_fd) };
-    projection.opener.accepts_root(&root)?;
+    projection.opener.accepts_root(&projection.root)?;
     spawn_supervised_mode(
         policy,
         launch,
         ready,
-        LaunchMode::Projected {
-            setup: projection,
-            root,
-        },
+        LaunchMode::Projected { setup: projection },
     )
 }
 
@@ -2795,8 +2781,16 @@ fn spawn_supervised_mode(
                 }
             }
             #[cfg(test)]
-            if let LaunchMode::Projected { root, .. } = &mode {
-                if libc::fchdir(root.as_raw_fd()) < 0
+            if let LaunchMode::Projected { setup } = &mode {
+                if let Some(namespaces) = &setup.namespaces
+                    && namespaces.enter().is_err()
+                {
+                    libc::_exit(12);
+                }
+                // Joining a user namespace can change credentials and clear PDEATHSIG.
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0
+                    || libc::getppid() != owner_pid
+                    || libc::fchdir(setup.root.as_raw_fd()) < 0
                     || libc::chroot(c".".as_ptr()) < 0
                     || libc::chdir(c"/".as_ptr()) < 0
                 {

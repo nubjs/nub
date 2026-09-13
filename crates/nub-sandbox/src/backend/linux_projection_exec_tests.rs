@@ -782,10 +782,7 @@ fn native_provider(root: &Path) {
     let mut child = spawn_supervised_projected(
         policy,
         launch,
-        ProjectedLaunch {
-            root: view_c.clone(),
-            opener: service.client(),
-        },
+        ProjectedLaunch::at_path(&view_c, service.client()).unwrap(),
     )
     .unwrap();
     let stderr = child.take_stderr().unwrap();

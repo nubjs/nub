@@ -2,7 +2,7 @@ use super::*;
 use crate::policy::{CanonGlob, Effect, FsOrigin, FsRule, FsRuleSet};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStringExt;
-use std::os::unix::fs::{OpenOptionsExt, symlink};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
 
 fn rules(grants: &[(&str, FsAccess)]) -> FsRuleSet {
     FsRuleSet {
@@ -427,6 +427,295 @@ fn readonly_truncate_requires_write_authority_but_returns_a_readonly_handle() {
     assert_eq!(
         unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) } & libc::O_ACCMODE,
         libc::O_RDONLY
+    );
+}
+
+#[test]
+fn setattr_preserves_rw_handle_identity_and_refuses_read_policy() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("rw"), b"rw").unwrap();
+    std::fs::write(root.path().join("locked"), b"locked").unwrap();
+    std::fs::create_dir(root.path().join("dir")).unwrap();
+    let fs = projection(
+        root.path(),
+        &[
+            ("/rw", FsAccess::ReadWrite),
+            ("/dir", FsAccess::ReadWrite),
+            ("/locked", FsAccess::Read),
+        ],
+    );
+    let mut state = fs.state().unwrap();
+    let rw = lookup(&mut state, ROOT, "rw");
+    let dir = lookup(&mut state, ROOT, "dir");
+    let locked = lookup(&mut state, ROOT, "locked");
+    let atime = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let mtime = UNIX_EPOCH + Duration::from_secs(1_700_000_001);
+
+    // Fresh operations use the current authorized spelling and preserve the
+    // actor's normal ownership checks instead of accepting an O_PATH fd.
+    state
+        .setattr(
+            rw,
+            Some(0o600),
+            Some(unsafe { libc::getuid() }),
+            Some(unsafe { libc::getgid() }),
+            None,
+            Some(TimeOrNow::SpecificTime(atime)),
+            Some(TimeOrNow::SpecificTime(mtime)),
+            None,
+        )
+        .unwrap();
+    let rw_meta = std::fs::metadata(root.path().join("rw")).unwrap();
+    assert_eq!(rw_meta.mode() & 0o7777, 0o600);
+    assert_eq!(rw_meta.atime(), 1_700_000_000);
+    assert_eq!(rw_meta.mtime(), 1_700_000_001);
+
+    state
+        .setattr(
+            dir,
+            Some(0o700),
+            None,
+            None,
+            None,
+            None,
+            Some(TimeOrNow::SpecificTime(mtime)),
+            None,
+        )
+        .unwrap();
+    let dir_meta = std::fs::metadata(root.path().join("dir")).unwrap();
+    assert_eq!(dir_meta.mode() & 0o7777, 0o700);
+    assert_eq!(dir_meta.mtime(), 1_700_000_001);
+
+    // An RW-authorized O_RDONLY file handle still names the original object.
+    let file_handle = state.open(rw, libc::O_RDONLY).unwrap();
+    std::fs::rename(root.path().join("rw"), root.path().join("moved-rw")).unwrap();
+    std::fs::write(root.path().join("rw"), b"replacement").unwrap();
+    let replacement_mode = std::fs::metadata(root.path().join("rw")).unwrap().mode() & 0o7777;
+    assert_errno(
+        state.setattr(rw, Some(0o640), None, None, None, None, None, None),
+        libc::ESTALE,
+    );
+    state
+        .setattr(
+            rw,
+            Some(0o640),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(file_handle),
+        )
+        .unwrap();
+    assert_eq!(
+        std::fs::metadata(root.path().join("moved-rw"))
+            .unwrap()
+            .mode()
+            & 0o7777,
+        0o640
+    );
+    assert_eq!(
+        std::fs::metadata(root.path().join("rw")).unwrap().mode() & 0o7777,
+        replacement_mode
+    );
+
+    // Directory handles retain only an O_PATH pin, so this exercises the
+    // trusted proc-fd metadata reopen after the original spelling is gone.
+    let directory_handle = state.opendir(dir).unwrap();
+    std::fs::rename(root.path().join("dir"), root.path().join("moved-dir")).unwrap();
+    std::fs::create_dir(root.path().join("dir")).unwrap();
+    let replacement_dir_mode = std::fs::metadata(root.path().join("dir")).unwrap().mode() & 0o7777;
+    state
+        .setattr(
+            dir,
+            Some(0o750),
+            None,
+            None,
+            None,
+            None,
+            Some(TimeOrNow::SpecificTime(atime)),
+            Some(directory_handle),
+        )
+        .unwrap();
+    let moved_dir = std::fs::metadata(root.path().join("moved-dir")).unwrap();
+    assert_eq!(moved_dir.mode() & 0o7777, 0o750);
+    assert_eq!(moved_dir.mtime(), 1_700_000_000);
+    assert_eq!(
+        std::fs::metadata(root.path().join("dir")).unwrap().mode() & 0o7777,
+        replacement_dir_mode
+    );
+
+    assert_errno(
+        state.setattr(locked, Some(0o600), None, None, None, None, None, None),
+        libc::EACCES,
+    );
+    let locked_handle = state.open(locked, libc::O_RDONLY).unwrap();
+    assert_errno(
+        state.setattr(
+            locked,
+            None,
+            None,
+            None,
+            None,
+            Some(TimeOrNow::Now),
+            None,
+            Some(locked_handle),
+        ),
+        libc::EACCES,
+    );
+}
+
+#[test]
+fn setattr_mode_zero_uses_empty_path_metadata_operations() {
+    let root = tempfile::tempdir().unwrap();
+    let regular = root.path().join("mode-zero");
+    let directory = root.path().join("mode-zero-dir");
+    let locked = root.path().join("mode-zero-locked");
+    std::fs::write(&regular, b"regular").unwrap();
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(&locked, b"locked").unwrap();
+    let fs = projection(
+        root.path(),
+        &[
+            ("/mode-zero", FsAccess::ReadWrite),
+            ("/mode-zero-dir", FsAccess::ReadWrite),
+            ("/mode-zero-locked", FsAccess::Read),
+        ],
+    );
+    let mut state = fs.state().unwrap();
+    let regular_ino = lookup(&mut state, ROOT, "mode-zero");
+    let directory_ino = lookup(&mut state, ROOT, "mode-zero-dir");
+    let locked_ino = lookup(&mut state, ROOT, "mode-zero-locked");
+    let timestamp = UNIX_EPOCH + Duration::from_secs(1_700_000_003);
+    let uid = unsafe { libc::getuid() };
+    let gid = unsafe { libc::getgid() };
+    for path in [&regular, &directory, &locked] {
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+    // Exercise timestamps while read permission is still absent, independently
+    // of the combined setattr below which restores a readable mode first.
+    for ino in [regular_ino, directory_ino] {
+        state
+            .setattr(
+                ino,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(TimeOrNow::SpecificTime(timestamp)),
+                None,
+            )
+            .unwrap();
+    }
+
+    state
+        .setattr(
+            regular_ino,
+            Some(0o600),
+            Some(uid),
+            Some(gid),
+            None,
+            None,
+            Some(TimeOrNow::SpecificTime(timestamp)),
+            None,
+        )
+        .unwrap();
+    let regular_meta = std::fs::metadata(&regular).unwrap();
+    assert_eq!(regular_meta.mode() & 0o7777, 0o600);
+    assert_eq!((regular_meta.uid(), regular_meta.gid()), (uid, gid));
+    assert_eq!(regular_meta.mtime(), 1_700_000_003);
+
+    state
+        .setattr(
+            directory_ino,
+            Some(0o700),
+            Some(uid),
+            Some(gid),
+            None,
+            None,
+            Some(TimeOrNow::SpecificTime(timestamp)),
+            None,
+        )
+        .unwrap();
+    let directory_meta = std::fs::metadata(&directory).unwrap();
+    assert_eq!(directory_meta.mode() & 0o7777, 0o700);
+    assert_eq!((directory_meta.uid(), directory_meta.gid()), (uid, gid));
+    assert_eq!(directory_meta.mtime(), 1_700_000_003);
+
+    let locked_before = std::fs::metadata(&locked).unwrap();
+    assert_errno(
+        state.setattr(
+            locked_ino,
+            Some(0o600),
+            Some(uid),
+            Some(gid),
+            None,
+            None,
+            Some(TimeOrNow::SpecificTime(timestamp)),
+            None,
+        ),
+        libc::EACCES,
+    );
+    let locked_after = std::fs::metadata(&locked).unwrap();
+    assert_eq!(locked_after.mode(), locked_before.mode());
+    assert_eq!(locked_after.uid(), locked_before.uid());
+    assert_eq!(locked_after.gid(), locked_before.gid());
+    assert_eq!(locked_after.mtime(), locked_before.mtime());
+}
+
+#[test]
+fn setattr_timestamp_conversion_preserves_pre_epoch_values() {
+    let [atime, mtime] = requested_times(
+        Some(TimeOrNow::SpecificTime(
+            UNIX_EPOCH - Duration::from_nanos(500_000_000),
+        )),
+        Some(TimeOrNow::Now),
+    )
+    .unwrap();
+    assert_eq!((atime.tv_sec, atime.tv_nsec), (-1, 500_000_000));
+    assert_eq!(mtime.tv_nsec, libc::UTIME_NOW);
+}
+
+#[test]
+fn setattr_updates_symlink_owner_and_times_without_following_target() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("target"), b"target").unwrap();
+    symlink("target", root.path().join("link")).unwrap();
+    let fs = projection(root.path(), &[("/link", FsAccess::ReadWrite)]);
+    let mut state = fs.state().unwrap();
+    let link = lookup(&mut state, ROOT, "link");
+    let time = UNIX_EPOCH + Duration::from_secs(1_700_000_002);
+
+    state
+        .setattr(
+            link,
+            None,
+            Some(unsafe { libc::getuid() }),
+            Some(unsafe { libc::getgid() }),
+            None,
+            None,
+            Some(TimeOrNow::SpecificTime(time)),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        std::fs::symlink_metadata(root.path().join("link"))
+            .unwrap()
+            .mtime(),
+        1_700_000_002
+    );
+    assert_ne!(
+        std::fs::metadata(root.path().join("target"))
+            .unwrap()
+            .mtime(),
+        1_700_000_002
+    );
+    assert_errno(
+        state.setattr(link, Some(0o600), None, None, None, None, None, None),
+        libc::EOPNOTSUPP,
     );
 }
 

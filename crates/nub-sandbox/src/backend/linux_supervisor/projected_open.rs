@@ -1,13 +1,35 @@
 //! Test-only native-file delivery through the actual projected kernel namespace.
-use super::super::linux_projection::{NativeOpenClient, NativeOpenLiveness, NativeOpenRequest};
+use super::super::linux_projection::{
+    NamespacePair, NativeOpenClient, NativeOpenLiveness, NativeOpenRequest,
+};
 use super::*;
 use std::fs::File;
 use std::io::Read;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 pub(crate) struct ProjectedLaunch {
-    pub root: CString,
+    pub root: File,
+    pub namespaces: Option<Arc<NamespacePair>>,
     pub opener: NativeOpenClient,
+}
+
+impl ProjectedLaunch {
+    pub(crate) fn at_path(root: &std::ffi::CStr, opener: NativeOpenClient) -> io::Result<Self> {
+        let fd = unsafe {
+            libc::open(
+                root.as_ptr(),
+                libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            root: unsafe { File::from_raw_fd(fd) },
+            namespaces: None,
+            opener,
+        })
+    }
 }
 
 pub(super) fn notifier() -> Vec<seccompiler::sock_filter> {

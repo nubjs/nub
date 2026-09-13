@@ -941,10 +941,7 @@ fn spawn_native_command(role: &str, view: &CString, opener: NativeOpenClient) ->
     spawn_supervised_projected(
         policy,
         launch,
-        ProjectedLaunch {
-            root: view.clone(),
-            opener,
-        },
+        ProjectedLaunch::at_path(view, opener).unwrap(),
     )
     .unwrap()
 }
@@ -1405,6 +1402,46 @@ pub(super) fn recursive_view(source: &Path, target: &Path, readonly: bool) -> Fi
         .unwrap()
 }
 
+fn native_stalled_shutdown(service: NativeOpenService) {
+    let client = service.client();
+    let pid = client.resolver_tid() as libc::pid_t;
+    checked(unsafe { libc::kill(pid, libc::SIGSTOP) }).unwrap();
+    let mut status = 0;
+    assert_eq!(
+        unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED) },
+        pid
+    );
+    assert!(libc::WIFSTOPPED(status));
+    let (entered, active) = std::sync::mpsc::sync_channel(1);
+    let pending = client
+        .submit_cancellable(
+            native_request(c"/app/native-read", libc::O_RDONLY, 0),
+            Box::new(move || {
+                entered.send(()).unwrap();
+                true
+            }),
+            || false,
+            |_| panic!("idle service must have capacity"),
+        )
+        .unwrap();
+    active.recv_timeout(Duration::from_secs(5)).unwrap();
+    // The raw child cannot reply while stopped. Shutdown must wake the request
+    // worker and kill/reap its child before joining, not wait for that reply.
+    let start = Instant::now();
+    service.shutdown().unwrap();
+    assert!(start.elapsed() < Duration::from_secs(5));
+    assert!(pending.finish_blocking().is_err());
+    assert_eq!(
+        unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
+        -1
+    );
+    assert_eq!(
+        io::Error::last_os_error().raw_os_error(),
+        Some(libc::ECHILD)
+    );
+    println!("NATIVE_STALLED_SERVICE_SHUTDOWN_REAPED");
+}
+
 fn native_provider(root: &Path) {
     unsafe {
         libc::alarm(45);
@@ -1443,8 +1480,16 @@ fn native_provider(root: &Path) {
     .expect("direct FUSE mount prerequisite");
     let serve = projection.clone();
     let server = std::thread::spawn(move || serve.serve(fuse.into()));
-    let service = projection.native_opener(&view).unwrap();
+    // Acquiring a reusable service from a short-lived library thread must not
+    // bind the raw opener's PDEATHSIG lifetime to that thread.
+    let acquire = projection.clone();
+    let acquire_view = view.clone();
+    let service = std::thread::spawn(move || acquire.native_opener(&acquire_view))
+        .join()
+        .unwrap()
+        .unwrap();
     native_queue_contract(&service, &raw);
+    println!("NATIVE_ACQUIRING_THREAD_EXIT_SURVIVED");
     native_simultaneous_command_contract(&service, &view_c);
     native_shared_service_cancellation_contract(&service, &view_c);
     native_admission_cancellation_contract(&service, &view_c, &raw);
@@ -1502,10 +1547,7 @@ fn native_provider(root: &Path) {
     let mut child = spawn_supervised_projected(
         policy,
         launch,
-        ProjectedLaunch {
-            root: view_c.clone(),
-            opener,
-        },
+        ProjectedLaunch::at_path(&view_c, opener).unwrap(),
     )
     .unwrap();
     let mut output = BufReader::new(child.take_stdout().unwrap());
@@ -1554,7 +1596,7 @@ fn native_provider(root: &Path) {
     );
     assert_ne!(stats.resolver_tid(), 0, "native resolver has no TID");
     drop(stats);
-    service.shutdown().unwrap();
+    native_stalled_shutdown(service);
     drop(projection);
     unmount_projection(&view_c, server);
     for path in [&read, &rw] {
