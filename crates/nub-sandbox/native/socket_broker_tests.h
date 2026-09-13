@@ -1,5 +1,58 @@
 #pragma once
 
+extern "C" DWORD sandbox_socket_broker_test_frames(const wchar_t* name) {
+    using namespace nub_sandbox::socket_broker;
+    HANDLE server = CreateNamedPipeW(name, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED |
+        FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE |
+        PIPE_REJECT_REMOTE_CLIENTS, 1, 1024, 1024, kTimeout, nullptr);
+    if (server == INVALID_HANDLE_VALUE) return GetLastError();
+    HANDLE client = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                                FILE_FLAG_OVERLAPPED, nullptr);
+    DWORD error = client == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+    HANDLE incoming = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    HANDLE outgoing = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    HANDLE stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!error && (!incoming || !outgoing || !stop)) error = ERROR_NOT_ENOUGH_MEMORY;
+    if (!error) {
+        OVERLAPPED connection = {};
+        connection.hEvent = incoming;
+        if (!ConnectNamedPipe(server, &connection) && GetLastError() != ERROR_PIPE_CONNECTED)
+            error = ERROR_PIPE_NOT_CONNECTED;
+    }
+    for (DWORD size : {0u, DWORD(sizeof(Request) - 1), DWORD(sizeof(Request)), DWORD(sizeof(Request) + 1)}) {
+        if (error) break;
+        BYTE frame[sizeof(Request) + 1] = {};
+        if (!transfer(client, outgoing, nullptr, frame, size, true)) { error = ERROR_WRITE_FAULT; break; }
+        Request request = {};
+        bool received = transfer(server, incoming, nullptr, &request, sizeof(request), false);
+        if (received != (size == sizeof(Request))) { error = ERROR_INVALID_DATA; break; }
+        if (size > sizeof(Request)) {
+            BYTE remainder;
+            if (!transfer(server, incoming, nullptr, &remainder, 1, false)) error = ERROR_READ_FAULT;
+        }
+    }
+    if (!error) {
+        // No message is queued: this starts a real pending read, cancels it and
+        // must drain its OVERLAPPED before returning to release the stack.
+        SetEvent(stop);
+        Request request = {};
+        ULONGLONG before = GetTickCount64();
+        if (transfer(server, incoming, stop, &request, sizeof(request), false) ||
+            GetTickCount64() - before > 2000) error = ERROR_INVALID_DATA;
+        // A subsequent exact exchange proves cancellation left no outstanding
+        // read to consume a later command's buffer.
+        if (!error && (!transfer(client, outgoing, nullptr, &request, sizeof(request), true) ||
+                       !transfer(server, incoming, nullptr, &request, sizeof(request), false)))
+            error = ERROR_INVALID_DATA;
+    }
+    if (client != INVALID_HANDLE_VALUE) CloseHandle(client);
+    CloseHandle(server);
+    if (incoming) CloseHandle(incoming);
+    if (outgoing) CloseHandle(outgoing);
+    if (stop) CloseHandle(stop);
+    return error;
+}
+
 // Called only by the Rust unit harness. All handles belong to this test process;
 // the empty command Job deliberately does not authorize the connecting process.
 extern "C" DWORD sandbox_socket_broker_test_foreign_client(const wchar_t* name) {

@@ -220,21 +220,40 @@ pub(super) fn inject(
 
 #[cfg(all(test, target_env = "msvc"))]
 mod tests {
+    fn endpoint() -> Vec<u16> {
+        let mut nonce = [0u8; 16];
+        getrandom::getrandom(&mut nonce).unwrap();
+        let nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+        format!(r"\\.\pipe\LOCAL\sandbox-socket-test-{nonce}")
+            .encode_utf16()
+            .chain([0])
+            .collect()
+    }
+
+    #[test]
+    fn socket_broker_rejects_wrong_frame_lengths_and_drains_cancelled_read() {
+        unsafe extern "C" {
+            fn sandbox_socket_broker_test_frames(endpoint: *const u16) -> u32;
+        }
+        // SAFETY: the native test owns every pipe/event and drains each pending
+        // operation before its stack buffers are released.
+        let error = unsafe { sandbox_socket_broker_test_frames(endpoint().as_ptr()) };
+        assert_eq!(
+            error,
+            0,
+            "{}",
+            std::io::Error::from_raw_os_error(error as i32)
+        );
+    }
+
     #[test]
     fn socket_broker_rejects_a_live_client_outside_its_job_and_cancels_idle_workers() {
         unsafe extern "C" {
             fn sandbox_socket_broker_test_foreign_client(endpoint: *const u16) -> u32;
         }
-        let mut nonce = [0u8; 16];
-        getrandom::getrandom(&mut nonce).unwrap();
-        let nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
-        let endpoint: Vec<u16> = format!(r"\\.\pipe\LOCAL\sandbox-socket-test-{nonce}")
-            .encode_utf16()
-            .chain([0])
-            .collect();
         // SAFETY: the native test copies this terminated name and creates only
         // its own pipe, empty Job, events and process-query handle.
-        let error = unsafe { sandbox_socket_broker_test_foreign_client(endpoint.as_ptr()) };
+        let error = unsafe { sandbox_socket_broker_test_foreign_client(endpoint().as_ptr()) };
         assert_eq!(
             error,
             0,
