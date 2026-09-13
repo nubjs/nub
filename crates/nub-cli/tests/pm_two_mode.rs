@@ -286,34 +286,26 @@ fn stray_workspace_yaml_under_nub_identity_warns_once_and_install_proceeds() {
     );
 }
 
-/// The role-first lifecycle UA, observed by a real root postinstall: a
-/// pnpm-declared project is served pnpm-first at the PINNED version with the
-/// nub token second; a nub-identity project is nub-first in the runner
-/// dialect. (The fresh + engine-parity cases live in tests/brand-sweep and
-/// the pm_engine unit tests.)
+/// The lifecycle user agent a real root postinstall observes under nub's own
+/// identity: nub first, so a build script deciding which package manager is
+/// installing it is told the truth.
+///
+/// The pnpm-declared half of this test is gone, and the reason is that its
+/// premise no longer holds. It pinned `packageManager: pnpm@9.9.9` and
+/// expected the pin to be reported as a user-agent datum. A pin naming a pnpm
+/// other than the embedded one is now honoured the way pnpm honours it — that
+/// pnpm is provisioned and the command delegated to it — so the fixture
+/// resolves `pnpm@9.9.9` over the network and fails, because no such release
+/// exists. The pin is an instruction, not a label. Delegation has its own
+/// coverage, measured against real pnpm in the row that settled it.
+///
+/// Only the leading token is asserted. The tail differs by package manager on
+/// a part that is not about the brand — one reports the real `node/<version>`,
+/// the other the `node/?` placeholder pnpm itself prints, having no embedded
+/// runtime to name.
 #[test]
-fn lifecycle_ua_is_pnpm_first_in_compat_and_nub_first_under_nub_identity() {
+fn lifecycle_ua_is_nub_first_under_nub_identity() {
     let postinstall = r#""scripts":{"postinstall":"node -e \"require('fs').writeFileSync('ua.txt', process.env.npm_config_user_agent||'')\""}"#;
-
-    let dir = project(
-        "ua-compat",
-        &[(
-            "package.json",
-            &format!(
-                r#"{{"name":"app","version":"1.0.0","packageManager":"pnpm@9.9.9",{postinstall}}}"#
-            ),
-        )],
-    );
-    let (stdout, stderr, code) = run(&dir, &["install"]);
-    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
-    let ua = std::fs::read_to_string(dir.join("ua.txt")).expect("postinstall must run");
-    assert!(
-        ua.starts_with(&format!(
-            "pnpm/9.9.9 nub/{} node/v",
-            env!("CARGO_PKG_VERSION")
-        )),
-        "compat UA must be pnpm-first at the pinned version, nub second: {ua}"
-    );
 
     let dir = project(
         "ua-nub",
@@ -331,8 +323,12 @@ fn lifecycle_ua_is_pnpm_first_in_compat_and_nub_first_under_nub_identity() {
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     let ua = std::fs::read_to_string(dir.join("ua.txt")).expect("postinstall must run");
     assert!(
-        ua.starts_with(&format!("nub/{} npm/? node/v", env!("CARGO_PKG_VERSION"))),
-        "nub-identity UA must be nub-first in the runner dialect: {ua}"
+        ua.starts_with(&format!("nub/{} npm/? node/", env!("CARGO_PKG_VERSION"))),
+        "nub-identity UA must name nub first: {ua}"
+    );
+    assert!(
+        !ua.contains("pnpm"),
+        "a nub project's build scripts must not be told pnpm is installing them: {ua}"
     );
 }
 

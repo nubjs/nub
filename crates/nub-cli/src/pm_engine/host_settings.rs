@@ -210,6 +210,9 @@ fn merge(sources: &Sources) -> Result<Map<String, Value>> {
     merged
         .entry("linkWorkspacePackages")
         .or_insert(Value::Bool(true));
+    merged
+        .entry("userAgent")
+        .or_insert(Value::String(lifecycle_user_agent()));
     if let Some(cache_root) = &sources.cache_root {
         for (key, leaf) in [("storeDir", "store"), ("cacheDir", "pm")] {
             if !merged.contains_key(key) {
@@ -219,6 +222,25 @@ fn merge(sources: &Sources) -> Result<Map<String, Value>> {
         }
     }
     Ok(merged)
+}
+
+/// The `npm_config_user_agent` a lifecycle script sees under nub's identity.
+///
+/// Every build script in the tree reads this to decide which package manager
+/// it is running under, so leaving the engine's default there tells a nub
+/// project's own `postinstall` that pnpm is installing it. Only the leading
+/// `name/version` token is nub's; the rest of the string — the `npm/?` and
+/// `node/?` placeholders, the platform and the arch — is taken from the
+/// engine's own builder rather than rebuilt here, so the two cannot drift on
+/// the parts that are not about the brand.
+///
+/// A pnpm-incumbent project never reaches this function and keeps pnpm's
+/// string verbatim, which is what makes a build script there see exactly what
+/// it would under pnpm.
+fn lifecycle_user_agent() -> String {
+    let engine = pnpm_config::default_user_agent();
+    let rest = engine.split_once(' ').map_or("", |(_, rest)| rest);
+    format!("nub/{} {rest}", env!("CARGO_PKG_VERSION"))
 }
 
 /// `nub.jsonc`'s curated `install` keys, spelled as the engine's settings and
@@ -825,9 +847,22 @@ mod tests {
 
         let merged = merge(&sources).expect("merge");
 
-        for absent in ["registry", "httpsProxy", "loglevel", "userAgent"] {
+        for absent in ["registry", "httpsProxy", "loglevel"] {
             assert!(!merged.contains_key(absent), "{absent} must not be lifted");
         }
+        // `userAgent` is the one this cannot check by absence, because nub
+        // supplies its own. Checking the VALUE is the stronger guard anyway:
+        // it proves both that the ambient `npm_config_user_agent` was
+        // discarded and that the string a build script ends up reading names
+        // nub. Lifting the ambient one would tell every postinstall in the
+        // tree that whichever npm happened to invoke nub is installing it.
+        assert!(
+            merged["userAgent"]
+                .as_str()
+                .is_some_and(|ua| ua.starts_with("nub/")),
+            "the ambient npm_config_user_agent must not be lifted: {}",
+            merged["userAgent"]
+        );
         assert!(!merged.keys().any(|key| key.contains("authToken")));
         assert_eq!(
             merged["publicHoistPattern"],
