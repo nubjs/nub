@@ -224,7 +224,7 @@ fn appcontainer_tmp_child_records_profile_storage() {
         "token": nub_sandbox::windows_token_report(),
         "package": probe_path(package.to_path_buf(), &nonce),
         "appcontainer_folder": probe_path(ac_folder.to_path_buf(), &nonce),
-        "temp": probe_path(temp, &nonce),
+        "temp": probe_path(temp.clone(), &nonce),
         "package_local_state": probe_path(package.join("LocalState"), &nonce),
         "appcontainer_local_state": probe_path(ac_folder.join("LocalState"), &nonce),
         "project": probe_path(project, &nonce),
