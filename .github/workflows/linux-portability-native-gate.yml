@@ -1,0 +1,159 @@
+name: Linux portability native gate
+
+on:
+  push:
+    branches: [linux-portability-native-gate]
+    paths:
+      - crates/nub-sandbox/**
+      - Cargo.lock
+      - Cargo.toml
+      - .github/workflows/linux-portability-native-gate.yml
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_COMMIT: 4dc19dee6954f0deef3ca70ccb5613245410d9b6
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux-gnu:
+    name: Linux GNU sandbox gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: linux-portability-native-gate
+          cache-on-failure: true
+      - name: Recording source and toolchain identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          git diff --exit-code "$SOURCE_COMMIT" -- crates/nub-sandbox
+          {
+            echo "probe_head=$(git rev-parse HEAD)"
+            echo "source_commit=$SOURCE_COMMIT"
+            git status --short
+            rustc -Vv
+            cargo --version
+            uname -a
+            sha256sum Cargo.lock crates/nub-sandbox/src/backend/linux.rs crates/nub-sandbox/src/backend/linux_supervisor.rs
+          } > reports/source-toolchain.txt
+      - name: Checking Linux GNU sandbox targets
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo check -p nub-sandbox --target x86_64-unknown-linux-gnu 2>&1 | tee reports/gnu-check.log
+          cargo clippy -p nub-sandbox --target x86_64-unknown-linux-gnu --all-targets --all-features -- -D warnings 2>&1 | tee reports/gnu-clippy.log
+          cargo test -p nub-sandbox --lib --no-run --message-format=json-render-diagnostics > reports/gnu-lib-artifacts.jsonl
+          python3 - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+
+          artifacts = [json.loads(line) for line in Path("reports/gnu-lib-artifacts.jsonl").read_text().splitlines()]
+          binaries = [Path(item["executable"]) for item in artifacts if item.get("reason") == "compiler-artifact" and item.get("target", {}).get("kind") == ["lib"] and item.get("executable")]
+          assert len(binaries) == 1, binaries
+          binary = binaries[0]
+          Path("reports/gnu-lib-binary.sha256").write_text(f"{hashlib.sha256(binary.read_bytes()).hexdigest()}  {binary}\n")
+          PY
+          cargo test -p nub-sandbox --lib -- --nocapture --test-threads=1 2>&1 | tee reports/gnu-lib.log
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' reports/gnu-lib.log
+      - name: Exercising supervised broker CA delivery
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p nub-sandbox --test supervised_broker_ca_linux --no-run --message-format=json-render-diagnostics > reports/broker-ca-artifacts.jsonl
+          python3 - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+
+          artifacts = [json.loads(line) for line in Path("reports/broker-ca-artifacts.jsonl").read_text().splitlines()]
+          binaries = [Path(item["executable"]) for item in artifacts if item.get("reason") == "compiler-artifact" and item.get("target", {}).get("name") == "supervised_broker_ca_linux" and item.get("executable")]
+          assert len(binaries) == 1, binaries
+          binary = binaries[0]
+          Path("reports/broker-ca-binary.sha256").write_text(f"{hashlib.sha256(binary.read_bytes()).hexdigest()}  {binary}\n")
+          PY
+          cargo test -p nub-sandbox --test supervised_broker_ca_linux -- --nocapture --test-threads=1 2>&1 | tee reports/broker-ca.log
+          grep -Eq 'test result: ok\. 2 passed; 0 failed;' reports/broker-ca.log
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: linux-gnu-portability
+          if-no-files-found: warn
+          path: reports/
+          retention-days: 14
+
+  linux-musl:
+    name: Linux musl sandbox (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          targets: ${{ matrix.target }}
+      - name: Installing pinned cross
+        shell: bash
+        run: cargo install cross --version 0.2.5 --locked
+      - name: Recording source and toolchain identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          git diff --exit-code "$SOURCE_COMMIT" -- crates/nub-sandbox
+          {
+            echo "probe_head=$(git rev-parse HEAD)"
+            echo "source_commit=$SOURCE_COMMIT"
+            echo "target=${{ matrix.target }}"
+            git status --short
+            rustc -Vv
+            cargo --version
+            cross --version
+            uname -a
+            sha256sum Cargo.lock crates/nub-sandbox/src/backend/linux.rs crates/nub-sandbox/src/backend/linux_supervisor.rs
+          } > reports/source-toolchain.txt
+      - name: Compiling all musl sandbox tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cross test -p nub-sandbox --tests --target "${{ matrix.target }}" --no-run --message-format=json-render-diagnostics > reports/musl-test-artifacts.jsonl
+          python3 - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+
+          artifacts = [json.loads(line) for line in Path("reports/musl-test-artifacts.jsonl").read_text().splitlines()]
+          binaries = [Path(item["executable"]) for item in artifacts if item.get("reason") == "compiler-artifact" and item.get("profile", {}).get("test") and item.get("executable")]
+          assert binaries, "No test binaries recorded"
+          lines = [f"{hashlib.sha256(binary.read_bytes()).hexdigest()}  {binary}" for binary in binaries]
+          Path("reports/musl-test-binaries.sha256").write_text("\n".join(lines) + "\n")
+          Path("reports/musl-test-binary-count.txt").write_text(f"{len(binaries)}\n")
+          PY
+      - name: Running x86_64 musl iovec regressions
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        shell: bash
+        run: |
+          set -o pipefail
+          cross test -p nub-sandbox --target "${{ matrix.target }}" msghdr_iov_count -- --nocapture --test-threads=1 2>&1 | tee reports/musl-iov.log
+          grep -Eq 'test result: ok\. 2 passed; 0 failed;' reports/musl-iov.log
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: linux-musl-portability-${{ matrix.target }}
+          if-no-files-found: warn
+          path: reports/
+          retention-days: 14
