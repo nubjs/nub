@@ -51,6 +51,44 @@ fn copy(source: &Path, destination: &Path) {
     fs::copy(source, destination).expect("fixture copy");
 }
 
+fn set_test_xattr(path: &Path, value: &[u8]) -> io::Result<()> {
+    let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: both strings are terminated and value remains live throughout.
+    let result = unsafe {
+        libc::lsetxattr(
+            path.as_ptr(),
+            c"user.projected_session".as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            0,
+        )
+    };
+    if result < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn get_test_xattr(path: &Path) -> io::Result<Vec<u8>> {
+    let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+    let mut bytes = vec![0u8; 32];
+    // SAFETY: terminated strings and a live writable buffer of the given size.
+    let count = unsafe {
+        libc::lgetxattr(
+            path.as_ptr(),
+            c"user.projected_session".as_ptr(),
+            bytes.as_mut_ptr().cast(),
+            bytes.len(),
+        )
+    };
+    if count < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    bytes.truncate(count as usize);
+    Ok(bytes)
+}
+
 fn executable_closure(executable: &Path) -> BTreeSet<PathBuf> {
     let mut closure = BTreeSet::new();
     let mut pending = vec![executable.to_owned()];
@@ -103,6 +141,11 @@ fn fixture(executable: &Path) -> Fixture {
     }
     for (name, bytes, access) in [
         ("allowed.txt", b"allowed-path".as_slice(), FsAccess::Read),
+        (
+            "writable.txt",
+            b"writable-path".as_slice(),
+            FsAccess::ReadWrite,
+        ),
         ("denied.txt", b"denied-path".as_slice(), FsAccess::Read),
         ("role", b"idle".as_slice(), FsAccess::Read),
         ("release", b"hold".as_slice(), FsAccess::Read),
@@ -111,6 +154,10 @@ fn fixture(executable: &Path) -> Fixture {
         if name != "denied.txt" {
             entries.push(rule(format!("/app/{name}"), access));
         }
+    }
+    for name in ["allowed.txt", "writable.txt"] {
+        set_test_xattr(&app.join(name), b"raw-control").expect("raw host xattr control");
+        assert_eq!(get_test_xattr(&app.join(name)).unwrap(), b"raw-control");
     }
 
     Fixture {
@@ -339,6 +386,19 @@ fn child_contract() {
     assert!(
         matches!(denied.raw_os_error(), Some(libc::EACCES | libc::ENOENT)),
         "denied projected leaf errno: {denied}"
+    );
+    assert_eq!(
+        get_test_xattr(Path::new("/app/allowed.txt")).expect("R path xattr read"),
+        b"raw-control"
+    );
+    let denied = set_test_xattr(Path::new("/app/allowed.txt"), b"denied")
+        .expect_err("R path xattr mutation succeeded");
+    assert_eq!(denied.raw_os_error(), Some(libc::EACCES));
+    set_test_xattr(Path::new("/app/writable.txt"), b"projected-write")
+        .expect("RW path xattr mutation");
+    assert_eq!(
+        get_test_xattr(Path::new("/app/writable.txt")).expect("RW path xattr read"),
+        b"projected-write"
     );
     denied_network();
 }
@@ -584,6 +644,15 @@ fn prepared_children_retain_the_mounted_lease() {
         "final PreparedChild lease did not clean staging"
     );
     assert_cleanup_ok(&observer);
+    assert_eq!(
+        get_test_xattr(&fixture.source.join("app/allowed.txt")).unwrap(),
+        b"raw-control"
+    );
+    assert_eq!(
+        get_test_xattr(&fixture.source.join("app/writable.txt")).unwrap(),
+        b"projected-write"
+    );
+    println!("PROJECTED_SESSION_XATTR_CONTROL_OK");
     println!("PROJECTED_SESSION_PREPARED_LEASE_STDIO_READY_REAP_OK");
 }
 

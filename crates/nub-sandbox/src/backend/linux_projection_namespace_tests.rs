@@ -7,12 +7,17 @@
 use super::super::linux_supervisor::{EgressPolicy, ProjectedLaunch};
 use super::super::{Prepared, PreparedSignalTarget, SupervisedPlan};
 use super::*;
+use std::ffi::CStr;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
 
 const RENAME_NOREPLACE: u32 = 1;
 const RENAME_EXCHANGE: u32 = 2;
+const XATTR_RW: &CStr = c"user.nub_namespace_rw";
+const XATTR_READ: &CStr = c"user.nub_namespace_read";
+const XATTR_TARGET: &CStr = c"user.nub_namespace_target";
+const XATTR_LINK: &CStr = c"user.nub_namespace_link";
 
 #[derive(Debug, PartialEq, Eq)]
 struct Snapshot {
@@ -96,6 +101,12 @@ fn namespace_fixture(root: &Path, exe: &Path) -> FsRuleSet {
             .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_001)),
     )
     .unwrap();
+    xattr_set(
+        &namespace.join("metadata-read.locked"),
+        XATTR_READ,
+        b"read-seeded",
+    )
+    .unwrap();
     rules
 }
 
@@ -152,6 +163,141 @@ fn read_at(directory: &File, name: &std::ffi::CStr) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
     Ok(bytes)
+}
+
+fn xattr_path(path: &Path) -> CString {
+    CString::new(path.as_os_str().as_bytes()).unwrap()
+}
+
+fn xattr_get(path: &Path, name: &CStr) -> io::Result<Vec<u8>> {
+    let path = xattr_path(path);
+    // SAFETY: path/name are NUL-terminated; a null buffer with size zero asks
+    // the host for the exact value size.
+    let size = unsafe { libc::getxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+    if size < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut value = vec![0; usize::try_from(size).unwrap()];
+    // SAFETY: value owns the size supplied by the host and remains live for
+    // the syscall; the host reports ERANGE if it changes before this read.
+    let result = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            value.as_mut_ptr().cast(),
+            value.len(),
+        )
+    };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    value.truncate(usize::try_from(result).unwrap());
+    Ok(value)
+}
+
+fn xattr_lget(path: &Path, name: &CStr) -> io::Result<Vec<u8>> {
+    let path = xattr_path(path);
+    // SAFETY: path/name are NUL-terminated; a null buffer with size zero asks
+    // the host for the exact link-local value size without following the link.
+    let size = unsafe { libc::lgetxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+    if size < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut value = vec![0; usize::try_from(size).unwrap()];
+    // SAFETY: value owns the size supplied by the host and remains live for
+    // the syscall; the host reports ERANGE if it changes before this read.
+    let result = unsafe {
+        libc::lgetxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            value.as_mut_ptr().cast(),
+            value.len(),
+        )
+    };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    value.truncate(usize::try_from(result).unwrap());
+    Ok(value)
+}
+
+fn xattr_list(path: &Path) -> io::Result<Vec<u8>> {
+    let path = xattr_path(path);
+    // SAFETY: path is NUL-terminated; a null buffer with size zero asks the
+    // host for the exact NUL-delimited list size.
+    let size = unsafe { libc::listxattr(path.as_ptr(), std::ptr::null_mut(), 0) };
+    if size < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut names = vec![0; usize::try_from(size).unwrap()];
+    // SAFETY: names owns the size supplied by the host and remains live for
+    // the syscall; the host reports ERANGE if it changes before this read.
+    let result = unsafe { libc::listxattr(path.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    names.truncate(usize::try_from(result).unwrap());
+    Ok(names)
+}
+
+fn xattr_set(path: &Path, name: &CStr, value: &[u8]) -> io::Result<()> {
+    let path = xattr_path(path);
+    // SAFETY: path/name are NUL-terminated and value remains live throughout.
+    if unsafe {
+        libc::setxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            0,
+        )
+    } < 0
+    {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn xattr_lset(path: &Path, name: &CStr, value: &[u8]) -> io::Result<()> {
+    let path = xattr_path(path);
+    // SAFETY: path/name are NUL-terminated and value remains live throughout.
+    if unsafe {
+        libc::lsetxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            0,
+        )
+    } < 0
+    {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn xattr_remove(path: &Path, name: &CStr) -> io::Result<()> {
+    let path = xattr_path(path);
+    // SAFETY: path/name are NUL-terminated.
+    if unsafe { libc::removexattr(path.as_ptr(), name.as_ptr()) } < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn assert_xattr_list_contains(path: &Path, name: &CStr) {
+    assert!(
+        xattr_list(path)
+            .unwrap()
+            .split(|byte| *byte == 0)
+            .any(|entry| entry == name.to_bytes()),
+        "xattr list for {} must include {:?}",
+        path.display(),
+        name,
+    );
 }
 
 fn case_marker(case: &str, projected: bool) {
@@ -290,6 +436,61 @@ fn namespace_metadata(namespace: &Path, directory: &File, projected: bool) {
         assert_eq!(after.mtime(), 1_700_000_123);
     }
     case_marker("metadata", projected);
+}
+
+fn namespace_xattrs(namespace: &Path, projected: bool) {
+    let writable = namespace.join("target.json");
+    xattr_set(&writable, XATTR_RW, b"rw-initial").unwrap();
+    assert_eq!(xattr_get(&writable, XATTR_RW).unwrap(), b"rw-initial");
+    assert_xattr_list_contains(&writable, XATTR_RW);
+    xattr_remove(&writable, XATTR_RW).unwrap();
+    assert_errno(
+        xattr_get(&writable, XATTR_RW),
+        libc::ENODATA,
+        "RW xattr remove",
+    );
+    xattr_set(&writable, XATTR_RW, b"rw-final").unwrap();
+    xattr_set(&writable, XATTR_TARGET, b"target-only").unwrap();
+
+    // The fixture seeds this through the raw backing path before either arm
+    // launches. An R grant must expose it but may not mutate or remove it.
+    let read_only = namespace.join("metadata-read.locked");
+    assert_eq!(xattr_get(&read_only, XATTR_READ).unwrap(), b"read-seeded");
+    assert_xattr_list_contains(&read_only, XATTR_READ);
+    if projected {
+        assert_errno(
+            xattr_set(&read_only, XATTR_READ, b"denied"),
+            libc::EACCES,
+            "R xattr set",
+        );
+        assert_errno(
+            xattr_remove(&read_only, XATTR_READ),
+            libc::EACCES,
+            "R xattr remove",
+        );
+    } else {
+        xattr_set(&read_only, XATTR_READ, b"raw-mutated").unwrap();
+        xattr_remove(&read_only, XATTR_READ).unwrap();
+        xattr_set(&read_only, XATTR_READ, b"read-seeded").unwrap();
+    }
+    assert_eq!(xattr_get(&read_only, XATTR_READ).unwrap(), b"read-seeded");
+
+    // The mounted `l*` calls must target the link itself. Linux rejects
+    // `user.*` attributes on symlinks, so preserve the raw ENODATA/EPERM
+    // contract rather than treating either link operation as a success.
+    let link = namespace.join("target-link.json");
+    assert_errno(
+        xattr_lget(&link, XATTR_TARGET),
+        libc::ENODATA,
+        "symlink xattr must not read its target",
+    );
+    assert_errno(
+        xattr_lset(&link, XATTR_LINK, b"link"),
+        libc::EPERM,
+        "symlink user xattr",
+    );
+    assert_eq!(xattr_get(&writable, XATTR_TARGET).unwrap(), b"target-only");
+    case_marker("xattr", projected);
 }
 
 fn namespace_command(root: &Path, projected: bool) {
@@ -440,6 +641,7 @@ fn namespace_command(root: &Path, projected: bool) {
     case_marker("directory_exchange", projected);
 
     namespace_metadata(&namespace, &directory, projected);
+    namespace_xattrs(&namespace, projected);
 
     let mut held = OpenOptions::new()
         .read(true)
@@ -577,6 +779,19 @@ fn verify_backing(
     assert_eq!(
         fs::read_link(namespace.join("denied-target.json")).unwrap(),
         Path::new("nearest.txt")
+    );
+    let target = namespace.join("target.json");
+    assert_eq!(xattr_get(&target, XATTR_RW).unwrap(), b"rw-final");
+    assert_xattr_list_contains(&target, XATTR_RW);
+    assert_eq!(xattr_get(&target, XATTR_TARGET).unwrap(), b"target-only");
+    assert_eq!(
+        xattr_get(&namespace.join("metadata-read.locked"), XATTR_READ).unwrap(),
+        b"read-seeded"
+    );
+    assert_errno(
+        xattr_lget(&namespace.join("target-link.json"), XATTR_TARGET),
+        libc::ENODATA,
+        "backing symlink xattr must not read its target",
     );
     assert!(!namespace.join("rename-source.json").exists());
     assert_eq!(

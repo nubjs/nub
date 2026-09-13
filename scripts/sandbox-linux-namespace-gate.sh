@@ -41,10 +41,10 @@ cat "$EVIDENCE/read-backing-prune.log"
 printf 'read-backing-prune\t%s\t0\n' "$prune_rc" >> "$EVIDENCE/results.tsv"
 result=0
 if [ "$base_rc" -ne 0 ] || [ "$rc" -ne 0 ] || [ "$pair_rc" -ne 0 ] || [ "$session_rc" -ne 0 ] || [ "$root_rc" -ne 0 ] || [ "$prune_rc" -ne 0 ]; then result=1; fi
-for marker in PROJECTED_PREPARED_READY_STDIO_REAP_OK NAMESPACE_NATIVE_PROVIDER_NORMAL_UNMOUNT_OK 'NAMESPACE_CASE directory_exchange projected=true' 'NAMESPACE_CASE metadata projected=true'; do
+for marker in PROJECTED_PREPARED_READY_STDIO_REAP_OK NAMESPACE_NATIVE_PROVIDER_NORMAL_UNMOUNT_OK 'NAMESPACE_CASE directory_exchange projected=true' 'NAMESPACE_CASE metadata projected=true' 'NAMESPACE_CASE xattr projected=true' 'NAMESPACE_CASE xattr projected=false'; do
   if ! grep -Fq "$marker" "$EVIDENCE/namespace-mounted.log"; then result=1; fi
 done
-for marker in PROJECTED_SESSION_STARTUP_FAULT_CLEANUP_OK PROJECTED_SESSION_FAILED_CLEANUP_RETRY_OK PROJECTED_SESSION_STAGING_JOURNAL_RETRY_OK PROJECTED_SESSION_PARENT_NETWORK_CONTROL_OK PROJECTED_SESSION_PREPARED_LEASE_STDIO_READY_REAP_OK; do
+for marker in PROJECTED_SESSION_STARTUP_FAULT_CLEANUP_OK PROJECTED_SESSION_FAILED_CLEANUP_RETRY_OK PROJECTED_SESSION_STAGING_JOURNAL_RETRY_OK PROJECTED_SESSION_PARENT_NETWORK_CONTROL_OK PROJECTED_SESSION_XATTR_CONTROL_OK PROJECTED_SESSION_PREPARED_LEASE_STDIO_READY_REAP_OK; do
   if ! grep -Fq "$marker" "$EVIDENCE/session-mounted.log"; then result=1; fi
 done
 if ! grep -Fq 'PROJECTED_SESSION_SOURCE_ROOT_TOPOLOGY_CLEANUP_OK' "$EVIDENCE/root-topology.log"; then result=1; fi
