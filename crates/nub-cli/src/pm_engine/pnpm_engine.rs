@@ -570,6 +570,27 @@ pub(crate) fn run(argv: Vec<std::ffi::OsString>) -> Result<i32> {
     }
 }
 
+/// An install driven through the engine's front door, for nub's own callers.
+///
+/// `nub init` scaffolds a project and then installs it, and a Node-major change
+/// reinstalls so native addons are rebuilt for it. Neither arrives as a command
+/// line, so neither passes the argv routing that hands every other PM verb to
+/// the engine — they called the host install path directly, which is what kept
+/// them on the other engine after that routing became unconditional. Going
+/// through [`run`] gives them exactly what `nub install` gets.
+///
+/// `--dir` rather than a chdir, because a caller may still need its own cwd
+/// afterwards; it is the same way `pm migrate` names the project.
+pub(crate) fn engine_install(dir: Option<&std::path::Path>) -> Result<i32> {
+    let mut argv = vec![std::ffi::OsString::from("nub")];
+    if let Some(dir) = dir {
+        argv.push(std::ffi::OsString::from("--dir"));
+        argv.push(std::ffi::OsString::from(dir));
+    }
+    argv.push(std::ffi::OsString::from("install"));
+    run(argv)
+}
+
 /// Print the install report's resolved-layout header ahead of the engine's
 /// progress display, where the vendored engine's own install path prints it.
 ///

@@ -340,15 +340,12 @@ fn repair_engine_mismatch(project: &Project, policy: Policy) {
         "nub: dependencies were installed for {was}, this run uses {now}. \
          Reinstalling — native addons are built per Node major."
     );
-    let flags = crate::pm_engine::InstallFlags {
-        dir: Some(anchor),
-        ..Default::default()
-    };
-    // `-C <dir>` chdirs the process and never restores it (a PM verb exits right
-    // after), but here the RUN still has to happen — from its own cwd, which the
-    // caller may have set explicitly (a workspace member under `nub exec -r`).
+    // The engine's `--dir` moves the process to the project and never restores
+    // it (a PM verb exits right after), but here the RUN still has to happen —
+    // from its own cwd, which the caller may have set explicitly (a workspace
+    // member under `nub exec -r`).
     let restore = std::env::current_dir().ok();
-    let outcome = crate::pm_engine::run_install(flags);
+    let outcome = crate::pm_engine::engine_install(Some(anchor.as_path()));
     if let Some(cwd) = restore {
         let _ = std::env::set_current_dir(cwd);
     }

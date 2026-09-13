@@ -69,6 +69,7 @@ pub mod phantom_closure;
 pub mod platform_flags;
 mod pnpm_engine;
 mod project_identity;
+pub(crate) use pnpm_engine::engine_install;
 pub(crate) use pnpm_engine::run as run_pnpm_engine;
 mod verb_routing;
 pub(crate) use verb_routing::engine_takes;

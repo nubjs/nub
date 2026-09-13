@@ -149,7 +149,7 @@ pub(crate) fn run_init(opts: InitOptions) -> Result<i32> {
     // no-install path needs its own separator before the next-step line.
     if !opts.no_install {
         println!();
-        let code = crate::pm_engine::run_install(crate::pm_engine::InstallFlags::default())?;
+        let code = crate::pm_engine::engine_install(None)?;
         if code != 0 {
             return Ok(code);
         }
