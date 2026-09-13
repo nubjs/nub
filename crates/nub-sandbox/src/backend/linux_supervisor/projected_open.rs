@@ -137,8 +137,21 @@ fn open_task_path(task: &File, path: &CString, flags: i32) -> io::Result<File> {
     }
 }
 
-fn capture(req: &SeccompNotif, client: &NativeOpenClient) -> io::Result<NativeOpenRequest> {
+fn require_live(nfd: RawFd, req: &SeccompNotif) -> io::Result<()> {
+    if notification_is_live(nfd, req.id) {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(libc::ECANCELED))
+    }
+}
+
+fn capture(
+    nfd: RawFd,
+    req: &SeccompNotif,
+    client: &NativeOpenClient,
+) -> io::Result<NativeOpenRequest> {
     let mem = open_child_mem(req.pid)?;
+    require_live(nfd, req)?;
     let args = req.data.args;
     let nr = req.data.nr as libc::c_long;
     let mut dirfd = libc::AT_FDCWD;
@@ -151,6 +164,7 @@ fn capture(req: &SeccompNotif, client: &NativeOpenClient) -> io::Result<NativeOp
         }
         let mut bytes = vec![0; args[3] as usize];
         child_pread(mem.as_raw_fd(), args[2], &mut bytes).map_err(io::Error::from_raw_os_error)?;
+        require_live(nfd, req)?;
         if bytes[24..].iter().any(|byte| *byte != 0) {
             return Err(io::Error::from_raw_os_error(libc::E2BIG));
         }
@@ -202,6 +216,7 @@ fn capture(req: &SeccompNotif, client: &NativeOpenClient) -> io::Result<NativeOp
         }
         path.push(byte[0]);
     }
+    require_live(nfd, req)?;
     if path.len() == 4096 {
         return Err(io::Error::from_raw_os_error(libc::ENAMETOOLONG));
     }
@@ -292,7 +307,7 @@ pub(super) fn handle(
         return true;
     }
     let result = (|| {
-        let request = capture(req, client)?;
+        let request = capture(nfd, req, client)?;
         let flags = request.flags;
         if !notification_is_live(nfd, req.id) {
             return Err(io::Error::from_raw_os_error(libc::ECANCELED));
