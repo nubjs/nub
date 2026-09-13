@@ -658,6 +658,14 @@ fn retained_handle_contract(root: &Path, mediated: bool) {
         fs::read(app.join("native-retained")).unwrap(),
         b"retained-replacement"
     );
+    let fresh_alias = OpenOptions::new()
+        .read(true)
+        .open(app.join("native-denied-alias"));
+    if mediated {
+        denied(fresh_alias, "fresh denied alias after retained replacement");
+    } else {
+        assert!(fresh_alias.is_ok(), "raw alias control after replacement");
+    }
     let forged = unsafe { libc::ioctl(retained.as_raw_fd(), FORGED_EXPORT_IOCTL) };
     // The confined command reaches the shared seccomp ioctl ceiling before a
     // provider callback; the provider's unfiltered non-resolver-thread unit
