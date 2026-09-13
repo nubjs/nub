@@ -37,8 +37,8 @@ jobs:
           if ($buildHead -notmatch '^[0-9a-f]{40}$') { throw 'A full lowercase build_head input is required' }
           $run = (& gh run view $buildRun --repo nubjs/nub --json status,conclusion,headSha) | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or $run.status -ne 'completed' -or $run.conclusion -ne 'success' -or $run.headSha -ne $buildHead) { throw 'Expected the completed successful exact-head diagnostic' }
-          & git -c "http.https://github.com/.extraheader=AUTHORIZATION: bearer $env:GH_TOKEN" fetch --depth=1 origin $buildHead
-          if ($LASTEXITCODE -ne 0) { throw 'Exact build revision is unavailable from origin' }
+          & git cat-file -e "$buildHead^{commit}"
+          if ($LASTEXITCODE -ne 0) { throw 'Exact build revision is unavailable in the checked-out history' }
           $allowed = @('.github/workflows/windows-full-network-replay.yml', 'tests/sandbox-native-adapter/run-full-network-standard-user.ps1', 'tests/sandbox-native-adapter/test-full-network-runner.ps1')
           $changed = @(git diff --name-only $buildHead HEAD)
           if ($LASTEXITCODE -ne 0) { throw 'Build revision unavailable' }
