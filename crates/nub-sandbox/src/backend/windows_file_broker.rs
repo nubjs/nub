@@ -239,10 +239,23 @@ mod tests {
         };
         // A client IPC timeout must not release the synthetic blocked worker by
         // exiting the process. Only Job termination should produce exit code 1.
-        if std::env::var_os("NUB_FILE_BROKER_CANCELLATION_REMOVE").is_some() {
-            let _ = std::fs::remove_file(path);
-        } else {
-            let _ = std::fs::File::open(path);
+        match std::env::var("NUB_FILE_BROKER_CANCELLATION_OPERATION")
+            .unwrap()
+            .as_str()
+        {
+            "remove" => {
+                let _ = std::fs::remove_file(path);
+            }
+            "create" | "write" => {
+                let _ = std::fs::write(path, b"must not be written after cancellation");
+            }
+            "mkdir" => {
+                let _ = std::fs::create_dir(path);
+            }
+            "read" => {
+                let _ = std::fs::File::open(path);
+            }
+            operation => panic!("unknown cancellation operation: {operation}"),
         }
         std::thread::sleep(std::time::Duration::from_secs(120));
         panic!("cancellation fixture survived its command Job deadline");
@@ -251,16 +264,18 @@ mod tests {
     #[test]
     #[ignore = "requires an ordinary-user native Windows acceptance run"]
     fn file_broker_kills_job_before_joining_blocked_worker() {
-        cancellation_control(false);
+        for operation in ["read", "create", "write", "mkdir"] {
+            cancellation_control(operation);
+        }
     }
 
     #[test]
     #[ignore = "requires an ordinary-user native Windows acceptance run"]
     fn file_broker_cancels_namespace_before_mutation() {
-        cancellation_control(true);
+        cancellation_control("remove");
     }
 
-    fn cancellation_control(remove: bool) {
+    fn cancellation_control(operation: &str) {
         use super::super::windows::WindowsStdio;
         use crate::{CommandSpec, CompileCtx, Homes, Sandbox, ScopeCapabilities, compile};
         use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
@@ -285,6 +300,10 @@ mod tests {
             std::fs::read(&file).unwrap(),
             b"ordinary caller open succeeds"
         );
+        let initially_absent = matches!(operation, "create" | "mkdir");
+        if initially_absent {
+            std::fs::remove_file(&file).unwrap();
+        }
         // SAFETY: unnamed, noninheritable manual-reset event, uniquely owned
         // below and retained until the native worker has returned.
         let entered = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
@@ -293,7 +312,7 @@ mod tests {
             // SAFETY: successful CreateEventW returned this unique handle.
             entered: unsafe { OwnedHandle::from_raw_handle(entered) },
             result: AtomicU32::new(0),
-            skip: AtomicU32::new(u32::from(remove)),
+            skip: AtomicU32::new(u32::from(operation == "remove")),
         });
         let ctx = CompileCtx::new(
             Homes {
@@ -316,12 +335,10 @@ mod tests {
             "NUB_FILE_BROKER_CANCELLATION_FILE".into(),
             file.to_str().unwrap().into(),
         );
-        if remove {
-            policy
-                .env
-                .constructed
-                .insert("NUB_FILE_BROKER_CANCELLATION_REMOVE".into(), "1".into());
-        }
+        policy.env.constructed.insert(
+            "NUB_FILE_BROKER_CANCELLATION_OPERATION".into(),
+            operation.into(),
+        );
         policy
             .env
             .constructed
@@ -346,10 +363,10 @@ mod tests {
                 default_effect: Effect::Deny,
                 entries: vec![rule(
                     file.to_str().unwrap(),
-                    if remove {
-                        FsAccess::ReadWrite
-                    } else {
+                    if operation == "read" {
                         FsAccess::Read
+                    } else {
+                        FsAccess::ReadWrite
                     },
                 )],
             },
@@ -365,7 +382,7 @@ mod tests {
         })
         .unwrap();
         // Entry occurs only after the native client authenticated, the real
-        // resolver pinned the existing file, and the immutable matcher allowed it.
+        // resolver pinned the file or parent, and the immutable matcher allowed it.
         // Always terminate/reap before asserting, including a missing-entry failure.
         let entered = unsafe { WaitForSingleObject(blocking.entered.as_raw_handle(), 30_000) };
         let live = child.try_wait().unwrap().is_none();
@@ -387,10 +404,16 @@ mod tests {
             result, 1,
             "worker did not observe Job-killed child before join: 0=not run, 2=deadline, 3=event failure, 4=other exit"
         );
-        assert_eq!(
-            std::fs::read(&file).unwrap(),
-            b"ordinary caller open succeeds"
-        );
+        if initially_absent {
+            assert!(!file.exists(), "cancelled {operation} created the target");
+        } else {
+            assert_eq!(
+                std::fs::read(&file).unwrap(),
+                b"ordinary caller open succeeds",
+                "cancelled {operation} changed the target"
+            );
+        }
+        println!("FILE_BROKER_CANCELLED_OPERATION={operation}");
         println!("FILE_BROKER_BLOCKED_WORKER_ENTERED");
         println!("FILE_BROKER_WORKER_OBSERVED_JOB_EXIT=1");
         println!("FILE_BROKER_KILL_BEFORE_JOIN_OK");

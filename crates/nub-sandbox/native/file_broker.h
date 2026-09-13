@@ -238,7 +238,8 @@ inline NTSTATUS resolve_parent(Api& api, const Request& request, ParentPath& par
     return 0;
 }
 
-inline NTSTATUS resolve(const Request& request, Authorize authorize, const void* context,
+inline NTSTATUS resolve(const Request& request, HANDLE process, HANDLE stop,
+                        Authorize authorize, const void* context,
                         Handle& result, IO_STATUS_BLOCK& io, Response& response) {
     Api api;
     ParentPath parent;
@@ -331,6 +332,10 @@ inline NTSTATUS resolve(const Request& request, Authorize authorize, const void*
         response.end = standard.EndOfFile.QuadPart;
         return 0;
     }
+    // Authorization may block until the command is cancelled. A late response
+    // must not create or truncate a path after that command has exited.
+    if (WaitForSingleObject(stop, 0) != WAIT_TIMEOUT ||
+        WaitForSingleObject(process, 0) != WAIT_TIMEOUT) return kDenied;
     status = open_relative(api, parent.handle(), path + leaf, request.length - leaf,
         transferred_access(access, directory) | SYNCHRONIZE, request.share, disposition,
         (request.options & ~kBackupIntent) | FILE_SYNCHRONOUS_IO_NONALERT |
@@ -484,7 +489,8 @@ inline void serve(Worker& worker) {
         if (WaitForSingleObject(broker.stop, 0) != WAIT_TIMEOUT) response.status = kDenied;
         else if (request.operation >= Remove)
             response.status = mutate(request, process.value, broker.stop, broker.authorize, broker.context, response);
-        else response.status = resolve(request, broker.authorize, broker.context, file, io, response);
+        else response.status = resolve(request, process.value, broker.stop,
+            broker.authorize, broker.context, file, io, response);
     }
     if (!response.status && file.value) {
         HANDLE target = nullptr;
