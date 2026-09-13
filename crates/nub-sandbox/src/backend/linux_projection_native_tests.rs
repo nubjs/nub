@@ -958,6 +958,53 @@ fn native_simultaneous_command_contract(service: &NativeOpenService, view: &CStr
     println!("NATIVE_SHARED_SERVICE_COMMANDS_OK");
 }
 
+fn native_shared_service_cancellation_contract(service: &NativeOpenService, view: &CString) {
+    let mut victim = spawn_native_command("native-concurrent", view, service.client());
+    let mut survivor = spawn_native_command("native-concurrent", view, service.client());
+    let mut victim_output = BufReader::new(victim.take_stdout().unwrap());
+    let mut survivor_output = BufReader::new(survivor.take_stdout().unwrap());
+    let victim_stderr = victim.take_stderr().unwrap();
+    let survivor_stderr = survivor.take_stderr().unwrap();
+    let victim_stderr_drain = std::thread::spawn(move || -> io::Result<String> {
+        let mut output = String::new();
+        BufReader::new(victim_stderr).read_to_string(&mut output)?;
+        Ok(output)
+    });
+    let survivor_stderr_drain = std::thread::spawn(move || -> io::Result<String> {
+        let mut output = String::new();
+        BufReader::new(survivor_stderr).read_to_string(&mut output)?;
+        Ok(output)
+    });
+    let victim_input = victim.take_stdin().unwrap();
+    let mut survivor_input = survivor.take_stdin().unwrap();
+    native_event(&mut victim_output, "NATIVE_CONCURRENT_READY").unwrap();
+    native_event(&mut survivor_output, "NATIVE_CONCURRENT_READY").unwrap();
+    let before = service.client().stats();
+    victim.kill().unwrap();
+    drop(victim_input);
+    let victim_status = victim.wait().unwrap();
+    let victim_stderr = victim_stderr_drain.join().unwrap().unwrap();
+    assert!(
+        !victim_status.success(),
+        "cancelled native command unexpectedly succeeded: {victim_status:?}\n{victim_stderr}"
+    );
+    survivor_input.write_all(b"go\n").unwrap();
+    native_event(&mut survivor_output, "NATIVE_CONCURRENT_OK").unwrap();
+    drop(survivor_input);
+    let survivor_status = survivor.wait().unwrap();
+    let survivor_stderr = survivor_stderr_drain.join().unwrap().unwrap();
+    assert!(
+        survivor_status.success(),
+        "surviving native command {survivor_status:?}\n{survivor_stderr}"
+    );
+    assert_eq!(
+        service.client().stats(),
+        (before.0 + 1, before.1 + 1),
+        "only the surviving command may acquire a native file after its peer is cancelled"
+    );
+    println!("NATIVE_SHARED_SERVICE_CANCELLATION_OK");
+}
+
 pub(super) fn recursive_view(source: &Path, target: &Path, readonly: bool) -> File {
     fs::create_dir(target).unwrap();
     let source = CString::new(source.as_os_str().as_bytes()).unwrap();
@@ -1046,6 +1093,7 @@ fn native_provider(root: &Path) {
     let service = projection.native_opener(&view).unwrap();
     native_queue_contract(&service, &raw);
     native_simultaneous_command_contract(&service, &view_c);
+    native_shared_service_cancellation_contract(&service, &view_c);
     // This provider thread is deliberately neither the registered resolver
     // thread nor seccomp-filtered. The FUSE callback therefore receives a
     // wrong Request.pid; EACCES proves callback authentication rather than the
