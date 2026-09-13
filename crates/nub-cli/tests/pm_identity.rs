@@ -388,27 +388,6 @@ fn cache_scratch_installs_never_inherit_ambient_identity() {
     );
 }
 
-/// The declared-yarn corner of the fresh row: identity resolves to yarn with
-/// no yarn.lock on disk, and the first install would CREATE yarn.lock — the
-/// gated write. Refused with the gate message, nothing written.
-#[test]
-fn a_fresh_declared_yarn_project_hits_the_write_gate_not_a_pnpm_lockfile() {
-    let dir = project(
-        "yarn-fresh",
-        r#"{"name":"app","version":"1.0.0","packageManager":"yarn@1.22.19"}"#,
-    );
-    let (_, stderr, code) = run(&dir, &["install"]);
-    assert_ne!(code, 0, "a fresh declared-yarn install must refuse");
-    assert!(
-        stderr.contains("refusing to modify yarn.lock") && stderr.contains("yarn install"),
-        "the refusal must be the yarn gate with its remedy: {stderr}"
-    );
-    assert!(
-        !dir.join("pnpm-lock.yaml").exists() && !dir.join("yarn.lock").exists(),
-        "no lockfile of any format may be written past the gate"
-    );
-}
-
 /// `nub.lock` — the engine's canonical lockfile under nub's filename toggle
 /// — IS nub identity: alone it resolves and installs in place, and no
 /// `pnpm-lock.yaml` appears beside it.

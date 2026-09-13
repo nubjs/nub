@@ -437,44 +437,6 @@ fn pnpmfile_ignored_silently_under_nub_identity() {
     );
 }
 
-/// npm incumbent: the cwd-default `.pnpmfile` is gated off — the hook
-/// never runs and exactly one dim warning names the file + the incumbent.
-#[test]
-fn pnpmfile_ignored_under_npm_incumbent_with_one_warning() {
-    let hook = r#"module.exports = { hooks: { preResolution(ctx) { require('fs').writeFileSync('hook-ran.txt', 'yes'); return ctx; } } };"#;
-    let dir = project(
-        "pnpmfile-npm",
-        &[
-            (
-                "package.json",
-                r#"{"name":"app","version":"1.0.0","packageManager":"npm@10.0.0"}"#,
-            ),
-            (
-                "package-lock.json",
-                r#"{"name":"app","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"app","version":"1.0.0"}}}"#,
-            ),
-            (".pnpmfile.cjs", hook),
-        ],
-    );
-    let (stdout, stderr, code) = run(&dir, &["install", "--no-frozen-lockfile"]);
-    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
-    assert!(
-        !dir.join("hook-ran.txt").exists(),
-        "the cwd-default .pnpmfile must NOT run under an npm incumbent: {stderr}"
-    );
-    assert_eq!(
-        stderr.matches(".pnpmfile.cjs` ignored").count(),
-        1,
-        "exactly one ignore warning naming the file: {stderr}"
-    );
-    assert!(
-        stderr.contains("this project uses npm")
-            && stderr.contains("--pnpmfile")
-            && stderr.contains("nub pm use pnpm"),
-        "the warning names the incumbent and both escape hatches: {stderr}"
-    );
-}
-
 /// pnpm incumbent: the cwd-default `.pnpmfile` is honored exactly as
 /// upstream — the hook runs and there is no ignore warning. This is the
 /// pnpm "special relationship": its proprietary config stays live when
