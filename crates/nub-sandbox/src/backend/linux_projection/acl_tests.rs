@@ -216,7 +216,9 @@ fn fixture_path_targets(grants: &mut BTreeSet<PathBuf>, path: &Path, links_left:
     while let Some(component) = components.next() {
         match component {
             Component::RootDir | Component::CurDir => continue,
-            Component::ParentDir => current.pop(),
+            Component::ParentDir => {
+                current.pop();
+            }
             Component::Normal(name) => current.push(name),
             Component::Prefix(_) => unreachable!("Linux fixture path prefix"),
         }
@@ -472,7 +474,7 @@ fn mounted_native_acl_preserves_host_dac_and_one_id_boundary() {
     let output = sandbox
         .prepare(command(&executable))
         .expect("prepared ACL discriminator")
-        .wait_with_output()
+        .output()
         .expect("prepared ACL discriminator reap");
     assert!(
         output.status.success(),
@@ -484,6 +486,7 @@ fn mounted_native_acl_preserves_host_dac_and_one_id_boundary() {
         String::from_utf8_lossy(&output.stdout).contains("NATIVE_ACL_ONE_ID_MOUNTED_OK"),
         "missing ACL discriminator marker"
     );
+    println!("{}", String::from_utf8_lossy(&output.stdout));
     let host_uid = unsafe { libc::getuid() };
     let host_acl = getxattr_path(&root.join("allowed-rw"), ACL_ACCESS).expect("raw mapped ACL");
     let host_ids = named_user_ids(&host_acl);
