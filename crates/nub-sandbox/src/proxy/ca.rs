@@ -212,6 +212,8 @@ fn write_bundle(bytes: &[u8]) -> io::Result<CaBundle> {
             .suffix(".pem")
             .make(|path| {
                 std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
                     .create_new(true)
                     .access_mode(GENERIC_READ | GENERIC_WRITE | WRITE_DAC)
                     .share_mode(FILE_SHARE_READ)
