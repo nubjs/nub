@@ -392,25 +392,68 @@ mod tests {
 
     #[test]
     fn file_broker_verified_name_uses_positive_union_without_namespace_reopen() {
-        let matcher = PathMatcher::new(&FsRuleSet {
-            default_effect: Effect::Deny,
-            entries: vec![
-                rule("C:/output/*.json", FsAccess::ReadWrite),
-                rule("C:/output/future.json", FsAccess::Read),
-            ],
-        });
-        let decision = matcher.decide_verified_name(r"C:\output\future.json");
+        use crate::{CompileCtx, Homes, ScopeCapabilities, compile};
+
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let output = root.path().join("output");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&output).unwrap();
+        let future = output.join("future.json");
+        std::fs::write(&future, b"held object").unwrap();
+        let ctx = CompileCtx::new(
+            Homes {
+                home: root.path().join("home"),
+                cache: root.path().join("cache"),
+                tmp: root.path().join("tmp"),
+                project: project.clone(),
+            },
+            project,
+            ScopeCapabilities::approved(),
+            std::env::vars().collect(),
+        );
+        // Exercise the public JSON grammar used by the native fixture. The
+        // narrower read overlaps the globbed read-write grant, so the held
+        // name must retain the unioned read-write authority.
+        let policy = compile(
+            &serde_json::json!({"fs": {
+                "./": "r",
+                "$tmp": false,
+                format!("{}/*.json", output.display()): "rw",
+                future.to_str().unwrap(): "r",
+            }, "net": false}),
+            &ctx,
+        )
+        .unwrap();
+        let matcher = PathMatcher::new(&policy.fs.rules);
+        let held = std::fs::canonicalize(&future).unwrap();
+        let decision = matcher.decide_verified_name(held.to_str().unwrap());
         assert_eq!(
             (decision.effect, decision.access),
             (Effect::Allow, FsAccess::ReadWrite)
         );
         assert_eq!(
-            matcher.decide_verified_name(r"C:\output\near.txt").effect,
+            matcher
+                .decide_verified_name(
+                    std::fs::canonicalize(&output)
+                        .unwrap()
+                        .join("near.txt")
+                        .to_str()
+                        .unwrap()
+                )
+                .effect,
             Effect::Deny
         );
         assert_eq!(
             matcher
-                .decide_verified_name(r"C:\output\nested\future.json")
+                .decide_verified_name(
+                    std::fs::canonicalize(&output)
+                        .unwrap()
+                        .join("nested")
+                        .join("future.json")
+                        .to_str()
+                        .unwrap()
+                )
                 .effect,
             Effect::Deny
         );
@@ -779,6 +822,44 @@ mod tests {
             ScopeCapabilities::approved(),
             std::env::vars().collect(),
         );
+        // This is the authority that the private test-only broker uses. It is
+        // compiled through the public JSON grammar rather than hand-built IR.
+        // `files` remains a sibling of the project grant, so its globbed
+        // entries cannot acquire an inherited AppContainer ACL.
+        assert!(!files.starts_with(&project));
+        let mut authority_fs = serde_json::Map::from([
+            ("./".to_string(), serde_json::json!("r")),
+            ("$tmp".to_string(), serde_json::json!(false)),
+            (
+                format!("{}/*.json", files.display()),
+                serde_json::json!("rw"),
+            ),
+        ]);
+        if dll.is_some() {
+            authority_fs.insert(
+                format!("{}/loader-*.dll", files.display()),
+                serde_json::json!("r"),
+            );
+        }
+        let authority_policy =
+            compile(&serde_json::json!({"fs": authority_fs, "net": false}), &ctx).unwrap();
+        let derived = super::super::windows::derive_grants(&authority_policy.fs);
+        assert!(
+            derived
+                .read
+                .iter()
+                .chain(&derived.read_nodes)
+                .chain(&derived.write)
+                .all(|grant| !files.starts_with(grant)),
+            "globbed file authority must not materialize an inherited grant covering {files:?}: read={:?}, nodes={:?}, write={:?}",
+            derived.read,
+            derived.read_nodes,
+            derived.write,
+        );
+
+        // The ordinary launch remains on the currently-admissible direct ACL
+        // policy. The compiled glob authority above reaches only the private
+        // test hook; it does not admit a live public file-broker grammar.
         let config = serde_json::json!({"fs": {"./": "r", "$tmp": "rw",
             binary.parent().unwrap().to_str().unwrap(): "r"}, "net": false});
         for mode in ["raw", "broker"] {
@@ -821,14 +902,7 @@ mod tests {
             );
             let launch = prepared.launch.take().unwrap();
             let resource = prepared.acquire_windows_resource(launch).unwrap();
-            let rules = FsRuleSet {
-                default_effect: Effect::Deny,
-                entries: vec![
-                    rule(&format!("{}/*.json", files.display()), FsAccess::ReadWrite),
-                    rule(&format!("{}/loader-*.dll", files.display()), FsAccess::Read),
-                ],
-            };
-            let mut child = with_test_rules(rules, || {
+            let mut child = with_test_rules(authority_policy.fs.rules.clone(), || {
                 resource.spawn_before_resume(
                     WindowsStdio::Null,
                     WindowsStdio::Piped,
