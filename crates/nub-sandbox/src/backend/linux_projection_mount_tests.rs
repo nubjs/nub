@@ -41,6 +41,40 @@ fn checked(rc: i32) -> io::Result<()> {
     }
 }
 
+fn unmounted_session_result(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        // Linux may report connection abort to a pending FUSE read when the
+        // owner unmounts. This classification is valid only after that unmount.
+        Err(error) if error.raw_os_error() == Some(libc::ECONNABORTED) => Ok(()),
+        result => result,
+    }
+}
+
+fn unmount_projection(target: &std::ffi::CStr, server: std::thread::JoinHandle<io::Result<()>>) {
+    assert!(
+        !server.is_finished(),
+        "FUSE server ended before owner unmount"
+    );
+    checked(unsafe { libc::umount2(target.as_ptr(), 0) }).expect("normal FUSE unmount");
+    unmounted_session_result(server.join().expect("FUSE server panicked")).unwrap();
+}
+
+#[test]
+fn owner_unmount_classifies_only_connection_abort() {
+    assert!(unmounted_session_result(Ok(())).is_ok());
+    assert!(
+        unmounted_session_result(Err(io::Error::from_raw_os_error(libc::ECONNABORTED))).is_ok()
+    );
+    for errno in [libc::EIO, libc::EACCES, libc::ENOTCONN] {
+        assert_eq!(
+            unmounted_session_result(Err(io::Error::from_raw_os_error(errno)))
+                .unwrap_err()
+                .raw_os_error(),
+            Some(errno)
+        );
+    }
+}
+
 // All pre_exec callers precompute strings and IDs. No allocation, filesystem
 // wrappers, locks, or arbitrary Rust callbacks run between fork and exec.
 unsafe fn parent_death(parent: libc::pid_t) -> io::Result<()> {
@@ -624,8 +658,7 @@ fn provider(root: &Path, owner_loss: bool, mappings: bool) {
     } else {
         verify_backing(root);
     }
-    checked(unsafe { libc::umount2(target.as_ptr(), 0) }).expect("normal direct unmount");
-    server.join().unwrap().unwrap();
+    unmount_projection(&target, server);
     fs::remove_dir(&mountpoint).unwrap();
     println!("NORMAL_UNMOUNT_BACKING_OK");
 }

@@ -704,8 +704,7 @@ fn fuse_provider(root: &Path) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    checked(unsafe { libc::umount2(target.as_ptr(), 0) }).unwrap();
-    server.join().unwrap().unwrap();
+    unmount_projection(&target, server);
     fs::remove_dir(view).unwrap();
     assert!(output.status.success(), "FUSE arm failed: {output:?}");
 }
@@ -807,8 +806,7 @@ fn native_provider(root: &Path) {
     println!("{text}{errors}");
     service.shutdown().unwrap();
     drop(projection);
-    checked(unsafe { libc::umount2(view_c.as_ptr(), 0) }).unwrap();
-    server.join().unwrap().unwrap();
+    unmount_projection(&view_c, server);
     for path in [&read, &rw] {
         let c = CString::new(path.as_os_str().as_bytes()).unwrap();
         checked(unsafe { libc::umount2(c.as_ptr(), 0) }).unwrap();

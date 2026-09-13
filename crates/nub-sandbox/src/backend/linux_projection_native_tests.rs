@@ -1153,8 +1153,7 @@ fn native_provider(root: &Path) {
     drop(stats);
     service.shutdown().unwrap();
     drop(projection);
-    checked(unsafe { libc::umount2(view_c.as_ptr(), 0) }).expect("normal FUSE unmount");
-    server.join().unwrap().unwrap();
+    unmount_projection(&view_c, server);
     for path in [&read, &rw] {
         let path_c = CString::new(path.as_os_str().as_bytes()).unwrap();
         checked(unsafe { libc::umount2(path_c.as_ptr(), 0) }).expect("normal backing-view unmount");
