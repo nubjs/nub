@@ -1508,17 +1508,16 @@ fn first_catalog_specifier(manifest: &aube_manifest::PackageJson, root: &Path) -
 
     // (2) workspace-member manifests' dep maps. Each importer is seeded
     // independently, so a member-only `catalog:` ref must refuse too.
-    if let Ok(members) = aube_workspace::find_workspace_packages(root) {
-        for dir in members {
-            let Some(member) = cached_aube_manifest(&dir.join("package.json")) else {
-                continue;
-            };
-            if let Some(hit) = first_catalog_in_dep_maps(&member) {
-                let label = member.name.as_deref().unwrap_or_else(|| {
-                    dir.file_name().and_then(|n| n.to_str()).unwrap_or("member")
-                });
-                return Some(format!("{label} → {hit}"));
-            }
+    for dir in workspace_members(root) {
+        let Some(member) = cached_aube_manifest(&dir.join("package.json")) else {
+            continue;
+        };
+        if let Some(hit) = first_catalog_in_dep_maps(&member) {
+            let label = member
+                .name
+                .as_deref()
+                .unwrap_or_else(|| dir.file_name().and_then(|n| n.to_str()).unwrap_or("member"));
+            return Some(format!("{label} → {hit}"));
         }
     }
 
@@ -2825,6 +2824,78 @@ fn strip_yarnrc_value(rest: &str) -> &str {
     rest.split('#').next().map(str::trim).unwrap_or(rest)
 }
 
+/// Every workspace member's directory under `root`, or none when `root` is not
+/// a workspace.
+///
+/// The one place the member walk is spelled, so the walk can be swapped for the
+/// engine's own (`pnpm_workspace::find_workspace_projects`) in a single edit
+/// when the vendored engine goes. Callers that need the manifests read them
+/// through [`cached_aube_manifest`], which is mtime-cached, so sharing one
+/// discovery across several scans costs nothing beyond the walk itself.
+pub(crate) fn workspace_members(root: &Path) -> Vec<PathBuf> {
+    // Memoized because the walk underneath is not: `find_workspace_packages`
+    // globs the tree afresh on every call, and two callers now ask the same
+    // question per install — the embedder defaults and the settings merge.
+    // Membership cannot change inside one process, so the first answer for a
+    // root is the answer. Keyed by the root rather than cached in a single
+    // slot: `--dir` and a workspace member's own cwd resolve to different
+    // roots in one run, and a one-slot cache would hand the second the first
+    // one's members.
+    type Members = std::collections::HashMap<PathBuf, Vec<PathBuf>>;
+    static MEMBERS: std::sync::LazyLock<std::sync::RwLock<Members>> =
+        std::sync::LazyLock::new(|| std::sync::RwLock::new(Members::new()));
+    // Poisoning is ignored both ways: the guarded value is a plain map of
+    // discovered paths, so a panic mid-write cannot leave it inconsistent.
+    if let Some(hit) = MEMBERS
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(root)
+    {
+        return hit.clone();
+    }
+    let found = aube_workspace::find_workspace_packages(root).unwrap_or_default();
+    MEMBERS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(root.to_path_buf(), found.clone());
+    found
+}
+
+/// The declared framework, if any, whose resolver cannot reach a store shared
+/// between projects — so this install must build its virtual store inside the
+/// project.
+///
+/// The same behavioural list [`nub_setting_defaults`] hands the vendored engine
+/// as `disableGlobalVirtualStoreForPackages`, asked the other way round. That
+/// setting names candidates and lets the engine match them against what the
+/// project declares; pnpm 12 has no such setting, so under it nub has to do the
+/// matching itself and decide the store's locality directly
+/// ([`host_settings`]). Both callers read this one definition, because a list
+/// that drifted from the predicate would put a framework's name in the install
+/// report while the install built the tree that framework cannot load.
+///
+/// Returns the first match rather than a bool: the reason is worth reporting,
+/// and the names are ordered so the unconditional ones answer first.
+pub(crate) fn store_locality_breaker(root: &Path, members: &[PathBuf]) -> Option<&'static str> {
+    // `next` and `react-native` break at every version, so declaring one is
+    // the whole test. `declared_direct_ranges` is the shared dependency-scope
+    // scan the version gates use (dependencies / devDependencies /
+    // optionalDependencies, root and members alike, peer excluded); here only
+    // whether it found anything matters, not what the range says.
+    for name in ["next", "react-native"] {
+        if !expo_compat::declared_direct_ranges(root, members, name).is_empty() {
+            return Some(name);
+        }
+    }
+    if expo_compat::expo_below_gvs_floor(root, members) {
+        return Some("expo");
+    }
+    if remix_compat::remix_needs_project_local_store(root, members) {
+        return Some("remix");
+    }
+    None
+}
+
 /// The defaults a config READ reports, for the project containing `cwd`.
 ///
 /// The same list the install resolves against, anchored the same way
@@ -2932,7 +3003,7 @@ fn nub_setting_defaults(
     // manifest scans below (the two version gates and the injected-deps check)
     // share the result.
     let gvs_root = detected.map(|d| d.dir.as_path()).unwrap_or(cwd);
-    let workspace_members = aube_workspace::find_workspace_packages(gvs_root).unwrap_or_default();
+    let workspace_members = workspace_members(gvs_root);
     let mut gvs_off: Vec<&str> = vec!["next", "react-native"];
     if expo_compat::expo_below_gvs_floor(gvs_root, &workspace_members) {
         gvs_off.push("expo");

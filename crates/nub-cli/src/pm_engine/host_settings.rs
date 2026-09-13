@@ -40,6 +40,10 @@ struct Sources<'a> {
     root: PathBuf,
     /// nub's cache directory, when one can be determined.
     cache_root: Option<PathBuf>,
+    /// The declared framework, if any, whose resolver cannot reach a store
+    /// shared between projects. Resolved here rather than in the merge because
+    /// answering it walks the workspace and reads every member's manifest.
+    store_locality_breaker: Option<&'static str>,
     ci: bool,
 }
 
@@ -58,6 +62,8 @@ fn gather<'a>(start_dir: &Path, install: &'a InstallConfig) -> Sources<'a> {
         .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
         .filter(|(name, _)| setting_key_of_var(name).is_some() || name == "NUB_CACHE_DIR")
         .collect();
+    let store_locality_breaker =
+        super::store_locality_breaker(&root, &super::workspace_members(&root));
     Sources {
         npmrc: npmrc_files(&root),
         install,
@@ -65,6 +71,7 @@ fn gather<'a>(start_dir: &Path, install: &'a InstallConfig) -> Sources<'a> {
         manifest: read_manifest(&root),
         root,
         cache_root: nub_core::node::discovery::cache_dir(),
+        store_locality_breaker,
         ci: std::env::var_os("CI").is_some(),
     }
 }
@@ -254,12 +261,20 @@ fn merge(sources: &Sources) -> Result<Map<String, Value>> {
     }
 
     // nub's defaults fill only what no source set. The shared store is a
-    // symlink layout, so it has nothing to say to a hoisted one.
+    // symlink layout, so it has nothing to say to a hoisted one — and a
+    // project declaring a framework that resolves through symlinks to a single
+    // root cannot use it at all, whatever the layout says. The previous engine
+    // was handed those framework names as a setting and matched them itself;
+    // pnpm 12 has no such setting, so the match happens here and the store's
+    // locality is decided rather than suggested. Still only a DEFAULT: a
+    // project that asks for the shared store explicitly gets it, because the
+    // ejection is a compatibility guess and the user's word outranks a guess.
     let isolated = merged
         .get("nodeLinker")
         .is_none_or(|linker| linker.as_str() == Some("isolated"));
     if !sources.ci
         && isolated
+        && sources.store_locality_breaker.is_none()
         && !merged.contains_key("enableGlobalVirtualStore")
         && !merged.contains_key("virtualStoreType")
     {
@@ -742,6 +757,7 @@ mod tests {
             manifest: Map::new(),
             root: PathBuf::from("/app"),
             cache_root: Some(PathBuf::from("/cache/nub")),
+            store_locality_breaker: None,
             ci: false,
         }
     }
@@ -887,6 +903,31 @@ mod tests {
         assert_eq!(
             merge(&opted_out).unwrap()["enableGlobalVirtualStore"],
             json!(false)
+        );
+
+        // And off for a project declaring a framework that cannot resolve
+        // through it — the case the previous engine handled by matching
+        // `disableGlobalVirtualStoreForPackages` itself, which pnpm 12 has no
+        // setting for.
+        let mut breaks = sources(&plain);
+        breaks.store_locality_breaker = Some("next");
+        assert!(
+            !merge(&breaks)
+                .unwrap()
+                .contains_key("enableGlobalVirtualStore"),
+            "a declared store-locality breaker must not get the shared store by default"
+        );
+
+        // Asking for it anyway wins: the ejection is a compatibility guess.
+        let mut breaks_but_asks = sources(&plain);
+        breaks_but_asks.store_locality_breaker = Some("next");
+        breaks_but_asks.npmrc = vec![(
+            PathBuf::from("/app/.npmrc"),
+            "enable-global-virtual-store=true\n".to_owned(),
+        )];
+        assert_eq!(
+            merge(&breaks_but_asks).unwrap()["enableGlobalVirtualStore"],
+            json!(true)
         );
     }
 
