@@ -76,14 +76,18 @@ function Run-Filtered([string]$file, [string]$label, [string[]]$arguments, [stri
     try {
         if (!$proc.Start()) { throw "Could not start ${label}" }
         $outTask = $proc.StandardOutput.ReadToEndAsync(); $errTask = $proc.StandardError.ReadToEndAsync()
-        if (!$proc.WaitForExit(900000)) { taskkill /PID $proc.Id /T /F | Out-Null; throw "${label} exceeded its 15-minute deadline" }
+        $timedOut = !$proc.WaitForExit(300000)
+        if ($timedOut) {
+            taskkill /PID $proc.Id /T /F | Out-Null
+            if (!$proc.WaitForExit(30000)) { throw "${label} did not exit after timeout termination" }
+        }
         if (![Threading.Tasks.Task]::WaitAll(@($outTask, $errTask), 30000)) { throw "${label} output drain timed out" }
         [IO.File]::WriteAllText($out, $outTask.Result); [IO.File]::WriteAllText($err, $errTask.Result)
         $text = $outTask.Result + $errTask.Result
         Write-Host "STANDARD_USER_FULL_NETWORK_FILTER_EXIT=${label}:$($proc.ExitCode)"
         Write-Host "STANDARD_USER_FULL_NETWORK_${label}_STDOUT_BEGIN"; Write-Host $outTask.Result; Write-Host "STANDARD_USER_FULL_NETWORK_${label}_STDOUT_END"
         Write-Host "STANDARD_USER_FULL_NETWORK_${label}_STDERR_BEGIN"; Write-Host $errTask.Result; Write-Host "STANDARD_USER_FULL_NETWORK_${label}_STDERR_END"
-        if ($proc.ExitCode -ne 0 -or !$text.Contains($summary) -or $text -notmatch 'running [1-9][0-9]* test(s)?') { $script:failed = $true; Write-Host "STANDARD_USER_FULL_NETWORK_FILTER_FAILURE=${label}:required-summary-or-exit" }
+        if ($timedOut -or $proc.ExitCode -ne 0 -or !$text.Contains($summary) -or $text -notmatch 'running [1-9][0-9]* test(s)?') { $script:failed = $true; Write-Host "STANDARD_USER_FULL_NETWORK_FILTER_FAILURE=${label}:timeout=$timedOut;required-summary-or-exit" }
     } catch {
         $script:failed = $true
         [IO.File]::WriteAllText($err, $_.Exception.ToString())
@@ -102,7 +106,7 @@ $runs = @(
     @{ file='nub_sandbox_lib.exe'; label='socket-protocol'; filter='backend::windows_native_compat::tests::socket_protocol_rejects_raw_privileged_unknown_and_malformed_requests'; summary=$one; exact=$true },
     @{ file='nub_sandbox_lib.exe'; label='socket-foreign-client'; filter='backend::windows_native_compat::tests::socket_broker_rejects_a_live_client_outside_its_job_and_cancels_idle_workers'; summary=$one; exact=$true },
     @{ file='nub_sandbox_lib.exe'; label='socket-framing'; filter='backend::windows_native_compat::tests::socket_broker_rejects_wrong_frame_lengths_and_drains_cancelled_read'; summary=$one; exact=$true },
-    @{ file='nub_sandbox_lib.exe'; label='owner-drop'; filter='native_adapter_drop_reaps_pending_listener_and_closes_port'; summary=$one; exact=$true; ignored=$true },
+    @{ file='windows_native_full_network.exe'; label='owner-drop'; filter='native_adapter_drop_reaps_pending_listener_and_closes_port'; summary=$one; exact=$true; ignored=$true },
     @{ file='nub_sandbox_lib.exe'; label='full-disk-admission'; filter='backend::windows::tests::apply_windows_full_disk_rejects_restricted_network'; summary=$one; exact=$true },
     @{ file='nub_sandbox_lib.exe'; label='public-full-disk-admission'; filter='backend::tests::public_preparation_rejects_unrestricted_filesystem_with_restricted_network'; summary=$one; exact=$true },
     @{ file='nub_sandbox_lib.exe'; label='embedded-native-adapter'; filter='backend::windows_native_adapter_probe::embedded_native_adapter_primitives_with_raw_and_plain_controls'; summary=$one; nativeAdapter=$true; exact=$true },
