@@ -461,6 +461,29 @@ mod tests {
     fn file_broker_protocol_rejects_authority_and_namespace_expansion() {
         let valid = request(r"C:\output\future.json");
         assert_eq!(validate(&valid), 0);
+        // Windows CreateFileW adds SYNCHRONIZE and FILE_READ_ATTRIBUTES to
+        // ordinary generic opens; keep the private protocol compatible with
+        // the exact shapes that reached the native capture control.
+        let standard_open = Request {
+            access: 0x8010_0080,
+            ..valid.clone()
+        };
+        assert_eq!(validate(&standard_open), 0);
+        let standard_create = Request {
+            operation: 2,
+            access: 0x4010_0080,
+            disposition: 3,
+            ..valid.clone()
+        };
+        assert_eq!(validate(&standard_create), 0);
+        assert_ne!(
+            validate(&Request {
+                options: standard_create.options | 0x4000,
+                ..standard_create.clone()
+            }),
+            0,
+            "ordinary CreateFileW shape must not admit backup-intent opens"
+        );
         for access in [
             0x10000000, 0x02000000, 0x00010000, 0x00040000, 0x00080000, 0x01000000, 0x40,
         ] {
