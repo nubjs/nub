@@ -17,6 +17,15 @@ use std::ffi::OsString;
 /// run the script, nub answers with `nub run <script>` instead, and
 /// `install-test` is the same shortcut with an install in front of it.
 ///
+/// `config` is nub's own configuration surface, not the engine's: it is
+/// project-scoped by default, spells user scope `--global`, and its
+/// `config init` writes a commented `nub.jsonc` — a file the engine knows
+/// nothing about. The engine names a `config` verb too, so without this
+/// entry the front door hands the whole surface over and `nub config
+/// init` answers "unrecognized subcommand 'init'". It is the ONLY verb
+/// where the two grammars collide; every other nub verb was checked
+/// against the engine's `--help` and is untouched.
+///
 /// nub's remaining verbs — `watch`, `compile`, `upgrade`, `node`, `pm`,
 /// `agent`, `global`, `help` — are not here because nub's own table is
 /// consulted first and settles them. That order is load-bearing for one
@@ -28,6 +37,7 @@ const HOST_VERBS: &[&str] = &[
     "dlx",
     "create",
     "init",
+    "config",
     "env",
     "test",
     "start",
