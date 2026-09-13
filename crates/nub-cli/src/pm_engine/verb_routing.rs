@@ -17,14 +17,18 @@ use std::ffi::OsString;
 /// run the script, nub answers with `nub run <script>` instead, and
 /// `install-test` is the same shortcut with an install in front of it.
 ///
-/// `config` is nub's own configuration surface, not the engine's: it is
-/// project-scoped by default, spells user scope `--global`, and its
-/// `config init` writes a commented `nub.jsonc` — a file the engine knows
-/// nothing about. The engine names a `config` verb too, so without this
-/// entry the front door hands the whole surface over and `nub config
-/// init` answers "unrecognized subcommand 'init'". It is the ONLY verb
-/// where the two grammars collide; every other nub verb was checked
-/// against the engine's `--help` and is untouched.
+/// `config`, and its hidden `get` / `set` shorthands, are nub's own
+/// configuration surface rather than the engine's: project-scoped by
+/// default, user scope spelled `--global`, and a `config init` that
+/// writes a commented `nub.jsonc` — a file the engine knows nothing
+/// about. All three names exist in the engine's grammar too, so without
+/// these entries the front door hands the surface over: `nub config
+/// init` answers "unrecognized subcommand 'init'", and `nub set
+/// auto-install-peers false` refuses outright and advises the user to
+/// edit a `pnpm-workspace.yaml`, which is a file nub must not write
+/// under its own identity. They are the ONLY verbs where the two
+/// grammars collide; every other nub verb was checked against the
+/// engine's `--help` and is untouched.
 ///
 /// nub's remaining verbs — `watch`, `compile`, `upgrade`, `node`, `pm`,
 /// `agent`, `global`, `help` — are not here because nub's own table is
@@ -38,6 +42,8 @@ const HOST_VERBS: &[&str] = &[
     "create",
     "init",
     "config",
+    "get",
+    "set",
     "env",
     "test",
     "start",
