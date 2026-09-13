@@ -860,14 +860,15 @@ fn macos_self_proc_nuget_tooldirs() {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "requires pinned Gradle; diagnoses the explicitly acknowledged net-full limit"]
-fn windows_gradle_with_limited_network() {
+#[ignore = "requires pinned Gradle and the Windows native adapter"]
+fn windows_gradle_with_native_network() {
     let tool = tool("gradle");
     let root = fixture();
     let env = env_for(root.path(), &tool);
     write_projects(root.path());
     let policy = policy(root.path(), &tool, env.clone(), true);
-    let sandbox = tool_sandbox::acquire(&policy).expect("limited-network sandbox acquires");
+    let sandbox = nub_sandbox::Sandbox::with_windows_native_compat(&policy)
+        .expect("native-network sandbox acquires");
     for tail in [
         &["--offline", "--no-daemon", "--stacktrace", "fixture"][..],
         &["--offline", "--no-daemon", "--stacktrace", "fixture"][..],
@@ -889,16 +890,14 @@ fn windows_gradle_with_limited_network() {
             .redact_stderr(true);
         let prepared = sandbox
             .prepare(spec)
-            .expect("limited-network command prepares");
-        // This diagnostic explicitly accepts a narrower network capability than
-        // net:true requested. The strict raw fixture above still refuses it.
-        assert_eq!(prepared.degradation.lost, vec!["net-full".to_owned()]);
-        eprintln!("GRADLE_LIMITED_NETWORK {:?} {tail:?}", prepared.degradation);
+            .expect("native-network command prepares");
+        assert!(prepared.degradation.is_full(), "{:?}", prepared.degradation);
+        eprintln!("GRADLE_NATIVE_NETWORK {:?} {tail:?}", prepared.degradation);
         let output = tool_output::output(prepared);
-        assert_ok(&tool, "limited-network execution", output);
+        assert_ok(&tool, "native-network execution", output);
     }
     sandbox.close();
-    nub_sandbox::cleanup().expect("limited-network resources are reclaimed");
+    nub_sandbox::cleanup().expect("native-network resources are reclaimed");
 }
 
 fn cargo_project_target(tooldirs: Option<bool>) {
