@@ -3,11 +3,11 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use regex_automata::nfa::thompson::{State, NFA};
+use regex_automata::nfa::thompson::{NFA, State};
 use regex_automata::util::primitives::StateID;
 
-use crate::matcher::path::compile_glob;
 use crate::matcher::path::PathMatcher;
+use crate::matcher::path::compile_glob;
 use crate::policy::{Effect, FsAccess, FsRuleSet};
 
 // Match globset's own regex-NFA cap, so traversal accepts every glob grammar
@@ -380,6 +380,24 @@ mod tests {
         assert_eq!(MAX_TRAVERSAL_NFA_BYTES, 10 * (1 << 20));
         let pattern = format!("/app/{}file", "?".repeat(32 * 1024));
         assert!(Rules::compile(&set(&pattern, FsAccess::Read)).is_ok());
+    }
+
+    #[test]
+    fn recursive_prefix_traversal_preserves_newline_bytes() {
+        let rules = Rules::compile(&set("/app/pre{**/deep,x}/file", FsAccess::Read)).unwrap();
+        for path in [
+            "/app/preone\n",
+            "/app/preone\n/two",
+            "/app/preone\n/two/deep",
+        ] {
+            assert!(rules.traversable(Path::new(path)), "{path:?}");
+            assert_eq!(rules.access(Path::new(path)), None, "{path:?}");
+        }
+        assert_eq!(
+            rules.access(Path::new("/app/preone\n/two/deep/file")),
+            Some(FsAccess::Read)
+        );
+        assert!(!rules.traversable(Path::new("/app/unrelated\n")));
     }
 
     #[test]
