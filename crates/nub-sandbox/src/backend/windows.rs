@@ -5780,7 +5780,10 @@ mod tests {
             "the absolute root and a drive-relative C: must not collapse in IR"
         );
         let grants = derive_grants(&policy.fs);
-        assert_eq!(grants.read, vec![PathBuf::from("C:/")]);
+        // Folding keeps a redundant child when it does not exist or crosses a
+        // reparse point. That does not change the explicit root read authority.
+        assert!(grants.read.contains(&PathBuf::from("C:/")));
+        assert!(grants.read_nodes.is_empty());
         assert_eq!(grants.write, vec![PathBuf::from("C:/workspace")]);
 
         let root_rw = crate::compiler::compile(&json!({ "fs": { "C:/": "rw" } }), &ctx)
