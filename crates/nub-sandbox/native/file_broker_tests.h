@@ -83,6 +83,15 @@ extern "C" DWORD sandbox_file_broker_test_foreign_client(const wchar_t* name) {
 
 extern "C" DWORD sandbox_file_broker_test_quality() {
     using namespace nub_sandbox::file_broker;
+    if (valid_object_flags(0) || valid_object_flags(kIgnoreImpersonatedDeviceMap)) return ERROR_INVALID_DATA;
+    for (DWORD flags : {DWORD(OBJ_CASE_INSENSITIVE), DWORD(OBJ_CASE_INSENSITIVE | kIgnoreImpersonatedDeviceMap)}) {
+        if (!valid_object_flags(flags)) return ERROR_INVALID_DATA;
+        for (unsigned bit = 0; bit < 32; ++bit) {
+            DWORD added = 1u << bit;
+            bool expected = (added & ~(OBJ_CASE_INSENSITIVE | kIgnoreImpersonatedDeviceMap)) == 0;
+            if (valid_object_flags(flags | added) != expected) return ERROR_INVALID_DATA;
+        }
+    }
     SECURITY_QUALITY_OF_SERVICE quality = {};
     quality.Length = sizeof(quality);
     DWORD fields = 0;
@@ -157,6 +166,10 @@ extern "C" DWORD sandbox_file_broker_test_four_calls(const wchar_t* path, BOOL a
     DWORD failures = 0;
     for (DWORD i = 0; i < std::size(results); ++i) {
         if (allowed ? results[i] != 0 : results[i] != kDenied) failures |= 1u << (i + 4);
+    }
+    attrs.Attributes |= kIgnoreImpersonatedDeviceMap;
+    for (NTSTATUS status : {basic(&attrs, metadata), full(&attrs, metadata)}) {
+        if (allowed ? status != 0 : status != kDenied) failures |= 1u << 8;
     }
     return failures;
 }

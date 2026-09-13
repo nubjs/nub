@@ -96,7 +96,7 @@ static bool capture_file_request(nub_sandbox::file_broker::Request& request,
         if (object.RootDirectory) details.object_fields |= FileBrokerObjectRoot;
         if (object.SecurityDescriptor) details.object_fields |= FileBrokerObjectDescriptor;
         if (object.SecurityQualityOfService) details.object_fields |= FileBrokerObjectQualityOfService;
-        if (object.Attributes != OBJ_CASE_INSENSITIVE) details.object_fields |= FileBrokerObjectFlags;
+        if (!valid_object_flags(object.Attributes)) details.object_fields |= FileBrokerObjectFlags;
         if (!object.ObjectName) details.object_fields |= FileBrokerObjectName;
         if (details.object_fields & ~FileBrokerObjectQualityOfService) {
             failure = FileBrokerCaptureObjectAttributes;

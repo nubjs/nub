@@ -31,6 +31,15 @@ constexpr DWORD kWrite = FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FI
 constexpr DWORD kOptions = FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT |
     FILE_SEQUENTIAL_ONLY | FILE_RANDOM_ACCESS | FILE_WRITE_THROUGH | kDisallowExclusive;
 
+// Loader metadata requests select the process user's DOS device map. The
+// broker already resolves under its owner, never an impersonated client, and
+// does not forward object flags or pointers across the protocol.
+constexpr DWORD kIgnoreImpersonatedDeviceMap = 0x00000800;
+inline bool valid_object_flags(DWORD flags) {
+    return flags == OBJ_CASE_INSENSITIVE ||
+        flags == (OBJ_CASE_INSENSITIVE | kIgnoreImpersonatedDeviceMap);
+}
+
 enum QualityField : DWORD {
     QualityLength = 1,
     QualityImpersonation = 2,
