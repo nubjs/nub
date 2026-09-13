@@ -524,6 +524,11 @@ fn ordinary_open_contract(root: &Path, mediated: bool) {
         .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC)
         .open(&app)
         .unwrap();
+    assert_ne!(
+        unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_GETFL) } & libc::O_PATH,
+        0,
+        "directory must retain O_PATH semantics"
+    );
     let name = CString::new("native-rw").unwrap();
     let fd = unsafe {
         libc::openat(

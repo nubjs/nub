@@ -114,6 +114,20 @@ fn is_open(nr: libc::c_long) -> bool {
     }
 }
 
+fn scalar_path_only(req: &SeccompNotif) -> bool {
+    let nr = req.data.nr as libc::c_long;
+    let flags = if nr == libc::SYS_openat {
+        req.data.args[2] as u32
+    } else {
+        #[cfg(target_arch = "x86_64")]
+        if nr == libc::SYS_open {
+            return req.data.args[1] as u32 & libc::O_PATH as u32 != 0;
+        }
+        return false;
+    };
+    flags & libc::O_PATH as u32 != 0
+}
+
 fn open_task_path(task: &File, path: &CString, flags: i32) -> io::Result<File> {
     let fd = unsafe { libc::openat(task.as_raw_fd(), path.as_ptr(), flags | libc::O_CLOEXEC) };
     if fd < 0 {
@@ -166,6 +180,12 @@ fn capture(req: &SeccompNotif, client: &NativeOpenClient) -> io::Result<NativeOp
         }
     };
     if flags & libc::O_TMPFILE as u64 == libc::O_TMPFILE as u64 {
+        return Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP));
+    }
+    if flags & libc::O_PATH as u64 != 0 {
+        // ADDFD uses fget(), which excludes O_PATH. Unlike scalar flags,
+        // open_how is mutable: continuing it could deliver an ordinary FUSE
+        // file instead of a native descriptor. This route is still incomplete.
         return Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP));
     }
     // Byte reads stop at NUL, including a string ending at a mapping boundary.
@@ -264,6 +284,13 @@ pub(super) fn handle(
     if !notification_is_live(nfd, req.id) {
         return true;
     }
+    if scalar_path_only(req) {
+        // Register flags are immutable; the kernel opens the path only once.
+        // FUSE authorizes that actual lookup in the child's pinned chroot,
+        // not a previously inspected host path or mutable open_how snapshot.
+        reply_continue(nfd, req.id);
+        return true;
+    }
     let result = (|| {
         let request = capture(req, client)?;
         let flags = request.flags;
@@ -317,6 +344,27 @@ pub(super) unsafe fn close_except(first: RawFd, second: RawFd) -> Result<(), i32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_only_continuation_requires_scalar_register_flags() {
+        let mut req: SeccompNotif = unsafe { std::mem::zeroed() };
+        req.data.nr = libc::SYS_openat as i32;
+        req.data.args[2] = (libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC) as u64;
+        assert!(scalar_path_only(&req));
+        req.data.args[2] = libc::O_RDONLY as u64;
+        assert!(!scalar_path_only(&req));
+        req.data.nr = libc::SYS_openat2 as i32;
+        req.data.args[2] = libc::O_PATH as u64;
+        assert!(!scalar_path_only(&req));
+        #[cfg(target_arch = "x86_64")]
+        {
+            req.data.nr = libc::SYS_open as i32;
+            req.data.args[1] = libc::O_PATH as u64;
+            assert!(scalar_path_only(&req));
+            req.data.nr = libc::SYS_creat as i32;
+            assert!(!scalar_path_only(&req));
+        }
+    }
 
     fn verdict(nr: u32, arch: u32, args: [u64; 6]) -> u32 {
         let program = notifier();
