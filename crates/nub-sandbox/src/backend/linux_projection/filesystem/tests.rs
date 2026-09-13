@@ -99,6 +99,26 @@ fn assert_errno<T>(result: io::Result<T>, expected: i32) {
 }
 
 #[test]
+fn rename_rebase_keeps_a_leaf_at_its_exact_destination_spelling() {
+    assert_eq!(
+        rebase_path(
+            Path::new("/source.json"),
+            Path::new("/source.json"),
+            Path::new("/destination.json"),
+        ),
+        Some(PathBuf::from("/destination.json"))
+    );
+    assert_eq!(
+        rebase_path(
+            Path::new("/source.dir/child.json"),
+            Path::new("/source.dir"),
+            Path::new("/destination.dir"),
+        ),
+        Some(PathBuf::from("/destination.dir/child.json"))
+    );
+}
+
+#[test]
 fn kernel_open_flags_preserve_read_and_write_authority() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("read-only"), b"original").unwrap();

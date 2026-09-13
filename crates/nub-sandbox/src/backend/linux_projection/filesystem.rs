@@ -42,7 +42,13 @@ fn accepted_rename_flags(flags: u32) -> bool {
 }
 
 fn rebase_path(path: &Path, old: &Path, new: &Path) -> Option<PathBuf> {
-    path.strip_prefix(old).ok().map(|suffix| new.join(suffix))
+    path.strip_prefix(old).ok().map(|suffix| {
+        if suffix.as_os_str().is_empty() {
+            new.to_path_buf()
+        } else {
+            new.join(suffix)
+        }
+    })
 }
 
 fn normalize_open_flags(flags: i32) -> io::Result<i32> {
