@@ -105,7 +105,7 @@ The notification path has a measurable cost. In the [Linux release control](http
 
 ## Operating-system support
 
-The engine probes the facilities required by each policy at acquisition.
+The engine validates facilities required by a policy while acquiring its reusable resources and preparing each command. The one-shot `apply` API performs both steps.
 
 | Platform | Required facilities | Runtime coverage |
 | --- | --- | --- |

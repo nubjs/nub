@@ -34,15 +34,15 @@ The public library operations are [[crates/nub-sandbox/src/compiler/preset.rs#co
 
 | Platform | Filesystem and process enforcement | Network enforcement |
 | --- | --- | --- |
-| Linux | Landlock, seccomp and owned process groups | Socket restrictions and supervised per-host egress |
-| macOS | Seatbelt and owned process groups | Seatbelt restrictions and a policy proxy |
-| Windows | AppContainer, temporary ACL grants and Job Objects | Capability restrictions and a co-package egress helper |
+| Linux | Landlock, seccomp and owned process groups | Coarse socket policy |
+| macOS | Seatbelt and owned process groups | Coarse Seatbelt network policy |
+| Windows | AppContainer, temporary ACL grants and Job Objects | AppContainer network capabilities for filesystem-confined launches |
 
-None of these paths creates an account, requests elevation or installs a privileged helper. Windows per-host egress uses a helper in the same AppContainer package rather than a machine-wide loopback exemption. Unsupported Windows TLS-inspection and credential-broker policies fail closed.
+The dependency build jail selects coarse network allow or deny, not hostname rules. It uses the ordinary `apply` path; the embedded Windows native compatibility adapter remains a separate library opt-in. The reusable engine also offers per-host networking, including a Windows co-package egress helper. None of these paths creates an account, requests elevation or installs a privileged helper.
 
 ## Operating-system support
 
-The engine probes native facilities at acquisition.
+The engine validates required facilities while acquiring reusable resources and preparing each command. The one-shot `apply` API performs both steps.
 
 Linux filesystem confinement uses [Landlock](https://docs.kernel.org/userspace-api/landlock.html), whose available restrictions depend on its ABI; per-host networking and self-process metadata add seccomp requirements. macOS uses Seatbelt. Windows uses AppContainer and extended process startup, including [`PROC_THREAD_ATTRIBUTE_JOB_LIST`](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute#proc_thread_attribute_job_list).
 
@@ -52,7 +52,7 @@ The technical matrix and runtime coverage live in [`crates/nub-sandbox/README.md
 
 The build jail is defense in depth, not a boundary suitable for arbitrary hostile workloads. Catalog grants deliberately admit capabilities required by dependency builds.
 
-Windows full-disk catalog grants omit AppContainer. Those launches keep environment filtering and process-tree ownership but have no OS filesystem or network boundary. This compatibility tier covers packages whose build tools cannot operate under a LowBox token. Other policies may reject a launch when a required guarantee is unavailable; callers must surface reported degradation.
+Windows full-disk catalog grants omit AppContainer. Those launches keep environment filtering and process-tree ownership but have no OS filesystem or network boundary. This compatibility tier covers packages whose build tools cannot operate under a LowBox token. The dependency lifecycle adapter refuses a launch when required enforcement is unavailable; it does not run the script with reduced enforcement.
 
 Windows Node preloads are compressed inline modules. They need no writable preload file, and their combined environment value stays below the limit used by downstream tools such as MSBuild. Successful process creation alone does not establish that those tools can copy the environment.
 
