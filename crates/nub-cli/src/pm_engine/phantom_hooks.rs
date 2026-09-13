@@ -46,6 +46,11 @@ struct ScanOnExtract {
 
 impl ExtractObserver for ScanOnExtract {
     fn package_extracted(&self, extracted: ExtractedPackage<'_>) {
+        // Off under the same A/B seam the policy reads, so the disabled arm
+        // writes no sidecars rather than writing verdicts nothing consults.
+        if !dynamic_phantom::enabled() {
+            return;
+        }
         let Some(dir) = self.dir.get_or_init(dynamic_phantom::phantom_cache_dir) else {
             return;
         };
@@ -75,6 +80,13 @@ struct EjectPhantomImporters {
 
 impl MaterializePolicy for EjectPhantomImporters {
     fn materialize_locally(&self, resolved: &[ResolvedPackage<'_>]) -> HashSet<String> {
+        // The internal A/B seam turns the whole eject off — the configured
+        // seed included, exactly as it does for the other engine, where the
+        // expansion hook is simply never installed and every package takes
+        // the shared layout.
+        if !dynamic_phantom::enabled() {
+            return HashSet::new();
+        }
         let mut keep: HashSet<String> = resolved
             .iter()
             .filter(|package| self.seeds.iter().any(|seed| names(package.id, seed)))
@@ -95,17 +107,22 @@ impl EjectPhantomImporters {
         let (Some(cache_dir), Some(store_dir)) = (&self.cache_dir, &self.store_dir) else {
             return Vec::new();
         };
-        let Ok(index) = StoreIndex::open(store_dir) else {
+        // `StoreDir::from` applies the store-version suffix; `StoreIndex::open`
+        // takes a raw path and does not. Opening the unsuffixed path does not
+        // fail — it CREATES an empty index there and then answers "no such
+        // package" for everything — so the index is opened through the store
+        // handle, which is the only spelling that cannot drift from it.
+        let store = pnpm_store_dir::StoreDir::from(store_dir.clone());
+        let Ok(index) = StoreIndex::open_in(&store) else {
             return Vec::new();
         };
-        let store = pnpm_store_dir::StoreDir::from(store_dir.clone());
         resolved
             .iter()
             .filter(|package| {
-                package
+                let v = package
                     .index_key
-                    .and_then(|key| verdict(&index, &store, cache_dir, key))
-                    .is_some_and(|scan| scan.has_unguarded_phantom)
+                    .and_then(|key| verdict(&index, &store, cache_dir, key));
+                v.is_some_and(|scan| scan.has_unguarded_phantom)
             })
             .map(|package| package.id.to_owned())
             .collect()

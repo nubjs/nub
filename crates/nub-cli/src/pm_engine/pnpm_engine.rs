@@ -219,6 +219,17 @@ fn profile(selection: Selection) -> Result<Embedder> {
             let install = loaded
                 .map(|loaded| loaded.values.install)
                 .unwrap_or_default();
+            // `install.linker.eject` names the packages this project keeps
+            // out of the shared store. The other engine publishes it while
+            // building the session this path never enters, so without this
+            // the policy would see nub's built-in names and nothing the
+            // project asked for.
+            super::phantom_closure::set_native_config_seed(match &install.linker {
+                Some(crate::project_config::LinkerConfig::Global { eject: Some(eject) }) => {
+                    eject.clone()
+                }
+                _ => Vec::new(),
+            });
             publish_host_settings(host_settings::resolve(&cwd, &install)?);
             Embedder {
                 workspace_settings: Some(host_workspace_settings),
