@@ -1,0 +1,47 @@
+name: Windows socket capability discriminator
+on:
+  push:
+    branches: [socket-capability-discriminator]
+    paths:
+      - tests/socket-capability-discriminator/**
+      - .github/workflows/socket-capability-discriminator.yml
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: windows-2022
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - name: Compiling the native socket fixture
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force reports, out, reports/source, reports/binaries | Out-Null
+          git rev-parse HEAD | Set-Content reports/source-head.txt
+          Copy-Item tests/socket-capability-discriminator/* reports/source
+          Copy-Item .github/workflows/socket-capability-discriminator.yml reports/source
+          Get-FileHash reports/source/* -Algorithm SHA256 | ConvertTo-Json | Set-Content reports/source-hashes.json
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -property installationPath
+          @"
+          @echo off
+          call "$vs\VC\Auxiliary\Build\vcvarsall.bat" amd64
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /W4 /MT /EHsc tests\socket-capability-discriminator\probe.cpp /Fe:out\probe.exe /link advapi32.lib userenv.lib ws2_32.lib
+          "@ | Set-Content out/build.cmd
+          cmd /c out/build.cmd *> reports/build.log
+          if ($LASTEXITCODE -ne 0) { Get-Content reports/build.log; exit $LASTEXITCODE }
+          Copy-Item out/probe.exe reports/binaries
+          Get-FileHash reports/binaries/* -Algorithm SHA256 | ConvertTo-Json | Set-Content reports/binary-hashes.json
+      - name: Running the ordinary-user socket matrix
+        shell: pwsh
+        run: |
+          & tests/socket-capability-discriminator/run-standard-user.ps1 -ProbeBinary out/probe.exe -ReportDirectory reports
+          exit $LASTEXITCODE
+      - name: Uploading the exact fixture and results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: socket-capability-discriminator
+          path: reports
