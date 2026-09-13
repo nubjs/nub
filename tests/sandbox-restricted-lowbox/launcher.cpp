@@ -68,7 +68,7 @@ void launch(HANDLE token, const std::wstring& root, const wchar_t* label) {
     wprintf(L"CHILD_TOKEN_QUERY label=%ls api=%d error=%lu\n", label, queried, queried ? 0 : GetLastError());
     if (queried) { token_facts(actual, label); CloseHandle(actual); }
     DWORD resumed = ResumeThread(pi.hThread);
-    wprintf(L"RESUME label=%ls previous=%lu error=%lu\n", label, resumed, resumed == -1u ? GetLastError() : 0);
+    wprintf(L"RESUME label=%ls previous=%lu error=%lu\n", label, resumed, resumed == MAXDWORD ? GetLastError() : 0);
     DWORD wait = WaitForSingleObject(pi.hProcess, 15000), code = STILL_ACTIVE;
     if (wait != WAIT_OBJECT_0) {
         require(TerminateProcess(pi.hProcess, 92), L"terminate timeout child");
