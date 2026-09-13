@@ -196,7 +196,9 @@ inline bool final_name(HANDLE handle, wchar_t (&path)[kPath], DWORD& length) {
                                           FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
     if (size < 8 || size >= std::size(extended) || wcsncmp(extended, L"\\\\?\\", 4)) return false;
     length = size - 4;
-    memcpy(path, extended + 4, (length + 1) * sizeof(wchar_t));
+    // valid_path checks the entire padded buffer, including when a caller
+    // reuses it for a shorter name after a previous lookup.
+    memcpy(path, extended + 4, sizeof(path));
     return valid_path(path, length);
 }
 
