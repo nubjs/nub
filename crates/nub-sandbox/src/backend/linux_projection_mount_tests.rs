@@ -16,6 +16,8 @@ use std::time::{Duration, Instant};
 
 #[path = "linux_projection_exec_tests.rs"]
 mod exec_tests;
+#[path = "linux_projection_namespace_tests.rs"]
+mod namespace_tests;
 #[path = "linux_projection_native_tests.rs"]
 mod native_tests;
 
@@ -854,6 +856,7 @@ fn projection_mount_helper() {
         }
         _ if native_tests::run_role(&role, &root) => {}
         _ if exec_tests::run_role(&role, &root) => {}
+        _ if namespace_tests::run_role(&role, &root) => {}
         _ => panic!("unknown projection helper role {role}"),
     }
 }
