@@ -885,30 +885,66 @@ fn init_is_nub_own_and_never_redirects_to_a_pm() {
     );
 }
 
-/// The excluded verbs answer with their honest per-verb status, never the
-/// generic "wired in phase Surface" stub text (nothing is left in backlog).
+/// The verbs that answer for themselves rather than with stub text.
+///
+/// Four of the five this used to list are no longer excluded from anything:
+/// `clean` and `purge` run and exit 0 silently, byte-for-byte what pnpm
+/// 12.4.1 does on the same fixture, and `deploy` and `sbom` refuse with
+/// reasons of their own — a deploy that has no workspace to deploy from, and
+/// a required argument clap names. Asserting "not supported" for any of them
+/// would pin a status that is no longer true.
+///
+/// What survives is the claim the name makes: an answer is the verb's own,
+/// never the generic placeholder, and never another package manager's brand.
+/// `recursive` is the one that still refuses outright, and it keeps the
+/// wording because nub's `-r` really does belong to each verb.
 #[test]
 fn excluded_verbs_answer_honestly_not_with_stub_text() {
     let dir = pm_tmpdir("excluded");
-    for (verb, expect) in [
-        ("recursive", "verb's own workspace flags"),
-        ("clean", "not supported"),
-        ("purge", "not supported"),
-        ("deploy", "not yet supported"),
-        ("sbom", "not yet supported"),
-    ] {
+
+    let recursive = run_nub(&dir, &["recursive"]);
+    assert_ne!(recursive.code, 0, "recursive must error");
+    recursive.assert_brand_clean();
+    assert!(
+        recursive.stderr.contains("verb's own workspace flags"),
+        "recursive must explain its status: {}",
+        recursive.stderr
+    );
+
+    // Each refuses over something it names itself. Read as a pair — the exit
+    // code alone would also be satisfied by a crash, and the text alone by a
+    // command that printed a reason and then succeeded anyway. The reason
+    // differs by package manager (one has no deploy at all; the other has one
+    // and there is no workspace to deploy from), so the assertion is on the
+    // verb being named rather than on either wording.
+    for verb in ["deploy", "sbom"] {
         let out = run_nub(&dir, &[verb]);
         assert_ne!(out.code, 0, "{verb} must error");
+        assert!(
+            out.combined().to_lowercase().contains(verb),
+            "{verb} must name what it refused over: {}",
+            out.combined()
+        );
+    }
+
+    // `clean` and `purge` carry no exit-code claim here, and that is the
+    // honest reading rather than a gap. The two package managers in this tree
+    // answer them differently on purpose: one refuses to delete node_modules
+    // for you, the other runs and exits 0 silently because a project this bare
+    // has nothing to remove — measured byte-for-byte against pnpm 12.4.1,
+    // which is A1.2. Asserting either one reddens the other arm. The claim
+    // lands as an equality against real pnpm once the second package manager
+    // leaves the tree; until then these two are carried by the brand and
+    // stub-text sweep below, which holds whoever is serving.
+
+    // The claim the name carries, over every one of them.
+    for verb in ["recursive", "clean", "purge", "deploy", "sbom"] {
+        let out = run_nub(&dir, &[verb]);
         out.assert_brand_clean();
         assert!(
-            out.stderr.contains(expect),
-            "{verb} must explain its status: {}",
-            out.stderr
-        );
-        assert!(
-            !out.stderr.contains("wired in phase Surface"),
+            !out.combined().contains("wired in phase Surface"),
             "{verb} must not use the generic stub text: {}",
-            out.stderr
+            out.combined()
         );
     }
 }
@@ -1115,6 +1151,19 @@ fn warm_exact_re_pin_skips_the_network_while_a_range_still_resolves() {
 /// `set-script` and `token` are deliberately excluded — nub ships native verbs
 /// for both (a superset of pnpm's not-implemented list, v0.1.9), verified
 /// clean elsewhere; they are not refused.
+///
+/// `prefix` is excluded for the opposite reason: it is a real command that
+/// prints the project directory and exits 0, measured identical to pnpm
+/// 12.4.1's own. A list of things that are "not a command" cannot hold it.
+///
+/// The brand assertion reads case-insensitively and then names pnpm as
+/// forbidden outright. The refusals carry the brand only as the uppercase
+/// `ERR_NUB_*` code, so a case-sensitive search for `nub` found nothing in a
+/// message that was in fact correctly branded; and three of these commands
+/// used to answer a nub user with "not yet implemented in pnpm", which is the
+/// same leak in the other direction and is what the loosened check would have
+/// let through. This fixture is nub-identity, so pnpm has no business in any
+/// of its output.
 #[test]
 fn unimplemented_pm_commands_never_leak_npm() {
     let dir = pm_tmpdir("noleak");
@@ -1130,7 +1179,6 @@ fn unimplemented_pm_commands_never_leak_npm() {
         "access",
         "edit",
         "issues",
-        "prefix",
         "profile",
         "team",
         "xmas",
@@ -1147,8 +1195,14 @@ fn unimplemented_pm_commands_never_leak_npm() {
             out.stderr
         );
         assert!(
-            out.combined().contains("nub"),
+            lower.contains("nub"),
             "the refusal must be nub-branded:\nstdout: {}\nstderr: {}",
+            out.stdout,
+            out.stderr
+        );
+        assert!(
+            !lower.contains("pnpm"),
+            "`nub {cmd}` must not name the engine to a nub project:\nstdout: {}\nstderr: {}",
             out.stdout,
             out.stderr
         );
