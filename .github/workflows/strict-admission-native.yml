@@ -1,0 +1,92 @@
+name: Strict admission native gate
+
+on:
+  push:
+    branches: [strict-admission-native-7c3]
+    paths: [crates/nub-sandbox/**, Cargo.toml, Cargo.lock, .github/workflows/strict-admission-native.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            toolchain: stable
+          - os: macos-14
+            target: aarch64-apple-darwin
+            toolchain: stable
+          - os: macos-15
+            target: aarch64-apple-darwin
+            toolchain: stable
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            toolchain: stable-x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            toolchain: stable-x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+      SOURCE_COMMIT: 7c3a25ddd703fec380d6ed5cf798954a9cdb6e3b
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Selecting Windows compiler host
+        if: runner.os == 'Windows'
+        run: echo 'RUSTUP_OVERRIDE_HOST_TRIPLE=x86_64-pc-windows-msvc' >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: strict-admission-native
+      - name: Binding immutable source and runner
+        run: |
+          set -euo pipefail
+          mkdir -p reports/executables
+          test "$(git rev-parse "$SOURCE_COMMIT")" = "$SOURCE_COMMIT"
+          git diff --exit-code "$SOURCE_COMMIT" -- crates/nub-sandbox Cargo.toml Cargo.lock
+          { printf 'source_commit=%s\nprobe_head=%s\ntarget=%s\n' "$SOURCE_COMMIT" "$(git rev-parse HEAD)" "$CARGO_BUILD_TARGET"; uname -a || ver; rustc -Vv; cargo -V; } > reports/environment.txt
+      - name: Running focused native aggregate
+        run: |
+          set -euo pipefail
+          failures=0; : > reports/results.tsv
+          run_case() { name="$1"; shift; set +e; "$@" > "reports/$name.log" 2>&1; rc=$?; set -e; printf '%s\t%s\n' "$name" "$rc" | tee -a reports/results.tsv; [ "$rc" -eq 0 ] || failures=1; }
+          run_case lib-tests-compile cargo test --locked -p nub-sandbox --lib --no-run
+          run_case integration-tests-compile cargo test --locked -p nub-sandbox --tests --no-run
+          run_case examples-compile cargo build --locked -p nub-sandbox --examples
+          run_case shared-backend-units cargo test --locked -p nub-sandbox --lib backend::tests -- --nocapture --test-threads=1
+          if [ "$RUNNER_OS" = macOS ]; then
+            run_case tmp-grant-composition cargo test --locked -p nub-sandbox --test tmp_grant_composition -- --nocapture --test-threads=1
+            run_case macos-backend-units cargo test --locked -p nub-sandbox --lib backend::macos::tests -- --nocapture --test-threads=1
+            run_case macos-positive-grammar cargo test --locked -p nub-sandbox --test macos_positive_grammar -- --nocapture --test-threads=1
+            run_case macos-path-operations cargo test --locked -p nub-sandbox --test macos_path_operations -- --nocapture --test-threads=1
+            run_case broker-session-example cargo run --locked -p nub-sandbox --example broker_session_fixture
+          fi
+          if [ "$RUNNER_OS" = Windows ]; then
+            run_case windows-tmp-refusal cargo test --locked -p nub-sandbox --test windows_tmp_policy -- --nocapture --test-threads=1
+            run_case windows-public-preparation-loss cargo test --locked -p nub-sandbox --lib backend::tests::public_preparation_rejects_a_real_backend_loss -- --exact --nocapture --test-threads=1
+          fi
+          for binary in $(find "$CARGO_TARGET_DIR" -type f \( -path '*/deps/nub_sandbox-*' -o -path '*/deps/tmp_grant_composition-*' -o -path '*/deps/macos_positive_grammar-*' -o -path '*/deps/macos_path_operations-*' -o -path '*/deps/windows_tmp_policy-*' -o -path '*/examples/broker_session_fixture*' \) -perm -111 -print); do cp "$binary" "reports/executables/$(basename "$binary")"; done
+          { sha256sum reports/executables/* 2>/dev/null || shasum -a 256 reports/executables/*; grep -hE 'running [0-9]+ tests|test result:|BROKER_NATIVE_SESSION_OK' reports/*.log || true; } > reports/binaries-and-runtime.txt
+          exit "$failures"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: strict-admission-native-${{ matrix.os }}
+          path: reports
+          retention-days: 14
