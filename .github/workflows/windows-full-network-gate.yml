@@ -108,21 +108,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & cargo test -p nub-sandbox --profile fast --test windows_native_full_network --no-run --message-format=json-render-diagnostics > reports/windows-native-full-network-artifacts.jsonl
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & cargo build -p nub-sandbox --profile fast --example windows_relay_fixture --message-format=json-render-diagnostics > reports/windows-relay-fixture-artifacts.jsonl
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $library = @(Get-Content reports/windows-library-artifacts.jsonl | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.kind -contains 'lib' -and $_.executable })
           $tmp = @(Get-Content reports/windows-tmp-policy-artifacts.jsonl | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'windows_tmp_policy' -and $_.executable })
           $lifecycle = @(Get-Content reports/production-readiness-artifacts.jsonl | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'production_readiness_windows' -and $_.executable })
           $driver = @(Get-Content reports/windows-native-full-network-artifacts.jsonl | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'windows_native_full_network' -and $_.executable })
-          if ($library.Count -ne 1 -or $tmp.Count -ne 1 -or $lifecycle.Count -ne 1 -or $driver.Count -ne 1) { throw "Expected exact library, tmp, lifecycle, and full-network driver executables; library=$($library.Count) tmp=$($tmp.Count) lifecycle=$($lifecycle.Count) driver=$($driver.Count)" }
+          $relay = @(Get-Content reports/windows-relay-fixture-artifacts.jsonl | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'windows_relay_fixture' -and $_.target.kind -contains 'example' -and $_.executable })
+          if ($library.Count -ne 1 -or $tmp.Count -ne 1 -or $lifecycle.Count -ne 1 -or $driver.Count -ne 1 -or $relay.Count -ne 1) { throw "Expected exact library, tmp, lifecycle, full-network driver, and standalone relay executables; library=$($library.Count) tmp=$($tmp.Count) lifecycle=$($lifecycle.Count) driver=$($driver.Count) relay=$($relay.Count)" }
           Copy-Item $library[0].executable reports/binaries/nub_sandbox_lib.exe
           Copy-Item $tmp[0].executable reports/binaries/windows_tmp_policy.exe
           Copy-Item $lifecycle[0].executable reports/binaries/production_readiness_windows.exe
           Copy-Item $driver[0].executable reports/binaries/windows_native_full_network.exe
+          Copy-Item $relay[0].executable reports/binaries/windows_relay_fixture.exe
           Get-FileHash -Algorithm SHA256 reports/binaries/* | Select-Object Path, Algorithm, Hash | ConvertTo-Json | Set-Content -Encoding utf8 reports/binary-sha256.json
       - name: Running focused full-network gate as an ordinary user
         if: ${{ steps.build_tests.outcome == 'success' }}
         shell: pwsh
         run: |
-          $parameters = @{ FixtureBinary = (Join-Path $PWD 'reports/binaries/native-full-network.exe'); LibraryBinary = (Join-Path $PWD 'reports/binaries/nub_sandbox_lib.exe'); TmpBinary = (Join-Path $PWD 'reports/binaries/windows_tmp_policy.exe'); NetworkBinary = (Join-Path $PWD 'reports/binaries/windows_native_full_network.exe'); BinaryManifest = (Join-Path $PWD 'reports/binary-sha256.json'); ReportDirectory = 'reports/full-network-standard-user' }
+          $parameters = @{ FixtureBinary = (Join-Path $PWD 'reports/binaries/native-full-network.exe'); LibraryBinary = (Join-Path $PWD 'reports/binaries/nub_sandbox_lib.exe'); TmpBinary = (Join-Path $PWD 'reports/binaries/windows_tmp_policy.exe'); NetworkBinary = (Join-Path $PWD 'reports/binaries/windows_native_full_network.exe'); RelayBinary = (Join-Path $PWD 'reports/binaries/windows_relay_fixture.exe'); BinaryManifest = (Join-Path $PWD 'reports/binary-sha256.json'); ReportDirectory = 'reports/full-network-standard-user' }
           $fileBrokerSource = 'crates/nub-sandbox/native/file_broker_fixture.c'
           $fileBrokerFixture = Join-Path $PWD 'reports/binaries/file-broker-fixture.dll'
           if (Test-Path -LiteralPath $fileBrokerSource -PathType Leaf) {

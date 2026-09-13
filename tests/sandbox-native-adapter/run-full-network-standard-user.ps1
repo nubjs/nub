@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory=$true)][string]$LibraryBinary,
     [Parameter(Mandatory=$true)][string]$TmpBinary,
     [Parameter(Mandatory=$true)][string]$NetworkBinary,
+    [Parameter(Mandatory=$true)][string]$RelayBinary,
     [Parameter(Mandatory=$true)][string]$BinaryManifest,
     [string]$FileBrokerFixtureBinary,
     [Parameter(Mandatory=$true)][string]$ReportDirectory
@@ -11,7 +12,7 @@ param(
 # Runs only staged, hash-recorded artifacts under a new ordinary local account.
 # It intentionally does not alter firewall, DNS, or machine-wide network policy.
 $ErrorActionPreference = 'Stop'
-foreach ($path in @($FixtureBinary, $LibraryBinary, $TmpBinary, $NetworkBinary)) {
+foreach ($path in @($FixtureBinary, $LibraryBinary, $TmpBinary, $NetworkBinary, $RelayBinary)) {
     if (!(Test-Path -LiteralPath $path -PathType Leaf)) { throw "Required artifact is missing: $path" }
 }
 if (!(Test-Path -LiteralPath $BinaryManifest -PathType Leaf)) { throw "Binary manifest is missing: $BinaryManifest" }
@@ -31,6 +32,7 @@ try {
     Copy-Item $LibraryBinary (Join-Path $stage 'nub_sandbox_lib.exe')
     Copy-Item $TmpBinary (Join-Path $stage 'windows_tmp_policy.exe')
     Copy-Item $NetworkBinary (Join-Path $stage 'windows_native_full_network.exe')
+    Copy-Item $RelayBinary (Join-Path $stage 'windows_relay_fixture.exe')
     if ($FileBrokerFixtureBinary) { Copy-Item $FileBrokerFixtureBinary (Join-Path $stage 'file-broker-fixture.dll') }
     Copy-Item $BinaryManifest (Join-Path $stage 'binary-sha256.json')
 @'
@@ -44,7 +46,7 @@ $env:TEMP = Join-Path $env:LOCALAPPDATA 'Temp'; $env:TMP = $env:TEMP
 New-Item -ItemType Directory -Force $env:TEMP | Out-Null
 $owned = Join-Path $profileRoot 'sandbox-native-full-network-gate'
 New-Item -ItemType Directory -Force $owned | Out-Null
-foreach ($file in @('native-full-network.exe', 'nub_sandbox_lib.exe', 'windows_tmp_policy.exe', 'windows_native_full_network.exe')) {
+foreach ($file in @('native-full-network.exe', 'nub_sandbox_lib.exe', 'windows_tmp_policy.exe', 'windows_native_full_network.exe', 'windows_relay_fixture.exe')) {
     Copy-Item (Join-Path $Stage $file) (Join-Path $owned $file) -Force
 }
 $fileBrokerFixture = Join-Path $Stage 'file-broker-fixture.dll'
@@ -61,7 +63,7 @@ function Sha256([string]$Path) {
 }
 $expected = @{}
 @((Get-Content (Join-Path $Stage 'binary-sha256.json') -Raw | ConvertFrom-Json)) | ForEach-Object { $expected[[IO.Path]::GetFileName($_.Path)] = $_.Hash.ToLowerInvariant() }
-foreach ($file in @('native-full-network.exe', 'nub_sandbox_lib.exe', 'windows_tmp_policy.exe', 'windows_native_full_network.exe')) {
+foreach ($file in @('native-full-network.exe', 'nub_sandbox_lib.exe', 'windows_tmp_policy.exe', 'windows_native_full_network.exe', 'windows_relay_fixture.exe')) {
     $actual = Sha256 (Join-Path $owned $file)
     if (!$expected.ContainsKey($file) -or $actual -ne $expected[$file]) { throw "Staged binary hash mismatch: $file" }
     Write-Host "STANDARD_USER_FULL_NETWORK_SHA256=${file}:$actual"
@@ -74,6 +76,7 @@ if ($fileBrokerFixture) {
 Set-Location $owned
 whoami /all
 $env:NUB_WINDOWS_NATIVE_FULL_NETWORK_FIXTURE = Join-Path $owned 'native-full-network.exe'
+$env:NUB_WINDOWS_RELAY_FIXTURE = Join-Path $owned 'windows_relay_fixture.exe'
 if ($fileBrokerFixture) { $env:NUB_FILE_BROKER_TEST_DLL = $fileBrokerFixture }
 $env:NUB_JAIL_DUMP_POLICY = '1'
 Write-Host "STANDARD_USER_FULL_NETWORK_PROFILE=$profileRoot"
