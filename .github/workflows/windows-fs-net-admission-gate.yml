@@ -1,0 +1,146 @@
+name: Windows filesystem network admission gate
+
+on:
+  push:
+    branches: [windows-fs-net-admission-gate]
+    paths:
+      - 'crates/nub-sandbox/**'
+      - 'tests/sandbox-native-adapter/run-standard-user.ps1'
+      - '.github/workflows/windows-fs-net-admission-gate.yml'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  windows-fs-net-admission:
+    name: filesystem network admission (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2022, windows-11-arm]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Recording source and runtime environment
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force reports, reports/binaries | Out-Null
+          @{
+            source = (git rev-parse HEAD)
+            sourceStatus = @(git status --short)
+            runner = '${{ matrix.runner }}'
+            os = [Environment]::OSVersion.VersionString
+            architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+            rustc = (& rustc --version)
+            cargo = (& cargo --version)
+          } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 reports/source-runtimeenv.json
+      - name: Compiling Windows backend and registry test preflight
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p nub-sandbox --profile fast --lib --no-run 2>&1 | tee reports/windows-library-preflight.log
+      - name: Building standard-user test binaries
+        id: build_tests
+        shell: pwsh
+        run: |
+          & cargo test -p nub-sandbox --profile fast --test windows_tmp_policy --no-run --message-format=json-render-diagnostics > reports/windows-tmp-policy-artifacts.jsonl
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & cargo test -p nub-sandbox --profile fast --test production_readiness_windows --no-run --message-format=json-render-diagnostics > reports/production-readiness-artifacts.jsonl
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & cargo test -p nub-sandbox --profile fast --lib --no-run --message-format=json-render-diagnostics > reports/windows-library-artifacts.jsonl
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $tmp = @(Get-Content reports/windows-tmp-policy-artifacts.jsonl | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'windows_tmp_policy' -and $_.executable })
+          $lifecycle = @(Get-Content reports/production-readiness-artifacts.jsonl | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'production_readiness_windows' -and $_.executable })
+          $library = @(Get-Content reports/windows-library-artifacts.jsonl | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.kind -contains 'lib' -and $_.executable })
+          if ($tmp.Count -ne 1 -or $lifecycle.Count -ne 1 -or $library.Count -ne 1) { throw "Expected exact tmp, lifecycle, and library test executables; tmp=$($tmp.Count) lifecycle=$($lifecycle.Count) library=$($library.Count)" }
+          Copy-Item $tmp[0].executable reports/binaries/windows_tmp_policy.exe
+          Copy-Item $lifecycle[0].executable reports/binaries/production_readiness_windows.exe
+          Copy-Item $library[0].executable reports/binaries/nub_sandbox_lib.exe
+          Get-FileHash -Algorithm SHA256 reports/binaries/*.exe | Select-Object Path, Algorithm, Hash | ConvertTo-Json | Set-Content -Encoding utf8 reports/binary-sha256.json
+      - name: Running tmp:false policy and reuse as a standard user
+        if: ${{ steps.build_tests.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $report = Join-Path $PWD 'reports/tmp-standard-user'
+          New-Item -ItemType Directory -Force $report | Out-Null
+          $name = 'sbx' + [guid]::NewGuid().ToString('N').Substring(0, 10)
+          $stage = Join-Path $env:PUBLIC $name
+          $password = ConvertTo-SecureString ([guid]::NewGuid().ToString('N') + '!aA1') -AsPlainText -Force
+          $user = $null; $process = $null; $exitCode = 1
+          try {
+            $user = New-LocalUser -Name $name -Password $password -AccountNeverExpires -PasswordNeverExpires
+            Add-LocalGroupMember -Group (Get-LocalGroup -SID 'S-1-5-32-545') -Member $name
+            New-Item -ItemType Directory -Force $stage | Out-Null
+            Copy-Item (Join-Path $PWD 'reports/binaries/windows_tmp_policy.exe') (Join-Path $stage 'windows_tmp_policy.exe')
+            Copy-Item (Join-Path $PWD 'reports/binaries/nub_sandbox_lib.exe') (Join-Path $stage 'nub_sandbox_lib.exe')
+          @'
+          param([string]$Stage)
+          $ErrorActionPreference = 'Stop'
+          $profileRoot = [Environment]::GetFolderPath('UserProfile')
+          if (!$profileRoot -or $profileRoot -like '*systemprofile*') { throw 'A normal user profile is required' }
+          $env:USERPROFILE = $profileRoot; $env:HOME = $profileRoot
+          $env:APPDATA = [IO.Path]::Combine($profileRoot, 'AppData', 'Roaming')
+          $env:LOCALAPPDATA = [IO.Path]::Combine($profileRoot, 'AppData', 'Local')
+          $env:TEMP = [IO.Path]::Combine($env:LOCALAPPDATA, 'Temp'); $env:TMP = $env:TEMP
+          [void][IO.Directory]::CreateDirectory($env:TEMP)
+          $owned = [IO.Path]::Combine($profileRoot, 'sandbox-tmp-native-gate')
+          [void][IO.Directory]::CreateDirectory($owned)
+          foreach ($file in @('windows_tmp_policy.exe', 'nub_sandbox_lib.exe')) { [IO.File]::Copy([IO.Path]::Combine($Stage, $file), [IO.Path]::Combine($owned, $file), $true) }
+          whoami /all
+          Write-Host "STANDARD_USER_TMP_PROFILE=$profileRoot"
+          function Run-Fixture([string]$file, [string]$label, [string[]]$arguments, [hashtable]$environment) {
+            $exe=[IO.Path]::Combine($owned,$file); $out=[IO.Path]::Combine($owned,"$label.stdout.log"); $err=[IO.Path]::Combine($owned,"$label.stderr.log")
+            $info=New-Object Diagnostics.ProcessStartInfo; $info.FileName=$exe; $info.WorkingDirectory=$owned; $info.UseShellExecute=$false; $info.RedirectStandardOutput=$true; $info.RedirectStandardError=$true
+            # The elevated runner has PowerShell 7, but the ordinary-user launch deliberately
+            # uses Windows PowerShell 5 where ProcessStartInfo.ArgumentList is unavailable.
+            # These fixed test-harness arguments contain no whitespace or shell metacharacters.
+            $info.Arguments = [string]::Join(' ', $arguments)
+            foreach ($entry in $environment.GetEnumerator()) { $info.Environment[$entry.Key] = $entry.Value }
+            $proc=New-Object Diagnostics.Process; $proc.StartInfo=$info
+            try { if(!$proc.Start()){throw "Could not start $label"}; $outTask=$proc.StandardOutput.ReadToEndAsync(); $errTask=$proc.StandardError.ReadToEndAsync(); if(!$proc.WaitForExit(300000)){ $proc.Kill(); $proc.WaitForExit(30000); throw "$label timed out" }; if(![Threading.Tasks.Task]::WaitAll(@($outTask,$errTask),30000)){throw "$label output drain timed out"}; [IO.File]::WriteAllText($out,$outTask.Result); [IO.File]::WriteAllText($err,$errTask.Result); return @{code=$proc.ExitCode;out=$out;err=$err;text=$outTask.Result+$errTask.Result} } catch { [IO.File]::WriteAllText($err,$_.Exception.ToString()); return @{code=1;out=$out;err=$err;text=$_.Exception.ToString()} } finally { if($proc){$proc.Dispose()} }
+          }
+          $runs = @(
+            @{file='windows_tmp_policy.exe';label='tmp-policy';filter=@('--nocapture','--test-threads=1');env=@{};summary='test result: ok. 6 passed; 0 failed; 0 ignored;'},
+            @{file='nub_sandbox_lib.exe';label='windows-cleanup';filter=@('backend::windows::windows_cleanup_tests','--nocapture','--test-threads=1');env=@{};summary='test result: ok. 16 passed; 0 failed; 1 ignored;'},
+            @{file='nub_sandbox_lib.exe';label='windows-native-child';filter=@('backend::windows::native_child_tests','--nocapture','--test-threads=1');env=@{};summary='test result: ok. 20 passed; 0 failed; 0 ignored;'},
+            @{file='nub_sandbox_lib.exe';label='windows-registry';filter=@('backend::windows::windows_registry::tests','--nocapture','--test-threads=1');env=@{};summary='test result: ok. 22 passed; 0 failed; 0 ignored;'},
+            @{file='nub_sandbox_lib.exe';label='windows-full-disk-admission';filter=@('backend::windows::tests::apply_windows_full_disk_rejects_restricted_network','--nocapture','--test-threads=1');env=@{};summary='test result: ok. 1 passed; 0 failed; 0 ignored;'},
+            @{file='nub_sandbox_lib.exe';label='public-full-disk-admission';filter=@('backend::tests::public_preparation_rejects_unrestricted_filesystem_with_restricted_network','--nocapture','--test-threads=1');env=@{};summary='test result: ok. 1 passed; 0 failed; 0 ignored;'},
+            @{file='nub_sandbox_lib.exe';label='embedded-native-adapter';filter=@('backend::windows_native_adapter_probe::embedded_native_adapter_primitives_with_raw_and_plain_controls','--nocapture','--test-threads=1');env=@{NUB_NATIVE_EMBEDDED_ADAPTER='1'};summary='test result: ok. 1 passed; 0 failed; 0 ignored;'}
+          )
+          $failed = $false
+          foreach ($run in $runs) {
+            $result=Run-Fixture $run.file $run.label $run.filter $run.env
+            foreach($path in @($result.out,$result.err)) { if (Test-Path $path) { [IO.File]::Copy($path,[IO.Path]::Combine($Stage,[IO.Path]::GetFileName($path)),$true); [Console]::Out.WriteLine([IO.File]::ReadAllText($path)) } }
+            Write-Host "STANDARD_USER_FILTER_EXIT=$($run.label):$($result.code)"
+            if ($result.code -ne 0 -or !$result.text.Contains($run.summary) -or $result.text -notmatch 'running [1-9][0-9]* test(s)?') { $failed = $true }
+          }
+          if ($failed) { exit 1 }
+          '@ | Set-Content -Encoding ascii (Join-Path $stage 'run-tmp-policy.ps1')
+            icacls $stage /grant "${name}:(OI)(CI)RX" /T | Tee-Object "$report/stage-acl.log"
+            if ($LASTEXITCODE -ne 0) { throw 'Granting staged artifact access failed' }
+            $credential = New-Object System.Management.Automation.PSCredential("$env:COMPUTERNAME\$name", $password)
+            Start-Service seclogon
+            $process = Start-Process powershell.exe -Credential $credential -LoadUserProfile -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',"$stage\run-tmp-policy.ps1",$stage) -WorkingDirectory $stage -PassThru -RedirectStandardOutput "$report/standard-user.log" -RedirectStandardError "$report/standard-user-error.log"
+            if (!$process.WaitForExit(1200000)) { taskkill /PID $process.Id /T /F | Out-Null; throw 'Tmp fixture exceeded deadline' }
+            $process.WaitForExit(); $exitCode = $process.ExitCode
+            Get-Content "$report/standard-user.log" -ErrorAction Continue; Get-Content "$report/standard-user-error.log" -ErrorAction Continue
+            Get-ChildItem $stage -Filter '*.log' | Copy-Item -Destination $report
+          } finally {
+            $cleanup=@{user=$name;errors=@()}; if ($user) { try { Get-CimInstance Win32_UserProfile -Filter "SID='$($user.SID.Value)'" | Remove-CimInstance } catch {$cleanup.errors += $_.Exception.Message}; try {Remove-LocalUser -Name $name} catch {$cleanup.errors += $_.Exception.Message} }; try {if(Test-Path $stage){Remove-Item -Recurse -Force $stage}} catch {$cleanup.errors += $_.Exception.Message}; $cleanup|ConvertTo-Json -Depth 3|Set-Content -Encoding utf8 "$report/cleanup.json"; if($cleanup.errors.Count){$exitCode=1}
+          }
+          exit $exitCode
+      - name: Running existing lifecycle regression as a standard user
+        if: ${{ steps.build_tests.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          & ./tests/sandbox-native-adapter/run-standard-user.ps1 -TestBinary (Join-Path $PWD 'reports/binaries/production_readiness_windows.exe') -ReportDirectory reports/lifecycle-standard-user
+          exit $LASTEXITCODE
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-fs-net-admission-gate-${{ matrix.runner }}
+          if-no-files-found: warn
+          path: reports/
