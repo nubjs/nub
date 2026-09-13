@@ -43,7 +43,7 @@ The standard cache roots are `XDG_CACHE_HOME` or `~/.cache` on Linux, `~/Library
 }
 ```
 
-The array form `{"fs":["./","$tooldirs","$tmp"]}` means read-write. The object form makes access explicit. Private temp accepts `"rw"` or `true`; `false` requests no temp access. It rejects read-only access and suffixes such as `$tmp/work`. The tool-directory set also takes no suffix.
+The array form `{"fs":["./","$tooldirs","$tmp"]}` means read-write. The object form makes access explicit. Private temp accepts `"rw"` or `true`; `false` requests no temp access. It rejects read-only access and suffixes such as `$tmp/work`. The tool-directory set also takes no suffix. Windows currently rejects `$tmp: false` before launch because its backend does not implement denial of Windows-managed temporary storage.
 
 Broad home reads can be combined with writes limited to the project and private temporary storage:
 

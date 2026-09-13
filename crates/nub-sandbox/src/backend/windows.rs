@@ -782,6 +782,18 @@ pub(crate) fn apply(
     let tmp_lost = super::tmp_lost_axis(policy);
     let private_tmp = policy.fs.tmp == crate::policy::TmpMode::Private;
 
+    // The current launch paths do not remove access to Windows-managed temporary
+    // storage. Reject the requested restriction before acquiring any profile or ACEs.
+    if policy.fs.tmp == crate::policy::TmpMode::Deny {
+        return Err(Degradation {
+            lost: vec!["tmp-deny".to_string()],
+            reason: Some(
+                "denying all temporary storage is not implemented by the Windows backend"
+                    .to_string(),
+            ),
+        });
+    }
+
     // Derived HERE rather than beside its other consumers below because `verify_clean_root`
     // needs `publishable` — the subtrees nub publishes to `ALL APPLICATION PACKAGES` — to tell
     // its own ace from a foreign one. Pure over the policy apart from an `exists()` per rule,
@@ -992,14 +1004,6 @@ pub(crate) fn apply(
     // OpenProcess(PROCESS_VM_READ), run 29043151805 — so NO `env-read-ascendant`
     // Degradation is emitted. Reporting it would falsely tell a frontend Windows is
     // degraded when it isn't. See the module doc.)
-    // The AppContainer owns private temporary storage. A deny-all temp policy
-    // remains unsupported because Windows itself grants the profile's storage.
-    if let Some(axis) = tmp_lost.filter(|_| !private_tmp) {
-        deg.lost.push(axis.to_string());
-        reason.get_or_insert_with(|| {
-            "denying all temporary storage is not supported by Windows AppContainer".to_string()
-        });
-    }
     deg.reason = reason;
 
     let launch = AppContainerLaunch {
@@ -5289,6 +5293,33 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
+    fn apply_windows_tmp_deny_rejects_before_working_directory_preflight() {
+        for build_jail in [false, true] {
+            let policy = SandboxPolicy {
+                fs: FsPolicy {
+                    tmp: crate::policy::TmpMode::Deny,
+                    ..Default::default()
+                },
+                build_jail,
+                ..Default::default()
+            };
+            let result = apply(
+                &policy,
+                crate::CommandSpec::new("cmd.exe"),
+                None,
+                None,
+                None,
+                None,
+            );
+            let Err(error) = result else {
+                panic!("temporary storage denial must fail before launch");
+            };
+            assert_eq!(error.lost, ["tmp-deny"]);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
     fn apply_windows_full_disk_build_jail_rejects_restricted_network() {
         use crate::policy::{CredentialBroker, NetPolicy, NetRule, NetTarget};
         let full_disk = |net: NetPolicy| SandboxPolicy {
@@ -5355,7 +5386,7 @@ mod tests {
             None,
         )
         .expect("unrestricted network remains supported by the full-disk compatibility tier");
-        assert_eq!(prepared.degradation, Degradation::full());
+        assert_eq!(prepared.degradation, crate::Degradation::full());
         assert!(prepared.launch.is_some());
     }
 }
