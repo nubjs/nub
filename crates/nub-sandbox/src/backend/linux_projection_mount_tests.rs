@@ -117,16 +117,22 @@ fn caps() -> [CapData; 2] {
     data
 }
 
-fn confined_launch(cmd: &mut Command, mountpoint: &Path) {
+fn confined_launch(cmd: &mut Command, mountpoint: &Path, fuse_fd: i32) {
     let mountpoint = CString::new(mountpoint.as_os_str().as_bytes()).unwrap();
     let parent = unsafe { libc::getpid() };
     unsafe {
         cmd.pre_exec(move || {
             parent_death(parent)?;
-            // Includes the FUSE connection, backing root, and all provider pins.
-            // This also closes std's exec-error pipe: readiness/exit assertions,
-            // not spawn() alone, therefore establish successful child setup.
-            checked(libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) as i32)?;
+            // Preserve std's exec-error pipe until exec, so a launch failure
+            // reports its errno. No backing authority survives into user code.
+            checked(libc::syscall(
+                libc::SYS_close_range,
+                3u32,
+                u32::MAX,
+                libc::CLOSE_RANGE_CLOEXEC,
+            ) as i32)?;
+            // A child blocked before exec must not keep the connection alive.
+            checked(libc::close(fuse_fd))?;
             checked(libc::chroot(mountpoint.as_ptr()))?;
             checked(libc::chdir(c"/".as_ptr()))?;
             checked(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0))?;
@@ -425,6 +431,7 @@ fn provider(root: &Path, owner_loss: bool) {
     for name in ["run", "math.so"] {
         fs::rename(root.join(name), root.join("raw/app").join(name)).unwrap();
     }
+    let fuse_fd = fuse.as_raw_fd();
     let server = std::thread::spawn(move || projection.serve(fuse.into()));
     let mut cmd = helper(
         Path::new("/app/run"),
@@ -436,7 +443,7 @@ fn provider(root: &Path, owner_loss: bool) {
         Path::new("/"),
     );
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped());
-    confined_launch(&mut cmd, &mountpoint);
+    confined_launch(&mut cmd, &mountpoint, fuse_fd);
     let mut command = cmd.spawn().unwrap();
     let mut output = BufReader::new(command.stdout.take().unwrap());
     if owner_loss {
@@ -475,7 +482,7 @@ fn provider(root: &Path, owner_loss: bool) {
 }
 
 fn audit_command() {
-    // close_range before chroot covers the entire descriptor range. This
+    // close_range(CLOEXEC) covers the entire descriptor range before exec. This
     // post-exec sample also catches ordinary loader/reentry descriptor leaks.
     for fd in 3..1024 {
         assert_eq!(
