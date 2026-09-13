@@ -70,9 +70,18 @@ fn tls_request(
     config: Arc<rustls::ClientConfig>,
     marker: &str,
 ) -> io::Result<String> {
+    tls_request_to(socket, config, marker, "localhost")
+}
+
+fn tls_request_to(
+    socket: TcpStream,
+    config: Arc<rustls::ClientConfig>,
+    marker: &str,
+    server_name: &'static str,
+) -> io::Result<String> {
     deadlines(&socket);
     let conn =
-        rustls::ClientConnection::new(config, ServerName::try_from("localhost").unwrap()).unwrap();
+        rustls::ClientConnection::new(config, ServerName::try_from(server_name).unwrap()).unwrap();
     let mut tls = rustls::StreamOwned::new(conn, socket);
     write!(
         tls,
@@ -87,6 +96,7 @@ fn tls_request(
     Ok(reply)
 }
 
+#[cfg(not(target_os = "linux"))]
 fn tunnel(token: &str, endpoint: &str, target: &str) -> (TcpStream, String) {
     let mut socket = TcpStream::connect(endpoint).unwrap();
     deadlines(&socket);
@@ -118,26 +128,48 @@ fn child() {
         .map(|entry| CertificateDer::from(entry.into_contents()))
         .collect();
     let config = client_config(certs);
+    #[cfg(not(target_os = "linux"))]
     let proxy = std::env::var("HTTPS_PROXY").unwrap();
-    let (token, endpoint) = proxy
-        .strip_prefix("http://")
-        .unwrap()
-        .split_once('@')
-        .unwrap();
-    assert!(
-        tunnel("wrong-token", endpoint, "denied.example:443")
-            .1
-            .starts_with("HTTP/1.1 407")
-    );
-    assert!(
-        tunnel(token, endpoint, "denied.example:443")
-            .1
-            .starts_with("HTTP/1.1 403")
-    );
+    #[cfg(not(target_os = "linux"))]
+    let (token, endpoint) = {
+        let (token, endpoint) = proxy
+            .strip_prefix("http://")
+            .unwrap()
+            .split_once('@')
+            .unwrap();
+        assert!(
+            tunnel("wrong-token", endpoint, "denied.example:443")
+                .1
+                .starts_with("HTTP/1.1 407")
+        );
+        assert!(
+            tunnel(token, endpoint, "denied.example:443")
+                .1
+                .starts_with("HTTP/1.1 403")
+        );
+        (token, endpoint)
+    };
+    #[cfg(target_os = "linux")]
+    {
+        // Linux routes raw connects in the supervisor; no proxy token enters the child.
+        assert!(std::env::var_os("HTTPS_PROXY").is_none());
+        let port = std::env::var(PORT).unwrap().parse::<u16>().unwrap();
+        let socket = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
+        assert!(
+            tls_request_to(socket, Arc::clone(&config), &marker, "denied.example").is_err(),
+            "an allowed address must not admit an unapproved TLS hostname"
+        );
+    }
     for (key, accepted) in [(PORT, true), (BAD_PORT, false)] {
-        let target = format!("localhost:{}", std::env::var(key).unwrap());
-        let (socket, reply) = tunnel(token, endpoint, &target);
-        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        let port = std::env::var(key).unwrap().parse::<u16>().unwrap();
+        #[cfg(target_os = "linux")]
+        let socket = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
+        #[cfg(not(target_os = "linux"))]
+        let socket = {
+            let (socket, reply) = tunnel(token, endpoint, &format!("localhost:{port}"));
+            assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+            socket
+        };
         let response = tls_request(socket, Arc::clone(&config), &marker);
         if accepted {
             assert!(response.unwrap().starts_with("HTTP/1.1 200"));
@@ -185,6 +217,8 @@ fn upstream(
                     Err(error) => panic!("upstream accept: {error}"),
                 }
             };
+            // Darwin inherits O_NONBLOCK from the accepting listener; TLS I/O here is blocking.
+            socket.set_nonblocking(false).unwrap();
             deadlines(&socket);
             let conn = rustls::ServerConnection::new(Arc::clone(&config)).unwrap();
             let mut tls = rustls::StreamOwned::new(conn, socket);
@@ -277,9 +311,16 @@ fn parent() {
         ScopeCapabilities::approved(),
         ambient,
     );
+    // A raw loopback connect has no observed DNS name on Linux. Admit its exact address while
+    // retaining the separate SNI hostname gate; this does not grant private ranges generally.
+    let network = if cfg!(target_os = "linux") {
+        json!(["localhost", "127.0.0.1"])
+    } else {
+        json!(["localhost"])
+    };
     let mut policy = compile(&json!({
         "fs": {(project.display().to_string()): "rw", (exe.display().to_string()): "r", "$tmp": "rw"},
-        "net": ["localhost"], "secrets": {SECRET: {"brokerTo": ["localhost"]}}
+        "net": network, "secrets": {SECRET: {"brokerTo": ["localhost"]}}
     }), &ctx).unwrap();
     policy.env.constructed.extend(environment);
     policy.env.constructed.extend([
@@ -326,6 +367,6 @@ fn parent() {
         ]
     );
     println!(
-        "BROKER_NATIVE_SESSION_OK verified TLS injection untrusted upstream denial auth host denial confined child reuse"
+        "BROKER_NATIVE_SESSION_OK verified TLS injection untrusted upstream denial host denial confined child reuse"
     );
 }
