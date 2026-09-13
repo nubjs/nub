@@ -409,3 +409,240 @@ fn readonly_truncate_requires_write_authority_but_returns_a_readonly_handle() {
         libc::O_RDONLY
     );
 }
+
+#[test]
+fn namespace_mutations_follow_matching_names_and_kernel_results() {
+    let root = tempfile::tempdir().unwrap();
+    let generated = root.path().join("generated");
+    std::fs::create_dir(&generated).unwrap();
+    std::fs::write(generated.join("source.json"), b"source").unwrap();
+    std::fs::write(generated.join("near.txt"), b"near").unwrap();
+    let fs = projection(
+        root.path(),
+        &[
+            ("/generated/*.json", FsAccess::ReadWrite),
+            ("/generated/*.dir", FsAccess::ReadWrite),
+        ],
+    );
+    let mut state = fs.state().unwrap();
+    let parent = lookup(&mut state, ROOT, "generated");
+
+    let directory = state
+        .mkdir(parent, OsStr::new("made.dir"), 0o777, 0o027)
+        .unwrap();
+    assert_eq!(directory.kind, FileType::Directory);
+    assert_eq!(directory.perm & 0o027, 0);
+    assert_errno(
+        state.mkdir(parent, OsStr::new("near.txt"), 0o700, 0),
+        libc::EACCES,
+    );
+
+    let link = state
+        .symlink(parent, OsStr::new("link.json"), Path::new("../outside"))
+        .unwrap();
+    assert_eq!(link.kind, FileType::Symlink);
+    let link_ino = lookup(&mut state, parent, "link.json");
+    let link_node = state.node(link_ino).unwrap();
+    assert_eq!(read_link(&link_node.pin).unwrap(), b"../outside");
+    let source = lookup(&mut state, parent, "source.json");
+    let hardlink = state
+        .link(source, parent, OsStr::new("linked.json"))
+        .unwrap();
+    assert_eq!(hardlink.kind, FileType::RegularFile);
+    assert_eq!(
+        std::fs::read(generated.join("linked.json")).unwrap(),
+        b"source"
+    );
+    assert_errno(
+        state.link(source, parent, OsStr::new("linked.txt")),
+        libc::EACCES,
+    );
+    assert_errno(
+        state.unlink(parent, OsStr::new("made.dir"), false),
+        libc::EISDIR,
+    );
+    assert_errno(
+        state.unlink(parent, OsStr::new("linked.json"), true),
+        libc::ENOTDIR,
+    );
+
+    state
+        .rename(
+            parent,
+            OsStr::new("source.json"),
+            parent,
+            OsStr::new("moved.json"),
+            0,
+        )
+        .unwrap();
+    assert!(!generated.join("source.json").exists());
+    assert_eq!(
+        std::fs::read(generated.join("moved.json")).unwrap(),
+        b"source"
+    );
+    assert_errno(
+        state.rename(
+            parent,
+            OsStr::new("moved.json"),
+            parent,
+            OsStr::new("linked.json"),
+            libc::RENAME_NOREPLACE,
+        ),
+        libc::EEXIST,
+    );
+    state
+        .rename(
+            parent,
+            OsStr::new("moved.json"),
+            parent,
+            OsStr::new("linked.json"),
+            libc::RENAME_EXCHANGE,
+        )
+        .unwrap();
+    assert_errno(
+        state.rename(
+            parent,
+            OsStr::new("moved.json"),
+            parent,
+            OsStr::new("linked.json"),
+            libc::RENAME_NOREPLACE | libc::RENAME_EXCHANGE,
+        ),
+        libc::EINVAL,
+    );
+    assert_errno(
+        state.rename(
+            parent,
+            OsStr::new("moved.json"),
+            parent,
+            OsStr::new("linked.json"),
+            libc::RENAME_WHITEOUT,
+        ),
+        libc::EINVAL,
+    );
+    assert_errno(
+        state.rename(
+            parent,
+            OsStr::new("linked.json"),
+            parent,
+            OsStr::new("near.txt"),
+            0,
+        ),
+        libc::EACCES,
+    );
+
+    state
+        .unlink(parent, OsStr::new("link.json"), false)
+        .unwrap();
+    state.unlink(parent, OsStr::new("made.dir"), true).unwrap();
+    assert!(!generated.join("link.json").exists());
+    assert!(!generated.join("made.dir").exists());
+    assert_eq!(std::fs::read(generated.join("near.txt")).unwrap(), b"near");
+}
+
+#[test]
+fn namespace_mutations_keep_handles_but_fresh_names_are_rechecked() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("allowed.json"), b"original").unwrap();
+    let fs = projection(root.path(), &[("/*.json", FsAccess::ReadWrite)]);
+    let mut state = fs.state().unwrap();
+    let ino = lookup(&mut state, ROOT, "allowed.json");
+    let handle = state.open(ino, libc::O_RDWR).unwrap();
+
+    state
+        .rename(
+            ROOT,
+            OsStr::new("allowed.json"),
+            ROOT,
+            OsStr::new("moved.json"),
+            0,
+        )
+        .unwrap();
+    assert_errno(state.open(ino, libc::O_RDONLY), libc::ENOENT);
+    let moved = lookup(&mut state, ROOT, "moved.json");
+    assert_ne!(ino, moved);
+    state.write(ino, handle, 0, b"retained").unwrap();
+    assert_eq!(
+        std::fs::read(root.path().join("moved.json")).unwrap(),
+        b"retained"
+    );
+
+    state.unlink(ROOT, OsStr::new("moved.json"), false).unwrap();
+    assert_errno(state.lookup(ROOT, OsStr::new("moved.json")), libc::ENOENT);
+    assert_eq!(state.read(ino, handle, 0, 100).unwrap(), b"retained");
+    state.write(ino, handle, 0, b"unlinked").unwrap();
+    assert_eq!(state.read(ino, handle, 0, 100).unwrap(), b"unlinked");
+}
+
+#[test]
+fn namespace_mutations_require_writable_source_and_destination_names() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("source.json"), b"source").unwrap();
+    let fs = projection(
+        root.path(),
+        &[
+            ("/source.json", FsAccess::Read),
+            ("/destination.json", FsAccess::ReadWrite),
+        ],
+    );
+    let mut state = fs.state().unwrap();
+    let source = lookup(&mut state, ROOT, "source.json");
+    assert_errno(
+        state.link(source, ROOT, OsStr::new("destination.json")),
+        libc::EACCES,
+    );
+    assert_errno(
+        state.unlink(ROOT, OsStr::new("source.json"), false),
+        libc::EACCES,
+    );
+    assert_errno(
+        state.rename(
+            ROOT,
+            OsStr::new("source.json"),
+            ROOT,
+            OsStr::new("destination.json"),
+            0,
+        ),
+        libc::EACCES,
+    );
+    assert!(root.path().join("source.json").exists());
+    assert!(!root.path().join("destination.json").exists());
+}
+
+#[test]
+fn stale_parent_is_rejected_while_an_already_held_parent_remains_distinct() {
+    let root = tempfile::tempdir().unwrap();
+    let parent_path = root.path().join("parent");
+    std::fs::create_dir(&parent_path).unwrap();
+    let fs = projection(root.path(), &[("/parent/*.json", FsAccess::ReadWrite)]);
+    let mut state = fs.state().unwrap();
+    let parent = lookup(&mut state, ROOT, "parent");
+    let held = state.current(&state.node(parent).unwrap()).unwrap();
+
+    std::fs::rename(&parent_path, root.path().join("moved")).unwrap();
+    std::fs::create_dir(&parent_path).unwrap();
+    assert_errno(
+        state.lookup(parent, OsStr::new("before.json")),
+        libc::ESTALE,
+    );
+    assert_errno(
+        state.mkdir(parent, OsStr::new("before.json"), 0o700, 0),
+        libc::ESTALE,
+    );
+    assert!(!parent_path.join("before.json").exists());
+    assert!(!root.path().join("moved/before.json").exists());
+
+    // A provider-held parent is a capability for that exact directory after it
+    // was acquired. This does not claim that a final leaf cannot be renamed by
+    // another host actor before a later namespace syscall.
+    state
+        .backing
+        .mkdir_at(&held, OsStr::new("held.json"), 0o700)
+        .unwrap();
+    let held_child = state
+        .backing
+        .pin_child(&held, OsStr::new("held.json"))
+        .unwrap();
+    assert!(held_child.metadata().unwrap().is_dir());
+    assert!(root.path().join("moved/held.json").is_dir());
+    assert!(!parent_path.join("held.json").exists());
+}

@@ -25,6 +25,11 @@ pub(super) fn error(errno: i32) -> io::Error {
 }
 
 pub(super) fn child_path(parent: &Path, name: &OsStr) -> io::Result<PathBuf> {
+    valid_child_name(name)?;
+    Ok(parent.join(name))
+}
+
+fn valid_child_name(name: &OsStr) -> io::Result<()> {
     let bytes = name.as_bytes();
     if bytes.is_empty()
         || bytes.contains(&0)
@@ -34,7 +39,12 @@ pub(super) fn child_path(parent: &Path, name: &OsStr) -> io::Result<PathBuf> {
     {
         return Err(error(libc::EINVAL));
     }
-    Ok(parent.join(name))
+    Ok(())
+}
+
+fn child_name(name: &OsStr) -> io::Result<CString> {
+    valid_child_name(name)?;
+    CString::new(name.as_bytes()).map_err(|_| error(libc::EINVAL))
 }
 
 pub(super) fn same_object(a: &Metadata, b: &Metadata) -> bool {
@@ -167,8 +177,7 @@ impl Backing {
         flags: i32,
         mode: u32,
     ) -> io::Result<File> {
-        child_path(Path::new("/"), name)?;
-        let name = CString::new(name.as_bytes()).map_err(|_| error(libc::EINVAL))?;
+        let name = child_name(name)?;
         // An existing final component must return to projected lookup, never
         // acquire authority by being raced into a destructive backing open.
         let fd = unsafe {
@@ -187,6 +196,130 @@ impl Backing {
             Err(io::Error::last_os_error())
         } else {
             Ok(unsafe { File::from_raw_fd(fd) })
+        }
+    }
+
+    /// Pin exactly one child of a held directory without re-resolving the
+    /// directory through the backing root. This protects the parent selected
+    /// at validation; it intentionally cannot freeze unrelated host renames
+    /// after that parent is acquired.
+    pub(super) fn pin_child(&self, parent: &File, name: &OsStr) -> io::Result<File> {
+        let name = child_name(name)?;
+        // SAFETY: parent is held by the caller; name is one validated, NUL-free
+        // component. O_NOFOLLOW pins a final symlink rather than its target.
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            // SAFETY: successful openat returns a fresh owned descriptor.
+            Ok(unsafe { File::from_raw_fd(fd) })
+        }
+    }
+
+    pub(super) fn mkdir_at(&self, parent: &File, name: &OsStr, mode: u32) -> io::Result<()> {
+        let name = child_name(name)?;
+        // SAFETY: parent and validated name remain live throughout the call.
+        let result = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), mode) };
+        if result < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(super) fn unlink_at(&self, parent: &File, name: &OsStr, directory: bool) -> io::Result<()> {
+        let name = child_name(name)?;
+        let flags = directory.then_some(libc::AT_REMOVEDIR).unwrap_or(0);
+        // SAFETY: parent and validated name remain live throughout the call.
+        let result = unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), flags) };
+        if result < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(super) fn symlink_at(&self, target: &Path, parent: &File, name: &OsStr) -> io::Result<()> {
+        let target =
+            CString::new(target.as_os_str().as_bytes()).map_err(|_| error(libc::EINVAL))?;
+        let name = child_name(name)?;
+        // SAFETY: parent, target and validated name remain live throughout the call.
+        let result = unsafe { libc::symlinkat(target.as_ptr(), parent.as_raw_fd(), name.as_ptr()) };
+        if result < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(super) fn rename_at(
+        &self,
+        old_parent: &File,
+        old_name: &OsStr,
+        new_parent: &File,
+        new_name: &OsStr,
+        flags: u32,
+    ) -> io::Result<()> {
+        let old_name = child_name(old_name)?;
+        let new_name = child_name(new_name)?;
+        // SAFETY: both parent descriptors and names remain live throughout the call.
+        let result = if flags == 0 {
+            unsafe {
+                libc::renameat(
+                    old_parent.as_raw_fd(),
+                    old_name.as_ptr(),
+                    new_parent.as_raw_fd(),
+                    new_name.as_ptr(),
+                )
+            }
+        } else {
+            unsafe {
+                libc::syscall(
+                    libc::SYS_renameat2,
+                    old_parent.as_raw_fd(),
+                    old_name.as_ptr(),
+                    new_parent.as_raw_fd(),
+                    new_name.as_ptr(),
+                    flags,
+                ) as i32
+            }
+        };
+        if result < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(super) fn link_at(
+        &self,
+        old_parent: &File,
+        old_name: &OsStr,
+        new_parent: &File,
+        new_name: &OsStr,
+    ) -> io::Result<()> {
+        let old_name = child_name(old_name)?;
+        let new_name = child_name(new_name)?;
+        // SAFETY: both parent descriptors and names remain live throughout the call.
+        let result = unsafe {
+            libc::linkat(
+                old_parent.as_raw_fd(),
+                old_name.as_ptr(),
+                new_parent.as_raw_fd(),
+                new_name.as_ptr(),
+                0,
+            )
+        };
+        if result < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
         }
     }
 }

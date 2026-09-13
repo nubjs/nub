@@ -9,9 +9,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuser::{
     AccessFlags, BsdFileFlags, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
-    INodeNo, InitFlags, IoctlFlags, KernelConfig, LockOwner, OpenFlags, ReplyAttr, ReplyCreate,
-    ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyIoctl, ReplyOpen, ReplyWrite, Request,
-    TimeOrNow, WriteFlags,
+    INodeNo, InitFlags, IoctlFlags, KernelConfig, LockOwner, OpenFlags, RenameFlags, ReplyAttr,
+    ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyIoctl, ReplyOpen,
+    ReplyWrite, Request, TimeOrNow, WriteFlags,
 };
 
 use super::backing::{
@@ -36,6 +36,10 @@ const KERNEL_O_LARGEFILE: i32 = 1 << 17;
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 const KERNEL_O_LARGEFILE: i32 = libc::O_LARGEFILE;
 const KERNEL_FMODE_EXEC: i32 = 1 << 5;
+
+fn accepted_rename_flags(flags: u32) -> bool {
+    matches!(flags, 0 | libc::RENAME_NOREPLACE | libc::RENAME_EXCHANGE)
+}
 
 fn normalize_open_flags(flags: i32) -> io::Result<i32> {
     // execve's internal marker is not a flag for the backing open syscall.
@@ -171,12 +175,19 @@ impl State {
     }
 
     fn child(&self, parent: u64, name: &OsStr) -> io::Result<PathBuf> {
+        self.child_parent(parent, name).map(|(path, _)| path)
+    }
+
+    /// Return a fresh, held parent descriptor with its policy child path. The
+    /// descriptor binds the namespace operation to this parent after validation;
+    /// a host may still rename a final component before the later kernel syscall.
+    fn child_parent(&self, parent: u64, name: &OsStr) -> io::Result<(PathBuf, File)> {
         let node = self.node(parent)?;
         if !node.pin.metadata()?.is_dir() {
             return Err(error(libc::ENOTDIR));
         }
-        self.current(&node)?;
-        child_path(&node.path, name)
+        let parent = self.current(&node)?;
+        Ok((child_path(&node.path, name)?, parent))
     }
 
     fn current(&self, node: &Node) -> io::Result<File> {
@@ -305,6 +316,25 @@ impl State {
         }
     }
 
+    fn require_write(&self, path: &Path) -> io::Result<()> {
+        if self.rules.access(path) == Some(FsAccess::ReadWrite) {
+            Ok(())
+        } else {
+            Err(error(libc::EACCES))
+        }
+    }
+
+    fn intern_entry(&mut self, path: PathBuf, pin: File) -> io::Result<FileAttr> {
+        let meta = pin.metadata()?;
+        file_kind(&meta)?;
+        let access = self
+            .rules
+            .access(&path)
+            .ok_or_else(|| error(libc::EACCES))?;
+        let ino = self.intern(path, pin)?;
+        attributes(ino, &meta, Some(access))
+    }
+
     fn open(&mut self, ino: u64, flags: i32) -> io::Result<u64> {
         let flags = normalize_open_flags(flags)?;
         let node = self.node(ino)?;
@@ -371,6 +401,82 @@ impl State {
             authority: FsAccess::ReadWrite,
         })?;
         Ok((self.attr(ino, Some(handle))?, handle))
+    }
+
+    fn mkdir(&mut self, parent: u64, name: &OsStr, mode: u32, umask: u32) -> io::Result<FileAttr> {
+        if self.nodes.len() == MAX_NODES {
+            return Err(error(libc::EMFILE));
+        }
+        let (path, parent) = self.child_parent(parent, name)?;
+        self.require_write(&path)?;
+        self.backing
+            .mkdir_at(&parent, name, mode & !umask & 0o777)?;
+        let pin = self.backing.pin_child(&parent, name)?;
+        self.intern_entry(path, pin)
+    }
+
+    fn unlink(&self, parent: u64, name: &OsStr, directory: bool) -> io::Result<()> {
+        let (path, parent) = self.child_parent(parent, name)?;
+        self.require_write(&path)?;
+        self.backing.unlink_at(&parent, name, directory)
+    }
+
+    fn symlink(&mut self, parent: u64, name: &OsStr, target: &Path) -> io::Result<FileAttr> {
+        if self.nodes.len() == MAX_NODES {
+            return Err(error(libc::EMFILE));
+        }
+        let (path, parent) = self.child_parent(parent, name)?;
+        self.require_write(&path)?;
+        self.backing.symlink_at(target, &parent, name)?;
+        let pin = self.backing.pin_child(&parent, name)?;
+        self.intern_entry(path, pin)
+    }
+
+    fn rename(
+        &self,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        flags: u32,
+    ) -> io::Result<()> {
+        if !accepted_rename_flags(flags) {
+            return Err(error(libc::EINVAL));
+        }
+        let (old_path, old_parent) = self.child_parent(parent, name)?;
+        let (new_path, new_parent) = self.child_parent(newparent, newname)?;
+        self.require_write(&old_path)?;
+        self.require_write(&new_path)?;
+        self.backing
+            .rename_at(&old_parent, name, &new_parent, newname, flags)
+    }
+
+    fn link(&mut self, ino: u64, newparent: u64, newname: &OsStr) -> io::Result<FileAttr> {
+        if self.nodes.len() == MAX_NODES {
+            return Err(error(libc::EMFILE));
+        }
+        let node = self.node(ino)?;
+        if node.pin.metadata()?.is_dir() {
+            return Err(error(libc::EPERM));
+        }
+        self.require_write(&node.path)?;
+        // A source FUSE inode is not authority after its name was replaced. The
+        // normal link syscall must name the current source spelling because an
+        // unprivileged process cannot link an arbitrary retained O_PATH fd.
+        self.current(&node)?;
+        let source_parent_path = node.path.parent().ok_or_else(|| error(libc::EPERM))?;
+        let source_name = node.path.file_name().ok_or_else(|| error(libc::EPERM))?;
+        let source_parent = self.backing.pin(source_parent_path)?;
+        let source = self.backing.pin_child(&source_parent, source_name)?;
+        if !same_object(&node.pin.metadata()?, &source.metadata()?) {
+            return Err(error(libc::ESTALE));
+        }
+        let (new_path, new_parent) = self.child_parent(newparent, newname)?;
+        self.require_write(&new_path)?;
+        self.backing
+            .link_at(&source_parent, source_name, &new_parent, newname)?;
+        let pin = self.backing.pin_child(&new_parent, newname)?;
+        self.intern_entry(new_path, pin)
     }
 
     fn read(&self, ino: u64, handle: u64, offset: u64, size: usize) -> io::Result<Vec<u8>> {
@@ -672,6 +778,102 @@ impl Filesystem for Projection {
                 FileHandle(handle),
                 FopenFlags::FOPEN_DIRECT_IO,
             ),
+            Err(err) => reply.error(err.into()),
+        }
+    }
+
+    fn mkdir(
+        &self,
+        _: &Request,
+        parent: INodeNo,
+        name: &OsStr,
+        mode: u32,
+        umask: u32,
+        reply: ReplyEntry,
+    ) {
+        match self
+            .state()
+            .and_then(|mut state| state.mkdir(parent.0, name, mode, umask))
+        {
+            Ok(attr) => reply.entry(&TTL, &attr, Generation(0)),
+            Err(err) => reply.error(err.into()),
+        }
+    }
+
+    fn unlink(&self, _: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        match self
+            .state()
+            .and_then(|state| state.unlink(parent.0, name, false))
+        {
+            Ok(()) => reply.ok(),
+            Err(err) => reply.error(err.into()),
+        }
+    }
+
+    fn rmdir(&self, _: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        match self
+            .state()
+            .and_then(|state| state.unlink(parent.0, name, true))
+        {
+            Ok(()) => reply.ok(),
+            Err(err) => reply.error(err.into()),
+        }
+    }
+
+    fn symlink(
+        &self,
+        _: &Request,
+        parent: INodeNo,
+        name: &OsStr,
+        target: &Path,
+        reply: ReplyEntry,
+    ) {
+        match self
+            .state()
+            .and_then(|mut state| state.symlink(parent.0, name, target))
+        {
+            Ok(attr) => reply.entry(&TTL, &attr, Generation(0)),
+            Err(err) => reply.error(err.into()),
+        }
+    }
+
+    fn rename(
+        &self,
+        _: &Request,
+        parent: INodeNo,
+        name: &OsStr,
+        newparent: INodeNo,
+        newname: &OsStr,
+        flags: RenameFlags,
+        reply: ReplyEmpty,
+    ) {
+        let flags = flags.bits();
+        if !accepted_rename_flags(flags) {
+            reply.error(fuser::Errno::EINVAL);
+            return;
+        }
+        match self
+            .state()
+            .and_then(|state| state.rename(parent.0, name, newparent.0, newname, flags))
+        {
+            Ok(()) => reply.ok(),
+            Err(err) => reply.error(err.into()),
+        }
+    }
+
+    fn link(
+        &self,
+        _: &Request,
+        ino: INodeNo,
+        newparent: INodeNo,
+        newname: &OsStr,
+        reply: ReplyEntry,
+    ) {
+        match self
+            .state()
+            .and_then(|mut state| state.link(ino.0, newparent.0, newname))
+        {
+            Ok(attr) => reply.entry(&TTL, &attr, Generation(0)),
             Err(err) => reply.error(err.into()),
         }
     }
