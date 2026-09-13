@@ -65,9 +65,70 @@ pub(crate) fn resolve(start_dir: &Path, install: &InstallConfig) -> Result<Works
         cache_root: nub_core::node::discovery::cache_dir(),
         ci: std::env::var_os("CI").is_some(),
     };
+    refuse_legacy_root_allow_builds(&sources.manifest)?;
+    announce_dropped_root_install_fields(&sources.manifest);
     let merged = merge(&sources)?;
     serde_json::from_value(Value::Object(merged))
         .context("nub could not hand its install settings to the package manager")
+}
+
+/// Refuse a manifest that still carries the OLD name for the build allowlist.
+///
+/// The list moved from a top-level `allowBuilds` map to `allowScripts`. Reading
+/// neither would silently drop the old map's approvals AND its explicit `false`
+/// denials, and the denials are the half that matters: proceeding would RUN a
+/// script the project wrote down that it did not want run. So this refuses
+/// rather than warns.
+///
+/// Only under nub's own identity, which is the only place this is reached. A
+/// project whose incumbent is pnpm gets pnpm's behaviour exactly, and pnpm has
+/// no opinion about a key at this position. `pnpm.allowBuilds` and a
+/// `pnpm-workspace.yaml` block are pnpm's own surface and untouched.
+fn refuse_legacy_root_allow_builds(manifest: &Map<String, Value>) -> Result<()> {
+    if !matches!(manifest.get("allowBuilds"), Some(Value::Object(_))) {
+        return Ok(());
+    }
+    bail!(
+        "nub: package.json sets a top-level `allowBuilds` map — that field was renamed to \
+         `allowScripts`, which is also the field npm reads. Rename the key in package.json; \
+         the entries are unchanged. (`pnpm.allowBuilds` and a `pnpm-workspace.yaml` \
+         `allowBuilds:` block are pnpm's own surface and still read as-is.) \
+         [ERR_NUB_ALLOW_BUILDS_RENAMED]"
+    )
+}
+
+/// Manifest-ROOT install keys nub used to read and no longer does, each with
+/// the surface that replaces it. All three were nub's own — no package manager
+/// reads a top-level `auditConfig`, `allowUnusedPatches` or
+/// `allowNonAppliedPatches` — so nothing else will report them, and a key that
+/// looks like it is doing something is worse than one that is plainly gone.
+const DROPPED_ROOT_INSTALL_FIELDS: [(&str, &str); 3] = [
+    (
+        "auditConfig",
+        "pass `nub audit --ignore <id>`, which takes advisory numbers, GHSA ids and CVE ids",
+    ),
+    (
+        "allowUnusedPatches",
+        "remove the `patchedDependencies` entry that matches no installed package",
+    ),
+    (
+        "allowNonAppliedPatches",
+        "remove the `patchedDependencies` entry that matches no installed package",
+    ),
+];
+
+/// Say so when the manifest sets one of those, and say nothing when it does
+/// not. A notice, never a failure: unlike the renamed allowlist above, none of
+/// these can make an install do something the project did not ask for.
+fn announce_dropped_root_install_fields(manifest: &Map<String, Value>) {
+    for (key, remedy) in DROPPED_ROOT_INSTALL_FIELDS {
+        if manifest.contains_key(key) {
+            eprintln!(
+                "nub: package.json sets a top-level `{key}` — no package manager reads that key \
+                 there, and nub no longer does either. Instead, {remedy}."
+            );
+        }
+    }
 }
 
 fn merge(sources: &Sources) -> Result<Map<String, Value>> {
