@@ -6,6 +6,10 @@ namespace nub_sandbox::socket_broker {
 constexpr DWORD kVersion = 1;
 constexpr DWORD kWorkers = 4;
 constexpr DWORD kTimeout = 10000;
+constexpr DWORD kClientAccess = FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES |
+    FILE_WRITE_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE;
+static_assert((kClientAccess & FILE_CREATE_PIPE_INSTANCE) == 0);
+static_assert((kClientAccess & ~0x12019bu) == 0);
 constexpr DWORD kSocketFlags = WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT |
     WSA_FLAG_MULTIPOINT_C_ROOT | WSA_FLAG_MULTIPOINT_C_LEAF |
     WSA_FLAG_MULTIPOINT_D_ROOT | WSA_FLAG_MULTIPOINT_D_LEAF | WSA_FLAG_REGISTERED_IO;
@@ -23,6 +27,49 @@ struct Response {
 };
 static_assert(sizeof(Request) == 20);
 static_assert(sizeof(Response) == 636);
+
+enum class Stage : LONG {
+    Request = 1, PipeOpen, PipeWait, ServerPidQuery, ServerPidMismatch, ReadMode,
+    ClientEvent, RequestWrite, ResponseRead, ResponseVersion, BrokerError,
+    Reconstruct, AcknowledgementWrite, HostIdentity, HostCreate, HostFlags,
+    HostDuplicate, HostRequestRead, HostResponseWrite, HostAcknowledgementRead,
+};
+static_assert(static_cast<LONG>(Stage::HostAcknowledgementRead) < 31);
+
+inline bool diagnostics_enabled() {
+    wchar_t value[2];
+    return GetEnvironmentVariableW(L"NUB_JAIL_DUMP_POLICY", value, _countof(value)) != 0;
+}
+
+inline void diagnose(bool enabled, Stage stage, DWORD error) {
+    if (!enabled) return;
+    DWORD saved = GetLastError();
+    // At most one small record per failure stage per process. Never log the
+    // command endpoint, protocol record, policy, credentials or peer identity.
+    static volatile LONG seen = 0;
+    LONG bit = 1L << static_cast<LONG>(stage);
+    if (!(InterlockedOr(&seen, bit) & bit)) {
+        char message[80];
+        int length = sprintf_s(message, "NUB_SOCKET_IPC stage=%ld error=%lu\r\n",
+                               static_cast<LONG>(stage), error);
+        DWORD written = 0;
+        if (length > 0) WriteFile(GetStdHandle(STD_ERROR_HANDLE), message,
+                                  DWORD(length), &written, nullptr);
+    }
+    SetLastError(saved);
+}
+
+inline DWORD configure_client(HANDLE pipe, DWORD expected_pid, Stage& stage) {
+    DWORD server = 0;
+    stage = Stage::ServerPidQuery;
+    if (!GetNamedPipeServerProcessId(pipe, &server)) return GetLastError();
+    stage = Stage::ServerPidMismatch;
+    if (server != expected_pid) return ERROR_ACCESS_DENIED;
+    stage = Stage::ReadMode;
+    DWORD mode = PIPE_READMODE_MESSAGE;
+    if (!SetNamedPipeHandleState(pipe, &mode, nullptr, nullptr)) return GetLastError();
+    return ERROR_SUCCESS;
+}
 
 constexpr DWORD source_flags(DWORD requested) {
     // The host descriptor must never enter a concurrent launch's inheritance
@@ -54,8 +101,11 @@ inline bool complete(HANDLE pipe, OVERLAPPED& operation, BOOL immediate,
         DWORD result = stop ? WaitForMultipleObjects(2, events, FALSE, timeout)
                             : WaitForSingleObject(operation.hEvent, timeout);
         if (result != (stop ? WAIT_OBJECT_0 + 1 : WAIT_OBJECT_0)) {
+            DWORD error = result == WAIT_TIMEOUT ? ERROR_TIMEOUT :
+                result == WAIT_FAILED ? GetLastError() : ERROR_OPERATION_ABORTED;
             CancelIoEx(pipe, &operation);
             GetOverlappedResult(pipe, &operation, &bytes, TRUE);
+            SetLastError(error);
             return false;
         }
     }
@@ -70,7 +120,9 @@ inline bool transfer(HANDLE pipe, HANDLE event, HANDLE stop, void* data,
     DWORD bytes = 0;
     BOOL immediate = writing ? WriteFile(pipe, data, size, nullptr, &operation)
                              : ReadFile(pipe, data, size, nullptr, &operation);
-    return complete(pipe, operation, immediate, stop, kTimeout, bytes) && bytes == size;
+    if (!complete(pipe, operation, immediate, stop, kTimeout, bytes)) return false;
+    if (bytes != size) { SetLastError(ERROR_INVALID_DATA); return false; }
+    return true;
 }
 
 #ifdef SANDBOX_COMPAT_HOST
@@ -87,6 +139,7 @@ struct Broker {
     HANDLE job = nullptr;
     HANDLE stop = nullptr;
     bool winsock = false;
+    bool diagnostics = false;
     wchar_t name[128] = {};
     Worker workers[kWorkers];
 
@@ -117,6 +170,7 @@ inline HANDLE requesting_process(HANDLE pipe, HANDLE job, DWORD& pid) {
         WaitForSingleObject(process, 0) != WAIT_TIMEOUT ||
         !GetNamedPipeClientProcessId(pipe, &current) || current != pid) {
         CloseHandle(process);
+        SetLastError(ERROR_ACCESS_DENIED);
         return nullptr;
     }
     return process;
@@ -126,7 +180,7 @@ inline void serve(Worker& worker) {
     Broker& broker = *worker.broker;
     DWORD pid = 0;
     HANDLE process = requesting_process(worker.pipe, broker.job, pid);
-    if (!process) return;
+    if (!process) { diagnose(broker.diagnostics, Stage::HostIdentity, GetLastError()); return; }
     Request request = {};
     Response response = {};
     response.version = kVersion;
@@ -139,22 +193,30 @@ inline void serve(Worker& worker) {
             // retain ConnectEx/AcceptEx/IOCP and datagram/listener semantics.
             socket = WSASocketW(request.family, request.type, request.protocol,
                                 nullptr, 0, source_flags(request.flags));
-            if (socket == INVALID_SOCKET) response.error = WSAGetLastError();
+            if (socket == INVALID_SOCKET) {
+                response.error = WSAGetLastError();
+                diagnose(broker.diagnostics, Stage::HostCreate, response.error);
+            }
             if (socket != INVALID_SOCKET) {
-                if (!SetHandleInformation(reinterpret_cast<HANDLE>(socket), HANDLE_FLAG_INHERIT, 0))
+                if (!SetHandleInformation(reinterpret_cast<HANDLE>(socket), HANDLE_FLAG_INHERIT, 0)) {
+                    diagnose(broker.diagnostics, Stage::HostFlags, GetLastError());
                     response.error = WSAEACCES;
-                else if (WSADuplicateSocketW(socket, pid, &response.info) == SOCKET_ERROR)
+                } else if (WSADuplicateSocketW(socket, pid, &response.info) == SOCKET_ERROR) {
                     response.error = WSAGetLastError();
+                    diagnose(broker.diagnostics, Stage::HostDuplicate, response.error);
+                }
             }
         } else if (!response.error) response.error = WSA_OPERATION_ABORTED;
-        if (transfer(worker.pipe, worker.event, broker.stop, &response, sizeof(response), true) &&
-            !response.error) {
+        if (!transfer(worker.pipe, worker.event, broker.stop, &response, sizeof(response), true)) {
+            diagnose(broker.diagnostics, Stage::HostResponseWrite, GetLastError());
+        } else if (!response.error) {
             // Keep the source descriptor alive until reconstruction completes.
             DWORD acknowledgement = 0;
-            transfer(worker.pipe, worker.event, broker.stop, &acknowledgement,
-                     sizeof(acknowledgement), false);
+            if (!transfer(worker.pipe, worker.event, broker.stop, &acknowledgement,
+                          sizeof(acknowledgement), false))
+                diagnose(broker.diagnostics, Stage::HostAcknowledgementRead, GetLastError());
         }
-    }
+    } else diagnose(broker.diagnostics, Stage::HostRequestRead, GetLastError());
     if (socket != INVALID_SOCKET) closesocket(socket);
     CloseHandle(process);
 }
@@ -185,6 +247,7 @@ inline DWORD start(HANDLE job, const wchar_t* name, PSID user, PSID package, Bro
     auto broker = new (std::nothrow) Broker;
     if (!broker) return ERROR_NOT_ENOUGH_MEMORY;
     broker->job = job;
+    broker->diagnostics = diagnostics_enabled();
     DWORD error = ERROR_SUCCESS;
     if (wcscpy_s(broker->name, name)) error = ERROR_INVALID_NAME;
     WSADATA data;
