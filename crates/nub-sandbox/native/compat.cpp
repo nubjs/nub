@@ -11,6 +11,7 @@
 #include <cwchar>
 #include <cstring>
 #include <cstdint>
+#include <cstddef>
 #include <initializer_list>
 #include <new>
 #include <iterator>
@@ -975,6 +976,7 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
         !resolve_nt(true_nt_create_file, "NtCreateFile") ||
         !resolve_nt(true_query_attributes, "NtQueryAttributesFile") ||
         !resolve_nt(true_query_full_attributes, "NtQueryFullAttributesFile") ||
+        !resolve_nt(true_set_file_information, "NtSetInformationFile") ||
         !resolve_nt(true_create_section, "NtCreateSection") ||
         !resolve_nt(true_create_mutant, "NtCreateMutant") ||
         !resolve_nt(true_create_event, "NtCreateEvent") ||
@@ -991,6 +993,7 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     if (state.file_broker[0]) {
         DetourAttach(reinterpret_cast<PVOID*>(&true_query_attributes), query_file_attributes);
         DetourAttach(reinterpret_cast<PVOID*>(&true_query_full_attributes), query_full_file_attributes);
+        DetourAttach(reinterpret_cast<PVOID*>(&true_set_file_information), set_file_information);
     }
     DetourAttach(reinterpret_cast<PVOID*>(&true_set_token), set_token);
     DetourAttach(reinterpret_cast<PVOID*>(&true_set_security), set_security);
