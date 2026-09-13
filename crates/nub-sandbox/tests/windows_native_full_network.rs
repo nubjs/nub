@@ -86,13 +86,14 @@ fn udp_peer(socket: UdpSocket) -> std::thread::JoinHandle<()> {
 }
 
 fn positive_client(root: &Path, fixture: &Path, case: &str, udp: bool, connections: usize) {
+    let bind = if case.ends_with('6') { "[::1]:0" } else { "127.0.0.1:0" };
     if udp {
-        let peer = UdpSocket::bind("127.0.0.1:0").unwrap(); let address = peer.local_addr().unwrap().to_string();
+        let peer = UdpSocket::bind(bind).unwrap(); let address = peer.local_addr().unwrap().to_string();
         let policy = policy(root, fixture, json!(true), Some(&address), None); let session = Sandbox::with_windows_native_compat(&policy).unwrap();
         let peer = udp_peer(peer); let result = output(&session, fixture, case); peer.join().unwrap();
         assert!(result.status.success(), "{result:?}"); assert_marker(&result, "FULL_NETWORK_PEER", "1");
     } else {
-        let peer = TcpListener::bind("127.0.0.1:0").unwrap(); let address = peer.local_addr().unwrap().to_string();
+        let peer = TcpListener::bind(bind).unwrap(); let address = peer.local_addr().unwrap().to_string();
         let policy = policy(root, fixture, json!(true), Some(&address), None); let session = Sandbox::with_windows_native_compat(&policy).unwrap();
         let peer = tcp_peer(peer, connections); let result = output(&session, fixture, case); peer.join().unwrap();
         assert!(result.status.success(), "{result:?}");
@@ -186,9 +187,9 @@ fn native_adapter_full_network_has_peer_oracles_and_retained_policy_separation()
     let plain = std::process::Command::new(&fixture).arg("fs-canary").env("NUB_FULL_NETWORK_FS_CANARY", root.path().join("withheld/canary")).output().unwrap();
     assert!(!plain.status.success()); assert_marker(&plain, "FULL_NETWORK_FS_CANARY", "read=0:write=0");
 
-    positive_client(root.path(), &fixture, "tcp4", false, 1); positive_client(root.path(), &fixture, "udp4", true, 1);
+    positive_client(root.path(), &fixture, "tcp4", false, 1); positive_client(root.path(), &fixture, "tcp6", false, 1); positive_client(root.path(), &fixture, "udp4", true, 1); positive_client(root.path(), &fixture, "udp6", true, 1);
     positive_client(root.path(), &fixture, "connectex4", false, 1); positive_client(root.path(), &fixture, "concurrent4", false, 12);
-    positive_client(root.path(), &fixture, "descendant4", false, 1); listener_case(root.path(), &fixture, "listen4"); listener_case(root.path(), &fixture, "acceptex4");
+    positive_client(root.path(), &fixture, "descendant4", false, 1); listener_case(root.path(), &fixture, "listen4"); listener_case(root.path(), &fixture, "listen6"); listener_case(root.path(), &fixture, "acceptex4");
     let fs_policy = policy(root.path(), &fixture, json!(true), None, None); let native = Sandbox::with_windows_native_compat(&fs_policy).unwrap(); let fs = output(&native, &fixture, "fs-canary"); assert!(!fs.status.success()); assert_marker(&fs, "FULL_NETWORK_FS_CANARY", "read=5:write=5"); drop(native);
 
     // These run after the positive lease with identical literal fs grants, targeting profile-key aliasing.
