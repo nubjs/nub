@@ -1,0 +1,114 @@
+name: Windows defensive native gate
+
+on:
+  push:
+    branches: [windows-defensive-native-gate-da4b]
+    paths:
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'crates/nub-sandbox/**'
+      - 'tests/sandbox-native-adapter/run-standard-user.ps1'
+      - '.github/workflows/windows-defensive-native-gate-da4b.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-gate:
+    name: Native gate (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    env:
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - name: Building static-CRT sandbox artifacts and selected unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          git rev-parse HEAD | tee reports/source-head.txt
+          rustc -vV | tee reports/rustc-vV.txt
+          printf '%s\n' "$CARGO_BUILD_TARGET" | tee reports/rust-target.txt
+          cargo build --locked -p nub-sandbox --lib 2>&1 | tee reports/static-crt-lib-build.log
+          cargo test --locked -p nub-sandbox --lib --no-run --message-format=json-render-diagnostics > reports/lib-test-artifacts.jsonl
+          cargo test --locked -p nub-sandbox --test windows_tmp_policy --no-run --message-format=json-render-diagnostics > reports/windows-tmp-policy-artifacts.jsonl
+          tests=(
+            backend::windows::tests::apply_windows_full_disk_build_jail_rejects_restricted_network
+            backend::windows::tests::apply_windows_tmp_deny_rejects_before_working_directory_preflight
+          )
+          for test_name in "${tests[@]}"; do
+            log="reports/${test_name##*::}.log"
+            cargo test --locked -p nub-sandbox --lib "$test_name" -- --exact >"$log" 2>&1 || {
+              cat "$log"
+              exit 1
+            }
+            cat "$log"
+            grep -F "test $test_name ... ok" "$log" > /dev/null || {
+              echo "selected test did not pass: $test_name"
+              exit 1
+            }
+          done
+      - name: Recording exact compiled test binaries
+        if: always()
+        shell: pwsh
+        run: |
+          $lib = @()
+          if (Test-Path reports/lib-test-artifacts.jsonl) {
+            $lib = @(Get-Content reports/lib-test-artifacts.jsonl | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'nub_sandbox' -and $_.executable })
+          }
+          $tmp = @()
+          if (Test-Path reports/windows-tmp-policy-artifacts.jsonl) {
+            $tmp = @(Get-Content reports/windows-tmp-policy-artifacts.jsonl | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'windows_tmp_policy' -and $_.executable })
+          }
+          if ($lib.Count -ne 1 -or $tmp.Count -ne 1) { throw "Expected one lib and one windows_tmp_policy executable; got $($lib.Count) and $($tmp.Count)" }
+          $manifest = @{
+            source = (git rev-parse HEAD).Trim()
+            binaries = @(
+              @{ target = 'nub_sandbox'; path = $lib[0].executable; sha256 = (Get-FileHash -Algorithm SHA256 $lib[0].executable).Hash.ToLowerInvariant() }
+              @{ target = 'windows_tmp_policy'; path = $tmp[0].executable; sha256 = (Get-FileHash -Algorithm SHA256 $tmp[0].executable).Hash.ToLowerInvariant() }
+            )
+          }
+          $manifest | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 reports/test-binaries.json
+      - name: Exercising windows_tmp_policy as a verified standard user
+        shell: pwsh
+        run: |
+          $artifacts = Get-Content reports/windows-tmp-policy-artifacts.jsonl | ForEach-Object { $_ | ConvertFrom-Json }
+          $test = @($artifacts | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'windows_tmp_policy' -and $_.executable })
+          if ($test.Count -ne 1) { throw "Expected one exact windows_tmp_policy executable, got $($test.Count)" }
+          $source = Get-Content ./tests/sandbox-native-adapter/run-standard-user.ps1 -Raw
+          $originalCommand = "& '.\probe.exe' --ignored --nocapture --test-threads=1"
+          $adaptedCommand = "& '.\probe.exe' --nocapture --test-threads=1"
+          if (!$source.Contains($originalCommand)) { throw 'Standard-user helper command shape changed' }
+          $adapted = $source.Replace($originalCommand, $adaptedCommand).Replace('^test result: ok\. 8 passed; 0 failed;', '^test result: ok\. 3 passed; 0 failed;')
+          Set-Content -Encoding utf8 reports/run-standard-user-windows-tmp-policy.ps1 $adapted
+          & reports/run-standard-user-windows-tmp-policy.ps1 -TestBinary $test[0].executable -ReportDirectory reports
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { exit $code }
+          $access = @(Select-String -Path reports/standard-user.log -Pattern '^WINDOWS_TMP_POLICY_ACCESS ' | ForEach-Object { $_.Line })
+          if ($access.Count -lt 1) { throw 'Standard-user tmp-policy access matrix was not recorded' }
+          $access | Set-Content -Encoding utf8 reports/standard-user-access-matrix.jsonl
+      - name: Uploading native gate evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-defensive-native-gate-${{ matrix.runner }}
+          path: reports/
+          if-no-files-found: warn
