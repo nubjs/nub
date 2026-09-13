@@ -506,6 +506,7 @@ fn listener_output(mut child: ListenerChild) -> Output {
             cancelled.store(true, Ordering::Release);
         }
         let status = child.wait_cancellable(&cancelled);
+        drop(child);
         let _ = done.send(());
         timer.join().expect("listener deadline thread joins");
         let stdout = stdout
