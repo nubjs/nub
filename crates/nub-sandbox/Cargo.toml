@@ -126,6 +126,10 @@ serde_json = { workspace = true }
 # Proxy integration tests build the client-side `Proxy-Authorization: Basic` credential.
 base64 = "0.22"
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# The projection's private mount is supplied directly, never by a mount helper.
+fuser = { version = "0.17.0", default-features = false }
+
 # The Windows enforcement probe is BOTH the runner and the AppContainer child, so it
 # needs a little FFI (token-query + process-liveness) beyond what the lib exposes.
 # Win32_Security_Authorization is the residual probe's own ACL surface (it places and

@@ -110,4 +110,18 @@ mod tests {
         set.entries[1].matcher = CanonGlob("/app/[".into());
         assert!(Rules::compile(&set).is_err());
     }
+
+    #[test]
+    fn explicitly_unconstrained_filesystem_preserves_write_authority() {
+        let rules = Rules::compile(&FsRuleSet {
+            entries: Vec::new(),
+            default_effect: Effect::Allow,
+        })
+        .unwrap();
+        assert_eq!(
+            rules.access(Path::new("/future/nested/file")),
+            Some(FsAccess::ReadWrite)
+        );
+        assert!(rules.traversable(Path::new("/future/nested")));
+    }
 }
