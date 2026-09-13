@@ -82,7 +82,8 @@ inline bool normalize_directory_capture(Request& request) {
 
 inline bool valid_path(const wchar_t* path, DWORD length) {
     // Only ordinary local-drive names. No remote provider, device namespace,
-    // streams, relative roots, short-name spelling, dot segments or wildcards.
+    // streams, relative roots, dot segments or wildcards. Existing leaf names
+    // must also agree with the held object's normalized name before authority.
     if (length < 4 || length >= kPath || path[length] ||
         !((path[0] >= L'A' && path[0] <= L'Z') || (path[0] >= L'a' && path[0] <= L'z')) ||
         path[1] != L':' || path[2] != L'\\') return false;
@@ -93,7 +94,7 @@ inline bool valid_path(const wchar_t* path, DWORD length) {
             if (i == start || path[i - 1] == L'.' || path[i - 1] == L' ') return false;
             start = i + 1;
         } else if (c < 32 || c == L'/' || c == L':' || c == L'*' || c == L'?' ||
-                   c == L'"' || c == L'<' || c == L'>' || c == L'|' || c == L'~') return false;
+                   c == L'"' || c == L'<' || c == L'>' || c == L'|') return false;
     }
     for (DWORD i = length + 1; i < kPath; ++i) if (path[i]) return false;
     return true;
@@ -206,6 +207,14 @@ struct ParentPath {
     HANDLE handle() const { return directories[depth].value; }
 };
 
+inline bool requested_name(HANDLE handle, const ParentPath& parent,
+                           wchar_t (&path)[kPath], DWORD& length) {
+    // A final-name lookup alone can observe another name after a concurrent
+    // rename. Never use that new name to authorize a different requested path.
+    return final_name(handle, path, length) && length == parent.length &&
+        !_wcsicmp(path, parent.canonical);
+}
+
 // Every component remains pinned without FILE_SHARE_DELETE for the entire
 // operation. The last open is relative to that held parent, never absolute.
 inline NTSTATUS resolve_parent(Api& api, const Request& request, ParentPath& parent,
@@ -285,9 +294,10 @@ inline NTSTATUS resolve(const Request& request, HANDLE process, HANDLE stop,
         if (!status) {
             wchar_t canonical[kPath] = {};
             DWORD length = 0;
-            // Opening is nondestructive. Authorize the actual held object,
-            // then transfer that same capability without a second name lookup.
-            if (!regular(result.value, directory) || !final_name(result.value, canonical, length)) return kDenied;
+            // Opening is nondestructive. Bind its name to the held parent,
+            // then transfer that same capability without a second open.
+            if (!regular(result.value, directory) ||
+                !requested_name(result.value, parent, canonical, length)) return kDenied;
             DWORD rights = authorize(context, canonical, length);
             if (!(rights & 1) || ((access_mask(request.access) & (kWrite | DELETE)) && !(rights & 2))) return kDenied;
             response.information = io.Information;
@@ -326,7 +336,7 @@ inline NTSTATUS resolve(const Request& request, HANDLE process, HANDLE stop,
             if (!regular(result.value, false) || !GetFileInformationByHandle(result.value, &info) ||
                 (info.dwFileAttributes != FILE_ATTRIBUTE_NORMAL &&
                     (info.dwFileAttributes & ~FILE_ATTRIBUTE_ARCHIVE)) ||
-                !final_name(result.value, canonical, length)) return kDenied;
+                !requested_name(result.value, parent, canonical, length)) return kDenied;
             // FILE_OVERWRITE can apply requested attributes and honor existing
             // EAs; EOF truncation cannot. The broker protocol has no EA buffer,
             // and this path accepts only ordinary attributes with no stored EAs.
@@ -372,7 +382,7 @@ inline NTSTATUS resolve(const Request& request, HANDLE process, HANDLE stop,
             if (!(request.options & FILE_NON_DIRECTORY_FILE))
                 directory = (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
             if (!regular(pin.value, metadata ? bool(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) : directory) ||
-                !final_name(pin.value, canonical, length)) return kDenied;
+                !requested_name(pin.value, parent, canonical, length)) return kDenied;
             if (disposition == FILE_OPEN_IF) disposition = FILE_OPEN;
             if (disposition == FILE_OVERWRITE_IF) disposition = FILE_OVERWRITE;
         }
@@ -410,7 +420,7 @@ inline NTSTATUS resolve(const Request& request, HANDLE process, HANDLE stop,
     if (status) return status;
     wchar_t opened[kPath] = {};
     DWORD opened_length = 0;
-    if (!regular(result.value, directory) || !final_name(result.value, opened, opened_length) ||
+    if (!regular(result.value, directory) || !requested_name(result.value, parent, opened, opened_length) ||
         opened_length != length || _wcsicmp(opened, canonical)) return kDenied;
     response.information = io.Information;
     response.attributes = directory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
@@ -463,7 +473,7 @@ inline NTSTATUS mutate(const Request& request, HANDLE process, HANDLE stop,
     wchar_t canonical[kPath] = {};
     DWORD length = 0;
     if (!regular(pinned.value, directory) || !same_file(capability.value, pinned.value) ||
-        !final_name(pinned.value, canonical, length) ||
+        !requested_name(pinned.value, from, canonical, length) ||
         (authorize(context, canonical, length) & 3) != 3) return kDenied;
     ParentPath destination;
     if (request.operation != Remove) {

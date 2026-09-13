@@ -672,7 +672,6 @@ mod tests {
         for path in [
             r"C:\output\..\canary",
             r"C:\output\a:stream",
-            r"C:\OUTPU~1\a",
             r"\\server\share\a",
             r"C:\output\a.\b",
             r"C:\output\a ",
@@ -680,6 +679,11 @@ mod tests {
         ] {
             assert_ne!(validate(&request(path)), 0, "{path}");
         }
+        assert_eq!(
+            validate(&request(r"C:\output\literal~name.json")),
+            0,
+            "a tilde is a legal filename character, not proof of an 8.3 alias"
+        );
         assert_ne!(
             validate(&request(r"C:\output\listing.dir\")),
             0,
@@ -889,7 +893,7 @@ mod tests {
                 exact_denial: i32,
             ) -> u32;
         }
-        for name in ["existing.json", "near.txt"] {
+        for name in ["existing.json", "near.txt", "literal~name.json"] {
             let path: Vec<u16> = root
                 .join(name)
                 .to_str()
@@ -907,6 +911,40 @@ mod tests {
                 )
             };
             assert_eq!(error, 0, "four-call failure bits for {name}: {error:#x}");
+        }
+        if let Some(short) = std::env::var_os("NUB_FILE_BROKER_TEST_SHORT_PATH") {
+            for (path, permitted) in [
+                (root.join("short-name-authority-control.payload"), allowed),
+                (std::path::PathBuf::from(&short), false),
+            ] {
+                let path: Vec<u16> = path.to_str().unwrap().encode_utf16().chain([0]).collect();
+                // SAFETY: host-verified fixture spellings and terminated paths;
+                // these are actual intercepted NT opens and metadata calls.
+                assert_eq!(
+                    unsafe {
+                        sandbox_file_broker_test_four_calls(
+                            path.as_ptr(),
+                            i32::from(permitted),
+                            std::ptr::null_mut(),
+                        )
+                    },
+                    0,
+                    "short-name read/metadata authority in {mode} mode"
+                );
+            }
+            let path: Vec<u16> = std::path::PathBuf::from(short)
+                .to_str()
+                .unwrap()
+                .encode_utf16()
+                .chain([0])
+                .collect();
+            // SAFETY: the helper attempts a real exclusive FILE_OVERWRITE;
+            // absence of short-name authority must prevent any truncation.
+            assert_eq!(
+                unsafe { sandbox_file_broker_test_exclusive_overwrite_denied(path.as_ptr(), 1) },
+                0
+            );
+            println!("FILE_BROKER_SHORT_ALIAS_DENIED mode={mode}");
         }
         let root_path: Vec<u16> = root.to_str().unwrap().encode_utf16().chain([0]).collect();
         // SAFETY: terminated fixture root; helper makes actual exclusive native
@@ -988,6 +1026,58 @@ mod tests {
         assert!(std::fs::remove_file(root.join("near.txt")).is_err());
         assert!(std::fs::rename(root.join("existing.json"), root.join("renamed.txt")).is_err());
         assert!(std::fs::hard_link(root.join("existing.json"), root.join("alias.txt")).is_err());
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(root.join("held.json"));
+        assert_eq!(held.is_ok(), allowed, "retained-handle open: {held:?}");
+        if allowed {
+            use std::io::{Read as _, Seek as _, Write as _};
+            use std::os::windows::io::AsRawHandle as _;
+            unsafe extern "C" {
+                fn sandbox_file_broker_test_rename_handle(
+                    file: *mut std::ffi::c_void,
+                    destination: *const u16,
+                ) -> i32;
+            }
+            let mut held = held.unwrap();
+            let destination: Vec<u16> = root
+                .join("moved.json")
+                .to_str()
+                .unwrap()
+                .encode_utf16()
+                .chain([0])
+                .collect();
+            // SAFETY: the borrowed file stays open; the helper makes an actual
+            // non-replacing FileRenameInformation call with a terminated path.
+            assert_eq!(
+                unsafe {
+                    sandbox_file_broker_test_rename_handle(
+                        held.as_raw_handle(),
+                        destination.as_ptr(),
+                    )
+                },
+                0
+            );
+            std::fs::write(root.join("held.json"), b"replacement").unwrap();
+            let mut original = String::new();
+            held.read_to_string(&mut original).unwrap();
+            assert_eq!(original, "original");
+            held.rewind().unwrap();
+            held.write_all(b"retained").unwrap();
+            assert_eq!(std::fs::read(root.join("moved.json")).unwrap(), b"retained");
+            assert_eq!(
+                std::fs::read(root.join("held.json")).unwrap(),
+                b"replacement"
+            );
+            assert!(std::fs::read(root.join("held-alias.txt")).is_err());
+            std::fs::write(root.join("literal~name.json"), b"literal tilde").unwrap();
+            assert_eq!(
+                std::fs::read(root.join("literal~name.json")).unwrap(),
+                b"literal tilde"
+            );
+            println!("FILE_BROKER_RETAINED_HANDLE_AND_FRESH_NAME_OK");
+        }
         if allowed && std::env::var_os("NUB_FILE_BROKER_TEST_LOADER").is_none() {
             use std::os::windows::fs::OpenOptionsExt as _;
             let exclusive = std::fs::OpenOptions::new()
@@ -1044,6 +1134,62 @@ mod tests {
     #[ignore = "requires an ordinary-user native Windows acceptance run"]
     fn file_broker_native_namespace_with_raw_control() {
         native_control(None, true);
+    }
+
+    #[test]
+    fn file_broker_requested_name_tracks_real_open_and_rename() {
+        unsafe extern "C" {
+            fn sandbox_file_broker_test_requested_name(root: *const u16) -> u32;
+        }
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("name-source.json"), b"original").unwrap();
+        let _ = short_name(&root.path().join("name-source.json"));
+        std::fs::hard_link(
+            root.path().join("name-source.json"),
+            root.path().join("name-alias.txt"),
+        )
+        .unwrap();
+        let path: Vec<u16> = root
+            .path()
+            .to_str()
+            .unwrap()
+            .encode_utf16()
+            .chain([0])
+            .collect();
+        // SAFETY: terminated disposable directory; the helper owns its handles
+        // and renames only the fixture source within that directory.
+        let result = unsafe { sandbox_file_broker_test_requested_name(path.as_ptr()) };
+        assert_eq!(result, 0, "requested-name native step failed: {result}");
+        assert!(!root.path().join("name-source.json").exists());
+        assert_eq!(
+            std::fs::read(root.path().join("name-moved.json")).unwrap(),
+            b"original"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("name-alias.txt")).unwrap(),
+            b"original"
+        );
+    }
+
+    fn short_name(path: &std::path::Path) -> Option<std::path::PathBuf> {
+        unsafe extern "C" {
+            fn sandbox_file_broker_test_short_name(path: *const u16, short: *mut u16) -> u32;
+        }
+        let path: Vec<u16> = path.to_str().unwrap().encode_utf16().chain([0]).collect();
+        let mut short = [0u16; 1024];
+        // SAFETY: terminated input and the native helper's full kPath output.
+        let result =
+            unsafe { sandbox_file_broker_test_short_name(path.as_ptr(), short.as_mut_ptr()) };
+        assert_eq!(result, 0, "short-name native step failed: {result}");
+        let length = short.iter().position(|unit| *unit == 0).unwrap();
+        if length == 0 {
+            println!("FILE_BROKER_SHORT_ALIAS_ABSENT");
+            None
+        } else {
+            let path = std::path::PathBuf::from(String::from_utf16(&short[..length]).unwrap());
+            println!("FILE_BROKER_SHORT_ALIAS_PRESENT={}", path.display());
+            Some(path)
+        }
     }
 
     fn namespace_fixture(root: &std::path::Path) {
@@ -1230,6 +1376,16 @@ mod tests {
         std::fs::create_dir(&project).unwrap();
         std::fs::create_dir(&files).unwrap();
         std::fs::write(files.join("existing.json"), b"original").unwrap();
+        std::fs::write(files.join("literal~name.json"), b"initial tilde").unwrap();
+        std::fs::write(files.join("held.json"), b"original").unwrap();
+        let short_target = files.join("short-name-authority-control.payload");
+        std::fs::write(&short_target, b"short alias must not truncate").unwrap();
+        let short = if namespace {
+            None
+        } else {
+            short_name(&short_target)
+        };
+        std::fs::hard_link(files.join("held.json"), files.join("held-alias.txt")).unwrap();
         std::fs::write(files.join("near.txt"), b"canary").unwrap();
         std::fs::hard_link(files.join("near.txt"), files.join("linked.json")).unwrap();
         std::fs::hard_link(
@@ -1291,7 +1447,7 @@ mod tests {
             ) -> u32;
             fn sandbox_file_broker_test_loader(path: *const u16, allowed: i32) -> u32;
         }
-        for name in ["existing.json", "near.txt"] {
+        for name in ["existing.json", "near.txt", "literal~name.json"] {
             let path: Vec<u16> = files
                 .join(name)
                 .to_str()
@@ -1366,8 +1522,21 @@ mod tests {
                 serde_json::json!("r"),
             );
         }
+        authority_fs.insert(
+            short_target.to_str().unwrap().into(),
+            serde_json::json!("rw"),
+        );
         let authority_policy =
             compile(&serde_json::json!({"fs": authority_fs, "net": false}), &ctx).unwrap();
+        if let Some(short) = &short {
+            assert_eq!(
+                PathMatcher::new(&authority_policy.fs.rules)
+                    .decide_verified_name(short.to_str().unwrap())
+                    .effect,
+                Effect::Deny,
+                "the discovered short spelling has no matcher grant"
+            );
+        }
         let derived = super::super::windows::derive_grants(&authority_policy.fs);
         assert!(
             derived
@@ -1393,6 +1562,17 @@ mod tests {
                 "NUB_FILE_BROKER_TEST_ROOT".into(),
                 files.to_str().unwrap().into(),
             );
+            if let Some(short) = &short {
+                policy.env.constructed.insert(
+                    "NUB_FILE_BROKER_TEST_SHORT_PATH".into(),
+                    short.to_str().unwrap().into(),
+                );
+            } else {
+                policy
+                    .env
+                    .constructed
+                    .remove("NUB_FILE_BROKER_TEST_SHORT_PATH");
+            }
             policy
                 .env
                 .constructed
@@ -1486,6 +1666,22 @@ mod tests {
             drop(resource);
             drop(prepared);
             sandbox.close();
+            assert_eq!(
+                std::fs::read(&short_target).unwrap(),
+                b"short alias must not truncate"
+            );
+            if mode == "raw" && !namespace {
+                assert_eq!(std::fs::read(files.join("held.json")).unwrap(), b"original");
+                assert_eq!(
+                    std::fs::read(files.join("held-alias.txt")).unwrap(),
+                    b"original"
+                );
+                assert!(!files.join("moved.json").exists());
+                assert_eq!(
+                    std::fs::read(files.join("literal~name.json")).unwrap(),
+                    b"initial tilde"
+                );
+            }
             if namespace {
                 assert_eq!(
                     files.join("force-image.json").try_exists().unwrap(),
@@ -1496,6 +1692,24 @@ mod tests {
         }
         assert_eq!(std::fs::read(files.join("near.txt")).unwrap(), b"canary");
         assert!(!files.join("future.txt").is_file());
+        if !namespace {
+            assert_eq!(
+                std::fs::read(files.join("held.json")).unwrap(),
+                b"replacement"
+            );
+            assert_eq!(
+                std::fs::read(files.join("moved.json")).unwrap(),
+                b"retained"
+            );
+            assert_eq!(
+                std::fs::read(files.join("held-alias.txt")).unwrap(),
+                b"retained"
+            );
+            assert_eq!(
+                std::fs::read(files.join("literal~name.json")).unwrap(),
+                b"literal tilde"
+            );
+        }
         if namespace {
             assert!(files.join("renamed.json").is_file());
             assert!(files.join("new-link.json").is_file());

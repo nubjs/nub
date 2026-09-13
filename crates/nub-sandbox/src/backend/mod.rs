@@ -86,6 +86,9 @@ pub mod macos_denials;
 #[cfg(target_os = "linux")]
 mod linux;
 
+#[cfg(all(target_os = "linux", test))]
+mod linux_projection;
+
 #[cfg(target_os = "linux")]
 mod linux_landlock;
 
