@@ -435,7 +435,15 @@ fn verify_backing(
     assert!(!namespace.join("held-renamed.json").exists());
     assert!(!namespace.join("unlink.json").exists());
     assert!(!namespace.join("future.dir").exists());
-    assert!(!namespace.join("directory-source.dir").exists());
+    assert_eq!(
+        fs::read(namespace.join("directory-source.dir/fresh.json")).unwrap(),
+        b"exchange-peer"
+    );
+    assert!(
+        !namespace
+            .join("directory-source.dir/retained.json")
+            .exists()
+    );
     assert_eq!(
         fs::read(namespace.join("directory-renamed.dir/fresh.json")).unwrap(),
         b"fresh-directory-child"
