@@ -8,7 +8,14 @@ Copy-Item "$Stage\launcher.exe", "$Stage\child.exe" $root
 Set-Location $root
 whoami /all
 Write-Output "FIXTURE_ROOT=$root"
-Get-FileHash launcher.exe, child.exe -Algorithm SHA256 | Format-List
+foreach ($name in @('launcher.exe', 'child.exe')) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $stream = [IO.File]::OpenRead((Join-Path $root $name))
+    try {
+        $hash = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+        Write-Output "DEPLOYED_SHA256 file=$name hash=$hash"
+    } finally { $stream.Dispose(); $sha.Dispose() }
+}
 & .\launcher.exe $root
 $code = $LASTEXITCODE
 foreach ($log in Get-ChildItem $root -Filter '*.log') {
