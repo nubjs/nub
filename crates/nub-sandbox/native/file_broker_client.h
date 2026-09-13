@@ -32,6 +32,7 @@ enum FileBrokerObjectAttributeField : DWORD {
 struct FileBrokerCaptureDetails {
     DWORD object_fields = 0;
     DWORD object_attributes = 0;
+    DWORD quality_fields = 0;
 };
 
 static void diagnose_file_broker(FileBrokerDiagnosticStage stage, DWORD status,
@@ -46,9 +47,9 @@ static void diagnose_file_broker(FileBrokerDiagnosticStage stage, DWORD status,
         char message[208];
         int length = stage == FileBrokerCapture
             ? sprintf_s(message,
-                "NUB_FILE_BROKER_IPC stage=%lu status=0x%08lx object=0x%08lx attributes=0x%08lx access=0x%08lx options=0x%08lx disposition=%lu\r\n",
+                "NUB_FILE_BROKER_IPC stage=%lu status=0x%08lx object=0x%08lx attributes=0x%08lx quality=0x%08lx access=0x%08lx options=0x%08lx disposition=%lu\r\n",
                 static_cast<DWORD>(stage), status, capture.object_fields, capture.object_attributes,
-                request.access, request.options, request.disposition)
+                capture.quality_fields, request.access, request.options, request.disposition)
             : sprintf_s(message,
                 "NUB_FILE_BROKER_IPC stage=%lu status=0x%08lx access=0x%08lx options=0x%08lx disposition=%lu\r\n",
                 static_cast<DWORD>(stage), status, request.access, request.options, request.disposition);
@@ -79,7 +80,7 @@ static bool capture_file_request(nub_sandbox::file_broker::Request& request,
         if (object.SecurityQualityOfService) details.object_fields |= FileBrokerObjectQualityOfService;
         if (object.Attributes != OBJ_CASE_INSENSITIVE) details.object_fields |= FileBrokerObjectFlags;
         if (!object.ObjectName) details.object_fields |= FileBrokerObjectName;
-        if (details.object_fields) {
+        if (details.object_fields & ~FileBrokerObjectQualityOfService) {
             failure = FileBrokerCaptureObjectAttributes;
             return false;
         }
@@ -96,7 +97,16 @@ static bool capture_file_request(nub_sandbox::file_broker::Request& request,
         }
         request.length = name.Length / sizeof(wchar_t) - 4;
         memcpy(request.path, name.Buffer + 4, request.length * sizeof(wchar_t));
-        if (validate(request) == 0) return true;
+        if (validate(request) == 0) {
+            // SECURITY_QUALITY_OF_SERVICE controls client impersonation for
+            // server connections. This broker resolves only validated local
+            // disk paths and never forwards this child pointer to its host.
+            if (!object.SecurityQualityOfService ||
+                valid_quality(*static_cast<const SECURITY_QUALITY_OF_SERVICE*>(object.SecurityQualityOfService),
+                              details.quality_fields)) return true;
+            failure = FileBrokerCaptureObjectAttributes;
+            return false;
+        }
         if (request.operation < Basic) {
             DWORD access = access_mask(request.access);
             if (!access || (access & ~(kRead | kWrite))) failure = FileBrokerCaptureAccess;

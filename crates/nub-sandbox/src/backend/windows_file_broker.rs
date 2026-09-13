@@ -459,6 +459,12 @@ mod tests {
 
     #[test]
     fn file_broker_protocol_rejects_authority_and_namespace_expansion() {
+        unsafe extern "C" {
+            fn sandbox_file_broker_test_quality() -> u32;
+        }
+        // SAFETY: native helper exercises only private, pointer-free QoS
+        // validation cases and returns a scalar verdict.
+        assert_eq!(unsafe { sandbox_file_broker_test_quality() }, 0);
         let valid = request(r"C:\output\future.json");
         assert_eq!(validate(&valid), 0);
         // Windows CreateFileW adds SYNCHRONIZE and FILE_READ_ATTRIBUTES to
@@ -469,6 +475,15 @@ mod tests {
             ..valid.clone()
         };
         assert_eq!(validate(&standard_open), 0);
+        let standard_arm_open = Request {
+            options: standard_open.options | 0x0002_0000,
+            ..standard_open.clone()
+        };
+        assert_eq!(
+            validate(&standard_arm_open),
+            0,
+            "FILE_DISALLOW_EXCLUSIVE is emitted by the ARM Win32 request"
+        );
         let standard_create = Request {
             operation: 2,
             access: 0x4010_0080,
@@ -476,6 +491,14 @@ mod tests {
             ..valid.clone()
         };
         assert_eq!(validate(&standard_create), 0);
+        assert_eq!(
+            validate(&Request {
+                options: standard_create.options | 0x0002_0000,
+                ..standard_create.clone()
+            }),
+            0,
+            "FILE_DISALLOW_EXCLUSIVE is emitted by the ARM Win32 create"
+        );
         assert_ne!(
             validate(&Request {
                 options: standard_create.options | 0x4000,
@@ -483,6 +506,14 @@ mod tests {
             }),
             0,
             "ordinary CreateFileW shape must not admit backup-intent opens"
+        );
+        assert_ne!(
+            validate(&Request {
+                options: standard_create.options | 0x0004_0000,
+                ..standard_create.clone()
+            }),
+            0,
+            "session-aware opens are outside the private broker contract"
         );
         for access in [
             0x10000000, 0x02000000, 0x00010000, 0x00040000, 0x00080000, 0x01000000, 0x40,
