@@ -31,7 +31,7 @@ The [initial version matrix](https://github.com/nubjs/nub/actions/runs/343481653
 | Cargo 1.91.1 | Pass | Pass | Adapter | Pass | Build and clean with project-local target. Server requires native compatibility. |
 | rustup 1.29.0 / 1.29.1 | Pass | Pass | Pass | Pass | Installed-toolchain and home queries, not new toolchain installation. |
 | Go 1.25.1 | Pass | Pass | Adapter | Pass | User config, build, install and cache cleanup. Server requires native compatibility. |
-| Gradle 8.14 | Pass | Pass | Qualified | Qualified | Offline task twice and daemon cleanup pass after acknowledging the specific full-networking limitation. |
+| Gradle 8.14 | Pass | Pass | Qualified | Qualified | Historical narrower-network probe passes; current native-adapter networking acceptance is unverified. |
 | Maven 3.9.11 | Pass | Pass | Pass | Pass | Offline validation and clean; both execute the user startup file. |
 | .NET SDK 10.0.100 / NuGet | Pass | Pass | Pass | Pass | Restore, build, cache cleanup and restore. Unix bundle includes process metadata/shared coordination; cache replacement uses a stable writable parent. |
 | Composer 2.8.12 | Pass | Pass | Adapter | Pass | Cold/warm install without plugins or scripts, then cache cleanup. Server requires native compatibility. |

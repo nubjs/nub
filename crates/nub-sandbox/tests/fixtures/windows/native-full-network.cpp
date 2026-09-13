@@ -273,7 +273,10 @@ bool listener_round_trip(int family) {
   }
   marker("FULL_NETWORK_READY", printable_endpoint(bound));
   u_long nonblocking = 1;
-  ioctlsocket(listener.value, FIONBIO, &nonblocking);
+  if (ioctlsocket(listener.value, FIONBIO, &nonblocking) != 0) {
+    marker("FULL_NETWORK_PEER", "0");
+    return false;
+  }
   Socket accepted;
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kTimeoutMs);
   while (!accepted && std::chrono::steady_clock::now() < deadline) {
@@ -281,7 +284,11 @@ bool listener_round_trip(int family) {
     if (!accepted && WSAGetLastError() != WSAEWOULDBLOCK) break;
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
-  if (accepted) set_timeout(accepted.value);
+  // accept inherits the listener's nonblocking mode. The byte oracle below
+  // deliberately uses bounded blocking reads, not arrival-order assumptions.
+  nonblocking = 0;
+  if (accepted && (ioctlsocket(accepted.value, FIONBIO, &nonblocking) != 0 ||
+                   !set_timeout(accepted.value))) accepted.reset();
   const bool peer = accepted && receive_exact(accepted.value, kRequest, static_cast<int>(sizeof(kRequest) - 1)) &&
                     send_all(accepted.value, kReply, static_cast<int>(sizeof(kReply) - 1));
   marker("FULL_NETWORK_PEER", peer ? "1" : "0");
