@@ -246,7 +246,7 @@ The private token also admits direct connections to private addresses. It is not
 | --- | --- | --- |
 | Linux | A seccomp notification supervisor redirects TCP connections through the policy proxy, including loopback destinations other than the proxy's own listener. | No client proxy configuration is required. DNS uses the configured resolver. Local services require an explicit matching hostname, IP or CIDR grant. General UDP is denied. Host rules are not an all-channel data-loss boundary. |
 | macOS | Seatbelt allows the proxy's loopback port; the proxy checks destinations. | Clients need HTTP CONNECT or SOCKS proxy support. Bypassing the proxy does not grant direct external access. |
-| Windows | A same-AppContainer helper provides the proxy; the command has no direct Internet capability. | Clients need proxy support. The helper rejects TLS-inspection and credential-broker policies. No administrator loopback exemption is installed. |
+| Windows | A same-AppContainer helper relays bytes to the parent-owned proxy; the command and helper have no direct Internet capability. TLS inspection and credential injection run in the parent. | Clients need proxy support. The embedder registers a helper entry point. No administrator loopback exemption is installed. |
 
 Coarse `net: true` and `net: false` policies do not start a host-filtering proxy. The build jail uses coarse catalog network permissions rather than enforcing its recorded observed-host lists. On Windows, the coarse allow grants public outbound networking, not unrestricted host/LAN/loopback access.
 
