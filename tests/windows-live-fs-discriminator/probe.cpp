@@ -28,6 +28,26 @@ constexpr ULONG kFileOpen = 1;
 constexpr ULONG kFileNonDirectory = 0x40;
 constexpr ULONG kFileSynchronousNonalert = 0x20;
 
+// winternl.h exposes the corresponding information classes but not these
+// undocumented wire structs in the hosted Windows SDK used by Actions.
+struct NtFileBasicInformation {
+  LARGE_INTEGER creation_time;
+  LARGE_INTEGER last_access_time;
+  LARGE_INTEGER last_write_time;
+  LARGE_INTEGER change_time;
+  ULONG file_attributes;
+};
+
+struct NtFileNetworkOpenInformation {
+  LARGE_INTEGER creation_time;
+  LARGE_INTEGER last_access_time;
+  LARGE_INTEGER last_write_time;
+  LARGE_INTEGER change_time;
+  LARGE_INTEGER allocation_size;
+  LARGE_INTEGER end_of_file;
+  ULONG file_attributes;
+};
+
 struct Handle {
   HANDLE value = nullptr;
   Handle() = default;
@@ -57,8 +77,8 @@ using NtCreateFileFn = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES
                                         PLARGE_INTEGER, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
 using NtOpenFileFn = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK,
                                       ULONG, ULONG);
-using NtQueryAttributesFileFn = NTSTATUS(NTAPI*)(POBJECT_ATTRIBUTES, FILE_BASIC_INFORMATION*);
-using NtQueryFullAttributesFileFn = NTSTATUS(NTAPI*)(POBJECT_ATTRIBUTES, FILE_NETWORK_OPEN_INFORMATION*);
+using NtQueryAttributesFileFn = NTSTATUS(NTAPI*)(POBJECT_ATTRIBUTES, NtFileBasicInformation*);
+using NtQueryFullAttributesFileFn = NTSTATUS(NTAPI*)(POBJECT_ATTRIBUTES, NtFileNetworkOpenInformation*);
 using NtCreateSectionFn = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PLARGE_INTEGER,
                                            ULONG, ULONG, HANDLE);
 using NtMapViewOfSectionFn = NTSTATUS(NTAPI*)(HANDLE, HANDLE, PVOID*, ULONG_PTR, SIZE_T,
@@ -113,8 +133,8 @@ NTSTATUS duplicate_brokered_dll(PHANDLE file, PIO_STATUS_BLOCK io_status) {
   return kStatusSuccess;
 }
 
-NTSTATUS describe_brokered_dll(FILE_BASIC_INFORMATION* basic,
-                               FILE_NETWORK_OPEN_INFORMATION* full) {
+NTSTATUS describe_brokered_dll(NtFileBasicInformation* basic,
+                               NtFileNetworkOpenInformation* full) {
   BY_HANDLE_FILE_INFORMATION info = {};
   FILE_STANDARD_INFO standard = {};
   if (!g_brokered_dll || !GetFileInformationByHandle(g_brokered_dll, &info) ||
@@ -129,21 +149,21 @@ NTSTATUS describe_brokered_dll(FILE_BASIC_INFORMATION* basic,
   };
   if (basic) {
     std::memset(basic, 0, sizeof(*basic));
-    basic->CreationTime = from_filetime(info.ftCreationTime);
-    basic->LastAccessTime = from_filetime(info.ftLastAccessTime);
-    basic->LastWriteTime = from_filetime(info.ftLastWriteTime);
-    basic->ChangeTime = basic->LastWriteTime;
-    basic->FileAttributes = info.dwFileAttributes;
+    basic->creation_time = from_filetime(info.ftCreationTime);
+    basic->last_access_time = from_filetime(info.ftLastAccessTime);
+    basic->last_write_time = from_filetime(info.ftLastWriteTime);
+    basic->change_time = basic->last_write_time;
+    basic->file_attributes = info.dwFileAttributes;
   }
   if (full) {
     std::memset(full, 0, sizeof(*full));
-    full->CreationTime = from_filetime(info.ftCreationTime);
-    full->LastAccessTime = from_filetime(info.ftLastAccessTime);
-    full->LastWriteTime = from_filetime(info.ftLastWriteTime);
-    full->ChangeTime = full->LastWriteTime;
-    full->AllocationSize = standard.AllocationSize;
-    full->EndOfFile = standard.EndOfFile;
-    full->FileAttributes = info.dwFileAttributes;
+    full->creation_time = from_filetime(info.ftCreationTime);
+    full->last_access_time = from_filetime(info.ftLastAccessTime);
+    full->last_write_time = from_filetime(info.ftLastWriteTime);
+    full->change_time = full->last_write_time;
+    full->allocation_size = standard.AllocationSize;
+    full->end_of_file = standard.EndOfFile;
+    full->file_attributes = info.dwFileAttributes;
   }
   return kStatusSuccess;
 }
@@ -243,7 +263,7 @@ NTSTATUS NTAPI shim_nt_open_file(PHANDLE file, ACCESS_MASK desired_access,
 }
 
 NTSTATUS NTAPI shim_nt_query_attributes_file(POBJECT_ATTRIBUTES object_attributes,
-                                             FILE_BASIC_INFORMATION* file_attributes) {
+                                             NtFileBasicInformation* file_attributes) {
   const NTSTATUS status = g_native_open_hooks.query_original(object_attributes, file_attributes);
   if (status >= 0 || !native_name_matches_brokered_dll(object_attributes)) return status;
   ++g_query_broker_calls;
@@ -251,7 +271,7 @@ NTSTATUS NTAPI shim_nt_query_attributes_file(POBJECT_ATTRIBUTES object_attribute
 }
 
 NTSTATUS NTAPI shim_nt_query_full_attributes_file(POBJECT_ATTRIBUTES object_attributes,
-                                                  FILE_NETWORK_OPEN_INFORMATION* file_attributes) {
+                                                  NtFileNetworkOpenInformation* file_attributes) {
   const NTSTATUS status = g_native_open_hooks.query_full_original(object_attributes, file_attributes);
   if (status >= 0 || !native_name_matches_brokered_dll(object_attributes)) return status;
   ++g_query_full_broker_calls;
