@@ -100,6 +100,13 @@ extern "C" DWORD sandbox_file_broker_test_namespace(const wchar_t* root, BOOL al
         NameInformation alias = {};
         if (swprintf_s(alias.name, L"\\??\\%sbroker-amplification-%lu.json", temp, GetCurrentProcessId()) < 0) return 21;
         alias.length = DWORD(wcslen(alias.name) * sizeof(wchar_t));
+        {
+            Handle writable;
+            writable.value = CreateFileW(alias.name + 4, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                         nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (writable.value == INVALID_HANDLE_VALUE) return 23;
+        }
+        if (!DeleteFileW(alias.name + 4)) return 23;
         // TEMP is directly writable by the child. A raw link there must not
         // amplify a read-only source, even before the broker sees the request.
         if (set(readonly.value, &io, &alias, DWORD(offsetof(NameInformation, name) + alias.length),
