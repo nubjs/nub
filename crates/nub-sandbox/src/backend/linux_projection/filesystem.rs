@@ -359,7 +359,8 @@ impl State {
         }
         // Always exclusive: a racing existing file must go through fresh lookup
         // and open rather than bypass the type/identity checks or get truncated.
-        let parent = self.current(&self.node(parent)?)?;
+        let parent_node = self.node(parent)?;
+        let parent = self.current(&parent_node)?;
         let file = self
             .backing
             .create_at(&parent, name, flags, mode & !umask & 0o777)?;
