@@ -35,9 +35,10 @@ fn nub_binary() -> PathBuf {
 
 /// A root `postinstall` that records the two augmentation signals a lifecycle
 /// script actually sees — `NODE_OPTIONS` (carries nub's preload injection) and
-/// the FIRST `PATH` entry (must be nub's node shim) — to `aug.json`. Only single
-/// quotes inside the JS so the `node -e "…"` wrapper needs no further escaping.
-const POSTINSTALL_PROBE: &str = "node -e \"const fs=require('fs'),sep=require('path').delimiter;fs.writeFileSync('aug.json',JSON.stringify({no:process.env.NODE_OPTIONS||'',p0:(process.env.PATH||'').split(sep)[0]||''}))\"";
+/// the whole `PATH` (nub's node shim must lead the inherited entries) — to
+/// `aug.json`. Only single quotes inside the JS so the `node -e "…"` wrapper
+/// needs no further escaping.
+const POSTINSTALL_PROBE: &str = "node -e \"const fs=require('fs'),sep=require('path').delimiter;fs.writeFileSync('aug.json',JSON.stringify({no:process.env.NODE_OPTIONS||'',p:(process.env.PATH||'').split(sep)}))\"";
 
 const EMPTY_LOCK: &str = "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n";
 
@@ -86,7 +87,12 @@ fn install_runs_lifecycle_scripts_under_runtime_augmentation() {
     });
     let aug: serde_json::Value = serde_json::from_str(&recorded).unwrap();
     let node_options = aug["no"].as_str().unwrap_or_default();
-    let first_path = aug["p0"].as_str().unwrap_or_default();
+    let path: Vec<&str> = aug["p"].as_array().map_or_else(Vec::new, |entries| {
+        entries
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect()
+    });
 
     // Slash-normalize so the compat-tier file:// URL (forward slashes) matches the
     // filesystem path on Windows too.
@@ -102,10 +108,23 @@ fn install_runs_lifecycle_scripts_under_runtime_augmentation() {
          augmentation did not reach the lifecycle script.\nNODE_OPTIONS = {node_options:?}"
     );
 
+    // Ahead of the inherited PATH, not first outright. The package manager
+    // puts a project's own `node_modules/.bin` ahead of anything the host
+    // can reach — npm and pnpm both do, and overriding that would change
+    // which binary a build script's bare `node` means, which augmentation
+    // must never do. What has to hold is that nub's shim beats the SYSTEM
+    // node, so a build script re-enters nub augmented.
+    let shim = path
+        .iter()
+        .position(|entry| entry.contains("nub-node-shim-"));
+    let system = path
+        .iter()
+        .position(|entry| matches!(*entry, "/usr/bin" | "/usr/local/bin" | "/bin"));
     assert!(
-        first_path.contains("nub-node-shim-"),
-        "the FIRST PATH entry in the lifecycle script must be nub's node-shim dir so a bare \
-         `node` in a build script re-enters nub augmented; got {first_path:?}"
+        shim.is_some_and(|shim| system.is_none_or(|system| shim < system)),
+        "nub's node-shim dir must lead the inherited PATH so a bare `node` in a build script \
+         re-enters nub augmented rather than reaching the system one; shim at {shim:?}, system \
+         at {system:?} in {path:?}"
     );
 }
 
