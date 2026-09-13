@@ -637,8 +637,8 @@ fn finalize_scan(buf: &[u8], decider: &dyn GrantDecider) -> (Vec<u8>, bool, Opti
 /// - HARD block (never opt-out-able, [`is_hard_blocked_ip`]): the cloud-metadata /
 ///   link-local surface — IPv4 link-local `169.254.0.0/16` (incl. the `169.254.169.254`
 ///   IMDS endpoint), IPv6 link-local `fe80::/10`, and the AWS IPv6 IMDS `fd00:ec2::254`.
-///   An IPv4-in-IPv6 form (`::ffff:169.254.169.254`, `::169.254.169.254`) is unmapped to
-///   its embedded v4 first so the encoding can't smuggle a metadata address past.
+///   Fixed IPv4-in-IPv6 forms (mapped, compatible and well-known NAT64) are
+///   classified on their embedded v4 address first.
 /// - PRIVATE block (default-on, lifted by an explicit `<private>` allow): RFC1918
 ///   `10/8`+`172.16/12`+`192.168/16` and IPv6 ULA `fc00::/7` ([`is_private_range`]).
 ///   `allow_private` is `true` only when the policy names `<private>` — a bare `*` does
@@ -660,7 +660,7 @@ fn is_hard_blocked_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_link_local(),
         IpAddr::V6(v6) => {
-            if let Some(v4) = v6.to_ipv4() {
+            if let Some(v4) = crate::matcher::host::embedded_ipv4_for_range_check(v6) {
                 return v4.is_link_local();
             }
             // fe80::/10 hand-rolled (`Ipv6Addr::is_unicast_link_local` is still unstable).
@@ -1079,6 +1079,8 @@ mod tests {
             "fd00:ec2::254",          // AWS IPv6 IMDS (inside ULA, but hard-blocked)
             "::ffff:169.254.169.254", // IPv4-mapped metadata (encoding smuggle)
             "::169.254.169.254",      // IPv4-compat metadata (encoding smuggle)
+            "64:ff9b::a9fe:a9fe",     // well-known NAT64 metadata
+            "64:ff9b::169.254.0.1",   // well-known NAT64 link-local
         ];
         for ip in hard {
             let ip: IpAddr = ip.parse().unwrap();
@@ -1098,6 +1100,8 @@ mod tests {
             "8.8.8.8",
             "203.0.113.10",
             "2606:4700:4700::1111",
+            "64:ff9b::808:808",
+            "64:ff9b::7f00:1",
         ] {
             let ip: IpAddr = ip.parse().unwrap();
             assert!(!is_blocked_egress_ip(ip, false), "{ip} must be reachable");
@@ -1118,6 +1122,9 @@ mod tests {
             "fdff:ffff::1",       // ULA upper edge (fc00::/7)
             "::ffff:10.0.0.1",    // IPv4-mapped RFC1918 (encoding smuggle)
             "::ffff:192.168.0.1", // IPv4-mapped RFC1918
+            "64:ff9b::10.0.0.1",  // well-known NAT64 RFC1918
+            "64:ff9b::172.31.255.254",
+            "64:ff9b::192.168.1.1",
         ];
         for ip in private {
             let ip: IpAddr = ip.parse().unwrap();
@@ -1138,6 +1145,33 @@ mod tests {
                 "{ip} is public, not private"
             );
         }
+    }
+
+    #[test]
+    fn nat64_range_checks_preserve_prefix_boundaries_and_private_matching() {
+        for ip in [
+            "64:ff9a::a9fe:a9fe",
+            "64:ff9b:0:0:0:1:a9fe:a9fe",
+            "64:ff9b:1::a9fe:a9fe",
+        ] {
+            assert!(!is_blocked_egress_ip(ip.parse().unwrap(), false), "{ip}");
+        }
+        let policy = net(
+            vec![NetRule {
+                target: NetTarget::Private,
+                effect: Effect::Allow,
+            }],
+            Effect::Deny,
+        );
+        let decider = StaticDecider::new(policy);
+        assert_eq!(
+            decider.decide(&Host::Ip("64:ff9b::a00:1".parse().unwrap())),
+            Decision::Allow
+        );
+        assert_eq!(
+            decider.decide(&Host::Ip("64:ff9b::808:808".parse().unwrap())),
+            Decision::Deny
+        );
     }
 
     #[test]
@@ -1168,6 +1202,14 @@ mod tests {
             &shutdown,
         )
         .expect_err("metadata egress must be blocked even with <private>");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        let err = connect_upstream(
+            &Host::Ip("64:ff9b::a9fe:a9fe".parse().unwrap()),
+            80,
+            true,
+            &shutdown,
+        )
+        .expect_err("well-known NAT64 metadata egress must remain blocked");
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
 
         // RFC1918 is denied without the opt-in, allowed with it.

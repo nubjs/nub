@@ -7,7 +7,7 @@
 //! but tighter than an apex-inclusive match (sandbox.mdx `net` grammar).
 
 use crate::policy::{Effect, NetPolicy, NetRule, NetTarget};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// A compiled last-match-wins matcher over a [`NetPolicy`]'s rules.
 pub struct HostMatcher<'a> {
@@ -104,16 +104,28 @@ pub fn host_pattern_is_valid(pattern: &str) -> bool {
 /// (`fc00::/7`) — the `<private>` class the egress proxy blocks by default. Loopback
 /// (`127/8`, `::1`) and link-local are deliberately NOT here: loopback is the proxy's
 /// own carve, and link-local is the separate always-blocked SSRF surface. An IPv4-mapped
-/// / IPv4-compatible IPv6 form is classified on its embedded v4, so a v4 private address
-/// cannot be smuggled past as a v6 literal.
+/// / IPv4-compatible IPv6 form or a well-known NAT64 address is classified on its
+/// embedded v4. Network-specific translation prefixes cannot be inferred from an IP.
 pub fn is_private_range(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_private_v4(v4),
-        IpAddr::V6(v6) => match v6.to_ipv4() {
+        IpAddr::V6(v6) => match embedded_ipv4_for_range_check(v6) {
             Some(v4) => is_private_v4(v4),
             // fc00::/7 (ULA) hand-rolled: the top 7 bits are `1111 110`.
             None => (v6.segments()[0] & 0xfe00) == 0xfc00,
         },
+    }
+}
+
+/// Decode fixed IPv4 embeddings for destination checks, not CIDR-rule matching.
+pub(crate) fn embedded_ipv4_for_range_check(v6: Ipv6Addr) -> Option<Ipv4Addr> {
+    if v6.segments()[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+        // RFC 6052's well-known /96 prefix; do not rely on the translator to
+        // reject non-global IPv4 addresses before applying local policy.
+        let bytes = v6.octets();
+        Some(Ipv4Addr::new(bytes[12], bytes[13], bytes[14], bytes[15]))
+    } else {
+        v6.to_ipv4()
     }
 }
 
