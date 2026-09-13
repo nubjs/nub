@@ -34,7 +34,47 @@ const NUB: Embedder = Embedder {
     reads_pnpm_config: false,
     workspace_settings: None,
     compat_package_extensions: None,
+    allow_builds_writer: Some(record_allow_scripts),
 };
+
+/// Record an `approve-builds` decision where a nub project reads it back:
+/// the `allowScripts` field of its `package.json`.
+///
+/// The engine would otherwise write `allowBuilds` into `pnpm-workspace.yaml`,
+/// which a nub project reads nothing from — so the approval would be lost on
+/// the next install, and worse, the file itself makes the project read as
+/// pnpm's, which would send every later command down the wrong identity.
+///
+/// A decision REPLACES the entry it names and leaves the rest alone, because
+/// the user is deciding one package at a time.
+fn record_allow_scripts(dir: &std::path::Path, decisions: &[(&str, bool)]) -> std::io::Result<()> {
+    nub_core::pm::resolve::edit_root_manifest(dir, |manifest| {
+        // Edited in place where the field already exists, so an approval
+        // moves nothing else in the file; a malformed value is replaced,
+        // since the engine could not have read it either.
+        if let Some(serde_json::Value::Object(allowed)) =
+            manifest.get_mut(host_settings::ALLOW_SCRIPTS_FIELD)
+        {
+            decide(allowed, decisions);
+            return;
+        }
+        let mut allowed = serde_json::Map::new();
+        decide(&mut allowed, decisions);
+        manifest.insert(
+            host_settings::ALLOW_SCRIPTS_FIELD.to_owned(),
+            serde_json::Value::Object(allowed),
+        );
+    })
+    .map(|_| ())
+    .map_err(std::io::Error::other)
+}
+
+/// Apply each decision, replacing whatever the field said about that package.
+fn decide(allowed: &mut serde_json::Map<String, serde_json::Value>, decisions: &[(&str, bool)]) {
+    for (package, may_run) in decisions {
+        allowed.insert((*package).to_owned(), serde_json::Value::Bool(*may_run));
+    }
+}
 
 /// nub's own compatibility rules, in the shape the engine's database takes.
 ///

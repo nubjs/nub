@@ -233,14 +233,28 @@ fn manifest_settings(manifest: &Map<String, Value>) -> Map<String, Value> {
             }
         }
     }
+    // What the project has decided may run scripts. nub spells it
+    // `allowScripts`, which is the name `nub approve-builds` writes back;
+    // the engine reads the same decisions under its own name.
+    if let Some(value @ Value::Object(_)) = manifest.get(ALLOW_SCRIPTS_FIELD) {
+        out.insert("allowBuilds".to_owned(), value.clone());
+    }
     out
 }
+
+/// The `package.json` field naming the dependencies whose install scripts may
+/// run. nub's own spelling of what the engine calls `allowBuilds`, and the
+/// file `approve-builds` writes under nub's identity — a nub project reads no
+/// `pnpm-workspace.yaml`, so a decision recorded there would never be read
+/// back.
+pub(crate) const ALLOW_SCRIPTS_FIELD: &str = "allowScripts";
 
 /// How a user wrote the `package.json` field behind a setting.
 fn manifest_field(setting: &str) -> String {
     match setting {
         "overrides" => "`overrides` or `resolutions`".to_owned(),
         "catalog" | "catalogs" => format!("`workspaces.{setting}`"),
+        "allowBuilds" => format!("`{ALLOW_SCRIPTS_FIELD}`"),
         other => format!("`{other}`"),
     }
 }
