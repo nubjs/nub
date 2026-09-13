@@ -130,6 +130,11 @@ fn merge(sources: &Sources) -> Result<Map<String, Value>> {
     {
         merged.insert("enableGlobalVirtualStore".to_owned(), Value::Bool(true));
     }
+    // The engine's update notifier checks the registry for a newer pnpm and
+    // tells the user how to install it. nub ships the engine and updates it
+    // through `nub upgrade`, so the advice would name a release nub does not
+    // take and a command nub does not have.
+    merged.entry("updateNotifier").or_insert(Value::Bool(false));
     if let Some(cache_root) = &sources.cache_root {
         for (key, leaf) in [("storeDir", "store"), ("cacheDir", "pm")] {
             if !merged.contains_key(key) {

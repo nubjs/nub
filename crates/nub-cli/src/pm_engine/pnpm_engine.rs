@@ -128,13 +128,10 @@ fn profile(selection: Selection) -> Result<Embedder> {
 /// errors likewise bake `Usage: pnpm <verb>` into a `#[display]` attribute,
 /// which the runtime program name the profile sets cannot reach.
 ///
-/// Deliberately narrow: only the usage prefix and the code prefixes are
-/// rewritten. The engine also suggests commands as `` `pnpm <verb>` ``, and
-/// those are left alone — several name verbs nub either does not have or
-/// spells differently, so substituting the program name would turn a brand
-/// leak into wrong advice.
+/// The commands a report tells the user to RUN are rewritten too, by
+/// [`rewrite_suggestions`].
 fn rebrand(rendered: &str, embedder: Embedder) -> String {
-    rendered
+    rewrite_suggestions(rendered, embedder.program_name)
         .replace(
             "Usage: pnpm ",
             &format!("Usage: {} ", embedder.program_name),
@@ -143,28 +140,55 @@ fn rebrand(rendered: &str, embedder: Embedder) -> String {
         .replace("WARN_PNPM_", "WARN_NUB_")
 }
 
-/// Diagnostic codes whose command has already printed its own report.
+/// Verbs whose advice nub has to respell rather than just rename.
 ///
-/// The engine's entry point skips the top-level render for these, so a host
-/// that renders unconditionally prints the same failure twice. Kept here
-/// rather than read from the engine because the list is private to it; the
-/// upstream seam is the right long-term home, and until it exports one this
-/// has to be checked against `is_reported_error` when the pin moves.
-const SELF_REPORTED_CODES: [&str; 3] = [
-    "ERR_PNPM_DEDUPE_CHECK_ISSUES",
-    "ERR_PNPM_PEER_DEP_ISSUES",
-    "ERR_PNPM_NO_MATCHING_PROJECTS",
-];
+/// The engine's `self-update` replaces the pnpm it runs as. nub's
+/// self-update is `upgrade`, and nub's `update` — which is what the engine
+/// reads `upgrade` as — updates dependencies, so swapping the program name
+/// alone here would point the user at a command that does something else.
+const SUGGESTION_RENAMES: [(&str, &str); 1] = [("self-update", "upgrade")];
 
-/// Whether the failing command already reported itself.
-fn is_self_reported(report: &miette::Report) -> bool {
-    report
-        .code()
-        .is_some_and(|code| SELF_REPORTED_CODES.contains(&code.to_string().as_str()))
+/// Rewrite the commands a rendered report tells the user to run.
+///
+/// The engine writes them `pnpm <verb>`, always inside quotes or
+/// backticks, and nub serves nearly every verb it names under the same
+/// spelling — so the program name is substituted and the verb kept, except
+/// for the few [`SUGGESTION_RENAMES`] respells. The quoting is what keeps
+/// this off ordinary prose, where `pnpm` is the subject of a sentence
+/// rather than a command to type.
+fn rewrite_suggestions(rendered: &str, program: &str) -> String {
+    let mut out = String::with_capacity(rendered.len());
+    let mut rest = rendered;
+    while let Some(at) = rest.find("pnpm ") {
+        let (before, from) = rest.split_at(at);
+        out.push_str(before);
+        rest = &from["pnpm ".len()..];
+        if !before.ends_with(['"', '`']) {
+            out.push_str("pnpm ");
+            continue;
+        }
+        out.push_str(program);
+        out.push(' ');
+        let verb = rest
+            .split(|c: char| !c.is_ascii_lowercase() && c != '-')
+            .next()
+            .unwrap_or_default();
+        if let Some((_, respelled)) = SUGGESTION_RENAMES.iter().find(|(named, _)| *named == verb) {
+            out.push_str(respelled);
+            rest = &rest[verb.len()..];
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
-/// Run the engine on the process argv and return its exit status.
-pub(crate) fn run_process_argv() -> Result<i32> {
+/// Run the engine on `argv` and return its exit status.
+///
+/// `argv` is the whole command line, program name first, as the host
+/// resolved it — not the process argv. nub reads a few flags of its own
+/// before the verb and acts on them itself, and the engine's grammar has
+/// no spelling for those, so what it runs on is what nub left.
+pub(crate) fn run(argv: Vec<std::ffi::OsString>) -> Result<i32> {
     let embedder = profile(selection().unwrap_or(Selection::Auto))?;
     // The engine's own entry point installs this before it can print. It
     // drops each cause the level above already states in full, so a host
@@ -172,10 +196,13 @@ pub(crate) fn run_process_argv() -> Result<i32> {
     // — a divergence invisible on a one-level diagnostic and plain on a
     // deep one.
     pnpm_diagnostics::install_report_handler();
-    match pnpm_cli::run(std::env::args_os().collect(), embedder) {
+    match pnpm_cli::run(argv, embedder) {
         Ok(()) => Ok(0),
         Err(report) => {
-            if !is_self_reported(&report) {
+            // The engine skips its own render for a command that has
+            // already printed its report, and answers for which those are,
+            // so nothing here has to track the list across a pin move.
+            if !pnpm_cli::is_reported_error(&report) {
                 // The `Error: ` prefix is the engine's own, not decoration:
                 // without it a pnpm-incumbent project's stderr differs from
                 // real pnpm's on every failure.
@@ -194,7 +221,37 @@ pub(crate) fn run_process_argv() -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::host_compat_rules;
+    use super::{host_compat_rules, rewrite_suggestions};
+
+    /// Only a quoted command is a command to type. The engine's prose uses
+    /// its own name as a subject too, and rewriting that would say nub does
+    /// things the sentence is not about.
+    #[test]
+    fn only_a_quoted_command_is_rewritten() {
+        assert_eq!(
+            rewrite_suggestions(r#"Run "pnpm approve-builds" to pick."#, "nub"),
+            r#"Run "nub approve-builds" to pick."#
+        );
+        assert_eq!(
+            rewrite_suggestions("run `pnpm clean --lockfile` and `pnpm install`.", "nub"),
+            "run `nub clean --lockfile` and `nub install`."
+        );
+        assert_eq!(
+            rewrite_suggestions("pnpm requires one wheel per package", "nub"),
+            "pnpm requires one wheel per package"
+        );
+    }
+
+    /// A verb nub spells differently is respelled, not merely renamed:
+    /// `nub self-update` does not exist and `nub update` updates
+    /// dependencies, so the program name alone would be wrong advice.
+    #[test]
+    fn a_verb_nub_spells_differently_is_respelled() {
+        assert_eq!(
+            rewrite_suggestions(r#"run "pnpm self-update latest" to downgrade."#, "nub"),
+            r#"run "nub upgrade latest" to downgrade."#
+        );
+    }
 
     /// The conversion drops a rule the engine cannot parse rather than failing
     /// an install, so a shape the engine stops accepting after a pin move would

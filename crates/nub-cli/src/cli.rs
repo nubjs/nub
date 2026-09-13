@@ -1873,6 +1873,62 @@ const SUBCOMMANDS: &[&str] = &[
     "compile",
 ];
 
+/// Whether nub dispatches `verb` itself once the engine owns the rest of
+/// the PM surface.
+///
+/// Everything in [`SUBCOMMANDS`] except the three install spellings, which
+/// are parser verbs of nub's today and the engine's to serve. The check
+/// runs before the engine is asked what a command line names, which is
+/// what keeps `nub upgrade` nub's self-update: the engine reads `upgrade`
+/// as a spelling of its own `update`.
+#[cfg(feature = "pm-pnpm")]
+fn host_owned_subcommand(verb: &str) -> bool {
+    SUBCOMMANDS.contains(&verb) && !matches!(verb, "install" | "i" | "ci")
+}
+
+/// The command line the pnpm engine runs on.
+///
+/// `rest` is nub's argv with the flags nub reads for itself already taken
+/// out, and that is what the engine needs: `--cwd` has moved the process
+/// already, and `--node` and the env-file family belong to running a file,
+/// so leaving any of them in would have the engine refuse a command line
+/// nub has honoured. The output flags are the ones both grammars have and
+/// only the engine can act on for its own commands, so they go back in, in
+/// pnpm's own spelling, ahead of the verb — where pnpm reads them too.
+/// `--silent` is pnpm's shorthand for `--reporter=silent`, and a
+/// `--reporter` written beside it overrides it, as it does for pnpm.
+#[cfg(feature = "pm-pnpm")]
+fn engine_argv(
+    rest: &[String],
+    silent: bool,
+    color_when: Option<ColorWhen>,
+    reporter: Option<&str>,
+    loglevel: Option<&str>,
+) -> Vec<std::ffi::OsString> {
+    let mut argv = vec![std::ffi::OsString::from("nub")];
+    if silent {
+        argv.push("--silent".into());
+    }
+    if let Some(when) = color_when {
+        argv.push(
+            match when {
+                ColorWhen::Always => "--color=always",
+                ColorWhen::Never => "--color=never",
+                ColorWhen::Auto => "--color=auto",
+            }
+            .into(),
+        );
+    }
+    if let Some(reporter) = reporter {
+        argv.push(format!("--reporter={reporter}").into());
+    }
+    if let Some(loglevel) = loglevel {
+        argv.push(format!("--loglevel={loglevel}").into());
+    }
+    argv.extend(rest.iter().map(std::ffi::OsString::from));
+    argv
+}
+
 /// `pnpm install <pkg>` (and the `i` alias) is the add-to-dependencies form —
 /// pnpm routes `install` with a package positional (or `-g`) through its `add`
 /// command. Nub's argumentless `install` is a native parser command (no
@@ -2531,6 +2587,27 @@ fn run_nub() -> Result<i32> {
         return run_watch(&file, &rest[1..]);
     }
 
+    // The engine serves every PM verb nub does not keep for itself, so ask
+    // it what this command line names. Asked here rather than inside
+    // `dispatch_subcommand`, which only ever sees one whose FIRST token is
+    // a verb: pnpm takes an rc-option ahead of the verb as readily as after
+    // it (`nub --store-dir <dir> install`), and the scan above reads such a
+    // leading flag as a Node flag. nub's own verbs are settled first, so
+    // `nub upgrade` stays nub's self-update rather than the engine's
+    // spelling of `update`.
+    #[cfg(feature = "pm-pnpm")]
+    if !rest.first().is_some_and(|verb| host_owned_subcommand(verb))
+        && let Some(argv) = crate::pm_engine::engine_takes(engine_argv(
+            &rest,
+            silent,
+            color_when,
+            reporter_val.as_deref(),
+            loglevel_val.as_deref(),
+        ))
+    {
+        return crate::pm_engine::run_pnpm_engine(argv);
+    }
+
     // If a subcommand was found, delegate to the parser for structured parsing.
     if subcommand_found {
         return dispatch_subcommand(rest);
@@ -2917,16 +2994,6 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     // owns its own args parsing (today: stubs that error with the user's
     // real-PM fallback). `install`/`i`/`ci` are NOT in the registry — they
     // are live parser verbs handled below.
-    // The pnpm 12 engine takes the whole PM surface, `install`/`i`/`ci`
-    // included, so it intercepts ahead of both the registry and the parser.
-    #[cfg(feature = "pm-pnpm")]
-    if crate::pm_engine::pnpm_engine_selected()
-        && (matches!(subcommand.as_str(), "install" | "i" | "ci")
-            || crate::pm_engine::lookup_verb(&subcommand).is_some())
-    {
-        return crate::pm_engine::run_pnpm_engine();
-    }
-
     if let Some(spec) = crate::pm_engine::lookup_verb(&subcommand) {
         // The PM hint is only consumed by the unwired-verb stub fallback
         // (`{pm} {verb}`); use the nub-identity-aware suggestion so a fresh /
