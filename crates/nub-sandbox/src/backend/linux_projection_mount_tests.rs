@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
+#[path = "linux_projection_exec_tests.rs"]
+mod exec_tests;
 #[path = "linux_projection_native_tests.rs"]
 mod native_tests;
 
@@ -818,6 +820,7 @@ fn projection_mount_helper() {
             }
         }
         _ if native_tests::run_role(&role, &root) => {}
+        _ if exec_tests::run_role(&role, &root) => {}
         _ => panic!("unknown projection helper role {role}"),
     }
 }
@@ -838,6 +841,12 @@ fn mounted_projection_preserves_mapping_semantics() {
 #[ignore = "requires an ordinary Linux user with direct user namespaces and /dev/fuse"]
 fn mounted_projection_delivers_native_regular_files() {
     run_mount_probe("native-supervisor", "NATIVE_PROJECTION_ACCEPTANCE_OK");
+}
+
+#[test]
+#[ignore = "requires an ordinary Linux user, /dev/fuse, and a C compiler on the remote fixture host"]
+fn mounted_projection_exec_and_dlopen_acceptance() {
+    run_mount_probe("exec-supervisor", "LINUX_EXEC_ACCEPTANCE_COMPLETE");
 }
 
 fn run_mount_probe(role: &str, marker: &str) {

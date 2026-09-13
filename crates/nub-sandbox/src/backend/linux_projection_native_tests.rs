@@ -43,7 +43,7 @@ fn native_rule(path: &str, access: FsAccess) -> FsRule {
     }
 }
 
-fn native_fixture(root: &Path, exe: &Path) -> FsRuleSet {
+pub(super) fn native_fixture(root: &Path, exe: &Path) -> FsRuleSet {
     let mut rules = fixture(root, exe);
     rules.entries.extend([
         native_rule("/app/native-read", FsAccess::Read),
@@ -623,6 +623,57 @@ fn ordinary_open_contract(root: &Path, mediated: bool) {
         // raw/FUSE symlink control.
         println!("RAW_ABSOLUTE_SYMLINK_HOST_ROOT_CONTROL");
     }
+    let trunc = unsafe {
+        libc::open(
+            CString::new(app.join("native-rw").as_os_str().as_bytes())
+                .unwrap()
+                .as_ptr(),
+            libc::O_RDONLY | libc::O_TRUNC | libc::O_CLOEXEC,
+        )
+    };
+    assert!(
+        trunc >= 0,
+        "O_RDONLY|O_TRUNC native-rw: {}",
+        io::Error::last_os_error()
+    );
+    let trunc = unsafe { File::from_raw_fd(trunc) };
+    assert_eq!(
+        unsafe { libc::fcntl(trunc.as_raw_fd(), libc::F_GETFL) } & libc::O_ACCMODE,
+        libc::O_RDONLY
+    );
+    assert_eq!(
+        trunc.metadata().unwrap().len(),
+        0,
+        "O_RDONLY|O_TRUNC must truncate through write authority"
+    );
+    assert_eq!(
+        unsafe { libc::write(trunc.as_raw_fd(), b"x".as_ptr().cast(), 1) },
+        -1
+    );
+    assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
+    if mediated {
+        let before = fs::read(app.join("native-read")).unwrap();
+        let read = CString::new(app.join("native-read").as_os_str().as_bytes()).unwrap();
+        assert_eq!(
+            unsafe {
+                libc::open(
+                    read.as_ptr(),
+                    libc::O_RDONLY | libc::O_TRUNC | libc::O_CLOEXEC,
+                )
+            },
+            -1
+        );
+        assert!(matches!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::EACCES | libc::ENOENT)
+        ));
+        assert_eq!(
+            fs::read(app.join("native-read")).unwrap(),
+            before,
+            "R O_TRUNC denial must not mutate canary"
+        );
+    }
+    println!("NATIVE_O_RDONLY_TRUNCATE_OK mediated={mediated}");
     let forbidden = OpenOptions::new()
         .read(true)
         .open(app.join("native-denied-alias"));
@@ -695,7 +746,7 @@ fn native_client(root: &Path, mediated: bool) {
     println!("NATIVE_CLIENT_ACCEPTANCE_OK mediated={mediated}");
 }
 
-fn recursive_view(source: &Path, target: &Path, readonly: bool) -> File {
+pub(super) fn recursive_view(source: &Path, target: &Path, readonly: bool) -> File {
     fs::create_dir(target).unwrap();
     let source = CString::new(source.as_os_str().as_bytes()).unwrap();
     let target_c = CString::new(target.as_os_str().as_bytes()).unwrap();
