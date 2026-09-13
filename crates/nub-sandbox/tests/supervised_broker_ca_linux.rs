@@ -39,8 +39,13 @@ fn supervised_broker_ca_child() {
     }
 
     let root = PathBuf::from(std::env::var_os(ROOT).expect("fixture root"));
+    let marker = std::env::var(SECRET).expect("broker marker is constructed for the child");
     assert!(
-        std::env::var_os(SECRET).is_none(),
+        marker.starts_with("nub-credential-v1-"),
+        "child receives the opaque broker marker, never the plaintext secret"
+    );
+    assert_ne!(
+        marker, "broker-secret",
         "broker secret must not enter the child's constructed environment"
     );
     let bundle = PathBuf::from(std::env::var_os("SSL_CERT_FILE").expect("broker CA path"));
