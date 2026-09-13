@@ -110,24 +110,6 @@ use aube_lockfile::LockfileKind;
 #[cfg(test)]
 pub(crate) static ENGINE_GLOBAL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Environment a frontend adds to every lifecycle-script spawn of this
-/// process's one install, on top of the runtime-augmentation overlay
-/// [`apply_lifecycle_augmentation`] builds. Set once, before the engine
-/// session opens; the npm-routing shim fills it with npm's
-/// `NODE_ENV=production` under an effective `omit=dev`. Per child, never the
-/// process environment (A19).
-static LIFECYCLE_ENV_EXTRA: std::sync::OnceLock<Vec<(std::ffi::OsString, std::ffi::OsString)>> =
-    std::sync::OnceLock::new();
-
-pub fn set_lifecycle_env(pairs: Vec<(String, String)>) {
-    let _ = LIFECYCLE_ENV_EXTRA.set(
-        pairs
-            .into_iter()
-            .map(|(key, value)| (key.into(), value.into()))
-            .collect(),
-    );
-}
-
 /// The four engine verb families. One module per family; each family module
 /// owns the wiring (args parsing, options construction, output routing) for
 /// its verbs.
@@ -930,10 +912,6 @@ fn engine_session_inner(
     // compiled against ambient Node instead of the project's. Default-empty
     // overlay when augmentation can't engage ⇒ behavior preserved.
     apply_lifecycle_augmentation(&cwd)?;
-    if let Some(extra) = LIFECYCLE_ENV_EXTRA.get() {
-        let extra = extra.clone();
-        aube_util::update_engine_context(move |c| c.env_overlay.extend(extra));
-    }
     Ok(EngineSession {
         detected,
         runtime: build_runtime()?,

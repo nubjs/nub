@@ -11442,8 +11442,11 @@ fn run_shim_engine_install(
     // dev dependencies are effectively omitted (`buildOmitList` in npm's
     // config definitions). Per child through the engine's overlay, never the
     // process environment (A19).
+    // The engine spawns lifecycle scripts as children of this process, so this
+    // rides the process environment, the same way the rest of nub's lifecycle
+    // augmentation reaches them.
     if route.prod {
-        crate::pm_engine::set_lifecycle_env(vec![("NODE_ENV".into(), "production".into())]);
+        unsafe { std::env::set_var("NODE_ENV", "production") };
     }
     let (from, to) = match route.verb {
         NpmInstallVerb::Ci => ("npm ci", "nub ci"),
@@ -11455,23 +11458,29 @@ fn run_shim_engine_install(
     } else {
         eprintln!("{line}");
     }
-    match route.verb {
-        NpmInstallVerb::Ci => crate::pm_engine::run_ci(crate::pm_engine::CiFlags {
-            prod: route.prod,
-            ignore_scripts,
-            no_optional: route.no_optional,
-            allow_all_builds: true,
-            ..Default::default()
+    // The engine's own command line, so a shimmed install is the same install
+    // `nub ci` / `nub install` runs — pnpm's approved-builds gate included,
+    // which is why no blanket build allowance rides along any more.
+    let mut argv = vec![
+        std::ffi::OsString::from("nub"),
+        std::ffi::OsString::from(match route.verb {
+            NpmInstallVerb::Ci => "ci",
+            NpmInstallVerb::Install => "install",
         }),
-        NpmInstallVerb::Install => crate::pm_engine::run_install(crate::pm_engine::InstallFlags {
-            no_frozen_lockfile: true,
-            prod: route.prod,
-            ignore_scripts,
-            no_optional: route.no_optional,
-            allow_all_builds: true,
-            ..Default::default()
-        }),
+    ];
+    if matches!(route.verb, NpmInstallVerb::Install) {
+        argv.push("--no-frozen-lockfile".into());
     }
+    if route.prod {
+        argv.push("--prod".into());
+    }
+    if ignore_scripts {
+        argv.push("--ignore-scripts".into());
+    }
+    if route.no_optional {
+        argv.push("--no-optional".into());
+    }
+    crate::pm_engine::run_pnpm_engine(argv)
 }
 
 /// Resolve the invocation to a [`ShimPlan`]: pin resolve at the workspace root
