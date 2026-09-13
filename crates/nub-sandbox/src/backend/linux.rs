@@ -1,11 +1,10 @@
 //! Linux zero-privilege enforcement: the Landlock build-jail backend and the shared
 //! seccomp filter it installs.
 //!
-//! [`preflight`] decides the mechanism (Landlock or nothing — the bubblewrap backend was
-//! removed with the curated zero-privilege import, epic 1.1), and [`apply`] launches the
-//! Landlock arm through [`apply_landlock`]. Every non-Landlock policy is the epic 1.1(d)
-//! seam, currently stubbed. [`build_seccomp`] compiles the socket/keyring/metadata ceiling
-//! shared by that path.
+//! [`preflight`] selects the Landlock build-jail arm or the seccomp `USER_NOTIF` supervised
+//! arm. The bubblewrap backend was removed with the curated zero-privilege import; non-build-jail
+//! policies are enforced by the supervisor rather than falling back to an unconstrained child.
+//! [`build_seccomp`] compiles the socket/keyring/metadata ceiling shared by both paths.
 #![cfg(target_os = "linux")]
 
 use crate::backend::linux_grants::fs_confines;
@@ -17,6 +16,7 @@ use seccompiler::{
 };
 use std::collections::BTreeMap;
 use std::ffi::{CString, OsStr, OsString};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -137,14 +137,12 @@ pub(super) const ESSENTIAL_READ_PATHS: &[&str] = &[
 ];
 
 pub(crate) struct LinuxPreflight {
-    /// Set when confinement is required but the Landlock mechanism was NOT selected — the
-    /// seam the removed bubblewrap backend used to fill. epic 1.1(d) drives the seccomp
-    /// user-notify supervisor into the case [`apply`] currently stubs. Distinct from "no
-    /// confinement at all", which leaves both this and `landlock` unset.
+    /// Set when confinement is required but the Landlock build-jail mechanism was NOT selected.
+    /// [`apply`] launches this arm through the seccomp `USER_NOTIF` supervisor. Distinct from
+    /// "no confinement at all", which leaves both this and `landlock` unset.
     confine_without_landlock: bool,
-    /// Set when the Landlock mechanism was selected. Landlock needs no bubblewrap candidate,
-    /// no runtime image, and no namespace, so it is the only enforcement path this
-    /// zero-privilege skeleton wires today.
+    /// Set when the Landlock build-jail mechanism was selected. It needs no runtime image or
+    /// namespace; other constrained policies use the supervised arm above.
     landlock: Option<LandlockPreflight>,
 }
 
@@ -186,7 +184,7 @@ pub(crate) fn preflight(
         if std::env::var("NUB_SANDBOX_MECHANISM").as_deref() == Ok("landlock") {
             return Err(Degradation {
                 lost: vec!["fs-self-proc".into()],
-                reason: Some("self-process metadata requires the seccomp supervisor, not the Landlock-only mechanism".into()),
+                reason: Some("self-process metadata requires the seccomp supervisor, not the Landlock build-jail arm".into()),
             });
         }
         return Ok(LinuxPreflight {
@@ -230,9 +228,8 @@ pub(crate) fn preflight(
     }
     // The bubblewrap backend that confined every non-Landlock policy was removed with the
     // curated zero-privilege import (epic 1.1). The two arms that fall through here — a policy
-    // pinned to bubblewrap, and one that is not a build jail — have no Landlock mechanism to
-    // use. Record that confinement is required WITHOUT Landlock and defer the decision to
-    // `apply`, where epic 1.1(d) drives the seccomp user-notify supervisor.
+    // pinned away from Landlock, and one that is not a build jail — are enforced by the
+    // seccomp `USER_NOTIF` supervisor in `apply`.
     Ok(LinuxPreflight {
         confine_without_landlock: true,
         landlock: None,
@@ -250,22 +247,33 @@ pub fn apply(
     // with the coarse seccomp family ceiling — so they flow only into the supervised plan. (5.1)
     proxy_port: Option<u16>,
     proxy_token: Option<&str>,
+    // The session-owned, sealed public CA bundle for a terminating proxy. The supervised child
+    // inherits this descriptor and reaches it only through `/proc/self/fd/<n>`; no temporary
+    // directory is granted and the private CA key never leaves the proxy.
+    ca_bundle: Option<std::fs::File>,
 ) -> Result<Prepared, Degradation> {
     if let Some(landlock) = preflight.landlock {
         return apply_landlock(policy, spec, landlock, tmp_dir, retained);
     }
     if preflight.confine_without_landlock {
-        // The supervised (seccomp USER_NOTIF) launch — epic 1.1d/1.4. This is the seam the removed
-        // bubblewrap backend filled: a policy that needs confinement but is not a build-jail
-        // Landlock policy. NET is transparent per-host egress through the in-process supervisor;
+        // The supervised (seccomp USER_NOTIF) launch — a policy that needs confinement but is not
+        // a build-jail Landlock policy. NET is transparent per-host egress through the in-process
+        // supervisor;
         // FS (allow-only) rides a Landlock ruleset the child `restrict_self`s; write-intent ops
         // ride the USER_NOTIF broker. Private tmp is the per-run scratch dir `make_private_tmp`
         // created (threaded in as `tmp_dir`), granted rw by the ruleset + broker with `TMPDIR`
         // pointed at it; Deny tmp grants nothing, so the shared `/tmp` is simply never in the
         // allow-set. The managed tmp root is stable for one explicit session (Env is enforced
         // by construction — `base_command`/`envp` — always.)
-        let plan =
-            build_supervised_plan(policy, &spec, tmp_dir, retained, proxy_port, proxy_token)?;
+        let plan = build_supervised_plan(
+            policy,
+            &spec,
+            tmp_dir,
+            retained,
+            proxy_port,
+            proxy_token,
+            ca_bundle,
+        )?;
         return Ok(Prepared {
             command: base_command(&spec, policy),
             degradation: Degradation::full(),
@@ -310,6 +318,7 @@ fn build_supervised_plan(
     retained: &RetainedLinuxGrants,
     proxy_port: Option<u16>,
     proxy_token: Option<&str>,
+    ca_bundle: Option<std::fs::File>,
 ) -> Result<super::SupervisedPlan, Degradation> {
     let to_cstring = |bytes: &[u8], label: &str| -> Result<CString, Degradation> {
         CString::new(bytes).map_err(|_| Degradation {
@@ -334,13 +343,14 @@ fn build_supervised_plan(
     for arg in spec.args.tokens() {
         argv.push(to_cstring(arg.as_bytes(), "argument")?);
     }
-    let mut envp = Vec::with_capacity(policy.env.constructed.len() + 3);
+    let mut envp = Vec::with_capacity(policy.env.constructed.len() + 3 + super::CA_ENV_KEYS.len());
     // A private tmp overrides the temp-dir env so tools write the per-run scratch dir, never the
     // shared `/tmp` (which the allow-set does not grant). Drop any constructed temp key first so
     // the child sees no duplicate — `execve` env with a repeated key is undefined.
     let is_tmp_key = |k: &str| tmp_dir.is_some() && matches!(k, "TMPDIR" | "TMP" | "TEMP");
+    let is_ca_key = |k: &str| ca_bundle.is_some() && super::CA_ENV_KEYS.contains(&k);
     for (key, value) in &policy.env.constructed {
-        if is_tmp_key(key) {
+        if is_tmp_key(key) || is_ca_key(key) {
             continue;
         }
         envp.push(to_cstring(
@@ -354,6 +364,24 @@ fn build_supervised_plan(
             envp.push(to_cstring(
                 format!("{key}={tmp}").as_bytes(),
                 "temp-dir env",
+            )?);
+        }
+    }
+    let ca_bundle_fd = ca_bundle.as_ref().map(AsRawFd::as_raw_fd);
+    // `LANDLOCK_RULE_PATH_BENEATH` requires an `O_PATH` source descriptor. The sealed memfd is
+    // deliberately a readable file descriptor for the child, so resolve the parent's
+    // `/proc/self/fd/<n>` alias to an `O_PATH` handle for the Landlock rule instead.
+    let ca_bundle_rule_fd = ca_bundle_fd.map(open_ca_bundle_rule_fd).transpose()?;
+    if let Some(fd) = ca_bundle_fd {
+        // This is a sealed memfd, not the proxy's mutable named tempfile. The supervisor makes
+        // only this descriptor survive exec; `linux_landlock::build` attaches its read rule to
+        // the same object, so the child gets a stable public bundle without authority over its
+        // parent directory or the proxy's private CA key.
+        let bundle = format!("/proc/self/fd/{fd}");
+        for key in super::CA_ENV_KEYS {
+            envp.push(to_cstring(
+                format!("{key}={bundle}").as_bytes(),
+                "CA-trust environment entry",
             )?);
         }
     }
@@ -382,11 +410,17 @@ fn build_supervised_plan(
     // subtree (`.git/hooks`, `.git/config`, the policy file) is carried by the write broker below.
     let ruleset = if fs_confines(&policy.fs) {
         Some(
-            super::linux_landlock::build(policy, tmp_dir, Some(&program_abs), &retained.0)
-                .map_err(|reason| Degradation {
-                    lost: vec!["fs".to_string()],
-                    reason: Some(reason),
-                })?,
+            super::linux_landlock::build(
+                policy,
+                tmp_dir,
+                Some(&program_abs),
+                ca_bundle_rule_fd.as_ref().map(AsRawFd::as_raw_fd),
+                &retained.0,
+            )
+            .map_err(|reason| Degradation {
+                lost: vec!["fs".to_string()],
+                reason: Some(reason),
+            })?,
         )
     } else {
         None
@@ -420,6 +454,7 @@ fn build_supervised_plan(
         envp,
         cwd,
         ruleset,
+        ca_bundle,
         // The connect-notifier mediates only AF_INET/AF_INET6, so without a socket-family ceiling
         // a confined child reaches host daemons over AF_UNIX (docker.sock, systemd), the
         // hypervisor over AF_VSOCK, or a raw socket, bypassing the per-host net policy entirely.
@@ -440,6 +475,26 @@ fn build_supervised_plan(
             reason: Some(reason),
         })?,
     })
+}
+
+/// Open an `O_PATH` reference to the inherited sealed CA memfd for Landlock rule creation.
+///
+/// The child receives the original readable descriptor; this parent-only reference is consumed
+/// synchronously by `landlock_add_rule` and cannot escape through the descriptor sweep.
+fn open_ca_bundle_rule_fd(fd: RawFd) -> Result<OwnedFd, Degradation> {
+    let path = CString::new(format!("/proc/self/fd/{fd}")).expect("numeric fd path has no NUL");
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(Degradation {
+            lost: vec!["fs".to_string()],
+            reason: Some(format!(
+                "opening sealed TLS broker CA for Landlock: {}",
+                std::io::Error::last_os_error()
+            )),
+        });
+    }
+    // SAFETY: `open` returned a fresh owned descriptor.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 fn has_explicit_fs_deny(policy: &SandboxPolicy) -> bool {
