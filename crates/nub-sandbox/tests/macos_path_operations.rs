@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 const CASE: &str = "NUB_MACOS_PATH_OPERATIONS_CASE";
 const RENAME_SOURCE: &str = "NUB_MACOS_PATH_OPERATIONS_RENAME_SOURCE";
@@ -33,10 +33,15 @@ const EXEC_ALLOWED: &str = "NUB_MACOS_PATH_OPERATIONS_EXEC_ALLOWED";
 const EXEC_DENIED: &str = "NUB_MACOS_PATH_OPERATIONS_EXEC_DENIED";
 const NATIVE_EXEC_ALLOWED: &str = "NUB_MACOS_PATH_OPERATIONS_NATIVE_EXEC_ALLOWED";
 const NATIVE_EXEC_DENIED: &str = "NUB_MACOS_PATH_OPERATIONS_NATIVE_EXEC_DENIED";
+const NATIVE_LEAF: &str = "NUB_MACOS_PATH_OPERATIONS_NATIVE_LEAF";
 
 #[test]
 fn macos_path_operations_child() {
     if std::env::var_os(CASE).is_none() {
+        return;
+    }
+    if let Some(label) = std::env::var_os(NATIVE_LEAF) {
+        println!("native-leaf:{}", label.to_string_lossy());
         return;
     }
     let path = |name| PathBuf::from(std::env::var_os(name).expect("path-operation canary"));
@@ -104,30 +109,26 @@ fn macos_path_operations_child() {
         Err(_) => {}
     }
 
-    // Unlike the scripts above, these are copied Mach-O executables: a success proves direct
-    // executable mapping/loading, not just that a permitted interpreter could read a script.
-    let native_allowed = Command::new(path(NATIVE_EXEC_ALLOWED))
-        .arg("native-allowed")
-        .output()
+    // Unlike the scripts above, these are copies of this already-built Rust Mach-O test binary.
+    // Its one leaf re-entry proves direct executable mapping/loading without relocating an Apple
+    // platform binary, whose unconfined AMFI behavior differs across runner versions.
+    let native_allowed = native_leaf(&path(NATIVE_EXEC_ALLOWED), "native-allowed")
         .expect("allowed future Mach-O executable starts");
-    assert!(
-        native_allowed.status.success(),
-        "allowed future Mach-O executable failed: {}",
-        native_allowed.status
+    assert_native_leaf_success(
+        "allowed future Mach-O executable",
+        &native_allowed,
+        "native-allowed",
     );
-    assert_eq!(native_allowed.stdout, b"native-allowed\n");
     assert!(
         fs::read(path(NATIVE_EXEC_DENIED)).is_err(),
         "ungranted future Mach-O executable was readable before direct execution"
     );
-    match Command::new(path(NATIVE_EXEC_DENIED))
-        .arg("native-denied")
-        .output()
-    {
+    match native_leaf(&path(NATIVE_EXEC_DENIED), "native-denied") {
         Ok(output) => assert!(
             !output.status.success(),
-            "ungranted future Mach-O executable completed successfully: {}",
-            String::from_utf8_lossy(&output.stdout)
+            "ungranted future Mach-O executable completed successfully:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         ),
         Err(_) => {}
     }
@@ -292,46 +293,24 @@ fn positive_grants_cover_path_operations_and_future_execs() {
     );
 
     // These files do not exist when compilation or profile preparation occurs.  The host
-    // controls establish that both scripts work before the child attempts them.
+    // controls establish that both scripts and native Mach-O leaf copies work before the child
+    // attempts them.
     write_executable(&allowed_exec);
     write_executable(&denied_exec);
-    fs::copy("/bin/echo", &allowed_native).expect("copy native allowed control");
-    fs::copy("/bin/echo", &denied_native).expect("copy native denied control");
+    let test_exe = std::env::current_exe().expect("test executable");
+    fs::copy(&test_exe, &allowed_native).expect("copy native allowed control");
+    fs::copy(&test_exe, &denied_native).expect("copy native denied control");
     for path in [&allowed_native, &denied_native] {
         let mut permissions = fs::metadata(path).unwrap().permissions();
         permissions.set_mode(0o700);
         fs::set_permissions(path, permissions).unwrap();
-        // A raw copy of Apple's platform-signed `/bin/echo` is killed by AMFI before it can
-        // print even outside the sandbox.  Re-sign the staged byte-identical program ad hoc so
-        // the unconfined controls prove a directly executable Mach-O before Seatbelt runs it.
-        let signed = Command::new("/usr/bin/codesign")
-            .args(["-f", "-s", "-"])
-            .arg(path)
-            .status()
-            .expect("codesign staged native control");
-        assert!(
-            signed.success(),
-            "codesign staged native control failed: {signed}"
-        );
     }
     assert!(Command::new(&allowed_exec).status().unwrap().success());
     assert!(Command::new(&denied_exec).status().unwrap().success());
-    assert_eq!(
-        Command::new(&allowed_native)
-            .arg("native-unconfined")
-            .output()
-            .unwrap()
-            .stdout,
-        b"native-unconfined\n"
-    );
-    assert_eq!(
-        Command::new(&denied_native)
-            .arg("native-unconfined")
-            .output()
-            .unwrap()
-            .stdout,
-        b"native-unconfined\n"
-    );
+    for path in [&allowed_native, &denied_native] {
+        let output = native_leaf(path, "native-unconfined").expect("unconfined native leaf starts");
+        assert_native_leaf_success("unconfined native leaf", &output, "native-unconfined");
+    }
     fs::remove_file(&symlink_path).unwrap();
     symlink(&replacement, &symlink_path).unwrap();
 
@@ -349,4 +328,33 @@ fn write_executable(path: &Path) {
     let mut permissions = fs::metadata(path).unwrap().permissions();
     permissions.set_mode(0o700);
     fs::set_permissions(path, permissions).unwrap();
+}
+
+fn native_leaf(path: &Path, label: &str) -> std::io::Result<Output> {
+    Command::new(path)
+        .args(["--exact", "macos_path_operations_child", "--nocapture"])
+        .env(CASE, "path-operations")
+        .env(NATIVE_LEAF, label)
+        .output()
+}
+
+fn assert_native_leaf_success(context: &str, output: &Output, label: &str) {
+    assert!(
+        output.status.success(),
+        "{context} failed ({})\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains(&format!("native-leaf:{label}")),
+        "{context} did not emit its leaf marker\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "{context} wrote to stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

@@ -1,11 +1,10 @@
 //! Per-OS enforcement backends and the [`apply`] entry that turns a resolved
 //! [`SandboxPolicy`] into a launch-ready child.
 //!
-//! The enforcement contract is FAIL-SAFE-WITH-DEGRADATION, not fail-open (ported
-//! from the reviewed salvage `backend/mod.rs`): a backend NEVER silently drops an
-//! axis it claimed to enforce. When a primitive is unavailable it records the
-//! loss in [`Degradation`] so the caller surfaces a WARNING; a hard fail-closed
-//! (a required axis unenforceable) is `Err(Degradation)`.
+//! The enforcement contract is FAIL-CLOSED, not fail-open: a backend NEVER silently
+//! drops an axis it claimed to enforce. When a primitive is unavailable it records
+//! the loss in [`Degradation`], and preparation rejects that plan before a command
+//! can launch.
 //!
 //! BACKEND STATUS: macOS (Seatbelt, [`macos`]), Linux (Landlock and seccomp,
 //! [`linux`]), and Windows (AppContainer LowBox, [`windows`]) are wired; any other
@@ -137,8 +136,8 @@ mod windows_ace;
 #[cfg(any(target_os = "linux", test))]
 mod linux_grants;
 
-/// Which confinement axes a backend managed to enforce, and which degraded. A
-/// non-empty `lost` becomes a user-facing WARNING. Ported contract.
+/// Which requested confinement axes a backend could not enforce. A non-empty
+/// `lost` rejects preparation before the command can launch.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Degradation {
     /// Axis names that could NOT be enforced (e.g. "fs", "net", "net-per-host").
@@ -156,15 +155,16 @@ impl Degradation {
     pub fn is_full(&self) -> bool {
         self.lost.is_empty()
     }
-    /// The one-line WARNING text, or `None` when fully enforced.
+    /// The one-line explanation for a refused preparation, or `None` when fully
+    /// enforced.
     pub fn warning(&self) -> Option<String> {
         if self.lost.is_empty() {
             return None;
         }
         let axes = self.lost.join(", ");
         Some(match &self.reason {
-            Some(r) => format!("sandbox running in reduced mode — {axes} not enforced ({r})"),
-            None => format!("sandbox running in reduced mode — {axes} not enforced"),
+            Some(r) => format!("sandbox preparation refused — {axes} not enforced ({r})"),
+            None => format!("sandbox preparation refused — {axes} not enforced"),
         })
     }
 }
@@ -367,6 +367,8 @@ pub struct Prepared {
     /// (`launch` is `None`); when one does — either Windows variant — `launch` owns the
     /// spawn and this field is unused.
     command: Command,
+    /// Always fully enforced for a value returned by [`apply`] or
+    /// [`Sandbox::prepare`]. Retained as an observable assertion for embedders.
     pub degradation: Degradation,
     /// The running egress proxy (design.md §2.5), when the policy enforces per-host
     /// net. It runs in the nub PARENT and MUST outlive the child, so it is owned here:
@@ -1435,8 +1437,8 @@ const PROXY_URL_KEYS: &[&str] = &[
 const PROXY_BYPASS_KEYS: &[&str] = &["NO_PROXY", "no_proxy", "npm_config_noproxy"];
 
 /// Apply a resolved policy to the unprivileged backend for this operating system.
-/// Environment filtering constructs the child's environment. Unsupported required
-/// guarantees fail closed; best-effort losses remain visible on `Prepared`.
+/// Environment filtering constructs the child's environment. Any requested axis
+/// the backend cannot enforce rejects preparation before launch.
 pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degradation> {
     Sandbox::new(policy)?.prepare(spec)
 }
@@ -1491,11 +1493,11 @@ fn prepare_with_resources(
     let tmp_dir = resources.private_tmp.as_ref().map(|d| d.path());
 
     #[cfg(target_os = "macos")]
-    let mut prepared = macos::apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;
+    let prepared = macos::apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;
     // The Landlock build-jail arm ignores the proxy pair (coarse seccomp family ceiling, no netns);
     // the supervised arm redirects an allowed connect through the loopback proxy (epic 5.1).
     #[cfg(target_os = "linux")]
-    let mut prepared = linux::apply(
+    let prepared = linux::apply(
         policy,
         spec,
         tmp_dir,
@@ -1524,17 +1526,13 @@ fn prepare_with_resources(
         }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    let mut prepared = generic_apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;
+    let prepared = generic_apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;
 
-    // Announce TLS inspection only when preparation retained its network enforcement.
+    let mut prepared = admit_prepared(prepared)?;
+
+    // Announce TLS inspection only after a fully enforceable plan was admitted.
     // A Windows command still must start its relay successfully before any child runs.
-    if ca_bundle_present
-        && !prepared
-            .degradation
-            .lost
-            .iter()
-            .any(|l| l.starts_with("net-per"))
-    {
+    if ca_bundle_present {
         emit_mitm_notice(policy);
     }
 
@@ -1542,6 +1540,17 @@ fn prepare_with_resources(
     prepared.redact_stdout = redact_stdout;
     prepared.redact_stderr = redact_stderr;
     Ok(prepared)
+}
+
+/// Admit only plans whose backend enforced every requested axis. Keeping this at
+/// the shared preparation seam makes `apply` and reusable [`Sandbox`] sessions
+/// fail closed alike, before any public launch method receives a `Prepared` value.
+fn admit_prepared(prepared: Prepared) -> Result<Prepared, Degradation> {
+    if prepared.degradation.is_full() {
+        Ok(prepared)
+    } else {
+        Err(prepared.degradation)
+    }
 }
 
 /// Whether `program` names `cmd.exe` — the sole program whose command line nub hands
@@ -1921,6 +1930,75 @@ mod tests {
     }
 
     use super::*;
+
+    fn prepared_for_admission_test(degradation: Degradation) -> Prepared {
+        Prepared {
+            command: Command::new(std::env::current_exe().unwrap()),
+            degradation,
+            proxy: None,
+            session: None,
+            #[cfg(target_os = "linux")]
+            _inherited_files: Vec::new(),
+            #[cfg(unix)]
+            signal_process_group: false,
+            #[cfg(target_os = "windows")]
+            launch: None,
+            _private_tmp: None,
+            redact_stdout: false,
+            redact_stderr: false,
+            #[cfg(target_os = "linux")]
+            supervised: None,
+        }
+    }
+
+    #[test]
+    fn partial_backend_plan_is_rejected_before_any_launch_method_can_receive_it() {
+        let result = admit_prepared(prepared_for_admission_test(Degradation {
+            lost: vec!["fs-read-glob".to_string()],
+            reason: Some("test backend gap".to_string()),
+        }));
+        let error = match result {
+            Ok(_) => panic!("a partial backend plan must never become launchable"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.lost, ["fs-read-glob"]);
+        assert_eq!(error.reason.as_deref(), Some("test backend gap"));
+    }
+
+    #[test]
+    fn fully_enforced_preparation_remains_available() {
+        let mut policy = SandboxPolicy::default();
+        policy.env = crate::policy::EnvPolicy::resolved(Default::default());
+        policy.net.enforce = true;
+        let cwd = tempfile::tempdir().unwrap();
+
+        let prepared = Sandbox::new(&policy)
+            .expect("a resolved policy acquires")
+            .prepare(CommandSpec::new(std::env::current_exe().unwrap()).cwd(cwd.path()))
+            .expect("a fully enforced backend plan prepares");
+
+        assert!(prepared.degradation.is_full());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn public_preparation_rejects_a_real_backend_loss() {
+        let mut policy = SandboxPolicy::default();
+        policy.env = crate::policy::EnvPolicy::resolved(Default::default());
+        // Filesystem confinement with unrestricted raw networking currently loses
+        // loopback access in AppContainer. Neither public entry may admit that plan.
+        let cwd = tempfile::tempdir().unwrap();
+        let command = || CommandSpec::new(std::env::current_exe().unwrap()).cwd(cwd.path());
+        let sandbox = Sandbox::new(&policy).expect("resolved policy acquires");
+        for prepared in [apply(&policy, command()), sandbox.prepare(command())] {
+            let error = match prepared {
+                Ok(_) => panic!("partial backend plan reached a public launch handle"),
+                Err(error) => error,
+            };
+            assert!(error.lost.iter().any(|axis| axis == "net-full"));
+        }
+    }
 
     #[test]
     fn proxy_activation_needs_an_explicit_mode_or_a_broker() {

@@ -529,9 +529,6 @@ impl aube_util::LifecycleSandbox for NubBuildJail {
                 .unwrap_or_else(|| format!("could not enforce {}", d.lost.join(", ")));
             std::io::Error::other(refusal(&detail))
         })?;
-        if let Some(warning) = prepared.degradation.warning() {
-            eprintln!("warning: {warning}");
-        }
         // The launch handle reaps the script's descendants on return and on drop (which
         // mechanism, per platform: `nub_sandbox::CommandSpec::reap_descendants`). What it
         // cannot cover is a `SIGINT`/`SIGTERM` whose default action kills nub, since that

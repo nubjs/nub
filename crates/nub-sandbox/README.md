@@ -288,7 +288,7 @@ let policy = nub_sandbox::compile(&permissions, &context)?;
 let sandbox = nub_sandbox::Sandbox::acquire(&policy)?;
 let command = nub_sandbox::CommandSpec::new(program).args(arguments).cwd(project);
 let prepared = sandbox.prepare(command)?;
-// Surface prepared.degradation before treating this as confined execution.
+// Preparation fails before launch if any requested axis cannot be enforced.
 let output = prepared.output()?;
 let next = sandbox.prepare(next_command)?.spawn()?;
 drop(next); // Stops and reaps this command tree.
