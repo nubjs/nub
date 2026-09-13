@@ -37,6 +37,11 @@ const NUB: Embedder = Embedder {
     // to resolve from it or every such project reports no lockfile at all.
     lockfile_legacy_basenames: &[LEGACY_LOCKFILE],
     virtual_store_dirname: ".store",
+    // What a diagnostic tells the user to edit when a setting has to change by
+    // hand — the `minimumReleaseAgeExclude` prompts above all. The engine's own
+    // answer is `pnpm-workspace.yaml`, which a nub project never reads, so the
+    // advice would name a file that changes nothing.
+    settings_file_display_name: "nub.jsonc",
     // A nub project's configuration is `nub.jsonc`, `package.json` and
     // `.npmrc`, never pnpm's files; `profile` supplies what nub resolved.
     reads_pnpm_config: false,
