@@ -8,6 +8,7 @@ use super::super::linux_supervisor::{
 use super::*;
 use crate::policy::{CanonGlob, Effect, FsAccess, FsOrigin, FsRule};
 use std::ffi::CStr;
+use std::io::{BufRead, Read};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::OpenOptionsExt;
 
@@ -49,6 +50,8 @@ fn native_fixture(root: &Path, exe: &Path) -> FsRuleSet {
         native_rule("/app/native-mapped-r", FsAccess::Read),
         native_rule("/app/native-mapped-rw", FsAccess::ReadWrite),
         native_rule("/app/native-rw", FsAccess::ReadWrite),
+        native_rule("/app/native-rw-link", FsAccess::Read),
+        native_rule("/app/native-rw-absolute", FsAccess::Read),
         native_rule("/app/native-retained", FsAccess::ReadWrite),
     ]);
     let app = root.join("raw/app");
@@ -112,6 +115,26 @@ fn assert_unchanged(path: &Path, before: &Snapshot, label: &str) {
 
 fn fd_error(result: libc::c_int, label: &str) {
     assert_eq!(result, -1, "{label} unexpectedly succeeded");
+}
+
+fn ssize_error(result: isize, label: &str) {
+    assert_eq!(result, -1, "{label} unexpectedly succeeded");
+}
+
+fn native_event(reader: &mut impl BufRead, prefix: &str) -> io::Result<String> {
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("missing {prefix}"),
+            ));
+        }
+        print!("{line}");
+        if let Some(value) = line.trim().strip_prefix(prefix) {
+            return Ok(value.to_owned());
+        }
+    }
 }
 
 fn open_read(path: &Path) -> File {
@@ -302,32 +325,62 @@ fn native_policy_contract(app: &Path, mediated: bool) {
         },
         0
     );
-    for (label, result) in [
-        ("R-fchmod", unsafe { libc::fchmod(read.as_raw_fd(), 0o644) }),
-        ("R-fchown", unsafe {
-            libc::fchown(read.as_raw_fd(), libc::getuid(), libc::getgid())
-        }),
-        ("R-futimens", unsafe {
-            libc::futimens(read.as_raw_fd(), times.as_mut_ptr())
-        }),
-        ("R-fsetxattr", unsafe {
-            libc::fsetxattr(
-                read.as_raw_fd(),
-                c"user.nub_native_projection".as_ptr(),
-                b"denied".as_ptr().cast(),
-                6,
-                0,
-            )
-        }),
-        ("R-ftruncate", unsafe {
-            libc::ftruncate(read.as_raw_fd(), 0)
-        }),
-        ("R-write", unsafe {
-            libc::pwrite(read.as_raw_fd(), b"bad".as_ptr().cast(), 3, 0)
-        }),
-    ] {
-        fd_error(result, label);
+    if mediated {
+        for (label, result) in [
+            ("R-fchmod", unsafe { libc::fchmod(read.as_raw_fd(), 0o644) }),
+            ("R-fchown", unsafe {
+                libc::fchown(read.as_raw_fd(), libc::getuid(), libc::getgid())
+            }),
+            ("R-futimens", unsafe {
+                libc::futimens(read.as_raw_fd(), times.as_mut_ptr())
+            }),
+            ("R-fsetxattr", unsafe {
+                libc::fsetxattr(
+                    read.as_raw_fd(),
+                    c"user.nub_native_projection".as_ptr(),
+                    b"denied".as_ptr().cast(),
+                    6,
+                    0,
+                )
+            }),
+        ] {
+            fd_error(result, label);
+        }
+    } else {
+        // Raw O_RDONLY is intentionally not equivalent to a descriptor from
+        // the R view: raw descriptors retain mount-independent metadata
+        // authority. These positives are the control for mediated denials.
+        assert_eq!(unsafe { libc::fchmod(read.as_raw_fd(), 0o640) }, 0);
+        assert_eq!(
+            unsafe { libc::fchown(read.as_raw_fd(), libc::getuid(), libc::getgid()) },
+            0
+        );
+        assert_eq!(
+            unsafe { libc::futimens(read.as_raw_fd(), times.as_ptr()) },
+            0
+        );
+        assert_eq!(
+            unsafe {
+                libc::fsetxattr(
+                    read.as_raw_fd(),
+                    c"user.nub_native_projection".as_ptr(),
+                    b"raw".as_ptr().cast(),
+                    3,
+                    0,
+                )
+            },
+            0
+        );
+        println!("RAW_O_RDONLY_METADATA_POSITIVE");
     }
+    fd_error(
+        unsafe { libc::ftruncate(read.as_raw_fd(), 0) },
+        "R-ftruncate",
+    );
+    ssize_error(
+        unsafe { libc::pwrite(read.as_raw_fd(), b"bad".as_ptr().cast(), 3, 0) },
+        "R-write",
+    );
     let writable = unsafe {
         libc::mmap(
             std::ptr::null_mut(),
@@ -358,23 +411,32 @@ fn native_policy_contract(app: &Path, mediated: bool) {
         libc::O_RDONLY,
         "F_SETFL cannot upgrade an R descriptor"
     );
-    fd_error(
+    ssize_error(
         unsafe { libc::pwrite(read.as_raw_fd(), b"bad".as_ptr().cast(), 3, 0) },
         "R write after F_SETFL",
     );
     let duplicated = unsafe { libc::fcntl(read.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
     assert!(duplicated >= 0);
-    fd_error(
-        unsafe { libc::fchmod(duplicated, 0o644) },
-        "R dup metadata mutation",
-    );
+    if mediated {
+        fd_error(
+            unsafe { libc::fchmod(duplicated, 0o644) },
+            "R dup metadata mutation",
+        );
+    } else {
+        assert_eq!(unsafe { libc::fchmod(duplicated, 0o644) }, 0);
+    }
     unsafe { libc::close(duplicated) };
     let pid = unsafe { libc::fork() };
     assert!(pid >= 0);
     if pid == 0 {
-        let rejected = unsafe { libc::fchmod(read.as_raw_fd(), 0o644) } == -1
-            && unsafe { libc::pwrite(read.as_raw_fd(), b"bad".as_ptr().cast(), 3, 0) } == -1;
-        unsafe { libc::_exit(if rejected { 0 } else { 1 }) };
+        let metadata = unsafe { libc::fchmod(read.as_raw_fd(), 0o644) };
+        let write = unsafe { libc::pwrite(read.as_raw_fd(), b"bad".as_ptr().cast(), 3, 0) };
+        let expected = if mediated {
+            metadata == -1 && write == -1
+        } else {
+            metadata == 0 && write == -1
+        };
+        unsafe { libc::_exit(if expected { 0 } else { 1 }) };
     }
     let mut status = 0;
     assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
@@ -550,13 +612,11 @@ fn ordinary_open_contract(root: &Path, mediated: bool) {
                 .is_file()
         );
     } else {
-        assert!(
-            OpenOptions::new()
-                .read(true)
-                .open(app.join("native-rw-absolute"))
-                .is_err(),
-            "raw control has no chroot-relative /app"
-        );
+        // A raw absolute symlink resolves from the host root, which is not a
+        // stable fixture namespace. The mediated positive above specifically
+        // proves projected-root resolution; the relative link is the shared
+        // raw/FUSE symlink control.
+        println!("RAW_ABSOLUTE_SYMLINK_HOST_ROOT_CONTROL");
     }
     let forbidden = OpenOptions::new()
         .read(true)
@@ -608,7 +668,13 @@ fn retained_handle_contract(root: &Path, mediated: bool) {
 }
 
 fn native_client(root: &Path, mediated: bool) {
-    audit_command();
+    if mediated {
+        audit_command();
+    } else {
+        // The raw arm intentionally runs outside the chroot/supervisor. Its
+        // NNP/capability state is therefore a control, not a projection claim.
+        println!("NATIVE_RAW_CONTROL_NO_SUPERVISOR");
+    }
     ordinary_open_contract(root, mediated);
     native_mapping_contract(&root.join("app"), mediated);
     native_policy_contract(&root.join("app"), mediated);
@@ -718,6 +784,7 @@ fn native_provider(root: &Path) {
         "export callback must reject the wrong Request.pid"
     );
     println!("NATIVE_EXPORT_CALLBACK_AUTH_DENIED");
+    drop(wrong_thread);
     let exe = [
         CString::new("/app/run").unwrap(),
         CString::new("--exact").unwrap(),
@@ -761,33 +828,51 @@ fn native_provider(root: &Path) {
     )
     .unwrap();
     let mut output = BufReader::new(child.take_stdout().unwrap());
+    let stderr = child.take_stderr().unwrap();
+    let stderr_drain = std::thread::spawn(move || -> io::Result<String> {
+        let mut output = String::new();
+        BufReader::new(stderr).read_to_string(&mut output)?;
+        Ok(output)
+    });
     let mut input = child.take_stdin().unwrap();
-    event(&mut output, "NATIVE_HOST_WRITE_READY");
-    let host_mapped = OpenOptions::new()
-        .write(true)
-        .open(raw.join("app/native-mapped-rw"))
-        .unwrap();
-    assert_eq!(
-        unsafe { libc::pwrite(host_mapped.as_raw_fd(), b"host!!!!".as_ptr().cast(), 8, 32) },
-        8
-    );
-    input.write_all(b"host-written\n").unwrap();
-    event(&mut output, "NATIVE_RETAINED_HANDLE_READY");
-    fs::rename(
-        raw.join("app/native-retained"),
-        raw.join("app/native-retained-hidden"),
-    )
-    .unwrap();
-    fs::write(raw.join("app/native-retained"), b"retained-replacement").unwrap();
-    input.write_all(b"replaced\n").unwrap();
-    event(&mut output, "NATIVE_CLIENT_ACCEPTANCE_OK mediated=true");
-    assert!(child.wait().unwrap().success());
+    let protocol = (|| -> io::Result<()> {
+        native_event(&mut output, "NATIVE_HOST_WRITE_READY")?;
+        let host_mapped = OpenOptions::new()
+            .write(true)
+            .open(raw.join("app/native-mapped-rw"))?;
+        if unsafe { libc::pwrite(host_mapped.as_raw_fd(), b"host!!!!".as_ptr().cast(), 8, 32) } != 8
+        {
+            return Err(io::Error::last_os_error());
+        }
+        input.write_all(b"host-written\n")?;
+        native_event(&mut output, "NATIVE_RETAINED_HANDLE_READY")?;
+        fs::rename(
+            raw.join("app/native-retained"),
+            raw.join("app/native-retained-hidden"),
+        )?;
+        fs::write(raw.join("app/native-retained"), b"retained-replacement")?;
+        input.write_all(b"replaced\n")?;
+        native_event(&mut output, "NATIVE_CLIENT_ACCEPTANCE_OK mediated=true")?;
+        Ok(())
+    })();
+    if let Err(error) = protocol {
+        drop(input);
+        let _ = child.kill();
+        let status = child.wait();
+        let stderr = stderr_drain.join().unwrap().unwrap();
+        panic!("native client protocol failed: {error}; child={status:?}\n{stderr}");
+    }
+    drop(input);
+    let status = child.wait().unwrap();
+    let stderr = stderr_drain.join().unwrap().unwrap();
+    assert!(status.success(), "native client {status:?}\n{stderr}");
     let (opened, exported) = stats.stats();
     assert!(
         opened > 0 && exported > 0,
         "native client did not exercise provider export"
     );
     assert_ne!(stats.resolver_tid(), 0, "native resolver has no TID");
+    drop(stats);
     service.shutdown().unwrap();
     drop(projection);
     checked(unsafe { libc::umount2(view_c.as_ptr(), 0) }).expect("normal FUSE unmount");
@@ -827,11 +912,16 @@ fn native_supervisor(root: &Path) {
         let before = snapshot(&case.join("raw/app/native-read"));
         let status = cmd.status().unwrap();
         assert!(status.success(), "{role}: {status:?}");
-        assert_unchanged(
-            &case.join("raw/app/native-read"),
-            &before,
-            "post-run native read canary",
-        );
+        let read = case.join("raw/app/native-read");
+        if role == "native-raw" {
+            assert_ne!(
+                snapshot(&read),
+                before,
+                "raw O_RDONLY metadata-positive control did not mutate its canary"
+            );
+        } else {
+            assert_unchanged(&read, &before, "mediated R-policy canary");
+        }
         fs::remove_dir_all(&case).unwrap();
     }
     println!("NATIVE_PROJECTION_ACCEPTANCE_OK");
