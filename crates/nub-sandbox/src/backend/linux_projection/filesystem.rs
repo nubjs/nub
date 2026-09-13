@@ -9,8 +9,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuser::{
     AccessFlags, BsdFileFlags, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
-    INodeNo, LockOwner, OpenFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
-    ReplyEntry, ReplyOpen, ReplyWrite, Request, TimeOrNow, WriteFlags,
+    INodeNo, InitFlags, KernelConfig, LockOwner, OpenFlags, ReplyAttr, ReplyCreate, ReplyData,
+    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request, TimeOrNow, WriteFlags,
 };
 
 use super::backing::{
@@ -470,6 +470,17 @@ fn attributes(ino: u64, meta: &Metadata, access: Option<FsAccess>) -> io::Result
 }
 
 impl Filesystem for Projection {
+    fn init(&mut self, _: &Request, config: &mut KernelConfig) -> io::Result<()> {
+        config
+            .add_capabilities(InitFlags::FUSE_DIRECT_IO_ALLOW_MMAP)
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "filesystem projection requires shared mappings with direct I/O",
+                )
+            })
+    }
+
     fn lookup(&self, _: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         match self
             .state()
@@ -515,9 +526,9 @@ impl Filesystem for Projection {
             .state()
             .and_then(|mut state| state.open(ino.0, flags.0))
         {
-            // Do not bypass the kernel page cache: ELF and shared-library mappings
-            // require ordinary FUSE buffered reads. Every open invalidates old data.
-            Ok(handle) => reply.opened(FileHandle(handle), FopenFlags::empty()),
+            // Path-specific inodes must not cache ordinary reads independently:
+            // a write through another hardlink must be visible to this handle.
+            Ok(handle) => reply.opened(FileHandle(handle), FopenFlags::FOPEN_DIRECT_IO),
             Err(err) => reply.error(err.into()),
         }
     }
@@ -541,7 +552,7 @@ impl Filesystem for Projection {
                 &attr,
                 Generation(0),
                 FileHandle(handle),
-                FopenFlags::empty(),
+                FopenFlags::FOPEN_DIRECT_IO,
             ),
             Err(err) => reply.error(err.into()),
         }
