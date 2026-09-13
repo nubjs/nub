@@ -3057,15 +3057,9 @@ mod lifecycle_tests {
     fn ancillary_rights_are_rejected_without_any_fd_duplication() {
         // The payload is intentionally not readable: validation must refuse control data before
         // inspecting or duplicating even a 253/254-descriptor SCM_RIGHTS array.
-        let hdr = libc::msghdr {
-            msg_name: std::ptr::null_mut(),
-            msg_namelen: 0,
-            msg_iov: std::ptr::null_mut(),
-            msg_iovlen: 0,
-            msg_control: std::ptr::NonNull::<libc::c_void>::dangling().as_ptr(),
-            msg_controllen: 64 * 1024,
-            msg_flags: 0,
-        };
+        let mut hdr: libc::msghdr = unsafe { std::mem::zeroed() };
+        hdr.msg_control = std::ptr::NonNull::<libc::c_void>::dangling().as_ptr();
+        hdr.msg_controllen = 64 * 1024;
         let mem = open_child_mem(std::process::id()).unwrap();
         assert_eq!(
             snapshot_msghdr(mem.as_raw_fd(), hdr).unwrap_err(),
@@ -3120,24 +3114,12 @@ mod lifecycle_tests {
             },
         ];
         let mut control: [libc::mmsghdr; 2] = unsafe { std::mem::zeroed() };
-        control[0].msg_hdr = libc::msghdr {
-            msg_name: std::ptr::null_mut(),
-            msg_namelen: 0,
-            msg_iov: &mut iovecs[0],
-            msg_iovlen: 1,
-            msg_control: std::ptr::null_mut(),
-            msg_controllen: 0,
-            msg_flags: 0,
-        };
-        control[1].msg_hdr = libc::msghdr {
-            msg_name: &second_addr as *const _ as *mut libc::c_void,
-            msg_namelen: size_of::<libc::sockaddr_in>() as libc::socklen_t,
-            msg_iov: &mut iovecs[1],
-            msg_iovlen: 1,
-            msg_control: std::ptr::null_mut(),
-            msg_controllen: 0,
-            msg_flags: 0,
-        };
+        control[0].msg_hdr.msg_iov = &mut iovecs[0];
+        control[0].msg_hdr.msg_iovlen = 1;
+        control[1].msg_hdr.msg_name = &second_addr as *const _ as *mut libc::c_void;
+        control[1].msg_hdr.msg_namelen = size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        control[1].msg_hdr.msg_iov = &mut iovecs[1];
+        control[1].msg_hdr.msg_iovlen = 1;
         assert_eq!(
             unsafe { libc::sendmmsg(sender.as_raw_fd(), control.as_mut_ptr(), 2, 0) },
             2

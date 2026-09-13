@@ -1503,9 +1503,11 @@ fn prepare_with_resources(
         tmp_dir,
         &resources.retained_grants,
         linux_preflight,
-        proxy_port,
-        proxy_token,
-        ca_bundle,
+        linux::ProxyLaunch {
+            port: proxy_port,
+            token: proxy_token,
+            ca_bundle,
+        },
     )?;
     #[cfg(target_os = "windows")]
     let mut prepared = windows::apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;
