@@ -254,8 +254,8 @@ struct WaitingForPermit<'a>(&'a QueueCapacity);
 struct WaitingForPermit;
 
 #[cfg(test)]
-impl WaitingForPermit<'_> {
-    fn new(capacity: &QueueCapacity) -> Self {
+impl<'a> WaitingForPermit<'a> {
+    fn new(capacity: &'a QueueCapacity) -> Self {
         capacity.waiting.fetch_add(1, Ordering::Release);
         capacity.admission_changed();
         Self(capacity)
