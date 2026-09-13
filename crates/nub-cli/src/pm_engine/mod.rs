@@ -81,6 +81,7 @@ pub mod present;
 pub mod publish_family;
 mod remix_compat;
 use nub_core::resource_limits;
+pub mod migrate;
 pub mod store_config_family;
 pub mod unsupported_config;
 pub mod use_align;

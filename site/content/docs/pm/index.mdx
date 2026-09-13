@@ -42,13 +42,15 @@ $ nub pm which
 
 ### `nub pm use`
 
-Declare the project's package manager — npm, pnpm, Yarn, or Bun. One command resolves the version (exact, range, or dist-tag; bare means `latest`), fetches and verifies it, writes `packageManager`, and aligns the lockfile.
+Declare the project's package manager — Nub or pnpm. One command resolves the version (exact, range, or dist-tag; bare means `latest`), fetches and verifies it, writes `packageManager`, and aligns the lockfile.
 
 ```bash
+nub pm use nub            # the running Nub
 nub pm use pnpm           # newest pnpm
-nub pm use npm@10         # newest 10.x
 nub pm use pnpm@9.15.4    # exact
 ```
+
+To carry an npm, Yarn or Bun project's pinned versions across, run [`nub pm migrate`](#nub-pm-migrate) once.
 
 Moving an npm project to pnpm:
 
@@ -67,22 +69,38 @@ What it writes:
 
 - **`package.json#/packageManager`** — the exact version plus a `+sha512` hash from the verified tarball. This is the field corepack, pnpm, and turbo read; `use` is the only Nub command that writes it.
 - **`package.json#/devEngines/packageManager`** — `{ name, version: "^<exact>", onFail: "warn" }`, the range-and-policy form npm and pnpm enforce natively, written beside the exact pin so the two can't drift.
-- **The lockfile, in the new manager's format.** A lockfile in another format is *converted* — resolution state preserved — and the old file removed. One already in the target format is left untouched; with no lockfile, the next install creates it. The converted lockfile passes the active manager's frozen install (`pnpm install --frozen-lockfile`, etc.) byte-for-byte.
+- **The lockfile, under the new manager's name.** Nub and pnpm write the same bytes, so switching between them renames the file and changes nothing in it. A lockfile another manager wrote is migrated the way [`nub pm migrate`](#nub-pm-migrate) migrates it, and the old file removed; with no lockfile, the next install creates it.
 
 <Callout title="Config is not migrated">
-Switching managers converts the lockfile, not your config. The `.npmrc`, any `pnpm.*` fields, `pnpm-workspace.yaml` settings, and other manager-specific config stay as they are — Nub does not translate them. Migrate the new manager's config manually.
+Running `use pnpm` moves the lockfile, not your config. The `.npmrc` and `pnpm-workspace.yaml` stay as they are. Only `use nub` migrates config, and it names every field it moves.
 </Callout>
 
-Whichever manager the project ends up on, [Nub's own installer](/docs/install) mirrors its supported resolution settings and respects its lockfile. The layout fields in [`nub.jsonc`](/docs/config#installlinker) apply in every project; the incumbent's branded layout settings do not.
-
-Every file written or removed is named in the output; rerunning is a no-op. Four cases stop the command before anything is written:
+Every file written or removed is named in the output; rerunning is a no-op. Two cases stop the command before anything is written:
 
 - **Multiple foreign-format lockfiles** — remove the stale ones first.
 - **A binary `bun.lockb` source** — regenerate it as text first with `bun install --save-text-lockfile`.
-- **Running `use yarn` onto a Berry (2+) `yarn.lock`** — classic would downgrade the format; use `yarn set version`.
-- **Running `use yarn` on a graph using the `workspace:` protocol** — classic yarn can't express it.
 
-Otherwise a converting `use yarn` writes a classic `yarn.lock` directly. Running `use bun` writes the pin and lockfile but doesn't provision bun.
+### `nub pm migrate`
+
+Read an npm, Yarn, or Bun lockfile once and write `nub.lock` from the versions it pins. Nub reads none of those files during an install, so a project that has just arrived resolves every range afresh until this runs.
+
+```console
+$ nub pm migrate
+Done in 15ms using nub v0.9.0
+  nub.lock: written (migrated from package-lock.json)
+  package-lock.json: removed (migrated)
+```
+
+The versions are preferences, not a transcription: one the source pinned wins among the versions its range allows, and one that is no longer published is skipped instead of failing the migration.
+
+An install before that says what it skipped, once:
+
+```console
+$ nub install
+...
+Done in 355ms using nub v0.9.0
+nub: package-lock.json is another package manager's lockfile and was not read — run `nub pm migrate` to carry the versions it pins into nub's own.
+```
 
 ### `nub pm pin`
 

@@ -2065,8 +2065,9 @@ fn install_to_add_args(rest: &[String]) -> Option<Vec<String>> {
 /// command instead of dispatching anything. Must stay disjoint from
 /// SUBCOMMANDS and the engine registry (asserted in tests).
 const PM_VERBS: &[&str] = &[
-    // yarn (berry) / bun lockfile migration verb; the engine spells the
-    // equivalent `import`, which is engine-routed.
+    // yarn / bun spell the lockfile migration as a top-level verb; nub's own
+    // lives in its package-manager namespace, and the engine serves `import`
+    // beside it.
     "migrate",
 ];
 
@@ -2663,15 +2664,15 @@ fn run_nub() -> Result<i32> {
             // PM_VERBS). Redirect with the exact command to paste, nub-identity-
             // aware: a foreign-PM project gets that PM's verb; a fresh / nub-
             // identity project gets nub's own equivalent. The only PM_VERB is
-            // `migrate` (yarn/bun lockfile migration), which nub spells `import`
-            // — so the nub-identity redirect names `nub import`, never a
-            // nonexistent `nub migrate`. If a future PM_VERB has no nub
-            // equivalent, add it here rather than emitting `nub <verb>`.
+            // `migrate`, which nub keeps in its package-manager namespace — so
+            // the nub-identity redirect names `nub pm migrate`, never a
+            // nonexistent top-level `nub migrate`. If a future PM_VERB has no
+            // nub equivalent, add it here rather than emitting `nub <verb>`.
             if PM_VERBS.contains(&first.as_str()) {
                 let pm = suggest_package_manager(&env::current_dir()?);
                 if pm == "nub" {
                     let nub_verb = match first.as_str() {
-                        "migrate" => "import",
+                        "migrate" => "pm migrate",
                         // No nub equivalent: fall back to the lockfile-detected
                         // foreign PM rather than suggesting a command nub lacks.
                         other => {
@@ -10020,9 +10021,10 @@ fn run_pm(args: &[String]) -> Result<i32> {
              Usage: nub pm <command>\n\n\
              Commands:\n\
              \x20 which              print the resolved package-manager path (why → stderr)\n\
-             \x20 use <pm>[@<spec>]  declare the project's package manager (npm|pnpm|yarn|bun|nub;\n\
-             \x20                    default: latest) — writes packageManager and aligns the lockfile;\n\
+             \x20 use <pm>[@<spec>]  declare the project's package manager (nub|pnpm; default:\n\
+             \x20                    latest) — writes packageManager and aligns the lockfile;\n\
              \x20                    `use nub` migrates the full config surface, `use pnpm` reverses it\n\
+             \x20 migrate            read an npm, yarn or bun lockfile once and write nub's own\n\
              \x20 pin [<version>]    lock this project to an exact nub version (default: the running nub)\n\
              \x20 update             re-resolve within the pinned range and bump the pin (alias: up)\n\
              \x20 cache [clear]      list cached package managers (or clear the cache)\n\
@@ -10132,7 +10134,7 @@ fn run_pm(args: &[String]) -> Result<i32> {
             let Some(arg) = args.get(1) else {
                 bail!(
                     "nub pm use requires a package manager — nub pm use <pm>[@<spec>] \
-                     (e.g. nub pm use pnpm, nub pm use npm@10, nub pm use pnpm@latest)"
+                     (e.g. nub pm use nub, nub pm use pnpm, nub pm use pnpm@12.4.1)"
                 );
             };
             let (name, spec) = split_pm_arg(arg)?;
@@ -10242,6 +10244,13 @@ fn run_pm(args: &[String]) -> Result<i32> {
         // pnpm-workspace.yaml, settings) is `use nub`'s job. Symmetric with
         // `nub node pin <version>`.
         "pin" => run_pm_pin(args.get(1).map(String::as_str), &cwd),
+        // Read another package manager's lockfile once and write nub's own in
+        // its place. `nub import` is the same conversion without the removal,
+        // because that is what pnpm's own verb does.
+        "migrate" => {
+            crate::pm_engine::engine_brand_preflight();
+            crate::pm_engine::migrate::run_pm_migrate(&cwd)
+        }
         // Install / remove the PM shims (spec: `package-manager-shims` (no such document)).
         "shim" => run_pm_shim_install(&args[1..]),
         "unshim" => run_pm_unshim(),
@@ -10254,7 +10263,9 @@ fn run_pm(args: &[String]) -> Result<i32> {
              the package manager and aligns the lockfile."
         ),
         _ => {
-            bail!("nub pm takes a subcommand (which, use, pin, update (up), cache, shim, unshim).")
+            bail!(
+                "nub pm takes a subcommand (which, use, migrate, pin, update (up), cache, shim, unshim)."
+            )
         }
     }
 }
@@ -10290,15 +10301,14 @@ fn berry_pin_refusal(cwd: &Path) -> String {
 }
 
 /// Split a `<pm>[@<spec>]` argument (`nub pm use`). The name must be a `use`
-/// target (npm | pnpm | yarn | bun | nub — bun is declaration+lockfile only,
-/// no provisioning); the spec stays RAW — exact, range, or dist-tag — and is
-/// resolved against the registry before anything is written (never a range
-/// into `packageManager`). Berry (`yarn@<2+>`) is refused later, by the shared
-/// flow, once a concrete major is known. `use nub` (the full switch into nub
-/// identity) takes an optional EXACT version: bare `nub` writes the non-locking
-/// devEngines caret range, `nub@<exact>` opts into the hard `packageManager`
-/// pin. A range/dist-tag spec for nub is refused — nub is the running binary,
-/// not a registry package, so there is nothing to resolve a range against.
+/// target — `nub` or `pnpm`, the two identities nub's package manager has;
+/// the spec stays RAW — exact, range, or dist-tag — and is resolved against
+/// the registry before anything is written (never a range into
+/// `packageManager`). `use nub` (the full switch into nub identity) takes an
+/// optional EXACT version: bare `nub` writes the non-locking devEngines caret
+/// range, `nub@<exact>` opts into the hard `packageManager` pin. A range or
+/// dist-tag spec for nub is refused — nub is the running binary, not a
+/// registry package, so there is nothing to resolve a range against.
 fn split_pm_arg(arg: &str) -> Result<(&str, Option<&str>)> {
     let (name, spec) = match arg.split_once('@') {
         Some((n, s)) => (n, Some(s.trim())),
@@ -10322,10 +10332,18 @@ fn split_pm_arg(arg: &str) -> Result<(&str, Option<&str>)> {
             env!("CARGO_PKG_VERSION")
         );
     }
-    if !matches!(name, "npm" | "pnpm" | "yarn" | "bun" | "nub") {
+    // npm, yarn and bun are managers nub installs FOR, never identities it
+    // declares: nub's package manager writes one lockfile format, and a
+    // declaration it cannot then honour is worse than no declaration.
+    if matches!(name, "npm" | "yarn" | "bun") {
         bail!(
-            "unsupported package manager \"{name}\" — nub pm use takes npm, pnpm, yarn, bun, or nub"
+            "nub pm use declares nub or pnpm — it writes no {name} lockfile. \
+             To hand the project back to {name}, run `{name} install` and delete \
+             the lockfile nub wrote."
         );
+    }
+    if !matches!(name, "pnpm" | "nub") {
+        bail!("unsupported package manager \"{name}\" — nub pm use takes nub or pnpm");
     }
     if spec.is_some_and(str::is_empty) {
         bail!("\"{arg}\" has an empty version spec — use <pm>@<spec> (e.g. {name}@latest)");
@@ -10530,7 +10548,6 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
     // be registered first: the source parse reads workspace config, whose
     // names freeze on first read.
     crate::pm_engine::engine_brand_preflight();
-    use_align::refuse_unconvertible(&root, name, &plan)?;
 
     let (version, write) = resolve_provision_declare(name, spec, cwd, true)?;
 
@@ -10572,18 +10589,13 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
                 );
             }
         }
-        AlignPlan::Convert {
-            from,
-            from_kind,
-            remove,
-        } => {
-            // Conversion goes through the engine's gated writers; the brand
-            // preflight must be registered before any engine code reads
-            // project state (workspace-yaml names freeze on first read).
+        AlignPlan::Migrate { from, remove } => {
+            // The migration reads project state, so the brand preflight must
+            // be registered first (workspace-yaml names freeze on first read).
             crate::pm_engine::engine_brand_preflight();
-            let written = use_align::convert_lockfile(&root, &from, from_kind, name)?;
+            let written = crate::pm_engine::migrate::migrate_lockfile(&root, &from, name)?;
             println!(
-                "  {}: written (converted from {})",
+                "  {}: written (migrated from {})",
                 written.file_name().unwrap_or_default().to_string_lossy(),
                 from.file_name().unwrap_or_default().to_string_lossy()
             );
@@ -13982,31 +13994,23 @@ mod tests {
 
     #[test]
     fn use_plans_lockfile_refusals_before_network_and_a_failed_resolve_writes_nothing() {
-        // (a) `use yarn` over a pnpm lockfile no longer refuses at the PLAN
-        // stage — the classic-yarn write gate is lifted (the classic writer is
-        // proven frozen-accepted by real yarn). The convert path now proceeds
-        // to a real resolve; with a dead registry it fails at the *network*
-        // (not the old write-gate refusal), and a failed convert writes
-        // nothing — proof the gate is gone but the resolve-before-write
-        // invariant still holds.
+        // (a) yarn is not a `use` target, so the refusal is immediate and
+        // pre-network: nothing is resolved, nothing is written.
         let before = r#"{"packageManager":"pnpm@9.1.0"}"#;
-        if !ambient_registry_override() {
-            let dir = offline_project("use-yarn-gate", before);
-            std::fs::write(dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
-            let err = format!(
-                "{:#}",
-                with_cwd(&dir, || run_pm(&["use".into(), "yarn".into()])).unwrap_err()
-            );
-            assert!(
-                err.contains("cannot reach the registry") && err.contains("127.0.0.1:1"),
-                "use yarn must now reach the resolver (gate lifted), failing at the \
-                 dead registry, not the old write-gate refusal, got: {err}"
-            );
-            assert!(
-                !err.contains("refuses to write yarn.lock"),
-                "the classic-yarn write gate must be lifted, got: {err}"
-            );
-        }
+        let dir = offline_project("use-yarn-gone", before);
+        std::fs::write(dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+        let err = with_cwd(&dir, || run_pm(&["use".into(), "yarn".into()]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("writes no yarn lockfile"),
+            "use yarn must refuse as an unsupported target, got: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("package.json")).unwrap(),
+            before,
+            "a refused use must write nothing"
+        );
 
         // (b) Multiple foreign lockfiles without the target's → the ambiguity
         // refusal, naming the files and the remedy — also pre-network.
@@ -14047,48 +14051,11 @@ mod tests {
         }
     }
 
+    /// `update` on a Berry-pinned project refuses, pointing at the tool that
+    /// manages committed releases. (`use` never reaches this: yarn is not a
+    /// target at all — see the refusal in the args test.)
     #[test]
-    fn use_and_update_refuse_berry_pointing_at_the_committed_release_tool() {
-        // `use yarn@<2+>` refuses before anything is written — nub can't
-        // provision Berry, so a pin it can't honestly hash would be a lie.
-        let before = r#"{"packageManager":"yarn@1.22.19"}"#;
-        let dir = offline_project("use-berry", before);
-        let err = with_cwd(&dir, || run_pm(&["use".into(), "yarn@4.2.2".into()]))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("Berry") && err.contains("committed release"),
-            "use yarn@4.2.2 must refuse with the berry message, got: {err}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(dir.join("package.json")).unwrap(),
-            before,
-            "a refused berry use must write nothing"
-        );
-
-        // With a yarnPath already committed, the refusal must NOT instruct the
-        // user to commit one (they did) — it points at `yarn set version`, the
-        // tool that manages the committed release.
-        let dir = offline_project("berry-has-yarnpath", r#"{"packageManager":"yarn@4.2.2"}"#);
-        std::fs::write(
-            dir.join(".yarnrc.yml"),
-            "yarnPath: .yarn/releases/yarn-4.2.2.cjs\n",
-        )
-        .unwrap();
-        let err = with_cwd(&dir, || run_pm(&["use".into(), "yarn@4.9.0".into()]))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("yarn set version") && err.contains("committed release"),
-            "the with-yarnPath refusal must point at `yarn set version`, got: {err}"
-        );
-        assert!(
-            !err.contains("Commit a release"),
-            "must not instruct committing a release that already exists, got: {err}"
-        );
-
-        // `update` on a Berry-pinned project refuses too, pointing at the tool
-        // that actually manages committed releases.
+    fn update_refuses_berry_pointing_at_the_committed_release_tool() {
         let dir = offline_project("update-berry", r#"{"packageManager":"yarn@4.2.2"}"#);
         let err = with_cwd(&dir, || run_pm(&["update".into()]))
             .unwrap_err()
@@ -14115,9 +14082,20 @@ mod tests {
             "bare use names the form"
         );
         assert!(
-            run(&["use", "vlt"]).contains("npm, pnpm, yarn, bun, or nub"),
+            run(&["use", "vlt"]).contains("nub or pnpm"),
             "an unsupported PM names the use target set"
         );
+        // npm, yarn and bun are managers nub installs for, never identities it
+        // declares — each names itself in the refusal, and what to run to go
+        // back to it, rather than falling into the generic unsupported message.
+        for pm in ["npm", "yarn", "bun"] {
+            let err = run(&["use", pm]);
+            assert!(
+                err.contains(&format!("writes no {pm} lockfile"))
+                    && err.contains(&format!("`{pm} install`")),
+                "`use {pm}` must name the manager and its own install, got: {err}"
+            );
+        }
         // `use nub` is a live target (the full switch). Bare + `nub@<exact>` are
         // both valid; only a range/dist-tag spec is refused — nub is the running
         // binary, so there is nothing to resolve a range against. Both a dist-tag
@@ -14143,7 +14121,7 @@ mod tests {
         );
         let err = run(&["frobnicate"]);
         assert!(
-            err.contains("which, use, pin, update (up), cache"),
+            err.contains("which, use, migrate, pin, update (up), cache"),
             "the unknown-verb error names the full verb set, got: {err}"
         );
     }
@@ -14855,59 +14833,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&fresh);
     }
 
-    /// Real-network e2e for cross-PM `nub pm use`: spec defaults to latest, the
-    /// lockfile converts to the target's format with the source removed, and
-    /// devEngines.packageManager is rewritten beside the pin ({name, ^range,
-    /// onFail:warn}). `#[ignore]` — downloads real npm tarballs.
-    ///   cargo test -p nub-cli --bin nub -- --ignored use_defaults
-    #[test]
-    #[ignore = "network: moves a pnpm project to npm@latest (real provision + conversion)"]
-    fn use_defaults_to_latest_crosses_pm_and_migrates_the_lockfile() {
-        let dir = pm_tmpdir("use-cross-net");
-        std::fs::write(
-            dir.join("package.json"),
-            r#"{"packageManager":"pnpm@9.1.0","devEngines":{"packageManager":{"name":"pnpm","version":"^9"}}}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("pnpm-lock.yaml"),
-            "lockfileVersion: '9.0'\n\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: false\n",
-        )
-        .unwrap();
-        let code = with_cwd(&dir, || run_pm(&["use".into(), "npm".into()])).unwrap();
-        assert_eq!(code, 0);
-
-        let (pkg_mgr, dev) = read_declaration(&dir);
-        assert!(
-            pkg_mgr.starts_with("npm@") && pkg_mgr.contains("+sha512."),
-            "use must rewrite the pin cross-PM with the resolved exact + hash, got {pkg_mgr}"
-        );
-        let exact = pkg_mgr
-            .trim_start_matches("npm@")
-            .split('+')
-            .next()
-            .unwrap()
-            .to_string();
-        assert_eq!(
-            dev,
-            serde_json::json!({"name": "npm", "version": format!("^{exact}"), "onFail": "warn"}),
-            "devEngines must be rewritten beside the pin"
-        );
-        assert!(
-            dir.join("package-lock.json").is_file(),
-            "the lockfile must convert to npm's format"
-        );
-        assert!(
-            !dir.join("pnpm-lock.yaml").exists(),
-            "the migrated source lockfile must be removed"
-        );
-    }
-
-    /// Real-network e2e for `nub pm update`: with a devEngines range present,
-    /// update floats within it (^9 stays on 9.x — never a silent cross-major jump
-    /// to 10/11), rewrites the hash, and re-writes devEngines beside the pin
-    /// (the caret of the new exact). `#[ignore]` — hits the registry.
-    ///   cargo test -p nub-cli --bin nub -- --ignored update_floats
     #[test]
     #[ignore = "network: re-resolves pnpm@^9.0.0 from the registry (real provision)"]
     fn update_floats_within_the_dev_engines_range() {

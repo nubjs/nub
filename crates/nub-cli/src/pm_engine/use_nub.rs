@@ -895,16 +895,16 @@ pub(crate) fn run_use_nub(root: &Path, exact_pin: Option<&str>) -> Result<i32> {
     // warning; nor does a fresh project or a pnpm→nub rename. (Bun's lockfile
     // shape is flat-ish, but it is NOT a hoisting PM for phantom-deps purposes —
     // exclude it here.)
-    let from_hoisting_pm = matches!(
-        &plan,
-        AlignPlan::Convert {
-            from_kind: aube_lockfile::LockfileKind::Npm
+    let from_hoisting_pm = match &plan {
+        AlignPlan::Migrate { from, .. } => matches!(
+            use_align::source_kind(from),
+            aube_lockfile::LockfileKind::Npm
                 | aube_lockfile::LockfileKind::NpmShrinkwrap
                 | aube_lockfile::LockfileKind::Yarn
-                | aube_lockfile::LockfileKind::YarnBerry,
-            ..
-        }
-    );
+                | aube_lockfile::LockfileKind::YarnBerry
+        ),
+        _ => false,
+    };
     // ── writes ──────────────────────────────────────────────────────────
     // The devEngines range is based on the pinned version when one is named
     // (`nub@<v>`), else the running binary. The exact `packageManager` field is
@@ -980,14 +980,10 @@ pub(crate) fn run_use_nub(root: &Path, exact_pin: Option<&str>) -> Result<i32> {
             );
             remove_strays(&remove, "migrated")?;
         }
-        AlignPlan::Convert {
-            from,
-            from_kind,
-            remove,
-        } => {
-            let written = use_align::convert_lockfile(root, &from, from_kind, "nub")?;
+        AlignPlan::Migrate { from, remove } => {
+            let written = super::migrate::migrate_lockfile(root, &from, "nub")?;
             println!(
-                "  {}: written (converted from {})",
+                "  {}: written (migrated from {})",
                 written.file_name().unwrap_or_default().to_string_lossy(),
                 from.file_name().unwrap_or_default().to_string_lossy()
             );

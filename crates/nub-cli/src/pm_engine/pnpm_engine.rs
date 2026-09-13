@@ -196,8 +196,16 @@ pub(crate) fn run(argv: Vec<std::ffi::OsString>) -> Result<i32> {
     // — a divergence invisible on a one-level diagnostic and plain on a
     // deep one.
     pnpm_diagnostics::install_report_handler();
+    // Asked BEFORE the run, because a successful install answers it: it
+    // writes nub's own lockfile, and the project then looks migrated.
+    let pending = pending_migration(embedder, pnpm_cli::command_name(&argv).as_deref());
     match pnpm_cli::run(argv, embedder) {
-        Ok(()) => Ok(0),
+        Ok(()) => {
+            if let Some(foreign) = pending {
+                eprintln!("{}", super::migrate::migration_hint(&foreign));
+            }
+            Ok(0)
+        }
         Err(report) => {
             // The engine skips its own render for a command that has
             // already printed its report, and answers for which those are,
@@ -217,6 +225,28 @@ pub(crate) fn run(argv: Vec<std::ffi::OsString>) -> Result<i32> {
             Ok(1)
         }
     }
+}
+
+/// The commands that resolve the project and write its lockfile. A project
+/// still holding another package manager's lockfile has just had it ignored,
+/// so this is where saying so belongs — not on a command that only reads.
+const RESOLVING_COMMANDS: [&str; 6] = ["install", "add", "remove", "update", "ci", "dedupe"];
+
+/// The foreign lockfile this command is about to ignore, if there is one and
+/// saying so is this program's business.
+///
+/// Only under nub's own identity: a pnpm project must see what pnpm prints,
+/// and pnpm says nothing here. The condition clears itself once the install
+/// has run, which is the whole reason it is asked first.
+fn pending_migration(embedder: Embedder, command: Option<&str>) -> Option<std::path::PathBuf> {
+    if embedder.program_name == Embedder::PNPM.program_name
+        || !command.is_some_and(|name| RESOLVING_COMMANDS.contains(&name))
+    {
+        return None;
+    }
+    let cwd = std::env::current_dir().ok()?;
+    let project = nub_core::workspace::detect::detect_project(&cwd)?;
+    super::migrate::pending_migration(&project.workspace_root.unwrap_or(project.root))
 }
 
 #[cfg(test)]
