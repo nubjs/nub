@@ -64,7 +64,9 @@ static NTSTATUS NTAPI record_nt_open_file(PHANDLE handle, ACCESS_MASK access,
                                           POBJECT_ATTRIBUTES attributes, PIO_STATUS_BLOCK io,
                                           ULONG share, ULONG options) {
     NTSTATUS status = real_nt_open_file(handle, access, attributes, io, share, options);
+    DWORD last_error = GetLastError();
     print_open("NtOpenFile", access, attributes, share, FILE_OPEN, options, status);
+    SetLastError(last_error);
     return status;
 }
 
@@ -76,7 +78,9 @@ static NTSTATUS NTAPI record_nt_create_file(PHANDLE handle, ACCESS_MASK access,
     NTSTATUS status = real_nt_create_file(handle, access, attributes, io, allocation,
                                           file_attributes, share, disposition, options,
                                           ea_buffer, ea_length);
+    DWORD last_error = GetLastError();
     print_open("NtCreateFile", access, attributes, share, disposition, options, status);
+    SetLastError(last_error);
     return status;
 }
 
@@ -84,6 +88,7 @@ static NTSTATUS NTAPI record_nt_set_information_file(HANDLE file, PIO_STATUS_BLO
                                                       PVOID information, ULONG length,
                                                       ULONG information_class) {
     NTSTATUS status = real_nt_set_information_file(file, io, information, length, information_class);
+    DWORD last_error = GetLastError();
     if (!current_operation || emitting) return status;
     HANDLE root = nullptr;
     // FileRenameInformation/FileLinkInformation and their Ex forms use this
@@ -101,6 +106,7 @@ static NTSTATUS NTAPI record_nt_set_information_file(HANDLE file, PIO_STATUS_BLO
                 static_cast<unsigned long>(status));
     std::fflush(stdout);
     emitting = false;
+    SetLastError(last_error);
     return status;
 }
 
@@ -116,13 +122,23 @@ static bool attach_detours() {
     if (!resolve_nt(real_nt_open_file, "NtOpenFile") ||
         !resolve_nt(real_nt_create_file, "NtCreateFile") ||
         !resolve_nt(real_nt_set_information_file, "NtSetInformationFile")) return false;
-    if (DetourTransactionBegin() != NO_ERROR || DetourUpdateThread(GetCurrentThread()) != NO_ERROR ||
-        DetourAttach(reinterpret_cast<PVOID*>(&real_nt_open_file), record_nt_open_file) != NO_ERROR ||
-        DetourAttach(reinterpret_cast<PVOID*>(&real_nt_create_file), record_nt_create_file) != NO_ERROR ||
-        DetourAttach(reinterpret_cast<PVOID*>(&real_nt_set_information_file),
-                     record_nt_set_information_file) != NO_ERROR)
+    LONG error = DetourTransactionBegin();
+    if (error != NO_ERROR) { SetLastError(error); return false; }
+    error = DetourUpdateThread(GetCurrentThread());
+    if (error == NO_ERROR)
+        error = DetourAttach(reinterpret_cast<PVOID*>(&real_nt_open_file), record_nt_open_file);
+    if (error == NO_ERROR)
+        error = DetourAttach(reinterpret_cast<PVOID*>(&real_nt_create_file), record_nt_create_file);
+    if (error == NO_ERROR)
+        error = DetourAttach(reinterpret_cast<PVOID*>(&real_nt_set_information_file), record_nt_set_information_file);
+    if (error != NO_ERROR) {
+        DetourTransactionAbort();
+        SetLastError(error);
         return false;
-    return DetourTransactionCommit() == NO_ERROR;
+    }
+    error = DetourTransactionCommit();
+    SetLastError(error);
+    return error == NO_ERROR;
 }
 
 static void begin_operation(const char* name) {
@@ -166,9 +182,11 @@ struct FixtureCleanup {
     wchar_t rename_source[MAX_PATH] = {};
     wchar_t rename_destination[MAX_PATH] = {};
     wchar_t hard_link[MAX_PATH] = {};
+    bool owned = false;
     bool finished = false;
 
     bool finish() {
+        if (!owned) return true;
         if (finished) return is_absent(root);
         finished = true;
         DeleteFileW(hard_link);
@@ -202,16 +220,18 @@ int wmain() {
     DWORD temporary_length = GetTempPathW(MAX_PATH, temporary);
     if (!temporary_length || temporary_length >= MAX_PATH) return 3;
     FixtureCleanup cleanup;
-    if (swprintf_s(cleanup.root, L"%snub-file-operation-shapes-%lu", temporary,
+    if (_snwprintf_s(cleanup.root, _TRUNCATE, L"%snub-file-operation-shapes-%lu", temporary,
                    static_cast<unsigned long>(GetCurrentProcessId())) < 0 ||
         !CreateDirectoryW(cleanup.root, nullptr)) return 4;
+    cleanup.owned = true;
 
-    swprintf_s(cleanup.enumeration_directory, L"%s\\enumeration", cleanup.root);
-    swprintf_s(cleanup.enumeration_file, L"%s\\entry.txt", cleanup.enumeration_directory);
-    swprintf_s(cleanup.created_directory, L"%s\\created", cleanup.root);
-    swprintf_s(cleanup.rename_source, L"%s\\rename-source.txt", cleanup.root);
-    swprintf_s(cleanup.rename_destination, L"%s\\rename-destination.txt", cleanup.root);
-    swprintf_s(cleanup.hard_link, L"%s\\hard-link.txt", cleanup.root);
+    if (_snwprintf_s(cleanup.enumeration_directory, _TRUNCATE, L"%s\\enumeration", cleanup.root) < 0 ||
+        _snwprintf_s(cleanup.enumeration_file, _TRUNCATE, L"%s\\entry.txt", cleanup.enumeration_directory) < 0 ||
+        _snwprintf_s(cleanup.created_directory, _TRUNCATE, L"%s\\created", cleanup.root) < 0 ||
+        _snwprintf_s(cleanup.rename_source, _TRUNCATE, L"%s\\rename-source.txt", cleanup.root) < 0 ||
+        _snwprintf_s(cleanup.rename_destination, _TRUNCATE, L"%s\\rename-destination.txt", cleanup.root) < 0 ||
+        _snwprintf_s(cleanup.hard_link, _TRUNCATE, L"%s\\hard-link.txt", cleanup.root) < 0)
+        return cleanup.finish() ? 5 : 6;
 
     int failures = 0;
     if (!CreateDirectoryW(cleanup.enumeration_directory, nullptr) || !make_file(cleanup.enumeration_file) ||
@@ -231,7 +251,8 @@ int wmain() {
     failures += !end_operation(removed != FALSE, remove_error);
 
     wchar_t pattern[MAX_PATH] = {};
-    swprintf_s(pattern, L"%s\\*", cleanup.enumeration_directory);
+    if (_snwprintf_s(pattern, _TRUNCATE, L"%s\\*", cleanup.enumeration_directory) < 0)
+        return cleanup.finish() ? 5 : 6;
     begin_operation("directory-enumeration");
     WIN32_FIND_DATAW entry = {};
     HANDLE enumeration = FindFirstFileW(pattern, &entry);
@@ -274,7 +295,9 @@ int wmain() {
     wchar_t system_directory[MAX_PATH] = {};
     DWORD system_length = GetSystemDirectoryW(system_directory, MAX_PATH);
     wchar_t application[MAX_PATH] = {};
-    swprintf_s(application, L"%s\\cmd.exe", system_directory);
+    if (!system_length || system_length >= MAX_PATH ||
+        _snwprintf_s(application, _TRUNCATE, L"%s\\cmd.exe", system_directory) < 0)
+        return cleanup.finish() ? 5 : 6;
     wchar_t command[] = L"cmd.exe /d /c exit 0";
     begin_operation("launch-system-command");
     STARTUPINFOW startup = {sizeof(startup)};
