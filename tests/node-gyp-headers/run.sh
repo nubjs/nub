@@ -65,7 +65,11 @@ JSON
 echo "$NODE_VERSION" > "$APP/.nvmrc"
 
 cd "$APP"
-PROBE_LOG="$SANDBOX/node-gyp.log" \
+# The global virtual store puts the dependency outside the project, where its
+# script must still build for the project's Node. CI turns the store off, so
+# it is forced on here.
+env -u CI NPM_CONFIG_ENABLE_GLOBAL_VIRTUAL_STORE=true \
+  PROBE_LOG="$SANDBOX/node-gyp.log" \
   npm_config_devdir="$DEVDIR" \
   npm_config_disturl="$DEAD_HOST" \
   "$NUB" install >"$SANDBOX/install.log" 2>&1 ||

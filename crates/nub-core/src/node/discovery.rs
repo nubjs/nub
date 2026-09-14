@@ -489,6 +489,33 @@ pub fn check_min_version(node: &ResolvedNode) -> Result<(), DiscoveryError> {
     }
 }
 
+/// The project an install resolved its lifecycle Node for, set on the install's
+/// own environment so every dependency script it spawns inherits it.
+///
+/// A dependency's directory never owns the Node choice — [`walk_up_for_pin`]
+/// already skips pin files under `node_modules` and climbs to the consumer's.
+/// Under the global virtual store, though, a dependency lives in the shared
+/// store, where no ancestor is the consumer, so a `node` its script launches
+/// walked off the top and ran the ambient Node, and a native addon was built for
+/// the wrong ABI. Discovery from inside a `node_modules` tree reads the pins of
+/// the project named here instead. Internal plumbing, denylisted from `.env`.
+pub const LIFECYCLE_PROJECT_ENV: &str = "__NUB_LIFECYCLE_PROJECT";
+
+/// The directory the pin chain is read from for `cwd` — see [`LIFECYCLE_PROJECT_ENV`].
+fn lifecycle_pin_anchor(cwd: &Path) -> PathBuf {
+    let project = env::var_os(LIFECYCLE_PROJECT_ENV).filter(|value| !value.is_empty());
+    pin_anchor(cwd, project.as_deref().map(Path::new))
+}
+
+fn pin_anchor(cwd: &Path, lifecycle_project: Option<&Path>) -> PathBuf {
+    match lifecycle_project {
+        Some(project) if cwd.components().any(|c| c.as_os_str() == "node_modules") => {
+            project.to_path_buf()
+        }
+        _ => cwd.to_path_buf(),
+    }
+}
+
 /// Walk up from `cwd` looking for a pin file. Returns the raw pin string, parsed
 /// pin, and the filename that produced it (`.node-version`, `.nvmrc`, or
 /// `.tool-versions`) for user-facing messages. Bounded by $HOME, filesystem root,
@@ -774,6 +801,7 @@ pub struct PinChain {
 /// [`walk_up_for_pin`]. Errs with [`DiscoveryError::RuntimeNotNode`] when
 /// `devEngines.runtime` declares a non-Node runtime that refuses (its default).
 pub fn resolve_pin_chain(cwd: &Path) -> Result<PinChain, DiscoveryError> {
+    let cwd = &lifecycle_pin_anchor(cwd);
     let mut warnings = Vec::new();
     let manifest = project_manifest(cwd);
     if let Some(field) = manifest
@@ -845,6 +873,7 @@ pub fn resolve_pin_chain(cwd: &Path) -> Result<PinChain, DiscoveryError> {
 /// `node` is the already-resolved result of [`discover_node`]; its `version` IS
 /// the pinned version when `pin_source` is set, so no re-resolution is needed.
 pub fn engines_disagreement_warning(cwd: &Path, node: &ResolvedNode) -> Option<String> {
+    let cwd = &lifecycle_pin_anchor(cwd);
     // Only a pinned resolution can "disagree" — an engines-only project has
     // nothing to contradict.
     let pin_source = node.pin_source.as_deref()?;
@@ -2328,6 +2357,36 @@ mod tests {
             "the dep's nested pin must be skipped"
         );
         assert_eq!(raw, "24.3.0", "the project pin above node_modules must win");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_dependency_in_a_shared_store_reads_the_installing_projects_pins() {
+        // Under the global virtual store a dependency's script runs from the
+        // shared store, which has no project above it to climb to.
+        let root = resolution_tmpdir("lifecycle-anchor");
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join(".nvmrc"), "24.3.0\n").unwrap();
+        let dep = root
+            .join("store")
+            .join("links")
+            .join("node_modules")
+            .join("dep");
+        std::fs::create_dir_all(&dep).unwrap();
+        assert_ne!(
+            walk_up_for_pin(&dep).map(|(raw, _, _)| raw).as_deref(),
+            Some("24.3.0"),
+            "the store has no path up to the project"
+        );
+
+        let (raw, _pin, _source) =
+            walk_up_for_pin(&pin_anchor(&dep, Some(&project))).expect("the project's pin");
+        assert_eq!(raw, "24.3.0");
+
+        // Outside `node_modules` a directory keeps its own pins, so a script that
+        // moves into another project still resolves that project's Node.
+        assert_eq!(pin_anchor(&project, Some(&root)), project);
         let _ = std::fs::remove_dir_all(&root);
     }
 

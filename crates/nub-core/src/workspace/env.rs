@@ -30,6 +30,9 @@ const ENV_FILE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 ///   so a `.env` that sets it would rewrite the code nub transpiles. The watch path
 ///   in particular applies its injected `.env` values AFTER stamping this var,
 ///   so without the denylist a repo-supplied `.env` wins.
+/// - `__NUB_LIFECYCLE_PROJECT` — the project whose Node pins a dependency's
+///   lifecycle script resolves against, so a `.env` that sets it would choose
+///   the Node a native addon is built for.
 /// - `__NUB_COMPAT_*` / `__NUB_AUGMENTED_*` — the parent-captured ambient
 ///   environment and ownership metadata used when a nested Nub invocation sheds
 ///   its parent's augmentation. Script launchers apply `.env` values after these
@@ -45,6 +48,7 @@ const ENV_FILE_DENYLIST: &[&str] = &[
     "NODE_EXTRA_CA_CERTS",
     "NODE_REPL_EXTERNAL_MODULE",
     "__NUB_RUNTIME_CONFIG",
+    "__NUB_LIFECYCLE_PROJECT",
     "__NUB_COMPAT_NODE_OPTIONS",
     "__NUB_COMPAT_NODE_PATH",
     "__NUB_COMPAT_NODE",

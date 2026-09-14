@@ -529,7 +529,12 @@ static LIFECYCLE_NODE_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock
 /// at, no runtime config — which leaves the engine's own behaviour
 /// exactly as it was.
 fn apply_lifecycle_augmentation(cwd: &Path, compat: bool) -> Result<()> {
-    let discovered = nub_core::node::discovery::discover_node(&super::lifecycle_node_anchor(cwd));
+    let anchor = super::lifecycle_node_anchor(cwd);
+    let discovered = nub_core::node::discovery::discover_node(&anchor);
+    // A dependency's script runs from the dependency's own directory, which the
+    // global virtual store puts outside the project: name the project whose pins
+    // a `node` launched there resolves against.
+    unsafe { std::env::set_var(nub_core::node::discovery::LIFECYCLE_PROJECT_ENV, &anchor) };
     let Ok(nub_binary) = nub_core::node::spawn::current_nub_binary() else {
         return Ok(());
     };
