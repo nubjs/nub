@@ -20,13 +20,10 @@
 //!   running script spawns from re-checking (matching npm/pnpm).
 //!
 //! Policy lives in the neutral `.npmrc` key `verify-deps-before-run` (with the
-//! `NUB_VERIFY_DEPS` env override); nub's default is `warn`. That is a
-//! deliberate divergence from the vendored engine's `install` default, wired
-//! through nub's OWN resolution so standalone aube's default is untouched
-//! (fork-discipline). Under a pnpm-**11+** incumbent the key lives SOLELY in
-//! `pnpm-workspace.yaml` — v11 dropped `.npmrc` support for it entirely — so
-//! `resolve_policy` reads whichever home the detected incumbent major actually
-//! uses (see its doc).
+//! `NUB_VERIFY_DEPS` env override); nub's default is `warn`. In a pnpm project
+//! the key lives SOLELY in `pnpm-workspace.yaml`, the only home pnpm 11 and
+//! later read, unless the `packageManager` pin names an older pnpm — so
+//! `resolve_policy` reads the home that project's pnpm reads (see its doc).
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -142,10 +139,7 @@ pub(crate) fn gate(cwd: &Path, compat_mode: bool) -> Option<i32> {
 }
 
 /// Resolve the policy from nub's OWN surfaces: the config snapshot, then the
-/// incumbent's real config home, else nub's `warn` default. Deliberately does
-/// NOT call the engine's `resolve_verify_deps_before_run` — that carries the
-/// engine's `install` default, and reusing it would either leak that default
-/// under nub or force a fork-side edit.
+/// home the project's package manager reads, else nub's `warn` default.
 ///
 /// The `NUB_VERIFY_DEPS` env override (and its pre-rename spelling) is NOT read
 /// here: `cli::verify_deps_env_setting` parses both into the snapshot's
@@ -153,14 +147,12 @@ pub(crate) fn gate(cwd: &Path, compat_mode: bool) -> Option<i32> {
 /// read below the snapshot branch would rank the variable BELOW a project
 /// `nub.jsonc`, which is the precedence inversion this consolidation removes.
 ///
-/// The incumbent's home is per-major (mirrors the pnpm-version-aware routing
-/// `pm_engine::store_config_family` already established for scalar config, per
-/// AGENTS.md's "Compat targets are PER-MAJOR-VERSION" position): a pnpm-**11+**
-/// incumbent reads `verifyDepsBeforeRun` SOLELY from `pnpm-workspace.yaml` (v11
-/// dropped `.npmrc` support for this key entirely, so a stale `.npmrc` leftover
-/// from a pre-v11 migration must never shadow the yaml value); pnpm ≤10, the
-/// unknown-pnpm-version default, and every non-pnpm incumbent keep reading the
-/// neutral project `.npmrc` — unchanged from before this key was yaml-aware.
+/// In a pnpm project that home is `pnpm-workspace.yaml` ALONE: pnpm 11 dropped
+/// `.npmrc` support for this key, and the embedded pnpm 12 runs every pnpm
+/// project whose pin names no older major, so a leftover `.npmrc` line must
+/// never shadow the yaml (pnpm 12.4.1 refuses a stale run under the yaml's
+/// `error` and runs it under the same value in `.npmrc`). A pin naming pnpm 10
+/// or older, and every nub project, keep reading the neutral project `.npmrc`.
 fn resolve_policy(project: &Project) -> Policy {
     use crate::project_config::{ConfigKey, ConfigSourceKind};
 
@@ -172,9 +164,12 @@ fn resolve_policy(project: &Project) -> Policy {
         return project_config_policy(value);
     }
     let workspace_root = project.workspace_root.as_deref().unwrap_or(&project.root);
-    if let PnpmIncumbency::Major(major) = pnpm_incumbency(workspace_root)
-        && major >= 11
-    {
+    let reads_workspace_yaml = match pnpm_incumbency(workspace_root) {
+        PnpmIncumbency::NotPnpm => false,
+        PnpmIncumbency::UnknownVersion => true,
+        PnpmIncumbency::Major(major) => major >= 11,
+    };
+    if reads_workspace_yaml {
         return workspace_yaml_policy(workspace_root).unwrap_or(Policy::Warn);
     }
     if let Some(p) = crate::pm_engine::unsupported_config::npmrc_scalar_value(
@@ -203,36 +198,30 @@ fn project_config_policy(value: &crate::project_config::VerifyDeps) -> Policy {
     }
 }
 
-/// pnpm incumbency + declared major at `workspace_root`, gating whether
-/// `pnpm-workspace.yaml` may be read at all (the brand-boundary rule: a
-/// pnpm-named file is never read unless pnpm is genuinely the incumbent —
-/// AGENTS.md "pnpm-NAMED files ... NEVER read unless pnpm is the incumbent
-/// PM"). Reuses the same declared-then-lockfile identity resolution
-/// (`pm_engine::config_scope::role_of`) and the name-gated major extraction
-/// `pm_engine::store_config_family::project_scalar_home` already use for this
-/// exact per-major config-home question, rather than re-deriving it.
+/// Whether `workspace_root` is a pnpm project, and which pnpm major its pin
+/// names. It gates whether `pnpm-workspace.yaml` may be read at all: a
+/// pnpm-named file is never read in a nub project. The identity is the
+/// install's own ([`crate::pm_engine::project_identity::detect`]), so `run` and
+/// `install` never disagree about whose rules a project follows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PnpmIncumbency {
-    /// Not pnpm (or unresolved) — `pnpm-workspace.yaml` must never be read.
+    /// A nub project — `pnpm-workspace.yaml` must never be read.
     NotPnpm,
-    /// pnpm is incumbent but no pin names a major — falls back to the
-    /// `.npmrc` default (the dominant, safest target for an unpinned
-    /// v9/v10-era project).
+    /// A pnpm project whose pin names no pnpm version: the embedded pnpm 12
+    /// runs it.
     UnknownVersion,
     Major(u64),
 }
 
 fn pnpm_incumbency(workspace_root: &Path) -> PnpmIncumbency {
-    let declared = nub_core::pm::resolve::declared_pm_raw(workspace_root);
-    let kind = aube_lockfile::detect_existing_lockfile_kind(workspace_root);
-    let role =
-        crate::pm_engine::config_scope::role_of(declared.as_ref().map(|(n, _)| n.as_str()), kind);
-    if role != Some(crate::pm_engine::config_scope::Role::Pnpm) {
+    use crate::pm_engine::project_identity::{self, ProjectIdentity};
+    if project_identity::detect(workspace_root) != ProjectIdentity::Pnpm {
         return PnpmIncumbency::NotPnpm;
     }
-    // Only trust the declared VERSION when the name is literally "pnpm" —
-    // `role_of` maps an unrecognized declared tool through the lockfile
-    // fallback too, and that tool's version string is not a pnpm major.
+    // Only a pin naming pnpm itself carries a pnpm major: a project is pnpm's
+    // by its lockfile or workspace file even when `packageManager` names
+    // another tool, and that tool's version is not a pnpm major.
+    let declared = nub_core::pm::resolve::declared_pm_raw(workspace_root);
     let major = declared
         .as_ref()
         .and_then(|(name, v)| (name == "pnpm").then_some(v.as_deref()).flatten())

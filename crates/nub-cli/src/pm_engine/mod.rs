@@ -71,7 +71,6 @@
 mod bun_config;
 mod compat_db;
 pub(crate) mod config_read;
-pub mod config_scope;
 mod duplicate_home;
 mod expo_compat;
 mod host_settings;
@@ -85,7 +84,7 @@ pub mod output;
 pub mod phantom_closure;
 pub mod platform_flags;
 mod pnpm_engine;
-mod project_identity;
+pub(crate) mod project_identity;
 pub(crate) use pnpm_engine::engine_install;
 pub(crate) use pnpm_engine::run as run_pnpm_engine;
 mod verb_routing;

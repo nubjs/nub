@@ -347,10 +347,38 @@ fn pnpm_11_incumbent_workspace_yaml_wins_over_a_stale_npmrc() {
     assert_eq!(out.code, 0);
 }
 
+/// A pnpm project whose pin names no pnpm version runs on the embedded pnpm 12,
+/// which reads the policy from `pnpm-workspace.yaml` alone: pnpm 12.4.1 refuses
+/// a stale run under the yaml's `error` and ignores the same key in `.npmrc`.
+#[test]
+fn an_unpinned_pnpm_project_reads_the_policy_from_workspace_yaml() {
+    let d = tmp("pnpmunpinned");
+    write(
+        &d.join("package.json"),
+        r#"{"name":"u","version":"1.0.0","scripts":{"build":"echo OK"},"devDependencies":{"typescript":"^5.0.0"}}"#,
+    );
+    write(
+        &d.join("pnpm-workspace.yaml"),
+        "verifyDepsBeforeRun: error\n",
+    );
+    write(&d.join(".npmrc"), "verify-deps-before-run=off\n");
+    let out = run(&d, &["run", "build"], &[]);
+    assert_eq!(
+        out.code, 1,
+        "the yaml's `error` refuses the stale run: {}",
+        out.stderr
+    );
+    assert!(out.stderr.contains(STALE), "{}", out.stderr);
+    assert!(
+        !out.stdout.contains("OK"),
+        "the script must not run: {}",
+        out.stdout
+    );
+}
+
 #[test]
 fn pnpm_10_incumbent_still_reads_the_policy_from_npmrc() {
-    // Regression guard: pnpm ≤10 (and the pnpm-unknown default) keep reading
-    // `.npmrc` — only a confirmed pnpm-11+ incumbent switches homes.
+    // A pin naming pnpm 10 keeps `.npmrc` as the home: that pnpm still reads it.
     let d = tmp("pnpm10npmrc");
     write(
         &d.join("package.json"),
