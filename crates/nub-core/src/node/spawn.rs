@@ -3889,6 +3889,13 @@ fn find_preload(nub_binary: &Path) -> Option<String> {
     }
 }
 
+/// The directory holding the runtime tree — the extracted embed, or the in-repo
+/// `runtime/` on a dev build — located through [`find_preload`] so both builds
+/// agree on what "the runtime" is. `None` when the preload cannot be found.
+pub fn find_runtime_dir(nub_binary: &Path) -> Option<PathBuf> {
+    find_preload(nub_binary).and_then(|p| Path::new(&p).parent().map(Path::to_path_buf))
+}
+
 /// Resolve the path to the currently running Nub binary (follows symlinks).
 pub fn current_nub_binary() -> Result<PathBuf> {
     let exe = env::current_exe().context("could not determine path to nub binary")?;

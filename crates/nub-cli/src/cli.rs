@@ -626,6 +626,8 @@ pub enum Argv0 {
     Nub,
     /// Invoked as `nubx` — enter `exec` directly.
     Nubx,
+    /// Invoked as `nubr` — the unified runner (`runtime/nubr.mjs`), see [`run_nubr`].
+    Nubr,
     /// Invoked as `node` via the PATH shim — augmented top-level execution.
     Node,
     /// Invoked as `npm`/`npx`/`pnpm`/`pnpx`/`yarn`/`yarnpkg` via a
@@ -640,8 +642,8 @@ static ARGV0_OVERRIDE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock
 
 /// Read `__NUB_ARGV0` into [`ARGV0_OVERRIDE`] and REMOVE it from the environment.
 ///
-/// The platform packages ship ONE binary. `nub` and `nubx` are the same file, and
-/// the verb normally comes from argv[0]'s basename — but the launcher's healed sh
+/// The platform packages ship ONE binary. `nub`, `nubx` and `nubr` are the same file,
+/// and the verb normally comes from argv[0]'s basename — but the launcher's healed sh
 /// trampoline `exec`s that file by its real path, and POSIX `sh` has no portable way
 /// to set argv[0] (`exec -a` is a bash/zsh-ism; dash, which is `/bin/sh` on Debian
 /// and Ubuntu, rejects it). So the launcher passes the verb in this variable instead.
@@ -700,6 +702,7 @@ impl Argv0 {
         let name = basename.strip_suffix("-dev").unwrap_or(basename);
         match name {
             "nubx" => Self::Nubx,
+            "nubr" => Self::Nubr,
             "node" => Self::Node,
             // `file_stem` already stripped any `.exe`, so the same parse serves
             // the Windows shim names.
@@ -1783,6 +1786,7 @@ pub fn run() -> Result<i32> {
 
     match argv0 {
         Argv0::Nubx => run_nubx(),
+        Argv0::Nubr => run_nubr(),
         Argv0::Node => run_as_node(),
         Argv0::PmShim(name) => {
             // The PM owns its argv — no nub flag parsing, everything after
@@ -3462,6 +3466,39 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
         Some(Command::Node { .. }) => unreachable!("`node` is handled before parser dispatch"),
         None => unreachable!(),
     }
+}
+
+/// `nubr` — the unified runner: a file, a `package.json` script, or an installed
+/// bin, resolved most-specific-first under one name. It is the command
+/// `@nubjs/runner` ships, and this arm runs the SAME `runtime/nubr.mjs` out of the
+/// embedded runtime on the resolved Node, so the binary alias and the npm package
+/// behave identically by construction; nothing about resolution or the spawn is
+/// reimplemented here. The full CLI keeps its three verbs (`nub <file>`, `nub
+/// run`, `nubx`) — this is the one-bin shape, not a change to them.
+fn run_nubr() -> Result<i32> {
+    let args: Vec<String> = env::args().skip(1).collect();
+    // `nubr.mjs` reads its version from the package.json beside it, which the
+    // extracted runtime does not carry; the binary knows its own version. Same
+    // spelling as the package (bare, no `v`), same first-argument-only rule.
+    if matches!(args.first().map(String::as_str), Some("-v" | "--version")) {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        return Ok(0);
+    }
+    let cwd = env::current_dir().context("could not determine the current directory")?;
+    let node = nub_core::node::discovery::discover_or_provision_node(&cwd)?;
+    nub_core::node::discovery::check_min_version(&node)?;
+    let nub_binary = nub_core::node::spawn::current_nub_binary()?;
+    let runtime = nub_core::node::spawn::find_runtime_dir(&nub_binary)
+        .context("nubr: the nub runtime could not be located")?;
+    let mut cmd = std::process::Command::new(node.path.as_str());
+    cmd.arg(runtime.join("nubr.mjs"))
+        .args(&args)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+    let status = nub_core::node::spawn::status_forwarding_signals(&mut cmd)
+        .with_context(|| format!("nubr: failed to spawn {}", node.path))?;
+    Ok(nub_core::node::spawn::exit_code_from_status(&status))
 }
 
 fn run_nubx() -> Result<i32> {
@@ -8689,22 +8726,23 @@ fn perform_selfowned_upgrade(
     #[cfg(not(windows))]
     ensure_bin_executable(&install_dir.join("bin").join(NUB_EXE))?;
 
-    // Recreate the `nubx` alias install.sh creates (relative symlink → nub; the CLI
-    // dispatches on argv[0], so only the alias NAME matters — see Argv0::detect).
-    // BEST-EFFORT per the resilience contract above: the binary is already swapped
-    // and executable, so `nub` works regardless. nubx is a derived convenience —
-    // its recreation failing (an exotic FS, a permissions quirk) must NOT abort an
-    // otherwise-successful upgrade; warn and continue rather than bail. POSIX-only:
-    // on Windows the nubx COPY is refreshed inside `swap_bin_files_windows`.
+    // Recreate the `nubx` / `nubr` aliases install.sh creates (relative symlinks →
+    // nub; the CLI dispatches on argv[0], so only the alias NAME matters — see
+    // Argv0::detect). BEST-EFFORT per the resilience contract above: the binary is
+    // already swapped and executable, so `nub` works regardless. The aliases are a
+    // derived convenience — their recreation failing (an exotic FS, a permissions
+    // quirk) must NOT abort an otherwise-successful upgrade; warn and continue
+    // rather than bail. POSIX-only: on Windows the alias COPIES are refreshed
+    // inside `swap_bin_files_windows`.
     #[cfg(unix)]
-    {
-        let nubx = install_dir.join("bin").join("nubx");
-        let _ = std::fs::remove_file(&nubx);
-        if let Err(e) = std::os::unix::fs::symlink("nub", &nubx) {
+    for alias in ["nubx", "nubr"] {
+        let link = install_dir.join("bin").join(alias);
+        let _ = std::fs::remove_file(&link);
+        if let Err(e) = std::os::unix::fs::symlink("nub", &link) {
             eprintln!(
-                "nub upgrade: warning: could not recreate the nubx alias at {} ({e}); \
-                 `nub` is upgraded and usable. Re-run the installer to restore nubx.",
-                nubx.display()
+                "nub upgrade: warning: could not recreate the {alias} alias at {} ({e}); \
+                 `nub` is upgraded and usable. Re-run the installer to restore {alias}.",
+                link.display()
             );
         }
     }
@@ -8742,13 +8780,13 @@ fn swap_bin_files_windows(install_dir: &Path, staged_bin: &Path) -> Result<()> {
         .with_context(|| format!("could not create {}", display_path(&bin_dir)))?;
     let nub = bin_dir.join("nub.exe");
     let nub_old = bin_dir.join("nub.exe.old");
-    let nubx = bin_dir.join("nubx.exe");
-    let nubx_old = bin_dir.join("nubx.exe.old");
     let busybox = bin_dir.join("busybox.exe");
     let busybox_old = bin_dir.join("busybox.exe.old");
 
     let _ = std::fs::remove_file(&nub_old);
-    let _ = std::fs::remove_file(&nubx_old);
+    for alias in ["nubx", "nubr"] {
+        let _ = std::fs::remove_file(bin_dir.join(format!("{alias}.exe.old")));
+    }
     let _ = std::fs::remove_file(&busybox_old);
 
     if nub.exists() {
@@ -8768,18 +8806,22 @@ fn swap_bin_files_windows(install_dir: &Path, staged_bin: &Path) -> Result<()> {
             .with_context(|| format!("nub upgrade: could not install {}", display_path(&nub)));
     }
 
-    // nubx refresh is BEST-EFFORT per the resilience contract: `nub` is already
-    // swapped and authoritative. A running nubx.exe blocks the delete but not
-    // the rename-aside; if even that fails, warn and leave the stale copy.
-    if nubx.exists() && std::fs::remove_file(&nubx).is_err() {
-        let _ = std::fs::rename(&nubx, &nubx_old);
-    }
-    if let Err(e) = std::fs::copy(&nub, &nubx) {
-        eprintln!(
-            "nub upgrade: warning: could not refresh the nubx alias at {} ({e}); \
-             `nub` is upgraded and usable. Re-run the installer to restore nubx.",
-            display_path(&nubx)
-        );
+    // The nubx / nubr alias refresh is BEST-EFFORT per the resilience contract:
+    // `nub` is already swapped and authoritative. A running alias .exe blocks the
+    // delete but not the rename-aside; if even that fails, warn and leave the
+    // stale copy.
+    for alias in ["nubx", "nubr"] {
+        let exe = bin_dir.join(format!("{alias}.exe"));
+        if exe.exists() && std::fs::remove_file(&exe).is_err() {
+            let _ = std::fs::rename(&exe, bin_dir.join(format!("{alias}.exe.old")));
+        }
+        if let Err(e) = std::fs::copy(&nub, &exe) {
+            eprintln!(
+                "nub upgrade: warning: could not refresh the {alias} alias at {} ({e}); \
+                 `nub` is upgraded and usable. Re-run the installer to restore {alias}.",
+                display_path(&exe)
+            );
+        }
     }
 
     // busybox.exe is nub's bundled POSIX shell for `nub run`, and unlike nubx it
@@ -13241,12 +13283,14 @@ mod tests {
             0,
             "upgraded bin/nub must be executable (the 0644-from-CI bug fix)"
         );
-        let nubx = install.join("bin").join("nubx");
-        assert_eq!(
-            std::fs::read_link(&nubx).unwrap(),
-            Path::new("nub"),
-            "self-owned upgrade must recreate the nubx → nub alias"
-        );
+        for alias in ["nubx", "nubr"] {
+            let link = install.join("bin").join(alias);
+            assert_eq!(
+                std::fs::read_link(&link).unwrap(),
+                Path::new("nub"),
+                "self-owned upgrade must recreate the {alias} → nub alias"
+            );
+        }
         assert!(
             !install.join("runtime").exists(),
             "single-binary upgrade must remove a stale pre-single-binary runtime/ sidecar"
@@ -13647,11 +13691,13 @@ mod tests {
         // Release names dispatch to their mode…
         assert_eq!(Argv0::classify("nub"), Argv0::Nub);
         assert_eq!(Argv0::classify("nubx"), Argv0::Nubx);
+        assert_eq!(Argv0::classify("nubr"), Argv0::Nubr);
         assert_eq!(Argv0::classify("node"), Argv0::Node);
         // …and the `-dev` symlinks `make install-dev` creates map identically
         // (the bug this guards: `nubx-dev` used to fall through to plain Nub).
         assert_eq!(Argv0::classify("nub-dev"), Argv0::Nub);
         assert_eq!(Argv0::classify("nubx-dev"), Argv0::Nubx);
+        assert_eq!(Argv0::classify("nubr-dev"), Argv0::Nubr);
         assert_eq!(Argv0::classify("node-dev"), Argv0::Node);
         // A PM-shim name still classifies as a shim, dev-suffixed or not.
         assert!(matches!(Argv0::classify("pnpm"), Argv0::PmShim(_)));
