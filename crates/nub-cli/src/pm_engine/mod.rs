@@ -2086,7 +2086,6 @@ pub(crate) fn with_fd_captured<T>(_fd: i32, f: impl FnOnce() -> T) -> (T, String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project_config::{Hoist, InstallConfig, LinkerConfig};
 
     #[test]
     fn pnpm_npmrc_key_policy_narrows_only_at_v11() {
