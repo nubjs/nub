@@ -1213,6 +1213,58 @@ fn config_get_registry_resolves_the_default_when_unset() {
     assert_eq!((stdout.trim(), code), ("https://mirror.example.test/", 0));
 }
 
+/// From inside a workspace member, the merged view answers what an install
+/// from there fetches from: the workspace root's registry, never the member's
+/// own `.npmrc`, which the install does not read. `nub run`'s documented
+/// `npm_config_registry` export carries the same value. One arm per identity,
+/// because each names its workspace root differently.
+#[test]
+fn a_member_reads_the_workspace_roots_registry() {
+    let script = r#"node -e "process.stdout.write(process.env.npm_config_registry || '<unset>')""#;
+    for (tag, root_manifest, root_file, root_body) in [
+        (
+            "reg-member-nub",
+            r#"{"name":"ws","private":true,"workspaces":["packages/*"]}"#,
+            ".npmrc",
+            "registry=https://root.example.test/\n",
+        ),
+        (
+            "reg-member-pnpm",
+            r#"{"name":"ws","private":true}"#,
+            "pnpm-workspace.yaml",
+            "packages:\n  - packages/*\nregistry: https://root.example.test/\n",
+        ),
+    ] {
+        let ctx = Ctx::new(tag, root_manifest);
+        std::fs::write(ctx.project.join(root_file), root_body).unwrap();
+        let member = ctx.project.join("packages").join("m");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(
+            member.join("package.json"),
+            format!(r#"{{"name":"m","version":"1.0.0","scripts":{{"reg":{script:?}}}}}"#),
+        )
+        .unwrap();
+        std::fs::write(
+            member.join(".npmrc"),
+            "registry=https://member.example.test/\n",
+        )
+        .unwrap();
+
+        let (stdout, stderr, code) = ctx.run_in(&member, &["config", "get", "registry"]);
+        assert_eq!(
+            (stdout.trim(), code),
+            ("https://root.example.test/", 0),
+            "[{tag}] config get registry: {stderr}"
+        );
+        let (stdout, stderr, code) = ctx.run_in(&member, &["run", "reg"]);
+        assert_eq!(code, 0, "[{tag}] run: {stderr}");
+        assert!(
+            stdout.trim_end().ends_with("https://root.example.test/"),
+            "[{tag}] the script must see the root's registry: {stdout:?}"
+        );
+    }
+}
+
 /// `pkg` and `set-script` are native package.json editors — fully offline.
 /// Round-trip a set → get and a set-script, asserting the manifest is
 /// edited in place (and key order preserved).

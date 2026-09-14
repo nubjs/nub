@@ -6069,18 +6069,20 @@ fn build_script_command(
         command.env(crate::pm_engine::node_gyp::PROJECT_DIR_ENV, &project.root);
     }
 
-    // `npm_config_registry`: pnpm always exports the resolved registry to a
-    // script's environment (defaulting to `https://registry.npmjs.org/`); npm
-    // exports it whenever a registry is configured. nub left it unset, so a
-    // script reading `$npm_config_registry` (publish wrappers, custom fetch
-    // tooling) saw `undefined` under nub but a real URL under npm/pnpm. Read
-    // the resolved registry from the project's `.npmrc`/config chain — the same
-    // `NpmConfig` the engine resolves installs against — and export it. Set
-    // before the `npm_env` loop so a user-set value still wins.
-    let registry = aube_registry::config::NpmConfig::load(&project.root)
-        .registry_for("")
-        .to_string();
-    command.env("npm_config_registry", registry);
+    // `npm_config_registry`: the registry an install from this project uses,
+    // for a script that reads it (publish wrappers, custom fetch tooling).
+    // pnpm 12 exports no such variable, but nub documents one, so what has to
+    // match pnpm is the VALUE: resolved at the workspace root, the answer `nub
+    // config get registry` gives, and never a member's own `.npmrc`, which the
+    // install does not read. An inherited value is left alone, as pnpm leaves
+    // it. Set before the `npm_env` loop so a user-set value still wins.
+    if std::env::var_os("npm_config_registry").is_none() {
+        let root = project.workspace_root.as_deref().unwrap_or(&project.root);
+        command.env(
+            "npm_config_registry",
+            crate::pm_engine::config_read::registry_at(root),
+        );
+    }
 
     for (k, v) in &env_vars {
         command.env(k, v);

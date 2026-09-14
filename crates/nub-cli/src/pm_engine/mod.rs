@@ -70,7 +70,7 @@
 
 mod bun_config;
 mod compat_db;
-mod config_read;
+pub(crate) mod config_read;
 pub mod config_scope;
 mod duplicate_home;
 mod expo_compat;

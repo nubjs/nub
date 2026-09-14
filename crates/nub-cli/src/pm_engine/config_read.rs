@@ -394,9 +394,23 @@ fn env_entries() -> Vec<(String, String)> {
 /// The defaults tier is here and not in either scope reader for the same
 /// reason it is in neither of npm's: a single-file view answers "what does
 /// THIS file say", and a default says nothing about any file.
+///
+/// Anchored at the WORKSPACE root, not at the member the command runs in. An
+/// install from a member reads the root's `.npmrc` and `pnpm-workspace.yaml`
+/// and never the member's own `.npmrc`, and pnpm's `config get` answers the
+/// same way. `config set` still writes the member's file, as pnpm's does, so
+/// only this merged view moves.
 pub(crate) fn read_merged() -> Vec<(String, String)> {
-    let root = project_root();
+    let root = merged_root();
     let mut out = default_entries(&root);
+    out.extend(configured_entries(&root));
+    out
+}
+
+/// The merged view without nub's defaults: every source something actually
+/// set, lowest precedence first.
+fn configured_entries(root: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
     if let Some(user) = user_npmrc_path() {
         out.extend(read_npmrc(&user));
         let project = root.join(".npmrc");
@@ -406,12 +420,37 @@ pub(crate) fn read_merged() -> Vec<(String, String)> {
     } else {
         out.extend(read_npmrc(&root.join(".npmrc")));
     }
-    out.extend(branded_yaml(&root, BrandedSource::GlobalConfig));
-    out.extend(branded_yaml(&root, BrandedSource::WorkspaceYaml));
-    out.extend(nub_jsonc_entries(&root));
+    out.extend(branded_yaml(root, BrandedSource::GlobalConfig));
+    out.extend(branded_yaml(root, BrandedSource::WorkspaceYaml));
+    out.extend(nub_jsonc_entries(root));
     // Last because it is highest.
     out.extend(env_entries());
     out
+}
+
+/// The workspace root of the project a config read runs in, or the project
+/// root itself outside a workspace.
+fn merged_root() -> PathBuf {
+    let root = project_root();
+    nub_core::workspace::detect::detect_project(&root)
+        .map(|project| project.workspace_root.unwrap_or(project.root))
+        .unwrap_or(root)
+}
+
+/// The registry an install from the workspace at `root` fetches unscoped
+/// packages from: the merged view's answer, else the engine's own default.
+///
+/// For `nub run`'s `npm_config_registry` export, which has to say what `nub
+/// config get registry` says. The defaults tier is skipped because it carries
+/// no registry, and computing it walks the project for lockfiles on a path
+/// that runs before every script.
+pub(crate) fn registry_at(root: &Path) -> String {
+    let aliases = resolve_aliases("registry");
+    configured_entries(root)
+        .into_iter()
+        .rev()
+        .find_map(|(key, value)| (key == "registry" || aliases.contains(&key)).then_some(value))
+        .unwrap_or_else(pnpm_config::default_registry)
 }
 
 /// The defaults nub itself applies, lowest precedence of all.
