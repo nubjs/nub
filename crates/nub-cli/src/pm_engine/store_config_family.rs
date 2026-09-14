@@ -5,10 +5,12 @@
 //! `get`/`set` shorthands, and the native package.json editors `pkg`,
 //! `set-script` (engine-implemented, not an npm shell-out).
 //!
-//! The wiring helpers (`verb_cli`, `run_wired`, `run_engine`) are shared with
-//! [`super::publish_family`] — see its module doc for the common shape
-//! (one stamped `usage_rs::Cli` root per verb, brand-rewritten help/usage,
-//! engine session preflight, failures through [`present::emit_report`]).
+//! This family owns its own wiring now. The publish family it used to share
+//! `run_wired`/`run_engine` with is gone — every one of those verbs is in
+//! pnpm's grammar, so the CLI front door takes them and the module had no
+//! reachable code left. The shape here is unchanged: one stamped
+//! `usage_rs::Cli` root per verb, brand-rewritten help and usage, an engine
+//! session preflight, and failures through [`present::emit_report`].
 //!
 //! Family notes:
 //! - `store path` prints the *resolved* store-version dir on stdout — under
@@ -717,9 +719,10 @@ fn dispatch_config(parsed: ConfigArgs) -> Result<i32> {
         // `get` / `list` / `delete` / bare `config` delegate unchanged.
         _ => {}
     }
-    // `config` reads/writes `.npmrc`-class settings; it never reads the project
-    // lockfile, so identity resolution is lenient (see `engine_session_global`):
-    // a multi-lockfile project must not block a `config get`/`set`/`list`.
+    // `config` reads/writes `.npmrc`-class settings and never reads the project
+    // lockfile, so a multi-lockfile project must not block a `config
+    // get`/`set`/`list`. It builds no engine session at all, which is why it
+    // survived the removal of the global-scope session constructor.
     super::config_read::run(parsed)
 }
 

@@ -89,7 +89,6 @@ pub(crate) use pnpm_engine::run as run_pnpm_engine;
 mod verb_routing;
 pub(crate) use verb_routing::engine_takes;
 pub mod present;
-pub mod publish_family;
 mod remix_compat;
 pub mod verb_parse;
 use nub_core::resource_limits;
@@ -543,7 +542,10 @@ pub fn dispatch_verb(
         // `lookup_verb`; an error beats a panic for a branch that is
         // unreachable by measurement rather than by type.
         Family::Info => anyhow::bail!("nub: internal: `{typed}` is served by the engine"),
-        Family::Publish => publish_family::run_verb(spec, typed, args, pm_hint),
+        // Dead for the same reason as `Info`, and measured the same way: all
+        // twelve publish verbs are in pnpm's grammar, so the front door takes
+        // their command lines and this arm is never chosen.
+        Family::Publish => anyhow::bail!("nub: internal: `{typed}` is served by the engine"),
         Family::StoreConfig => store_config_family::run_verb(spec, typed, args, pm_hint),
     }
 }
@@ -643,31 +645,6 @@ pub(crate) fn engine_session_transient(dir: Option<&Path>) -> Result<EngineSessi
     )
 }
 
-/// [`engine_session`] for GLOBAL-SCOPE commands that never read or write
-/// the project's lockfile: the global store/cache forensics (`store`, `cache`,
-/// `cat-file`, `cat-index`, `find-hash`), config get/set, the registry/auth
-/// surface (`publish`, `pack`, `version`, `deprecate`/`undeprecate`,
-/// `dist-tag`, `unpublish`, `login`/`logout`, `whoami`, `owner`, `token`),
-/// package.json edits (`pkg`, `set-script`), and the pure registry-query /
-/// path-print verbs (`view`, `search`, `bin`, `root`). Because none of these
-/// consume the project's resolved PM identity, a multi-lockfile /
-/// declaration-contradiction project must NOT block them — identity resolution
-/// runs LENIENT (degrades to no-identity instead of hard-erroring
-/// `ERR_NUB_LOCKFILE_AMBIGUOUS`), exactly like the transient dlx path (#197).
-/// This is the same `IdentityStrictness` machinery, applied to the global-scope
-/// read class rather than the transient fetch-and-run class. The STRICT
-/// ambiguity guard remains for the mutating install family, which writes the
-/// lockfile.
-pub(crate) fn engine_session_global(dir: Option<&Path>) -> Result<EngineSession> {
-    engine_session_inner(
-        dir,
-        ConfigScopeNoise::Silent,
-        IdentityStrictness::Lenient,
-        VirtualStoreLocality::Default,
-        ProjectInstallConfig::Ignore,
-    )
-}
-
 /// Whether an identity-resolution failure (multi-lockfile ambiguity, declared
 /// PM contradicted by the on-disk lockfile) is a HARD ERROR or degrades to
 /// no-identity. `Lenient` swallows it and proceeds with no resolved identity.
@@ -678,9 +655,10 @@ pub(crate) fn engine_session_global(dir: Option<&Path>) -> Result<EngineSession>
 /// (`verb_routing`); every session this module still builds is one of the
 /// classes that was always lenient, because none of them reads or writes the
 /// CWD project's lockfile: the transient-package families (dlx/create, see
-/// [`engine_session_transient`]) and the global-scope read class (store/cache/
-/// config/registry/path, see [`engine_session_global`]). The parameter is kept
-/// so a caller that needs the strict diagnostic can ask for it again.
+/// [`engine_session_transient`]). The global-scope read class used to be the
+/// other one; its verbs are all the engine's now, so its constructor went with
+/// them. The parameter is kept so a caller that needs the strict diagnostic
+/// can ask for it again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IdentityStrictness {
     Lenient,

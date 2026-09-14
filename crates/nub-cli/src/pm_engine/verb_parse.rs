@@ -176,17 +176,8 @@ macro_rules! verb_cli {
 }
 pub(super) use verb_cli;
 
-/// [`verb_cli`] for the plain shape: the engine's own args type and nothing else.
-macro_rules! plain_verb_cli {
-    ($name:ident, $spec:tt, $engine:ty) => {
-        crate::pm_engine::verb_parse::verb_cli! {
-            $name, $spec, { #[usage(flatten)] args: $engine }
-        }
-        impl $name {
-            fn into_engine(self) -> $engine {
-                self.args
-            }
-        }
-    };
-}
-pub(super) use plain_verb_cli;
+// `plain_verb_cli!` stood beside `verb_cli!` for the shape that flattens the
+// engine's own args type and nothing else. Every verb that used it was a
+// publish-family verb, and they are all the engine's now, so it went with the
+// family. `verb_cli!` above survives because `store_config_family` still
+// stamps roots with it.
