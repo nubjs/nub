@@ -2,7 +2,9 @@
 //!
 //! Supports:
 //! - `--filter <name>` — exact package name match
-//! - `--filter "<glob>"` — glob pattern against package name or relative dir
+//! - `--filter "<glob>"` — glob pattern against the package name
+//! - `--filter ./<dir>` / `{<dir>}` — a project directory or path glob, resolved
+//!   from the project the command runs in (`.` and `../<dir>` included)
 //! - `--filter <name>...` — package + all its dependencies
 //! - `--filter ...<name>` — package + all its dependents
 //! - `--filter "...<name>..."` — both directions
@@ -20,7 +22,10 @@ use std::path::{Path, PathBuf};
 /// A parsed filter expression.
 #[derive(Debug, Clone)]
 pub struct Filter {
+    /// The name pattern; empty when the selector names none.
     pattern: String,
+    /// A directory selector: an absolute, `/`-separated path glob.
+    dir: Option<String>,
     include_dependencies: bool,
     include_dependents: bool,
     exclude_self: bool,
@@ -29,69 +34,137 @@ pub struct Filter {
 }
 
 impl Filter {
-    pub fn parse(s: &str) -> Self {
-        let mut pattern = s.to_string();
-        let mut include_dependencies = false;
-        let mut include_dependents = false;
+    /// Parse one selector the way pnpm's `parseProjectSelector` does:
+    /// `name{dir}[ref]` with every part optional, or a bare location (`.`,
+    /// `./dir`, `..`, `../dir`). A directory resolves from `prefix`, the project
+    /// the command runs in, and never from the workspace root.
+    pub fn parse(s: &str, prefix: &Path) -> Self {
+        let mut rest = s;
+        let exclude = rest.starts_with('!');
+        if exclude {
+            rest = &rest[1..];
+        }
+        // Trailing `...` (or `^...`): the package AND its dependencies.
         let mut exclude_self = false;
-        let mut git_ref = None;
-        let mut exclude = false;
-
-        // Exclude prefix: !pkg
-        if pattern.starts_with('!') {
-            exclude = true;
-            pattern = pattern[1..].to_string();
-        }
-
-        // Trailing ellipsis + optional ^: pkg...  or  pkg...^ — pnpm: the package
-        // AND its dependencies (the packages it depends on).
-        if pattern.ends_with("...") {
-            include_dependencies = true;
-            pattern = pattern[..pattern.len() - 3].to_string();
-            if pattern.ends_with('^') {
+        let include_dependencies = rest.ends_with("...");
+        if include_dependencies {
+            rest = &rest[..rest.len() - 3];
+            if let Some(stripped) = rest.strip_suffix('^') {
                 exclude_self = true;
-                pattern = pattern[..pattern.len() - 1].to_string();
+                rest = stripped;
             }
         }
-
-        // Leading ellipsis + optional ^: ...pkg  or  ...^pkg — pnpm: the package
-        // AND its dependents (the packages that depend on it).
-        if pattern.starts_with("...") {
-            include_dependents = true;
-            pattern = pattern[3..].to_string();
-            if pattern.starts_with('^') {
+        // Leading `...` (or `...^`): the package AND its dependents.
+        let include_dependents = rest.starts_with("...");
+        if include_dependents {
+            rest = &rest[3..];
+            if let Some(stripped) = rest.strip_prefix('^') {
                 exclude_self = true;
-                pattern = pattern[1..].to_string();
+                rest = stripped;
             }
         }
-
-        // Git ref: [origin/main] or [HEAD~2].
-        if pattern.starts_with('[') {
-            if let Some(close) = pattern.find(']') {
-                git_ref = Some(pattern[1..close].to_string());
-                pattern = pattern[close + 1..].to_string();
-            }
+        let none = Self {
+            pattern: String::new(),
+            dir: None,
+            include_dependencies: false,
+            include_dependents: false,
+            exclude_self: false,
+            git_ref: None,
+            exclude: false,
+        };
+        if let Some((name, dir, git_ref)) = split_selector(rest) {
+            return Self {
+                pattern: name.to_owned(),
+                dir: dir.map(|dir| join_dir(prefix, dir)),
+                include_dependencies,
+                include_dependents,
+                exclude_self,
+                git_ref: git_ref.map(str::to_owned),
+                exclude,
+            };
         }
-
-        // Directory selector: {packages/foo} → ./packages/foo
-        if pattern.starts_with('{') && pattern.ends_with('}') {
-            let inner = &pattern[1..pattern.len() - 1];
-            if inner.starts_with('.') {
-                pattern = inner.to_string();
-            } else {
-                pattern = format!("./{inner}");
-            }
+        // pnpm keeps only the exclusion on a bare location, so `./dir...`
+        // selects the directory alone where `{./dir}...` expands, and text of
+        // neither shape is a name with no modifiers at all.
+        if is_location(rest) {
+            return Self {
+                dir: Some(join_dir(prefix, rest)),
+                exclude,
+                ..none
+            };
         }
-
         Self {
-            pattern,
-            include_dependencies,
-            include_dependents,
-            exclude_self,
-            git_ref,
-            exclude,
+            pattern: rest.to_owned(),
+            ..none
         }
     }
+}
+
+/// `name{dir}[ref]` split the way pnpm's selector regex
+/// `^([^.][^{}[\]]*)?(\{[^}]+\})?(\[[^\]]+\])?$` splits it, or `None` for text of
+/// another shape. The name cannot contain a delimiter, so it either runs to the
+/// first one or is absent.
+fn split_selector(s: &str) -> Option<(&str, Option<&str>, Option<&str>)> {
+    let name_end = match s.chars().next() {
+        Some(first) if first != '.' => s[first.len_utf8()..]
+            .find(['{', '}', '[', ']'])
+            .map_or(s.len(), |at| at + first.len_utf8()),
+        _ => 0,
+    };
+    [name_end, 0].into_iter().find_map(|end| {
+        let (name, rest) = s.split_at(end);
+        let (dir, rest) = delimited(rest, '{', '}')?;
+        let (git_ref, rest) = delimited(rest, '[', ']')?;
+        rest.is_empty().then_some((name, dir, git_ref))
+    })
+}
+
+/// An optional `<open>inner<close>` group at the start of `s`, and the text
+/// after it; `None` for a group that never closes or is empty.
+fn delimited(s: &str, open: char, close: char) -> Option<(Option<&str>, &str)> {
+    let Some(inner) = s.strip_prefix(open) else {
+        return Some((None, s));
+    };
+    let end = inner.find(close).filter(|&end| end > 0)?;
+    Some((Some(&inner[..end]), &inner[end + close.len_utf8()..]))
+}
+
+/// `.`, `./<dir>`, `..` or `../<dir>`, with either separator.
+fn is_location(s: &str) -> bool {
+    s.strip_prefix("..")
+        .or_else(|| s.strip_prefix('.'))
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '\\']))
+}
+
+/// `rel` joined onto `prefix` the way Node's `path.join` joins it (a leading
+/// separator does not discard the prefix), in [`normalize_dir`]'s form.
+fn join_dir(prefix: &Path, rel: &str) -> String {
+    normalize_dir(&prefix.join(rel.trim_start_matches(['/', '\\'])))
+}
+
+/// A directory resolved lexically — `.` and `..` folded, no filesystem access —
+/// and written with `/` separators: the form selectors and member directories
+/// are compared in.
+fn normalize_dir(path: &Path) -> String {
+    use std::path::Component;
+    let mut head = String::new();
+    let mut parts: Vec<String> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => head.push_str(&prefix.as_os_str().to_string_lossy()),
+            Component::RootDir => head.push('/'),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if parts.last().is_some_and(|last| last != "..") {
+                    parts.pop();
+                } else if head.is_empty() {
+                    parts.push("..".to_owned());
+                }
+            }
+            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+        }
+    }
+    format!("{head}{}", parts.join("/")).replace('\\', "/")
 }
 
 /// Resolve changed packages from a git ref.
@@ -455,44 +528,44 @@ fn raw_matched_set(
     name_to_idx: &FxHashMap<&str, usize>,
     workspace_root: Option<&Path>,
 ) -> HashSet<usize> {
-    // Find initial matches.
+    // pnpm's order: a `[ref]` or a directory picks the entry projects, and a
+    // name then narrows them (or the whole workspace when neither is given).
     let mut matched: HashSet<usize> = if let Some(ref git_ref) = filter.git_ref {
-        let ws = workspace_root.unwrap_or(Path::new("."));
-        packages_changed_since(ws, members, git_ref)
-    } else if filter.pattern.is_empty() {
-        (0..members.len()).collect()
+        let scope = filter.dir.as_deref().map(Path::new).or(workspace_root);
+        packages_changed_since(scope.unwrap_or(Path::new(".")), members, git_ref)
+    } else if let Some(dir) = &filter.dir {
+        (0..members.len())
+            .filter(|&i| matches_dir(dir, &normalize_dir(&members[i].dir)))
+            .collect()
     } else {
-        let mut m = HashSet::new();
-        for (i, pkg) in members.iter().enumerate() {
-            // Directory selectors match the dir RELATIVE to the workspace root.
-            let rel_dir = workspace_root
-                .and_then(|root| pkg.dir.strip_prefix(root).ok())
-                .unwrap_or(pkg.dir.as_path())
-                .to_string_lossy();
-            if matches_pattern(&pkg.name, rel_dir.as_ref(), &filter.pattern) {
-                m.insert(i);
-            }
-        }
+        (0..members.len()).collect()
+    };
+    if !filter.pattern.is_empty() {
+        let named: HashSet<usize> = matched
+            .iter()
+            .copied()
+            .filter(|&i| matches_name(&members[i].name, &filter.pattern))
+            .collect();
         // pnpm scope resolution (parseProjectSelector / matchPackagesByGlob): a
-        // bare unscoped name with no exact/glob/dir match also selects a SCOPED
+        // bare unscoped name with no exact/glob match also selects a SCOPED
         // package whose unscoped part equals it — but only if EXACTLY ONE does.
         // Two scoped packages sharing an unscoped name (`@foo/bar` + `@types/bar`
-        // for `bar`) are ambiguous → select none. An exact match always wins (it
-        // is already in `m`, so this only runs when `m` is empty).
-        if m.is_empty() && is_bare_name(&filter.pattern) {
-            let unscoped: Vec<usize> = members
+        // for `bar`) are ambiguous → select none. An exact match always wins.
+        matched = if named.is_empty() && is_bare_name(&filter.pattern) {
+            let unscoped: Vec<usize> = matched
                 .iter()
-                .enumerate()
-                .filter(|(_, p)| unscoped_name(&p.name) == filter.pattern)
-                .map(|(i, _)| i)
+                .copied()
+                .filter(|&i| unscoped_name(&members[i].name) == filter.pattern)
                 .collect();
             if unscoped.len() == 1 {
-                m.insert(unscoped[0]);
+                unscoped.into_iter().collect()
+            } else {
+                HashSet::new()
             }
-            // 0 → no match; 2+ → ambiguous, select none.
-        }
-        m
-    };
+        } else {
+            named
+        };
+    }
 
     let initial_matches: HashSet<usize> = matched.clone();
 
@@ -601,40 +674,20 @@ fn unscoped_name(name: &str) -> &str {
     name.rsplit('/').next().unwrap_or(name)
 }
 
-/// `rel_dir` is the member's directory **relative to the workspace root** (the
-/// caller computes it), which is what pnpm matches directory selectors against.
-fn matches_pattern(name: &str, rel_dir: &str, pattern: &str) -> bool {
-    // Exact package-name match.
-    if name == pattern {
-        return true;
-    }
+/// A package name against a name selector: exact, or a glob.
+fn matches_name(name: &str, pattern: &str) -> bool {
+    name == pattern
+        || ((pattern.contains('*') || pattern.contains('?') || pattern.contains('{'))
+            && glob_match::glob_match(pattern, name))
+}
 
-    // Directory / path-glob selector. The `{dir}` and `./dir` forms both parse to
-    // a leading "./". A BARE dir selects ONLY the package whose own directory IS
-    // that dir — pnpm's default glob dir-filtering (`useGlobDirFiltering`,
-    // `matchProjectsByGlob`) glob-matches the rel dir against the literal selector,
-    // and a literal has no `**`, so it never matches a nested child. Recursion is
-    // opt-in via an explicit glob (`./dir/*`, `./dir/**`), handled just above by
-    // the glob branch of this same block. Matching
-    // the workspace-relative dir (not the absolute path) is what makes
-    // `--filter ./packages/*` and `--filter ./packages/**` select child packages.
-    if let Some(p) = pattern.strip_prefix("./") {
-        let p = p.trim_end_matches('/');
-        if p.is_empty() {
-            return false;
-        }
-        if p.contains('*') || p.contains('?') || p.contains('{') {
-            return glob_match::glob_match(p, rel_dir);
-        }
-        return rel_dir == p;
-    }
-
-    // Name glob (non-path patterns) match the package NAME.
-    if pattern.contains('*') || pattern.contains('?') || pattern.contains('{') {
-        return glob_match::glob_match(pattern, name);
-    }
-
-    false
+/// A member directory against a directory selector, both in [`normalize_dir`]'s
+/// form. pnpm's default glob dir-filtering (`useGlobDirFiltering`,
+/// `matchProjectsByGlob`) matches the member's own directory against the
+/// selector as a path glob, so a BARE dir selects ONLY the project that lives
+/// there and never one nested below it; recursion is opt-in through `*` or `**`.
+fn matches_dir(pattern: &str, dir: &str) -> bool {
+    dir == pattern || glob_match::glob_match(pattern, dir)
 }
 
 /// Build a dependency graph: index → set of dependency indices.
@@ -788,7 +841,7 @@ mod tests {
 
     #[test]
     fn parse_simple_filter() {
-        let f = Filter::parse("@org/api");
+        let f = Filter::parse("@org/api", Path::new(""));
         assert_eq!(f.pattern, "@org/api");
         assert!(!f.include_dependencies);
         assert!(!f.include_dependents);
@@ -797,7 +850,7 @@ mod tests {
     #[test]
     fn parse_deps_filter() {
         // Trailing `...` (pnpm: package + its dependencies).
-        let f = Filter::parse("@org/api...");
+        let f = Filter::parse("@org/api...", Path::new(""));
         assert_eq!(f.pattern, "@org/api");
         assert!(f.include_dependencies);
         assert!(!f.include_dependents);
@@ -806,7 +859,7 @@ mod tests {
     #[test]
     fn parse_dependents_filter() {
         // Leading `...` (pnpm: package + its dependents).
-        let f = Filter::parse("...@org/api");
+        let f = Filter::parse("...@org/api", Path::new(""));
         assert_eq!(f.pattern, "@org/api");
         assert!(!f.include_dependencies);
         assert!(f.include_dependents);
@@ -814,7 +867,7 @@ mod tests {
 
     #[test]
     fn parse_both_directions() {
-        let f = Filter::parse("...@org/api...");
+        let f = Filter::parse("...@org/api...", Path::new(""));
         assert_eq!(f.pattern, "@org/api");
         assert!(f.include_dependencies);
         assert!(f.include_dependents);
@@ -822,7 +875,7 @@ mod tests {
 
     #[test]
     fn parse_exclude_filter() {
-        let f = Filter::parse("!@org/api");
+        let f = Filter::parse("!@org/api", Path::new(""));
         assert_eq!(f.pattern, "@org/api");
         assert!(f.exclude);
         assert!(!f.exclude_self);
@@ -848,9 +901,8 @@ mod tests {
         }
     }
 
-    /// A package with an explicit (workspace-relative) directory, for directory
-    /// selector tests. (`apply_filter` is called with `workspace_root: None`, so
-    /// these dirs are already the workspace-relative form `matches_pattern` sees.)
+    /// A package with an explicit directory, for directory selector tests. A
+    /// relative dir pairs with the empty prefix [`selected_names`] resolves from.
     fn pkg_in(name: &str, dir: &str) -> WorkspacePackage {
         WorkspacePackage {
             name: name.to_string(),
@@ -860,8 +912,16 @@ mod tests {
     }
 
     fn selected_names<'a>(members: &'a [WorkspacePackage], filter: &str) -> HashSet<&'a str> {
-        let f = Filter::parse(filter);
-        apply_filter(members, &f, None)
+        selected_from(members, filter, "")
+    }
+
+    /// The names `filter` selects when the command runs in `from`.
+    fn selected_from<'a>(
+        members: &'a [WorkspacePackage],
+        filter: &str,
+        from: &str,
+    ) -> HashSet<&'a str> {
+        apply_filter(members, &Filter::parse(filter, Path::new(from)), None)
             .iter()
             .map(|&i| members[i].name.as_str())
             .collect()
@@ -895,8 +955,8 @@ mod tests {
 
     #[test]
     fn dir_selector_matches_workspace_relative_path() {
-        // Directory selectors match the dir relative to the workspace root, with
-        // pnpm's default glob dir-filtering semantics: a BARE dir selects ONLY the
+        // A directory selector matches the member's own dir with pnpm's default
+        // glob dir-filtering semantics: a BARE dir selects ONLY the
         // package whose own directory IS that dir — it never recurses into nested
         // packages (pnpm `--filter ./apps` over `apps/web` selects {}). Recursion
         // is opt-in via an explicit `*`/`**` glob; an exact package dir picks one.
@@ -951,6 +1011,46 @@ mod tests {
             selected_names(&members, "./packages/group/*"),
             HashSet::from(["groupchild"])
         );
+    }
+
+    /// A location selector resolves from the project the command runs in, not
+    /// from the workspace root: `.` is that project and `../b` its sibling. A
+    /// bare location drops the `...` expansion that `{dir}...` keeps, and a name
+    /// beside a directory narrows it.
+    #[test]
+    fn a_location_selector_resolves_from_the_project_it_runs_in() {
+        let members = vec![
+            pkg_in("root", "/ws"),
+            WorkspacePackage {
+                dir: PathBuf::from("/ws/packages/a"),
+                ..pkg_with_deps("a", &["b"])
+            },
+            pkg_in("b", "/ws/packages/b"),
+        ];
+        let from_a = "/ws/packages/a";
+        assert_eq!(selected_from(&members, ".", "/ws"), HashSet::from(["root"]));
+        assert_eq!(selected_from(&members, "./", from_a), HashSet::from(["a"]));
+        assert_eq!(
+            selected_from(&members, "../b", from_a),
+            HashSet::from(["b"])
+        );
+        assert_eq!(
+            selected_from(&members, "{../b}", from_a),
+            HashSet::from(["b"])
+        );
+        assert_eq!(
+            selected_from(&members, "./packages/a...", "/ws"),
+            HashSet::from(["a"])
+        );
+        assert_eq!(
+            selected_from(&members, "{packages/a}...", "/ws"),
+            HashSet::from(["a", "b"])
+        );
+        assert_eq!(
+            selected_from(&members, "a{packages/*}", "/ws"),
+            HashSet::from(["a"])
+        );
+        assert!(selected_from(&members, "b{packages/a}", "/ws").is_empty());
     }
 
     /// End-to-end ellipsis DIRECTION, matching pnpm (the contract nub claims
@@ -1029,7 +1129,10 @@ mod tests {
         members: &'a [WorkspacePackage],
         filters: &[&str],
     ) -> HashSet<&'a str> {
-        let parsed: Vec<Filter> = filters.iter().map(|s| Filter::parse(s)).collect();
+        let parsed: Vec<Filter> = filters
+            .iter()
+            .map(|s| Filter::parse(s, Path::new("")))
+            .collect();
         apply_filters(members, &parsed, None)
             .iter()
             .map(|&i| members[i].name.as_str())
@@ -1081,7 +1184,7 @@ mod tests {
     #[test]
     fn parse_exclude_self_deps() {
         // Trailing `^...` (pnpm: dependencies only, package itself excluded).
-        let f = Filter::parse("@org/api^...");
+        let f = Filter::parse("@org/api^...", Path::new(""));
         assert_eq!(f.pattern, "@org/api");
         assert!(f.include_dependencies);
         assert!(f.exclude_self);
@@ -1091,7 +1194,7 @@ mod tests {
     #[test]
     fn parse_exclude_self_dependents() {
         // Leading `...^` (pnpm: dependents only, package itself excluded).
-        let f = Filter::parse("...^@org/api");
+        let f = Filter::parse("...^@org/api", Path::new(""));
         assert_eq!(f.pattern, "@org/api");
         assert!(f.include_dependents);
         assert!(f.exclude_self);
@@ -1100,14 +1203,14 @@ mod tests {
 
     #[test]
     fn parse_dir_selector() {
-        let f = Filter::parse("{packages/foo}");
-        assert_eq!(f.pattern, "./packages/foo");
+        let f = Filter::parse("{packages/foo}", Path::new(""));
+        assert_eq!(f.dir.as_deref(), Some("packages/foo"));
         assert!(!f.include_dependencies);
     }
 
     #[test]
     fn parse_gitref_only() {
-        let f = Filter::parse("[master]");
+        let f = Filter::parse("[master]", Path::new(""));
         assert_eq!(f.git_ref, Some("master".to_string()));
         assert_eq!(f.pattern, "");
         assert!(!f.include_dependencies);
@@ -1116,7 +1219,7 @@ mod tests {
     #[test]
     fn parse_gitref_with_deps_trailing() {
         // Trailing `...` → dependencies.
-        let f = Filter::parse("[master]...");
+        let f = Filter::parse("[master]...", Path::new(""));
         assert_eq!(f.git_ref, Some("master".to_string()));
         assert!(f.include_dependencies);
         assert!(!f.include_dependents);
@@ -1125,7 +1228,7 @@ mod tests {
     #[test]
     fn parse_gitref_with_deps_leading() {
         // Leading `...` → dependents.
-        let f = Filter::parse("...[master]");
+        let f = Filter::parse("...[master]", Path::new(""));
         assert_eq!(f.git_ref, Some("master".to_string()));
         assert!(f.include_dependents);
         assert!(!f.include_dependencies);
@@ -1133,7 +1236,7 @@ mod tests {
 
     #[test]
     fn parse_gitref_both_directions() {
-        let f = Filter::parse("...[master]...");
+        let f = Filter::parse("...[master]...", Path::new(""));
         assert_eq!(f.git_ref, Some("master".to_string()));
         assert!(f.include_dependencies);
         assert!(f.include_dependents);
@@ -1142,8 +1245,8 @@ mod tests {
     #[test]
     fn parse_dir_with_deps() {
         // Leading `...` on a dir selector → dependents (pnpm direction).
-        let f = Filter::parse("...{./foo}");
-        assert_eq!(f.pattern, "./foo");
+        let f = Filter::parse("...{./foo}", Path::new(""));
+        assert_eq!(f.dir.as_deref(), Some("foo"));
         assert!(f.include_dependents);
         assert!(!f.include_dependencies);
     }

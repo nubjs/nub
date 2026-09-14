@@ -2,9 +2,9 @@
 //! end-to-end through the binary against real fixture monorepos. These pin the
 //! pnpm-parity contracts a workspaces differential found nub diverging on:
 //!
-//!   - a recursive run SKIPS packages that lack the script (exit 0), and only
-//!     prints an informational notice — never fails — when *no* selected
-//!     package has it (matching pnpm 10.x, which exits 0 there);
+//!   - a recursive run SKIPS packages that lack the script (exit 0), and fails
+//!     only when *no* selected package has it, unless `--if-present` (as pnpm 12
+//!     does);
 //!   - a genuinely failing script still propagates non-zero;
 //!   - a filter that matches nothing is an exit-0 no-op, not an error;
 //!   - `remove --filter` on a package with a surviving `workspace:*` dep
@@ -230,19 +230,24 @@ fn a_pnpm_project_runs_the_projects_pnpm_runs() {
 }
 
 #[test]
-fn recursive_run_with_no_matching_script_anywhere_notifies_and_exits_zero() {
+fn recursive_run_with_no_matching_script_anywhere_is_an_error() {
     let root = script_workspace("none-have-it");
-    let (stdout, stderr, code) = run_nub(&root, &["run", "-r", "absent-everywhere"]);
-    // pnpm 10.x prints "None of the selected packages has a ..." on stdout and
-    // exits 0 — it's informational, not a failure.
+    // pnpm 12 fails a recursive run that found nothing to run, unless
+    // `--if-present` waives it.
+    let (_stdout, stderr, code) = run_nub(&root, &["run", "-r", "absent-everywhere"]);
     assert_eq!(
-        code, 0,
-        "all-missing recursive run matches pnpm's exit 0\nstderr: {stderr}"
+        code, 1,
+        "no selected package has the script\nstderr: {stderr}"
     );
     assert!(
-        stdout.contains("None of the selected packages has a \"absent-everywhere\" script"),
-        "the pnpm-style notice must print on stdout, got stdout: {stdout}"
+        stderr.contains(
+            "RECURSIVE_RUN_NO_SCRIPT: None of the selected packages has a \"absent-everywhere\" script"
+        ),
+        "the error must name the script, got stderr: {stderr}"
     );
+    let (_stdout, stderr, code) =
+        run_nub(&root, &["run", "-r", "--if-present", "absent-everywhere"]);
+    assert_eq!(code, 0, "--if-present waives the error\nstderr: {stderr}");
 }
 
 #[test]
@@ -273,22 +278,46 @@ fn filter_matching_no_package_is_a_clean_no_op() {
         "a filter that matches nothing exits 0 (pnpm parity)\n{stderr}"
     );
     assert!(
-        stderr.contains("No projects matched the filters"),
-        "the pnpm-style no-match message must surface, got: {stderr}"
+        stderr.contains("Scope: 0 of 4 workspace projects"),
+        "pnpm 12 announces the empty scope, got: {stderr}"
     );
 }
 
 #[test]
 fn fail_if_no_match_turns_an_empty_filter_into_an_error() {
     let root = script_workspace("fail-if-no-match");
-    let (_stdout, stderr, code) = run_nub(
+    let (stdout, stderr, code) = run_nub(
         &root,
         &["run", "-F", "does-not-exist", "--fail-if-no-match", "build"],
     );
-    assert_ne!(
-        code, 0,
+    assert_eq!(
+        code, 1,
         "--fail-if-no-match restores the hard error\n{stderr}"
     );
+    assert!(
+        stdout.contains("No projects matched the filters in"),
+        "pnpm's notice goes to stdout, got: {stdout}"
+    );
+}
+
+/// A directory selector resolves from the project the command runs in, as in
+/// pnpm: `.` is that project and `../web` its sibling.
+#[test]
+fn a_directory_selector_resolves_from_the_project_it_runs_in() {
+    let root = script_workspace("dir-selector");
+    let api = root.join("packages/api");
+    for (filter, ran, skipped) in [
+        (".", "BUILD:api", "BUILD:web"),
+        ("../web", "BUILD:web", "BUILD:api"),
+    ] {
+        let (stdout, stderr, code) = run_nub(&api, &["run", "--filter", filter, "build"]);
+        let combined = format!("{stdout}{stderr}");
+        assert_eq!(code, 0, "--filter {filter}\n{combined}");
+        assert!(
+            combined.contains(ran) && !combined.contains(skipped),
+            "--filter {filter} from packages/api runs only that project\n{combined}"
+        );
+    }
 }
 
 /// Offline guard for the network-backed remove test.

@@ -5036,7 +5036,7 @@ fn run_workspace_target(
         let filters: Vec<_> = ws
             .filter
             .iter()
-            .map(|s| nub_core::workspace::filter::Filter::parse(s))
+            .map(|s| nub_core::workspace::filter::Filter::parse(s, &project.root))
             .collect();
         let v = nub_core::workspace::filter::apply_filters(&members, &filters, Some(ws_root));
         v.into_iter().collect()
@@ -5069,33 +5069,6 @@ fn run_workspace_target(
         _ => "workspace projects",
     };
 
-    // Zero-match handling. A filter that selects nothing is a clean exit-0
-    // no-op (matching pnpm: `No projects matched the filters in "<dir>"`), not
-    // an error — CI commonly runs `--filter <maybe-empty>` and expects success.
-    // `--fail-if-no-match` is the opt-in that turns the empty selection back
-    // into a hard error (pnpm's `--fail-if-no-match` semantics, exit 1).
-    if matched_set.is_empty() {
-        if ws.fail_if_no_match {
-            if !ws.filter.is_empty() {
-                bail!(
-                    "no packages matched the filter{}: {}",
-                    if ws.filter.len() == 1 { "" } else { "s" },
-                    ws.filter.join(", ")
-                );
-            }
-            bail!("no packages to run (--fail-if-no-match)");
-        }
-        if !ws.filter.is_empty() {
-            eprintln!(
-                "No projects matched the filters in \"{}\"",
-                ws_root.display()
-            );
-        } else if pnpm.is_some() {
-            eprintln!("Scope: 0 of {} {projects_noun}", members.len());
-        }
-        return Ok(0);
-    }
-
     // pnpm's "Scope:" header (reportScope.ts): how many workspace projects this
     // run touches out of the total. `total` counts the workspace root too — it
     // is in `members` only when `--include-workspace-root` appended it
@@ -5108,6 +5081,21 @@ fn run_workspace_target(
         members.len() + 1
     };
     let selected = matched_set.len();
+
+    // An empty selection, as pnpm 12 reports it: a clean exit 0 that announces
+    // its scope (CI commonly runs `--filter <maybe-empty>`), unless
+    // `--fail-if-no-match` asks for exit 1, which prints pnpm's notice to stdout.
+    if selected == 0 {
+        if ws.fail_if_no_match {
+            println!(
+                "No projects matched the filters in \"{}\"",
+                ws_root.display()
+            );
+            return Ok(1);
+        }
+        eprintln!("Scope: 0 of {total_projects} {projects_noun}");
+        return Ok(0);
+    }
     if selected > 1 {
         if selected == total_projects {
             eprintln!("Scope: all {total_projects} {projects_noun}");
@@ -5351,22 +5339,27 @@ fn run_workspace_target(
         }
     }
 
-    // A recursive run where no selected package declared the script is a
-    // clean exit-0 no-op with an informational notice on stdout, matching
-    // pnpm 10.x's observed behavior — it prints "None of the selected
-    // packages has a \"<script>\" script" and exits 0 rather than failing.
-    // `--if-present` and `test` (npm/pnpm treat a missing `test` as success)
-    // suppress even the notice. Only `Script` targets reach this; a `Bin` run
-    // already errors per-member on a missing bin.
-    if let WorkspaceTarget::Script(script, _) = target {
-        if ran_count == 0 && total_failed == 0 && !ws.if_present && script != "test" {
-            println!("None of the selected packages has a \"{script}\" script");
-        }
-    }
-
     if reporter_is_ndjson() {
         let total_pkgs: usize = chunks.iter().map(|c| c.len()).sum();
         emit_ndjson_summary(total_pkgs.saturating_sub(total_failed), total_failed);
+    }
+    // A recursive run where no selected package declared the script is an error
+    // in pnpm 12, worded for the whole workspace when every project was
+    // selected. `--if-present` and `test` (which pnpm falls back to a default
+    // for) waive it. Only `Script` targets reach this; a `Bin` run already
+    // errors per member on a missing bin.
+    if let WorkspaceTarget::Script(script, _) = target
+        && ran_count == 0
+        && total_failed == 0
+        && !ws.if_present
+        && script != "test"
+    {
+        let packages = if selected == total_projects {
+            "packages"
+        } else {
+            "selected packages"
+        };
+        bail!("ERR_NUB_RECURSIVE_RUN_NO_SCRIPT: None of the {packages} has a \"{script}\" script");
     }
     if total_failed > 0 { Ok(1) } else { Ok(0) }
 }
