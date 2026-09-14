@@ -8,32 +8,33 @@
 # FAILS, so a behavior change can't land silently. Delete the entry when the
 # cell's expected outcome changes.
 #
-# Two categories live here:
-#  (A) CORRECT non-zero — the command did its job; non-zero is the right answer
-#      (e.g. `audit` found vulnerabilities → exit 1, matching pnpm/npm). These
-#      are NOT bugs; the entry documents that the harness's bare "exit 0 = pass"
-#      rule doesn't apply to this cell. (Future: an `expect` column on the
-#      inventory will encode this directly; for phase 1 it lives here.)
-#  (B) REAL nub bugs found by the sweep — kept red until fixed, each referencing
-#      its tracking thread. When fixed, the cell goes green and the entry is
-#      deleted (XPASS-STALE forces that).
+# Tuned to the zod fixture described in README.md (commit c7ec94d3, pin removed,
+# strictDepBuilds: false), a pnpm project. Every reason was re-derived by running
+# the same cell against pnpm 12.4.1 (REF=1, or by hand where the cell has no
+# parity verb).
+#
+#  (A) CORRECT non-zero — the command did its job, and pnpm 12.4.1 exits
+#      non-zero on the same tree. NOT bugs.
+#  (B) REAL product divergences from pnpm 12.4.1 — kept red until fixed.
 #
 # ── (A) correct non-zero on the zod fixture (NOT bugs) ───────────────────────
-audit            vulnerabilities present in the tree → exit 1 (matches pnpm/npm)
+audit            vulnerabilities present in the tree → exit 1; pnpm 12.4.1 exits 1
 audit-json       same, --json
 audit-dev        same, --dev
 audit-level      same, --audit-level high
-outdated         outdated deps present → exit 1 (conventional)
-run-missing-script  missing script → exit 1 (correct; pnpm also errors WITHOUT --if-present)
-add-dep          monorepo root refuses bare add (needs -W) → exit 1 (correct guard)
-add-dev          same, -D
-remove-dep       removing an absent dep → non-zero (correct)
-update           trust-policy blocked a provenance-downgrade beta → exit 23 (protective refusal)
-import           pnpm-lock.yaml already present → exit 1 (correct; needs --force)
-install-prod     fixture `prepare` script needs husky (not installed) → exit 127-from-script (env, not nub)
-rebuild          same husky prepare-script env failure
-fetch            network-touching (net): linux-only optional dep tarball decode can flake over the network
-peers-check      exit 1 on UNPARSEABLE-ONLY peers (0 unmet/0 missing, 5 unparseable workspace link: peers). Nothing to diff against: the reference pnpm 10 has no `peers` verb. DESIGN-DECISION item for triage: is "couldn't verify" → non-zero the right posture?
+outdated         outdated deps present → exit 1; pnpm 12.4.1 exits 1
+peers-check      unmet peer (typia wants typescript <5.10.0) → exit 1; pnpm 12.4.1 prints the same issue and exits 1
+run-missing-script  missing script → exit 1; pnpm 12.4.1 exits 1 (ERR_PNPM_NO_SCRIPT)
+remove-dep       left-pad is not a dependency → ERR_PNPM_CANNOT_REMOVE_MISSING_DEPS; pnpm 12.4.1 exits 1 the same way
+import           no npm/yarn lockfile to import → ERR_PNPM_LOCKFILE_NOT_FOUND; pnpm 12.4.1 exits 1
+install-prod     root `prepare` runs husky, a devDependency --prod omits → exit 127 from the script; pnpm 12.4.1 fails the same way
+pm-which         the prepared fixture declares no package manager → exit 1 (nub's own verb; no pnpm counterpart)
+store-status     ERR_PNPM_MODIFIED_DEPENDENCY after install; pnpm 12.4.1 reports the same after its own install and exits 1
 #
-# ── (B) REAL nub findings on the zod sweep (recommend-only; own fix threads) ──
-run-ifpresent    BUG: `run <missing> --if-present` exits 1; pnpm/npm exit 0. parity divergence.
+# ── (B) product divergences from pnpm 12.4.1 on this fixture ─────────────────
+install          DIVERGENCE: nub's augmented resolver honors tsconfig `customConditions: ["@zod/source"]` inside lifecycle scripts, so `packages/docs postinstall` (fumadocs-mdx) resolves zod@3.25.68's `@zod/source` export to an unpublished ./index.ts and fails ERR_MODULE_NOT_FOUND; pnpm 12.4.1 and `NODE_COMPAT=1 nub install` run it to "Done" and exit 0
+install-frozen   same postinstall divergence (nub=1, pnpm 12.4.1=0)
+install-offline  same postinstall divergence
+ci               same postinstall divergence
+dedupe           same postinstall divergence (nub=1, pnpm 12.4.1=0)
+prune            same postinstall divergence (nub=1, pnpm 12.4.1=0)

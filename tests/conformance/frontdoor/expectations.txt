@@ -1,0 +1,9 @@
+# Known product divergences for the front-door matrix.
+#
+# Format:  <id>  <reason...>
+#
+# A listed cell is reported XFAIL and the run stays green; the moment it passes
+# the harness reports XPASS-STALE and the run FAILS, so delete the entry with the
+# fix. Only a real divergence from the documented behavior belongs here, with the
+# reference output that proves it.
+run-reporter-silent-flag	`nub --reporter=silent run hello` prints the `$ <cmd>` run-echo; pnpm 12.4.1 suppresses it, in a nub project and a pnpm project alike. `--silent run hello` and `run --reporter=silent hello` suppress it under both tools.

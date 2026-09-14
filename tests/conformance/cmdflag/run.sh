@@ -19,9 +19,10 @@
 #            [id ...]       restrict to specific inventory ids (default: all).
 #
 # Env:
-#   REFPM=pnpm           reference PM for parity diffs (pnpm|npm|yarn|bun).
-#   REF=1                run the reference PM for parity-tagged cells + compare
-#                        exit-code agreement. Off by default (slow/network).
+#   REFPM=pnpm           the pnpm 12.4.1 command to diff against; REF=1 refuses
+#                        any other version.
+#   REF=1                run REFPM for parity-tagged cells + compare exit-code
+#                        agreement. Off by default (slow/network).
 #   NET=1                also run the `net` cells (registry/network/TTY). Off by
 #                        default so the core sweep is hermetic + offline-ish.
 #   USER_NPMRC=<file>    seed the sandbox HOME's ~/.npmrc from this file BEFORE
@@ -79,11 +80,20 @@ if [ -n "${USER_NPMRC:-}" ]; then
   sed 's/^/    | /' "$HOME/.npmrc"
 fi
 
+# A pnpm project must behave as exactly this pnpm, so a diff against any other
+# version measures the wrong thing — refuse it rather than report agreement.
+REF_PNPM_VERSION=12.4.1
+if [ "$REF" = 1 ]; then
+  refver="$("$REFPM" --version 2>/dev/null)"
+  [ "$refver" = "$REF_PNPM_VERSION" ] || {
+    echo "error: REF=1 diffs against pnpm $REF_PNPM_VERSION, but '$REFPM --version' printed '${refver:-nothing}'" >&2; exit 2; }
+fi
+
 echo "== nub command×flag conformance =="
 echo "nub:      $NUB ($("$NUB" --version 2>/dev/null || echo '?'))"
 echo "node:     $(node --version 2>/dev/null || echo MISSING)"
 echo "fixture:  $FIXTURE"
-echo "refpm:    $REFPM (parity diff: $([ "$REF" = 1 ] && echo on || echo off))"
+echo "refpm:    $REFPM (parity diff: $([ "$REF" = 1 ] && echo "on, pnpm $refver" || echo off))"
 echo "net:      $([ "$NET" = 1 ] && echo on || echo off)"
 echo "sandbox:  $SANDBOX_ROOT"
 echo
@@ -104,21 +114,30 @@ expected_reason() {
     "$HERE/expectations.txt" 2>/dev/null
 }
 
-# True when the project in $1 belongs to pnpm. Markers per nub_core::pm::identity;
-# a directory with none of them — the meta cells' bare sandbox included — is nub's.
-# The manifest is parsed rather than grepped, since a `devEngines` pin is a nested
-# object; with no node on PATH the fallback sees the `packageManager` pin only.
+# The package manager a manifest names, by nub_core::pm::resolve's pin reader: a
+# `packageManager` string wins outright, else the LAST named entry of
+# `devEngines.packageManager` (an object or an array). Flattened and matched
+# rather than parsed, so the verdict needs no node — the matcher can stop at the
+# first `}` or `]` because devEngines entries are flat objects.
+declared_pm() {
+  local flat pin
+  flat="$(tr -d ' \t\r\n' <"$1")"
+  pin="$(printf '%s' "$flat" | grep -oE '"packageManager":"[^"@]*' | head -n 1)"
+  if [ -n "$pin" ]; then printf '%s\n' "${pin##*\"}"; return; fi
+  printf '%s' "$flat" | grep -oE '"devEngines":\{.*' \
+    | grep -oE '"packageManager":(\{[^}]*\}|\[[^]]*\])' | head -n 1 \
+    | grep -oE '"name":"[^"]*"' | tail -n 1 | cut -d'"' -f4
+}
+
+# True when the project in $1 belongs to pnpm, by nub_core::pm::identity's rule: a
+# `nub` declaration beats any pnpm-named file, a pnpm-named file beats any other
+# declaration, and a directory with no marker — the meta cells' bare sandbox
+# included — is nub's.
 pnpm_incumbent() {
-  local dir="$1"
-  [ -f "$dir/pnpm-lock.yaml" ] && return 0
-  [ -f "$dir/pnpm-workspace.yaml" ] && return 0
-  [ -f "$dir/package.json" ] || return 1
-  command -v node >/dev/null 2>&1 \
-    || { grep -qE '"packageManager"[[:space:]]*:[[:space:]]*"pnpm@' "$dir/package.json"; return $?; }
-  node -e 'const m = require(process.argv[1]);
-    const pin = m.packageManager || "";
-    const dev = (m.devEngines && m.devEngines.packageManager && m.devEngines.packageManager.name) || "";
-    process.exit(pin.startsWith("pnpm@") || dev === "pnpm" ? 0 : 1);' "$dir/package.json" 2>/dev/null
+  local dir="$1" declared=""
+  [ -f "$dir/package.json" ] && declared="$(declared_pm "$dir/package.json")"
+  [ "$declared" = nub ] && return 1
+  [ -f "$dir/pnpm-lock.yaml" ] || [ -f "$dir/pnpm-workspace.yaml" ] || [ "$declared" = pnpm ]
 }
 
 RESULTS=()
@@ -202,7 +221,7 @@ done < <(grep -vE '^[[:space:]]*(#|$)' "$HERE/inventory.tsv")
 echo
 echo "== results =="
 printf '%-22s %-34s %s\n' "id" "status" "detail"
-for row in "${RESULTS[@]}"; do
+for row in ${RESULTS[@]+"${RESULTS[@]}"}; do
   IFS='|' read -r i s d <<<"$row"
   printf '%-22s %-34s %s\n' "$i" "$s" "$d"
 done

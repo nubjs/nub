@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 # Front-door pm-compat conformance MATRIX — the anti-resurfacing guard.
 #
-# For each incumbent identity × front-door surface (config read/write, env
-# knobs, run/exec flags), assert nub behaves per the documented per-incumbent
-# behavior map (wiki/research/nub-incumbent-behavior.md). A gap/regression on a
+# For each project identity × front-door surface (config read/write, env knobs,
+# run/exec flags, a foreign lockfile), assert nub behaves as that identity
+# requires. There are two: a pnpm project (a pnpm pin, `pnpm-lock.yaml` or
+# `pnpm-workspace.yaml`, per crates/nub-core/src/pm/identity.rs) behaves exactly
+# like pnpm 12.4.1, and every other project is nub's. A gap/regression on a
 # covered cell FAILS here instead of being rediscovered ad-hoc by a user.
 #
 # DISTINCT from its two siblings (README.md): the lockfile harness verifies
 # round-trip fidelity; the cmdflag harness verifies every verb runs on one repo;
-# THIS one is the only suite parameterized by INCUMBENT, and it targets the
+# THIS one is the only suite parameterized by IDENTITY, and it targets the
 # front-door SURFACE that users actually drive.
 #
 # Usage:  run.sh <path-to-nub> [surface ...]
 #           [surface ...]  restrict to surfaces (run-flag|config-read|
-#                          config-write|env-bridge|env-gate) or specific ids.
+#                          config-write|env-bridge|env-gate|lockfile) or ids.
 # Env:
-#   REF=1            also run the `ref`-mode cells' real-PM differential (needs
-#                    the PM installed; a couple touch the network). Off → those
-#                    cells run their doc-mode assertion only.
-#   REFPM=pnpm       reference PM for the run-flag ref diffs.
+#   REF=1            also run the `ref`-mode cells, which install against the
+#                    network. Off → they SKIP.
 #   KEEP=1           keep the sandbox for forensics.
 set -uo pipefail   # NOT -e: a failing cell is data, not a harness abort.
 
@@ -32,12 +32,11 @@ NUB="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 shift
 ONLY=("$@")
 REF="${REF:-0}"
-REFPM="${REFPM:-pnpm}"
 
 # Hermetic sandbox — the dev box's ~/.npmrc carries a DEAD proxy that breaks
 # fetches, so isolating HOME/XDG is mandatory (same discipline as the siblings).
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/nub-frontdoor.XXXXXX")"
-mkdir -p "$SANDBOX/home" "$SANDBOX/runs" "$SANDBOX/logs"
+mkdir -p "$SANDBOX/home" "$SANDBOX/homes" "$SANDBOX/runs" "$SANDBOX/logs"
 export HOME="$SANDBOX/home"
 export XDG_DATA_HOME="$HOME/.local/share" XDG_CACHE_HOME="$HOME/.cache"
 export XDG_CONFIG_HOME="$HOME/.config" XDG_STATE_HOME="$HOME/.local/state"
@@ -55,25 +54,58 @@ done
 echo "== front-door pm-compat conformance matrix =="
 echo "nub:      $NUB ($("$NUB" --version 2>/dev/null || echo '?'))"
 echo "node:     $(node --version 2>/dev/null || echo MISSING)"
-echo "ref:      $([ "$REF" = 1 ] && echo "on ($REFPM)" || echo off)"
+echo "ref:      $([ "$REF" = 1 ] && echo on || echo off)"
 echo "sandbox:  $SANDBOX"
 echo
 
-# Fresh throwaway copy of an incumbent fixture; echoes its path.
+# Fresh throwaway copy of a fixture; echoes its path.
 stage() {
-  local incumbent="$1" id="$2" src
-  [ "$incumbent" = "-" ] && incumbent="nub"
-  src="$FIXTURES/$incumbent"
+  local fixture="$1" id="$2" src
+  [ "$fixture" = "-" ] && fixture="nub"
+  src="$FIXTURES/$fixture"
   [ -d "$src" ] || { echo "MISSING-FIXTURE:$src" >&2; return 1; }
   local proj="$SANDBOX/runs/$id"
   rm -rf "$proj"; mkdir -p "$proj"; cp -R "$src/." "$proj/"
   echo "$proj"
 }
 
-RESULTS=(); FAILS=0; SKIPS=0
-pass() { RESULTS+=("$1|PASS|$2"); echo "    PASS  $2"; }
-fail() { RESULTS+=("$1|FAIL|$2"); echo "    FAIL  $2"; FAILS=$((FAILS+1)); }
+# A listed cell is a known product divergence: it stays red without failing the
+# run, and the moment it passes the run fails so the entry cannot outlive the bug.
+expected_reason() {
+  awk -v id="$1" '$1==id { $1=""; sub(/^[ \t]*/,""); print; exit }' "$HERE/expectations.txt" 2>/dev/null
+}
+
+RESULTS=(); FAILS=0; SKIPS=0; XFAILS=0
+pass() {
+  local reason; reason="$(expected_reason "$1")"
+  if [ -n "$reason" ]; then
+    RESULTS+=("$1|XPASS-STALE|$2"); echo "    XPASS-STALE  $2 — delete its expectations.txt entry"; FAILS=$((FAILS+1))
+  else RESULTS+=("$1|PASS|$2"); echo "    PASS  $2"; fi
+}
+fail() {
+  local reason; reason="$(expected_reason "$1")"
+  if [ -n "$reason" ]; then
+    RESULTS+=("$1|XFAIL|$2"); echo "    XFAIL $2 — expected: $reason"; XFAILS=$((XFAILS+1))
+  else RESULTS+=("$1|FAIL|$2"); echo "    FAIL  $2"; FAILS=$((FAILS+1)); fi
+}
 skip() { RESULTS+=("$1|SKIP|$2"); echo "    SKIP  $2"; SKIPS=$((SKIPS+1)); }
+
+# `~/x` names a file in the sandbox HOME, anything else a file in the project.
+resolve_path() {  # proj relpath
+  case "$2" in "~/"*) echo "$HOME/${2#\~/}" ;; *) echo "$1/$2" ;; esac
+}
+
+# Write `registry` = value in the syntax the named file speaks.
+seed_registry() {  # path value
+  mkdir -p "$(dirname "$1")"
+  case "$(basename "$1")" in
+    pnpm-workspace.yaml) printf 'packages:\n  - "."\nregistry: %s\n' "$2" >"$1" ;;
+    config.yaml)         printf 'registry: %s\n' "$2" >"$1" ;;
+    .yarnrc.yml)         printf 'npmRegistryServer: "%s"\n' "$2" >"$1" ;;
+    bunfig.toml)         printf '[install]\nregistry = "%s"\n' "$2" >"$1" ;;
+    *) return 1 ;;
+  esac
+}
 
 # ─ assertion verbs ───────────────────────────────────────────────────────────
 # Each takes: id, log, proj, then verb-specific operands. They emit pass/fail.
@@ -86,29 +118,42 @@ nub_run() {  # proj log [ENV=val ...] -- nub-args...
   local -a envs=()
   while [ "$1" != "--" ]; do envs+=("$1"); shift; done
   shift
-  ( cd "$proj" && env "${envs[@]}" "$NUB" "$@" ) >"$log" 2>&1
+  # The `+` form: bash 3.2 (macOS /bin/bash) calls an empty array unbound under
+  # `set -u`, which killed the subshell before nub ran — and every echo-hidden
+  # cell then passed on an empty log.
+  ( cd "$proj" && env ${envs[@]+"${envs[@]}"} "$NUB" "$@" ) >"$log" 2>&1
   return $?
 }
 
 echo_present() { grep -qE '^\$ ' "$1"; }   # nub's run-echo line
 
 run_cell() {
-  local id="$1" incumbent="$2" surface="$3" mode="$4" verb="$5"; shift 5
+  local id="$1" fixture="$2" surface="$3" mode="$4" verb="$5"; shift 5
   local log="$SANDBOX/logs/$id.log"
-  local proj; proj="$(stage "$incumbent" "$id")" || { fail "$id" "no fixture"; return; }
-  echo "--- $id  [$incumbent/$surface/$mode]  $verb $*"
+  local proj; proj="$(stage "$fixture" "$id")" || { fail "$id" "no fixture"; return; }
+  echo "--- $id  [$fixture/$surface/$mode]  $verb $*"
+  # A HOME per cell: a shared one let an earlier cell's metadata cache or global
+  # config decide a later cell, so a cell passed in the suite and failed alone.
+  export HOME="$SANDBOX/homes/$id"
+  export XDG_DATA_HOME="$HOME/.local/share" XDG_CACHE_HOME="$HOME/.cache"
+  export XDG_CONFIG_HOME="$HOME/.config" XDG_STATE_HOME="$HOME/.local/state"
+  mkdir -p "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME"
 
   case "$verb" in
     echo-shown)
       nub_run "$proj" "$log" -- "$@"; echo_present "$log" \
         && pass "$id" "run-echo shown" || fail "$id" "run-echo MISSING" ;;
     echo-hidden)
-      nub_run "$proj" "$log" -- "$@"; echo_present "$log" \
-        && fail "$id" "run-echo SHOWN (not suppressed)" || pass "$id" "run-echo suppressed" ;;
+      nub_run "$proj" "$log" -- "$@"
+      if ! grep -qF "RAN:" "$log"; then fail "$id" "script never ran — nothing to judge the echo against"; sed 's/^/      | /' "$log"
+      elif echo_present "$log"; then fail "$id" "run-echo SHOWN (not suppressed)"
+      else pass "$id" "run-echo suppressed"; fi ;;
     echo-hidden-env)   # ENV  --  args...   (env pair from $1, args after)
       local e="$1"; shift
-      nub_run "$proj" "$log" "$e" -- "$@"; echo_present "$log" \
-        && fail "$id" "run-echo SHOWN under $e (G1 regression)" || pass "$id" "run-echo suppressed under $e" ;;
+      nub_run "$proj" "$log" "$e" -- "$@"
+      if ! grep -qF "RAN:" "$log"; then fail "$id" "script never ran — nothing to judge the echo against"; sed 's/^/      | /' "$log"
+      elif echo_present "$log"; then fail "$id" "run-echo SHOWN under $e (G1 regression)"
+      else pass "$id" "run-echo suppressed under $e"; fi ;;
     echo-shown-env)
       local e="$1"; shift
       nub_run "$proj" "$log" "$e" -- "$@"; echo_present "$log" \
@@ -136,66 +181,78 @@ run_cell() {
       nub_run "$proj" "$log" -- "$@"; local c=$?
       [ "$c" != 0 ] && pass "$id" "exit=$c (nonzero as required)" || fail "$id" "exit=0 (expected nonzero)" ;;
     config-reads)      # key=val
-      local kv="$1" key="${1%%=*}" val="${1#*=}"
+      local key="${1%%=*}" val="${1#*=}"
       printf '%s=%s\n' "$key" "$val" >"$proj/.npmrc"
       local out; out="$( cd "$proj" && "$NUB" config get "$key" 2>>"$log" )"
       [ "$out" = "$val" ] && pass "$id" "honored $key=$val" || fail "$id" "config get $key => '$out' (want '$val')" ;;
-    config-ignores-pnpm-yaml)  # leak-value  control-npmrc-value
-      # Seed a pnpm-NAMED file with a LEAK registry (must be ignored under npm)
-      # AND the project .npmrc with a distinct CONTROL registry. nub must return
-      # the control value: proves the reader is LIVE and chose the right file —
-      # not vacuously returning the default because nothing was read at all.
-      local leak="$1" control="$2"
-      printf 'packages:\n  - "."\nregistry: %s\n' "$leak" >"$proj/pnpm-workspace.yaml"
-      printf 'registry=%s\n' "$control" >"$proj/.npmrc"
+    config-file)       # file  value  control|-  honored|ignored
+      # Seed `registry` in a config file one identity reads and the other must
+      # not. With a control, the project .npmrc carries a second registry: an
+      # `ignored` row must return THAT, which proves the reader is live rather
+      # than returning a default because it read nothing, and an `honored` row
+      # proves the file outranks .npmrc. With no control (a HOME file that a
+      # project .npmrc would outrank anyway), `ignored` leans on its `honored`
+      # twin in the other identity to keep the file live.
+      local file="$1" val="$2" control="$3" want="$4" path
+      path="$(resolve_path "$proj" "$file")"
+      seed_registry "$path" "$val" || { fail "$id" "config-file: no registry syntax for $file"; return; }
+      [ "$control" != "-" ] && printf 'registry=%s\n' "$control" >"$proj/.npmrc"
       local out; out="$( cd "$proj" && "$NUB" config get registry 2>>"$log" )"
-      if [ "$out" = "$control" ]; then
-        pass "$id" "read .npmrc ($control), ignored pnpm-named file ($leak)"
-      elif [ "$out" = "$leak" ]; then
-        fail "$id" "READ a pnpm-named file under a non-pnpm incumbent (brand-boundary breach): $leak"
-      else
-        fail "$id" "reader inert/wrong: got '$out' (want control '$control'; leak was '$leak')"
-      fi ;;
-    config-writes-to)  # relpath  key  val   (grep the distinctive VALUE — the key
-      local relpath="$1" key="$2" val="$3"   # is kebab→camel-normalized in yaml)
-      ( cd "$proj" && "$NUB" config set "$key" "$val" ) >>"$log" 2>&1
-      local in_target=0 leaked=""
-      [ -f "$proj/$relpath" ] && grep -qF "$val" "$proj/$relpath" && in_target=1
-      for other in .npmrc pnpm-workspace.yaml package.json; do
-        [ "$other" = "$relpath" ] && continue
-        [ -f "$proj/$other" ] && grep -qF "$val" "$proj/$other" && leaked="$other"
+      case "$want" in
+        honored)
+          [ "$out" = "$val" ] && pass "$id" "read $file ($val)" \
+            || fail "$id" "$file NOT honored: config get registry => '$out' (want '$val')" ;;
+        ignored)
+          if [ "$out" = "$val" ]; then fail "$id" "READ $file, which this identity must not read: $val"
+          elif [ "$control" != "-" ] && [ "$out" != "$control" ]; then fail "$id" "reader inert/wrong: got '$out' (want control '$control')"
+          elif [ -z "$out" ] || [ "$out" = "undefined" ]; then fail "$id" "config get registry surfaced no value — cell can't observe the gate (vacuous)"
+          else pass "$id" "ignored $file (registry stayed '$out')"; fi ;;
+        *) fail "$id" "config-file: want must be honored|ignored, got '$want'" ;;
+      esac ;;
+    config-writes-to)  # target  key  val  [config-set flags...]
+      # Grep the distinctive VALUE, not the key: pnpm's yaml homes store it
+      # camelCased (store-dir → storeDir).
+      local target="$1" key="$2" val="$3"; shift 3
+      local tpath; tpath="$(resolve_path "$proj" "$target")"
+      ( cd "$proj" && "$NUB" config set "$@" "$key" "$val" ) >>"$log" 2>&1
+      local in_target=0 leaked="" other opath
+      [ -f "$tpath" ] && grep -qF "$val" "$tpath" && in_target=1
+      for other in .npmrc pnpm-workspace.yaml package.json nub.jsonc "~/.npmrc" "~/.config/pnpm/config.yaml" "~/.config/nub/nub.jsonc"; do
+        opath="$(resolve_path "$proj" "$other")"
+        [ "$opath" = "$tpath" ] && continue
+        [ -f "$opath" ] && grep -qF "$val" "$opath" && leaked="$other"
       done
-      if [ "$in_target" = 1 ] && [ -z "$leaked" ]; then pass "$id" "wrote $key → $relpath only"
-      elif [ "$in_target" != 1 ]; then fail "$id" "$key NOT in $relpath"; sed 's/^/      | /' "$log"
+      if [ "$in_target" = 1 ] && [ -z "$leaked" ]; then pass "$id" "wrote $key → $target only"
+      elif [ "$in_target" != 1 ]; then fail "$id" "$key NOT in $target${leaked:+ (landed in $leaked)}"; sed 's/^/      | /' "$log"
       else fail "$id" "$key also leaked into $leaked (wrong home)"; fi ;;
-    env-bridge-resolver)   # unreachable-registry-url  (ref-mode: observes the install resolver)
-      local url="$1"
+    env-bridge-resolver)   # unreachable-registry-url  honored|ignored
+      local url="$1" want="$2"
       if [ "$REF" != 1 ]; then skip "$id" "REF=1 to run the resolver probe"; return; fi
-      ( cd "$proj" && env "npm_config_registry=$url" "$NUB" install --no-frozen-lockfile ) >>"$log" 2>&1
-      # The bridge took effect iff the resolver ATTEMPTED the env-supplied host —
-      # not merely logged the registry at startup. Require the host string on a
-      # line that also carries a fetch/resolve/DNS-failure token, so the cell keys
-      # on a real network attempt against that host (an unreachable .invalid host
-      # forces a resolve error naming it). Match is case-insensitive.
-      if grep -iE "frontdoor-envbridge\.invalid" "$log" \
-           | grep -qiE "fetch|resolv|resolu|request|ENOTFOUND|EAI_AGAIN|getaddrinfo|dns|connect|GET |https?://"; then
-        pass "$id" "resolver ATTEMPTED npm_config_registry host ($url)"
-      else
-        fail "$id" "npm_config_registry host not reached by a resolve/fetch attempt"; sed 's/^/      | /' "$log"
-      fi ;;
-    env-not-in-config-get) # key  shadow-value  (assert env does NOT surface in config get)
-      local key="$1" shadow="$2"
-      local out; out="$( cd "$proj" && env "npm_config_${key}=$shadow" "$NUB" config get "$key" 2>>"$log" )"
-      [ "$out" != "$shadow" ] && pass "$id" "config get $key does NOT reflect env ($out)" \
-        || fail "$id" "config get $key now reflects npm_config_$key — config-display semantics changed" ;;
+      ( cd "$proj" && env "npm_config_registry=$url" "$NUB" install ) >>"$log" 2>&1; local c=$?
+      # A real attempt, not a startup mention: the host must share a line with a
+      # fetch/resolve/DNS-failure token (an unreachable .invalid host forces an
+      # error naming it).
+      local attempted=0
+      grep -iE "frontdoor-envbridge\.invalid" "$log" \
+        | grep -qiE "fetch|resolv|resolu|request|ENOTFOUND|EAI_AGAIN|getaddrinfo|dns|connect|GET |https?://" && attempted=1
+      case "$want" in
+        honored)
+          [ "$attempted" = 1 ] && pass "$id" "resolver ATTEMPTED npm_config_registry host ($url)" \
+            || { fail "$id" "npm_config_registry host not reached by a resolve/fetch attempt"; sed 's/^/      | /' "$log"; } ;;
+        ignored)
+          # exit 0 is the witness that the install fetched from somewhere else;
+          # a failed install proves nothing about which registry it tried.
+          if [ "$attempted" = 1 ]; then fail "$id" "resolver used npm_config_registry, which this identity must ignore"; sed 's/^/      | /' "$log"
+          elif [ "$c" != 0 ]; then fail "$id" "install exit=$c — cannot tell which registry it used"; sed 's/^/      | /' "$log"
+          else pass "$id" "install ignored npm_config_registry and succeeded"; fi ;;
+        *) fail "$id" "env-bridge-resolver: want must be honored|ignored, got '$want'" ;;
+      esac ;;
     env-gate)          # key  ENV_VAR  value  honored|ignored
-      # The engine reads pnpm's own config env, and the incumbent decides whether
-      # that reader is on: a pnpm project gets pnpm 12 exactly, every other
-      # project gets nub, which reads no branded env at all. So each `ignored`
-      # row has an `honored` twin differing only in the incumbent — a variable
-      # nothing reads would pass `ignored` however broken the gate, and the twin
-      # is what keeps the variable live. The key must also be one `config get`
-      # surfaces, or neither row observes anything.
+      # Whether a config env variable is read is the identity's call, so each
+      # `ignored` row has an `honored` twin differing only in the fixture — a
+      # variable nothing reads would pass `ignored` however broken the gate, and
+      # the twin is what keeps the variable (or at least the read path) live. The
+      # key must also be one `config get` surfaces, or neither row observes anything.
       local key="$1" envvar="$2" val="$3" want="$4"
       local base; base="$( cd "$proj" && "$NUB" config get "$key" 2>>"$log" )"
       local out;  out="$(  cd "$proj" && env "$envvar=$val" "$NUB" config get "$key" 2>>"$log" )"
@@ -208,12 +265,43 @@ run_cell() {
           if [ -z "$base" ] || [ "$base" = "undefined" ]; then
             fail "$id" "config get $key surfaced no value — cell can't observe the gate (vacuous)"
           elif [ "$out" != "$base" ]; then
-            fail "$id" "$envvar was READ here (brand leak into the config surface): $key moved '$base' → '$out'"
+            fail "$id" "$envvar was READ here, which this identity must not do: $key moved '$base' → '$out'"
           else
             pass "$id" "$envvar ignored ($key stayed '$out', not the seeded '$val')"
           fi ;;
         *) fail "$id" "env-gate: want must be honored|ignored, got '$want'" ;;
       esac ;;
+    foreign-lockfile)  # file  hint|quiet
+      # npm, Yarn and Bun confer no identity: their lockfile is left unread and
+      # untouched, and a nub project says once that `nub pm migrate` carries it
+      # across. A pnpm project stays silent, as pnpm 12.4.1 does. Each branch
+      # also demands the lockfile its identity writes, so the absence of a hint
+      # is only accepted from an install that demonstrably ran.
+      local file="$1" want="$2" src
+      if [ ! -f "$proj/$file" ]; then
+        case "$file" in package-lock.json) src=npm ;; yarn.lock) src=yarn ;; bun.lock) src=bun ;; *) src="" ;; esac
+        [ -n "$src" ] && [ -f "$FIXTURES/$src/$file" ] || { fail "$id" "foreign-lockfile: no fixture carries $file"; return; }
+        cp "$FIXTURES/$src/$file" "$proj/$file"
+      fi
+      cp "$proj/$file" "$SANDBOX/logs/$id.orig"
+      ( cd "$proj" && "$NUB" install --offline ) >"$log" 2>&1; local c=$?
+      local hint=0; grep -F "$file" "$log" | grep -qF "nub pm migrate" && hint=1
+      local problems=""
+      [ "$c" = 0 ] || problems="$problems install exit=$c;"
+      cmp -s "$proj/$file" "$SANDBOX/logs/$id.orig" || problems="$problems $file was rewritten;"
+      case "$want" in
+        hint)
+          [ "$hint" = 1 ] || problems="$problems no \`nub pm migrate\` hint naming $file;"
+          [ -f "$proj/nub.lock" ] || problems="$problems no nub.lock written;"
+          [ -f "$proj/pnpm-lock.yaml" ] && problems="$problems wrote pnpm-lock.yaml in a nub project;" ;;
+        quiet)
+          grep -qF "pm migrate" "$log" && problems="$problems printed nub's migrate hint in a pnpm project;"
+          [ -f "$proj/pnpm-lock.yaml" ] || problems="$problems no pnpm-lock.yaml written;"
+          [ -f "$proj/nub.lock" ] && problems="$problems wrote nub.lock in a pnpm project;" ;;
+        *) problems="foreign-lockfile: want must be hint|quiet, got '$want'" ;;
+      esac
+      [ -z "$problems" ] && pass "$id" "$file unread and untouched ($want)" \
+        || { fail "$id" "${problems# }"; sed 's/^/      | /' "$log"; } ;;
     *) fail "$id" "unknown assert verb '$verb'" ;;
   esac
 }
@@ -225,26 +313,22 @@ want_id() {
   return 1
 }
 
-while IFS=$'\t' read -r id incumbent surface mode verb rest; do
+while IFS=$'\t' read -r id fixture surface mode verb rest; do
   [ -z "$id" ] && continue
   case "$id" in \#*) continue ;; esac
   want_id "$id" "$surface" || continue
-  # ref-mode cells: with REF=0 we still run the doc assertion (the verb itself is
-  # the documented-behavior check); REF=1 is where the real-PM differential adds
-  # value. The real-PM diff for run-flag cells is recorded as a comparison note,
-  # not a separate pass/fail (the doc assertion is authoritative for the gate).
   # shellcheck disable=SC2086
-  run_cell "$id" "$incumbent" "$surface" "$mode" "$verb" $rest
+  run_cell "$id" "$fixture" "$surface" "$mode" "$verb" $rest
 done < <(grep -vE '^[[:space:]]*(#|$)' "$HERE/assertions.tsv")
 
 echo
 echo "== results =="
-printf '%-34s %-6s %s\n' "id" "status" "detail"
-for row in "${RESULTS[@]}"; do IFS='|' read -r i s d <<<"$row"; printf '%-34s %-6s %s\n' "$i" "$s" "$d"; done
-PASSES=$(( ${#RESULTS[@]} - FAILS - SKIPS ))
+printf '%-38s %-11s %s\n' "id" "status" "detail"
+for row in ${RESULTS[@]+"${RESULTS[@]}"}; do IFS='|' read -r i s d <<<"$row"; printf '%-38s %-11s %s\n' "$i" "$s" "$d"; done
+PASSES=$(( ${#RESULTS[@]} - FAILS - SKIPS - XFAILS ))
 echo
 if [ "$FAILS" -gt 0 ]; then
-  echo "RESULT: FAIL ($FAILS fail, $PASSES pass, $SKIPS skip)"; echo "sandbox kept: $SANDBOX"; exit 1
+  echo "RESULT: FAIL ($FAILS fail, $PASSES pass, $XFAILS expected-fail, $SKIPS skip)"; echo "sandbox kept: $SANDBOX"; exit 1
 fi
-echo "RESULT: OK ($PASSES pass, $SKIPS skip)"
+echo "RESULT: OK ($PASSES pass, $XFAILS expected-fail, $SKIPS skip)"
 [ "${KEEP:-0}" = 1 ] && echo "sandbox kept: $SANDBOX" || rm -rf "$SANDBOX"

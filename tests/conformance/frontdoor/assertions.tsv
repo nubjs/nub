@@ -3,93 +3,80 @@
 # One row = one assertion the harness runs. See README.md for the full design.
 # Columns (TAB-separated):
 #
-#   id          unique slug  <incumbent>-<surface>-<case>
-#   incumbent   fixture identity: nub npm pnpm10 pnpm11 yarn1 yarnberry bun
-#                 or "-" for an incumbent-invariant cell (uses fixtures/nub)
-#   surface     config-read | config-write | env-bridge | env-gate | run-flag
-#   mode        doc  = assert documented behavior, hermetic, every-PR leg
-#               ref  = ALSO diff vs real PM under REF=1 (opt-in leg)
+#   id          unique slug  <fixture>-<surface>-<case>
+#   fixture     fixtures/<name>: nub envbridge npm yarn bun (nub projects),
+#                 pnpm envbridge-pnpm (pnpm projects), or "-" for an
+#                 identity-invariant cell (uses fixtures/nub)
+#   surface     config-read | config-write | env-bridge | env-gate | run-flag | lockfile
+#   mode        doc  = hermetic, offline, every-PR leg
+#               ref  = needs the network; runs only under REF=1
 #   assert      assertion verb + args (see README "Assertion verbs")
 #
-# FIRST SLICE: the surfaces that reached users (run reporter/regex/env-file,
-# config read+write home per incumbent, the npm_config_* bridge). Deferred
-# cells are listed as TODO comments so a new finding ADDS a row here instead of
-# resurfacing ad-hoc.
+# Every pnpm-project expectation below was derived by running pnpm 12.4.1 on the
+# same fixture; a pnpm project that disagrees with it is a nub bug.
 #
-# ── run/exec flags (incumbent-INVARIANT — nub's own CLI, not identity-gated) ──
-# The exact surface that churned: reporter-silent, regex selection, --env-file,
-# multi-script semantics. Each is a documented-behavior assertion; the three
-# high-traffic ones (reporter, regex, env-file) also carry a real-PM diff.
+# ── run/exec flags (identity-INVARIANT — nub's own CLI) ────────────────────────
 run-echo-default	-	run-flag	doc	echo-shown	run hello
 run-echo-silent-flag	-	run-flag	doc	echo-hidden	--silent run hello
 run-reporter-silent-flag	-	run-flag	doc	echo-hidden	--reporter=silent run hello
-run-reporter-env-silent	-	run-flag	ref	echo-hidden-env	npm_config_reporter=silent	run hello
-run-loglevel-env-not-honored	-	run-flag	ref	echo-shown-env	npm_config_loglevel=silent	run hello
+run-reporter-env-silent	-	run-flag	doc	echo-hidden-env	npm_config_reporter=silent	run hello
+run-loglevel-env-not-honored	-	run-flag	doc	echo-shown-env	npm_config_loglevel=silent	run hello
 run-multi-script-first-only	-	run-flag	doc	runs-scripts	hello	run hello build:app
-run-regex-selection	-	run-flag	ref	runs-scripts	build:app,build:lib	run /^build:/
+run-regex-selection	-	run-flag	doc	runs-scripts	build:app,build:lib	run /^build:/
 run-env-file-injects	-	run-flag	doc	env-injected	FRONTDOOR_SECRET=topsecret	--env-file SECRETS run show-env
 run-missing-script-errors	-	run-flag	doc	exits-nonzero	run __frontdoor_no_such_script__
 #
-# ── config READ honored — seed the incumbent's OWN config, assert nub reads it ─
-# registry is the universal scalar every incumbent reads from .npmrc; it is the
-# cleanest cross-incumbent read probe (config get registry reflects it).
+# ── config READ — the project .npmrc is read under both identities ────────────
 nub-config-read-npmrc	nub	config-read	doc	config-reads	registry=https://nub.example/
-npm-config-read-npmrc	npm	config-read	doc	config-reads	registry=https://npm.example/
-pnpm10-config-read-npmrc	pnpm10	config-read	doc	config-reads	registry=https://pnpm10.example/
-pnpm11-config-read-npmrc	pnpm11	config-read	doc	config-reads	registry=https://pnpm11.example/
-yarn1-config-read-npmrc	yarn1	config-read	doc	config-reads	registry=https://yarn1.example/
-bun-config-read-npmrc	bun	config-read	doc	config-reads	registry=https://bun.example/
+pnpm-config-read-npmrc	pnpm	config-read	doc	config-reads	registry=https://pnpm.example/
 #
-# ── config READ symmetric boundary — a FOREIGN branded file is NOT read ───────
-# Under a non-pnpm incumbent nub must ignore a pnpm-NAMED file (the gate is on
-# the NAME). npm fixture + a pnpm-workspace.yaml carrying a leak registry → must
-# be ignored. POSITIVE CONTROL (3rd operand): also seed the project .npmrc with a
-# distinct registry; nub must return THAT (proves the reader is live and picked
-# the right file — not vacuously returning the default because nothing was read).
-npm-config-ignores-pnpm-yaml	npm	config-read	doc	config-ignores-pnpm-yaml	https://pnpm-leak.example/	https://npmrc-control.example/
+# ── config READ — pnpm's own files are pnpm's, other tools' files nobody's ────
+# pnpm 12.4.1 takes `registry` from pnpm-workspace.yaml over the project .npmrc,
+# and reads its global config.yaml. A nub project reads neither (a
+# pnpm-workspace.yaml cannot appear in one: it makes the project pnpm's), and
+# reads no .yarnrc.yml or bunfig.toml — the .npmrc control must win there.
+pnpm-config-read-workspace-yaml	pnpm	config-read	doc	config-file	pnpm-workspace.yaml	https://pnpm-yaml.example/	https://npmrc-control.example/	honored
+pnpm-config-read-global-yaml	pnpm	config-read	doc	config-file	~/.config/pnpm/config.yaml	https://pnpm-global.example/	-	honored
+nub-config-ignores-global-pnpm-yaml	nub	config-read	doc	config-file	~/.config/pnpm/config.yaml	https://pnpm-global.example/	-	ignored
+yarn-config-ignores-yarnrc-yml	yarn	config-read	doc	config-file	.yarnrc.yml	https://yarnrc-leak.example/	https://npmrc-control.example/	ignored
+bun-config-ignores-bunfig	bun	config-read	doc	config-file	bunfig.toml	https://bunfig-leak.example/	https://npmrc-control.example/	ignored
 #
 # ── config WRITE home — set a non-shared scalar, assert where it lands ─────────
-# pnpm-11 routes non-shared scalars to pnpm-workspace.yaml; everyone else to the
-# project .npmrc (neutral home, never a pnpm-branded file). store-dir is a
-# non-shared scalar (no auth/registry semantics); the harness greps for the
-# distinctive VALUE (the key is normalized kebab→camel in the yaml home, so a
-# key-literal grep would miss — the value is the stable witness).
+# pnpm 12.4.1 writes a bare `config set` to its global config.yaml and
+# `--location project` to pnpm-workspace.yaml (as `storeDir`). A nub project
+# writes the project .npmrc.
 nub-config-write-npmrc	nub	config-write	doc	config-writes-to	.npmrc	store-dir	/frontdoor/store/nub
-npm-config-write-npmrc	npm	config-write	doc	config-writes-to	.npmrc	store-dir	/frontdoor/store/npm
-pnpm10-config-write-npmrc	pnpm10	config-write	doc	config-writes-to	.npmrc	store-dir	/frontdoor/store/p10
-pnpm11-config-write-yaml	pnpm11	config-write	doc	config-writes-to	pnpm-workspace.yaml	store-dir	/frontdoor/store/p11
-bun-config-write-npmrc	bun	config-write	doc	config-writes-to	.npmrc	store-dir	/frontdoor/store/bun
+pnpm-config-write-global	pnpm	config-write	doc	config-writes-to	~/.config/pnpm/config.yaml	store-dir	/frontdoor/store/pnpm
+pnpm-config-write-location-project	pnpm	config-write	doc	config-writes-to	pnpm-workspace.yaml	store-dir	/frontdoor/store/pnpm-project	--location	project
 #
-# ── env: the npm_config_* bridge (neutral, honored under EVERY incumbent) ─────
-# The bridge reaches the install-time RESOLVER, not the config-display path
-# (verified: `config get registry` does NOT reflect npm_config_registry — that
-# command reads config FILES). So the bridge is observed at install time: point
-# npm_config_registry at an unreachable host and assert the resolver tries THAT
-# host (the failure names it). ref-mode: it touches the (mocked) network, so it
-# runs on the opt-in leg; the doc-side witness is the negative below.
-nub-env-bridge-registry	envbridge	env-bridge	ref	env-bridge-resolver	https://frontdoor-envbridge.invalid/
+# ── env: the npm_config_* bridge — nub's, and not pnpm 12's ──────────────────
+# A nub project reads npm_config_* at install time and in `config get`. pnpm
+# 12.4.1 reads neither: its install fetches from the default registry and its
+# `config get registry` does not move. Each pair differs only in the identity.
+nub-env-bridge-registry	envbridge	env-bridge	ref	env-bridge-resolver	https://frontdoor-envbridge.invalid/	honored
+pnpm-env-bridge-registry-ignored	envbridge-pnpm	env-bridge	ref	env-bridge-resolver	https://frontdoor-envbridge.invalid/	ignored
+nub-env-bridge-in-config-get	nub	env-bridge	doc	env-gate	registry	npm_config_registry	https://frontdoor-envbridge-shadow.example/	honored
+pnpm-env-bridge-not-in-config-get	pnpm	env-bridge	doc	env-gate	registry	npm_config_registry	https://frontdoor-envbridge-shadow.example/	ignored
 #
-# Documented NEGATIVE (hermetic): npm_config_registry does NOT surface through
-# `config get registry` (it's a resolver-path knob, not a config-file value).
-# Pinning this stops a future change from silently making config-display honor
-# env (which would mask the real bridge path and confuse `config get` semantics).
-nub-env-bridge-not-in-config-get	nub	env-bridge	doc	env-not-in-config-get	registry	https://frontdoor-envbridge-shadow.example/
-#
-# ── env: branded gating (pnpm's config env read under pnpm only) ──────────────
-# The engine reads `pnpm_config_<key>` / `PNPM_CONFIG_<KEY>` for the whole schema
-# (its config crate's env_overlay). A pnpm project gets that reader, as it gets
-# every other pnpm 12 behaviour; a nub project gets none of it, and there is no
-# NUB_* replacement. The pair below differs only in the incumbent, so the gate is
-# the only thing either row can be measuring: the honored row proves the variable
-# is live, the ignored row proves the identity turns it off. store-dir is the
-# target because it is a scalar the env reader covers AND `config get` surfaces.
+# ── env: branded config variables ─────────────────────────────────────────────
+# pnpm_config_* is pnpm's and nothing else's (pnpm 12.4.1 honors it). BUN_CONFIG_*
+# is read by neither identity; its twin is nub-env-bridge-in-config-get, which
+# keeps the `config get registry` env read path live in the same kind of project.
 nub-env-gate-pnpm-ignored	nub	env-gate	doc	env-gate	store-dir	pnpm_config_store_dir	/frontdoor/env-store	ignored
-pnpm10-env-gate-pnpm-honored	pnpm10	env-gate	doc	env-gate	store-dir	pnpm_config_store_dir	/frontdoor/env-store	honored
+pnpm-env-gate-pnpm-honored	pnpm	env-gate	doc	env-gate	store-dir	pnpm_config_store_dir	/frontdoor/env-store	honored
+bun-env-gate-bun-config-ignored	bun	env-gate	doc	env-gate	registry	BUN_CONFIG_REGISTRY	https://bun-env-leak.example/	ignored
 #
-# ── DEFERRED / scaffolded (add a row when the gap surfaces or the audit lands) ─
-# config-read: pnpm.* fields honored under pnpm only; bunfig honored under bun;
-#   yarnrc.yml honored under yarn-berry (doc-mode; host yarn is v1).
-# env-gate: the rest of the pnpm_config_* schema beyond store-dir;
-#   BUN_CONFIG_REGISTRY honored under bun only.
-# config-write: per-field incumbent-aware shared-ness (pm-config-field-level-audit).
+# ── another package manager's lockfile ───────────────────────────────────────
+# Unread and untouched under both identities; a nub project writes nub.lock and
+# points at `nub pm migrate`, a pnpm project writes pnpm-lock.yaml and says nothing.
+npm-lockfile-ignored	npm	lockfile	doc	foreign-lockfile	package-lock.json	hint
+yarn-lockfile-ignored	yarn	lockfile	doc	foreign-lockfile	yarn.lock	hint
+bun-lockfile-ignored	bun	lockfile	doc	foreign-lockfile	bun.lock	hint
+pnpm-foreign-lockfile-quiet	pnpm	lockfile	doc	foreign-lockfile	package-lock.json	quiet
+#
+# ── DEFERRED (add a row when the gap surfaces) ─────────────────────────────────
+# config-read: nub.jsonc and the neutral package.json fields in a nub project.
+# env-gate: the rest of the pnpm_config_* schema beyond store-dir.
+# identity: a pin naming another pnpm version provisions that pnpm and delegates
+#   (network + provisioning; no hermetic observable).
 # lockfile round-trip: covered by tests/conformance/run.sh + lockfile-conformance.

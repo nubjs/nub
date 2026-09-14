@@ -1,37 +1,41 @@
 # Front-door pm-compat conformance matrix
 
-The anti-resurfacing guard. Every pm-compat gap that reached a user — `npm_config_reporter` not honored, `--env-file` grammar, regex script selection, the config-read gate, the `npm_config_*` bridge — was rediscovered ad-hoc because only the **engine** and the **lockfile** were ever tested, never the **front door**: the CLI surface a user actually drives (config read/write, env knobs, run/exec flags, lockfile round-trip), *per incumbent package manager*.
+The anti-resurfacing guard. Every pm-compat gap that reached a user — `npm_config_reporter` not honored, `--env-file` grammar, regex script selection, the config-read gate, the `npm_config_*` bridge — was rediscovered ad-hoc because only the **engine** and the **lockfile** were ever tested, never the **front door**: the CLI surface a user actually drives (config read/write, env knobs, run/exec flags, another tool's lockfile), *per project identity*.
 
-This harness turns the per-incumbent behavior map (`wiki/research/nub-incumbent-behavior.md`) into a CI matrix. A gap or regression on a covered cell **fails CI** instead of waiting for a user report.
+This harness turns the per-identity behavior map below into a CI matrix. A gap or regression on a covered cell **fails CI** instead of waiting for a user report.
 
 It is a **third axis**, distinct from its two siblings:
 
 - `tests/conformance/run.sh` — lockfile round-trip fidelity (does nub read/write each PM's lockfile?).
 - `tests/conformance/cmdflag/run.sh` — does every wired verb × flag *run* on one real repo?
-- **this** — does each front-door SURFACE behave correctly *under each incumbent identity*? It is the only suite parameterized by incumbent.
+- **this** — does each front-door SURFACE behave correctly *under each project identity*? It is the only suite parameterized by identity.
 
 ## The matrix
 
-Two dimensions. **Incumbent** (the project identity nub detects) × **surface** (the front-door behavior class). Each filled cell is one or more `assertions.tsv` rows.
+Two dimensions. **Identity** (the one nub detects) × **surface** (the front-door behavior class). Each filled cell is one or more `assertions.tsv` rows.
 
-| surface ↓ \ incumbent → | nub-identity | npm | pnpm 9/10 | pnpm 11 | yarn-classic | yarn-berry | bun |
-|---|---|---|---|---|---|---|---|
-| **config READ honored** | neutral only | npmrc | npmrc + pnpm.* | npmrc + yaml | yarnrc | yarnrc.yml | bunfig |
-| **config WRITE home** | npmrc | npmrc | npmrc | pnpm-workspace.yaml | npmrc | npmrc | npmrc |
-| **env: `npm_config_*` bridge** | honored | honored | honored | honored | honored | honored | honored |
-| **env: branded gating** | no pnpm_config_* | no pnpm_* | pnpm_* honored | pnpm_* honored | no pnpm_* | no pnpm_* | BUN_CONFIG_* honored |
-| **run/exec flags** | reporter / regex / env-file / filter (incumbent-invariant) |
-| **lockfile round-trip** | nub.lock | package-lock | pnpm-lock v9 | pnpm-lock v9 | yarn.lock v1 | yarn.lock v2+ | bun.lock |
+There are exactly two identities, decided by `crates/nub-core/src/pm/identity.rs`. A **pnpm project** carries a pnpm pin (`packageManager` or `devEngines.packageManager`), a `pnpm-lock.yaml` or a `pnpm-workspace.yaml`, and must behave exactly like **pnpm 12.4.1**. Every other project is a **nub project** — including one holding an npm, Yarn or Bun lockfile, which no longer confers an identity of its own. The `npm`, `yarn` and `bun` fixtures exist to prove that: they are nub projects carrying another tool's files.
 
-The run/exec-flag surface is **incumbent-invariant** (the run echo, `--env-file`, reporter, regex selection are nub's own CLI, not gated on identity), so it is asserted once rather than per-incumbent — the matrix tracks it as a single column to avoid bloat.
+| surface ↓ \ identity → | nub project | pnpm project (= pnpm 12.4.1) |
+|---|---|---|
+| **config READ** | project `.npmrc`; never `~/.config/pnpm/config.yaml`, `.yarnrc.yml` or `bunfig.toml` | project `.npmrc`, `pnpm-workspace.yaml` over it, global `config.yaml` |
+| **config WRITE home** | project `.npmrc` | global `config.yaml`; `--location project` → `pnpm-workspace.yaml` |
+| **env: `npm_config_*`** | honored (install and `config get`) | ignored (install and `config get`) |
+| **env: branded** | `pnpm_config_*` and `BUN_CONFIG_*` ignored | `pnpm_config_*` honored |
+| **foreign lockfile** | unread, untouched, `nub.lock` written, one `nub pm migrate` line | unread, untouched, `pnpm-lock.yaml` written, silent |
+| **run/exec flags** | reporter / regex / env-file (identity-invariant) | |
 
-Lockfile round-trip is **already covered comprehensively** by the two sibling harnesses; this harness does not duplicate it. It is listed in the matrix for completeness and links out — see "Deferred / covered elsewhere."
+Every pnpm-project expectation was derived by running pnpm 12.4.1 on the same fixture, and no other pnpm version is a reference: a pnpm 10 or 11 answer describes a different config model (pnpm 12 writes `config set` to its global `config.yaml`, not `.npmrc`, and does not honor `npm_config_registry`).
 
-### Scope decisions (recorded here, the thread's open questions)
+The run/exec-flag surface is **identity-invariant** (the run echo, `--env-file`, reporter, regex selection are nub's own CLI), so it is asserted once rather than per identity.
 
-- **Hybrid assertion model.** Most cells assert **documented behavior** — hermetic, offline, no real PM needed (cheap, gates every PR). The high-traffic front-door cells that historically churned (run reporter/regex/env-file) ALSO get a **real-PM differential** on an opt-in leg (`REF=1`), diffing nub against the actual PM. This is the hybrid the matrix thread recommended: assert-documented for breadth, real-PM-diff for the surfaces that bite.
-- **First slice = the surfaces that just churned.** The run reporter/regex/env-file flags, config read+write home per incumbent, and the `npm_config_*` bridge. Everything else in the grid is scaffolded (a fixture exists, the assertion is a TODO row) so a new finding *adds a row* instead of resurfacing.
-- **CI cadence.** The documented-behavior core is hermetic + offline (no network, no real PM) → it can gate **every PR**. The `REF=1` real-PM-diff leg needs the PMs installed and (for a couple of cells) the network → **scheduled / opt-in leg**, same posture as the sibling harnesses.
+Lockfile round-trip is **covered by the sibling harnesses**; this harness only asserts that another tool's lockfile is left alone. See "Deferred / covered elsewhere."
+
+### Scope decisions
+
+- **Documented behavior, hermetic by default.** Every `doc` cell runs offline with no reference tool installed, so the suite can gate every PR. The expectations it asserts are measured against pnpm 12.4.1 once, recorded in the row comments, and re-derived when the reference moves.
+- **`ref` cells need the network.** The two `npm_config_registry` install probes run only under `REF=1`.
+- **Known divergences are listed, not hidden.** `expectations.txt` names each cell that is red because the product disagrees with the reference; the cell reports XFAIL, and XPASS-STALE fails the run once the product is fixed.
 
 ## Cells
 
@@ -39,83 +43,95 @@ Lockfile round-trip is **already covered comprehensively** by the two sibling ha
 
 | column | meaning |
 |---|---|
-| `id` | unique slug (`<incumbent>-<surface>-<case>`) |
-| `incumbent` | fixture identity: `nub` `npm` `pnpm9` `pnpm10` `pnpm11` `yarn1` `yarnberry` `bun` `-` (incumbent-invariant) |
-| `surface` | `config-read` `config-write` `env-bridge` `env-gate` `run-flag` |
-| `mode` | `doc` (assert documented behavior, hermetic) · `ref` (also diff vs real PM under `REF=1`) |
+| `id` | unique slug (`<fixture>-<surface>-<case>`) |
+| `fixture` | `fixtures/<name>` the cell runs in, or `-` (identity-invariant, uses `fixtures/nub`) |
+| `surface` | `config-read` `config-write` `env-bridge` `env-gate` `run-flag` `lockfile` |
+| `mode` | `doc` (hermetic, offline) · `ref` (needs the network, runs only under `REF=1`) |
 | `assert` | the assertion verb (see below) + its args |
 
 Assertion verbs (run by `run.sh`):
 
 | verb | meaning |
 |---|---|
-| `echo-shown` / `echo-hidden` | run nub with the given env/flags; assert the `$ <cmd>` run-echo is present / suppressed |
+| `echo-shown` / `echo-hidden` | run nub with the given flags; assert the `$ <cmd>` run-echo is present / suppressed (a suppressed echo only counts if the script ran) |
+| `echo-hidden-env` / `echo-shown-env` | the same, with one `VAR=val` in the environment |
 | `runs-scripts <a,b,…>` | assert exactly these scripts ran (by their stdout markers) |
 | `env-injected <VAR>=<val>` | assert the child process saw the env var (script prints it) |
-| `config-reads <key>=<val>` | seed the incumbent's config file with `<key>`, assert nub honors it (`config get` / behavior) |
-| `config-ignores <file>` | seed a *foreign-branded* config file, assert nub does NOT read it |
-| `config-writes-to <relpath>` | run `nub config set`, assert the value landed in `<relpath>` and nowhere else |
+| `exits-nonzero` | assert the command fails |
+| `config-reads <key>=<val>` | seed the project `.npmrc`, assert `config get` returns it |
+| `config-file <file> <val> <control\|-> honored\|ignored` | seed `registry` in `<file>` (`~/…` is the sandbox HOME), optionally with a different `.npmrc` control; assert the file wins, or that the control (or the default) does |
+| `config-writes-to <target> <key> <val> [flags…]` | run `config set [flags…] <key> <val>`; assert the value landed in `<target>` and in no other config home |
+| `env-gate <key> <VAR> <val> honored\|ignored` | assert `config get <key>` does / does not follow `VAR` |
+| `env-bridge-resolver <url> honored\|ignored` | `REF=1`: install with `npm_config_registry=<url>`; assert the resolver tries that host, or ignores it and succeeds |
+| `foreign-lockfile <file> hint\|quiet` | `install --offline` with another tool's lockfile; assert it is untouched and nub's own lockfile (hint) or pnpm's (quiet) is written, with or without the `nub pm migrate` line |
+
+`expectations.txt` lists cells that are red because of a known product divergence, one line each with the reference output that proves it. A listed cell reports XFAIL; once it passes it reports XPASS-STALE and fails the run, so the entry is deleted with the fix.
 
 ## Usage
 
 ```sh
 # build the dev nub first (see the dev-loop skill), then:
 tests/conformance/frontdoor/run.sh /path/to/nub                 # hermetic doc-mode core (every-PR leg)
-REF=1 tests/conformance/frontdoor/run.sh /path/to/nub           # also real-PM diffs (opt-in leg; needs PMs)
+REF=1 tests/conformance/frontdoor/run.sh /path/to/nub           # also the network cells
 tests/conformance/frontdoor/run.sh /path/to/nub run-flag        # one surface
 KEEP=1 tests/conformance/frontdoor/run.sh /path/to/nub          # keep sandbox for forensics
+
+# re-derive the pnpm-project cells against the reference: pnpm accepts every command they run
+npm install --prefix /tmp/pnpm12 pnpm@12.4.1
+REF=1 tests/conformance/frontdoor/run.sh /tmp/pnpm12/node_modules/.bin/pnpm $(grep -oE '^pnpm-[a-z-]+' tests/conformance/frontdoor/assertions.tsv)
 ```
 
-The runner spins a **hermetic sandbox** `HOME`/`XDG_*` (the dev box's `~/.npmrc` — which carries a dead proxy that breaks fetches — never leaks in; isolation is mandatory). Each cell runs in a fresh copy of its incumbent's fixture. No network in `doc` mode.
+The runner spins a **hermetic sandbox** with its own `HOME`/`XDG_*` per cell, and unsets every inherited `npm_config_*`, `NPM_CONFIG_*`, `pnpm_config_*` and `PNPM_*` variable before any cell runs (the dev box's `~/.npmrc` carries a dead proxy that breaks fetches, and a developer's `PNPM_HOME` would move a pnpm cell's store out of the sandbox). Each cell runs in a fresh copy of its fixture. No network in `doc` mode.
 
 ## Fixtures
 
-One minimal fixture per incumbent identity under `fixtures/<incumbent>/`. Each is the **smallest** project that makes nub detect that identity (a `packageManager` field or the marker lockfile/config file) plus a `package.json` with the marker scripts the run-flag assertions need. Fixtures are hand-built and tiny by design — the suite tests *identity detection + surface behavior*, not real installs, so most fixtures need no `node_modules`.
+One minimal fixture per shape under `fixtures/<name>/`. Fixtures are hand-built and tiny by design — the suite tests *identity + surface behavior*, not real installs, so none needs `node_modules`.
 
-| fixture | makes nub detect | marker |
+| fixture | identity | marker |
 |---|---|---|
-| `nub` | nub-identity | no lockfile, no declaration, no pnpm-named file |
-| `npm` | npm | `package-lock.json` |
-| `pnpm10` | pnpm 9/10 | `packageManager: "pnpm@10.x"` |
-| `pnpm11` | pnpm 11 | `packageManager: "pnpm@11.x"` + `pnpm-workspace.yaml` |
-| `yarn1` | yarn-classic | `yarn.lock` (v1) + classic `.yarnrc` |
-| `yarnberry` | yarn-berry | `.yarnrc.yml` + berry `yarn.lock` |
-| `bun` | bun | `bun.lock` + `bunfig.toml` |
-| `envbridge` | nub-identity (with a dep) | one real dependency, so the `REF=1` resolver probe actually fetches |
+| `nub` | nub | nothing; also carries the run-flag marker scripts |
+| `pnpm` | pnpm | `pnpm-workspace.yaml` |
+| `npm` | nub | `package-lock.json` |
+| `yarn` | nub | `packageManager: "yarn@4.5.0"` + berry `yarn.lock` |
+| `bun` | nub | `bun.lock` + `bunfig.toml` |
+| `envbridge` | nub | one real dependency, so the `REF=1` resolver probe actually fetches |
+| `envbridge-pnpm` | pnpm | the same dependency + `pnpm-workspace.yaml` |
 
-The run-flag fixture is identity-agnostic (the run surface isn't gated on identity) — it reuses `fixtures/nub`.
+The pnpm fixtures declare pnpm with `pnpm-workspace.yaml` rather than a `packageManager` pin on purpose: under a `pnpm@12.4.1` pin the engine resolves pnpm itself as a config dependency from the registry, so an offline install fails with `ERR_PNPM_BAD_CONFIG_DEP` and a config command reaches for the network — pnpm 12.4.1 does the same.
 
-### Front-door behaviors this slice pinned (corrected against the real binary)
+### Front-door behaviors this slice pinned
 
-Building the slice surfaced/confirmed several exact behaviors — each is now a guarded cell:
+Each is a guarded cell, and each pnpm-project row agrees with pnpm 12.4.1 run on the same fixture:
 
-- **`--reporter=silent` suppresses the run-echo only PRE-subcommand** (`nub --reporter=silent run x`), not post-script (`nub run x --reporter=silent`, where it forwards to the script). Same three-position rule as every other nub flag.
+- **`--reporter=silent` before the subcommand** suppresses the run-echo under pnpm 12.4.1 (`pnpm --reporter=silent run x`). nub still prints it — the one listed divergence. `--silent run x` and `run --reporter=silent x` suppress it under both.
 - **Space-separated `run a b` runs only `a`** and forwards `b` as an arg (NOT a multi-script feature — matches pnpm).
 - **Regex selection `run /^build:/` runs all matching scripts** (`build:app`+`build:lib`).
-- **`config set` normalizes kebab→camel in the pnpm-11 yaml home** (`store-dir` → `storeDir:`), but keeps kebab in `.npmrc`. Cells grep the distinctive VALUE, not the key.
-- **The `npm_config_*` bridge is a RESOLVER knob, not a config-display value** — `config get registry` does NOT reflect `npm_config_registry` (it reads config FILES). The bridge is observed at install time (`REF=1`) by pointing it at an unreachable host and asserting the resolver ATTEMPTS that host (the host string must co-occur with a fetch/resolve/DNS-failure token — keying on a startup log mention would be a false green), with a hermetic negative cell pinning that `config get` stays file-only.
-- **The engine's `pnpm_config_*` env reader follows the incumbent** — a pnpm project honors it, as pnpm 12 does; a nub project ignores it, and no `NUB_*` variable takes its place. The gate cells target `store-dir`/`pnpm_config_store_dir` because that is a scalar the reader covers and `config get` surfaces. They come in a pair differing only in the incumbent: the pnpm row asserts the variable IS honored, which is what keeps the nub row honest — a variable nothing reads passes an "ignored" assertion however broken the gate is.
+- **`config set` has a different home per identity.** A nub project writes the project `.npmrc`. pnpm 12.4.1 writes its global `config.yaml`, and `--location project` writes `pnpm-workspace.yaml` as `storeDir`. Cells grep the distinctive VALUE, not the key.
+- **`registry` in `pnpm-workspace.yaml` outranks the project `.npmrc`** in a pnpm project.
+- **`npm_config_*` is nub's and not pnpm 12's.** A nub project honors `npm_config_registry` at install time and in `config get`; pnpm 12.4.1 honors it in neither. The install cells point it at an unreachable host: the nub row requires a resolve attempt against that host, the pnpm row requires a successful install that never names it.
+- **The engine's `pnpm_config_*` env reader follows the identity** — a pnpm project honors it, as pnpm 12 does; a nub project ignores it, and no `NUB_*` variable takes its place. The gate cells target `store-dir`/`pnpm_config_store_dir` because that is a scalar the reader covers and `config get` surfaces.
+- **Another tool's lockfile is never read or rewritten.** A nub project writes `nub.lock` and prints one line pointing at `nub pm migrate`; a pnpm project writes `pnpm-lock.yaml` and prints nothing, as pnpm 12.4.1 does.
 
 ### Anti-vacuousness discipline (the guard guarding itself)
 
-This suite exists to catch false greens, so its OWN cells must not be vacuous. Two rules a new cell must satisfy:
+This suite exists to catch false greens, so its OWN cells must not be vacuous. Every identity-scoped cell was broken on purpose (its fixture flipped to the other identity, or its expectation removed) and watched go red. Rules a new cell must satisfy:
 
-- **Negative cells need a positive control.** "nub did NOT read the forbidden thing" is only meaningful if nub demonstrably reads the RIGHT thing on the same probe. The pnpm-named-file ignore cell seeds both a leak (pnpm yaml) and a control (`.npmrc`) and asserts nub returns the control — proving the reader is live, not merely returning a default because it read nothing.
-- **Brand-gate cells must target an observable gate.** The setting must be one the unbranded engine actually reads from the branded env AND surfaces through the assertion's read path — otherwise the assertion passes regardless of the gate.
+- **Negative cells need a positive control.** "nub did NOT read the forbidden thing" is only meaningful if the reader is demonstrably live. A `config-file ... ignored` row seeds a distinct `.npmrc` control and must return it; where no control is possible (a HOME file a project `.npmrc` would outrank), the row has an `honored` twin in the other identity.
+- **Every `ignored` / absent assertion has an `honored` / present twin** differing only in the fixture: `pnpm_config_store_dir` (nub ignores, pnpm honors), `npm_config_registry` (nub honors, pnpm ignores), the global `config.yaml`, the migrate hint. `BUN_CONFIG_REGISTRY` has no reader in either identity, so its twin is the `npm_config_registry` row that keeps the same `config get registry` env path live.
+- **An absence must come from a command that ran.** `echo-hidden` requires the script's marker, and `foreign-lockfile quiet` requires `pnpm-lock.yaml`, so a crash cannot pass as a suppressed echo or a silent install.
 
 ## Deferred / covered elsewhere
 
-- **Lockfile round-trip** — fully covered by `tests/conformance/run.sh` (both directions, all PMs, pnpm-11 leg) and `tests/lockfile-conformance/`. Not duplicated here.
-- **Config-write per-field incumbent-aware shared-ness** (the `pm-config-field-level-audit` known gap) — a TODO row per affected scalar once that audit lands; this harness is its natural regression home.
-- **Detection-chain tail** (installed-PM `--version` / lockfile-version-signal refinement, gap G9) — deliberately unwired; no cell until the posture changes.
-- **The `REF=1` yarn-berry leg** — host `yarn` is v1, so the berry *config-read* cell here is doc-mode only.
+- **Lockfile round-trip** — fully covered by `tests/conformance/run.sh` and `tests/lockfile-conformance/`. Not duplicated here.
+- **nub.jsonc and the neutral `package.json` fields** in a nub project — no cell yet.
+- **A pin naming another pnpm version** provisions that pnpm and delegates to it; that needs the network and a provisioned pnpm, so no hermetic cell observes it.
 
 ## Adding a cell when a new gap is found
 
 This is the whole point. When a pm-compat gap surfaces:
 
-1. Add a fixture under `fixtures/<incumbent>/` if its identity isn't represented yet.
-2. Add an `assertions.tsv` row for the surface + case, `mode=doc` (and `mode=ref` if it's a high-traffic surface worth a real-PM diff).
-3. Run `run.sh` — red until the gap is fixed; it then becomes the permanent regression guard.
+1. Add a fixture under `fixtures/<name>/` if its shape isn't represented yet.
+2. Add an `assertions.tsv` row for the surface + case. For a pnpm project, run the row against pnpm 12.4.1 first (see Usage) — that output is the expectation.
+3. Run `run.sh` — red until the gap is fixed; it then becomes the permanent regression guard. Break the fixture once and watch it go red before trusting it.
 
 A gap that lives as a row here can never silently resurface.
