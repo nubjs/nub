@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // Semantic dependency-graph extractor for the mutation differential.
 //
-// Given a project directory, find its lockfile (pnpm / npm / bun) and emit a
+// Given a project directory, read its pnpm-format lockfile — pnpm-lock.yaml, or
+// nub.lock when there is none, since the two share one format — and emit a
 // NORMALIZED, order-insensitive view of the resolved graph:
 //
 //   {
-//     "format": "pnpm" | "npm" | "bun",
+//     "format": "pnpm",
 //     "direct":   { "<name>": "<declared-spec>", ... },   // root importer deps
 //     "resolved": { "<name>@<version>": <count>, ... }     // every resolved pkg
 //   }
@@ -17,23 +18,15 @@
 //       * add  (M.1)  — the new dep + its transitives APPEAR in the set.
 //       * dedup (M.3) — whether a shared transitive collapses to one version
 //                       or keeps two shows up as one-vs-two keys in the set.
-//       * prune (M.5/M.6) — removed/kept transitives are present/absent.
-//     It is independent of each PM's nesting LAYOUT (npm path nesting vs pnpm
-//     flat `name@ver` keys vs bun `parent/child` path keys), which legitimately
-//     differs and which byte-identity would false-fail on.
+//       * prune (M.5) — removed/kept transitives are present/absent.
 //   - `direct` is the root importer's declared specifiers (name -> range). It
 //     captures the manifest-side mutation: `add pkg@^1` must write `^1`
-//     verbatim, `remove` must drop the entry. This is the declared-spec-
-//     preservation axis (catalogue 1.1/1.2/M.2).
+//     verbatim, `remove` must drop the entry.
 //
 // The comparator (compare-graphs.mjs) diffs two of these JSON blobs for
-// equality, ignoring key ordering. Same PM on both sides — we compare
-// nub's-mutated-<pm>-lockfile vs real-<pm>'s-mutated-lockfile, never cross-PM
-// (PMs legitimately resolve differently from each other; each must match ITS
-// OWN reference).
+// equality, ignoring key ordering.
 //
-// Usage:  extract-graph.mjs <project-dir> [--format pnpm|npm|bun]
-//         (auto-detects the lockfile when --format is omitted)
+// Usage:  extract-graph.mjs <project-dir>
 
 import fs from "node:fs";
 import path from "node:path";
@@ -44,23 +37,8 @@ function die(msg) {
 }
 
 const args = process.argv.slice(2);
-let dir = null;
-let forced = null;
-for (let i = 0; i < args.length; i++) {
-  if (args[i] === "--format") forced = args[++i];
-  else if (!dir) dir = args[i];
-  else die(`unexpected argument: ${args[i]}`);
-}
-if (!dir) die("usage: extract-graph.mjs <project-dir> [--format pnpm|npm|bun]");
-
-const has = (f) => fs.existsSync(path.join(dir, f));
-let format = forced;
-if (!format) {
-  if (has("pnpm-lock.yaml")) format = "pnpm";
-  else if (has("package-lock.json")) format = "npm";
-  else if (has("bun.lock")) format = "bun";
-  else die(`no lockfile (pnpm-lock.yaml / package-lock.json / bun.lock) in ${dir}`);
-}
+if (args.length !== 1) die("usage: extract-graph.mjs <project-dir>");
+const dir = args[0];
 
 const bump = (obj, key) => {
   obj[key] = (obj[key] || 0) + 1;
@@ -140,76 +118,13 @@ function extractPnpm(text) {
   return { format: "pnpm", direct, resolved };
 }
 
-// ── npm: package-lock.json (lockfileVersion 3) ────────────────────────────
-// `packages[""]` is the root: its dependencies/devDependencies/optional carry
-// the direct specs. Every other `packages["node_modules/.../<name>"]` entry is
-// a resolved package; the LAST path segment after `node_modules/` is the name,
-// and `.version` is the version. Nested duplicates (`.../node_modules/x`) yield
-// the same name at possibly-different versions — exactly the multiset we want.
-function extractNpm(text) {
-  const lock = JSON.parse(text);
-  const direct = {};
-  const resolved = {};
-  const root = (lock.packages && lock.packages[""]) || {};
-  for (const bucket of ["dependencies", "devDependencies", "optionalDependencies"]) {
-    for (const [name, spec] of Object.entries(root[bucket] || {})) direct[name] = spec;
-  }
-  for (const [key, entry] of Object.entries(lock.packages || {})) {
-    if (key === "") continue;
-    if (!entry || entry.link) continue; // workspace symlink entry, not a real pkg
-    const segs = key.split("node_modules/");
-    const name = segs[segs.length - 1].replace(/\/$/, "");
-    const version = entry.version;
-    if (!version) continue;
-    bump(resolved, `${name}@${version}`);
-  }
-  return { format: "npm", direct, resolved };
-}
+const lockPath = ["pnpm-lock.yaml", "nub.lock"].map((f) => path.join(dir, f)).find((f) => fs.existsSync(f));
+if (!lockPath) die(`no lockfile (pnpm-lock.yaml / nub.lock) in ${dir}`);
 
-// ── bun: bun.lock (JSONC — trailing commas) ───────────────────────────────
-// `workspaces[""].{dependencies,devDependencies,optionalDependencies}` carries
-// the root direct specs. `packages` is a map whose VALUES are arrays whose
-// FIRST element is `"<name>@<version>"`. The map KEY is a nesting path
-// (`parent/child`) — we ignore it and read name@version off the value tuple,
-// which is the resolved package.
-function extractBun(text) {
-  // bun.lock is JSON with trailing commas; strip them for JSON.parse.
-  const cleaned = text.replace(/,(\s*[}\]])/g, "$1");
-  const lock = JSON.parse(cleaned);
-  const direct = {};
-  const resolved = {};
-  const root = (lock.workspaces && lock.workspaces[""]) || {};
-  for (const bucket of ["dependencies", "devDependencies", "optionalDependencies"]) {
-    for (const [name, spec] of Object.entries(root[bucket] || {})) direct[name] = spec;
-  }
-  for (const tuple of Object.values(lock.packages || {})) {
-    const id = Array.isArray(tuple) ? tuple[0] : null;
-    if (typeof id !== "string") continue;
-    // id is `name@version` (scoped: `@scope/name@version`). Split on LAST `@`.
-    const at = id.lastIndexOf("@");
-    if (at <= 0) continue;
-    const name = id.slice(0, at);
-    const version = id.slice(at + 1);
-    // A workspace member entry has an empty/path version — skip non-semver-ish.
-    if (!version || version.startsWith("workspace:")) continue;
-    bump(resolved, `${name}@${version}`);
-  }
-  return { format: "bun", direct, resolved };
-}
-
-const lockPath = {
-  pnpm: "pnpm-lock.yaml",
-  npm: "package-lock.json",
-  bun: "bun.lock",
-}[format];
-if (!lockPath) die(`unknown format: ${format}`);
-const full = path.join(dir, lockPath);
-if (!fs.existsSync(full)) die(`expected ${lockPath} in ${dir}`);
-const text = fs.readFileSync(full, "utf8");
-
-let out;
-if (format === "pnpm") out = extractPnpm(text);
-else if (format === "npm") out = extractNpm(text);
-else out = extractBun(text);
-
+// A project that pins pnpm gets a lockfile of two YAML documents from pnpm 12:
+// the package manager's own (`packageManagerDependencies`) first, then the
+// project's. The project graph is the last document.
+const documents = fs.readFileSync(lockPath, "utf8").split(/^---$/m).filter((doc) => /^importers:/m.test(doc));
+if (documents.length === 0) die(`no importers in ${lockPath}`);
+const out = extractPnpm(documents[documents.length - 1]);
 process.stdout.write(JSON.stringify(out, null, 2) + "\n");

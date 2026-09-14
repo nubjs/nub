@@ -1,10 +1,7 @@
-# Known-red nub MUTATION scenarios: "<fixture> <pm> <reason>".
-# Same discipline as tests/conformance/expected-failures.txt — this list must
-# SHRINK. A listed scenario that passes fails the run (XPASS-STALE) so the green
-# flip is recorded by deleting the entry in the same commit as the fix.
+# Known-red nub MUTATION scenarios: "<fixture> <leg> <reason>".
+# This list must SHRINK. A listed scenario that passes fails the run
+# (XPASS-STALE), so the fix and the entry's deletion land in one commit.
 #
-# A red here is a nub WRITE-PATH divergence the differential caught: nub's
-# mutated lockfile/manifest does not match what the real PM produces for the
-# SAME mutation (add/remove/update). Each entry names the exact divergence
-# richly enough to open a fix thread.
-
+# A red here is a write-path divergence the differential caught: nub's mutated
+# lockfile or manifest does not match what real pnpm produces for the same
+# mutation. Each entry names the divergence precisely enough to act on.

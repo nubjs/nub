@@ -1,44 +1,31 @@
 #!/usr/bin/env bash
 # Lockfile MUTATION differential harness — the write-path counterpart to the
-# static round-trip in tests/conformance/. Every conformance fixture is a
-# STATIC install; nothing exercised `nub add` / `nub remove` / `nub update`
-# against a lockfile a real PM already wrote. That is where write-path bugs
-# live (a static install can pass while an `add` churns or corrupts), and it is
-# the single biggest coverage gap. See README.md for the full design.
+# static round trips in tests/conformance/ and tests/lockfile-conformance/. A
+# static install can pass while `nub add` / `nub remove` / `nub update` churns
+# the untouched part of a lockfile, de-dups a shared transitive differently, or
+# over/under-prunes. See README.md for the full design.
 #
-# The loop, per (fixture, mutation, pm):
+# Two legs per fixture, each judged by REAL pnpm (pinned via npx):
 #
-#   1. stage the fixture into two parallel copies: `nub/` and `ref/`.
-#   2. the REAL PM installs in BOTH (identical pre-mutation baseline lockfile +
-#      node_modules).
-#   3. MUTATE: in `nub/`, run `nub <add|remove|update>`; in `ref/`, run the
-#      EQUIVALENT real-PM mutation (`pnpm add` / `npm install` / `bun add` …).
-#   4. assert (a) FROZEN-ACCEPT: the real PM frozen-installs nub's mutated
-#      lockfile and does NOT rewrite it (a frozen install must be a no-op on a
-#      well-formed lockfile — `cmp` byte-identity before/after the frozen run).
-#   5. assert (b) SEMANTIC EQUIVALENCE: nub's mutated lockfile and the real PM's
-#      mutated lockfile describe the same resolved graph (same direct-spec map +
-#      same resolved-version multiset), ignoring ordering/formatting. This is
-#      the differential — run the same mutation with the real PM on a parallel
-#      copy and compare the SEMANTIC content, never the bytes (`add` ordering
-#      legitimately differs run-to-run). extract-graph.mjs + compare-graphs.mjs.
+#   pnpm — a pnpm project (`packageManager: pnpm@<pin>`). Real pnpm installs in
+#          two copies, nub mutates one and real pnpm the other. Real pnpm must
+#          frozen-accept nub's mutated pnpm-lock.yaml without rewriting it, and
+#          both mutated lockfiles must describe the same graph.
+#   nub  — a nub project. nub installs and mutates, writing nub.lock; the
+#          reference copy is a pnpm project that real pnpm installs and mutates.
+#          A frozen nub install must leave nub.lock unchanged, real pnpm must
+#          frozen-accept it renamed into a pnpm-declaring copy, and its graph
+#          must equal real pnpm's.
 #
-# We compare nub-<pm> vs real-<pm> ALWAYS — never cross-PM (PMs legitimately
-# resolve/dedup differently from each other; each nub-format must match ITS OWN
-# reference PM).
-#
-# Conventions mirror tests/conformance/run.sh: hermetic HOME/XDG sandbox, pinned
-# PMs on PATH, cold bun cache for honest integrity verification, a skip_reason()
-# for ecosystem-level impossibilities, and an expected-failures.txt of known-red
-# nub mutation bugs that must SHRINK.
-#
-# yarn is READ-ONLY in nub (no write-path mutation), so it is skipped entirely.
+# Graphs are compared semantically (extract-graph.mjs + compare-graphs.mjs):
+# the same direct-spec map and resolved-version multiset, ignoring order and
+# formatting, because `add` ordering legitimately differs run to run.
 #
 # Usage:  run-mutations.sh [<path-to-nub>] [fixture ...]
-# Env:    SANDBOX_ROOT=<dir>   reuse/inspect the sandbox (implies KEEP)
+# Env:    LEGS="pnpm nub"      subset of legs to run
+#         SANDBOX_ROOT=<dir>   reuse/inspect the sandbox (implies KEEP)
 #         KEEP=1               keep the sandbox on success
-#         SKIP_BUN=1           skip bun legs even if bun is on PATH
-# Exit:   0 = all required legs pass (skips for missing tools are fine);
+# Exit:   0 = every leg passes or is an expected red;
 #         1 = at least one unexpected FAIL or stale expected-failure entry.
 set -uo pipefail
 
@@ -60,20 +47,16 @@ EXTRACT="$HERE/extract-graph.mjs"
 COMPARE="$HERE/compare-graphs.mjs"
 [ -f "$EXTRACT" ] && [ -f "$COMPARE" ] || { echo "error: extract/compare scripts missing in $HERE" >&2; exit 2; }
 
+# The judge, fetched per run via npx into the sandbox HOME, so the pin is exact
+# on every machine. It is the pnpm the engine tracks.
+PNPM_PIN=12.4.1
+
 ALL_FIXTURES=(m1-add-noconflict m3-add-dedup m5-remove-prune)
 FIXTURES=("$@")
 [ ${#FIXTURES[@]} -gt 0 ] || FIXTURES=("${ALL_FIXTURES[@]}")
-
-HAVE_NPM=0;  command -v npm  >/dev/null 2>&1 && HAVE_NPM=1
-HAVE_PNPM=0; command -v pnpm >/dev/null 2>&1 && HAVE_PNPM=1
-HAVE_BUN=0;  command -v bun  >/dev/null 2>&1 && [ "${SKIP_BUN:-0}" != "1" ] && HAVE_BUN=1
-
-NPM_VERSION="$(npm  --version 2>/dev/null || echo MISSING)"
-PNPM_VERSION="$(pnpm --version 2>/dev/null || echo MISSING)"
-BUN_VERSION="$(bun  --version 2>/dev/null || echo MISSING)"
+LEGS="${LEGS:-pnpm nub}"
 
 # Hermetic sandbox — redirect HOME + XDG so no dev-box config leaks in or out.
-# Template deliberately avoids "aube" (brand sweep false-positive).
 CREATED_SANDBOX=0
 if [ -z "${SANDBOX_ROOT:-}" ]; then
   SANDBOX_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/nub-mutation.XXXXXX")"
@@ -86,13 +69,12 @@ export XDG_CACHE_HOME="$HOME/.cache"
 export XDG_CONFIG_HOME="$HOME/.config"
 export XDG_STATE_HOME="$HOME/.local/state"
 mkdir -p "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME"
-unset npm_config_default_lockfile_format NPM_CONFIG_DEFAULT_LOCKFILE_FORMAT 2>/dev/null || true
+
+run_pnpm() { npx -y "pnpm@$PNPM_PIN" "$@"; }
 
 echo "=== nub lockfile-mutation differential ==="
 echo "nub:      $NUB ($NUB_VERSION)"
-echo "npm:      $NPM_VERSION  (HAVE=$HAVE_NPM)"
-echo "pnpm:     $PNPM_VERSION  (HAVE=$HAVE_PNPM)"
-echo "bun:      $BUN_VERSION  (HAVE=$HAVE_BUN)"
+echo "pnpm:     $PNPM_PIN (pinned via npx)"
 echo "sandbox:  $SANDBOX_ROOT"
 echo ""
 
@@ -104,15 +86,28 @@ step() {
 
 wipe_node_modules() { find "$1" -name node_modules -type d -prune -exec rm -rf {} + 2>/dev/null || true; }
 
+# declare_pnpm <proj> — make the project a pnpm project by declaring the pin.
+declare_pnpm() {
+  (cd "$1" && node -e '
+    const fs = require("fs");
+    const manifest = JSON.parse(fs.readFileSync("package.json", "utf8"));
+    manifest.packageManager = process.argv[1];
+    fs.writeFileSync("package.json", JSON.stringify(manifest, null, 2) + "\n");
+  ' "pnpm@$PNPM_PIN")
+}
+
+# stage_fixture <fixture> <proj> <identity> — copy the manifest (never the
+# `mutation` spec, which is harness metadata) as the kind of project needed.
 stage_fixture() {
-  local fixture="$1" proj="$2"
+  local fixture="$1" proj="$2" identity="$3"
   rm -rf "$proj"; mkdir -p "$proj"
-  # Copy only package.json (and any extra manifest files) — NOT the `mutation`
-  # spec file, which is harness metadata, not project content.
   cp "$HERE/fixtures/$fixture/package.json" "$proj/package.json"
-  for extra in pnpm-workspace.yaml .npmrc; do
-    [ -f "$HERE/fixtures/$fixture/$extra" ] && cp "$HERE/fixtures/$fixture/$extra" "$proj/$extra"
-  done
+  if [ "$identity" = pnpm ]; then
+    if [ -f "$HERE/fixtures/$fixture/pnpm-workspace.yaml" ]; then
+      cp "$HERE/fixtures/$fixture/pnpm-workspace.yaml" "$proj/"
+    fi
+    declare_pnpm "$proj"
+  fi
 }
 
 # Read a `<verb>: <args>` line from the fixture's mutation spec.
@@ -121,133 +116,101 @@ mutation_field() {
   awk -F': *' -v v="$verb" '!/^#/ && $1==v { print $2; exit }' "$HERE/fixtures/$fixture/mutation"
 }
 
-# Per-PM real-PM install (writes lockfile + node_modules). Pre-mutation baseline.
-real_install() {
-  local pm="$1" proj="$2" log="$3"
-  case "$pm" in
-    npm)  ( cd "$proj" && step "$log" "npm install (baseline)"  npm install ) ;;
-    pnpm) ( cd "$proj" && step "$log" "pnpm install (baseline)" pnpm install --no-frozen-lockfile ) ;;
-    bun)  ( cd "$proj" && step "$log" "bun install (baseline)"  env BUN_INSTALL_CACHE_DIR="$proj/.bun-cache" bun install ) ;;
+# baseline <who> <proj> <log> — the pre-mutation install, by nub or real pnpm.
+baseline() {
+  local who="$1" proj="$2" log="$3"
+  case "$who" in
+    nub)  ( cd "$proj" && step "$log" "nub install (baseline)" "$NUB" install ) ;;
+    pnpm) ( cd "$proj" && step "$log" "pnpm install (baseline)" run_pnpm install ) ;;
   esac
 }
 
-# Per-PM real-PM mutation matching nub's. `add: X` -> `<pm> add X`;
-# `remove: X` -> `<pm> remove X`; `update: X` -> `<pm> update X`.
-real_mutate() {
-  local pm="$1" proj="$2" log="$3" verb="$4" args="$5"
+# mutate <who> <proj> <log> <verb> <args> — nub and pnpm share the verb names.
+mutate() {
+  local who="$1" proj="$2" log="$3" verb="$4" args="$5"
   # shellcheck disable=SC2086
-  case "$pm--$verb" in
-    npm--add)     ( cd "$proj" && step "$log" "npm install $args"   npm install $args ) ;;
-    npm--remove)  ( cd "$proj" && step "$log" "npm uninstall $args" npm uninstall $args ) ;;
-    npm--update)  ( cd "$proj" && step "$log" "npm update $args"    npm update $args ) ;;
-    pnpm--add)    ( cd "$proj" && step "$log" "pnpm add $args"      pnpm add $args ) ;;
-    pnpm--remove) ( cd "$proj" && step "$log" "pnpm remove $args"   pnpm remove $args ) ;;
-    pnpm--update) ( cd "$proj" && step "$log" "pnpm update $args"   pnpm update $args ) ;;
-    bun--add)     ( cd "$proj" && step "$log" "bun add $args"       env BUN_INSTALL_CACHE_DIR="$proj/.bun-cache" bun add $args ) ;;
-    bun--remove)  ( cd "$proj" && step "$log" "bun remove $args"    env BUN_INSTALL_CACHE_DIR="$proj/.bun-cache" bun remove $args ) ;;
-    bun--update)  ( cd "$proj" && step "$log" "bun update $args"    env BUN_INSTALL_CACHE_DIR="$proj/.bun-cache" bun update $args ) ;;
-    *) echo "FAILED: no real-PM mapping for $pm $verb" >>"$log"; return 1 ;;
+  case "$who" in
+    nub)  ( cd "$proj" && step "$log" "nub $verb $args" "$NUB" "$verb" $args ) ;;
+    pnpm) ( cd "$proj" && step "$log" "pnpm $verb $args" run_pnpm "$verb" $args ) ;;
   esac
 }
 
-# nub's mutation. nub auto-detects the lockfile format already on disk.
-nub_mutate() {
-  local proj="$1" log="$2" verb="$3" args="$4"
-  # shellcheck disable=SC2086
-  case "$verb" in
-    add)    ( cd "$proj" && step "$log" "nub add $args"    "$NUB" add $args ) ;;
-    remove) ( cd "$proj" && step "$log" "nub remove $args" "$NUB" remove $args ) ;;
-    update) ( cd "$proj" && step "$log" "nub update $args" "$NUB" update $args ) ;;
-    *) echo "FAILED: unknown nub verb $verb" >>"$log"; return 1 ;;
-  esac
-}
-
-lockfile_of() {
-  case "$1" in
-    npm)  echo "package-lock.json" ;;
-    pnpm) echo "pnpm-lock.yaml" ;;
-    bun)  echo "bun.lock" ;;
-  esac
-}
-
-# Real PM frozen-accept of nub's mutated lockfile, with zero further churn.
-frozen_accept() {
-  local pm="$1" proj="$2" log="$3"
-  local lf; lf="$(lockfile_of "$pm")"
-  [ -f "$proj/$lf" ] || { echo "FAILED: nub produced no $lf to frozen-accept" >>"$log"; return 1; }
-  cp "$proj/$lf" "$log.frozen-before"
+# pnpm_accepts <proj> <log> <label> — real pnpm frozen-installs the project's
+# pnpm-lock.yaml and leaves it byte-identical.
+pnpm_accepts() {
+  local proj="$1" log="$2" label="$3"
+  [ -f "$proj/pnpm-lock.yaml" ] || { echo "FAILED: no pnpm-lock.yaml to judge ($label)" >>"$log"; return 1; }
+  cp "$proj/pnpm-lock.yaml" "$log.frozen-before"
   wipe_node_modules "$proj"
-  case "$pm" in
-    npm)  ( cd "$proj" && step "$log" "npm ci (frozen-accept nub lock)" npm ci ) \
-            || { echo "FAILED: npm ci rejected nub's mutated package-lock.json" >>"$log"; return 1; } ;;
-    pnpm) ( cd "$proj" && step "$log" "pnpm install --frozen-lockfile" pnpm install --frozen-lockfile ) \
-            || { echo "FAILED: pnpm rejected nub's mutated pnpm-lock.yaml (--frozen-lockfile)" >>"$log"; return 1; } ;;
-    bun)  ( cd "$proj" && step "$log" "bun install --frozen-lockfile (cold cache)" \
-              env BUN_INSTALL_CACHE_DIR="$proj/.bun-cold-cache" bun install --frozen-lockfile ) \
-            || { echo "FAILED: bun rejected nub's mutated bun.lock (--frozen-lockfile)" >>"$log"; return 1; } ;;
-  esac
-  cmp -s "$log.frozen-before" "$proj/$lf" || {
-    echo "FAILED: $pm rewrote nub's mutated $lf during frozen install (churn)" >>"$log"
-    diff -u "$log.frozen-before" "$proj/$lf" >>"$log" 2>&1 || true
+  ( cd "$proj" && step "$log" "real pnpm frozen accept ($label)" run_pnpm install --frozen-lockfile ) \
+    || { echo "FAILED: real pnpm rejected the mutated lockfile ($label, --frozen-lockfile)" >>"$log"; return 1; }
+  cmp -s "$log.frozen-before" "$proj/pnpm-lock.yaml" || {
+    echo "FAILED: real pnpm rewrote the mutated lockfile during a frozen install ($label)" >>"$log"
+    diff -u "$log.frozen-before" "$proj/pnpm-lock.yaml" >>"$log" 2>&1 || true
     return 1
   }
-  return 0
 }
 
-# Semantic differential: nub's mutated graph ≡ real-PM's mutated graph.
+# semantic_equal <nub_proj> <ref_proj> <log> — nub's mutated graph equals real pnpm's.
 semantic_equal() {
-  local pm="$1" nub_proj="$2" ref_proj="$3" log="$4"
+  local nub_proj="$1" ref_proj="$2" log="$3"
   local ga="$log.graph-nub.json" gb="$log.graph-ref.json"
-  node "$EXTRACT" "$nub_proj" --format "$pm" >"$ga" 2>>"$log" \
-    || { echo "FAILED: could not extract graph from nub's $pm lockfile" >>"$log"; return 1; }
-  node "$EXTRACT" "$ref_proj" --format "$pm" >"$gb" 2>>"$log" \
-    || { echo "FAILED: could not extract graph from real $pm lockfile" >>"$log"; return 1; }
-  { echo; echo "### semantic compare (nub vs real $pm)"; } >>"$log"
-  if node "$COMPARE" "$ga" "$gb" --label-a "nub-$pm" --label-b "real-$pm" >>"$log" 2>&1; then
-    return 0
-  fi
-  echo "FAILED: nub's mutated $pm graph diverges from real $pm's (see compare output above)" >>"$log"
+  node "$EXTRACT" "$nub_proj" >"$ga" 2>>"$log" \
+    || { echo "FAILED: could not extract the graph from nub's lockfile" >>"$log"; return 1; }
+  node "$EXTRACT" "$ref_proj" >"$gb" 2>>"$log" \
+    || { echo "FAILED: could not extract the graph from real pnpm's lockfile" >>"$log"; return 1; }
+  { echo; echo "### semantic compare (nub vs real pnpm)"; } >>"$log"
+  node "$COMPARE" "$ga" "$gb" --label-a nub --label-b real-pnpm >>"$log" 2>&1 && return 0
+  echo "FAILED: nub's mutated graph diverges from real pnpm's (see compare output above)" >>"$log"
   return 1
 }
 
-# One (fixture, pm) leg — run the whole mutation loop.
-run_leg() {
-  local fixture="$1" pm="$2" log="$3"
-  local base="$SANDBOX_ROOT/runs/$fixture--$pm"
-  local nub_proj="$base/nub" ref_proj="$base/ref"
-  stage_fixture "$fixture" "$nub_proj"
-  stage_fixture "$fixture" "$ref_proj"
-
-  local verb args
-  for v in add remove update; do
-    args="$(mutation_field "$fixture" "$v")"
-    [ -n "$args" ] && { verb="$v"; break; }
-  done
-  [ -n "${verb:-}" ] || { echo "FAILED: fixture $fixture has no mutation spec" >>"$log"; return 1; }
-
-  real_install "$pm" "$nub_proj" "$log" || { echo "FAILED: baseline install ($pm) in nub copy" >>"$log"; return 1; }
-  real_install "$pm" "$ref_proj" "$log" || { echo "FAILED: baseline install ($pm) in ref copy" >>"$log"; return 1; }
-
-  nub_mutate "$nub_proj" "$log" "$verb" "$args" \
-    || { echo "FAILED: nub $verb $args errored" >>"$log"; return 1; }
-  real_mutate "$pm" "$ref_proj" "$log" "$verb" "$args" \
-    || { echo "FAILED: real $pm $verb $args errored" >>"$log"; return 1; }
-
-  # (a) frozen-accept zero-churn, then (b) semantic equivalence.
-  frozen_accept "$pm" "$nub_proj" "$log" || return 1
-  semantic_equal "$pm" "$nub_proj" "$ref_proj" "$log" || return 1
-  return 0
+leg_pnpm() {
+  local fixture="$1" log="$2" verb="$3" args="$4"
+  local nub_proj="$SANDBOX_ROOT/runs/$fixture--pnpm/nub" ref_proj="$SANDBOX_ROOT/runs/$fixture--pnpm/ref"
+  stage_fixture "$fixture" "$nub_proj" pnpm
+  stage_fixture "$fixture" "$ref_proj" pnpm
+  baseline pnpm "$nub_proj" "$log" || { echo "FAILED: baseline pnpm install (nub copy)" >>"$log"; return 1; }
+  baseline pnpm "$ref_proj" "$log" || { echo "FAILED: baseline pnpm install (reference copy)" >>"$log"; return 1; }
+  mutate nub "$nub_proj" "$log" "$verb" "$args" || { echo "FAILED: nub $verb $args errored" >>"$log"; return 1; }
+  mutate pnpm "$ref_proj" "$log" "$verb" "$args" || { echo "FAILED: real pnpm $verb $args errored" >>"$log"; return 1; }
+  pnpm_accepts "$nub_proj" "$log" "pnpm project" || return 1
+  semantic_equal "$nub_proj" "$ref_proj" "$log"
 }
 
-skip_reason() {
-  # Hook for future PM-specific mutation cases (none yet). Mirrors conformance.
-  local fixture="$1" pm="$2"
-  :
+leg_nub() {
+  local fixture="$1" log="$2" verb="$3" args="$4"
+  local base="$SANDBOX_ROOT/runs/$fixture--nub"
+  local nub_proj="$base/nub" ref_proj="$base/ref" judge="$base/judge"
+  stage_fixture "$fixture" "$nub_proj" nub
+  stage_fixture "$fixture" "$ref_proj" pnpm
+  baseline nub "$nub_proj" "$log" || { echo "FAILED: baseline nub install" >>"$log"; return 1; }
+  baseline pnpm "$ref_proj" "$log" || { echo "FAILED: baseline pnpm install (reference copy)" >>"$log"; return 1; }
+  mutate nub "$nub_proj" "$log" "$verb" "$args" || { echo "FAILED: nub $verb $args errored" >>"$log"; return 1; }
+  mutate pnpm "$ref_proj" "$log" "$verb" "$args" || { echo "FAILED: real pnpm $verb $args errored" >>"$log"; return 1; }
+  [ -f "$nub_proj/nub.lock" ] || { echo "FAILED: nub wrote no nub.lock" >>"$log"; return 1; }
+  cp "$nub_proj/nub.lock" "$log.nub-before"
+  wipe_node_modules "$nub_proj"
+  ( cd "$nub_proj" && step "$log" "nub install --frozen-lockfile" "$NUB" install --frozen-lockfile ) \
+    || { echo "FAILED: a frozen nub install rejected the mutated nub.lock" >>"$log"; return 1; }
+  cmp -s "$log.nub-before" "$nub_proj/nub.lock" \
+    || { echo "FAILED: a frozen nub install rewrote the mutated nub.lock" >>"$log"; return 1; }
+  # nub.lock is pnpm's lockfile format, so the same file in a pnpm-declaring
+  # copy is real pnpm's to judge.
+  rm -rf "$judge"; mkdir -p "$judge"
+  cp "$nub_proj/package.json" "$judge/package.json"
+  cp "$nub_proj/nub.lock" "$judge/pnpm-lock.yaml"
+  if [ -f "$HERE/fixtures/$fixture/pnpm-workspace.yaml" ]; then
+    cp "$HERE/fixtures/$fixture/pnpm-workspace.yaml" "$judge/"
+  fi
+  declare_pnpm "$judge"
+  pnpm_accepts "$judge" "$log" "nub.lock as pnpm-lock.yaml" || return 1
+  semantic_equal "$nub_proj" "$ref_proj" "$log"
 }
 
 expected_reason() {
-  awk -v f="$1" -v p="$2" \
-    '!/^#/ && $1==f && $2==p { $1=""; $2=""; sub(/^  */,""); print; exit }' \
+  awk -v f="$1" -v l="$2" \
+    '!/^#/ && $1==f && $2==l { $1=""; $2=""; sub(/^  */,""); print; exit }' \
     "$HERE/expected-failures.txt" 2>/dev/null
 }
 
@@ -255,62 +218,49 @@ RESULTS=(); FAILS=0; XPASSES=0
 
 for fixture in "${FIXTURES[@]}"; do
   [ -d "$HERE/fixtures/$fixture" ] || { echo "error: unknown fixture '$fixture'" >&2; exit 2; }
+  verb=""; args=""
+  for v in add remove update; do
+    args="$(mutation_field "$fixture" "$v")"
+    [ -n "$args" ] && { verb="$v"; break; }
+  done
+  [ -n "$verb" ] || { echo "error: fixture $fixture has no mutation spec" >&2; exit 2; }
 
-  declare -a pms=()
-  [ "$HAVE_NPM"  -eq 1 ] && pms+=(npm)
-  [ "$HAVE_PNPM" -eq 1 ] && pms+=(pnpm)
-  [ "$HAVE_BUN"  -eq 1 ] && pms+=(bun)
-
-  for pm in "${pms[@]}"; do
-    case "$pm" in
-      npm)  pmv="$NPM_VERSION"  ;;
-      pnpm) pmv="$PNPM_VERSION" ;;
-      bun)  pmv="$BUN_VERSION"  ;;
-    esac
-    label="$fixture × $pm@$pmv"
-    echo "--- $label"
-
-    skip="$(skip_reason "$fixture" "$pm")"
-    if [ -n "$skip" ]; then
-      echo "    skip (by design): $skip"
-      RESULTS+=("$fixture|$pm|$pmv|SKIP (by design)")
-      continue
-    fi
-
-    log="$SANDBOX_ROOT/logs/$fixture--$pm.log"; : >"$log"
+  for leg in $LEGS; do
+    echo "--- $fixture × $leg ($verb $args)"
+    log="$SANDBOX_ROOT/logs/$fixture--$leg.log"; : >"$log"
     ok=0
-    run_leg "$fixture" "$pm" "$log" || ok=$?
+    case "$leg" in
+      pnpm) leg_pnpm "$fixture" "$log" "$verb" "$args" || ok=$? ;;
+      nub)  leg_nub  "$fixture" "$log" "$verb" "$args" || ok=$? ;;
+      *) echo "error: unknown leg '$leg'" >&2; exit 2 ;;
+    esac
 
-    reason="$(expected_reason "$fixture" "$pm")"
+    reason="$(expected_reason "$fixture" "$leg")"
     if [ "$ok" -eq 0 ] && [ -z "$reason" ]; then
       echo "    PASS"
-      RESULTS+=("$fixture|$pm|$pmv|PASS")
+      RESULTS+=("$fixture|$leg|PASS")
     elif [ "$ok" -eq 0 ] && [ -n "$reason" ]; then
       echo "    XPASS-STALE: now passes — remove from expected-failures.txt: $reason"
       XPASSES=$((XPASSES + 1))
-      RESULTS+=("$fixture|$pm|$pmv|XPASS-STALE")
+      RESULTS+=("$fixture|$leg|XPASS-STALE")
     elif [ -n "$reason" ]; then
       echo "    expected red: $reason"
-      RESULTS+=("$fixture|$pm|$pmv|RED (expected)")
+      RESULTS+=("$fixture|$leg|RED (expected)")
     else
       FAILS=$((FAILS + 1))
       echo "    FAIL — log: $log"
       tail -n 24 "$log" | sed 's/^/    | /'
-      RESULTS+=("$fixture|$pm|$pmv|FAIL")
+      RESULTS+=("$fixture|$leg|FAIL")
     fi
   done
 done
 
-[ "$HAVE_NPM"  -eq 0 ] && echo "NOTE: npm not on PATH — npm legs skipped"
-[ "$HAVE_PNPM" -eq 0 ] && echo "NOTE: pnpm not on PATH — pnpm legs skipped"
-[ "$HAVE_BUN"  -eq 0 ] && echo "NOTE: bun not on PATH (or SKIP_BUN=1) — bun legs skipped"
-
 echo ""
 echo "=== results ==="
-printf '%-22s %-6s %-12s %s\n' "fixture" "pm" "pm-version" "result"
+printf '%-22s %-6s %s\n' "fixture" "leg" "result"
 for row in "${RESULTS[@]}"; do
-  IFS='|' read -r f p v s <<<"$row"
-  printf '%-22s %-6s %-12s %s\n' "$f" "$p" "$v" "$s"
+  IFS='|' read -r f l s <<<"$row"
+  printf '%-22s %-6s %s\n' "$f" "$l" "$s"
 done
 echo ""
 
