@@ -55,9 +55,11 @@ gcloud services enable \
 The deployer needs Google's [source-deployment roles](https://docs.cloud.google.com/run/docs/deploying-source-code#before_you_begin). Source builds use the Compute Engine default service account unless the project selects another builder. A project administrator can grant the default account its required builder role:
 
 ```bash
-PROJECT_NUMBER=$(gcloud projects describe PROJECT_ID --format="value(projectNumber)")
+PROJECT_NUMBER=$(gcloud projects describe PROJECT_ID \
+  --format="value(projectNumber)")
+COMPUTE_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
 gcloud projects add-iam-policy-binding PROJECT_ID \
-  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+  --member="serviceAccount:$COMPUTE_SA" \
   --role="roles/run.builder"
 ```
 

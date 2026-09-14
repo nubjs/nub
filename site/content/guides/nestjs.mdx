@@ -21,8 +21,8 @@ NestJS resolves constructor dependencies by their declared type, and it reads th
 {
   "compilerOptions": {
     // ...
-    "experimentalDecorators": true,  // the legacy decorator form Nest is written against
-    "emitDecoratorMetadata": true    // emits design:paramtypes for the DI container
+    "experimentalDecorators": true,  // the form Nest is written against
+    "emitDecoratorMetadata": true    // design:paramtypes for the DI
   }
 }
 ```
@@ -70,7 +70,7 @@ This is the one capability you give up. The Swagger and GraphQL CLI plugins are 
 // nest-cli.json
 {
   "compilerOptions": {
-    "plugins": ["@nestjs/swagger"]   // runs only under nest build / nest start
+    "plugins": ["@nestjs/swagger"]   // only under nest build / start
   }
 }
 ```

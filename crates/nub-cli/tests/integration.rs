@@ -25,6 +25,15 @@ fn run_nub(fixture: &str, file: &str) -> (String, String, i32) {
     run_nub_with_env(fixture, file, &[])
 }
 
+#[test]
+fn gc_startup_preserves_explicit_worker_limits() {
+    let (stdout, stderr, code) = run_nub("gc-startup", "main.cjs");
+    assert_eq!(code, 0, "{stderr}");
+    let report: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(report["workers"].as_array().unwrap().len(), 4);
+    assert_eq!(report["fork"]["workers"].as_array().unwrap().len(), 4);
+}
+
 /// A unique per-invocation cache dir, so concurrent integration tests never share
 /// the transpile cache / project-keyed webstorage under the ambient
 /// `~/.cache/nub` — keeps the suite hermetic and removes the cross-test

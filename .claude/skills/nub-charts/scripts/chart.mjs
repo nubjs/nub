@@ -1,9 +1,12 @@
 // House chart renderer for nubjs.com blog and docs figures.
 //
-// Three forms, all 720px wide with a monospace label gutter on the left:
+// Three forms, all 720px wide, with a monospace label gutter on the left that is exactly as
+// wide as the longest label and a bar column that ends where the longest trailing text meets
+// the right padding — so the ink sits centered in the frame with the same 22px on either side
+// whatever the labels are. Nothing here hardcodes where the bars start or end.
 //   pairedChart  — the same measurement under two conditions, one bar each per row (node vs nub).
-//                  Groups carry their own axis, unit and direction, so a throughput group and a
-//                  latency group can share one figure without sharing a scale.
+//                  No axis: the value labels are the numbers. Groups carry their own scale and
+//                  unit, so two magnitudes can share one figure without sharing a scale.
 //   overlapChart — one measurement against another on a shared axis where the subject is the
 //                  SMALLER number (a time). The slower series is a track; the faster one is an
 //                  ember bar drawn inside it, so the gap is the win.
@@ -86,6 +89,27 @@ function fmtTick(v, unitLabel, last, axisMax) {
 
 /** Approximate rendered width of 12px Encode Sans, for placing things that must not collide. */
 const textW = (s, size = 12) => String(s).length * size * 0.54;
+/** The same for the monospace labels: Geist Mono and Menlo both advance 0.6em per glyph. */
+const monoW = (s, size = 12) => String(s).length * size * 0.6;
+
+// The breathing room around the ink. Without it the figure reads as cropped, and the two
+// horizontal margins are what the eye compares: a figure with 140px of nothing to the left of
+// its labels and 40px to the right of its notes reads as pushed off-center however carefully
+// each element is aligned (maintainer, 2026-09-12). The gutter and the bar column are sized
+// from the content so that both side margins come out at PAD_X. The sides get more than the
+// top and bottom on purpose: in a frame this wide, equal margins all round look tight at the
+// sides, and 22px there read as cramped even once they matched (same day).
+const PAD_X = 56;
+const PAD_Y = 30;
+/** Left edge of the bar column: the widest label, right-aligned, plus its gap, after the padding. */
+const gutterFor = (labels) => PAD_X + Math.ceil(Math.max(0, ...labels.map((l) => monoW(l)))) + 12;
+/**
+ * Right edge of the bar column: the widest column such that every piece of text anchored to a
+ * bar still ends inside the padding. Each anchor is text placed at X0 + f·(XMAX − X0) + c, where
+ * f is the bar's share of the axis and c the text's offset plus width, so the binding one is
+ * the row whose bar-plus-label runs longest — not necessarily the longest bar.
+ */
+const fitRight = (W, X0, anchors) => Math.floor(Math.min(W - PAD_X, ...anchors.filter((a) => a.f > 0).map((a) => X0 + (W - PAD_X - X0 - a.c) / a.f)));
 
 function frame({ theme, opaque, W, H, title }) {
   const t = THEMES[theme];
@@ -109,36 +133,37 @@ function heading_(s, t, X0, padY, heading, headingNote) {
 }
 
 /**
- * groups: [{ title?, unit?, unitLabel?, rows: [{ label, a, b, note? }] }] — `a` is the baseline
- * (plain node, drawn as a track-colored bar), `b` the subject (nub, drawn in the accent). Each
- * group has its own axis, so `unit`/`unitLabel` are per group; pass one group when everything
- * shares a unit. Every group in a figure reads in the SAME direction — a figure never mixes
+ * groups: [{ title?, unit?, rows: [{ label, a, b, note? }] }] — `a` is the baseline (plain
+ * node, drawn as a track-colored bar), `b` the subject (nub, drawn in the accent). Each group
+ * has its own scale, and `unit` formats its value labels; no axis is drawn, so the unit has to
+ * be in the label (`fmtReq` gives `66 req/s`). Every group in a figure reads in the SAME direction — a figure never mixes
  * "higher is better" with "lower is better"; that is two figures. Rows are drawn in the order given.
  */
 export function pairedChart({ groups, heading, headingNote, aLabel = "node", bLabel = "nub", accent = "ember", title, theme = "light", opaque = false }) {
   const t = THEMES[theme];
   const barFill = t.accents[accent] ?? t.bar;
-  const W = 720, X0 = 200, rowH = 44, barH = 12, gap = 3;
-  const padY = 22;
-  // The bar column ends at 640 unless the longest bar's value label and note would run off the
-  // canvas, in which case the column shrinks to fit them: a clipped "+3%" is invisible in the
-  // source and the first thing a reader sees.
-  const overhang = Math.max(0, ...groups.flatMap((g) => {
+  const W = 720, rowH = 44, barH = 12, gap = 3;
+  const padY = PAD_Y;
+  const X0 = gutterFor(groups.flatMap((g) => g.rows.map((r) => r.label)));
+  // The column runs as wide as the value labels and notes allow: a clipped "+3%" is invisible
+  // in the source and the first thing a reader sees, so the row whose bar-plus-text runs
+  // longest sets the edge.
+  const XMAX = fitRight(W, X0, groups.flatMap((g) => {
     const unit = g.unit ?? fmtReq;
-    const max = Math.max(...g.rows.flatMap((r) => [r.a, r.b]));
-    return g.rows.map((r) => {
-      const v = Math.max(r.a, r.b);
-      const label = v === r.b ? unit(r.b) : unit(r.a);
-      const note = v === r.b && r.note ? 8 + textW(r.note, 11) : 0;
-      return X0 + (v / axisFor(max).max) * (640 - X0) + 7 + textW(label, 11) + note - (W - padY);
-    });
+    const axis = axisFor(Math.max(...g.rows.flatMap((r) => [r.a, r.b])));
+    return g.rows.flatMap((r) => [
+      { f: r.a / axis.max, c: 7 + textW(unit(r.a), 11) },
+      { f: r.b / axis.max, c: 7 + unit(r.b).length * 6.6 + (r.note ? 8 + textW(r.note, 11) : 0) },
+    ]);
   }));
-  const XMAX = 640 - Math.ceil(overhang);
   const headH = heading ? 20 : 0;
   const legendH = aLabel && bLabel ? 22 : 0;
-  const groupTitleH = 24, axisH = 30, groupGap = 18;
+  // No axis: every bar carries its own value label, so ticks and tick labels only repeated the
+  // numbers and, with a scale per group, at positions that did not line up from one group to
+  // the next (maintainer, 2026-09-12). Groups are separated by spacing alone.
+  const groupTitleH = 24, groupGap = 10;
   const top = padY + headH + legendH + 8;
-  const plotH = groups.reduce((h, g) => h + (g.title ? groupTitleH : 0) + g.rows.length * rowH + axisH, 0) + (groups.length - 1) * groupGap;
+  const plotH = groups.reduce((h, g) => h + (g.title ? groupTitleH : 0) + g.rows.length * rowH, 0) + (groups.length - 1) * groupGap;
   const H = top + plotH + padY - 8;
 
   let s = frame({ theme, opaque, W, H, title: title ?? heading });
@@ -154,12 +179,7 @@ export function pairedChart({ groups, heading, headingNote, aLabel = "node", bLa
     }
     const axis = axisFor(Math.max(...g.rows.flatMap((r) => [r.a, r.b])));
     const sx = (v) => Math.max((v / axis.max) * (XMAX - X0), 3);
-    const rowsTop = y, axisY = y + g.rows.length * rowH + 2;
-    for (const v of axis.ticks) {
-      const x = X0 + (v / axis.max) * (XMAX - X0);
-      s += `<line x1="${x.toFixed(1)}" y1="${rowsTop - 2}" x2="${x.toFixed(1)}" y2="${axisY}" stroke="${t.grid}" stroke-width="1"/>`;
-      s += `<text x="${x.toFixed(1)}" y="${axisY + 15}" text-anchor="middle" fill="${t.muted}" font-size="11">${v ? esc(fmtTick(v, g.unitLabel, v === axis.max, axis.max)) : "0"}</text>`;
-    }
+    const rowsTop = y;
     g.rows.forEach((r, i) => {
       const ry = rowsTop + i * rowH + (rowH - (2 * barH + gap)) / 2;
       s += `<text x="${X0 - 12}" y="${ry + barH + gap / 2 + 4}" text-anchor="end" fill="${t.text}" font-family="${MONO}" font-size="12">${esc(r.label)}</text>`;
@@ -172,7 +192,7 @@ export function pairedChart({ groups, heading, headingNote, aLabel = "node", bLa
       s += `<text x="${leadX.toFixed(1)}" y="${ry + 2 * barH + gap - 1}" fill="${t.text}" font-weight="700" font-size="11">${esc(lead)}</text>`;
       if (r.note) s += `<text x="${(leadX + lead.length * 6.6 + 8).toFixed(1)}" y="${ry + 2 * barH + gap - 1}" fill="${t.muted}" font-size="11">${esc(r.note)}</text>`;
     });
-    y = axisY + axisH + groupGap;
+    y = rowsTop + g.rows.length * rowH + groupGap;
   }
   return `${s}</svg>`;
 }
@@ -186,13 +206,25 @@ export function pairedChart({ groups, heading, headingNote, aLabel = "node", bLa
 export function overlapChart({ rows, heading, headingNote, trackLabel, barLabel, title, axisMax, ticks, unit = fmtNs, unitLabel = "ns", accent = "ember", theme = "light", opaque = false, callout }) {
   const t = THEMES[theme];
   const barFill = t.accents[accent] ?? t.bar;
-  const W = 720, X0 = 250, XMAX = 610, rowH = 34, barH = 20;
-  const padY = 22; // breathing room above the heading and below the axis labels; without it the figure reads as cropped
+  const W = 720, rowH = 34, barH = 20;
+  const padY = PAD_Y;
   const headH = heading ? 20 : 0;
   const legendH = trackLabel && barLabel ? 22 : 0;
   const top = padY + headH + legendH + 12;
   const H = top + rows.length * rowH + 34 + padY;
   const axis = axisMax ? { max: axisMax, ticks: ticks ?? axisFor(axisMax).ticks } : axisFor(Math.max(...rows.map((r) => r.track)));
+  const X0 = gutterFor(rows.map((r) => r.label));
+  // A note clears whichever runs longer, the track or the bold value label, so both are anchors.
+  const XMAX = fitRight(W, X0, [
+    { f: 1, c: textW(fmtTick(axis.max, unitLabel, true, axis.max), 11) / 2 },
+    ...rows.flatMap((r) => {
+      const lead = unit(r.bar);
+      return [
+        { f: r.bar / axis.max, c: 7 + lead.length * 7 },
+        ...(r.note ? [{ f: r.track / axis.max, c: 8 + textW(r.note) }, { f: r.bar / axis.max, c: 7 + lead.length * 7 + 10 + textW(r.note) }] : []),
+      ];
+    }),
+  ]);
   const sx = (v) => Math.max((v / axis.max) * (XMAX - X0), 3);
 
   let s = frame({ theme, opaque, W, H, title: title ?? heading });
@@ -242,10 +274,12 @@ export function overlapChart({ rows, heading, headingNote, trackLabel, barLabel,
 export function rankedChart({ groups, heading, title, unit = fmtOps, accent = "ember", theme = "light", opaque = false }) {
   const t = THEMES[theme];
   const barFill = t.accents[accent] ?? t.bar;
-  const W = 720, X0 = 160, XMAX = 640, rowH = 30, barH = 18, top = 44, groupGap = 44;
+  const W = 720, rowH = 30, barH = 18, top = 44, groupGap = 44;
   const multi = groups.length > 1;
   const H = top + groups.reduce((h, g) => h + g.rows.length * rowH + (multi ? groupGap : 4), 0);
   const max = Math.max(...groups.flatMap((g) => g.rows.map((r) => r.value)));
+  const X0 = gutterFor(groups.flatMap((g) => g.rows.map((r) => r.label)));
+  const XMAX = fitRight(W, X0, groups.flatMap((g) => g.rows.map((r) => ({ f: r.value / max, c: 8 + textW(unit(r.value)) * (r.highlight ? 1.08 : 1) }))));
 
   let s = frame({ theme, opaque, W, H, title: title ?? heading });
   if (heading) s += `<text x="${X0}" y="22" fill="${t.text}" font-weight="700" font-size="16">${esc(heading)}</text>`;

@@ -97,7 +97,8 @@ nub pm pin 0.2.10    # pin an exact version
 $ nub pm pin
 pinned nub@0.2.10
   package.json: packageManager = nub@0.2.10
-  package.json: devEngines.packageManager = { name: "nub", version: "^0.2.10", onFail: "ignore" }
+  package.json: devEngines.packageManager =
+    { name: "nub", version: "^0.2.10", onFail: "ignore" }
 ```
 
 It writes the two pin fields — the exact `packageManager` and the `devEngines.packageManager` caret beside it — and nothing else: no lockfile conversion, no config migration. The full switch onto Nub is [`nub pm use nub`](#nub-pm-use); `pin` only records the version, the package-manager analog of [Nub's Node pin](/docs/node).

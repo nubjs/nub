@@ -29,8 +29,8 @@
 //!   DACL rather than inheriting access from a potentially shared parent.
 //!
 //! - **R2 — verify the loaded code against a baked-in hash (integrity backstop).**
-//!   `build.rs` bakes the BLAKE3 digest of the five directly-loaded entrypoints
-//!   (`preload.mjs`, `preload.cjs`, `watch-env-guard.cjs`,
+//!   `build.rs` bakes the BLAKE3 digest of the directly-loaded entrypoints
+//!   (`preload.mjs`, `preload.cjs`, `gc-startup.cjs`, `watch-env-guard.cjs`,
 //!   `compile-preamble.mjs`, and `addons/nub-native.node`) into the binary. On
 //!   the load path (once per process, inside the OnceLock init, ~6 ms for the ~9 MB
 //!   addon on aarch64 — BLAKE3 over software SHA-256's ~28 ms there) the EXTRACTED
@@ -72,6 +72,7 @@ const CACHE_KEY: &str = env!("NUB_RUNTIME_CACHE_KEY");
 /// (signed) binary so a tampered on-disk file can't swap its own hash alongside it.
 const HASH_PRELOAD_MJS: &str = env!("NUB_RUNTIME_HASH_PRELOAD_MJS");
 const HASH_PRELOAD_CJS: &str = env!("NUB_RUNTIME_HASH_PRELOAD_CJS");
+const HASH_GC_STARTUP: &str = env!("NUB_RUNTIME_HASH_GC_STARTUP");
 const HASH_WATCH_ENV_GUARD: &str = env!("NUB_RUNTIME_HASH_WATCH_ENV_GUARD");
 const HASH_THREADPOOL_SNAPSHOT: &str = env!("NUB_RUNTIME_HASH_THREADPOOL_SNAPSHOT");
 const HASH_COMPILE_PREAMBLE: &str = env!("NUB_RUNTIME_HASH_COMPILE_PREAMBLE");
@@ -84,9 +85,10 @@ const RUNTIME_TREE_BLAKE3: &str = env!("NUB_RUNTIME_TREE_BLAKE3");
 /// per-load hash (R1's 0700 owner-only base already closes their planted-file
 /// vector, and hashing the whole ~13 MB tree every run would be a real regression
 /// for a fast script runner — the entrypoints keep the cost ~1-2 ms).
-const VERIFIED_ENTRYPOINTS: [(&str, &str); 6] = [
+const VERIFIED_ENTRYPOINTS: [(&str, &str); 7] = [
     ("preload.mjs", HASH_PRELOAD_MJS),
     ("preload.cjs", HASH_PRELOAD_CJS),
+    ("gc-startup.cjs", HASH_GC_STARTUP),
     ("watch-env-guard.cjs", HASH_WATCH_ENV_GUARD),
     ("threadpool-snapshot.cjs", HASH_THREADPOOL_SNAPSHOT),
     // `nub compile` loads this executable JS straight from the extracted runtime.
@@ -734,7 +736,7 @@ fn clean_racing_winner(target: &Path, verify: impl Fn(&Path) -> bool) -> Option<
 /// This intentionally sits outside [`EXTRACTED`]: [`ensure_runtime`] memoizes the
 /// normal launch-path entrypoint check, but compile reads transitive support files
 /// and must detect corruption that happens before or after that memoization. The
-/// full-tree hash is paid only by compile; ordinary launches retain the five-file
+/// full-tree hash is paid only by compile; ordinary launches retain the entrypoint
 /// check and its canary policy.
 pub(crate) fn verify_or_heal_embedded_runtime_tree(dir: &Path) -> bool {
     let Some((base, target)) = canonical_runtime_target(dir) else {
@@ -774,7 +776,7 @@ pub(crate) fn verify_or_heal_embedded_runtime_tree(dir: &Path) -> bool {
     false
 }
 
-/// Re-hash the extracted entrypoints in `dir` against the baked digests. All six
+/// Re-hash the extracted entrypoints in `dir` against the baked digests. All
 /// must read AND match. ~6 ms (entrypoints only, addon-dominated), paid at most once
 /// per process (the caller runs inside the `EXTRACTED` OnceLock init).
 fn verify_entrypoints(dir: &Path) -> bool {

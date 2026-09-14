@@ -56,7 +56,7 @@ The 23.x exclusion is not a special case, it is the tier definition applied corr
 
 Using `--require` on the fast tier is a correctness mechanism, not an optimization. An `--import` preload forces eager ESM loader initialization, which routes even a CommonJS entry point through the async module job and breaks `executionAsyncId`, sync exception origin, `require.main.id` and `module.parent`. Coverage and composition behavior of the hooks API is measured in [[research/registerhooks-coverage-matrix]].
 
-The standalone loader also accepts `--import @nubjs/loader`. Its own preload is excluded from foreign-loader detection, while additional loader flags and runtime hook registrations retain the composition guards. Earlier foreign `--require` preloads conservatively disable the CommonJS cache repair because they may register hooks before detection starts. When it is the only loader, imported CommonJS dependencies retain their `require.cache`, `require.extensions` and `require.resolve.paths` APIs.
+The standalone runner also accepts `--import @nubjs/runner`. Its own preload is excluded from foreign-loader detection, while additional loader flags and runtime hook registrations retain the composition guards. Earlier foreign `--require` preloads conservatively disable the CommonJS cache repair because they may register hooks before detection starts. When it is the only loader, imported CommonJS dependencies retain their `require.cache`, `require.extensions` and `require.resolve.paths` APIs.
 
 ## TypeScript and resolution
 
@@ -83,6 +83,23 @@ The persistent shim installed by `nub node shim` is the opposite: it runs the re
 Both `--node` and a truthy `NODE_COMPAT` disable runtime augmentation — no hooks, no preload, no injected flags, no path shim. They compose, and `NODE_COMPAT` is stamped tree-wide so every descendant inherits it.
 
 Two details make the switch trustworthy. Compat mode does not merely skip augmentation; it restores a parent's augmented environment to its pre-Nub state. And version provisioning stays on, because running on stock Node and running on no particular Node are different requests.
+
+## Main-heap memory tuning
+
+Direct Node launches on Linux x64 use a small semi-space floor only in a measured, closed set of Node releases and cgroup budgets. File runs and Node-backed `exec`/`nubx` binaries share this launch path.
+
+The policy in [[crates/nub-core/src/node/gc.rs#eligible]] requires at least 512 MiB after accounting for ancestors and physical memory. The leaf budget must also be within the release-specific range below; a tighter parent alone cannot enable an override of an already-large nursery.
+
+| Node release | Eligible leaf budget, inclusive | Default semi-space in that range |
+|---|---|---|
+| 22.23.2 | 512 MiB–1 GiB | 1–4 MiB |
+| 24.20.0 | 512 MiB | 1 MiB |
+
+Node 24's own nursery reaches 16 MiB immediately above its upper bound. Node 22 above 1 GiB and Node 26 retain their defaults because production-mode SSR regressed with the larger nursery, despite gains in retained-object workloads. Smaller budgets retain Node's defaults because the larger nursery can increase cgroup OOM kills under allocation pressure. Explicit startup options, PnP, environment-owner loaders, compatibility mode, and inherited augmented processes disable it. Watch and compiled launchers do not apply this policy.
+
+The launcher supplies `--max-semi-space-size=16` for main-isolate initialization. Before any application preload or entry code runs, the fast CJS preload resets the process-global flag to zero. V8 has already stored main's limit, while later Worker isolates can still apply their own `resourceLimits`. Keeping the global override would silently replace explicit Worker young-generation limits, even with an empty `execArgv`.
+
+This is a one-shot, release-specific startup operation, not a live GC controller. Adding a release requires auditing V8's flag readers and Node's preload ordering, then running constrained-memory and Worker/fork acceptance tests. The startup helper also rides argv so Workers with a replacement environment still run its argument cleanup. Both injected arguments are hidden from `process.execArgv`; application-created child processes do not inherit them as explicit heap settings. User heap flags remain visible and unchanged.
 
 ## Environment files
 

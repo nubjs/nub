@@ -56,6 +56,12 @@ const config = {
       { source: '/docs/pm-shim', destination: '/docs/pm/pm-shim', permanent: true },
       // Guides moved from /docs/guides/* to the top-level /guides/* route.
       { source: '/docs/guides/:path*', destination: '/guides/:path*', permanent: true },
+      // @nubjs/loader renamed to @nubjs/runner, and the page with it (2026-09-01).
+      { source: '/docs/loader', destination: '/docs/standalone', permanent: true },
+      // The @nubjs/extensions page was dropped (2026-09-13); the install
+      // overview's packageExtensions section covers the bundled database.
+      { source: '/docs/install/extensions', destination: '/docs/install#packageextensions', permanent: true },
+      { source: '/llms/docs/install/extensions.mdx', destination: '/llms/docs/install.mdx', permanent: true },
     ];
   },
   // Advertise the llms.txt index on every page so crawlers/agents can

@@ -254,8 +254,8 @@ Modern Node already obsoletes a second set, which you inherit by running on a mo
 node-fetch, cross-fetch, whatwg-fetch   # native fetch since 18
 abort-controller                        # native since 15
 uuid (v4 case)                          # crypto.randomUUID since 14.17
-rimraf                                  # fs.rmSync recursive+force since 14.14
-mkdirp                                  # fs.mkdirSync recursive since 10.12
+rimraf                                  # fs.rmSync recursive+force, 14.14
+mkdirp                                  # fs.mkdirSync recursive, 10.12
 glob, globby (basic cases)              # fs.glob since 22
 form-data                               # native FormData since 18
 # native WebSocket since 22.0, unflagged down to 20.10
@@ -330,8 +330,8 @@ A compat flag on `nub run` and `nubx`. It disables Nub's runtime augmentation fo
 # plain Node, full stop — shell `node` is always your real Node
 node script.js
 nub script.js                # Nub augmentation active
-nub run --node test          # Nub's CLI orchestration, runtime augmentation off
-nubx --node prisma generate  # Nub's bin resolution, runtime augmentation off
+nub run --node test          # Nub's CLI orchestration, no augmentation
+nubx --node prisma generate  # Nub's bin resolution, no augmentation
 ```
 
 It strips every runtime augmentation for the spawned process — the transpile hook, `.env` loading, polyfills, unflagging, and the PATH shim — leaving byte-exact Node runtime behavior; full contract at [the runtime overview](/docs/runtime#--node).
@@ -386,7 +386,8 @@ Two environment variables customize the script, following the same convention as
 Set them on the shell that runs the script — the right side of the pipe, not on `curl`:
 
 ```bash
-curl -fsSL https://nubjs.com/install.sh | NUB_INSTALL_DIR="$HOME/.local/nub" NUB_NO_MODIFY_PATH=1 bash
+curl -fsSL https://nubjs.com/install.sh \\
+  | NUB_INSTALL_DIR="$HOME/.local/nub" NUB_NO_MODIFY_PATH=1 bash
 ```
 
 On Windows, set `$env:NUB_INSTALL_DIR` / `$env:NUB_NO_MODIFY_PATH` before the `irm | iex`.

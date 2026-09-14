@@ -796,6 +796,8 @@ pub struct SpawnConfig<'a> {
     /// `NODE_OPTIONS` but accepts them on the command line, so this is the only
     /// channel that can carry them.
     pub runtime_v8_flags: &'a [String],
+    /// Configured preloads can ride Nub's own preload without a Node-options token.
+    pub runtime_has_preloads: bool,
 }
 
 /// The result of spawning a Node process.
@@ -1529,6 +1531,40 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // .env vars injected by the CLI layer.
     for (k, v) in config.env_vars {
         cmd.env(k, v);
+    }
+
+    // Only the ordinary fast CJS preload path has the startup ordering required
+    // by the main-isolate GC policy. Unknown/user preloads and environment owners
+    // stand down rather than risking a Worker created before the override resets.
+    cmd.env_remove(super::gc::STARTUP_ENV);
+    if !config.compat_mode
+        && preload.is_some()
+        && config.env_owner.is_none()
+        && config.prefix.is_none()
+        && config.pnp.is_none()
+        // The built-in export condition cannot execute application preload code.
+        && config
+            .runtime_node_options
+            .iter()
+            .all(|option| option == "--conditions=nub")
+        && config.runtime_v8_flags.is_empty()
+        && !config.runtime_has_preloads
+        && !config.env_vars.contains_key("NODE_OPTIONS")
+        && env::var_os("NODE_OPTIONS").is_none_or(|value| value.to_str().is_some())
+        && super::gc::eligible(
+            &config.node.version,
+            config.user_args,
+            node_options.as_deref(),
+            super::gc::constrained_memory,
+        )
+        && let Some(startup) = preload
+            .as_deref()
+            .map(|path| Path::new(path).with_file_name("gc-startup.cjs"))
+            .filter(|path| path.is_file())
+    {
+        let startup_arg = format!("--require={}", startup.display());
+        cmd.arg(super::gc::SEMI_SPACE_FLAG).arg(&startup_arg);
+        cmd.env(super::gc::STARTUP_ENV, startup_arg);
     }
 
     // Compat is tree-wide, not only a choice made by this one launcher. The

@@ -55,7 +55,7 @@ Nub is a registered WinterTC runtime key, so a package can now carry a `nub` bra
 
 Every CLI-augmented run passes `--conditions=nub` to Node, alongside whatever the project declares in `nub.jsonc` or a tsconfig `customConditions`. Conditions are a set, so a package with no `nub` key resolves exactly as it does on plain Node.
 
-Compat mode is unaffected — `--node` and `NODE_COMPAT` skip the option builder entirely, so a compat run keeps Node's own condition set. The standalone `@nubjs/loader` leaves the condition set alone too, because its contract is that a file resolves identically under it, under tsx, and under plain Node. Documentation is at [nubjs.com/docs/runtime/resolution](https://nubjs.com/docs/runtime/resolution). ([#913](https://github.com/nubjs/nub/pull/913))
+Compat mode is unaffected — `--node` and `NODE_COMPAT` skip the option builder entirely, so a compat run keeps Node's own condition set. The standalone `@nubjs/runner` leaves the condition set alone too, because its contract is that a file resolves identically under it, under tsx, and under plain Node. Documentation is at [nubjs.com/docs/runtime/resolution](https://nubjs.com/docs/runtime/resolution). ([#913](https://github.com/nubjs/nub/pull/913))
 
 ## Breaking changes
 

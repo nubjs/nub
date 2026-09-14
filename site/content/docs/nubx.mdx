@@ -105,9 +105,9 @@ The remote half on its own: fetch a package from the registry and run its bin. T
 
 ```bash
 nub dlx create-vite my-app
-nub x create-vite my-app                       # short alias, as bunx / bun x
-nub dlx -p @angular/cli ng new my-app          # bin name differs from the package
-nub dlx -p cowsay -c 'cowsay hi | tr a-z A-Z'  # shell one-liner with the bin on PATH
+nub x create-vite my-app                       # short alias, as bunx
+nub dlx -p @angular/cli ng new my-app          # bin name differs
+nub dlx -p cowsay -c 'cowsay hi | tr a-z A-Z'  # one-liner, bin on PATH
 nub dlx --node prisma generate                 # augmentation off
 ```
 
@@ -124,7 +124,8 @@ Whether a tool may be pulled from the registry at all is a decision about your m
 {
   // ...
   "dlx": {
-    "consent": "never"  // no implicit nubx registry fetch; an explicit nub dlx still runs
+    // no implicit nubx registry fetch; an explicit nub dlx still runs
+    "consent": "never"
   }
 }
 ```

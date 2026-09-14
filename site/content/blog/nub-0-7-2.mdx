@@ -25,7 +25,8 @@ $ nubx some-tool
 + some-tool@2.3.0  latest 2.4.0
 
 warn: the latest some-tool release (2.4.0) is younger than minimumReleaseAge; using 2.3.0 instead
-help: to take the newest release anyway: `--minimum-release-age=0`, or `--minimum-release-age-exclude=some-tool`
+help: to take the newest release anyway: `--minimum-release-age=0`, or
+      `--minimum-release-age-exclude=some-tool`
 ```
 
 That notice matters more here than on an install. A remote tool run happens in a scratch project that is deleted the moment the tool exits, so there is no manifest and no lockfile left to inspect afterward — the line above is the only record of which version actually ran.

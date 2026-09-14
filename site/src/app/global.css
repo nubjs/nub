@@ -304,13 +304,41 @@ h1, h2, h3, h4, .font-display {
   margin-top: 2.25rem;
 }
 
+/* Fumadocs renders an accordion's trigger as an <h3>, so the heading rules above
+   land INSIDE the card: the top margin drew a 44px empty band above the title,
+   and the editorial scale set that title larger than the prose it hides. The
+   component's own `not-prose` cannot stop either — both are plain descendant
+   selectors, not Tailwind typography, and an attribute selector is what outranks
+   them. The panel is then inset to the trigger's text (12px padding + 16px
+   chevron + 8px gap) so the two share a left edge, and given a bottom padding
+   that matches the top of the card rather than fumadocs' 8px. */
+.prose h3[data-accordion-value],
+.blog-prose h3[data-accordion-value] {
+  margin-top: 0;
+  font-size: 1rem;
+  line-height: 1.5;
+}
+.prose h3[data-accordion-value] + div > div,
+.blog-prose h3[data-accordion-value] + div > div {
+  padding-left: 2.25rem;
+  padding-bottom: 0.875rem;
+}
+
 /* Tables: auto layout hands the first column most of the row when later
    columns wrap. Shrink the first two columns to their content (width:1% +
    nowrap) so the prose-length last column gets the remaining space.
 
    `.tool-matrix` (the N-tool capability matrix) is the one table shaped the
    other way round — prose in the FIRST column, glyphs in the rest — so it sizes
-   its own columns with a <colgroup> and opts out here. */
+   its own columns with a <colgroup> and opts out here.
+
+   `.extensions-table` (the paginated package-extensions list) opts out for a
+   different reason: it is the only PAGINATED table here, and content-sized
+   columns are measured per rendered page, so the package column jumped width
+   whenever a page happened to contain a long scoped name. It pins its columns
+   with a <colgroup>, which needs the `white-space` here off as well — under a
+   fixed layout nowrap does not widen the column, it spills the name into the
+   next one. */
 .blog-prose table {
   width: 100%;
 }
@@ -318,11 +346,34 @@ h1, h2, h3, h4, .font-display {
    (three fixed columns plus a prose column), and a plain markdown table has no
    scroll container — so let every column wrap there instead. */
 @media (min-width: 640px) {
-  .blog-prose table:not(.tool-matrix) th:not(:last-child),
-  .blog-prose table:not(.tool-matrix) td:not(:last-child) {
+  .blog-prose table:not(.tool-matrix):not(.extensions-table) th:not(:last-child),
+  .blog-prose table:not(.tool-matrix):not(.extensions-table) td:not(:last-child) {
     width: 1%;
     white-space: nowrap;
   }
+}
+
+/* The extensions table's rows scroll inside a fixed-height pane, so its column
+   headings stick to the top of that pane instead of scrolling out of reach. The
+   tint is composited onto the page background rather than left translucent —
+   `bg-fd-muted/40` alone would show the rows sliding under it — and the header's
+   bottom rule rides along as an inset shadow, because the border lives on the
+   <tr>, which does not stick.
+
+   The `overflow` reset is what makes the sticking work at all: the prose styles
+   give every table in an article `overflow: hidden` (measured — a bare <table>
+   dropped into the article computes it too), which makes the TABLE the nearest
+   scrollport and leaves a sticky cell with nothing to stick to. The pane owns
+   the scrolling and the rounded frame here, so the table needs neither. */
+.extensions-table {
+  overflow: visible;
+}
+.extensions-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background-color: color-mix(in srgb, var(--color-fd-muted) 40%, var(--color-fd-background));
+  box-shadow: inset 0 -1px 0 var(--color-fd-border);
 }
 
 /* The matrix's "us" column. One variable so the tint is a single knob: the

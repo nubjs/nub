@@ -1,5 +1,5 @@
 #!/bin/sh
-# rustc-qos-version: 11  (build-status compares the installed copy against this)
+# rustc-qos-version: 12  (build-status compares the installed copy against this)
 # rustc-qos — machine-global cargo rustc-wrapper. Three jobs, all about stopping a
 # fleet of concurrent agent builds from bricking a 10-core dev host:
 #
@@ -575,8 +575,13 @@ _release() {
   return 0
 }
 trap '_release' EXIT
+# `<&0` is load-bearing: a POSIX background job gets /dev/null as stdin unless
+# it is redirected explicitly, and a build-script feature probe (io-extras,
+# io-lifetimes: `rustc --emit=metadata -` with the source on stdin, through
+# RUSTC_WRAPPER) then compiles an EMPTY crate, exits 0, and reports a nightly
+# feature as available on stable — the real compile fails with E0554 afterwards.
 # shellcheck disable=SC2086
-$_qos "$@" &
+$_qos "$@" <&0 &
 _child=$!
 # Forward termination, so killing the wrapper kills the rustc it owns. Without
 # this the token would be released while the compile it guards still runs.

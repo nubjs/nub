@@ -36,6 +36,15 @@
 // test-cjs-esm-warn, test-disable-require-module-with-detection,
 // test-esm-type-field-errors-2, parallel/test-require-mjs.)
 
+// The launcher only arms this on measured releases without user Node options,
+// snapshots, PnP, or environment-owner preloads. Main's heap is already configured;
+// clear the process-global override before any application can create a Worker.
+// V8's ConfigureHeap gives this flag precedence over Worker resourceLimits, even
+// with execArgv: []. Resetting it leaves main's stored heap limits unchanged.
+if (process.env.__NUB_GC_STARTUP) {
+  require("./gc-startup.cjs");
+}
+
 // Electron self-disable (issue #246). Bail before any augmentation when this
 // preload runs inside an Electron process: the fast-tier `module.registerHooks`
 // load hook below DEADLOCKS Electron's main-process module bootstrap (the call

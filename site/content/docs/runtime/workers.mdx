@@ -10,7 +10,8 @@ The browser-shape `Worker` global is typed by Nub's own types package — `@type
 Browsers expose a `Worker` global; Node ships only `node:worker_threads.Worker`, a different class with a different API. Nub preloads a polyfill on every supported Node (18.19+), so the browser constructor and messaging shape work.
 
 ```ts
-const worker = new Worker(import.meta.resolve("./worker.ts"), { type: "module" });
+const url = import.meta.resolve("./worker.ts");
+const worker = new Worker(url, { type: "module" });
 
 worker.onmessage = (ev) => {
   console.log(ev.data); // → 42
@@ -36,7 +37,8 @@ Read the [full docs](https://developer.mozilla.org/en-US/docs/Web/API/Worker) fo
 The constructor takes the WHATWG script-URL inputs — a file path or `URL` (including `file://`), a `data:` URL, or a `blob:` URL. For a path-based worker, default to `import.meta.resolve`:
 
 ```ts
-new Worker(import.meta.resolve("./worker.ts")); // resolves relative to this module; a .ts entry is fine
+// resolves relative to this module; a .ts entry is fine
+new Worker(import.meta.resolve("./worker.ts"));
 ```
 
 The `import.meta.resolve` call resolves a specifier against the current module — never `process.cwd()` — and returns its URL.
@@ -44,13 +46,15 @@ The `import.meta.resolve` call resolves a specifier against the current module �
 Vite, webpack, and esbuild trace the `new URL(...)` form — pulling the worker into its own chunk and rewriting its path — but do not trace `import.meta.resolve`. Use that form when a bundler is in the pipeline:
 
 ```ts
-new Worker(new URL("./worker.ts", import.meta.url)); // traced by bundlers; also correct at runtime
+// traced by bundlers; also correct at runtime
+new Worker(new URL("./worker.ts", import.meta.url));
 ```
 
 A bare relative string resolves against `process.cwd()`, not the calling module — matching `node:worker_threads` and Bun. It works when the launch directory is fixed, but breaks for a nested file run from elsewhere:
 
 ```ts
-new Worker("./worker.ts"); // cwd-relative — avoid unless the launch dir is known
+// cwd-relative — avoid unless the launch dir is known
+new Worker("./worker.ts");
 ```
 
 Inline sources skip resolution. A `data:` URL runs directly, and a `blob:` URL from `URL.createObjectURL` is snapshotted synchronously and spawned:
@@ -58,7 +62,8 @@ Inline sources skip resolution. A `data:` URL runs directly, and a `blob:` URL f
 ```ts
 const src = "self.postMessage('ready')";
 new Worker("data:text/javascript," + encodeURIComponent(src));
-new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+const blob = new Blob([src], { type: "text/javascript" });
+new Worker(URL.createObjectURL(blob));
 ```
 
 A Blob's bytes are only readable asynchronously, so Nub captures them when the Blob is constructed — which caps a `blob:` worker source at 4 MB. Past that the URL is rejected as a worker entry; use a file or `data:` URL instead.
@@ -81,8 +86,10 @@ The two threads exchange messages with `postMessage` and `onmessage` (or `addEve
 
 ```ts
 worker.postMessage({ n: 41 });
-worker.onmessage = (ev) => console.log(ev.data); // MessageEvent — payload on .data
-worker.addEventListener("message", (ev) => console.log(ev.data)); // same event, EventTarget form
+// MessageEvent — payload on .data
+worker.onmessage = (ev) => console.log(ev.data);
+// the same event, in EventTarget form
+worker.addEventListener("message", (ev) => console.log(ev.data));
 ```
 
 A thrown error in the worker surfaces on the main thread as an `ErrorEvent` carrying `message`, `error`, and the source location read from the worker's stack:

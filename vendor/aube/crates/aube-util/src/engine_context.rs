@@ -433,6 +433,34 @@ pub struct EngineContext {
     /// kinds that carry no checksum (npm/yarn/bun): stored and computed both
     /// resolve to `None`, so the check is a no-op.
     pub enforce_package_extensions_checksum: bool,
+
+    /// Replacement DEFAULT shell for every lifecycle-script spawn, used only
+    /// when the user configured no `script-shell` (which still wins). `None`
+    /// (default) keeps aube's platform default — `sh -c` on Unix, `cmd.exe
+    /// /d /s /c` on Windows.
+    ///
+    /// Exists for the Windows default specifically: an embedder that runs the
+    /// same POSIX script bodies through its own surfaces wants ONE shell, and
+    /// a POSIX shell is the more robust choice under an OS sandbox because it
+    /// needs no filesystem-ancestor repair to behave correctly. aube itself
+    /// takes no position — it consumes whatever the embedder resolved.
+    pub default_script_shell: Option<ScriptShell>,
+}
+
+/// A shell invocation: the program plus the leading args that precede the
+/// script body. Two args are needed because a multi-call binary dispatches on
+/// an applet name — busybox is spawned as `busybox.exe sh -c <body>`, where a
+/// plain shell takes `<shell> -c <body>`.
+#[derive(Clone, Debug)]
+pub struct ScriptShell {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    /// The shell up-cases environment names when it loads the Windows
+    /// environment, as busybox-w32 does, so a body would see `NPM_PACKAGE_NAME`
+    /// and `$npm_package_name` would expand to nothing. When set, the spawn
+    /// re-binds the lowercase names it set at the head of the body
+    /// (`aube_scripts::lowercase_env_prologue`).
+    pub restore_env_casing: bool,
 }
 
 impl Default for EngineContext {
@@ -467,6 +495,7 @@ impl Default for EngineContext {
             embedder_package_extensions: None,
             bundled_package_extensions: None,
             enforce_package_extensions_checksum: false,
+            default_script_shell: None,
         }
     }
 }
