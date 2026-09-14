@@ -82,7 +82,15 @@ impl Ctx {
             .env("HOME", &self.home)
             .env("XDG_DATA_HOME", self.home.join("xdg-data"))
             .env("XDG_CACHE_HOME", self.home.join("xdg-cache"))
-            .env("XDG_CONFIG_HOME", self.home.join("xdg-config"));
+            .env("XDG_CONFIG_HOME", self.home.join("xdg-config"))
+            // `npm_config_userconfig` outranks `$HOME` when nub resolves the
+            // user `.npmrc`, so an inherited one defeats the redirect above and
+            // points these tests at the developer's real credentials file —
+            // which they would then WRITE, since the global-set path follows the
+            // same resolution. Any machine where npm has been configured exports
+            // it, and this one does.
+            .env_remove("npm_config_userconfig")
+            .env_remove("NPM_CONFIG_USERCONFIG");
         for (name, value) in envs {
             cmd.env(name, value);
         }
@@ -691,6 +699,35 @@ fn config_auth_defaults_to_user_scope_unless_local_is_explicit() {
     );
     assert!(read(&ctx.project.join(".npmrc")).contains(&format!("{key}={token}")));
     assert!(!read(&ctx.home.join(".npmrc")).contains(key));
+}
+
+/// `npm_config_userconfig` names the user `.npmrc` outright, outranking `$HOME`.
+/// Every reader honors it, so the global WRITE has to as well. While it resolved
+/// the path from `$HOME` on its own, `config set --global` reported success
+/// against `$HOME/.npmrc` and the matching `get` answered `undefined` with exit
+/// 0 — the write was invisible to every later read rather than refused.
+#[test]
+fn global_config_write_follows_npm_config_userconfig() {
+    let ctx = Ctx::new("global-userconfig", MANIFEST);
+    let userconfig = ctx.home.join("named-elsewhere.npmrc");
+    let env = [("npm_config_userconfig", userconfig.to_str().unwrap())];
+
+    let (_, stderr, code) =
+        ctx.run_env(&["config", "set", "--global", "scope-probe", "user"], &env);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        read(&userconfig).contains("scope-probe=user"),
+        "the global write must land on the named user file: {:?}",
+        read(&userconfig)
+    );
+    assert!(
+        !ctx.home.join(".npmrc").exists(),
+        "the global write must not fall back to $HOME/.npmrc"
+    );
+
+    let (value, stderr, code) = ctx.run_env(&["config", "get", "--global", "scope-probe"], &env);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(value.trim(), "user");
 }
 
 #[test]

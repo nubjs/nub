@@ -1145,17 +1145,25 @@ mod npmrc_first {
     /// resolver reads each setting's `.npmrc` alias from it, so the write is
     /// read-coherent. (Auth/registry keys take the engine's own user-`.npmrc`
     /// writer instead — see the `set` dispatch.)
+    ///
+    /// The path comes from [`super::config_read::user_npmrc_path`] rather than
+    /// from `$HOME` directly, because `npm_config_userconfig` moves the user
+    /// file and every READER here honors it (`config_read`'s get/delete and
+    /// `host_settings::npmrc_files`). Resolving the write independently made
+    /// this the only disagreeing site: with that variable set, a global `set`
+    /// landed in `$HOME/.npmrc` while the matching `get` answered `undefined`
+    /// and exited 0 — a silent wrong answer rather than a failure.
     pub(super) fn set_user_npmrc(key: &str, value: &str) -> Result<i32> {
         if let Some(err) = no_npmrc_home_refusal(key) {
             return Err(err);
         }
-        let Some(home) = home_dir() else {
+        let Some(path) = crate::pm_engine::config_read::user_npmrc_path() else {
             return Err(anyhow!(
-                "nub config set --global: could not locate the home directory\n\
-                 \x20\x20set HOME (or USERPROFILE on Windows) to point at your user config"
+                "nub config set --global: could not locate the user `.npmrc`\n\
+                 \x20\x20set HOME (or USERPROFILE on Windows) to point at your user config,\n\
+                 \x20\x20or name the file directly with npm_config_userconfig"
             ));
         };
-        let path = home.join(".npmrc");
         let (sweep, write_key) = write_plan(key);
         npmrc_set(&path, &sweep, &write_key, value)?;
         report_set(&write_key, value, &path);
@@ -1181,14 +1189,6 @@ mod npmrc_first {
     /// The same map-refusal error as the project path, by meta.
     pub(super) fn map_setting_error_for(meta: &SettingMeta) -> anyhow::Error {
         map_setting_error(meta.name)
-    }
-
-    /// `~/.npmrc` home, honoring `HOME` (Unix) / `USERPROFILE` (Windows).
-    fn home_dir() -> Option<PathBuf> {
-        std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(PathBuf::from)
-            .filter(|p| !p.as_os_str().is_empty())
     }
 
     /// Mirror of the engine's `is_npm_shared_key` (crate-private at the

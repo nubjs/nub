@@ -458,6 +458,12 @@ fn nub_profile_reads_no_branded_user_or_project_config_file() {
         .env("XDG_CONFIG_HOME", &xdg_config)
         .env("XDG_DATA_HOME", dir.join("xdg-data"))
         .env("XDG_CACHE_HOME", dir.join("xdg-cache"))
+        // `npm_config_userconfig` outranks `$HOME` for the user `.npmrc`, on the
+        // read side here and on the write side below, so an inherited one aims
+        // both at the developer's real credentials file. Every machine where npm
+        // has been configured exports it.
+        .env_remove("npm_config_userconfig")
+        .env_remove("NPM_CONFIG_USERCONFIG")
         .output()
         .expect("failed to spawn nub");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -486,6 +492,8 @@ fn nub_profile_reads_no_branded_user_or_project_config_file() {
         .env("XDG_CONFIG_HOME", &xdg_config)
         .env("XDG_DATA_HOME", dir.join("xdg-data"))
         .env("XDG_CACHE_HOME", dir.join("xdg-cache"))
+        .env_remove("npm_config_userconfig")
+        .env_remove("NPM_CONFIG_USERCONFIG")
         .output()
         .expect("failed to spawn nub");
     assert_eq!(
