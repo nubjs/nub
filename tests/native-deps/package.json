@@ -4,5 +4,9 @@
   "dependencies": {
     "esbuild": "0.28.0",
     "better-sqlite3": "11.10.0"
+  },
+  "allowScripts": {
+    "esbuild": true,
+    "better-sqlite3": true
   }
 }

@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
-# Native-dependency floor end-to-end harness.
+# Native-dependency builds under the approve-builds gate, end to end.
 #
-# Exercises two classes of native build that the default-trust floor covers:
+# A nub project decides which dependencies may run install scripts in
+# package.json `allowScripts`, and nub runs exactly those, the way pnpm 12 runs
+# `allowBuilds`. The fixture approves two classes of native build:
 #
-#   esbuild (0.28.0)         — ships a postinstall script that DOWNLOADS the
-#                              platform-specific esbuild binary from the npm
-#                              registry. Under nub's default-trust policy, this
-#                              package is on the floor allowlist (it is a
-#                              long-lived, registry-only, well-known build tool).
-#                              The floor must: (a) allow the build to run,
-#                              (b) disclose the package by name, (c) produce a
-#                              working module.
+#   esbuild (0.28.0)         — a postinstall that checks for, or downloads, the
+#                              platform-specific esbuild binary.
+#   better-sqlite3 (11.10.0) — an install script that fetches a prebuilt N-API
+#                              addon or compiles one with node-gyp.
 #
-#   better-sqlite3 (11.10.0) — compiles a C++ N-API addon via node-gyp at
-#                              postinstall. Also on the floor allowlist. Same
-#                              three-part pass: allowed + disclosed + loadable.
-#
-# A third fixture (core-js-only) installs a package NOT on the allowlist and
-# asserts that its build is BLOCKED — the deny side of the floor policy.
+# Every project gets its own HOME and XDG dirs, so its own store. Asserted:
+#   1. approved builds run and both modules load;
+#   2. a frozen install from the lockfile into a FRESH store runs them again —
+#      the state a teammate's clone or a CI job starts from;
+#   3. a build nobody decided about fails the install with
+#      ERR_NUB_IGNORED_BUILDS, naming the package and `nub approve-builds`,
+#      as pnpm 12 fails;
+#   4. a build decided `false` is skipped and the install succeeds.
 #
 # Usage: tests/native-deps/run.sh <path-to-nub>
 # Env:   SANDBOX_ROOT=<dir>   reuse/inspect the sandbox (default: mktemp)
@@ -57,145 +57,127 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# NOTE: unlike the brand-sweep and conformance harnesses, this one does NOT
-# sandbox HOME or XDG_CACHE_HOME. The reason: the default-trust floor requires
-# the OSV advisory gate to have run (`osv_gate_active = true`). The OSV gate
-# depends on nub's packument cache, which lives in $XDG_CACHE_HOME/nub/pm/ —
-# a completely cold sandbox defeats the gate, causing the floor to fall back to
-# deny+warn (`WARN_NUB_IGNORED_BUILD_SCRIPTS`) instead of the expected allow+
-# disclose path. On CI (ubuntu-latest),
-# the runner has network access and the XDG cache starts cold — but the
-# resolver warms it during the resolve phase before the scripts phase, so the
-# OSV gate runs and the floor fires correctly. Sandboxing the project dirs
-# (node_modules, lockfile) is enough isolation for this test's purpose.
+# in_sandbox <box> <cmd...> — run with HOME and every XDG dir inside <box>. A
+# store shared between projects would already hold the first install's
+# finished builds, and a later install would link them instead of building.
+in_sandbox() {
+  local box=$1
+  shift
+  mkdir -p "$box/home"
+  env HOME="$box/home" XDG_DATA_HOME="$box/xdg/data" XDG_CACHE_HOME="$box/xdg/cache" \
+    XDG_CONFIG_HOME="$box/xdg/config" XDG_STATE_HOME="$box/xdg/state" "$@"
+}
 
-# ── Fixture: esbuild + better-sqlite3 (both on the floor allowlist) ──────────
-echo "── floor-allowed native builds ──────────────────────────────────────────"
-PROJ_ALLOW="$SANDBOX_ROOT/floor-allowed"
-mkdir -p "$PROJ_ALLOW"
-# Copy only the fixture files — not the harness scripts — to avoid
-# confusing nub install with extra .sh/.md files in the project root.
-cp "$HERE/package.json" "$HERE/verify-load.cjs" "$PROJ_ALLOW/"
-# Defensive: ensure no stale lock or node_modules from a prior run in this sandbox.
-rm -f "$PROJ_ALLOW/pnpm-lock.yaml" "$PROJ_ALLOW/package-lock.json"
-rm -rf "$PROJ_ALLOW/node_modules"
+# assert_nub_identity <output> <label> — a nub project reports the gate in
+# nub's words.
+assert_nub_identity() {
+  if echo "$1" | grep -nE 'ERR_PNPM_|WARN_PNPM_|pnpm approve-builds'; then
+    fail "pnpm's identity reached a nub project's output ($2)"
+  fi
+}
 
-install_out="$(cd "$PROJ_ALLOW" && "$NUB" install 2>&1)" || install_rc=$?
-install_rc="${install_rc:-0}"
+# assert_builds_ran <output> <label>
+assert_builds_ran() {
+  echo "$1" | grep -q 'node_modules/esbuild postinstall: Done' \
+    || fail "esbuild's approved postinstall did not run ($2). Output: $1"
+  echo "$1" | grep -q 'node_modules/better-sqlite3 install: Done' \
+    || fail "better-sqlite3's approved install script did not run ($2). Output: $1"
+}
 
-# Brand check — no aube/jdx.dev identity, even when the install itself fails.
-if echo "$install_out" | grep -qiE 'aube|jdx\.dev'; then
-  echo "$install_out"
-  fail "engine-branded identity in install output"
-fi
-
-# Default-trust disclosure: both floor-allowed packages must be named in the
-# defaultTrust warning — the floor is NOT a silent allow path.
-# This fires before the lifecycle script phase, so it is present even when a
-# build (e.g. better-sqlite3's node-gyp compile) fails afterward.
-echo "$install_out" | grep -q 'WARN defaultTrust: running build scripts' \
-  || fail "defaultTrust disclosure missing from output (floor allowed builds silently). Output: $install_out"
-echo "$install_out" | grep -q 'esbuild' \
-  || fail "esbuild not named in defaultTrust disclosure. Output: $install_out"
-echo "$install_out" | grep -q 'better-sqlite3' \
-  || fail "better-sqlite3 not named in defaultTrust disclosure. Output: $install_out"
-pass "default-trust disclosure: both packages disclosed by name"
-
-# esbuild binary must have been placed by postinstall (esbuild's build is a
-# binary download and succeeds even when better-sqlite3's node-gyp compile fails).
-ESBUILD_BIN="$PROJ_ALLOW/node_modules/.bin/esbuild"
-[ -e "$ESBUILD_BIN" ] \
-  || fail "esbuild binary not materialized at $ESBUILD_BIN (postinstall did not run)"
-pass "esbuild postinstall ran: binary present"
-
-# Verify modules are loadable. verify-load.cjs handles better-sqlite3
-# gracefully on dev boxes where the toolchain can't compile node-gyp addons;
-# the esbuild check is authoritative on every platform.
-# Run from within $PROJ_ALLOW so require() resolves against that node_modules.
+# assert_loadable <project> <label>
 #
-# Capture the status separately instead of letting `set -e` kill the script on the
-# assignment. A native addon that aborts (SIGABRT/139/134) rather than throwing takes
-# the whole node process down, and under `set -e` the failing command substitution
-# ended run.sh with only the raw exit code — no output, because everything node wrote
-# went into the variable the failed assignment discarded. That is how an abort here
-# reads as an unexplained "exit code 134" with no diagnostics at all.
-LOAD_RC=0
-LOAD_OUT="$(cd "$PROJ_ALLOW" && node ./verify-load.cjs 2>&1)" || LOAD_RC=$?
-[ "$LOAD_RC" -eq 0 ] \
-  || fail "verify-load.cjs exited $LOAD_RC (a signal death is 128+n, so 134=SIGABRT in a native addon). Output: $LOAD_OUT"
-echo "$LOAD_OUT" | grep -q "NATIVE-DEPS-OK" \
-  || fail "native modules not loadable after install. verify-load output: $LOAD_OUT"
-pass "native modules loadable: $LOAD_OUT"
+# The status is captured apart from the assignment: a native addon that aborts
+# (SIGABRT, exit 134) rather than throwing takes node down, and under `set -e` a
+# failing command substitution ended run.sh with only the raw exit code and none
+# of the output node wrote.
+assert_loadable() {
+  local load_rc=0 load_out
+  load_out="$(cd "$1" && node ./verify-load.cjs 2>&1)" || load_rc=$?
+  [ "$load_rc" -eq 0 ] \
+    || fail "verify-load.cjs exited $load_rc in $2 (a signal death is 128+n, so 134=SIGABRT in a native addon). Output: $load_out"
+  echo "$load_out" | grep -q "NATIVE-DEPS-OK" \
+    || fail "native modules not loadable ($2). verify-load output: $load_out"
+}
 
-# ── Fixture: frozen install from the lockfile (CI / teammate clone) ──────────
-# Regression guard for the default-trust floor's frozen-install bug
-# (wiki/commands/pm/supply-chain-posture.md Decision 2): on a frozen install
-# the per-install OSV gate is correctly skipped, so the floor used to fall
-# closed and silently NOT run trusted packages' build scripts — even though
-# they ran for whoever wrote the lockfile. A clone/CI run must reproduce the
-# fresh install's build behavior, inheriting the lockfile's resolution-time
-# vetting. We reuse the lockfile the fresh install above just produced,
-# simulate a clone (only package.json + lockfile, no node_modules), and run
-# a frozen install.
+# ── 1. approved builds run ───────────────────────────────────────────────────
+echo "── approved native builds ───────────────────────────────────────────────"
+PROJ_ALLOW="$SANDBOX_ROOT/approved"
+mkdir -p "$PROJ_ALLOW"
+# Only the fixture files, not the harness scripts.
+cp "$HERE/package.json" "$HERE/verify-load.cjs" "$PROJ_ALLOW/"
+rm -rf "$PROJ_ALLOW/node_modules" "$PROJ_ALLOW/nub.lock"
+
+install_rc=0
+install_out="$(cd "$PROJ_ALLOW" && in_sandbox "$SANDBOX_ROOT/approved-home" "$NUB" install 2>&1)" || install_rc=$?
+[ "$install_rc" -eq 0 ] || fail "install with every build approved exited $install_rc. Output: $install_out"
+assert_nub_identity "$install_out" "approved install"
+assert_builds_ran "$install_out" "approved install"
+assert_loadable "$PROJ_ALLOW" "approved install"
+pass "approved builds ran and both modules load"
+
+# ── 2. a frozen install into a fresh store runs them again ───────────────────
 echo ""
-echo "── frozen install runs trusted builds (Decision 2 regression) ────────────"
-LOCKFILE=""
-for cand in nub.lock lock.yaml aube-lock.yaml pnpm-lock.yaml; do
-  [ -f "$PROJ_ALLOW/$cand" ] && { LOCKFILE="$cand"; break; }
-done
-[ -n "$LOCKFILE" ] \
-  || fail "fresh install produced no lockfile in $PROJ_ALLOW (expected nub.lock, lock.yaml, aube-lock.yaml, or pnpm-lock.yaml)"
-
-PROJ_FROZEN="$SANDBOX_ROOT/floor-frozen-clone"
+echo "── frozen install into a fresh store ────────────────────────────────────"
+[ -f "$PROJ_ALLOW/nub.lock" ] || fail "the approved install wrote no nub.lock"
+PROJ_FROZEN="$SANDBOX_ROOT/frozen-clone"
 mkdir -p "$PROJ_FROZEN"
-cp "$PROJ_ALLOW/package.json" "$PROJ_ALLOW/verify-load.cjs" "$PROJ_FROZEN/"
-cp "$PROJ_ALLOW/$LOCKFILE" "$PROJ_FROZEN/"
-# No node_modules — this is the clone/CI starting state.
+cp "$PROJ_ALLOW/package.json" "$PROJ_ALLOW/verify-load.cjs" "$PROJ_ALLOW/nub.lock" "$PROJ_FROZEN/"
 
-frozen_out="$(cd "$PROJ_FROZEN" && "$NUB" install --frozen-lockfile 2>&1)" || frozen_rc=$?
-frozen_rc="${frozen_rc:-0}"
+frozen_rc=0
+frozen_out="$(cd "$PROJ_FROZEN" && in_sandbox "$SANDBOX_ROOT/frozen-home" "$NUB" install --frozen-lockfile 2>&1)" || frozen_rc=$?
+[ "$frozen_rc" -eq 0 ] || fail "frozen install exited $frozen_rc. Output: $frozen_out"
+assert_nub_identity "$frozen_out" "frozen install"
+assert_builds_ran "$frozen_out" "frozen install"
+assert_loadable "$PROJ_FROZEN" "frozen install"
+pass "frozen install into a fresh store ran the approved builds again"
 
-if echo "$frozen_out" | grep -qiE 'aube|jdx\.dev'; then
-  echo "$frozen_out"
-  fail "engine-branded identity in frozen install output"
-fi
-
-# The floor must fire on the frozen install exactly as on the fresh one.
-echo "$frozen_out" | grep -q 'WARN defaultTrust: running build scripts' \
-  || fail "FROZEN INSTALL: defaultTrust disclosure missing — the floor fell closed on a frozen install (Decision 2 bug). Output: $frozen_out"
-echo "$frozen_out" | grep -q 'esbuild' \
-  || fail "FROZEN INSTALL: esbuild not named in defaultTrust disclosure. Output: $frozen_out"
-pass "frozen install: default-trust floor fired (build scripts trusted)"
-
-# And the postinstall must actually have run — esbuild binary materialized.
-FROZEN_ESBUILD_BIN="$PROJ_FROZEN/node_modules/.bin/esbuild"
-[ -e "$FROZEN_ESBUILD_BIN" ] \
-  || fail "FROZEN INSTALL: esbuild binary not materialized at $FROZEN_ESBUILD_BIN (postinstall did not run on the frozen install)"
-pass "frozen install: esbuild postinstall ran (binary present)"
-
-# ── Fixture: core-js only (NOT on the floor allowlist — default-deny side) ───
+# ── 3. a build nobody decided about fails the install ────────────────────────
 echo ""
-echo "── floor-denied native build ─────────────────────────────────────────────"
-PROJ_DENY="$SANDBOX_ROOT/floor-denied"
-mkdir -p "$PROJ_DENY"
-cat > "$PROJ_DENY/package.json" <<'JSON'
+echo "── undecided build ──────────────────────────────────────────────────────"
+PROJ_UNDECIDED="$SANDBOX_ROOT/undecided"
+mkdir -p "$PROJ_UNDECIDED"
+cat > "$PROJ_UNDECIDED/package.json" <<'JSON'
 {
-  "name": "native-deps-deny-fixture",
+  "name": "native-deps-undecided-fixture",
   "private": true,
   "dependencies": { "core-js": "3.40.0" }
 }
 JSON
 
-deny_out="$(cd "$PROJ_DENY" && "$NUB" install 2>&1)" || true
+undecided_rc=0
+undecided_out="$(cd "$PROJ_UNDECIDED" && in_sandbox "$SANDBOX_ROOT/undecided-home" "$NUB" install 2>&1)" || undecided_rc=$?
+[ "$undecided_rc" -ne 0 ] || fail "an install with an undecided build script exited 0, where pnpm 12 fails. Output: $undecided_out"
+echo "$undecided_out" | grep -q 'ERR_NUB_IGNORED_BUILDS' \
+  || fail "the undecided build did not fail with ERR_NUB_IGNORED_BUILDS. Output: $undecided_out"
+echo "$undecided_out" | grep -q 'core-js@3.40.0' \
+  || fail "core-js is not named in the ignored-builds error. Output: $undecided_out"
+echo "$undecided_out" | grep -q 'Run "nub approve-builds"' \
+  || fail "the ignored-builds error does not point at nub approve-builds. Output: $undecided_out"
+assert_nub_identity "$undecided_out" "undecided build"
+pass "an undecided build fails the install, named, with the approve-builds hint"
 
-# The floor must NOT allow core-js's build (it is not on the allowlist).
-# The ignored-build-scripts warning must appear — not a hard failure, but not
-# a silent allow.
-echo "$deny_out" | grep -q 'WARN_NUB_IGNORED_BUILD_SCRIPTS' \
-  || fail "core-js build was not mentioned in WARN_NUB_IGNORED_BUILD_SCRIPTS (deny side broken). Output: $deny_out"
-echo "$deny_out" | grep -q 'core-js' \
-  || fail "core-js not named in ignored-build-scripts warning. Output: $deny_out"
-pass "default-trust deny side: core-js build blocked + named in warning"
+# ── 4. a build decided false is skipped ──────────────────────────────────────
+echo ""
+echo "── denied build ─────────────────────────────────────────────────────────"
+PROJ_DENIED="$SANDBOX_ROOT/denied"
+mkdir -p "$PROJ_DENIED"
+cat > "$PROJ_DENIED/package.json" <<'JSON'
+{
+  "name": "native-deps-denied-fixture",
+  "private": true,
+  "dependencies": { "core-js": "3.40.0" },
+  "allowScripts": { "core-js": false }
+}
+JSON
+
+denied_rc=0
+denied_out="$(cd "$PROJ_DENIED" && in_sandbox "$SANDBOX_ROOT/denied-home" "$NUB" install 2>&1)" || denied_rc=$?
+[ "$denied_rc" -eq 0 ] || fail "an install whose only build is decided false exited $denied_rc. Output: $denied_out"
+if echo "$denied_out" | grep -q 'node_modules/core-js postinstall'; then
+  fail "core-js's build ran although it is decided false. Output: $denied_out"
+fi
+assert_nub_identity "$denied_out" "denied build"
+pass "a build decided false is skipped and the install succeeds"
 
 echo ""
 echo "native-deps: all assertions passed."

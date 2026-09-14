@@ -1,16 +1,16 @@
 name: Native-dep floor
 
-# End-to-end test of nub's default-trust floor policy against real packages that
+# End-to-end test of nub's approve-builds gate against real packages that
 # compile native code or run postinstall download scripts.
 #
-# Two fixture legs:
-#   floor-allowed: esbuild + better-sqlite3 (both on the allowlist). Asserts:
-#     (a) install exits 0 and artifacts materialize,
-#     (b) the defaultTrust warning discloses both packages by name — the
-#         floor is NOT a silent allow path,
-#     (c) native modules are loadable after install.
-#   floor-denied:  core-js (not on the allowlist). Asserts:
-#     WARN_NUB_IGNORED_BUILD_SCRIPTS names core-js — build is blocked.
+# Legs, each in its own HOME and store:
+#   approved:  esbuild + better-sqlite3 decided true in `allowScripts`. Asserts
+#     both scripts run, on a fresh install and on a frozen install into a fresh
+#     store, and both native modules load.
+#   undecided: core-js with no decision. Asserts the install fails with
+#     ERR_NUB_IGNORED_BUILDS naming core-js, as pnpm 12 fails.
+#   denied:    core-js decided false. Asserts the script is skipped and the
+#     install succeeds.
 #
 # A second harness rides the same job: tests/node-gyp-headers asserts that a
 # node-gyp build finds its headers in the cache nub seeded from the provisioned
