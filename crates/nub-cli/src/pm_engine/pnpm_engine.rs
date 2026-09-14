@@ -496,6 +496,7 @@ fn apply_lifecycle_augmentation(cwd: &Path) -> Result<()> {
     let Ok(nub_binary) = nub_core::node::spawn::current_nub_binary() else {
         return Ok(());
     };
+    stamp_node_gyp(cwd, &nub_binary);
     let node = discovered.unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
     // The engine keys its build artifacts to whichever Node the lifecycle
     // scripts run under, so the install stamp has to name THIS one. Published
@@ -547,6 +548,60 @@ fn apply_lifecycle_augmentation(cwd: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Point every lifecycle script this session spawns at a runnable node-gyp.
+///
+/// npm and pnpm both bundle node-gyp with themselves and hand it to a build
+/// script through two channels — `npm_config_node_gyp`, and a `node-gyp-bin`
+/// directory prepended to `PATH`. This engine supplies neither under nub: it
+/// passes `node_gyp_path: None` at every call site, and its `PATH` channel comes
+/// from `pnpm_executor::bundled_node_gyp_bin`, which looks for a
+/// `dist/node-gyp-bin` beside the running executable — a layout pnpm's npm
+/// package has and nub's binary does not. So a dependency with a native addon
+/// could not build on a machine without a global node-gyp.
+///
+/// Both channels are nub's lazy shims, which cost a couple of small file writes
+/// and bootstrap the real node-gyp only if something invokes them
+/// ([`super::node_gyp`]). Stamped on the process environment, which is what the
+/// engine builds a script's environment from — the same seam the augmentation
+/// above uses. The `PATH` entry goes on before the augmentation's own prepend,
+/// so nub's Node shim still fronts it, and the engine puts every
+/// `node_modules/.bin` ahead of the inherited `PATH` regardless.
+///
+/// An ambient `npm_config_node_gyp` is left alone: a value the user set (or one
+/// inherited from an outer nub that already stamped it) is the answer, exactly
+/// as on the `nub run` path, where this is stamped before the user's own npm
+/// config is applied over it. The `PATH` channel stands down on its own terms —
+/// see [`node_gyp::lazy_shim_bin_dir`].
+fn stamp_node_gyp(cwd: &Path, nub_binary: &Path) {
+    use super::node_gyp;
+
+    // Failure to write the shims degrades to leaving this path exactly where it
+    // already was, which is why neither half is fatal.
+    if std::env::var_os(node_gyp::CONFIG_ENV).is_none()
+        && std::env::var_os(node_gyp::CONFIG_ENV.to_ascii_uppercase()).is_none()
+        && let Ok(node_gyp_js) = node_gyp::lazy_js_shim_path()
+    {
+        unsafe {
+            std::env::set_var(node_gyp::CONFIG_ENV, node_gyp_js);
+            std::env::set_var(node_gyp::EXE_ENV, nub_binary);
+            std::env::set_var(node_gyp::PROJECT_DIR_ENV, cwd);
+        }
+    }
+
+    let project_bin_dir = super::lifecycle_node_anchor(cwd)
+        .join("node_modules")
+        .join(".bin");
+    if let Ok(Some(shim_dir)) = node_gyp::lazy_shim_bin_dir(&project_bin_dir) {
+        let mut entries = vec![shim_dir];
+        if let Some(existing) = std::env::var_os("PATH") {
+            entries.extend(std::env::split_paths(&existing));
+        }
+        if let Ok(joined) = std::env::join_paths(entries) {
+            unsafe { std::env::set_var("PATH", joined) };
+        }
+    }
 }
 
 /// The directory this command line makes the project's.

@@ -38,8 +38,9 @@
 //!   `sponsors`, `diag`, `doctor`, `completion`, `usage`. The internal
 //!   `__node-gyp-bootstrap` re-entry verb is also outside the registry but
 //!   IS wired — as an early intercept in cli.rs dispatching to
-//!   [`run_node_gyp_bootstrap`], because the engine's lazy node-gyp shims
-//!   re-invoke `current_exe()` (= nub) with it mid-lifecycle-script.
+//!   [`run_node_gyp_bootstrap`], because nub's lazy node-gyp shims
+//!   ([`node_gyp`]) re-invoke `current_exe()` (= nub) with it
+//!   mid-lifecycle-script.
 //!
 //! `install`/`i`/`ci` are *not* in the registry: they are live parser verbs
 //! in `cli.rs` (SUBCOMMANDS), and the front door routes them to the engine
@@ -79,6 +80,7 @@ pub mod install_family;
 mod install_report;
 pub mod log;
 pub mod min_release_age;
+pub(crate) mod node_gyp;
 pub mod output;
 pub mod phantom_closure;
 pub mod platform_flags;
@@ -550,51 +552,37 @@ pub fn dispatch_verb(
     }
 }
 
-/// The engine's hidden node-gyp re-entry verb: `__node-gyp-bootstrap
-/// <project-dir>` resolves (bootstrapping on first use) the cached
-/// node-gyp and prints its executable path on stdout. The lazy shims the
-/// engine drops into a project's `.bin` re-invoke `current_exe()` with
-/// this verb mid-lifecycle-script — and under nub, `current_exe()` IS
+/// nub's hidden node-gyp re-entry verb: `__node-gyp-bootstrap <project-dir>`
+/// resolves (bootstrapping on first use) the cached node-gyp and prints its
+/// executable path on stdout. The lazy shims [`node_gyp`] writes re-invoke
+/// `current_exe()` with this verb mid-lifecycle-script — and `current_exe()` IS
 /// nub — so cli.rs intercepts the spelling before the parser and lands here.
-/// The printed path is data for the shim (it lands under nub's own cache
-/// root, which the identity profile's `cache_namespace` carries), so stdout
-/// is passed through; failures route through the brand rewrite like every
-/// other engine report.
+/// The printed path is data for the shim, so stdout carries it and nothing
+/// else; the bootstrap install is silenced for that reason.
 pub(crate) fn run_node_gyp_bootstrap(args: &[String]) -> Result<i32> {
     let [project_dir] = args else {
         anyhow::bail!("usage: nub __node-gyp-bootstrap <project-dir>");
     };
-    // Register nub's static identity FIRST so the bootstrap's cache lands under
-    // nub's namespace (`$XDG_CACHE/nub/pm/tools/node-gyp`, via the identity's
-    // `cache_namespace`) rather than aube's. This re-entry runs as a fresh
-    // child process spawned by the engine's lazy shim (`AUBE_NODE_GYP_EXE
-    // __node-gyp-bootstrap <dir>`, where `current_exe()` is nub) before any other
-    // preflight, so the namespace registration has to happen here.
+    // Register nub's static identity FIRST: this re-entry runs as a fresh child
+    // process spawned by the shim mid-build, before any other preflight, and the
+    // bootstrap install it is about to drive derives its brand-scoped paths from
+    // the profile.
     engine_brand_preflight();
-    // The embed facade's bootstrap entry resolves/bootstraps the cached
-    // node-gyp and returns its executable, which is printed on stdout for the
-    // shim to exec. Drive it on a fresh runtime; route any failure through the
-    // brand rewrite like every other engine report.
-    let rt = build_runtime()?;
     let project = std::path::Path::new(project_dir);
-    match rt.block_on(aube::embed::bootstrap_node_gyp(project)) {
-        Ok(binary) => {
-            // node-gyp runs next, under the project's Node, so put that Node's
-            // headers where node-gyp looks before it downloads them
-            // (`nub_core::node::headers`). Plain discovery, never provisioning:
-            // the version logic fires only where node-version-management puts
-            // it. Best effort, since node-gyp's own download stays the fallback.
-            if let Ok(node) = nub_core::node::discovery::discover_node(project) {
-                nub_core::node::headers::seed_node_gyp_cache(
-                    node.path.as_std_path(),
-                    &node.version.to_string(),
-                );
-            }
-            println!("{}", binary.display());
-            Ok(0)
-        }
-        Err(report) => Ok(present::emit_report(&report)),
+    let binary = node_gyp::bootstrap(project)?;
+    // node-gyp runs next, under the project's Node, so put that Node's headers
+    // where node-gyp looks before it downloads them (`nub_core::node::headers`).
+    // Plain discovery, never provisioning: the version logic fires only where
+    // node-version-management puts it. Best effort, since node-gyp's own
+    // download stays the fallback.
+    if let Ok(node) = nub_core::node::discovery::discover_node(project) {
+        nub_core::node::headers::seed_node_gyp_cache(
+            node.path.as_std_path(),
+            &node.version.to_string(),
+        );
     }
+    println!("{}", binary.display());
+    Ok(0)
 }
 
 /// The shared stub error for registered-but-unwired verbs: names the verb
@@ -2224,6 +2212,19 @@ fn nub_data_dir_from(
 /// constraint we shrink BOTH pools to fit the headroom; on an unconstrained box
 /// it returns `None` and we keep the full-speed defaults — so normal-box install
 /// performance is untouched.
+///
+/// UNREFERENCED, and deliberately kept rather than deleted. The node-gyp
+/// bootstrap was its last caller; it drives the pnpm engine now, which builds
+/// its own tokio runtime. The tokio sizing here is therefore aube's alone, but
+/// the two caps it composes are not: the pnpm engine fans work out over the same
+/// rayon GLOBAL pool and honours `childConcurrency`, whose own EAGAIN diagnostic
+/// names `RLIMIT_NPROC` — so a constrained box has lost this protection in the
+/// engine migration, and re-wiring the caps into `pnpm_engine::session_prologue`
+/// changes every PM command's concurrency, which is its own decision to make.
+#[expect(
+    dead_code,
+    reason = "pending the concurrency-cap rewiring described above"
+)]
 fn build_runtime() -> Result<tokio::runtime::Runtime> {
     // Use `resource_limits::available_cores()` (NOT a local `unwrap_or(4)`) so this
     // `raw_cpu` matches the `cores` the `cpu_budget()` gate compares against — the

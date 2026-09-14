@@ -234,6 +234,12 @@ clx = "3"
 demand = "2"
 dirs-next.workspace = true
 dotenvy = "0.15"
+# Cross-process advisory lock around the lazy node-gyp bootstrap
+# (pm_engine/node_gyp.rs): one install can run several build scripts at once,
+# each of which may re-enter nub to bootstrap, and two installs into one cache
+# dir corrupt it. Same version the engine already builds through `xx`, so it
+# adds nothing to the graph.
+fslock = "0.2"
 # The string form of `nub.jsonc#prefix` splits like a POSIX shell word list.
 shlex = "2"
 # `preserve_order` keeps serde_json::Map in INSERTION order (IndexMap-backed) so

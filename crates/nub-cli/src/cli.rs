@@ -1595,7 +1595,7 @@ pub fn run() -> Result<i32> {
 
     let argv0 = Argv0::detect();
 
-    // The engine's lazy node-gyp shims re-invoke `current_exe()` with this hidden
+    // nub's lazy node-gyp shims re-invoke `current_exe()` with this hidden
     // verb mid-lifecycle-script, and `current_exe()` carries whatever NAME nub is
     // running under — a PM shim when the install was driven through one. Force the
     // `nub` identity so the verb resolves exactly as it does under argv0 `nub`;
@@ -2254,7 +2254,7 @@ fn run_nub() -> Result<i32> {
             _ => {
                 // Check if this is the first positional and matches a subcommand
                 // (nub-native, a verb registered to the embedded PM engine, or
-                // the engine's hidden node-gyp re-entry verb — its lazy shims
+                // nub's hidden node-gyp re-entry verb — its lazy shims
                 // re-invoke current_exe() with it mid-lifecycle-script). The
                 // parent-death watcher's verb is handled in `run()`, above
                 // argv0 dispatch, so it never reaches here.
@@ -2790,10 +2790,10 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
         return run_global(&rest[1..]);
     }
 
-    // The engine's lazy node-gyp shims re-invoke `current_exe()` (= nub)
-    // with this hidden verb mid-lifecycle-script; intercept it before the parser
-    // (it's internal plumbing, not a documented verb) and dispatch straight
-    // to the engine's bootstrap entry point.
+    // nub's lazy node-gyp shims re-invoke `current_exe()` (= nub) with this
+    // hidden verb mid-lifecycle-script; intercept it before the parser (it's
+    // internal plumbing, not a documented verb) and dispatch straight to the
+    // bootstrap entry point.
     if subcommand == "__node-gyp-bootstrap" {
         initialize_config_snapshot(false, false)?;
         return crate::pm_engine::run_node_gyp_bootstrap(&rest[1..]);
@@ -6055,18 +6055,18 @@ fn build_script_command(
     // `npm_config_node_gyp`: npm/pnpm always point this at a runnable node-gyp
     // (their bundled `node-gyp/bin/node-gyp.js`) so a script's `node
     // $npm_config_node_gyp …` resolves without a global node-gyp install. nub
-    // hands out the engine's lazy `node-gyp.js` shim, which trampolines back
-    // into nub via `AUBE_NODE_GYP_EXE` (handled by `__node-gyp-bootstrap`) to
-    // bootstrap the real node-gyp on first use. Mirrors what the engine's
-    // lifecycle path stamps (`aube-scripts::apply_script_settings_env`) so the
-    // run and lifecycle paths agree. Set before the `npm_env` loop so a
-    // user-set value still wins; the bootstrap markers are nub-internal env
-    // (brand-exempt) and only meaningful to the shim. Failure to write the
-    // (cheap) shim degrades to leaving the var unset — same as a plain Node.
-    if let Ok(node_gyp_js) = aube::commands::install::node_gyp_bootstrap::lazy_js_shim_path() {
-        command.env("npm_config_node_gyp", node_gyp_js);
-        command.env("AUBE_NODE_GYP_EXE", &nub_binary);
-        command.env("AUBE_NODE_GYP_PROJECT_DIR", &project.root);
+    // hands out its lazy `node-gyp.js` shim, which trampolines back into nub via
+    // `__NUB_NODE_GYP_EXE` (handled by `__node-gyp-bootstrap`) to bootstrap the
+    // real node-gyp on first use. The install path stamps the same three
+    // (pm_engine::pnpm_engine::apply_lifecycle_augmentation) so the run and
+    // lifecycle paths agree. Set before the `npm_env` loop so a user-set value
+    // still wins; the bootstrap markers are nub-internal env (brand-exempt) and
+    // only meaningful to the shim. Failure to write the (cheap) shim degrades to
+    // leaving the var unset — same as a plain Node.
+    if let Ok(node_gyp_js) = crate::pm_engine::node_gyp::lazy_js_shim_path() {
+        command.env(crate::pm_engine::node_gyp::CONFIG_ENV, node_gyp_js);
+        command.env(crate::pm_engine::node_gyp::EXE_ENV, &nub_binary);
+        command.env(crate::pm_engine::node_gyp::PROJECT_DIR_ENV, &project.root);
     }
 
     // `npm_config_registry`: pnpm always exports the resolved registry to a

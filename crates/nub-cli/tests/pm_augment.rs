@@ -21,6 +21,10 @@
 //! ancestor (the shared cross-worktree dir) used to find no preload and augment
 //! nothing, so a lifecycle test that merely didn't assert on augmentation passed
 //! green while running un-augmented.
+//!
+//! The second test covers the other thing nub has to hand a lifecycle script for
+//! a native addon to build: a runnable node-gyp, through both channels npm and
+//! pnpm supply it on.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -39,6 +43,13 @@ fn nub_binary() -> PathBuf {
 /// `aug.json`. Only single quotes inside the JS so the `node -e "…"` wrapper
 /// needs no further escaping.
 const POSTINSTALL_PROBE: &str = "node -e \"const fs=require('fs'),sep=require('path').delimiter;fs.writeFileSync('aug.json',JSON.stringify({no:process.env.NODE_OPTIONS||'',p:(process.env.PATH||'').split(sep)}))\"";
+
+/// A root `postinstall` that records both channels a lifecycle script can reach
+/// node-gyp through: `npm_config_node_gyp`, and every executable `node-gyp` its
+/// `PATH` resolves. It RESOLVES rather than runs them — invoking nub's shim
+/// would trigger the real bootstrap install, so a probe that executed it would
+/// need the network to answer a question about the environment.
+const NODE_GYP_PROBE: &str = "node -e \"const fs=require('fs'),p=require('path');const found=(process.env.PATH||'').split(p.delimiter).map(d=>p.join(d,'node-gyp')).filter(f=>{try{fs.accessSync(f,fs.constants.X_OK);return true}catch(e){return false}});fs.writeFileSync('gyp.json',JSON.stringify({gyp:process.env.npm_config_node_gyp||'',onPath:found}))\"";
 
 const EMPTY_LOCK: &str = "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n";
 
@@ -72,8 +83,8 @@ fn install_runs_lifecycle_scripts_under_runtime_augmentation() {
         .map(|stem| format!("{stem}.cjs"))
         .unwrap_or_default();
 
-    let dir = fixture();
-    let (stdout, stderr, code) = run(&nub, &dir, &["install"]);
+    let dir = fixture(POSTINSTALL_PROBE);
+    let (stdout, stderr, code) = run(&nub, &dir, &["install"], None);
     assert_eq!(
         code, 0,
         "install failed\nstdout: {stdout}\nstderr: {stderr}"
@@ -128,9 +139,120 @@ fn install_runs_lifecycle_scripts_under_runtime_augmentation() {
     );
 }
 
+/// npm and pnpm both bundle node-gyp with themselves, so a dependency with a
+/// native addon builds on a machine that has none installed. nub has no bundled
+/// JavaScript and supplies lazy shims instead — one for `npm_config_node_gyp`,
+/// one on `PATH` for the far commoner `"install": "node-gyp rebuild"`. The
+/// engine supplies neither: `node_gyp_path` is `None` at all of its call sites,
+/// and its `PATH` channel looks for a `dist/node-gyp-bin` beside the running
+/// executable, a layout pnpm's npm package has and nub's binary does not.
+///
+/// The `nub run` path stamps the variable at its own site and is covered by
+/// `pm_identity`'s brand test; this is the install path, which is where the two
+/// silently diverged.
+#[test]
+fn install_hands_lifecycle_scripts_a_runnable_node_gyp() {
+    let nub = nub_binary();
+    let dir = fixture(NODE_GYP_PROBE);
+    let cache_root = dir.join("xdg-cache");
+    let scrubbed = scrubbed_path(&dir);
+
+    let (stdout, stderr, code) = run(&nub, &dir, &["install"], scrubbed.as_deref());
+    assert_eq!(
+        code, 0,
+        "install failed\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let recorded = std::fs::read_to_string(dir.join("gyp.json")).unwrap_or_else(|_| {
+        panic!(
+            "the root postinstall did not run — gyp.json was never written.\n\
+             stdout: {stdout}\nstderr: {stderr}"
+        )
+    });
+    let probe: serde_json::Value = serde_json::from_str(&recorded).unwrap();
+
+    // Asserted against THIS test's cache root, not merely "non-empty": the
+    // harness inherits an npm lifecycle environment that can carry
+    // `npm_config_node_gyp` already, and nub deliberately leaves an ambient
+    // value alone, so a laxer assertion would read its own environment back.
+    let gyp = probe["gyp"].as_str().unwrap_or_default();
+    assert!(
+        !gyp.is_empty() && Path::new(gyp).starts_with(&cache_root),
+        "the postinstall's npm_config_node_gyp must name a node-gyp nub supplied under {} — \
+         a script's `node $npm_config_node_gyp …` has nothing to run otherwise.\n\
+         npm_config_node_gyp = {gyp:?}",
+        cache_root.display()
+    );
+
+    // Only meaningful under the scrub: with an ambient node-gyp reachable, nub
+    // stands down by design and finding one would prove nothing.
+    let Some(_) = &scrubbed else {
+        return;
+    };
+    let on_path: Vec<&str> = probe["onPath"].as_array().map_or_else(Vec::new, |found| {
+        found.iter().filter_map(serde_json::Value::as_str).collect()
+    });
+    assert!(
+        on_path
+            .iter()
+            .any(|found| Path::new(found).starts_with(&cache_root)),
+        "a bare `node-gyp` — what almost every native addon's install script runs — must \
+         resolve on the lifecycle script's PATH to one nub supplied under {}; the PATH held \
+         only node and the system dirs, so nothing else could have put one there.\n\
+         resolved: {on_path:?}",
+        cache_root.display()
+    );
+}
+
+/// A `PATH` carrying only `node` and the system directories, so "node-gyp
+/// resolves" can only be true because nub put one there. Without this the
+/// assertion is free on any developer machine: npm installs its own `node-gyp`
+/// beside `node`.
+///
+/// `None` when the link cannot be made — Windows grants symlink creation only
+/// under Developer Mode, and a hard link fails across volumes. The caller drops
+/// the PATH half of its assertion rather than letting an ambient node-gyp
+/// satisfy it.
+fn scrubbed_path(dir: &Path) -> Option<std::ffi::OsString> {
+    let exe = if cfg!(windows) { "node.exe" } else { "node" };
+    let node = std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|entry| entry.join(exe))
+        .find(|candidate| candidate.is_file())
+        .expect("no `node` on PATH — this suite cannot run a lifecycle script without one");
+
+    let bin = dir.join("scrubbed-bin");
+    std::fs::create_dir_all(&bin).ok()?;
+    let linked = bin.join(exe);
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&node, &linked).ok()?;
+    #[cfg(windows)]
+    std::fs::hard_link(&node, &linked).ok()?;
+
+    let system: Vec<PathBuf> = if cfg!(windows) {
+        std::env::var_os("SystemRoot")
+            .map(|root| {
+                let root = PathBuf::from(root);
+                vec![root.join("system32"), root]
+            })
+            .unwrap_or_default()
+    } else {
+        ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+            .iter()
+            .map(PathBuf::from)
+            .collect()
+    };
+    let path = std::env::join_paths(std::iter::once(bin).chain(system)).ok()?;
+    // The scrub is an instrument, so it is checked against the thing it claims:
+    // a `node-gyp` still reachable means the assertion below would pass for free.
+    assert!(
+        !std::env::split_paths(&path).any(|entry| entry.join("node-gyp").is_file()),
+        "the scrubbed PATH still resolves a node-gyp: {path:?}"
+    );
+    Some(path)
+}
+
 /// A nub-identity project with a root postinstall probe, an empty lock, no
 /// dependencies, and a dead-port registry (offline).
-fn fixture() -> PathBuf {
+fn fixture(postinstall: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
@@ -144,14 +266,20 @@ fn fixture() -> PathBuf {
     std::fs::write(dir.join("nub.lock"), EMPTY_LOCK).unwrap();
     let pkg = format!(
         r#"{{"name":"app","version":"1.0.0","packageManager":"nub@0.0.1","scripts":{{"postinstall":{}}}}}"#,
-        serde_json::to_string(POSTINSTALL_PROBE).unwrap()
+        serde_json::to_string(postinstall).unwrap()
     );
     std::fs::write(dir.join("package.json"), pkg).unwrap();
     dir
 }
 
-fn run(nub: &Path, dir: &Path, args: &[&str]) -> (String, String, i32) {
-    let out = Command::new(nub)
+fn run(
+    nub: &Path,
+    dir: &Path,
+    args: &[&str],
+    path: Option<&std::ffi::OsStr>,
+) -> (String, String, i32) {
+    let mut command = Command::new(nub);
+    command
         .args(args)
         .current_dir(dir)
         // The fixture pins `nub@0.0.1` to exercise nub identity, not the self-shim —
@@ -159,8 +287,15 @@ fn run(nub: &Path, dir: &Path, args: &[&str]) -> (String, String, i32) {
         .env("NUB_SELF_SHIM", "0")
         .env("XDG_DATA_HOME", dir.join("xdg-data"))
         .env("XDG_CACHE_HOME", dir.join("xdg-cache"))
-        .output()
-        .expect("failed to spawn nub");
+        // `cargo test` is routinely run from an npm lifecycle environment, which
+        // carries a `node-gyp` of its own; nub honours an ambient value, so the
+        // probe would read the harness's environment back.
+        .env_remove("npm_config_node_gyp")
+        .env_remove("NPM_CONFIG_NODE_GYP");
+    if let Some(path) = path {
+        command.env("PATH", path);
+    }
+    let out = command.output().expect("failed to spawn nub");
     (
         String::from_utf8_lossy(&out.stdout).to_string(),
         String::from_utf8_lossy(&out.stderr).to_string(),
