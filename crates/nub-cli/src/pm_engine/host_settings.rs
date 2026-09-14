@@ -16,8 +16,9 @@
 //! else sets those, so they take no part in the order. Credentials stay out of
 //! every tier, and the registry, proxy and TLS keys stay out of the `.npmrc`
 //! tier, because the engine reads `.npmrc` itself under its own trust rules.
-//! It reads no `npm_config_*` variable, though, so from the environment those
-//! keys come in here (see [`left_to_engine`]).
+//! It reads those keys from `npm_config_*` too, but at `.npmrc`'s rank, so from
+//! the environment the registry and proxy keys come in here as well, to outrank
+//! `nub.jsonc` (see [`left_to_engine`]).
 
 use crate::project_config::{Hoist, InstallConfig, LinkerConfig};
 use anyhow::{Context, Result, anyhow, bail};
@@ -681,11 +682,11 @@ fn setting_key_of_var(name: &str) -> Option<&str> {
 /// whichever registry this layer names. `user-agent` is never carried either —
 /// the engine sends its own, and an `npm run` parent exports npm's to every
 /// child. The registry and proxy keys depend on the source. The engine reads
-/// `.npmrc` itself, so from there they stay out. It reads no `npm_config_*`
-/// variable, so from the environment this layer is the only thing that can
-/// honour them, and carrying them ranks the variable above `.npmrc`, where npm
-/// ranks it. The TLS keys have no setting here to carry, so a variable naming
-/// one reaches nothing: the engine takes them from `.npmrc` alone.
+/// `.npmrc` itself, so from there they stay out. Under nub's profile it reads
+/// them from `npm_config_*` as well, but at `.npmrc`'s rank, below `nub.jsonc`;
+/// carrying them here puts the variable above both, where the order above
+/// ranks it. The TLS keys have no setting here and need none, since the
+/// engine's own read of the variable is already the highest source they have.
 ///
 /// Case matters because a variable's tail keeps the case it was exported in:
 /// comparing it case-sensitively once let `NPM_CONFIG_REGISTRY` through while
@@ -1208,8 +1209,8 @@ mod tests {
         );
     }
 
-    /// From the environment a registry or proxy key IS this layer's, because
-    /// the engine reads no `npm_config_*` variable; the test above is the
+    /// From the environment a registry or proxy key IS this layer's, so it
+    /// outranks `nub.jsonc` as well as `.npmrc`; the test above is the
     /// `.npmrc` half, where the same key stays the engine's. Every spelling a
     /// shell exports has to reach the same answer, and `user-agent` stays out
     /// in upper case too.

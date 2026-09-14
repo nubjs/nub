@@ -46,6 +46,10 @@ pub(super) const NUB: Embedder = Embedder {
     // A nub project's configuration is `nub.jsonc`, `package.json` and
     // `.npmrc`, never pnpm's files; `profile` supplies what nub resolved.
     reads_pnpm_config: false,
+    // npm's environment is a nub project's too. The TLS keys have no setting
+    // `profile` could carry, so without this `npm_config_strict_ssl` and
+    // `npm_config_cafile` reached nothing.
+    reads_npm_config_env: true,
     // The write-side twin. Several engine paths record a decision by merging
     // it into `pnpm-workspace.yaml` — the `minimumReleaseAgeExclude` entries
     // an approved install persists, resolved catalog entries, the
@@ -112,9 +116,9 @@ pub(crate) fn host_store_dir() -> Option<std::path::PathBuf> {
 /// The profile `nubx` and `dlx` fetch a tool under: nub's, carrying the
 /// environment's settings and none of the project's.
 ///
-/// Without them the fetch honoured no `npm_config_*` variable at all, so a CI
-/// job pointing `npm_config_registry` at a private mirror fetched the tool
-/// from the public registry.
+/// The engine reads a variable's registry, proxy and TLS keys itself; every
+/// other setting one names, such as `npm_config_fetch_retries`, reaches the
+/// fetch only through these.
 pub(super) fn dlx_profile() -> Result<Embedder> {
     publish_host_settings(host_settings::env_only()?);
     Ok(Embedder {
