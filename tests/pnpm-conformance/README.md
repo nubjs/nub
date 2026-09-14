@@ -1,111 +1,84 @@
-# pnpm conformance harness — run pnpm's OWN test suite against nub
+# pnpm conformance harness
 
-This harness runs pnpm's own black-box CLI test suite against the nub binary. It is the widest-net way to verify nub's pnpm-compatibility claim: instead of writing nub-authored parity tests, it points the *incumbent's* suite at nub and treats every divergence as a candidate finding. It is the PM-CLI analog of the Node-test-suite leverage harness (`tests/node-suite/`).
+This harness runs pnpm's own black-box CLI test suite against the Nub binary. In a pnpm project Nub claims to behave exactly like pnpm 12.4.1, so instead of writing Nub-authored parity tests it points the incumbent's suite at Nub and treats every divergence as a candidate finding. [`tests/conformance/`](../conformance/) is the complementary harness: it diffs Nub against a real pnpm 12.4.1 on lockfiles and `node_modules` for a fixed fixture set.
+
+## What pnpm 12 ships
+
+pnpm 12 is the Rust `pnpm-cli` crate in the [pnpm/pnpm](https://github.com/pnpm/pnpm) monorepo (`pnpm/crates/cli`, published as the `pnpm` npm package from `pnpm/npm/pnpm`). Its end-to-end suite is a single integration-test binary, `pnpm/crates/cli/tests/suite/`, of roughly 2,000 tests run with `cargo nextest`. The TypeScript suite under `pnpm11/pnpm/test/` in the same tree belongs to the pnpm 11 line and does not test pnpm 12.
 
 ## The seam
 
-pnpm's front-door package — the package literally named `pnpm` inside the [pnpm/pnpm](https://github.com/pnpm/pnpm) monorepo — ships ~64 test files in `pnpm/test/*.ts`. 63 of them spawn the real binary through ONE seam in `pnpm/test/utils/execPnpm.ts`:
+Every test in the suite reaches the CLI through assert_cmd's `Command::cargo_bin("pnpm")`, which resolves `CARGO_BIN_EXE_pnpm`, the path of the `pnpm` binary Cargo built into `<clone>/target/debug/pnpm`. nextest sets that variable itself when it starts each test, so exporting a different value does nothing; the file at that path is the seam.
 
-```ts
-export const binDir = path.join(__dirname, '../..', isWindows() ? 'dist' : 'bin')
-export const pnpmBinLocation = path.join(binDir, 'pnpm.cjs')   // .mjs on newer pnpm
-crossSpawn.spawn(process.execPath, [pnpmBinLocation, ...args], { env, stdio })
-```
+`run.sh` builds the suite, records nextest's build metadata (`cargo nextest list --list-type binaries-only` and `cargo metadata`), replaces `target/debug/pnpm` with `nub-as-pnpm.sh`, and runs the recorded binaries with `--binaries-metadata`/`--cargo-metadata`, so nextest never asks Cargo to rebuild and restore the original. Two controls bracket the swap: the seam must report `12.4.1` before it and Nub's own version after it. The shim logs each invocation, and a run in which Nub was never spawned fails.
 
-Every assertion is on stdout / stderr / exit-code / lockfile / node_modules state — exactly nub's drop-in parity surface. The harness replaces `bin/pnpm.cjs` with a shim (`nub-pnpm-shim.cjs`) that re-execs the nub binary with `argv0: 'pnpm'`, so nub adopts the pnpm identity (nub picks its package-manager role from argv[0]'s basename — `Argv0::detect` in `crates/nub-cli/src/cli.rs`). The whole suite then exercises nub.
+The shim execs `nub` under its own name. Nub's argv0 `pnpm` is the package-manager shim, which hands the command to a real pnpm, so a seam that invoked Nub as `pnpm` would test pnpm against itself.
 
-npm's own suite is NOT usable this way: it constructs npm's internal JS `Npm` class in-process (tmock + nock), never spawning a binary (~3% black-box). The harness is pnpm-only by design.
+## Which tests are pnpm projects
 
-## Why a pinned clone (not a vendored subset)
+Nub picks its identity per project: a directory with a `pnpm-lock.yaml`, a `pnpm-workspace.yaml`, or a `packageManager`/`devEngines` pin naming pnpm is a pnpm project, and anything else is a Nub project with its own lockfile and error codes. Most tests set up the mocked registry with `CommandTempCwd::add_mocked_registry`, which writes a `pnpm-workspace.yaml`, so they run as pnpm projects. Tests that call `CommandTempCwd::init()` alone and never write a pnpm marker run as Nub projects; a failure there that follows from Nub's identity is a legitimate divergence, and the allowlist names it as such rather than as a bug. A test that pins a `packageManager` version other than 12.4.1 is delegated to that pnpm.
 
-The reference checkout `.repos/pnpm` tracks pnpm's `main`, which drifts from the version nub spoofs. The harness clones pnpm at the EXACT version nub reports on `pnpm --version` (`v11.3.0` == `PNPM_PARITY_VERSION` in `crates/nub-cli/src/pm_engine/mod.rs`) so the suite's version-string assertions match the behavior nub targets. A vendored subset was the documented fallback if bootstrap proved too flaky; the pinned-clone bootstrap proved tractable (one `pnpm install` + a lean compile), so we use it — it never rots against the version under test.
+Several tests also spawn a bare `pnpm` from `PATH` and compare its output with the binary under test. The harness installs `pnpm@12.4.1` for them and checks its version.
 
 ## Files
 
 | file | role |
 | --- | --- |
-| `run.sh` | the harness: clone → bootstrap → seam-swap → jest → classify |
-| `nub-pnpm-shim.cjs` | the seam replacement: first entry execs nub-as-pnpm, a NESTED entry execs real pnpm (the re-entry guard — see below); `__NUB_BIN__`/`__ORIG_PNPM__`/`__CLONE_DIR__` are baked at swap time |
-| `classify.mjs` | parses jest `--json` output; classifies each failure against the allowlist |
-| `allowlist.txt` | known-OK failures: intended divergences + tracked bugs (GENERATED — see below) |
-| `gen-allowlist.mjs` | regenerates `allowlist.txt` from a run's results JSON, bucketed by category |
+| `run.sh` | clone at the tag, install tools, build, swap the seam, run, classify |
+| `nub-as-pnpm.sh` | the seam replacement; `__NUB_BIN__` and `__SHIM_LOG__` are substituted at swap time |
+| `junit.mjs` | readers for nextest's JUnit report and the allowlist |
+| `classify.mjs` | classifies each failing test against the allowlist |
+| `gen-allowlist.mjs` | regenerates `allowlist.txt` from a report, one reason per entry |
+| `allowlist.txt` | known failures with their category and reason (generated) |
 
-## Running it locally
+## Running it
 
 ```bash
-# Build nub first.
-cargo build -p nub-cli
-
-# A real pnpm must be on PATH — NOT for the commands under test (those go to nub
-# via the seam), but for the suite's registry mock, which launches verdaccio via
-# `pnpm --use-node-version=20.x`. Install one separate from any nub shim:
-npm install -g pnpm@11.3.0
-
-# Full suite (clones to a temp dir, pins v11.3.0):
+# Needs cargo (rustup; the clone pins its own toolchain), node, npm, git and curl.
 tests/pnpm-conformance/run.sh target/debug/nub
 
-# A single test file (fast iteration; stale-allowlist check is skipped on subsets):
-tests/pnpm-conformance/run.sh target/debug/nub v11.3.0 test/root.ts
+# A subset, passed through to nextest (stale entries are not reported):
+tests/pnpm-conformance/run.sh target/debug/nub -E 'test(/^root::/)'
 
-# Reuse a clone across runs (skips the slow bootstrap). A reused clone whose
-# checked-out tag differs from the requested pin is re-checked-out automatically.
-PNPM_CLONE_DIR=/tmp/pnpm-conf KEEP_CLONE=1 tests/pnpm-conformance/run.sh target/debug/nub
+# Keep the clone and build between runs:
+CONF_WORK_DIR=/tmp/pnpm-conf tests/pnpm-conformance/run.sh target/debug/nub
 ```
 
-Exit 0 iff no failing test is a SURPRISE (an un-allowlisted divergence). A stale allowlist entry is reported but does NOT fail the run — a known failure that starts passing is an improvement, not a regression.
+The first run clones pnpm/pnpm, installs its root workspace, and compiles the suite, which is a large Rust build; run it on a Linux builder rather than a laptop. The run strips every `npm_*`, `NPM_CONFIG_*`, `pnpm_config_*` and `PNPM_*` variable and gives the tools a private `HOME` and XDG tree under the work directory.
 
-## Safe local runs — the re-entry guard + process cap
+## The allowlist
 
-The seam swap makes `pnpm` resolve to the nub shim **everywhere** on a `node_modules/.bin` PATH in the monorepo (jest-config declares `pnpm: workspace:*`, so its `.bin/pnpm` points at the swapped front-door seam too), not only at the test seam. nub-as-pnpm runs lifecycle scripts with `.bin` on PATH, so without a guard a nested `pnpm` (a lifecycle script, dlx, or runtime provision) re-enters nub install and self-spawns unbounded — a fork bomb (once observed locally at ~10k processes).
-
-Two defenses make local runs safe:
-
-- **Re-entry guard (the real fix).** Only the FIRST shim entry is the command under test (nub). It stamps a sentinel env var; a NESTED entry detects the sentinel and execs the REAL pnpm instead — so nested infra `pnpm` terminates exactly as it would in a real-pnpm run. Real pnpm is taken from the `*.orig-pnpm` backup the swap saves (content-verified, so a corrupt backup falls through to a global pnpm on PATH that lives outside the clone).
-- **Process cap (belt-and-suspenders).** `run.sh` sets `ulimit -u` to `current-process-count + headroom` before running, so any future recursion regression still cannot melt the host. Set `NUB_CONF_PROC_HEADROOM` to tune the headroom (default 800), or `NUB_CONF_NO_ULIMIT=1` to skip it (e.g. when relying on a container `--pids-limit` instead).
-
-A reused clone is also tag-verified: if its checked-out tag does not match the requested pin, `run.sh` re-checks-out the correct tag (restoring the seam to pristine) and wipes `node_modules`/`dist` so the bootstrap re-runs cleanly. This closes the stale-clone-reuse hole that originally triggered the fork bomb.
-
-## Bootstrap, step by step
-
-1. **Clone** pnpm/pnpm at the pinned tag (`git clone --depth 1 --branch v11.3.0`).
-2. **Install** the monorepo deps (`corepack pnpm install --frozen-lockfile`, ~30 s). Corepack runs the repo's own pinned pnpm.
-3. **Compile** only the `pnpm` front-door package — `tsc --build` then `bundle` (produces `pnpm/dist/pnpm.cjs`) plus the runtime-asset copies. We deliberately SKIP the full `compile-only` script: it also typechecks + lints the entire monorepo (many minutes, irrelevant to running the suite).
-4. **Swap the seam**: detect whether the suite spawns `bin/pnpm.cjs` or `bin/pnpm.mjs` (version-dependent), back it up, and write the shim with the absolute nub path baked in. (Baked, not env-passed: the suite's `createEnv()` rebuilds a clean env keeping only `PATH`/`COLORTERM`/`APPDATA`, so an exported `NUB_BIN` would be stripped before the shim runs.)
-5. **Run jest** scoped to `pnpm/test/` from inside the `pnpm/` package (so its `@pnpm/jest-config/with-registry` preset — which boots the registry mock — is active).
-6. **Classify** the jest `--json` output against the allowlist.
-
-## The allowlist (generated)
-
-The suite has a large, stable set of known failures — intended/out-of-scope divergences (pnpm version-switching, per-package Node provisioning, `pnpm server`/`self-update`, the global-install layout, patch/configurational-dependency hooks, supportedArchitectures), harness-infrastructure brittleness (the registry mock not honored on a flow, an `execPnpm.ts` helper that crashes on empty output, multi-minute timeouts on unimplemented features), and genuine nub↔pnpm divergences worth fixing. The maintainer call (2026-06-30) is to SKIP all of them so the nightly is green on this known reality and reds ONLY on a genuine NEW regression.
-
-So `allowlist.txt` is GENERATED, not hand-maintained, from a real full-suite run:
+`allowlist.txt` is generated from a full run, never edited by hand. Generating it takes three files from the work directory: the report of the run against Nub, the seam's invocation log (one line per call: test name, the project identity Nub picks for the cwd, the cwd, the arguments), and a baseline report from the same suite run against pnpm itself with `CONF_BASELINE=1`:
 
 ```bash
-node tests/pnpm-conformance/gen-allowlist.mjs <results.json> > tests/pnpm-conformance/allowlist.txt
+CONF_WORK_DIR=/tmp/pnpm-conf CONF_BASELINE=1 tests/pnpm-conformance/run.sh target/debug/nub
+CONF_WORK_DIR=/tmp/pnpm-conf tests/pnpm-conformance/run.sh target/debug/nub
+node tests/pnpm-conformance/gen-allowlist.mjs /tmp/pnpm-conf/junit.xml \
+  /tmp/pnpm-conf/shim-invocations.log /tmp/pnpm-conf/junit-baseline.xml > tests/pnpm-conformance/allowlist.txt
 ```
 
-Every currently-failing test becomes an EXACT-fullName entry (matched as a substring against a failing test's full name), bucketed into commented category sections. The **genuine-divergence** bucket is thread-referenced (`pnpm-conformance-divergences` D1–D7, `pnpm-conformance-99`) so real bugs are skipped-but-not-buried: fix the bug, then drop its line (or regenerate after the next run). Regenerate after any deliberate suite/pin change; the diff shows exactly which failures appeared or disappeared.
+Each line is `<module>::<test>  # <category>: <reason>`. `gen-allowlist.mjs` assigns every failure to the first rule that accepts it, and exits non-zero if any failure matches no rule, so a new kind of failure needs a written reason before it can be allowlisted. The categories:
 
-The classifier reports three things; only one reds the run:
+| category | meaning |
+| --- | --- |
+| `environment` | the test also fails against pnpm itself on the same runner |
+| `bug/…` | a divergence in a pnpm project with no design reason; a product defect |
+| `divergence/…` | Nub answers with its own command or version in a pnpm project, by its current routing |
+| `identity/nub-project` | the fixture has no pnpm marker, so Nub's own identity applies |
+| `seam/…` | behavior the seam cannot show, such as pnpm's shims that copy its own executable |
 
-- **SURPRISE** (FATAL) — a failing test matching NO allowlist entry: a genuinely new divergence / regression. This is the whole value of the gate.
-- **STALE-ALLOW** (non-fatal) — an allowlist entry that matched no failure (a known failure that now passes or was renamed): reported loudly for pruning, but it does NOT red the run — an improvement is not a regression.
-- **KNOWN-FAILING** — a failure matching an allowlist entry: expected, skipped.
+The classifier reports three outcomes:
 
-## Flake sources (and mitigations)
+- **SURPRISE** (fails the run): a failing test with no entry.
+- **STALE-ALLOW** (reported only): an entry whose test now passes or no longer exists.
+- **KNOWN**: a failing test with an entry.
 
-- **Registry mock (verdaccio).** The jest preset boots verdaccio under Node 20 via a real pnpm. Needs a real pnpm on PATH and (first run) a Node-20 download. This is the main flake/cost source; the CI job allows 90 minutes and uploads the results JSON as an artifact.
-- **Self-update banner (B3).** nub never checks for a newer pnpm, and the harness exports `CI=1`, so no "Update available" box should reach stdout; an `Update available` entry stays in the allowlist defensively.
-- **Network.** The pinned clone and the monorepo install need network; this is not an offline harness.
+Regenerate after a pnpm version change or a Nub change that moves the failure set; the diff shows which failures appeared or disappeared.
 
 ## CI
 
-`.github/workflows/pnpm-conformance.yml` runs this NIGHTLY (08:00 UTC) and on-demand (`workflow_dispatch`, with optional `pnpm_tag` / `jest_args` inputs). It is intentionally NOT a per-PR gate: it is a new external-suite surface with real flake sources, so it must not block the trunk. Promote it to a per-PR gate only after it proves stable across several nightly runs.
+`.github/workflows/pnpm-conformance.yml` runs the harness nightly and on demand. It is not a pull-request gate: it clones an external repository, compiles a large workspace, and its mocked registry proxies real npm packages from the public registry.
 
-## Baseline (2026-06-30, local, pnpm v11.3.0)
+## Updating the pin
 
-Full front-door suite (`pnpm/test/`, 50 suites / 337 tests, ~45–60 min including the slow `server.ts`/`recursive` suites). With the generated allowlist the classifier reports `SURPRISE: 0` → exit 0. The known-failing set is bucketed in `allowlist.txt`; the genuine-divergence bucket is tracked in `pnpm-conformance-divergences` (D1–D7) and `pnpm-conformance-99`, to be fixed on their own threads. Regenerate the baseline after a deliberate suite/pin change.
-
-## Keeping the pin in sync
-
-When nub's spoofed pnpm version (`PNPM_PARITY_VERSION` in `crates/nub-cli/src/pm_engine/mod.rs`) changes, update `PNPM_TAG`/`PNPM_PIN` in the workflow + the version references here to the SAME version, then **regenerate `allowlist.txt`** from a fresh run (`gen-allowlist.mjs`) — a version change shifts the failure set, and the generated allowlist must match. (`lockfile-roundtrip.yml` pins its own version for lockfile-FORMAT coverage, a separate axis — it no longer tracks this pin.)
+When Nub's pnpm target version changes, change `PNPM_TAG` in `run.sh` and the workflow, run the full suite, and regenerate the allowlist.

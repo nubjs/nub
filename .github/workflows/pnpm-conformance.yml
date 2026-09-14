@@ -1,34 +1,21 @@
 name: pnpm conformance
 
-# Run pnpm's OWN black-box CLI test suite against the nub binary.
+# Run pnpm 12.4.1's OWN black-box CLI suite (the Rust `pnpm-cli` crate's
+# `tests/suite`) against the nub binary. The harness swaps the `pnpm` binary the
+# suite spawns for nub and classifies every failure against a generated
+# allowlist; an un-allowlisted failure fails the run. Design and seam:
+# tests/pnpm-conformance/README.md.
 #
-# pnpm's front-door package (`pnpm/` inside pnpm/pnpm) ships ~64 test files in
-# pnpm/test/*.ts; 63 spawn the real binary through ONE seam (pnpmBinLocation in
-# pnpm/test/utils/execPnpm.ts). The harness (tests/pnpm-conformance/) clones pnpm
-# at a tag matching nub's spoofed pnpm version, bootstraps it, swaps that seam for
-# nub (identified as pnpm via argv[0]), runs jest over pnpm/test/, and classifies
-# each failure against an allowlist of intended divergences + tracked bugs. A
-# SURPRISE failure (unexpected divergence) or a STALE allowlist entry fails the
-# run. Full design + bootstrap notes: tests/pnpm-conformance/README.md.
-#
-# CADENCE — non-blocking on purpose. This is a NEW external-suite CI surface with
-# real flake sources (the registry-mock verdaccio bootstrap, network for the
-# pinned clone + a Node-20 download). It runs NIGHTLY and ON-DEMAND only, NOT on
-# every PR, so a flaky upstream suite never gates the trunk. Promote to a per-PR
-# gate only once it has proven stable over several nightly runs.
+# Nightly and on demand only: it clones pnpm/pnpm, compiles its workspace, and
+# its mocked registry proxies real packages from the npm registry.
 
 on:
   schedule:
-    # Nightly at 08:00 UTC (offset from the lockfile-roundtrip nightly at 07:00).
     - cron: "0 8 * * *"
   workflow_dispatch:
     inputs:
-      pnpm_tag:
-        description: "pnpm git tag to clone & pin (e.g. v11.3.0)"
-        required: false
-        default: "v11.3.0"
-      jest_args:
-        description: "extra jest args (e.g. a single file: test/root.ts) — leave blank for the full suite"
+      nextest_args:
+        description: "extra cargo-nextest args (e.g. -E 'test(/^root::/)'); blank runs the full suite"
         required: false
         default: ""
 
@@ -36,23 +23,17 @@ permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
-  # Pin pnpm to the EXACT version nub spoofs on `pnpm --version`
-  # (PNPM_PARITY_VERSION in crates/nub-cli/src/pm_engine/mod.rs). Matching it
-  # keeps version-string assertions from false-failing — the harness README's
-  # "pin to nub's spoofed major" rule. (lockfile-roundtrip.yml pins its own
-  # version for lockfile-FORMAT coverage — a separate axis — so the two no
-  # longer track each other.) Bump both this and PNPM_PARITY_VERSION together,
-  # then regenerate the allowlist (tests/pnpm-conformance/gen-allowlist.mjs).
-  PNPM_TAG: ${{ github.event.inputs.pnpm_tag || 'v11.3.0' }}
-  PNPM_PIN: "11.3.0"
-  # B3 flake mitigation: gate nub's self-update so no banner pollutes stdout.
+  # The pnpm version nub matches in a pnpm project. Bump together with
+  # PNPM_TAG's default in tests/pnpm-conformance/run.sh, then regenerate the
+  # allowlist from a full run.
+  PNPM_TAG: v12.4.1
   NUB_NO_UPDATE: "1"
 
 jobs:
   conformance:
-    name: pnpm black-box suite vs nub (ubuntu)
+    name: pnpm 12 CLI suite vs nub (ubuntu)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 150
     permissions:
       contents: read
     steps:
@@ -60,42 +41,36 @@ jobs:
         with:
           persist-credentials: false
 
+      # nub and the pnpm workspace are two large debug builds on one runner.
+      - name: Free up runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
-          node-version: "24"
+          node-version: "26"
 
       - name: Build nub
         run: cargo build -p nub-cli
 
-      - name: Install a real pnpm on PATH (for the registry-mock infra ONLY)
-        # The suite's registry mock launches verdaccio via a real `pnpm
-        # --use-node-version` — that is test INFRASTRUCTURE, separate from the
-        # commands under test (which the seam routes to nub). Pin it to PNPM_PIN.
-        run: | # zizmor: ignore[adhoc-packages] intentional global install, exact-version pinned via PNPM_PIN
-          npm install -g "pnpm@${PNPM_PIN}"
-          echo "real pnpm (registry infra): $(pnpm --version)"
-
-      - name: Run pnpm conformance suite against nub
+      - name: Run pnpm's CLI suite against nub
         env:
-          PNPM_CLONE_DIR: ${{ runner.temp }}/pnpm-conformance-clone
-          KEEP_CLONE: "1"
-          JEST_ARGS: ${{ github.event.inputs.jest_args }}
+          CONF_WORK_DIR: ${{ runner.temp }}/pnpm-conformance
+          NEXTEST_ARGS: ${{ github.event.inputs.nextest_args }}
         run: |
-          # JEST_ARGS is intentionally unquoted: it carries zero-or-more extra
-          # jest args (blank means none) and must word-split like the dispatch
-          # input always has.
-          tests/pnpm-conformance/run.sh \
-            target/debug/nub \
-            "${PNPM_TAG}" \
-            ${JEST_ARGS}
+          # Zero or more extra nextest arguments, split on whitespace (quotes
+          # are not interpreted, so write a filter without spaces).
+          read -r -a extra <<< "${NEXTEST_ARGS}"
+          tests/pnpm-conformance/run.sh target/debug/nub "${extra[@]}"
 
-      - name: Upload jest results
+      - name: Upload JUnit report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
-          name: pnpm-conformance-results
-          path: ${{ runner.temp }}/pnpm-conformance-clone/nub-conformance-results.json
+          name: pnpm-conformance-junit
+          path: ${{ runner.temp }}/pnpm-conformance/junit.xml
           if-no-files-found: ignore
           retention-days: 7
