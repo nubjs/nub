@@ -195,3 +195,7 @@ unimplemented = "warn"
 # Vendored to give x86_64 macOS the same real Mach-O section arm64 gets.
 [patch.crates-io]
 libsui = { path = "vendor/libsui" }
+# The pnpm engine patches node-semver in its own workspace, and a patch applies
+# only from the root one, so it is repeated here. Without it `>=1 <=2` rejects
+# 2.0.0, where pnpm accepts it. Keep this in step with nubjs/pnpm Cargo.toml.
+node-semver = { git = "https://github.com/pnpm/node-semver-rs", rev = "1ae976a0023b4dec80b1a5411ccee8343f91320e" }
