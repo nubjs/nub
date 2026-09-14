@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end guard for `nub install -g` / `nub remove -g` bin handling.
 #
-# The unit tests in `vendor/aube/.../commands/global.rs` cover the ownership
-# LOGIC against constructed fixtures. This covers the INTEGRATION: a real
-# registry install, the real content store, the real symlink shapes the linker
+# This covers the INTEGRATION of global bin ownership: a real registry install, the real content store, the real symlink shapes the linker
 # produces, and the resolved on-disk layout. Three of the four defects below
 # were invisible to unit tests because they only appear once a package has
 # actually been installed.

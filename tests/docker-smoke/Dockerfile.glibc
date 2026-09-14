@@ -13,7 +13,7 @@
 
 # ── builder: compile a Linux glibc nub + native addon ────────────────────────
 FROM rust:1-bookworm AS builder
-# libz-ng-sys (zlib-ng, via the vendored aube engine) builds with cmake.
+# aws-lc-sys (rustls's aws-lc-rs backend) builds with cmake.
 RUN apt-get update && apt-get install -y --no-install-recommends cmake && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .

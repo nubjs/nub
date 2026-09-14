@@ -95,7 +95,7 @@ The classifier reports three things; only one reds the run:
 ## Flake sources (and mitigations)
 
 - **Registry mock (verdaccio).** The jest preset boots verdaccio under Node 20 via a real pnpm. Needs a real pnpm on PATH and (first run) a Node-20 download. This is the main flake/cost source; the CI job allows 90 minutes and uploads the results JSON as an artifact.
-- **Self-update banner (B3).** nub's/aube's self-update check can print an "Update available" box to stdout. The harness exports `NUB_NO_UPDATE=1` and `AUBE_NO_UPDATE_CHECK=1` to suppress it; an `Update available` entry stays in the allowlist defensively.
+- **Self-update banner (B3).** nub never checks for a newer pnpm, and the harness exports `CI=1`, so no "Update available" box should reach stdout; an `Update available` entry stays in the allowlist defensively.
 - **Network.** The pinned clone and the monorepo install need network; this is not an offline harness.
 
 ## CI

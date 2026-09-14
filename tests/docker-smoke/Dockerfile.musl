@@ -13,7 +13,7 @@
 
 # ── builder: compile a Linux musl nub + native addon ─────────────────────────
 FROM rust:alpine AS builder
-# cmake + make: libz-ng-sys (zlib-ng, via the vendored aube engine) builds with cmake.
+# cmake + make: aws-lc-sys (rustls's aws-lc-rs backend) builds with cmake.
 RUN apk add --no-cache musl-dev bash cmake make
 WORKDIR /src
 COPY . .

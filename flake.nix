@@ -167,9 +167,9 @@
 
             # The hermetic Nix sandbox ships no system tools, so the C-building
             # crates in nub's graph need their build tools declared explicitly:
-            # aws-lc-sys (via aube → sigstore) and libz-ng-sys (via flate2's
-            # zlib-ng feature) both compile through cmake. Every existing CI runner
-            # ships cmake preinstalled, which is why this surfaces only under Nix.
+            # aws-lc-sys (rustls's aws-lc-rs backend) compiles through cmake. Every
+            # existing CI runner ships cmake preinstalled, which is why this surfaces
+            # only under Nix.
             nativeBuildInputs = [
               pkgs.cmake
               pkgs.perl

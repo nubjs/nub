@@ -5,19 +5,19 @@
 # full offline reinstall) for nub vs pnpm (vs bun, conditionally) on two fixtures:
 #
 #   gvs-eligible   — realistic backend/library project with NO
-#                    next/nuxt/parcel dep. nub's global virtual
+#                    framework that needs a local store. nub's global virtual
 #                    store (GVS) stays ON → node_modules is a symlink farm into
 #                    one shared store.
-#   gvs-ineligible — same deps PLUS `next`, which is on nub's
-#                    disableGlobalVirtualStoreForPackages list
-#                    (next,nuxt,parcel). GVS auto-disables → nub
+#   gvs-ineligible — same deps PLUS `next`, which nub always installs
+#                    into a project-local store. GVS auto-disables → nub
 #                    falls back to per-project materialize ≈ pnpm parity.
-#                    The GVS-on speedup does not apply to Next/Nuxt/Parcel.
+#                    The GVS-on speedup does not apply to those projects.
 #
-# IMPORTANT — nub's GVS trigger list is next,nuxt,parcel. vite, vitepress, and
-# @sveltejs/kit are NOT triggers in nub (they are aube's standalone defaults,
-# which nub overrides via the embedder-defaults seam). So those apps keep GVS ON.
-# The auto-disable path is exercised with `next`, not vite.
+# IMPORTANT — nub keeps `next` and `react-native` projects, and some `expo` and
+# `remix` ones, on a project-local store (`store_locality_breaker` in
+# crates/nub-cli/src/pm_engine/mod.rs). vite, vitepress and @sveltejs/kit are
+# NOT on that list, so those apps keep GVS ON. The auto-disable path is
+# exercised with `next`.
 #
 # Teardown (wiping node_modules) is via rename-aside in hyperfine --prepare and
 # is EXCLUDED from timing — see tests/bench/install/README.md for the full methodology.
@@ -191,7 +191,7 @@ echo "  date: $(date)   load: $(uptime | sed 's/.*load averages*: //')"
 echo "================================================================"
 
 FIXTURES=(
-  "gvs-eligible|gvs-eligible (~571 pkgs, NO next/nuxt/parcel — GVS ON)"
+  "gvs-eligible|gvs-eligible (~571 pkgs, NO next — GVS ON)"
   "gvs-ineligible|gvs-ineligible (~619 pkgs, +next — GVS auto-disabled)"
 )
 for entry in "${FIXTURES[@]}"; do

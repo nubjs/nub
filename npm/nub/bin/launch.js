@@ -157,8 +157,7 @@ function leadsToUs(entry, st, ourReal) {
       // never lands, that is paid on EVERY call. Every shim shape we handle is ~0.5-2 KB and
       // starts with `#!`. The size cap rejects the binary off the `lstat` healPathEntry
       // already took, for zero extra syscalls; only a file that passes the cap is opened at
-      // all. Cap is deliberately far above any real shim rather than tight, and matches
-      // aube's own MAX_BIN_SHIM_BYTES (aube-linker/src/sys.rs) for the same reason.
+      // all. Cap is deliberately far above any real shim rather than tight.
       if (st.size > 64 * 1024) return false;
       const body = fs.readFileSync(entry, "utf8");
       if (!body.startsWith("#!")) return false;

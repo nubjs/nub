@@ -43,6 +43,6 @@ KEEP=1 tests/daily-driver/run.sh target/debug/nub
 
 ## CI gating
 
-The `daily-driver` CI job (`.github/workflows/daily-driver.yml`) runs on ubuntu-latest on every push touching `crates/`, `runtime/`, `vendor/aube`, or the harness. It builds nub from source, scaffolds the fixture, installs from the real registry, and runs all six scenarios.
+The `daily-driver` CI job (`.github/workflows/daily-driver.yml`) runs on ubuntu-latest on every push touching `crates/`, `runtime/`, or the harness. It builds nub from source, scaffolds the fixture, installs from the real registry, and runs all six scenarios.
 
 **Not in ci.yml:** the job performs real `npm` registry installs (Vite + React + vitest = ~300 packages). That's too heavy for the main CI matrix. The separate workflow + path filter means it only fires when nub itself changed, not on every doc or wiki edit.

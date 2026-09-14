@@ -259,7 +259,7 @@ async function main() {
     if (/\b(?:node-gyp|gyp info)\b/i.test(`${install.stdout}\n${install.stderr}`)) {
       fail("--mode prebuilt forbids a node-gyp fallback; expected native prebuild was unavailable");
     }
-    const lockNames = ["package-lock.json", "npm-shrinkwrap.json", "nub.lock", "lock.yaml", "aube-lock.yaml", "pnpm-lock.yaml"];
+    const lockNames = ["package-lock.json", "npm-shrinkwrap.json", "nub.lock", "pnpm-lock.yaml"];
     const lockPath = lockNames.map((name) => join(project, name)).find(existsSync);
     if (!lockPath) fail("default install produced no pinned lock input");
     const lockInput = { path: basename(lockPath), sha256: await digest(lockPath), bytes: (await stat(lockPath)).size };

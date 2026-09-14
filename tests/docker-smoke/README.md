@@ -32,6 +32,6 @@ nub links against the system C library. The musl binary (Alpine) is a different 
 
 ## CI gating
 
-The `docker-smoke` CI job (`.github/workflows/docker-smoke.yml`) runs on every push that touches `crates/`, `runtime/`, `vendor/aube`, or the harness itself. It is an ubuntu-latest job that calls both Dockerfiles in sequence, so it doubles as the Linux cross-platform gate for the binary.
+The `docker-smoke` CI job (`.github/workflows/docker-smoke.yml`) runs on every push that touches `crates/`, `runtime/`, or the harness itself. It is an ubuntu-latest job that calls both Dockerfiles in sequence, so it doubles as the Linux cross-platform gate for the binary.
 
 The job is **not** in `ci.yml` because the builds are slow (Rust from scratch inside Docker) — keeping it in a separate workflow lets GitHub schedule it independently and lets the fast `ci.yml` jobs finish first. The path filter ensures it only fires when the binary or runtime could have changed.

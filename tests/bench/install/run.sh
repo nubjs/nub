@@ -176,8 +176,8 @@ setup_workdir() {
 # stale state, and wall-clock stays bounded. The teardown cost itself is measured
 # and reported SEPARATELY below so it stays transparent.
 #
-# GVS STATE IS PINNED, NOT INHERITED. aube's global virtual store defaults to ON
-# outside CI and OFF inside CI (`!aube_util::env::is_ci()`, and is_ci() is just
+# GVS STATE IS PINNED, NOT INHERITED. nub's global virtual store defaults to ON
+# outside CI and OFF inside CI (`host_settings::merge_sources`, where CI is just
 # `CI` being set in the env). An ambient `CI` var would silently flip nub from the
 # symlink-farm path to the materialized path — a different scenario wearing the
 # same "warm" label. We therefore pin it explicitly:

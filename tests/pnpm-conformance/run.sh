@@ -229,10 +229,8 @@ ESM
 esac
 
 # ── Flake mitigations ────────────────────────────────────────────────────────
-# B3: gate nub/aube self-update check off so the "Update available" banner never
-# pollutes stdout assertions.
-export NUB_NO_UPDATE=1
-export AUBE_NO_UPDATE_CHECK=1
+# B3: nub never checks for a newer pnpm, and CI=1 keeps any other update notice
+# quiet, so no "Update available" banner pollutes stdout assertions.
 export CI=1
 
 # ── Run jest, scoped to the front-door suite (pnpm/test/) ────────────────────
