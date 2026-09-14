@@ -569,6 +569,16 @@ pub(crate) fn run(argv: Vec<std::ffi::OsString>) -> Result<i32> {
                     0,
                     LIFECYCLE_NODE_VERSION.get().map(String::as_str),
                 );
+                // Vite realpath-checks every module it serves against
+                // `server.fs.allow`, which defaults to the workspace root — and
+                // under the global virtual store a dependency's realpath is the
+                // machine-global store, outside it. Vite 8.1 reads the store's
+                // location out of `.modules.yaml` itself, which the engine now
+                // writes; below that it has to be told, so the ejected copy is
+                // patched here. Same identity gate as the stamp: pnpm's virtual
+                // store is project-local, so a pnpm-incumbent tree never has the
+                // problem and must not be touched.
+                super::vite_compat::apply(&cwd);
             }
             if let Some(pending) = legacy {
                 pending.retire(embedder, &cwd);

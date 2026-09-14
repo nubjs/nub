@@ -238,16 +238,20 @@ pub(crate) fn vite_lt_8_1(version: &str) -> bool {
 /// registered by the time install runs, so `aube_store::dirs::cache_dir()`
 /// resolves the nub namespace.
 ///
-/// Only the DEFAULT location is reproduced here. aube v1.35.0 added the
-/// `globalVirtualStoreDir` / `cacheDir` settings, which relocate the real store
-/// at runtime; the resolver for those (`commands::settings_context::
-/// global_virtual_store_dir`) is `pub(crate)` to the aube crate, so nub cannot
-/// consult it without widening that surface. A project that sets either setting
-/// therefore gets a `.modules.yaml` naming the default path rather than the
-/// relocated one, and Vite would not be told to allow the real store.
+/// Taken from the store the engine resolved for this run rather than rebuilt
+/// from the default layout, so a project that relocates its store with
+/// `storeDir` is told about the store it will actually load from. That was the
+/// documented gap while this read aube's default location: aube's own resolver
+/// for the relocating settings was private to its crate, so a relocated store
+/// produced a `.modules.yaml` naming a path nothing used.
 fn global_virtual_store_dir() -> Option<PathBuf> {
-    aube_store::dirs::cache_dir().map(|c| c.join(aube_util::embedder().virtual_store_subdir))
+    super::pnpm_engine::host_store_dir().map(|store| store.join(GLOBAL_VIRTUAL_STORE_LEAF))
 }
+
+/// The leaf under the store holding the shared virtual store's package
+/// directories — what a global-virtual-store install symlinks `node_modules`
+/// entries at, and so the directory Vite has to be told to serve from.
+const GLOBAL_VIRTUAL_STORE_LEAF: &str = "links";
 
 /// Unit A. Write `<node_modules>/.modules.yaml` as JSON `{"virtualStoreDir":…}`.
 /// MUST be JSON-flow (Vite ≤ 8.1.x's native sniff parses with `JSON.parse`;
