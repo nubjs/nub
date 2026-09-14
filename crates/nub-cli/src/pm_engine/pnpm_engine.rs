@@ -45,6 +45,11 @@ pub(super) const NUB: Embedder = Embedder {
     // diagnostic telling the user to approve a build has to name that one.
     // The engine's own answer is `allowBuilds`, which nothing here reads.
     allow_builds_display_name: super::host_settings::ALLOW_SCRIPTS_FIELD,
+    // `audit --fix` writes an override through `record_overrides`, which
+    // edits the root `package.json` — not the settings file the rest of the
+    // help names. Without this the flag would describe a file it never
+    // touches.
+    overrides_file_display_name: Some("package.json"),
     // Hidden entries nub writes into a modules directory beside the engine's
     // own, so `clean` empties `node_modules` instead of leaving a tree that
     // still looks installed: the engine stamp, and the preload chainer dir
