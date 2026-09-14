@@ -2504,6 +2504,23 @@ mod tests {
             expected(&["prompt", "never"])
         );
 
+        // `prefix`'s string branch is the one field whose validity is a PATTERN
+        // rather than a key or an enum, so neither check above reaches it. The
+        // pattern must reject what `as_command_words` rejects: a backslash, which
+        // the shell splitting would eat, and a value with no program in it. Pinned
+        // as a literal because nub-cli takes no regex dependency and adding one to
+        // run the cases here would move the root lockfile for a single assertion —
+        // `prefix_refuses_a_backslash_in_the_string_form` covers the parser side,
+        // so the two together fail whichever half drifts.
+        assert_eq!(
+            schema
+                .pointer("/properties/prefix/oneOf/0/pattern")
+                .and_then(Value::as_str),
+            Some(r"^[^\\]*[^\\\s][^\\]*$"),
+            "prefix: the schema must refuse a backslash in the string form, or an \
+             editor blesses a Windows path the parser rejects"
+        );
+
         // `loader` spells its vocabulary three times: the open map, plus a
         // narrowed override per JSX-pinned extension. All three drift
         // independently of the parser, and an extra value here is an editor
