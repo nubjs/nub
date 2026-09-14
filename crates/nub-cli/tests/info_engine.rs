@@ -1,6 +1,7 @@
 //! Info-family verbs (`list`/`why`/`outdated`/`audit`/`peers`, …) through
-//! the embedded pnpm 12 engine, end-to-end through the binary. The wiring
-//! under test lives in `crates/nub-cli/src/pm_engine/info_family.rs`.
+//! the embedded pnpm 12 engine, end-to-end through the binary. There is no
+//! host module left to point at: pnpm's grammar knows every verb here, so
+//! the front door hands each command line straight to the engine.
 //!
 //! Every verb here is an ENGINE verb, so the contract is pnpm 12's behavior
 //! with the embedder's rebrand over it — and the rebrand is scoped by project
@@ -360,11 +361,14 @@ fn list_json_emits_the_empty_importer_shape_without_a_lockfile() {
 }
 
 /// The path verbs print the resolved project locations without any install,
-/// `check` on a never-installed project reports zero packages and exits 0,
 /// and `licenses` accepts pnpm's documented `list` spelling beside the
 /// engine's `ls` (reviewer #6). All offline, all brand-clean.
+///
+/// A bare `check` used to be asserted here too. It was one of the three verbs
+/// aube served that pnpm has no counterpart for, so it went with aube; pnpm's
+/// own `peers check` is a different command and is covered above.
 #[test]
-fn check_bin_root_and_licenses_list_work_offline_and_stay_brand_clean() {
+fn bin_root_and_licenses_list_work_offline_and_stay_brand_clean() {
     let dir = lockfile_fixture("paths", "is-positive", "3.1.0", "3.1.0", IS_POSITIVE_310);
 
     let (root_out, stderr, code) = run_nub(&dir, &["root"]);
@@ -381,24 +385,12 @@ fn check_bin_root_and_licenses_list_work_offline_and_stay_brand_clean() {
         "bin must print the project's bin dir: {bin_out}"
     );
 
-    let (check_out, stderr, code) = run_nub(&dir, &["check"]);
-    assert_eq!(code, 0, "check: stdout: {check_out}\nstderr: {stderr}");
-    assert!(
-        check_out.contains("checked 0 packages"),
-        "check without an install must report zero packages: {check_out}"
-    );
-
     for argv in [&["licenses", "list"][..], &["licenses", "ls"][..]] {
         let (stdout, stderr, code) = run_nub(&dir, argv);
         assert_eq!(code, 0, "nub {argv:?}: stdout: {stdout}\nstderr: {stderr}");
         assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
     }
-    assert_no_engine_branding(&[
-        ("root", &root_out),
-        ("bin", &bin_out),
-        ("check", &check_out),
-        ("stderr", &stderr),
-    ]);
+    assert_no_engine_branding(&[("root", &root_out), ("bin", &bin_out), ("stderr", &stderr)]);
 }
 
 /// Last path segment of a fixture dir (macOS canonicalizes `/var` →

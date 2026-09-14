@@ -262,8 +262,7 @@ struct EngineGlobals {
     /// line on those verbs, and threading a second args group through the
     /// family would be more machinery than that is worth. The read-only verbs
     /// (`why`, `list`, `licenses`, `outdated`, `audit`) are unaffected either
-    /// way — they parse through `info_family`'s own verb roots and never see
-    /// this struct.
+    /// way — the engine parses them and they never see this struct.
     #[usage(flatten)]
     age_gate: super::min_release_age::AgeGateFlags,
 

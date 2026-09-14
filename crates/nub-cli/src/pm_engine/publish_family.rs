@@ -294,14 +294,6 @@ fn run_publish(typed: &str, args: &[String]) -> Result<i32> {
     }
 }
 
-/// `search` is dispatched by [`super::info_family`] (it is a read-only
-/// registry query) but rides this family's plain wired shape.
-pub(super) fn run_search(typed: &str, args: &[String]) -> Result<i32> {
-    run_wired!(SearchCli, typed, args, aube::commands::search::run)
-}
-
-plain_verb_cli!(SearchCli, "nub search", aube::commands::search::SearchArgs);
-
 #[cfg(test)]
 mod tests {
     use super::*;

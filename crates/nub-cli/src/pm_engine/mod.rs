@@ -7,8 +7,9 @@
 //! - [`install_family`] — dependency-graph mutation and linking (`install`,
 //!   `ci`, `add`, `remove`, `update`, `link`, `patch*`, …). All are wired to
 //!   the embedded engine; `install`/`ci` dispatch via live parser verbs.
-//! - [`info_family`] — read-only project/graph/registry queries (`list`,
-//!   `why`, `outdated`, `audit`, `view`, …).
+//!   The read-only queries (`list`, `why`, `outdated`, `audit`, `view`, …)
+//!   have no module here: pnpm's grammar knows every one of them, so the
+//!   front door hands their command lines straight to the engine.
 //! - [`publish_family`] — registry writes, packaging, and auth (`publish`,
 //!   `pack`, `version`, `login`, `dist-tag`, …).
 //! - [`store_config_family`] — store/cache forensics and settings
@@ -47,9 +48,14 @@
 //! Every other registered verb is wired to the engine through its family
 //! module, except the deliberate exclusions — `recursive` (no meta-verb;
 //! use `-r`/`--filter` on the verb), `clean`/`purge` (nub doesn't delete
-//! node_modules for you), `deploy` (not yet wired), and `sbom` (engine
-//! branding in the document body — info_family module doc) — which error
-//! with honest per-verb messages in their family dispatchers.
+//! node_modules for you) and `deploy` (not yet wired) — which error with
+//! honest per-verb messages in their family dispatchers.
+//!
+//! `sbom` was a fifth exclusion and is not one any more: the engine serves
+//! it, and the document it writes matches real pnpm 12.4.1. The reason the
+//! exclusion existed has outlived it — the engine still names ITSELF in the
+//! SBOM's `metadata.tools`, which is a brand leak to fix where the name is
+//! written rather than by refusing the verb.
 
 mod bun_config;
 mod compat_db;
@@ -59,7 +65,6 @@ mod duplicate_home;
 mod expo_compat;
 mod host_settings;
 pub mod identity;
-pub mod info_family;
 pub mod install_family;
 mod install_report;
 pub mod log;
@@ -101,7 +106,7 @@ use aube_lockfile::LockfileKind;
 /// Any test that drives `engine_brand_preflight` / a family `run_verb`
 /// (which registers `NUB` and writes `read_branded_pnpm_config` from the test
 /// process's cwd) races a test that READS that posture
-/// (e.g. `info_family`'s `find_workspace_root`, gated on
+/// (e.g. a workspace-root lookup, gated on
 /// `read_branded_pnpm_config`). Both sides take this lock so the global state
 /// is stable for the reader's duration. Cheap (`std::sync::Mutex`), test-only.
 #[cfg(test)]
@@ -321,28 +326,10 @@ pub const ENGINE_VERBS: &[VerbSpec] = &[
         aube_args: "commands::licenses::LicensesArgs",
     },
     VerbSpec {
-        canonical: "deprecations",
-        aliases: &[],
-        family: Family::Info,
-        aube_args: "commands::deprecations::DeprecationsArgs",
-    },
-    VerbSpec {
         canonical: "peers",
         aliases: &[],
         family: Family::Info,
         aube_args: "commands::peers::PeersArgs",
-    },
-    VerbSpec {
-        canonical: "query",
-        aliases: &[],
-        family: Family::Info,
-        aube_args: "commands::query::QueryArgs",
-    },
-    VerbSpec {
-        canonical: "check",
-        aliases: &[],
-        family: Family::Info,
-        aube_args: "commands::check::CheckArgs",
     },
     VerbSpec {
         canonical: "bin",
@@ -534,7 +521,18 @@ pub fn dispatch_verb(
 ) -> Result<i32> {
     match spec.family {
         Family::Install => install_family::run_verb(spec, typed, args, pm_hint),
-        Family::Info => info_family::run_verb(spec, typed, args, pm_hint),
+        // Nothing reaches this arm any more, and that was measured rather
+        // than reasoned: an instrumented copy of this match printed a marker
+        // for every read-only verb of every family, and all sixteen Info
+        // spellings went to the engine instead. `engine_takes` claims the
+        // command line at the front door because pnpm's own grammar knows
+        // them, and the help path renders from the engine too. The three that
+        // did land here — `check`, `deprecations`, `query` — were aube
+        // commands with no pnpm counterpart, and they went with aube. The
+        // variant stays because the registry still classifies these verbs for
+        // `lookup_verb`; an error beats a panic for a branch that is
+        // unreachable by measurement rather than by type.
+        Family::Info => anyhow::bail!("nub: internal: `{typed}` is served by the engine"),
         Family::Publish => publish_family::run_verb(spec, typed, args, pm_hint),
         Family::StoreConfig => store_config_family::run_verb(spec, typed, args, pm_hint),
     }
@@ -679,28 +677,7 @@ pub(crate) fn engine_session_transient(dir: Option<&Path>) -> Result<EngineSessi
     )
 }
 
-/// [`engine_session`] for the read-only PROJECT-GRAPH families that resolve
-/// the project's dependency tree from its lockfile (`list`, `why`, `outdated`,
-/// `query`, `audit`, `licenses`, `deprecations`, `peers`, `check`). The
-/// config-scoping FILTER still applies — `why` / `outdated` should reflect the
-/// same effective override set a real install would — but the user-facing
-/// scoping *warnings* and the `catalog:`-under-the-wrong-PM hard error are
-/// suppressed: those are install-time UX, and surfacing them on a `nub why`
-/// would be noise. Identity resolution stays STRICT: these commands READ the
-/// project lockfile, so a multi-lockfile ambiguity must be a loud error — a
-/// silent degrade to no-identity would yield an empty/wrong graph. See the
-/// config-scoping policy ([`config_scope`]).
-pub(crate) fn engine_session_quiet(dir: Option<&Path>) -> Result<EngineSession> {
-    engine_session_inner(
-        dir,
-        ConfigScopeNoise::Silent,
-        IdentityStrictness::Strict,
-        VirtualStoreLocality::Default,
-        ProjectInstallConfig::Apply,
-    )
-}
-
-/// [`engine_session_quiet`] for GLOBAL-SCOPE commands that never read or write
+/// [`engine_session`] for GLOBAL-SCOPE commands that never read or write
 /// the project's lockfile: the global store/cache forensics (`store`, `cache`,
 /// `cat-file`, `cat-index`, `find-hash`), config get/set, the registry/auth
 /// surface (`publish`, `pack`, `version`, `deprecate`/`undeprecate`,
@@ -713,8 +690,8 @@ pub(crate) fn engine_session_quiet(dir: Option<&Path>) -> Result<EngineSession> 
 /// `ERR_NUB_LOCKFILE_AMBIGUOUS`), exactly like the transient dlx path (#197).
 /// This is the same `IdentityStrictness` machinery, applied to the global-scope
 /// read class rather than the transient fetch-and-run class. The STRICT
-/// ambiguity guard remains for the mutating install family (writes the
-/// lockfile) and the project-graph readers above (see [`engine_session_quiet`]).
+/// ambiguity guard remains for the mutating install family, which writes the
+/// lockfile.
 pub(crate) fn engine_session_global(dir: Option<&Path>) -> Result<EngineSession> {
     engine_session_inner(
         dir,

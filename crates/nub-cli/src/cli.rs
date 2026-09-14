@@ -13757,13 +13757,19 @@ mod tests {
         // names the verb's actual status — not the generic "wired in phase
         // Surface" stub text (everything destined for wiring IS wired; these
         // are exclusions, not backlog). Reasons: install_family module doc.
+        // `sbom` used to be here. It is no longer an exclusion: the engine
+        // serves it, and `nub sbom --sbom-format cyclonedx` writes a valid
+        // CycloneDX 1.7 document that matches real pnpm 12.4.1 byte for byte
+        // apart from the rebranded program name. The exclusion existed because
+        // the OLD engine put its own brand in the document body — which the
+        // new one still does, in `metadata.tools`, tracked as a fork fix
+        // rather than a refusal to run the verb.
         for (verb, expect) in [
             ("deploy", "not yet supported"),
             ("recursive", "not supported"),
             ("multi", "not supported"), // recursive alias keeps the message
             ("clean", "not supported"),
             ("purge", "not supported"),
-            ("sbom", "not yet supported"),
         ] {
             let spec = crate::pm_engine::lookup_verb(verb)
                 .unwrap_or_else(|| panic!("{verb} must be registered"));
