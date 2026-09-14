@@ -653,26 +653,27 @@ pub(crate) fn project_supplied_settings() -> Vec<String> {
     supplied
 }
 
-/// Per-process, mtime-validated cache of parsed `aube_manifest::PackageJson`
-/// keyed by file path. The PM-engine config phase parses the root manifest
-/// through aube's parser several times per command — `apply_config_scope` and
-/// the scan's `manifest_has_pnpm_overrides` — and `first_catalog_specifier`
-/// parses every member manifest. This collapses repeat parses of one path to a single read. mtime
-/// validation keeps it stale-proof (a mid-command engine rewrite re-reads).
-///
-/// A parse ERROR (or missing file) yields `None` and is NOT cached, matching
-/// every call site's existing `let Ok(..) = .. else { skip }` handling exactly.
-static AUBE_MANIFEST_CACHE: nub_core::config_cache::MtimeCache<aube_manifest::PackageJson> =
+/// Per-process, mtime-validated cache of parsed `package.json` files keyed by
+/// path. The framework gates and the member-pattern read parse the same root
+/// and member manifests several times per command; this collapses the repeats
+/// to one read, and the mtime check re-reads a manifest rewritten mid-command.
+/// A missing or unparseable file yields `None` and is not cached.
+static MANIFEST_CACHE: nub_core::config_cache::MtimeCache<serde_json::Value> =
     nub_core::config_cache::MtimeCache::new();
 
-/// Read + parse `path` as an `aube_manifest::PackageJson` through
-/// [`AUBE_MANIFEST_CACHE`]. `None` on a missing/unparseable manifest (never
-/// cached) — behavior-identical to a direct `PackageJson::from_path(path).ok()`,
-/// just deduplicated across the repeat parses one command makes of the same path.
-pub(crate) fn cached_aube_manifest(
-    path: &Path,
-) -> Option<std::sync::Arc<aube_manifest::PackageJson>> {
-    AUBE_MANIFEST_CACHE.get_or_read(path, || aube_manifest::PackageJson::from_path(path).ok())
+/// The fields a declared dependency is looked up in, in order.
+/// `peerDependencies` is not one of them.
+pub(crate) const DEPENDENCY_FIELDS: [&str; 3] =
+    ["dependencies", "devDependencies", "optionalDependencies"];
+
+/// `path` read as a JSON object through [`MANIFEST_CACHE`].
+pub(crate) fn cached_manifest(path: &Path) -> Option<std::sync::Arc<serde_json::Value>> {
+    MANIFEST_CACHE.get_or_read(path, || {
+        let text = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str::<serde_json::Value>(nub_core::strip_utf8_bom(&text))
+            .ok()
+            .filter(serde_json::Value::is_object)
+    })
 }
 
 /// Parse the leading `<major>.<minor>` out of a declared `packageManager`
@@ -1394,7 +1395,7 @@ fn read_file_head(path: &Path, max_bytes: usize) -> std::io::Result<String> {
 /// a workspace.
 ///
 /// The one place the member walk is spelled. Callers that need the manifests
-/// read them through [`cached_aube_manifest`], which is mtime-cached, so
+/// read them through [`cached_manifest`], which is mtime-cached, so
 /// sharing one discovery across several scans costs nothing beyond the walk
 /// itself.
 pub(crate) fn workspace_members(root: &Path) -> Vec<PathBuf> {
@@ -1473,8 +1474,10 @@ fn workspace_patterns(root: &Path) -> Vec<String> {
             return pnpm_workspace::workspace_package_patterns(&manifest);
         }
     }
-    cached_aube_manifest(&root.join("package.json"))
-        .and_then(|pkg| pkg.workspaces.as_ref().map(|w| w.patterns().to_vec()))
+    cached_manifest(&root.join("package.json"))
+        .and_then(|manifest| {
+            nub_core::workspace::filter::workspace_patterns_from_manifest(&manifest)
+        })
         .unwrap_or_default()
 }
 
@@ -1536,17 +1539,12 @@ fn declared_store_opt_out(root: &Path, members: &[PathBuf], patterns: &[String])
 /// The dependency names `dir`'s manifest declares, in the scopes the framework
 /// gates read.
 fn declared_dependency_names(dir: &Path) -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(dir.join("package.json")) else {
+    let Some(manifest) = cached_manifest(&dir.join("package.json")) else {
         return Vec::new();
     };
-    let Ok(serde_json::Value::Object(manifest)) =
-        serde_json::from_str(nub_core::strip_utf8_bom(&text))
-    else {
-        return Vec::new();
-    };
-    ["dependencies", "devDependencies", "optionalDependencies"]
+    DEPENDENCY_FIELDS
         .into_iter()
-        .filter_map(|scope| manifest.get(scope)?.as_object())
+        .filter_map(|field| manifest.get(field)?.as_object())
         .flat_map(|deps| deps.keys().cloned())
         .collect()
 }

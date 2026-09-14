@@ -71,13 +71,11 @@ pub(super) fn declared_direct_ranges(
 }
 
 fn declared_direct_range(manifest_path: &Path, name: &str) -> Option<String> {
-    let manifest = super::cached_aube_manifest(manifest_path)?;
-    manifest
-        .dependencies
-        .get(name)
-        .or_else(|| manifest.dev_dependencies.get(name))
-        .or_else(|| manifest.optional_dependencies.get(name))
-        .cloned()
+    let manifest = super::cached_manifest(manifest_path)?;
+    super::DEPENDENCY_FIELDS
+        .into_iter()
+        .find_map(|field| manifest.get(field)?.get(name)?.as_str())
+        .map(str::to_owned)
 }
 
 /// Best-effort major from a declared semver RANGE. `Some(major)` for a single

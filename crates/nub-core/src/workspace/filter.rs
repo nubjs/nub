@@ -232,7 +232,10 @@ pub fn discover_members(workspace_root: &Path) -> Vec<WorkspacePackage> {
     expand_member_patterns(workspace_root, &patterns)
 }
 
-fn workspace_patterns_from_manifest(manifest: &serde_json::Value) -> Option<Vec<String>> {
+/// The member globs a manifest's `workspaces` names: an array, or an object's
+/// `packages`. `None` otherwise — a single string included, which npm rejects
+/// and the install does not read as a workspace.
+pub fn workspace_patterns_from_manifest(manifest: &serde_json::Value) -> Option<Vec<String>> {
     match manifest.get("workspaces") {
         Some(serde_json::Value::Array(arr)) => Some(string_array_values(arr)),
         Some(serde_json::Value::Object(obj)) => obj
