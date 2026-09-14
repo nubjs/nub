@@ -1,0 +1,9 @@
+#!/usr/bin/env node
+"use strict";
+// Entry point for the `nubr` command (the unified runner: a file, a package.json
+// script, or an installed bin). The package manager links its on-PATH `nubr` to
+// this Node launcher; on its first POSIX call launch.js self-heals that entry into
+// a tiny sh trampoline that exec's the platform package's bin/nub with the verb in
+// `__NUB_ARGV0`, which makes the Rust CLI enter runner mode (Argv0::Nubr). On
+// Windows this Node launcher runs every call (no fast path).
+require("./launch.js")("nubr");

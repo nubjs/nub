@@ -61,6 +61,9 @@ curl -fsSL https://nubjs.com/install.sh | bash
 # Windows (PowerShell)
 irm https://nubjs.com/install.ps1 | iex
 
+# Windows (winget)
+winget install Nub.Nub
+
 # Homebrew (macOS / Linux)
 brew install nub
 
@@ -230,6 +233,18 @@ nubx -y cowsay@1.5.0 "hi"   # fetched from the registry (auto-approved via -y)
 - 🪜 Walks the resolution chain — member `.bin`, then workspace root, then ancestors
 
 View the [full package runner docs 👉](https://nubjs.com/docs/nubx).
+
+## Unified runner — `nubr`
+
+One name for the three runners above: a file, a `package.json` script, or an installed bin, resolved most-specific-first. The installer puts it on `PATH` beside `nub`, and [`@nubjs/runner`](https://www.npmjs.com/package/@nubjs/runner) ships the same command for a project that cannot install the binary.
+
+```sh
+nubr app.ts        # a file
+nubr build         # a package.json script
+nubr vitest run    # an installed node_modules/.bin entry
+```
+
+View the [unified runner docs 👉](https://nubjs.com/docs/standalone).
 
 <br/>
 

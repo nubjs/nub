@@ -3026,18 +3026,18 @@ jobs:
 
   submit-winget:
     name: Submit winget manifest
-    # Open/refresh the Nubjs.Nub manifest in microsoft/winget-pkgs for this release.
+    # Refresh the Nub.Nub manifest in microsoft/winget-pkgs for this release.
     # Runs after a validated stable release, because the manifest references the
     # published release-asset URLs + their SHA256 sidecars.
     #
-    # HELD FOR MAINTAINER ENABLEMENT — this is an EXTERNAL, effectively-irreversible
-    # publish under the nubjs publisher identity (winget-releaser opens a PR on
-    # microsoft/winget-pkgs from the token owner's fork). It is a NO-OP until a
-    # WINGET_PAT secret is present: the gate step below reads the secret and skips
-    # the submission when it is absent (empty string), so merging this workflow
-    # fires NOTHING. winget-releaser also UPDATES an existing package — the FIRST
-    # version (Nubjs.Nub v1) is bootstrapped manually from the committed
-    # winget/manifests/... set. Both are documented in winget/README.md.
+    # DORMANT BY DESIGN. Nub.Nub has been on winget since 0.1.0 and community
+    # automation (UnownBot, via komac) has bumped it within minutes of every
+    # release, so a submission from here would race that PR and land as a
+    # duplicate. This job is the fallback for the day that automation stops: it is
+    # a NO-OP until a WINGET_PAT secret is present — the gate step below reads the
+    # secret and skips the submission when it is absent (empty string), so merging
+    # this workflow fires NOTHING. The committed winget/manifests/... set is the
+    # validated fixture, not a bootstrap. Documented in winget/README.md.
     if: needs.verify.outputs.publish_tag != ''
     needs: [verify, github-release]
     runs-on: ubuntu-latest
@@ -3069,7 +3069,7 @@ jobs:
         if: steps.gate.outputs.enabled == 'true'
         uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
         with:
-          identifier: Nubjs.Nub
+          identifier: Nub.Nub
           version: ${{ steps.gate.outputs.version }}
           release-tag: ${{ needs.verify.outputs.publish_tag }}
           # Match only the two Windows portable zips this release uploads.

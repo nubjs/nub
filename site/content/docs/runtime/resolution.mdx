@@ -187,12 +187,14 @@ The Nub CLI matches a `nub` condition on every run it augments, so a package tha
 {
   "exports": {
     ".": {
-      "nub": "./src/index.ts",
+      "nub": "./dist/nub.js",
       "default": "./dist/index.js"
     }
   }
 }
 ```
+
+Point the branch at JavaScript. Files inside `node_modules` are [never transpiled](/docs/runtime/typescript), so a TypeScript target fails to load under Nub.
 
 Two runs do not match it. Passing `--node` runs with Node's own conditions and nothing else, and the standalone [runner](https://www.npmjs.com/package/@nubjs/runner) leaves Node's condition set alone so a file resolves the same way under it as under tsx. Both fall through to `default`.
 

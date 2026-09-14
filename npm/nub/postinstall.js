@@ -41,14 +41,14 @@ function platformPkg() {
 // runtime chmod is the second line of defense.
 function chmodExecutable(pkg) {
   const ext = process.platform === "win32" ? ".exe" : "";
-  for (const verb of ["nub", "nubx"]) {
+  for (const verb of ["nub", "nubx", "nubr"]) {
     let binPath;
     try {
       binPath = require.resolve(`${pkg}/bin/${verb}${ext}`);
     } catch {
-      // `nubx` is expected to miss: current platform packages ship only `bin/nub`
-      // and the verb rides in `__NUB_ARGV0`. Still probed so a newer launcher paired
-      // with an older platform package chmods that package's `bin/nubx` too.
+      // `nubx` / `nubr` are expected to miss: current platform packages ship only
+      // `bin/nub` and the verb rides in `__NUB_ARGV0`. Still probed so a newer launcher
+      // paired with an older platform package chmods that package's `bin/nubx` too.
       continue;
     }
     try {
@@ -219,7 +219,7 @@ function dropStaleWindowsExe() {
   const path = require("path");
   for (const dir of (process.env.PATH || "").split(path.delimiter)) {
     if (!dir) continue;
-    for (const verb of ["nub", "nubx"]) {
+    for (const verb of ["nub", "nubx", "nubr"]) {
       // Only where npm's own shim for that verb still sits: that pairing is what marks the
       // directory as ours. A bare `<verb>.exe` in some unrelated PATH dir is not ours to
       // delete — there is a real unrelated `nub@1.0.0` on npm.

@@ -77,8 +77,10 @@ install-dev: addon-fast qos-global
 	  test -x $$t/fast/nub || { echo "install-dev: no binary at $$t/fast/nub" >&2; exit 1; }; \
 	  ln -sf $$t/fast/nub $(BIN_DIR)/nub-dev; \
 	  ln -sf $$t/fast/nub $(BIN_DIR)/nubx-dev; \
+	  ln -sf $$t/fast/nub $(BIN_DIR)/nubr-dev; \
 	  echo "Installed: $(BIN_DIR)/nub-dev -> $$t/fast/nub"; \
-	  echo "Installed: $(BIN_DIR)/nubx-dev -> $$t/fast/nub"
+	  echo "Installed: $(BIN_DIR)/nubx-dev -> $$t/fast/nub"; \
+	  echo "Installed: $(BIN_DIR)/nubr-dev -> $$t/fast/nub"
 	@echo ""
 	@nub-dev --version
 
@@ -128,8 +130,8 @@ build-slots-on:
 	@rm -f $${NUB_BUILD_SEM_DIR:-$$HOME/.cache/nub/build-sem}/off && echo "build slots ON"
 
 uninstall-dev:
-	rm -f $(BIN_DIR)/nub-dev $(BIN_DIR)/nubx-dev
-	@echo "Removed nub-dev and nubx-dev from $(BIN_DIR)"
+	rm -f $(BIN_DIR)/nub-dev $(BIN_DIR)/nubx-dev $(BIN_DIR)/nubr-dev
+	@echo "Removed nub-dev, nubx-dev and nubr-dev from $(BIN_DIR)"
 
 test:
 	$(CARGO) test

@@ -23,7 +23,8 @@
   },
   "bin": {
     "nub": "bin/nub",
-    "nubx": "bin/nubx"
+    "nubx": "bin/nubx",
+    "nubr": "bin/nubr"
   },
   "scripts": {
     "postinstall": "node postinstall.js"

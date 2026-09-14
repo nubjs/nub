@@ -201,12 +201,13 @@
               chmod -R u+w runtime
             '';
 
-            # nub dispatches its nub/nubx personality from the argv[0] basename
+            # nub dispatches its nub/nubx/nubr personality from the argv[0] basename
             # (cli.rs Argv0::detect → file_stem), NOT from a canonicalized
             # current_exe(), so a symlink invoked as `nubx` enters nubx mode — no
             # need for a second real binary copy.
             postInstall = ''
               ln -s nub "$out/bin/nubx"
+              ln -s nub "$out/bin/nubr"
             '';
 
             # The Node N-API addon is embedded as opaque bytes, so Nix can't see its
@@ -249,6 +250,10 @@
           nubx = {
             type = "app";
             program = "${nubPkg}/bin/nubx";
+          };
+          nubr = {
+            type = "app";
+            program = "${nubPkg}/bin/nubr";
           };
           default = {
             type = "app";
