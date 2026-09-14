@@ -2,8 +2,8 @@
 
 Exercise nub's **full CLI command × flag surface** against a real project and
 assert each command behaves: exits cleanly where it should, fails *correctly*
-where it should, never leaks the `aube` brand, and — where parity is claimed —
-agrees with the reference package manager.
+where it should, speaks the identity the project earns, and — where parity is
+claimed — agrees with the reference package manager.
 
 This is a **different axis** from the lockfile harness one level up
 (`tests/conformance/run.sh`), which verifies lockfile round-trip fidelity. This
@@ -24,9 +24,11 @@ For a given nub binary + a real project fixture, the runner:
    have a `node_modules` to read.
 4. Drives every cell in [`inventory.tsv`](inventory.tsv): runs `nub <args>` in
    the right cwd, captures exit + output, classifies PASS / FAIL / RED(expected)
-   / XPASS-STALE, and sweeps the output for the `aube` brand.
+   / XPASS-STALE, and sweeps the output for the wrong identity's brand.
 5. For `mut`/`net` cells (anything that writes the tree or hits the registry),
    operates on a fresh **throwaway copy** so the fixture is never dirtied.
+
+The brand sweep is scoped by the identity of the project each cell ran in. A pnpm-incumbent fixture — a `pnpm-lock.yaml`, a `pnpm-workspace.yaml`, or a pnpm `packageManager` / `devEngines` pin — must behave as pnpm 12 does, `ERR_PNPM_*` codes and `pnpm.io` links included, so there the sweep hunts `ERR_NUB_*` / `WARN_NUB_*`. Every other fixture speaks nub, so there it hunts pnpm's codes and links. It matches codes and links rather than the brand NAME because nub's own help and agent copy name pnpm on purpose.
 
 ## The inventory
 

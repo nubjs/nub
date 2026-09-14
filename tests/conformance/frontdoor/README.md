@@ -19,7 +19,7 @@ Two dimensions. **Incumbent** (the project identity nub detects) × **surface** 
 | **config READ honored** | neutral only | npmrc | npmrc + pnpm.* | npmrc + yaml | yarnrc | yarnrc.yml | bunfig |
 | **config WRITE home** | npmrc | npmrc | npmrc | pnpm-workspace.yaml | npmrc | npmrc | npmrc |
 | **env: `npm_config_*` bridge** | honored | honored | honored | honored | honored | honored | honored |
-| **env: branded gating** | no AUBE_*/pnpm_* | no pnpm_* | pnpm_* honored | pnpm_* honored | no pnpm_* | no pnpm_* | BUN_CONFIG_* honored |
+| **env: branded gating** | no pnpm_config_* | no pnpm_* | pnpm_* honored | pnpm_* honored | no pnpm_* | no pnpm_* | BUN_CONFIG_* honored |
 | **run/exec flags** | reporter / regex / env-file / filter (incumbent-invariant) |
 | **lockfile round-trip** | nub.lock | package-lock | pnpm-lock v9 | pnpm-lock v9 | yarn.lock v1 | yarn.lock v2+ | bun.lock |
 
@@ -94,7 +94,7 @@ Building the slice surfaced/confirmed several exact behaviors — each is now a 
 - **Regex selection `run /^build:/` runs all matching scripts** (`build:app`+`build:lib`).
 - **`config set` normalizes kebab→camel in the pnpm-11 yaml home** (`store-dir` → `storeDir:`), but keeps kebab in `.npmrc`. Cells grep the distinctive VALUE, not the key.
 - **The `npm_config_*` bridge is a RESOLVER knob, not a config-display value** — `config get registry` does NOT reflect `npm_config_registry` (it reads config FILES). The bridge is observed at install time (`REF=1`) by pointing it at an unreachable host and asserting the resolver ATTEMPTS that host (the host string must co-occur with a fetch/resolve/DNS-failure token — keying on a startup log mention would be a false green), with a hermetic negative cell pinning that `config get` stays file-only.
-- **`AUBE_*` env vars are suppressed under the nub embedder profile** — the gate cell targets `store-dir`/`AUBE_STORE_DIR` specifically: aube reads that env in standalone mode AND surfaces it via `config get store-dir`, so the cell can actually OBSERVE the gate (it verifies `config get store-dir` surfaces a value first, then that the `AUBE_STORE_DIR` env does not change it). A setting with no `AUBE_*` env source — e.g. `registry` — would make the cell vacuous (it'd pass even if the gate were broken), so it must not be used here.
+- **The engine's `pnpm_config_*` env reader follows the incumbent** — a pnpm project honors it, as pnpm 12 does; a nub project ignores it, and no `NUB_*` variable takes its place. The gate cells target `store-dir`/`pnpm_config_store_dir` because that is a scalar the reader covers and `config get` surfaces. They come in a pair differing only in the incumbent: the pnpm row asserts the variable IS honored, which is what keeps the nub row honest — a variable nothing reads passes an "ignored" assertion however broken the gate is.
 
 ### Anti-vacuousness discipline (the guard guarding itself)
 
@@ -108,7 +108,7 @@ This suite exists to catch false greens, so its OWN cells must not be vacuous. T
 - **Lockfile round-trip** — fully covered by `tests/conformance/run.sh` (both directions, all PMs, pnpm-11 leg) and `tests/lockfile-conformance/`. Not duplicated here.
 - **Config-write per-field incumbent-aware shared-ness** (the `pm-config-field-level-audit` known gap) — a TODO row per affected scalar once that audit lands; this harness is its natural regression home.
 - **Detection-chain tail** (installed-PM `--version` / lockfile-version-signal refinement, gap G9) — deliberately unwired; no cell until the posture changes.
-- **The `REF=1` yarn-berry leg** — host `yarn` is v1; berry round-trip fidelity lives in `aube-lockfile` unit tests (see the sibling README). The berry *config-read* cell here is doc-mode only.
+- **The `REF=1` yarn-berry leg** — host `yarn` is v1, so the berry *config-read* cell here is doc-mode only.
 
 ## Adding a cell when a new gap is found
 

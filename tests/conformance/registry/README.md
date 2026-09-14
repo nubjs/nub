@@ -48,11 +48,11 @@ node main.mjs | node report.mjs   # human-readable per-cell comparison
   PATH and DOES read `.npmrc registry=`. Yarn berry uses `.yarnrc.yml`
   `npmRegistryServer` / `npmScopes` / `npmAuthToken`; berry needs `nodeLinker:
   node-modules` + `unsafeHttpWhitelist` for a plain-http mock.
-- **nub yarn is READ-ONLY**: `nub install` against a project with an existing
-  `yarn.lock` is BLOCKED (it would rewrite the lock). To differentially test berry
-  registry resolution use a read-only command (`nub view <pkg>`), which still reads
-  `.yarnrc.yml`.
-- nub fires a **speculative `HEAD /` TLS-prewarm** at the registry root(s) before
-  resolution (`aube-registry/src/client/lifecycle.rs`). It is fire-and-forget,
-  unauthenticated, response-discarded — not a resolution request; ignore it when
-  diffing.
+- **nub does not read a yarn project**: `nub install` against a project with an
+  existing `yarn.lock` exits 0, leaves that file untouched, writes `nub.lock`, and
+  prints one line naming `nub pm migrate`. The yarn leg here therefore measures
+  yarn alone; nub reads no `.yarnrc.yml`, so there is no nub-side yarn registry
+  path to diff against it.
+- **Request COUNTS differ between tools; diff on the package request alone.** On
+  `default-registry-project-npmrc` nub and yarn send only `GET /is-odd`, while npm
+  precedes it with two `GET /npm` and pnpm with one `GET /pnpm`.

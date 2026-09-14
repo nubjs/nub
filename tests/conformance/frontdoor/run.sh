@@ -42,6 +42,15 @@ export HOME="$SANDBOX/home"
 export XDG_DATA_HOME="$HOME/.local/share" XDG_CACHE_HOME="$HOME/.cache"
 export XDG_CONFIG_HOME="$HOME/.config" XDG_STATE_HOME="$HOME/.local/state"
 mkdir -p "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME"
+# A config variable the caller exported is the same input the env cells set, so
+# an inherited one decides a cell before it runs. Running the suite through a
+# package manager's own `run` is enough to inherit a dozen.
+# `PNPM_` and not `PNPM_CONFIG_`: a pnpm project honors PNPM_HOME, so a developer's
+# own PNPM_HOME would move that cell's store out of the sandbox and into their
+# real one.
+for var in $(env | grep -oE '^(npm_config_|NPM_CONFIG_|pnpm_config_|PNPM_)[A-Za-z0-9_]*' || true); do
+  unset "$var"
+done
 
 echo "== front-door pm-compat conformance matrix =="
 echo "nub:      $NUB ($("$NUB" --version 2>/dev/null || echo '?'))"
@@ -179,23 +188,32 @@ run_cell() {
       local out; out="$( cd "$proj" && env "npm_config_${key}=$shadow" "$NUB" config get "$key" 2>>"$log" )"
       [ "$out" != "$shadow" ] && pass "$id" "config get $key does NOT reflect env ($out)" \
         || fail "$id" "config get $key now reflects npm_config_$key — config-display semantics changed" ;;
-    env-gate-aube-ignored) # key  AUBE_ENV_VAR  leak-value
-      # The setting MUST be one aube reads from this AUBE_* env in standalone mode
-      # and surfaces via `config get` (store-dir / AUBE_STORE_DIR) — otherwise the
-      # cell is vacuous. Two witnesses: (1) `config get <key>` surfaces a value at
-      # all (the reader is live); (2) setting the AUBE_* env does NOT change it
-      # under the nub embedder profile (env_prefix=None suppresses the branded env
-      # that WOULD win in standalone aube).
-      local key="$1" envvar="$2" leak="$3"
+    env-gate)          # key  ENV_VAR  value  honored|ignored
+      # The engine reads pnpm's own config env, and the incumbent decides whether
+      # that reader is on: a pnpm project gets pnpm 12 exactly, every other
+      # project gets nub, which reads no branded env at all. So each `ignored`
+      # row has an `honored` twin differing only in the incumbent — a variable
+      # nothing reads would pass `ignored` however broken the gate, and the twin
+      # is what keeps the variable live. The key must also be one `config get`
+      # surfaces, or neither row observes anything.
+      local key="$1" envvar="$2" val="$3" want="$4"
       local base; base="$( cd "$proj" && "$NUB" config get "$key" 2>>"$log" )"
-      local out;  out="$(  cd "$proj" && env "$envvar=$leak" "$NUB" config get "$key" 2>>"$log" )"
-      if [ -z "$base" ] || [ "$base" = "undefined" ]; then
-        fail "$id" "config get $key surfaced no value — cell can't observe the gate (vacuous)"
-      elif [ "$out" = "$leak" ]; then
-        fail "$id" "$envvar was READ under nub (AUBE_* brand leak into config surface): $key=$leak"
-      else
-        pass "$id" "$envvar ignored under nub ($key stayed '$out', not the leak '$leak')"
-      fi ;;
+      local out;  out="$(  cd "$proj" && env "$envvar=$val" "$NUB" config get "$key" 2>>"$log" )"
+      case "$want" in
+        honored)
+          [ "$out" = "$val" ] \
+            && pass "$id" "$envvar honored ($key=$out)" \
+            || fail "$id" "$envvar NOT honored: config get $key => '$out' (want '$val') — nothing reads it, so its ignored twin proves nothing" ;;
+        ignored)
+          if [ -z "$base" ] || [ "$base" = "undefined" ]; then
+            fail "$id" "config get $key surfaced no value — cell can't observe the gate (vacuous)"
+          elif [ "$out" != "$base" ]; then
+            fail "$id" "$envvar was READ here (brand leak into the config surface): $key moved '$base' → '$out'"
+          else
+            pass "$id" "$envvar ignored ($key stayed '$out', not the seeded '$val')"
+          fi ;;
+        *) fail "$id" "env-gate: want must be honored|ignored, got '$want'" ;;
+      esac ;;
     *) fail "$id" "unknown assert verb '$verb'" ;;
   esac
 }

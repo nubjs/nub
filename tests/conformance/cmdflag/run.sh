@@ -63,6 +63,12 @@ export XDG_CACHE_HOME="$HOME/.cache"
 export XDG_CONFIG_HOME="$HOME/.config"
 export XDG_STATE_HOME="$HOME/.local/state"
 mkdir -p "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME"
+# Settings a runner or a developer exported must not steer these cells. `PNPM_`
+# rather than `PNPM_CONFIG_`, because a pnpm project honors PNPM_HOME: a
+# developer's own would move that cell's store out of the sandbox and into theirs.
+for var in $(env | grep -oE '^(npm_config_|NPM_CONFIG_|pnpm_config_|PNPM_)[A-Za-z0-9_]*' || true); do
+  unset "$var"
+done
 
 # Seed the user ~/.npmrc — the real-world config that broke `nub audit`. The
 # point of the harness is to cover REAL machine state, not a pristine void.
@@ -98,6 +104,23 @@ expected_reason() {
     "$HERE/expectations.txt" 2>/dev/null
 }
 
+# True when the project in $1 belongs to pnpm. Markers per nub_core::pm::identity;
+# a directory with none of them — the meta cells' bare sandbox included — is nub's.
+# The manifest is parsed rather than grepped, since a `devEngines` pin is a nested
+# object; with no node on PATH the fallback sees the `packageManager` pin only.
+pnpm_incumbent() {
+  local dir="$1"
+  [ -f "$dir/pnpm-lock.yaml" ] && return 0
+  [ -f "$dir/pnpm-workspace.yaml" ] && return 0
+  [ -f "$dir/package.json" ] || return 1
+  command -v node >/dev/null 2>&1 \
+    || { grep -qE '"packageManager"[[:space:]]*:[[:space:]]*"pnpm@' "$dir/package.json"; return $?; }
+  node -e 'const m = require(process.argv[1]);
+    const pin = m.packageManager || "";
+    const dev = (m.devEngines && m.devEngines.packageManager && m.devEngines.packageManager.name) || "";
+    process.exit(pin.startsWith("pnpm@") || dev === "pnpm" ? 0 : 1);' "$dir/package.json" 2>/dev/null
+}
+
 RESULTS=()
 FAILS=0; XPASSES=0
 run_cell() {
@@ -124,8 +147,15 @@ run_cell() {
   (cd "$proj" && "$NUB" "${cell_args[@]}") >>"$log" 2>&1 || code=$?
   echo "### exit=$code" >>"$log"
 
+  # Which identity belongs in the output is the project's to decide: a pnpm
+  # project must speak pnpm 12 exactly, every other project speaks nub. So the
+  # sweep hunts the OTHER one's codes and links rather than its name — nub's own
+  # help and agent copy name pnpm throughout, by design.
+  local foreign tag
+  if pnpm_incumbent "$proj"; then foreign='ERR_NUB_|WARN_NUB_'; tag=nub-in-pnpm-project
+  else foreign='ERR_PNPM_|WARN_PNPM_|pnpm\.io'; tag=pnpm-in-nub-project; fi
   local leak=""
-  grep -qiE '\baube\b' "$log" && leak=" [BRAND-LEAK:aube]"
+  grep -qE "$foreign" "$log" && leak=" [BRAND-LEAK:$tag]"
 
   local parity_note=""
   if [ "$REF" = 1 ] && [ "$parity" != "-" ]; then

@@ -33,8 +33,7 @@ import           pnpm-lock.yaml already present → exit 1 (correct; needs --for
 install-prod     fixture `prepare` script needs husky (not installed) → exit 127-from-script (env, not nub)
 rebuild          same husky prepare-script env failure
 fetch            network-touching (net): linux-only optional dep tarball decode can flake over the network
-peers-check      exit 1 on UNPARSEABLE-ONLY peers (0 unmet/0 missing, 5 unparseable workspace link: peers). No reference-PM equivalent (peers is a nub/aube-native verb). DESIGN-DECISION item for triage: is "couldn't verify" → non-zero the right posture?
+peers-check      exit 1 on UNPARSEABLE-ONLY peers (0 unmet/0 missing, 5 unparseable workspace link: peers). Nothing to diff against: the reference pnpm 10 has no `peers` verb. DESIGN-DECISION item for triage: is "couldn't verify" → non-zero the right posture?
 #
 # ── (B) REAL nub findings on the zod sweep (recommend-only; own fix threads) ──
 run-ifpresent    BUG: `run <missing> --if-present` exits 1; pnpm/npm exit 0. parity divergence.
-agent-skill      BUG: `nub agent skill` output contains literal "aube" (brand leak in public agent copy).

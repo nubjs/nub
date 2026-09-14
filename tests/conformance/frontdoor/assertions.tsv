@@ -75,22 +75,21 @@ nub-env-bridge-registry	envbridge	env-bridge	ref	env-bridge-resolver	https://fro
 # env (which would mask the real bridge path and confuse `config get` semantics).
 nub-env-bridge-not-in-config-get	nub	env-bridge	doc	env-not-in-config-get	registry	https://frontdoor-envbridge-shadow.example/
 #
-# ── env: branded gating (AUBE_* never read under nub — brand boundary) ────────
-# Must target a setting aube DOES read from an AUBE_* env in standalone mode AND
-# surfaces via `config get` — else the cell is vacuous. The original AUBE_REGISTRY
-# cell proved NOTHING: aube's `registry` has sources.env=[] (settings.toml:633),
-# so no env is read at all — it'd pass even against an aube that fully honored
-# AUBE_*. `storeDir` is the right target: sources.env=[…,"AUBE_STORE_DIR"],
-# sources.npmrc=["store-dir","storeDir"] (settings.toml:1102-1103), so under
-# STANDALONE aube the env WOULD win — the nub embedder profile (env_prefix=None)
-# must suppress it. Verified vs the binary: `config get store-dir` surfaces a
-# value and AUBE_STORE_DIR is ignored under nub.
-nub-env-gate-no-aube	nub	env-gate	doc	env-gate-aube-ignored	store-dir	AUBE_STORE_DIR	/aube-leak/store
+# ── env: branded gating (pnpm's config env read under pnpm only) ──────────────
+# The engine reads `pnpm_config_<key>` / `PNPM_CONFIG_<KEY>` for the whole schema
+# (its config crate's env_overlay). A pnpm project gets that reader, as it gets
+# every other pnpm 12 behaviour; a nub project gets none of it, and there is no
+# NUB_* replacement. The pair below differs only in the incumbent, so the gate is
+# the only thing either row can be measuring: the honored row proves the variable
+# is live, the ignored row proves the identity turns it off. store-dir is the
+# target because it is a scalar the env reader covers AND `config get` surfaces.
+nub-env-gate-pnpm-ignored	nub	env-gate	doc	env-gate	store-dir	pnpm_config_store_dir	/frontdoor/env-store	ignored
+pnpm10-env-gate-pnpm-honored	pnpm10	env-gate	doc	env-gate	store-dir	pnpm_config_store_dir	/frontdoor/env-store	honored
 #
 # ── DEFERRED / scaffolded (add a row when the gap surfaces or the audit lands) ─
 # config-read: pnpm.* fields honored under pnpm only; bunfig honored under bun;
 #   yarnrc.yml honored under yarn-berry (doc-mode; host yarn is v1).
-# env-gate: pnpm_config_* honored under pnpm, ignored elsewhere;
+# env-gate: the rest of the pnpm_config_* schema beyond store-dir;
 #   BUN_CONFIG_REGISTRY honored under bun only.
 # config-write: per-field incumbent-aware shared-ness (pm-config-field-level-audit).
 # lockfile round-trip: covered by tests/conformance/run.sh + lockfile-conformance.
