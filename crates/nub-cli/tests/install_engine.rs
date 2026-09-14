@@ -985,8 +985,15 @@ fn cold_install_with_trust_downgrade_still_aborts() {
         eprintln!("skipping: registry.npmjs.org unreachable");
         return;
     }
+    // A RANGE, not the bare `10.3.0` this once pinned. An exact pin admits one
+    // candidate, so a refusal there cannot tell "the gate stopped the install"
+    // apart from "the gate walked the range and found nothing" — and the second
+    // is what the docs used to claim happens. This range tops out at the
+    // downgraded version and admits several earlier ones that DO clear the
+    // check (`>=10.0.0 <10.3.0` installs 10.2.0), so a substitution would
+    // succeed and link a package. The refusal is total, and now measurably so.
     const MANIFEST: &str =
-        r#"{"name":"dg","version":"1.0.0","dependencies":{"node-gyp":"10.3.0"}}"#;
+        r#"{"name":"dg","version":"1.0.0","dependencies":{"node-gyp":">=10.0.0 <=10.3.0"}}"#;
 
     // Arm 1 — the shipped default. `10.3.0` is years old, so the window exempts
     // it and the install proceeds. A real backport on an old release line is
@@ -1020,13 +1027,18 @@ fn cold_install_with_trust_downgrade_still_aborts() {
         stderr.contains("trust downgrade"),
         "the abort must say what it refused: {stderr}"
     );
-    // ⛔ TWO PARTS OF THE OLD CONTRACT ARE NOT BACK YET, and they are asserted
-    // loosely above rather than dropped so this cannot go quiet. The engine
-    // exits 1 where nub documented a dedicated 23, and renders the failure
-    // through the generic resolve error, so the code it does carry is
-    // `ERR_PNPM_RESOLVING_NPM_RESOLVER_TRUST_CHECK_FAILED` rather than the
-    // `ERR_NUB_TRUST_DOWNGRADE` that `site/content/docs/install/index.mdx`
-    // names. Both need the fork, so they ride the next pin bump.
+    // The assertions here stay loose on purpose, because the exact code and
+    // exit status are the ENGINE's and nub matches them rather than restoring
+    // the aube-era ones. Measured against real pnpm 12.4.1 on this same
+    // fixture: it also exits 1, installs nothing, and prints the same
+    // "High-risk trust downgrade" text through the generic resolve error. The
+    // dedicated exit 23 and the `ERR_NUB_TRUST_DOWNGRADE` spelling were aube's;
+    // neither appears in `site/content/docs/` any more, because the docs were
+    // corrected to the behavior rather than the behavior bent back to the docs.
+    //
+    // What a refused version does NOT do is resolve around itself to an earlier
+    // release — the docs used to promise that substitution, pnpm 12 has never
+    // done it, and the assertion below is what pins the refusal being total.
     assert!(
         !dir.join("node_modules/node-gyp").exists(),
         "no package may be linked when the trust gate aborts resolution"
