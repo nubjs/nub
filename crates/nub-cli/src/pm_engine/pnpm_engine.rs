@@ -113,14 +113,14 @@ pub(crate) fn host_store_dir() -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
-/// The profile `nubx` and `dlx` fetch a tool under: nub's, carrying the
-/// environment's settings and none of the project's.
+/// The profile `nubx` and `dlx` fetch a tool under: nub's, carrying nub's
+/// defaults and the environment's settings, and none of the project's.
 ///
 /// The engine reads a variable's registry, proxy and TLS keys itself; every
 /// other setting one names, such as `npm_config_fetch_retries`, reaches the
 /// fetch only through these.
 pub(super) fn dlx_profile() -> Result<Embedder> {
-    publish_host_settings(host_settings::env_only()?);
+    publish_host_settings(host_settings::fetch_settings()?);
     Ok(Embedder {
         workspace_settings: Some(host_workspace_settings),
         ..NUB
@@ -659,7 +659,7 @@ fn host_base_dir(argv: &[std::ffi::OsString]) -> Result<PathBuf> {
 /// resolved it — not the process argv. nub reads a few flags of its own
 /// before the verb and acts on them itself, and the engine's grammar has
 /// no spelling for those, so what it runs on is what nub left.
-pub(crate) fn run(argv: Vec<std::ffi::OsString>) -> Result<i32> {
+pub(crate) fn run(mut argv: Vec<std::ffi::OsString>) -> Result<i32> {
     let cwd = host_base_dir(&argv)?;
     let embedder = profile(selection(), &cwd)?;
     session_prologue(&cwd, false)?;
@@ -672,6 +672,18 @@ pub(crate) fn run(argv: Vec<std::ffi::OsString>) -> Result<i32> {
     // Asked BEFORE the run, because a successful install answers it: it
     // writes nub's own lockfile, and the project then looks migrated.
     let command = pnpm_cli::command_name(&argv);
+    // A few flags nub reads past pnpm's grammar, in its own projects only: a
+    // pnpm-incumbent command line reaches the engine exactly as pnpm reads it.
+    if embedder.program_name != Embedder::PNPM.program_name
+        && let Some(name) = command.as_deref()
+    {
+        if matches!(name, "install" | "add" | "update") {
+            super::platform_flags::expand_engine_argv(&mut argv).warn();
+        }
+        if RESOLVING_COMMANDS.contains(&name) {
+            argv = super::min_release_age::engine_argv(argv)?;
+        }
+    }
     let pending = pending_migration(embedder, command.as_deref(), &cwd);
     // Asked before the run for the same reason, and it is the stronger case:
     // the install is about to write nub's lockfile, after which no project

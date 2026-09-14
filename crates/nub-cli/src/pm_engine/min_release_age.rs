@@ -1,8 +1,9 @@
 //! The per-invocation `minimumReleaseAge` CLI surface: [`AgeGateFlags`] and the
 //! [`ReleaseAge`] value grammar behind `--minimum-release-age`.
 //!
-//! The flags publish into the engine's process-global CLI-override bag, so one
-//! call covers the whole run and nothing needs the value threaded down to it.
+//! pnpm 12 takes neither flag on its own command line, only the settings they
+//! name, spelled `--config.<key>=`. So both reach the engine in that spelling:
+//! from `nubx`, and from an install command line in a nub project.
 //!
 //! This module also held the loose-mode auto-persist that co-wrote an immature
 //! fallback pick into `minimumReleaseAgeExclude` ([#262]). Its only callers were
@@ -14,6 +15,8 @@
 //! rules.
 //!
 //! [#262]: https://github.com/nubjs/nub/issues/262
+
+use std::ffi::OsString;
 
 /// Engine minutes for a `--minimum-release-age` value, accepting BOTH surfaces
 /// this setting already has:
@@ -70,8 +73,8 @@ impl std::str::FromStr for ReleaseAge {
 
 // The per-invocation age-gate flags. `nubx` is the one nub-parsed surface that
 // flattens them: the install family's verbs are parsed by the engine at the CLI
-// front door, so their own `--minimum-release-age` comes from the engine's
-// parse tables rather than from here.
+// front door, which has no spelling for either flag, so on those command lines
+// [`engine_argv`] rewrites them instead.
 //
 // Each flag mirrors BOTH of the surfaces this setting already has: the pnpm
 // spelling (its CLI type map declares `minimum-release-age` and
@@ -110,46 +113,89 @@ pub struct AgeGateFlags {
 }
 
 impl AgeGateFlags {
-    /// The `(setting, value)` pairs for [`aube_settings::set_global_cli_overrides`].
-    /// Keys are the canonical setting names — `cli_key_matches` compares in
-    /// kebab-case, so these reach `minimumReleaseAge` / `minimumReleaseAgeExclude`
-    /// without needing a `sources.cli` alias declared in `settings.toml`.
-    fn cli_overrides(&self) -> Vec<(String, String)> {
-        let mut out = Vec::new();
-        if let Some(ReleaseAge(minutes)) = self.minimum_release_age {
-            out.push(("minimumReleaseAge".to_string(), minutes.to_string()));
-        }
-        if !self.minimum_release_age_exclude.is_empty() {
-            // The settings reader takes the LAST matching CLI entry and parses it
-            // as one list, so repeated `--minimum-release-age-exclude` flags have
-            // to arrive joined rather than as separate entries.
-            out.push((
-                "minimumReleaseAgeExclude".to_string(),
-                self.minimum_release_age_exclude.join(","),
-            ));
-        }
-        out
+    /// These flags in the engine's own spelling.
+    pub(crate) fn engine_args(&self) -> Vec<OsString> {
+        let minutes = self
+            .minimum_release_age
+            .map(|ReleaseAge(minutes)| setting_arg(AGE, &minutes.to_string()));
+        let excludes = self
+            .minimum_release_age_exclude
+            .iter()
+            .map(|package| setting_arg(EXCLUDE, package));
+        minutes.into_iter().chain(excludes).collect()
     }
+}
 
-    /// Publish the flags into the engine's process-global CLI-override bag,
-    /// which `aube_settings`' typed accessors consult ahead of every other
-    /// source. One call covers the whole run: the resolver, the default-trust
-    /// floor, and any chained install all read through the same accessors, so
-    /// nothing needs the value threaded down to it.
-    ///
-    /// A managed (org-policy) config still wins — `minimumReleaseAge` carries
-    /// `managedPolicy = "max"`, applied by the generated accessor's finalizer
-    /// after this bag is consulted, so a CLI flag can raise the floor but never
-    /// lower one an administrator set.
-    ///
-    /// The bag is a `OnceLock`, so skip the call when nothing was passed rather
-    /// than latching an empty vec.
-    pub fn apply(&self) {
-        let overrides = self.cli_overrides();
-        if !overrides.is_empty() {
-            aube_settings::set_global_cli_overrides(overrides);
-        }
+const AGE: &str = "minimum-release-age";
+const EXCLUDE: &str = "minimum-release-age-exclude";
+
+/// A setting as the engine's command line takes one. A repeated exclusion
+/// collects into one list, which replaces the configured list.
+fn setting_arg(key: &str, value: &str) -> OsString {
+    format!("--config.{key}={value}").into()
+}
+
+/// Rewrite `--minimum-release-age` and `--minimum-release-age-exclude` on an
+/// engine command line into the engine's own spelling, with the duration in
+/// minutes.
+///
+/// Either flag takes its value after `=` or as the next word. A flag with no
+/// value is left for the engine to report, and nothing after `--` is read.
+pub(crate) fn engine_argv(argv: Vec<OsString>) -> anyhow::Result<Vec<OsString>> {
+    let mut out = Vec::with_capacity(argv.len());
+    let mut rest = argv.into_iter();
+    while let Some(arg) = rest.next() {
+        let Some((key, joined)) = arg.to_str().and_then(age_flag) else {
+            let ends_options = arg == "--";
+            out.push(arg);
+            if ends_options {
+                out.extend(rest);
+                break;
+            }
+            continue;
+        };
+        let value = match joined {
+            Some(value) => value,
+            None => {
+                let next = rest
+                    .as_slice()
+                    .first()
+                    .and_then(|word| word.to_str())
+                    .filter(|word| !word.starts_with('-'))
+                    .map(str::to_owned);
+                let Some(value) = next else {
+                    out.push(arg);
+                    continue;
+                };
+                rest.next();
+                value
+            }
+        };
+        let value = if key == AGE {
+            let ReleaseAge(minutes) = value
+                .parse()
+                .map_err(|reason| anyhow::anyhow!("nub: `--{AGE}`: {reason}"))?;
+            minutes.to_string()
+        } else {
+            value
+        };
+        out.push(setting_arg(key, &value));
     }
+    Ok(out)
+}
+
+/// The setting a `--minimum-release-age…` word names, with any value joined to
+/// it by `=`.
+fn age_flag(word: &str) -> Option<(&'static str, Option<String>)> {
+    let option = word.strip_prefix("--")?;
+    let (name, joined) = match option.split_once('=') {
+        Some((name, value)) => (name, Some(value.to_owned())),
+        None => (option, None),
+    };
+    [AGE, EXCLUDE]
+        .into_iter()
+        .find(|key| *key == name)
+        .map(|key| (key, joined))
 }
 
 #[cfg(test)]
@@ -159,8 +205,8 @@ mod tests {
     /// Zero must reach the engine as a literal `0`, because `0` is the ONLY way
     /// to turn the gate off — nub ships no strictness flag, so a value that
     /// arrived as anything else (or was dropped as "unset") would leave a user
-    /// who asked for no window still gated. `resolve_minimum_release_age`
-    /// short-circuits to `None` on exactly `0`.
+    /// who asked for no window still gated. The engine reads exactly `0` as no
+    /// window.
     #[test]
     fn zero_reaches_the_engine_as_the_off_switch() {
         let flags = AgeGateFlags {
@@ -168,8 +214,8 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            flags.cli_overrides(),
-            vec![("minimumReleaseAge".to_string(), "0".to_string())],
+            flags.engine_args(),
+            ["--config.minimum-release-age=0"],
             "0 must be published verbatim, not elided as a falsy/default value"
         );
         // Every spelling of "no window" collapses to the same 0.
@@ -226,21 +272,47 @@ mod tests {
         assert_eq!("2h".parse::<ReleaseAge>().map(|a| a.0), Ok(120));
     }
 
-    /// Repeated `--minimum-release-age-exclude` must arrive as ONE joined entry:
-    /// the settings reader takes the last matching CLI key and parses it as a
-    /// single list, so separate entries would drop all but the final package.
+    /// Every exclusion reaches the engine as its own setting, which the engine
+    /// collects into one list. An install command line reaches it in the same
+    /// spelling, with the duration in minutes and nothing past `--` touched.
     #[test]
-    fn repeated_excludes_are_joined_into_one_cli_entry() {
+    fn the_flags_reach_the_engine_as_settings() {
         let flags = AgeGateFlags {
             minimum_release_age_exclude: vec!["react".into(), "@myorg/*".into()],
             ..Default::default()
         };
-        let overrides = flags.cli_overrides();
-        let exclude: Vec<_> = overrides
-            .iter()
-            .filter(|(k, _)| k == "minimumReleaseAgeExclude")
-            .collect();
-        assert_eq!(exclude.len(), 1, "must be one entry, got {overrides:?}");
-        assert_eq!(exclude[0].1, "react,@myorg/*");
+        assert_eq!(
+            flags.engine_args(),
+            [
+                "--config.minimum-release-age-exclude=react",
+                "--config.minimum-release-age-exclude=@myorg/*"
+            ]
+        );
+
+        let words = |words: &[&str]| words.iter().map(OsString::from).collect::<Vec<_>>();
+        let rewritten = engine_argv(words(&[
+            "nub",
+            "add",
+            "tool",
+            "--minimum-release-age=2h",
+            "--minimum-release-age-exclude",
+            "@internal/*",
+            "--",
+            "--minimum-release-age=1",
+        ]))
+        .expect("a valid duration");
+        assert_eq!(
+            rewritten,
+            words(&[
+                "nub",
+                "add",
+                "tool",
+                "--config.minimum-release-age=120",
+                "--config.minimum-release-age-exclude=@internal/*",
+                "--",
+                "--minimum-release-age=1",
+            ])
+        );
+        assert!(engine_argv(words(&["nub", "add", "--minimum-release-age=3y"])).is_err());
     }
 }

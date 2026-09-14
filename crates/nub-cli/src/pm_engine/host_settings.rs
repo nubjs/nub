@@ -238,14 +238,6 @@ fn merge(sources: &Sources) -> Result<Map<String, Value>> {
     }
 
     lift_env(&mut merged, &known, &sources.env)?;
-    if let Some((_, dir)) = sources
-        .env
-        .iter()
-        .rfind(|(name, _)| name == "NUB_CACHE_DIR")
-        && !dir.is_empty()
-    {
-        merged.insert("cacheDir".to_owned(), Value::String(dir.clone()));
-    }
 
     for (key, value) in manifest_settings(&sources.manifest, &sources.root) {
         if passthrough.is_some_and(|settings| settings.contains_key(&key)) {
@@ -277,6 +269,16 @@ fn merge(sources: &Sources) -> Result<Map<String, Value>> {
     {
         merged.insert("enableGlobalVirtualStore".to_owned(), Value::Bool(true));
     }
+    fill_defaults(&mut merged, sources.cache_root.as_deref());
+    Ok(merged)
+}
+
+/// nub's own defaults, filling only what no source set.
+///
+/// A project's install and a fetch that belongs to no project share them,
+/// because none is a project's to set: where the store and the cache live, and
+/// how strict the release-age floor and the trust policy are.
+fn fill_defaults(merged: &mut Map<String, Value>, cache_root: Option<&Path>) {
     // The engine already applies a 24-hour maturity cutoff of its own, so the
     // minutes need no default here — but it applies that built-in one
     // NON-strictly, falling back to an immature version whenever no mature one
@@ -349,7 +351,7 @@ fn merge(sources: &Sources) -> Result<Map<String, Value>> {
     merged
         .entry("userAgent")
         .or_insert(Value::String(lifecycle_user_agent()));
-    if let Some(cache_root) = &sources.cache_root {
+    if let Some(cache_root) = cache_root {
         for (key, leaf) in [("storeDir", "store"), ("cacheDir", "pm")] {
             if !merged.contains_key(key) {
                 let dir = cache_root.join(leaf).to_string_lossy().into_owned();
@@ -357,7 +359,6 @@ fn merge(sources: &Sources) -> Result<Map<String, Value>> {
             }
         }
     }
-    Ok(merged)
 }
 
 /// The `npm_config_user_agent` a lifecycle script sees under nub's identity.
@@ -581,23 +582,31 @@ fn manifest_field(setting: &str) -> String {
     }
 }
 
-/// The environment's settings alone, for a fetch that belongs to no project.
+/// The settings for a fetch that belongs to no project.
 ///
 /// `nubx` and `dlx` run a tool nub fetches for itself, so the project's
-/// `nub.jsonc`, the `.npmrc` tier and nub's install defaults take no part. The
-/// engine still reads the `.npmrc` files; what it cannot read is an
-/// `npm_config_*` variable, which is where a CI job names its mirror.
-pub(crate) fn env_only() -> Result<WorkspaceSettings> {
+/// `nub.jsonc` and the `.npmrc` tier take no part; the engine reads the `.npmrc`
+/// files itself. The environment does, since a CI job names its mirror there,
+/// and nub's defaults fill the rest, so the tool lands in nub's store and meets
+/// the release-age floor and trust policy an install meets.
+pub(crate) fn fetch_settings() -> Result<WorkspaceSettings> {
     let env: Vec<(String, String)> = std::env::vars_os()
         .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
         .collect();
-    let mut merged = Map::new();
-    lift_env(&mut merged, &known_keys(), &env)?;
+    let merged = fetch_merge(&env, nub_core::node::discovery::cache_dir().as_deref())?;
     serde_json::from_value(Value::Object(merged))
-        .context("nub could not hand the environment's settings to the package manager")
+        .context("nub could not hand the fetch's settings to the package manager")
 }
 
-/// Lift every `npm_config_*` variable in `env`, in environment order.
+fn fetch_merge(env: &[(String, String)], cache_root: Option<&Path>) -> Result<Map<String, Value>> {
+    let mut merged = Map::new();
+    lift_env(&mut merged, &known_keys(), env)?;
+    fill_defaults(&mut merged, cache_root);
+    Ok(merged)
+}
+
+/// Lift every `npm_config_*` variable in `env`, in environment order, then
+/// `NUB_CACHE_DIR` over its npm spelling.
 fn lift_env(
     merged: &mut Map<String, Value>,
     known: &BTreeSet<String>,
@@ -622,6 +631,11 @@ fn lift_env(
             Origin::Env,
             &source,
         )?;
+    }
+    if let Some((_, dir)) = env.iter().rfind(|(name, _)| name == "NUB_CACHE_DIR")
+        && !dir.is_empty()
+    {
+        merged.insert("cacheDir".to_owned(), Value::String(dir.clone()));
     }
     Ok(())
 }
@@ -923,6 +937,25 @@ mod tests {
         let resolved: WorkspaceSettings =
             serde_json::from_value(Value::Object(merged)).expect("the engine accepts the merge");
         assert_eq!(resolved.dedupe_peers, Some(false));
+    }
+
+    /// A fetch that belongs to no project takes the environment over nub's
+    /// defaults, and gets those defaults where the environment is silent: the
+    /// store under nub's cache directory and a strict release-age floor.
+    #[test]
+    fn a_fetch_takes_the_environment_over_nubs_defaults() {
+        let env = env(&[
+            ("npm_config_node_linker", "hoisted"),
+            ("npm_config_trust_policy", "off"),
+            ("NUB_CACHE_DIR", "/from/nub"),
+        ]);
+        let merged = fetch_merge(&env, Some(Path::new("/cache/nub"))).expect("merge");
+
+        assert_eq!(merged["nodeLinker"], json!("hoisted"));
+        assert_eq!(merged["trustPolicy"], json!("off"));
+        assert_eq!(merged["cacheDir"], json!("/from/nub"));
+        assert_eq!(merged["storeDir"], json!("/cache/nub/store"));
+        assert_eq!(merged["minimumReleaseAgeStrict"], json!(true));
     }
 
     /// Only the `npm_config_` prefix names a setting. The settings table still

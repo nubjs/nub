@@ -619,3 +619,39 @@ fn collect_brand_crossed_paths(root: &Path, out: &mut Vec<PathBuf>) {
         }
     }
 }
+
+/// nub reads two of pnpm's flags past pnpm's own grammar, and only in its own
+/// projects: a `--os` value that names no platform warns, and
+/// `--minimum-release-age` takes nub's duration. A pnpm-incumbent project gets
+/// pnpm 12's reading, where that value selects nothing silently and the flag
+/// is not an option at all.
+#[test]
+fn nubs_reading_of_the_platform_and_release_age_flags_stops_at_a_pnpm_project() {
+    let nub = project("flags-nub", r#"{"name":"app","version":"1.0.0"}"#);
+    let (_, stderr, code) = run(&nub, &["install", "--os", "bogusos"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stderr.contains("`--os bogusos` matches no platform"),
+        "a nub project warns about a value that selects nothing: {stderr}"
+    );
+    let (_, stderr, code) = run(&nub, &["add", "left-pad", "--minimum-release-age=3y"]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("`--minimum-release-age`: expected minutes"),
+        "a nub project parses the duration itself: {stderr}"
+    );
+
+    let pnpm = project("flags-pnpm", r#"{"name":"app","version":"1.0.0"}"#);
+    std::fs::write(pnpm.join("pnpm-workspace.yaml"), "nodeLinker: isolated\n").unwrap();
+    let (_, stderr, code) = run(&pnpm, &["install", "--os", "bogusos"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        !stderr.contains("matches no platform"),
+        "a pnpm project gets pnpm's silence: {stderr}"
+    );
+    let (_, stderr, code) = run(&pnpm, &["add", "left-pad", "--minimum-release-age=3y"]);
+    assert_eq!(code, 2, "pnpm 12 has no such option: {stderr}");
+
+    let _ = std::fs::remove_dir_all(&nub);
+    let _ = std::fs::remove_dir_all(&pnpm);
+}

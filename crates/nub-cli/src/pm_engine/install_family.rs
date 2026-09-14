@@ -136,6 +136,7 @@ pub fn run_dlx_for_nubx(
     // fetch-and-run whose cache is nub's, and it must not inherit a pnpm
     // incumbent's profile — including the one that would make a failed child
     // exit this process before the consent ledger below is written.
+    flags.platform.warn();
     let profile = super::pnpm_engine::dlx_profile()?;
     match pnpm_cli::run(nubx_dlx_argv(bin, args, flags), profile) {
         Ok(()) => Ok((0, true)),
@@ -164,7 +165,8 @@ pub fn run_dlx_for_nubx(
 /// positional (so the engine derives the bin name from the package's `bin` map,
 /// or runs it from `-p` packages) and `args` forward verbatim. The dlx-only
 /// `-c` shell mode and `--allow-build` are not in nubx's surface, so they stay
-/// at their safe defaults — matching `npx <tool> [args]`.
+/// at their safe defaults — matching `npx <tool> [args]`. The platform and
+/// release-age flags go before the positional, in the engine's own spelling.
 fn nubx_dlx_argv(
     bin: &str,
     args: &[String],
@@ -175,6 +177,8 @@ fn nubx_dlx_argv(
         argv.push("--package".into());
         argv.push(package.into());
     }
+    argv.extend(flags.platform.engine_args());
+    argv.extend(flags.age_gate.engine_args());
     argv.push(bin.into());
     argv.extend(args.iter().map(std::ffi::OsString::from));
     argv
@@ -336,6 +340,37 @@ mod tests {
                 "--help"
             ],
             "-p spec drives the fetch; the positional bin and its args follow"
+        );
+    }
+
+    /// The platform and release-age flags reach the engine's `dlx` as its own.
+    /// Left off, a fetch for another platform installs the host's packages and
+    /// a release-age window is ignored.
+    #[test]
+    fn nubx_platform_and_release_age_flags_reach_the_engine() {
+        let flags = crate::cli::NubxDlxFlags {
+            platform: crate::pm_engine::PlatformFlags {
+                os: vec!["linux".into()],
+                cpu: vec!["arm64".into()],
+                libc: Vec::new(),
+            },
+            age_gate: crate::pm_engine::AgeGateFlags {
+                minimum_release_age: Some(crate::pm_engine::min_release_age::ReleaseAge(0)),
+                minimum_release_age_exclude: Vec::new(),
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            nubx_dlx_argv("esbuild", &["--version".into()], &flags),
+            [
+                "nub",
+                "dlx",
+                "--os=linux",
+                "--cpu=arm64",
+                "--config.minimum-release-age=0",
+                "esbuild",
+                "--version"
+            ]
         );
     }
 

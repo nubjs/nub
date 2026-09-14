@@ -79,6 +79,11 @@ pub struct NubxDlxFlags {
     /// ([`crate::nubx_consent`]). Without it, a registry fallthrough fails closed
     /// in CI / non-TTY and prompts once per spec in an interactive terminal.
     pub yes: bool,
+    /// `--minimum-release-age`/`--minimum-release-age-exclude` for the fetch.
+    pub age_gate: crate::pm_engine::AgeGateFlags,
+    /// `--os`/`--cpu`/`--libc`: which platforms' optional dependencies the
+    /// fetch installs.
+    pub platform: crate::pm_engine::PlatformFlags,
 }
 
 /// Print a response the parser produced instead of a parse, on the stream and
@@ -3072,11 +3077,6 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             if no_check {
                 crate::verify_deps::disable();
             }
-            // Only the DLX fallback below resolves from the registry, but the
-            // bag is inert on the local-bin path, so publish unconditionally
-            // rather than duplicating the call into each branch.
-            age_gate.apply();
-            platform.apply();
             filter.extend(workspace);
             let recursive = recursive || parallel || include_workspace_root;
             let workspace_run = recursive || !filter.is_empty() || parallel;
@@ -3134,6 +3134,8 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                     no_install: no_install || no_fetch,
                     quiet,
                     yes,
+                    age_gate,
+                    platform,
                 };
                 run_exec_with_dlx(&bin, node, &args, Some(&dlx_flags))
             }
