@@ -7453,13 +7453,15 @@ fn exec_bin_reports_role_aware_user_agent() {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     };
 
-    // Fresh / nub-identity → nub-first, on BOTH branches.
+    // Fresh / nub-identity → nub-first, on BOTH branches, in the install's own
+    // shape (`node/?` included), so a launched tool and a dep's postinstall
+    // read one string.
     let fresh = make_project("fresh", "", None);
-    let fresh_prefix = format!("nub/{nub_version} npm/?");
+    let fresh_prefix = format!("nub/{nub_version} npm/? node/? ");
     let node_ua = exec_ua(&fresh, &[], "printua");
     assert!(
-        node_ua.starts_with(&fresh_prefix) && node_ua.contains(" node/v"),
-        "node .bin exec must lead `{fresh_prefix}` with the node/v tail: {node_ua:?}"
+        node_ua.starts_with(&fresh_prefix),
+        "node .bin exec must lead `{fresh_prefix}`: {node_ua:?}"
     );
     let sh_ua = exec_ua(&fresh, &[], "shprintua");
     assert!(
@@ -7467,16 +7469,17 @@ fn exec_bin_reports_role_aware_user_agent() {
         "non-node .bin exec (apply_exec_augmentation) must lead `{fresh_prefix}`: {sh_ua:?}"
     );
 
-    // pnpm incumbent → incumbent-first, nub second (role-aware, same as run).
+    // pnpm incumbent → pnpm's own string, with the pinned version an install
+    // there delegates to.
     let pnpm = make_project(
         "pnpm",
         r#", "packageManager": "pnpm@9.1.0""#,
         Some(("pnpm-lock.yaml", "lockfileVersion: \"9.0\"\n")),
     );
     let pnpm_ua = exec_ua(&pnpm, &[], "printua");
-    let pnpm_prefix = format!("pnpm/9.1.0 nub/{nub_version}");
+    let pnpm_prefix = "pnpm/9.1.0 npm/? node/? ";
     assert!(
-        pnpm_ua.starts_with(&pnpm_prefix),
+        pnpm_ua.starts_with(pnpm_prefix),
         "a pnpm-incumbent exec must lead `{pnpm_prefix}`: {pnpm_ua:?}"
     );
 
@@ -10176,16 +10179,13 @@ fn node_which_unsatisfiable_pin_gives_nub_remedy_not_nvm() {
     );
 }
 
-/// `nub run`/`nub exec` must report a ROLE-AWARE `npm_config_user_agent`, the
-/// same incumbent-first UA the engine's lifecycle path sends — not a hardcoded
-/// `nub/<v> npm/?`. Postinstall sniffers (only-allow, which-pm-runs) branch on
-/// this token, so a pnpm project's run-script reporting `npm/?` is a real
-/// compat break. Three cases, one fixture each: a pnpm incumbent
-/// (`packageManager` + pnpm-lock.yaml) → `pnpm/<pin> nub/<v> …`; an npm
-/// incumbent → `npm/<pin> nub/<v> …`; a fresh/nub-identity project (no
-/// declaration, no lockfile) → `nub/<v> npm/? …`. The version token is the
-/// declared pin; the platform tail follows in Node's vocabulary. Regression
-/// guard for the hardcoded-UA bug in `npm_env`.
+/// `nub run` must report the same `npm_config_user_agent` an install's
+/// lifecycle scripts see for the same project. Postinstall sniffers
+/// (only-allow, which-pm-runs) branch on it, so a run-script and a postinstall
+/// disagreeing about the package manager is a real compat break. Three cases,
+/// one fixture each: a pnpm project (`packageManager` + pnpm-lock.yaml) →
+/// pnpm's own string with the pinned version; a project declaring npm, which
+/// confers no identity → nub's string; a fresh project → nub's string.
 #[test]
 fn run_script_reports_role_aware_user_agent() {
     let nub_version = env!("CARGO_PKG_VERSION");
@@ -10204,7 +10204,7 @@ fn run_script_reports_role_aware_user_agent() {
         manifest_extra: &'static str,
         /// Lockfile that pins the project's PM identity (none = fresh/nub).
         lockfile: Option<(&'static str, &'static str)>,
-        /// The UA tokens that must lead, before the ` node/v… <os> <arch>` tail.
+        /// Everything before the `<os> <arch>` tail.
         expected_prefix: String,
     }
     let cases = [
@@ -10212,7 +10212,7 @@ fn run_script_reports_role_aware_user_agent() {
             name: "pnpm",
             manifest_extra: r#""packageManager": "pnpm@9.1.0","#,
             lockfile: Some(("pnpm-lock.yaml", "lockfileVersion: \"9.0\"\n")),
-            expected_prefix: format!("pnpm/9.1.0 nub/{nub_version}"),
+            expected_prefix: "pnpm/9.1.0 npm/? node/? ".to_string(),
         },
         Case {
             name: "npm",
@@ -10221,13 +10221,13 @@ fn run_script_reports_role_aware_user_agent() {
                 "package-lock.json",
                 "{\"lockfileVersion\":3,\"name\":\"npm-ua\"}\n",
             )),
-            expected_prefix: format!("npm/10.5.0 nub/{nub_version}"),
+            expected_prefix: format!("nub/{nub_version} npm/? node/? "),
         },
         Case {
             name: "fresh",
             manifest_extra: "",
             lockfile: None,
-            expected_prefix: format!("nub/{nub_version} npm/?"),
+            expected_prefix: format!("nub/{nub_version} npm/? node/? "),
         },
     ];
 
@@ -10267,13 +10267,14 @@ fn run_script_reports_role_aware_user_agent() {
         let ua = stdout.trim();
         assert!(
             ua.starts_with(expected_prefix.as_str()),
-            "[{name}] npm_config_user_agent must lead with `{expected_prefix}` (role-aware), got: {ua:?}"
+            "[{name}] npm_config_user_agent must lead with `{expected_prefix}`, got: {ua:?}"
         );
-        // The Node token and platform tail follow the product tokens in pnpm's
-        // shape, so a sniffer parses one format regardless of role.
-        assert!(
-            ua.contains(" node/v"),
-            "[{name}] UA must carry the node/v<ver> token: {ua:?}"
+        // Exactly the platform and arch after it, in pnpm's shape, so a sniffer
+        // parses one format whichever project it runs in.
+        assert_eq!(
+            ua.split(' ').count(),
+            5,
+            "[{name}] UA must be `<pm>/<v> npm/? node/? <os> <arch>`: {ua:?}"
         );
     }
 

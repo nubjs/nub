@@ -125,22 +125,16 @@ fn find_closing_slash(s: &str) -> Option<usize> {
 
 /// Build the npm_* environment variables from package.json.
 ///
-/// `user_agent_product` is the role-aware UA *product tokens* (everything
-/// before the `<os> <arch>` tail) composed by the PM engine's role resolver
-/// (`crates/nub-cli/src/pm_engine/mod.rs::run_lifecycle_ua_product`), so a
-/// `nub run`/`nub exec` script reports the incumbent PM's role exactly like an
-/// engine lifecycle spawn does (e.g. `pnpm/9.1.0 nub/<v> node/v<ver>`). The
-/// platform tail is appended here in Node's `process.platform`/`process.arch`
-/// vocabulary so postinstall sniffers parse one format. nub-core has no PM
-/// identity logic, so the role-aware product is threaded in rather than
-/// recomputed — keeping the UA composition centralized in one place.
+/// `user_agent` is the whole `npm_config_user_agent` value. nub-core has no PM
+/// identity logic, so the CLI picks it — the string its install's lifecycle
+/// scripts see for the same project — and threads it in.
 pub fn npm_env(
     manifest: &serde_json::Value,
     project_root: &Path,
     lifecycle_event: &str,
     lifecycle_script: Option<&str>,
     node_execpath: &str,
-    user_agent_product: &str,
+    user_agent: &str,
 ) -> HashMap<String, String> {
     let mut env_vars = HashMap::new();
 
@@ -195,10 +189,7 @@ pub fn npm_env(
 
     env_vars.insert("npm_command".to_string(), "run-script".to_string());
 
-    env_vars.insert(
-        "npm_config_user_agent".to_string(),
-        user_agent_string(user_agent_product),
-    );
+    env_vars.insert("npm_config_user_agent".to_string(), user_agent.to_string());
 
     if let Ok(exe) = env::current_exe() {
         env_vars.insert(
@@ -216,37 +207,6 @@ pub fn npm_env(
     );
 
     env_vars
-}
-
-/// The full `npm_config_user_agent` value: role-aware product tokens plus the
-/// `<platform> <arch>` tail in Node's `process.platform`/`process.arch`
-/// vocabulary (darwin/win32, x64/arm64) so postinstall sniffers (which-pm-runs,
-/// only-allow, create-* scaffolders) parse one shape regardless of which nub
-/// surface — `run`, lifecycle, or bin-exec — emitted it. The single source of
-/// truth for the UA format; callers supply only the composed product tokens.
-pub fn user_agent_string(product: &str) -> String {
-    format!("{product} {} {}", node_platform(), node_arch())
-}
-
-/// Node's `process.platform` vocabulary for the UA string (`darwin`, `win32`,
-/// `linux`), mapped from Rust's `std::env::consts::OS`.
-fn node_platform() -> &'static str {
-    match env::consts::OS {
-        "macos" => "darwin",
-        "windows" => "win32",
-        other => other,
-    }
-}
-
-/// Node's `process.arch` vocabulary (`x64`, `arm64`, `ia32`), mapped from
-/// Rust's `std::env::consts::ARCH`.
-fn node_arch() -> &'static str {
-    match env::consts::ARCH {
-        "x86_64" => "x64",
-        "aarch64" => "arm64",
-        "x86" => "ia32",
-        other => other,
-    }
 }
 
 /// Envify a manifest key the npm way: every character outside `[A-Za-z0-9_]`

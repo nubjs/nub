@@ -1,6 +1,6 @@
 # Package-manager user agent — what Nub sets, and how `create-*` scaffolders read it
 
-Nub's run and install-lifecycle paths emit a valid pnpm-shaped `npm_config_user_agent`. The exec paths emit nothing, and the `nub/` leading token used in nub-identity projects is unrecognized by the common scaffolder detectors.
+Nub's run, exec and install-lifecycle paths emit one pnpm-shaped `npm_config_user_agent` per project. The `nub/` leading token used in nub-identity projects is unrecognized by the common scaffolder detectors.
 
 ## Question
 
@@ -38,14 +38,12 @@ Observations:
 ## Nub — code + empirical
 
 Where Nub sets it:
-- **Install lifecycle** (dep postinstalls): `vendor/aube/crates/aube-scripts/src/lib.rs` — `aube_user_agent()` → `cmd.env("npm_config_user_agent", …)`. Product token comes from the engine context's `lifecycle_user_agent_product`, set by the PM engine at `crates/nub-cli/src/pm_engine/mod.rs:733`.
-- **`nub run` / `nub exec` (script)**: `crates/nub-core/src/workspace/scripts.rs:206` (`npm_env`), product threaded from `crates/nub-cli/src/pm_engine/mod.rs::run_lifecycle_ua_product` → `compose_lifecycle_ua`.
+- **Install lifecycle** (dep postinstalls): the embedded pnpm engine stamps it on every lifecycle spawn. A nub-identity project hands the engine Nub's string as its `userAgent` setting (`crates/nub-cli/src/pm_engine/host_settings.rs::lifecycle_user_agent`); a pnpm project keeps the engine's default.
+- **`nub run`, `nub exec` and `nubx`**: `crates/nub-cli/src/pm_engine/mod.rs::script_user_agent`, which picks between the same two strings by the same project identity.
 
-The composer (`compose_lifecycle_ua`, mod.rs:1164) is role-aware:
-- **nub-identity / fresh** → `nub/<v> npm/? node/v<ver> <os> <arch>` (leads with `nub/`)
-- **compat mode** (incumbent npm/pnpm/yarn/bun detected) → `<incumbent>/<ver> nub/<v> node/v<ver> <os> <arch>` (leads with the incumbent token)
+Both strings share the engine's tail, `npm/? node/? <os> <arch>`, and differ only in the leading token: `nub/<v>` in a nub-identity project, `pnpm/<v>` in a pnpm project, where `<v>` is the version a `packageManager` pin names when it names one exactly.
 
-Empirical capture (dev build at commit `ba6648a`, v0.2.10):
+The capture below is from a dev build at commit `ba6648a` (v0.2.10), before the engine change. It records the earlier role-aware shape, which carried a `node/v<ver>` token and put an incumbent's token ahead of `nub/`.
 
 | # | Context | Set? | Verbatim UA | Leading token |
 |---|---------|------|-------------|---------------|
@@ -65,7 +63,7 @@ Verified empirically and at source. All three left `npm_config_user_agent` unset
 1. **`nub exec` / `nubx`** → `run_exec_with_dlx` → `launch_bin` (`crates/nub-cli/src/cli.rs`). `launch_bin` has TWO branches: a **node-bin** branch (`is_node_bin` true → `run_file_in_dir`, spawned as `node <bin>` — the common `create-*` case, since a scaffolder's `.bin` entry is a node script) and a **non-node** branch (`apply_exec_augmentation`). `apply_exec_augmentation` set `NODE`/`NODE_OPTIONS`/`NODE_PATH`/`PATH` plus the localStorage signal but never the UA; `run_file_in_dir` built its child env without it.
 2. **`nub x` / `nub dlx` / `nub create`** → the aube ENGINE (`aube::commands::dlx::run` / `create::run`), which spawns the resolved bin INSIDE aube (`vendor/aube/crates/aube/src/commands/exec.rs::exec_bin` for a local-bin hit, or a direct spawn for a fetched package). Neither aube spawn sets the UA. This is a distinct surface from (1) — `nub x`/`dlx` are aliases of the engine `dlx` verb, NOT of `nub exec`.
 
-Reference tools all set it in exec. Nub's `launch_bin` branches set it the same way as `run`, reusing `run_lifecycle_ua_product` plus a shared `scripts::user_agent_string` helper (#260); the engine dlx path takes its product from the engine context.
+Reference tools all set it in exec. Nub's `launch_bin` branches set it the same way as `run`, through `script_user_agent`.
 
 ## Consumers — how `create-*` detect the PM
 
@@ -95,9 +93,11 @@ Three settled positions bear on this: the PM-run compat decision that fixed the 
 
 ## Current behavior
 
-Nub sets a role-aware `npm_config_user_agent` on `nub run`, on install lifecycle scripts, and on the bin-exec routes.
+Nub sets `npm_config_user_agent` on `nub run`, on the bin-exec routes, and on install lifecycle scripts, and all three carry the same string for a given project.
 
-In a nub-identity project the leading token is Nub's own — `nub/<version> npm/? node/<v> <platform>`, the shape yarn-berry uses for its `npm/?` placeholder — so scaffolders that match the token against a whitelist (create-next-app, the `package-manager-detector` family) fall back to npm's next-step commands until they recognize `nub`, while name-generic detectors (create-vite) print `nub` commands. In a compat project the incumbent's token leads, so every detector prints the incumbent's commands, which Nub's pnpm-compatible grammar runs as written. The honest lead is the deliberate choice: an incumbent-shaped token in a nub-identity project would advertise a package manager that is not there.
+A pnpm project gets pnpm 12's own string byte for byte: `pnpm/<version> npm/? node/? <platform> <arch>`, with the version of the pnpm a `packageManager` pin names. A nub-identity project gets the same shape with Nub's leading token: `nub/<version> npm/? node/? <platform> <arch>`.
+
+In a nub-identity project, scaffolders that match the leading token against a whitelist (create-next-app, the `package-manager-detector` family) fall back to npm's next-step commands until they recognize `nub`, while name-generic detectors (create-vite) print `nub` commands. In a pnpm project every detector prints pnpm commands, which Nub's pnpm-compatible grammar runs as written. The honest lead is the deliberate choice: a pnpm-shaped token in a nub-identity project would advertise a package manager that is not there.
 
 ## Changelog
 
@@ -106,3 +106,4 @@ Two revisions, both 2026-06-30: the initial audit, then the exec-surface correct
 - 2026-06-30 — **Exec-surface correction (#260).** Empirical build showed the bin-exec surface is THREE routes, not the single `apply_exec_augmentation` the initial write-up named: `nub exec`/`nubx` split into a node-bin branch (`run_file_in_dir`) and a non-node branch (`apply_exec_augmentation`) under `launch_bin`, and `nub x`/`nub dlx`/`nub create` route through the aube engine's `exec_bin` — all three left `npm_config_user_agent` unset. PR #260 fixes the `nub exec`/`nubx` routes (both branches, reusing `run_lifecycle_ua_product` + a shared `scripts::user_agent_string`); the engine dlx path stays open as an aube-side follow-up. Gap 2 (nub/-lead misdetection) unchanged.
 - 2026-06-30 — Initial write-up. Audited nub's `npm_config_user_agent` across run/lifecycle/exec vs npm 11.13.0 / pnpm 10.15.1 / yarn 1.13.0 / bun 1.3.14, and consumer behavior in package-manager-detector 1.6.0 / create-next-app / create-vite. Found (1) exec-path (`nub x`/`dlx`/`nubx`) sets nothing — parity gap; (2) nub-identity UA leads with unrecognized `nub/` → misdetected as npm by the whitelist-detector family (create-vite is the raw-passthrough exception).
 - 2026-08-28 — Trimmed to the measured findings and current behavior.
+- 2026-09-14 — Current behavior updated for the embedded pnpm engine: `nub run` and the exec routes emit the install's own string, pnpm's verbatim in a pnpm project (`node/?` included) and Nub's leading token otherwise. The incumbent-first shape and its npm, yarn and bun roles no longer apply, because only pnpm and nub identities remain.

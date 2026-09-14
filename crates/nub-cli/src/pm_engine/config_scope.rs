@@ -27,9 +27,7 @@ pub(crate) enum Role {
 }
 
 /// Resolve the active-PM [`Role`] from the declared `packageManager` name
-/// (if it names a PM nub recognizes) then the detected lockfile kind. This
-/// is the shared role mapping; the lifecycle UA composer
-/// (`compose_lifecycle_ua`) routes through it so the two never diverge.
+/// (if it names a PM nub recognizes) then the detected lockfile kind.
 ///
 /// `declared` is the raw `(name, version)` from `packageManager` /
 /// `devEngines`; `kind` is the resolved lockfile kind. An unknown declared

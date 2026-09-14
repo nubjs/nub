@@ -997,13 +997,6 @@ pub(crate) fn scope_warning_uses_dim() -> bool {
     crate::cli::color_enabled(std::io::stderr().is_terminal())
 }
 
-/// The pnpm version the role-first UA advertises for a pnpm-role project with
-/// no pinned version — the engine's parity claim (full pnpm-v11 settings
-/// catalog + v11 build-policy posture; see the pnpm-11 compat decision,
-/// epics/v0.2-aube). A `packageManager`/`devEngines` pin always outranks this:
-/// the UA impersonates the pinned version when one exists.
-pub(crate) const PNPM_PARITY_VERSION: &str = "11.3.0";
-
 /// The project-local virtual-store directory leaf under `node_modules/`.
 /// `.store` is the vendor-neutral isolated-store convention (npm isolated-mode
 /// RFC-0042, Yarn-berry's pnpm-linker `pnpmStoreFolder`, cnpm), so tools that
@@ -1016,77 +1009,45 @@ pub(crate) const PNPM_PARITY_VERSION: &str = "11.3.0";
 // @lat: [[research/store-marker-hardcoding#Synthesis / recommendation (recommend-only)]]
 pub(crate) const PROJECT_VIRTUAL_STORE_LEAF: &str = ".store";
 
-/// Role-aware lifecycle UA *product tokens* for the `nub run` / `nub exec`
-/// script path (`crates/nub-cli/src/cli.rs::build_script_command`), so a
-/// run-script reports the same incumbent-first UA the engine's lifecycle path
-/// already sends (`pnpm/<ver> nub/<ver> node/v<ver>` in compat mode, `nub/...`
-/// first under nub identity / fresh). Resolves the project's PM identity by
-/// walking up from `cwd` exactly as the engine does, then defers to the shared
-/// composer — there is no second hardcoded UA. The caller (`npm_env`) appends
-/// the `<os> <arch>` platform tail in the runner's vocabulary. `node_version`
-/// is threaded in from the run path's single Node discovery so this does not
-/// re-discover. Falls back to the nub-first product on an identity error
-/// (a malformed/ambiguous lockfile is surfaced loudly elsewhere; the UA must
-/// never panic a script spawn).
-pub(crate) fn run_lifecycle_ua_product(cwd: &Path, node_version: &str) -> String {
-    let detected = resolve_identity_walk_up(cwd, IdentityStrictness::Lenient)
-        .ok()
-        .flatten();
-    compose_lifecycle_ua(
-        nub_core::pm::resolve::declared_pm_raw(cwd),
-        detected.map(|d| d.kind),
-        node_version,
-    )
-}
-
-/// Pure core of [`lifecycle_ua_product`] (unit-tested without a fixture).
+/// The `npm_config_user_agent` a script nub launches sees — `nub run`, `nub
+/// exec`, and a bin `nubx` runs — which is the string the install's own
+/// lifecycle scripts see for the same project, so a tool sniffing the running
+/// package manager gets one answer from every surface.
+///
+/// A pnpm project gets pnpm's string; a nub project gets nub's leading token on
+/// the same tail ([`host_settings::lifecycle_user_agent`]). The identity is the
+/// install's own, so the two cannot pick differently.
 ///
 /// The leading token is the contested part: a `nub/`-first string is honest but
 /// unrecognized by the whitelist detectors (`package-manager-detector`,
 /// create-next-app), which fall back to npm and print npm commands. That cost
-/// was weighed against masquerading as the incumbent, and honesty won.
+/// was weighed against masquerading as pnpm, and honesty won.
 // @lat: [[research/npm-config-user-agent#Current behavior]]
-fn compose_lifecycle_ua(
-    declared: Option<(String, Option<String>)>,
-    kind: Option<LockfileKind>,
-    node_version: &str,
-) -> String {
-    let nub_version = env!("CARGO_PKG_VERSION");
-    // The declared name is the role when it names an identity nub recognizes;
-    // an unknown tool name (vlt, deno, …) falls through to the lockfile kind,
-    // exactly like identity resolution does. Role mapping is shared with the
-    // config-scoping policy ([`config_scope::role_of`]) so the two never
-    // diverge; the UA needs the declared *version* token too, kept here.
-    let declared_role = declared
-        .as_ref()
-        .filter(|(name, _)| matches!(name.as_str(), "npm" | "pnpm" | "yarn" | "bun" | "nub"))
-        .map(|(name, version)| (name.clone(), version.clone()));
-    let role = config_scope::role_of(declared.as_ref().map(|(n, _)| n.as_str()), kind).map(|r| {
-        match r {
-            config_scope::Role::Npm => "npm",
-            config_scope::Role::Pnpm => "pnpm",
-            config_scope::Role::Yarn => "yarn",
-            config_scope::Role::Bun => "bun",
-            config_scope::Role::Nub => "nub",
+pub(crate) fn script_user_agent(cwd: &Path) -> String {
+    match project_identity::detect(cwd) {
+        project_identity::ProjectIdentity::Nub => host_settings::lifecycle_user_agent(),
+        project_identity::ProjectIdentity::Pnpm => {
+            pnpm_user_agent(nub_core::pm::resolve::declared_pm_raw(cwd))
         }
-        .to_string()
-    });
-    match role.as_deref() {
-        // Compat mode: the incumbent's token first, nub always second. The
-        // version is the pin when the declaration supplied one, else the
-        // engine's parity version (pnpm) or `?` (roles nub doesn't embed).
-        Some(other) if other != "nub" => {
-            let version = declared_role
-                .and_then(|(_, version)| version)
-                .unwrap_or_else(|| match other {
-                    "pnpm" => PNPM_PARITY_VERSION.to_string(),
-                    _ => "?".to_string(),
-                });
-            format!("{other}/{version} nub/{nub_version} node/v{node_version}")
-        }
-        // Nub identity or a fresh project: nub first, byte-identical to the
-        // runner's dialect (`nub/<v> npm/? node/v<ver>`).
-        _ => format!("nub/{nub_version} npm/? node/v{node_version}"),
+    }
+}
+
+/// pnpm's own user agent, with the version an exact pnpm pin names.
+///
+/// An install under such a pin delegates to that pnpm, so its lifecycle
+/// scripts see that version. A range, or no pin at all, runs the embedded
+/// engine, whose version the string already carries.
+fn pnpm_user_agent(declared: Option<(String, Option<String>)>) -> String {
+    let engine = pnpm_config::default_user_agent();
+    let pinned = declared
+        .filter(|(name, _)| name == "pnpm")
+        .and_then(|(_, version)| version)
+        // `packageManager` may carry a `+sha512.…` integrity suffix.
+        .map(|version| version.split('+').next().unwrap_or_default().to_owned())
+        .filter(|version| semver::Version::parse(version).is_ok());
+    match (pinned, engine.split_once(' ')) {
+        (Some(version), Some((_, tail))) => format!("pnpm/{version} {tail}"),
+        _ => engine,
     }
 }
 
@@ -3741,70 +3702,29 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_ua_is_role_first_in_compat_and_nub_first_otherwise() {
-        let nub = env!("CARGO_PKG_VERSION");
-        let pin = |name: &str, v: Option<&str>| Some((name.to_string(), v.map(str::to_string)));
+    fn a_pnpm_projects_script_user_agent_names_only_an_exact_pnpm_pin() {
+        let engine = pnpm_config::default_user_agent();
+        let (_, tail) = engine
+            .split_once(' ')
+            .expect("the engine's user agent carries a tail");
+        let pin = |name: &str, v: &str| Some((name.to_string(), Some(v.to_string())));
 
-        // Compat, pinned: the incumbent's token first with the PINNED version,
-        // nub always second, runner dialect (node/v token present).
+        assert_eq!(pnpm_user_agent(None), engine, "no pin: the engine's own");
         assert_eq!(
-            compose_lifecycle_ua(
-                pin("pnpm", Some("9.1.0")),
-                Some(LockfileKind::Pnpm),
-                "22.15.0"
-            ),
-            format!("pnpm/9.1.0 nub/{nub} node/v22.15.0")
-        );
-        // Compat, unpinned pnpm (lockfile-inferred): the engine's parity version.
-        assert_eq!(
-            compose_lifecycle_ua(None, Some(LockfileKind::Pnpm), "22.15.0"),
-            format!("pnpm/{PNPM_PARITY_VERSION} nub/{nub} node/v22.15.0")
-        );
-        // npm/bun roles: pnpm's own `?` convention when no version is declared.
-        assert_eq!(
-            compose_lifecycle_ua(None, Some(LockfileKind::Npm), "22.15.0"),
-            format!("npm/? nub/{nub} node/v22.15.0")
+            pnpm_user_agent(pin("pnpm", "9.1.0+sha512.abc")),
+            format!("pnpm/9.1.0 {tail}"),
+            "an exact pin names its version, without the integrity suffix"
         );
         assert_eq!(
-            compose_lifecycle_ua(
-                pin("bun", Some("1.2.0")),
-                Some(LockfileKind::Bun),
-                "22.15.0"
-            ),
-            format!("bun/1.2.0 nub/{nub} node/v22.15.0")
-        );
-        // Declaration outranks a stray foreign lockfile for the role, exactly
-        // like identity resolution.
-        assert_eq!(
-            compose_lifecycle_ua(
-                pin("npm", Some("11.0.0")),
-                Some(LockfileKind::Npm),
-                "22.15.0"
-            ),
-            format!("npm/11.0.0 nub/{nub} node/v22.15.0")
-        );
-        // Unknown declared tool falls through to the lockfile kind.
-        assert_eq!(
-            compose_lifecycle_ua(pin("vlt", None), Some(LockfileKind::Yarn), "22.15.0"),
-            format!("yarn/? nub/{nub} node/v22.15.0")
-        );
-
-        // Nub identity (declared, or the lock.yaml kind) and fresh projects:
-        // nub first, byte-identical to the runner's dialect.
-        let nub_first = format!("nub/{nub} npm/? node/v22.15.0");
-        assert_eq!(
-            compose_lifecycle_ua(
-                pin("nub", Some("0.1.0")),
-                Some(LockfileKind::Aube),
-                "22.15.0"
-            ),
-            nub_first
+            pnpm_user_agent(pin("pnpm", "^12.0.0")),
+            engine,
+            "a range delegates to no other pnpm"
         );
         assert_eq!(
-            compose_lifecycle_ua(None, Some(LockfileKind::Aube), "22.15.0"),
-            nub_first
+            pnpm_user_agent(pin("npm", "11.0.0")),
+            engine,
+            "another tool's pin names no pnpm version"
         );
-        assert_eq!(compose_lifecycle_ua(None, None, "22.15.0"), nub_first);
     }
 
     #[test]

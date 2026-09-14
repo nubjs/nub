@@ -375,8 +375,9 @@ fn merge(sources: &Sources) -> Result<Map<String, Value>> {
 ///
 /// A pnpm-incumbent project never reaches this function and keeps pnpm's
 /// string verbatim, which is what makes a build script there see exactly what
-/// it would under pnpm.
-fn lifecycle_user_agent() -> String {
+/// it would under pnpm. The scripts nub launches itself take the same string
+/// through [`super::script_user_agent`].
+pub(crate) fn lifecycle_user_agent() -> String {
     let engine = pnpm_config::default_user_agent();
     let rest = engine.split_once(' ').map_or("", |(_, rest)| rest);
     format!("nub/{} {rest}", env!("CARGO_PKG_VERSION"))

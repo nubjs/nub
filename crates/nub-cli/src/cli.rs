@@ -4617,16 +4617,16 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     }
 
     // Bin-exec parity with `nub run`: when this spawn is nub LAUNCHING a resolved
-    // node bin (a `nubx`/`nub exec` scaffolder — `exec_ua`), set the same role-
-    // aware `npm_config_user_agent` the run path emits so the tool detects nub as
-    // the invoking PM. Not set for a plain `nub <file>` run (`exec_ua == false`),
-    // matching `node <file>`, which leaves it undefined; skipped in compat mode
-    // (`--node` = vanilla). nub's value overrides an inherited one — nub is the
-    // running PM here, exactly as the run path overrides it.
+    // node bin (a `nubx`/`nub exec` scaffolder — `exec_ua`), set the same
+    // `npm_config_user_agent` the run path emits so the tool detects the invoking
+    // PM. Not set for a plain `nub <file>` run (`exec_ua == false`), matching
+    // `node <file>`, which leaves it undefined; skipped in compat mode (`--node` =
+    // vanilla). nub's value overrides an inherited one — nub is the running PM
+    // here, exactly as the run path overrides it.
     if exec_ua && !compat_mode {
         env_vars.insert(
             "npm_config_user_agent".to_string(),
-            exec_user_agent(cwd, &node.version.to_string()),
+            crate::pm_engine::script_user_agent(cwd),
         );
     }
 
@@ -5821,20 +5821,17 @@ fn build_script_command(
         Some(runtime_config_json(&runtime)?)
     };
 
-    // Role-aware lifecycle UA: a `nub run`/`nub exec` script must report the
-    // same incumbent-first `npm_config_user_agent` the engine's lifecycle path
-    // already sends (so only-allow / which-pm-runs see `pnpm/<ver> nub/<v> …`
-    // in a pnpm project, not a hardcoded `nub/<v> npm/?`). The role resolver
-    // walks up from `cwd`; the version token is the run path's already-resolved
-    // Node, threaded in so it isn't re-discovered.
-    let ua_product = crate::pm_engine::run_lifecycle_ua_product(&cwd, &node.version.to_string());
+    // The user agent the install's own lifecycle scripts see in this project,
+    // so a run script and a dependency's postinstall agree about the package
+    // manager (only-allow and which-pm-runs branch on it).
+    let user_agent = crate::pm_engine::script_user_agent(&cwd);
     let npm_env = nub_core::workspace::scripts::npm_env(
         &project.manifest,
         &project.root,
         lifecycle_event,
         Some(cmd),
         node.path.as_str(),
-        &ua_product,
+        &user_agent,
     );
 
     // Shell precedence: an explicit `--script-shell <path>` flag wins, then a
@@ -7716,18 +7713,6 @@ fn bin_launcher(path: &Path, args: &[String]) -> std::process::Command {
     c
 }
 
-/// The `npm_config_user_agent` value nub emits when it LAUNCHES a bin/tool
-/// (`nubx`, `nub exec`, a workspace-bin run), reusing the same role-aware
-/// composer + platform tail as the `nub run` / lifecycle paths — no second
-/// hardcoded format. `nub/<v> npm/? …` under nub identity / fresh, incumbent-
-/// first (`pnpm/<pin> nub/<v> …`) in a compat project. `node_version` is the
-/// caller's already-resolved Node so this does not re-discover it.
-// @lat: [[research/npm-config-user-agent#Nub — code + empirical#The exec surface — three routes, not one]]
-fn exec_user_agent(cwd: &Path, node_version: &str) -> String {
-    let product = crate::pm_engine::run_lifecycle_ua_product(cwd, node_version);
-    nub_core::workspace::scripts::user_agent_string(&product)
-}
-
 /// Apply nub's augmentation env (NODE_OPTIONS preload + PATH shim + `.bin`
 /// chain) to a non-node launcher, so any `node` the tool spawns is transpile-
 /// enabled — the same env `nub run` gives a script. No-op if augmentation can't
@@ -7757,14 +7742,15 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Resul
         exec_tokens.iter().map(String::as_str),
     );
     // Exec-path parity with `nub run`/lifecycle: a launched non-node bin (a
-    // create-* scaffolder, a tool that shells out) must see the same role-aware
-    // `npm_config_user_agent` so it detects nub as the invoking PM instead of a
-    // blank value (which the whitelist detectors fall back to npm on). Set before
-    // the preload early-return below — the UA is independent of whether the
+    // create-* scaffolder, a tool that shells out) must see the same
+    // `npm_config_user_agent` so it detects the invoking PM instead of a blank
+    // value (which the whitelist detectors fall back to npm on). Set before the
+    // preload early-return below — the UA is independent of whether the
     // transpile preload was found.
+    // @lat: [[research/npm-config-user-agent#Nub — code + empirical#The exec surface — three routes, not one]]
     cmd.env(
         "npm_config_user_agent",
-        exec_user_agent(cwd, &node.version.to_string()),
+        crate::pm_engine::script_user_agent(cwd),
     );
     let pnp_ctx = nub_core::pnp::detect(cwd);
     let Some(aug) = nub_core::node::spawn::compute_augmentation_env(
