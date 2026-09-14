@@ -69,7 +69,7 @@ nub run build         # root script: "turbo run build"
  Tasks:    1 successful, 1 total
 ```
 
-The one thing that matters is that **Turborepo runs under Nub**. Launch it with `nub run <script>` (where the script's command is `turbo run …`) or with `nubx turbo run …`. If you invoke the `turbo` binary directly from a plain shell, the tasks run on whatever Node is on your path with no augmentation, and a `.ts` entry will fail to parse.
+The one thing that matters is that **Turborepo runs under Nub**. Launch it with `nub run <script>` (where the script's command is `turbo run …`) or with `nubx turbo run …`. If you invoke the `turbo` binary directly from a plain shell, the tasks run on whatever Node is on your path with no augmentation. A `.ts` entry then fails on a Node without type stripping, and on a Node with it, syntax such as `enum` still fails.
 
 You do not need to rewrite your package scripts to say `nub` anywhere. A script of `node ./build.ts` is enough — Nub's augmentation is what turns that into a TypeScript-aware run.
 
