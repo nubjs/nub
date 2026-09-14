@@ -1,32 +1,30 @@
 name: Lockfile round-trip
 
-# Bidirectional cross-tool lockfile round-trip gates. Two harnesses, both
-# shelling out to REAL pinned package managers as the honest judge:
+# Bidirectional lockfile gates, each judged by REAL pnpm 12 — the version nub
+# embeds:
 #
-#   tests/conformance/run.sh — drop-in round-trip. Direction A: a real PM
-#     writes its lockfile, nub `--frozen-lockfile` installs from it. Direction
-#     B: nub writes the lockfile, the real PM frozen-installs it with zero
-#     churn (`cmp`). The real PM judges BOTH directions.
+#   tests/conformance/run.sh — drop-in round-trip on a pnpm project. Direction
+#     A: real pnpm writes its lockfile, nub `--frozen-lockfile` installs from
+#     it. Direction B: nub writes the lockfile, real pnpm frozen-installs it with
+#     zero churn (`cmp`).
 #   tests/conversion/run.sh — cross-format migration: a source PM writes its
 #     lockfile, `nub pm use <target>` converts it, the target PM frozen-accepts.
-#   tests/mutation/run-mutations.sh — the WRITE-PATH differential: a real PM
-#     installs, nub MUTATES (`nub add`/`remove`/`update`), the real PM frozen-
-#     accepts nub's mutated lockfile AND the mutated graph is semantically equal
-#     to what the real PM produces for the same mutation. NIGHTLY only (heavier:
-#     two installs + a mutation per leg).
+#   tests/mutation/run-mutations.sh — the WRITE-PATH differential: nub MUTATES
+#     (`nub add`/`remove`/`update`) a pnpm project and a nub project, real
+#     pnpm frozen-accepts the mutated lockfile, and the mutated graph is
+#     semantically equal to what real pnpm produces for the same mutation.
+#     NIGHTLY only (heavier: two installs + a mutation per leg).
 #
-# Both harnesses invoke pnpm/npm/bun/yarn by name off PATH (NOT npx-pinned like
-# tests/lockfile-conformance/run.sh), so this workflow pins each one deterministically
-# on PATH before running — see the "Pin package managers" step. Keep these pins
-# in sync with the tool/version matrices documented in each harness README and
-# with BUN_PIN/PNPM_PIN/NPM_PIN defaults in the run.sh scripts.
+# The conformance and mutation harnesses fetch pnpm through npx at PNPM_PIN, so
+# they need nothing on PATH beyond Node. The conversion harness still drives
+# npm, yarn and bun off PATH as SOURCE package managers, so its job pins them.
 #
 # Two cadences:
 #   per-PR  — the conformance harness on a TIGHT, fast fixture set, so it doesn't
-#             heavily gate every push. Skips yarn (slowest leg) to stay quick.
+#             heavily gate every push.
 #   nightly — the FULL conformance matrix + the full conversion matrix + the
-#             mutation differential, all PMs. The mutation leg is nightly-only
-#             (no per-PR gate) because it is heavier than a static round-trip.
+#             mutation differential. The mutation leg is nightly-only (no per-PR
+#             gate) because it is heavier than a static round-trip.
 #
 # Real registry installs run, so these need network. Known-red scenarios live in
 # each harness's expected-failures.txt and must shrink (a stale entry fails the
@@ -68,10 +66,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # Pinned package-manager versions. Keep in sync with the harness READMEs and
-  # the *_PIN defaults in tests/conversion/run.sh.
+  # Pinned package-manager versions. PNPM_PIN is the pnpm nub embeds: every
+  # harness here reads it, and a different major judges a different product.
   NPM_PIN: "11.13.0"
-  PNPM_PIN: "10.15.1"
+  PNPM_PIN: "12.4.1"
   BUN_PIN: "1.3.14"
   YARN_PIN: "1.22.22"
 
@@ -97,24 +95,12 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "24"
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
-        with:
-          bun-version: ${{ env.BUN_PIN }}
-      - name: Pin package managers on PATH
-        run: | # zizmor: ignore[adhoc-packages] versions pinned via workflow-level *_PIN env vars
-          npm install -g "npm@${NPM_PIN}" "pnpm@${PNPM_PIN}"
-          echo "npm:  $(npm --version)"
-          echo "pnpm: $(pnpm --version)"
-          echo "bun:  $(bun --version)"
       - name: Build nub
         run: cargo build -p nub-cli
-      - name: Drop-in round-trip (tight fixture set, no yarn)
+      - name: Drop-in round-trip (tight fixture set)
         # The tight set: table-stakes (simple, scoped) + the feature fixtures
-        # that exercise the bug-prone diverging fields. yarn is skipped here to
-        # keep the PR gate fast; the nightly job runs it.
-        env:
-          SKIP_YARN: "1"
-        run: tests/conformance/run.sh target/debug/nub simple scoped peers overrides-ref overrides-nested patched-deps catalog workspace workspace-dedup empty-root-importer git-dep platform-optional dist-tag-spec range-forms alias-scoped has-install-script injected-deps
+        # that exercise the bug-prone diverging fields.
+        run: tests/conformance/run.sh target/debug/nub simple scoped peers overrides-ref overrides-nested patched-deps catalog workspace workspace-dedup empty-root-importer git-dep platform-optional dist-tag-spec range-forms alias-scoped injected-deps
 
   # ── Nightly: full conformance matrix + full conversion matrix ─────────────
   conformance-nightly:
@@ -136,19 +122,9 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "24"
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
-        with:
-          bun-version: ${{ env.BUN_PIN }}
-      - name: Pin package managers on PATH
-        run: | # zizmor: ignore[adhoc-packages] versions pinned via workflow-level *_PIN env vars
-          npm install -g "npm@${NPM_PIN}" "pnpm@${PNPM_PIN}" "yarn@${YARN_PIN}"
-          echo "npm:  $(npm --version)"
-          echo "pnpm: $(pnpm --version)"
-          echo "yarn: $(yarn --version)"
-          echo "bun:  $(bun --version)"
       - name: Build nub
         run: cargo build -p nub-cli
-      - name: Drop-in round-trip (full fixture matrix, all PMs)
+      - name: Drop-in round-trip (full fixture matrix)
         run: tests/conformance/run.sh target/debug/nub
 
   conversion-nightly:
@@ -190,8 +166,7 @@ jobs:
 
   # ── Nightly: lockfile MUTATION differential (write-path) ──────────────────
   # Heavier than a static round-trip (two installs + a mutation per leg), so it
-  # is nightly/dispatch only — no per-PR gate. yarn is read-only in nub (no
-  # write-path mutation), so this matrix is npm/pnpm/bun and skips the yarn pin.
+  # is nightly/dispatch only — no per-PR gate.
   mutation-nightly:
     name: lockfile mutation differential, full matrix (ubuntu)
     if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
@@ -211,15 +186,6 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "24"
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
-        with:
-          bun-version: ${{ env.BUN_PIN }}
-      - name: Pin package managers on PATH
-        run: | # zizmor: ignore[adhoc-packages] versions pinned via workflow-level *_PIN env vars
-          npm install -g "npm@${NPM_PIN}" "pnpm@${PNPM_PIN}"
-          echo "npm:  $(npm --version)"
-          echo "pnpm: $(pnpm --version)"
-          echo "bun:  $(bun --version)"
       - name: Build nub
         run: cargo build -p nub-cli
       - name: Lockfile mutation differential (add / remove / update)

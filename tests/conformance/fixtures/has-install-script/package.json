@@ -1,9 +1,0 @@
-{
-  "name": "conform-has-install-script",
-  "version": "1.0.0",
-  "private": true,
-  "description": "Drop-in PM conformance fixture for npm's per-package verbatim lockfile keys. esbuild carries hasInstallScript in package-lock.json (its postinstall selects the prebuilt platform binary). Direction A is the field-preservation test: real npm writes hasInstallScript, nub frozen-reads and re-emits it with zero churn. Direction B confirms npm ci accepts a nub-written lockfile unchanged.",
-  "dependencies": {
-    "esbuild": "0.21.5"
-  }
-}

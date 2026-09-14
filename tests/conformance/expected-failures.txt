@@ -1,12 +1,7 @@
-# Known-red drop-in conformance scenarios: "<fixture> <direction> <pm> <reason>".
+# Known-red drop-in conformance scenarios: "<fixture> <direction> <reason>".
 # Same discipline as tests/lockfile-conformance/expected-failures.txt — this list
-# must SHRINK. A listed scenario that passes fails the run (XPASS-STALE) so the
-# green flip is recorded by deleting the entry in the same commit as the fix.
-# All entries are fixable lockfile-writer bugs (vendor/aube fork); scenarios
-# the ecosystem makes impossible are skip_reason() in run.sh instead.
-
-# overrides-ref Direction A is no longer gated: the pnpm.overrides $-ref
-# read-as-drift bug (#16) was fixed by the vendor/aube pin bump c948a38. Its
-# Direction B stays an intended brand-boundary divergence (skip_reason in
-# run.sh), not a bug.
-
+# must SHRINK. A listed scenario that passes fails the run (XPASS-STALE), so the
+# fix and the entry's deletion land in one commit.
+#
+# A permanent ecosystem-level impossibility does NOT belong here: no lockfile nub
+# could write would clear it, so it is a skip_reason() in run.sh instead.
