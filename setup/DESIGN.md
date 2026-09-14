@@ -15,14 +15,14 @@ The central fact that reshapes everything: **nub already does jobs (1) and (3) i
 | nub cache root: `$XDG_CACHE_HOME/nub` else `~/.cache/nub` (hardcoded `.cache`, even on macOS) | `crates/nub-core/src/node/discovery.rs:809` |
 | Provisioned Node toolchains: `<cache>/node/<version>/` (dir name IS the version) | `discovery.rs:817`; `wiki/commands/node-versions.md:33` |
 | PM engine cache (packuments, git-clone, node-gyp): `$XDG_CACHE_HOME/nub/pm` | `pm_engine/identity.rs:60-65` (`cache_namespace="nub/pm"`) |
-| Global CAS store: `$XDG_DATA_HOME/nub/store/v1` else `~/.local/share/nub/store/v1` | `identity.rs:66-68`, `mod.rs:1427` (`data_namespace="nub"`, `storeDir`) |
+| Global CAS store: `$XDG_CACHE_HOME/nub/store/v11` else `~/.cache/nub/store/v11` | `pm_engine/host_settings.rs` (`storeDir`); confirmed by `nub store path` |
 | Per-project virtual store: `node_modules/.store` | `mod.rs` `PROJECT_VIRTUAL_STORE_LEAF` → `nub_setting_defaults` (`virtualStoreDir`) |
 | Bare `nub node install` provisions the project pin (manual form of the implicit path) | `node-versions.md:33` |
 | `nub <file>` / `nub install` auto-provision the pinned Node if absent | `node-versions.md:15,65` |
 | Node-version files read: `.node-version` (precedence #1), `.nvmrc`, `package.json` `engines.node`/`volta`/`packageManager` | `node-versions.md:44`, `discovery.rs:123` |
 | Sole Node-version env override: `NODE_EXECUTABLE` (no `NUB_*` for node) | `node-versions.md:78` |
 | PM cache-dir env override: `NUB_CACHE_DIR` (neutral `npm_config_*` also honored) | `identity.rs:52-59` |
-| nub's PM reads standard `.npmrc`: `registry`, `_authToken`, `<scope>:registry`, `NPM_TOKEN` — never a branded file | `publish_family.rs:25-30`; `aube-resolver/src/error.rs:335` |
+| nub's PM reads standard `.npmrc`: `registry`, `_authToken`, `<scope>:registry`, `NPM_TOKEN` — never a branded file | `publish_family.rs:25-30`; `pm_engine/host_settings.rs` |
 | `nub ci` = frozen + clean install (one step) | `pm_engine/mod.rs:2176`, `install_family.rs:177,797` |
 | `nub store path` prints the resolved CAS store dir (scriptable — derive cache paths at runtime, don't hardcode) | `store_config_family.rs:13-15` |
 | `nub store add <pkg>` populates the global store without touching `node_modules` (a real CI pre-warm primitive) | `wiki/commands/pm/store.md:28` |
@@ -75,8 +75,8 @@ The central fact that reshapes everything: **nub already does jobs (1) and (3) i
 **What to cache.** nub's three durable, cross-run-reusable directories:
 
 ```
-$XDG_DATA_HOME/nub/store/v1      # global CAS store — the big win, content-addressed packages
-                                 #   (else ~/.local/share/nub/store/v1)
+$XDG_CACHE_HOME/nub/store/v11    # global CAS store — the big win, content-addressed packages
+                                 #   (else ~/.cache/nub/store/v11)
 $XDG_CACHE_HOME/nub/pm           # packument cache, git-clone cache, node-gyp tool cache
                                  #   (else ~/.cache/nub/pm)
 $XDG_CACHE_HOME/nub/node         # provisioned Node toolchains (else ~/.cache/nub/node)
@@ -84,7 +84,7 @@ $XDG_CACHE_HOME/nub/node         # provisioned Node toolchains (else ~/.cache/nu
 
 Do NOT cache `node_modules/.store` (the per-project virtual store) — it's reconstructed from the CAS store on each install and is cheap to relink; caching it fights nub's own reflink/relink path.
 
-> **Correction (2026-06-16 verification pass):** the PM packument cache may NOT land at `$XDG_CACHE_HOME/nub/pm`. `store_config_family.rs:16-19` documents a KNOWN GAP — `cacheDir` can't ride the embedder-defaults tier at the pinned aube API, so the engine's `cache` operates on `<XDG_CACHE_HOME>/aube/…`. The `nub/pm` namespace is *configured* but the packument cache specifically escapes it. The load-bearing cache layers are the **store** (`nub store path`, `$XDG_DATA_HOME/nub/store/v1`) and the **Node toolchain** (`<cache>/node`) — derive both at runtime, never hardcode. Treat the PM-cache dir as best-effort (packuments are small + re-fetchable; a wrong path is a cheap miss, not breakage), and resolve the `nub/pm`-vs-`aube/` ambiguity (or drop that cache line) before flipping `cache` default to `true`.
+> **Correction (2026-09-14 verification pass, superseding the 2026-06-16 one):** the packument cache DOES land under `nub/`, and both of the paths above moved. Measured on a sandboxed `HOME` and `XDG_*`: `nub config get cache-dir` answers `$XDG_CACHE_HOME/nub/pm` and the install creates `nub/pm/v11`; `nub store path` answers `$XDG_CACHE_HOME/nub/store/v11`. Nothing in the sandbox carries another tool's name. Two things the earlier pass got wrong and this one corrects: the store is under the CACHE tier, not the data tier, and its version leaf is `v11`, not `v1`. The standing advice is unchanged and is the reason it survived the move — derive both paths at runtime from `nub store path` and `nub config get cache-dir`, never hardcode them.
 
 **Cache key.** Mirror `setup-node`'s shape:
 
@@ -100,11 +100,11 @@ Keying on the lockfile (`cache-dependency-path`, default = auto-detect the prese
 
 **RECOMMENDATION:** ship `cache` (boolean) + `cache-dependency-path` in v1; cache the three dirs above with the keyed `restore-keys` ladder; default `cache: false`. This is the single most valuable field and worth getting concrete. **Open sub-question (needs maintainer sign-off):** default `cache` to `true` (aggressive, setup-node-like — most CI wants it) or `false` (conservative, pnpm-like — opt-in)? Recommend **`false` for v1**, flip to `true` once the cache paths prove out on the smoke matrix.
 
-**Implementation primitives (don't hardcode paths).** nub exposes scriptable commands the action should lean on instead of literal paths: `nub store path` prints the resolved CAS store dir (`store_config_family.rs:13-15`) — derive the `actions/cache` path from it rather than hardcoding `~/.local/share/nub/store/v1`, so an `XDG_DATA_HOME` override or a future layout change doesn't silently break caching. For an explicit pre-warm beyond restore, `nub store add <pkg>` populates the global store without touching `node_modules` (`wiki/commands/pm/store.md:28`) — though for CI the simpler warm path is just `nub ci` after a cache restore.
+**Implementation primitives (don't hardcode paths).** nub exposes scriptable commands the action should lean on instead of literal paths: `nub store path` prints the resolved CAS store dir (`store_config_family.rs:13-15`) — derive the `actions/cache` path from it rather than hardcoding `~/.cache/nub/store/v11`, so an `XDG_CACHE_HOME` override or a future layout change doesn't silently break caching — the store has already moved tier and version leaf once. For an explicit pre-warm beyond restore, `nub store add <pkg>` populates the global store without touching `node_modules` (`wiki/commands/pm/store.md:28`) — though for CI the simpler warm path is just `nub ci` after a cache restore.
 
 ### HQ3 — `registry-url` / `scope` / `always-auth` (auth)
 
-**The brand-boundary check passes cleanly.** `setup-node` writes a project-level `.npmrc` with the registry + `:_authToken=${NODE_AUTH_TOKEN}` and exports `NPM_CONFIG_USERCONFIG` to point at it. nub's PM reads exactly that standard `.npmrc` (registry, `_authToken`, `<scope>:registry`, `NPM_TOKEN` — `publish_family.rs:25`, `aube-resolver/error.rs:335`). So `setup-nub` writes the **identical neutral `.npmrc`** `setup-node` does — no branded file, no `nub`-named config, fully consistent with the symmetric brand boundary (nub never emits its brand into your config and reads only neutral fields).
+**The brand-boundary check passes cleanly.** `setup-node` writes a project-level `.npmrc` with the registry + `:_authToken=${NODE_AUTH_TOKEN}` and exports `NPM_CONFIG_USERCONFIG` to point at it. nub's PM reads exactly that standard `.npmrc` (registry, `_authToken`, `<scope>:registry`, `NPM_TOKEN` — `publish_family.rs:25`, `pm_engine/host_settings.rs`). So `setup-nub` writes the **identical neutral `.npmrc`** `setup-node` does — no branded file, no `nub`-named config, fully consistent with the symmetric brand boundary (nub never emits its brand into your config and reads only neutral fields).
 
 **RECOMMENDATION: MIRROR `registry-url` / `scope` exactly** (same `.npmrc` lines, same `NODE_AUTH_TOKEN` env contract, same `RUNNER_TEMP/.npmrc` + `NPM_CONFIG_USERCONFIG` export). **Mirror `always-auth`** too. The auth story is byte-for-byte `setup-node`'s — that's the point, and it's brand-clean because the file is neutral. **To confirm:** reuse `setup-node`'s `NODE_AUTH_TOKEN` env-var name (yes — it's the ecosystem convention every workflow already sets; a `NUB_AUTH_TOKEN` rename would break the drop-in and add brand surface for no gain).
 
@@ -201,7 +201,7 @@ runs:
     # Restore step (actions/cache) — paths + key per HQ2. Shown conceptually;
     # the real implementation uses actions/cache@v4 with the restore-keys ladder.
     # paths:
-    #   ~/.local/share/nub/store/v1   (or $XDG_DATA_HOME/nub/store/v1)
+    #   ~/.cache/nub/store/v11        (or $XDG_CACHE_HOME/nub/store/v11)
     #   ~/.cache/nub/pm               (or $XDG_CACHE_HOME/nub/pm)
     #   ~/.cache/nub/node             (or $XDG_CACHE_HOME/nub/node)
 
@@ -250,7 +250,7 @@ Recommended: a `v0` branch (or lightweight tag) the release workflow advances to
 3. **Accept and ignore `token` / `check-latest` / `architecture` / `mirror` / `mirror-token` in v1** (setup-node compatibility).
 4. **`cache` default** (HQ2) — `false` (opt-in, pnpm-like) vs `true` (aggressive, setup-node-like). **Recommend: `false` for v1, flip after the smoke matrix proves the paths.**
 5. **`cache` is a boolean, not a pm-name enum** (HQ2) — confirm nub's single-store model means we diverge from `setup-node`'s `cache: npm|yarn|pnpm`. **Recommend: boolean.**
-6. **Cache the three dirs** (`store/v1`, `pm`, `node`), NOT `node_modules/.store`; key on lockfile + node-version with the `restore-keys` ladder (HQ2). **Recommend: as specified.**
+6. **Cache the three dirs** (`store/v11`, `pm`, `node`), NOT `node_modules/.store`; key on lockfile + node-version with the `restore-keys` ladder (HQ2). **Recommend: as specified.**
 7. **Reuse `NODE_AUTH_TOKEN`** (not `NUB_AUTH_TOKEN`) for the `.npmrc` auth token (HQ3). **Recommend: reuse — ecosystem convention, brand-clean, drop-in.**
 8. **Emit `node-version` output unconditionally** (extra `nub node which` per run) vs only when provisioning happened (HQ4). **Recommend: unconditional — cheap, preserves contract.**
 9. **Create + maintain a floating `v0` ref** separate from `v0.0.x` (release-process, but blocks adoption). **Recommend: do it before promoting the action.**
