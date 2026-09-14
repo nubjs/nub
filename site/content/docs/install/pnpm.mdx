@@ -23,8 +23,8 @@ Nub mirrors pnpm most closely: the CLI surface, the isolated `node_modules` layo
     { feature: <><code>audit</code> / <code>licenses</code> / <code>peers</code></>, status: 'yes' },
     { feature: <><code>publish</code> / <code>pack</code> / <code>version</code></>, status: 'yes' },
     { feature: <><code>store</code> / <code>config</code></>, status: 'yes' },
-    { feature: <><code>recursive</code> meta-verb</>, status: 'yes' },
-    { feature: <><code>deploy</code></>, status: 'no', note: 'Not wired; pnpm deploy stays the path for now.' },
+    { feature: <><code>recursive</code> meta-verb</>, status: 'no', note: 'Recursion goes on the verb: -r or --filter.' },
+    { feature: <><code>deploy</code></>, status: 'yes' },
   ]}
 />
 
@@ -164,11 +164,14 @@ Lifecycle scripts for dependencies are skipped by default, as pnpm 10 does. A pa
 
 ## Unsupported
 
-Two pnpm commands produce an unsupported-command error rather than a silent fallback:
+`pnpm recursive` has no equivalent. Nub has no recursive meta-verb, so the recursion goes on the verb itself:
 
-```text
-sbom        # CycloneDX/SPDX bill of materials — not yet wired
-deploy      # not yet wired; the operation stays manual
+```console
+$ nub recursive
+  Error: nub recursive: not supported — nub has no recursive meta-verb.
+    Use the verb's own workspace flags instead: `nub -r <verb>` /
+    `nub <verb> -r` or `--filter <pattern>` (e.g. `nub run -r build`,
+    `nub update -r`).
 ```
 
 The `node-linker=pnp` install mode is also declined; see the table above.
