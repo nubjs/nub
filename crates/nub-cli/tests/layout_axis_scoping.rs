@@ -174,3 +174,42 @@ fn a_yarnrc_supplies_no_config_and_no_layout() {
     std::fs::write(neutral.join(".npmrc"), "nodeLinker=hoisted\n").unwrap();
     assert_eq!(config_get(&neutral, "nodeLinker"), "hoisted");
 }
+
+/// `nub ci` builds the tree a deploy copies into an image, where the shared
+/// store does not exist, so it keeps the store inside the project the way CI
+/// does. A plain install in the same project keeps sharing it.
+#[test]
+fn nub_ci_keeps_the_virtual_store_inside_the_project() {
+    let dir = project(
+        "ci",
+        &[(
+            "package.json",
+            r#"{"name":"app","version":"1.0.0","packageManager":"nub@0.1.0"}"#,
+        )],
+    );
+    let virtual_store_dir = || {
+        let state = std::fs::read_to_string(dir.join("node_modules/.modules.yaml")).unwrap();
+        let state: serde_json::Value = serde_json::from_str(&state).unwrap();
+        state["virtualStoreDir"].as_str().unwrap().to_string()
+    };
+
+    install(&dir);
+    let shared = virtual_store_dir();
+    assert!(
+        shared.ends_with("links"),
+        "a plain install shares the store: {shared}"
+    );
+
+    let out = run(&dir, &["ci"]);
+    let report = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "ci failed:\n{report}");
+    assert_eq!(virtual_store_dir(), ".store", "{report}");
+    assert!(
+        report.contains("isolated (global virtual store auto-disabled in CI)"),
+        "the header names the store the install built:\n{report}"
+    );
+}

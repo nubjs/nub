@@ -177,6 +177,8 @@ pub(super) struct SourceIndex {
     /// to be set, which on the CI leg that gates merge meant skipping it
     /// always. Reading it once at `load`, where every other tier is also
     /// snapshotted, makes the layout decision a pure function of this struct.
+    /// `nub ci` sets it too, whatever the environment: its tree is the one a
+    /// deploy copies.
     ci: bool,
     /// The declared framework whose resolver cannot reach a shared store, as the
     /// install decides it ([`super::store_locality_breaker`]), so the row names
@@ -185,7 +187,7 @@ pub(super) struct SourceIndex {
 }
 
 impl SourceIndex {
-    pub(super) fn load(cwd: &Path, cli: &[(String, String)]) -> Self {
+    pub(super) fn load(cwd: &Path, cli: &[(String, String)], clean_install: bool) -> Self {
         let root = super::host_settings::workspace_root(cwd);
         // Split by PATH rather than by position: `npmrc_files` drops a file
         // that does not exist, so a project with no user `.npmrc` would
@@ -222,7 +224,7 @@ impl SourceIndex {
             user_npmrc,
             embedder_defaults: super::host_settings::defaults(cwd),
             branded_layout_ignored: npm_layout_key_present(cwd),
-            ci: std::env::var_os("CI").is_some(),
+            ci: clean_install || std::env::var_os("CI").is_some(),
             store_locality_breaker: super::store_locality_breaker(
                 &root,
                 &super::workspace_members(&root),
@@ -627,11 +629,12 @@ pub(super) fn print_resolved_layout(
     cwd: &Path,
     output: &OutputFlags,
     cli_flags: &[(String, String)],
+    clean_install: bool,
 ) {
     if output.is_silent() {
         return;
     }
-    let rows = resolved_rows(&SourceIndex::load(cwd, cli_flags));
+    let rows = resolved_rows(&SourceIndex::load(cwd, cli_flags, clean_install));
     eprint!("{}", render_block(&rows, stderr_cols()));
     eprintln!();
 }
@@ -1081,8 +1084,9 @@ mod tests {
             }
             dir
         };
-        let detected =
-            |dir: &tempfile::TempDir| SourceIndex::load(dir.path(), &[]).branded_layout_ignored;
+        let detected = |dir: &tempfile::TempDir| {
+            SourceIndex::load(dir.path(), &[], false).branded_layout_ignored
+        };
 
         for (file, body) in [
             // npm's keys live in `.npmrc`, which nub reads under every

@@ -315,7 +315,10 @@ pub(super) fn runs_as_pnpm(argv: &[std::ffi::OsString]) -> bool {
 /// This is also where a configuration that cannot be honoured is refused,
 /// because it is the first point at which both the identity and nub's own
 /// config file are in hand.
-fn profile(selection: Selection, cwd: &Path) -> Result<Embedder> {
+///
+/// `clean_install` is `nub ci` under any of its names: its tree is the one a
+/// deploy copies, so a nub project's install keeps the store inside it.
+fn profile(selection: Selection, cwd: &Path, clean_install: bool) -> Result<Embedder> {
     let identity = identity_of(selection, cwd);
     let loaded = crate::project_config::load_project_config(cwd)?;
     if let Some(loaded) = &loaded
@@ -340,7 +343,7 @@ fn profile(selection: Selection, cwd: &Path) -> Result<Embedder> {
                 }
                 _ => Vec::new(),
             });
-            publish_host_settings(host_settings::resolve(cwd, &install)?);
+            publish_host_settings(host_settings::resolve(cwd, &install, clean_install)?);
             warn_about_a_stray_workspace_yaml(cwd);
             Embedder {
                 workspace_settings: Some(host_workspace_settings),
@@ -675,7 +678,10 @@ fn host_base_dir(argv: &[std::ffi::OsString]) -> Result<PathBuf> {
 /// no spelling for those, so what it runs on is what nub left.
 pub(crate) fn run(mut argv: Vec<std::ffi::OsString>) -> Result<i32> {
     let cwd = host_base_dir(&argv)?;
-    let embedder = profile(selection(), &cwd)?;
+    // The engine's grammar names the command, so `ci`'s aliases arrive as `ci`.
+    let command = pnpm_cli::command_name(&argv);
+    let clean_install = command.as_deref() == Some("ci");
+    let embedder = profile(selection(), &cwd, clean_install)?;
     session_prologue(&cwd, false)?;
     // The engine's own entry point installs this before it can print. It
     // drops each cause the level above already states in full, so a host
@@ -683,9 +689,6 @@ pub(crate) fn run(mut argv: Vec<std::ffi::OsString>) -> Result<i32> {
     // — a divergence invisible on a one-level diagnostic and plain on a
     // deep one.
     pnpm_diagnostics::install_report_handler();
-    // Asked BEFORE the run, because a successful install answers it: it
-    // writes nub's own lockfile, and the project then looks migrated.
-    let command = pnpm_cli::command_name(&argv);
     // A few flags nub reads past pnpm's grammar, in its own projects only: a
     // pnpm-incumbent command line reaches the engine exactly as pnpm reads it.
     if embedder.program_name != Embedder::PNPM.program_name
@@ -698,6 +701,8 @@ pub(crate) fn run(mut argv: Vec<std::ffi::OsString>) -> Result<i32> {
             argv = super::min_release_age::engine_argv(argv)?;
         }
     }
+    // Asked BEFORE the run, because a successful install answers it: it
+    // writes nub's own lockfile, and the project then looks migrated.
     let pending = pending_migration(embedder, command.as_deref(), &cwd);
     // Asked before the run for the same reason, and it is the stronger case:
     // the install is about to write nub's lockfile, after which no project
@@ -849,6 +854,7 @@ fn report_resolved_layout(
         cwd,
         &output_flags(argv),
         &super::install_report::cli_setting_flags(argv),
+        command == Some("ci"),
     );
 }
 

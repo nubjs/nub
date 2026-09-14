@@ -46,6 +46,8 @@ struct Sources<'a> {
     /// shared between projects. Resolved here rather than in the merge because
     /// answering it walks the workspace and reads every member's manifest.
     store_locality_breaker: Option<&'static str>,
+    /// Set under `CI`, and for `nub ci`, whose tree is copied into images where
+    /// the shared store does not exist.
     ci: bool,
 }
 
@@ -78,9 +80,15 @@ fn gather<'a>(start_dir: &Path, install: &'a InstallConfig) -> Sources<'a> {
     }
 }
 
-/// The settings for the project containing `start_dir`.
-pub(crate) fn resolve(start_dir: &Path, install: &InstallConfig) -> Result<WorkspaceSettings> {
-    let sources = gather(start_dir, install);
+/// The settings for the project containing `start_dir`. `clean_install` is
+/// `nub ci`, which keeps its store inside the project the way CI does.
+pub(crate) fn resolve(
+    start_dir: &Path,
+    install: &InstallConfig,
+    clean_install: bool,
+) -> Result<WorkspaceSettings> {
+    let mut sources = gather(start_dir, install);
+    sources.ci |= clean_install;
     refuse_legacy_root_allow_builds(&sources.manifest)?;
     announce_dropped_root_install_fields(&sources.manifest);
     let merged = merge(&sources)?;
