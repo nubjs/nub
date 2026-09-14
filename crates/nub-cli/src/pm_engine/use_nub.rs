@@ -674,7 +674,7 @@ pub(crate) fn apply_manifest_edits(
     for (key, entries) in [
         ("overrides", &m.overrides),
         ("patchedDependencies", &m.patched_dependencies),
-        (aube_manifest::ROOT_ALLOW_SCRIPTS_KEY, &m.allow_builds),
+        (super::host_settings::ALLOW_SCRIPTS_FIELD, &m.allow_builds),
     ] {
         let Some(entries) = entries else { continue };
         let target = obj.entry(key).or_insert_with(|| Value::Object(Map::new()));
@@ -896,13 +896,7 @@ pub(crate) fn run_use_nub(root: &Path, exact_pin: Option<&str>) -> Result<i32> {
     // shape is flat-ish, but it is NOT a hoisting PM for phantom-deps purposes —
     // exclude it here.)
     let from_hoisting_pm = match &plan {
-        AlignPlan::Migrate { from, .. } => matches!(
-            use_align::source_kind(from),
-            aube_lockfile::LockfileKind::Npm
-                | aube_lockfile::LockfileKind::NpmShrinkwrap
-                | aube_lockfile::LockfileKind::Yarn
-                | aube_lockfile::LockfileKind::YarnBerry
-        ),
+        AlignPlan::Migrate { from, .. } => use_align::is_hoisting_source(from),
         _ => false,
     };
     // ── writes ──────────────────────────────────────────────────────────
@@ -937,7 +931,7 @@ pub(crate) fn run_use_nub(root: &Path, exact_pin: Option<&str>) -> Result<i32> {
             migration.patched_dependencies.is_some(),
         ),
         (
-            aube_manifest::ROOT_ALLOW_SCRIPTS_KEY,
+            super::host_settings::ALLOW_SCRIPTS_FIELD,
             migration.allow_builds.is_some(),
         ),
     ] {
@@ -1159,8 +1153,8 @@ pub(crate) fn regenerate_workspace_yaml(root: &Path) -> Result<Vec<String>> {
     // other's entries silently, and the entry that matters is a `false`: losing
     // a denial runs a script the project refused.
     let allow_builds = merge_root_allow_maps(
-        manifest.get(aube_manifest::LEGACY_ROOT_ALLOW_BUILDS_KEY),
-        manifest.get(aube_manifest::ROOT_ALLOW_SCRIPTS_KEY),
+        manifest.get(super::host_settings::LEGACY_ALLOW_BUILDS_FIELD),
+        manifest.get(super::host_settings::ALLOW_SCRIPTS_FIELD),
     );
     // Rescue only. `nub pm use nub` no longer writes this key — nub has no
     // persistent audit-ignore config — but a project converted before that
@@ -1207,11 +1201,11 @@ pub(crate) fn regenerate_workspace_yaml(root: &Path) -> Result<Vec<String>> {
             "workspaces",
             "overrides",
             "patchedDependencies",
-            aube_manifest::ROOT_ALLOW_SCRIPTS_KEY,
+            super::host_settings::ALLOW_SCRIPTS_FIELD,
             // Cleared alongside the current spelling. Both were folded into the
             // one map written above, so removing only one would strand a
             // duplicate nothing reads.
-            aube_manifest::LEGACY_ROOT_ALLOW_BUILDS_KEY,
+            super::host_settings::LEGACY_ALLOW_BUILDS_FIELD,
             "auditConfig",
         ] {
             obj.remove(key);

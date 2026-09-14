@@ -36,9 +36,33 @@ fn stamp_path(anchor: &Path) -> PathBuf {
     anchor.join("node_modules").join(STAMP_FILE)
 }
 
-/// `<os>-<arch>-node<major>` for a resolved Node version.
+/// `<os>-<arch>-node<major>` for a resolved Node version, the arch spelled the
+/// way Node's `process.arch` spells it. The major is the axis a native addon's
+/// ABI breaks on; a minor or patch bump reuses the tree.
 pub(crate) fn engine_name(node_version: &str) -> String {
-    aube_lockfile::graph_hash::engine_name_default(node_version).0
+    let major = node_version
+        .trim_start_matches('v')
+        .split('.')
+        .next()
+        .unwrap_or_default();
+    format!(
+        "{}-{}-node{major}",
+        std::env::consts::OS,
+        node_arch(std::env::consts::ARCH)
+    )
+}
+
+/// Rust's `std::env::consts::ARCH` as Node's `process.arch`. An unknown value
+/// passes through rather than landing on a neighbouring architecture's name.
+fn node_arch(rust_arch: &str) -> &str {
+    match rust_arch {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        "x86" => "ia32",
+        "powerpc64" => "ppc64",
+        "powerpc" => "ppc",
+        other => other,
+    }
 }
 
 /// The engine a nub install last built `anchor`'s tree for. `None` when nub
@@ -139,11 +163,25 @@ mod tests {
         assert_eq!(recorded(anchor), Some(engine_name("22.15.0")));
     }
 
+    /// The stamp names the architecture the way Node does, so a tree built on
+    /// Apple silicon reads `arm64`, never Rust's `aarch64`.
+    #[test]
+    fn the_arch_is_spelled_the_way_node_spells_it() {
+        assert_eq!(node_arch("x86_64"), "x64");
+        assert_eq!(node_arch("aarch64"), "arm64");
+        assert_eq!(node_arch("x86"), "ia32");
+        assert_eq!(node_arch("riscv64"), "riscv64");
+    }
+
     #[test]
     fn engine_name_tracks_the_node_major_only() {
         assert_eq!(engine_name("22.15.0"), engine_name("22.16.3"));
         assert_ne!(engine_name("22.15.0"), engine_name("26.5.0"));
         assert!(engine_name("26.5.0").ends_with("-node26"));
+        assert!(
+            engine_name("v26.5.0").ends_with("-node26"),
+            "a leading v is not part of the major"
+        );
     }
 
     #[test]

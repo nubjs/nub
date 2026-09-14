@@ -12231,49 +12231,6 @@ mod tests {
     }
 
     #[test]
-    fn aube_lockfile_detects_pnpm_lock_in_project_dir() {
-        // Linkage spike for the vendored aube workspace (vendor/aube submodule):
-        // proves the cross-workspace path dep on aube-lockfile compiles and links
-        // by exercising its lockfile-kind detection against a real temp dir.
-        use aube_lockfile::{LockfileKind, detect_existing_lockfile_kind};
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        assert_eq!(
-            detect_existing_lockfile_kind(dir.path()),
-            None,
-            "empty project dir must detect no lockfile"
-        );
-        std::fs::write(
-            dir.path().join("pnpm-lock.yaml"),
-            "lockfileVersion: '9.0'\n",
-        )
-        .expect("write pnpm-lock.yaml");
-        assert_eq!(
-            detect_existing_lockfile_kind(dir.path()),
-            Some(LockfileKind::Pnpm),
-            "pnpm-lock.yaml on disk must detect as LockfileKind::Pnpm"
-        );
-    }
-
-    #[test]
-    fn aube_lib_seam_exposes_install_entry_point() {
-        // Embedding-seam spike for the aube *library* target (vendor/aube fork,
-        // lib split landed in nubjs/aube@b15cdcb): proves nub can construct the
-        // install options and reach `commands::install::run` without shelling
-        // out. No network, no install run — this is a link/shape check only.
-        use aube::commands::install::{FrozenMode, InstallOptions};
-
-        let opts = InstallOptions::with_mode(FrozenMode::Prefer);
-        assert!(
-            matches!(opts.mode, FrozenMode::Prefer),
-            "with_mode must store the requested frozen mode"
-        );
-        // Name the async entry point so the seam (not just the options struct)
-        // must resolve and link.
-        let _entry = aube::commands::install::run;
-    }
-
-    #[test]
     fn is_node_bin_classifies_by_shebang_line_not_body() {
         // aube's `.bin` entries are `#!/bin/sh` shim scripts whose BODY mentions
         // node (`NODE_PATH=…`, `exec "$basedir/node" …`). Those must run via the sh

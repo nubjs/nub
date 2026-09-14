@@ -18,7 +18,7 @@
 //! consent path). Writes go through the `jsonc_parser::cst` module — a
 //! comment/whitespace/key-order-preserving CST edit — so a `set` that touches one
 //! key leaves the rest of a hand-authored file intact. Writes are atomic (temp +
-//! rename via `aube_util`). Only `nub.jsonc` is accepted; `nub.json` is never read.
+//! rename via [`crate::fs_atomic`]). Only `nub.jsonc` is accepted; `nub.json` is never read.
 //!
 //! [`set_json_path`] and [`unset_json_path`] are that CST edit, generalized to an
 //! arbitrary path: they serve this file's own `exec.implicitDlx` key AND every
@@ -403,9 +403,9 @@ pub(crate) fn set_json_path(
     write_preserving_mode(path, &root.to_string())
 }
 
-/// Write through the atomic temp-and-rename, verify the update landed, and carry
-/// across the two properties of the prior file that the new inode would
-/// otherwise lose: its mode, and a leading UTF-8 BOM.
+/// Write through the atomic temp-and-rename, carrying across the two properties
+/// of the prior file that the new inode would otherwise lose: its mode, and a
+/// leading UTF-8 BOM.
 ///
 /// The rename installs a NEW inode carrying the temp file's default permissions,
 /// so a config the user had narrowed — `600` on a file they consider private —
@@ -430,25 +430,15 @@ fn write_preserving_mode(path: &Path, text: &str) -> std::io::Result<()> {
     } else {
         text.as_bytes().to_vec()
     };
-    aube_util::fs_atomic::atomic_write_with_permissions(path, &bytes, prior)?;
-
-    // `Ok(())` from the atomic write is not proof the write landed: its rename
-    // reports success whenever the destination exists, which is right for the
-    // content-addressed store it was built for (a racing writer committed
-    // bit-identical bytes) and wrong here, where the destination always exists
-    // and the bytes are unique — so a file that cannot be renamed over leaves
-    // `nub config set` printing its success line over unchanged content. Reading
-    // back is the only check that separates the two; a length-and-mtime stat
-    // cannot see the common case of a key set to a same-width value. The
-    // comparison runs through the guarded reader against `text`, so it asserts
-    // what the success line actually claims — that the next read sees this edit.
-    if crate::jsonc::read_guarded(path).is_ok_and(|on_disk| on_disk == text) {
-        return Ok(());
-    }
-    Err(std::io::Error::other(format!(
-        "{} does not hold the update after writing it — the file may be read-only or immutable",
-        path.display()
-    )))
+    crate::fs_atomic::write(path, &bytes, prior).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!(
+                "could not replace {} ({error}) — the file may be read-only or immutable",
+                path.display()
+            ),
+        )
+    })
 }
 
 /// Remove the key at `segments`, preserving the rest of the file. An absent
@@ -1000,11 +990,8 @@ mod tests {
         });
     }
 
-    /// The atomic rename underneath reports success whenever the destination
-    /// already exists — correct for the content-addressed store it was built
-    /// for, and wrong here, where the destination always exists. Without the
-    /// read-back, a file that cannot be renamed over leaves `nub config set`
-    /// printing its success line while the user's policy is unchanged.
+    /// A file that cannot be renamed over fails the write, rather than leaving
+    /// `nub config set` printing its success line over unchanged content.
     ///
     /// A directory at the destination is the portable way to make that rename
     /// fail: it needs neither an immutable flag nor root, and it fails on every
@@ -1018,8 +1005,8 @@ mod tests {
         let err = write_preserving_mode(&occupied, "{ \"nodeCompat\": true }\n")
             .expect_err("a write that did not land must not report success");
         assert!(
-            err.to_string().contains("does not hold the update"),
-            "says the update is not there: {err}"
+            err.to_string().contains("could not replace"),
+            "names the file it could not replace: {err}"
         );
         assert!(occupied.is_dir(), "and the destination is untouched");
     }

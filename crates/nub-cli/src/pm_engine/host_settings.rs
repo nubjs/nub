@@ -212,7 +212,10 @@ pub(crate) fn env_settings_sourced() -> Vec<(String, String, String)> {
 /// no opinion about a key at this position. `pnpm.allowBuilds` and a
 /// `pnpm-workspace.yaml` block are pnpm's own surface and untouched.
 fn refuse_legacy_root_allow_builds(manifest: &Map<String, Value>) -> Result<()> {
-    if !matches!(manifest.get("allowBuilds"), Some(Value::Object(_))) {
+    if !matches!(
+        manifest.get(LEGACY_ALLOW_BUILDS_FIELD),
+        Some(Value::Object(_))
+    ) {
         return Ok(());
     }
     bail!(
@@ -616,6 +619,9 @@ fn lexically_resolve(base: &Path, relative: &str) -> PathBuf {
 /// `pnpm-workspace.yaml`, so a decision recorded there would never be read
 /// back.
 pub(crate) const ALLOW_SCRIPTS_FIELD: &str = "allowScripts";
+
+/// The earlier name of the root [`ALLOW_SCRIPTS_FIELD`] field.
+pub(crate) const LEGACY_ALLOW_BUILDS_FIELD: &str = "allowBuilds";
 
 /// The neutral `package.json` field a nub project pins dependency versions
 /// with, read above alongside `resolutions` and written by `nub link`. Named

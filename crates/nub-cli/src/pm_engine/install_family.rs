@@ -226,15 +226,10 @@ pub(super) fn stamp_virgin_dev_engines(cwd: &Path) {
     if dir_walk_up_has_any(cwd, &["bun.lockb", ".yarnrc.yml"]) {
         return;
     }
-    // Stamp ONLY when this op wrote nub's OWN canonical (neutral) lockfile. The
-    // stamp's whole purpose is to supply the PM signal that nub's UNBRANDED
-    // lockfile otherwise withholds; when a virgin project resolves to a FOREIGN
-    // lockfile format instead (e.g. `default_lockfile_format=pnpm`), that
-    // lockfile IS the signal — so the stamp is unneeded, AND a nub claim beside a
-    // pnpm/npm-format lock misrepresents the project. Keyed off the
-    // canonical-lockfile NAME accessor (rename-safe; resolves the embedder
-    // profile + git-branch variant).
-    if !root.join(aube_lockfile::aube_lock_filename(&root)).exists() {
+    // Stamp ONLY when this op wrote nub's OWN lockfile. The stamp supplies the
+    // PM signal that nub's UNBRANDED lockfile otherwise withholds, so an install
+    // that wrote none has nothing for it to stand beside.
+    if !root.join(super::use_align::NUB_LOCKFILE).exists() {
         return;
     }
     let range = format!("^{}", env!("CARGO_PKG_VERSION"));
@@ -414,11 +409,10 @@ mod tests {
     /// reflows the user's existing keys), and NEVER the hard `packageManager`
     /// pin. Gating on virginity is the caller's job; this asserts the write
     /// itself. Seed nub's OWN canonical lockfile in `dir` so the stamp's
-    /// "nub wrote its neutral format" gate passes deterministically, whichever
-    /// embedder profile the test binary happens to have registered.
+    /// "nub wrote its own lockfile" gate passes.
     fn seed_nub_lockfile(dir: &Path) {
         std::fs::write(
-            dir.join(aube_lockfile::aube_lock_filename(dir)),
+            dir.join(crate::pm_engine::use_align::NUB_LOCKFILE),
             "lockfileVersion: '9.0'\n",
         )
         .unwrap();

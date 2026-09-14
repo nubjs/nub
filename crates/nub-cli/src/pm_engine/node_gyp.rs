@@ -287,10 +287,10 @@ fn write_shim_if_stale(path: &Path, contents: &str) -> Result<()> {
     };
     #[cfg(not(unix))]
     let permissions = None;
-    // `atomic_write_with_permissions` creates the parent dir and applies the
+    // `fs_atomic::write` creates the parent dir and applies the
     // mode before the rename, so the fast path above can skip `create_dir_all`
     // entirely: a matching file proves the dir.
-    aube_util::fs_atomic::atomic_write_with_permissions(path, contents.as_bytes(), permissions)
+    crate::fs_atomic::write(path, contents.as_bytes(), permissions)
         .with_context(|| format!("writing the node-gyp shim {}", path.display()))
 }
 
@@ -355,7 +355,7 @@ fn write_bootstrap_project(tool_dir: &Path, project_npmrc: &Path) -> Result<()> 
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    aube_util::fs_atomic::atomic_write(path, bytes)
+    crate::fs_atomic::write(path, bytes, None)
         .with_context(|| format!("writing {}", path.display()))
 }
 

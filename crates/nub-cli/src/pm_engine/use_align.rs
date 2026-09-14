@@ -13,7 +13,6 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
-use aube_lockfile::LockfileKind;
 
 /// Nub's own lockfile name under nub identity (the two-mode model): the
 /// engine's canonical-lockfile slot under nub's own basename — `nub.lock`,
@@ -30,7 +29,7 @@ pub(crate) const NUB_LEGACY_LOCKFILE: &str = "lock.yaml";
 
 /// The known lockfile artifacts, in the engine's candidate precedence order
 /// *within* each family (npm-shrinkwrap.json outranks package-lock.json as a
-/// conversion source, matching npm and `aube_lockfile::lockfile_candidates`).
+/// conversion source, matching npm).
 /// `lock.yaml` is nub's own artifact (the `nub` family). `aube-lock.yaml` is
 /// deliberately absent: it is another tool's artifact, not part of nub's
 /// identity model (nub never writes it and `use` neither keeps, converts,
@@ -146,19 +145,13 @@ pub(crate) fn plan_alignment(root: &Path, target: &str) -> Result<AlignPlan> {
     Ok(AlignPlan::Migrate { from, remove })
 }
 
-/// The [`LockfileKind`] of a migration source file (content-refined for
-/// yarn.lock, mirroring the engine's `refine_yarn_kind`).
-pub(crate) fn source_kind(path: &Path) -> LockfileKind {
-    match path.file_name().and_then(|n| n.to_str()) {
-        Some(NUB_LOCKFILE) | Some(NUB_LEGACY_LOCKFILE) => LockfileKind::Aube,
-        Some("pnpm-lock.yaml") => LockfileKind::Pnpm,
-        Some("bun.lock") => LockfileKind::Bun,
-        Some("npm-shrinkwrap.json") => LockfileKind::NpmShrinkwrap,
-        Some("package-lock.json") => LockfileKind::Npm,
-        Some("yarn.lock") if aube_lockfile::yarn::is_berry_path(path) => LockfileKind::YarnBerry,
-        Some("yarn.lock") => LockfileKind::Yarn,
-        other => unreachable!("not a planned lockfile source: {other:?}"),
-    }
+/// Whether a migration source is a hoisting package manager's lockfile, whose
+/// flat `node_modules` let a project import packages it never declared.
+pub(crate) fn is_hoisting_source(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("package-lock.json" | "npm-shrinkwrap.json" | "yarn.lock")
+    )
 }
 
 #[cfg(test)]
@@ -301,7 +294,7 @@ mod tests {
         match plan_alignment(&dir, "pnpm").unwrap() {
             AlignPlan::Migrate { from, mut remove } => {
                 assert_eq!(from, dir.join("npm-shrinkwrap.json"));
-                assert_eq!(source_kind(&from), LockfileKind::NpmShrinkwrap);
+                assert!(is_hoisting_source(&from));
                 remove.sort();
                 assert_eq!(
                     remove,

@@ -15,6 +15,7 @@ mod config;
 mod config_fields;
 mod dynamic_phantom;
 mod env_owner;
+mod fs_atomic;
 mod init;
 mod install_engine;
 mod jsonc;
