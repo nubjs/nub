@@ -322,13 +322,12 @@ interface Date {
 // ONE argument. `fetch(request)` is the intersection of Workers' `(request, env,
 // ctx)`, Bun's `(request, server)` and Deno's `(request, info)`; a second stays
 // additive for whenever WinterTC's http-server proposal settles what belongs in it.
-// `port` and `hostname` are the only other keys the server reads, and `PORT`/`HOST`
-// outrank both. `port` admits a string because the runtime coerces one.
+// No other key is read — the listener's address comes from `PORT` and `HOST` — so a
+// Bun-style `port` or `hostname` key fails to compile here instead of being
+// silently ignored at run time.
 declare module "@nubjs/types" {
   export type FetchHandler = (request: Request) => Response | Promise<Response>;
   export interface ExportedHandler {
     fetch: FetchHandler;
-    port?: number | string;
-    hostname?: string;
   }
 }

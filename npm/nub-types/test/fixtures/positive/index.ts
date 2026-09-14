@@ -143,16 +143,13 @@ const served = {
   fetch(request) {
     return new Response(request.url);
   },
-  port: 3000,
-  hostname: "127.0.0.1",
 } satisfies ExportedHandler;
 const standalone: FetchHandler = async (request) => new Response(request.method);
 void [served, standalone];
 
-// `fetch` is REQUIRED — an object carrying only the option keys is not a handler.
-// Annotating the conditional is what pins it: making `fetch` optional flips this to
-// `true` and fails the fixture.
-type FetchOptional = { port: number } extends ExportedHandler ? true : false;
+// `fetch` is REQUIRED — an empty object is not a handler. Annotating the conditional
+// is what pins it: making `fetch` optional flips this to `true` and fails the fixture.
+type FetchOptional = {} extends ExportedHandler ? true : false;
 const fetchIsRequired: false = null as unknown as FetchOptional;
 // ONE argument, which is what holds the Workers/Bun/Deno second argument out until
 // WinterTC settles it: a two-parameter handler must not be assignable.

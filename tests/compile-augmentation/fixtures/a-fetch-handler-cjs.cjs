@@ -2,11 +2,11 @@
 // and the bundler's interop has to hand it to the program root as `default` for
 // the artifact to serve it. A CommonJS entry cannot await a port probe, so the
 // port is derived from the pid — unique enough for a harness that runs its
-// fixtures one at a time — and cleared of `PORT` for the same reason as the ESM
-// fixture.
-delete process.env.PORT;
-
+// fixtures one at a time — and handed to the server through `PORT` and `HOST`, for
+// the same reason as the ESM fixture.
 const port = 40000 + (process.pid % 1000);
+process.env.PORT = String(port);
+process.env.HOST = "127.0.0.1";
 const deadline = Date.now() + 3000;
 const report = (line) => process.stdout.write(`${line}\n`, () => process.exit(0));
 (async () => {
@@ -26,8 +26,6 @@ const report = (line) => process.stdout.write(`${line}\n`, () => process.exit(0)
 })();
 
 module.exports = {
-  port,
-  hostname: "127.0.0.1",
   fetch() {
     return new Response("hello from commonjs");
   },

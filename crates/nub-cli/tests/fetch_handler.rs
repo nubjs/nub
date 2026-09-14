@@ -17,7 +17,7 @@
 //! cannot fail on its own. Their positive control is the rest of this file: each one
 //! runs a fixture that another test proves does get served, so a green absence means
 //! the exclusion held rather than that the feature was never wired. Measured with the
-//! installer stubbed out: twenty of these go red, and exactly those three stay green.
+//! installer stubbed out: nineteen of these go red, and exactly those three stay green.
 //!
 //! One invariant this file deliberately does NOT test: that the detection pass never
 //! evaluates the entry ahead of the user's preloads. It cannot be tested here, because
@@ -81,10 +81,13 @@ fn start(name: &str, env: &[(&str, &str)]) -> Server {
 
 /// `nub <args…>` in `dir`, waited for until it reports its listener.
 fn launch(dir: &Path, args: &[&str], env: &[(&str, &str)], name: &str) -> Server {
+    // A known address every time: a free port, and no `HOST` leaking in from the
+    // environment running the tests, since several of them read the reported host.
     let mut cmd = Command::new(nub_binary());
     cmd.args(args)
         .current_dir(dir)
         .env("PORT", "0")
+        .env_remove("HOST")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -680,56 +683,29 @@ fn an_application_argument_cannot_disturb_the_claim() {
 
 // ── Address selection ───────────────────────────────────────────────
 
-/// `PORT` outranks a `port` the source committed, because an environment that sets it
-/// is a platform placing the process. With `PORT` unset the export's own value is
-/// honored.
+/// The listener's address comes from the environment alone. `HOST` is honored as
+/// given, and a `hostname` key on the export — which Bun reads — is not: the fixture
+/// asks for `127.0.0.1`, and with no `HOST` the server binds every interface, which it
+/// reports as `localhost`. A `port` key cannot be observed the same way without
+/// binding the default port, which a shared runner cannot promise is free; it went
+/// out through the same read.
 #[test]
-fn port_precedence_puts_the_environment_first() {
-    let s = start("configured.mjs", &[]);
-    assert_ne!(s.port, 41999, "PORT=0 must outrank the export's `port`");
-    assert_eq!(get(&s, "/").body, "configured");
-
-    // The export's value, with nothing in the environment to outrank it. Bound by the
-    // test first so the fixture's own literal is the thing that fails.
-    let held = TcpListener::bind(("127.0.0.1", 41999));
-    if held.is_ok() {
-        drop(held);
-        let f = fixture("configured.mjs");
-        let mut child = Command::new(nub_binary())
-            .arg(&f)
-            .current_dir(f.parent().unwrap())
-            .env_remove("PORT")
-            .stdin(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let err = child.stderr.take().unwrap();
-        let line = BufReader::new(err)
-            .lines()
-            .map_while(Result::ok)
-            .find(|l| l.starts_with("Listening on"));
-        let _ = child.kill();
-        let _ = child.wait();
-        assert_eq!(
-            line.as_deref(),
-            Some("Listening on http://127.0.0.1:41999"),
-            "the export's `port` and `hostname` are honored when the environment is silent"
-        );
-    }
-}
-
-/// `HOST` outranks the export's `hostname`. The fixture asks for `127.0.0.1` and the
-/// environment asks for `localhost`: the same interface, so the server answers either
-/// way, and the reported host is what says which source won.
-#[test]
-fn host_env_outranks_the_export() {
-    let s = start("configured.mjs", &[("HOST", "localhost")]);
-    assert_eq!(get(&s, "/").body, "configured");
-    let reported = format!("Listening on http://localhost:{}", s.port);
+fn only_the_environment_chooses_the_address() {
+    let s = start("server.mjs", &[("HOST", "127.0.0.1")]);
     assert_eq!(
-        s.startup_line, reported,
-        "HOST must outrank the export's `hostname`"
+        s.startup_line,
+        format!("Listening on http://127.0.0.1:{}", s.port)
     );
+    get(&s, "/");
+    drop(s);
+
+    let s = start("configured.mjs", &[]);
+    assert_eq!(
+        s.startup_line,
+        format!("Listening on http://localhost:{}", s.port),
+        "the export's `hostname` must not choose the bind address"
+    );
+    assert_eq!(get(&s, "/").body, "configured");
 }
 
 /// A port already in use is fatal, matching Bun and Deno. Quietly serving a port

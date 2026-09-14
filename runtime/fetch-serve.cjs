@@ -12,8 +12,9 @@
 // `fetch(request: Request) → Response | Promise<Response>` — the intersection of
 // Workers' `(request, env, ctx)`, Bun's `(request, server)` and Deno's
 // `(request, info)`. A second argument stays additive for whenever WinterTC's
-// http-server proposal settles what belongs in one. Honored option keys on the
-// default export are `port` and `hostname`, nothing else. Pure node:http plus
+// http-server proposal settles what belongs in one. Nothing else on the default
+// export is read: the listener's address comes from `PORT` and `HOST` alone (see
+// `listenOptions`). Pure node:http plus
 // WHATWG Request/Response: no N-API, no Rust listener, and the same adapter shape
 // `srvx` and `@hono/node-server` use on plain Node, which is the escape hatch this
 // feature is reversible through.
@@ -32,7 +33,7 @@ function serve(handler) {
   let port;
   let host;
   try {
-    ({ port, host } = listenOptions(handler, process.env));
+    ({ port, host } = listenOptions(process.env));
   } catch (err) {
     fail(err.message);
   }
@@ -56,16 +57,16 @@ function serve(handler) {
   });
 }
 
-// `PORT` > the export's `port` > 3000, and `HOST` > the export's `hostname` > every
-// interface. `PORT` is the one signal every platform-as-a-service agrees on, and
-// Bun, Express and Next all read it, so an environment that sets it has to win over
-// a port literal the source committed. Leaving the host undefined hands Node its own
-// dual-stack default rather than pinning IPv4.
-function listenOptions(handler, env) {
-  const port = parsePort(env.PORT, "PORT")
-    ?? parsePort(handler.port, "the default export's `port`")
-    ?? DEFAULT_PORT;
-  const host = nonEmpty(env.HOST) ?? nonEmpty(handler.hostname) ?? undefined;
+// `PORT` or 3000, and `HOST` or every interface, with nothing read off the export: a
+// `port` or `hostname` key there is ignored. `nub <file>` has no command or config
+// file of its own to hold an option, a key in the source binds a different port on
+// the runtimes that ignore it (`deno serve`, `wrangler dev`), and `PORT` is what
+// every platform-as-a-service already sets. `HOST` takes an IP address or a name.
+// `HOSTNAME` is not read: it names the machine, not an address to bind. Leaving the
+// host undefined hands Node its own dual-stack default rather than pinning IPv4.
+function listenOptions(env) {
+  const port = parsePort(env.PORT, "PORT") ?? DEFAULT_PORT;
+  const host = nonEmpty(env.HOST);
   return { port, host };
 }
 

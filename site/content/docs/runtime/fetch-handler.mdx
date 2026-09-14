@@ -56,41 +56,27 @@ module.exports = {
 };
 ```
 
-## `port`
+## Port and address
 
-Nub reads the port from the first of these that is set:
+Nub takes the port and bind address from the environment. A `port` or `hostname` key on the default export is ignored.
 
-- `PORT` in the environment
-- `port` on the default export
-- 3000
-
-```ts
-export default {
-  port: 8080,
-  fetch() {
-    return new Response("hello");
-  },
-};
-```
+| Variable | Default | Accepts |
+| --- | --- | --- |
+| `PORT` | 3000 | a port number, or `0` for any free port |
+| `HOST` | every interface | an IPv4 or IPv6 address, or a name such as `localhost` |
 
 ```console
-$ PORT=4000 nub server.ts
-Listening on http://localhost:4000
-```
+$ PORT=8080 nub server.ts
+Listening on http://localhost:8080
 
-Setting `PORT=0` picks any free port, which is what a test harness wants. A port already in use is fatal.
-
-## `hostname`
-
-The bind address comes from the first of these that is set:
-
-- `HOST` in the environment
-- `hostname` on the default export
-- every interface
-
-```console
 $ HOST=127.0.0.1 nub server.ts
 Listening on http://127.0.0.1:3000
+```
+
+To keep a port with the project, set it in a script. Scripts run through a [POSIX shell](/docs/run#the-script-shell) on every platform, so the assignment works on Windows too:
+
+```json
+{ "scripts": { "start": "PORT=8080 nub server.ts" } }
 ```
 
 ## Type checking
@@ -106,7 +92,6 @@ The `ExportedHandler` type comes from Nub's own types package. Install `@nubjs/t
 import type { ExportedHandler } from "@nubjs/types";
 
 export default {
-  port: 8080,
   fetch(request) {
     return new Response(new URL(request.url).pathname);
   },
