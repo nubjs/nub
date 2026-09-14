@@ -72,7 +72,7 @@ The command cheat sheet — every row is a drop-in replacement, and none of them
 
 Two facts to hold onto when proposing changes:
 
-**The project's package manager and lockfile stay.** Nub's package-manager commands have a pnpm-shaped CLI but are **lockfile-compatible with whatever the project already uses** — Nub infers the incumbent (npm / pnpm / Bun / Yarn) and reads *and writes* that PM's native lockfile, never imposing its own. pnpm, npm, and Bun round-trip in place; Yarn is read-only (Nub installs and runs a Yarn project but won't rewrite `yarn.lock`). So `nub install` / `nub add` / `nub remove` are safe here regardless of the package manager, and there is nothing to migrate — **never propose switching the project's package manager or lockfile format.**
+**The lockfile decides how `nub install` behaves.** Nub's package-manager commands have a pnpm-shaped CLI. In a pnpm project — a `pnpm-lock.yaml`, a `pnpm-workspace.yaml`, or a `packageManager: "pnpm@…"` pin — Nub installs exactly as pnpm 12 does, so `nub install` / `nub add` / `nub remove` keep the project's `pnpm-lock.yaml`. Every other project gets `nub.lock`: Nub does not read an npm, Yarn, or Bun lockfile, and running `nub install` there writes `nub.lock` beside it. Converting that lockfile (`nub pm migrate`) changes the project's lockfile format — **propose it as an explicit step for the user to approve, never run it as a side effect.**
 
 **Node versions are automatic.** Pin a version in `.node-version` / `.nvmrc` / `engines.node` and the matching build is fetched from nodejs.org (checksum-verified, cached) and used on the next `nub <file>` — no `nvm use`, no corepack. With no pin, Nub uses whatever `node` is on `PATH`.
 
@@ -91,7 +91,7 @@ The same pages online (agent-readable index: https://nubjs.com/llms.txt; `nub <c
 - [Introduction](https://nubjs.com/docs)
 - Runner — [script runner](https://nubjs.com/docs/run), [bin runner](https://nubjs.com/docs/nubx), [watch mode](https://nubjs.com/docs/watch)
 - Runtime — [overview](https://nubjs.com/docs/runtime), [TypeScript](https://nubjs.com/docs/runtime/typescript), [JSX](https://nubjs.com/docs/runtime/jsx), [env files](https://nubjs.com/docs/runtime/env), [module resolution](https://nubjs.com/docs/runtime/resolution), [loaders](https://nubjs.com/docs/runtime/loaders), [decorators](https://nubjs.com/docs/runtime/decorators), [debugging](https://nubjs.com/docs/runtime/debugging), [Web Storage](https://nubjs.com/docs/runtime/web-storage), [Web Workers](https://nubjs.com/docs/runtime/workers)
-- Package manager — [overview](https://nubjs.com/docs/install), [npm](https://nubjs.com/docs/install/npm), [pnpm](https://nubjs.com/docs/install/pnpm), [Bun](https://nubjs.com/docs/install/bun), [Yarn](https://nubjs.com/docs/install/yarn), [the virtual store](https://nubjs.com/docs/install/virtual-store), [meta-manager](https://nubjs.com/docs/pm)
+- Package manager — [overview](https://nubjs.com/docs/install), [pnpm](https://nubjs.com/docs/install/pnpm), [migrating from npm, Yarn, or Bun](https://nubjs.com/docs/install/migrate), [the virtual store](https://nubjs.com/docs/install/virtual-store), [meta-manager](https://nubjs.com/docs/pm)
 - Toolchain — [Node manager](https://nubjs.com/docs/node), [creating a project](https://nubjs.com/docs/init), [plugins](https://nubjs.com/docs/plugins), [deployment](https://nubjs.com/docs/deployment), [FAQ](https://nubjs.com/docs/faq)
 
 ## 3. Investigate the project
@@ -108,7 +108,7 @@ Do a read-only pass over the project — dependencies, `package.json` scripts, t
 | Script orchestration | `npm-run-all` / `npm-run-all2` (`run-p`, `run-s`) | `nub run "/^build:/"` runs matching scripts concurrently; serial with `--workspace-concurrency 1` |
 | Path aliases | `tsconfig-paths`, `-r tsconfig-paths/register` | `tsconfig.json#paths` applied at runtime |
 | Bin runners | `npx`, `pnpm dlx` / `pnpm exec`, `yarn dlx`, `bunx` | `nubx <tool>` |
-| Package-manager wrappers | `ni` / `@antfu/ni` | Nub drives the incumbent PM's lockfile directly |
+| Package-manager wrappers | `ni` / `@antfu/ni` | `nub install` / `nub add`, with pnpm's commands and flags |
 | Package patching | `patch-package` + its `postinstall` hook | `nub patch` / `nub patch-commit` — but patches then apply only on `nub install`, so teammates and CI must install through Nub |
 | Node version managers | `nvm`, `fnm`, `n`, `volta`; "install Node / nvm use" steps in the README | the pin (`.node-version` / `engines.node`) alone provisions the right Node |
 | Package-manager provisioning | corepack, `corepack enable` in setup or CI | `nub pm` |
@@ -116,7 +116,7 @@ Do a read-only pass over the project — dependencies, `package.json` scripts, t
 
 Some of these may still be referenced in code (e.g. an explicit `import "dotenv/config"`) — a dependency is only safe to remove once nothing references it, so note the references your plan would have to update.
 
-**Coming from Bun?** If the project runs on the Bun *runtime* (code calls `Bun.*` APIs, scripts invoke `bun run`), the move is bigger than a dependency cleanup — point the user at the dedicated migration guide, https://nubjs.com/guides/bun-to-nub, and offer to follow it. A project that merely uses Bun as its package manager needs no migration at all: Nub round-trips `bun.lock` in place.
+**Coming from Bun?** If the project runs on the Bun *runtime* (code calls `Bun.*` APIs, scripts invoke `bun run`), the move is bigger than a dependency cleanup — point the user at the dedicated migration guide, https://nubjs.com/guides/bun-to-nub, and offer to follow it. A project that only uses Bun as its package manager needs no code changes, but Nub does not read `bun.lock`: converting it to `nub.lock` with `nub pm migrate` is a lockfile change to propose for the user's approval.
 
 ## 4. Propose the plan — a menu of opt-in steps
 

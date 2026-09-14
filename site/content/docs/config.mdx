@@ -29,12 +29,13 @@ Put `nub.jsonc` at the project root — the workspace root in a monorepo. Every 
   "decorators": "legacy",                  // legacy TypeScript decorator semantics
   "emitDecoratorMetadata": true,            // design-type metadata for legacy decorators
 
-  // ── installs — layout everywhere; release gates under Nub identity ──
+  // ── installs — Nub projects only; an error in a pnpm project ──
   "install": {
     "linker": "global-virtual-store",      // global-virtual-store | isolated | hoisted
     "publicHoist": ["@types/*"],           // name patterns; ["*"] for all
     "minimumReleaseAge": "3d",             // <int><s|m|h|d|w>; default 24h, "0s" off
-    "minimumReleaseAgeExclude": ["@company/*"]
+    "minimumReleaseAgeExclude": ["@company/*"],
+    "settings": { "savePrefix": "~" }      // pnpm-workspace.yaml key names
   }
 }
 ```
@@ -530,7 +531,7 @@ Emit the design-type metadata used by decorator-based dependency injection and O
 
 ## `install`
 
-The install block takes four fields: `linker` and `publicHoist` for `node_modules` layout, and `minimumReleaseAge` with `minimumReleaseAgeExclude` for the version cooling window.
+The install block takes four fields: `linker` and `publicHoist` for `node_modules` layout, and `minimumReleaseAge` with `minimumReleaseAgeExclude` for the version cooling window. Any other install setting goes in [`settings`](#installsettings).
 
 The block applies when Nub is the project's package manager. A project that already belongs to pnpm takes its install settings from pnpm's own configuration, so an `install` block there is a contradiction rather than a setting to skip, and Nub refuses the command instead of picking one of the two:
 
@@ -685,6 +686,70 @@ Exclude selected packages when they must update immediately.
     ]
   }
 }
+```
+
+### `install.settings`
+
+Set any other install setting by the name `pnpm-workspace.yaml` gives it. Keys and values are spelled exactly as pnpm spells them.
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "install": {
+    "settings": {
+      "savePrefix": "~"
+    }
+  }
+}
+```
+
+<Callout>
+Read the [full docs](https://pnpm.io/settings) on pnpm.io.
+</Callout>
+
+A key that `pnpm-workspace.yaml` does not accept is an error:
+
+```text
+Error: install.settings.savePrefx is not a setting pnpm-workspace.yaml accepts
+```
+
+The four fields above also have a pnpm spelling, such as `nodeLinker` for `linker`. Setting one both ways is an error:
+
+```text
+Error: `install.settings.nodeLinker` in /app/nub.jsonc: sets the same thing as
+`install.linker`; keep one of the two
+```
+
+A few pnpm settings are refused, because a Nub project reads that setting from somewhere else or does not read it at all. The error names the replacement:
+
+```text
+# pnpm's own files and directories
+pnpmfile
+ignorePnpmfile
+tryLoadDefaultPnpmfile
+globalShims
+pnpmHomeDir
+pnpmExecPath
+
+# the Node version, which Nub picks
+nodeVersion
+executionEnv
+useNodeVersion
+
+# build lists; use allowScripts in package.json
+onlyBuiltDependencies
+onlyBuiltDependenciesFile
+neverBuiltDependencies
+ignoredBuiltDependencies
+
+# workspace members; use workspaces in package.json
+packages
+```
+
+```text
+Error: `install.settings.onlyBuiltDependencies` in /app/nub.jsonc: is a
+deprecated build list; approve dependency scripts with `allowScripts` in
+package.json
 ```
 
 ## `dlx`

@@ -1,0 +1,84 @@
+---
+title: Migrating from npm, Yarn, or Bun
+description: Convert an npm, Yarn, or Bun lockfile into a Nub lockfile once, keeping the versions it pins.
+---
+
+Nub installs from `nub.lock`, or from `pnpm-lock.yaml` in a [pnpm project](/docs/install/pnpm). It does not read an npm, Yarn, or Bun lockfile, so convert that file once:
+
+```console
+$ nub pm migrate
+Done in 14ms using nub v0.9.0
+  nub.lock: written (migrated from package-lock.json)
+  package-lock.json: removed (migrated)
+```
+
+The versions the old lockfile pins carry across as preferences within your ranges; see [`nub pm migrate`](/docs/pm#nub-pm-migrate). Commit `nub.lock` in place of the file it removed.
+
+## Supported lockfiles
+
+| Lockfile | Written by |
+|---|---|
+| `package-lock.json` | npm |
+| `npm-shrinkwrap.json` | npm |
+| `yarn.lock` | Yarn 1, and Yarn 2 and later |
+| `bun.lock` | Bun 1.2 and later |
+
+Bun's binary `bun.lockb` is not read. Write a text `bun.lock` with Bun first:
+
+```console
+$ nub pm migrate
+Error: bun.lockb is bun's binary lockfile and nub does not read it — run
+`bun install --save-text-lockfile` to write a bun.lock first, then rerun the
+migration.
+```
+
+## Before you migrate
+
+An install in a project that has only a foreign lockfile resolves every range afresh and writes `nub.lock`. It names the file it skipped:
+
+```console
+$ nub install
+...
+Done in 463ms using nub v0.9.0
+nub: package-lock.json is another package manager's lockfile and was not
+read — run `nub pm migrate` to carry the versions it pins into nub's own.
+```
+
+A frozen install has no lockfile to install from until `nub.lock` exists, so `nub ci` and `nub install --frozen-lockfile` fail:
+
+```console
+$ nub ci
+  ╰─▶ Headless installation requires a nub.lock file, but none was found. Run
+      `nub install` without --frozen-lockfile to create one.
+```
+
+## Migrating to pnpm
+
+To make the project a pnpm project instead, declare pnpm. The same conversion then writes `pnpm-lock.yaml`:
+
+```console
+$ nub pm use pnpm@12.4.1
+using pnpm@12.4.1
+  package.json: packageManager = pnpm@12.4.1 (+sha512)
+  package.json: devEngines.packageManager =
+    { name: "pnpm", version: "^12.4.1", onFail: "warn" }
+Done in 333ms using pnpm v12.4.1
+  pnpm-lock.yaml: written (migrated from package-lock.json)
+  package-lock.json: removed (migrated)
+```
+
+## Configuration
+
+A migration moves versions, not settings. A Nub project reads registries and auth from `.npmrc` and `npm_config_*`, and resolution fields from `package.json`; see [resolution](/docs/install#resolution). It does not read `.yarnrc.yml`, `bunfig.toml`, or Bun's `trustedDependencies`.
+
+Build-script approvals move to `allowScripts`:
+
+```json title="package.json"
+{
+  "allowScripts": {
+    "esbuild": true
+  }
+}
+```
+
+Running `nub approve-builds <pkg>` writes the same field.

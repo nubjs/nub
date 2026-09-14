@@ -10,14 +10,14 @@ Render can [build a repository's Dockerfile](https://render.com/docs/docker) or 
 ```dockerfile title="Dockerfile"
 FROM ghcr.io/nubjs/nub:{{NUB_VERSION}}
 
-COPY --chown=node:node package.json package-lock.json ./
+COPY --chown=node:node package.json nub.lock ./
 RUN nub ci
 
 COPY --chown=node:node . .
 CMD ["nub", "run", "start"]
 ```
 
-Change `package-lock.json` to the project's lockfile. The HTTP server must listen on `0.0.0.0` and use `PORT`:
+In a pnpm project, copy `pnpm-lock.yaml` instead of `nub.lock`. The HTTP server must listen on `0.0.0.0` and use `PORT`:
 
 ```ts title="server.ts"
 import { createServer } from "node:http";

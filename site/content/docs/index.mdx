@@ -13,12 +13,12 @@ nub run dev              # run a package.json script
 nubx prisma generate     # run a CLI from node_modules/.bin
 ```
 
-Every augmentation uses Node's own public extension surfaces, and the package manager reads and writes whatever lockfile your project already uses.
+Every augmentation uses Node's own public extension surfaces, and in a pnpm project the package manager installs exactly as pnpm does.
 
 ## The toolkit
 
 - **A runtime** — execute `.{js,cjs,mjs,jsx,ts,cts,mts,tsx}` files with full TypeScript support, on the stock `node` binary. See [files](/docs/runtime).
-- **A package manager** — a pnpm-compatible installer that round-trips your existing npm, pnpm, or bun lockfile. See [install](/docs/install).
+- **A package manager** — a pnpm-compatible installer that works in pnpm projects unchanged and writes `nub.lock` everywhere else. See [install](/docs/install).
 - **A script runner** — run `package.json` scripts 24× faster than `pnpm run`, with the full workspace and lifecycle-hook surface preserved. See [run](/docs/run).
 - **A bin runner** — run a local CLI an order of magnitude faster than `npx`, or fetch and run an uninstalled one from the registry. See [nubx](/docs/nubx).
 - **A Node version manager** — pin a version and Nub provisions it from nodejs.org on demand, replacing `nvm` and `fnm`. See [node](/docs/node).
@@ -80,17 +80,17 @@ The same binaries are attached to the rolling [canary release](https://github.co
 
 ## Package management
 
-The installer is pnpm-compatible at the CLI surface and lockfile-compatible with whatever your project already uses. It infers the incumbent package manager and mirrors it — npm, pnpm, and bun lockfiles round-trip cleanly; yarn is read-only.
+The installer takes pnpm's commands and flags. In a pnpm project it installs exactly as pnpm 12 does, from `pnpm-lock.yaml`; every other project gets `nub.lock`.
 
 ```bash
-nub install              # resolve + link node_modules into existing lockfile
+nub install              # resolve, write the lockfile, link node_modules
 nub add -E -D react      # exact pin, devDeps — pnpm flag spelling
 nub remove lodash
 nub update
 nub ci                   # frozen-lockfile install
 ```
 
-The installer is optional: keep your existing package manager and use Nub for everything else. See [install](/docs/install) for lockfile fidelity per incumbent, and [pm](/docs/pm) for provisioning the exact package-manager version a project pins.
+The installer is optional: keep your existing package manager and use Nub for everything else. See [install](/docs/install) for Nub and pnpm projects, [migrating](/docs/install/migrate) for npm, Yarn, and Bun lockfiles, and [pm](/docs/pm) for provisioning the exact package-manager version a project pins.
 
 ## Configuration
 

@@ -3,11 +3,11 @@ title: The virtual store
 description: How Nub's default linker works — one symlink per package into a machine-global store, with install-time phantom detection and per-package ejection — its warm-install performance, and the flat and project-local opt-outs.
 ---
 
-Every install links an **isolated virtual store** by default: direct dependencies sit at the top of `node_modules`, transitive packages link into a per-machine store, and undeclared (phantom) dependencies fail instead of resolving by accident.
+A Nub project links an **isolated virtual store** by default: direct dependencies sit at the top of `node_modules`, transitive packages link into a per-machine store, and undeclared (phantom) dependencies fail instead of resolving by accident. A [pnpm project](/docs/install/pnpm) keeps pnpm's defaults.
 
 ## One symlink per package
 
-Incumbent package managers build `node_modules` file by file: npm copies every file into every project, and pnpm and Bun hardlink every file from a machine cache — faster, but still one syscall per file, tens of thousands for a typical app.
+Other package managers build `node_modules` file by file: npm copies every file into every project, and pnpm and Bun hardlink every file from a machine cache — faster, but still one syscall per file, tens of thousands for a typical app.
 
 Nub's default layout links **one symlink per package**. Package files live in a machine-global store, one real copy per package version, deduplicated by content hash:
 
@@ -77,34 +77,22 @@ For a single command, without touching config:
 nub install --node-linker hoisted
 ```
 
-Nub reads `node-linker` from `.npmrc` under every incumbent, including pnpm 11 and later. Files still materialize from the global content store by reflink or hardlink, so a flat tree costs little extra disk.
+A Nub project reads `node-linker` from `.npmrc`. Files still materialize from the global content store by reflink or hardlink, so a flat tree costs little extra disk.
 
 <Callout title="Layout versus hoist patterns">
 The `node-linker` setting picks the layout: `isolated` (the default symlink tree) or `hoisted` (flat). It is unrelated to `hoist`, `shamefully-hoist`, and `public-hoist-pattern`, which lift packages to the top level *within* the isolated layout and leave the virtual store in place.
 </Callout>
 
-## Per package manager
+## In a pnpm project
 
-Nub does not take layout from an incumbent's branded config:
+A pnpm project takes its layout from `pnpm-workspace.yaml`, as pnpm 12 does, and `node-linker` in `.npmrc` has no effect there. The global virtual store is off unless the project turns it on:
 
-| Incumbent | Its own flat-layout config | Under Nub |
-|---|---|---|
-| **pnpm** | `nodeLinker: hoisted` in `pnpm-workspace.yaml` or global `config.yaml` | No effect — set `node-linker=hoisted` |
-| **npm** | `install-strategy=hoisted` | No effect — set `node-linker=hoisted` |
-| **Yarn** | `nodeLinker: node-modules` in `.yarnrc.yml` | No effect — set `node-linker=hoisted` |
-| **Bun** | `linker = "hoisted"` under `[install]` in `bunfig.toml` | No effect — set `node-linker=hoisted` |
-
-The same rule covers hoisting keys, the modules directory, and virtual-store paths — see [layout settings](/docs/install#layout-settings) for the full field list. The layout fields in `nub.jsonc` apply under every incumbent.
-
-Yarn Plug'n'Play is refused rather than ignored, because Nub installs a `node_modules` tree and a PnP project has none:
-
-```console
-$ nub install
-Error: nub: this project is configured for Yarn Plug'n'Play (nodeLinker: pnp,   # ❌
-or Yarn Berry's default) — nub installs a node_modules tree and doesn't support
-PnP yet, so the result would diverge from yarn's. Install with yarn, or set
-`nodeLinker: node-modules` in .yarnrc.yml. [ERR_NUB_PNP_UNSUPPORTED]
+```yaml title="pnpm-workspace.yaml"
+nodeLinker: hoisted             # a flat tree
+enableGlobalVirtualStore: true  # or: link from pnpm's shared store
 ```
+
+See [pnpm](/docs/install/pnpm) for the rest of a pnpm project's settings.
 
 ## Flat vs project-local
 
@@ -166,7 +154,7 @@ Earlier versions of Nub kept the shared store in a different layout. A prune rem
 
 ## Project configuration
 
-Any project can pick the layout with one [`linker`](/docs/config#installlinker) field — `global-virtual-store` for the shared store (the default), `isolated` for a project-local one, or `hoisted` for a flat, real-directory tree.
+A Nub project can pick the layout with one [`linker`](/docs/config#installlinker) field — `global-virtual-store` for the shared store (the default), `isolated` for a project-local one, or `hoisted` for a flat, real-directory tree.
 
 ```jsonc title="nub.jsonc"
 {

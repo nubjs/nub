@@ -1,171 +1,119 @@
 ---
 title: pnpm
-description: Nub mirrors pnpm most closely — native version-9 lockfile read and write, the full dependency-verb surface, workspace selectors, an isolated dependency tree, and pnpm-owned config, all gated on pnpm being the incumbent.
+description: In a pnpm project, Nub installs exactly as pnpm 12 does — the same lockfile bytes, the same node_modules layout, and pnpm's own configuration.
 ---
 
-Nub mirrors pnpm most closely: the CLI surface, the isolated `node_modules` layout, and the lockfile. When pnpm is the incumbent — a `packageManager: "pnpm@…"` field, an existing `pnpm-lock.yaml`, or a `pnpm-workspace.yaml` — Nub reads and writes pnpm's own `pnpm-lock.yaml` in its native format, and honors pnpm's config. Everything below is gated on that.
+A project is a pnpm project when it has any one of these:
 
-## Commands
+```text
+"packageManager": "pnpm@<version>"   # in package.json
+pnpm-lock.yaml
+pnpm-workspace.yaml
+```
 
-<CompatTable
-  incumbent="pnpm"
-  rows={[
-    { feature: <><code>install</code> / <code>i</code> / <code>ci</code></>, status: 'yes' },
-    { feature: <><code>add</code> / <code>remove</code> / <code>update</code></>, status: 'yes' },
-    { feature: <><code>import</code></>, status: 'yes' },
-    { feature: <><code>dedupe</code> / <code>prune</code></>, status: 'yes' },
-    { feature: <><code>rebuild</code> / <code>fetch</code></>, status: 'yes' },
-    { feature: <><code>link</code> / <code>unlink</code></>, status: 'yes' },
-    { feature: <><code>patch</code> / <code>patch-commit</code> / <code>patch-remove</code></>, status: 'yes' },
-    { feature: <><code>approve-builds</code> / <code>ignored-builds</code></>, status: 'yes' },
-    { feature: <><code>dlx</code> / <code>create</code></>, status: 'yes' },
-    { feature: <><code>list</code> / <code>why</code> / <code>outdated</code></>, status: 'yes' },
-    { feature: <><code>audit</code> / <code>licenses</code> / <code>peers</code></>, status: 'yes' },
-    { feature: <><code>publish</code> / <code>pack</code> / <code>version</code></>, status: 'yes' },
-    { feature: <><code>store</code> / <code>config</code></>, status: 'yes' },
-    { feature: <><code>recursive</code> meta-verb</>, status: 'no', note: 'Recursion goes on the verb: -r or --filter.' },
-    { feature: <><code>deploy</code></>, status: 'yes' },
-  ]}
-/>
-
-## Configuration
-
-<CompatTable
-  incumbent="pnpm"
-  rows={[
-    // ── Dependency fields ─────────────────────────────────────────────
-    { feature: <><code>dependencies</code> / <code>devDependencies</code></>, status: 'yes' },
-    { feature: <><code>optionalDependencies</code></>, status: 'yes' },
-    { feature: <><code>peerDependencies</code> / <code>peerDependenciesMeta</code></>, status: 'yes' },
-    { feature: <><code>dependenciesMeta.injected</code></>, status: 'yes' },
-    { feature: <><code>pnpm.overrides</code></>, status: 'yes' },
-    { feature: <><code>pnpm.packageExtensions</code></>, status: 'yes' },
-    { feature: <><code>pnpm.patchedDependencies</code></>, status: 'yes' },
-    { feature: <><code>pnpm.supportedArchitectures</code></>, status: 'yes', note: 'Also settable per-invocation with --os / --cpu / --libc.' },
-    { feature: <><code>resolutions</code></>, status: 'yes' },
-    { feature: <><code>onlyBuiltDependencies</code> / <code>neverBuiltDependencies</code></>, status: 'yes' },
-    { feature: <><code>packageManager</code> / <code>engines</code></>, status: 'yes' },
-    // ── Workspaces ────────────────────────────────────────────────────
-    { feature: <><code>workspaces</code> / <code>pnpm-workspace.yaml</code></>, status: 'yes', note: 'Workspace, resolution, and layout settings.' },
-    { feature: <><code>catalog:</code> / <code>catalogs:</code></>, status: 'yes' },
-    { feature: <><code>workspace:</code> protocol</>, status: 'yes' },
-    { feature: <><code>namedRegistries</code></>, status: 'yes', note: 'Alias-to-registry map; built-in gh: alias for GitHub Packages.' },
-    { feature: <>workspace selectors</>, status: 'partial', note: 'No git-since ([ref]) selector.' },
-    // ── Config files ──────────────────────────────────────────────────
-    { feature: <code>.npmrc</code>, status: 'yes' },
-    { feature: <><code>.pnpmfile.cjs</code> / <code>.pnpmfile.mjs</code></>, status: 'yes' },
-    // ── Environment variables ─────────────────────────────────────────
-    { feature: <><code>npm_config_*</code></>, status: 'yes' },
-    { feature: <><code>pnpm_config_*</code></>, status: 'yes' },
-    // ── Lockfiles ─────────────────────────────────────────────────────
-    { feature: <><code>pnpm-lock.yaml</code> v9</>, status: 'yes', note: 'v6/v5.4 declined — re-lock under pnpm 9+.' },
-    // ── Linking / hoisting ────────────────────────────────────────────
-    { feature: <code>nodeLinker</code>, status: 'yes', note: 'Read from pnpm-workspace.yaml or --node-linker, as pnpm 12 reads it.' },
-  ]}
-/>
-
-## `pnpm-lock.yaml`
-
-Nub reads and writes pnpm lockfile **v9** (`lockfileVersion: '9.0'`) — what pnpm 9+ emits. A lockfile Nub writes installs cleanly under pnpm:
+In a pnpm project, `nub install` installs the way pnpm 12 does. The lockfile it writes is byte-identical to the one `pnpm install` writes, and the output names the pnpm that did the work:
 
 ```console
 $ nub install
+Packages: +2
+++
+Progress: resolved 2, reused 2, downloaded 0, added 2, done
+
 dependencies:
-+ is-odd@3.0.1
++ is-odd 3.0.1
 
-$ grep lockfileVersion pnpm-lock.yaml
-lockfileVersion: '9.0'
-
-$ pnpm install --frozen-lockfile
-Lockfile is up to date, resolution step is skipped
+Done in 55ms using pnpm v12.4.1
 ```
 
-The round-trip holds both directions, for single packages and for workspaces with `catalog:` and `workspace:` entries (verified against pnpm 10.15.1).
+## What matches pnpm
 
-Older formats — v6 (pnpm 8) and v5.4 (pnpm 7) — keep root dependencies under a top-level `dependencies:` map instead of v9's `importers:`. Nub declines them up front and leaves your `node_modules` and lockfile untouched:
+Everything about the install follows pnpm's own rules:
 
-```console
-# captured: nub 0.0.44 on a lockfileVersion: '6.0' lockfile
-$ nub install
-Error: ERR_NUB_LOCKFILE_UNSUPPORTED_FORMAT
+| | In a pnpm project |
+|---|---|
+| Lockfile | `pnpm-lock.yaml`, the bytes pnpm writes |
+| Layout | `node_modules/.pnpm`, inside the project |
+| Global virtual store | Off, unless `enableGlobalVirtualStore: true` is set |
+| Store | pnpm's store — `nub store path` and `pnpm store path` print the same directory |
+| Settings | `pnpm-workspace.yaml`, the `.npmrc` chain, and pnpm's global config |
+| Build scripts | pnpm's approval gate, configured with `allowBuilds` |
 
-  × pnpm-lock.yaml is lockfileVersion 6.0 (pnpm 8); nub reads v9 (pnpm 9+).
-  help: Re-lock under pnpm 9+ (`pnpm install`), then `nub install`.
+Settings live where pnpm 12 reads them. Layout keys such as `nodeLinker` and save keys such as `savePrefix` go in `pnpm-workspace.yaml`; the same keys in `.npmrc` have no effect, as in pnpm 12.
+
+```yaml title="pnpm-workspace.yaml"
+nodeLinker: hoisted
 ```
 
-The refusal names the detected version (v5.4 reads `(pnpm 7)`). Migrate by running a one-time `pnpm install` under pnpm 9+ to upgrade the lockfile to v9, then `nub install`.
-
-## Settings
-
-When pnpm is the incumbent, Nub honors pnpm's own settings:
-
-- `pnpm-workspace.yaml` — `packages:` globs, the `catalog:` / `catalogs:` maps, and the settings pnpm keeps there, layout included. `nub config` reads and writes them as `pnpm config` does.
-- `namedRegistries` — an alias-to-registry-URL map from `pnpm-workspace.yaml` or the global pnpm `config.yaml`; a dependency spec prefixed `<alias>:` (e.g. `"@work/constants": "work:1.x.x"`) resolves from that registry, the built-in `gh:` alias points at GitHub Packages, and auth rides existing `//host/:_authToken=` entries in `.npmrc`.
-- `pnpm.overrides` — version pins applied during resolution, written into the lockfile's `overrides:` block.
-- `pnpm.packageExtensions` — extra dependency/peer metadata merged onto resolved packages, hashed into the lockfile's `packageExtensionsChecksum`.
-- `pnpm.patchedDependencies` — patch files applied to dependency contents during linking, wired to `nub patch` / `patch-commit` / `patch-remove`.
-- `pnpm.onlyBuiltDependencies` / `pnpm.neverBuiltDependencies` / `pnpm.allowBuilds` — feed Nub's lifecycle-script policy.
-- `pnpm.supportedArchitectures` — which platforms' optional dependencies get installed. Also readable from `.npmrc` and `pnpm-workspace.yaml`, and overridable per axis for one run with [`--os` / `--cpu` / `--libc`](/docs/install#nub-install).
-- `.pnpmfile.cjs` / `.pnpmfile.mjs` — the `readPackage`, `preResolution`, and `afterAllResolved` hooks run. Dependency-map edits from `readPackage` apply; package-map edits from `afterAllResolved` apply. `preResolution` is read-only: it runs on every install and receives pnpm's lockfile object, but Nub runs it out of process, so edits it makes to that object are reported and discarded. New importers/packages, identity rewrites, `updateConfig` hooks, and config-dependency pnpmfiles are not supported.
+Environment variables follow pnpm 12 too. The registry comes from `pnpm_config_registry` or `PNPM_CONFIG_REGISTRY`, and `npm_config_registry` is not read.
 
 <Callout>
 Read the [full docs](https://pnpm.io/settings) on pnpm.io.
 </Callout>
 
-```yaml title="pnpm-workspace.yaml"
-packages:
-  - 'packages/*'
-catalog:
-  lodash.merge: 4.6.2
-namedRegistries:
-  work: https://npm.example.com/
-```
+## Build scripts
 
-```json title="package.json"
-{
-  "pnpm": { "overrides": { "is-number": "7.0.0" } }
-}
-```
-
-Nub reads `overrides`, `packageExtensions`, and `patchedDependencies` from either home pnpm accepts: the `pnpm.*` namespace in `package.json`, or the matching key in `pnpm-workspace.yaml`. The pnpm resolver prefers `pnpm.overrides`; top-level `resolutions` is still honored (pnpm supports it for Yarn compatibility), but top-level `overrides` is npm and Bun's field and is ignored under pnpm.
-
-Adopting Nub into an existing pnpm repo leaves the project pnpm-owned. Switching it to Nub's own identity with `nub pm use nub` migrates the pins to the top-level `overrides` and `patchedDependencies` fields in `package.json`.
-
-None of this is read under an npm, Yarn, or Bun incumbent, or in a Nub-identity project. Under those three incumbents, a stray `.pnpmfile.cjs` is ignored with a warning rather than applied silently:
+A dependency with build scripts that is not approved fails the install, as it does under pnpm 12:
 
 ```console
 $ nub install
-nub: `.pnpmfile.cjs` ignored — this project uses npm, which doesn't
-     apply pnpmfile hooks. Remove it, name it explicitly with
-     `--pnpmfile`, or switch to pnpm (`nub pm use pnpm`).
+Error: ERR_PNPM_IGNORED_BUILDS
+
+  × installing dependencies
+  ╰─▶ Ignored build scripts: core-js@3.45.1
+  help: Run "pnpm approve-builds" to pick which dependencies should be allowed
+        to run scripts.
 ```
 
-Under Nub identity, a default `.pnpmfile.cjs` / `.pnpmfile.mjs` is ignored silently. An explicit `--pnpmfile <path>` always loads.
+Approve a package in `pnpm-workspace.yaml`:
 
-## Install behavior
+```yaml title="pnpm-workspace.yaml"
+allowBuilds:
+  core-js: true
+```
 
-The default `node_modules` layout is **isolated** — pnpm's symlink-into-a-virtual-store scheme. The `--node-linker hoisted` flag gives the flat npm-style layout.
+Every build needs that explicit decision. There is no list of packages trusted to build automatically.
 
-Nub reads `nodeLinker` and the hoisting keys from `pnpm-workspace.yaml`, as pnpm 12 does.
+## Version pins
 
-<Callout>
-Read the [full docs](https://pnpm.io/settings/node-modules#nodelinker) on pnpm.io.
-</Callout>
-
-A `pnp` linker behaves as it does under pnpm 12: the install writes a `.pnp.cjs` next to the isolated `node_modules` tree.
-
-Lifecycle scripts for dependencies are skipped by default, as pnpm 10 does. A package runs install scripts only when allowlisted via `pnpm.onlyBuiltDependencies` (or `pnpm.allowBuilds`), or when Nub's gated default-trust floor vouches for it (see [the default-trust floor](/docs/install#default-trust-floor)); `nub approve-builds` adds an entry and builds the approved packages in the same invocation. `pnpm.neverBuiltDependencies` is a denylist that wins over any allow and over the floor.
-
-## Unsupported
-
-`pnpm recursive` has no equivalent. Nub has no recursive meta-verb, so the recursion goes on the verb itself:
+A `packageManager` pin that names another pnpm version is honored. Nub provisions that version and runs the install with it:
 
 ```console
-$ nub recursive
-  Error: nub recursive: not supported — nub has no recursive meta-verb.
-    Use the verb's own workspace flags instead: `nub -r <verb>` /
-    `nub <verb> -r` or `--filter <pattern>` (e.g. `nub run -r build`,
-    `nub update -r`).
+$ nub install   # "packageManager": "pnpm@10.15.1"
+...
+dependencies:
++ is-odd 3.0.1
+
+Done in 705ms using pnpm v10.15.1
 ```
 
-The `node-linker=pnp` install mode is also declined; see the table above.
+## `nub.jsonc`
+
+A pnpm project takes its install settings from pnpm's configuration, so an `install` block in `nub.jsonc` is an error. See [`install`](/docs/config#install) for the message. The runtime fields of `nub.jsonc` apply as in any project.
+
+## Switching to a Nub project
+
+Running `nub pm use nub` turns a pnpm project into a Nub project. The lockfile is renamed with its bytes unchanged, and settings from `pnpm-workspace.yaml` move to neutral homes:
+
+```console
+$ nub pm use nub
+using nub@0.9.0
+  package.json: devEngines.packageManager =
+    { name: "nub", version: "^0.9.0", onFail: "ignore" }
+  package.json: top-level overrides migrated
+  nub.lock: renamed from pnpm-lock.yaml
+    (bytes unchanged — still pnpm-v9 format)
+  pnpm-workspace.yaml: deleted (all keys migrated or named below)
+  .npmrc: + node-linker=hoisted
+  .npmrc: + save-prefix=~
+```
+
+Running `nub pm use pnpm` reverses the rename, and the lockfile bytes stay the same:
+
+```console
+$ nub pm use pnpm@12.4.1
+using pnpm@12.4.1
+  package.json: packageManager = pnpm@12.4.1 (+sha512)
+  package.json: devEngines.packageManager =
+    { name: "pnpm", version: "^12.4.1", onFail: "warn" }
+  pnpm-lock.yaml: renamed from nub.lock (bytes unchanged)
+```

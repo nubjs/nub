@@ -44,7 +44,7 @@ This is transpilation, not type-checking — Nub runs the TypeScript above but n
 
 ## Package management
 
-Nub is a full package manager, powered by the embedded [aube](https://github.com/jdx/aube) engine — it resolves the dependency graph, links `node_modules`, and round-trips whatever lockfile your project already uses. Vite+ is a [passthrough](https://viteplus.dev/guide/env) to an existing package manager: in a pnpm project, `vp install` runs pnpm's install.
+Nub is a full package manager with pnpm's command-line interface — it resolves the dependency graph and links `node_modules`. In a pnpm project it installs exactly as pnpm 12 does, from `pnpm-lock.yaml`; every other project gets `nub.lock`. Vite+ is a [passthrough](https://viteplus.dev/guide/env) to an existing package manager: in a pnpm project, `vp install` runs pnpm's install.
 
 ## The frontend toolchain
 

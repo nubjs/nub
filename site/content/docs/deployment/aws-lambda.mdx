@@ -12,7 +12,7 @@ FROM public.ecr.aws/awsguru/aws-lambda-adapter:1.0.1 AS lambda-adapter
 FROM ghcr.io/nubjs/nub:{{NUB_VERSION}}
 
 COPY --from=lambda-adapter /lambda-adapter /opt/extensions/lambda-adapter
-COPY --chown=node:node package.json package-lock.json ./
+COPY --chown=node:node package.json nub.lock ./
 RUN nub ci
 
 COPY --chown=node:node . .
@@ -21,7 +21,7 @@ EXPOSE 8080
 CMD ["nub", "run", "start"]
 ```
 
-Change `package-lock.json` to the project's lockfile. The application must listen on `0.0.0.0:8080` and return a response from its readiness path:
+In a pnpm project, copy `pnpm-lock.yaml` instead of `nub.lock`. The application must listen on `0.0.0.0:8080` and return a response from its readiness path:
 
 ```ts title="server.ts"
 import { createServer } from "node:http";

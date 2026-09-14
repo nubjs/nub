@@ -3,7 +3,7 @@ title: Migrating from Bun to Nub
 description: A practical, code-first guide to moving a Bun project onto Node + Nub — runtime, scripts, env files, a complete map of every Bun-specific API to its Node or npm-ecosystem replacement, Dependabot, and the gotchas that actually bite.
 ---
 
-This guide walks through moving a project from the Bun runtime to stock Node driven by Nub. The shape of the move is: Nub runs your TypeScript directly on stock Node — the version your project pins, provisioned on demand — your package manager and lockfile stay where they are, and the `Bun.*` APIs your code calls get swapped for their Node or npm-ecosystem equivalents. Most of the work is the last part — Bun's batteries-included global APIs are the surface with no exact Node counterpart, so each one needs a deliberate replacement.
+This guide walks through moving a project from the Bun runtime to stock Node driven by Nub. The shape of the move is: Nub runs your TypeScript directly on stock Node — the version your project pins, provisioned on demand — your `bun.lock` converts once into Nub's lockfile, and the `Bun.*` APIs your code calls get swapped for their Node or npm-ecosystem equivalents. Most of the work is the last part — Bun's batteries-included global APIs are the surface with no exact Node counterpart, so each one needs a deliberate replacement.
 
 Everything below is grounded in how Nub actually behaves today. Where Nub does not yet do something, this guide says so plainly rather than papering over it.
 
@@ -37,9 +37,28 @@ bun remove <pkg>              # → nub remove <pkg>
 bunx <pkg>                    # → nubx <pkg>     (always fetch: nub dlx <pkg>)
 ```
 
-Nub is **lockfile-compatible** with what your project already uses — it round-trips npm, pnpm, and bun lockfiles and reads yarn's — so you do not have to convert your lockfile to adopt Nub. The CLI grammar is pnpm's, but lockfile support is not limited to pnpm's format. If you want Nub to own resolution as a Nub-identity project (consuming only neutral, cross-tool config), drop the bun-branded `bunfig.toml` and let Nub write a neutral `.npmrc`; if you keep an incumbent PM, Nub mirrors that PM faithfully.
+Nub does not read `bun.lock`. Convert it once from the project root. The versions it pins carry across, and `bun.lock` is removed:
 
-One real difference from Bun: Nub follows pnpm's dependency model, which does **not** auto-install peer dependencies. Packages that worked under Bun because Bun silently installed their peers will surface as missing — add the peers explicitly to your `package.json`. This is the single most common post-migration install surprise.
+```console
+$ nub pm migrate
+Done in 26ms using nub v0.9.0
+  nub.lock: written (migrated from bun.lock)
+  bun.lock: removed (migrated)
+```
+
+Commit `nub.lock` in its place. A binary `bun.lockb` has to become a text `bun.lock` first, with `bun install --save-text-lockfile`; see [migrating from npm, Yarn, or Bun](/docs/install/migrate).
+
+Nub does not read `trustedDependencies`. A dependency with build scripts stops the install until you approve it:
+
+```console
+$ nub install
+  × installing dependencies
+  ╰─▶ Ignored build scripts: core-js@3.45.1
+  help: Run "nub approve-builds" to pick which dependencies should be allowed
+        to run scripts.
+```
+
+Running `nub approve-builds core-js` records the approval in `allowScripts` in `package.json`, which takes over from `trustedDependencies`.
 
 ## Scripts: parallel and sequential
 
@@ -294,19 +313,23 @@ Use `node` directly to run a built, already-transpiled server bundle; reach for 
 
 ## Supply-chain cooldown (`minimumReleaseAge`)
 
-Bun's `bunfig.toml` supports `[install].minimumReleaseAge` — a supply-chain hardening gate that refuses to install package versions newer than a threshold. Nub honors the same gate. As a Nub-identity project it lives in `.npmrc` as `minimum-release-age`, in **minutes**:
+Bun's `bunfig.toml` supports `[install].minimumReleaseAge` — a supply-chain hardening gate that refuses to install package versions newer than a threshold. Nub applies the same kind of gate, with a 24-hour window by default, but it does not read `bunfig.toml`. Move the setting to `nub.jsonc`:
 
-```ini
-# .npmrc
-minimum-release-age=1440   # one day
+```jsonc title="nub.jsonc"
+{
+  "install": {
+    "minimumReleaseAge": "3d",  // bunfig: 259200 (seconds)
+    // bunfig: minimumReleaseAgeExcludes
+    "minimumReleaseAgeExclude": ["@company/*"]
+  }
+}
 ```
 
-If you are migrating a `bunfig.toml`, note the unit change: bunfig expresses `minimumReleaseAge` in **seconds**, and `nub install` converts it to the engine's minutes (rounding up so a small non-zero gate never collapses to zero). Bun's `minimumReleaseAgeExcludes` maps to Nub's `minimumReleaseAgeExclude`.
+The value takes a unit — `s`, `m`, `h`, `d`, or `w` — where bunfig counts seconds. See [`install.minimumReleaseAge`](/docs/config#installminimumreleaseage).
 
 ## Gotchas worth pre-empting
 
-- **Peer dependencies are not auto-installed.** The biggest behavioral difference from Bun. Add missing peers explicitly; expect more than one to surface.
-- **A bunfig `[install].linker` value is not read.** Nub mirrors Bun's resolution, not its `node_modules` layout. Choose a layout with `install.linker` in `nub.jsonc`, `node-linker` in `.npmrc`, or the `--node-linker` flag — see [layout settings](/docs/install#layout-settings).
+- **Bun's config file is not read.** Move registry and auth settings from `bunfig.toml` to `.npmrc`, and the release-age window and layout to the `install` block in `nub.jsonc` — see [`install`](/docs/config#install).
 - **`nub run a b` is not multi-script.** It runs `a` with `b` as an argument (same as pnpm and Bun's plain `run`). Use a `/regex/` selector or `npm-run-all2` for real fan-out.
 - **`--env-file` suppresses auto-discovery.** Once you pass an explicit file, the automatic `.env*` cascade is off for that run — pass every file you need, or rely on auto-discovery instead.
 - **`--env-file-if-exists` is not a first-class Nub flag yet.** Use `--env-file` with files you know exist, or auto-discovery (which already tolerates missing files).

@@ -10,7 +10,7 @@ Cloud Run accepts any image that follows its [container runtime contract](https:
 ```dockerfile title="Dockerfile"
 FROM ghcr.io/nubjs/nub:{{NUB_VERSION}}
 
-COPY --chown=node:node package.json package-lock.json ./
+COPY --chown=node:node package.json nub.lock ./
 RUN nub ci
 
 COPY --chown=node:node . .
@@ -18,7 +18,7 @@ EXPOSE 8080
 CMD ["nub", "run", "start"]
 ```
 
-Change `package-lock.json` to the project's lockfile. The ingress container must listen on `0.0.0.0` at Cloud Run's `PORT`, which defaults to `8080`:
+In a pnpm project, copy `pnpm-lock.yaml` instead of `nub.lock`. The ingress container must listen on `0.0.0.0` at Cloud Run's `PORT`, which defaults to `8080`:
 
 ```ts title="server.ts"
 import { createServer } from "node:http";

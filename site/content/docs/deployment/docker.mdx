@@ -9,7 +9,7 @@ Nub augments the Node already in your image — it is not a separate runtime. Th
 
 ```dockerfile title="Dockerfile"
 FROM ghcr.io/nubjs/nub:{{NUB_VERSION}}
-COPY --chown=node:node package.json package-lock.json ./
+COPY --chown=node:node package.json nub.lock ./
 RUN nub ci
 COPY --chown=node:node . .
 CMD ["nub", "run", "start"]
@@ -80,7 +80,7 @@ Copy manifests before source files so dependency installation stays cached. The 
 ```dockerfile title="Dockerfile"
 FROM ghcr.io/nubjs/nub:{{NUB_VERSION}}
 
-COPY --chown=node:node package.json package-lock.json ./
+COPY --chown=node:node package.json nub.lock ./
 RUN nub ci
 
 COPY --chown=node:node . .
@@ -88,7 +88,7 @@ EXPOSE 8080
 CMD ["nub", "run", "start"]
 ```
 
-Change `package-lock.json` to the project's existing lockfile. Exclude `node_modules`, `.git`, and local `.env` files with `.dockerignore`.
+In a pnpm project, copy `pnpm-lock.yaml` instead of `nub.lock`. Exclude `node_modules`, `.git`, and local `.env` files with `.dockerignore`.
 
 ## Multi-stage builds
 
@@ -98,7 +98,7 @@ The tree the build stage installs carries `devDependencies` the final image neve
 
 ```dockerfile title="Dockerfile"
 FROM ghcr.io/nubjs/nub:{{NUB_VERSION}} AS build
-COPY --chown=node:node package.json package-lock.json ./
+COPY --chown=node:node package.json nub.lock ./
 RUN nub ci
 COPY --chown=node:node . .
 RUN nub run build

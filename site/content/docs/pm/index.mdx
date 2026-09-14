@@ -20,10 +20,6 @@ The pin is read from two `package.json` fields at the workspace root, in order:
 
 Ranges belong in `devEngines`; corepack, pnpm, and Yarn all reject them in `packageManager`. With no pin in either field, `nub pm which` errors and points at [`nub pm use`](#nub-pm-use). A lockfile never implies a pin.
 
-<Callout title="Multiple lockfiles">
-Two PMs' lockfiles side by side (`pnpm-lock.yaml` and `package-lock.json`) is ambiguous — Nub errors (`ERR_NUB_LOCKFILE_AMBIGUOUS`). Remove the stale one, or declare the pin with [`nub pm use`](#nub-pm-use).
-</Callout>
-
 <Callout title="Yarn Berry">
 A committed Berry release (`.yarnrc.yml` `yarnPath`) wins over the pin fields above. Nub runs the committed file directly and never provisions Berry, so a `yarn@2+` pin without a committed release errors. Yarn classic (1.x) provisions like any other manager.
 </Callout>
@@ -55,13 +51,13 @@ To carry an npm, Yarn or Bun project's pinned versions across, run [`nub pm migr
 Moving an npm project to pnpm:
 
 ```console
-$ nub pm use pnpm
-Fetching pnpm 11.5.3 (4 MB)...
-using pnpm@11.5.3
-  package.json: packageManager = pnpm@11.5.3 (+sha512)
+$ nub pm use pnpm@12.4.1
+using pnpm@12.4.1
+  package.json: packageManager = pnpm@12.4.1 (+sha512)
   package.json: devEngines.packageManager =
-    { name: "pnpm", version: "^11.5.3", onFail: "warn" }
-  pnpm-lock.yaml: written (converted from package-lock.json)
+    { name: "pnpm", version: "^12.4.1", onFail: "warn" }
+Done in 333ms using pnpm v12.4.1
+  pnpm-lock.yaml: written (migrated from package-lock.json)
   package-lock.json: removed (migrated)
 ```
 

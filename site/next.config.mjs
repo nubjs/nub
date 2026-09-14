@@ -56,6 +56,14 @@ const config = {
       { source: '/docs/pm-shim', destination: '/docs/pm/pm-shim', permanent: true },
       // Guides moved from /docs/guides/* to the top-level /guides/* route.
       { source: '/docs/guides/:path*', destination: '/guides/:path*', permanent: true },
+      // npm, Yarn, and Bun lockfiles are migrated once rather than installed from
+      // (2026-09-14); the three per-manager pages became one migration page.
+      { source: '/docs/install/npm', destination: '/docs/install/migrate', permanent: true },
+      { source: '/docs/install/yarn', destination: '/docs/install/migrate', permanent: true },
+      { source: '/docs/install/bun', destination: '/docs/install/migrate', permanent: true },
+      { source: '/llms/docs/install/npm.mdx', destination: '/llms/docs/install/migrate.mdx', permanent: true },
+      { source: '/llms/docs/install/yarn.mdx', destination: '/llms/docs/install/migrate.mdx', permanent: true },
+      { source: '/llms/docs/install/bun.mdx', destination: '/llms/docs/install/migrate.mdx', permanent: true },
     ];
   },
   // Advertise the llms.txt index on every page so crawlers/agents can

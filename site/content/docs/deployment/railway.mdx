@@ -10,14 +10,14 @@ Railway [detects a root `Dockerfile`](https://docs.railway.com/builds/dockerfile
 ```dockerfile title="Dockerfile"
 FROM ghcr.io/nubjs/nub:{{NUB_VERSION}}
 
-COPY --chown=node:node package.json package-lock.json ./
+COPY --chown=node:node package.json nub.lock ./
 RUN nub ci
 
 COPY --chown=node:node . .
 CMD ["nub", "run", "start"]
 ```
 
-Change `package-lock.json` to the lockfile the project already uses. The start script must bind its HTTP server to `0.0.0.0` and read Railway's `PORT`:
+In a pnpm project, copy `pnpm-lock.yaml` instead of `nub.lock`. The start script must bind its HTTP server to `0.0.0.0` and read Railway's `PORT`:
 
 ```ts title="server.ts"
 import { createServer } from "node:http";

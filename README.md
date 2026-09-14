@@ -235,7 +235,7 @@ View the [full package runner docs 👉](https://nubjs.com/docs/nubx).
 
 ## Package manager — `nub install`
 
-Nub is a package manager powered by the [Aube](https://github.com/jdx/aube) engine. The CLI is flag-for-flag compatible with `pnpm` for muscle memory, but 
+Nub is a package manager with pnpm's CLI, flag for flag. In a pnpm project it installs exactly as pnpm 12 does; every other project gets a `nub.lock`.
 
 ```sh
 nub install                    
@@ -260,25 +260,22 @@ It's fast — avoids the per-command Node.js bootstrap lag incurred by JS-based 
 ### Security
 
 - 🛡️ Blocks postinstall by default
-- 🦠 Checks [osv.dev](https://osv.dev) for known-malicious package versions during resolution by default
+- 🔍 `nub audit` reports known vulnerabilities on demand
 - 🔻 Refuses provenance downgrades by default
 - ⏳ Strict 24-hour `minimumReleaseAge` by default
 
 ### Compatibility
 
-When you run `nub install` inside a project, it detects the *incumbent* package manager (based on your `package.json#packageManager` or any detected lockfiles). It then runs in **compat-mode**, respecting the config files and environment variables for that package manager.
+`nub install` treats every project as one of two kinds:
 
-Under each incumbent, Nub reads that tool's branded config and no other's; the neutral `.npmrc` cascade and `npm_config_*` are read under every one.
+| Project | Detected by | Lockfile | Config it reads |
+|---|---|---|---|
+| **pnpm** | `packageManager: "pnpm@…"`, `pnpm-lock.yaml`, or `pnpm-workspace.yaml` | `pnpm-lock.yaml`, byte-identical to pnpm 12's | pnpm's own — `pnpm-workspace.yaml`, `.npmrc`, global config, `pnpm_config_*` |
+| **Nub** | everything else | `nub.lock` (pnpm lockfile v9 format) | `nub.jsonc`, `.npmrc`, `npm_config_*`, and neutral `package.json` fields |
 
-| Incumbent | Config it reads |
-|---|---|
-| **npm** | `package-lock.json`, `.npmrc`, `overrides`, `workspaces`, `engines`/`os`/`cpu`/`libc` |
-| **pnpm** | `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `package.json#pnpm`, `resolutions`, `catalog:`, `.npmrc` |
-| **Yarn** (read-only) | `yarn.lock`, a `.yarnrc.yml` / `.yarnrc` subset, `YARN_*`, `resolutions`, `packageExtensions`, `.npmrc` |
-| **Bun** | `bun.lock`, `bunfig.toml` `[install]`, `trustedDependencies`, `overrides`, `patchedDependencies`, `catalog:`, `.npmrc` |
-| **Nub** | neutral only — `.npmrc`, `npm_config_*`, `overrides` / `resolutions` / `catalog` / `workspaces` |
+An npm, Yarn, or Bun lockfile is not read. Run `nub pm migrate` once to convert it.
 
-View the [full package manager docs 👉](https://nubjs.com/docs/install#config-it-reads).
+View the [full package manager docs 👉](https://nubjs.com/docs/install#nub-and-pnpm-projects).
 
 <br/>
 

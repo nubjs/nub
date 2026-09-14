@@ -1,6 +1,6 @@
 ---
 title: Using Nub with Turborepo
-description: How Nub and Turborepo coexist in a monorepo today — Turborepo owns the task graph and cache, Nub is the runtime and package manager underneath. You keep your existing packageManager field and lockfile, run Turborepo under Nub, and TypeScript and .env files just work inside every task.
+description: How Nub and Turborepo coexist in a monorepo today — Turborepo owns the task graph and cache, Nub is the runtime and package manager underneath. In a pnpm monorepo you keep your packageManager field and lockfile, run Turborepo under Nub, and TypeScript and .env files just work inside every task.
 ---
 
 Turborepo and Nub solve different problems, and they compose without either one knowing about the other. Turborepo schedules tasks across your packages and caches their results. Nub is what runs underneath: it installs your dependencies, provisions the Node version, and augments the Node that each task spawns so TypeScript and `.env` files work without a build step. You do not reconfigure Turborepo to adopt Nub — you keep your existing setup and run Turborepo *through* Nub.
@@ -9,8 +9,8 @@ Everything below is grounded in how the two tools actually behave together today
 
 ## The short version
 
-- Keep your `package.json` `packageManager` field and your existing lockfile exactly as they are.
-- Install with `nub install` instead of your old package manager.
+- Use a pnpm workspace, and keep its pnpm `packageManager` field and `pnpm-lock.yaml` as they are.
+- Install with `nub install` instead of `pnpm install`.
 - Run Turborepo under Nub — `nub run <script>` where the script is `turbo run …`, or `nubx turbo run …`.
 
 That is the whole integration. The rest of this page explains why it works and what to watch for.
@@ -19,12 +19,22 @@ That is the whole integration. The rest of this page explains why it works and w
 
 Turborepo infers the package manager for the repo from the `packageManager` field in the root `package.json` (the Corepack format, for example `pnpm@9.12.0`) together with the lockfile that is present. It recognizes npm, pnpm, yarn, and bun. There is no Turborepo setting for the package manager, and no Nub identifier exists for it to recognize. So there is nothing to point Turborepo at, and you should not try.
 
-This is fine, because Nub is **lockfile-compatible** with what your project already uses — it round-trips npm, pnpm, and bun lockfiles and reads yarn's. Turborepo keeps seeing the incumbent package manager via the `packageManager` field and the lockfile, and stays happy. Nub handles installation underneath. Your Turborepo config does not change at all.
+A pnpm workspace fits this. In a pnpm project, `nub install` installs exactly as pnpm 12 does, so Turborepo still sees pnpm through the `packageManager` field and `pnpm-lock.yaml`. Your Turborepo config does not change.
 
 ```bash
 pnpm install          # before
-nub install           # after — same lockfile, same node_modules layout
+nub install           # after — same pnpm-lock.yaml, same node_modules layout
 ```
+
+A Nub project, with `nub.lock` and no pnpm `packageManager` field, does not work with Turborepo, because Turborepo cannot resolve its workspaces:
+
+```console
+$ nubx turbo run build
+  x Could not resolve workspaces.
+  `-> Missing `packageManager` field in package.json
+```
+
+An npm, Yarn, or Bun monorepo converts to pnpm once with `nub pm use pnpm`; see [migrating to pnpm](/docs/install/migrate#migrating-to-pnpm).
 
 ## How Turborepo runs a task, and why Nub reaches into it
 

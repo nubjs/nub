@@ -52,7 +52,7 @@ The official image starts from Node, installs Nub, and runs as the non-root `nod
 ```dockerfile title="Dockerfile"
 FROM ghcr.io/nubjs/nub:{{NUB_VERSION}}
 
-COPY --chown=node:node package.json package-lock.json ./
+COPY --chown=node:node package.json nub.lock ./
 RUN nub ci
 
 COPY --chown=node:node . .
@@ -60,7 +60,7 @@ EXPOSE 8080
 CMD ["nub", "run", "start"]
 ```
 
-Change `package-lock.json` to the lockfile the project already uses. Nub reads npm, pnpm, Bun, and Yarn lockfiles.
+In a pnpm project, copy `pnpm-lock.yaml` instead of `nub.lock`. A project with an npm, Yarn, or Bun lockfile [migrates it](/docs/install/migrate) first.
 
 See [Docker](/docs/deployment/docker#web-services) for the server contract and image variants.
 

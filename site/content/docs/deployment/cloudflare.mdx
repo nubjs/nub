@@ -27,7 +27,7 @@ Read the [full docs](https://developers.cloudflare.com/workers/ci-cd/builds/conf
 
 ## Letting Nub run the install
 
-Workers Builds installs dependencies itself before the build command runs, picking the package manager from the lockfile it finds. It does not yet recognize `nub.lock`, so a Nub-owned project ends up with a second lockfile from whichever manager Cloudflare falls back to. The next `nub install` then refuses, unable to tell which one owns the project.
+Workers Builds installs dependencies itself before the build command runs, picking the package manager from the lockfile it finds. It does not yet recognize `nub.lock`, so in a Nub project it falls back to another manager, which installs the dependencies a second time and writes its own lockfile beside `nub.lock`.
 
 Add a build variable so Cloudflare skips its install and Nub owns it:
 
@@ -41,7 +41,7 @@ Then install from the build command:
 nub install && nub run build
 ```
 
-Projects that keep an existing `pnpm-lock.yaml`, `package-lock.json`, or `bun.lock` are unaffected — Cloudflare installs with that manager, one lockfile stays on disk, and Nub reads it.
+A pnpm project is unaffected: Cloudflare installs with pnpm from `pnpm-lock.yaml`, and Nub reads the same file.
 
 ## HTTP endpoint
 

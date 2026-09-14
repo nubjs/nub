@@ -101,18 +101,17 @@ The action installs the Nub CLI onto the runner, and from there Nub provisions t
 
 ## Does it replace my package manager?
 
-It can. The `nub install` command is a full package manager — pnpm's CLI surface, your project's lockfile — powered by the embedded aube engine. It detects the lockfile your project already has and writes the same format back, and `nub pm use` provisions the original tool at its exact pinned version (corepack's job, without the PATH shims).
+It can. The `nub install` command is a full package manager with pnpm's command-line interface. In a pnpm project it installs exactly as pnpm 12 does, from `pnpm-lock.yaml`; every other project gets `nub.lock`.
 
-| Lockfile | Behavior |
+| The project has | `nub install` |
 | --- | --- |
-| `pnpm-lock.yaml` | Round-trips in place |
-| `package-lock.json` | Round-trips in place |
-| `bun.lock` | Round-trips in place |
-| `yarn.lock` | Read-only — an install that would rewrite it is refused, with the exact yarn command to run instead |
+| `pnpm-lock.yaml`, `pnpm-workspace.yaml`, or a pnpm `packageManager` pin | Installs as pnpm 12, from `pnpm-lock.yaml` |
+| `nub.lock`, or no lockfile | Installs from `nub.lock` |
+| `package-lock.json`, `yarn.lock`, or `bun.lock` | Does not read it, and writes `nub.lock` — convert it once with [`nub pm migrate`](/docs/install/migrate) |
 
 ## Does it work with `pnpm` / `npm` / `yarn` / `bun`?
 
-Yes. Your lockfile stays in whatever format your package manager produces, and workspace topology (`pnpm-workspace.yaml`, `npm` workspaces, `yarn` workspaces) is honored by `nub run` and `nubx` directly. The sources of truth:
+Yes. Whatever installed the project, workspace topology (`pnpm-workspace.yaml`, `npm` workspaces, `yarn` workspaces) is honored by `nub run` and `nubx` directly. The sources of truth:
 
 - `nub run` reads `package.json` and its `"scripts"` field.
 - `nubx` reads `node_modules/.bin`.
@@ -245,7 +244,7 @@ tsconfig-paths
 npx                 # → nubx / nub exec
 nvm, fnm            # the pin file alone provisions the right Node
 corepack            # → nub pm
-the PM CLI itself   # nub install / nub run, against your existing lockfile
+the PM CLI itself   # nub install / nub run
 ```
 
 Modern Node already obsoletes a second set, which you inherit by running on a modern-Node floor:
