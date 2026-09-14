@@ -45,9 +45,8 @@ env:
   # then regenerate the allowlist (tests/pnpm-conformance/gen-allowlist.mjs).
   PNPM_TAG: ${{ github.event.inputs.pnpm_tag || 'v11.3.0' }}
   PNPM_PIN: "11.3.0"
-  # B3 flake mitigation: gate nub/aube self-update so no banner pollutes stdout.
+  # B3 flake mitigation: gate nub's self-update so no banner pollutes stdout.
   NUB_NO_UPDATE: "1"
-  AUBE_NO_UPDATE_CHECK: "1"
 
 jobs:
   conformance:

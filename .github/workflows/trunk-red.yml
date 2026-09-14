@@ -18,7 +18,6 @@ on:  # zizmor: ignore[dangerous-triggers] trunk-only notifier; reads CI conclusi
     workflows:
       - CI
       - Node matrix
-      - Aube parity
       - Docker install smoke
       - Native-dep floor
       - Daily-driver smoke

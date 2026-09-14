@@ -42,7 +42,6 @@ on:
       - "tests/conversion/**"
       - "tests/mutation/**"
       - "crates/**"
-      - "vendor/aube/**"
       - "Cargo.lock"
       - ".github/workflows/lockfile-roundtrip.yml"
   push:

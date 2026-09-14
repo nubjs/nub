@@ -1,9 +1,7 @@
 #!/usr/bin/env node
 // merge-cascade — drive the orchestrator's merge-queue: for each enqueued PR,
 // wait for CI to go green, squash-merge, and fast-forward the shared tree.
-// Automates the manual watch → merge → pull → next-PR loop. (vendor/aube is plain
-// in-tree files now (Pattern B) — its edits ride the normal pull, no submodule
-// sync.)
+// Automates the manual watch → merge → pull → next-PR loop.
 //
 // Runs under BOTH plain Node (type-stripping) and nub:
 //   node scripts/merge-cascade.ts [--dry-run] [--queue <path>] [--shared-tree <dir>]
@@ -383,7 +381,7 @@ async function main() {
       }
     }
 
-    // Fast-forward the shared tree (vendor/aube edits ride the normal update).
+    // Fast-forward the shared tree.
     // NOT `pull --ff-only`: this repo sets pull.rebase=true, so pull runs rebase's precondition
     // check first and aborts on ANY unstaged change. The shared tree always carries some agent's
     // WIP, so that form failed on every single drain — silently, because the throw lands in the

@@ -81,9 +81,8 @@ jobs:
         with:
           persist-credentials: false
       # diffs against the PR base; on push it diffs against the before-SHA. Only
-      # docs/site-only changes flip a group OFF — everything else (including the
-      # vendored aube tree under vendor/aube/**, so any aube edit triggers the
-      # full suite) is Rust-relevant. .github/workflows/** is Rust-relevant so a
+      # docs/site-only changes flip a group OFF — everything else is
+      # Rust-relevant. .github/workflows/** is Rust-relevant so a
       # CI change still exercises the matrix it edits.
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
         id: filter
@@ -93,7 +92,6 @@ jobs:
           filters: |
             rust:
               - 'crates/**'
-              - 'vendor/aube/**'
               - 'vendor/libsui/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
@@ -228,8 +226,8 @@ jobs:
           shared-key: ci-check
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # `--locked`, because this crate is its OWN workspace with its own tracked
-      # `Cargo.lock` — the fifth in the repo, alongside the root, nub-native,
-      # nub-launcher and vendor/aube. Without it this step silently re-resolves
+      # `Cargo.lock` — the fourth in the repo, alongside the root, nub-native
+      # and nub-launcher. Without it this step silently re-resolves
       # around a stale lock, so a manifest change that should have moved the lock
       # passes here and the tracked file keeps describing a dependency graph that
       # no longer exists. That is not hypothetical: switching this crate's gzip
@@ -309,17 +307,6 @@ jobs:
       # fast` for the same reason nub-phantom does: its workspace defines no such
       # profile, only `[profile.release]`.
       - run: cd crates/nub-launcher && cargo clippy --locked --all-targets -- -D warnings && cargo build --locked && cargo test --locked
-      # Static brand-boundary gate: no AUBE_*-branded env-var READS in nub crate
-      # source (the embedded engine's brand is never nub's config surface). Cheap
-      # grep, no build — runs alongside clippy on the same run_rust gate.
-      - name: Brand lint (no AUBE_* env reads)
-        run: tests/brand-lint/check-env-reads.sh
-      # The write-side twin of the gate above: no on-disk path nub creates may
-      # carry the engine's brand. Scans the vendored engine too — that is where
-      # the hardcoded names lived, and where they leaked into users' caches,
-      # stores, and node_modules.
-      - name: Brand lint (no aube-branded path literals)
-        run: tests/brand-lint/check-path-literals.sh
 
   # The single-binary `embed-runtime` feature is OFF in every default build, so the
   # feature-off `test` job never RUNS the runtime_cache extraction/race/GC/INTEGRITY
@@ -839,20 +826,6 @@ jobs:
           cp -R node_modules/@oxc-project/runtime runtime/node_modules/@oxc-project/
           cp -R node_modules/@petamoriken/float16 runtime/node_modules/@petamoriken/
           cp -R node_modules/jsbi node_modules/urlpattern-polyfill runtime/node_modules/
-      # Without the typosquat corpus, aube-resolver/build.rs ships an EMPTY primer and
-      # says so only in a cargo warning — the binary then falls back to network
-      # packument fetches at exit 0, which would silently turn any install benchmark
-      # run against this artifact into a measurement of the network. AUBE_REQUIRE_PRIMER
-      # on the build below turns that warning into a hard failure; this step supplies
-      # what it then demands. Same pair as mac-build.yml, and the reason is the same.
-      - name: Generate typosquat popularity corpus
-        run: |
-          set -euo pipefail
-          cd vendor/aube
-          node scripts/generate-primer.mjs \
-            --top 1 \
-            --out "$RUNNER_TEMP/primer-discard.json" \
-            --popular-names-out crates/aube-resolver/data/popular-top100000-v1.json
       - name: Build + stage release nub-native addon
         shell: bash
         run: |
@@ -861,8 +834,6 @@ jobs:
           mkdir -p runtime/addons
           cp target/release/libnub_native.dylib runtime/addons/nub-native.node
       - name: Build release nub (--features embed-runtime)
-        env:
-          AUBE_REQUIRE_PRIMER: "1"
         run: cargo build -p nub-cli --release --features embed-runtime
       # The libsui signing-determinism test is `cfg(target_vendor = "apple")`, and the
       # per-OS launcher step in the test job reaches macOS only on push:main and
@@ -1113,8 +1084,7 @@ jobs:
       # compat corpus is #[ignore]'d (a CI-scale gate, not a unit test) — so
       # this job stays fast across the full os×node matrix, including the 22.15
       # floor where the using/ErrorEvent fallback paths are exercised by the
-      # integration tests. vendor/aube (the cargo path dep) is plain in-tree
-      # files — checked out by the normal checkout, no submodule init needed.
+      # integration tests.
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           persist-credentials: false
@@ -1215,10 +1185,8 @@ jobs:
       # shim, so the interception that covered the old `npm ci` does not cover
       # this step. What still holds on EVERY leg: nub.lock pins each tarball by
       # integrity hash and `--frozen-lockfile` refuses to re-resolve. Lifecycle
-      # confinement does NOT hold everywhere — the build jail is Linux (landlock
-      # + seccomp) and macOS only (aube-scripts/src/lib.rs has no Windows arm),
-      # so on the windows-latest cell the mitigation is the pinned lockfile
-      # alone. The shims stay for the pnpm/npm surfaces the tests drive.
+      # scripts run unconfined, so on every cell the pinned lockfile is the
+      # mitigation. The shims stay for the pnpm/npm surfaces the tests drive.
       - uses: ./setup
         with:
           cache: 'true'

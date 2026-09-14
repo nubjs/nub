@@ -113,7 +113,7 @@ for pid in $(ps -Ao pid=,command= | awk '/[b]in\/cargo/ {print $1}'); do
   # ABSENT variable means "inherit"), so such a build is outside the full
   # semaphore -- but NOT ungoverned: qos-global also registers the wrapper as
   # rustc-workspace-wrapper, so workspace crates still take tokens while deps
-  # and vendor/aube do not. No in-tree caller produces this shape any more
+  # do not. No in-tree caller produces this shape any more
   # (rust-build.sh blanks both keys or neither); it is the mark of a STALE
   # checkout's rust-build.sh, or a hand-rolled config.
   case "$w" in

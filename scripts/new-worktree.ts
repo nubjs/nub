@@ -14,16 +14,14 @@
 // What it does, in order:
 //   1. `git fetch origin` so the base ref is current.
 //   2. `git worktree add <path> -b <branch> origin/main` (tracked files only;
-//      the shared tree is untouched). vendor/aube is plain in-tree files (Pattern
-//      B, 2026-06-22) — NOT a submodule — so it comes along with the checkout; no
-//      submodule-init step is needed.
+//      the shared tree is untouched).
 //   3. Apply `.worktreeinclude` — copy/symlink the listed gitignored entries
 //      INTO the worktree (things `git worktree` won't bring, e.g. `.repos/`).
 //   4. Print the build convention: use `scripts/rust-build.sh` instead of bare
 //      `cargo`. Worktrees SHARE one target dir (~/.cache/nub/shared-target) so a
 //      fresh worktree reuses the crates.io DEP artifacts a sibling compiled and
 //      only recompiles the workspace crates — the fast path. But sharing clobbers
-//      when two worktrees diverge the SAME depended-on crate (e.g. vendor/aube on
+//      when two worktrees diverge the SAME depended-on crate (e.g. nub-core on
 //      different branches), so rust-build.sh shares by default and auto-isolates
 //      to a private target dir the moment THIS worktree diverges such a crate.
 //      See .claude/skills/rust-build/SKILL.md. (Bare `cargo` + a hardcoded shared
@@ -207,15 +205,12 @@ function main(): void {
 
   run("git", ["-C", repoRoot, "worktree", "add", opts.path, "-b", opts.slug, opts.base]);
 
-  // vendor/aube is plain in-tree files (Pattern B) — checked out by `worktree
-  // add`, no submodule init needed.
-
   applyInclude(mainRoot, opts.path);
 
   // Build via scripts/rust-build.sh, not a hardcoded CARGO_TARGET_DIR: it points
   // at the shared dir (~/.cache/nub/shared-target) for the fast incremental path,
   // but auto-isolates to a private target dir the moment this worktree diverges a
-  // depended-on crate (vendor/aube, nub-core, …) — which is when the shared dir
+  // depended-on crate (nub-core, nub-settings, …) — which is when the shared dir
   // would otherwise clobber a sibling and fail with a phantom compile error on
   // correct source. Pre-create the shared dir so the fast path is real on run 1.
   const sharedTarget = `${homedir()}/.cache/nub/shared-target`;

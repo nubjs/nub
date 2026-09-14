@@ -114,8 +114,7 @@ replaceOrDie(
 // reach this file while only `make version` can rely on cargo and a network, and
 // these are path dependencies whose lock entry is a plain version string.
 // `\r?\n`, not `\n`: this is the only MULTI-LINE pattern in the file, and the
-// GitHub runner image ships `core.autocrlf=true` (see the mitigation in
-// aube-parity.yml, and #290). Neither lock is normalized by .gitattributes, so
+// GitHub runner image ships `core.autocrlf=true` (#290). Neither lock is normalized by .gitattributes, so
 // on the two windows-latest release shards they check out CRLF — and a literal
 // `\n` matches only 0x0A, so the stamp would exit 1 before either shard built
 // anything. The single-line patterns above are CRLF-transparent for the opposite

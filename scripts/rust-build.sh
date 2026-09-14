@@ -41,7 +41,7 @@
 # keyed by a hash of that content, so "same path" IMPLIES "same content" by
 # construction rather than by inference. A per-worktree merge-base cannot carry
 # that weight: it proves only that THIS worktree made no local changes vs ITS OWN
-# base, so two worktrees whose bases straddle a nub-core/aube commit both read
+# base, so two worktrees whose bases straddle a nub-core commit both read
 # "shared" while disagreeing on content — measured at 4 distinct contents among 6
 # nominal sharers, i.e. live rebuild ping-pong plus the phantom-E0063 tail risk.
 #

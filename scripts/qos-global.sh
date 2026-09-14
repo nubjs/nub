@@ -11,7 +11,7 @@
 #     worktrees still carried that version on 2026-08-19. Such a build opts
 #     itself out of `rustc-wrapper`, but not out of RUSTC_WORKSPACE_WRAPPER, so
 #     binding the same wrapper there keeps its workspace crates governed
-#     (partial by construction: not vendor/aube or crates.io deps).
+#     (partial by construction: not git or crates.io deps).
 #   - Every stale checkout's qos-global.sh copies its own older rustc-qos.sh
 #     over ~/.cargo/rustc-qos.sh on `make install-dev`, silently downgrading the
 #     machine-wide governor. Checkouts older than this second name leave

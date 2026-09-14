@@ -27,8 +27,8 @@ test('normalizeGitHubRepo accepts https, scp-ssh, ssh://, with/without .git', ()
 
 test('normalizeGitHubRepo rejects non-github and malformed URLs', () => {
   assert.equal(normalizeGitHubRepo('https://gitlab.com/nubjs/nub.git'), null)
-  assert.equal(normalizeGitHubRepo('git@github.com:aube.git'), null)
-  assert.equal(normalizeGitHubRepo('/local/path/aube'), null)
+  assert.equal(normalizeGitHubRepo('git@github.com:pkg.git'), null)
+  assert.equal(normalizeGitHubRepo('/local/path/pkg'), null)
 })
 
 test('parseRemotes keeps one fetch URL per remote and ignores push lines', () => {

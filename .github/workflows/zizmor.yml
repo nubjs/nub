@@ -22,8 +22,5 @@ jobs:
       - uses: zizmorcore/zizmor-action@192e21d79ab29983730a13d1382995c2307fbcaa # v0.5.7
         with:
           advanced-security: false
-          # Scan only nub's own workflows/actions. vendor/aube ships aube's
-          # workflow FILES, but GitHub never executes workflows outside the
-          # root .github/ — inert vendored bytes, not attack surface here,
-          # and not ours to harden in this repo.
+          # Scan only nub's own workflows/actions.
           inputs: .github/

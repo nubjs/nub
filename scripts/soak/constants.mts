@@ -7,7 +7,7 @@
  *
  *   - `.cargo/config.toml`        -> `global-min-publish-age = "<SOAK_DAYS> days"` (cargo -Zmin-publish-age,
  *                              applied by `cargo +nightly update`; no repo-wide nightly pin)
- *   - `pnpm-workspace.yaml`  -> `minimumReleaseAge: <SOAK_MINUTES>` (aube reads minutes)
+ *   - `pnpm-workspace.yaml`  -> `minimumReleaseAge: <SOAK_MINUTES>` (pnpm reads minutes)
  *   - `.npmrc`               -> `min-release-age=<SOAK_DAYS>` (npm >= 11.17, days)
  *   - `taze.config.mts`      -> `maturityPeriod: SOAK_DAYS` (imports this)
  *
@@ -17,7 +17,7 @@
 
 export const SOAK_DAYS = 7
 
-// pnpm/aube `minimumReleaseAge` is expressed in MINUTES.
+// pnpm's `minimumReleaseAge` is expressed in MINUTES.
 export const SOAK_MINUTES = SOAK_DAYS * 24 * 60
 
 // Exclusion annotation carried on the line ABOVE every version-pinned

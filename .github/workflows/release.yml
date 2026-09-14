@@ -70,14 +70,6 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
-# Metadata-primer embed (the time-bearing seed that kills the cold-install cliff).
-# The primer-related env vars (AUBE_PRIMER_TOP / AUBE_PRIMER_VERSION_CAP /
-# AUBE_REQUIRE_PRIMER) are scoped to the `primer` job (generation) and the `build`
-# job (embed), NOT to this workflow-level env — deliberately, so the `test` and
-# `conformance` jobs (which also `cargo build` nub-cli) are NOT forced to generate
-# a primer or fail under the require guard, keeping them off the registry's
-# critical path the way they were before this fix.
-
 jobs:
   verify:
     name: Verify version consistency
@@ -287,269 +279,6 @@ jobs:
             echo "skipping the canary build — ${REASON}"
           fi
 
-  primer:
-    name: Generate metadata primer (once, shared to all builds)
-    needs: verify
-    # Runs for the stable paths always; for a canary run only when the gate
-    # said build. Skipping primer here is what skips the whole canary pipeline
-    # on a nightly with nothing new to ship — build `needs:` primer, and
-    # everything heavier `needs:` build, so the skip cascades.
-    if: needs.verify.outputs.is_canary != 'true' || needs.verify.outputs.canary == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    timeout-minutes: 20
-    # Must match what vendor/aube/crates/aube-resolver/build.rs computes for a
-    # `--release` build, because TOP/CAP form the on-disk primer filename
-    # (`primer-top{TOP}-v{CAP}-s{SCHEMA}.rkyv.{zst,json}`) the build jobs' build.rs
-    # looks for. TOP=2000 == build.rs RELEASE_TOP; CAP=100 == build.rs DEFAULT_VERSION_CAP.
-    env:
-      AUBE_PRIMER_TOP: "2000"
-      AUBE_PRIMER_VERSION_CAP: "100"
-    steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5 # zizmor: ignore[cache-poisoning] this job runs no package install (generate-primer.mjs uses node: builtins only), so the default cache is unused
-        with:
-          node-version: "24"
-      # === produce-the-blob: source decision (ISOLATED on purpose) ================
-      # This is the ONLY place the primer's SOURCE is decided. Two sources, in
-      # preference order, both leaving ONE file under
-      # vendor/aube/crates/aube-resolver/data/ named
-      # primer-top${AUBE_PRIMER_TOP}-v${AUBE_PRIMER_VERSION_CAP}-s<schema>.rkyv.{zst,json}
-      # — the exact name the consumers' build.rs computes from those same TOP/CAP
-      # and PRIMER_DATA_SCHEMA, so it's picked up directly with no node needed in
-      # the cross containers. The downstream contract (the metadata-primer artifact
-      # → every build embeds it; AUBE_REQUIRE_PRIMER=1 + the per-target gate) is
-      # IDENTICAL regardless of which source wins:
-      #
-      #   1. SMART blob (token present): the private nubjs/nub-primer pipeline's
-      #      latest-s2 release asset (multi-factor scoring, ~93% lockfile coverage
-      #      @ 7.3MB). It is the on-disk `.rkyv.zst` form build.rs reads directly
-      #      (read raw bytes → zstd-decode → rkyv → per-package re-pack), byte-
-      #      compatible with the public generator's output. We download it, validate
-      #      it (non-empty + zstd-decodes), and RENAME it to the build-expected
-      #      `-s<schema>.rkyv.zst` filename for this TOP/CAP. The blob's own TOP/CAP
-      #      (6172/60) are irrelevant downstream — at this point the filename is just
-      #      the selector build.rs greps for; the embedded content is whatever we put
-      #      there. A schema mismatch (build.rs bumped past the blob's -sK) downloads
-      #      nothing → clean fallback.
-      #   2. PUBLIC generate (token absent OR download/validation failed): the
-      #      committed tokenless generate-primer.mjs against the public registry
-      #      (~70% coverage @ 9.1MB) — the unchanged 0.0.38/0.0.39 behavior. Emits
-      #      the `.rkyv.json` form; build.rs's `source.with_extension("json")` branch
-      #      compresses it into the embedded rkyv+zstd blob.
-      #
-      # INERT WITHOUT THE PAT: a missing GitHub Actions secret is the empty string,
-      # so the smart step explicitly tests `-z "$PRIMER_BLOB_TOKEN"` and skips the
-      # download entirely when it's empty — no PAT ⇒ source=fallback ⇒ identical to
-      # today. The smart step is non-fatal by construction (it never `exit 1`s on a
-      # download/validation miss; it just records source=fallback), so a private-repo
-      # outage or a revoked token degrades to the public path rather than failing the
-      # release.
-      - name: Try smart primer blob (private repo, token-gated)
-        id: smart
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.PRIMER_BLOB_TOKEN }}
-        run: |
-          # Default: fall back to public-generate. Only flips to "smart" on a fully
-          # validated download. Never exits non-zero — a miss must downgrade, not
-          # fail the release.
-          echo "source=fallback" >> "$GITHUB_OUTPUT"
-
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "PRIMER_BLOB_TOKEN absent (empty secret) — using public-generate fallback (current 0.0.38/0.0.39 behavior)."
-            exit 0
-          fi
-
-          schema=$(grep -E '^const PRIMER_DATA_SCHEMA: u32 = [0-9]+;' \
-            vendor/aube/crates/aube-resolver/build.rs | awk -F'= ' '{print $2}' | tr -d ';')
-          if [ -z "$schema" ]; then
-            echo "::warning::could not parse PRIMER_DATA_SCHEMA — using public-generate fallback"
-            exit 0
-          fi
-
-          dir="vendor/aube/crates/aube-resolver/data"
-          mkdir -p "$dir"
-          tmp="$(mktemp -d)"
-
-          # Pull the rolling latest-s${schema} pointer, matching ONLY blobs whose
-          # filename schema matches what build.rs expects. A schema mismatch (or a
-          # missing pointer) downloads nothing → fallback.
-          if ! gh release download "latest-s${schema}" \
-                 --repo nubjs/nub-primer \
-                 --pattern "primer-*-s${schema}.rkyv.zst" \
-                 --dir "$tmp" --clobber; then
-            echo "::warning::smart primer download failed (no token access, missing latest-s${schema}, or network) — using public-generate fallback"
-            exit 0
-          fi
-
-          blob="$(find "$tmp" -maxdepth 1 -name "primer-*-s${schema}.rkyv.zst" 2>/dev/null | head -1)"
-          if [ -z "$blob" ] || [ ! -s "$blob" ]; then
-            echo "::warning::smart primer download produced no non-empty -s${schema} blob — using public-generate fallback"
-            exit 0
-          fi
-          if ! zstd -t "$blob" 2>/dev/null; then
-            echo "::warning::smart primer blob failed zstd validation — using public-generate fallback"
-            exit 0
-          fi
-
-          # Rename into the build-expected on-disk name for THIS TOP/CAP/schema so
-          # the consumers' build.rs reads it directly (the .rkyv.zst branch).
-          out="$dir/primer-top${AUBE_PRIMER_TOP}-v${AUBE_PRIMER_VERSION_CAP}-s${schema}.rkyv.zst"
-          mv "$blob" "$out"
-          bytes=$(wc -c < "$out")
-          echo "✓ smart primer: $(basename "$out") is $bytes bytes (private nubjs/nub-primer latest-s${schema})"
-          echo "source=smart" >> "$GITHUB_OUTPUT"
-          echo "path=$out" >> "$GITHUB_OUTPUT"
-      # The smart blob contains only metadata, so it still needs the exact popular
-      # name list that AUBE_REQUIRE_PRIMER=1 makes build.rs require. The generator's
-      # names-only mode reuses its public-source fetch/parser/retry path without
-      # fetching packuments. The public fallback below writes both files in one pass.
-      - name: Generate popular package names (smart metadata primer)
-        if: steps.smart.outputs.source == 'smart'
-        shell: bash
-        run: |
-          cd vendor/aube
-          popular_out="crates/aube-resolver/data/popular-top100000-v1.json"
-          attempt=0
-          until node scripts/generate-primer.mjs \
-                  --popular-names-only \
-                  --popular-names-out "$popular_out"; do
-            attempt=$((attempt + 1))
-            if [ "$attempt" -ge 3 ]; then
-              echo "::error::generate-primer.mjs could not generate validated popular names after $attempt attempts"
-              exit 1
-            fi
-            echo "--- popular-name generation attempt $attempt failed; retrying in 30s ---"
-            sleep 30
-          done
-
-      # Public-registry fallback. Runs only when the smart blob was not adopted
-      # (token absent, download failed, or validation failed), retries the whole
-      # generation, and emits both the metadata `.rkyv.json` build.rs compresses
-      # and the exactly-100000-name list build.rs embeds under the require guard.
-      - name: Generate metadata primer (public fallback)
-        id: primer
-        if: steps.smart.outputs.source != 'smart'
-        shell: bash
-        run: |
-          cd vendor/aube
-          schema=$(grep -E '^const PRIMER_DATA_SCHEMA: u32 = [0-9]+;' \
-            crates/aube-resolver/build.rs | awk -F'= ' '{print $2}' | tr -d ';')
-          if [ -z "$schema" ]; then
-            echo "::error::failed to parse PRIMER_DATA_SCHEMA from vendor/aube/crates/aube-resolver/build.rs"
-            exit 1
-          fi
-          out="crates/aube-resolver/data/primer-top${AUBE_PRIMER_TOP}-v${AUBE_PRIMER_VERSION_CAP}-s${schema}.rkyv.json"
-          popular_out="crates/aube-resolver/data/popular-top100000-v1.json"
-          attempt=0
-          until node scripts/generate-primer.mjs \
-                  --top "$AUBE_PRIMER_TOP" \
-                  --versions "$AUBE_PRIMER_VERSION_CAP" \
-                  --out "$out" \
-                  --popular-names-out "$popular_out"; do
-            attempt=$((attempt + 1))
-            if [ "$attempt" -ge 3 ]; then
-              echo "::error::generate-primer.mjs failed after $attempt attempts"
-              exit 1
-            fi
-            echo "--- generate attempt $attempt failed; retrying in 30s ---"
-            sleep 30
-          done
-          # Fail loud here too (don't wait for build.rs): a syntactically-valid but
-          # empty/near-empty primer must never reach the builds under the require guard.
-          bytes=$(wc -c < "$out")
-          if [ "$bytes" -lt 100000 ]; then
-            echo "::error::generated primer is suspiciously small ($bytes bytes) — refusing to ship a degraded primer"
-            exit 1
-          fi
-          echo "primer $out is $bytes bytes"
-          echo "path=vendor/aube/$out" >> "$GITHUB_OUTPUT"
-      # The typosquat corpus, which is a SEPARATE artifact from the primer and is
-      # required by build.rs whenever AUBE_REQUIRE_PRIMER=1 (which the build job
-      # sets) — without it every build job dies in write_popular_names_blob with
-      # "popular package names are required". It has to be its own step because
-      # the smart-blob path above never runs generate-primer.mjs at all, so
-      # hanging --popular-names-out off the public fallback (as upstream aube
-      # does, .github/workflows/release.yml there) would leave the smart path
-      # short. `--top 1` is the cheapest way to reach the script's popular-names
-      # branch — one packument — and its primer output is discarded outside data/
-      # so it can never be mistaken for the real blob.
-      #
-      # This file is what makes the corpus DOWNLOAD-RANKED rather than the
-      # alphabetical metadata-primer fallback, which is the condition
-      # aube_resolver::popular_package_names_are_ranked() reports and the
-      # similar-name gate refuses to run without.
-      - name: Generate typosquat popularity corpus
-        shell: bash
-        run: |
-          cd vendor/aube
-          attempt=0
-          until node scripts/generate-primer.mjs \
-                  --top 1 \
-                  --out "$RUNNER_TEMP/primer-discard.json" \
-                  --popular-names-out crates/aube-resolver/data/popular-top100000-v1.json; do
-            attempt=$((attempt + 1))
-            if [ "$attempt" -ge 3 ]; then
-              echo "::error::generate-primer.mjs failed to produce the popularity corpus after $attempt attempts"
-              exit 1
-            fi
-            echo "--- popularity-corpus attempt $attempt failed; retrying in 30s ---"
-            sleep 30
-          done
-          bytes=$(wc -c < crates/aube-resolver/data/popular-top100000-v1.json)
-          echo "popularity corpus is $bytes bytes"
-      # Upload whichever source won, plus the popularity corpus. Exactly ONE
-      # primer-* file exists in data/ at this point (smart .rkyv.zst XOR public
-      # .rkyv.json), both named for the build-expected TOP/CAP/schema; the glob
-      # captures it. The downstream build job downloads this artifact into the same
-      # data/ dir, so build.rs picks both files up directly. `if-no-files-found:
-      # error` keeps the empty-primer guard: a missing file here (both sources
-      # failed) fails the release loud rather than shipping an empty primer.
-
-      # Verify the exact two-file artifact contract before upload. `if-no-files-found`
-      # only rejects an empty glob set, so it cannot prove the popular-name file is
-      # present when a metadata primer exists.
-      - name: Gate metadata primer artifact inputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd vendor/aube
-          shopt -s nullglob
-          primers=(crates/aube-resolver/data/primer-*-s*.rkyv.zst crates/aube-resolver/data/primer-*-s*.rkyv.json)
-          if [ "${#primers[@]}" -ne 1 ]; then
-            echo "::error::expected exactly one metadata primer file, found ${#primers[@]}"
-            printf '%s\n' "${primers[@]}"
-            exit 1
-          fi
-          node - crates/aube-resolver/data/popular-top100000-v1.json <<'NODE'
-          const fs = require('node:fs');
-          const path = process.argv[2];
-          const names = JSON.parse(fs.readFileSync(path, 'utf8'));
-          if (!Array.isArray(names) || names.length !== 100000 || names.some((name) => typeof name !== 'string' || !name || /[\u0009-\u000d\u0020]/.test(name)) || new Set(names).size !== 100000) {
-            throw new Error(`${path} must contain exactly 100000 unique names without ASCII whitespace`);
-          }
-          NODE
-
-      # Upload whichever metadata source won plus the validated popular-name list.
-      # Exactly ONE primer-* file exists in data/ at this point (smart .rkyv.zst XOR
-      # public .rkyv.json), both named for the build-expected TOP/CAP/schema; the
-      # glob captures it. The downstream build job downloads both into the same data/
-      # dir, so build.rs picks them up directly. `if-no-files-found: error` keeps the
-      # require guard intact: a missing metadata or popular-name file fails the
-      # release loud rather than shipping a degraded primer.
-      - name: Upload metadata primer artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
-        with:
-          name: metadata-primer
-          path: |
-            vendor/aube/crates/aube-resolver/data/primer-*-s*.rkyv.*
-            vendor/aube/crates/aube-resolver/data/popular-top100000-v1.json
-          if-no-files-found: error
-
   test:
     name: Test gate (cargo test)
     needs: verify
@@ -659,22 +388,15 @@ jobs:
 
   build:
     name: Build (${{ matrix.platform }})
-    needs: [verify, primer]
+    needs: verify
+    # Runs for the stable paths always; for a canary run only when the gate
+    # said build. Skipping build is what skips the whole canary pipeline on a
+    # nightly with nothing new to ship: everything heavier `needs:` build, so
+    # the skip cascades.
+    if: needs.verify.outputs.is_canary != 'true' || needs.verify.outputs.canary == 'true'
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
-    # Primer embed (see the `primer` job + the "Download metadata primer" step):
-    # TOP/CAP select which downloaded primer-top{TOP}-v{CAP}-s<schema> file
-    # vendor/aube's build.rs embeds; AUBE_REQUIRE_PRIMER=1 makes build.rs FAIL LOUD
-    # on an empty/missing primer instead of silently shipping write_package_blob(&[])
-    # (the 0.0.37 bug). For the cross targets these are forwarded into the cross
-    # Docker container by the root Cross.toml passthrough — without that entry the
-    # require guard never fires inside the container. Scoped to this job (not the
-    # workflow env) so the test/conformance jobs stay off the registry critical path.
-    env:
-      AUBE_PRIMER_TOP: "2000"
-      AUBE_PRIMER_VERSION_CAP: "100"
-      AUBE_REQUIRE_PRIMER: "1"
     strategy:
       fail-fast: false
       # Built as data by the `verify` job so a linux_only debug dispatch can drop the
@@ -685,24 +407,6 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           persist-credentials: false
-
-      # Pull the metadata primer generated ONCE by the `primer` job into the dir
-      # vendor/aube/crates/aube-resolver/build.rs reads. It lands as the
-      # `primer-top{TOP}-v{CAP}-s<schema>.rkyv.json` file build.rs's
-      # `source.with_extension("json")` branch compresses+embeds — so EVERY
-      # platform (including the node-LESS cross containers for musl/arm) embeds
-      # the real primer instead of the empty fallback. With AUBE_REQUIRE_PRIMER=1
-      # (workflow env), a missing artifact here fails the build loud rather than
-      # silently shipping an empty primer (the 0.0.37 bug).
-      #
-      # The same artifact carries `popular-top100000-v1.json`, the download-ranked
-      # typosquat corpus. build.rs treats it as mandatory under the require guard,
-      # so it is not optional decoration: without it every build job here fails.
-      - name: Download metadata primer
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
-        with:
-          name: metadata-primer
-          path: vendor/aube/crates/aube-resolver/data
 
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
         with:
@@ -774,7 +478,7 @@ jobs:
       # tars + zstd-19-compresses it and `include_bytes!`-embeds it into THIS
       # platform's binary. build.rs reads <repo>/runtime by default, so the staging
       # location needs no env override (and so it works inside the cross containers,
-      # which mount the project — no AUBE_*-style passthrough needed).
+      # which mount the project, so no env passthrough is needed).
       - name: Build + stage nub-native addon (embedded into the binary)
         env:
           MATRIX_CROSS: ${{ matrix.cross }}
@@ -926,44 +630,6 @@ jobs:
           CMD="cargo"; [ "$MATRIX_CROSS" = "true" ] && CMD="cross"
           (cd crates/nub-launcher && $CMD build --locked --release --target "$MATRIX_TARGET")
         shell: bash
-
-      # CI GATE: the built binary must embed a NON-EMPTY metadata primer.
-      # vendor/aube's build.rs generates a PRIMER_INDEX of package-NAME string
-      # literals (crates/aube-resolver/src/primer.rs `include!`s it and references
-      # it at runtime, so the names survive release stripping in the binary's
-      # rodata). An EMPTY primer => empty index => none of these names are present.
-      # This is exactly the 0.0.37 failure (cross containers shipped write_package_blob(&[]));
-      # this gate would have caught it. It mirrors the addon-presence gate in the
-      # assemble step and runs per-target, so a degraded cross build fails HERE
-      # rather than silently shipping. (Enabling this BEFORE the artifact-share fix
-      # would correctly fail the cross builds — it lands together with the fix.)
-      - name: Gate — binary embeds a non-empty primer
-        shell: bash
-        env:
-          MATRIX_TARGET: ${{ matrix.target }}
-          MATRIX_PLATFORM: ${{ matrix.platform }}
-        run: |
-          case "$MATRIX_PLATFORM" in
-            win32-*) BIN="target/$MATRIX_TARGET/release/nub.exe" ;;
-            *)       BIN="target/$MATRIX_TARGET/release/nub" ;;
-          esac
-          # A handful of packages near-certain to be in any "top npm packages"
-          # primer; require at least one to be embedded as a string literal in the
-          # binary's rodata (the PRIMER_INDEX names survive release stripping). An
-          # EMPTY primer => empty index => none present. `grep -a` scans the binary
-          # as text, so this needs no `strings` binary (not guaranteed on the
-          # Windows runner). The patterns are distinctive enough not to collide
-          # with unrelated rodata.
-          # `typescript` and `@types/node` are NOT usable markers: crates/nub-cli/src/init.rs
-          # writes both literals into the `nub init` scaffold, so they sit in every
-          # binary's rodata whether the primer has 100 000 entries or zero — which
-          # is precisely the bug this gate exists to catch.
-          if grep -aqE 'react-dom|@babel/core' "$BIN"; then
-            echo "✓ $MATRIX_PLATFORM: binary embeds a non-empty primer"
-          else
-            echo "::error::$MATRIX_PLATFORM: binary does NOT embed a populated primer — the primer index is empty (the 0.0.37 cross-build bug). The 'Download metadata primer' step or the AUBE_* cross passthrough is broken."
-            exit 1
-          fi
 
       - name: Assemble platform package (single binary — bin/ only)
         shell: bash

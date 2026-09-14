@@ -44,7 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    # A cold from-source build of the whole nub + vendored-aube workspace under Nix
+    # A cold from-source build of the whole nub workspace under Nix
     # (no Swatinem cache) is far heavier than the old fetchurl repackage.
     timeout-minutes: 60
     steps:

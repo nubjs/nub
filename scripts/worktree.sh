@@ -14,10 +14,8 @@
 #   scripts/worktree.sh list              # list worktrees
 #   scripts/worktree.sh reap              # prune dead-session worktrees (metadata + empty dirs)
 #
-# SUBMODULES. `git worktree add` does NOT populate submodules. vendor/aube is
-# NO LONGER a submodule (plain in-tree files since Pattern B, 2026-06-22) — it
-# comes along with the checkout, build-critical and already present. The only
-# remaining submodule is tests/node-suite (the ENTIRE nodejs/node repo — huge,
+# SUBMODULES. `git worktree add` does NOT populate submodules. The only
+# submodule is tests/node-suite (the ENTIRE nodejs/node repo — huge,
 # compat-corpus only), left empty on purpose; init it by hand in a worktree if
 # you actually need the corpus.
 #
@@ -44,8 +42,6 @@ validate_name() {
 branch_exists() { git -C "$REPO_ROOT" rev-parse --verify --quiet "refs/heads/$1" >/dev/null 2>&1; }
 
 post_create() {
-  # vendor/aube is plain in-tree files now (Pattern B) — checked out by
-  # `git worktree add`, no submodule init needed.
   local wt="$1"
   echo "" >&2
   echo "worktree ready: $wt" >&2
@@ -72,9 +68,7 @@ remove() {
   local wt="${WORKTREE_BASE}/${name}"
   if [ -e "$wt" ]; then
     # We ALWAYS pass --force to git (to discard build artifacts), but first enforce
-    # the real safety check ourselves: NEVER lose work. vendor/aube is plain in-tree
-    # files now (Pattern B), so its edits are ordinary tracked changes caught by the
-    # single `git status` check below — no separate submodule-clone check needed.
+    # the real safety check ourselves: NEVER lose work.
     if [ "$force" != "--force" ]; then
       if [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]; then
         die "worktree '$name' has uncommitted changes; commit them first, or 'rm $name --force' to discard"

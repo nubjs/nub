@@ -14,7 +14,7 @@ Task playbooks ("skills") live as plain-markdown `SKILL.md` files under `.claude
 - **`ci-adhoc-test`** — run a macOS/Windows/Linux-arch probe on real CI with no PR (branch-scoped workflow). **`ci-watch`** — block on CI correctly.
 - **`release`** — cut a patch release end-to-end. **`address-issue`** — the full issue playbook. **`audit-thread`** / **`sandbox-pentest`** — parity-audit and adversarial-red-team methodology.
 - **`epic`** — run ONE session, in series, through work bigger than a context: a continuously-rewritten task list that is the only memory surviving compaction, driven by the standing prompt your harness re-delivers at rest and after compaction. No hooks to install — the loop is armed by the agent. Covers the part that decides whether such a loop converges or thrashes: how the task file is structured and what the standing prompt says.
-- Also **`benchmarking`**, **`pm-perf-tracing`**, **`aube-bump`**, **`soak`**.
+- Also **`benchmarking`**, **`pm-perf-tracing`**, **`soak`**.
 
 `.claude/skills/*` is this repo's own agent tooling; the "agent-agnostic, never overfit to Claude" rule governs copy that ships to *users'* agents, not these playbooks.
 

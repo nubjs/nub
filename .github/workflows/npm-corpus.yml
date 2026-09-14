@@ -17,7 +17,6 @@ on:
   push:
     branches: [main]
     paths:
-      - "vendor/aube/**"
       - "crates/nub-cli/src/pm_engine/**"
       - "crates/nub-cli/src/cli.rs"
       - "tests/npm-corpus/**"
@@ -27,7 +26,6 @@ on:
     types: [labeled]
     branches: [main]
     paths:
-      - "vendor/aube/**"
       - "crates/nub-cli/src/pm_engine/**"
       - "crates/nub-cli/src/cli.rs"
       - "tests/npm-corpus/**"

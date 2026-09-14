@@ -68,25 +68,23 @@ test("parseArgs reads the adhoc job and its script path", () => {
 for (const job of ["clippy", "test", "adhoc"]) {
   test(`jobScript(${job}) guards the prerequisites a fresh clone lacks`, () => {
     const s = jobScript(job, "fast");
-    assert.match(s, /command -v node/, "must fail loudly without node (else the primer silently empties)");
+    assert.match(s, /command -v node/, "must fail loudly without node (the root npm install needs it)");
     assert.match(s, /runtime\/addons\/nub-native\.node/, "must stage the addon placeholder (nub-core/build.rs panics without it)");
     assert.match(s, /npm install/, "must install node_modules");
   });
 }
 
-// Verified against .github/workflows/ci.yml: the Clippy job runs FOUR things. nub-native
+// Verified against .github/workflows/ci.yml: the Clippy job runs THREE things. nub-native
 // is its own workspace (panic=unwind cdylib) `exclude`d from the root, so a root-only
 // clippy goes green on code that CI then rejects — the exact --all-targets-shaped gap
 // AGENTS.md warns about.
 //
-// This test has twice pinned drift in place rather than catching it, so it is worth stating
+// This test has pinned drift in place rather than catching it, so it is worth stating
 // what it is FOR: every leg CI runs must appear here, or a remote gate reports green on code
 // CI rejects. It previously asserted the invocation WITHOUT `--profile fast` while claiming
 // to be verified against ci.yml, so the job built a second dependency graph under `dev` and
-// could not reuse the golden image's artifacts. And it asserted THREE legs after
-// `check-path-literals.sh` (ci.yml:237) had joined `check-env-reads.sh`, so that lint was
-// missing from every remote clippy run. And a THIRD time: it asserted FOUR legs while
-// ci.yml also runs `cd crates/nub-launcher && cargo clippy --locked --all-targets -- -D warnings
+// could not reuse the golden image's artifacts. It also missed a lint leg ci.yml had gained,
+// and later missed `cd crates/nub-launcher && cargo clippy --locked --all-targets -- -D warnings
 // && cargo build --locked && cargo test --locked` — its own workspace, invisible to the root gate, and the half
 // that ships inside every compiled artifact. Count the legs in ci.yml, do not trust this name.
 test("jobScript(clippy) reproduces every leg of the CI clippy gate", () => {
@@ -98,8 +96,6 @@ test("jobScript(clippy) reproduces every leg of the CI clippy gate", () => {
     /crates\/nub-launcher && cargo clippy --locked --all-targets -- -D warnings && cargo build --locked && cargo test --locked/,
     "ci.yml:258 gates nub-launcher, a separate workspace the root clippy never sees",
   );
-  assert.match(s, /tests\/brand-lint\/check-env-reads\.sh/);
-  assert.match(s, /tests\/brand-lint\/check-path-literals\.sh/, "ci.yml:237 runs a second brand lint");
 });
 
 // CI runs the WHOLE workspace (`cargo test`, not `-p nub-cli`) and builds the REAL addon

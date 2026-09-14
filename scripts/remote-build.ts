@@ -430,9 +430,8 @@ function syncSource(source: string, ip: string) {
 //     The placeholder only has to exist and hash — it is never loaded for a build/clippy/test.
 //     The same build.rs also requires the vendored runtime node_modules, which these gates
 //     opt out of below rather than vendor npm packages onto the builder.
-//   - Without `node` on PATH, aube-resolver/build.rs emits "shipping empty primer" and
-//     produces a SILENTLY DEGRADED binary. The golden image installs Node for this reason;
-//     this check fails loudly if a caller points at a hand-rolled box that lacks it.
+//   - Without `node` on PATH, the root `npm install` below cannot run. The golden image
+//     installs Node; this check fails loudly if a caller points at a hand-rolled box that lacks it.
 const PREPARE = `set -euo pipefail
 # sshd runs \`bash -s\` NON-interactively, so it reads neither /etc/profile nor (thanks to
 # Ubuntu's early \`case $- in *i*) ;; *) return\`) ~/.bashrc. rustup's PATH line therefore
@@ -443,20 +442,11 @@ const PREPARE = `set -euo pipefail
 # \`rm -rf ~/src\`, so a target dir INSIDE ~/src would be destroyed with it and every
 # builder would pay a full cold compile despite the image claiming otherwise.
 export CARGO_TARGET_DIR="$HOME/.cargo-shared-target"
-# DELIBERATELY NOT SET: AUBE_REQUIRE_PRIMER. aube-resolver/build.rs silently ships an EMPTY
-# primer when scripts/generate-primer.mjs is missing or fails, and release.yml sets that var
-# so a SHIPPED binary fails loud instead. That is a RELEASE concern: a lint/test gate ships
-# nothing, and ci.yml never sets it. Setting it here made every remote gate die in build.rs
-# with "popular package names are required, but …popular-top100000-v1.json was missing" —
-# unsatisfiably, because that JSON is gitignored (vendor/aube/.gitignore) so the
-# \`git ls-files\`-driven sync can never carry it, and regenerating it needs the networked
-# npm-registry crawl that only release.yml's dedicated \`primer\` job performs. This is why
-# the tool had never completed a clippy or test run.
 cd ~/src
 # A lint/test gate ships nothing, so it opts out of the vendored-runtime requirement exactly as
 # ci.yml's clippy job does. Same reasoning as the placeholder addon staged below.
 export NUB_ALLOW_INCOMPLETE_RUNTIME=1
-command -v node >/dev/null || { echo "remote-build: node missing on builder (would silently degrade the primer)" >&2; exit 3; }
+command -v node >/dev/null || { echo "remote-build: node missing on builder (the root npm install needs it)" >&2; exit 3; }
 mkdir -p runtime/addons
 [ -s runtime/addons/nub-native.node ] || printf 'placeholder' > runtime/addons/nub-native.node
 [ -d node_modules ] || npm install --no-audit --no-fund --loglevel=error
@@ -465,21 +455,17 @@ mkdir -p runtime/addons
 export function jobScript(job: string, profile: string, adhocB64 = "") {
   // Mirror .github/workflows/ci.yml EXACTLY. The root clippy does NOT cover nub-native —
   // it is its own workspace (panic=unwind cdylib), `exclude`d from the root — so a
-  // root-only run goes green on code CI then rejects. The brand lints are cheap greps.
+  // root-only run goes green on code CI then rejects.
   if (job === "clippy") {
     // `--profile fast` is part of mirroring ci.yml (lines 220/226), not an optimisation:
     // omitting it drove a whole SECOND dependency build under `dev`, so the bake's warm
     // `--profile fast` artifacts were never reused and every remote clippy was fully cold.
     //
-    // FOUR legs, not three: `check-path-literals.sh` (ci.yml:237) joined `check-env-reads.sh`
-    // and this mirror never picked it up, so a remote clippy could go green on a path-literal
-    // violation that CI then rejects — the same class of false green the nub-native leg exists
-    // to prevent. Keep this list in lockstep with ci.yml's clippy job.
+    // Keep this list in lockstep with ci.yml's clippy job: a leg missing here is a remote
+    // clippy that goes green on code CI then rejects.
     return `${PREPARE}cargo clippy --all-targets --all-features --profile fast -- -D warnings
 (cd crates/nub-native && cargo clippy --all-features --profile fast -- -D warnings)
-(cd crates/nub-launcher && cargo clippy --locked --all-targets -- -D warnings && cargo build --locked && cargo test --locked)
-tests/brand-lint/check-env-reads.sh
-tests/brand-lint/check-path-literals.sh`;
+(cd crates/nub-launcher && cargo clippy --locked --all-targets -- -D warnings && cargo build --locked && cargo test --locked)`;
   }
   // CI runs the WHOLE workspace, and builds the REAL addon first because the data-format
   // loader tests dlopen it — an 11-byte placeholder makes them fail on a malformed library

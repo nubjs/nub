@@ -11,7 +11,7 @@ name: Daily-driver smoke
 #
 # Why separate workflow: the fixture installs ~300 packages (Vite + React + vitest)
 # from the real registry. That's too heavy for the main ci.yml matrix. A path filter
-# fires this only when nub itself (crates/, runtime/, vendor/aube) changed.
+# fires this only when nub itself (crates/, runtime/) changed.
 
 on:
   push:
@@ -19,7 +19,6 @@ on:
     paths:
       - "crates/**"
       - "runtime/**"
-      - "vendor/aube/**"
       - "vendor/libsui/**"
       - "tests/daily-driver/**"
       - ".github/workflows/daily-driver.yml"
@@ -30,7 +29,6 @@ on:
     paths:
       - "crates/**"
       - "runtime/**"
-      - "vendor/aube/**"
       - "vendor/libsui/**"
       - "tests/daily-driver/**"
       - ".github/workflows/daily-driver.yml"
@@ -61,8 +59,8 @@ jobs:
       # Trunk writes, pull requests read. A cache saved from a PR ref is visible only to
       # that ONE pull request, yet it still counts against the repository-wide 10 GB
       # budget — so unconditional saving here evicted the shared trunk caches that every
-      # other job restores from. Same reasoning in native-deps, lockfile-roundtrip,
-      # aube-parity and verb-dispatch.
+      # other job restores from. Same reasoning in native-deps, lockfile-roundtrip
+      # and verb-dispatch.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}

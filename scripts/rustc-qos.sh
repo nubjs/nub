@@ -553,8 +553,8 @@ fi
 # NUB_BUILD_IDLE would otherwise leave its build looking idle the instant it
 # finished, and a waiter polling in the gap before cargo's next rustc would take
 # the slot from a build in full flight (the harness's idle scenario runs a
-# compile longer than its window for exactly this; `aube` alone outlasts the
-# 120s default under load).
+# compile longer than its window for exactly this; one large crate alone can outlast
+# the 120s default under load).
 # shellcheck disable=SC2329  # invoked from the traps below
 _release() {
   [ -n "$_slot" ] && rm -rf "$_slot" 2>/dev/null

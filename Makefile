@@ -166,8 +166,6 @@ verify:
 	NUB_ALLOW_INCOMPLETE_RUNTIME=1 NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" clippy --all-targets --all-features --profile fast -- -D warnings
 	@tests/build-slots/run.sh
 	(cd crates/nub-native && NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" clippy --all-features --profile fast -- -D warnings)
-	tests/brand-lint/check-env-reads.sh
-	tests/brand-lint/check-path-literals.sh
 	@tests/target-gc/run.sh
 	NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" test
 
