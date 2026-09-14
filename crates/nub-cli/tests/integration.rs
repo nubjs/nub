@@ -3371,9 +3371,8 @@ console.log(`shim-hardlink:${shimStat.dev === sourceStat.dev && shimStat.ino ===
 ///
 /// The inherited `NUB_*` slots are cleared before the spawn, because the probe
 /// can only count what the child SEES and the claim is about what nub INJECTS.
-/// Three of those names are sanctioned user config (`NUB_CACHE_DIR`,
-/// `NUB_CONCURRENCY`, `NUB_PRIMER_TTL`), so without the strip a developer who
-/// sets one fails a test they have not broken — as did the remote ad-hoc VM,
+/// `NUB_CACHE_DIR` is sanctioned user config, so without the strip a developer
+/// who sets it fails a test they have not broken — as did the remote ad-hoc VM,
 /// which hands every job a `NUB_BIN` and so went red on a clean box while this
 /// passed on the dev machine.
 #[test]

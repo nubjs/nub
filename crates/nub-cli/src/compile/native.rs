@@ -1639,8 +1639,8 @@ enum Classification {
 fn check_target(bytes: &[u8], path: &Path, target: &TargetPlatform) -> Result<()> {
     // Names only Nub's own `--os` / `--cpu` / `--libc` install flags, which work
     // in every project. The persistent `supportedArchitectures` setting is not
-    // offered: the engine reads it only from an incumbent pnpm or yarn's config,
-    // so for a nub, npm or bun project it is advice that cannot be followed.
+    // offered: it lives in `pnpm-workspace.yaml` in a pnpm project and in
+    // `nub.jsonc` `install.settings` in a nub project, so no one line fits both.
     let advice = "\x20\x20A native addon is machine code for one platform, and a compiled binary \
                   loads it\n\x20\x20from a real file at run time — there is no later step that \
                   could translate it. The\n\x20\x20install has to put the target's own platform \

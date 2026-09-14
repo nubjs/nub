@@ -38,7 +38,7 @@ pub(crate) const SELF_DISPATCHED_ENV: &str = "__NUB_SELF_DISPATCHED";
 /// The user-facing opt-out: a falsey value disables auto-delegation tree-wide and
 /// is inherited by every descendant. Positive-default spelling (modelled on
 /// `NODE_COMPAT`) — only an explicit falsey value turns the feature off. `NUB_*`
-/// is a sanctioned PM knob (`NUB_CACHE_DIR`/`NUB_CONCURRENCY`/`NUB_PRIMER_TTL`).
+/// is a sanctioned PM knob prefix, as `NUB_CACHE_DIR` is.
 pub(crate) const SELF_SHIM_ENV: &str = "NUB_SELF_SHIM";
 
 /// The PM mutating verbs that delegate to a pinned nub — the set whose deliverable

@@ -515,8 +515,8 @@ fn ensure_metadata_matches(
 
 /// Names only Nub's own `--os` / `--cpu` / `--libc` install flags, for the same
 /// reason [`super::native`]'s `check_target` does: the persistent
-/// `supportedArchitectures` setting is read only from an incumbent pnpm or
-/// yarn's config, so it is advice a nub, npm or bun project cannot follow.
+/// `supportedArchitectures` setting lives in a different file for each kind of
+/// project, so the flags are the one advice that reads the same everywhere.
 fn architecture_advice() -> &'static str {
     "\x20\x20Install a compatible optional package before compiling.\n\
      \n\x20\x20Select it with nub install --os <os> --cpu <cpu> --libc <libc>, then compile again.\n\
