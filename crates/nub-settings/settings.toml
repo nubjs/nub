@@ -639,7 +639,7 @@ npmShared = true
 
 [fetchTimeout]
 type = "int"
-default = "300000"
+default = "60000"
 sources.cli = ["fetch-timeout"]
 sources.env = ["npm_config_fetch_timeout", "NPM_CONFIG_FETCH_TIMEOUT"]
 sources.npmrc = ["fetch-timeout", "fetchTimeout"]
