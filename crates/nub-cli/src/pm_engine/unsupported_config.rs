@@ -1,31 +1,15 @@
-//! The cheap config-driven install wins.
-//!
-//! IMPLEMENT-wins — config that nub's existing machinery can honor once
-//! it's read. Rather than warn/error on these, nub mirrors the incumbent:
-//!   1. Dep-type selection — npm `.npmrc` `omit`/`include`, bun bunfig
-//!      `[install].production` → the engine's `DepSelection`
-//!      (`--prod`/`--dev`/`--no-optional` axis).
-//!   2. Frozen-from-config — bun bunfig in-file `frozenLockfile`, yarn
-//!      `enableImmutableInstalls`/`immutablePatterns` → the engine's frozen
-//!      mode (same path `--frozen-lockfile` takes).
-//!   3. `enableScripts: false` (yarn) → force a block-all-builds policy that
-//!      overrides even nub's curated default-trust floor.
-//!
-//! (`minimumReleaseAge` from bunfig is wired in [`super::bun_config`] — it maps
-//! to a synthetic `.npmrc` entry the settings registry already reads.)
+//! Scalar reads from the neutral `.npmrc` surface, for the settings nub reads
+//! itself rather than through the engine: the project's walk-up, optionally led
+//! by the user's `~/.npmrc`, with the nearest file winning.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nub_core::config_cache::MtimeCache;
 
-/// Per-process, mtime-validated cache of raw config-file CONTENTS keyed by path.
-/// The unsupported-config readers each opened the same `.yarnrc.yml` / `.npmrc`
-/// file once PER KEY (immutable, scripts, network, hardened; omit, include,
-/// legacy-peer-deps) — several reads of one file per command.
-/// This collapses them to a single read per `(path, mtime)`; the per-key parse
-/// then runs against the cached string. mtime validation keeps it stale-proof:
-/// any rewrite of the file bumps the mtime, the next lookup misses and re-reads.
+/// Per-process, mtime-validated cache of `.npmrc` contents keyed by path, so
+/// the keys one command reads share a single read per `(path, mtime)`. A
+/// rewrite of the file bumps the mtime, so the next lookup misses and re-reads.
 static CONFIG_TEXT_CACHE: MtimeCache<String> = MtimeCache::new();
 
 /// Read a config file's full contents through [`CONFIG_TEXT_CACHE`]. `None`
@@ -55,7 +39,7 @@ fn npmrc_paths_inner(root: &Path, include_global: bool) -> Vec<PathBuf> {
     paths.extend(dirs.into_iter().map(|d| d.join(".npmrc")));
     // Defensive: if the project walk-up reaches the home dir, that surfaces the
     // user `~/.npmrc` even in project-scoped mode (e.g. a package.json directly
-    // in $HOME). The FATAL scan must not see the global file, so drop it.
+    // in $HOME). A project-scoped read must not see the user's file, so drop it.
     if !include_global && let Some(home) = dirs_next::home_dir() {
         let global = home.join(".npmrc");
         paths.retain(|p| p != &global);

@@ -535,12 +535,10 @@ fn nub_profile_reads_no_branded_user_or_project_config_file() {
 /// carrying the embedded engine's brand. Two independent mechanisms broke this
 /// before, and the assertions below pin both.
 ///
-/// 1. `aube_util::embedder()` falls back to the *aube* profile whenever the
-///    identity OnceLock is unset, and identity was registered only inside the
-///    PM engine's preflight. `nub run` never reaches preflight, so it wrote the
-///    engine's lazy node-gyp shim to `<cache>/aube/tools/…` and handed that path
-///    to every script as `npm_config_node_gyp`. `main` now registers identity
-///    before anything else runs.
+/// 1. The engine's profile lookup fell back to the engine's own brand whenever
+///    nothing had registered nub's, and `nub run` never registered it, so it
+///    wrote the engine's lazy node-gyp shim to `<cache>/aube/tools/…` and handed
+///    that path to every script as `npm_config_node_gyp`.
 /// 2. On-disk marker/probe/temp names inside the engine were hardcoded to
 ///    `aube` rather than composed from the active profile, so they landed
 ///    brand-crossed even once identity was correct.

@@ -39,18 +39,6 @@ fn main() -> Result<()> {
     // process environment, which is only sound while nub is single-threaded.
     cli::normalize_invocation_environment();
 
-    // Embedder identity before any subsystem initialization. Every
-    // brand-scoped path the engine derives — cache root, data root, config
-    // home — flows from `aube_util::embedder()`, which falls back to the
-    // *aube* profile whenever the OnceLock is unset. Registering only inside
-    // `engine_brand_preflight` left that fallback live on every non-PM path,
-    // so `nub run` wrote the engine's node-gyp shim to `<cache>/aube/...` and
-    // exported that path to scripts as `npm_config_node_gyp`. Registering here
-    // makes the fallback structurally unreachable in the nub binary rather
-    // than fixing one call site at a time; preflight still re-registers
-    // (set-once, idempotent) so pm_engine stays self-contained under test.
-    pm_engine::identity::register();
-
     // Engine-aware subscriber: surfaces the embedded engine's warning
     // channel (brand-rewritten) by default; RUST_LOG still owns the
     // filter when set. See pm_engine::log.

@@ -28,8 +28,8 @@
 //! Vendoring pins one dataset per nub release and makes each refresh a
 //! reviewable commit — `node scripts/sync-package-extensions.mjs`.
 //!
-//! Refreshing is safe for existing projects: this feeds
-//! `EngineContext::bundled_package_extensions`, which is read only when
+//! Refreshing is safe for existing projects: this feeds the engine's
+//! compatibility rules (`Embedder::compat_package_extensions`), which are read only when
 //! resolving a package and never by the lockfile `packageExtensionsChecksum`,
 //! so a bump cannot drift a lockfile or abort a frozen install.
 

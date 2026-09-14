@@ -840,12 +840,10 @@ fn config_set_under_nub_identity_routes_scalar_to_neutral_npmrc() {
 }
 
 /// An UNKNOWN declared PM name at a high major must NOT leak a pnpm-branded
-/// file. `resolve_config_surface` maps an unknown declared tool (`deno`, …) to
-/// the pnpm-shaped surface (conservative), so a `packageManager: "deno@11.0.0"`
-/// reaches the scalar router with `pnpm_incumbent = true` — but the version
-/// gate only applies to a name of literally `pnpm`, so the major-11 here is
-/// ignored and the scalar lands in the neutral `.npmrc`, never
-/// `pnpm-workspace.yaml`. (Regression guard for the discarded-name bug.)
+/// file. The version gate only applies to a name of literally `pnpm`, so the
+/// major 11 in `packageManager: "deno@11.0.0"` is ignored and the scalar lands
+/// in the neutral `.npmrc`, never `pnpm-workspace.yaml`. (Regression guard for
+/// the discarded-name bug.)
 #[test]
 fn config_set_under_unknown_pm_name_at_high_major_does_not_leak_yaml() {
     const UNKNOWN_PM_HIGH_MAJOR: &str =

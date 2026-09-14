@@ -460,11 +460,8 @@ fn project_scalar_home(pnpm_incumbent: bool) -> config_model::ScalarHome {
         return config_model::ScalarHome::Npmrc;
     }
     // The version may only select the pnpm version-gated read when the
-    // declared name is LITERALLY "pnpm". `resolve_config_surface` maps an
-    // UNKNOWN declared tool name (e.g. `deno`, `vlt`) to `PnpmOrFresh` too
-    // (conservative — keeps the full pnpm-compat surface live), so without this
-    // name-gate a `packageManager: "deno@11.0.0"` would feed major 11 into the
-    // pnpm gate and read pnpm's global config (brand boundary). Gating the
+    // declared name is LITERALLY "pnpm": without this name-gate a
+    // `packageManager: "deno@11.0.0"` would feed major 11 into the pnpm gate and read pnpm's global config (brand boundary). Gating the
     // version on `name == "pnpm"` means any non-pnpm / unknown declared name —
     // and a genuine fresh / lockfile-only pnpm project, which has NO declaration
     // (name `None`) — resolves to major `None` → the `.npmrc` model.
@@ -611,7 +608,6 @@ fn dispatch_config(parsed: ConfigArgs) -> Result<i32> {
         // the project `.npmrc`; maps refused. A pnpm project's `config set` is
         // pnpm's own command and never reaches here.
         Some(ConfigCommand::Set(set)) => {
-            super::engine_brand_preflight();
             if global {
                 // Global scope has no router, so it repeats the refusals it
                 // needs — the same shape as the map refusal below. A setting

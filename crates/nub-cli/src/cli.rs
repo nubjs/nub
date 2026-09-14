@@ -10118,10 +10118,7 @@ fn run_pm(args: &[String]) -> Result<i32> {
         // Read another package manager's lockfile once and write nub's own in
         // its place. `nub import` is the same conversion without the removal,
         // because that is what pnpm's own verb does.
-        "migrate" => {
-            crate::pm_engine::engine_brand_preflight();
-            crate::pm_engine::migrate::run_pm_migrate(&cwd)
-        }
+        "migrate" => crate::pm_engine::migrate::run_pm_migrate(&cwd),
         // Install / remove the PM shims (spec: `package-manager-shims` (no such document)).
         "shim" => run_pm_shim_install(&args[1..]),
         "unshim" => run_pm_unshim(),
@@ -10415,10 +10412,7 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
     // Refuse a conversion the target format can't faithfully represent
     // (today: `use yarn` over a `workspace:`-protocol graph) BEFORE touching
     // the manifest — a half-switch that pins yarn but writes no lockfile is
-    // exactly the silent-broken state we must avoid. The brand preflight must
-    // be registered first: the source parse reads workspace config, whose
-    // names freeze on first read.
-    crate::pm_engine::engine_brand_preflight();
+    // exactly the silent-broken state we must avoid.
 
     let (version, write) = resolve_provision_declare(name, spec, cwd, true)?;
 
@@ -10461,9 +10455,6 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
             }
         }
         AlignPlan::Migrate { from, remove } => {
-            // The migration reads project state, so the brand preflight must
-            // be registered first (workspace-yaml names freeze on first read).
-            crate::pm_engine::engine_brand_preflight();
             let written = crate::pm_engine::migrate::migrate_lockfile(&root, &from, name)?;
             println!(
                 "  {}: written (migrated from {})",
@@ -13665,14 +13656,6 @@ mod tests {
         use std::sync::Mutex;
         static CWD_LOCK: Mutex<()> = Mutex::new(());
         let _g = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // `run_pm` (the usual `f` here) drives `engine_brand_preflight`, which
-        // writes the process-global engine context (registers `NUB`, sets
-        // `read_branded_pnpm_config` from `dir`). Serialize against tests that
-        // READ that context so we never flip it mid-read. See
-        // `pm_engine::ENGINE_GLOBAL_LOCK`.
-        let _ctx = crate::pm_engine::ENGINE_GLOBAL_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let prev = env::current_dir().unwrap();
         env::set_current_dir(dir).unwrap();
         let out = f();
@@ -13717,14 +13700,6 @@ mod tests {
 
     #[test]
     fn excluded_engine_verbs_error_with_honest_per_verb_messages() {
-        // Dispatching these verbs runs the family `run_verb` path, which calls
-        // `engine_brand_preflight` and writes the process-global engine context
-        // (registering `NUB`, flipping `read_branded_pnpm_config` from this
-        // process's cwd). Serialize with the context-reading tests so it can't
-        // race their reads. See `pm_engine::ENGINE_GLOBAL_LOCK`.
-        let _guard = crate::pm_engine::ENGINE_GLOBAL_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
         // The deliberately-excluded verbs must fail loud with a message that
         // names the verb's actual status — not the generic "wired in phase
         // Surface" stub text (everything destined for wiring IS wired; these

@@ -35,9 +35,8 @@ use std::ffi::OsString;
 ///
 /// Sub-minute values round UP, never down: the engine setting is whole minutes,
 /// and `30s` collapsing to `0` would SILENTLY DISABLE the gate instead of
-/// tightening it. Same rule, and the same reason, as the bunfig seconds→minutes
-/// conversion in [`super::bun_config`]. A literal `0` still means zero — that is
-/// the documented "turn it off" value, not a rounding artifact.
+/// tightening it. A literal `0` still means zero — that is the documented "turn
+/// it off" value, not a rounding artifact.
 fn parse_release_age_minutes(raw: &str) -> Result<u64, String> {
     let s = raw.trim();
     if let Ok(minutes) = s.parse::<u64>() {
@@ -244,8 +243,7 @@ mod tests {
     }
 
     /// Sub-minute values must round UP. Truncating `30s` to `0` would turn a
-    /// request to TIGHTEN the gate into silently disabling it — the same trap
-    /// the bunfig seconds→minutes conversion guards against.
+    /// request to TIGHTEN the gate into silently disabling it.
     #[test]
     fn sub_minute_release_age_rounds_up_so_it_never_disables_the_gate() {
         assert_eq!(parse_release_age_minutes("30s"), Ok(1));
