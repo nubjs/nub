@@ -187,7 +187,7 @@ fi
 if [[ "$install_dir" == "$default_install_dir" ]]; then
     rm -rf "${install_dir:?}/bin" "${install_dir:?}/runtime"
 else
-    rm -f "${bin_dir:?}/nub" "${bin_dir:?}/nubx"
+    rm -f "${bin_dir:?}/nub" "${bin_dir:?}/nubx" "${bin_dir:?}/nubr"
 fi
 tar -xzf "$tmp_archive" -C "$install_dir" ||
     error "Failed to extract nub archive from: $url"
@@ -195,12 +195,15 @@ tar -xzf "$tmp_archive" -C "$install_dir" ||
 [[ -f "$exe" ]] || error "Archive did not contain bin/nub"
 chmod +x "$exe" || error "Failed to set permissions on $exe"
 
-# `nubx` is the same binary as `nub`, dispatched on argv[0] (cli.rs reads
-# args_os()[0].file_stem(): "nubx" -> exec). The release archive ships only
-# bin/nub, so create the nubx alias as a relative symlink alongside it. `-f`
-# makes this idempotent across reinstall/upgrade and harmless if a future
-# archive ever ships its own nubx. Relative target keeps it valid if ~/.nub moves.
-ln -sf nub "$bin_dir/nubx" || error "Failed to create nubx symlink in $bin_dir"
+# `nubx` and `nubr` are the same binary as `nub`, dispatched on argv[0] (cli.rs
+# reads args_os()[0].file_stem(): "nubx" -> exec, "nubr" -> the unified runner).
+# The release archive ships only bin/nub, so create each alias as a relative
+# symlink alongside it. `-f` makes this idempotent across reinstall/upgrade and
+# harmless if a future archive ever ships its own aliases. Relative target keeps
+# it valid if ~/.nub moves.
+for alias in nubx nubr; do
+    ln -sf nub "$bin_dir/$alias" || error "Failed to create $alias symlink in $bin_dir"
+done
 
 # `nub pm shim` HARDLINKS ~/.nub/shims/{npm,npx,…} at the nub binary, so replacing
 # bin/nub above left every one of them pinned to the previous version's inode. That
@@ -284,7 +287,7 @@ cat > "$install_dir/.nub-receipt" <<'RECEIPT' || error "Failed to write install 
 # in-place self-update for a non-default install location).
 RECEIPT
 
-success "Installed nub ${display_version} (with nubx) to $exe"
+success "Installed nub ${display_version} (with nubx and nubr) to $exe"
 
 # --- PATH setup ---
 
