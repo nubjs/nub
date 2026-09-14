@@ -10592,3 +10592,40 @@ fn install_help_does_not_advertise_unapproved_gvs_flags() {
         );
     }
 }
+
+#[test]
+fn a_failing_verb_in_a_foreign_lockfile_repo_still_points_at_the_migration() {
+    // `ci` is headless, so in a repo carrying only another package manager's
+    // lockfile it cannot do anything but fail — the engine reads no
+    // package-lock.json. That makes it the verb where the migrate hint matters
+    // most, and it was the one verb that never printed it: the hint lived only
+    // on the success path, so the user who most needed the remedy saw the bare
+    // error. Guarded here because nothing else covers the failure arm.
+    let project = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        project.path().join("package.json"),
+        "{\"name\":\"foreign\",\"version\":\"1.0.0\"}\n",
+    )
+    .expect("write manifest");
+    std::fs::write(
+        project.path().join("package-lock.json"),
+        "{\"name\":\"foreign\",\"version\":\"1.0.0\",\"lockfileVersion\":3,\"packages\":{}}\n",
+    )
+    .expect("write npm lockfile");
+
+    let out = Command::new(nub_binary())
+        .args(["ci"])
+        .current_dir(project.path())
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("failed to spawn nub");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a headless ci with no nub lockfile must fail; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("nub pm migrate"),
+        "the failure must name the migration that fixes it; stderr:\n{stderr}"
+    );
+}

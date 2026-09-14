@@ -67,7 +67,7 @@ pub(crate) fn record(cwd: &Path, code: i32) {
 /// success gate is unit-testable without touching that global. A non-zero exit
 /// records nothing — a failed install must not stamp the tree as built for this
 /// engine — and an unresolved version has nothing to record.
-fn record_for(cwd: &Path, code: i32, version: Option<&str>) {
+pub(crate) fn record_for(cwd: &Path, code: i32, version: Option<&str>) {
     if code != 0 {
         return;
     }

@@ -416,6 +416,10 @@ fn session_prologue(cwd: &Path) -> Result<()> {
     apply_lifecycle_augmentation(cwd)
 }
 
+/// The Node the lifecycle augmentation resolved for this run, for the install
+/// stamp to name. Set once, before the engine runs.
+static LIFECYCLE_NODE_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 /// Put nub's runtime augmentation on THIS process's environment, so every
 /// lifecycle script the engine spawns inherits it.
 ///
@@ -439,6 +443,11 @@ fn apply_lifecycle_augmentation(cwd: &Path) -> Result<()> {
         return Ok(());
     };
     let node = discovered.unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
+    // The engine keys its build artifacts to whichever Node the lifecycle
+    // scripts run under, so the install stamp has to name THIS one. Published
+    // here rather than re-discovered at record time, which could name a
+    // different Node and stamp a lie.
+    let _ = LIFECYCLE_NODE_VERSION.set(node.version.to_string());
     let mut runtime = crate::project_config::runtime_config()?;
     let runtime_node_options = crate::cli::lifecycle_node_options(&mut runtime, &node)?;
     let runtime_json = crate::cli::runtime_config_json(&runtime)?;
@@ -532,6 +541,12 @@ pub(crate) fn run(argv: Vec<std::ffi::OsString>) -> Result<i32> {
     // the install is about to write nub's lockfile, after which no project
     // still looks virgin.
     let stamp = project_is_virgin(embedder, command.as_deref(), &cwd);
+    // Asked here too, while `command` is still in hand: the stamp below records
+    // that this tree was materialized, so it rides the resolving verbs.
+    let records_install_engine = embedder.program_name != Embedder::PNPM.program_name
+        && command
+            .as_deref()
+            .is_some_and(|name| RESOLVING_COMMANDS.contains(&name));
     // Also asked before, and for a third reason: the answer is a COMPARISON
     // against the lockfile as it stands now.
     let legacy = legacy_lockfile_pending(embedder, command.as_deref(), &cwd);
@@ -543,6 +558,17 @@ pub(crate) fn run(argv: Vec<std::ffi::OsString>) -> Result<i32> {
             }
             if stamp {
                 super::install_family::stamp_virgin_dev_engines(&cwd);
+            }
+            // Which Node this tree's native addons were built for, so a later
+            // run under a different Node major can notice and reinstall
+            // (`verify_deps`). Nub identity only: the stamp is nub's own file
+            // and a pnpm-incumbent tree must look exactly as pnpm left it.
+            if records_install_engine {
+                crate::install_engine::record_for(
+                    &cwd,
+                    0,
+                    LIFECYCLE_NODE_VERSION.get().map(String::as_str),
+                );
             }
             if let Some(pending) = legacy {
                 pending.retire(embedder, &cwd);
@@ -564,6 +590,18 @@ pub(crate) fn run(argv: Vec<std::ffi::OsString>) -> Result<i32> {
                 } else {
                     eprintln!("{}", rebrand(&rendered, embedder));
                 }
+            }
+            // The same hint the success arm prints, because a FAILURE is where
+            // it matters most: `ci` is headless, so in a repo carrying only
+            // another package manager's lockfile it cannot do anything but
+            // fail, and the migration is the whole remedy. Printing it only on
+            // success meant the one verb that can never succeed there was also
+            // the one that never said why. After the error, so it reads as the
+            // way out rather than as part of the diagnosis; `pending` is
+            // already `None` under pnpm identity, whose stderr must stay
+            // byte-identical to real pnpm's.
+            if let Some(foreign) = pending {
+                eprintln!("{}", super::migrate::migration_hint(&foreign));
             }
             Ok(1)
         }
