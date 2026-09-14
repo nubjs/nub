@@ -44,7 +44,7 @@ const DEFAULT_ENGINE_LEVEL: &str = "warn";
 /// just the command layer. `level` is a tracing level token (`warn`,
 /// `error`, `info`, `debug`) or `off`.
 fn engine_directives(level: &str) -> String {
-    const CRATES: [&str; 11] = [
+    const CRATES: [&str; 10] = [
         "aube",
         "aube_registry",
         "aube_resolver",
@@ -53,7 +53,6 @@ fn engine_directives(level: &str) -> String {
         "aube_linker",
         "aube_manifest",
         "aube_scripts",
-        "aube_workspace",
         "aube_settings",
         "aube_util",
     ];

@@ -171,7 +171,6 @@ aube = { path = "../../vendor/aube/crates/aube", default-features = false, featu
 ] }
 # `EffectiveFilter` for the workspace-aware engine verbs (`nub publish
 # --filter/-r`); same type aube's own dispatch passes to publish/list/etc.
-aube-workspace = { path = "../../vendor/aube/crates/aube-workspace" }
 # Settings metadata (`meta::SETTINGS`): drives the npmrc-first config write
 # routing in pm_engine/store_config_family.rs (npmShared flag, alias
 # spellings, scalar-vs-map types).
@@ -215,6 +214,7 @@ pnpm-diagnostics = { git = "https://github.com/nubjs/pnpm", rev = "9eb705b410cc5
 pnpm-lockfile = { git = "https://github.com/nubjs/pnpm", rev = "9eb705b410cc5d551c3cbc56117d8a5cd523626f" }
 pnpm-package-manager = { git = "https://github.com/nubjs/pnpm", rev = "9eb705b410cc5d551c3cbc56117d8a5cd523626f" }
 pnpm-store-dir = { git = "https://github.com/nubjs/pnpm", rev = "9eb705b410cc5d551c3cbc56117d8a5cd523626f" }
+pnpm-workspace = { git = "https://github.com/nubjs/pnpm", rev = "9eb705b410cc5d551c3cbc56117d8a5cd523626f" }
 # Same major + `fancy` as vendor/aube — present.rs renders the engine's
 # miette::Report exactly as aube's own cli_main would, then rewrites it.
 miette = { version = "7", features = ["fancy"] }

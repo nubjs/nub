@@ -2628,14 +2628,13 @@ fn strip_yarnrc_value(rest: &str) -> &str {
 /// Every workspace member's directory under `root`, or none when `root` is not
 /// a workspace.
 ///
-/// The one place the member walk is spelled, so the walk can be swapped for the
-/// engine's own (`pnpm_workspace::find_workspace_projects`) in a single edit
-/// when the vendored engine goes. Callers that need the manifests read them
-/// through [`cached_aube_manifest`], which is mtime-cached, so sharing one
-/// discovery across several scans costs nothing beyond the walk itself.
+/// The one place the member walk is spelled. Callers that need the manifests
+/// read them through [`cached_aube_manifest`], which is mtime-cached, so
+/// sharing one discovery across several scans costs nothing beyond the walk
+/// itself.
 pub(crate) fn workspace_members(root: &Path) -> Vec<PathBuf> {
-    // Memoized because the walk underneath is not: `find_workspace_packages`
-    // globs the tree afresh on every call, and two callers now ask the same
+    // Memoized because the walk underneath is not: the engine's walk globs
+    // the tree afresh on every call, and two callers now ask the same
     // question per install — the embedder defaults and the settings merge.
     // Membership cannot change inside one process, so the first answer for a
     // root is the answer. Keyed by the root rather than cached in a single
@@ -2654,12 +2653,64 @@ pub(crate) fn workspace_members(root: &Path) -> Vec<PathBuf> {
     {
         return hit.clone();
     }
-    let found = aube_workspace::find_workspace_packages(root).unwrap_or_default();
+    let found = discover_workspace_members(root);
     MEMBERS
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(root.to_path_buf(), found.clone());
     found
+}
+
+/// Expand the project's member globs through the engine's own walk.
+///
+/// The engine unconditionally reports the workspace root as a project of its
+/// own (pnpm/pnpm#1986), which this drops: every caller here already takes the
+/// root as a separate argument and scans it in its own right, so letting it
+/// through would have each of them read the root manifest twice.
+fn discover_workspace_members(root: &Path) -> Vec<PathBuf> {
+    let patterns = workspace_patterns(root);
+    // An explicit empty pattern list means "the root alone" to the engine,
+    // which after the filter above is no members at all — but the walk still
+    // costs a full glob of the tree to arrive there, so stop here instead.
+    if patterns.is_empty() {
+        return Vec::new();
+    }
+    let opts = pnpm_workspace::FindWorkspaceProjectsOpts {
+        patterns: Some(patterns),
+    };
+    let Ok(projects) = pnpm_workspace::find_workspace_projects(root, &opts) else {
+        return Vec::new();
+    };
+    let mut members: Vec<PathBuf> = projects
+        .into_iter()
+        .map(|project| project.root_dir)
+        .filter(|dir| dir != root)
+        .collect();
+    members.sort_unstable();
+    members
+}
+
+/// The member globs to expand under `root`, chosen by the project's identity.
+///
+/// The engine takes its patterns from the caller rather than discovering them
+/// itself, and that is what lets the SOURCE obey the brand boundary. The
+/// vendored engine's walk read `pnpm-workspace.yaml` first whatever the
+/// project's identity, so a nub project that happened to carry one took its
+/// members from a pnpm-named file — the one behavior this swap deliberately
+/// changes. Under pnpm the precedence is pnpm's own and unchanged.
+fn workspace_patterns(root: &Path) -> Vec<String> {
+    if project_identity::detect(root) == project_identity::ProjectIdentity::Pnpm {
+        // A malformed workspace manifest reads as absent here rather than as
+        // an error: the engine raises it on the install path with its own
+        // diagnostic and its own source span, and a membership scan that
+        // several read-only surfaces call is not the place to surface it.
+        if let Ok(Some(manifest)) = pnpm_workspace::read_workspace_manifest(root) {
+            return pnpm_workspace::workspace_package_patterns(&manifest);
+        }
+    }
+    cached_aube_manifest(&root.join("package.json"))
+        .and_then(|pkg| pkg.workspaces.as_ref().map(|w| w.patterns().to_vec()))
+        .unwrap_or_default()
 }
 
 /// The declared framework, if any, whose resolver cannot reach a store shared
@@ -5032,6 +5083,61 @@ mod tests {
 
     fn root_manifest(root: &Path) -> aube_manifest::PackageJson {
         aube_manifest::PackageJson::from_path(&root.join("package.json")).unwrap()
+    }
+
+    /// The member walk runs on the engine, which reports the workspace root as
+    /// a project of its own. Every caller takes the root separately, so
+    /// `discover_workspace_members` drops it — and a member that a pattern does
+    /// match is still returned.
+    #[test]
+    fn the_member_walk_returns_members_without_the_workspace_root() {
+        let d = workspace(&[
+            ("package.json", r#"{"name":"root","workspaces":["pkgs/*"]}"#),
+            ("pkgs/a/package.json", r#"{"name":"pkg-a"}"#),
+            ("pkgs/b/package.json", r#"{"name":"pkg-b"}"#),
+        ]);
+        let members = discover_workspace_members(d.path());
+        let names: Vec<_> = members
+            .iter()
+            .map(|m| m.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(names, ["a", "b"], "members: {members:?}");
+    }
+
+    /// The pattern SOURCE is identity-gated, which is the whole reason nub
+    /// passes patterns to the engine instead of letting it discover them. A
+    /// project declaring nub is nub's however many pnpm-named files sit beside
+    /// it, so its members come from the neutral `workspaces` field alone — the
+    /// vendored engine read `pnpm-workspace.yaml` here whatever the identity.
+    #[test]
+    fn a_nub_project_takes_no_members_from_pnpm_workspace_yaml() {
+        // One tree, two declarations: the members live only in the pnpm-named
+        // file, so whether they are found is entirely a question of identity.
+        let tree = |declared: &str| {
+            workspace(&[
+                (
+                    "package.json",
+                    &format!(r#"{{"name":"root","packageManager":"{declared}"}}"#),
+                ),
+                ("pkgs/a/package.json", r#"{"name":"pkg-a"}"#),
+                ("pnpm-workspace.yaml", "packages:\n  - pkgs/*\n"),
+            ])
+        };
+
+        let nub = tree("nub@0.9.0");
+        let found = discover_workspace_members(nub.path());
+        assert!(
+            found.is_empty(),
+            "a nub project must not read pnpm-workspace.yaml: {found:?}"
+        );
+
+        // The control: the identical tree under pnpm, where reading that file
+        // is exactly what parity requires. Without it, the assertion above
+        // would pass just as well if the walk were simply broken.
+        let pnpm = tree("pnpm@12.4.1");
+        let found = discover_workspace_members(pnpm.path());
+        assert_eq!(found.len(), 1, "pnpm must read its own file: {found:?}");
+        assert_eq!(found[0].file_name().unwrap(), "a");
     }
 
     #[test]
