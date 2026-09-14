@@ -530,18 +530,16 @@ Emit the design-type metadata used by decorator-based dependency injection and O
 
 ## `install`
 
-The install block takes four fields. Its layout fields apply in every project; its release-age fields apply only when Nub is the project's package manager.
+The install block takes four fields: `linker` and `publicHoist` for `node_modules` layout, and `minimumReleaseAge` with `minimumReleaseAgeExclude` for the version cooling window.
 
-| behavior | fields | where it applies |
-| --- | --- | --- |
-| `node_modules` layout | `linker`, `publicHoist` | Every project, including npm, pnpm, Yarn, and Bun incumbents |
-| Version cooling window | `minimumReleaseAge`, `minimumReleaseAgeExclude` | Nub-identity projects |
-
-Under an npm, pnpm, Yarn, or Bun incumbent, Nub names each release-age field it skipped.
+The block applies when Nub is the project's package manager. A project that already belongs to pnpm takes its install settings from pnpm's own configuration, so an `install` block there is a contradiction rather than a setting to skip, and Nub refuses the command instead of picking one of the two:
 
 ```text
-nub: `install.minimumReleaseAge` ignored — it is nub-native install config, and this project resolves as pnpm. Run `nub pm use nub` to make nub the project's package manager.
+Error: /path/to/nub.jsonc sets an `install` block, but this project already belongs to pnpm.
+A pnpm project takes its install settings from pnpm's own configuration, so the block would be ignored. Move those settings into pnpm-workspace.yaml, or remove pnpm's files to make this a nub project.
 ```
+
+The refusal covers the whole block, layout fields included.
 
 ### `install.linker`
 
