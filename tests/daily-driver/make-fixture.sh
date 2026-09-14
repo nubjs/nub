@@ -52,6 +52,14 @@ cat > package.json <<'JSON'
 }
 JSON
 
+# pnpm 12 fails an install whose dependency build scripts are undecided, and
+# esbuild (under Vite) has one. The project records the decision, as a real app
+# approving it would.
+cat > pnpm-workspace.yaml <<'YAML'
+allowBuilds:
+  esbuild: true
+YAML
+
 cat > tsconfig.json <<'JSON'
 {
   "compilerOptions": {

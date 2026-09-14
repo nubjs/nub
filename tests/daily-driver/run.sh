@@ -63,7 +63,8 @@ cd "$FIXTURE"
 
 # ── 1. Install ────────────────────────────────────────────────────────────────
 echo "── install ───────────────────────────────────────────────────────────────"
-install_out="$("$NUB" install 2>&1)"
+install_out="$("$NUB" install 2>&1)" \
+  || fail install "nub install exited nonzero. Output: $install_out"
 [ -d node_modules/vite ] || fail install "node_modules/vite not present after install. Output: $install_out"
 [ -d node_modules/react ] || fail install "node_modules/react not present after install. Output: $install_out"
 # The fixture pins the version nub embeds, so the engine runs IN-PROCESS under
