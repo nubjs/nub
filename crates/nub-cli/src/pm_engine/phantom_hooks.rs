@@ -115,6 +115,14 @@ impl MaterializePolicy for EjectPhantomImporters {
         keep.extend(self.flagged(resolved));
         grow_to_importers(resolved, keep)
     }
+
+    /// Everything that changes this policy's answer for an unchanged graph —
+    /// the scanner, the curated list, the eject algorithm and the internal A/B
+    /// switch — so the engine re-links a warm tree the previous answer shaped
+    /// instead of reporting it up to date.
+    fn fingerprint(&self) -> Option<String> {
+        Some(dynamic_phantom::settings_fingerprint())
+    }
 }
 
 impl EjectPhantomImporters {

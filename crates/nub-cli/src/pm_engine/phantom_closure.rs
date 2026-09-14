@@ -106,15 +106,13 @@ pub(super) const NUB_PROJECT_CONTEXT_EJECT: &[&str] = &[
 ];
 
 /// Stable, order-independent fingerprint token for the curated eject list, folded
-/// into the install-state settings hash via [`crate::dynamic_phantom::settings_token`]
-/// (the `extra_settings_fingerprint` embedder hook). Load-bearing for warm/upgrade
-/// trees (nub#457): the curated seed is injected INSIDE the expand hook, after
-/// aube's `disk_materialize_packages` settings fold, so without this token an
-/// existing install — one from a nub predating the list, or after any FUTURE list
-/// edit — keeps an identical `settings_hash`, and aube's existence-gated fast path
-/// accepts the stale symlinked tree and skips the relink, leaving #457 unfixed.
-/// Folding this token forces the relink that converts the stale symlink to an
-/// ejected dir. Hashing the SORTED names makes the token move on any add/remove and
+/// into the eject policy's fingerprint via [`crate::dynamic_phantom::settings_token`].
+/// Load-bearing for warm/upgrade trees (nub#457): the list is nub's own, so no
+/// engine setting moves when it changes, and without this token an existing
+/// install — one from a nub predating the list, or after any FUTURE list edit —
+/// passes the engine's repeat-install fast path and keeps the stale symlinked
+/// tree. Folding this token forces the relink that converts the stale symlink to
+/// an ejected dir. Hashing the SORTED names makes the token move on any add/remove and
 /// hold steady on a pure reorder; FNV-1a keeps it dependency-free and stable across
 /// platforms/releases (std's `DefaultHasher` is not guaranteed stable across Rust
 /// versions).

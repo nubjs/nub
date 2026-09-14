@@ -74,38 +74,21 @@ fn eject_disabled(raw: Option<&str>) -> bool {
     )
 }
 
-/// The effective phantom-eject setting as a stable token, folded into the
-/// vendored engine's install-state `settings_hash` through its embedder
-/// `extra_settings_fingerprint` hook (that engine's
-/// [`crate::pm_engine::identity::NUB`] profile points the hook here). The setting
-/// is nub's own rather than the engine's, so it cannot ride the resolved-settings
-/// hash — this seam is what makes it invalidate the warm tree.
+/// The effective phantom-eject setting as a stable token: the fingerprint the
+/// eject policy hands the engine ([`crate::pm_engine::phantom_hooks`]). The
+/// engine records it in the workspace state beside the settings its repeat-install
+/// fast path compares, so a changed token makes a warm tree re-link instead of
+/// reporting "Already up to date". The setting is nub's own rather than the
+/// engine's, so no engine setting can carry it.
 ///
-/// ⛔ **INERT UNDER THE pnpm ENGINE, WHICH IS THE ONE THAT RUNS INSTALLS.** That
-/// engine's `Embedder` has no `extra_settings_fingerprint` field, so nothing
-/// calls this and none of the invalidation described below happens: bumping
-/// [`PHANTOM_SCANNER_VERSION`] or [`GVS_EJECT_ALGO_VERSION`] re-scans content
-/// into a new sidecar path but no longer forces the warm tree to re-link, so an
-/// existing install keeps serving the old shape. The rest of this comment
-/// describes the mechanism as it works on the vendored engine, and is kept
-/// because whatever replaces the hook has to reproduce it. Choosing that
-/// replacement is its own migration — it needs a seam on the pnpm side — so it
-/// is deliberately not decided here.
-///
-/// For users the token is CONSTANT-ON: the dead on/off toggle is gone, so it folds
-/// [`PHANTOM_SCANNER_VERSION`] plus the curated-eject list token
-/// ([`crate::pm_engine::phantom_closure::project_context_eject_token`]). The scanner
-/// fold makes a scanner-logic bump COMPLETE rather than a half-fix — the bump
-/// re-scans content into a new sidecar path, but on a warm tree with an unchanged
-/// lockfile aube would SKIP the link phase and never apply the improved verdict;
-/// changing this token forces the link to re-run so the consumer picks up the
-/// new-version sidecars. The curated-eject fold does the same for the #457 list: its
-/// members are injected inside the expand hook, past aube's `disk_materialize_packages`
-/// settings fold, so folding the list token here is what invalidates a warm tree on
-/// the initial ship AND on any future list edit (else the stale symlinked shape is
-/// accepted and #457 stays unfixed on existing installs). It also folds
-/// [`GVS_EJECT_ALGO_VERSION`], which covers the third way a warm tree goes stale:
-/// the plan is unchanged but the LINKER writes it differently (nub#711).
+/// For users the token is constant, and each part covers one way a warm tree with
+/// an unchanged lockfile goes stale. [`PHANTOM_SCANNER_VERSION`]: a bump re-scans
+/// content into a new sidecar path, but only a re-link applies the new verdict.
+/// The curated-eject list token
+/// ([`crate::pm_engine::phantom_closure::project_context_eject_token`]): an edit
+/// to the list changes which packages are seeded, on the initial ship and on every
+/// later edit (#457). [`GVS_EJECT_ALGO_VERSION`]: the plan is unchanged but the
+/// linker writes it differently (nub#711).
 ///
 /// The token still branches on [`enabled`] SOLELY for the internal A/B seam: when
 /// an agent flips [`INTERNAL_EJECT_DISABLE_VAR`] the token changes, so a warm tree
@@ -276,9 +259,9 @@ fn write_sidecar_atomic(sidecar: &Path, fingerprint: &str, result: &ScanResult) 
 /// into [`settings_fingerprint`] (the install-state token), so a bump both
 /// re-scans content into a new sidecar path AND invalidates the warm tree — the
 /// link phase re-runs and the consumer applies the new-version verdicts. Without
-/// that fold a bump would re-scan but never re-materialize a warm tree (aube
-/// skips link on an unchanged lockfile + flag), silently no-op'ing the
-/// improvement. The relink a bump forces is a one-time cost on the next install
+/// that fold a bump would re-scan but never re-materialize a warm tree (the
+/// engine's repeat-install fast path skips the link on an unchanged lockfile),
+/// silently no-op'ing the improvement. The relink a bump forces is a one-time cost on the next install
 /// after upgrade; harmless and expected (the whole point is to pick up the better
 /// verdict). Just bump the number when the scanner logic changes — the coupling
 /// is structural, nothing else to remember.
@@ -288,32 +271,29 @@ pub(crate) const PHANTOM_SCANNER_VERSION: u32 = 5;
 /// set — bumped when the same plan produces a different on-disk shape.
 ///
 /// Distinct from [`PHANTOM_SCANNER_VERSION`] (which plan is computed) and from
-/// aube's `disk_materialize_packages` fold (which NAMES are in the seed): both of
-/// those are unchanged when only the EXECUTOR changes, so neither invalidates.
+/// the curated-list token (which NAMES are in the seed): both of those are
+/// unchanged when only the EXECUTOR changes, so neither invalidates.
 /// nub#711 is the case in point — `link_workspace` never consulted the eject set,
 /// so every workspace install produced an all-symlinks tree. Fixing the linker
 /// moves no hash: the lockfile, the manifest, the settings and the seed are all
-/// identical, so `try_install_fast_path` reports "Already up to date" and the
+/// identical, so the repeat-install fast path reports "Already up to date" and the
 /// broken layout survives the upgrade. Only the users who filed the bug have such
 /// a tree, so without this salt the fix reaches nobody until unrelated churn
 /// (a lockfile edit, `--force`) happens to bust the state.
 ///
-/// Same shape and same remedy as aube's `hoisted_layout_algo` salt, which exists
-/// because a hoisted-layout algorithm change likewise left the graph hash
-/// identical. Bump on any future change to what that pass materializes.
+/// Bump on any future change to what that pass materializes.
 ///
-/// COST of a bump, measured rather than assumed: the dependency side is cheap —
-/// no refetch, no rebuild, no side-effects-cache bust, no lockfile churn, since
-/// those all stay gated on content-hash deltas. But root lifecycle hooks are
-/// gated only on the fast path being missed, so `preinstall` and
+/// COST of a bump: nothing is refetched and the lockfile does not change, but
+/// root lifecycle hooks run whenever the fast path is missed, so `preinstall` and
 /// `install`/`postinstall`/`prepare` re-run ONCE PER IMPORTER on the first
-/// install after a bump — meaningful in a workspace whose members drive builds
-/// from `prepare`. Accepted here: the alternative is leaving every already-installed
+/// install after a bump (measured: one extra root `postinstall` per re-link) —
+/// meaningful in a workspace whose members drive builds from `prepare`. Accepted here: the alternative is leaving every already-installed
 /// workspace on the broken layout, and `PHANTOM_SCANNER_VERSION` bumps already
 /// carry the same cost. Narrowing the salt to "only when the eject closure is
-/// non-empty" is NOT available — the closure needs the resolved graph, and this
-/// hash is computed before resolution. The auto-install path (`nub run`) does not
-/// pay it at all: it passes no CLI flags, which skips the settings-hash check.
+/// non-empty" is NOT available — the closure needs the resolved graph, and the
+/// fast path is decided before resolution. The auto-install path (`nub run`) does
+/// not pay it: its freshness walk reads manifests and installed packages, never
+/// the policy fingerprint.
 pub(crate) const GVS_EJECT_ALGO_VERSION: u32 = 1;
 
 /// THE single source of truth for a phantom sidecar's location: the versioned

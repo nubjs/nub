@@ -5372,7 +5372,7 @@ dependencies = [
 [[package]]
 name = "pnpm-auth-commands"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "dialoguer",
@@ -5393,7 +5393,7 @@ dependencies = [
 [[package]]
 name = "pnpm-cargo-resolver"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "cargo-lock",
  "cargo-util-schemas",
@@ -5407,7 +5407,7 @@ dependencies = [
 [[package]]
 name = "pnpm-catalogs-config"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "miette 7.6.0",
@@ -5418,7 +5418,7 @@ dependencies = [
 [[package]]
 name = "pnpm-catalogs-protocol-parser"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "pnpm-catalogs-types",
 ]
@@ -5426,7 +5426,7 @@ dependencies = [
 [[package]]
 name = "pnpm-catalogs-resolver"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "miette 7.6.0",
@@ -5437,12 +5437,12 @@ dependencies = [
 [[package]]
 name = "pnpm-catalogs-types"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 
 [[package]]
 name = "pnpm-cli"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "base64 0.23.1",
  "cargo-lock",
@@ -5561,7 +5561,7 @@ dependencies = [
 [[package]]
 name = "pnpm-cmd-shim"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "dunce",
@@ -5580,7 +5580,7 @@ dependencies = [
 [[package]]
 name = "pnpm-config"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "base64 0.23.1",
  "derive_more",
@@ -5617,12 +5617,12 @@ dependencies = [
 [[package]]
 name = "pnpm-config-dir"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 
 [[package]]
 name = "pnpm-config-parse-overrides"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "miette 7.6.0",
@@ -5635,7 +5635,7 @@ dependencies = [
 [[package]]
 name = "pnpm-crypto-hash"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "base64 0.23.1",
  "sha2 0.10.9",
@@ -5645,7 +5645,7 @@ dependencies = [
 [[package]]
 name = "pnpm-crypto-shasums-file"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "base64 0.23.1",
  "derive_more",
@@ -5659,7 +5659,7 @@ dependencies = [
 [[package]]
 name = "pnpm-default-reporter"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "chrono",
  "console",
@@ -5673,7 +5673,7 @@ dependencies = [
 [[package]]
 name = "pnpm-deps-inspection"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "dunce",
  "miette 7.6.0",
@@ -5697,7 +5697,7 @@ dependencies = [
 [[package]]
 name = "pnpm-deps-inspection-peers"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "dunce",
  "node-semver",
@@ -5718,7 +5718,7 @@ dependencies = [
 [[package]]
 name = "pnpm-deps-path"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "node-semver",
@@ -5728,7 +5728,7 @@ dependencies = [
 [[package]]
 name = "pnpm-deps-restorer"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "base64 0.23.1",
  "derive_more",
@@ -5785,12 +5785,12 @@ dependencies = [
 [[package]]
 name = "pnpm-detect-libc"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 
 [[package]]
 name = "pnpm-diagnostics"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "miette 7.6.0",
  "tracing",
@@ -5800,7 +5800,7 @@ dependencies = [
 [[package]]
 name = "pnpm-directory-fetcher"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "miette 7.6.0",
@@ -5815,7 +5815,7 @@ dependencies = [
 [[package]]
 name = "pnpm-engine-pm-yarn-resolver"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "miette 7.6.0",
@@ -5834,7 +5834,7 @@ dependencies = [
 [[package]]
 name = "pnpm-engine-runtime-bun-resolver"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "miette 7.6.0",
@@ -5853,7 +5853,7 @@ dependencies = [
 [[package]]
 name = "pnpm-engine-runtime-deno-resolver"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "base64 0.23.1",
  "derive_more",
@@ -5872,7 +5872,7 @@ dependencies = [
 [[package]]
 name = "pnpm-engine-runtime-node-resolver"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "miette 7.6.0",
@@ -5891,7 +5891,7 @@ dependencies = [
 [[package]]
 name = "pnpm-env-installer"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "futures-util",
@@ -5920,12 +5920,12 @@ dependencies = [
 [[package]]
 name = "pnpm-env-replace"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 
 [[package]]
 name = "pnpm-executor"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "deno_task_shell",
  "derive_more",
@@ -5942,7 +5942,7 @@ dependencies = [
 [[package]]
 name = "pnpm-exportable-manifest"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "libc",
@@ -5958,7 +5958,7 @@ dependencies = [
 [[package]]
 name = "pnpm-fs"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "dunce",
@@ -5973,7 +5973,7 @@ dependencies = [
 [[package]]
 name = "pnpm-fs-packlist"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "ignore",
@@ -5986,7 +5986,7 @@ dependencies = [
 [[package]]
 name = "pnpm-git-fetcher"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "miette 7.6.0",
@@ -6011,7 +6011,7 @@ dependencies = [
 [[package]]
 name = "pnpm-git-utils"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "libc",
 ]
@@ -6019,7 +6019,7 @@ dependencies = [
 [[package]]
 name = "pnpm-global"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "miette 7.6.0",
@@ -6035,7 +6035,7 @@ dependencies = [
 [[package]]
 name = "pnpm-graph-hasher"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "base64 0.23.1",
  "indexmap 2.14.0",
@@ -6047,7 +6047,7 @@ dependencies = [
 [[package]]
 name = "pnpm-hooks"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "async-trait",
  "derive_more",
@@ -6062,7 +6062,7 @@ dependencies = [
 [[package]]
 name = "pnpm-injected-deps-syncer"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "miette 7.6.0",
@@ -6080,7 +6080,7 @@ dependencies = [
 [[package]]
 name = "pnpm-install-coordinator"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "futures-util",
  "libc",
@@ -6094,7 +6094,7 @@ dependencies = [
 [[package]]
 name = "pnpm-lockfile"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "indexmap 2.14.0",
@@ -6120,7 +6120,7 @@ dependencies = [
 [[package]]
 name = "pnpm-lockfile-import"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "miette 7.6.0",
@@ -6132,7 +6132,7 @@ dependencies = [
 [[package]]
 name = "pnpm-lockfile-preferred-versions"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "node-semver",
  "pnpm-lockfile",
@@ -6144,7 +6144,7 @@ dependencies = [
 [[package]]
 name = "pnpm-lockfile-verification"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "chrono",
  "derive_more",
@@ -6164,7 +6164,7 @@ dependencies = [
 [[package]]
 name = "pnpm-modules-yaml"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "httpdate",
@@ -6181,7 +6181,7 @@ dependencies = [
 [[package]]
 name = "pnpm-network"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "bytes",
  "derive_more",
@@ -6197,7 +6197,7 @@ dependencies = [
 [[package]]
 name = "pnpm-network-web-auth"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "crossterm",
  "derive_more",
@@ -6217,7 +6217,7 @@ dependencies = [
 [[package]]
 name = "pnpm-pack"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "flate2",
@@ -6245,7 +6245,7 @@ dependencies = [
 [[package]]
 name = "pnpm-package-is-installable"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "miette 7.6.0",
@@ -6257,7 +6257,7 @@ dependencies = [
 [[package]]
 name = "pnpm-package-manager"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "async-recursion",
  "chrono",
@@ -6337,7 +6337,7 @@ dependencies = [
 [[package]]
 name = "pnpm-package-manifest"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "miette 7.6.0",
@@ -6351,7 +6351,7 @@ dependencies = [
 [[package]]
 name = "pnpm-patching"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "diffy",
@@ -6367,7 +6367,7 @@ dependencies = [
 [[package]]
 name = "pnpm-pnpr-client"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "futures-util",
@@ -6390,7 +6390,7 @@ dependencies = [
 [[package]]
 name = "pnpm-publish"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -6424,7 +6424,7 @@ dependencies = [
 [[package]]
 name = "pnpm-python-resolver"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "miette 7.6.0",
  "pep440_rs",
@@ -6439,7 +6439,7 @@ dependencies = [
 [[package]]
 name = "pnpm-real-hoist"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "indexmap 2.14.0",
@@ -6450,7 +6450,7 @@ dependencies = [
 [[package]]
 name = "pnpm-registry"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "miette 7.6.0",
@@ -6470,7 +6470,7 @@ dependencies = [
 [[package]]
 name = "pnpm-reporter"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "gethostname",
  "serde",
@@ -6480,7 +6480,7 @@ dependencies = [
 [[package]]
 name = "pnpm-resolving-default-resolver"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "miette 7.6.0",
@@ -6500,7 +6500,7 @@ dependencies = [
 [[package]]
 name = "pnpm-resolving-deps-resolver"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "async-recursion",
  "chrono",
@@ -6532,7 +6532,7 @@ dependencies = [
 [[package]]
 name = "pnpm-resolving-git-resolver"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "miette 7.6.0",
@@ -6553,7 +6553,7 @@ dependencies = [
 [[package]]
 name = "pnpm-resolving-jsr-specifier-parser"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "miette 7.6.0",
@@ -6563,7 +6563,7 @@ dependencies = [
 [[package]]
 name = "pnpm-resolving-local-resolver"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "home",
@@ -6581,7 +6581,7 @@ dependencies = [
 [[package]]
 name = "pnpm-resolving-npm-resolver"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "chrono",
  "dashmap",
@@ -6615,12 +6615,12 @@ dependencies = [
 [[package]]
 name = "pnpm-resolving-parse-wanted-dependency"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 
 [[package]]
 name = "pnpm-resolving-resolver-base"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "chrono",
  "derive_more",
@@ -6637,7 +6637,7 @@ dependencies = [
 [[package]]
 name = "pnpm-resolving-tarball-resolver"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "pnpm-lockfile",
  "pnpm-network",
@@ -6653,7 +6653,7 @@ dependencies = [
 [[package]]
 name = "pnpm-semver-include-prerelease"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "node-semver",
 ]
@@ -6661,7 +6661,7 @@ dependencies = [
 [[package]]
 name = "pnpm-shared-artifact-protocol"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "base64 0.23.1",
  "derive_more",
@@ -6674,7 +6674,7 @@ dependencies = [
 [[package]]
 name = "pnpm-store-dir"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "dashmap",
  "derive_more",
@@ -6701,7 +6701,7 @@ dependencies = [
 [[package]]
 name = "pnpm-tarball"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "bytes",
  "dashmap",
@@ -6734,12 +6734,12 @@ dependencies = [
 [[package]]
 name = "pnpm-text-sanitize"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 
 [[package]]
 name = "pnpm-versioning"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "getrandom 0.4.2",
@@ -6756,7 +6756,7 @@ dependencies = [
 [[package]]
 name = "pnpm-workspace"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "cap-primitives",
  "derive_more",
@@ -6778,7 +6778,7 @@ dependencies = [
 [[package]]
 name = "pnpm-workspace-manifest-writer"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "indexmap 2.14.0",
@@ -6799,7 +6799,7 @@ dependencies = [
 [[package]]
 name = "pnpm-workspace-projects-filter"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "indexmap 2.14.0",
@@ -6813,7 +6813,7 @@ dependencies = [
 [[package]]
 name = "pnpm-workspace-projects-graph"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "indexmap 2.14.0",
  "node-semver",
@@ -6826,7 +6826,7 @@ dependencies = [
 [[package]]
 name = "pnpm-workspace-range-resolver"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "node-semver",
 ]
@@ -6834,12 +6834,12 @@ dependencies = [
 [[package]]
 name = "pnpm-workspace-spec"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 
 [[package]]
 name = "pnpm-workspace-state"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "indexmap 2.14.0",
@@ -6852,7 +6852,7 @@ dependencies = [
 [[package]]
 name = "pnpm-workspace-task-scheduler"
 version = "0.0.1"
-source = "git+https://github.com/nubjs/pnpm?rev=e0ae24e5195c1e77f2c9e38f114e7656171d2513#e0ae24e5195c1e77f2c9e38f114e7656171d2513"
+source = "git+https://github.com/nubjs/pnpm?rev=cd12004142f0075653266050ef36080f59753093#cd12004142f0075653266050ef36080f59753093"
 dependencies = [
  "derive_more",
  "futures-util",
