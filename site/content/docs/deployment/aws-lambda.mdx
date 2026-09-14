@@ -51,7 +51,8 @@ The adapter activates inside Lambda. The same image runs as a normal HTTP server
 ```bash
 export AWS_REGION=us-east-1
 export ECR_REPOSITORY=nub-lambda-app
-export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+export AWS_ACCOUNT_ID=$(aws sts get-caller-identity \
+  --query Account --output text)
 export ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
 export ECR_IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:latest"
 
@@ -102,9 +103,10 @@ ROLE_ARN=$(aws iam create-role \
   --query Role.Arn \
   --output text)
 
+BASIC_EXECUTION=service-role/AWSLambdaBasicExecutionRole
 aws iam attach-role-policy \
   --role-name "$LAMBDA_ROLE" \
-  --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+  --policy-arn "arn:aws:iam::aws:policy/$BASIC_EXECUTION"
 
 # Give the new role time to propagate before Lambda assumes it.
 sleep 10

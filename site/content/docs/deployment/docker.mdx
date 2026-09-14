@@ -102,7 +102,7 @@ COPY --chown=node:node package.json package-lock.json ./
 RUN nub ci
 COPY --chown=node:node . .
 RUN nub run build
-RUN nub ci --prod  # drop devDependencies from the tree the next stage copies
+RUN nub ci --prod  # drop devDependencies before the next stage copies
 
 FROM ghcr.io/nubjs/nub:{{NUB_VERSION}}
 COPY --from=build --chown=node:node /app/node_modules ./node_modules

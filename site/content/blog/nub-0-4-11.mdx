@@ -17,7 +17,8 @@ The `curl | bash` and `irm | iex` installers now honor two environment variables
 Set them on the shell that runs the script — the right side of the pipe, not on `curl`:
 
 ```bash
-curl -fsSL https://nubjs.com/install.sh | NUB_INSTALL_DIR="$HOME/.local/nub" NUB_NO_MODIFY_PATH=1 bash
+curl -fsSL https://nubjs.com/install.sh \\
+  | NUB_INSTALL_DIR="$HOME/.local/nub" NUB_NO_MODIFY_PATH=1 bash
 ```
 
 With neither variable set, the installer behaves exactly as before. ([#420](https://github.com/nubjs/nub/pull/420))

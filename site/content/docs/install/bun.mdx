@@ -44,7 +44,7 @@ When Bun is the incumbent package manager, Nub installs against it and writes no
 The text lockfile (Bun 1.2+ default) is read, written, and preserved as-is.
 
 ```console
-# captured: nub 0.0.44 — install in a bun.lock project, then diff the lockfile
+# captured: nub 0.0.44 — install in a bun.lock project, then diff the lock
 $ nub install
 dependencies:
 + is-odd@3.0.1
@@ -60,7 +60,7 @@ ls: pnpm-lock.yaml: No such file or directory
 
 The legacy binary lockfile (pre-1.2) is **not** read. With only a `bun.lockb` and no text `bun.lock`, Nub refuses up front rather than guess or fall through to another format:
 
-```console
+```console wide
 # captured: nub 0.0.44 — a project with only bun.lockb
 $ nub install
 ERR_NUB_LOCKFILE_PARSE          # ❌ binary format rejected
@@ -89,7 +89,7 @@ Read the [full docs](https://bun.com/docs/pm/lifecycle#trusteddependencies) on b
 }
 ```
 
-```console
+```console wide
 # captured: nub 0.0.44 — esbuild NOT in trustedDependencies — build skipped
 $ nub install
 dependencies:

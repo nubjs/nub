@@ -3,10 +3,10 @@
   "pages": [
     "index",
     "runtime",
-    "standalone",
     "watch",
     "run",
     "nubx",
+    "standalone",
     "compile",
     "init",
     "install",

@@ -104,7 +104,8 @@ A subpath into a dependency gets the same probing, so an extensionless import fi
 import "prismjs/components/prism-python";
 
 // a workspace package with "main": "./index.ts" and no exports map
-import { createPrompt } from "@repo/lib/prompt";   // resolves packages/lib/prompt.ts
+// resolves packages/lib/prompt.ts
+import { createPrompt } from "@repo/lib/prompt";
 ```
 
 The order here is fixed, and unlike relative imports it does not vary with the importing file's extension:
@@ -135,7 +136,7 @@ With `moduleResolution: "nodenext"`, `tsc` requires a `.js` extension even thoug
 // resolves ./handler.ts when no ./handler.js exists
 import { handler } from "./handler.js";
 
-// and across a package subpath, into a workspace package built from TS source
+// and across a package subpath, into a workspace package built from TS
 import { createPrompt } from "@repo/lib/prompt.js";
 ```
 

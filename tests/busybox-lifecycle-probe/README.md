@@ -1,8 +1,10 @@
 # busybox-lifecycle-probe — the dependency lifecycle shell, on real Windows
 
 A throwaway, branch-scoped CI probe (see `.claude/skills/ci-adhoc-test`). No PR is
-needed: pushing to the `busybox-lifecycle-main` branch runs
-`.github/workflows/busybox-lifecycle-probe.yml` on a real `windows-latest` runner.
+needed: `.github/workflows/busybox-lifecycle-probe.yml` runs on a manual dispatch,
+and on pushes to the `busybox-lifecycle-probe` branch. It covers both published
+Windows triples — `windows-latest` for x64 and `windows-11-arm` for arm64 — because
+they ship different sidecar binaries (`busybox64.exe` and `busybox64a.exe`).
 
 Sibling of `tests/busybox-run-probe/`, which covers the same shell swap for
 `nub run`. This one covers the engine's **dependency lifecycle** path

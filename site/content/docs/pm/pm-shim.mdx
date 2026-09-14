@@ -35,7 +35,8 @@ In a pinned project, a shim refuses to run a *different* package manager — whi
 $ yarn add react   # ❌ wrong package manager for this project
 nub: the nub package-manager shims on your PATH (installed via
      `nub pm shim`) intercepted this.
-This project pins pnpm (via package.json#packageManager) — refusing to run yarn.
+This project pins pnpm (via package.json#packageManager) — refusing to
+run yarn.
 A different package manager here would write a competing lockfile
 and node_modules.
 

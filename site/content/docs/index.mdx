@@ -83,7 +83,7 @@ The same binaries are attached to the rolling [canary release](https://github.co
 The installer is pnpm-compatible at the CLI surface and lockfile-compatible with whatever your project already uses. It infers the incumbent package manager and mirrors it — npm, pnpm, and bun lockfiles round-trip cleanly; yarn is read-only.
 
 ```bash
-nub install              # resolve + link node_modules into existing lockfile
+nub install              # resolve + link node_modules, existing lockfile
 nub add -E -D react      # exact pin, devDeps — pnpm flag spelling
 nub remove lodash
 nub update
@@ -100,12 +100,12 @@ To change a default, put a `nub.jsonc` at the project root:
 {
   "$schema": "https://nubjs.com/schema/latest.json",
 
-  "preload": ["./instrumentation.ts"],   // load a module before the entry file
-  "envFile": [".env.local"],             // read these env files instead of the default set
-  "tsconfig": "./tsconfig.runtime.json", // the TypeScript config the runtime uses
+  "preload": ["./instrumentation.ts"],   // loaded before the entry file
+  "envFile": [".env.local"],             // these instead of the defaults
+  "tsconfig": "./tsconfig.runtime.json", // the runtime's TypeScript config
 
   "install": {
-    "minimumReleaseAge": "3d"            // refuse dependencies published in the last 3 days
+    "minimumReleaseAge": "3d"            // refuse deps newer than 3 days
   }
 }
 ```

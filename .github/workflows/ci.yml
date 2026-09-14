@@ -1571,6 +1571,11 @@ jobs:
       # node 24 strips the script's erasable TS types natively — no build step.
       - name: Validate internal docs links & anchors
         run: node scripts/check-docs-links.ts
+      # A fenced line wider than its rendered column gives the page a horizontal
+      # scrollbar. `next build` does not care, so this is the only gate for it.
+      - name: Check fenced code-block width
+        run: node scripts/lint-code-line-length.mjs
+        working-directory: site
 
   site-build:
     name: Site build

@@ -42,7 +42,8 @@ A config Nub cannot read in full stops the run.
 $ nub main.ts
 Nub: /app/tsconfig.json: File './base.json' not found.
 Error: the project's tsconfig.json could not be read in full (see above).
-Fix the config, or use --node to run without Nub's TypeScript features, path aliases included.
+Fix the config, or use --node to run without Nub's TypeScript features,
+path aliases included.
 ```
 
 Compat mode turns off every config-derived behavior, so `--node` gets past the error but loses what the config was setting up — path aliases and decorator flags included.

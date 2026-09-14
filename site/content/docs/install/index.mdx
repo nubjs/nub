@@ -331,7 +331,7 @@ Each flag is repeatable, takes a comma-separated list, and accepts `current` for
 
 ```bash
 nub install --os linux                  # Linux binaries, host CPU
-nub install --os current,linux          # this machine's platform, and Linux
+nub install --os current,linux          # this machine and Linux
 nub install --os '*' --cpu '*'          # every platform variant
 ```
 
@@ -342,7 +342,7 @@ To quiet the progress output, pass `--silent` (or `-s`, or `--reporter=silent`):
 In a workspace, `install` and `ci` accept the same selector flags as script running — install only the packages a filter matches:
 
 ```bash
---filter <sel>, -F        # pnpm's selector grammar (see /docs/run#--filter)
+--filter <sel>, -F        # pnpm's selector grammar (see /docs/run)
 --recursive, -r           # every workspace package
 --filter-prod <sel>       # selector, production deps only
 --include-workspace-root  # add the root package to the recursive set
@@ -362,10 +362,10 @@ nub add --save-peer <pkg>      # peer + dev dependencies (pnpm parity)
 nub add -g <pkg>               # global install
 nub add -w <pkg>               # write to the workspace root
 nub add --save-catalog <pkg>   # add into the workspace catalog
-nub add --allow-build=<pkg>    # pre-approve its build scripts for this install
+nub add --allow-build=<pkg>    # pre-approve its build scripts
 nub add --no-save <pkg>        # link without persisting to package.json
 nub add <pkg>@<version>        # pin an exact version
-nub add <pkg>@<version> --lockfile-only  # refresh the lockfile, skip node_modules
+nub add <pkg>@<version> --lockfile-only  # refresh the lockfile only
 ```
 
 ### `nub remove`
@@ -386,8 +386,8 @@ Re-resolves dependencies within their ranges; `--latest` rewrites the `package.j
 ```bash
 nub update                 # up — refresh all deps within range
 nub update <pkg>           # update a single dependency
-nub update <pkg>@<version> # pin one dep to a version, keeping its ^/~ operator
-nub update <pkg>@<tag>     # move one dep to a dist-tag (beta, next) as an exact pin
+nub update <pkg>@<version> # pin one dep, keeping its ^/~ operator
+nub update <pkg>@<tag>     # move one dep to a dist-tag, exact
 nub update -i              # --interactive: pick each package's target
 nub update -L              # --latest: move past the manifest range
 nub update -E -L           # pin the rewritten range to an exact version
@@ -398,7 +398,7 @@ nub update --lockfile-only # refresh the lockfile, leave node_modules alone
 
 The interactive picker shows one row per outdated dependency, grouped by dependency type. Space (or `←`/`→`) cycles a row between keeping the current version, the newest version inside the manifest range, and the registry's `latest` — so one invocation covers both in-range refreshes and range-crossing bumps, per package. Nothing is selected by default: press enter and only the rows you flipped are updated. Version targets are colored by semver impact, and a `latest` that would downgrade a prerelease pin is never offered.
 
-```text
+```text wide
 Choose dependency updates
                                          keep             latest in range   latest
   dependencies
@@ -424,7 +424,7 @@ nub dedupe --check  # CI: exit non-zero if dedupe would change anything
 Converts another package manager's lockfile to Nub's `pnpm-lock.yaml`, without installing:
 
 ```bash
-nub import          # package-lock.json / yarn.lock / bun.lock → pnpm-lock.yaml
+nub import          # package-lock / yarn.lock / bun.lock → pnpm-lock
 nub import --force  # overwrite an existing pnpm-lock.yaml
 ```
 
@@ -494,7 +494,8 @@ The executable directory is shared, so a package's executable name may already b
 
 ```console
 $ nub add -g cowsay
-warning: not linking cowsay — /Users/you/.local/bin/cowsay already exists and was not created by this tool; remove it to link cowsay
+warning: not linking cowsay — /Users/you/.local/bin/cowsay already
+exists and was not created by this tool; remove it to link cowsay
 ```
 
 The rest of the package's executables still link. Removing a global package likewise only unlinks entries it owns, so an executable that another install has since taken over is left alone.
@@ -504,10 +505,10 @@ The rest of the package's executables still link. Removing a global package like
 Some dependencies run build steps on install — `preinstall`, `install`, and `postinstall` scripts declared in their own `package.json` (across pnpm, npm, and Bun). Nub denies them by default; you allow the packages that may build.
 
 ```bash
-nub approve-builds                # approve packages to build, then build them
-nub add --allow-build=<pkg> <pkg> # pre-approve its build scripts as you add it
-nub rebuild                       # re-run scripts for already-approved packages
-nub install --ignore-scripts      # skip dependency build scripts this install
+nub approve-builds                # approve packages, then build them
+nub add --allow-build=<pkg> <pkg> # pre-approve as you add it
+nub rebuild                       # re-run already-approved scripts
+nub install --ignore-scripts      # skip dependency build scripts
 ```
 
 Approval takes effect immediately: `nub approve-builds` records the decision and runs the just-approved packages' build scripts in the same invocation, matching pnpm — no follow-up `nub install` or `nub rebuild` needed.
@@ -517,9 +518,9 @@ The neutral `allowScripts` field grants permission, and it keys on the package n
 ```json title="package.json"
 {
   "allowScripts": {
-    "esbuild": true,                        // a registry dependency, by name
-    "buildy@file:./buildy-1.0.0.tgz": true, // anything else, by full specifier
-    "sharp": false                          // a denial beats any allow in the map
+    "esbuild": true,                        // a registry dep, by name
+    "buildy@file:./buildy-1.0.0.tgz": true, // anything else, in full
+    "sharp": false                          // a denial beats any allow
   }
 }
 ```
@@ -531,11 +532,12 @@ That field applies in any project, whoever owns it, and npm 12 reads the same ma
 A failed build fails the install. The one exception is a package reachable only through `optionalDependencies`, which the project has declared it can work without: that failure is reported and the install continues, matching npm and pnpm.
 
 ```console
-# captured: nub 0.7.5, optfail@1.0.0 whose postinstall exits 3, allowScripts entry present
+# captured: nub 0.7.5, optfail@1.0.0 postinstall exits 3, allowScripts set
 $ nub install
-WARN optfail@1.0.0 is an optional dependency and failed to build; continuing
-     without it: lifecycle script postinstall failed for optfail@1.0.0: script
-     `postinstall` exited with code 3   code=WARN_NUB_OPTIONAL_BUILD_FAILED
+WARN optfail@1.0.0 is an optional dependency and failed to build;
+     continuing without it: lifecycle script postinstall failed for
+     optfail@1.0.0: script `postinstall` exited with code 3
+     code=WARN_NUB_OPTIONAL_BUILD_FAILED
 optionalDependencies:
 + optfail@1.0.0
 ```
@@ -552,7 +554,7 @@ Asking for a package without naming a version resolves to the newest release tha
 
 ```console
 $ nub add some-tool
-+ some-tool@2.3.0  latest 2.4.0   # 2.4.0 is still inside the window, so 2.3.0 installs
++ some-tool@2.3.0  latest 2.4.0   # 2.4.0 is still inside the window
 ```
 
 The fallback stops at whatever the publisher currently tags `latest`; a version published and then untagged was withdrawn. When `latest` is a prerelease the command fails outright, since the stable release below it belongs to a line the publisher has moved off.
@@ -572,11 +574,11 @@ Two flags adjust the window for a single command:
 
 ```console
 $ nub add some-tool
-ERR_NUB_NO_MATURE_MATCHING_VERSION            # ❌ every matching version is too new
+ERR_NUB_NO_MATURE_MATCHING_VERSION       # ❌ every version is too new
 
-$ nub add some-tool --minimum-release-age=0                   # turn the window off, this run only
-$ nub add some-tool --minimum-release-age=2h                  # or just shorten it
-$ nub add some-tool --minimum-release-age-exclude=some-tool   # exempt one package
+$ nub add some-tool --minimum-release-age=0                 # off, this run
+$ nub add some-tool --minimum-release-age=2h                # or shorten it
+$ nub add some-tool --minimum-release-age-exclude=some-tool # exempt one
 ```
 
 The duration takes a unit — `s`, `m`, `h`, `d`, or `w` — and a bare number means minutes, matching pnpm. Both flags work on every command that installs, including the remote bin runner.
@@ -584,7 +586,8 @@ The duration takes a unit — `s`, `m`, `h`, `d`, or `w` — and a bare number m
 The exclude flag *replaces* the configured `minimumReleaseAgeExclude` for that run rather than adding to it, matching pnpm — so name every package you still need:
 
 ```console
-$ nub add some-tool --minimum-release-age-exclude='@internal/*' --minimum-release-age-exclude=some-tool
+$ nub add some-tool --minimum-release-age-exclude='@internal/*' \
+    --minimum-release-age-exclude=some-tool
 ```
 
 <Callout title="Enforcement">
@@ -606,14 +609,15 @@ This is the one case where `nub outdated` warns: staying silent would report no 
 
 ```console
 $ nub outdated
-warn: internal-pkg has no registry publish times, so minimumReleaseAge cannot admit any version; `nub update` will fail for it
+warn: internal-pkg has no registry publish times, so minimumReleaseAge
+      cannot admit any version; `nub update` will fail for it
 All dependencies up to date.
 ```
 
 Two remedies:
 
 ```ini title=".npmrc"
-minimumReleaseAgeExclude=internal-pkg   # exempt one package (comma-separated)
+minimumReleaseAgeExclude=internal-pkg   # exempt one (comma-separated)
 minimumReleaseAge=0                     # turn the window off
 ```
 
@@ -634,9 +638,9 @@ Explicit decisions outrank the floor in both directions: a package you approve b
 A fresh resolve, or a lockfile Nub itself wrote (which carries the `time:` block), gives the floor everything it needs, so curated packages like `esbuild` build automatically:
 
 ```console
-# captured: nub 0.0.44, pnpm-incumbent, esbuild@0.21.5 — no allowScripts entry
+# captured: nub 0.0.44, pnpm, esbuild@0.21.5 — no allowScripts entry
 $ nub install
-WARN defaultTrust: running build scripts for esbuild@0.21.5   # ✓ all three gates passed
+WARN defaultTrust: running build scripts for esbuild@0.21.5  # ✓ gates ok
 dependencies:
 + esbuild@0.21.5
 ```
@@ -648,7 +652,7 @@ When a gate fails, the floor does not apply: the same package is skipped and dis
 $ nub install
 WARN ignored build scripts for 1 package(s): esbuild@0.21.5.
      Run `nub approve-builds` to review and enable them.
-     code=WARN_NUB_IGNORED_BUILD_SCRIPTS   # ❌ cooling-window gate failed closed
+     code=WARN_NUB_IGNORED_BUILD_SCRIPTS   # ❌ cooling gate closed
 dependencies:
 + esbuild@0.21.5
 ```
@@ -668,9 +672,12 @@ Nub also weighs trust *evidence* across a package's release history — OIDC pro
 Refusing a version is not the same as failing the install. Nub keeps looking through the versions the range admits and takes the best one that still carries its evidence, naming what it skipped and why:
 
 ```console
-# captured: fast-glob@^3.3.2 → @nodelib/fs.walk → fastq, whose 1.20.2 was hand-published
+# captured: fast-glob → @nodelib/fs.walk → fastq; 1.20.2 hand-published
 $ nub install
-WARN skipped fastq@1.20.2 (trustPolicy=no-downgrade): earlier published version 1.20.0 had trusted publisher but this version has no trust evidence; resolved to fastq@1.20.1 instead code=WARN_NUB_TRUST_DOWNGRADE_SKIPPED
+WARN skipped fastq@1.20.2 (trustPolicy=no-downgrade): earlier published
+     version 1.20.0 had trusted publisher but this version has no trust
+     evidence; resolved to fastq@1.20.1 instead
+     code=WARN_NUB_TRUST_DOWNGRADE_SKIPPED
 ```
 
 The substitution stays inside the declared range and never crosses the refused version — down to an older release for an ordinary pick, and up to a newer one when `resolution-mode=time-based` resolves a direct dependency to its range floor. When nothing the range admits clears the check, the install stops with `ERR_NUB_TRUST_DOWNGRADE`.
@@ -680,7 +687,7 @@ A lockfile names one exact version rather than a range, so there is nothing to w
 The comparison is by publish date, so a legitimate maintenance release on an older major — shipped after a newer major adopted provenance — can trigger it. Nub exempts any version older than 14 days, so an aged, un-yanked backport resolves while a freshly published downgrade is still checked against the full history. Widen the window, clear a single package, or turn the check off in `.npmrc`:
 
 ```ini title=".npmrc"
-trustPolicyIgnoreAfter=20160        # age exemption in minutes (default 14 days)
+trustPolicyIgnoreAfter=20160        # exemption, minutes (default 14d)
 trustPolicyExclude=tailwind-merge   # exempt one package regardless of age
 trustPolicy=off                     # disable the check entirely
 ```
@@ -738,8 +745,10 @@ cache-dir=/mnt/fast/nub-cache
 Two environment variables set the same thing, and both outrank the file:
 
 ```bash
-npm_config_cache_dir=/mnt/fast/nub-cache nub install   # neutral — npm and pnpm read it too
-NUB_CACHE_DIR=/mnt/fast/nub-cache nub install          # Nub's own spelling, wins over the above
+# neutral — npm and pnpm read it too
+npm_config_cache_dir=/mnt/fast/nub-cache nub install
+# Nub's own spelling, which wins over the above
+NUB_CACHE_DIR=/mnt/fast/nub-cache nub install
 ```
 
 Print the effective value:
@@ -964,9 +973,10 @@ Config reads are symmetric with the lockfile: under each incumbent Nub reads tha
 Mirroring runs in both directions, so a field the incumbent would ignore Nub ignores too. A pin written in `overrides` in a pnpm project changes nothing, because pnpm itself reads `resolutions` and `pnpm.overrides` — Nub applies what pnpm would and says which field it skipped:
 
 ```console
-# captured: nub 0.7.2, pnpm-incumbent project with a top-level overrides block
+# captured: nub 0.7.2, pnpm project with a top-level overrides block
 $ nub install
-nub: `overrides` ignored — this project uses pnpm, which doesn't apply it. move these pins to `resolutions`.
+nub: `overrides` ignored — this project uses pnpm, which doesn't apply
+it. move these pins to `resolutions`.
 dependencies:
 + is-odd@3.0.1
 ```
@@ -1021,8 +1031,8 @@ Nub stops rather than guess. Two lockfiles it cannot choose between:
 $ nub install
 Error: ERR_NUB_LOCKFILE_AMBIGUOUS
 
-  × multiple lockfiles found: pnpm-lock.yaml, package-lock.json — cannot tell
-  │ which package manager owns this project
+  × multiple lockfiles found: pnpm-lock.yaml, package-lock.json —
+  │ cannot tell which package manager owns this project
   help: remove the stale lockfile, or run nub pm use <pm> naming a specific
         manager
 ```

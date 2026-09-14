@@ -14,6 +14,7 @@ const COMMAND_BY_URL: Record<string, string> = {
   '/docs/runtime': 'nub <file>',
   '/docs/run': 'nub run',
   '/docs/nubx': 'nubx',
+  '/docs/standalone': 'nubr',
   '/docs/install': 'nub install',
   '/docs/node': 'nub node',
   '/docs/pm': 'nub pm',

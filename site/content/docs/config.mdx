@@ -10,30 +10,34 @@ Put `nub.jsonc` at the project root — the workspace root in a monorepo. Every 
   "$schema": "https://nubjs.com/schema/latest.json",
 
   // ── runtime — file runs, scripts, and watch mode ──
-  "preload": ["./setup.ts", "tsx/esm"],    // paths or bare specifiers, in order
+  "preload": ["./setup.ts", "tsx/esm"],    // paths or bare specifiers
   "nodeOptions": ["--enable-source-maps"], // any flag NODE_OPTIONS accepts
-  "v8Flags": ["--stack-size=2000"],        // the full V8 set, via the command line
-  "nodeCompat": false,                     // true = disable all Nub augmentation
-  "prefix": "dotenvx run --",              // a wrapper in front of file runs, scripts, and watch
-  "envFile": [".env", ".env.local"],       // true = cascade | false = none | "varlock"
+  "v8Flags": ["--stack-size=2000"],        // the full V8 set
+  "nodeCompat": false,                     // true = no augmentation
+  "prefix": "dotenvx run --",              // wraps runs, scripts, watch
+  // true = cascade | false = none | "varlock"
+  "envFile": [".env", ".env.local"],
 
   // text | jsonc | json5 | toml | yaml | ts | tsx | jsx
   "loader": { ".graphql": "text" },
   "verifyDeps": "warn",                    // warn | error | true | false
-  "tsconfig": "./tsconfig.runtime.json",   // paths, conditions, transform defaults; no type checking
-  "conditions": ["development"],           // additional; matched before "default"
-  "jsx": "react-jsx",                      // react | react-jsx | react-jsxdev
+  // paths, conditions, transform defaults; no type checking
+  "tsconfig": "./tsconfig.runtime.json",
+  "conditions": ["development"],           // matched before "default"
+  // react | react-jsx | react-jsxdev
+  "jsx": "react-jsx",
   "jsxImportSource": "preact",             // automatic runtime package
-  "jsxFactory": "createElement",            // classic runtime factory
-  "jsxFragmentFactory": "Fragment",         // classic runtime fragment factory
-  "decorators": "legacy",                  // legacy TypeScript decorator semantics
-  "emitDecoratorMetadata": true,            // design-type metadata for legacy decorators
+  "jsxFactory": "createElement",           // classic runtime factory
+  "jsxFragmentFactory": "Fragment",        // classic fragment factory
+  "decorators": "legacy",                  // legacy TS semantics
+  "emitDecoratorMetadata": true,           // design-type metadata
 
   // ── installs — layout everywhere; release gates under Nub identity ──
   "install": {
-    "linker": "global-virtual-store",      // global-virtual-store | isolated | hoisted
+    // global-virtual-store | isolated | hoisted
+    "linker": "global-virtual-store",
     "publicHoist": ["@types/*"],           // name patterns; ["*"] for all
-    "minimumReleaseAge": "3d",             // <int><s|m|h|d|w>; default 24h, "0s" off
+    "minimumReleaseAge": "3d",             // default 24h, "0s" off
     "minimumReleaseAgeExclude": ["@company/*"]
   }
 }
@@ -230,8 +234,10 @@ Name the Node binary to run, instead of letting Nub resolve a version.
 
 ```jsonc title="nub.jsonc"
 {
-  // ...
-  // a command in $(...) runs, and its output is the path
+  // specify absolute path
+  "nodeExecutable": "/path/to/node",
+
+  // or use $(...) syntax to run a command
   "nodeExecutable": "$(mise which node)"
 }
 ```
@@ -278,7 +284,8 @@ Put a command in front of everything Nub runs for the project.
 ```jsonc title="nub.jsonc"
 {
   // ...
-  "prefix": "dotenvx run --"   // split like a shell; the array form takes exact arguments
+  // split like a shell; the array form takes exact arguments
+  "prefix": "dotenvx run --"
 }
 ```
 
@@ -300,6 +307,8 @@ The program resolves from the project's `node_modules/.bin`, then `PATH`, so a w
   "prefix": ["./tools/wrap", "--quiet"]
 }
 ```
+
+The array form takes its arguments exactly as written, with no splitting. A Windows path belongs there: the string form is split like a shell, where a backslash escapes the next character, so Nub refuses one rather than quietly running `C:toolswrap.exe`.
 
 The Node process still receives [environment files](/docs/runtime/env) as before; on a file run the wrapper starts with them set too. A wrapper that owns the environment itself pairs the prefix with `"envFile": false`. Compatibility mode (`--node`) runs without the prefix.
 
@@ -560,7 +569,9 @@ The install block takes four fields. Its layout fields apply in every project; i
 Under an npm, pnpm, Yarn, or Bun incumbent, Nub names each release-age field it skipped.
 
 ```text
-nub: `install.minimumReleaseAge` ignored — it is nub-native install config, and this project resolves as pnpm. Run `nub pm use nub` to make nub the project's package manager.
+nub: `install.minimumReleaseAge` ignored — it is nub-native install config,
+and this project resolves as pnpm. Run `nub pm use nub` to make nub the
+project's package manager.
 ```
 
 ### `install.linker`
@@ -623,14 +634,16 @@ Setting `false` is strict: an undeclared import fails instead of resolving. Sett
 Writing a key under the wrong strategy is an error, and the message names the strategy that takes it.
 
 ```text
-`install.linker.hoist` in nub.jsonc: not valid with `strategy: "global-virtual-store"` — it
-configures the "isolated" layout. Either switch to `strategy: "isolated"` or drop this key.
+`install.linker.hoist` in nub.jsonc: not valid with `strategy:
+"global-virtual-store"` — it configures the "isolated" layout. Either
+switch to `strategy: "isolated"` or drop this key.
 ```
 
 The strategy `"pnp"` is reserved for future Plug'n'Play support. An install that names it is rejected until support ships.
 
 ```text
-nub: `install.linker: "pnp"` is reserved and not supported yet [ERR_NUB_CONFIG_UNSUPPORTED]
+nub: `install.linker: "pnp"` is reserved and not supported yet
+[ERR_NUB_CONFIG_UNSUPPORTED]
 ```
 
 ### `install.publicHoist`
@@ -771,14 +784,16 @@ nub config set loader '{".graphql":"text",".rules":"yaml"}'
 Scalar values need no JSON quoting. A union field uses JSON only for its array or object form.
 
 ```bash
-nub config set install.linker '{"strategy":"isolated","hoist":["@types/*"]}'
+nub config set install.linker \
+  '{"strategy":"isolated","hoist":["@types/*"]}'
 ```
 
 Values are checked against the same rules that read the file, so a rejected write leaves it untouched.
 
 ```text
 $ nub config set install.minimumReleaseAge 3
-nub: `install.minimumReleaseAge` in /app/nub.jsonc: invalid duration `3` — expected an integer followed by a unit s|m|h|d|w (e.g. "3d")
+nub: `install.minimumReleaseAge` in /app/nub.jsonc: invalid duration `3` —
+expected an integer followed by a unit s|m|h|d|w (e.g. "3d")
 ```
 
 Comments, blank lines, and key order survive an edit.
@@ -788,7 +803,7 @@ Writes go to the project file, and `--global` sends them to the global one inste
 ```bash
 nub config set --global envFile false       # personal default, everywhere
 nub global config set envFile false         # equivalent prefix form
-nub config set dlx.consent never             # global; the selector is redundant
+nub config set dlx.consent never            # global; selector redundant
 ```
 
 Reads take the project file first and fall back to the global one. Structured values print as compact JSON so they can be passed back to `set`; scalar strings print without JSON quotes. An unset field prints `undefined`, and `--json` prints the exact stored value.
@@ -805,7 +820,8 @@ Nub refuses a key it would never read back rather than writing a line nothing co
 ```text
 $ nub config set updateNotifier false
 Error: nub config set updateNotifier: `updateNotifier` is not a nub setting
-  nub does not check for its own updates while running a command. Run `nub upgrade` when you want a new version.
+  nub does not check for its own updates while running a command. Run
+  `nub upgrade` when you want a new version.
 ```
 
 Those keys are absent from `nub config list --all` too, so the listing and the write agree on what this project can set.
@@ -814,8 +830,11 @@ A field of this file also wins over the `.npmrc` spelling of the same setting. W
 
 ```text
 $ nub config set nodeLinker isolated
-Error: nub config set nodeLinker: this project sets `install.linker` in nub.jsonc, which outranks .npmrc, so the value written here would never be read
-  run `nub config set install.linker <value>` instead, or remove `install.linker` from nub.jsonc
+Error: nub config set nodeLinker: this project sets `install.linker` in
+nub.jsonc, which outranks .npmrc, so the value written here would never be
+read
+  run `nub config set install.linker <value>` instead, or remove
+  `install.linker` from nub.jsonc
 ```
 
 The rule follows what the project sets, not the key alone. `install.linker: "hoisted"` decides the linker and nothing else, so `hoist-pattern` still reads from `.npmrc`; giving `linker` a `hoist` list decides that too, and then it does not.

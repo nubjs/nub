@@ -103,7 +103,8 @@ The fallback returns generator-backed helper objects. Iteration, laziness, valid
 The supplied helpers are:
 
 ```text
-map  filter  take  drop  flatMap  reduce  toArray  some  every  find  forEach
+map  filter  take  drop  flatMap  reduce  toArray
+some  every  find  forEach
 ```
 
 ### `Iterator.concat()`
@@ -332,7 +333,8 @@ Feature-detected JavaScript polyfill before Node 25; native on Node 25+.
 
 ```ts
 const bytes = new TextEncoder().encode("hello");
-const encoded = bytes.toBase64({ alphabet: "base64url", omitPadding: true });
+const opts = { alphabet: "base64url", omitPadding: true };
+const encoded = bytes.toBase64(opts);
 const decoded = Uint8Array.fromBase64(encoded, { alphabet: "base64url" });
 
 console.log(decoded.toHex());

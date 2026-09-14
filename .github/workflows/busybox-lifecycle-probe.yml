@@ -1,13 +1,19 @@
 # Branch-scoped Windows probe (see .claude/skills/ci-adhoc-test) — NO PR needed.
-# Pushing to the busybox-lifecycle-main branch runs this on a real
-# windows-latest runner. It builds one nub and drives the same dependency
+# Pushing to the busybox-lifecycle-probe branch runs this, and so does a manual
+# dispatch. It builds one nub per architecture and drives the same dependency
 # postinstall fixtures twice, with `busybox.exe` staged next to nub.exe and
 # without it — the sidecar's presence is the only variable, and its absence
 # reproduces the pre-change cmd.exe behavior exactly.
+#
+# Both published Windows triples run, because they ship DIFFERENT sidecar
+# binaries (busybox64.exe vs busybox64a.exe) and only the x64 one had ever been
+# executed. release.yml picks the arch-appropriate file against a pinned
+# SHA-256, so a packaging slip cannot reach here — what this covers is whether
+# the arm64 build of busybox-w32 actually runs the script bodies.
 name: busybox-lifecycle-probe
 on:
   push:
-    branches: [busybox-lifecycle-main]
+    branches: [busybox-lifecycle-probe]
     paths:
       - 'tests/busybox-lifecycle-probe/**'
       - '.github/workflows/busybox-lifecycle-probe.yml'
@@ -23,16 +29,36 @@ permissions:
 
 jobs:
   probe:
-    name: busybox dependency lifecycle (windows-latest)
-    runs-on: windows-latest
+    name: busybox dependency lifecycle (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+            busybox: vendor/busybox-w32/busybox64.exe
+            expect: AMD64
+          - arch: arm64
+            runner: windows-11-arm
+            busybox: vendor/busybox-w32/busybox64a.exe
+            expect: ARM64
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           persist-credentials: false
+      # Asked before anything is built: a mislabelled runner would make the
+      # arm64 leg a second x64 run that passes and proves nothing.
+      - name: Confirm the runner architecture
+        shell: pwsh
+        run: |
+          $arch = $env:PROCESSOR_ARCHITECTURE
+          "runner architecture: $arch"
+          if ($arch -ne '${{ matrix.expect }}') { throw "expected ${{ matrix.expect }}, got $arch" }
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
-          shared-key: busybox-lifecycle-probe
+          shared-key: busybox-lifecycle-probe-${{ matrix.arch }}
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: 24
@@ -59,4 +85,4 @@ jobs:
         shell: bash
         run: |
           node tests/busybox-lifecycle-probe/run-probe.mjs \
-            target/debug/nub.exe "$RUNNER_TEMP/bblp" vendor/busybox-w32/busybox64.exe
+            target/debug/nub.exe "$RUNNER_TEMP/bblp" '${{ matrix.busybox }}'

@@ -6,7 +6,7 @@ description: libuv's threadpool is sized to the cores available to the process i
 Node hands async `fs`, `dns.lookup`, async `zlib` and async `crypto` calls, and native addons such as `bcrypt` and `sharp`, to libuv's threadpool. The pool has four threads whatever the machine, and its size is read from `UV_THREADPOOL_SIZE` the first time it is used, so only the environment can change it. Nub sets the variable when it starts Node.
 
 ```sh
-nub server.ts                        # pool sized to the cores, 16 on a 16-vCPU box
+nub server.ts                        # sized to the cores: 16 on 16 vCPUs
 node server.ts                       # pool of 4
 UV_THREADPOOL_SIZE=6 nub server.ts   # your value, used as is
 ```

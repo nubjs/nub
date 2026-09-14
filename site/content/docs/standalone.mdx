@@ -1,5 +1,5 @@
 ---
-title: Standalone runner
+title: Unified runner
 description: Run TypeScript on plain Node without installing the Nub binary — one small npm package that gives you a run command and a Node preload for tools that spawn Node themselves.
 ---
 
@@ -49,9 +49,9 @@ Names resolve most-specific-first: a file, then a script, then a bin. A script w
 Some invocations of `node` are fixed: a test runner, a framework CLI, a deploy script that shells out directly. Register the package as a preload and those get TypeScript too:
 
 ```sh
-node --import @nubjs/runner app.ts            # one run
-NODE_OPTIONS="--import @nubjs/runner" vitest  # a tool that spawns node itself
-node --require @nubjs/runner app.ts           # CommonJS delivery
+node --import @nubjs/runner app.ts           # one run
+NODE_OPTIONS="--import @nubjs/runner" vitest # a tool that spawns node
+node --require @nubjs/runner app.ts          # CommonJS delivery
 ```
 
 ```json
@@ -80,9 +80,9 @@ Dependencies under `node_modules` are never transpiled, and files Node handles n
 ## Entry points
 
 ```sh
-node --import @nubjs/runner app.ts        # ESM hooks + CommonJS require() augmentation
-node --require @nubjs/runner app.ts       # same, delivered as a CommonJS preload (Node 20.19+)
-node --import @nubjs/runner/esm app.ts    # ESM hooks only
+node --import @nubjs/runner app.ts      # ESM hooks + CJS require()
+node --require @nubjs/runner app.ts     # same, as a CJS preload (20.19+)
+node --import @nubjs/runner/esm app.ts  # ESM hooks only
 ```
 
 Module formats follow Node's own rules: a `.cts` file is CommonJS and a `.mts` file is an ES module. The package transpiles types and syntax; it does not convert one format into the other, so a `.cts` file uses `module.exports`, as it would under plain Node.

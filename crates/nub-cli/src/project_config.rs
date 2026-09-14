@@ -1171,13 +1171,31 @@ fn as_string_array(v: &Value, path: &str) -> Result<Vec<String>> {
 /// A command line (`prefix`): a string split like a POSIX shell word list, or an
 /// array of arguments taken as written. Refused when it names no program — an
 /// empty string, an unbalanced quote, an empty array — because the field's whole
-/// job is to put something in front of the command.
+/// job is to put something in front of the command, and refused when the string
+/// form carries a backslash, which the lexer would silently eat.
 fn as_command_words(v: &Value, path: &str) -> Result<Vec<String>> {
     let words = match v {
-        Value::String(s) => shlex::split(s).ok_or_else(|| ConfigError::Value {
-            path: path.into(),
-            message: "unbalanced quotes in the command".into(),
-        })?,
+        Value::String(s) => {
+            // A backslash is an ESCAPE to the lexer, which drops it and keeps the
+            // next character, so `C:\tools\wrap.exe` would launch `C:toolswrap.exe`.
+            // As a program that surfaces as a puzzling not-found; as an ARGUMENT it
+            // is a silent wrong answer, because the wrapper starts and receives a
+            // mangled path. The lexer cannot switch on the host — a config file is
+            // committed and read on every platform — so refuse the character and
+            // point at the array form, which takes arguments as written.
+            if s.contains('\\') {
+                return Err(ConfigError::Value {
+                    path: path.into(),
+                    message: "a backslash is a shell escape in the string form — \
+                              use the array form, which takes arguments as written"
+                        .into(),
+                });
+            }
+            shlex::split(s).ok_or_else(|| ConfigError::Value {
+                path: path.into(),
+                message: "unbalanced quotes in the command".into(),
+            })?
+        }
         Value::Array(_) => as_string_array(v, path)?,
         _ => {
             return Err(ConfigError::Type {
@@ -1859,6 +1877,37 @@ mod tests {
         );
     }
 
+    /// A Windows path in the string form is the case the shell lexer silently
+    /// corrupts: it eats each backslash and joins the segments. Refusing the
+    /// character is what turns that into an error, and the array form — the
+    /// spelling the error names — has to carry the same path untouched.
+    #[test]
+    fn prefix_refuses_a_backslash_in_the_string_form() {
+        for raw in [
+            r#""C:\\tools\\wrap.exe --""#,
+            r#""wrap -f C:\\dir\\.env""#,
+            r#""wrap C:\\""#,
+        ] {
+            let err = parse_project_config(&format!(r#"{{ "prefix": {raw} }}"#)).unwrap_err();
+            let ConfigError::Value { path, message } = &err else {
+                panic!("{raw} must be refused as a value, got {err}");
+            };
+            assert_eq!(path, "prefix");
+            assert!(
+                message.contains("array form"),
+                "{raw} must be refused with the spelling that works: {message}"
+            );
+        }
+
+        let cfg =
+            parse_project_config(r#"{ "prefix": ["C:\\tools\\wrap.exe", "-f", "C:\\dir\\.env"] }"#)
+                .unwrap();
+        assert_eq!(
+            cfg.prefix.as_deref(),
+            Some(&[r"C:\tools\wrap.exe", "-f", r"C:\dir\.env"].map(String::from)[..])
+        );
+    }
+
     #[test]
     fn decorators_accepts_only_implemented_semantics() {
         let cfg = parse_project_config(r#"{ "decorators": "legacy" }"#).unwrap();
@@ -2453,6 +2502,23 @@ mod tests {
         assert_eq!(
             enum_values(&schema, "/properties/dlx/properties/consent/enum"),
             expected(&["prompt", "never"])
+        );
+
+        // `prefix`'s string branch is the one field whose validity is a PATTERN
+        // rather than a key or an enum, so neither check above reaches it. The
+        // pattern must reject what `as_command_words` rejects: a backslash, which
+        // the shell splitting would eat, and a value with no program in it. Pinned
+        // as a literal because nub-cli takes no regex dependency and adding one to
+        // run the cases here would move the root lockfile for a single assertion —
+        // `prefix_refuses_a_backslash_in_the_string_form` covers the parser side,
+        // so the two together fail whichever half drifts.
+        assert_eq!(
+            schema
+                .pointer("/properties/prefix/oneOf/0/pattern")
+                .and_then(Value::as_str),
+            Some(r"^[^\\]*[^\\\s][^\\]*$"),
+            "prefix: the schema must refuse a backslash in the string form, or an \
+             editor blesses a Windows path the parser rejects"
         );
 
         // `loader` spells its vocabulary three times: the open map, plus a

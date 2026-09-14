@@ -15,7 +15,7 @@ import { Steps, Step } from 'fumadocs-ui/components/steps';
 
 Add both commands to `vercel.json`. The installer fetches a static binary, then Nub installs the dependencies and runs the build:
 
-```json title="vercel.json"
+```json title="vercel.json" wide
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "installCommand": "curl -fsSL https://nubjs.com/install.sh | bash && export PATH=$HOME/.nub/bin:$PATH && nub ci",

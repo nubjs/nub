@@ -113,7 +113,7 @@ As each tarball is downloaded and installed from npm, Nub scans that version's p
 
 Each verdict lands as a tiny sidecar file in the machine store, keyed by the package's content fingerprint:
 
-```console
+```console wide
 $ cat ~/.local/share/nub/store/v1/phantom/s2/0b278fff….json
 {"has_unguarded_phantom":true,"targets":[{"name":"preact-render-to-string","from_main":false,"from_subpath":true}],"files_analyzed":39}
 ```
@@ -123,7 +123,7 @@ At link time, a flagged package is **ejected**: instead of a symlink into the ma
 ```text
 my-app/
 └── node_modules/
-    ├── @firebase/database/                            # ejected: hardlinked files, inside the project
+    ├── @firebase/database/          # ejected: hardlinked into the project
     └── react  →  ~/.cache/nub/pm/store/react@19.2.0
 ```
 

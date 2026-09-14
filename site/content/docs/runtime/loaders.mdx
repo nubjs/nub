@@ -74,7 +74,7 @@ Add the `with { type: "text" }` import attribute to read a file's raw contents a
 ```ts
 import readme from "./README.md" with { type: "text" };  // string
 import query from "./query.sql" with { type: "text" };   // string
-import raw from "./config.yaml" with { type: "text" };    // the YAML source, unparsed
+import raw from "./config.yaml" with { type: "text" };   // YAML, unparsed
 ```
 
 The attribute wins over parsing: a `.yaml` or `.json` file read this way is the raw text, not the parsed value. A text import is a single default export, like the data loaders — there are no named exports.

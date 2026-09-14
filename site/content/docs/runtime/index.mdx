@@ -90,7 +90,10 @@ Modern globals — TC39, web-platform, and newer Node built-ins — are availabl
 ```ts
 const now = Temporal.Now.plainDateTimeISO();
 const route = new URLPattern({ pathname: "/u/:id" });
-const { me, feed } = await Promise.allKeyed({ me: getMe(), feed: getFeed() });
+const { me, feed } = await Promise.allKeyed({
+  me: getMe(),
+  feed: getFeed(),
+});
 ```
 
 See [Modern APIs](/docs/runtime/modern-apis) for the complete version-aware reference and examples.
@@ -161,9 +164,9 @@ Settings you want on every run go in a [nub.jsonc](/docs/config) at the project 
 
 ```jsonc title="nub.jsonc"
 {
-  "preload": ["./instrumentation.ts", "tsx/esm"], // loaded before the entry file
-  "nodeOptions": ["--enable-source-maps"],        // Node options for every run
-  "v8Flags": ["--expose-gc"]                      // V8 flags, on Node's argv
+  "preload": ["./instrumentation.ts", "tsx/esm"], // before the entry
+  "nodeOptions": ["--enable-source-maps"],        // on every run
+  "v8Flags": ["--expose-gc"]                      // on Node's argv
 }
 ```
 
@@ -190,7 +193,7 @@ Setting a truthy `NODE_COMPAT` (`1`, `true`, or `yes`, case-insensitive) has the
 
 ```bash
 export NODE_COMPAT=1     # every nub/node in this shell now runs vanilla
-nub script.ts            # plain Node, still on the project's pinned version
+nub script.ts            # plain Node, still on the pinned version
 ```
 
 ### `nodeCompat`

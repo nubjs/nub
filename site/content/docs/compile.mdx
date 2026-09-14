@@ -26,7 +26,7 @@ The default embeds Node; `--smol` does not.
 
 ```bash
 nub compile app.ts           # self-contained for this target: embeds Node
-nub compile app.ts --smol    # tiny: discovers or provisions Node at first run
+nub compile app.ts --smol    # tiny: finds or provisions Node at first run
 ```
 
 A `--smol` binary first looks in Nub's Node store, version-manager installations, and `PATH`. It provisions Node only when none satisfies its target.
@@ -58,8 +58,8 @@ Ship an executable with no embedded Node. On first run it looks for a usable Nod
 
 ```bash
 nub compile app.ts --smol                  # ~0.9 MB, finds or fetches Node
-nub compile app.ts --smol --target ">=22 <23" # accepts a host Node in the range
-nub compile app.ts --smol --target 26.0.0  # uses or provisions exactly Node 26.0.0
+nub compile app.ts --smol --target ">=22 <23" # a host Node in the range
+nub compile app.ts --smol --target 26.0.0     # exactly Node 26.0.0
 ```
 
 A machine with no Node and no way to download one exits with an error pointing at the default build. The default shape has no such dependency.
@@ -78,16 +78,16 @@ The pin is resolved from `.node-version`, `.nvmrc`, `engines.node`, or `devEngin
 ```bash
 nub compile app.ts --target {{NODE_MAJOR}}       # newest {{NODE_MAJOR}}.x
 nub compile app.ts --target {{NODE_VERSION}}     # an exact version
-nub compile app.ts --target latest    # the latest major ({{NODE_MAJOR}} today), not LTS
+nub compile app.ts --target latest    # latest major ({{NODE_MAJOR}}), not LTS
 ```
 
 The two shapes treat the version differently. The default shape bakes one **exact** version into the binary — a range resolves to the newest match at compile time. With `--smol`, an exact version such as `26.0.0` requires that exact Node at runtime. A range that names a lower bound is enforced **in full**, upper bound included; `24.x` counts, because fixing the major fixes the bottom of the range at `24.0.0`. Every other form resolves to a **floor** and accepts any Node at or above it — a major or minor pin, an alias, and a range that names only an upper bound such as `<23`, which has no lower bound to enforce. When no installed Node qualifies, Nub provisions the newest matching release resolved when the executable was compiled.
 
 ```bash
-nub compile app.ts --target ">=22"          # default: bakes the newest >=22 now
-nub compile app.ts --smol --target ">=22"   # smol: accepts any host Node >= 22
-nub compile app.ts --smol --target ">=22 <23" # smol: rejects Node 23 and newer
-nub compile app.ts --smol --target 26.0.0   # smol: requires exactly Node 26.0.0
+nub compile app.ts --target ">=22"            # bakes the newest >=22 now
+nub compile app.ts --smol --target ">=22"     # smol: any host Node >= 22
+nub compile app.ts --smol --target ">=22 <23" # smol: rejects 23 and newer
+nub compile app.ts --smol --target 26.0.0     # smol: exactly Node 26.0.0
 ```
 
 With nothing pinned up the tree and no `--target`, Nub refuses rather than guessing — a compiled binary's Node version has to be intentional and reproducible, so there is no silent "latest" fallback the way `nub run` has:
@@ -142,9 +142,9 @@ Error: no such order
 Pick a different mode when the default doesn't fit:
 
 ```bash
-nub compile app.ts --sourcemap=linked     # a .map shipped inside the binary
-nub compile app.ts --sourcemap=inline     # the map embedded in the bundle itself
-nub compile app.ts --sourcemap=external   # a .map written beside the binary, not shipped
+nub compile app.ts --sourcemap=linked    # a .map inside the binary
+nub compile app.ts --sourcemap=inline    # the map inside the bundle
+nub compile app.ts --sourcemap=external  # a .map beside it, not shipped
 ```
 
 Prefer `linked`: the map travels in the binary but Node reads it only when it renders a stack trace, so it costs nothing on a run that does not throw. `inline` embeds the map in the bundle instead, which the runtime reads and parses on every launch.
@@ -156,7 +156,8 @@ Use `external` to keep your source out of what you distribute while still holdin
 Replace an expression at build time. Values are JavaScript expressions, so a string constant carries its own quotes:
 
 ```bash
-nub compile app.ts --define 'API_URL="https://api.example.com"' --define BUILD=42
+nub compile app.ts --define 'API_URL="https://api.example.com"' \
+  --define BUILD=42
 ```
 
 Three defines are always applied, and an explicit `--define` of the same key overrides them:
@@ -198,8 +199,9 @@ Embedded files are extracted beside the compiled entry, keeping the layout they 
 
 ```ts
 // src/index.ts, compiled with the command above
-const instructions = readFileSync(join(import.meta.dirname, "instructions.md"), "utf8");
-const icons = createReadStream(join(import.meta.dirname, "..", "assets", "icons.xml"));
+const here = import.meta.dirname;
+const instructions = readFileSync(join(here, "instructions.md"), "utf8");
+const icons = createReadStream(join(here, "..", "assets", "icons.xml"));
 ```
 
 Because they are real files, every filesystem API works on them — `readFile`, `createReadStream`, `stat`, `readdir`, and a native addon opening the path itself.
@@ -224,14 +226,15 @@ A pattern that matches nothing fails the build, since the alternative is discove
 ```ansi
 $ nub compile app.ts --include=data/missing.json
 \e[35m\e[1mnub\e[22m\e[39m \e[2m0.8.3\e[22m \e[2m·\e[22m compiling app.ts \e[2m→\e[22m \e[96mapp\e[39m
-\e[31m\e[1merror\e[22m\e[39m  --include "data/missing.json" matched no files (the path does not exist)
+\e[31m\e[1merror\e[22m\e[39m  --include "data/missing.json" matched no files
+       (the path does not exist)
 ```
 
 Embedded bytes are stored as they are, not compressed, so the executable grows by roughly the size of what you embed.
 
 An embedded file that would land on top of compiled output is refused. On a target whose filesystem ignores case — Windows, and macOS by default — that includes a name matching only in case:
 
-```console
+```console wide
 $ nub compile main.ts --include=Main.js
 nub 0.8.3 · compiling main.ts → main
 error  two files would collide in the compiled binary: "main.js" (compiled output) and "Main.js" (an embedded file), so one would overwrite the other where it is extracted.
@@ -253,7 +256,8 @@ That failure looks like a missing file inside the extracted binary, because the 
 
 ```console
 $ ./app
-Error: ENOENT: no such file or directory, open '/…/compile-app/64119dd9/table.txt'
+Error: ENOENT: no such file or directory, open
+'/…/compile-app/64119dd9/table.txt'
 ```
 
 A package that names the same file statically, with `new URL('./table.txt', import.meta.url)`, needs no flag — Nub carries it into the binary and rewrites the reference.
@@ -293,7 +297,8 @@ Forcing a package that genuinely loads native code into the bundle produces a bi
 Drop paths from what `--include` selected, for when a directory is almost the right set:
 
 ```bash
-nub compile app.ts --include=data --exclude=data/fixtures --exclude='**/*.tmp'
+nub compile app.ts --include=data --exclude=data/fixtures \
+  --exclude='**/*.tmp'
 ```
 
 An `--exclude` that matches nothing is ignored rather than an error, so it can outlive the files it was written for. That also means a mistyped one prunes nothing — check what shipped if a path was meant to stay out.
@@ -363,7 +368,7 @@ Only a literal specifier can be embedded, since the file has to be known while t
 ```ts
 new URL("./table.bin", import.meta.url)         // embedded
 new URL(`./${locale}.json`, import.meta.url)    // computed — left alone
-new URL("./cache.db", import.meta.url)          // no such file yet — left alone
+new URL("./cache.db", import.meta.url)       // no such file — left alone
 ```
 
 The last two are also how a program names a file it *writes*, so neither is an error. Embed the files a computed URL might reach with `--include`, and reach them by a path the entry can see (below).
@@ -374,8 +379,8 @@ The extracted app dir mirrors your source tree, and every module's `import.meta.
 
 ```ts
 // Entry src/index.ts, helper src/shapes/lib.ts, asset at assets/icons.xml.
-join(import.meta.dirname, "..", "assets", "icons.xml")        // from the entry
-join(import.meta.dirname, "..", "..", "assets", "icons.xml")  // from the helper
+join(import.meta.dirname, "..", "assets", "icons.xml")       // from entry
+join(import.meta.dirname, "..", "..", "assets", "icons.xml") // from helper
 ```
 
 Both work, and each is the path you would write for plain `node`. Write them exactly as you would without compiling.
@@ -383,10 +388,12 @@ Both work, and each is the path you would write for plain `node`. Write them exa
 The mirror is rooted at the deepest directory holding the entry and everything you `--include`, so including a file from outside the entry's own directory roots it higher:
 
 ```console
-$ nub compile src/index.ts                        # entry at the root, assets beside it
-$ nub compile src/index.ts --include assets       # `assets` is a sibling of `src`, so
-                                                  # the root holds both, and the entry
-                                                  # sits in `src/` inside it
+$ nub compile src/index.ts                   # entry at the root, assets
+                                             # beside it
+$ nub compile src/index.ts --include assets  # `assets` is a sibling of
+                                             # `src`, so the root holds
+                                             # both, and the entry sits
+                                             # in `src/` inside it
 ```
 
 Relative distances survive that either way, which is the point of rooting it there.
@@ -420,10 +427,11 @@ Each worker receives the compiled runtime preamble before its bundled entry runs
 The constructor is followed through every spelling whose identity the build can prove:
 
 ```ts
-new globalThis.Worker(new URL("./worker.ts", import.meta.url)); // also self, window, global
-const Spawn = Worker;                                           // and chains of aliases
+// also self, window, global
+new globalThis.Worker(new URL("./worker.ts", import.meta.url));
+const Spawn = Worker;                          // and chains of aliases
 const { Worker: Spawn } = globalThis;
-const Spawn = globalThis.Worker ?? NodeWorker;                  // every arm must be a Worker
+const Spawn = globalThis.Worker ?? NodeWorker; // every arm is a Worker
 ```
 
 The URL itself is read only where it is written inline, as above. A specifier computed into a variable first is not bundled.
@@ -439,8 +447,9 @@ Name the constructor directly — the global, a property of `globalThis`, or an 
 A path given as a plain string is a different case again: it neither bundles nor fails the build. Node resolves it against the working directory, and the compiled program does the same, so it finds the file only if the machine you ship to has one there.
 
 ```ts
-new Worker("./worker.js");                        // resolved at run time, against the cwd
-fork(new URL("./child.js", import.meta.url));     // a child process, not an import — never bundled
+new Worker("./worker.js");                    // resolved against the cwd
+// a child process, not an import — never bundled
+fork(new URL("./child.js", import.meta.url));
 ```
 
 `child_process.fork` and `spawn` are the same story for the same reason: they start a new process rather than importing a module, so the build has nothing to follow. Ship those scripts alongside the binary, or make the work a worker with an inline `new URL` and let it travel inside.
@@ -468,11 +477,11 @@ if (process.platform === "darwin" && process.arch === "arm64") {
 
 The build names what ships:
 
-```ansi
+```ansi wide
 $ nub compile app.ts
 \e[35m\e[1mnub\e[22m\e[39m \e[2m0.8.3\e[22m \e[2m·\e[22m compiling app.ts \e[2m→\e[22m \e[96mapp\e[39m
 Shipping 1 package unbundled, in its own installed layout:
-  @napi-rs/nice — it declares 16 per-platform binary packages (napi-rs layout)
+  @napi-rs/nice — 16 per-platform binary packages (napi-rs layout)
 
     \e[2moutput\e[22m  \e[96mapp\e[39m  29.5 MB\e[2m  (node 28.2 MB · app 165 KB · launcher 851 KB · signature 228 KB)\e[22m
    \e[2mruntime\e[22m  Node 26.7.0, embedded\e[2m  (package.json#engines.node)\e[22m
@@ -491,13 +500,16 @@ $ nub compile app.ts --platform linux-x64
 nub 0.8.3 · compiling app.ts → app
 error  the bundler failed:
   app.ts:1:19
-    Could not load node_modules/local-addon/addon.node (imported by app.ts) - plugin `nub:native-addons` threw an error.
+    Could not load node_modules/local-addon/addon.node (imported by
+    app.ts) - plugin `nub:native-addons` threw an error.
 
-this native addon is built for macOS, but the binary targets linux-x64: node_modules/local-addon/addon.node
-  A native addon is machine code for one platform, and a compiled binary loads it
-  from a real file at run time — there is no later step that could translate it.
-  Install this dependency for the target (its platform package) and compile again,
-  or drop --platform to build for this machine.
+this native addon is built for macOS, but the binary targets linux-x64:
+node_modules/local-addon/addon.node
+  A native addon is machine code for one platform, and a compiled binary
+  loads it from a real file at run time — there is no later step that
+  could translate it. Install this dependency for the target (its
+  platform package) and compile again, or drop --platform to build for
+  this machine.
 ```
 
 Installing the target's platform package fixes an operating-system or architecture mismatch. Package managers skip a dependency whose `os` or `cpu` does not match the machine installing it, so a cross-compile usually has to ask for that package by name. The compiler does not validate libc requirements or compatibility with older Node ABIs; verify those against the target runtime.
@@ -512,7 +524,7 @@ require(`pkg-${process.platform}`)             // followed
 const name = `pkg-${process.platform}`;
 require(name);                                 // not followed
 
-require("bindings")("better_sqlite3.node")     // searches the disk when it runs
+require("bindings")("better_sqlite3.node")  // searches the disk at run
 ```
 
 Nothing is embedded for the last two, and the require fails when the executable runs. Compile those packages with `--external` instead, which leaves them to be resolved on the machine that runs the binary.
@@ -528,7 +540,8 @@ $ nub compile app.ts --node-options "--experimental-vm-modules"
 The string is spelled exactly like the `NODE_OPTIONS` environment variable, so one of them carries as many options as you need:
 
 ```console
-$ nub compile app.ts --node-options "--max-old-space-size=4096 --experimental-vm-modules"
+$ nub compile app.ts \
+    --node-options "--max-old-space-size=4096 --experimental-vm-modules"
 ```
 
 An option that takes a value needs an equals sign — a bare word after a space is a script path to Node, so the build refuses it rather than let the binary run something else. Quote a value containing a space, and repeat the flag to add more.
@@ -596,13 +609,13 @@ error  1 import could not be resolved at build time:
   /src/plugins.ts:6:22
     import(pluginName)
 
-  A compiled binary carries no node_modules, so an unresolved import fails at
-  runtime on the machine you ship to. Make the specifier a static string so
-  the bundler can follow it.
-  A specifier your program computes at run time — a plugin path, a config
-  module — cannot be made static. Pass --allow-dynamic-import to keep it, and
-  the binary will resolve it from the directory it is started in. What it
-  loads then depends on the machine you ship to.
+  A compiled binary carries no node_modules, so an unresolved import
+  fails at runtime on the machine you ship to. Make the specifier a
+  static string so the bundler can follow it.
+  A specifier your program computes at run time — a plugin path, a
+  config module — cannot be made static. Pass --allow-dynamic-import to
+  keep it, and the binary will resolve it from the directory it is
+  started in. What it loads then depends on the machine you ship to.
 ```
 
 Almost always the culprit is a dynamic import whose specifier is a variable. Make it a literal and the bundler can follow it:
@@ -627,12 +640,12 @@ error  1 import could not be resolved at build time:
   /app/node_modules/umdpkg/lib/main.js:8:18
     require("./helper")
 
-  A compiled binary carries no node_modules, so an unresolved import fails at
-  runtime on the machine you ship to. Make the specifier a static string so
-  the bundler can follow it.
-  A require() whose `require` is a local binding (a UMD factory parameter) is
-  an ordinary call the bundler cannot rewrite. Depend on the package's ESM
-  build, or alias the specifier to it with --alias.
+  A compiled binary carries no node_modules, so an unresolved import
+  fails at runtime on the machine you ship to. Make the specifier a
+  static string so the bundler can follow it.
+  A require() whose `require` is a local binding (a UMD factory
+  parameter) is an ordinary call the bundler cannot rewrite. Depend on
+  the package's ESM build, or alias the specifier to it with --alias.
 ```
 
 Nub resolves a package's `module` field ahead of `main`, so a dual package reaches its ESM build and never hits this. A UMD-only package needs `--alias` pointed at an ESM entry. Guarded probes are left alone — a `require()` whose specifier is a variable is nearly always an optional loader inside a `try`/`catch`, and failing on those would break builds that work.
@@ -650,9 +663,10 @@ error  the bundler emitted 1 chunk that is not valid JavaScript:
   app.js:1:16
     Unexpected JSX expression
 
-  The compiled binary would throw a SyntaxError on startup. This usually means
-  a source language survived the bundle untransformed — most often JSX, from a
-  tsconfig whose compilerOptions.jsx is "preserve".
+  The compiled binary would throw a SyntaxError on startup. This
+  usually means a source language survived the bundle untransformed —
+  most often JSX, from a tsconfig whose compilerOptions.jsx is
+  "preserve".
 ```
 
 Nearly always the cause is JSX under a tsconfig setting `"jsx": "preserve"`, which tells the bundler to leave JSX for a later tool to handle. A compiled binary has no later tool, so nub transforms it with the automatic runtime, honoring `jsxImportSource` the same way `nub run` does. The check covers what that cannot reach — a nested tsconfig the entry's own config never sees, for one.
@@ -742,7 +756,9 @@ Windows is the only target that carries its icon inside the executable. macOS ta
 Set the fields Windows shows in an executable's Details tab, and that `(Get-Item app.exe).VersionInfo` reads:
 
 ```bash
-nub compile app.ts --platform win32-x64 --metadata "CompanyName=Acme Inc." --metadata "LegalCopyright=Copyright 2026 Acme"
+nub compile app.ts --platform win32-x64 \
+  --metadata "CompanyName=Acme Inc." \
+  --metadata "LegalCopyright=Copyright 2026 Acme"
 ```
 
 Most builds need no flag at all. Product name, description, version and company come from `name`, `description`, `version` and `author` in the nearest `package.json`, and the original filename comes from `--out`. The flag only overrides that, and `Key=` with an empty value drops a field rather than writing a blank one.
@@ -907,7 +923,8 @@ For a locked-down Linux deploy, warm the cache at image-build time in an executa
 
 ```dockerfile
 ENV XDG_CACHE_HOME=/opt/cache
-RUN ./app --version || true   # the exit code is irrelevant; the extraction is the point
+RUN ./app --version || true   # the exit code is irrelevant; the
+                              # extraction is the point
 ```
 
 The application's own files land beside it under `compile-app/<hash>`, keyed by the payload's content. That key changes with every rebuild, so a machine that compiles the same program repeatedly accumulates one extraction per build. Each holds the bundle plus any unbundled packages in full — tens of megabytes for a program with one unbundled package, more as that list grows. The embedded Node is not part of it: that is cached once under `compile-node-blob` and shared by every build. Nothing evicts either. Delete the directory to reclaim the space; the next run extracts again:
@@ -936,7 +953,7 @@ A compiled macOS binary is ad-hoc-signed, not notarized. The signature allows lo
 Notarizing is yours to do, because it needs your Apple Developer identity. To ship a macOS binary without the warning, sign it with a Developer ID certificate and notarize it through [Apple's notarization service](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution). Someone who already holds an un-notarized binary can clear the quarantine flag instead:
 
 ```bash
-xattr -d com.apple.quarantine ./app   # or, once: right-click the app → Open
+xattr -d com.apple.quarantine ./app   # or right-click the app → Open
 ```
 
 ## Distributing on Windows
