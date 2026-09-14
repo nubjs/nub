@@ -441,7 +441,7 @@ fn manifest_settings(manifest: &Map<String, Value>, root: &Path) -> Map<String, 
     let mut out = Map::new();
     let mut overrides = Map::new();
     // Both spellings are honored, and `overrides` is read last so it wins.
-    for field in ["resolutions", "overrides"] {
+    for field in ["resolutions", OVERRIDES_FIELD] {
         if let Some(Value::Object(pins)) = manifest.get(field) {
             for (selector, spec) in pins {
                 if spec.is_string() && !selector.is_empty() {
@@ -565,6 +565,13 @@ fn lexically_resolve(base: &Path, relative: &str) -> PathBuf {
 /// `pnpm-workspace.yaml`, so a decision recorded there would never be read
 /// back.
 pub(crate) const ALLOW_SCRIPTS_FIELD: &str = "allowScripts";
+
+/// The neutral `package.json` field a nub project pins dependency versions
+/// with, read above alongside `resolutions` and written by `nub link`. Named
+/// because the read and the write have to agree: an override recorded anywhere
+/// the resolver does not read it leaves the dependency on the registry copy,
+/// which is the opposite of what a link asks for.
+pub(crate) const OVERRIDES_FIELD: &str = "overrides";
 
 /// How a user wrote the `package.json` field behind a setting.
 fn manifest_field(setting: &str) -> String {

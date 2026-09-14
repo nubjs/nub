@@ -58,6 +58,9 @@ const NUB: Embedder = Embedder {
     workspace_settings: None,
     compat_package_extensions: None,
     allow_builds_writer: Some(record_allow_scripts),
+    // A nub project keeps its overrides in `package.json`, which it reads, so
+    // `link` records them there instead of refusing.
+    overrides_writer: Some(record_overrides),
     extract_observer: Some(super::phantom_hooks::extract_observer),
     materialize_policy: Some(super::phantom_hooks::materialize_policy),
 };
@@ -162,6 +165,51 @@ fn record_allow_scripts(dir: &std::path::Path, decisions: &[(&str, bool)]) -> st
     .map_err(std::io::Error::other)?;
     republish_allow_builds(decisions);
     Ok(())
+}
+
+/// Record the overrides a `link` implies where a nub project reads them back:
+/// the neutral `overrides` field of its `package.json`.
+///
+/// A link is only a link because an override points the dependency at the
+/// local directory. The engine would otherwise merge that override into
+/// `pnpm-workspace.yaml`, which a nub project reads nothing from — so the next
+/// install would resolve the dependency to the registry copy, and the file
+/// itself would make the project read as pnpm's. Without a writer the engine
+/// refuses to link at all, which is the right default and the wrong answer
+/// here, because nub already reads this field.
+///
+/// An entry REPLACES the selector it names and leaves the rest alone: the user
+/// is linking one package at a time.
+fn record_overrides(dir: &std::path::Path, entries: &[(&str, &str)]) -> std::io::Result<()> {
+    nub_core::pm::resolve::edit_root_manifest(dir, |manifest| {
+        // Edited in place where the field already exists, so a link moves
+        // nothing else in the file; a malformed value is replaced, since the
+        // engine could not have read it either.
+        if let Some(serde_json::Value::Object(pins)) =
+            manifest.get_mut(host_settings::OVERRIDES_FIELD)
+        {
+            pin(pins, entries);
+            return;
+        }
+        let mut pins = serde_json::Map::new();
+        pin(&mut pins, entries);
+        manifest.insert(
+            host_settings::OVERRIDES_FIELD.to_owned(),
+            serde_json::Value::Object(pins),
+        );
+    })
+    .map_err(std::io::Error::other)?;
+    Ok(())
+}
+
+/// Apply each override, replacing whatever the field said about that selector.
+fn pin(pins: &mut serde_json::Map<String, serde_json::Value>, entries: &[(&str, &str)]) {
+    for (selector, specifier) in entries {
+        pins.insert(
+            (*selector).to_owned(),
+            serde_json::Value::String((*specifier).to_owned()),
+        );
+    }
 }
 
 /// Apply each decision, replacing whatever the field said about that package.
