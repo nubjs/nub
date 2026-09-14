@@ -709,8 +709,9 @@ enum Origin {
 }
 
 /// Record one `.npmrc` or environment entry, if it names a setting this layer
-/// carries. Keys pnpm does not know are npm's own and pass by silently; a
-/// known key with a value pnpm would refuse is an error naming its source.
+/// carries. Keys the engine does not know are npm's own and pass by silently,
+/// as does a scalar that names a setting the engine reads as a table; any
+/// other value the engine would refuse is an error naming its source.
 fn lift(
     merged: &mut Map<String, Value>,
     known: &BTreeSet<String>,
@@ -733,9 +734,20 @@ fn lift(
         return Ok(());
     }
     let value = match raw {
-        Raw::Scalar(raw) => typed(&setting, &raw).with_context(|| {
-            format!("{source} sets `{key}` to `{raw}`, which is not a value pnpm accepts for it")
-        })?,
+        Raw::Scalar(raw) => match typed(&setting, &raw) {
+            Some(value) => value,
+            // npm's flat config and the engine's settings share one namespace,
+            // and a few names collide across SHAPES: npm's `audit` is a boolean
+            // and its `python` an interpreter path, where the engine reads a
+            // table for each. A scalar cannot spell a table, so the value is
+            // npm's under a shared name — node-gyp reads `npm_config_python`
+            // out of the environment itself — and refusing it failed the whole
+            // install for anyone carrying either in `~/.npmrc`.
+            None if check(&setting, &json!({})).is_ok() => return Ok(()),
+            None => {
+                bail!("{source} sets `{key}` to `{raw}`, which is not a value that setting accepts")
+            }
+        },
         Raw::List(items) => {
             let value = json!(items);
             check(&setting, &value).map_err(|error| anyhow!("{source} sets `{key}[]`: {error}"))?;
@@ -1362,6 +1374,26 @@ mod tests {
             message.contains("/app/.npmrc") && message.contains("node-linker"),
             "{message}"
         );
+    }
+
+    /// A scalar naming a table-shaped setting belongs to npm, not the engine.
+    /// The `node-linker=sideways` half of the test above is the control: a bad
+    /// value for a setting that IS scalar still refuses.
+    #[test]
+    fn an_npm_scalar_sharing_a_name_with_a_table_setting_stays_npms() {
+        let install = InstallConfig::default();
+        let mut sources = sources(&install);
+        sources.npmrc = vec![(
+            PathBuf::from("/app/.npmrc"),
+            "audit=false\npython=/usr/bin/python3\n".to_owned(),
+        )];
+        sources.env = env(&[("npm_config_cargo", "x"), ("npm_config_catalog", "y")]);
+
+        let merged = merge(&sources).expect("npm's own scalars pass by");
+
+        for absent in ["audit", "python", "cargo", "catalog"] {
+            assert!(!merged.contains_key(absent), "{absent} must not be lifted");
+        }
     }
 
     /// From the environment a registry or proxy key IS this layer's, so it
