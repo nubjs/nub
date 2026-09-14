@@ -3756,6 +3756,20 @@ mod tests {
         let path = dir.join(name);
         fs::write(&path, format!("#!/bin/sh\nexit {exit_code}\n")).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        // A sibling test that forks while `fs::write` holds this file open keeps
+        // the write descriptor in its child until that child execs, and running
+        // the script inside that window fails with ETXTBSY. The descriptor is
+        // closed by now, so no later fork can inherit it: once one run gets
+        // through, every later run will too.
+        for _ in 0..200 {
+            let busy = Command::new(&path)
+                .status()
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::ExecutableFileBusy);
+            if !busy {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
         path
     }
 
