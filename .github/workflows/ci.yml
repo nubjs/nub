@@ -1347,13 +1347,12 @@ jobs:
           actual="$(cd "$work" && __NUB_COMPILE_CACHE_DIR="$work/compile-cache" "$work/app")"
           [ "$actual" = 'embedded-compile-ok' ] \
             || { echo "::error::default compiled artifact printed '$actual'"; exit 1; }
-      # Brand-boundary sweep for the embedded PM engine: a real `nub install`
-      # in a sandboxed fixture (HOME/XDG_* inside a temp dir) must never leak
-      # the engine's upstream identity — no ERR_AUBE_/WARN_AUBE_/aube.jdx.dev
-      # in output, AUBE_* env vars dead, no aube-named on-disk paths beyond the
-      # documented shrinking allowlist in the script, and
-      # npm_config_user_agent's first token == nub/<ver>. One leg is enough:
-      # the assertions are OS- and Node-version-independent.
+      # Brand-boundary sweep for the embedded PM engine: real installs in
+      # sandboxed fixtures (HOME/XDG_* inside a temp dir). A nub project must
+      # carry nub's identity — ERR_NUB_ codes, no pnpm.io link, PNPM_* env dead,
+      # stores under nub's cache, a nub-first npm_config_user_agent — while a
+      # pnpm project keeps pnpm's. One leg is enough: the assertions are OS- and
+      # Node-version-independent.
       - name: Brand sweep (embedded PM engine)
         if: matrix.os == 'ubuntu-latest' && matrix.node == '24'
         run: |
