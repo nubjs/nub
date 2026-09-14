@@ -175,6 +175,13 @@ fn a_yarnrc_supplies_no_config_and_no_layout() {
     assert_eq!(config_get(&neutral, "nodeLinker"), "hoisted");
 }
 
+/// Where the install put the virtual store, as the engine recorded it.
+fn virtual_store_dir(dir: &Path) -> String {
+    let state = std::fs::read_to_string(dir.join("node_modules/.modules.yaml")).unwrap();
+    let state: serde_json::Value = serde_json::from_str(&state).unwrap();
+    state["virtualStoreDir"].as_str().unwrap().to_string()
+}
+
 /// `nub ci` builds the tree a deploy copies into an image, where the shared
 /// store does not exist, so it keeps the store inside the project the way CI
 /// does. A plain install in the same project keeps sharing it.
@@ -187,14 +194,8 @@ fn nub_ci_keeps_the_virtual_store_inside_the_project() {
             r#"{"name":"app","version":"1.0.0","packageManager":"nub@0.1.0"}"#,
         )],
     );
-    let virtual_store_dir = || {
-        let state = std::fs::read_to_string(dir.join("node_modules/.modules.yaml")).unwrap();
-        let state: serde_json::Value = serde_json::from_str(&state).unwrap();
-        state["virtualStoreDir"].as_str().unwrap().to_string()
-    };
-
     install(&dir);
-    let shared = virtual_store_dir();
+    let shared = virtual_store_dir(&dir);
     assert!(
         shared.ends_with("links"),
         "a plain install shares the store: {shared}"
@@ -207,9 +208,49 @@ fn nub_ci_keeps_the_virtual_store_inside_the_project() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(out.status.success(), "ci failed:\n{report}");
-    assert_eq!(virtual_store_dir(), ".store", "{report}");
+    assert_eq!(virtual_store_dir(&dir), ".store", "{report}");
     assert!(
         report.contains("isolated (global virtual store auto-disabled in CI)"),
         "the header names the store the install built:\n{report}"
+    );
+}
+
+/// A package the project names in `.npmrc` keeps the store inside the project
+/// the way a framework nub knows about does, and the header names it. The names
+/// are matched against what the project declares, so a pattern works.
+#[test]
+fn a_package_named_in_npmrc_keeps_the_virtual_store_inside_the_project() {
+    let installed = |npmrc: Option<&str>| {
+        let dir = project(
+            "opt-out",
+            &[(
+                "package.json",
+                r#"{"name":"app","version":"1.0.0","packageManager":"nub@0.1.0","dependencies":{"my-bundler":"link:./my-bundler"}}"#,
+            )],
+        );
+        std::fs::create_dir_all(dir.join("my-bundler")).unwrap();
+        std::fs::write(
+            dir.join("my-bundler/package.json"),
+            r#"{"name":"my-bundler","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        if let Some(npmrc) = npmrc {
+            std::fs::write(dir.join(".npmrc"), npmrc).unwrap();
+        }
+        let report = install(&dir);
+        (virtual_store_dir(&dir), report)
+    };
+
+    let (shared, report) = installed(None);
+    assert!(
+        shared.ends_with("links"),
+        "nothing is named, so the store is shared:\n{report}"
+    );
+
+    let (store, report) = installed(Some("disableGlobalVirtualStoreForPackages=other,my-*\n"));
+    assert_eq!(store, ".store", "{report}");
+    assert!(
+        report.contains("isolated (global virtual store auto-disabled in my-bundler projects)"),
+        "the header names the package:\n{report}"
     );
 }

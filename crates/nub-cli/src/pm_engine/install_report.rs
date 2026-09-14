@@ -180,10 +180,10 @@ pub(super) struct SourceIndex {
     /// `nub ci` sets it too, whatever the environment: its tree is the one a
     /// deploy copies.
     ci: bool,
-    /// The declared framework whose resolver cannot reach a shared store, as the
+    /// The declared package whose resolver cannot reach a shared store, as the
     /// install decides it ([`super::store_locality_breaker`]), so the row names
-    /// the framework the install acted on and stays silent about one it did not.
-    store_locality_breaker: Option<&'static str>,
+    /// the package the install acted on and stays silent about one it did not.
+    store_locality_breaker: Option<String>,
 }
 
 impl SourceIndex {
@@ -521,8 +521,8 @@ fn layout_row(index: &SourceIndex) -> (String, Option<Source>) {
     if index.ci {
         return isolated(Some(Source::Ci));
     }
-    if let Some(name) = index.store_locality_breaker {
-        return isolated(Some(Source::IncompatiblePackage(name.to_string())));
+    if let Some(name) = &index.store_locality_breaker {
+        return isolated(Some(Source::IncompatiblePackage(name.clone())));
     }
     ("global-virtual-store".to_string(), None)
 }
@@ -904,7 +904,7 @@ mod tests {
     fn a_gvs_incompatible_dependency_reports_the_project_local_store() {
         let index = SourceIndex {
             embedder_defaults: named(&[("nodeLinker", "isolated")]),
-            store_locality_breaker: Some("next"),
+            store_locality_breaker: Some("next".to_owned()),
             ..empty_index()
         };
         assert_eq!(
@@ -1044,7 +1044,7 @@ mod tests {
 
         let incompatible = SourceIndex {
             ci: false,
-            store_locality_breaker: Some("next"),
+            store_locality_breaker: Some("next".to_owned()),
             ..in_ci
         };
         assert_eq!(

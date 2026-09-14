@@ -57,6 +57,13 @@ pub const UNSUPPORTED_SETTINGS: &[(&str, &str)] = &[
         "nub always runs `pre`/`post` scripts for a named script, like npm. \
              Pass `--ignore-scripts` to `nub run` to skip the whole lifecycle.",
     ),
+    // The previous engine's per-package eject list. The pnpm engine never reads
+    // it; nub takes the same list from `install.linker.eject`.
+    (
+        "diskMaterializePackages",
+        "nub does not read this setting. Name the package in `install.linker.eject` \
+             in nub.jsonc to keep it out of the shared store.",
+    ),
     // `update_check::check_and_notify`, reached from the engine's own CLI
     // dispatcher and `doctor`. nub's self-update is `nub upgrade`
     // (`self_update_enabled: false`), which never runs during another verb.

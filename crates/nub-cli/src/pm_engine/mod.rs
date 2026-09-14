@@ -1479,9 +1479,10 @@ fn workspace_patterns(root: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The declared framework, if any, whose resolver cannot reach a store shared
+/// The declared package, if any, whose resolver cannot reach a store shared
 /// between projects — so this install must build its virtual store inside the
-/// project.
+/// project. Either a framework nub knows about, or one the project names in
+/// `disableGlobalVirtualStoreForPackages`.
 ///
 /// pnpm 12 has no setting that names such packages, so nub matches them itself
 /// and decides the store's locality directly ([`host_settings`]). The install
@@ -1490,8 +1491,16 @@ fn workspace_patterns(root: &Path) -> Vec<String> {
 /// the tree that framework cannot load.
 ///
 /// Returns the first match rather than a bool: the reason is worth reporting,
-/// and the names are ordered so the unconditional ones answer first.
-pub(crate) fn store_locality_breaker(root: &Path, members: &[PathBuf]) -> Option<&'static str> {
+/// and the frameworks nub knows about answer before the project's own list.
+pub(crate) fn store_locality_breaker(root: &Path, members: &[PathBuf]) -> Option<String> {
+    known_store_locality_breaker(root, members)
+        .map(str::to_owned)
+        .or_else(|| declared_store_opt_out(root, members, &store_opt_out_patterns(root)))
+}
+
+/// The frameworks nub knows break under a shared store, ordered so the
+/// unconditional ones answer first.
+fn known_store_locality_breaker(root: &Path, members: &[PathBuf]) -> Option<&'static str> {
     // `next` and `react-native` break at every version, so declaring one is
     // the whole test. `declared_direct_ranges` is the shared dependency-scope
     // scan the version gates use (dependencies / devDependencies /
@@ -1509,6 +1518,88 @@ pub(crate) fn store_locality_breaker(root: &Path, members: &[PathBuf]) -> Option
         return Some("remix");
     }
     None
+}
+
+/// The first dependency the root or a member declares that `patterns` names.
+/// The package comes back rather than the pattern that caught it, because the
+/// name is what the reader finds in their own manifest.
+fn declared_store_opt_out(root: &Path, members: &[PathBuf], patterns: &[String]) -> Option<String> {
+    let matcher = pnpm_config::matcher::create_matcher(patterns);
+    if matcher.is_empty() {
+        return None;
+    }
+    std::iter::once(root)
+        .chain(members.iter().map(PathBuf::as_path))
+        .flat_map(declared_dependency_names)
+        .find(|name| matcher.matches(name))
+}
+
+/// The dependency names `dir`'s manifest declares, in the scopes the framework
+/// gates read.
+fn declared_dependency_names(dir: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(dir.join("package.json")) else {
+        return Vec::new();
+    };
+    let Ok(serde_json::Value::Object(manifest)) =
+        serde_json::from_str(nub_core::strip_utf8_bom(&text))
+    else {
+        return Vec::new();
+    };
+    ["dependencies", "devDependencies", "optionalDependencies"]
+        .into_iter()
+        .filter_map(|scope| manifest.get(scope)?.as_object())
+        .flat_map(|deps| deps.keys().cloned())
+        .collect()
+}
+
+/// The packages the project names in `disableGlobalVirtualStoreForPackages`,
+/// from the highest source that sets it: `npm_config_*` over the project's
+/// `.npmrc` over the user's. pnpm 12 has no such setting, so the engine never
+/// reads it. A comma-separated value and the `key[]=` list form both work.
+fn store_opt_out_patterns(root: &Path) -> Vec<String> {
+    const SPELLINGS: [&str; 3] = [
+        "disableGlobalVirtualStoreForPackages",
+        "disable-global-virtual-store-for-packages",
+        "disable_global_virtual_store_for_packages",
+    ];
+    let names_the_setting = |key: &str| {
+        SPELLINGS
+            .iter()
+            .any(|spelling| key.eq_ignore_ascii_case(spelling))
+    };
+    let items = |value: &str| {
+        value
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let mut patterns = Vec::new();
+    for (_, text) in host_settings::npmrc_files(root) {
+        for (key, raw) in host_settings::npmrc_entries(&text) {
+            if names_the_setting(&key) {
+                patterns = match raw {
+                    host_settings::Raw::Scalar(value) => items(&value),
+                    host_settings::Raw::List(values) => values,
+                };
+            }
+        }
+    }
+    const PREFIX: &str = "npm_config_";
+    for (name, value) in std::env::vars_os() {
+        let (Some(name), Some(value)) = (name.to_str(), value.to_str()) else {
+            continue;
+        };
+        if name
+            .get(..PREFIX.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(PREFIX))
+            && names_the_setting(&name[PREFIX.len()..])
+        {
+            patterns = items(value);
+        }
+    }
+    patterns
 }
 
 /// Whether `dir` holds nub's own canonical lockfile under EITHER the current
@@ -2042,11 +2133,11 @@ mod tests {
         };
         assert_eq!(
             breaker(r#"{"name":"x","dependencies":{"next":"15.0.0"}}"#),
-            Some("next")
+            Some("next".to_owned())
         );
         assert_eq!(
             breaker(r#"{"name":"x","devDependencies":{"react-native":"0.76.0"}}"#),
-            Some("react-native")
+            Some("react-native".to_owned())
         );
         for below in [
             r#"{"name":"x","dependencies":{"expo":"~52.0.0"}}"#,
@@ -2054,7 +2145,7 @@ mod tests {
             r#"{"name":"x","optionalDependencies":{"expo":"50.0.0"}}"#,
             r#"{"name":"x","dependencies":{"expo":"*"}}"#,
         ] {
-            assert_eq!(breaker(below), Some("expo"), "{below}");
+            assert_eq!(breaker(below), Some("expo".to_owned()), "{below}");
         }
         for keeps in [
             r#"{"name":"x","dependencies":{"expo":"~56.0.0"}}"#,
@@ -2063,6 +2154,36 @@ mod tests {
         ] {
             assert_eq!(breaker(keeps), None, "{keeps}");
         }
+    }
+
+    /// A package the project names is matched against what the root and its
+    /// members declare, `*` included, and the NAME comes back.
+    #[test]
+    fn a_package_the_project_names_is_matched_against_its_declarations() {
+        let root = tempfile::tempdir().unwrap();
+        let member = root.path().join("packages/app");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"name":"ws","devDependencies":{"typescript":"5.0.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            member.join("package.json"),
+            r#"{"name":"app","dependencies":{"@acme/bundler":"1.0.0"}}"#,
+        )
+        .unwrap();
+        let named = |patterns: &[&str]| {
+            let patterns: Vec<String> = patterns.iter().map(|p| (*p).to_owned()).collect();
+            declared_store_opt_out(root.path(), std::slice::from_ref(&member), &patterns)
+        };
+        assert_eq!(named(&["@acme/*"]).as_deref(), Some("@acme/bundler"));
+        assert_eq!(
+            named(&["other", "typescript"]).as_deref(),
+            Some("typescript")
+        );
+        assert_eq!(named(&["other"]), None);
+        assert_eq!(named(&[]), None);
     }
 
     #[test]

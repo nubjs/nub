@@ -42,10 +42,10 @@ struct Sources<'a> {
     root: PathBuf,
     /// nub's cache directory, when one can be determined.
     cache_root: Option<PathBuf>,
-    /// The declared framework, if any, whose resolver cannot reach a store
+    /// The declared package, if any, whose resolver cannot reach a store
     /// shared between projects. Resolved here rather than in the merge because
     /// answering it walks the workspace and reads every member's manifest.
-    store_locality_breaker: Option<&'static str>,
+    store_locality_breaker: Option<String>,
     /// Set under `CI`, and for `nub ci`, whose tree is copied into images where
     /// the shared store does not exist.
     ci: bool,
@@ -1137,7 +1137,7 @@ mod tests {
         // `disableGlobalVirtualStoreForPackages` itself, which pnpm 12 has no
         // setting for.
         let mut breaks = sources(&plain);
-        breaks.store_locality_breaker = Some("next");
+        breaks.store_locality_breaker = Some("next".to_owned());
         assert!(
             !merge(&breaks)
                 .unwrap()
@@ -1147,7 +1147,7 @@ mod tests {
 
         // Asking for it anyway wins: the ejection is a compatibility guess.
         let mut breaks_but_asks = sources(&plain);
-        breaks_but_asks.store_locality_breaker = Some("next");
+        breaks_but_asks.store_locality_breaker = Some("next".to_owned());
         breaks_but_asks.npmrc = vec![(
             PathBuf::from("/app/.npmrc"),
             "enable-global-virtual-store=true\n".to_owned(),

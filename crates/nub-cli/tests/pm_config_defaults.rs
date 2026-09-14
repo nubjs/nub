@@ -210,6 +210,8 @@ const NOT_CONSUMED: &[(&str, &str)] = &[
     ("deployAllFiles", "deploy"),
     // A parity no-op in the engine itself, wired to nothing.
     ("useBetaCli", "beta-gated"),
+    // The previous engine's per-package eject list; nub.jsonc carries it.
+    ("diskMaterializePackages", "install.linker.eject"),
     // Read as the `CI` environment variable, never as a config key.
     ("ci", "CI"),
 ];

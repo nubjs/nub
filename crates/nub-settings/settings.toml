@@ -1229,53 +1229,22 @@ examples = [
 ]
 
 [disableGlobalVirtualStoreForPackages]
-description = "Package names whose presence in any importer forces per-project materialization."
+description = "Package names whose presence in any importer keeps the virtual store inside the project."
 type = "list<string>"
-default = "[\"next\", \"expo\", \"react-native\", \"metro\"]"
+default = "[]"
 docs = """
-aube's global virtual store makes `node_modules/.aube/<pkg>` an
-absolute symlink into `~/.cache/aube/virtual-store/`. Tools whose
-module resolvers follow symlinks to real paths and then walk up the
-directory tree can't reach the project's `node_modules/` from inside
-the global store and produce errors like `Symlink ... is invalid, it
-points out of the filesystem root`.
+Under the global virtual store, `node_modules` links into a store shared
+between projects, so a package's real path is outside the project. A bundler
+or asset server that resolves modules by real path and walks up from there
+cannot find the project's `node_modules`.
 
-When `aube install` finds one of these names in any importer's
-`dependencies`, `devDependencies`, or `optionalDependencies`, it
-forces per-project materialization for that install and prints a
-one-line warning naming the trigger.
+When a name here matches a package in the `dependencies`, `devDependencies`,
+or `optionalDependencies` of the root or any workspace member, the install
+builds its virtual store inside the project instead, and the install header
+names the package. `*` matches any run of characters.
 
-The default list — `next`, `expo`, `react-native`, `metro` — covers the tools
-with concrete filesystem-root failures. Next.js's Turbopack canonicalizes
-through symlinks and walks up for app-router/monorepo detection. Metro's file
-map requires symlink targets to stay within the project root or configured
-watch folders; Expo and React Native use Metro but normally declare their
-framework package rather than `metro` directly.
-
-Track upstream compatibility in
-[vercel/next.js#93556](https://github.com/vercel/next.js/issues/93556) for
-Next.js and
-[expo/expo#45460](https://github.com/expo/expo/pull/45460) for the Metro
-file-map change that follows global-store symlinks. The Metro-family entries
-remain in the default list until that behavior is available across the Expo,
-React Native, and direct Metro versions aube supports.
-
-Nuxt, Parcel, Vite, and VitePress are compatible with the global virtual store.
-For Nuxt and Parcel, aube's sibling dependency links keep resolution inside the
-installed graph. For Vite and VitePress, aube writes
-`node_modules/.modules.yaml` with the store location, which Vite
-8.1+ reads when constructing its filesystem allow-list. For older Vite
-versions, aube materializes only the Vite dependency path locally and backports
-the same allow-list lookup into that project-local copy; unrelated dependencies
-remain in the shared store.
-
-Webpack and Rollup are *not* on the default list: plain Webpack
-resolves via the sibling symlinks aube already places inside
-`.aube/<pkg>/node_modules/`, and Rollup is rarely a direct dep (it's
-typically transitive of Vite). Add them back here if a specific
-plugin needs the fallback, or set the list to `[]` to disable the
-heuristic entirely. `CI=1` already forces per-project mode, so the
-warning suppresses itself in that case.
+Next.js, React Native, Expo before SDK 56, and Remix 3 need no entry. `CI`
+and `nub ci` already keep the store inside the project.
 """
 sources.cli = []
 sources.env = ["npm_config_disable_global_virtual_store_for_packages", "NPM_CONFIG_DISABLE_GLOBAL_VIRTUAL_STORE_FOR_PACKAGES", "AUBE_DISABLE_GLOBAL_VIRTUAL_STORE_FOR_PACKAGES"]
