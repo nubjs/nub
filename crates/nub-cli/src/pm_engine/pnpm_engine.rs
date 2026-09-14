@@ -20,7 +20,7 @@ use pnpm_config::Embedder;
 use std::path::{Path, PathBuf};
 
 /// nub's naming for the files and directories the engine owns.
-const NUB: Embedder = Embedder {
+pub(super) const NUB: Embedder = Embedder {
     program_name: "nub",
     program_version: env!("CARGO_PKG_VERSION"),
     // nub provisions Node and pins its own version; the engine must not act
@@ -63,6 +63,12 @@ const NUB: Embedder = Embedder {
     overrides_writer: Some(record_overrides),
     extract_observer: Some(super::phantom_hooks::extract_observer),
     materialize_policy: Some(super::phantom_hooks::materialize_policy),
+    // nub is not finished when a dlx child is: `nubx` records the run-consent
+    // ledger after the tool returns, so the engine exiting in the child's place
+    // would skip it. A failed child comes back as `ERR_PNPM_DLX_CHILD_FAILED`
+    // carrying the code, which stays distinguishable from failing to FETCH the
+    // tool — the distinction that ledger is gated on.
+    dlx_exits_like_child: false,
 };
 
 /// What this process answers the engine with when it asks for the host's

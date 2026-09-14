@@ -21,7 +21,6 @@
 
 use std::fmt;
 use std::path::Path;
-use std::sync::RwLock;
 
 use clx::style;
 use nub_settings::meta as settings_meta;
@@ -856,75 +855,6 @@ pub(super) fn cli_setting_flags(argv: &[std::ffi::OsString]) -> Vec<(String, Str
     out
 }
 
-// ───────────────────────── the materialization digest ─────────────────────────
-
-/// Why one package ended up as real project-local bytes instead of a symlink
-/// into the shared store. Recorded where the decision is made — nub's
-/// disk-materialize expansion hook — so the digest reports the plan that ran
-/// rather than re-deriving it afterwards.
-///
-/// There is deliberately no importing SOURCE FILE here: the phantom scanner
-/// caches a per-content verdict carrying the undeclared package NAMES only, so a
-/// file path would have to be invented.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum Reason {
-    /// Ships imports it never declared; the names are what the scanner found.
-    Undeclared(Vec<String>),
-    /// Its type surface imports a peer whose `@types/*` sits at the project root.
-    PeerTypes,
-    /// Its build script reads or writes the consuming project.
-    ProjectContext,
-    /// Vite below 8.1 cannot read the shared store's `.modules.yaml`.
-    LegacyVite,
-    /// Named by `install.linker.eject`, or by nub's own built-in seed.
-    Configured,
-    /// Imports a package that had to move, so it moves too — otherwise it would
-    /// keep resolving the store-resident copy and split the singleton.
-    ImporterOf(String),
-    /// In the closure for a reason this walk could not name — it matched no
-    /// seed, and no declared dependency of it was found in the plan.
-    ///
-    /// Its own variant rather than falling back to [`Reason::Configured`],
-    /// which is the shape this had and which was simply false: it told the
-    /// reader config named a package config never mentions, and that is a claim
-    /// they can go check. Vague and true beats specific and wrong on a line
-    /// whose entire job is explaining why something moved.
-    Closure,
-}
-
-impl fmt::Display for Reason {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Reason::Undeclared(names) => write!(f, "undeclared imports: {}", names.join(", ")),
-            Reason::PeerTypes => f.write_str("peer types resolved from the project root"),
-            Reason::ProjectContext => f.write_str("build script reads the project"),
-            Reason::LegacyVite => f.write_str("vite below 8.1"),
-            Reason::Configured => f.write_str("named by config"),
-            Reason::ImporterOf(spec) => write!(f, "imports {spec}"),
-            Reason::Closure => f.write_str("pulled in by the materialized set"),
-        }
-    }
-}
-
-/// One materialized package: what it is, and why it moved.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct Materialized {
-    pub(super) name: String,
-    pub(super) version: String,
-    pub(super) reason: Reason,
-}
-
-impl Materialized {}
-
-static PLAN: RwLock<Vec<Materialized>> = RwLock::new(Vec::new());
-
-/// Record the expansion hook's plan for the digest. Sorted here because the plan
-/// is built from hash sets, and an install's output must not reorder run to run.
-pub(super) fn record_plan(mut entries: Vec<Materialized>) {
-    entries.sort_by(|a, b| (&a.name, &a.version).cmp(&(&b.name, &b.version)));
-    *PLAN.write().unwrap_or_else(|error| error.into_inner()) = entries;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1540,24 +1470,6 @@ mod tests {
                  a request nub declined: {body:?}"
             );
         }
-    }
-
-    /// A package in the closure whose edge could not be located must not claim
-    /// config named it. `Reason::Configured` was the fallback for that case, so
-    /// the digest told the reader to go look in `install.linker.eject` for a
-    /// package that is not there — a specific, checkable, wrong answer on the
-    /// one line whose whole job is saying why something moved.
-    #[test]
-    fn an_unattributed_closure_member_does_not_blame_config() {
-        assert_eq!(
-            Reason::Closure.to_string(),
-            "pulled in by the materialized set"
-        );
-        assert_ne!(
-            Reason::Closure.to_string(),
-            Reason::Configured.to_string(),
-            "the two must stay distinguishable — collapsing them is the defect"
-        );
     }
 
     /// Provenance names the surface the reader can act on: the `nub.jsonc` field

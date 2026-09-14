@@ -106,52 +106,54 @@ pub fn run_dlx_for_nubx(
     compat_mode: bool,
 ) -> Result<(i32, bool)> {
     if flags.quiet {
-        // Same knob aube's own startup flips for `--silent`: drop the animated
-        // progress UI to plain text so a `-q` fetch stays quiet.
+        // Drop the animated progress UI to plain text so a `-q` fetch stays
+        // quiet.
         clx::progress::set_output(clx::progress::ProgressOutput::Text);
     }
-    let verb = nubx_dlx_args(bin, args, flags);
-    // Transient fetch-and-run (see `engine_session_transient`): `nubx <tool>`
-    // fetches a throwaway package and runs it; the CWD project's lockfile is
-    // irrelevant, so a multi-lockfile project must not raise
-    // ERR_NUB_LOCKFILE_AMBIGUOUS the way npm/pnpm/bun's npx/dlx/bunx don't.
-    let session = super::engine_session_transient(None)?;
-    // `Ok` = fetched + ran (the tool's own code via Ok(Some(code)), success via
-    // Ok(None)); `Err` = the fetch/install failed before the tool ran. We surface
-    // the Err's report exactly as `finish_code` would, but also report the
-    // success bit so the consent caller never records a failed fetch.
-    match session.runtime.block_on(aube::commands::dlx::run_in(
-        verb,
-        None,
-        crate::cli::dlx_child_env(compat_mode),
-    )) {
-        Ok(code) => Ok((code.unwrap_or(0), true)),
-        Err(report) => Ok((present::emit_report(&report), false)),
+    // The engine spawns the tool itself and an argv carries no environment, so
+    // nub's overlay rides the PROCESS environment — the same mechanism the
+    // lifecycle overlay already uses on the install path.
+    for (key, value) in crate::cli::dlx_child_env(compat_mode) {
+        // SAFETY: startup, before the engine spawns anything; no other thread
+        // is reading the environment yet.
+        unsafe { std::env::set_var(key, value) };
+    }
+    // `nub`'s embedder rather than the project's: `nubx <tool>` is a transient
+    // fetch-and-run whose cache is nub's, and it must not inherit a pnpm
+    // incumbent's profile — including the one that would make a failed child
+    // exit this process before the consent ledger below is written.
+    match pnpm_cli::run(nubx_dlx_argv(bin, args, flags), super::pnpm_engine::NUB) {
+        Ok(()) => Ok((0, true)),
+        Err(report) => match pnpm_cli::dlx_child_exit_code(&report) {
+            // The tool RAN and exited nonzero. The fetch succeeded, so consent
+            // is real, and the code is the tool's own.
+            Some(code) => Ok((code, true)),
+            // Everything else failed BEFORE the tool ran — a 404, a resolution
+            // error, no such bin. `fetched_ok` stays false so the caller never
+            // records consent for a spec that was never published.
+            None => Ok((present::emit_report(&report), false)),
+        },
     }
 }
 
-/// Build the `dlx` invocation for a `nubx <tool> [args]` fallback: `<tool>` is
-/// the positional (so the engine derives the actual bin name from the package's
-/// `bin` map, or runs it from `-p` packages) and `args` forward verbatim. The
-/// dlx-only `-c` shell-mode and `--allow-build` are not in nubx's surface yet, so
-/// they stay at their safe defaults — matching `npx <tool> [args]`.
-fn nubx_dlx_args(
+/// The `dlx` command line for a `nubx <tool> [args]` fallback: `<tool>` is the
+/// positional (so the engine derives the bin name from the package's `bin` map,
+/// or runs it from `-p` packages) and `args` forward verbatim. The dlx-only
+/// `-c` shell mode and `--allow-build` are not in nubx's surface, so they stay
+/// at their safe defaults — matching `npx <tool> [args]`.
+fn nubx_dlx_argv(
     bin: &str,
     args: &[String],
     flags: &crate::cli::NubxDlxFlags,
-) -> aube::commands::dlx::DlxArgs {
-    let mut params = Vec::with_capacity(args.len() + 1);
-    params.push(bin.to_string());
-    params.extend(args.iter().cloned());
-    aube::commands::dlx::DlxArgs {
-        params,
-        shell_mode: false,
-        package: flags.package.clone(),
-        allow_build: Vec::new(),
-        lockfile: Default::default(),
-        network: Default::default(),
-        virtual_store: Default::default(),
+) -> Vec<std::ffi::OsString> {
+    let mut argv: Vec<std::ffi::OsString> = vec!["nub".into(), "dlx".into()];
+    for package in &flags.package {
+        argv.push("--package".into());
+        argv.push(package.into());
     }
+    argv.push(bin.into());
+    argv.extend(args.iter().map(std::ffi::OsString::from));
+    argv
 }
 
 /// Nearest ancestor (inclusive) carrying a `package.json`, bounded like
@@ -253,47 +255,62 @@ mod tests {
     /// the tool name doubles as the package (no `-p`, so the engine resolves the
     /// real bin name from the package's `bin` map), nothing is run through `sh -c`
     /// (no `-c`), and no lifecycle scripts are auto-approved (no `--allow-build`).
+    ///
+    /// Asserted on the ARGV now that the engine is reached through
+    /// `pnpm_cli::run` rather than a typed `DlxArgs` — the contract is the same,
+    /// and an absent flag is spelled by its absence from the command line.
     #[test]
     fn nubx_dlx_fallback_forwards_tool_and_args_with_no_dlx_flags() {
         let flags = crate::cli::NubxDlxFlags::default();
-        let verb = nubx_dlx_args(
+        let argv = nubx_dlx_argv(
             "cowsay",
             &["-f".into(), "tux".into(), "hi there".into()],
             &flags,
         );
         // Tool is the positional; args ride after it untouched (a tool flag like
         // `-f` is the tool's, never consumed by nubx/dlx).
-        assert_eq!(verb.params, ["cowsay", "-f", "tux", "hi there"]);
+        assert_eq!(argv, ["nub", "dlx", "cowsay", "-f", "tux", "hi there"]);
         // With no `-p`, the tool name is the package — the engine derives the bin.
-        assert!(verb.package.is_empty(), "no -p: tool name is the package");
         assert!(
-            !verb.shell_mode,
+            !argv.iter().any(|a| a == "--package"),
+            "no -p: tool name is the package"
+        );
+        assert!(
+            !argv.iter().any(|a| a == "-c"),
             "no -c: tool argv must round-trip, not sh -c"
         );
-        assert!(verb.allow_build.is_empty(), "no scripts auto-approved");
+        assert!(
+            !argv.iter().any(|a| a == "--allow-build"),
+            "no scripts auto-approved"
+        );
 
         // A tool with no args still produces a single-positional invocation.
-        let bare = nubx_dlx_args("serve", &[], &flags);
-        assert_eq!(bare.params, ["serve"]);
+        assert_eq!(nubx_dlx_argv("serve", &[], &flags), ["nub", "dlx", "serve"]);
     }
 
-    /// `nubx -p <spec> <bin> [args]` populates `DlxArgs.package` with the spec(s)
-    /// and keeps `<bin>` as the positional, so the engine fetches the package and
-    /// runs the named bin from it (npx's package≠bin decoupling).
+    /// `nubx -p <spec> <bin> [args]` passes the spec(s) as `--package` and keeps
+    /// `<bin>` as the positional, so the engine fetches the package and runs the
+    /// named bin from it (npx's package≠bin decoupling).
     #[test]
     fn nubx_dlx_package_flag_drives_the_fetch_set() {
         let flags = crate::cli::NubxDlxFlags {
             package: vec!["@tanstack/cli".into()],
             ..Default::default()
         };
-        let verb = nubx_dlx_args("tanstack", &["--help".into()], &flags);
-        assert_eq!(verb.package, ["@tanstack/cli"], "-p spec drives the fetch");
         assert_eq!(
-            verb.params,
-            ["tanstack", "--help"],
-            "the positional bin + its args still ride params[0..]"
+            nubx_dlx_argv("tanstack", &["--help".into()], &flags),
+            [
+                "nub",
+                "dlx",
+                "--package",
+                "@tanstack/cli",
+                "tanstack",
+                "--help"
+            ],
+            "-p spec drives the fetch; the positional bin and its args follow"
         );
     }
+
     /// fd capture round-trips engine prints so the rewrite can reach raw
     /// println/eprintln sites (unix; the non-unix fallback is a documented
     /// pass-through). Writes at the fd level — libtest's output capture
