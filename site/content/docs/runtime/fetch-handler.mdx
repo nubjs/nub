@@ -93,6 +93,28 @@ $ HOST=127.0.0.1 nub server.ts
 Listening on http://127.0.0.1:3000
 ```
 
+## Type checking
+
+Mark the export with `satisfies ExportedHandler` and TypeScript checks its shape. Without it, a misspelled `fetch` key turns the file into an ordinary script that exits, and a handler that returns something other than a `Response` answers every request with a 500.
+
+<TypesSetup>
+The `ExportedHandler` type comes from Nub's own types package. Install `@nubjs/types` as a devDependency alongside `@types/node` 26.
+</TypesSetup>
+
+```ts
+// server.ts
+import type { ExportedHandler } from "@nubjs/types";
+
+export default {
+  port: 8080,
+  fetch(request) {
+    return new Response(new URL(request.url).pathname);
+  },
+} satisfies ExportedHandler;
+```
+
+The import is type-only and is removed when the file is compiled, so it still runs on every runtime listed under [Portability](#portability).
+
 ## Watch mode
 
 Running the file under [`nub watch`](/docs/watch) restarts the server on every edit:
