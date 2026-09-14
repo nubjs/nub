@@ -45,7 +45,6 @@
     "whitelist": [
       ".cargo",
       "crates/nub-native/.cargo",
-      "vendor/aube/.cargo",
       "tests/docker-smoke"
     ]
   },

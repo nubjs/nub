@@ -1,5 +1,5 @@
-//! Package-manager verbs through the embedded aube engine (vendor/aube,
-//! linked as a library; no subprocess).
+//! Package-manager verbs through the embedded pnpm engine (linked as a
+//! library; no subprocess).
 //!
 //! This module is the shared plumbing; the verbs themselves live in four
 //! per-family modules:
@@ -16,15 +16,13 @@
 //! - [`store_config_family`] — store/cache forensics and settings
 //!   (`store`, `cache`, `config`, `cat-file`, …).
 //!
-//! All engine output flows through [`present`]: miette reports are rendered
-//! with the `ERR_AUBE_*` → `ERR_NUB_*` / `WARN_AUBE_*` → `WARN_NUB_*`
-//! rewrite, engine doc URLs stripped, message-level `aube` verb spellings
-//! rebranded, and exit codes mapped via the engine's own exit table.
+//! Engine-adjacent text nub relays passes through [`present`]'s credential
+//! scrub; the engine brands its own output through the embedder profile.
 //!
 //! # Verb registry
 //!
-//! [`ENGINE_VERBS`] registers the complete aube verb surface (read from
-//! `vendor/aube/crates/aube/src/lib.rs::Commands`) minus two exclusion sets:
+//! [`ENGINE_VERBS`] registers the package-manager verb surface minus two
+//! exclusion sets:
 //!
 //! - **nub-reserved** (collision policy: nub verbs win): `run`
 //!   (+`run-script`), `exec` (+`x`), `test` (+`t`), `start`, `stop`,
@@ -119,21 +117,15 @@ pub enum Family {
     StoreConfig,
 }
 
-/// One registered engine verb: its canonical spelling, accepted aliases
-/// (mirroring aube's own aliases), owning family, and — documentation for
-/// the Surface phase — the aube args type the wired implementation parses.
+/// One registered engine verb: its canonical spelling, accepted aliases and
+/// owning family.
 pub struct VerbSpec {
     pub canonical: &'static str,
     pub aliases: &'static [&'static str],
     pub family: Family,
-    /// The `aube::commands::…` args type this verb will parse when wired.
-    /// Doc-only today (stubs never parse); kept in the table so the family
-    /// fill-in work is self-describing. Read by tests only until then.
-    #[allow(dead_code)]
-    pub aube_args: &'static str,
 }
 
-/// The complete not-yet-wired aube verb surface, per the module doc's
+/// The package-manager verb surface, per the module doc's
 /// exclusion rules. Spellings must be unique across canonicals + aliases and
 /// disjoint from cli.rs's SUBCOMMANDS and PM_VERBS (asserted in tests here
 /// and in cli.rs).
@@ -143,111 +135,93 @@ pub const ENGINE_VERBS: &[VerbSpec] = &[
         canonical: "add",
         aliases: &["a"],
         family: Family::Install,
-        aube_args: "commands::add::AddArgs",
     },
     VerbSpec {
         canonical: "remove",
         aliases: &["rm", "uninstall", "un", "uni"],
         family: Family::Install,
-        aube_args: "commands::remove::RemoveArgs",
     },
     // aube also aliases `upgrade` here; that spelling is nub's self-update.
     VerbSpec {
         canonical: "update",
         aliases: &["up"],
         family: Family::Install,
-        aube_args: "commands::update::UpdateArgs",
     },
     VerbSpec {
         canonical: "import",
         aliases: &[],
         family: Family::Install,
-        aube_args: "commands::import::ImportArgs",
     },
     VerbSpec {
         canonical: "dedupe",
         aliases: &[],
         family: Family::Install,
-        aube_args: "commands::dedupe::DedupeArgs",
     },
     VerbSpec {
         canonical: "prune",
         aliases: &[],
         family: Family::Install,
-        aube_args: "commands::prune::PruneArgs",
     },
     VerbSpec {
         canonical: "rebuild",
         aliases: &["rb"],
         family: Family::Install,
-        aube_args: "commands::rebuild::RebuildArgs",
     },
     VerbSpec {
         canonical: "fetch",
         aliases: &[],
         family: Family::Install,
-        aube_args: "commands::fetch::FetchArgs",
     },
     VerbSpec {
         canonical: "link",
         aliases: &["ln"],
         family: Family::Install,
-        aube_args: "commands::link::LinkArgs",
     },
     VerbSpec {
         canonical: "unlink",
         aliases: &["dislink"],
         family: Family::Install,
-        aube_args: "commands::unlink::UnlinkArgs",
     },
     VerbSpec {
         canonical: "approve-builds",
         aliases: &[],
         family: Family::Install,
-        aube_args: "commands::approve_builds::ApproveBuildsArgs",
     },
     VerbSpec {
         canonical: "ignored-builds",
         aliases: &[],
         family: Family::Install,
-        aube_args: "commands::ignored_builds::IgnoredBuildsArgs",
     },
     VerbSpec {
         canonical: "patch",
         aliases: &[],
         family: Family::Install,
-        aube_args: "commands::patch::PatchArgs",
     },
     VerbSpec {
         canonical: "patch-commit",
         aliases: &[],
         family: Family::Install,
-        aube_args: "commands::patch_commit::PatchCommitArgs",
     },
     VerbSpec {
         canonical: "patch-remove",
         aliases: &[],
         family: Family::Install,
-        aube_args: "commands::patch_remove::PatchRemoveArgs",
     },
     VerbSpec {
         canonical: "clean",
         aliases: &[],
         family: Family::Install,
-        aube_args: "commands::clean::CleanArgs",
     },
     // `purge` is aube's alias-shaped variant of clean (commands::clean::run_purge).
     VerbSpec {
         canonical: "purge",
         aliases: &[],
         family: Family::Install,
-        aube_args: "commands::clean::CleanArgs",
     },
     VerbSpec {
         canonical: "deploy",
         aliases: &[],
         family: Family::Install,
-        aube_args: "commands::deploy::DeployArgs",
     },
     // `x` is the short fetch-and-run spelling (the `x` in `nubx`/`bunx`; `bun x`
     // == `bunx` == dlx). It aliases dlx — NOT exec — so `nub x <tool>` fetches a
@@ -256,13 +230,11 @@ pub const ENGINE_VERBS: &[VerbSpec] = &[
         canonical: "dlx",
         aliases: &["x"],
         family: Family::Install,
-        aube_args: "commands::dlx::DlxArgs",
     },
     VerbSpec {
         canonical: "create",
         aliases: &[],
         family: Family::Install,
-        aube_args: "commands::create::CreateArgs",
     },
     // `init` is deliberately NOT registered: the spelling belongs to nub's
     // own project scaffold (src/init.rs, a native subcommand), not the engine's
@@ -275,143 +247,120 @@ pub const ENGINE_VERBS: &[VerbSpec] = &[
         canonical: "recursive",
         aliases: &["multi", "m"],
         family: Family::Install,
-        aube_args: "commands::recursive::RecursiveArgs",
     },
     // ── info family: read-only queries ──────────────────────────────────
     VerbSpec {
         canonical: "list",
         aliases: &["ls"],
         family: Family::Info,
-        aube_args: "commands::list::ListArgs",
     },
     // `la`/`ll` are aube's hidden list-long variants (ListArgs + long=true).
     VerbSpec {
         canonical: "la",
         aliases: &[],
         family: Family::Info,
-        aube_args: "commands::list::ListArgs",
     },
     VerbSpec {
         canonical: "ll",
         aliases: &[],
         family: Family::Info,
-        aube_args: "commands::list::ListArgs",
     },
     VerbSpec {
         canonical: "why",
         aliases: &["w"],
         family: Family::Info,
-        aube_args: "commands::why::WhyArgs",
     },
     VerbSpec {
         canonical: "outdated",
         aliases: &[],
         family: Family::Info,
-        aube_args: "commands::outdated::OutdatedArgs",
     },
     VerbSpec {
         canonical: "audit",
         aliases: &[],
         family: Family::Info,
-        aube_args: "commands::audit::AuditArgs",
     },
     VerbSpec {
         canonical: "licenses",
         aliases: &[],
         family: Family::Info,
-        aube_args: "commands::licenses::LicensesArgs",
     },
     VerbSpec {
         canonical: "peers",
         aliases: &[],
         family: Family::Info,
-        aube_args: "commands::peers::PeersArgs",
     },
     VerbSpec {
         canonical: "bin",
         aliases: &[],
         family: Family::Info,
-        aube_args: "commands::bin::BinArgs",
     },
     VerbSpec {
         canonical: "root",
         aliases: &[],
         family: Family::Info,
-        aube_args: "commands::root::RootArgs",
     },
     VerbSpec {
         canonical: "sbom",
         aliases: &[],
         family: Family::Info,
-        aube_args: "commands::sbom::SbomArgs",
     },
     VerbSpec {
         canonical: "view",
         aliases: &["info", "show", "v"],
         family: Family::Info,
-        aube_args: "commands::view::ViewArgs",
     },
     // Native registry full-text search (formerly an npm-only fallback).
     VerbSpec {
         canonical: "search",
         aliases: &[],
         family: Family::Info,
-        aube_args: "commands::search::SearchArgs",
     },
     // ── publish family: registry writes, packaging, auth ────────────────
     VerbSpec {
         canonical: "publish",
         aliases: &[],
         family: Family::Publish,
-        aube_args: "commands::publish::PublishArgs",
     },
     VerbSpec {
         canonical: "pack",
         aliases: &[],
         family: Family::Publish,
-        aube_args: "commands::pack::PackArgs",
     },
     VerbSpec {
         canonical: "version",
         aliases: &[],
         family: Family::Publish,
-        aube_args: "commands::version::VersionArgs",
     },
     VerbSpec {
         canonical: "deprecate",
         aliases: &[],
         family: Family::Publish,
-        aube_args: "commands::deprecate::DeprecateArgs",
     },
     VerbSpec {
         canonical: "undeprecate",
         aliases: &[],
         family: Family::Publish,
-        aube_args: "commands::undeprecate::UndeprecateArgs",
     },
     VerbSpec {
         canonical: "dist-tag",
         aliases: &["dist-tags"],
         family: Family::Publish,
-        aube_args: "commands::dist_tag::DistTagArgs",
     },
     VerbSpec {
         canonical: "unpublish",
         aliases: &[],
         family: Family::Publish,
-        aube_args: "commands::unpublish::UnpublishArgs",
     },
     VerbSpec {
         canonical: "login",
         aliases: &["adduser"],
         family: Family::Publish,
-        aube_args: "commands::login::LoginArgs",
     },
     VerbSpec {
         canonical: "logout",
         aliases: &[],
         family: Family::Publish,
-        aube_args: "commands::logout::LogoutArgs",
     },
     // Native account/registry verbs (formerly npm-only fallbacks upstream).
     // `stage` is intentionally absent: it is not a real npm/pnpm command, so
@@ -420,82 +369,69 @@ pub const ENGINE_VERBS: &[VerbSpec] = &[
         canonical: "whoami",
         aliases: &[],
         family: Family::Publish,
-        aube_args: "commands::whoami::WhoamiArgs",
     },
     VerbSpec {
         canonical: "owner",
         aliases: &["owners"],
         family: Family::Publish,
-        aube_args: "commands::owner::OwnerArgs",
     },
     VerbSpec {
         canonical: "token",
         aliases: &[],
         family: Family::Publish,
-        aube_args: "commands::token::TokenArgs",
     },
     // ── store/config family: store + cache forensics, settings ──────────
     VerbSpec {
         canonical: "store",
         aliases: &[],
         family: Family::StoreConfig,
-        aube_args: "commands::store::StoreArgs",
     },
     VerbSpec {
         canonical: "cache",
         aliases: &[],
         family: Family::StoreConfig,
-        aube_args: "commands::cache::CacheArgs",
     },
     VerbSpec {
         canonical: "cat-file",
         aliases: &[],
         family: Family::StoreConfig,
-        aube_args: "commands::cat_file::CatFileArgs",
     },
     VerbSpec {
         canonical: "cat-index",
         aliases: &[],
         family: Family::StoreConfig,
-        aube_args: "commands::cat_index::CatIndexArgs",
     },
     VerbSpec {
         canonical: "find-hash",
         aliases: &[],
         family: Family::StoreConfig,
-        aube_args: "commands::find_hash::FindHashArgs",
     },
     VerbSpec {
         canonical: "config",
         aliases: &["c"],
         family: Family::StoreConfig,
-        aube_args: "commands::config::ConfigArgs",
     },
     // hidden config get/set shorthands upstream.
     VerbSpec {
         canonical: "get",
         aliases: &[],
         family: Family::StoreConfig,
-        aube_args: "commands::config::GetArgs",
     },
     VerbSpec {
         canonical: "set",
         aliases: &[],
         family: Family::StoreConfig,
-        aube_args: "commands::config::SetArgs",
     },
     // Native package.json editors (formerly npm-only fallbacks).
     VerbSpec {
         canonical: "pkg",
         aliases: &[],
         family: Family::StoreConfig,
-        aube_args: "commands::pkg::PkgArgs",
     },
     VerbSpec {
         canonical: "set-script",
         aliases: &["ss"],
         family: Family::StoreConfig,
-        aube_args: "commands::set_script::SetScriptArgs",
     },
 ];
 

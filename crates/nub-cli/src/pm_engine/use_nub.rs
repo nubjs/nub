@@ -1354,7 +1354,7 @@ mod tests {
 
     #[test]
     fn gvs_setting_keeps_approved_npmrc_and_env_sources() {
-        let settings = include_str!("../../../../vendor/aube/crates/aube-settings/settings.toml");
+        let settings = include_str!("../../../nub-settings/settings.toml");
         let start = settings
             .find("[enableGlobalVirtualStore]")
             .expect("settings registry must define enableGlobalVirtualStore");

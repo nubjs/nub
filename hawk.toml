@@ -1,7 +1,4 @@
 # hawk (astral-sh/hawk) visibility-lint config.
-# vendor/aube is NOT a workspace member (own workspace, path deps) so hawk
-# treats it as external and never lints it — aube stays byte-for-byte untouched.
-#
 # BLIND SPOT hawk cannot see: two crates OUTSIDE this workspace consume
 # workspace members — crates/nub-native (own workspace) uses nub-cache-key, and
 # crates/nub-phantom (own workspace, the eval tool) uses nub-phantom-scan +

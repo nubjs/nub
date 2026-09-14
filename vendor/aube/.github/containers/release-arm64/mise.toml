@@ -1,3 +1,0 @@
-[tools]
-node = "24.20.0"
-rust = { version = "1.98", profile = "minimal", components = ["llvm-tools-preview"] }

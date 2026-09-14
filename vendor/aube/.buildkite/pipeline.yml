@@ -1,3 +1,0 @@
-steps:
-  - label: ":pipeline: upload"
-    command: ".buildkite/pipeline.sh | buildkite-agent pipeline upload"

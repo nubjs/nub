@@ -2,31 +2,13 @@
 #
 # cross does not pass arbitrary host env into the build container by default, so
 # anything the build needs from the workflow env must be whitelisted here.
-# cross reads the Cross.toml in the BUILD CWD (the nub repo root), NOT
-# vendor/aube/Cross.toml — so the primer/RUSTFLAGS passthroughs the aube fork
-# declares for its OWN cross builds are invisible to nub's `cross build`. They
-# must be duplicated here.
 #
 # - RUSTFLAGS: the release workflow builds the nub-native cdylib (.node) addon
 #   for the musl targets with `RUSTFLAGS="-C target-feature=-crt-static"` (musl's
 #   default fully-static crt can't produce a cdylib). Without this passthrough the
 #   flag is silently dropped and the musl addon build fails with "cannot produce
 #   cdylib ... musl does not support these crate types".
-#
-# - AUBE_PRIMER_TOP / AUBE_PRIMER_VERSION_CAP / AUBE_REQUIRE_PRIMER: vendor/aube's
-#   build.rs embeds the metadata primer. The primer file is downloaded into
-#   vendor/aube/crates/aube-resolver/data BEFORE the cross build (see the build
-#   job's "Download metadata primer" step). These env vars tell build.rs which
-#   primer-top{TOP}-v{CAP}-s<schema> file to embed, and AUBE_REQUIRE_PRIMER=1 makes
-#   it FAIL LOUD on an empty/missing primer. WITHOUT this passthrough they are
-#   dropped inside the cross container and the require guard never fires for the
-#   musl/arm cross targets — the exact platforms that silently shipped an empty
-#   primer in 0.0.37. The whole cross-build primer fix hinges on this line.
-#   See .github/workflows/release.yml.
 [build.env]
 passthrough = [
     "RUSTFLAGS",
-    "AUBE_PRIMER_TOP",
-    "AUBE_PRIMER_VERSION_CAP",
-    "AUBE_REQUIRE_PRIMER",
 ]

@@ -21,11 +21,7 @@
 #   can't produce a cdylib). This passthrough is what carries that flag into the
 #   cross container.
 #
-# Note: the AUBE_PRIMER_* vars the repo-root Cross.toml passes through are NOT
-# duplicated here — they drive the CLI binary's build.rs metadata-primer embedding
-# (a separate `cross build -p nub-cli` run from the repo root, which correctly
-# finds the root Cross.toml). nub-native's build.rs does not read them; the addon
-# only needs RUSTFLAGS. Keep this list minimal to the addon's actual needs.
+# Keep this list minimal to the addon's actual needs.
 [build.env]
 passthrough = [
     "RUSTFLAGS",

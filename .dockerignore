@@ -927,5 +927,4 @@ yarn.lock
 !tests/docker-smoke
 !undici-types
 !urlpattern-polyfill
-!vendor/aube/.cargo
 ### finished auto generated using `untracked`

@@ -1,8 +1,0 @@
-{
-  "name": "local-dir",
-  "version": "1.0.0",
-  "main": "index.js",
-  "dependencies": {
-    "is-number": "^6.0.0"
-  }
-}

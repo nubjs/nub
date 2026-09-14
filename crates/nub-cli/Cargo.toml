@@ -2,10 +2,7 @@
 name = "nub-cli"
 version.workspace = true
 edition.workspace = true
-# 1.95 for core::hint::cold_path() in the vendored aube engine (a path dep of
-# nub-cli) — an explicit guard that stands independent of the workspace's
-# oxc-0.140-driven 1.95 floor. See vendor/aube/Cargo.toml.
-rust-version = "1.95"
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
@@ -128,82 +125,7 @@ nub-phantom-core = { path = "../nub-phantom-core" }
 # construction — same oxc-parser weight as nub-phantom-core, no fetch stack. The
 # `ScanResult` it defines is the sidecar payload phantom_closure deserializes.
 nub-phantom-scan = { path = "../nub-phantom-scan" }
-# Vendored aube (vendor/aube — plain in-tree files, vendored from nubjs/aube). aube-lockfile
-# is a pure library crate (no CLI/tokio surface); `aube` is the command layer
-# as a library (lib target landed in nubjs/aube@b15cdcb) — `nub install` /
-# `nub ci` route through `aube::commands::install::run` in-process instead of
-# shelling out. See vendor/aube/AGENTS.md and src/pm_engine/.
-aube-lockfile = { path = "../../vendor/aube/crates/aube-lockfile" }
-# aube-linker: nub installs a disk-materialize expansion hook (selective-subtree
-# materialization) via `aube_linker::set_disk_materialize_expand_hook`; a pure
-# library crate (no CLI/tokio surface), same lean-graph rationale as aube-lockfile.
-aube-linker = { path = "../../vendor/aube/crates/aube-linker" }
-# aube-resolver: `nub import` runs the peer-context pass (hoist_auto_installed_peers
-# + apply_peer_contexts) on a bun/npm-parsed graph before writing pnpm-lock, so the
-# imported lockfile carries peer suffixes the install path assumes pnpm-locks have
-# (#453). Pure offline graph transforms; a lean library crate already in the graph.
-aube-resolver = { path = "../../vendor/aube/crates/aube-resolver" }
-aube-manifest = { path = "../../vendor/aube/crates/aube-manifest" }
-# default-features = false drops aube's default set (`mimalloc`, `config-tui`),
-# neither of which nub uses: aube's `config-tui` (ratatui/crossterm) only feeds
-# `aube config tui`, a tool subcommand nub never dispatches (the engine is
-# embedded as a library; output is rebranded through pm_engine::present), and
-# aube's `mimalloc` feature only swaps the allocator in aube's own dead main.rs
-# — nub sets its own mimalloc global allocator in nub-cli's main.rs. Dropping
-# config-tui removes ratatui + crossterm from the binary's dependency graph.
-#
-# `rustls` and `publish` are NOT optional for nub even though they are default
-# features upstream: aube v1.32 (jdx/aube#1068, #1069) feature-gated the TLS
-# backend and the publish/sigstore stack so embedders can drop them, so with
-# `default-features = false` they must be re-named here. `rustls` is the crate's
-# only TLS backend (upstream: "embedders depend with default-features = false,
-# features = [\"rustls\"]"); `publish` gates `commands::publish`, which
-# pm_engine/publish_family.rs calls directly. `hickory-dns` stays OFF
-# deliberately — reqwest's hickory-dns feature flips the default DNS resolver
-# for every client in the final binary, nub's included.
-aube = { path = "../../vendor/aube/crates/aube", default-features = false, features = [
-    "rustls",
-    "publish",
-    # Comment/format-preserving edits of user-authored workspace YAML (catalogs,
-    # allowBuilds, patchedDependencies). Upstream made it optional in v2.2
-    # (aubepkg/aube#1278) and keeps it default; nub always had it, so re-name it.
-    "workspace-yaml-preserve",
-] }
-# `EffectiveFilter` for the workspace-aware engine verbs (`nub publish
-# --filter/-r`); same type aube's own dispatch passes to publish/list/etc.
-# Settings metadata (`meta::SETTINGS`): drives the npmrc-first config write
-# routing in pm_engine/store_config_family.rs (npmShared flag, alias
-# spellings, scalar-vs-map types).
-aube-settings = { path = "../../vendor/aube/crates/aube-settings" }
 nub-settings = { path = "../nub-settings" }
-# Registry URL normalization helpers for translating incumbent Bun config into
-# the engine's existing `.npmrc`-shaped registry/auth model.
-#
-# `hickory-dns` is named explicitly to PRESERVE pre-v1.32 behavior, not to add
-# any: this crate used to call `.hickory_dns(cfg!(not(target_os = "android")))`
-# unconditionally, and jdx/aube#1068 moved it behind a non-default feature so
-# embedders can opt out. Leaving it off would silently drop the in-process DNS
-# cache and serialize the first cold lookup per origin. The Android carve-out
-# (hickory reads OS DNS config via JNI and aborts without a JVM on Termux)
-# still lives inside the gate.
-aube-registry = { path = "../../vendor/aube/crates/aube-registry", features = [
-    "hickory-dns",
-] }
-# Engine error-code constants + the bespoke exit-code table; consumed by the
-# presentation layer (src/pm_engine/present.rs) for the ERR_AUBE_→ERR_NUB_
-# rewrite and the cli_main-compatible exit mapping.
-aube-codes = { path = "../../vendor/aube/crates/aube-codes" }
-# Build-script trust policy: `enableScripts: false` (yarn) forces
-# `BuildPolicy::deny_all()` to override even nub's defaultTrust floor
-# (pm_engine/unsupported_config.rs). Same path-dep shape as the rest.
-aube-scripts = { path = "../../vendor/aube/crates/aube-scripts" }
-# Diagnostics / critical-path recorder: nub's engine_session calls diag::init()
-# so AUBE_DIAG_* env vars work when nub install runs the embedded aube engine.
-aube-util = { path = "../../vendor/aube/crates/aube-util" }
-# Store dir resolution: the Vite compat post-install step (pm_engine/vite_compat.rs)
-# reads the global virtual-store path via `aube_store::dirs::cache_dir()` (embedder
-# cache_namespace-aware) to write it into `.modules.yaml`. Already a transitive dep.
-aube-store = { path = "../../vendor/aube/crates/aube-store" }
 # pnpm 12 engine crates, pinned to a commit on the nubjs/pnpm `nub-embedder`
 # branch (v12.4.1 plus the embedder patches). Move `rev` to re-pin.
 # The engine takes its compatibility rules as an `IndexMap`, so the host names the type.
@@ -215,8 +137,6 @@ pnpm-lockfile = { git = "https://github.com/nubjs/pnpm", rev = "cd12004142f00756
 pnpm-package-manager = { git = "https://github.com/nubjs/pnpm", rev = "cd12004142f0075653266050ef36080f59753093" }
 pnpm-store-dir = { git = "https://github.com/nubjs/pnpm", rev = "cd12004142f0075653266050ef36080f59753093" }
 pnpm-workspace = { git = "https://github.com/nubjs/pnpm", rev = "cd12004142f0075653266050ef36080f59753093" }
-# Same major + `fancy` as vendor/aube — present.rs renders the engine's
-# miette::Report exactly as aube's own cli_main would, then rewrites it.
 miette = { version = "7", features = ["fancy"] }
 anyhow.workspace = true
 base64 = "0.22"
@@ -224,21 +144,15 @@ base64 = "0.22"
 # (the cdylib loaded into Node) — that must not hijack Node's allocator.
 mimalloc = "0.1"
 usage-rs.workspace = true
-# Same major as vendor/aube: `nubx -q` switches the engine's progress UI to
-# text mode via clx::progress::set_output, the same knob aube's own startup
-# flips for --silent (vendor/aube/crates/aube/src/startup.rs).
 clx = "3"
-# Same major as vendor/aube: `nub init`'s prompts (src/init.rs) use the same
-# clack-style prompt crate the engine already ships, so the dep graph carries
-# one copy and the prompt aesthetic matches the engine's own pickers.
+# `nub init`'s prompts (src/init.rs).
 demand = "2"
 dirs-next.workspace = true
 dotenvy = "0.15"
 # Cross-process advisory lock around the lazy node-gyp bootstrap
 # (pm_engine/node_gyp.rs): one install can run several build scripts at once,
 # each of which may re-enter nub to bootstrap, and two installs into one cache
-# dir corrupt it. Same version the engine already builds through `xx`, so it
-# adds nothing to the graph.
+# dir corrupt it.
 fslock = "0.2"
 # The string form of `nub.jsonc#prefix` splits like a POSIX shell word list.
 shlex = "2"
@@ -262,14 +176,13 @@ rustc-hash.workspace = true
 semver = "1"
 # npm-semantics range satisfaction for the pre-run dependency-freshness gate
 # (verify_deps.rs). The Cargo `semver` crate above uses Cargo semantics, which
-# don't match npm ranges (`x`-ranges, `||` unions, hyphen ranges); node-semver
-# is the same resolver aube already uses.
+# don't match npm ranges (`x`-ranges, `||` unions, hyphen ranges).
 node-semver = "2"
 pathdiff = { version = "0.2" }
 # pnpm-workspace.yaml read + regeneration for `nub pm use nub` / `use pnpm`
 # (pm_engine/use_nub.rs). serde_yaml is archived/unmaintained; yaml_serde is
-# the maintained, API-compatible fork vendor/aube already builds, aliased as
-# `serde_yaml` so the source paths are unchanged.
+# the maintained, API-compatible fork, aliased as `serde_yaml` so the source
+# paths are unchanged.
 serde_yaml = { package = "yaml_serde", version = "0.10" }
 sha2.workspace = true
 hex = "0.4"
@@ -283,9 +196,8 @@ toml.workspace = true
 # global config file (~/.config/nub/nub.jsonc, see src/config.rs).
 jsonc-parser.workspace = true
 console.workspace = true
-# Multi-thread runtime for the embedded aube install engine (pm_engine.rs).
-# Mirrors aube's own cli_main runtime shape; tokio is dormant on every other
-# nub code path.
+# Multi-thread runtime for the embedded install engine (pm_engine.rs); tokio is
+# dormant on every other nub code path.
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tracing-subscriber.workspace = true
 url = "2.5"

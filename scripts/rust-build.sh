@@ -29,7 +29,7 @@
 #
 # THE HAZARD THAT SHARING CREATES. Cargo names a crate's output by package id
 # (name + version), NOT by source content. Two worktrees whose source for the SAME
-# depended-on crate differs — classically vendor/aube on divergent branches — write
+# depended-on crate differs — classically nub-core on divergent branches — write
 # the same output slot and clobber each other. A dependent crate then links the
 # stale rlib and fails to compile against source that is actually correct: the
 # phantom "E0063: missing field" class of error, pointing at a field that exists
@@ -118,11 +118,11 @@ diverged=""
 if [ -n "$base" ]; then
   # shellcheck disable=SC2086  # $leaves must word-split into separate pathspecs
   diverged=$(git -C "$root" diff --name-only "$base" -- \
-    vendor/aube vendor/libsui crates runtime $leaves 2>/dev/null || true)
+    vendor/libsui crates runtime $leaves 2>/dev/null || true)
 fi
 # shellcheck disable=SC2086
 untracked=$(git -C "$root" ls-files --others --exclude-standard -- \
-  vendor/aube vendor/libsui crates runtime $leaves 2>/dev/null || true)
+  vendor/libsui crates runtime $leaves 2>/dev/null || true)
 
 # Digest binary, resolved EXPLICITLY rather than off PATH. A PATH-resolved
 # `shasum` can be a third-party perl build that HANGS rather than failing: on
@@ -146,7 +146,7 @@ fi
 # from — so it is computed unconditionally. `ls-files -s` emits the staged blob
 # OIDs, so this is a pure content hash of the depended-on crates. ~0.2s.
 # shellcheck disable=SC2086
-key=$(git -C "$root" ls-files -s -- vendor/aube vendor/libsui crates runtime $leaves 2>/dev/null \
+key=$(git -C "$root" ls-files -s -- vendor/libsui crates runtime $leaves 2>/dev/null \
   | "$digest" 2>/dev/null | cut -c1-12 || true)
 if [ "$keyed" = 1 ]; then
   bucket="$shared${key:+-$key}"
