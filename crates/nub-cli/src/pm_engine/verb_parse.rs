@@ -190,27 +190,3 @@ macro_rules! plain_verb_cli {
     };
 }
 pub(super) use plain_verb_cli;
-
-/// Every flag spelling on `cmd` that consumes the FOLLOWING argv token.
-///
-/// Read off the parse tables themselves, so a value-taking field added to an
-/// engine args type — or to a flattened nub group — is picked up with no
-/// second list to keep in sync. `require_equals` flags stay out on purpose:
-/// their next token is a positional (or a parse error), never their value.
-pub(super) fn separate_value_flags(cmd: &usage_rs::Command<'_>) -> Vec<String> {
-    let mut spellings: Vec<String> = cmd
-        .flags
-        .iter()
-        .filter(|flag| flag.takes_value && !flag.require_equals)
-        .flat_map(|flag| {
-            flag.shorts
-                .iter()
-                .map(|short| format!("-{}", *short as char))
-                .chain(flag.longs.iter().map(|long| format!("--{long}")))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    spellings.sort();
-    spellings.dedup();
-    spellings
-}

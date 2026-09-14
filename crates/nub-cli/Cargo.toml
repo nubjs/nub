@@ -293,7 +293,7 @@ rayon = "1"
 
 [target.'cfg(unix)'.dependencies]
 # fd-level capture of the engine's raw println/eprintln hint lines so the
-# brand rewrite can reach them (pm_engine/install_family.rs::with_fd_captured).
+# brand rewrite can reach them (pm_engine/mod.rs::with_fd_captured).
 libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]

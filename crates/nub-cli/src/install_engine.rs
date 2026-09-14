@@ -50,23 +50,13 @@ pub(crate) fn recorded(anchor: &Path) -> Option<String> {
     (!engine.is_empty()).then(|| engine.to_string())
 }
 
-/// Record the engine after a tree-materializing verb. Takes the version from
+/// Record the engine after a tree-materializing verb. The version comes from
 /// the engine context, where `apply_lifecycle_augmentation` published the SAME
-/// value the engine keyed its build artifacts with — re-discovering here could
-/// name a different Node and stamp a lie. Best-effort: an install that already
-/// succeeded must not fail on an unwritable stamp.
-pub(crate) fn record(cwd: &Path, code: i32) {
-    record_for(
-        cwd,
-        code,
-        aube_util::engine_context().runtime_node_version.as_deref(),
-    );
-}
-
-/// The gated write, split from its process-global engine-context read so the
-/// success gate is unit-testable without touching that global. A non-zero exit
-/// records nothing — a failed install must not stamp the tree as built for this
-/// engine — and an unresolved version has nothing to record.
+/// value the engine keyed its build artifacts with — re-discovering it here
+/// could name a different Node and stamp a lie. A non-zero exit records nothing
+/// — a failed install must not stamp the tree as built for this engine — and an
+/// unresolved version has nothing to record. Best-effort otherwise: an install
+/// that already succeeded must not fail on an unwritable stamp.
 pub(crate) fn record_for(cwd: &Path, code: i32, version: Option<&str>) {
     if code != 0 {
         return;

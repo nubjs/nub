@@ -10,7 +10,7 @@
 //! `usage_rs::Cli` root per verb with [`verb_cli`], parse the verb's argv
 //! against it — help text and usage errors are routed through
 //! [`present::rewrite_help`] so `--help` can't leak engine branding — then
-//! build an [`super::engine_session`] (embedder preflight: env families,
+//! build an [`super::engine_session_global`] (embedder preflight: env families,
 //! user agent, nub setting defaults) and run the engine command on the
 //! session runtime. Failures route through [`present::emit_report`] (brand
 //! rewrite + the engine's own exit table); success output is the engine's

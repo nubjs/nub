@@ -1,29 +1,17 @@
-//! Output-verbosity flags for the install family, forwarded to the embedded
-//! engine's existing text-mode renderers.
+//! Output-verbosity state for the install family: the spellings real pnpm
+//! accepts — `--reporter <default|append-only|silent>`, `--silent`/`-s`,
+//! `--loglevel <level>` — resolved across nub's two flag positions. There are
+//! no nub-specific output knobs.
 //!
-//! nub dispatches the engine's command impls directly and never runs aube's
-//! `async_main`, so the reporter/verbosity setup `async_main` performs (force
-//! the progress UI to text, retune the log level, install the silent-stderr
-//! redirect) does not happen for nub — leaving no way to quiet `nub install`.
-//! This module mirrors that setup for the spellings real pnpm accepts:
-//! `--reporter <default|append-only|silent>`, `--silent`/`-s`, and
-//! `--loglevel <level>`. Each maps onto the engine's own switch — there are no
-//! nub-specific output knobs.
-//!
-//! Mapping (mirrors `vendor/aube/crates/aube/src/startup.rs`):
-//! - silent (`--silent`/`-s`, `--reporter=silent`, `--loglevel silent`) →
-//!   progress to text + engine logs off + [`aube::silence_own_output`] (skips
-//!   the install summary; redirects fd 2 on Unix). Matches `pnpm --silent`:
-//!   nothing on stderr but fatal errors.
-//! - `--reporter=append-only` → progress to text (the engine drops its
-//!   progress object; the dependency summary still prints).
-//! - `--loglevel <error|warn|info|debug>` → retune the engine log level
-//!   (`error` hides warnings; `info`/`debug` surface more). `debug` also
-//!   forces text so logs don't collide with the progress display.
+//! Applying the mode is the ENGINE's job: it parses the family's command lines
+//! at the CLI front door and runs its own reporter/verbosity startup. What nub
+//! still needs from these flags is [`OutputFlags::is_silent`], which decides
+//! whether nub's own non-engine output — the resolved-layout report — prints.
+//! The module used to mirror aube `async_main`'s setup as well (progress to
+//! text, log-level reload, `aube::silence_own_output`); that ran only from the
+//! nub-side verb runners and went with them.
 
 use std::sync::atomic::{AtomicU8, Ordering};
-
-use super::log;
 
 // ───────────────────────── process-global defaults ──────────────────────────
 //
@@ -143,11 +131,13 @@ pub enum LogLevel {
     Debug,
 }
 
-// The forwarded output flags, flattened into the install/ci surfaces and the
-// engine-verb globals (and embedded in the install/ci flag structs).
-// Default = no override (the engine's normal output). Spellings mirror pnpm's;
-// each field's `///` doc is its `--help` text. (Plain `//` on the struct: a
-// rustdoc comment here would clobber the flattened command's about-text.)
+// The resolved output flags. Default = no override (the engine's normal
+// output). Spellings mirror pnpm's; each field's `///` doc is its `--help`
+// text. Nothing flattens this into a nub-parsed command any more — the family's
+// verbs are parsed by the engine — so the values arrive from
+// `pnpm_engine::output_flags`, which scans the same three spellings off the
+// argv the engine is about to receive. (Plain `//` on the struct: a rustdoc
+// comment here would clobber a flattened command's about-text.)
 #[derive(Debug, Default, Clone, Copy, usage_rs::Args)]
 pub struct OutputFlags {
     /// Output format: `default`, `append-only`, or `silent`.
@@ -178,64 +168,13 @@ impl OutputFlags {
 
     /// True when any spelling resolves to full silence (`pnpm --silent`),
     /// including the pre-verb global forms (`nub --silent <verb>`,
-    /// `nub --reporter=silent <verb>`). Public so command impls that print
-    /// their own (non-engine) summary — e.g. `import` — can suppress it.
+    /// `nub --reporter=silent <verb>`). Public so the nub-side output that the
+    /// engine does not own — the resolved-layout report — can suppress itself.
     pub fn is_silent(&self) -> bool {
         self.silent
             || self.eff_reporter() == Some(Reporter::Silent)
             || self.eff_loglevel() == Some(LogLevel::Silent)
     }
-
-    /// True when the progress UI must drop to plain text — silent, the
-    /// append-only reporter, or a debug log level (whose lines would
-    /// otherwise collide with the progress display). Mirrors the engine's
-    /// `force_text`.
-    fn force_text(&self) -> bool {
-        self.is_silent()
-            || self.eff_reporter() == Some(Reporter::AppendOnly)
-            || self.eff_loglevel() == Some(LogLevel::Debug)
-    }
-
-    /// The engine log level to apply, as a tracing token, or `None` to leave
-    /// the default. Silent turns logging off entirely.
-    fn engine_level(&self) -> Option<&'static str> {
-        if self.is_silent() {
-            return Some("off");
-        }
-        match self.eff_loglevel() {
-            Some(LogLevel::Error) => Some("error"),
-            Some(LogLevel::Info) => Some("info"),
-            Some(LogLevel::Debug) => Some("debug"),
-            // `warn` is already the default filter, so no reload is needed.
-            // Silent is handled above; `None` leaves the default intact.
-            Some(LogLevel::Warn | LogLevel::Silent) | None => None,
-        }
-    }
-
-    /// Apply the resolved output mode for the rest of this command. Returns a
-    /// guard ([`OutputGuard`] is itself `#[must_use]`) that MUST be held across
-    /// the engine run — when silent, its `Drop` restores stderr (so a final
-    /// error report still prints). Idempotent and cheap when no flag is set (the
-    /// common path): it does nothing.
-    pub fn apply(&self) -> OutputGuard {
-        if self.force_text() {
-            clx::progress::set_output(clx::progress::ProgressOutput::Text);
-        }
-        if let Some(level) = self.engine_level() {
-            log::set_engine_loglevel(level);
-        }
-        let silencer = self.is_silent().then(aube::silence_own_output);
-        OutputGuard {
-            _silencer: silencer,
-        }
-    }
-}
-
-/// Holds the engine's silent-output guard for the duration of a command. Drop
-/// restores stderr. Inert (no guard) when the command isn't silent.
-#[must_use]
-pub struct OutputGuard {
-    _silencer: Option<aube::OwnOutputSilencer>,
 }
 
 #[cfg(test)]
@@ -258,40 +197,5 @@ mod tests {
         // append-only is text, not silence.
         assert!(!flags(Some(Reporter::AppendOnly), false, None).is_silent());
         assert!(!flags(None, false, Some(LogLevel::Error)).is_silent());
-    }
-
-    #[test]
-    fn force_text_covers_silent_append_only_and_debug() {
-        assert!(flags(None, true, None).force_text());
-        assert!(flags(Some(Reporter::AppendOnly), false, None).force_text());
-        assert!(flags(None, false, Some(LogLevel::Debug)).force_text());
-        // default reporter / info level keep the rich display.
-        assert!(!flags(Some(Reporter::Default), false, None).force_text());
-        assert!(!flags(None, false, Some(LogLevel::Info)).force_text());
-        assert!(!flags(None, false, None).force_text());
-    }
-
-    #[test]
-    fn engine_level_maps_each_level_and_silence_to_off() {
-        assert_eq!(flags(None, true, None).engine_level(), Some("off"));
-        assert_eq!(
-            flags(None, false, Some(LogLevel::Error)).engine_level(),
-            Some("error")
-        );
-        assert_eq!(
-            flags(None, false, Some(LogLevel::Debug)).engine_level(),
-            Some("debug")
-        );
-        // No level flag — and an explicit `warn`, which equals the default —
-        // both leave the filter untouched (no redundant reload).
-        assert_eq!(flags(None, false, None).engine_level(), None);
-        assert_eq!(
-            flags(None, false, Some(LogLevel::Warn)).engine_level(),
-            None
-        );
-        assert_eq!(
-            flags(Some(Reporter::AppendOnly), false, None).engine_level(),
-            None
-        );
     }
 }

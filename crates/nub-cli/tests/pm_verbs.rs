@@ -1,8 +1,9 @@
 //! Behavioral coverage for the install family's registry verbs (`nub add`,
 //! `rm`, `up`, `dlx`, `import`, `link`/`unlink`, the yarn write gate) through
-//! the real binary — real fixtures, real lockfiles, real node_modules. The
-//! wiring under test lives in `src/pm_engine/install_family.rs`; `install` /
-//! `ci` have their own file (`install_engine.rs`).
+//! the real binary — real fixtures, real lockfiles, real node_modules. These
+//! command lines are claimed by the engine at the CLI front door
+//! (`src/pm_engine/verb_routing.rs`) and handled in `src/pm_engine/`; `install`
+//! / `ci` have their own file (`install_engine.rs`).
 //!
 //! Network tests are `#[ignore]` per the provisioning-test convention — run
 //! via `cargo test -p nub-cli --test pm_verbs -- --ignored` — and self-skip

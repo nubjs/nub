@@ -92,23 +92,6 @@ pub fn init() {
         .init();
 }
 
-/// Retune the engine log level for the rest of the process (a per-invocation
-/// `--loglevel` / `--reporter=silent` / `--silent`). `level` is a tracing
-/// level token (`error`, `warn`, `info`, `debug`) or `off`. A no-op when
-/// `RUST_LOG` was set at startup — an explicit `RUST_LOG` owns the filter,
-/// mirroring aube's `AUBE_LOG`-wins precedence.
-pub fn set_engine_loglevel(level: &str) {
-    if *RUST_LOG_OWNS_FILTER.get().unwrap_or(&false) {
-        return;
-    }
-    let Some(handle) = FILTER_RELOAD.get() else {
-        return;
-    };
-    if let Ok(filter) = EnvFilter::try_new(engine_directives(level)) {
-        let _ = handle.reload(filter);
-    }
-}
-
 /// Minimal event renderer: `LEVEL message [field=value …]`, no timestamp or
 /// module-path target (a Rust module path is engine internals, not user output).
 /// Redundant human-facing fields may be collapsed before the whole line is

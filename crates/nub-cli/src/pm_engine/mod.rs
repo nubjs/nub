@@ -4,12 +4,13 @@
 //! This module is the shared plumbing; the verbs themselves live in four
 //! per-family modules:
 //!
-//! - [`install_family`] — dependency-graph mutation and linking (`install`,
-//!   `ci`, `add`, `remove`, `update`, `link`, `patch*`, …). All are wired to
-//!   the embedded engine; `install`/`ci` dispatch via live parser verbs.
-//!   The read-only queries (`list`, `why`, `outdated`, `audit`, `view`, …)
-//!   have no module here: pnpm's grammar knows every one of them, so the
-//!   front door hands their command lines straight to the engine.
+//! - [`install_family`] — what is left of dependency-graph mutation and
+//!   linking. pnpm's grammar knows every verb in it (`install`, `ci`, `add`,
+//!   `remove`, `update`, `link`, `patch*`, …), as it knows the read-only
+//!   queries (`list`, `why`, `outdated`, `audit`, `view`, …), so the front
+//!   door hands all of their command lines straight to the engine and the
+//!   module keeps only [`install_family::run_verb`]'s refusals, the `nubx`
+//!   dlx fallback, and the virgin `devEngines` stamp.
 //! - [`publish_family`] — registry writes, packaging, and auth (`publish`,
 //!   `pack`, `version`, `login`, `dist-tag`, …).
 //! - [`store_config_family`] — store/cache forensics and settings
@@ -41,10 +42,10 @@
 //!   re-invoke `current_exe()` (= nub) with it mid-lifecycle-script.
 //!
 //! `install`/`i`/`ci` are *not* in the registry: they are live parser verbs
-//! in `cli.rs` (SUBCOMMANDS) dispatching straight to
-//! [`install_family::run_install`] / [`install_family::run_ci`]. `init` is
-//! not in the registry either — the spelling is reserved for nub's own
-//! project init; cli.rs's bareword arm answers it with a "coming" note.
+//! in `cli.rs` (SUBCOMMANDS), and the front door routes them to the engine
+//! like the rest of the family. `init` is not in the registry either — the
+//! spelling is reserved for nub's own project init; cli.rs's bareword arm
+//! answers it with a "coming" note.
 //! Every other registered verb goes to the engine, and the front door is
 //! what sends it there: `engine_takes` claims any command line pnpm's own
 //! grammar can parse, so a family dispatcher only ever sees what is left.
@@ -611,61 +612,17 @@ pub(crate) fn stub_error(typed: &str, args: &[String], pm_hint: &str) -> anyhow:
     )
 }
 
-/// One prepared engine invocation: the project's resolved PM identity
-/// (layout-policy input) plus the tokio runtime the command runs on. Every
-/// family verb starts by calling [`engine_session`] instead of re-deriving
-/// the preflight/runtime recipe.
+/// One prepared engine invocation. [`engine_session_inner`] does the work —
+/// `--dir`, the brand/seam toggles, identity resolution, the embedder setting
+/// defaults — and all a caller still needs back from it is the tokio runtime to
+/// drive the command on. The resolved identity and cwd used to ride along for
+/// the nub-side verb runners; the engine now parses those verbs itself, and the
+/// one remaining consumer (`nubx`'s dlx fallback) needs neither.
 pub(crate) struct EngineSession {
-    pub(crate) detected: Option<DetectedLockfile>,
     pub(crate) runtime: tokio::runtime::Runtime,
-    /// No PM-preference lockfile signal at session-build time — no lockfile of
-    /// ANY package manager (npm/pnpm/yarn/bun, NOR nub's own canonical lockfile)
-    /// and no pnpm-named file (`is_truly_fresh_project` keys on those, not on the
-    /// manifest's declaration fields). Captured BEFORE the engine writes
-    /// anything, so it reflects the pre-install state: the FIRST install in a
-    /// virgin project sees `true`; every subsequent install (nub's lockfile now
-    /// present ⇒ `detected` is `Some`) sees `false`. The install family reads
-    /// this to stamp the `devEngines.packageManager` caret range exactly once,
-    /// on the virgin install (and never over an existing `devEngines` pin).
-    pub(crate) truly_fresh: bool,
-    /// The resolved working directory the session ran in (after `--dir`). The
-    /// install family writes the virgin `devEngines` stamp relative to it.
-    pub(crate) cwd: PathBuf,
 }
 
-/// Build the shared engine context for one verb invocation: apply `--dir`,
-/// register the brand/seam toggles, resolve the project's PM identity
-/// (declared-first, walking up), push the embedder setting defaults, and
-/// construct the runtime. Idempotent at the seam level (every seam is a
-/// `OnceLock`), which fits nub's one-command-per-process CLI shape.
-///
-/// Identity resolution is the engine's declaration-aware policy
-/// (`aube_lockfile::resolve_project_lockfile_kind` — pin-over-inference per
-/// `identity-policy` (no such document), Axiom 1), so a declared PM outranks
-/// stray lockfiles, a declared-but-contradicted project errors loudly here
-/// (rendered through [`present`], with the `nub pm use` remedy), and an
-/// undeclared multi-lockfile project errors as ambiguous instead of
-/// silently picking by filename precedence.
-///
-/// Ordering is load-bearing: the brand preflight must run before *any*
-/// engine code touches project config — even identity resolution reads the
-/// workspace yaml transitively (`resolve_project_lockfile_kind` →
-/// `aube_lock_filename` → `git_branch_lockfile_enabled` → workspace-config
-/// load), and the toggled getters freeze on first read. The embedder
-/// defaults are the one seam that *needs* the resolution result, so they
-/// land after it (they feed settings resolution, which no detection-path
-/// code consults).
-pub(crate) fn engine_session(dir: Option<&Path>) -> Result<EngineSession> {
-    engine_session_inner(
-        dir,
-        ConfigScopeNoise::Warn,
-        IdentityStrictness::Strict,
-        VirtualStoreLocality::Default,
-        ProjectInstallConfig::Apply,
-    )
-}
-
-/// [`engine_session`] for the TRANSIENT-package families (`nubx`/`dlx`,
+/// [`engine_session_inner`] for the TRANSIENT-package families (`nubx`/`dlx`,
 /// plain `exec` dlx-fallback, `create`). These fetch-and-run a package into a
 /// throwaway store and never read or write the CWD project's lockfile, so the
 /// project's PM identity is irrelevant to them. Identity resolution therefore
@@ -713,16 +670,19 @@ pub(crate) fn engine_session_global(dir: Option<&Path>) -> Result<EngineSession>
 
 /// Whether an identity-resolution failure (multi-lockfile ambiguity, declared
 /// PM contradicted by the on-disk lockfile) is a HARD ERROR or degrades to
-/// no-identity. `Strict` — the default for every project-reading/-writing
-/// family — surfaces the loud diagnostic with the `nub pm use` remedy.
-/// `Lenient` — the transient-package families (dlx/create, see
+/// no-identity. `Lenient` swallows it and proceeds with no resolved identity.
+///
+/// Only `Lenient` remains. The strict arm — the loud diagnostic carrying the
+/// `nub pm use` remedy — belonged to the project-reading/-writing families,
+/// whose verbs the engine now parses and dispatches at the CLI front door
+/// (`verb_routing`); every session this module still builds is one of the
+/// classes that was always lenient, because none of them reads or writes the
+/// CWD project's lockfile: the transient-package families (dlx/create, see
 /// [`engine_session_transient`]) and the global-scope read class (store/cache/
-/// config/registry/path, see [`engine_session_global`]) — swallows it and
-/// proceeds with no resolved identity, because those commands never read or
-/// write the CWD project's lockfile.
+/// config/registry/path, see [`engine_session_global`]). The parameter is kept
+/// so a caller that needs the strict diagnostic can ask for it again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IdentityStrictness {
-    Strict,
     Lenient,
 }
 
@@ -873,10 +833,7 @@ fn engine_session_inner(
     // overlay when augmentation can't engage ⇒ behavior preserved.
     apply_lifecycle_augmentation(&cwd)?;
     Ok(EngineSession {
-        detected,
         runtime: build_runtime()?,
-        truly_fresh,
-        cwd,
     })
 }
 
@@ -1836,7 +1793,7 @@ fn lifecycle_node_anchor(cwd: &Path) -> PathBuf {
 /// env `nub run` / `nub exec` give scripts. The overlay stays default-empty
 /// (behavior preserved) when augmentation can't be computed (compat /
 /// re-entrant / broken install); the resolved Node *version* is published to the
-/// engine either way. Called once per command from [`engine_session`].
+/// engine either way. Called once per command from [`engine_session_inner`].
 fn apply_lifecycle_augmentation(cwd: &Path) -> Result<()> {
     let anchor = lifecycle_node_anchor(cwd);
     // The project's Node — pin-aware (`.nvmrc`/`.node-version`/`engines`), NOT
@@ -1926,9 +1883,7 @@ fn apply_lifecycle_augmentation(cwd: &Path) -> Result<()> {
 
 /// `--dir` / `-C` (and the global `--cwd`, which dispatch applies earlier):
 /// chdir before anything reads the project. Mirrors aube's global `-C`.
-/// `pub(crate)` for the verbs that deliberately skip [`engine_session`]'s
-/// identity resolution (`import` — see its module note).
-pub(crate) fn apply_dir(dir: Option<&Path>) -> Result<()> {
+fn apply_dir(dir: Option<&Path>) -> Result<()> {
     if let Some(dir) = dir {
         std::env::set_current_dir(dir)
             .with_context(|| format!("failed to change directory to {}", dir.display()))?;
@@ -1940,11 +1895,6 @@ pub(crate) struct DetectedLockfile {
     pub(crate) kind: LockfileKind,
     /// Directory the identity resolved in (project / workspace root).
     pub(crate) dir: PathBuf,
-    /// True when the kind comes from the manifest declaration alone
-    /// (`ResolvedLockfileKind::DeclaredFresh`) — no lockfile exists on disk
-    /// yet. The yarn write gate branches on this: a fresh declared-yarn
-    /// install would *create* yarn.lock, which is gated.
-    pub(crate) fresh: bool,
 }
 
 /// Resolve the project's PM identity, walking up like the PM-redirect
@@ -1977,19 +1927,15 @@ fn resolve_identity_walk_up(
     let mut dir = cwd.to_path_buf();
     for _ in 0..16 {
         match aube_lockfile::resolve_project_lockfile_kind(&dir) {
-            Ok(ResolvedLockfileKind::Existing(kind)) => {
-                return Ok(Some(DetectedLockfile {
-                    kind,
-                    dir,
-                    fresh: false,
-                }));
-            }
-            Ok(ResolvedLockfileKind::DeclaredFresh(kind)) => {
-                return Ok(Some(DetectedLockfile {
-                    kind,
-                    dir,
-                    fresh: true,
-                }));
+            // A declaration with no lockfile on disk yet decides the identity
+            // exactly as an existing lockfile does. The two were distinguished
+            // for the yarn write gate, which needed to know that a first
+            // install would CREATE the gated file; that gate lived in the
+            // nub-side verb runners and went with them.
+            Ok(
+                ResolvedLockfileKind::Existing(kind) | ResolvedLockfileKind::DeclaredFresh(kind),
+            ) => {
+                return Ok(Some(DetectedLockfile { kind, dir }));
             }
             // Nothing at this level decides the identity — keep walking.
             Ok(ResolvedLockfileKind::Fresh) => {}
@@ -2061,11 +2007,11 @@ fn identity_error(err: aube_lockfile::Error) -> anyhow::Error {
 }
 
 /// Register nub's brand/seam toggles on the engine's process-wide embedder
-/// seams. Called once per command (via [`engine_session`]) **before any
+/// seams. Called once per command (via [`engine_session_inner`]) **before any
 /// engine code reads project state** — the getters behind these setters are
 /// freeze-on-first-read `OnceLock`s, and even lockfile detection reads the
 /// workspace config transitively (see the ordering note on
-/// [`engine_session`]). Every seam is idempotent.
+/// [`engine_session_inner`]). Every seam is idempotent.
 pub(crate) fn engine_brand_preflight() {
     // Static identity FIRST, before anything reads project state or branding.
     // The whole compile-time profile — name, `nub/<ver>` UA, `nub.lock`
@@ -2258,9 +2204,15 @@ pub(crate) fn engine_brand_preflight() {
             // on purpose). One dim warning when a present default file is
             // suppressed, matching the pnpm-workspace.yaml ignore-with-warning
             // pattern.
+            //
+            // The warning USED to be suppressed for a user who had already named
+            // a pnpmfile explicitly — its own remedy says to do that, so telling
+            // them to is a contradiction. The suppression rode a process flag set
+            // by the nub-side `add`/`install` runners, and the engine now parses
+            // those verbs at the front door, so nothing sets it. Restoring the
+            // suppression means reading the flags where the engine parses them.
             if let Some(present) = std::env::current_dir()
                 .ok()
-                .filter(|_| !pnpmfile_choice_is_explicit())
                 .and_then(|cwd| pnpmfile_default_path(&cwd))
             {
                 let name = present
@@ -2305,26 +2257,6 @@ fn pnpmfile_default_path(cwd: &Path) -> Option<PathBuf> {
         }
     }
     None
-}
-
-/// Set when the invocation named a pnpmfile decision on the command line
-/// (`--pnpmfile` / `--global-pnpmfile` / `--ignore-pnpmfile`).
-///
-/// A process global rather than a parameter because the warning above is
-/// emitted from [`engine_brand_preflight`], which takes no arguments and is
-/// reached from a dozen call sites long before any verb's flags are read. The
-/// warning's own remedy is "name it explicitly with `--pnpmfile`", so printing
-/// it at a user who did exactly that would contradict the run they are looking
-/// at.
-static PNPMFILE_CHOICE_IS_EXPLICIT: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-pub(crate) fn note_explicit_pnpmfile_choice() {
-    PNPMFILE_CHOICE_IS_EXPLICIT.store(true, std::sync::atomic::Ordering::Relaxed);
-}
-
-fn pnpmfile_choice_is_explicit() -> bool {
-    PNPMFILE_CHOICE_IS_EXPLICIT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The role-gated config surface for a project, resolved by ONE engine-free
@@ -3829,7 +3761,6 @@ mod tests {
         let detected = |kind| DetectedLockfile {
             kind,
             dir: dir.path().to_path_buf(),
-            fresh: false,
         };
         assert!(native_pm_mode(None, true, dir.path()));
         assert!(native_pm_mode(
@@ -3865,7 +3796,6 @@ mod tests {
             Some(&DetectedLockfile {
                 kind,
                 dir: dir.to_path_buf(),
-                fresh: false,
             }),
             false,
             dir,
@@ -4015,7 +3945,6 @@ mod tests {
         let detected = |kind| DetectedLockfile {
             kind,
             dir: dir.path().to_path_buf(),
-            fresh: false,
         };
 
         // Every non-injected incumbent kind AND a fresh project default to
@@ -4174,7 +4103,6 @@ mod tests {
         let detected = DetectedLockfile {
             kind: LockfileKind::Npm,
             dir: dir.path().to_path_buf(),
-            fresh: false,
         };
         for defaults in [
             nub_setting_defaults(
@@ -4210,7 +4138,6 @@ mod tests {
         let detected = DetectedLockfile {
             kind: LockfileKind::Npm,
             dir: dir.path().to_path_buf(),
-            fresh: false,
         };
 
         let ci = nub_setting_defaults(
@@ -4287,7 +4214,6 @@ mod tests {
         let pnpm = DetectedLockfile {
             kind: LockfileKind::Pnpm,
             dir: dir.path().to_path_buf(),
-            fresh: false,
         };
         assert_eq!(
             get(
@@ -4319,7 +4245,6 @@ mod tests {
             let detected = detected.map(|kind| DetectedLockfile {
                 kind,
                 dir: dir.path().to_path_buf(),
-                fresh: false,
             });
             // `truly_fresh = false` here: this exercises the
             // identity-settings invariants for the non-truly-fresh surfaces
@@ -4381,7 +4306,6 @@ mod tests {
         let detected = |kind| DetectedLockfile {
             kind,
             dir: dir.path().to_path_buf(),
-            fresh: false,
         };
 
         let all_kinds = [
@@ -4470,7 +4394,6 @@ mod tests {
             let detected = kind.map(|k| DetectedLockfile {
                 kind: k,
                 dir: dir.path().to_path_buf(),
-                fresh: false,
             });
             let is_yarn = matches!(
                 detected.as_ref().map(|d| d.kind),

@@ -100,7 +100,8 @@ update.bats|aube update: workspace update.ignoreDeps takes precedence|update its
 # ── virgin projects self-pin nub via devEngines.packageManager ──────────────
 # On the FIRST package.json-modifying verb in a project nub is first to touch,
 # nub stamps devEngines.packageManager={name:"nub",version:"^<v>",onFail:"warn"}
-# (the non-locking cross-tool PM signal — install_family.rs stamp_if_virgin).
+# (the non-locking cross-tool PM signal — install_family.rs
+# stamp_virgin_dev_engines).
 # aube has no such self-pin, so these order tests see an extra top-level
 # `devEngines` key. The existing keys' ORDER is preserved (the stamp is appended
 # at the tail); the divergence is the intended extra key, not a reorder.

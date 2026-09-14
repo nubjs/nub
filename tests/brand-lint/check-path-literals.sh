@@ -49,10 +49,15 @@ PATH_CALL='join\(|push\(|prefix\(|with_file_name\(|set_file_name\(|create_dir|Pa
 #   argv.rs          — `args[0]` for aube's own CLI parse; an argument, not a
 #                      path. Scoped to the `args[0]` assignment rather than the
 #                      whole file, so an unrelated literal there is still caught.
-#   patch.rs         — the engine's fallback edit dir. Unreachable under nub:
-#                      `install_family.rs::run_patch` always injects `edit_dir`
-#                      (`get_or_insert_with(nub_patch_edit_parent)`) before
-#                      calling the engine, so `default_edit_parent` never runs.
+#   patch.rs         — the engine's fallback edit dir. REACHABLE, and the only
+#                      entry here that is: `nub patch` with no `--edit-dir` now
+#                      goes straight to the engine, which composes the name and
+#                      PRINTS it in the success message. The nub-side runner
+#                      that used to inject a `nub-patch-…` parent first went
+#                      when the front door took the verb. Exempted so the gate
+#                      still passes on what it was written for; the fix is to
+#                      compose the leaf from `prog()` engine-side, not to keep
+#                      claiming the path never runs.
 #   self_install.rs  — the mise TOOL NAME being looked up ("where did mise
 #                      install aube"), not a path nub composes. Self-update is
 #                      off under the nub profile besides.
