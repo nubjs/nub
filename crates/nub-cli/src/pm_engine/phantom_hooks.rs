@@ -32,16 +32,37 @@ use pnpm_store_dir::{
 
 use crate::dynamic_phantom;
 
-/// Scan each package as it lands in the store.
+/// The store this run reads and writes, as a handle — the one thing every path
+/// below is derived from.
 ///
-/// The sidecar directory resolves on FIRST FIRE, never at registration: the
-/// profile is built before the engine takes the project's directory, so
-/// resolving early would answer for the wrong project. Memoising that first
-/// answer is safe because the directory anchors at the walked-up workspace
-/// root, which every member of one workspace shares.
-#[derive(Debug, Default)]
+/// A handle rather than the raw setting because the store-version suffix is the
+/// engine's: `StoreDir::from` appends it and the setting does not carry it, and
+/// nothing downstream fails on the unsuffixed path. `StoreIndex::open` would
+/// CREATE an empty index there and answer "no such package" for everything, and
+/// a sidecar written there lands in a sibling of the real store that no install
+/// ever reads. Both are silent, so deriving from the handle is the only spelling
+/// that cannot drift from the store.
+///
+/// Taken from the settings nub published for the project, which resolve once at
+/// the walked-up workspace root — `.npmrc` discovery does not walk up, so
+/// resolving against the process cwd instead would miss a `store-dir` override
+/// for every command run from inside a workspace member and silently answer with
+/// the default store (#643). `None` under pnpm's own identity, which resolves
+/// its store itself and installs neither of these hooks.
+fn host_store() -> Option<pnpm_store_dir::StoreDir> {
+    super::pnpm_engine::host_store_dir().map(pnpm_store_dir::StoreDir::from)
+}
+
+/// The sidecar tier of that store: `<store>/phantom/`, beside the CAS and the
+/// index, so the verdicts move with the packages they are keyed to.
+fn sidecar_dir(store: &pnpm_store_dir::StoreDir) -> PathBuf {
+    store.root().join("phantom")
+}
+
+/// Scan each package as it lands in the store.
+#[derive(Debug)]
 struct ScanOnExtract {
-    dir: std::sync::OnceLock<Option<PathBuf>>,
+    dir: Option<PathBuf>,
 }
 
 impl ExtractObserver for ScanOnExtract {
@@ -51,7 +72,7 @@ impl ExtractObserver for ScanOnExtract {
         if !dynamic_phantom::enabled() {
             return;
         }
-        let Some(dir) = self.dir.get_or_init(dynamic_phantom::phantom_cache_dir) else {
+        let Some(dir) = &self.dir else {
             return;
         };
         let files = file_list(extracted.cas_paths);
@@ -69,11 +90,10 @@ impl ExtractObserver for ScanOnExtract {
 /// depends on it being a single instance breaks in a way nothing reports.
 #[derive(Debug)]
 struct EjectPhantomImporters {
-    /// Where the sidecars live, resolved once per run.
-    cache_dir: Option<PathBuf>,
-    /// The store the packages themselves live in, for the ones this run did
-    /// not extract.
-    store_dir: Option<PathBuf>,
+    /// The store this run reads: the packages it did not extract itself, and
+    /// the sidecar tier holding their verdicts. ONE handle for both, so the
+    /// index the scan reads and the sidecars it writes cannot name two stores.
+    store: Option<pnpm_store_dir::StoreDir>,
     /// Packages the project named itself, plus the ones nub always ejects.
     seeds: Vec<String>,
 }
@@ -126,16 +146,13 @@ impl EjectPhantomImporters {
     /// scan that could not run is not evidence of a phantom, and ejecting on
     /// a miss would move packages for no reason on every install.
     fn flagged(&self, resolved: &[ResolvedPackage<'_>]) -> Vec<String> {
-        let (Some(cache_dir), Some(store_dir)) = (&self.cache_dir, &self.store_dir) else {
+        let Some(store) = &self.store else {
             return Vec::new();
         };
-        // `StoreDir::from` applies the store-version suffix; `StoreIndex::open`
-        // takes a raw path and does not. Opening the unsuffixed path does not
-        // fail — it CREATES an empty index there and then answers "no such
-        // package" for everything — so the index is opened through the store
-        // handle, which is the only spelling that cannot drift from it.
-        let store = pnpm_store_dir::StoreDir::from(store_dir.clone());
-        let Ok(index) = StoreIndex::open_in(&store) else {
+        let cache_dir = sidecar_dir(store);
+        // `open_in`, never `open`: the raw-path form is the silent-miss trap
+        // [`host_store`] describes.
+        let Ok(index) = StoreIndex::open_in(store) else {
             return Vec::new();
         };
         // The names a project depends on directly. Under the shared store a
@@ -152,7 +169,7 @@ impl EjectPhantomImporters {
             .filter(|package| {
                 let Some(scan) = package
                     .index_key
-                    .and_then(|key| verdict(&index, &store, cache_dir, key))
+                    .and_then(|key| verdict(&index, store, &cache_dir, key))
                 else {
                     return false;
                 };
@@ -222,7 +239,7 @@ fn verdict(
 ) -> Option<nub_phantom_scan::ScanResult> {
     let row = index.get(index_key).ok()??;
     let files = file_list(&cas_paths_of(store, &row));
-    dynamic_phantom::cached_or_scan_verdict_files(cache_dir, None, &fingerprint_of(&row), &files)
+    dynamic_phantom::cached_or_scan_verdict_files(cache_dir, &fingerprint_of(&row), &files)
 }
 
 /// Grow `keep` until it holds every package that transitively imports one of
@@ -295,14 +312,15 @@ fn cas_paths_of(
 
 /// The observer this host registers.
 pub(crate) fn extract_observer() -> Arc<dyn ExtractObserver> {
-    Arc::new(ScanOnExtract::default())
+    Arc::new(ScanOnExtract {
+        dir: host_store().as_ref().map(sidecar_dir),
+    })
 }
 
 /// The policy this host registers.
 pub(crate) fn materialize_policy() -> Arc<dyn MaterializePolicy> {
     Arc::new(EjectPhantomImporters {
-        cache_dir: dynamic_phantom::phantom_cache_dir(),
-        store_dir: super::pnpm_engine::host_store_dir(),
+        store: host_store(),
         seeds: super::phantom_closure::configured_eject_names(),
     })
 }

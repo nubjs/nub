@@ -47,7 +47,7 @@ use nub_phantom_scan::{ScanResult, scan_index};
 /// `NUB_DYNAMIC_PHANTOM_EJECT` user knob is dead and ignored). Off only under the
 /// internal A/B seam below. This is the SINGLE arm both halves gate on — the
 /// extract-time PRODUCER here and the link-time CONSUMER
-/// ([`crate::pm_engine::phantom_closure`]) call this one function, and the
+/// ([`crate::pm_engine::phantom_hooks`]) call this one function, and the
 /// install-state fingerprint ([`settings_fingerprint`]) folds THIS value, so
 /// detection, closure, and warm-tree invalidation can never drift.
 pub(crate) fn enabled() -> bool {
@@ -175,22 +175,14 @@ pub(crate) fn content_fingerprint<'a>(
 /// false break.
 pub(crate) fn cached_or_scan_verdict_files(
     dir: &Path,
-    read_fallback_dir: Option<&Path>,
     fingerprint: &str,
     files: &[(String, PathBuf)],
 ) -> Option<ScanResult> {
     let sidecar = sidecar_path(dir, fingerprint);
-    // `read_fallback_dir` is the global store's sidecar tier when installs
-    // are writing a project-local store: its verdicts are read, never
-    // written, the same layering the CAS itself uses.
-    let cached = std::iter::once(sidecar.clone())
-        .chain(read_fallback_dir.map(|dir| sidecar_path(dir, fingerprint)));
-    for candidate in cached {
-        if let Ok(bytes) = std::fs::read(&candidate)
-            && let Ok(result) = serde_json::from_slice::<ScanResult>(&bytes)
-        {
-            return Some(result);
-        }
+    if let Ok(bytes) = std::fs::read(&sidecar)
+        && let Ok(result) = serde_json::from_slice::<ScanResult>(&bytes)
+    {
+        return Some(result);
     }
     // No (or unreadable) sidecar → scan the already-loaded index now, cache it,
     // and use the verdict for this install's eject decision.
@@ -220,7 +212,7 @@ fn scan_of_files(files: &[(String, PathBuf)]) -> Option<ScanResult> {
 /// Persist a scan verdict to its per-content sidecar via an atomic temp+rename.
 ///
 /// The serialized JSON is the [`nub_phantom_scan::ScanResult`], read back by the
-/// CONSUMER ([`crate::pm_engine::phantom_closure`]) — which, being in nub-cli,
+/// CONSUMER ([`crate::pm_engine::phantom_hooks`]) — which, being in nub-cli,
 /// deserializes it into the typed `ScanResult` (no cross-fork string coupling).
 /// Best-effort: any fs failure leaves the sidecar absent or unchanged (a later
 /// read retries an absent/corrupt target as a miss). Shared by the extract-hook
@@ -250,44 +242,6 @@ fn write_sidecar_atomic(sidecar: &Path, fingerprint: &str, result: &ScanResult) 
     if std::fs::write(&tmp, &bytes).is_ok() && std::fs::rename(&tmp, sidecar).is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
-}
-
-/// Nub's CAS store schema dirs: `<store-root>/v1/`, the parent of the CAS
-/// `files/` and `index/` tiers and the `phantom/` sidecar tier — the one the
-/// engine WRITES this run, plus the read-only global one it still reads when
-/// the default store is unwritable (a coding agent's sandbox). Resolves through
-/// [`aube::commands::resolved_project_store_v1_dirs`], the engine's own
-/// `storeDir` resolution and fallback decision, anchored at the walked-up
-/// project/workspace root — so a configured `store-dir` override moves the
-/// sidecar tier WITH the store it indexes (#643), and a project-local fallback
-/// store carries its own sidecars. The ANCHOR is the load-bearing half:
-/// `.npmrc` and `pnpm-workspace.yaml` discovery does not walk up, and the
-/// install pipeline anchors at `workspace_or_project_root()`, so resolving
-/// against the raw process cwd instead would miss the override for every
-/// command run from inside a workspace member and silently return the default
-/// store. Falls back to nub's [`crate::pm_engine::nub_data_dir`] — the same
-/// base its `storeDir` embedder default is built from — when no project root
-/// resolves at all. `None` when no data home resolves either. `pub(crate)` so
-/// the sidecar CONSUMER ([`crate::pm_engine::phantom_closure`]) derives its
-/// store handle from the same dirs this producer uses.
-pub(crate) fn store_v1_dirs() -> Option<aube::commands::StoreV1Dirs> {
-    if let Some(dirs) = aube::commands::resolved_project_store_v1_dirs() {
-        return Some(dirs);
-    }
-    Some(aube::commands::StoreV1Dirs {
-        primary: crate::pm_engine::nub_data_dir()?.join("store/v1"),
-        read_fallback: None,
-    })
-}
-
-/// The per-content sidecar directory the producer WRITES: `<store>/v1/phantom/`
-/// under the primary store, next to the CAS + index tiers. `None` when no data
-/// home resolves (the scanner then simply doesn't arm). `pub(crate)` so the
-/// consumer writes on-demand verdicts to the same directory this producer does;
-/// the consumer additionally READS the global store's sidecars through
-/// [`store_v1_dirs`]'s fallback.
-pub(crate) fn phantom_cache_dir() -> Option<PathBuf> {
-    Some(store_v1_dirs()?.primary.join("phantom"))
 }
 
 /// The phantom scanner's LOGIC version — BUMP on ANY change to the scanner's
@@ -351,15 +305,15 @@ pub(crate) const PHANTOM_SCANNER_VERSION: u32 = 5;
 pub(crate) const GVS_EJECT_ALGO_VERSION: u32 = 1;
 
 /// THE single source of truth for a phantom sidecar's location: the versioned
-/// subdir `<phantom_cache_dir>/s<PHANTOM_SCANNER_VERSION>/<fingerprint>.json`.
+/// subdir `<sidecar-dir>/s<PHANTOM_SCANNER_VERSION>/<fingerprint>.json`.
 /// Both halves derive their path HERE — the extract-time PRODUCER
 /// ([`scan_and_cache_files`]) and the link-time CONSUMER
-/// ([`crate::pm_engine::phantom_closure`]) — so the fingerprint keying, the
+/// ([`crate::pm_engine::phantom_hooks`]) — so the fingerprint keying, the
 /// `.json` extension, AND the scanner-version segment stay in lockstep and cannot
 /// drift apart (a producer/consumer path disagreement would silently serve "no
-/// eject" for every package). `base` is the caller-resolved
-/// [`phantom_cache_dir`]; the version subdir keeps each scanner generation's
-/// sidecars grouped for wholesale GC of a superseded version.
+/// eject" for every package). `base` is the store tier the caller resolved
+/// (`phantom_hooks::sidecar_dir`); the version subdir keeps each scanner
+/// generation's sidecars grouped for wholesale GC of a superseded version.
 pub(crate) fn sidecar_path(base: &Path, fingerprint: &str) -> PathBuf {
     base.join(format!("s{PHANTOM_SCANNER_VERSION}"))
         .join(format!("{fingerprint}.json"))

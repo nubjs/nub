@@ -82,12 +82,11 @@ fn a_seed_name_matches_that_package_and_not_a_longer_one() {
     assert!(!names("rollup@4.0.0", "vite"));
 }
 
-/// A policy with only its seed names filled in: the store handles are what
-/// the scan half reads, and the seed half never touches them.
+/// A policy with only its seed names filled in: the store handle is what the
+/// scan half reads, and the seed half never touches it.
 fn policy(seeds: &[&str]) -> EjectPhantomImporters {
     EjectPhantomImporters {
-        cache_dir: None,
-        store_dir: None,
+        store: None,
         seeds: seeds.iter().map(|name| (*name).to_string()).collect(),
     }
 }
