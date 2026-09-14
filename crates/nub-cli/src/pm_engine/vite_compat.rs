@@ -14,7 +14,7 @@
 //! - **Unit A (all Vite versions): write `node_modules/.modules.yaml`.** JSON
 //!   `{"virtualStoreDir":"<abs store>"}`. Vite ≥ 8.1 reads it natively
 //!   (`server/index.ts`, PR vitejs/vite#22415) and pushes the path onto
-//!   `fs.allow`. Additive (nub's own state lives in `.aube-state`), idempotent,
+//!   `fs.allow`. Additive (a foreign `.modules.yaml` is never overwritten), idempotent,
 //!   plain data — read regardless of whether nub is in the process.
 //!
 //! - **Unit B (Vite < 8.1): backport Vite's own 8.1 sniff.** The sniff predates
@@ -211,20 +211,13 @@ pub(crate) fn vite_lt_8_1(version: &str) -> bool {
     minor.and_then(|m| m.parse::<u32>().ok()).unwrap_or(0) < 1
 }
 
-/// nub's global virtual-store directory (`<cache>/store`, where `<cache>` is
-/// embedder-namespaced to `~/.cache/nub/pm`). This is the realpath prefix of
-/// every store-resident served module, so it is the value Vite must allow. The
-/// leaf name comes from the active embedder (`store` under nub), matching what
-/// `aube_store::Store::virtual_store_dir` writes. The embedder profile is
-/// registered by the time install runs, so `aube_store::dirs::cache_dir()`
-/// resolves the nub namespace.
+/// nub's global virtual-store directory: [`GLOBAL_VIRTUAL_STORE_LEAF`] under the
+/// store the engine resolved for this run. This is the realpath prefix of every
+/// store-resident served module, so it is the value Vite must allow.
 ///
-/// Taken from the store the engine resolved for this run rather than rebuilt
-/// from the default layout, so a project that relocates its store with
-/// `storeDir` is told about the store it will actually load from. That was the
-/// documented gap while this read aube's default location: aube's own resolver
-/// for the relocating settings was private to its crate, so a relocated store
-/// produced a `.modules.yaml` naming a path nothing used.
+/// Taken from the resolved store rather than rebuilt from the default layout, so
+/// a project that relocates its store with `storeDir` is told about the store it
+/// will actually load from.
 fn global_virtual_store_dir() -> Option<PathBuf> {
     super::pnpm_engine::host_store_dir().map(|store| store.join(GLOBAL_VIRTUAL_STORE_LEAF))
 }

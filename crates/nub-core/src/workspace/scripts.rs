@@ -225,9 +225,7 @@ fn envify_env_key(key: &str) -> String {
 
 /// Deep-flatten a JSON value into `prefix`-rooted `npm_package_*` pairs,
 /// npm-style: objects recurse with `_`-joined envified keys, arrays index with
-/// `_<i>`, scalars stringify, `null` is skipped. Matches aube's
-/// `flatten_json_env` (the lifecycle path) so the run and lifecycle paths emit
-/// byte-identical `npm_package_*` environments.
+/// `_<i>`, scalars stringify, `null` is skipped.
 fn flatten_npm_package_env(
     prefix: &str,
     value: &serde_json::Value,

@@ -7,8 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 /// Maximum total decompressed bytes accepted from a single archive — the
-/// decompression-bomb ceiling (N2). 1 GiB, mirroring the engine's
-/// `aube_store::MAX_TARBALL_DECOMPRESSED_BYTES`. A stock Node dist tarball
+/// decompression-bomb ceiling (N2). 1 GiB. A stock Node dist tarball
 /// unpacks to well under 100 MiB, so this sits an order of magnitude above any
 /// real artifact while stopping a malicious/mirror-served small-compressed /
 /// huge-decompressed payload from exhausting disk or memory. On the streamed
@@ -22,12 +21,10 @@ use anyhow::{Context, Result, bail};
 /// (~25 MB Node / ~15 MB pnpm) provisioning e2e tests.
 pub(crate) const MAX_ARCHIVE_DECOMPRESSED_BYTES: u64 = 1 << 30;
 
-/// Maximum bytes for a single archive entry (zip per-file cap). 512 MiB, the
-/// same shape as `aube_store::MAX_TARBALL_ENTRY_BYTES`.
+/// Maximum bytes for a single archive entry (zip per-file cap). 512 MiB.
 const MAX_ARCHIVE_ENTRY_BYTES: u64 = 512 << 20;
 
-/// Maximum number of entries in a single archive — the third aube-store cap
-/// (`aube_store::MAX_TARBALL_ENTRIES`), bounding the per-entry `File::create`
+/// Maximum number of entries in a single archive, bounding the per-entry `File::create`
 /// syscall/inode cost so a crafted archive of millions of tiny (empty-header)
 /// entries can't pin the CPU or exhaust inodes even while staying under the byte
 /// cap. `next` (the largest top-1000 npm package) ships ~8k files and a Node dist
@@ -35,8 +32,8 @@ const MAX_ARCHIVE_ENTRY_BYTES: u64 = 512 << 20;
 pub(crate) const MAX_ARCHIVE_ENTRIES: usize = 200_000;
 
 /// A `Read` wrapper that refuses to deliver more than `remaining` bytes,
-/// surfacing exhaustion as an `io::Error` rather than a clean EOF. Mirror of
-/// `aube_store`'s `CappedReader`: when it wraps a gzip/xz decoder feeding a tar
+/// surfacing exhaustion as an `io::Error` rather than a clean EOF. When it wraps
+/// a gzip/xz decoder feeding a tar
 /// archive, a clean EOF on a block boundary would let a crafted archive silently
 /// truncate into a partial tree; an explicit error keeps the tar iterator from
 /// accepting a half-read stream as complete. Shared with [`crate::pm::extract`].

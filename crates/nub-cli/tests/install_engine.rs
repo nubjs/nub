@@ -1,7 +1,5 @@
-//! `nub install` / `nub ci` through the embedded aube engine, end-to-end
+//! `nub install` / `nub ci` through the embedded pnpm engine, end-to-end
 //! through the binary: real fixtures, real node_modules, real lockfiles.
-//! The layout policy and the yarn write gate live in
-//! `crates/nub-cli/src/pm_engine.rs`.
 //!
 //! The two installing tests are `#[ignore]` (network) following the
 //! provisioning-test convention — run them via
@@ -35,7 +33,7 @@ fn pm_tmpdir(tag: &str) -> PathBuf {
     dir
 }
 
-/// Spawn `nub <args>` in `dir` with the aube store/cache isolated to fresh
+/// Spawn `nub <args>` in `dir` with the engine's store/cache isolated to fresh
 /// temp roots (XDG_DATA_HOME carries the CAS store, XDG_CACHE_HOME the
 /// packument cache) so tests never warm-hit the dev box's real store.
 fn run_install(dir: &Path, args: &[&str]) -> (String, String, i32) {
@@ -187,21 +185,14 @@ fn install_truly_fresh_project_claims_nub_identity() {
         return;
     }
     let dir = pm_tmpdir("fresh");
-    // The impossible `engines.aube` pin proves the embedder toggle: stock
-    // aube would warn (or hard-fail under engine-strict) on the mismatch;
-    // nub skips the field entirely — its users aren't running that tool.
     std::fs::write(
         dir.join("package.json"),
-        r#"{"name":"fresh","version":"1.0.0","engines":{"aube":"999.0.0"},"dependencies":{"is-positive":"3.1.0"}}"#,
+        r#"{"name":"fresh","version":"1.0.0","dependencies":{"is-positive":"3.1.0"}}"#,
     )
     .unwrap();
 
     let (stdout, stderr, code) = run_install(&dir, &["install"]);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
-    assert!(
-        !stderr.to_lowercase().contains("engine"),
-        "engines.aube must be ignored, not warned about: {stderr}"
-    );
 
     // Isolated layout: the top-level entry is a symlink into the virtual
     // store `.modules.yaml` reports — the global virtual store outside the
@@ -226,10 +217,6 @@ fn install_truly_fresh_project_claims_nub_identity() {
         store.display(),
         std::fs::read_link(&dep).unwrap().display()
     );
-    assert!(
-        !dir.join("node_modules/.aube").exists(),
-        "no .aube directory may materialize"
-    );
 
     // A patch-free install writes no applied-patches sidecar (an empty `{}`
     // manifest is information-free clutter; a missing file reads back the same).
@@ -243,8 +230,8 @@ fn install_truly_fresh_project_claims_nub_identity() {
         "truly-fresh install writes nub's neutral nub.lock"
     );
     assert!(
-        !dir.join("pnpm-lock.yaml").exists() && !dir.join("aube-lock.yaml").exists(),
-        "neither pnpm-lock.yaml nor aube-lock.yaml may appear on the truly-fresh path"
+        !dir.join("pnpm-lock.yaml").exists(),
+        "pnpm-lock.yaml must not appear on the truly-fresh path"
     );
 
     // A virgin install stamps a caret RANGE into `devEngines.packageManager`
@@ -530,7 +517,7 @@ fn install_with_pnpm_workspace_stays_pnpm_shaped_no_stamp() {
 /// A project with a (frozen-satisfiable) package-lock.json: the layout policy
 /// defaults to the isolated layout (the GVS flip — npm/yarn/bun incumbents no
 /// longer force hoisted), and the lockfile format is preserved — no
-/// aube-lock.yaml appears next to package-lock.json.
+/// pnpm-lock.yaml appears next to package-lock.json.
 #[test]
 #[ignore = "network: fetches is-positive@3.1.0 (resolution comes from the lockfile)"]
 fn install_with_package_lock_isolates_and_preserves_the_npm_lockfile() {
@@ -589,7 +576,7 @@ fn install_with_package_lock_isolates_and_preserves_the_npm_lockfile() {
         "the npm lockfile must be preserved"
     );
     assert!(
-        !dir.join("aube-lock.yaml").exists() && !dir.join("pnpm-lock.yaml").exists(),
+        !dir.join("pnpm-lock.yaml").exists(),
         "no foreign lockfile may appear next to package-lock.json"
     );
 }
@@ -784,8 +771,8 @@ fn add_on_a_truly_fresh_project_claims_nub_identity() {
         "a truly-fresh add writes nub's neutral nub.lock: {stderr}"
     );
     assert!(
-        !dir.join("pnpm-lock.yaml").exists() && !dir.join("aube-lock.yaml").exists(),
-        "neither pnpm-lock.yaml nor aube-lock.yaml may appear on the truly-fresh path"
+        !dir.join("pnpm-lock.yaml").exists(),
+        "pnpm-lock.yaml must not appear on the truly-fresh path"
     );
 
     let manifest: serde_json::Value =
@@ -1029,12 +1016,13 @@ fn cold_install_with_trust_downgrade_still_aborts() {
     );
     // The assertions here stay loose on purpose, because the exact code and
     // exit status are the ENGINE's and nub matches them rather than restoring
-    // the aube-era ones. Measured against real pnpm 12.4.1 on this same
+    // the previous engine's. Measured against real pnpm 12.4.1 on this same
     // fixture: it also exits 1, installs nothing, and prints the same
     // "High-risk trust downgrade" text through the generic resolve error. The
-    // dedicated exit 23 and the `ERR_NUB_TRUST_DOWNGRADE` spelling were aube's;
-    // neither appears in `site/content/docs/` any more, because the docs were
-    // corrected to the behavior rather than the behavior bent back to the docs.
+    // dedicated exit 23 and the `ERR_NUB_TRUST_DOWNGRADE` spelling were the
+    // previous engine's; neither appears in `site/content/docs/` any more,
+    // because the docs were corrected to the behavior rather than the behavior
+    // bent back to the docs.
     //
     // What a refused version does NOT do is resolve around itself to an earlier
     // release — the docs used to promise that substitution, pnpm 12 has never

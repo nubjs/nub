@@ -6,15 +6,12 @@
 //! (`--omit`, `--no-save`, `-S`/`--save`, the npm `-w <name>` member selector).
 //! The contract: nub accepts a form on these verbs IFF pnpm accepts it.
 //!
-//! WHY THIS EXISTS (the #29 / P0 blind spot). nub routes a verb through one of
-//! two parsers: nub's own hand-written clap structs (`install`/`i`/`ci`/
-//! `upgrade`) and the engine verbs (`add`/`remove`/`update`/… — parsed with
-//! aube's `Args` types). Every historical flag/positional compat bug has lived
-//! at the seam between those two parsers, and nothing crossed it: the native
-//! install/ci structs had ZERO parse coverage, and the engine-verb parse test
-//! only asserted what aube HAS, never what pnpm documents. `nub install -g
+//! WHY THIS EXISTS (the #29 / P0 blind spot). A verb parses with one of two
+//! grammars: the engine's, which is pnpm's own (`install`/`add`/`update`/…),
+//! or nub's, for the verbs nub runs itself (`exec`/`dlx`). `nub install -g
 //! <pkg>` (#29) and `nub install <pkg>` (its strictly-more-common twin) both
-//! shipped rejecting at clap because of exactly that gap.
+//! once shipped rejecting at the parser, because nothing asserted the forms
+//! pnpm documents — only the forms a parser happened to have.
 //!
 //! WHAT THIS GUARDS. A hand-curated, deliberately-WIDE table of the
 //! pnpm-DOCUMENTED flag / alias / positional forms users actually type for each
@@ -23,17 +20,13 @@
 //! flags, a false-negative trap), so a row asserts a form pnpm documents as
 //! supported. For each row we assert nub's parser ACCEPTS the grammar: spawn
 //! `nub <form> --help` and FAIL iff clap emitted `unexpected argument` /
-//! `unrecognized …` (its parse-reject markers). The table spans BOTH parsers in
+//! `unrecognized …` (its parse-reject markers). The table spans BOTH grammars in
 //! one place, so the routing seam is always crossed.
 //!
 //! Appending `--help` makes each spawn a pure parse-then-print — clap intercepts
 //! `--help` once the argv parses, so no install runs and no network is touched.
 //! A runtime failure (no lockfile, bin-not-found → exit 127) is NOT a parse
 //! reject and does not fail a row; only the clap reject markers do.
-//!
-//! KNOWN-STILL-BROKEN rows (forms pnpm documents but nub rejects today) live in
-//! `#[ignore]`d tests below, each naming its follow-up, so the gap is
-//! documented-not-silently-missing.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -109,7 +102,7 @@ fn assert_all_accepted(label: &str, rows: &[(&[&str], &str)]) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// install / i — native clap struct + the install→add routing seam (A/B/C/D).
+// install / i — pnpm's install grammar, `install <pkg>` included (A/B/C/D).
 // Grounded in `pnpm install --help` and `pnpm add --help` (pnpm-only — nub's
 // frontend targets the pnpm CLI surface, not npm).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -175,12 +168,8 @@ fn install_family_grammar_accepts_documented_forms() {
             ),
             (&["i", "lodash"], "pnpm i <pkg> (P0)"),
             (&["install", "express", "lodash"], "multiple package specs"),
-            // pnpm add save flags — both the lowercase pnpm shorts and the long
-            // forms (aube's uppercase shorts are translated/forwarded).
-            (
-                &["install", "express", "-D"],
-                "aube -D (save-dev short) forwards",
-            ),
+            // pnpm add save flags — the shorts and the long forms.
+            (&["install", "express", "-D"], "pnpm -D (save-dev short)"),
             (&["install", "express", "--save-dev"], "pnpm --save-dev"),
             (&["install", "express", "--save-exact"], "pnpm --save-exact"),
             (
@@ -349,9 +338,8 @@ fn ci_grammar_accepts_documented_forms() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Engine verbs — the other side of the routing seam. Each parses with aube's
-// own `Args` + nub's `EngineGlobals`. Grounded in `pnpm <verb> --help` (the CLI
-// surface nub targets).
+// Engine verbs beyond install. Each parses with the engine's own grammar.
+// Grounded in `pnpm <verb> --help` (the CLI surface nub targets).
 // ─────────────────────────────────────────────────────────────────────────────
 #[test]
 fn engine_add_grammar_accepts_documented_forms() {
@@ -368,6 +356,12 @@ fn engine_add_grammar_accepts_documented_forms() {
             (&["add", "foo", "-O"], "pnpm -O / --save-optional"),
             (&["add", "foo", "--save-optional"], "pnpm --save-optional"),
             (&["add", "foo", "--save-peer"], "pnpm --save-peer"),
+            (&["add", "foo", "--save-prod"], "pnpm add -P / --save-prod"),
+            (&["add", "foo", "--offline"], "pnpm add --offline"),
+            (
+                &["add", "foo", "--prefer-offline"],
+                "pnpm add --prefer-offline",
+            ),
             (&["add", "foo", "-g"], "pnpm -g / --global"),
             (&["add", "foo", "--global"], "pnpm --global"),
             (&["add", "foo", "-w"], "pnpm -w (add to workspace root)"),
@@ -380,7 +374,7 @@ fn engine_add_grammar_accepts_documented_forms() {
                 &["add", "foo", "--ignore-pnpmfile"],
                 "pnpm add --ignore-pnpmfile",
             ),
-            // Output-verbosity flags (#179), forwarded via EngineGlobals.
+            // Output-verbosity flags (#179).
             (&["add", "foo", "--silent"], "pnpm --silent"),
             (&["add", "foo", "-s"], "pnpm -s (silent short)"),
             (
@@ -459,7 +453,7 @@ fn exec_dlx_grammar_accepts_documented_forms() {
             ),
             (
                 &["dlx", "-p", "cowsay", "cowsay"],
-                "pnpm dlx -p (aube's --package short)",
+                "nub dlx -p (--package short)",
             ),
             // `x` is the short alias of `dlx` (bun's `bun x`): it must accept the
             // exact same fetch-and-run grammar, including the `-p`/`--package`
@@ -468,35 +462,6 @@ fn exec_dlx_grammar_accepts_documented_forms() {
             (
                 &["x", "-p", "cowsay", "cowsay"],
                 "nub x -p (dlx alias, --package short)",
-            ),
-        ],
-    );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// KNOWN-STILL-BROKEN — forms pnpm documents that nub rejects today. Kept
-// (ignored) so the gap is visible, not silently missing. When the named
-// fork-side follow-up lands, drop the `#[ignore]` and the row joins the passing
-// table.
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// E (fork-side, `nubjs/aube`): aube's `AddArgs` lacks `-p`/`--save-prod`,
-/// `--offline`, `--prefer-offline` — all DOCUMENTED by `pnpm add --help`. The
-/// fix adds the flags to aube's `AddArgs` (default-preserving) via the nub-fork
-/// workflow, then this test un-ignores. The install→add routing already DROPS a
-/// translated `-p`/`-P`/`--save-prod` (save-to-deps is the add default), so the
-/// gap is only on the bare engine `add` verb, not on `install <pkg> --save-prod`.
-#[test]
-#[ignore = "E: aube AddArgs missing --save-prod/--offline/--prefer-offline (fork-side, nubjs/aube)"]
-fn engine_add_pnpm_only_flags_blocked_on_fork() {
-    assert_all_accepted(
-        "add (fork-blocked)",
-        &[
-            (&["add", "foo", "--save-prod"], "pnpm add -p / --save-prod"),
-            (&["add", "foo", "--offline"], "pnpm add --offline"),
-            (
-                &["add", "foo", "--prefer-offline"],
-                "pnpm add --prefer-offline",
             ),
         ],
     );

@@ -44,11 +44,8 @@ pub struct Project {
 /// The stamp captures `package.json` *content* only at the resolved project (and
 /// workspace) root — not the *presence* of a `package.json` newly appearing at a
 /// LOWER walked dir, which would relocate the project root. That residual is
-/// unreachable in practice rather than stamped: a `None` walk is never cached
-/// (so a no-project cwd always re-walks), and the only in-process creator of a
-/// fresh `package.json` (`aube add`'s bootstrap) is gated on there being NO
-/// ancestor manifest — so it can never materialize a manifest *below* an
-/// already-resolved root. Canonicalizing the key keeps two cwds that resolve to
+/// not stamped: a `None` walk is never cached, so a no-project cwd always
+/// re-walks. Canonicalizing the key keeps two cwds that resolve to
 /// the same directory sharing one entry while never serving a `Project` computed
 /// for a genuinely different directory.
 pub fn detect_project(cwd: &Path) -> Option<Project> {

@@ -256,9 +256,10 @@ impl SourceIndex {
         // Last variable in environment order wins, which is the order the
         // settings layer lifts them in. Matched on the SETTING the layer
         // resolved rather than on `meta.env_vars`: only an `npm_config_`
-        // prefix reaches this tier, in either case, so the brand-prefixed
-        // aliases the table still lists (`AUBE_*`) are excluded structurally
-        // — crediting one would name a variable no install consulted.
+        // prefix reaches this tier, in either case, so the pnpm-prefixed
+        // aliases the table also lists (`PNPM_CONFIG_*`) are excluded
+        // structurally — crediting one would name a variable no install
+        // consulted.
         if let Some((var, _, raw)) = self
             .env
             .iter()
@@ -1377,13 +1378,10 @@ mod tests {
     /// The parenthetical names the variable the install actually read — not a
     /// spelling picked off the settings table's alias list.
     ///
-    /// CONTRACT CHANGE. Two tests used to sit here, one per brand-prefixed
-    /// alias family (`AUBE_*`, `PNPM_CONFIG_*`), each flipping a process-global
-    /// engine posture to prove the report skipped a variable the resolver
-    /// skipped. This walk no longer goes through `meta.env_vars` at all: it
-    /// reads the tier the settings layer BUILT, which admits the `npm_config_`
-    /// prefix and nothing else, so the skip is structural and the postures that
-    /// gated it are gone. The prefix rule is asserted where it lives —
+    /// This walk does not go through `meta.env_vars`: it reads the tier the
+    /// settings layer BUILT, which admits the `npm_config_` prefix and nothing
+    /// else, so the skip is structural. The prefix rule is asserted where it
+    /// lives —
     /// `host_settings::tests::a_brand_prefixed_variable_is_not_a_setting_source`
     /// — and what remains here is this module's own half.
     #[test]

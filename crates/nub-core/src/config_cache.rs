@@ -9,7 +9,7 @@
 //! This is a memoizer for the READ/parse phase only. The single thing that
 //! makes it correct rather than a stale-value hazard: every lookup re-stats the
 //! file and serves the cached value ONLY when the file's modification time is
-//! unchanged. A mutation (the in-process aube engine rewriting `package.json`
+//! unchanged. A mutation (the in-process engine rewriting `package.json`
 //! mid-command) bumps the mtime, the next lookup misses, and the file is
 //! re-read. So the no-stale-read property is STRUCTURAL — it does not depend on
 //! call-ordering analysis: a cache validated on mtime can never serve a value

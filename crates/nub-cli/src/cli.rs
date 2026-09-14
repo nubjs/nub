@@ -9,8 +9,9 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use anyhow::{Context, Result, bail};
 
 /// Stable, branded error codes for nub-cli's own (non-engine) failure paths.
-/// The engine's `ERR_AUBE_*` codes are rewritten to `ERR_NUB_*` at presentation
-/// (see `pm_engine::present`); these are nub's native equivalents, embedded
+/// The engine's own codes reach the user as `ERR_NUB_*` (see
+/// `pm_engine::pnpm_engine::report_engine_error`); these are nub's native
+/// equivalents, embedded
 /// directly in the user-facing message text since these paths surface as
 /// `anyhow` errors rather than miette reports. Keep the `ERR_NUB_*` spelling so
 /// the brand boundary holds and the codes read identically to the engine's.
@@ -1686,7 +1687,7 @@ struct ScriptExecOpts<'a> {
 }
 
 /// Known subcommand names the parser should handle. `install`/`i`/`ci` route
-/// to the embedded aube install engine (src/pm_engine/).
+/// to the embedded PM engine (src/pm_engine/).
 const SUBCOMMANDS: &[&str] = &[
     "run",
     "watch",
@@ -1761,136 +1762,11 @@ fn engine_argv(
     argv
 }
 
-/// `pnpm install <pkg>` (and the `i` alias) is the add-to-dependencies form —
-/// pnpm routes `install` with a package positional (or `-g`) through its `add`
-/// command. Nub's argumentless `install` is a native parser command (no
-/// positionals), and the global form `install -g <pkg>` is an add too, so detect
-/// that compatibility shape before the parser rejects the package positional / `-g` /
-/// save flags as unknown and translate it into an engine `add` invocation.
-///
-/// nub's CLI frontend targets pnpm compatibility ONLY (not npm), so this routing
-/// honors exactly the spellings `pnpm install <pkg>` accepts — no npm-isms
-/// (`--omit`, `--no-save`, `-S`/`--save`, the npm `-w <name>` member selector).
-///
-/// Routes to `add` when `install`/`i` carries a positional package OR `-g`/
-/// `--global` (before any `--` separator). Plain `nub install` (no positionals,
-/// no `-g`) and `nub install <native-flags>` (e.g. `--frozen-lockfile`, `-r`,
-/// `-F foo`, `-P` with no package) stay on the native install path. A `--`
-/// separator stops the scan, so `nub install -- -g` keeps `-g` literal.
-///
-/// pnpm's save spellings are translated to the equivalent the engine `add`
-/// accepts (aube's `AddArgs`, whose save shorts are uppercase `-D`/`-E`/`-O`):
-/// - pnpm lowercase save shorts → aube long forms: `-d` → `--save-dev`,
-///   `-o` → `--save-optional`, `-e` → `--save-exact`.
-/// - `-p`/`-P`/`--save-prod` → dropped (save-to-`dependencies` is the `add`
-///   default; this matches `pnpm add`'s default behavior).
-/// - Everything else (`-D`/`--save-dev`, `-E`/`--save-exact`, `-O`/
-///   `--save-optional`, `--save-peer`, `-g`/`--global`, `-w` (pnpm's boolean
-///   `--workspace-root`), `-r`/`-F`/`--filter`/`-C`, positionals, …) is already
-///   an `add`-accepted pnpm spelling — forwarded verbatim.
-fn install_to_add_args(rest: &[String]) -> Option<Vec<String>> {
-    let subcommand = rest.first()?.as_str();
-    if !matches!(subcommand, "install" | "i") {
-        return None;
-    }
-
-    // First pass over the pre-`--` args: decide whether this is an add (a
-    // package positional or `-g`/`--global` present). Native install flags
-    // alone keep `install` on its own path.
-    let body = &rest[1..];
-    let mut saw_separator_at: Option<usize> = None;
-    let mut route_to_add = false;
-    {
-        // Value-taking flags whose argument must NOT be mistaken for a package
-        // positional during the route decision. (pnpm `-w` is a boolean
-        // `--workspace-root`, NOT a value flag — it is deliberately absent.)
-        const VALUE_FLAGS: &[&str] = &[
-            "-F",
-            "--filter",
-            "--filter-prod",
-            "-C",
-            "--dir",
-            "--registry",
-            "--node-linker",
-            // Output-control flags: their space-separated value would otherwise
-            // be read as a package positional and trigger a wrong route to `add`.
-            // (`--loglevel silent` is the canonical misroute case.) The native
-            // install variant accepts them via the flattened `OutputFlags`;
-            // listing them here prevents the space-separated value from looking
-            // like a pkg.
-            "--loglevel",
-            "--reporter",
-            // Same shape: `nub install --minimum-release-age 0` would otherwise
-            // read `0` as a package and route the whole command to `add`.
-            "--minimum-release-age",
-            "--minimum-release-age-exclude",
-            // Platform selection, same shape: `nub install --os linux` would
-            // otherwise read `linux` as a package spec and route the whole
-            // command to `add`. The `--os=linux` form never had the problem,
-            // which is what makes omitting these easy to ship unnoticed.
-            "--os",
-            "--cpu",
-            "--libc",
-            // Same shape again: `nub install --pnpmfile hooks.cjs` would read
-            // the path as a package spec. Caught by `cli_grammar_parity` the
-            // day these two landed, exactly as the note above predicts.
-            "--pnpmfile",
-            "--global-pnpmfile",
-        ];
-        let mut i = 0;
-        while i < body.len() {
-            let arg = &body[i];
-            if arg == "--" {
-                saw_separator_at = Some(i);
-                break;
-            }
-            if matches!(arg.as_str(), "-g" | "--global") {
-                route_to_add = true;
-            }
-            let bare = arg.split('=').next().unwrap_or("");
-            if !arg.starts_with('-') {
-                // A bare token in operand position is a package spec.
-                route_to_add = true;
-            } else if VALUE_FLAGS.contains(&bare) && !arg.contains('=') {
-                // Skip the separate value so it isn't read as a positional.
-                i += 1;
-            }
-            i += 1;
-        }
-    }
-    if !route_to_add {
-        return None;
-    }
-
-    // Second pass: translate pnpm save spellings into the engine `add` grammar.
-    let scan_end = saw_separator_at.unwrap_or(body.len());
-    let mut out: Vec<String> = vec!["add".to_string()];
-    for arg in &body[..scan_end] {
-        match arg.as_str() {
-            // Dropped: save-to-dependencies is the default for `add`.
-            "-p" | "-P" | "--save-prod" => {}
-            // pnpm lowercase save shorts → aube's long forms (aube's shorts are
-            // uppercase `-D`/`-O`/`-E`).
-            "-d" => out.push("--save-dev".to_string()),
-            "-o" => out.push("--save-optional".to_string()),
-            "-e" => out.push("--save-exact".to_string()),
-            // Everything else is already an `add`-accepted pnpm spelling.
-            other => out.push(other.to_string()),
-        }
-    }
-    // Anything after `--` is forwarded literally (e.g. package specs that
-    // start with a dash).
-    if let Some(sep) = saw_separator_at {
-        out.extend(body[sep..].iter().cloned());
-    }
-    Some(out)
-}
-
 /// PM-management verbs nub recognizes only to redirect. The pure-passthrough
 /// frontend (A2) was disabled 2026-06-09 in favor of the normalized standard
 /// surface (`package-manager-normalized-surface` (no such document)):
 /// `install`/`i`/`ci` graduated into SUBCOMMANDS (live engine dispatch), and
-/// the rest of the aube verb surface graduated into the engine verb registry
+/// the other package-manager verbs graduated into the engine verb registry
 /// (`pm_engine::ENGINE_VERBS` — stubs today, family fill-ins next). What's
 /// left here is the rump of PM verbs that exist in *other* package managers
 /// but not in the embedded engine; they error with the project's real PM
@@ -2628,8 +2504,7 @@ fn value_consuming_flags(subcommand: &str) -> &'static [&'static str] {
             "--cwd",
             "--minimum-release-age",
             "--minimum-release-age-exclude",
-            // Platform selection is value-taking too, and the sibling list in
-            // `install_to_add_args` needed the same three. `nubx --os linux -p
+            // Platform selection is value-taking too: `nubx --os linux -p
             // left-pad pad` would otherwise split at `linux`, pushing `-p
             // left-pad` into the forwarded suffix instead of binding it.
             "--os",
@@ -2804,22 +2679,6 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
         return crate::pm_engine::run_node_gyp_bootstrap(&rest[1..]);
     }
 
-    // Compatibility alias: npm and pnpm treat `install <pkg>` / `i <pkg>` (and
-    // the global form `install -g <pkg>`) as a package add. Route that shape
-    // through the engine's `add` implementation, translating npm save/spec/
-    // workspace spellings, before the native argumentless-install variant
-    // rejects the positional / `-g` / unknown save flags. Plain `nub install`
-    // and `nub install <native-flags>` stay on the native install path.
-    if let Some(add_argv) = install_to_add_args(&rest)
-        && let Some(spec) = crate::pm_engine::lookup_verb("add")
-    {
-        let pm = suggest_package_manager(&env::current_dir()?);
-        // `add_argv[0]` is the canonical verb ("add"); the engine wants the
-        // args after the verb. Report the user's actual typed spelling so
-        // usage/errors still read `nub install …`.
-        return crate::pm_engine::dispatch_verb(spec, &subcommand, &add_argv[1..], &pm);
-    }
-
     // `dlx`, its `x` alias, and `create` are NUB's fetch-and-run path, not a
     // package manager's: they are three spellings of what `nubx` already
     // implements, and routing them anywhere else is what kept the vendored
@@ -2828,7 +2687,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
         return run_dlx_family(&subcommand, &rest[1..]);
     }
 
-    // Verbs registered to the embedded PM engine (the aube verb surface minus
+    // Verbs registered to the embedded PM engine (the engine's verb surface minus
     // nub-reserved and tool-identity verbs — see pm_engine::ENGINE_VERBS).
     // Dispatched before the parser: these aren't parser variants; each family module
     // owns its own args parsing (today: stubs that error with the user's
@@ -3566,7 +3425,7 @@ fn scan_node_compat_flag(args: &[String]) -> (bool, Vec<String>) {
 /// tree — the persistent form of `--node`. Version resolution/provisioning
 /// stays ON (compat = no augmentation, not no-pinning), exactly like `--node`.
 /// Truthy = `1`/`true`/`yes` (case-insensitive); empty/`0`/`false`/unset = off.
-/// Brand-clean: `NODE_*` prefix (Node doesn't claim the name), not `NUB_*`/`AUBE_*`.
+/// Brand-clean: `NODE_*` prefix (Node doesn't claim the name), not `NUB_*`.
 fn node_compat_env_setting() -> Option<bool> {
     let value = env::var("NODE_COMPAT").ok()?;
     match value.trim().to_ascii_lowercase().as_str() {
@@ -6130,8 +5989,8 @@ fn build_script_command(
     // the switch they already honor. Measured against pnpm 10.15.1, which resolves
     // the flag exactly this way: `--color=always` gives the child `FORCE_COLOR=1`
     // and `--no-color` gives it `FORCE_COLOR=0`. Default `auto` sets nothing, so
-    // the deliberate refusal to force color unasked (see aube's run_output.rs) is
-    // preserved — this is the opt-in escape hatch, not a new default.
+    // the deliberate refusal to force color unasked is preserved — this is the
+    // opt-in escape hatch, not a new default.
     match color_mode() {
         ColorWhen::Always => {
             command.env("FORCE_COLOR", "1");
@@ -7689,8 +7548,8 @@ fn is_node_bin(path: &Path) -> bool {
         _ => {}
     }
     // Peek the shebang: `#!/usr/bin/env node`, `#!/usr/local/bin/node`, etc.
-    // Match only on the shebang LINE — a `#!/bin/sh` shim (e.g. aube's `.bin`
-    // entries) routinely names node in its body (`NODE_PATH=…`, `exec …/node …`),
+    // Match only on the shebang LINE — a `#!/bin/sh` shim (e.g. the `.bin`
+    // entries pnpm writes) routinely names node in its body (`NODE_PATH=…`, `exec …/node …`),
     // and running such a script through `node` parses sh-as-JS (SyntaxError).
     let Ok(mut f) = std::fs::File::open(path) else {
         return false;
@@ -12248,7 +12107,7 @@ mod tests {
 
     #[test]
     fn is_node_bin_classifies_by_shebang_line_not_body() {
-        // aube's `.bin` entries are `#!/bin/sh` shim scripts whose BODY mentions
+        // pnpm's `.bin` entries are `#!/bin/sh` shim scripts whose BODY mentions
         // node (`NODE_PATH=…`, `exec "$basedir/node" …`). Those must run via the sh
         // interpreter (the kernel honors the shebang), NOT through `node <shim>` —
         // feeding the sh script to node throws `SyntaxError: Invalid or unexpected
@@ -12259,7 +12118,7 @@ mod tests {
         let sh_shim = dir.path().join("cowsay");
         std::fs::write(
             &sh_shim,
-            "#!/bin/sh\n# aube-bin-shim v1\nexport NODE_PATH=\"$basedir/..\"\nexec \"$basedir/node\" \"$basedir/../cli.js\" \"$@\"\n",
+            "#!/bin/sh\nbasedir=$(dirname \"$0\")\nexport NODE_PATH=\"$basedir/..\"\nexec \"$basedir/node\" \"$basedir/../cli.js\" \"$@\"\n",
         )
         .expect("write sh shim");
         assert!(
@@ -12317,178 +12176,6 @@ mod tests {
         assert!(
             matches!(cli.command, Some(Command::Run { ref script, .. }) if script.as_deref() == Some("dev"))
         );
-    }
-
-    #[test]
-    fn install_routes_to_add_args() {
-        let args = |parts: &[&str]| parts.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-
-        // Global add (the #29 form) — preserved.
-        assert_eq!(
-            install_to_add_args(&args(&["install", "-g", "is-number@7.0.0"])),
-            Some(args(&["add", "-g", "is-number@7.0.0"])),
-            "nub install -g <pkg> routes through the engine's global add path"
-        );
-        assert_eq!(
-            install_to_add_args(&args(&["i", "--global", "is-number@7.0.0"])),
-            Some(args(&["add", "--global", "is-number@7.0.0"])),
-            "nub i --global <pkg> routes through the same alias"
-        );
-
-        // Local add (the P0) — a bare package positional routes to add.
-        assert_eq!(
-            install_to_add_args(&args(&["install", "express"])),
-            Some(args(&["add", "express"])),
-            "nub install <pkg> is the add-to-dependencies form"
-        );
-        assert_eq!(
-            install_to_add_args(&args(&["i", "lodash"])),
-            Some(args(&["add", "lodash"])),
-            "nub i <pkg> routes to add"
-        );
-
-        // pnpm save flags forwarded or translated to aube's `add` grammar.
-        assert_eq!(
-            install_to_add_args(&args(&["install", "--save-dev", "vitest"])),
-            Some(args(&["add", "--save-dev", "vitest"])),
-            "--save-dev forwards to add verbatim"
-        );
-        assert_eq!(
-            install_to_add_args(&args(&["install", "-D", "vitest"])),
-            Some(args(&["add", "-D", "vitest"])),
-            "-D (aube's save-dev short) forwards verbatim"
-        );
-        assert_eq!(
-            install_to_add_args(&args(&["install", "-d", "vitest"])),
-            Some(args(&["add", "--save-dev", "vitest"])),
-            "pnpm lowercase -d → aube's --save-dev long form"
-        );
-        assert_eq!(
-            install_to_add_args(&args(&["install", "-o", "fsevents"])),
-            Some(args(&["add", "--save-optional", "fsevents"])),
-            "pnpm lowercase -o → aube's --save-optional long form"
-        );
-        assert_eq!(
-            install_to_add_args(&args(&["install", "-e", "react@18.0.0"])),
-            Some(args(&["add", "--save-exact", "react@18.0.0"])),
-            "pnpm lowercase -e → aube's --save-exact long form"
-        );
-        assert_eq!(
-            install_to_add_args(&args(&["install", "-P", "express"])),
-            Some(args(&["add", "express"])),
-            "-P (save-prod) is the add default, so it is dropped"
-        );
-        assert_eq!(
-            install_to_add_args(&args(&["install", "-p", "express"])),
-            Some(args(&["add", "express"])),
-            "pnpm -p (save-prod) is dropped — add saves to dependencies by default"
-        );
-
-        // pnpm `-w` is the boolean `--workspace-root` — forwarded verbatim, NOT
-        // an npm-style member selector (no `--filter` translation).
-        assert_eq!(
-            install_to_add_args(&args(&["install", "-w", "express"])),
-            Some(args(&["add", "-w", "express"])),
-            "pnpm -w (--workspace-root boolean) forwards verbatim, not translated to --filter"
-        );
-
-        // A `--` separator stops the scan and keeps tokens literal.
-        assert_eq!(
-            install_to_add_args(&args(&["install", "--", "-g"])),
-            None,
-            "a leading separator makes -g positional, not an install-global flag"
-        );
-        assert_eq!(
-            install_to_add_args(&args(&["install", "express", "--", "-some-weird-spec"])),
-            Some(args(&["add", "express", "--", "-some-weird-spec"])),
-            "tokens after -- are forwarded literally"
-        );
-
-        // Native install path is preserved (no package, no -g).
-        assert_eq!(
-            install_to_add_args(&args(&["install"])),
-            None,
-            "plain nub install stays on the native argumentless install path"
-        );
-        assert_eq!(
-            install_to_add_args(&args(&["install", "--frozen-lockfile"])),
-            None,
-            "nub install with only native flags stays native"
-        );
-        assert_eq!(
-            install_to_add_args(&args(&["install", "-F", "pkg-a", "-r"])),
-            None,
-            "nub install with workspace selectors but no package stays a native install"
-        );
-
-        // Output-control flags with a space-separated value must NOT be mistaken
-        // for a package positional (the root bug: `--loglevel silent` with a
-        // space caused `silent` to be read as a package → misrouted to `add`).
-        assert_eq!(
-            install_to_add_args(&args(&["install", "--loglevel", "silent"])),
-            None,
-            "nub install --loglevel silent stays on the native install path"
-        );
-        assert_eq!(
-            install_to_add_args(&args(&["install", "--reporter", "silent"])),
-            None,
-            "nub install --reporter silent stays on the native install path"
-        );
-        assert_eq!(
-            install_to_add_args(&args(&["i", "--loglevel", "info"])),
-            None,
-            "nub i --loglevel info stays on the native install path (non-silent level)"
-        );
-        // Equals form was never affected (no space → no positional confusion).
-        assert_eq!(
-            install_to_add_args(&args(&["install", "--loglevel=silent"])),
-            None,
-            "nub install --loglevel=silent stays on the native install path (equals form)"
-        );
-        // `--minimum-release-age` has the same shape: its MINUTES value in the
-        // space form would read as a package spec and misroute the install.
-        assert_eq!(
-            install_to_add_args(&args(&["install", "--minimum-release-age", "0"])),
-            None,
-            "nub install --minimum-release-age 0 stays on the native install path"
-        );
-        assert_eq!(
-            install_to_add_args(&args(&["install", "--minimum-release-age", "0", "react"])),
-            Some(args(&["add", "--minimum-release-age", "0", "react"])),
-            "--minimum-release-age 0 with a package routes to add, minutes not mis-forwarded"
-        );
-        // Output-control flags combined with a real package still route to add,
-        // with the flag consumed as a flag (value NOT forwarded as a package).
-        assert_eq!(
-            install_to_add_args(&args(&["install", "--loglevel", "silent", "react"])),
-            Some(args(&["add", "--loglevel", "silent", "react"])),
-            "--loglevel silent with a package routes to add, value is not mis-forwarded"
-        );
-        // Platform selection, same shape again. Only the SPACE form can
-        // misroute — `--os=linux` carries its value inside the token — so a
-        // test that checks just the `=` spelling proves nothing here.
-        for flag in ["--os", "--cpu", "--libc"] {
-            assert_eq!(
-                install_to_add_args(&args(&["install", flag, "linux"])),
-                None,
-                "nub install {flag} linux stays on the native install path"
-            );
-        }
-        assert_eq!(
-            install_to_add_args(&args(&["install", "--os", "linux", "react"])),
-            Some(args(&["add", "--os", "linux", "react"])),
-            "--os linux with a package routes to add, the os value is not mis-forwarded"
-        );
-        // The pnpmfile path flags are the same shape once more, and shipped
-        // with exactly this bug: `--pnpmfile=h.cjs` parsed while
-        // `--pnpmfile h.cjs` read the path as a package spec.
-        for flag in ["--pnpmfile", "--global-pnpmfile"] {
-            assert_eq!(
-                install_to_add_args(&args(&["install", flag, "hooks.cjs"])),
-                None,
-                "nub install {flag} hooks.cjs stays on the native install path"
-            );
-        }
     }
 
     #[test]
@@ -13669,7 +13356,7 @@ mod tests {
         // the engine verb registry (pm_engine::ENGINE_VERBS, family
         // dispatch), and PM_VERBS (redirect-only rump). Any overlap makes a
         // later arm unreachable. `install`/`i`/`ci` graduated from PM_VERBS
-        // to native verbs (the embedded aube engine, src/pm_engine/) — they
+        // to native verbs (the embedded PM engine, src/pm_engine/) — they
         // must stay native and out of the registry.
         for verb in [
             "run", "exec", "node", "pm", "global", "watch", "upgrade", "help", "install", "i",
@@ -14729,11 +14416,10 @@ mod tests {
         assert_eq!(args, vec!["--help".to_string()], "post-bin args forward");
     }
 
-    /// `value_consuming_flags("nubx")` and `install_to_add_args`'s `VALUE_FLAGS`
-    /// are two hand-maintained lists carrying the same contract, so a flag added
-    /// to one is easy to forget in the other. The miss is silent in the worst
-    /// way here: `nubx --os linux cowsay` alone comes out right, and only a
-    /// SECOND nubx-owned flag after the value exposes the bad split.
+    /// A value-taking platform flag missing from `value_consuming_flags("nubx")`
+    /// is silent in the worst way: `nubx --os linux cowsay` alone comes out
+    /// right, and only a SECOND nubx-owned flag after the value exposes the bad
+    /// split.
     #[test]
     fn nubx_platform_flag_values_do_not_steal_the_positional() {
         for flag in ["--os", "--cpu", "--libc"] {

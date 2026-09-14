@@ -28,11 +28,11 @@
 //!   (+`run-script`), `exec` (+`x`), `test` (+`t`), `start`, `stop`,
 //!   `restart`, `install-test` (+`it`) — the script-runner family routes to
 //!   nub's own runner or stays an error, exactly as today; `node`, `pm`,
-//!   `watch`, `upgrade` are nub-native namespaces (so aube's `upgrade`
+//!   `watch`, `upgrade` are nub-native namespaces (so pnpm's `upgrade`
 //!   alias on `update` is dropped — `nub update`/`up` is dependency update,
 //!   `nub upgrade` is self-update). The `External` bare-script catch-all is
 //!   also out: bare `nub <script>` stays banned.
-//! - **tool-identity** (they describe the aube tool, not the project):
+//! - **tool-identity** (about the tool, not the project):
 //!   `sponsors`, `diag`, `doctor`, `completion`, `usage`. The internal
 //!   `__node-gyp-bootstrap` re-entry verb is also outside the registry but
 //!   IS wired — as an early intercept in cli.rs dispatching to
@@ -141,7 +141,7 @@ pub const ENGINE_VERBS: &[VerbSpec] = &[
         aliases: &["rm", "uninstall", "un", "uni"],
         family: Family::Install,
     },
-    // aube also aliases `upgrade` here; that spelling is nub's self-update.
+    // pnpm also aliases `upgrade` here; that spelling is nub's self-update.
     VerbSpec {
         canonical: "update",
         aliases: &["up"],
@@ -212,7 +212,7 @@ pub const ENGINE_VERBS: &[VerbSpec] = &[
         aliases: &[],
         family: Family::Install,
     },
-    // `purge` is aube's alias-shaped variant of clean (commands::clean::run_purge).
+    // `purge` runs pnpm's clean under its own name, with the same arguments.
     VerbSpec {
         canonical: "purge",
         aliases: &[],
@@ -254,7 +254,7 @@ pub const ENGINE_VERBS: &[VerbSpec] = &[
         aliases: &["ls"],
         family: Family::Info,
     },
-    // `la`/`ll` are aube's hidden list-long variants (ListArgs + long=true).
+    // `ll` (alias `la`) is pnpm's long-format list.
     VerbSpec {
         canonical: "la",
         aliases: &[],
@@ -459,8 +459,8 @@ pub fn dispatch_verb(
         // spellings went to the engine instead. `engine_takes` claims the
         // command line at the front door because pnpm's own grammar knows
         // them, and the help path renders from the engine too. The three that
-        // did land here — `check`, `deprecations`, `query` — were aube
-        // commands with no pnpm counterpart, and they went with aube. The
+        // did land here — `check`, `deprecations`, `query` — were the previous
+        // engine's commands with no pnpm counterpart, and they went with it. The
         // variant stays because the registry still classifies these verbs for
         // `lookup_verb`; an error beats a panic for a branch that is
         // unreachable by measurement rather than by type.
@@ -673,7 +673,8 @@ fn pnpm_user_agent(declared: Option<(String, Option<String>)>) -> String {
 }
 
 /// Convert nub's runtime augmentation into the generic `(env_overlay,
-/// path_prepends)` that aube applies to every lifecycle-script spawn. This is
+/// path_prepends)` nub sets on its own process before the engine runs, so every
+/// lifecycle script inherits it. This is
 /// the ONE augmentation source `nub run` / `nub exec` already use — feeding it
 /// to the engine's lifecycle path makes run / exec / lifecycle scripts share
 /// identical augmentation and closes the ABI bug where dep build scripts
@@ -714,7 +715,7 @@ fn augmentation_to_lifecycle_overlay(
         node_shim.as_deref().or(ambient_node.as_deref()),
         &mut set_env,
     );
-    // Aube composes its lifecycle `.bin` chain after this overlay, so the exact
+    // The engine prepends each script's `.bin` chain after this overlay, so the exact
     // final PATH is not available here. Mark the ambient baseline: a fresh
     // boundary will then remove only Nub's exact shim component and preserve
     // both lifecycle `.bin` entries and any later user additions.
@@ -758,14 +759,13 @@ fn augmentation_to_lifecycle_overlay(
 /// The directory lifecycle Node discovery is anchored at: the workspace root
 /// when `cwd` sits in a member, else the project root, else `cwd` itself.
 ///
-/// aube keys its install state and virtual store at the workspace root
-/// (`dirs::workspace_or_project_root`), and an install from a member
+/// The engine keeps its install state and virtual store at the workspace root,
+/// and an install from a member
 /// materializes the ONE shared tree for the whole workspace — so the Node its
 /// build scripts compile against, which is also the engine that keys the ABI
 /// caches, must be the root's pin rather than whichever member the shell sits
 /// in. Anchoring at the raw cwd instead lets a member's own `.nvmrc` flip the
 /// engine key against a root-anchored state file, thrashing the warm path.
-/// `detect_project` walks up by the same rule aube's root does.
 fn lifecycle_node_anchor(cwd: &Path) -> PathBuf {
     nub_core::workspace::detect::detect_project(cwd)
         .map(|p| p.workspace_root.unwrap_or(p.root))
@@ -1037,10 +1037,8 @@ pub(crate) fn pm_cache_clamp(cwd: &Path) -> Option<PathBuf> {
     cwd.starts_with(&canon).then_some(canon)
 }
 
-/// Multi-thread runtime mirroring aube's own `cli_main` shape
-/// (`vendor/aube/crates/aube/src/lib.rs`): workers capped at 8 (the install
-/// semaphore already gates network), blocking pool at 128 (tarball decode +
-/// linker fan-out). The AUBE_TOKIO_* benchmark overrides are not honored here.
+/// Multi-thread runtime: workers capped at 8 (the install semaphore already
+/// gates network), blocking pool at 128 (tarball decode + linker fan-out).
 ///
 /// CONSTRAINT-AWARE sizing: on a resource-constrained box (a tight cgroup
 /// `pids.max` or low `RLIMIT_NPROC`) the unbounded `128` blocking pool plus the
@@ -1054,7 +1052,7 @@ pub(crate) fn pm_cache_clamp(cwd: &Path) -> Option<PathBuf> {
 ///
 /// UNREFERENCED, and deliberately kept rather than deleted. The node-gyp
 /// bootstrap was its last caller; it drives the pnpm engine now, which builds
-/// its own tokio runtime. The tokio sizing here is therefore aube's alone, but
+/// its own tokio runtime. The tokio sizing here therefore reaches nothing, but
 /// the two caps it composes are not: the pnpm engine fans work out over the same
 /// rayon GLOBAL pool and honours `childConcurrency`, whose own EAGAIN diagnostic
 /// names `RLIMIT_NPROC` — so a constrained box has lost this protection in the
@@ -1163,11 +1161,10 @@ fn build_runtime() -> Result<tokio::runtime::Runtime> {
         .context("failed to build the install engine's tokio runtime")
 }
 
-/// Lower the parallel build-script process count (aube's `child_concurrency`,
-/// default 5) so the native-postinstall fan-out — each spawning Go/Rust
-/// grandchildren — stays under the PID ceiling. nub exports this through the
-/// NEUTRAL `npm_config_child_concurrency` setting (which aube honors, same as
-/// npm/pnpm), so standalone aube is UNCHANGED and no engine-brand var leaks; only
+/// Lower the parallel build-script process count (`childConcurrency`) so the
+/// native-postinstall fan-out — each spawning Go/Rust grandchildren — stays
+/// under the PID ceiling. nub exports this through the NEUTRAL
+/// `npm_config_child_concurrency` setting, so no engine-brand var leaks; only
 /// nub, on a detected constraint, asks for fewer parallel builds. A user/CI-set
 /// value (any of the recognized keys) is left untouched.
 ///
@@ -1176,9 +1173,8 @@ fn build_runtime() -> Result<tokio::runtime::Runtime> {
 /// other threads reading the environment.
 fn apply_constrained_child_concurrency(capped: usize) {
     // Respect an explicit user/CI choice — never override a value they set. Only
-    // the NEUTRAL keys are honored: nub respects ZERO AUBE_*-branded env vars
-    // (AGENTS.md brand boundary), so `AUBE_CHILD_CONCURRENCY` is deliberately NOT
-    // read here even to defer to it.
+    // the NEUTRAL keys are honored: nub reads no engine-branded variable (the
+    // brand boundary), not even to defer to it.
     const KEYS: [&str; 2] = [
         "npm_config_child_concurrency",
         "NPM_CONFIG_CHILD_CONCURRENCY",
@@ -1574,7 +1570,7 @@ mod tests {
         use std::ffi::OsString;
 
         // A populated augmentation (what `nub run`/`exec` compute) must convert
-        // into the generic overlay aube applies to every lifecycle spawn:
+        // into the generic overlay every lifecycle spawn inherits:
         // NODE → the node shim (so a build script's `$NODE child.js` re-enters
         // nub augmented), NODE_OPTIONS (preload + source maps; feature flags ride argv), NODE_PATH
         // (vendored helper resolution), npm_node_execpath PINNED to the
@@ -1704,8 +1700,8 @@ mod tests {
     #[test]
     fn x_is_an_alias_of_dlx() {
         // `nub x <tool>` is the short fetch-and-run spelling — it resolves to the
-        // same `dlx` engine verb as `nub dlx`, so both share one dispatch path
-        // (`run_dlx` → `aube::commands::dlx`). It is NOT exec: `x` fetches a
+        // same `dlx` engine verb as `nub dlx`, so both share one dispatch path.
+        // It is NOT exec: `x` fetches a
         // missing tool, exec does not.
         let spec = lookup_verb("x").expect("x must be a registered verb");
         assert_eq!(spec.canonical, "dlx");
@@ -1714,9 +1710,9 @@ mod tests {
 
     #[test]
     fn verb_registry_excludes_reserved_and_tool_identity_verbs() {
-        // nub-reserved spellings (collision policy) and aube tool-identity
+        // nub-reserved spellings (collision policy) and tool-identity
         // verbs must never enter the registry — `upgrade` in particular is
-        // nub's self-update, not aube's update alias. (`x` is deliberately
+        // nub's self-update, not pnpm's update alias. (`x` is deliberately
         // ABSENT: it is a registered alias of `dlx` — asserted by
         // `x_is_an_alias_of_dlx` — not a reserved exclusion.)
         for verb in [
@@ -1834,7 +1830,7 @@ mod tests {
 
     #[test]
     fn a_member_install_resolves_the_workspace_roots_node_pin() {
-        // aube anchors install state and the virtual store at the workspace root,
+        // The engine anchors install state and the virtual store at the workspace root,
         // and a member install materializes that ONE shared tree. So the engine
         // published for it has to name the root's Node: keyed off the member's own
         // pin, the ABI caches describe a Node the root-anchored state file never

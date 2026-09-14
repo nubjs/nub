@@ -36,9 +36,9 @@ const REMIX_ASSET_SERVER_FLOOR: u32 = 3;
 /// resolve to the asset-server major — i.e. GVS must be ejected for it.
 /// `false` when no manifest declares `remix` or every declared range is
 /// confined below the floor; `true` when any range reaches the floor OR is
-/// ambiguous (unfloorable, or an open lower bound). Same dependency scope as
-/// the aube trigger (dependencies / devDependencies / optionalDependencies;
-/// peer excluded), root and workspace members alike. `workspace_members` is
+/// ambiguous (unfloorable, or an open lower bound). Dependency scope:
+/// dependencies / devDependencies / optionalDependencies, peer excluded, root
+/// and workspace members alike. `workspace_members` is
 /// the caller's one-shot discovery for `root`.
 pub(crate) fn remix_needs_project_local_store(root: &Path, workspace_members: &[PathBuf]) -> bool {
     declared_direct_ranges(root, workspace_members, "remix")
@@ -92,7 +92,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dev_dependency_counts_like_the_aube_trigger() {
+    fn a_dev_dependency_counts_toward_the_trigger() {
         let dir = project_with(r#"{"name":"app","devDependencies":{"remix":"^3.0.0"}}"#);
         assert!(ejects(dir.path()));
     }

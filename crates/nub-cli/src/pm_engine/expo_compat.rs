@@ -41,8 +41,8 @@ const EXPO_GVS_FLOOR: u32 = 56;
 /// below the GVS floor — i.e. GVS must be ejected for it. `false` when no
 /// manifest declares `expo` (not an Expo project) or every declared major is
 /// `>= EXPO_GVS_FLOOR`; `true` when any is below the floor OR can't be
-/// floor-parsed (eject-on-ambiguity). Matches the aube trigger's dependency
-/// scope (dependencies / devDependencies / optionalDependencies; peer excluded).
+/// floor-parsed (eject-on-ambiguity). Dependency scope: dependencies /
+/// devDependencies / optionalDependencies, peer excluded.
 pub(crate) fn expo_below_gvs_floor(root: &Path, workspace_members: &[PathBuf]) -> bool {
     declared_direct_ranges(root, workspace_members, "expo")
         .iter()

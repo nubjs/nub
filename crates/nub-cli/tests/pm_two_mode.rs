@@ -3,9 +3,7 @@
 //! nub-identity config gating (stray-yaml warning). All rows run OFFLINE —
 //! `pm use nub` never touches a registry by design, the install rows use
 //! empty-dependency manifests, and every project points its registry at a
-//! dead port so accidental network fails loudly. The online halves (real
-//! pnpm judging the reversed state) live in tests/aube-conformance (the
-//! `nub` format leg) and tests/brand-sweep.
+//! dead port so accidental network fails loudly.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

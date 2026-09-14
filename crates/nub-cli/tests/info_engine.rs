@@ -72,23 +72,11 @@ fn registry_reachable() -> bool {
         })
 }
 
-/// The output brand boundary: no engine name on either stream, ever.
-/// (Temp-dir fixtures keep legitimately-preserved on-disk names — there is
-/// no `aube-lock.yaml` etc. in these projects — so the blanket check is
-/// exact here.)
-fn assert_no_engine_branding(streams: &[(&str, &str)]) {
-    for (name, s) in streams {
-        assert!(
-            !s.to_lowercase().contains("aube"),
-            "engine branding leaked on {name}: {s}"
-        );
-    }
-}
-
-/// The same boundary for the pnpm engine, and it only holds under NUB
-/// identity — under pnpm identity the `pnpm` spelling is the contract, not a
-/// leak. A1.7 exempts real on-disk names, so this is only exact for a fixture
-/// that has no pnpm-named file in it; every caller below is one.
+/// The output brand boundary: no `pnpm` spelling on either stream. It holds
+/// only under NUB identity — under pnpm identity the `pnpm` spelling is the
+/// contract, not a leak. A1.7 exempts real on-disk names, so this is only
+/// exact for a fixture that has no pnpm-named file in it; every caller below
+/// is one.
 fn assert_no_pnpm_branding(streams: &[(&str, &str)]) {
     for (name, s) in streams {
         assert!(
@@ -155,10 +143,9 @@ const LODASH_41720: &str = "sha512-PlhdFcillOINfeV7Ni6oF1TAEayyZBoZ8bcshTHqOYJYl
 
 /// The offline read verbs against one lockfile fixture: `list` (plus the
 /// `ls` alias and the `ll` long form), `why`, and `peers check` all read the
-/// handcrafted graph, print the dep on stdout, exit 0, and leak no engine
-/// branding on either stream.
+/// handcrafted graph, print the dep on stdout, and exit 0.
 #[test]
-fn lockfile_read_verbs_work_offline_and_stay_brand_clean() {
+fn lockfile_read_verbs_work_offline() {
     let dir = lockfile_fixture("reads", "is-positive", "3.1.0", "3.1.0", IS_POSITIVE_310);
 
     for argv in [
@@ -176,7 +163,6 @@ fn lockfile_read_verbs_work_offline_and_stay_brand_clean() {
                 "nub {argv:?} must print the dep: {stdout}"
             );
         }
-        assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
     }
 
     // `--json` is machine-readable and carries the version.
@@ -189,13 +175,8 @@ fn lockfile_read_verbs_work_offline_and_stay_brand_clean() {
 
 /// The never-installed project, on a nub-incumbent fixture.
 ///
-/// OLD CONTRACT (aube): aube handled this case with a direct branded
-/// `eprintln`, so nub short-circuited ahead of it — both verbs printed a
-/// hand-written `Run \`nub install\`…` hint on stderr and exited 0.
-///
-/// NEW CONTRACT: the short-circuit is gone, because the engine's own handling
-/// is correct and A1.6 routes these verbs to it unchanged. The two verbs
-/// diverge, and that divergence is pnpm's:
+/// nub does not short-circuit ahead of the engine here: A1.6 routes these
+/// verbs to it unchanged. The two verbs diverge, and that divergence is pnpm's:
 ///   - `list` is a valid query against an empty graph, so it prints the real
 ///     empty listing on stdout and exits 0.
 ///   - `outdated` cannot answer without a lockfile, so it errors and exits 1.
@@ -226,7 +207,6 @@ fn missing_lockfile_defers_to_the_engine_and_rebrands_for_nub_identity() {
         !stderr.contains("No lockfile found"),
         "nub's own no-lockfile short-circuit must not fire: {stderr}"
     );
-    assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
     assert_no_pnpm_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
 
     // `outdated`: the engine's error, rebranded for nub identity, exit 1.
@@ -240,20 +220,14 @@ fn missing_lockfile_defers_to_the_engine_and_rebrands_for_nub_identity() {
         stderr.contains("No lockfile in directory"),
         "outdated must speak the engine's own diagnostic: {stderr}"
     );
-    assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
     assert_no_pnpm_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
 }
 
 /// `--filter` on a project that is not a workspace, on a nub-incumbent
 /// fixture.
 ///
-/// OLD CONTRACT (aube): nub ran its own pre-flight ahead of the engine and
-/// failed the command with `--filter requires a workspace root (…)`. That
-/// check existed to replace aube's phrasing, which named `aube-workspace.yaml`
-/// and leaked the engine's brand into nub's output.
-///
-/// NEW CONTRACT: there is nothing to rebrand, so the pre-flight is gone and
-/// the filter is simply a selector that matches no project — a silent no-op at
+/// nub runs no `--filter` pre-flight of its own, so the filter is simply a
+/// selector that matches no project — a silent no-op at
 /// exit 0. That is not an obviously-right behavior, so it is pinned against
 /// the reference rather than reasoned about: MEASURED identical to pnpm 12.4.1
 /// on the same fixture for all three verb shapes, and identical again for a
@@ -290,7 +264,6 @@ fn filter_on_a_non_workspace_is_a_silent_no_op() {
             !stderr.contains("--filter requires a workspace root"),
             "nub's own --filter pre-flight must not fire: {stderr}"
         );
-        assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
         assert_no_pnpm_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
     }
 }
@@ -332,7 +305,6 @@ fn list_json_emits_the_empty_importer_shape_without_a_lockfile() {
     assert_eq!(v[0]["name"], "nolock-json", "importer name: {stdout}");
     assert_eq!(v[0]["version"], "2.3.4", "importer version: {stdout}");
     assert!(v[0]["path"].is_string(), "importer path: {stdout}");
-    assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
     assert_no_pnpm_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
 
     // `--format json` is not pnpm 12 grammar. The rejection is the parser's,
@@ -356,19 +328,14 @@ fn list_json_emits_the_empty_importer_shape_without_a_lockfile() {
         stderr.contains("ERR_NUB_OUTDATED_NO_LOCKFILE"),
         "the error code must rebrand under nub identity: {stderr}"
     );
-    assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
     assert_no_pnpm_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
 }
 
 /// The path verbs print the resolved project locations without any install,
 /// and `licenses` accepts pnpm's documented `list` spelling beside the
-/// engine's `ls` (reviewer #6). All offline, all brand-clean.
-///
-/// A bare `check` used to be asserted here too. It was one of the three verbs
-/// aube served that pnpm has no counterpart for, so it went with aube; pnpm's
-/// own `peers check` is a different command and is covered above.
+/// engine's `ls` (reviewer #6). All offline.
 #[test]
-fn bin_root_and_licenses_list_work_offline_and_stay_brand_clean() {
+fn bin_root_and_licenses_list_work_offline() {
     let dir = lockfile_fixture("paths", "is-positive", "3.1.0", "3.1.0", IS_POSITIVE_310);
 
     let (root_out, stderr, code) = run_nub(&dir, &["root"]);
@@ -388,9 +355,7 @@ fn bin_root_and_licenses_list_work_offline_and_stay_brand_clean() {
     for argv in [&["licenses", "list"][..], &["licenses", "ls"][..]] {
         let (stdout, stderr, code) = run_nub(&dir, argv);
         assert_eq!(code, 0, "nub {argv:?}: stdout: {stdout}\nstderr: {stderr}");
-        assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
     }
-    assert_no_engine_branding(&[("root", &root_out), ("bin", &bin_out), ("stderr", &stderr)]);
 }
 
 /// Last path segment of a fixture dir (macOS canonicalizes `/var` →
@@ -401,14 +366,7 @@ fn tag_leaf(dir: &Path) -> String {
 
 /// Which file declares a workspace, per identity.
 ///
-/// OLD CONTRACT: an `aube-workspace.yaml` on disk was another tool's state and
-/// must not change what nub reads, while `pnpm-workspace.yaml` must. The probe
-/// rode nub's no-lockfile short-circuit from a member directory.
-///
-/// That test is gone twice over: there is no aube and so no
-/// `aube-workspace.yaml`, and the short-circuit it observed through no longer
-/// exists. What replaced it is a real per-identity split, which is what this
-/// pins instead. nub's embedder sets `workspaces_from_package_manifest`, so a
+/// nub's embedder sets `workspaces_from_package_manifest`, so a
 /// nub-incumbent project declares members in the neutral
 /// `package.json#workspaces`; a pnpm-incumbent one uses
 /// `pnpm-workspace.yaml`, exactly as pnpm does. The two are not
@@ -537,7 +495,6 @@ fn a_foreign_package_manager_pin_is_enforced_only_under_pnpm_identity() {
         stdout.contains("root@1.0.0"),
         "the query must run to completion: {stdout}"
     );
-    assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
     assert_no_pnpm_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
 
     // pnpm identity: pnpm's refusal, mirrored whole. The `pnpm` spellings in
@@ -554,11 +511,10 @@ fn a_foreign_package_manager_pin_is_enforced_only_under_pnpm_identity() {
             && stderr.contains("This project is configured to use yarn"),
         "the refusal must match pnpm's: {stderr}"
     );
-    assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
 }
 
-/// Per-verb `--help` renders (engine verbs bypass nub's top-level clap), is
-/// named for nub, and carries no engine verb spellings.
+/// Per-verb `--help` renders (engine verbs bypass nub's top-level clap) and is
+/// named for nub.
 #[test]
 fn verb_help_is_rendered_and_rebranded() {
     let dir = pm_tmpdir("help");
@@ -567,10 +523,6 @@ fn verb_help_is_rendered_and_rebranded() {
     assert!(
         stdout.contains("Usage: nub outdated"),
         "help must be named for nub: {stdout}"
-    );
-    assert!(
-        !stdout.contains("aube outdated") && !stdout.contains("`aube "),
-        "engine verb spellings must rebrand in help: {stdout}"
     );
 }
 
@@ -671,56 +623,6 @@ fn outdated_reports_registry_drift_and_exits_one() {
         stdout.contains("is-positive") && stdout.contains("3.0.0") && stdout.contains("3.1.0"),
         "the drift row must show current and wanted: {stdout}"
     );
-    assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
-}
-
-/// `outdated` under a release-age window that admits nothing (#722).
-///
-/// The report used to offer an upgrade the resolver would then refuse, so it
-/// exited 1 forever and no `nub update` could clear it. The columns now agree
-/// with the resolver, and the window is honored SILENTLY — the same way
-/// `install` and `update` honor it — so a project with no installable upgrade
-/// reports nothing and exits 0.
-///
-/// This lives here rather than beside the implementation because it drives the
-/// `nub` binary end to end, which the unit tests beside `collect_rows` cannot.
-/// (`vendor/aube`'s own test targets do run in CI, via the `Aube parity`
-/// workflow — the root workspace is what never builds a path dependency's
-/// tests, not CI as a whole.)
-#[test]
-#[ignore = "network: fetches the is-positive packument from the npm registry"]
-fn outdated_honors_the_release_age_window_silently_and_exits_zero() {
-    if !registry_reachable() {
-        eprintln!("skipping: registry.npmjs.org unreachable");
-        return;
-    }
-    let dir = lockfile_fixture(
-        "outdated-age",
-        "is-positive",
-        "^3.0.0",
-        "3.0.0",
-        IS_POSITIVE_300,
-    );
-    // A century-wide window. is-positive's newest release went up in January
-    // 2016, so the window has to reach back past that to bite at all — a
-    // decade is NOT enough and leaves this test asserting on an ungated run.
-    std::fs::write(dir.join(".npmrc"), "minimumReleaseAge=52560000\n").unwrap();
-
-    let (stdout, stderr, code) = run_nub(&dir, &["outdated"]);
-    assert_eq!(
-        code, 0,
-        "an upgrade nub would refuse to install must not fail the command: \
-         stdout: {stdout}\nstderr: {stderr}"
-    );
-    assert!(
-        !stdout.contains("3.1.0"),
-        "3.1.0 is inside the window, so the report must not offer it: {stdout}"
-    );
-    assert!(
-        !stdout.contains("minimumReleaseAge") && !stdout.contains('*'),
-        "the window is the project's own policy and is honored without remark: {stdout}"
-    );
-    assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
 }
 
 /// `audit` against the real registry: lodash 4.17.20 carries published
@@ -743,5 +645,4 @@ fn audit_surfaces_known_advisories_and_exits_one() {
         stdout.contains("lodash"),
         "the advisory table must name the package: {stdout}"
     );
-    assert_no_engine_branding(&[("stdout", &stdout), ("stderr", &stderr)]);
 }

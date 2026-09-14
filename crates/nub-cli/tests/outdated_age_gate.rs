@@ -1,11 +1,10 @@
 //! `nub outdated` against a registry that dates nothing (#722, #581).
 //!
-//! Written against the vendored aube engine, which age-gated its own reporting:
-//! a `minimumReleaseAge` window was checked against per-version publish times,
-//! and a registry serving none made the gate fail closed, so `outdated` printed
-//! "All dependencies up to date." plus a stderr warning naming `nub update` as
-//! the command that would fail. That warning was the fix for #722's
-//! report/installer disagreement.
+//! The previous engine age-gated `outdated`: a registry serving no publish
+//! times made the gate fail closed, so the command printed "All dependencies
+//! up to date." plus a stderr warning naming `nub update` as the command that
+//! would fail. That warning was the fix for #722's report/installer
+//! disagreement.
 //!
 //! The pnpm 12 engine does not age-gate `outdated` at all. Its report is the
 //! plain `Package | Current | Latest` table — there is no `wanted` column for a
@@ -257,9 +256,9 @@ impl Drop for Registry {
     }
 }
 
-/// The retired aube warning. No longer emitted by anything; asserted absent so
-/// that re-introducing an age gate into `outdated` fails here rather than
-/// silently changing what the command reports.
+/// The previous engine's age-gate warning. No longer emitted by anything;
+/// asserted absent so that re-introducing an age gate into `outdated` fails
+/// here rather than silently changing what the command reports.
 const WARNING: &str = "undated-pkg has no registry publish times";
 
 /// A registry that dates nothing does not change what `outdated` reports: the

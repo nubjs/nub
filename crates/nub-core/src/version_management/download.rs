@@ -53,8 +53,8 @@ const RETRY_BACKOFF: Duration = Duration::from_millis(400);
 /// Blocking HTTP client: rustls (no OpenSSL), native roots so corporate MITM CAs
 /// keep working, and `HTTP(S)_PROXY` / `NO_PROXY` honored for free by reqwest.
 ///
-/// The redirect policy blocks an https→http DOWNGRADE on redirect (N1; mirrors
-/// the engine's `aube-registry` client). reqwest already strips `Authorization`
+/// The redirect policy blocks an https→http DOWNGRADE on redirect (N1). reqwest
+/// already strips `Authorization`
 /// on a cross-HOST redirect as of 0.12, but an https→http hop to the SAME
 /// host+port is not "cross-host" by that check — so a `302` from a good registry
 /// to `http://<same-host>/` would otherwise carry the `_authToken` (which

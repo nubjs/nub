@@ -39,7 +39,6 @@ fn nub_binary() -> PathBuf {
 /// or in any shell exporting `PREFIX`, would otherwise reach `<prefix>/etc/npmrc`.
 const SCRUBBED: &[&str] = &[
     "NUB_CACHE_DIR",
-    "AUBE_CACHE_DIR",
     "npm_config_cache_dir",
     "NPM_CONFIG_CACHE_DIR",
     "pnpm_config_cache_dir",
@@ -214,12 +213,6 @@ fn cache_dir_env_moves_the_pm_cache() {
             "{key} did not move the cache the engine reads"
         );
     }
-
-    assert_eq!(
-        cached_names(&fx, &[("AUBE_CACHE_DIR", dir.as_str())]),
-        Vec::<String>::new(),
-        "the engine's own brand must stay unreadable under nub"
-    );
 }
 
 /// Env outranks `.npmrc`, in both directions. The `.npmrc`-only row is the

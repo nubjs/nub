@@ -460,8 +460,7 @@ fn rewrite_tarball_origin(tarball: &str, registry_base: &str) -> String {
 /// has already pinned the tarball onto the registry's own origin, so this matches
 /// and auth is attached exactly as before; the public-registry tarball is on the
 /// registry host, so it matches too. The only request that loses auth is one to a
-/// host the credential was never issued for — the leak. Mirrors aube matching
-/// tarball auth to the tarball's own host.
+/// host the credential was never issued for — the leak.
 pub fn auth_for_tarball<'a>(cfg: &'a RegistryConfig, tarball_url: &str) -> Option<&'a Auth> {
     let reg_origin = origin_of(&cfg.base)?;
     let tar_origin = origin_of(tarball_url)?;
@@ -552,15 +551,11 @@ pub(crate) fn normalize_range(spec: &str) -> String {
 /// `dist-tags.<tag>` value straight into [`dist_from_meta`], and the runnable
 /// target is built `<store>/pm/<pm>/<version>/package/<bin>` via `Path::join`,
 /// which an absolute or `..`-laden version escapes (the F0c registry-exec
-/// boundary). Mirrors the engine's own guard `aube_store::validate_version`
-/// (nub-core has no aube dep, so the char-blocklist is restated here, the same
-/// way [`safe_bin_subpath`] mirrors aube's bin-path guard): reject path
-/// separators on any platform, NUL, control chars, and the `.`/`..` dir aliases.
+/// boundary). Reject path separators on any platform, NUL, control chars, and
+/// the `.`/`..` dir aliases.
 ///
-/// nub-core is deliberately STRICTER than aube-store on one byte — it also rejects
-/// `:`. The two guards have different input domains. aube-store's `version` slot
-/// can carry non-semver specs (git URLs, npm aliases, file specs) that legitimately
-/// contain `:`, so blocking it there would break real installs. nub-core's
+/// It also rejects `:`, which a guard over general version specs could not: git
+/// URLs, npm aliases and file specs legitimately contain it. nub-core's
 /// `version` is always a CONCRETE PUBLISHED npm version: every branch of
 /// [`resolve_dist`] passes a `versions[..]` KEY (npm publishes are semver), which
 /// never contains `:`. Blocking it here costs nothing and closes a real escape — on

@@ -132,12 +132,6 @@ pub(crate) fn scan_and_cache_files(dir: &Path, fingerprint: &str, files: &[(Stri
 
 /// A content fingerprint over what the store says a package holds: each
 /// file's path, the digest of its contents, and whether it is executable.
-///
-/// The scheme matches the one aube's store computes, but the digests do not
-/// — the two engines hash contents differently — so the same package under
-/// each engine keys a different sidecar. That costs a cold scan once and
-/// nothing else: a verdict is a pure function of the bytes, and the two
-/// engines do not share a store to begin with.
 pub(crate) fn content_fingerprint<'a>(
     entries: impl Iterator<Item = (&'a str, &'a str, bool)>,
 ) -> String {

@@ -4,21 +4,16 @@
 //! silent reclassify→404 / downgrade, and an OPTIONAL one warns and proceeds
 //! rather than aborting.
 //!
-//! These were written against the vendored aube engine, which enforced the
-//! policy in its foreign-lockfile READER: it parsed a `yarn.lock`/`bun.lock`,
-//! and an entry whose source it could not resolve raised
-//! `ERR_NUB_LOCKFILE_UNSUPPORTED_SOURCE` (exit 14), with a sibling refusal for
-//! a Yarn PnP project. Nub no longer reads another package manager's lockfile
-//! at all, so both of those codes are unreachable and the reader they lived in
-//! is gone. The POLICY survives, relocated to the engine's own resolver: an
-//! unresolvable spec in the MANIFEST fails the dependency-tree resolve, exits
-//! non-zero, and leaves the tree untouched.
+//! The policy lives in the engine's resolver: an unresolvable spec in the
+//! MANIFEST fails the dependency-tree resolve, exits non-zero, and leaves the
+//! tree untouched. Nub reads no other package manager's lockfile, so a
+//! `yarn.lock` or `bun.lock` beside the manifest neither rescues the install
+//! nor changes the refusal.
 //!
-//! Every fixture below was run on both engines (`NUB_PM_ENGINE=aube` and the
-//! default) and differentialled against pnpm 12.4.1, which produces the same
-//! refusals byte for byte with `ERR_PNPM_*` in place of `ERR_NUB_*`. That
-//! rewrite is the only difference, which is why the no-brand-leak assertions
-//! below now watch for `ERR_PNPM_`.
+//! Every fixture below was differentialled against pnpm 12.4.1, which produces
+//! the same refusals byte for byte with `ERR_PNPM_*` in place of `ERR_NUB_*`.
+//! That rewrite is the only difference, which is why the no-brand-leak
+//! assertions below watch for `ERR_PNPM_`.
 //!
 //! Still hermetic: `exotic:bar` is rejected by spec classification before any
 //! network call — confirmed by re-running each fixture with `registry` pointed
@@ -92,11 +87,6 @@ const BUN_LOCK_PINNING_FOO: &str = r#"{
 
 /// An unresolvable dependency aborts the install before the tree is touched,
 /// and no foreign lockfile sitting beside it changes that.
-///
-/// Was two tests, one per lockfile flavor, because aube gave yarn and bun
-/// separate readers and each had to refuse its own unsupported source. Neither
-/// file is read now, so both flavors take one code path and a second copy would
-/// assert nothing the first did not.
 #[test]
 fn install_aborts_on_an_unresolvable_spec_no_foreign_lockfile_rescues_it() {
     for (lockfile, body) in [
@@ -181,9 +171,8 @@ fn a_yarn_pnp_project_installs_a_node_modules_tree() {
 /// An OPTIONAL unresolvable dependency is skipped and the install proceeds,
 /// matching every incumbent's tolerance of a missing optional.
 ///
-/// The carve-out survived the engine change; only its wording moved. Was
-/// `WARN_NUB_LOCKFILE_UNSUPPORTED_SOURCE` from aube's reader. The engine says
-/// it the way pnpm 12.4.1 does, verbatim, on a successful run.
+/// The engine words the skip the way pnpm 12.4.1 does, verbatim, on a
+/// successful run.
 #[test]
 fn install_proceeds_on_an_optional_unresolvable_spec() {
     let dir = tmpdir("opt");
@@ -220,9 +209,8 @@ fn install_proceeds_on_an_optional_unresolvable_spec() {
 /// no lockfile at all as far as `ci` is concerned, and `ci` refuses rather than
 /// resolving fresh.
 ///
-/// Was: aube's bun reader drove `ci` straight off `bun.lock`, so this fixture
-/// installed successfully. Reaching a green `nub ci` here now takes a `nub
-/// install` (or `nub pm migrate`) first.
+/// Reaching a green `nub ci` here takes a `nub install` (or `nub pm migrate`)
+/// first.
 ///
 /// Only the code is asserted, deliberately. The message it carries still names
 /// `pnpm-lock.yaml`, a file that never exists in a project nub installed — a

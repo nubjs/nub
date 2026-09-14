@@ -3,13 +3,12 @@
 //! `nub install` must run a project's lifecycle scripts under nub's runtime
 //! augmentation — nub's preload in `NODE_OPTIONS` and the node-shim dir leading
 //! `PATH`, so a build script's `node`/`$NODE child.js` re-enters nub augmented and
-//! node-gyp compiles against the provisioned Node. Both halves of that seam
-//! (`augmentation_to_lifecycle_overlay` in pm_engine, aube's env-overlay
-//! application in aube-scripts) are unit-tested in isolation over hand-built
-//! structs; nothing joined `compute_augmentation_env` → the overlay → a real
-//! spawn. That uncovered join is what let a lifecycle hang survive 2,672 aube +
-//! 443 nub tests during the v1.32 sync (#528). This test closes it by observing a
-//! real root `postinstall`'s environment.
+//! node-gyp compiles against the provisioned Node. The overlay builder
+//! (`augmentation_to_lifecycle_overlay` in pm_engine) is unit-tested in
+//! isolation over hand-built structs, and nothing there joins
+//! `compute_augmentation_env` → the overlay → a real spawn. That uncovered join
+//! is what once let a lifecycle hang pass every unit test (#528). This test
+//! closes it by observing a real root `postinstall`'s environment.
 //!
 //! It runs OFFLINE — a nub-identity project with an empty lock, no dependencies,
 //! and its registry pointed at a dead port so any accidental network fails loudly.
@@ -148,8 +147,8 @@ fn install_runs_lifecycle_scripts_under_runtime_augmentation() {
 /// executable, a layout pnpm's npm package has and nub's binary does not.
 ///
 /// The `nub run` path stamps the variable at its own site and is covered by
-/// `pm_identity`'s brand test; this is the install path, which is where the two
-/// silently diverged.
+/// `pm_identity`'s `run_exports_a_node_gyp_shim_under_nubs_cache_namespace`;
+/// this is the install path, which is where the two silently diverged.
 #[test]
 fn install_hands_lifecycle_scripts_a_runnable_node_gyp() {
     let nub = nub_binary();

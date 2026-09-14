@@ -1016,21 +1016,16 @@ mod tests {
         assert_eq!(merged["minimumReleaseAgeStrict"], json!(true));
     }
 
-    /// Only the `npm_config_` prefix names a setting. The settings table still
-    /// LISTS a brand-prefixed alias beside each of those spellings — `AUBE_*`
-    /// from the previous engine, `PNPM_CONFIG_*` from pnpm's own surface — and
-    /// neither is nub's to read: one carries an engine brand nub does not own,
-    /// the other configures a different tool's install. Structural rather than
-    /// gated, so the install report can credit whatever reaches this tier
-    /// without re-deciding the question.
+    /// Only the `npm_config_` prefix names a setting. The settings table also
+    /// LISTS the `PNPM_CONFIG_*` spelling beside each of those, from pnpm's own
+    /// surface, and it is not nub's to read: it configures a different tool's
+    /// install. Structural rather than gated, so the install report can credit
+    /// whatever reaches this tier without re-deciding the question.
     #[test]
     fn a_brand_prefixed_variable_is_not_a_setting_source() {
         let install = InstallConfig::default();
         let mut sources = sources(&install);
-        sources.env = env(&[
-            ("AUBE_NODE_LINKER", "hoisted"),
-            ("PNPM_CONFIG_NODE_LINKER", "hoisted"),
-        ]);
+        sources.env = env(&[("PNPM_CONFIG_NODE_LINKER", "hoisted")]);
 
         let merged = merge(&sources).expect("merge");
 

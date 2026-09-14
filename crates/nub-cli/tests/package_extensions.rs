@@ -138,9 +138,7 @@ fn top_level_package_extensions_shapes_resolution_and_invalidates_freshness() {
 /// pnpm's additions — and pnpm merges it into every install. `reactcss@1.2.3`
 /// requires `react` and declares it nowhere, so the catalog entry
 /// `reactcss@* -> peerDependencies.react` is what makes `auto-install-peers`
-/// supply it. Until the engine's embedder gate came off, that catalog applied
-/// only to standalone aube, so this package installed under pnpm and threw
-/// `Cannot find module 'react'` under nub.
+/// supply it.
 ///
 /// Both arms matter. The opt-out arm is the control: it proves the pass is the
 /// database doing work rather than `react` arriving by some other route, and it

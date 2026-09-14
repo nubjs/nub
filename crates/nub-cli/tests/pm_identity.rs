@@ -238,9 +238,8 @@ fn transient_runs_do_not_error_on_multi_lockfile_projects() {
         stderr.contains("ERR_NUB_PACKAGE_MANAGER_ADD_RESOLVE_LATEST"),
         "dlx should get past identity to the registry fetch: {stderr}"
     );
-    // The brand rewrite reaches this path. It did not once: dlx reported through
-    // the vendored engine's presenter, which knows only `ERR_AUBE_*`, so the
-    // engine's own code reached the user's terminal verbatim.
+    // The brand rewrite reaches this path: the engine's own spelling of the
+    // code must not reach the user's terminal.
     assert!(
         !stderr.contains("ERR_PNPM_"),
         "no engine-branded code may reach the user: {stderr}"
@@ -343,7 +342,7 @@ fn cache_scratch_installs_never_inherit_ambient_identity() {
     .unwrap();
     std::fs::write(dir.join("yarn.lock"), "# yarn lockfile v1\n").unwrap();
 
-    // The tool dir exactly as `bootstrap_blocking` shapes it: manifest +
+    // The tool dir exactly as `write_bootstrap_project` shapes it: manifest +
     // empty workspace-yaml stub, no lockfile. The dead-port `.npmrc` proves
     // the install gets past identity to the resolve phase.
     let tool_dir = dir
@@ -356,7 +355,7 @@ fn cache_scratch_installs_never_inherit_ambient_identity() {
     std::fs::create_dir_all(&tool_dir).unwrap();
     std::fs::write(
         tool_dir.join("package.json"),
-        r#"{"name":"aube-tool-node-gyp","private":true,"dependencies":{"node-gyp":"^12.0.0"}}"#,
+        r#"{"name":"nub-tool-node-gyp","private":true,"dependencies":{"node-gyp":"^12.0.0"}}"#,
     )
     .unwrap();
     std::fs::write(tool_dir.join("pnpm-workspace.yaml"), "").unwrap();
@@ -420,13 +419,12 @@ fn lock_yaml_alone_is_nub_identity() {
 }
 
 /// Brand boundary on the config-FILE surface: under the NUB profile the engine
-/// reads NO branded user/project config file. The vendored engine's
-/// `~/.config/aube/config.toml` + `<cwd>/.config/aube/config.toml` (the leak)
-/// are ignored, and nub authors no `~/.config/nub/` home of its own — a planted
-/// `.config/nub/config.{toml}` is ignored too. The reader is `nub config get`,
-/// whose value would echo any honored file source. All four plants set
-/// `minimumReleaseAge`; with every branded file ignored the setting falls back
-/// to its built-in default, so the readout is NOT any planted value.
+/// reads NO branded user/project config file. nub authors no `~/.config/nub/`
+/// home of its own, so a planted `.config/nub/config.toml` is ignored at both
+/// user and project scope. The reader is `nub config get`, whose value would
+/// echo any honored file source. Both plants set `minimumReleaseAge`; with
+/// every branded file ignored the setting falls back to its built-in default,
+/// so the readout is NOT any planted value.
 ///
 /// HOME + XDG_CONFIG_HOME are pinned to throwaway dirs so the user-scope plant
 /// is hermetic (never the developer's real `~/.config`).
@@ -435,13 +433,7 @@ fn nub_profile_reads_no_branded_user_or_project_config_file() {
     let dir = project("config-file-brand", r#"{"name":"app","version":"1.0.0"}"#);
     let xdg_config = dir.join("xdg-config");
 
-    // User scope (XDG_CONFIG_HOME): both the aube leak and a would-be nub home.
-    std::fs::create_dir_all(xdg_config.join("aube")).unwrap();
-    std::fs::write(
-        xdg_config.join("aube").join("config.toml"),
-        "minimumReleaseAge = 4321\n",
-    )
-    .unwrap();
+    // User scope (XDG_CONFIG_HOME): a would-be nub home.
     std::fs::create_dir_all(xdg_config.join("nub")).unwrap();
     std::fs::write(
         xdg_config.join("nub").join("config.toml"),
@@ -450,12 +442,6 @@ fn nub_profile_reads_no_branded_user_or_project_config_file() {
     .unwrap();
 
     // Project scope (<cwd>/.config/<brand>/config.toml).
-    std::fs::create_dir_all(dir.join(".config").join("aube")).unwrap();
-    std::fs::write(
-        dir.join(".config").join("aube").join("config.toml"),
-        "minimumReleaseAge = 7777\n",
-    )
-    .unwrap();
     std::fs::create_dir_all(dir.join(".config").join("nub")).unwrap();
     std::fs::write(
         dir.join(".config").join("nub").join("config.toml"),
@@ -486,7 +472,7 @@ fn nub_profile_reads_no_branded_user_or_project_config_file() {
         Some(0),
         "stdout: {stdout}\nstderr: {stderr}"
     );
-    for planted in ["4321", "5555", "7777", "8888"] {
+    for planted in ["5555", "8888"] {
         assert!(
             !stdout.contains(planted),
             "nub must ignore every branded config file (read `{planted}`): {stdout}"
@@ -520,35 +506,17 @@ fn nub_profile_reads_no_branded_user_or_project_config_file() {
         "the write must land on the neutral .npmrc"
     );
     assert_eq!(
-        std::fs::read_to_string(xdg_config.join("aube").join("config.toml")).unwrap(),
-        "minimumReleaseAge = 4321\n",
-        "config set must not write the aube-branded user config file"
-    );
-    assert_eq!(
         std::fs::read_to_string(xdg_config.join("nub").join("config.toml")).unwrap(),
         "minimumReleaseAge = 5555\n",
         "config set must not write a nub-branded user config file"
     );
 }
 
-/// Brand boundary on the on-disk PATH surface: nub must never create a path
-/// carrying the embedded engine's brand. Two independent mechanisms broke this
-/// before, and the assertions below pin both.
-///
-/// 1. The engine's profile lookup fell back to the engine's own brand whenever
-///    nothing had registered nub's, and `nub run` never registered it, so it
-///    wrote the engine's lazy node-gyp shim to `<cache>/aube/tools/…` and handed
-///    that path to every script as `npm_config_node_gyp`.
-/// 2. On-disk marker/probe/temp names inside the engine were hardcoded to
-///    `aube` rather than composed from the active profile, so they landed
-///    brand-crossed even once identity was correct.
-///
-/// The run path is the probe because it is the one that regressed; the
-/// assertion is on the whole isolated home, so any new brand-crossed write
-/// from any subsystem trips it. `npm_config_node_gyp` is asserted positively
-/// too — absence alone would also pass if the var stopped being exported.
+/// `nub run` hands every script `npm_config_node_gyp`, pointing at the lazy
+/// node-gyp shim under nub's own PM cache namespace. Asserted positively, so
+/// the test also fails if the variable stops being exported.
 #[test]
-fn nub_never_writes_an_aube_branded_path() {
+fn run_exports_a_node_gyp_shim_under_nubs_cache_namespace() {
     let dir = project(
         "brand-path",
         r#"{"name":"app","version":"1.0.0","scripts":{"probe":"node -e \"console.log(process.env.npm_config_node_gyp)\""}}"#,
@@ -584,38 +552,9 @@ fn nub_never_writes_an_aube_branded_path() {
     // `contains("/nub/")` fails there while the leak it guards is unchanged.
     let normalized = node_gyp.replace('\\', "/");
     assert!(
-        normalized.contains("/nub/") && !normalized.contains("/aube/"),
+        normalized.contains("/nub/"),
         "npm_config_node_gyp must live under nub's cache namespace: {node_gyp}"
     );
-
-    let mut offenders = Vec::new();
-    collect_brand_crossed_paths(&dir, &mut offenders);
-    assert!(
-        offenders.is_empty(),
-        "nub wrote aube-branded path(s): {offenders:#?}"
-    );
-}
-
-/// Every path under `root` whose file name carries the embedded engine's
-/// brand. Walks rather than globbing so a brand-crossed leaf at any depth is
-/// caught (the side-effects marker sits several levels inside the store).
-fn collect_brand_crossed_paths(root: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.to_ascii_lowercase().contains("aube"))
-        {
-            out.push(path.clone());
-        }
-        if path.is_dir() && !path.is_symlink() {
-            collect_brand_crossed_paths(&path, out);
-        }
-    }
 }
 
 /// nub reads two of pnpm's flags past pnpm's own grammar, and only in its own

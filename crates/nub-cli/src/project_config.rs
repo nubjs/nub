@@ -319,8 +319,8 @@ pub enum DecoratorMode {
     Legacy,
 }
 
-/// The `install` block, consumed by the native PM through its aube settings
-/// bridge.
+/// The `install` block, lowered into engine settings by
+/// `pm_engine::host_settings`.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct InstallConfig {
     pub linker: Option<LinkerConfig>,

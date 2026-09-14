@@ -9,12 +9,6 @@
 //! via `cargo test -p nub-cli --test pm_verbs -- --ignored` — and self-skip
 //! when the registry is unreachable. Everything else is offline by
 //! construction (gate pre-flights, lockfile conversion, symlink plumbing).
-//!
-//! Brand guard: every test asserts no `aube` token in the combined output.
-//! Exception: `link`/`unlink -g` print the engine's global-links registry
-//! path (`<XDG_CACHE_HOME>/aube/global-links` — leaf-fixed at the pinned
-//! API, documented residual), so the link test scopes its guard to the
-//! non-path lines it owns.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -51,16 +45,6 @@ struct Output {
 impl Output {
     fn combined(&self) -> String {
         format!("{}\n{}", self.stdout, self.stderr)
-    }
-
-    #[track_caller]
-    fn assert_brand_clean(&self) {
-        assert!(
-            !self.combined().to_lowercase().contains("aube"),
-            "no engine branding may reach the output:\nstdout: {}\nstderr: {}",
-            self.stdout,
-            self.stderr
-        );
     }
 }
 
@@ -189,7 +173,7 @@ const AJV_PEER_PACKAGE_LOCK: &str = r#"{
 
 /// `nub add` then `nub rm` (alias) round-trip on a truly-fresh project: add
 /// persists the dep + writes nub's neutral `nub.lock` + links node_modules;
-/// remove strips the dep from the manifest again. Both outputs brand-clean.
+/// remove strips the dep from the manifest again.
 #[test]
 #[ignore = "network: resolves + fetches is-positive@3.1.0 from the npm registry"]
 fn add_then_remove_round_trips_manifest_lockfile_and_node_modules() {
@@ -211,16 +195,13 @@ fn add_then_remove_round_trips_manifest_lockfile_and_node_modules() {
         "stdout: {}\nstderr: {}",
         add.stdout, add.stderr
     );
-    add.assert_brand_clean();
     let manifest = std::fs::read_to_string(dir.join("package.json")).unwrap();
     assert!(
         manifest.contains("\"is-positive\""),
         "add must persist the dependency: {manifest}"
     );
     assert!(
-        dir.join("nub.lock").is_file()
-            && !dir.join("pnpm-lock.yaml").exists()
-            && !dir.join("aube-lock.yaml").exists(),
+        dir.join("nub.lock").is_file() && !dir.join("pnpm-lock.yaml").exists(),
         "add on a truly-fresh project writes nub's neutral nub.lock"
     );
     assert!(
@@ -231,7 +212,6 @@ fn add_then_remove_round_trips_manifest_lockfile_and_node_modules() {
 
     let rm = run_nub_with(&dir, &["rm", "is-positive"], &data, &cache);
     assert_eq!(rm.code, 0, "stdout: {}\nstderr: {}", rm.stdout, rm.stderr);
-    rm.assert_brand_clean();
     let manifest = std::fs::read_to_string(dir.join("package.json")).unwrap();
     assert!(
         !manifest.contains("is-positive"),
@@ -242,7 +222,7 @@ fn add_then_remove_round_trips_manifest_lockfile_and_node_modules() {
 /// The patch workflow round-trips: `patch` extracts into a nub-named edit
 /// dir and prints the rebranded patch-commit hint; `patch-commit` writes
 /// the `.patch` file, records `pnpm.patchedDependencies`, and re-links the
-/// edited content; `patch-remove` reverts all of it. All outputs brand-clean.
+/// edited content; `patch-remove` reverts all of it.
 #[test]
 #[ignore = "network: resolves + fetches is-positive@3.1.0 from the npm registry"]
 fn patch_workflow_round_trips_through_commit_and_remove() {
@@ -262,7 +242,6 @@ fn patch_workflow_round_trips_through_commit_and_remove() {
 
     let patch = run_nub_with(&dir, &["patch", "is-positive@3.1.0"], &data, &cache);
     assert_eq!(patch.code, 0, "stderr: {}", patch.stderr);
-    patch.assert_brand_clean();
     assert!(
         patch.stdout.contains("nub patch-commit"),
         "the follow-up hint must be rebranded: {}",
@@ -283,7 +262,6 @@ fn patch_workflow_round_trips_through_commit_and_remove() {
 
     let commit = run_nub_with(&dir, &["patch-commit", edit_dir], &data, &cache);
     assert_eq!(commit.code, 0, "stderr: {}", commit.stderr);
-    commit.assert_brand_clean();
     assert!(
         dir.join("patches/is-positive@3.1.0.patch").is_file(),
         "patch-commit must write the patch file: {}",
@@ -304,7 +282,6 @@ fn patch_workflow_round_trips_through_commit_and_remove() {
 
     let remove = run_nub_with(&dir, &["patch-remove", "is-positive@3.1.0"], &data, &cache);
     assert_eq!(remove.code, 0, "stderr: {}", remove.stderr);
-    remove.assert_brand_clean();
     assert!(
         !dir.join("patches/is-positive@3.1.0.patch").exists(),
         "patch-remove must delete the patch file"
@@ -335,7 +312,6 @@ fn update_latest_moves_the_manifest_and_lockfile_forward() {
 
     let up = run_nub(&dir, &["up", "--latest"]);
     assert_eq!(up.code, 0, "stdout: {}\nstderr: {}", up.stdout, up.stderr);
-    up.assert_brand_clean();
     let manifest = std::fs::read_to_string(dir.join("package.json")).unwrap();
     assert!(
         manifest.contains("3.1.0"),
@@ -372,7 +348,6 @@ fn update_pins_named_version_preserving_manifest_operator() {
 
     let up = run_nub(&dir, &["up", "is-positive@3.1.0"]);
     assert_eq!(up.code, 0, "stdout: {}\nstderr: {}", up.stdout, up.stderr);
-    up.assert_brand_clean();
     let manifest = std::fs::read_to_string(dir.join("package.json")).unwrap();
     assert!(
         manifest.contains("\"is-positive\": \"^3.1.0\""),
@@ -420,7 +395,6 @@ fn update_rejects_non_semver_specs_without_touching_the_manifest() {
         std::fs::write(dir.join("package.json"), manifest_src).unwrap();
         let out = run_nub(&dir, &["up", spec]);
         assert_ne!(out.code, 0, "`{spec}` must be rejected: {}", out.combined());
-        out.assert_brand_clean();
         let after = std::fs::read_to_string(dir.join("package.json")).unwrap();
         assert_eq!(
             after, manifest_src,
@@ -452,7 +426,6 @@ fn add_lockfile_only_writes_lockfile_without_linking_node_modules() {
         "stdout: {}\nstderr: {}",
         add.stdout, add.stderr
     );
-    add.assert_brand_clean();
     let manifest = std::fs::read_to_string(dir.join("package.json")).unwrap();
     assert!(
         manifest.contains("is-positive"),
@@ -484,7 +457,6 @@ fn dlx_installs_and_runs_a_bin_from_a_scratch_project() {
         "stdout: {}\nstderr: {}",
         out.stdout, out.stderr
     );
-    out.assert_brand_clean();
     let printed = out.stdout.trim();
     assert!(
         printed.len() == 36 && printed.chars().filter(|c| *c == '-').count() == 4,
@@ -586,7 +558,6 @@ fn dedupe_ignores_workspace_links_and_check_passes() {
         "workspace links must not be reported as dedupe changes: {}",
         dedupe.combined()
     );
-    dedupe.assert_brand_clean();
     assert_eq!(
         std::fs::read_to_string(dir.join("nub.lock")).unwrap(),
         lock_before,
@@ -647,7 +618,6 @@ fn dedupe_ignores_npm_alias_targets_and_check_passes() {
         "an alias target must not be reported as removed: {}",
         dedupe.combined()
     );
-    dedupe.assert_brand_clean();
     assert_eq!(
         std::fs::read_to_string(dir.join("pnpm-lock.yaml")).unwrap(),
         lock_before,
@@ -708,7 +678,6 @@ fn import_converts_package_lock_to_the_projects_own_lockfile() {
         "stdout: {}\nstderr: {}",
         out.stdout, out.stderr
     );
-    out.assert_brand_clean();
     let (path, lock) = canonical_lockfile(&dir);
     assert!(
         lock.contains("is-positive"),
@@ -716,8 +685,8 @@ fn import_converts_package_lock_to_the_projects_own_lockfile() {
         path.display()
     );
     assert!(
-        !dir.join("aube-lock.yaml").exists() && !dir.join("pnpm-lock.yaml.import-backup").exists(),
-        "no foreign lockfile or leftover backup may appear"
+        !dir.join("pnpm-lock.yaml.import-backup").exists(),
+        "no leftover import backup may appear"
     );
     assert!(
         dir.join("package-lock.json").is_file(),
@@ -843,7 +812,6 @@ fn verb_help_is_rebranded_and_exits_zero() {
     for verb in ["add", "dlx", "create"] {
         let out = run_nub(&dir, &[verb, "--help"]);
         assert_eq!(out.code, 0, "{verb} --help: stderr: {}", out.stderr);
-        out.assert_brand_clean();
         assert!(
             out.stdout.contains(&format!("nub {verb}")),
             "{verb} help must carry nub usage: {}",
@@ -862,7 +830,6 @@ fn init_is_nub_own_and_never_redirects_to_a_pm() {
     std::fs::write(dir.join("package.json"), r#"{"name":"init-fixture"}"#).unwrap();
     let out = run_nub(&dir, &["init", "-y", "--no-install"]);
     assert_ne!(out.code, 0, "init must refuse over an existing manifest");
-    out.assert_brand_clean();
     assert!(
         out.stderr.contains("refusing to overwrite"),
         "the refusal is nub's own conflict message: {}",
@@ -885,7 +852,7 @@ fn init_is_nub_own_and_never_redirects_to_a_pm() {
 /// would pin a status that is no longer true.
 ///
 /// What survives is the claim the name makes: an answer is the verb's own,
-/// never the generic placeholder, and never another package manager's brand.
+/// never the generic placeholder.
 /// `recursive` is the one that still refuses outright, and it keeps the
 /// wording because nub's `-r` really does belong to each verb.
 #[test]
@@ -894,7 +861,6 @@ fn excluded_verbs_answer_honestly_not_with_stub_text() {
 
     let recursive = run_nub(&dir, &["recursive"]);
     assert_ne!(recursive.code, 0, "recursive must error");
-    recursive.assert_brand_clean();
     assert!(
         recursive.stderr.contains("verb's own workspace flags"),
         "recursive must explain its status: {}",
@@ -903,10 +869,9 @@ fn excluded_verbs_answer_honestly_not_with_stub_text() {
 
     // Each refuses over something it names itself. Read as a pair — the exit
     // code alone would also be satisfied by a crash, and the text alone by a
-    // command that printed a reason and then succeeded anyway. The reason
-    // differs by package manager (one has no deploy at all; the other has one
-    // and there is no workspace to deploy from), so the assertion is on the
-    // verb being named rather than on either wording.
+    // command that printed a reason and then succeeded anyway. `deploy` has no
+    // workspace to deploy from and `sbom` lacks its required format, the same
+    // two refusals pnpm 12.4.1 gives on this directory.
     for verb in ["deploy", "sbom"] {
         let out = run_nub(&dir, &[verb]);
         assert_ne!(out.code, 0, "{verb} must error");
@@ -917,20 +882,27 @@ fn excluded_verbs_answer_honestly_not_with_stub_text() {
         );
     }
 
-    // `clean` and `purge` carry no exit-code claim here, and that is the
-    // honest reading rather than a gap. The two package managers in this tree
-    // answer them differently on purpose: one refuses to delete node_modules
-    // for you, the other runs and exits 0 silently because a project this bare
-    // has nothing to remove — measured byte-for-byte against pnpm 12.4.1,
-    // which is A1.2. Asserting either one reddens the other arm. The claim
-    // lands as an equality against real pnpm once the second package manager
-    // leaves the tree; until then these two are carried by the brand and
-    // stub-text sweep below, which holds whoever is serving.
+    // `clean` and `purge` find no `node_modules` in a project this bare, so
+    // each exits 0 and prints nothing — what pnpm 12.4.1 does on the same
+    // directory, byte for byte.
+    for verb in ["clean", "purge"] {
+        let out = run_nub(&dir, &[verb]);
+        assert_eq!(
+            out.code,
+            0,
+            "{verb} has nothing to remove: {}",
+            out.combined()
+        );
+        assert!(
+            out.stdout.is_empty() && out.stderr.is_empty(),
+            "{verb} must remove nothing silently: {}",
+            out.combined()
+        );
+    }
 
     // The claim the name carries, over every one of them.
     for verb in ["recursive", "clean", "purge", "deploy", "sbom"] {
         let out = run_nub(&dir, &[verb]);
-        out.assert_brand_clean();
         assert!(
             !out.combined().contains("wired in phase Surface"),
             "{verb} must not use the generic stub text: {}",
@@ -957,7 +929,6 @@ fn redirect_surfaces_agree_on_pm_identity() {
     // `nub pm migrate`, never a phantom top-level verb and never a blind npm.
     let migrate = run_nub(&nub_dir, &["migrate", "yarn.lock"]);
     assert_ne!(migrate.code, 0, "migrate is not a nub command");
-    migrate.assert_brand_clean();
     assert!(
         migrate.stderr.contains("nub pm migrate yarn.lock"),
         "migrate redirect must suggest the real `nub pm migrate`, not npm: {}",
@@ -972,7 +943,6 @@ fn redirect_surfaces_agree_on_pm_identity() {
     // Surface 3 — the `nubx`-miss hint (exec of an uninstalled bin).
     let exec = run_nub(&nub_dir, &["exec", "definitely-not-installed-xyz"]);
     assert_eq!(exec.code, 127, "missing bin exits 127");
-    exec.assert_brand_clean();
     assert!(
         exec.stderr.contains("nub add -D") && exec.stderr.contains("nubx "),
         "nubx hint must speak nub in a fresh project: {}",
@@ -1035,7 +1005,6 @@ fn create_runs_a_real_scaffolder_via_the_dlx_path() {
         "stdout: {}\nstderr: {}",
         out.stdout, out.stderr
     );
-    out.assert_brand_clean();
     let manifest = dir.join("scaffolded/package.json");
     assert!(
         manifest.is_file(),
@@ -1117,7 +1086,6 @@ fn warm_exact_re_pin_skips_the_network_while_a_range_still_resolves() {
         after.contains("\"pnpm@9.1.0+sha512.deadbeef\""),
         "the existing exact+hash pin must survive the re-pin verbatim:\n{after}"
     );
-    warm.assert_brand_clean();
 
     // A range spec is NOT the same version literal — it must resolve through the
     // registry, which is dead here, so it fails. (Proves the short-circuit is
@@ -1134,7 +1102,7 @@ fn warm_exact_re_pin_skips_the_network_while_a_range_still_resolves() {
 /// own "not implemented" set (`access`/`edit`/`issues`/`profile`/`team`/…) to
 /// the npm CLI, so `pnpm access` prints `npm error code EUSAGE`. nub must NOT
 /// inherit that leak: a command nub does not implement is refused with a
-/// nub-branded message, never an `npm error` (or `aube`) line, on every output
+/// nub-branded message, never an `npm error` line, on every output
 /// stream. This locks the brand contract regardless of how the refusal message
 /// is later worded or which exit code it carries.
 ///
@@ -1176,7 +1144,6 @@ fn unimplemented_pm_commands_never_leak_npm() {
     ] {
         let out = run_nub(&dir, &[cmd]);
         assert_ne!(out.code, 0, "`nub {cmd}` is not a command — must fail");
-        out.assert_brand_clean();
         let lower = out.combined().to_lowercase();
         assert!(
             !lower.contains("npm error"),

@@ -3,13 +3,7 @@
 //! Reads `settings.toml` beside it and generates `settings_meta_data.rs`
 //! in `$OUT_DIR` — `pub const SETTINGS: &[SettingMeta]`, `include!`d by
 //! [`crate::meta`]. That table is the whole output: what a setting is
-//! called in each source, what it defaults to, and how `nub config`
-//! describes it.
-//!
-//! It also used to emit typed accessors for `crate::values::resolved`, a
-//! module this crate has never had — the generator came across with the
-//! table when the table was vendored, so every accessor it produced was
-//! written to `$OUT_DIR` and then discarded.
+//! called in each source, what type it takes, and what it defaults to.
 //!
 //! Output is built as a plain `String` via `writeln!` — no proc-macro
 //! dependencies, since the generated file is straightforward.
@@ -22,12 +16,9 @@ use std::path::PathBuf;
 
 #[derive(Debug, Deserialize)]
 struct SettingDef {
-    description: String,
     #[serde(rename = "type")]
     type_: String,
     default: String,
-    #[serde(default)]
-    docs: String,
     #[serde(default)]
     sources: Sources,
     /// Marks a setting as part of the npm-shared `.npmrc` surface: npm
@@ -38,19 +29,9 @@ struct SettingDef {
     #[serde(default, rename = "npmShared")]
     npm_shared: bool,
     /// Marks a setting that shapes how `node_modules` is physically arranged
-    /// rather than what resolves. Gates the workspace-YAML source family at
-    /// runtime via `read_layout_from_workspace_yaml`; see `settings.toml`'s
-    /// schema header and `values.rs`.
+    /// rather than what resolves. See `SettingMeta::layout` for its reader.
     #[serde(default)]
     layout: bool,
-    /// Managed hardening merge policy. Empty means this setting is not
-    /// enforceable through managed config. Supported values are interpreted by
-    /// `values.rs`: `max`, `trueWins`, `falseWins`, `managedWins`, and ranked
-    /// strings such as `ranked:off<on<required`.
-    #[serde(default, rename = "managedPolicy")]
-    managed_policy: String,
-    #[serde(default)]
-    examples: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -110,10 +91,8 @@ fn main() {
     for (name, def) in &settings {
         writeln!(out, "    SettingMeta {{").unwrap();
         writeln!(out, "        name: {},", lit(name)).unwrap();
-        writeln!(out, "        description: {},", lit(&def.description)).unwrap();
         writeln!(out, "        type_: {},", lit(&def.type_)).unwrap();
         writeln!(out, "        default: {},", lit(&def.default)).unwrap();
-        writeln!(out, "        docs: {},", lit(&def.docs)).unwrap();
         writeln!(out, "        cli_flags: {},", slice_lit(&def.sources.cli)).unwrap();
         let env_vars = merged_env_vars(&def.sources.env);
         writeln!(out, "        env_vars: {},", slice_lit(&env_vars)).unwrap();
@@ -125,10 +104,8 @@ fn main() {
             slice_lit(&def.sources.workspace_yaml)
         )
         .unwrap();
-        writeln!(out, "        examples: {},", slice_lit(&def.examples)).unwrap();
         writeln!(out, "        npm_shared: {},", def.npm_shared).unwrap();
         writeln!(out, "        layout: {},", def.layout).unwrap();
-        writeln!(out, "        managed_policy: {},", lit(&def.managed_policy)).unwrap();
         writeln!(out, "    }},").unwrap();
     }
 
@@ -187,22 +164,11 @@ fn is_case_convertible_key(key: &str) -> bool {
 /// `NPM_CONFIG_*`), so a setting that already declares the npm spelling
 /// gets the matching pnpm spellings for free — no per-setting edit in
 /// `settings.toml`, mirroring how [`merged_npmrc_keys`] synthesizes
-/// kebab/camel aliases.
+/// kebab/camel aliases. Each pnpm alias lands immediately after the npm
+/// alias it derives from.
 ///
-/// Ordering matters, because a reader walks `env_vars` in reverse and so
-/// lets a later alias outrank an earlier one. Each pnpm alias is inserted
-/// immediately *after* the npm alias it derives from, which places the
-/// whole pnpm family above the npm family (pnpm's own resolution prefers
-/// `pnpm_config_*` over the npm-compat `npm_config_*` fallback) while
-/// leaving any tool-branded `{PREFIX}_*` alias declared last as the
-/// highest-priority entry.
-///
-/// Whether the pnpm family is read at all is not decided here: this makes
-/// the table aware of the spellings, and the incumbency posture that gates
-/// them lives with the reader. Registry- and auth-style keys
-/// (`@scope:registry`, `//host/:_authToken`) are pnpm's `.npmrc` syntax
-/// carried in an env name, already handled URL-scoped by the registry
-/// client, so they are left untouched.
+/// Listing a spelling does not make nub read it: which prefixes a variable
+/// may carry is decided by the reader, not by this table.
 fn merged_env_vars(declared: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(declared.len() * 2);
     for alias in declared {

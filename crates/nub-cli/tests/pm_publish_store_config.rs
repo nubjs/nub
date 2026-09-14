@@ -3,9 +3,6 @@
 //! npmrc-first `config get`/`set` routing. All offline (pack/publish
 //! --dry-run never touch the registry; store path only opens the local
 //! store) — no `#[ignore]` legs.
-//!
-//! Every run asserts the brand boundary: no `aube`/`AUBE` token and no
-//! engine doc URL may appear in stdout or stderr.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -97,27 +94,7 @@ impl Ctx {
         let out = cmd.output().expect("failed to spawn nub");
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-        assert_brand_clean(args, &stdout, &stderr);
         (stdout, stderr, out.status.code().unwrap_or(-1))
-    }
-}
-
-/// The hard requirement: no engine branding and no engine doc URLs in
-/// anything nub prints. Real on-disk paths under an `aube`-named segment
-/// can't occur here because every test isolates HOME/XDG into fresh roots
-/// whose paths carry no such segment.
-fn assert_brand_clean(args: &[&str], stdout: &str, stderr: &str) {
-    for (stream, text) in [("stdout", stdout), ("stderr", stderr)] {
-        assert!(
-            !text.to_lowercase().contains("aube"),
-            "`nub {}` leaked engine branding on {stream}:\n{text}",
-            args.join(" ")
-        );
-        assert!(
-            !text.contains("jdx.dev"),
-            "`nub {}` leaked an engine doc URL on {stream}:\n{text}",
-            args.join(" ")
-        );
     }
 }
 
@@ -828,8 +805,7 @@ fn config_set_under_nub_identity_routes_scalar_to_neutral_npmrc() {
     // No config.toml under nub identity either.
     for forbidden in [ctx.home.join("xdg-config"), ctx.project.join(".config")] {
         assert!(
-            !forbidden.join("aube/config.toml").exists()
-                && !forbidden.join("nub/config.toml").exists(),
+            !forbidden.join("nub/config.toml").exists(),
             "config set must never write a config.toml under {}",
             forbidden.display()
         );
@@ -912,8 +888,7 @@ fn global_set_writes_neutral_never_a_pm_branded_global_file() {
         "global write must NEVER create pnpm's global config.yaml"
     );
     assert!(
-        !ctx.home.join("xdg-config/aube/config.toml").exists()
-            && !ctx.home.join("xdg-config/nub/config.toml").exists(),
+        !ctx.home.join("xdg-config/nub/config.toml").exists(),
         "global write must never create a config.toml"
     );
     assert!(

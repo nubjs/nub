@@ -31,8 +31,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// Spinner period. Matches aube's install spinner (`SPIN_FRAME_MS`): ~16 fps, the
-/// 10-frame loop cycling in 600 ms.
+/// Spinner period: ~16 fps, the 10-frame loop cycling in 600 ms.
 const FRAME: Duration = Duration::from_millis(60);
 /// Work that finishes faster than this never paints, so a warm-ish cold start
 /// doesn't flash a box for one frame.
@@ -142,9 +141,7 @@ impl Sty {
         match self {
             Sty::Plain => "",
             Sty::Dim => "\x1b[2m",
-            // Blue — byte-for-byte aube's install spinner (`clx::style::eblue`,
-            // i.e. `console`'s standard-blue SGR), so nub's compiled-binary
-            // first-run spinner matches the one shown during `nub install`.
+            // Blue — `console`'s standard-blue SGR (clx's `eblue`).
             Sty::Accent => "\x1b[34m",
         }
     }
@@ -164,9 +161,9 @@ struct Glyphs {
     spin: &'static [&'static str],
 }
 
-/// The braille "dots" spinner — the exact frames aube renders during `nub install`
-/// (its `SPIN_FRAMES`, clx's `mini_dot` set), so a compiled binary's first-run
-/// spinner is the same one the user already watches on every install.
+/// The braille "dots" spinner — clx's `mini_dot` set, the frames `nub compile`'s
+/// live line spins, so a compiled binary's first-run spinner matches the build
+/// that produced it.
 const UNICODE_GLYPHS: Glyphs = Glyphs {
     tl: '╭',
     tr: '╮',
@@ -713,18 +710,18 @@ mod tests {
     }
 
     /// The message line: spinner, ONE space, label — nothing between them — and the
-    /// spinner is aube's exact blue braille "dots" set (matching `nub install`),
-    /// each glyph one cell wide.
+    /// spinner is the blue braille "dots" set (clx's `mini_dot`), each glyph one
+    /// cell wide.
     #[test]
     fn message_is_blue_braille_spinner_one_space_then_label() {
-        // The frames aube renders during `nub install` (its `SPIN_FRAMES`).
-        const AUBE_SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        assert_eq!(UNICODE_GLYPHS.spin, AUBE_SPIN);
-        // Blue — `console`/clx `eblue`, byte-for-byte aube's spinner color.
+        // clx's `mini_dot` frames.
+        const MINI_DOT_SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        assert_eq!(UNICODE_GLYPHS.spin, MINI_DOT_SPIN);
+        // Blue — `console`'s standard-blue SGR, clx's `eblue`.
         assert_eq!(Sty::Accent.escape(), "\x1b[34m");
 
         let l = boxed(plan(Some("Setting up app"), &caps(true, Some((80, 24)))));
-        for (frame, want) in AUBE_SPIN.iter().enumerate() {
+        for (frame, want) in MINI_DOT_SPIN.iter().enumerate() {
             let row = l.message_row(frame);
             let (spin_sty, spin) = &row[1];
             assert_eq!(*spin_sty, Sty::Accent);

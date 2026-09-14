@@ -45,8 +45,8 @@ fn run(dir: &Path, args: &[&str]) -> (String, String, i32) {
 }
 
 /// Like [`run`] but with extra env vars. The `CI` var is stripped from the
-/// inherited environment unless a caller overrides it: aube defaults a flagless
-/// install to FROZEN when `CI` is set (pnpm parity), and a frozen op never
+/// inherited environment unless a caller overrides it: the engine defaults a
+/// flagless install to FROZEN when `CI` is set (pnpm parity), and a frozen op never
 /// writes the lockfile, so a real-change row that relied on the flagless
 /// writable default would flip to frozen (no write, no migration) when the
 /// suite runs on a CI runner. Rows exercising the frozen-read-only path opt

@@ -30,10 +30,7 @@ pub(crate) const NUB_LEGACY_LOCKFILE: &str = "lock.yaml";
 /// The known lockfile artifacts, in the engine's candidate precedence order
 /// *within* each family (npm-shrinkwrap.json outranks package-lock.json as a
 /// conversion source, matching npm).
-/// `lock.yaml` is nub's own artifact (the `nub` family). `aube-lock.yaml` is
-/// deliberately absent: it is another tool's artifact, not part of nub's
-/// identity model (nub never writes it and `use` neither keeps, converts,
-/// nor removes it).
+/// `lock.yaml` is nub's own artifact (the `nub` family).
 const LOCKFILES: &[(&str, &str)] = &[
     (NUB_LOCKFILE, "nub"),
     // Legacy nub name (pre-rename), still nub's artifact for alignment.

@@ -13,33 +13,19 @@
 
 pub mod meta;
 
-pub use meta::{
-    SettingMeta, all, find, is_layout_npmrc_key, is_supported, unsupported_advice,
-    unsupported_for_key,
-};
+pub use meta::{SettingMeta, all, find, is_supported, unsupported_advice, unsupported_for_key};
 
 /// Settings the table declares but nub never consumes, each with the line
 /// `config set` prints instead of writing the key through.
 ///
-/// Without this, a setting whose only reader was the previous engine reads as
-/// free-form config: `nub config set aubeNoAutoInstall true` used to write
-/// that name into a user's `.npmrc`, inert and carrying a brand nub does not
-/// own. A name here that no longer spells a real setting is a SILENT no-op —
-/// the filter simply never matches — which is why `meta`'s own tests check
-/// every entry against the table.
+/// Without this, such a setting reads as free-form config and `config set`
+/// writes it into a user's `.npmrc`, where nothing reads it. A name here that
+/// no longer spells a real setting is a SILENT no-op — the filter simply never
+/// matches.
 pub const UNSUPPORTED_SETTINGS: &[(&str, &str)] = &[
-    // `commands::auto_install::ensure_installed`, reached only from the
-    // engine's `run`/`exec`/`restart`. nub runs scripts through its own
-    // frontend and gates freshness in `crate::verify_deps`. Before this
-    // entry `nub config set aubeNoAutoInstall true` wrote the ENGINE's brand
-    // into a user's `.npmrc` for a value nub never reads.
-    (
-        "aubeNoAutoInstall",
-        "nub does not auto-install before a run. Use `verifyDeps` in nub.jsonc, or \
-             `verify-deps-before-run` in .npmrc, to choose what happens when dependencies \
-             are stale.",
-    ),
-    // Same dead gate: the flag that lets that auto-install skip a repeat.
+    // The flag that lets a pre-run auto-install skip a repeat. nub runs
+    // scripts through its own frontend and checks dependency freshness in
+    // nub-cli's `verify_deps`.
     (
         "optimisticRepeatInstall",
         "nub does not auto-install before a run, so there is no repeat install to skip. \
@@ -138,9 +124,7 @@ pub const UNSUPPORTED_SETTINGS: &[(&str, &str)] = &[
     // fall the accessor through to the default: a database applied to every
     // install with no way to turn it off.
     ("useBetaCli", "nub has no beta-gated commands."),
-    // `install::FrozenMode::default_for_env` asks `aube_util::env::is_ci()`,
-    // which reads the `CI` ENVIRONMENT VARIABLE. No reader consults the
-    // config key, so an `.npmrc` `ci=` line has never decided anything.
+    // The engine derives the `ci` default from the process environment.
     (
         "ci",
         "nub detects CI from the `CI` environment variable, not from config. Set `CI=1`, \

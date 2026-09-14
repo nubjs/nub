@@ -2,21 +2,11 @@
 //! binary: the DEFAULT column of `config list --all`, and which settings
 //! `config set` will write.
 //!
-//! That column is the shared engine table's `default` field — a build-time
-//! constant. A directory default written as a literal is therefore baked with
-//! the ENGINE's namespace and printed verbatim by whichever host embeds the
-//! engine, so nub advertised its cache default as `$XDG_CACHE_HOME/aube`, a
-//! directory nub never uses. The defaults now carry namespace tokens that
-//! resolve against the active embedder at display time.
+//! That column is the settings table's `default` field — a build-time
+//! constant — so a default naming one of nub's own directories carries a
+//! namespace token that resolves at display time.
 //!
 //! Offline: `config list` reads config files and the static table, nothing else.
-//!
-//! The file also holds the brand-cleanliness assertion for this command, which
-//! nothing covered while `aubeNoAutoInstall` was still in the listing — the
-//! engine's brand in a setting NAME, on a setting nub never reads. It reaches
-//! the listing through the shared settings table rather than through any nub
-//! code path, so `pm_publish_store_config`'s per-spawn `assert_brand_clean`
-//! could never have caught it: that harness only ever spawned other commands.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -116,9 +106,7 @@ fn row<'a>(listing: &'a str, key: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no `{key}` row in `config list --all`:\n{listing}"))
 }
 
-/// The cache default names nub's own namespace. This is the row that carried
-/// the engine's name, so it is also the control: the assertion below fails on
-/// the literal that shipped before the tokens existed.
+/// The cache default names nub's own namespace, resolved from its token.
 #[test]
 fn the_cache_default_names_nubs_namespace() {
     let listing = list_all("cache");
@@ -127,10 +115,6 @@ fn the_cache_default_names_nubs_namespace() {
         cache.contains("nub/pm"),
         "the cache default must name nub's cache namespace: {cache}"
     );
-    assert!(
-        !cache.to_lowercase().contains("aube"),
-        "the cache default still names the engine: {cache}"
-    );
 }
 
 /// No KNOWN token survives into the listing — the substitution ran for every
@@ -138,9 +122,7 @@ fn the_cache_default_names_nubs_namespace() {
 ///
 /// This deliberately proves less than it might: a MISSPELLED token is invisible
 /// here, because `render_namespaces` leaves it untouched and the result looks
-/// like ordinary prose. That case is caught at its source by
-/// `aube_settings::meta`'s audit of the raw defaults against the substitution
-/// table, which is where a typo can actually be told apart from text.
+/// like ordinary prose.
 #[test]
 fn no_known_token_survives_into_the_listing() {
     let listing = list_all("tokens");
@@ -154,36 +136,6 @@ fn no_known_token_survives_into_the_listing() {
     );
 }
 
-/// Nothing in the listing names the engine.
-///
-/// The last leak was `aubeNoAutoInstall` — the setting behind the engine's own
-/// pre-run auto-install gate, which nub never reaches because it runs scripts
-/// through its own frontend. Left in the table it was pure misdirection: a
-/// brand-named row a user could set and nub would never read. Nub's embedder
-/// profile now declares it unsupported, which drops it from the table here.
-///
-/// Broad on purpose. A narrow `!listing.contains("aubeNoAutoInstall")` would
-/// pass the day someone adds the next branded setting, and the whole point of
-/// this row is that no such setting reached a user-visible surface.
-#[test]
-fn the_listing_never_names_the_engine() {
-    let listing = list_all("brand");
-    let leaked: Vec<&str> = listing
-        .lines()
-        .filter(|line| line.to_lowercase().contains("aube"))
-        .collect();
-    assert!(
-        leaked.is_empty(),
-        "engine branding in `nub config list --all`: {leaked:#?}"
-    );
-    // Positive control: the listing really was populated, so the emptiness
-    // above is a clean sweep rather than an empty read.
-    assert!(
-        listing.lines().count() > 50,
-        "expected a full `--all` listing, got:\n{listing}"
-    );
-}
-
 /// Every setting nub's embedder profile declares it does not consume, with a
 /// substring the refusal has to name so the user has somewhere to go.
 ///
@@ -194,7 +146,6 @@ fn the_listing_never_names_the_engine() {
 /// not exist would still refuse, and refuse looking correct.
 const NOT_CONSUMED: &[(&str, &str)] = &[
     // The engine's pre-run auto-install gate (nub runs scripts itself).
-    ("aubeNoAutoInstall", "verify"),
     ("optimisticRepeatInstall", "verify"),
     // Its script runner (nub's own frontend always runs pre/post).
     ("enablePrePostScripts", "--ignore-scripts"),
@@ -255,7 +206,7 @@ fn config_set_refuses_a_setting_nub_does_not_consume() {
     }
     // The alias surface too: the profile hangs its advice on the canonical name,
     // and the lookup has to reach it from an `.npmrc` spelling as well.
-    let (_, stderr, code, _) = config(&["set", "aube-no-auto-install", "true"]);
+    let (_, stderr, code, _) = config(&["set", "optimistic-repeat-install", "true"]);
     assert_ne!(code, 0, "the kebab alias must refuse too: {stderr}");
     assert!(stderr.contains("verify"), "{stderr}");
 }
@@ -275,8 +226,8 @@ fn the_listing_never_offers_a_setting_nub_does_not_consume() {
             "`config list --all` still offers {key}:\n{listing}"
         );
     }
-    // Positive control, same shape as the brand row above: the listing really
-    // was populated, so every absence is a sweep rather than an empty read.
+    // Positive control: the listing really was populated, so every absence is
+    // a sweep rather than an empty read.
     assert!(
         listing.lines().count() > 50,
         "expected a full `--all` listing, got:\n{listing}"
@@ -345,20 +296,24 @@ fn config_set_still_writes_a_setting_nub_does_consume() {
 fn a_stale_key_from_an_older_nub_can_still_be_deleted() {
     let project = fixture("stale");
     let npmrc = project.join(".npmrc");
-    std::fs::write(&npmrc, "aubeNoAutoInstall=true\nauto-install-peers=false\n").unwrap();
+    std::fs::write(
+        &npmrc,
+        "optimisticRepeatInstall=true\nauto-install-peers=false\n",
+    )
+    .unwrap();
 
     let (listing, _, code, _) = spawn_in(&project, &["list"]);
     assert_eq!(code, 0);
     assert!(
-        listing.contains("aubeNoAutoInstall=true"),
+        listing.contains("optimisticRepeatInstall=true"),
         "the user's own .npmrc line must be echoed, not hidden: {listing}"
     );
 
-    let (_, stderr, code, _) = spawn_in(&project, &["delete", "aubeNoAutoInstall"]);
+    let (_, stderr, code, _) = spawn_in(&project, &["delete", "optimisticRepeatInstall"]);
     assert_eq!(code, 0, "`config delete` must still work: {stderr}");
     let after = std::fs::read_to_string(&npmrc).unwrap();
     assert!(
-        !after.contains("aubeNoAutoInstall"),
+        !after.contains("optimisticRepeatInstall"),
         "the stale key survived the delete: {after:?}"
     );
     // Control: the delete was surgical, not a truncation of the whole file.

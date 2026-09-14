@@ -1,37 +1,14 @@
-//! Store/config family — global-store and cache forensics plus settings
-//! through the embedded aube engine: `store` (add/path/prune/status),
-//! `cache` (list/view/delete/prune/list-registries), `cat-file`,
-//! `cat-index`, `find-hash`, `config` (+`c`) with the hidden top-level
-//! `get`/`set` shorthands, and the native package.json editors `pkg`,
-//! `set-script` (engine-implemented, not an npm shell-out).
-//!
-//! This family owns its own wiring now. The publish family it used to share
-//! `run_wired`/`run_engine` with is gone — every one of those verbs is in
-//! pnpm's grammar, so the CLI front door takes them and the module had no
-//! reachable code left. The shape here is unchanged: one stamped
-//! `usage_rs::Cli` root per verb, brand-rewritten help and usage, an engine
-//! session preflight, and failures through [`super::pnpm_engine::report_engine_error`].
+//! Config family — `config` (+`c`) and the hidden top-level `get`/`set`
+//! shorthands.
 //!
 //! Family notes:
-//! - `store path` prints the *resolved* store-version dir on stdout — under
-//!   nub's embedder defaults that is `$XDG_DATA_HOME/nub/store/v1` (data,
-//!   not a diagnostic; already nub-named via the `storeDir` default).
-//! - `cache` operates on the engine's packument cache under the RESOLVED
-//!   `cacheDir` — `<XDG_CACHE_HOME>/nub/pm/packuments-*` by default (the
-//!   identity's `cache_namespace`), or wherever `NUB_CACHE_DIR` /
-//!   `npm_config_cache_dir` / `.npmrc cache-dir` points it. That makes
-//!   `cache list` the cheapest read-side proof of which cache directory the
-//!   engine resolved, which is how `pm_env_matrix` pins it. Paths printed by
-//!   `cache view --json` / `cache delete` are real on-disk paths, which the
-//!   rewrite policy deliberately preserves.
 //! - `config` writes a nub project's settings to `.npmrc` (**no `config.toml`,
 //!   ever**); in a pnpm project `config` is pnpm's own command
 //!   ([`super::verb_routing::engine_takes`]). npm-shared keys (`registry`,
 //!   proxies, per-host auth templates, `@scope:registry`, bare auth scalars, …)
 //!   and every other scalar go to the project `.npmrc`, which npm, Yarn and pnpm
 //!   all read. Workspace *map* settings (`allowBuilds.<pkg>`, `overrides.<pkg>`,
-//!   bare `allowBuilds`, …) are refused (upstream's fallback would write a
-//!   `package.json#aube.<map>` field, and `.npmrc` lines for map entries are
+//!   bare `allowBuilds`, …) are refused (`.npmrc` lines for map entries are
 //!   unread).
 //! - **GLOBAL config reads follow identity; writes stay neutral:**
 //!     - **Reads:** the neutral user `~/.npmrc` is always eligible. Pnpm's
@@ -106,7 +83,7 @@ pub(crate) fn run_verb(
 }
 
 /// Parse + dispatch the three config spellings. Top-level `get`/`set` are
-/// aube's hidden shorthands for `config get` / `config set`; the
+/// the hidden shorthands for `config get` / `config set`; the
 /// subcommand name is spliced into the argv so all three flow through one
 /// `ConfigArgs` parse (and usage errors render as `nub get …` / `nub set …`).
 fn run_config(canonical: &str, typed: &str, args: &[String]) -> Result<i32> {
@@ -144,7 +121,7 @@ fn run_config(canonical: &str, typed: &str, args: &[String]) -> Result<i32> {
 /// flattens the bare-list flags into the parent command, so copy a parent scope
 /// into key subcommands before Nub intercepts their keys, then clear the parent
 /// copy so the engine does not reject it as a stray list flag. An explicit
-/// subcommand scope wins, matching [`aube::commands::config`]'s list behavior.
+/// subcommand scope wins.
 fn inherit_parent_scope(parsed: &mut ConfigArgs) {
     let parent_global = parsed.list.global;
     let parent_local = parsed.list.local;
@@ -748,8 +725,8 @@ mod help_tests {
             ("config delete", &delete_help),
         ] {
             assert!(
-                !text.to_lowercase().contains("aube") && !text.contains("config.toml"),
-                "nub {name} help must be brand-clean and config.toml-free: {text}"
+                !text.contains("config.toml"),
+                "nub {name} help must be config.toml-free: {text}"
             );
             assert!(text.contains("--global"), "nub {name}: {text}");
             assert!(!text.contains("--location"), "nub {name}: {text}");
@@ -827,9 +804,8 @@ mod npmrc_first {
         // and its own arm rather than a case of the `setting_for_key` match
         // below — that lookup is embedder-FILTERED, so an unsupported setting
         // reads as unknown and falls to the free-form `ProjectNpmrc` route,
-        // writing the key verbatim into the user's `.npmrc`. That is how
-        // `aubeNoAutoInstall` used to land there: inert, unreadable by anything,
-        // and carrying the engine's brand into a file nub wrote.
+        // writing the key verbatim into the user's `.npmrc`, where nothing
+        // reads it.
         if let Some(err) = unsupported_setting_refusal(key) {
             return SetRoute::Refuse(err);
         }
@@ -838,9 +814,8 @@ mod npmrc_first {
         }
         match setting_for_key(key) {
             // Bare map setting (`allowBuilds`, `overrides`, …): a single
-            // scalar can't represent it, and upstream's per-entry fallback
-            // writes `package.json#aube.<map>` — a foreign-brand manifest
-            // field nub must never produce.
+            // scalar can't represent it, and `.npmrc` lines for map entries
+            // are not read.
             Some(meta) if meta.type_ == "object" => SetRoute::Refuse(map_setting_error(meta.name)),
             // A known scalar with NO `.npmrc` alias cannot be read back out of
             // the file this route writes: `write_plan` falls back to the key
@@ -1077,12 +1052,6 @@ mod npmrc_first {
     /// Name the surfaces that DO read the setting. Both settings in this class
     /// today (`pnpmfilePath`, `globalPnpmfile`) carry a CLI flag, and only
     /// `pnpmfilePath` also has a workspace-yaml key.
-    ///
-    /// An `AUBE_*` variable is never offered: `env_prefix: None` means nub does
-    /// not read the engine's env family, so naming one would replace a dead
-    /// write with a dead export. That leaves both of these with real advice; a
-    /// future setting sourced ONLY from `AUBE_*` would fall to the last line,
-    /// which is the honest answer rather than a wrong pointer.
     fn no_npmrc_home_error(meta: &SettingMeta) -> anyhow::Error {
         let mut homes: Vec<String> = Vec::new();
         if let Some(flag) = meta.cli_flags.first() {
@@ -1095,7 +1064,7 @@ mod npmrc_first {
                 meta.workspace_yaml_keys[0]
             ));
         }
-        if let Some(var) = meta.env_vars.iter().find(|v| !v.starts_with("AUBE_")) {
+        if let Some(var) = meta.env_vars.first() {
             homes.push(format!("export `{var}`"));
         }
         let advice = if homes.is_empty() {
@@ -1168,8 +1137,7 @@ mod npmrc_first {
         #[test]
         fn npm_shared_and_map_routing() {
             assert!(matches!(classify_set("registry"), SetRoute::Engine));
-            // Map settings: bare and dotted forms both refuse (upstream would
-            // write package.json#aube.<map> — brand boundary), and a nested
+            // Map settings: bare and dotted forms both refuse, and a nested
             // spelling of a scalar setting refuses with the direct-set hint.
             for refused in ["allowBuilds", "allowBuilds.esbuild", "autoInstallPeers.x"] {
                 assert!(

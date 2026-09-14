@@ -5,13 +5,10 @@
 //! differential. nub's PM grammar is pnpm's, so `nub install …` is
 //! `pnpm install …` to the engine's parser.
 //!
-//! The variable used to be what selected the engine at all, back when the
-//! vendored one was still the default. Unset now means this engine. The two
-//! forced values remain because a differential needs them: `pnpm` runs it under
-//! pnpm's own rules on a fixture nub would claim, and `pnpm-nub` under nub's
-//! (`nub.lock`, `node_modules/.store`, and the settings nub resolves) on one
-//! pnpm would. Any other value still falls through to the vendored engine,
-//! which is what keeps both arms runnable until `vendor/aube` goes.
+//! The two forced values exist because a differential needs them: `pnpm` runs
+//! the engine under pnpm's own rules on a fixture nub would claim, and
+//! `pnpm-nub` under nub's (`nub.lock`, `node_modules/.store`, and the settings
+//! nub resolves) on one pnpm would. Any other value is ignored.
 
 use super::host_settings;
 use super::project_identity::{self, ProjectIdentity};
@@ -775,9 +772,9 @@ pub(crate) fn run(mut argv: Vec<std::ffi::OsString>) -> Result<i32> {
 /// site has to render one.
 ///
 /// Shared rather than inlined because the alternative was measured: the `nubx`
-/// dlx path reported through [`super::present`] instead, which rewrites the
-/// VENDORED engine's `ERR_AUBE_*` and knows nothing of this one's codes, so a
-/// resolution failure reached the user spelled `ERR_PNPM_*`.
+/// dlx path reported through a text rewrite instead, which knew nothing of
+/// this engine's codes, so a resolution failure reached the user spelled
+/// `ERR_PNPM_*`.
 ///
 /// Three things have to happen together. The engine skips its own render for a
 /// command that has already printed its report and answers for which those are,

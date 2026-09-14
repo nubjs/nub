@@ -124,7 +124,7 @@ pub fn find_on_path(names: &[&str]) -> Option<std::path::PathBuf> {
 /// does not (it rejects the BOM as an unexpected value "at line 1 column 1").
 /// `str::trim`/`trim_start` do NOT remove it (U+FEFF is not ASCII whitespace).
 /// Every nub-side manifest read funnels through this before parsing. (The
-/// vendored aube engine strips the BOM at its own reader independently.)
+/// engine strips the BOM at its own manifest reader independently.)
 pub fn strip_utf8_bom(s: &str) -> &str {
     s.strip_prefix('\u{feff}').unwrap_or(s)
 }

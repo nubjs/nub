@@ -18,11 +18,11 @@
 //!   actually does with those verbs now. Anything else falls through to the
 //!   shared stub error.
 //! - [`run_dlx_for_nubx`], the DLX fallback behind the `nubx` entry point,
-//!   and the only live engine call left here. Residual: `dlx` propagates the
-//!   child's exit code via `std::process::exit` inside the engine (no return
-//!   through nub's exit path), and its scratch project uses the engine's
-//!   `aube-dlx-*` tempdir prefix + `aube-dlx` manifest name — on-disk temp
-//!   state, never printed on success.
+//!   and the only live engine call left here. The tool's own nonzero exit
+//!   comes back inside the engine's error report
+//!   (`pnpm_cli::dlx_child_exit_code`), and the scratch project lives under
+//!   the engine's cache (`dlx/<key>/`, manifest name `dlx`) — on-disk state,
+//!   never printed on success.
 //! - [`stamp_virgin_dev_engines`], the virgin `devEngines.packageManager`
 //!   stamp, called from `super::pnpm_engine` after a successful install.
 
@@ -149,10 +149,9 @@ pub fn run_dlx_for_nubx(
             // records consent for a spec that was never published.
             //
             // Reported through the engine's own path, NOT `present`: that one
-            // rewrites the vendored engine's `ERR_AUBE_*` and resolves exit
-            // codes against its table, so an engine diagnostic came out of it
-            // still spelled `ERR_PNPM_*` — a brand leak straight to the user's
-            // terminal, and the only engine call site that had one.
+            // only scrubs credentials, so an engine diagnostic relayed through
+            // it would keep its `ERR_PNPM_*` spelling — a brand leak straight
+            // to the user's terminal.
             None => {
                 super::pnpm_engine::report_engine_error(&report, profile);
                 Ok((1, false))
@@ -185,9 +184,8 @@ fn nubx_dlx_argv(
 }
 
 /// Nearest ancestor (inclusive) carrying a `package.json`, bounded like
-/// `super::detect_lockfile_walk_up`. Approximation of aube's
-/// `dirs::project_root` (which is crate-private); the home-dir boundary is
-/// not enforced here.
+/// `super::detect_lockfile_walk_up`. The walk does not stop at the home
+/// directory.
 fn find_manifest_root(cwd: &Path) -> Option<PathBuf> {
     let mut dir = cwd.to_path_buf();
     for _ in 0..16 {
@@ -526,7 +524,7 @@ mod tests {
         );
     }
 
-    /// Symmetric brand boundary: a foreign PM signal aube's detection misses
+    /// Symmetric brand boundary: a foreign PM signal the virgin check ignores
     /// (`bun.lockb`, pre-1.2 bun) still blocks the stamp, so nub never imposes
     /// its `devEngines` marker on a bun-owned project.
     #[test]

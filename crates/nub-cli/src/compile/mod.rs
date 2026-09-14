@@ -901,14 +901,12 @@ fn paint_success(color: bool) -> String {
     }
 }
 
-/// An elapsed build, in the three bands the engine's install summary uses
-/// (`aube::progress::ci::format_duration`): sub-second `240ms`, sub-minute
-/// `4.0s`, otherwise `3m12s`.
+/// An elapsed build, in three bands: sub-second `240ms`, sub-minute `4.0s`,
+/// otherwise `3m12s`.
 ///
-/// Reimplemented rather than called because that function is private to the
-/// engine. The bands matter here more than they do for an install: a `--target`
-/// that has to download and recompress a ~100 MB Node routinely runs past a
-/// minute, and the flat `{:.1}s` this replaces rendered that as `92.4s`.
+/// The minute band matters: a `--target` that has to download and recompress a
+/// ~100 MB Node routinely runs past a minute, and the flat `{:.1}s` this
+/// replaces rendered that as `92.4s`.
 fn format_elapsed(d: std::time::Duration) -> String {
     let ms = d.as_millis();
     if ms < 1_000 {
@@ -1246,12 +1244,11 @@ fn mb(bytes: u64) -> String {
 
 /// The one status line a compile shows while it runs.
 ///
-/// It is deliberately the SAME surface `nub install` draws — the magenta `nub`
-/// token, the dim version, clx's `mini_dot` braille spinner, a cyan phase verb —
-/// because a user who has watched an install already knows how to read it. The
-/// spinner is clx's own `{{ spinner() }}`, whose default set is `mini_dot`: the
-/// exact frames aube spins during an install and the compiled binary's launcher
-/// spins on first run, so all three animate identically without sharing code.
+/// It carries the magenta `nub` token, the dim version, clx's `mini_dot` braille
+/// spinner and a cyan phase verb. The spinner is clx's own `{{ spinner() }}`,
+/// whose default set is `mini_dot`: the exact frames the compiled binary's
+/// launcher spins on first run, so the two animate identically without sharing
+/// code.
 ///
 /// Progress erases itself. Every fact worth keeping is restated by the closing
 /// block, so a scrollback full of phase lines would be a second, worse copy of
@@ -1275,8 +1272,7 @@ const PHASE_WIDTH: usize = 11;
 /// deepest ones — the Node stripper, the launcher fetch, the bundler's own
 /// warnings — and none of them is otherwise given anything about how this command
 /// reports. Threading a reporter down to `prepare_node_bytes` to let it say one
-/// sentence buys nothing but churn in the signatures in between. aube reaches for
-/// the same shape and for the same reason (`progress::safe_eprintln`).
+/// sentence buys nothing but churn in the signatures in between.
 ///
 /// Only `run` writes it, once, and only through [`LiveLine::start`].
 static LIVE: std::sync::Mutex<Option<std::sync::Arc<clx::progress::ProgressJob>>> =
@@ -3427,8 +3423,7 @@ fn probe_once(bin: &Path) -> std::io::Result<std::process::Output> {
 ///
 /// Test the RAW code, never `ErrorKind`: what std maps these to is std's
 /// business and has changed, whereas which codes mean "too long" is this
-/// predicate's contract. `aube-linker`'s `is_transient_fs_error` documents the
-/// same trap for os 32, which no `matches!` arm could name.
+/// predicate's contract.
 #[cfg(windows)]
 fn is_path_too_long_to_spawn(error: &std::io::Error) -> bool {
     matches!(error.raw_os_error(), Some(3 | 206))

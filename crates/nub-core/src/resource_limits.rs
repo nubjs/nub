@@ -113,10 +113,9 @@ pub fn spawn_headroom() -> Option<usize> {
 /// symlink passes out concurrently, each holding open descriptors. macOS ships a
 /// stingy default soft limit (commonly 256) while the hard limit is far higher,
 /// so a big dependency tree (e.g. the AWS SDK / aws-cdk-lib) exhausts the soft
-/// limit and the install dies with `Too many open files (os error 24)`. The aube
-/// engine raises this in its own `inner_main` startup, but nub dispatches the
-/// command impls directly and never runs that path — so we mirror the raise here,
-/// on the one startup all PM verbs flow through.
+/// limit and the install dies with `Too many open files (os error 24)`. The
+/// engine raises it only once it loads packument mirrors, so nub raises it up
+/// front, from the session prologue the engine front door runs.
 ///
 /// DESIGN: only ever RAISES the soft limit toward the hard ceiling, never lowers
 /// it, and silently keeps the existing limit on any failure (an unprivileged
@@ -129,10 +128,6 @@ pub fn raise_nofile_limit() {
     // SAFETY: get/setrlimit are sync syscalls reading/writing this process's own
     // resource table. The out-param pointer is valid for the call; failure is a
     // non-zero return, handled below.
-    //
-    // NOTE: aube's original (startup.rs) emits a `tracing::trace!` on each branch;
-    // those are deliberately dropped here — nub has no `tracing` pipeline wired at
-    // this site. Re-add them when syncing from aube only if nub gains one.
     unsafe {
         let mut rlim = std::mem::zeroed::<libc::rlimit>();
         if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) != 0 {

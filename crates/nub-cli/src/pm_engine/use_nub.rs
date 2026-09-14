@@ -41,8 +41,8 @@ use super::use_align::{self, AlignPlan, NUB_LEGACY_LOCKFILE, NUB_LOCKFILE};
 
 /// Yaml/settings keys whose post-migration home is `.npmrc`, per the audit
 /// table. Spellings are the camelCase yaml forms; emission converts to the
-/// kebab alias via [`to_kebab_case`] (aube's settings codegen registers both
-/// at build time, so the kebab line always parses). Objects and lists are
+/// kebab alias via [`to_kebab_case`] — pnpm's own `.npmrc` spelling, so the
+/// engine always parses it. Objects and lists are
 /// emitted as JSON values — the engine's npmrc readers parse both
 /// (`object_setting_from_npmrc`, `parse_string_list`).
 ///
@@ -167,7 +167,7 @@ const NPMRC_KEYS: &[&str] = &[
     "scope",
     "access",
     "provenance",
-    // aube-only keys a yaml the engine wrote may carry; all have npmrc homes.
+    // Keys only the previous engine wrote into a workspace yaml; all have npmrc homes.
     "defaultLockfileFormat",
     "defaultTrust",
     "deprecationWarnings",
@@ -332,9 +332,9 @@ const WARN_TAIL: &[&str] = &[
     "yes",
 ];
 
-/// Camel → kebab, byte-for-byte the algorithm in aube-settings' codegen
-/// (`vendor/aube/crates/aube-settings/build.rs::to_kebab_case`), so every
-/// emitted `.npmrc` key is exactly the kebab alias the engine registered.
+/// Camel → kebab, the same algorithm as `to_kebab_case` in
+/// `crates/nub-settings/build.rs`, so every emitted `.npmrc` key is exactly the
+/// kebab alias the settings table registers.
 fn to_kebab_case(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 4);
     let mut prev_lower = false;

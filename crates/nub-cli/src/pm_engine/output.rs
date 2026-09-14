@@ -7,9 +7,6 @@
 //! at the CLI front door and runs its own reporter/verbosity startup. What nub
 //! still needs from these flags is [`OutputFlags::is_silent`], which decides
 //! whether nub's own non-engine output — the resolved-layout report — prints.
-//! The module used to mirror aube `async_main`'s setup as well (progress to
-//! text, log-level reload, `aube::silence_own_output`); that ran only from the
-//! nub-side verb runners and went with them.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 

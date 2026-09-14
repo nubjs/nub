@@ -933,8 +933,8 @@ fn shell_path_node(pin_source: Option<String>) -> Result<ResolvedNode, Discovery
 /// Node from its pin chain (`devEngines.runtime` → `.node-version` → `.nvmrc`
 /// → `.tool-versions` → `engines.node`), which has never included `.bin`.
 ///
-/// It is also a recursion guard, and the one that bites hardest: aube puts
-/// `.bin` on PATH for every lifecycle script, so a `.bin/node` wrapper is
+/// It is also a recursion guard, and the one that bites hardest: the package
+/// manager puts `.bin` on PATH for every lifecycle script, so a `.bin/node` wrapper is
 /// reachable from the very probe that runs `node --version` (#656).
 fn is_package_bin_dir(dir: &Path) -> bool {
     dir.file_name().is_some_and(|n| n == ".bin")
@@ -2140,7 +2140,7 @@ mod tests {
     }
 
     /// A dependency's `.bin/node` must never be mistaken for the project's
-    /// runtime. The npm package `node` puts one there, and aube prepends
+    /// runtime. The npm package `node` puts one there, and the package manager prepends
     /// `.bin` to PATH for every lifecycle script — so before this guard the
     /// version probe ran a package's bin wrapper and `nub install node@26.5.1`
     /// never terminated (#656).
