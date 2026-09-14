@@ -40,6 +40,16 @@ pub(super) const NUB: Embedder = Embedder {
     // answer is `pnpm-workspace.yaml`, which a nub project never reads, so the
     // advice would name a file that changes nothing.
     settings_file_display_name: "nub.jsonc",
+    // The build allow-list a nub project edits is the `package.json` field
+    // `record_allow_scripts` writes and `host_settings` reads back, so a
+    // diagnostic telling the user to approve a build has to name that one.
+    // The engine's own answer is `allowBuilds`, which nothing here reads.
+    allow_builds_display_name: super::host_settings::ALLOW_SCRIPTS_FIELD,
+    // Hidden entries nub writes into a modules directory beside the engine's
+    // own, so `clean` empties `node_modules` instead of leaving a tree that
+    // still looks installed: the engine stamp, and the preload chainer dir
+    // `prepare_preload_chain` writes when the project configures a preload.
+    hidden_modules_dir_entries: &[".nub-engine", ".nub"],
     // A nub project's configuration is `nub.jsonc`, `package.json` and
     // `.npmrc`, never pnpm's files; `profile` supplies what nub resolved.
     reads_pnpm_config: false,
