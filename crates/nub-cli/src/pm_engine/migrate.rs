@@ -30,6 +30,15 @@ const FOREIGN_LOCKFILES: &[&str] = &[
     "bun.lockb",
 ];
 
+/// The package manager that writes `name`, one of [`FOREIGN_LOCKFILES`].
+fn foreign_family(name: &str) -> &'static str {
+    match name {
+        "yarn.lock" => "yarn",
+        "bun.lock" | "bun.lockb" => "bun",
+        _ => "npm",
+    }
+}
+
 /// The lockfiles that answer the question a migration would, so finding one
 /// means there is nothing pending. pnpm's is among them because it is nub's
 /// own bytes under pnpm's name.
@@ -92,6 +101,24 @@ pub(crate) fn run_pm_migrate(cwd: &Path) -> Result<i32> {
             ),
         }
     };
+    // Lockfiles from two package managers are two answers to what the project
+    // resolves to. `nub pm use` refuses to guess between them, and so does this:
+    // migrating one would remove it and leave the other firing the hint.
+    let present: Vec<&str> = FOREIGN_LOCKFILES
+        .iter()
+        .copied()
+        .filter(|name| root.join(name).is_file())
+        .collect();
+    let mut families: Vec<&str> = present.iter().map(|name| foreign_family(name)).collect();
+    families.sort_unstable();
+    families.dedup();
+    if families.len() > 1 {
+        bail!(
+            "multiple lockfiles found ({}) — nub can't infer which lockfile to migrate. \
+             Remove the stale ones first, then rerun `nub pm migrate`.",
+            present.join(", ")
+        );
+    }
     // A pnpm-incumbent project keeps pnpm's lockfile name; everything else
     // gets nub's. Without the engine there is no pnpm identity to detect and
     // nub's own is the only lockfile this build writes.

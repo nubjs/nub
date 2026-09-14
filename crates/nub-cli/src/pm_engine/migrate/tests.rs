@@ -75,3 +75,25 @@ fn the_hint_names_the_file_and_the_command() {
     assert!(hint.contains("nub pm migrate"), "{hint}");
     assert_eq!(hint.lines().count(), 1, "{hint}");
 }
+
+/// Lockfiles from two package managers are two answers to what the project
+/// resolves to, so the migration refuses rather than pick one and remove it.
+#[test]
+fn lockfiles_from_two_package_managers_are_refused_untouched() {
+    let dir = root("two-families", &["yarn.lock", "bun.lock"]);
+    std::fs::write(dir.join("package.json"), "{\"name\":\"app\"}\n").expect("writing the manifest");
+
+    let error =
+        super::run_pm_migrate(&dir).expect_err("two package managers' lockfiles must refuse");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("multiple lockfiles found (yarn.lock, bun.lock)"),
+        "the refusal must name both files: {message}"
+    );
+    assert!(
+        dir.join("yarn.lock").is_file() && dir.join("bun.lock").is_file(),
+        "a refusal must remove neither lockfile"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
