@@ -2207,6 +2207,11 @@ fn run_nub() -> Result<i32> {
     let _ = NO_ENV_FILE.set(no_env_file);
 
     SHOW_WARNINGS.store(show_warnings, Ordering::Relaxed);
+    // pnpm reads a leading `--reporter=silent` as `--silent`, for `run` too;
+    // `run` reads only this, not the PM defaults recorded below.
+    if reporter_val.as_deref() == Some("silent") {
+        silent = true;
+    }
     SILENT.store(silent, Ordering::Relaxed);
     if let Some(when) = color_when {
         set_color_mode(when);
