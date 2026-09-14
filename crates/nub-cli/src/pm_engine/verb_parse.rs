@@ -71,25 +71,15 @@ pub(super) fn set_display_name(name: &str) {
     DISPLAY_NAME.with(|cell| cell.set(interned));
 }
 
-/// Print a rendered help page to stdout through the help-grade rewrite.
-///
-/// Help/usage text describes nub's configured contract (workspace-yaml list,
-/// config namespaces, …) rather than runtime facts, which is why it takes
-/// [`present::rewrite_help`] and not the plain report rewrite.
+/// Print a rendered help page to stdout through [`present::rewrite`].
 pub(super) fn print_page(page: Option<String>) {
-    println!(
-        "{}",
-        present::rewrite_help(page.unwrap_or_default().trim_end())
-    );
+    println!("{}", present::rewrite(page.unwrap_or_default().trim_end()));
 }
 
 /// [`print_page`] on stderr, for a usage failure and for the automatic help
 /// `arg_required_else_help` raises (which usage models as a failure, exit 2).
 pub(super) fn eprint_page(page: Option<String>) {
-    eprintln!(
-        "{}",
-        present::rewrite_help(page.unwrap_or_default().trim_end())
-    );
+    eprintln!("{}", present::rewrite(page.unwrap_or_default().trim_end()));
 }
 
 /// Stamp one `usage_rs::Cli` root for an engine verb, plus the shared parse
@@ -167,8 +157,8 @@ macro_rules! verb_cli {
             #[allow(dead_code)]
             fn long_help(bin: &str) -> String {
                 crate::pm_engine::verb_parse::set_display_name(bin);
-                crate::pm_engine::present::rewrite_help(
-                    Self::render_help(Self::command(), true).unwrap_or_default(),
+                crate::pm_engine::present::rewrite(
+                    &Self::render_help(Self::command(), true).unwrap_or_default(),
                 )
             }
         }

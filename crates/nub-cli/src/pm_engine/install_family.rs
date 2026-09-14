@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn fd_capture_round_trips_raw_prints() {
         let (value, captured) = crate::pm_engine::with_fd_captured(1, || {
-            let line = b"Run `aube install` to execute their scripts.\n";
+            let line = b"GET https://alice:s3cr3t@registry.example.com/x failed\n";
             // SAFETY: plain write(2) on fd 1, which the helper owns here.
             let wrote = unsafe { libc::write(1, line.as_ptr().cast(), line.len()) };
             assert_eq!(wrote, line.len() as isize, "raw write must not short");
@@ -388,19 +388,12 @@ mod tests {
         // process-global, so the libtest harness's own progress lines
         // ("test … ok") from parallel tests can land anywhere in the capture
         // window — before OR after our write — so neither a prefix nor a
-        // suffix check is stable. The contract under test is narrow and fully
-        // pinned by presence: the raw write survives the capture, the rewrite
-        // reaches it (the rewritten `nub install` line is present), and the
-        // rewrite neutralized the engine's `aube` brand (the un-rewritten
-        // `aube install` form is absent).
+        // suffix check is stable. Presence pins the contract: the raw write
+        // survives the capture and the rewrite reaches it.
         let rewritten = present::rewrite(&captured);
         assert!(
-            rewritten.contains("Run `nub install` to execute their scripts.\n"),
-            "captured+rewritten stream must contain the rewritten engine line, got: {rewritten:?}"
-        );
-        assert!(
-            !rewritten.contains("Run `aube install`"),
-            "rewrite must neutralize the engine's aube brand, got: {rewritten:?}"
+            rewritten.contains("GET https://***@registry.example.com/x failed\n"),
+            "captured+rewritten stream must contain the scrubbed engine line, got: {rewritten:?}"
         );
     }
 

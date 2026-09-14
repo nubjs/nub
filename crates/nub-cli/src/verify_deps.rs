@@ -120,9 +120,8 @@ pub(crate) fn gate(cwd: &Path, compat_mode: bool) -> Option<i32> {
     repair_engine_mismatch(&project, policy);
 
     let reason = needs_install_reason(&project)?; // fresh / uncertain → proceed silently
-    // Defense-in-depth brand pass: the reason strings are nub-native today, but
-    // route them through the same rewrite all engine-adjacent output uses so no
-    // future engine-sourced token could ever leak here.
+    // Defense in depth: the reason strings are nub-native today, but route them
+    // through the same credential scrub as all engine-adjacent output.
     let reason = crate::pm_engine::present::rewrite(&reason);
     match policy {
         Policy::Warn => {

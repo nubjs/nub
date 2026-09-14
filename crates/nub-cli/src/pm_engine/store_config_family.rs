@@ -723,7 +723,7 @@ mod help_tests {
     use crate::pm_engine::verb_parse::set_display_name;
 
     /// A `nub config <sub>` long-help page, rendered from the same tables the
-    /// parse walks and put through the brand rewrite.
+    /// parse walks and put through the output rewrite.
     fn sub_help(name: &str) -> String {
         set_display_name("nub config");
         let cmd = ConfigCli::command()
@@ -731,9 +731,7 @@ mod help_tests {
             .iter()
             .find(|sub| sub.name == name)
             .unwrap_or_else(|| panic!("config has a {name} subcommand"));
-        crate::pm_engine::present::rewrite_help(
-            ConfigCli::render_help(cmd, true).unwrap_or_default(),
-        )
+        crate::pm_engine::present::rewrite(&ConfigCli::render_help(cmd, true).unwrap_or_default())
     }
 
     /// Nub's public config help exposes the project-default / `--global`
