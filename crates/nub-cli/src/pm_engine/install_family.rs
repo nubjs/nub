@@ -136,7 +136,8 @@ pub fn run_dlx_for_nubx(
     // fetch-and-run whose cache is nub's, and it must not inherit a pnpm
     // incumbent's profile — including the one that would make a failed child
     // exit this process before the consent ledger below is written.
-    match pnpm_cli::run(nubx_dlx_argv(bin, args, flags), super::pnpm_engine::NUB) {
+    let profile = super::pnpm_engine::dlx_profile()?;
+    match pnpm_cli::run(nubx_dlx_argv(bin, args, flags), profile) {
         Ok(()) => Ok((0, true)),
         Err(report) => match pnpm_cli::dlx_child_exit_code(&report) {
             // The tool RAN and exited nonzero. The fetch succeeded, so consent
@@ -152,7 +153,7 @@ pub fn run_dlx_for_nubx(
             // still spelled `ERR_PNPM_*` — a brand leak straight to the user's
             // terminal, and the only engine call site that had one.
             None => {
-                super::pnpm_engine::report_engine_error(&report, super::pnpm_engine::NUB);
+                super::pnpm_engine::report_engine_error(&report, profile);
                 Ok((1, false))
             }
         },

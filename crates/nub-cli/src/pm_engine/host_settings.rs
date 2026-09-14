@@ -13,10 +13,11 @@
 //! 4. `npm_config_*` variables, then `NUB_CACHE_DIR`.
 //!
 //! The neutral `package.json` fields of the workspace root join them; nothing
-//! else sets those, so they take no part in the order. Registry, credential,
-//! proxy and TLS keys stay out on purpose: the engine reads them from `.npmrc`
-//! and `npm_config_*` itself, under its own trust rules, and a copy in this
-//! layer would outrank those rules.
+//! else sets those, so they take no part in the order. Credentials stay out of
+//! every tier, and the registry, proxy and TLS keys stay out of the `.npmrc`
+//! tier, because the engine reads `.npmrc` itself under its own trust rules.
+//! It reads no `npm_config_*` variable, though, so from the environment those
+//! keys come in here (see [`left_to_engine`]).
 
 use crate::project_config::{Hoist, InstallConfig, LinkerConfig};
 use anyhow::{Context, Result, anyhow, bail};
@@ -129,6 +130,11 @@ pub(crate) fn env_settings_sourced() -> Vec<(String, String, String)> {
         let Some(key) = setting_key_of_var(&name) else {
             continue;
         };
+        // The install never carries it, so reporting it would name a value
+        // the install is not using.
+        if left_to_engine(key, Origin::Env) {
+            continue;
+        }
         // The same two steps [`lift`] takes, and for the same reason: the
         // variable's tail is snake_case (`npm_config_cache_dir` carries
         // `cache_dir`), which names no setting until it is camel-cased, and a
@@ -215,7 +221,8 @@ fn merge(sources: &Sources) -> Result<Map<String, Value>> {
 
     for (path, text) in &sources.npmrc {
         for (key, raw) in npmrc_entries(text) {
-            lift(&mut merged, &known, &key, raw, &path.display().to_string())?;
+            let source = path.display().to_string();
+            lift(&mut merged, &known, &key, raw, Origin::Npmrc, &source)?;
         }
     }
 
@@ -229,18 +236,7 @@ fn merge(sources: &Sources) -> Result<Map<String, Value>> {
         merged.insert(key.clone(), value.clone());
     }
 
-    for (name, value) in &sources.env {
-        if let Some(key) = setting_key_of_var(name) {
-            let source = format!("the {name} environment variable");
-            lift(
-                &mut merged,
-                &known,
-                key,
-                Raw::Scalar(value.clone()),
-                &source,
-            )?;
-        }
-    }
+    lift_env(&mut merged, &known, &sources.env)?;
     if let Some((_, dir)) = sources
         .env
         .iter()
@@ -584,6 +580,58 @@ fn manifest_field(setting: &str) -> String {
     }
 }
 
+/// The environment's settings alone, for a fetch that belongs to no project.
+///
+/// `nubx` and `dlx` run a tool nub fetches for itself, so the project's
+/// `nub.jsonc`, the `.npmrc` tier and nub's install defaults take no part. The
+/// engine still reads the `.npmrc` files; what it cannot read is an
+/// `npm_config_*` variable, which is where a CI job names its mirror.
+pub(crate) fn env_only() -> Result<WorkspaceSettings> {
+    let env: Vec<(String, String)> = std::env::vars_os()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .collect();
+    let mut merged = Map::new();
+    lift_env(&mut merged, &known_keys(), &env)?;
+    serde_json::from_value(Value::Object(merged))
+        .context("nub could not hand the environment's settings to the package manager")
+}
+
+/// Lift every `npm_config_*` variable in `env`, in environment order.
+fn lift_env(
+    merged: &mut Map<String, Value>,
+    known: &BTreeSet<String>,
+    env: &[(String, String)],
+) -> Result<()> {
+    for (name, value) in env {
+        let Some(key) = setting_key_of_var(name) else {
+            continue;
+        };
+        // An empty value names nothing, and an `npm run` parent exports
+        // `noproxy` that way. The engine's own variable reader skips empties
+        // for the same reason.
+        if value.is_empty() && is_registry_client_key(key) {
+            continue;
+        }
+        let source = format!("the {name} environment variable");
+        lift(
+            merged,
+            known,
+            key,
+            Raw::Scalar(value.clone()),
+            Origin::Env,
+            &source,
+        )?;
+    }
+    Ok(())
+}
+
+/// Where an entry reached this layer from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    Npmrc,
+    Env,
+}
+
 /// Record one `.npmrc` or environment entry, if it names a setting this layer
 /// carries. Keys pnpm does not know are npm's own and pass by silently; a
 /// known key with a value pnpm would refuse is an error naming its source.
@@ -592,9 +640,10 @@ fn lift(
     known: &BTreeSet<String>,
     key: &str,
     raw: Raw,
+    origin: Origin,
     source: &str,
 ) -> Result<()> {
-    if read_by_engine(key) {
+    if left_to_engine(key, origin) {
         return Ok(());
     }
     let setting = to_camel_case(key);
@@ -624,19 +673,50 @@ fn setting_key_of_var(name: &str) -> Option<&str> {
         .filter(|key| !key.is_empty())
 }
 
-/// Whether the engine reads `key` from `.npmrc` and the environment itself.
-/// `user-agent` is here too: the engine sends its own, and an `npm run`
-/// parent exports npm's to every child.
-fn read_by_engine(key: &str) -> bool {
-    const KEYS: &[&str] = &[
-        "registry",
+/// Whether `key`, arriving from `origin`, is the engine's to read rather than
+/// this layer's to carry.
+///
+/// Credentials are the engine's from every source, under any spelling or case:
+/// it scopes a token to its registry, and a copy here would travel with
+/// whichever registry this layer names. `user-agent` is never carried either —
+/// the engine sends its own, and an `npm run` parent exports npm's to every
+/// child. The registry and proxy keys depend on the source. The engine reads
+/// `.npmrc` itself, so from there they stay out. It reads no `npm_config_*`
+/// variable, so from the environment this layer is the only thing that can
+/// honour them, and carrying them ranks the variable above `.npmrc`, where npm
+/// ranks it. The TLS keys have no setting here to carry, so a variable naming
+/// one reaches nothing: the engine takes them from `.npmrc` alone.
+///
+/// Case matters because a variable's tail keeps the case it was exported in:
+/// comparing it case-sensitively once let `NPM_CONFIG_REGISTRY` through while
+/// `npm_config_registry` was dropped.
+fn left_to_engine(key: &str, origin: Origin) -> bool {
+    const ALWAYS: &[&str] = &[
         "_auth",
-        "_authToken",
+        "_authtoken",
         "_password",
         "username",
         "email",
-        "tokenHelper",
+        "tokenhelper",
         "token-helper",
+        "npmrc-auth-file",
+        "userconfig",
+        "user-agent",
+    ];
+    let lower = key.to_ascii_lowercase();
+    let kebab = lower.replace('_', "-");
+    lower.starts_with("//")
+        || lower.ends_with(":registry")
+        || ALWAYS.contains(&lower.as_str())
+        || ALWAYS.contains(&kebab.as_str())
+        || (origin == Origin::Npmrc && is_registry_client_key(key))
+}
+
+/// The registry, proxy and TLS keys the engine reads from `.npmrc`, in any
+/// case and with `_` or `-` between words.
+fn is_registry_client_key(key: &str) -> bool {
+    const KEYS: &[&str] = &[
+        "registry",
         "https-proxy",
         "http-proxy",
         "proxy",
@@ -648,15 +728,9 @@ fn read_by_engine(key: &str) -> bool {
         "key",
         "strict-ssl",
         "local-address",
-        "npmrc-auth-file",
-        "userconfig",
-        "user-agent",
     ];
-    let kebab = key.replace('_', "-");
-    key.starts_with("//")
-        || key.ends_with(":registry")
-        || KEYS.contains(&key)
-        || KEYS.contains(&kebab.as_str())
+    let kebab = key.to_ascii_lowercase().replace('_', "-");
+    KEYS.contains(&kebab.as_str())
 }
 
 /// Every setting name `pnpm-workspace.yaml` accepts. The struct serializes
@@ -1132,6 +1206,49 @@ mod tests {
             message.contains("/app/.npmrc") && message.contains("node-linker"),
             "{message}"
         );
+    }
+
+    /// From the environment a registry or proxy key IS this layer's, because
+    /// the engine reads no `npm_config_*` variable; the test above is the
+    /// `.npmrc` half, where the same key stays the engine's. Every spelling a
+    /// shell exports has to reach the same answer, and `user-agent` stays out
+    /// in upper case too.
+    #[test]
+    fn an_environment_registry_outranks_npmrc_in_any_case() {
+        for name in [
+            "npm_config_registry",
+            "NPM_CONFIG_REGISTRY",
+            "NPM_CONFIG_registry",
+        ] {
+            let install = InstallConfig::default();
+            let mut sources = sources(&install);
+            sources.npmrc = vec![(
+                PathBuf::from("/app/.npmrc"),
+                "registry=https://npmrc.example/\n".to_owned(),
+            )];
+            sources.env = env(&[
+                (name, "https://env.example/"),
+                ("NPM_CONFIG_HTTP_PROXY", "http://proxy.example/"),
+                ("npm_config_noproxy", ""),
+                ("NPM_CONFIG_USER_AGENT", "npm/11.0.0 node/v26.0.0"),
+            ]);
+
+            let merged = merge(&sources).expect("merge");
+
+            assert_eq!(merged["registry"], json!("https://env.example/"), "{name}");
+            assert_eq!(merged["httpProxy"], json!("http://proxy.example/"));
+            assert!(
+                !merged.contains_key("noproxy"),
+                "an empty value names nothing"
+            );
+            assert!(
+                merged["userAgent"]
+                    .as_str()
+                    .is_some_and(|ua| ua.starts_with("nub/")),
+                "an upper-case user agent must not be lifted either: {}",
+                merged["userAgent"]
+            );
+        }
     }
 
     /// A path specifier has many spellings for one directory and the engine

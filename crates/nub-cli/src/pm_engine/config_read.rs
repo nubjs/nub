@@ -374,13 +374,40 @@ pub(crate) fn read_project_entries() -> Vec<(String, String)> {
     out
 }
 
-/// The `npm_config_*` overlay, which belongs to the merged view and to no
+/// The environment's overlay, which belongs to the merged view and to no
 /// file. `--local` and `--global` each name a FILE, so an environment value
 /// under either would answer a question that was not asked.
-fn env_entries() -> Vec<(String, String)> {
-    super::host_settings::env_settings()
+///
+/// Which variables count follows the identity, because the two installs read
+/// different ones: pnpm 12 reads `pnpm_config_*` and no `npm_config_*`, and a
+/// nub install the reverse (measured against pnpm 12.4.1). pnpm's are read
+/// through the engine's own reader, so the answer is the one its install uses.
+fn env_entries(root: &Path) -> Vec<(String, String)> {
+    let settings = if super::project_identity::detect(root)
+        == super::project_identity::ProjectIdentity::Pnpm
+    {
+        pnpm_env_settings()
+    } else {
+        super::host_settings::env_settings()
+    };
+    settings
         .into_iter()
         .filter_map(|(key, value)| Some((canonical_list_key(&key), render(value)?)))
+        .collect()
+}
+
+/// The settings `pnpm_config_*` variables set, as the engine reads them. A
+/// field still at its default was set by nothing.
+fn pnpm_env_settings() -> serde_json::Map<String, Value> {
+    let from_env = pnpm_config::WorkspaceSettings::from_pnpm_config_env::<pnpm_config::Host>();
+    let (Ok(Value::Object(set)), Ok(Value::Object(unset))) = (
+        serde_json::to_value(from_env),
+        serde_json::to_value(pnpm_config::WorkspaceSettings::default()),
+    ) else {
+        return serde_json::Map::new();
+    };
+    set.into_iter()
+        .filter(|(key, value)| !value.is_null() && unset.get(key) != Some(value))
         .collect()
 }
 
@@ -424,7 +451,7 @@ fn configured_entries(root: &Path) -> Vec<(String, String)> {
     out.extend(branded_yaml(root, BrandedSource::WorkspaceYaml));
     out.extend(nub_jsonc_entries(root));
     // Last because it is highest.
-    out.extend(env_entries());
+    out.extend(env_entries(root));
     out
 }
 

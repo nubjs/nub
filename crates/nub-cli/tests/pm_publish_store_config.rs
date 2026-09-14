@@ -1213,6 +1213,38 @@ fn config_get_registry_resolves_the_default_when_unset() {
     assert_eq!((stdout.trim(), code), ("https://mirror.example.test/", 0));
 }
 
+/// The environment tier of `config get` reads the variables the project's own
+/// install reads: `PNPM_CONFIG_*` and no `npm_config_*` in a pnpm project, as
+/// pnpm 12 does, and `npm_config_*` in either case in a nub project. Unix-only
+/// for the same reason as the default-substitution test above: the unset arm
+/// is answered by that substitution.
+#[cfg(unix)]
+#[test]
+fn config_get_reads_the_environment_its_install_reads() {
+    const ENV: &str = "https://env.example.test/";
+    const DEFAULT: &str = "https://registry.npmjs.org/";
+    let pnpm = Ctx::new("env-get-pnpm", r#"{"name":"p","version":"1.0.0"}"#);
+    std::fs::write(pnpm.project.join("pnpm-workspace.yaml"), "packages: []\n").unwrap();
+    let nub = Ctx::new("env-get-nub", r#"{"name":"n","version":"1.0.0"}"#);
+
+    for (ctx, variable, expected) in [
+        (&pnpm, "PNPM_CONFIG_REGISTRY", ENV),
+        (&pnpm, "npm_config_registry", DEFAULT),
+        (&nub, "NPM_CONFIG_REGISTRY", ENV),
+        (&nub, "npm_config_registry", ENV),
+        (&nub, "PNPM_CONFIG_REGISTRY", DEFAULT),
+    ] {
+        let (stdout, stderr, code) =
+            ctx.run_env(&["config", "get", "registry"], &[(variable, ENV)]);
+        assert_eq!(
+            (stdout.trim(), code),
+            (expected, 0),
+            "{variable} in {}: {stderr}",
+            ctx.project.display()
+        );
+    }
+}
+
 /// From inside a workspace member, the merged view answers what an install
 /// from there fetches from: the workspace root's registry, never the member's
 /// own `.npmrc`, which the install does not read. `nub run`'s documented

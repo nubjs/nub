@@ -109,6 +109,20 @@ pub(crate) fn host_store_dir() -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
+/// The profile `nubx` and `dlx` fetch a tool under: nub's, carrying the
+/// environment's settings and none of the project's.
+///
+/// Without them the fetch honoured no `npm_config_*` variable at all, so a CI
+/// job pointing `npm_config_registry` at a private mirror fetched the tool
+/// from the public registry.
+pub(super) fn dlx_profile() -> Result<Embedder> {
+    publish_host_settings(host_settings::env_only()?);
+    Ok(Embedder {
+        workspace_settings: Some(host_workspace_settings),
+        ..NUB
+    })
+}
+
 /// Answer with `settings` from here on. Leaked because the engine holds its
 /// configuration for as long as the run, and called once per resolve — at
 /// startup, and again when a command writes the project's own settings.
