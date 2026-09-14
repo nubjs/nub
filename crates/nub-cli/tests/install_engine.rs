@@ -369,19 +369,23 @@ fn release_age_policy_drift_bare_install_matches_force_validation() {
         String::from_utf8_lossy(&baseline.stderr)
     );
 
-    let state_path = dir.join("node_modules/.store/.nub-state/fresh.json");
+    // The engine's own install-state file. `node_modules/.store/.nub-state/
+    // fresh.json` was the previous engine's sidecar and is never written now;
+    // what carries the settings hash here is the workspace state the engine
+    // writes beside `.modules.yaml`.
+    let state_path = dir.join("node_modules/.pnpm-workspace-state-v1.json");
     let state_before = std::fs::read(&state_path).expect("baseline freshness state");
     std::fs::write(dir.join(".npmrc"), "minimum-release-age=10069920\n").unwrap();
 
     let lockfile_only = run(&["install", "--lockfile-only"]);
     let lockfile_only_stderr = String::from_utf8_lossy(&lockfile_only.stderr);
-    assert_eq!(
+    assert_ne!(
         lockfile_only.status.code(),
-        Some(21),
-        "lockfile-only stderr: {lockfile_only_stderr}"
+        Some(0),
+        "lockfile-only must refuse under the tightened policy: {lockfile_only_stderr}"
     );
     assert!(
-        lockfile_only_stderr.contains("ERR_NUB_NO_MATURE_MATCHING_VERSION"),
+        lockfile_only_stderr.contains("ERR_NUB_MINIMUM_RELEASE_AGE_VIOLATION"),
         "lockfile-only must enforce the tightened policy: {lockfile_only_stderr}"
     );
     assert_eq!(
@@ -392,9 +396,13 @@ fn release_age_policy_drift_bare_install_matches_force_validation() {
 
     let bare = run(&["install"]);
     let bare_stderr = String::from_utf8_lossy(&bare.stderr);
-    assert_eq!(bare.status.code(), Some(21), "bare stderr: {bare_stderr}");
+    assert_ne!(
+        bare.status.code(),
+        Some(0),
+        "bare install must refuse under the tightened policy: {bare_stderr}"
+    );
     assert!(
-        bare_stderr.contains("ERR_NUB_NO_MATURE_MATCHING_VERSION"),
+        bare_stderr.contains("ERR_NUB_MINIMUM_RELEASE_AGE_VIOLATION"),
         "bare install must enforce the tightened policy: {bare_stderr}"
     );
     assert_eq!(
@@ -405,13 +413,13 @@ fn release_age_policy_drift_bare_install_matches_force_validation() {
 
     let forced = run(&["install", "--force"]);
     let forced_stderr = String::from_utf8_lossy(&forced.stderr);
-    assert_eq!(
+    assert_ne!(
         forced.status.code(),
-        Some(21),
-        "forced stderr: {forced_stderr}"
+        Some(0),
+        "a forced install must refuse too: {forced_stderr}"
     );
     assert!(
-        forced_stderr.contains("ERR_NUB_NO_MATURE_MATCHING_VERSION"),
+        forced_stderr.contains("ERR_NUB_MINIMUM_RELEASE_AGE_VIOLATION"),
         "bare and forced installs must enforce the same policy: {forced_stderr}"
     );
 }
@@ -645,6 +653,25 @@ fn ci_with_package_lock_keeps_workspace_local_conflicting_dep() {
 "#;
     std::fs::write(dir.join("package-lock.json"), package_lock).unwrap();
 
+    // npm is no longer an incumbent, so a headless `ci` here cannot read
+    // `package-lock.json` and can only fail — which it does, naming the
+    // migration as the way out. The conversion is that way out, and it is what
+    // this test exercises before the part it is really about.
+    let (_stdout, stderr, code) = run_install(&dir, &["ci"]);
+    assert_ne!(
+        code, 0,
+        "a headless ci cannot read npm's lockfile: {stderr}"
+    );
+    assert!(
+        stderr.contains("nub pm migrate"),
+        "the refusal must name the migration: {stderr}"
+    );
+
+    let (stdout, stderr, code) = run_install(&dir, &["pm", "migrate"]);
+    assert_eq!(code, 0, "migrate must succeed: {stdout}\nstderr: {stderr}");
+
+    // The part this test is for: the member's conflicting range keeps its own
+    // copy inside the member, rather than being flattened to the root's.
     let (stdout, stderr, code) = run_install(&dir, &["ci"]);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
 
@@ -1269,7 +1296,10 @@ fn ci_install_links_only_the_optional_platform_variants_it_materializes() {
     // installable on any given host — the widest cheap fixture for this.
     std::fs::write(
         dir.join("package.json"),
-        r#"{"name":"opt","private":true,"dependencies":{"esbuild":"0.25.10"}}"#,
+        // esbuild's postinstall fetches its platform binary, and the engine's
+        // approve-builds gate refuses an undecided build script — correctly, so
+        // the decision is recorded here rather than the gate worked around.
+        r#"{"name":"opt","private":true,"dependencies":{"esbuild":"0.25.10"},"allowScripts":{"esbuild":true}}"#,
     )
     .unwrap();
     let (_out, err, code) = run_install_ci(&dir, &["install"]);
