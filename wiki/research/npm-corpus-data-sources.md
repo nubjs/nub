@@ -64,7 +64,7 @@ Two properties of the field are easy to get wrong in the unsafe direction.
 
 Requesting with `accept: application/json` returns the full document, which carries the complete per-version `scripts` object and the `time` map of publish dates. It does **not** carry `hasInstallScript` — the two forms are complementary, not nested.
 
-The accept header has to name `application/json` alone. Content negotiation prefers the abbreviated form whenever it is named or a `*/*` wildcard appears, regardless of q-values, so a permissive header silently yields a document with no `time` map. The same trap is documented in this repo's vendored engine at [`vendor/aube/scripts/generate-primer.mjs`](../../vendor/aube/scripts/generate-primer.mjs).
+The accept header has to name `application/json` alone. Content negotiation prefers the abbreviated form whenever it is named or a `*/*` wildcard appears, regardless of q-values, so a permissive header silently yields a document with no `time` map. The same trap is documented in a comment in [`scripts/generate-primer.mjs`](https://github.com/jdx/aube/blob/main/scripts/generate-primer.mjs) of the aube package manager, which Nub vendored when this survey was written.
 
 ### Replication (`replicate.npmjs.com`)
 
@@ -107,7 +107,7 @@ last-month 404
 last-year 404
 ```
 
-This is a one-package-per-request endpoint with no bulk form. Twenty requests fired in parallel all returned 200, so it tolerates more concurrency than a conservative crawler assumes. Sustained high-volume use is a different regime and was not measured here; the harvester in [`vendor/aube/scripts/fetch-download-weights.mjs`](../../vendor/aube/scripts/fetch-download-weights.mjs) documents Cloudflare burst limiting on this endpoint and paces itself at 1.5 s between requests.
+This is a one-package-per-request endpoint with no bulk form. Twenty requests fired in parallel all returned 200, so it tolerates more concurrency than a conservative crawler assumes. Sustained high-volume use is a different regime and was not measured here; the download harvester aube carried when this survey was written, `scripts/fetch-download-weights.mjs`, documented Cloudflare burst limiting on this endpoint and paced itself at 1.5 s between requests.
 
 **Package-level.** Both `downloads/point/<period>/<names>` and `downloads/range/<from>:<to>/<names>` accept comma-separated names, with two hard limits that return explicit errors:
 
@@ -182,18 +182,18 @@ Compressed response sizes were heavily skewed — mean 3,036 bytes, median 881 b
 
 That makes the natural shape a two-stage crawl: abbreviated packuments for every package to identify the population, then full packuments for the small surviving fraction. On a deliberately heavy sample of 24 native-build packages the full form averaged 541 KB gzip against 452 KB for the abbreviated form, so stage two is dominated by how many packages survive stage one rather than by any per-request premium.
 
-## Prior art in this repository
+## Prior art in the aube package manager
 
-Two pieces of machinery in the vendored engine look relevant, and only one is.
+When this survey was written, Nub vendored the aube package manager, and two pieces of its machinery looked relevant; only one is.
 
-**The OSV bloom filter is not reusable for this.** [`vendor/aube/crates/aube-registry/src/osv_bloom_client.rs`](../../vendor/aube/crates/aube-registry/src/osv_bloom_client.rs) fetches a roughly 380 KB `filter.bin` that `endevco/osv-bloom` regenerates every ten minutes and publishes to GitHub Pages, then probes `(name, semver-major-bucket)` pairs against it and escalates hits to the live OSV API. It encodes malicious-advisory membership and nothing else — no version existence, no release dates, no script presence — and a bloom filter is membership-only and lossy by construction, so it cannot enumerate and admits false positives by design. The name invites the assumption that it carries release data; the code does not.
+**The OSV bloom filter is not reusable for this.** aube's [`crates/aube-registry/src/osv_bloom_client.rs`](https://github.com/jdx/aube/blob/main/crates/aube-registry/src/osv_bloom_client.rs) fetched a roughly 380 KB `filter.bin` that `endevco/osv-bloom` regenerates every ten minutes and publishes to GitHub Pages, then probed `(name, semver-major-bucket)` pairs against it and escalated hits to the live OSV API. It encodes malicious-advisory membership and nothing else — no version existence, no release dates, no script presence — and a bloom filter is membership-only and lossy by construction, so it cannot enumerate and admits false positives by design. The name invites the assumption that it carries release data; the code does not.
 
-**The primer pipeline is directly reusable.** Two scripts already solve most of the corpus problem:
+**The primer pipeline is directly reusable.** Two of its scripts already solved most of the corpus problem:
 
-- [`vendor/aube/scripts/generate-primer.mjs`](../../vendor/aube/scripts/generate-primer.mjs) fetches full packuments and already extracts `hasInstallScript` into its compact schema, along with the accept-header gotcha documented in a comment.
-- [`vendor/aube/scripts/fetch-download-weights.mjs`](../../vendor/aube/scripts/fetch-download-weights.mjs) is the two-signal download harvester this survey converges on independently: bulk `downloads/range` for package-level ranking, sequential per-version `last-week` for version-level weight, with the 128-name cap and the scoped-name exclusion handled.
+- [`scripts/generate-primer.mjs`](https://github.com/jdx/aube/blob/main/scripts/generate-primer.mjs) fetched full packuments and extracted `hasInstallScript` into its compact schema, along with the accept-header gotcha documented in a comment.
+- `scripts/fetch-download-weights.mjs` was the two-signal download harvester this survey converges on independently: bulk `downloads/range` for package-level ranking, sequential per-version `last-week` for version-level weight, with the 128-name cap and the scoped-name exclusion handled.
 
-The name list those scripts consume comes from `jdx/aube-primer-packages`, whose GitHub Actions cron publishes a 100,000-name popularity ranking plus a transitive-dependency list on the first of each month — a maintained, ready-made ranking.
+The name list those scripts consumed came from `jdx/aube-primer-packages`, whose GitHub Actions cron publishes a 100,000-name popularity ranking plus a transitive-dependency list on the first of each month — a maintained, ready-made ranking.
 
 ## Recommended pipeline
 
@@ -221,3 +221,4 @@ Four hard limits: no historical per-version downloads, no script bodies without 
 Every revision to this document, with the date and what changed.
 
 - 2026-08-01 — Initial write-up.
+- 2026-09-14 — The aube machinery cited as prior art is no longer in this repository; the section now describes it in the past tense and links aube's own repository where the file still exists.

@@ -209,7 +209,7 @@ The rule is about the whole dependency closure, not one package. Where `better-s
 
 A sidecar that rules the target out is dropped whole rather than merely stripped of its addon, because most of one is the shared library beside the addon. `os`, `cpu` and `libc` are the same fields npm and pnpm read to decide whether to install an optional dependency, so the package states the answer itself: `@img/sharp-darwin-arm64` declares `os: ["darwin"]`, and the musl build adds `libc: ["musl"]`. Absent fields mean it runs anywhere. For sharp this is the difference between 52 MB and 38 MB.
 
-Where pnpm or yarn is the incumbent, its `supportedArchitectures` setting installs a foreign dependency tree. Other projects can select the target for one install:
+Where pnpm is the incumbent, its `supportedArchitectures` setting installs a foreign dependency tree. Other projects can select the target for one install:
 
 ```bash
 nub install --os linux --cpu arm64 --libc musl

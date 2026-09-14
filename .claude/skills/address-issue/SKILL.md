@@ -79,7 +79,7 @@ Tier every agent you do dispatch by the judgment its task needs. A repro, a harv
 Work in an isolated worktree off `origin/main`:
 
 ```bash
-git worktree add /tmp/nub-fix-<n> -b fix-issue-<n> origin/main   # vendor/aube comes along (plain in-tree files)
+git worktree add /tmp/nub-fix-<n> -b fix-issue-<n> origin/main
 cd /tmp/nub-fix-<n>
 # Build through the wrapper; never export CARGO_TARGET_DIR yourself — that opts
 # out of the CoW seeding that starts an isolated worktree warm (~14s) instead of

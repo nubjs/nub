@@ -69,7 +69,6 @@ It deletes no worktree, branch, source file, or shared cache. Layouts it covers:
 
 ```text
 ~/.cache/nub/worktrees/<slug>/target/
-~/.cache/nub/worktrees/<slug>/aube-target/
 ~/.cache/nub/worktrees/<slug>/target-linux/
 ~/.cache/nub/worktrees/<slug>-target/
 ~/.cache/nub/worktrees/<slug>-launcher-target/

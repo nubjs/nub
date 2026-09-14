@@ -1,59 +1,62 @@
 ---
 name: pm-perf-tracing
-description: Performance-trace Nub package-manager installs using the existing phase timings, structured diagnostics, and sampling-profiler workflow. Use when an install or package-manager operation is unexpectedly slow and the bottleneck needs to be localized before changing code.
+description: Performance-trace Nub package-manager installs using the embedded engine's phase tracing and the sampling-profiler workflow. Use when an install or package-manager operation is unexpectedly slow and the bottleneck needs to be localized before changing code.
 metadata:
   internal: true
 ---
 
 # pm-perf-tracing
 
-How to performance-trace the nub package manager (install/resolve/fetch/**link**) and find where the time actually goes — the method that cracked the hoisted-linker slowness (10.8s → root-caused to a per-file copy loop). Reach for this any time a `nub install` / PM operation is "mysteriously slow" — do NOT reverse-engineer from source; the instrumentation already exists, turn it on.
+How to performance-trace the nub package manager (resolve, virtual store, **link**, apply) and find where the time actually goes. Reach for this any time a `nub install` / PM operation is "mysteriously slow" — do NOT reverse-engineer from source; the instrumentation already exists, turn it on.
 
-## The two layers that already exist
+## The tracing that already exists
 
-1. **Phase timings — works under nub TODAY.** `RUST_LOG=debug nub install` emits `phase:<name> <elapsed>` lines on stderr: `phase:resolve`, `phase:fetch (N packages)`, `phase:link (N files)`, `phase:link_bins`. This alone tells you the coarse split (is it network/resolve, or linking?). The aube engine wires these through the `tracing` crate.
+The engine is pnpm 12's Rust engine, consumed as git dependencies on `nubjs/pnpm` (AGENTS.md, "The pnpm engine fork and pin"). It emits `tracing` events, and nub renders them through its own subscriber (`crates/nub-cli/src/pm_engine/log.rs`) as `LEVEL message field=value …` on stderr. `RUST_LOG` sets the filter; nothing prints without it. The engine's own `TRACE` variable does nothing under nub, because nub's subscriber is installed first and keeps precedence.
 
-2. **Rich diagnostics layer — native under nub via `NUB_DIAG_*`.** `aube_util::diag` emits structured JSONL to `NUB_DIAG_FILE=<path>` — including, for the linker, one event per file naming the strategy used (`link_clonedir`, `link_reflink`, `link_macos_small_copy`, `link_copy`, `link_hardlink`). This is the load-independent crux for a link-perf question. The full knob set (all off by default, zero cost when unset):
+1. **Phase timings.** `RUST_LOG=pacquet::install::phase=info nub install` prints one line per engine phase:
 
-   - `NUB_DIAG_FILE=<path>` — JSONL events to a file.
-   - `NUB_DIAG_PRINT=1` — live per-span lines to stderr.
-   - `NUB_DIAG_SUMMARY=1` — end-of-run aggregate table.
-   - `NUB_DIAG_CRITPATH=1` — retain records for the critical-path / lifecycle / starvation analyzers.
-   - `NUB_DIAG_THRESHOLD_MS=<n>` — filter live prints below `<n>` ms.
-   - `NUB_DIAG_KERNEL=1` — `getrusage` kernel deltas around phases.
-   - `NUB_BENCH_PHASES_FILE=<path>` — per-run phase-timing JSON for the bench harness.
+   ```text
+   INFO phase complete phase=resolve_workspace elapsed_ms=187 importers=1 nodes=1
+   INFO phase complete phase=create_virtual_store_partition warm=0 cold=1 skipped=0 total=1 node_linker=Hoisted
+   INFO phase complete phase=link.symlink_direct_deps elapsed_ms=1
+   INFO phase complete phase=apply_materialization_result elapsed_ms=11
+   ```
+
+   A fresh-lockfile install prints, roughly in order: `load_wanted_lockfile`, `load_current_lockfile`, `resolve_level` / `resolve_workspace`, `build_fresh_lockfile`, `virtual_store_layout_new`, `create_virtual_store_partition`, `link_slots`, `create_virtual_store`, `link.*`, `apply.*`, `apply_materialization_result`. That split alone tells you whether the time is resolution or materialization. `create_virtual_store_partition` also counts warm / cold / skipped slots and names the linker that ran.
+
+2. **Package import method.** Add `pacquet::package_import_method=info` to the filter and the engine prints `INFO selected package import method method=<clone|hardlink|copy>` — once for each method the install used, not once per file. It tells you which tier of the `packageImportMethod` ladder (default `auto`) did the linking.
 
 ```sh
-cargo build -p nub-cli --profile fast        # dev binary at <worktree>-target/fast/nub
-NUB=<worktree>-target/fast/nub
-NUB_DIAG_FILE=/tmp/d.jsonl NUB_DIAG_SUMMARY=1 "$NUB" install --offline
-grep -o '"name":"link_[a-z_]*"' /tmp/d.jsonl | sort | uniq -c     # per-strategy tally
+scripts/rust-build.sh build -p nub-cli --profile fast
+NUB="$(scripts/rust-build.sh --print-target)/fast/nub"
+RUST_LOG='pacquet::install::phase=info,pacquet::package_import_method=info' "$NUB" install --offline 2> /tmp/phases.log; echo "EXIT=$?"
+grep -E 'phase complete|import method' /tmp/phases.log
 ```
 
-(The diag layer reads `NUB_DIAG_*` under the nub embedder profile via the `diag_env_prefix` hook — no source edit needed. `AUBE_DIAG_*` is NOT read under nub. The `dev-tracing-telemetry` thread / `wiki/research/dev-tracing-telemetry.md` tracks the optional chrome-trace/flamegraph export layer on top.)
+`RUST_LOG=debug` works too, but it floods stderr with every other engine event; filter by target.
 
 ## The measurement discipline (load-independent — this host is permanently contended)
 
 The dev box runs load ~30–50 and never goes quiet, so **absolute wall-clock is untrustworthy**. Measure things contention can't ruin:
 
-- **Verified-clean warm loop:** `rm -rf node_modules` and *assert it's gone*, warm store already populated, `--offline` (proves zero network: `phase:fetch` shows `0 packages`), and check **rc=0** on every run (a timing from an errored install — e.g. npm's `rm: Directory not empty` purge failures → rc=254 — is garbage).
-- **Strategy tally, not seconds:** "75,079/76,167 files took `link_macos_small_copy`, 0 took `link_clonedir`" is a fact regardless of load. That's what proves a design gap.
-- **Back-to-back A/B on the same box, report the RATIO:** e.g. hoisted vs `--node-linker isolated` on the same fixture, same load window → the relative delta (≈26×) is robust even when both absolutes are inflated.
+- **Verified-clean warm loop:** `rm -rf node_modules` and *assert it's gone*, warm store already populated, `--offline` (the final `Progress:` line shows `downloaded 0`), and check **rc=0** on every run (a timing from an errored install — e.g. npm's `rm: Directory not empty` purge failures → rc=254 — is garbage).
+- **Counts, not seconds:** the warm / cold / skipped slot counts and the selected import method are facts regardless of load. That's what proves a design gap.
+- **Back-to-back A/B on the same box, report the RATIO:** e.g. `--node-linker hoisted` vs the isolated default on the same fixture, same load window → the relative delta is robust even when both absolutes are inflated.
 - For a real clean wall-clock number, hand it to a quiet machine / CI runner — never block on this box settling.
 
 ## Layout matters — always check which linker path runs
 
-nub mirrors the incumbent layout: an npm/yarn/bun lockfile → **hoisted** layout (`link.rs` → `hoisted::link_hoisted_importer`); nub-identity / `--node-linker isolated` → **isolated** layout (`materialize_into`, the only path with the whole-dir `clonefile(2)` fast path). They have completely different perf characteristics. When a perf question is about linking, run BOTH (`--node-linker isolated` vs default) and diff — that A/B is what localized the hoisted-linker gap.
+The engine's default linker is isolated (`NodeLinker::Isolated` in the engine's `pnpm-config` crate); a project selects hoisted with `nodeLinker`, or one install with `--node-linker hoisted`. In a Nub project outside CI, nub also turns on the global virtual store by default (`fill_install_defaults` in `crates/nub-cli/src/pm_engine/host_settings.rs`), so a warm isolated install links into the machine-global store and can skip every slot. The `node_linker=` field on `create_virtual_store_partition` says which layout ran. When a perf question is about linking, A/B the linker AND the global virtual store (`npm_config_enable_global_virtual_store=false`) and diff.
 
 ## When spans aren't enough — sampling profiler
 
-Span/JSONL instrumentation can distort a syscall-bound, parallel pass (observer effect). For "where inside the link phase do the syscalls go" use a sampling profiler on a **release** build: `samply record -- <NUB> install --offline` (macOS/Linux), or `cargo flamegraph`. Spans tell you *which phase/strategy*; the sampler tells you *which syscalls/functions* dominate.
+Span instrumentation can distort a syscall-bound, parallel pass (observer effect). For "where inside the link phase do the syscalls go" use a sampling profiler on a **release** build: `samply record -- <NUB> install --offline` (macOS/Linux), or `cargo flamegraph`. Phase lines tell you *which phase*; the sampler tells you *which syscalls/functions* dominate.
 
 ## Fixtures
 
-- `/tmp/coffee2-demo` — CoffeeScript 2.0.1, npm `lockfileVersion:1`, 519 pkgs / ~76k hoisted files. The canonical heavy-hoisted-layout fixture.
-- A minimal hoisted repro: a `package.json` + `package-lock.json` with `webpack@3.6.0` + `underscore` (no `node_modules`).
+- A heavy tree: CoffeeScript 2.0.1's dependency set (519 packages, ~76k files in a hoisted layout), kept at `/tmp/coffee2-demo` when present. It carries an npm `package-lock.json`, which no install reads, so run `nub pm migrate` there first.
+- A minimal repro: a `package.json` with `webpack@3.6.0` + `underscore` (no `node_modules`).
 
 ## The one-liner to remember
 
-`RUST_LOG=debug nub install` for the phase split; if it's `phase:link`, set `NUB_DIAG_FILE=…` for the per-file strategy tally; A/B against `--node-linker isolated`; judge by strategy-tally + ratio, never the contended absolute.
+`RUST_LOG=pacquet::install::phase=info nub install` for the phase split; add `pacquet::package_import_method=info` for the link tier; A/B `--node-linker hoisted` and the global virtual store against the defaults; judge by counts + ratio, never the contended absolute.

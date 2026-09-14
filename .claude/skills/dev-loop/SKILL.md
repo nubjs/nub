@@ -9,7 +9,7 @@ description: >-
   ONE CARGO_TARGET_DIR across worktrees (`~/.cache/nub/shared-target`) so deps
   are reused and only the workspace crates recompile — but auto-isolates a
   worktree to a private target dir the moment it diverges a depended-on crate
-  (vendor/aube, nub-core, …), which is when a shared dir would clobber a sibling
+  (nub-core, vendor/libsui, …), which is when a shared dir would clobber a sibling
   and fail with a phantom compile error on correct source (the `rust-build`
   skill). A shared cross-worktree compiler-WRAPPER cache (sccache) was
   separately measured to give 0% Rust speedup and is NOT used. Covers the real
@@ -29,11 +29,11 @@ metadata:
 
 **Before you build anything here: does this belong on the local box at all?** The default home for a build, a gate, or a test run is off-host — a committed test that CI runs, or an ephemeral spot VM via the `remote-build` skill (`--job clippy|test|adhoc --detach`, collected with `--attach`). What stays local is the ~5s warm incremental rebuild you are actively iterating against, and macOS-native behavior. A cold build, `clippy --all-targets --all-features`, a full `cargo test`, a `release` build or a multi-fixture sweep goes remote unless you have a stated reason. See `AGENTS.md` → "Builds and tests go REMOTE by default".
 
-nub is a Rust workspace — `nub-cli`, `nub-core`, `nub-native` plus the vendored aube PM engine (`vendor/aube`, plain in-tree files, its own Cargo workspace, linked in-process as a library).
+nub is a Rust workspace — `nub-cli`, `nub-core`, `nub-native` — plus pnpm 12's Rust package-manager engine, taken as git dependencies on the `nubjs/pnpm` fork (pinned by `rev` in `crates/nub-cli/Cargo.toml`) and linked in-process as a library.
 
 **The rule that makes iteration fast:** build with `--profile fast` (never `release`), through `scripts/rust-build.sh`, which points `CARGO_TARGET_DIR` at the shared dir `~/.cache/nub/shared-target` — cold ≈ 3 min, every rebuild after ≈ 5s. Don't clean the shared dir between iterations.
 
-**Use the wrapper, not a raw `export CARGO_TARGET_DIR`.** The shared dir is safe only while every worktree agrees on the depended-on crates; two that diverge the same one (classically `vendor/aube`) clobber each other's rlib and fail with a phantom `E0063`-class error on correct source. The wrapper auto-isolates exactly then. **The `rust-build` skill owns the target-dir decision.**
+**Use the wrapper, not a raw `export CARGO_TARGET_DIR`.** The shared dir is safe only while every worktree agrees on the depended-on crates; two that diverge the same one (classically `nub-core`) clobber each other's rlib and fail with a phantom `E0063`-class error on correct source. The wrapper auto-isolates exactly then. **The `rust-build` skill owns the target-dir decision.**
 
 ## Step 1 — Set up a worktree
 
@@ -56,7 +56,7 @@ cargo build -p nub-cli --profile fast
 make install-dev        # addon-fast, then `scripts/rust-build.sh build --profile fast`, then symlinks
                         # nub-dev/nubx-dev -> $(scripts/rust-build.sh --print-target)/fast/nub — the
                         # wrapper's hashed bucket under ~/.cache/nub/, NOT the repo's target/. The bucket
-                        # id tracks depended-on crate content, so a change under vendor/aube or nub-core
+                        # id tracks depended-on crate content, so a change under vendor/libsui or nub-core
                         # moves it: re-run install-dev or nub-dev keeps resolving to the previous bucket.
 
 # Just the native addon (oxc transpiler), fast profile:
@@ -105,15 +105,9 @@ cargo test -p nub-core
 # in the napi-free nub-cache-key crate (`cargo test -p nub-cache-key`).
 (cd crates/nub-native && cargo test)
 
-# The VENDORED AUBE crates are their own workspace, and here the CWD is load-bearing
-# for CORRECTNESS. `vendor/aube/.cargo/config.toml` pins RUST_TEST_THREADS = "1" because
-# several aube-util tests mutate the process env and setenv/getenv are not thread-safe.
-# Cargo discovers config from the CWD, NOT from --manifest-path, so running from the repo
-# root silently bypasses the pin, runs those tests in parallel, and produces failures CI
-# never sees (`set_allow_builds_*`, `pnpmfile::tests::detect_*`) that look like real bugs.
-(cd vendor/aube && cargo test -p aube-resolver)   # RIGHT — inherits the serial pin
-# cargo test --manifest-path vendor/aube/Cargo.toml -p aube-resolver
-#   ^ WRONG from the repo root: resolves the crate but drops the pin.
+# The package-manager engine is a git dependency on nubjs/pnpm, so no command here runs
+# its tests. Run them in a clone of the fork's nub-embedder branch (AGENTS.md,
+# "The pnpm engine fork and pin").
 
 # Everything (slow):
 cargo test          # or `make test`
@@ -170,7 +164,7 @@ Then run the full [pre-push local verification loop in AGENTS.md](../../../AGENT
 **`crates/nub-cli`** — the CLI (clap dispatch + PM verb routing).
 - `src/cli.rs` — the clap command grammar + dispatch (the pnpm-compatible PM surface, `run`/`watch`/`nubx`/`upgrade`/`node`, the top-level file runner).
 - `src/main.rs` — entry point.
-- `src/pm_engine/` — routes PM verbs into the vendored aube engine in-process. `mod.rs` (`ENGINE_VERBS`), `present.rs` (rebrands engine output: `ERR_AUBE_*`→`ERR_NUB_*`, `aube`→`nub`), `config_scope.rs` (mirror-active-PM / brand-boundary config policy), `identity.rs` (PM-identity inference), `install_family.rs`, `info_family.rs`, `publish_family.rs`, `store_config_family.rs`, `use_*.rs`, and `bun_config.rs` / `yarn_*` / `unsupported_config.rs` for incumbent-PM compat.
+- `src/pm_engine/` — routes PM verbs into the embedded pnpm engine in-process (`pnpm_cli::run`). `mod.rs` (`ENGINE_VERBS`), `pnpm_engine.rs` (the `NUB` embedder profile, profile selection by identity, and the `ERR_PNPM_*`→`ERR_NUB_*` rebrand for a nub-identity project), `project_identity.rs` (pnpm vs nub identity), `host_settings.rs` (the settings a nub-identity project hands the engine), `present.rs` (credential scrub over relayed engine text), `migrate.rs` (`nub pm migrate`), `install_family.rs`, `store_config_family.rs`, `use_*.rs`, `unsupported_config.rs`.
 - `src/agent/` — agent surface.
 - `tests/*.rs` — integration tests.
 
@@ -181,7 +175,7 @@ Then run the full [pre-push local verification loop in AGENTS.md](../../../AGENT
 
 **`crates/nub-native`** — the N-API addon (a cdylib loaded into the user's Node process). oxc-based transpiler + resolver: `transform.rs`, `resolve.rs`, `tsconfig.rs`, `cache.rs`, `detect.rs`.
 
-**`vendor/aube`** — the vendored PM engine. Its own Cargo workspace; nub takes path deps into `vendor/aube/crates/*` and calls `aube::commands::<verb>::run(...)` in-process, never as a subprocess. Changes are normal nub edits/PRs (no pin, no submodule). For upstream sync, see the `aube-bump` skill.
+**The package-manager engine** — pnpm 12's Rust engine: seven git dependencies on `nubjs/pnpm`, pinned by one `rev` in `crates/nub-cli/Cargo.toml`. nub hands it an argv through `pnpm_cli::run(argv, embedder)` in-process, never as a subprocess. An engine change is a commit on the fork's `nub-embedder` branch, then a pin move in nub (AGENTS.md, "The pnpm engine fork and pin").
 
 ---
 

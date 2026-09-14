@@ -2,7 +2,7 @@
 name: rust-build
 description: >-
   Use when building or testing the nub Rust workspace inside a git worktree —
-  `cargo build`/`test`/`clippy` for nub-cli/nub-core/aube in a worktree off
+  `cargo build`/`test`/`clippy` for nub-cli/nub-core in a worktree off
   origin/main. Explains how worktrees share ONE cargo target dir for fast
   incremental builds, the cross-worktree artifact-contamination hazard that
   sharing creates (the phantom `E0063: missing field` on correct source), and the
@@ -45,10 +45,10 @@ All worktrees default to `~/.cache/nub/shared-target`. A fresh worktree reuses t
 
 ## The hazard sharing creates
 
-Cargo names a crate's output by **package id (name + version), not source content.** Two worktrees whose source for the same depended-on crate differs — classically `vendor/aube` on divergent branches — write the same output slot and clobber each other. A dependent crate then links the stale rlib:
+Cargo names a crate's output by **package id (name + version), not source content.** Two worktrees whose source for the same depended-on crate differs — classically `nub-core` on divergent branches — write the same output slot and clobber each other. A dependent crate then links the stale rlib:
 
 ```
-error[E0063]: missing field `lockfile_legacy_basenames` in initializer of `aube_util::Embedder`
+error[E0063]: missing field `<field>` in initializer of `nub_core::<Type>`
 ```
 
 — a field that exists nowhere in your checkout. Only bites crates that **other crates link**; a divergent leaf binary (`nub-cli`) just rebuilds cleanly.
@@ -60,9 +60,9 @@ Sharers are grouped by the **content** of their depended-on crates, hashed into 
 - **Depended-on crate sources and `runtime/` unmodified → share** that content's bucket. Everyone in it agrees by construction. The common case: feature work in `nub-cli`, integration tests, docs.
 - **Diverged a depended-on crate or `runtime/` → isolate** to a private per-worktree `target/` (removed with the worktree), CoW-seeded from the matching bucket so you rebuild only what differs. `runtime/` is hashed for a different reason than the crates: a dev binary resolves `runtime/*.cjs` from the tree that compiled `nub-core` (baked `CARGO_MANIFEST_DIR`), so a shared-bucket binary loads whichever sharer compiled last — a worktree with edited runtime files would silently test a sibling's copy.
 
-**Content, not merge-base:** a merge-base proves only that *this* worktree made no local changes against *its own* base, so two worktrees whose bases straddle a `nub-core`/`aube` commit both pass while disagreeing on content. The key hashes the git **index**, which only matters on the shared branch (no local changes by definition), so it moves on rebase, never mid-edit.
+**Content, not merge-base:** a merge-base proves only that *this* worktree made no local changes against *its own* base, so two worktrees whose bases straddle a `nub-core` commit both pass while disagreeing on content. The key hashes the git **index**, which only matters on the shared branch (no local changes by definition), so it moves on rebase, never mid-edit.
 
-The hashed set = every workspace/vendored crate **except leaf artifacts nothing links** — `crates/nub-cli` (bin), `crates/nub-native` (cdylib, own workspace), `crates/nub-phantom` (bin, own workspace) — **plus `runtime/`**. So: `crates/nub-core`, `crates/nub-cache-key`, `crates/nub-phantom-core`, `crates/nub-phantom-scan`, all of `vendor/aube`, and `runtime/`. `nub-phantom-core`/`nub-phantom-scan` are **not** leaves — `nub-cli` depends on both — and the pathspec `:(exclude)crates/nub-phantom` matches only that directory, not those siblings.
+The hashed set = every workspace/vendored crate **except leaf artifacts nothing links** — `crates/nub-cli` (bin), `crates/nub-native` (cdylib, own workspace), `crates/nub-phantom` (bin, own workspace) — **plus `runtime/`**. So: `crates/nub-core`, `crates/nub-cache-key`, `crates/nub-phantom-core`, `crates/nub-phantom-scan`, `vendor/libsui`, and `runtime/`. The engine's git dependencies are not hashed; they move only with the `rev` pin in `crates/nub-cli/Cargo.toml`. `nub-phantom-core`/`nub-phantom-scan` are **not** leaves — `nub-cli` depends on both — and the pathspec `:(exclude)crates/nub-phantom` matches only that directory, not those siblings.
 
 ## Letting the wrapper choose IS the caching strategy
 
@@ -90,13 +90,11 @@ For a `orchestrator` run, pinning buys nothing: every lane edits ONE worktree an
 
 ## Trade-offs and edges
 
-- **A worktree that edits aube pays a cold build even with no sibling diverging aube concurrently.** The invariant is "match origin/main," which doesn't depend on volatile sibling state — that's what makes it robust.
+- **A worktree that edits a depended-on crate isolates even with no sibling diverging it concurrently.** The invariant is "match origin/main," which doesn't depend on volatile sibling state — that's what makes it robust.
 - **Concurrent builds in two sharing worktrees serialize** on cargo's target-dir lock. A latency cost, never a correctness one. Need two at once? Isolate one.
 - **`NUB_SHARED_TARGET`** relocates the target dir and the path is used **exactly as given** — not content-keyed, because a caller naming a path is asking for that path (`make verify` relies on this to reach `$(CURDIR)/target`). The value must be **private to one checkout**; two worktrees on one relocated path recreates the phantom-`E0063` clobber. To relocate a cache several worktrees share, leave it unset and move `~/.cache/nub` itself.
 - Cleanup: `git worktree remove <path> --force` drops the worktree and its private `target/`; the shared dir is intentionally left in place.
-- **A build script can pin an ABSOLUTE PATH into the shared dir** — a second contamination shape. A build script resolving inputs through compile-time `env!("CARGO_MANIFEST_DIR")` bakes the compiling worktree's path into the cached build-script binary, which is cached per package id and survives into every sharing worktree. Symptom: `failed to read /…/worktrees/<some-other-tree>/…` naming a directory absent from your checkout. Fixed at the source; for a stale one, `rm -rf <target-dir>/*/build/<crate>-*` and rebuild. Note `cargo clean -p <crate>` from the repo ROOT is a **silent no-op** for the aube crates — not root workspace members, so it reports `Removed 0 files` and exits 0.
-- **Running the vendored aube test suite from the repo root drops its serial-execution pin.** `vendor/aube/.cargo/config.toml` sets `RUST_TEST_THREADS = "1"` because some aube-util tests mutate process env, and cargo discovers config from the **CWD, not `--manifest-path`** — so `cargo test --manifest-path vendor/aube/Cargo.toml …` from the root runs them in parallel and produces failures CI never sees. Run it as CI does: `(cd vendor/aube && cargo test …)`.
-
+- **A build script can pin an ABSOLUTE PATH into the shared dir** — a second contamination shape. A build script resolving inputs through compile-time `env!("CARGO_MANIFEST_DIR")` bakes the compiling worktree's path into the cached build-script binary, which is cached per package id and survives into every sharing worktree. Symptom: `failed to read /…/worktrees/<some-other-tree>/…` naming a directory absent from your checkout. Fixed at the source; for a stale one, `rm -rf <target-dir>/*/build/<crate>-*` and rebuild.
 ## The gates run on TWO profiles — budget for two dependency builds
 
 | Gate | Profile | CI line |

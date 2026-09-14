@@ -6,8 +6,7 @@ description: >-
   worktree to land a change, when you want to know what `.worktreeinclude` does
   or how to add an entry, or when cleaning up after a merge. Encodes the
   one-command setup (`nub scripts/new-worktree.ts <slug>` or `node …`) that bakes
-  in the proven recipe — worktree off origin/main (vendor/aube is plain in-tree
-  files now, no submodule init), the shared CARGO_TARGET_DIR
+  in the proven recipe — worktree off origin/main, the shared CARGO_TARGET_DIR
   (`~/.cache/nub/shared-target`) that all worktrees reuse, and applying
   `.worktreeinclude` — plus the eagerly-pull-the-shared-tree discipline and the
   safe cleanup path. Pairs with the `dev-loop` build skill.
@@ -31,7 +30,7 @@ node scripts/new-worktree.ts <slug>
 It performs the proven recipe, in order:
 
 1. `git fetch origin` (skip with `--no-fetch`).
-2. `git worktree add ~/.cache/nub/worktrees/<slug> -b <slug> origin/main` — tracked files only; the shared tree is untouched. `vendor/aube` is plain in-tree files, checked out by this step with no submodule init. (Non-temp location: not auto-swept like `/tmp`, out of the repo dir, same volume so APFS clonefile stays fast.)
+2. `git worktree add ~/.cache/nub/worktrees/<slug> -b <slug> origin/main` — tracked files only; the shared tree is untouched. (Non-temp location: not auto-swept like `/tmp`, out of the repo dir, same volume so APFS clonefile stays fast.)
 3. Apply `.worktreeinclude` — copy/symlink the listed gitignored entries in.
 4. Pre-create + print the shared `CARGO_TARGET_DIR` (`~/.cache/nub/shared-target`).
 

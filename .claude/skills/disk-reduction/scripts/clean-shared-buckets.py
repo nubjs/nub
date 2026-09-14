@@ -4,7 +4,7 @@
 A bucket is named shared-target-<key>, where <key> is a content hash of the
 depended-on crates (scripts/rust-build.sh). Only a NON-diverged worktree resolves
 to a bucket -- one that diverges a depended-on crate builds into a private
-$root/target instead. So every feature branch that touches vendor/aube or a
+$root/target instead. So every feature branch that touches vendor/libsui or a
 non-leaf crate stops referencing its bucket the moment it diverges, and main
 advancing orphans whatever key it moved off. Buckets therefore accumulate far
 faster than rust-build.sh's own 14-day mtime GC retires them.
@@ -41,7 +41,7 @@ LEAVES = [
 # `runtime` rides along for the same reason it joined rust-build.sh: a dev
 # binary resolves runtime/*.cjs from the tree that compiled nub-core, so the
 # hash covers it and a runtime-divergent worktree isolates.
-CRATE_PATHS = ["vendor/aube", "crates", "runtime"]
+CRATE_PATHS = ["vendor/libsui", "crates", "runtime"]
 BUCKET_RE = re.compile(r"^shared-target-([0-9a-f]+)$")
 
 

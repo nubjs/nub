@@ -45,7 +45,7 @@ git log "$PREV"..HEAD --oneline               # the full changeset since the las
 - **Confirm docs are current** — a shipped feature whose `site/content/docs/` lags is a release blocker.
 - **Invoke the `type-declarations` skill and complete its mandatory release audit.** Reconcile every user-visible runtime change in `$PREV..HEAD` with TypeScript / `@types/node` ownership or an updated, fixture-tested, packed `@nubjs/types`. Missing or unverified declarations are a release blocker.
 - Pick the next version: patch-bump `$PREV`, dropping the leading `v`.
-- Keep the `git log` output — raw material for Steps 4 and 5. For `vendor/aube/**` changes, note the user-facing effect, not the diff.
+- Keep the `git log` output — raw material for Steps 4 and 5. For an engine pin move (the `rev` on the `nubjs/pnpm` dependencies in `crates/nub-cli/Cargo.toml`), note the user-facing effect of the fork commits it takes in, not the diff.
 
 ## Step 2 — Version bump
 
@@ -81,7 +81,7 @@ git push origin v<ver>    # the single tag: THIS is what triggers the publish
 
 Post-merge, fast-forward the shared tree so it tracks origin: `git -C <shared-tree> pull --ff-only` (the eagerly-pull rule, AGENTS.md "Default to a PR flow" — the shared checkout otherwise drifts behind as PRs land).
 
-The workflow runs, in order: `verify` (version + tag-match), `primer`, `test` + `conformance` + `glibc-floor-guard` + `pre-publish-gate`, `build` (8 platforms), `stable-immutable-release` (32 assets), `publish-npm` (10 packages, idempotent), `github-release` (stable presentation), then the post-publish fan-out — `test-install` / `test-install-musl`, `docker`, `bump-homebrew-tap`, `submit-winget`.
+The workflow runs, in order: `verify` (version + tag-match), `test` + `conformance` + `glibc-floor-guard` + `pre-publish-gate`, `build` (8 platforms), `stable-immutable-release` (32 assets), `publish-npm` (10 packages, idempotent), `github-release` (stable presentation), then the post-publish fan-out — `test-install` / `test-install-musl`, `docker`, `bump-homebrew-tap`, `submit-winget`.
 
 **Watch CI through the `ci-watch` skill until it returns a terminal verdict.** Keep the selected monitor in a tracked persistent process or an owned live agent; never detach `gh run watch` and infer completion from a log. The release is not done until `stable-immutable-release`, `publish-npm`, and `github-release` are green.
 

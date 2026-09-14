@@ -108,4 +108,4 @@ Short-lived install/measurement processes reap themselves. The hazard is a **lon
 
 ## Internal decomposition
 
-When a comparative number raises "WHY is nub's phase X slow?", switch to [`pm-perf-tracing`](../pm-perf-tracing/SKILL.md): `RUST_LOG=debug nub install` for the `phase:resolve/fetch/link` split, and the gated `AUBE_DIAG_FILE` per-file linker strategy tally.
+When a comparative number raises "WHY is nub's phase X slow?", switch to [`pm-perf-tracing`](../pm-perf-tracing/SKILL.md): `RUST_LOG=pacquet::install::phase=info nub install` for the per-phase split, and `pacquet::package_import_method=info` for the link tier the install used.

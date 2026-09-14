@@ -102,7 +102,7 @@ Any of the packages above could be fixed upstream this way. `electron-builder` (
 
 3. **`.store` is not universal.** `@percy/cli`, `blitz`, `@talend/icons`, and `app-root-path`'s global edge hardcode only `.pnpm` and would still misresolve under `.store`. These are lower download and/or narrow impact — Percy plugin discovery; `app-root-path`'s local path is fine. Naming the store `.pnpm` would fix them, but masquerades as pnpm and risks confusing real pnpm and `which-pm`-style detection tooling that keys on `node_modules/.pnpm`. Not recommended.
 
-4. **The universal fix is upstream and nub already enables it.** All of these break because they use `process.cwd()` plus a marker instead of `INIT_CWD` or a generic `node_modules`-segment split. Nub already sets `INIT_CWD` correctly for lifecycle scripts (`vendor/aube/crates/aube-scripts/src/lib.rs`, `…/aube/src/commands/run.rs`), matching pnpm, so any of these packages could fix themselves robustly with no nub change. That is the durable path — upstream issues/PRs recognizing `.nub` or preferring `INIT_CWD` — but it is out of nub's control.
+4. **The universal fix is upstream and nub already enables it.** All of these break because they use `process.cwd()` plus a marker instead of `INIT_CWD` or a generic `node_modules`-segment split. Nub sets `INIT_CWD` for `nub run` (`crates/nub-core/src/workspace/scripts.rs`) and, through the embedded pnpm engine, for lifecycle scripts, so any of these packages could fix themselves robustly with no nub change. That is the durable path — upstream issues/PRs recognizing `.nub` or preferring `INIT_CWD` — but it is out of nub's control.
 
 **Net:** `.store` is a low-cost, brand-clean rename that fixes the git-hooks class and rides the neutral convention. A residual `.pnpm`-only tail (Percy, blitz, the `app-root-path` global edge) remains and is best closed upstream.
 
@@ -115,7 +115,7 @@ The exact package versions, files and functions read, plus the code-search queri
 - `app-root-path@3.1.0` `lib/resolve.js` — `isInstalledWithPNPM` + `getFirstPartFromNodeModules`.
 - `@percy/cli@1.32.3` `dist/commands.js` `getSiblings` — `root.indexOf('.pnpm')`.
 - The `.store` provenance: npm's isolated-mode `isolated-reifier.js`; the `pnpmStoreFolder` default in `yarn-4.10.3.cjs`; Deno's `cli/tools/clean.rs` (`.deno`).
-- Nub store name at the time of the scan: `crates/nub-cli/src/pm_engine/present.rs` (`virtualStoreDir=node_modules/.nub`); the engine default `.aube` in `vendor/aube/crates/aube-linker/src/lib.rs`. That same file now sets `virtualStoreDir=node_modules/.store`.
+- Nub store name at the time of the scan: `virtualStoreDir=node_modules/.nub`, set in `crates/nub-cli/src/pm_engine/present.rs` over the default `.aube` of the engine Nub then vendored. The store is now `node_modules/.store`, the `PROJECT_VIRTUAL_STORE_LEAF` that `crates/nub-cli/src/pm_engine/mod.rs` hands the embedded pnpm engine.
 - GitHub code search (`gh search code "indexOf('.pnpm')"`, `"includes('.pnpm')"`) corroborated the narrow real-world set.
 
 ## Changelog
@@ -125,3 +125,4 @@ Every revision to this document, with the date and what changed.
 - 2026-08-28 — Recorded that the recommended `.nub` → `.store` rename has shipped, and corrected the store name in the evidence list.
 - 2026-07-30 — Initial publication.
 - 2026-07-07 — Initial write-up. Scanned the git-hooks/lifecycle tools + find-project-root utility libs + GitHub code search. Established that `.store` is the vendor-neutral isolated-store name (npm RFC-0042 / Yarn-pnpm-linker / npminstall), that the marker-hardcoding class is small and git-hooks-dominated, that `.store` fixes `simple-git-hooks`+`bun-git-hooks` but not the `.pnpm`-only tools (`@percy/cli`, `blitz`, `app-root-path` global edge), and that the durable fix is upstream `INIT_CWD` adoption (which nub already enables).
+- 2026-09-14 — Pointed the `INIT_CWD` and store-name evidence at `crates/nub-core/src/workspace/scripts.rs`, the embedded pnpm engine and `crates/nub-cli/src/pm_engine/mod.rs`; the vendored engine files those citations named are no longer in the tree.
