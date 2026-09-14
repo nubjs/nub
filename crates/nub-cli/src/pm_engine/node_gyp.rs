@@ -48,9 +48,9 @@ const BINARY_NAMES: &[&str] = &["node-gyp"];
 /// nub's PM cache root. `pm` is the leaf the engine's `cache_namespace`
 /// ("nub/pm") appends, so this addresses the same tree `nub pm cache` lists.
 fn tool_root() -> Result<PathBuf> {
-    let cache = nub_core::node::discovery::cache_dir()
+    let cache = super::pm_cache_dir()
         .context("could not locate nub's cache directory (no $HOME / $XDG_CACHE_HOME)")?;
-    Ok(cache.join("pm").join("tools").join("node-gyp"))
+    Ok(cache.join("tools").join("node-gyp"))
 }
 
 /// The platform's accepted `node-gyp` shim filename in `bin_dir`, if any. On

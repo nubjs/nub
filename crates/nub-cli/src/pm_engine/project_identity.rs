@@ -18,7 +18,8 @@
 //! run inside a workspace member has to reach the same verdict as the same
 //! command run at the root. The nearest ancestor carrying ANY marker decides:
 //! a nub project nested inside a pnpm monorepo is nub's, and a pnpm project
-//! nested inside a nub one is pnpm's.
+//! nested inside a nub one is pnpm's. The one bound on that walk is nub's own
+//! PM cache root, which an install running inside must not escape (#489).
 
 use crate::project_config::InstallConfig;
 use anyhow::{Result, bail};
@@ -39,9 +40,28 @@ pub(crate) enum ProjectIdentity {
 /// probes and one small manifest read per ancestor, and it stops at the
 /// first directory that carries a marker.
 pub(crate) fn detect(start_dir: &Path) -> ProjectIdentity {
+    detect_within(start_dir, super::pm_cache_clamp(start_dir).as_deref())
+}
+
+/// Pure core of [`detect`] (unit-tested without touching the environment).
+///
+/// `clamp`, when set, is the last directory the walk may consider — nub's own
+/// PM cache root. An install running inside that root is nub-internal by
+/// construction (the node-gyp bootstrap's nested install, a dlx scratch dir),
+/// so it must not inherit an identity from whatever sits above the cache
+/// (#489). Unclamped the failure is silent rather than loud: a
+/// `pnpm-lock.yaml` anywhere above `~/.cache` hands the internal install pnpm's
+/// profile, which then reads pnpm's configuration and writes `pnpm-lock.yaml`
+/// into nub's own cache.
+fn detect_within(start_dir: &Path, clamp: Option<&Path>) -> ProjectIdentity {
     for dir in start_dir.ancestors() {
         if let Some(identity) = identity_of_dir(dir) {
             return identity;
+        }
+        // Checked after `identity_of_dir`, so the cache root itself still gets
+        // to declare an identity — it is the level ABOVE it that is off limits.
+        if clamp == Some(dir) {
+            break;
         }
     }
     ProjectIdentity::Nub
@@ -263,5 +283,40 @@ mod tests {
             .expect("a nub project is exactly where an install block belongs");
         check_install_block(ProjectIdentity::Pnpm, path, &InstallConfig::default())
             .expect("a pnpm project that writes no install settings has nothing to reconcile");
+    }
+
+    /// An install inside nub's PM cache is nub-internal by construction, so a
+    /// pnpm marker above the cache must not reach it (#489).
+    ///
+    /// Both halves matter and the unclamped one is the control: without it the
+    /// clamped assertion passes whenever the fixture fails to confer pnpm
+    /// identity for some unrelated reason. Driving [`detect_within`] rather
+    /// than [`detect`] keeps the clamp explicit instead of resolving it from
+    /// `$XDG_CACHE_HOME`, which is process-global and would make this test race
+    /// its siblings under cargo's thread pool.
+    #[test]
+    fn the_cache_root_stops_an_identity_walk() {
+        let outer = tempdir().unwrap();
+        write(
+            &outer.path().join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n",
+        );
+        let cache_root = outer.path().join("cache").join("nub").join("pm");
+        let internal = cache_root.join("tools").join("node-gyp");
+        write(
+            &internal.join("package.json"),
+            r#"{"name":"node-gyp-host"}"#,
+        );
+
+        assert_eq!(
+            detect_within(&internal, Some(&cache_root)),
+            ProjectIdentity::Nub,
+            "a marker above the cache root must not claim an internal install"
+        );
+        assert_eq!(
+            detect_within(&internal, None),
+            ProjectIdentity::Pnpm,
+            "unclamped the same tree DOES inherit pnpm, which is what the clamp prevents"
+        );
     }
 }

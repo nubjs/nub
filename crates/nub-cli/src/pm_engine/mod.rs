@@ -1207,22 +1207,11 @@ fn resolve_identity_walk_up(
     strictness: IdentityStrictness,
 ) -> Result<Option<DetectedLockfile>> {
     use aube_lockfile::ResolvedLockfileKind;
-    // The walk never escapes nub's own PM cache root. Installs running inside
-    // it are nub-internal by construction (the node-gyp bootstrap's recursive
-    // install, dlx scratch dirs) and must not inherit identity from whatever
-    // sits above the cache — unbounded, a first-run bootstrap dir (manifest,
-    // no lockfile yet) walked into $HOME and hard-failed the outer install on
-    // unrelated-lockfile ambiguity (#489). The root is kept in whichever
-    // spelling is an ancestor of `cwd` (raw, or canonicalized for the
-    // symlinked-temp-dir case) so the containment test stays consistent as
-    // `dir` pops.
-    let clamp = aube_store::dirs::cache_dir().and_then(|root| {
-        if cwd.starts_with(&root) {
-            return Some(root);
-        }
-        let canon = std::fs::canonicalize(&root).ok()?;
-        cwd.starts_with(&canon).then_some(canon)
-    });
+    // The walk never escapes nub's own PM cache root (#489) — unbounded, a
+    // first-run bootstrap dir (manifest, no lockfile yet) walked into $HOME and
+    // hard-failed the outer install on unrelated-lockfile ambiguity. See
+    // [`pm_cache_clamp`] for why the two identity walks share one root.
+    let clamp = pm_cache_clamp(cwd);
     let mut dir = cwd.to_path_buf();
     for _ in 0..16 {
         match aube_lockfile::resolve_project_lockfile_kind(&dir) {
@@ -2152,6 +2141,42 @@ fn is_truly_fresh_project(cwd: &Path, detected: Option<&DetectedLockfile>) -> bo
 fn nub_lockfile_present(dir: &Path) -> bool {
     dir.join(use_align::NUB_LOCKFILE).is_file()
         || dir.join(use_align::NUB_LEGACY_LOCKFILE).is_file()
+}
+
+/// Nub's PM cache root — the `pm` namespace under
+/// [`nub_core::node::discovery::cache_dir`], so `$XDG_CACHE_HOME/nub/pm` or
+/// `~/.cache/nub/pm`.
+///
+/// The one place the namespace is spelled. It is the root every PM-owned cache
+/// tier hangs off (the node-gyp bootstrap's tool dir, dlx scratch), and it is
+/// also the CLAMP for the identity walk: an install running inside it is
+/// nub-internal by construction and must not inherit identity from whatever sits
+/// above the cache (#489). Both readings have to name the same directory, which
+/// is why they share this rather than each joining `pm` themselves.
+pub(crate) fn pm_cache_dir() -> Option<PathBuf> {
+    nub_core::node::discovery::cache_dir().map(|cache| cache.join("pm"))
+}
+
+/// The PM cache root to stop an identity walk at, or `None` when `cwd` is not
+/// inside it and no clamp applies.
+///
+/// Shared by BOTH walks that can reach that state — [`resolve_identity_walk_up`]
+/// and [`project_identity::detect`] — because a clamp naming a different
+/// directory from the cache the install actually uses is no clamp at all. The
+/// two diverged once and only the config-read walk was guarded, which left the
+/// install path inheriting a pnpm identity from above the cache silently.
+///
+/// The SPELLING is the subtle part. A temp dir is a symlink on macOS, so the
+/// raw root and its canonicalization are different strings and at most one of
+/// them is a prefix of `cwd` — the containment test has to keep using whichever
+/// one matched, or it stops holding as the walk pops.
+pub(crate) fn pm_cache_clamp(cwd: &Path) -> Option<PathBuf> {
+    let root = pm_cache_dir()?;
+    if cwd.starts_with(&root) {
+        return Some(root);
+    }
+    let canon = std::fs::canonicalize(&root).ok()?;
+    cwd.starts_with(&canon).then_some(canon)
 }
 
 /// Nub's XDG data root (`$XDG_DATA_HOME/nub`, `%LOCALAPPDATA%\nub` on Windows,
