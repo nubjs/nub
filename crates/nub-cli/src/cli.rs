@@ -2348,6 +2348,11 @@ fn run_nub() -> Result<i32> {
         if is_node_passthrough {
             run_file_with_compat(&rest, compat)
         } else {
+            if first == "self-update" {
+                bail!(
+                    "nub: \"self-update\" is not a nub command — nub updates itself with `nub upgrade`"
+                );
+            }
             // No magic auto-run (deliberate divergence from pnpm/bun, which run
             // `<pm> dev` as the dev script). But when the bareword is almost
             // certainly a script — it's defined in the local package.json#scripts,

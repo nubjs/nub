@@ -285,6 +285,9 @@ fn merge_sources(sources: &Sources) -> Result<Map<String, Value>> {
         if !known.contains(key) {
             bail!("install.settings.{key} is not a setting pnpm-workspace.yaml accepts");
         }
+        if let Some(advice) = nub_settings::unsupported_advice(key) {
+            bail!("install.settings.{key} is not a setting nub reads. {advice}");
+        }
         check(key, value).map_err(|error| anyhow!("install.settings.{key}: {error}"))?;
         merged.insert(key.clone(), value.clone());
     }
@@ -391,7 +394,7 @@ fn fill_defaults(merged: &mut Map<String, Value>, cache_root: Option<&Path>) {
     // tells the user how to install it. nub ships the engine and updates it
     // through `nub upgrade`, so the advice would name a release nub does not
     // take and a command nub does not have.
-    merged.entry("updateNotifier").or_insert(Value::Bool(false));
+    merged.insert("updateNotifier".to_owned(), Value::Bool(false));
     // A sibling named by a plain semver range is the workspace member, not a
     // package of the same name on the registry. npm, yarn and bun all resolve
     // it that way, and a project that reached nub from any of them would
@@ -723,6 +726,12 @@ fn lift(
     if !known.contains(&setting) {
         return Ok(());
     }
+    // A setting `config set` refuses stays out of the engine from the sources
+    // nub shares with npm too. The line is skipped rather than refused, since
+    // failing an install over another tool's file would be worse.
+    if !nub_settings::is_supported(&setting) {
+        return Ok(());
+    }
     let value = match raw {
         Raw::Scalar(raw) => typed(&setting, &raw).with_context(|| {
             format!("{source} sets `{key}` to `{raw}`, which is not a value pnpm accepts for it")
@@ -1039,6 +1048,38 @@ mod tests {
         assert_eq!(
             merge(&sources).expect("merge")["nodeLinker"],
             json!("hoisted")
+        );
+    }
+
+    /// A setting `config set` refuses reaches the engine from no source. The
+    /// files nub shares with npm skip the line; `nub.jsonc` is nub's own, so
+    /// there the same key is an error naming what to use instead.
+    #[test]
+    fn a_refused_setting_reaches_the_engine_from_no_source() {
+        let install = InstallConfig::default();
+        let mut shared = sources(&install);
+        shared.npmrc = vec![(
+            PathBuf::from("/app/.npmrc"),
+            "update-notifier=true\nruntime-on-fail=download\nuse-stderr=true\n".to_owned(),
+        )];
+        shared.env = env(&[("npm_config_runtime_on_fail", "download")]);
+
+        let merged = merge(&shared).expect("merge");
+
+        assert_eq!(merged["updateNotifier"], json!(false));
+        assert!(!merged.contains_key("runtimeOnFail"), "{merged:?}");
+        // The positive control: a setting nub consumes arrives from the same file.
+        assert_eq!(merged["useStderr"], json!(true));
+
+        let install = InstallConfig {
+            settings: settings(json!({ "runtimeOnFail": "download" })),
+            ..Default::default()
+        };
+        let error = merge(&sources(&install)).expect_err("a refused key in nub.jsonc");
+        let error = error.to_string();
+        assert!(
+            error.contains("install.settings.runtimeOnFail") && error.contains("nub node install"),
+            "{error}"
         );
     }
 

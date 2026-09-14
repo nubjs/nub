@@ -12,7 +12,8 @@ use std::ffi::OsString;
 /// Verbs nub serves itself, under the engine's canonical name for each.
 ///
 /// `run`, `exec`, `dlx`, `create` and `init` are nub's own commands. `env`
-/// is a pnpm surface nub does not offer at all. The script shortcuts are
+/// is a pnpm surface nub does not offer at all, and neither is `self-update`,
+/// which installs a pnpm: nub updates itself with `upgrade`. The script shortcuts are
 /// nub's standing refusal of an implicit `nub <script>`: the engine would
 /// run the script, nub answers with `nub run <script>` instead, and
 /// `install-test` is the same shortcut with an install in front of it.
@@ -46,6 +47,7 @@ const HOST_VERBS: &[&str] = &[
     "get",
     "set",
     "env",
+    "self-update",
     "test",
     "start",
     "stop",

@@ -23,17 +23,8 @@ pub use meta::{SettingMeta, all, find, is_supported, unsupported_advice, unsuppo
 /// no longer spells a real setting is a SILENT no-op — the filter simply never
 /// matches.
 pub const UNSUPPORTED_SETTINGS: &[(&str, &str)] = &[
-    // The flag that lets a pre-run auto-install skip a repeat. nub runs
-    // scripts through its own frontend and checks dependency freshness in
-    // nub-cli's `verify_deps`.
-    (
-        "optimisticRepeatInstall",
-        "nub does not auto-install before a run, so there is no repeat install to skip. \
-             Use `verifyDeps` in nub.jsonc, or `verify-deps-before-run` in .npmrc, to choose \
-             what happens when dependencies are stale.",
-    ),
-    // `commands::run`, the engine's script runner. nub runs scripts through
-    // its own frontend (`cli::run_single_script`), which runs `pre`/`post`
+    // Read only by the engine's script runner. `run` is a verb nub keeps, and
+    // its frontend (`cli::run_single_script`) runs `pre`/`post`
     // unconditionally — the DECIDED behavior, not an oversight: the run docs
     // promise `npm run` semantics for the hooks and name `--ignore-scripts`
     // as the way to skip them. So the key can never decide anything here,
@@ -50,17 +41,19 @@ pub const UNSUPPORTED_SETTINGS: &[(&str, &str)] = &[
         "nub does not read this setting. Name the package in `install.linker.eject` \
              in nub.jsonc to keep it out of the shared store.",
     ),
-    // `update_check::check_and_notify`, reached from the engine's own CLI
-    // dispatcher and `doctor`. nub's self-update is `nub upgrade`
-    // (`self_update_enabled: false`), which never runs during another verb.
+    // The engine's check for a newer pnpm. nub updates itself through
+    // `nub upgrade`, so the notice names a release and a command that do not
+    // update nub.
     (
         "updateNotifier",
         "nub does not check for its own updates while running a command. Run `nub upgrade` \
              when you want a new version.",
     ),
-    // `runtime::RuntimeSettings::from_ctx`. `resolve_context` returns the
-    // PATH fallback before consuming any of them under
-    // `runtime_switching: false` — nub owns Node provisioning.
+    // Node provisioning is nub's (`nub node`). `runtimeInstaller` names no
+    // pnpm 12 setting. `runtimeOnFail: download` does: the engine turns
+    // `devEngines.runtime` into a Node download inside the dependency graph,
+    // beside the Node nub provisions from the same field, so `host_settings`
+    // keeps it out of every source as well as `config set` refusing it.
     (
         "runtimeInstaller",
         "nub provisions Node itself rather than delegating to another installer. \
@@ -71,14 +64,10 @@ pub const UNSUPPORTED_SETTINGS: &[(&str, &str)] = &[
         "nub provisions Node itself and installs a missing pin on demand. \
              Manage versions with `nub node install` and `nub node pin`.",
     ),
-    (
-        "nodeDownloadMirrors",
-        "nub provisions Node itself and does not read the engine's download mirrors. \
-             Install the version another way and `nub node pin` it.",
-    ),
-    // `startup::StartupSettings` / `package_manager_guard_mode`, built by
-    // the engine's own CLI dispatcher and by self-version switching. nub
-    // resolves the `packageManager` pin in `nub_core::pm::resolve`.
+    // None of the three is a pnpm 12 setting. Its replacement, `pmOnFail`, is
+    // read only when the embedder manages package-manager versions, and nub's
+    // does not. nub resolves the `packageManager` pin in
+    // `nub_core::pm::resolve`.
     (
         "packageManagerStrict",
         "nub does not enforce another package manager's pin. `nub pm pin` records the \
@@ -94,23 +83,10 @@ pub const UNSUPPORTED_SETTINGS: &[(&str, &str)] = &[
         "nub does not download or switch package-manager versions. `nub pm pin` records \
              the project's manager, and `nub upgrade` updates nub itself.",
     ),
-    // `commands::npm_fallback`, the engine's shell-out dispatcher for verbs
-    // it has no implementation of. Every verb nub routes runs in-process.
+    // Not a pnpm 12 setting: the engine has no npm shell-out to point it at.
     (
         "npmPath",
         "nub never shells out to npm; every package-manager verb runs in-process.",
-    ),
-    // `commands::deploy`, which `install_family` refuses as a stub.
-    (
-        "deployAllFiles",
-        "nub does not implement `deploy`. For now: pnpm deploy.",
-    ),
-    // Read by the engine's own CLI dispatcher to pick an output stream. nub
-    // owns its output routing.
-    (
-        "useStderr",
-        "nub chooses its own output streams. Redirect the command's stdout or stderr \
-             in your shell instead.",
     ),
     // A parity no-op in the engine ITSELF, not just under nub: accepted and
     // wired to nothing. It carries the standing note in settings.toml that

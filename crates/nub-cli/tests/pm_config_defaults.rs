@@ -145,21 +145,19 @@ fn no_known_token_survives_into_the_listing() {
 /// buy is the advice check: an entry whose advice pointed at something that does
 /// not exist would still refuse, and refuse looking correct.
 const NOT_CONSUMED: &[(&str, &str)] = &[
-    // The engine's pre-run auto-install gate (nub runs scripts itself).
-    ("optimisticRepeatInstall", "verify"),
-    // Its script runner (nub's own frontend always runs pre/post).
+    // Read only by the engine's script runner; nub keeps `run`.
     ("enablePrePostScripts", "--ignore-scripts"),
-    // Its self-update notifier (`self_update_enabled: false`).
+    // The engine's check for a newer pnpm; nub updates through `nub upgrade`.
     ("updateNotifier", "nub upgrade"),
-    // Its Node provisioning (`runtime_switching: false`).
+    // Not a pnpm 12 setting: Node provisioning is nub's.
     ("runtimeInstaller", "nub node install"),
-    // Its package-manager-version guard, built only by its own CLI dispatcher.
+    // Read by the engine, which would download Node into the dependency graph.
+    ("runtimeOnFail", "nub node install"),
+    // Not a pnpm 12 setting: the package-manager pin is nub's.
     ("managePackageManagerVersions", "nub pm pin"),
-    // Its npm shell-out dispatcher (every nub verb runs in-process).
+    // Not a pnpm 12 setting: nothing shells out to npm.
     ("npmPath", "in-process"),
-    // A verb nub stubs out.
-    ("deployAllFiles", "deploy"),
-    // A parity no-op in the engine itself, wired to nothing.
+    // Declared by the engine and read by nothing.
     ("useBetaCli", "beta-gated"),
     // The previous engine's per-package eject list; nub.jsonc carries it.
     ("diskMaterializePackages", "install.linker.eject"),
@@ -206,9 +204,9 @@ fn config_set_refuses_a_setting_nub_does_not_consume() {
     }
     // The alias surface too: the profile hangs its advice on the canonical name,
     // and the lookup has to reach it from an `.npmrc` spelling as well.
-    let (_, stderr, code, _) = config(&["set", "optimistic-repeat-install", "true"]);
+    let (_, stderr, code, _) = config(&["set", "runtime-on-fail", "download"]);
     assert_ne!(code, 0, "the kebab alias must refuse too: {stderr}");
-    assert!(stderr.contains("verify"), "{stderr}");
+    assert!(stderr.contains("nub node install"), "{stderr}");
 }
 
 /// A setting nub does not consume is absent from `config list --all` too.
@@ -296,24 +294,20 @@ fn config_set_still_writes_a_setting_nub_does_consume() {
 fn a_stale_key_from_an_older_nub_can_still_be_deleted() {
     let project = fixture("stale");
     let npmrc = project.join(".npmrc");
-    std::fs::write(
-        &npmrc,
-        "optimisticRepeatInstall=true\nauto-install-peers=false\n",
-    )
-    .unwrap();
+    std::fs::write(&npmrc, "useBetaCli=true\nauto-install-peers=false\n").unwrap();
 
     let (listing, _, code, _) = spawn_in(&project, &["list"]);
     assert_eq!(code, 0);
     assert!(
-        listing.contains("optimisticRepeatInstall=true"),
+        listing.contains("useBetaCli=true"),
         "the user's own .npmrc line must be echoed, not hidden: {listing}"
     );
 
-    let (_, stderr, code, _) = spawn_in(&project, &["delete", "optimisticRepeatInstall"]);
+    let (_, stderr, code, _) = spawn_in(&project, &["delete", "useBetaCli"]);
     assert_eq!(code, 0, "`config delete` must still work: {stderr}");
     let after = std::fs::read_to_string(&npmrc).unwrap();
     assert!(
-        !after.contains("optimisticRepeatInstall"),
+        !after.contains("useBetaCli"),
         "the stale key survived the delete: {after:?}"
     );
     // Control: the delete was surgical, not a truncation of the whole file.

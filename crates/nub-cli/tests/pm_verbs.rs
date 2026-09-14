@@ -900,6 +900,22 @@ fn excluded_verbs_answer_honestly_not_with_stub_text() {
         );
     }
 
+    // pnpm's `self-update` installs a pnpm. Routed to the engine, it put one in
+    // the global bin directory and reported updating pnpm; nub's own update
+    // is `upgrade`.
+    let self_update = run_nub(&dir, &["self-update"]);
+    assert_ne!(
+        self_update.code,
+        0,
+        "self-update must refuse: {}",
+        self_update.combined()
+    );
+    assert!(
+        self_update.stderr.contains("nub upgrade"),
+        "self-update must name nub's own update: {}",
+        self_update.stderr
+    );
+
     // The claim the name carries, over every one of them.
     for verb in ["recursive", "clean", "purge", "deploy", "sbom"] {
         let out = run_nub(&dir, &[verb]);
