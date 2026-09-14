@@ -168,6 +168,24 @@ nub_step() {
   return $code
 }
 
+# carry_patched_dependencies <proj> — move package.json's patchedDependencies,
+# where a nub project records a patch, into pnpm-workspace.yaml, the only place
+# pnpm reads them from.
+carry_patched_dependencies() {
+  (cd "$1" && node -e '
+    const fs = require("fs");
+    const manifest = JSON.parse(fs.readFileSync("package.json", "utf8"));
+    const patched = manifest.patchedDependencies;
+    if (!patched) process.exit(0);
+    delete manifest.patchedDependencies;
+    fs.writeFileSync("package.json", JSON.stringify(manifest, null, 2) + "\n");
+    const entries = Object.entries(patched).map(([key, file]) => "  " + JSON.stringify(key) + ": " + JSON.stringify(file));
+    const yaml = fs.existsSync("pnpm-workspace.yaml") ? fs.readFileSync("pnpm-workspace.yaml", "utf8") : "";
+    const base = yaml === "" || yaml.endsWith("\n") ? yaml : yaml + "\n";
+    fs.writeFileSync("pnpm-workspace.yaml", base + ["patchedDependencies:", ...entries].join("\n") + "\n");
+  ')
+}
+
 # declare_pnpm <proj> — make the project a pnpm project by declaring the pin.
 declare_pnpm() {
   (cd "$1" && node -e '
@@ -262,6 +280,7 @@ leg_nub() {
     cp "$HERE/fixtures/$fixture/pnpm-workspace.yaml" "$judge/"
   fi
   declare_pnpm "$judge"
+  carry_patched_dependencies "$judge"
   judge_pnpm "$log" "$judge" "$fixture" "nub.lock as pnpm-lock.yaml"
 }
 

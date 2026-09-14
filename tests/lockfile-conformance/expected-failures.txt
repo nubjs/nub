@@ -2,4 +2,3 @@
 # This list must SHRINK. A listed scenario that passes fails the run
 # (XPASS-STALE), so the fix and the entry's deletion land in one commit.
 
-patched nub `nub patch-commit` refuses before writing the patch file — the engine's patchedDependencies writer is declined because nub.jsonc is not its to write, and no host writer exists yet, so the hint names a patches/*.patch that was never created. Needs the fork seam (an Embedder patched-dependencies writer, modelled on allow_builds_writer) writing package.json patchedDependencies.

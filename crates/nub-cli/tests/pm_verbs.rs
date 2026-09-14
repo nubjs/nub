@@ -219,10 +219,11 @@ fn add_then_remove_round_trips_manifest_lockfile_and_node_modules() {
     );
 }
 
-/// The patch workflow round-trips: `patch` extracts into a nub-named edit
-/// dir and prints the rebranded patch-commit hint; `patch-commit` writes
-/// the `.patch` file, records `pnpm.patchedDependencies`, and re-links the
-/// edited content; `patch-remove` reverts all of it.
+/// The patch workflow round-trips in a nub project: `patch` extracts into an
+/// edit dir and prints the rebranded patch-commit hint; `patch-commit` writes
+/// the `.patch` file, records it in `package.json`'s own
+/// `patchedDependencies`, and re-links the edited content; `patch-remove`
+/// reverts all of it.
 #[test]
 #[ignore = "network: resolves + fetches is-positive@3.1.0 from the npm registry"]
 fn patch_workflow_round_trips_through_commit_and_remove() {
@@ -247,16 +248,16 @@ fn patch_workflow_round_trips_through_commit_and_remove() {
         "the follow-up hint must be rebranded: {}",
         patch.stdout
     );
-    // The edit dir is the nub-named default (printed path = real path).
+    // The hint quotes the edit dir it names.
     let edit_dir = patch
         .stdout
         .lines()
-        .find_map(|l| l.strip_prefix("You can now edit the following folder: "))
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("nub patch-commit '")?
+                .strip_suffix('\'')
+        })
         .unwrap_or_else(|| panic!("patch must print the edit dir: {}", patch.stdout));
-    assert!(
-        edit_dir.contains("nub-patch-is-positive"),
-        "default edit dir must be nub-named: {edit_dir}"
-    );
     let edited = Path::new(edit_dir).join("index.js");
     std::fs::write(&edited, "module.exports = () => 'patched';\n").unwrap();
 
@@ -269,8 +270,8 @@ fn patch_workflow_round_trips_through_commit_and_remove() {
     );
     let manifest = std::fs::read_to_string(dir.join("package.json")).unwrap();
     assert!(
-        manifest.contains("patchedDependencies") && manifest.contains("\"pnpm\""),
-        "patch-commit must record the entry under the pnpm namespace: {manifest}"
+        manifest.contains("\"patchedDependencies\"") && !manifest.contains("\"pnpm\""),
+        "patch-commit must record the entry in package.json's own field: {manifest}"
     );
     let linked = dir.join("node_modules/is-positive/index.js");
     assert!(

@@ -137,7 +137,8 @@ pub fn run_dlx_for_nubx(
     // incumbent's profile — including the one that would make a failed child
     // exit this process before the consent ledger below is written.
     flags.platform.warn();
-    let profile = super::pnpm_engine::dlx_profile()?;
+    let mut profile = super::pnpm_engine::dlx_profile()?;
+    profile.node_execpath = super::pnpm_engine::lifecycle_node_execpath();
     match pnpm_cli::run(nubx_dlx_argv(bin, args, flags), profile) {
         Ok(()) => Ok((0, true)),
         Err(report) => match pnpm_cli::dlx_child_exit_code(&report) {

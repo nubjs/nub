@@ -62,6 +62,11 @@ pub(super) const NUB: Embedder = Embedder {
     // A nub project keeps its overrides in `package.json`, which it reads, so
     // `link` records them there instead of refusing.
     overrides_writer: Some(record_overrides),
+    // `patchedDependencies` lives in `package.json` too, so `patch-commit` and
+    // `patch-remove` record there instead of refusing.
+    patched_dependencies_writer: Some(record_patched_dependencies),
+    // The Node a run resolves is not known here; `run` fills it in.
+    node_execpath: None,
     extract_observer: Some(super::phantom_hooks::extract_observer),
     materialize_policy: Some(super::phantom_hooks::materialize_policy),
     // nub is not finished when a dlx child is: `nubx` records the run-consent
@@ -221,6 +226,90 @@ fn record_overrides(dir: &std::path::Path, entries: &[(&str, &str)]) -> std::io:
     })
     .map_err(std::io::Error::other)?;
     Ok(())
+}
+
+/// `package.json`'s key for the patches a nub project applies.
+const PATCHED_DEPENDENCIES_FIELD: &str = "patchedDependencies";
+
+/// Record a `patch-commit` or `patch-remove` where a nub project reads it
+/// back: the neutral `patchedDependencies` field of its `package.json`.
+///
+/// The engine still writes and deletes the patch files; this records which
+/// selector each one applies to. An edit naming a file replaces the selector's
+/// entry, and one naming none drops it, leaving the rest alone.
+fn record_patched_dependencies(
+    dir: &std::path::Path,
+    edits: &[(&str, Option<&str>)],
+) -> std::io::Result<()> {
+    nub_core::pm::resolve::edit_root_manifest(dir, |manifest| {
+        if let Some(serde_json::Value::Object(patched)) =
+            manifest.get_mut(PATCHED_DEPENDENCIES_FIELD)
+        {
+            apply_patch_edits(patched, edits);
+            if patched.is_empty() {
+                manifest.shift_remove(PATCHED_DEPENDENCIES_FIELD);
+            }
+            return;
+        }
+        let mut patched = serde_json::Map::new();
+        apply_patch_edits(&mut patched, edits);
+        if !patched.is_empty() {
+            manifest.insert(
+                PATCHED_DEPENDENCIES_FIELD.to_owned(),
+                serde_json::Value::Object(patched),
+            );
+        }
+    })
+    .map_err(std::io::Error::other)?;
+    republish_patched_dependencies(edits);
+    Ok(())
+}
+
+/// Fold a patch edit into what this process answers with. Both commands
+/// install straight after recording it, on a fresh configuration, which would
+/// otherwise apply the patches as they stood before the edit.
+fn republish_patched_dependencies(edits: &[(&str, Option<&str>)]) {
+    let mut slot = HOST_SETTINGS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut settings = slot.map_or_else(Default::default, Clone::clone);
+    let patched = settings
+        .patched_dependencies
+        .get_or_insert_with(Default::default);
+    for (selector, file) in edits {
+        match file {
+            Some(file) => {
+                patched.insert((*selector).to_owned(), (*file).to_owned());
+            }
+            None => {
+                patched.shift_remove(*selector);
+            }
+        }
+    }
+    if patched.is_empty() {
+        settings.patched_dependencies = None;
+    }
+    *slot = Some(Box::leak(Box::new(settings)));
+}
+
+/// Apply each patch edit to the field: a file records the selector, none drops it.
+fn apply_patch_edits(
+    patched: &mut serde_json::Map<String, serde_json::Value>,
+    edits: &[(&str, Option<&str>)],
+) {
+    for (selector, file) in edits {
+        match file {
+            Some(file) => {
+                patched.insert(
+                    (*selector).to_owned(),
+                    serde_json::Value::String((*file).to_owned()),
+                );
+            }
+            None => {
+                patched.shift_remove(*selector);
+            }
+        }
+    }
 }
 
 /// Apply each override, replacing whatever the field said about that selector.
@@ -511,6 +600,18 @@ pub(super) fn session_prologue(cwd: &Path, compat: bool) -> Result<()> {
 /// stamp to name. Set once, before the engine runs.
 static LIFECYCLE_NODE_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
+/// The same Node's executable, for the engine to hand every script it spawns
+/// as `NODE` and `npm_node_execpath`. Left unset, the engine records the first
+/// `node` on `PATH` — the shim the augmentation below puts there, in a
+/// temporary directory that is gone once the run ends, and not a Node
+/// installation node-gyp can take headers from.
+static LIFECYCLE_NODE_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The Node this run's scripts run under, once the session prologue resolved one.
+pub(super) fn lifecycle_node_execpath() -> Option<&'static Path> {
+    LIFECYCLE_NODE_PATH.get().map(PathBuf::as_path)
+}
+
 /// Put nub's runtime augmentation on THIS process's environment, so every
 /// lifecycle script the engine spawns inherits it.
 ///
@@ -545,6 +646,10 @@ fn apply_lifecycle_augmentation(cwd: &Path, compat: bool) -> Result<()> {
     // here rather than re-discovered at record time, which could name a
     // different Node and stamp a lie.
     let _ = LIFECYCLE_NODE_VERSION.set(node.version.to_string());
+    // The fallback names no file, only the bare word `node`.
+    if node.path.is_absolute() {
+        let _ = LIFECYCLE_NODE_PATH.set(node.path.clone().into_std_path_buf());
+    }
     let mut runtime = crate::project_config::runtime_config()?;
     let runtime_node_options = crate::cli::lifecycle_node_options(&mut runtime, &node)?;
     let runtime_json = crate::cli::runtime_config_json(&runtime)?;
@@ -683,8 +788,11 @@ pub(crate) fn run(mut argv: Vec<std::ffi::OsString>) -> Result<i32> {
     // The engine's grammar names the command, so `ci`'s aliases arrive as `ci`.
     let command = pnpm_cli::command_name(&argv);
     let clean_install = command.as_deref() == Some("ci");
-    let embedder = profile(selection(), &cwd, clean_install)?;
+    let mut embedder = profile(selection(), &cwd, clean_install)?;
     session_prologue(&cwd, false)?;
+    // In a pnpm project too: nub resolves the Node either way, and pnpm hands
+    // scripts a real Node rather than a shim.
+    embedder.node_execpath = lifecycle_node_execpath();
     // The engine's own entry point installs this before it can print. It
     // drops each cause the level above already states in full, so a host
     // that leaves miette at its default renders chains the engine collapses

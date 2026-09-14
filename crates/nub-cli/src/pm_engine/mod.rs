@@ -684,8 +684,10 @@ fn pnpm_user_agent(declared: Option<(String, Option<String>)>) -> String {
 /// `node_execpath` is the resolved/provisioned Node binary; it pins
 /// `npm_node_execpath` so node-gyp builds against the project's Node even when
 /// no shim is set up (re-entrant / broken install). The shim dir (when present)
-/// fronts PATH and backs `$NODE` so a bare `node` or `$NODE child.js` in a
-/// build script re-enters nub augmented — identical to `nub run`'s spawn env.
+/// fronts PATH so a bare `node` in a build script re-enters nub augmented. A
+/// script the engine spawns has `NODE` and `npm_node_execpath` replaced by the
+/// profile's `node_execpath`, this same Node, so the shim `NODE` below reaches
+/// only what nub spawns itself.
 fn augmentation_to_lifecycle_overlay(
     aug: &nub_core::node::spawn::AugmentationEnv,
     node_execpath: &str,
@@ -693,8 +695,7 @@ fn augmentation_to_lifecycle_overlay(
 ) -> (Vec<(std::ffi::OsString, std::ffi::OsString)>, Vec<PathBuf>) {
     use std::ffi::OsString;
     let mut overlay: Vec<(OsString, OsString)> = Vec::new();
-    // $NODE → the shim (→ nub) so userland `$NODE child.js` / `spawn(env.NODE)`
-    // in a build script stays augmented, exactly as build_script_command sets it.
+    // $NODE → the shim (→ nub), for what nub spawns itself; see the doc above.
     let node_shim = aug.node_shim_exe();
     if let Some(node_shim) = &node_shim {
         overlay.push((OsString::from("NODE"), node_shim.clone()));
@@ -1571,8 +1572,7 @@ mod tests {
 
         // A populated augmentation (what `nub run`/`exec` compute) must convert
         // into the generic overlay every lifecycle spawn inherits:
-        // NODE → the node shim (so a build script's `$NODE child.js` re-enters
-        // nub augmented), NODE_OPTIONS (preload + source maps; feature flags ride argv), NODE_PATH
+        // NODE → the node shim (for what nub spawns itself), NODE_OPTIONS (preload + source maps; feature flags ride argv), NODE_PATH
         // (vendored helper resolution), npm_node_execpath PINNED to the
         // provisioned Node (the ABI fix — node-gyp must compile against the
         // project's Node, not ambient), and the shim dir leading PATH.

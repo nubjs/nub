@@ -2,8 +2,8 @@
 //!
 //! `nub install` must run a project's lifecycle scripts under nub's runtime
 //! augmentation — nub's preload in `NODE_OPTIONS` and the node-shim dir leading
-//! `PATH`, so a build script's `node`/`$NODE child.js` re-enters nub augmented and
-//! node-gyp compiles against the provisioned Node. The overlay builder
+//! `PATH`, so a build script's bare `node` re-enters nub augmented, while `NODE`
+//! and `npm_node_execpath` name the provisioned Node that node-gyp compiles against. The overlay builder
 //! (`augmentation_to_lifecycle_overlay` in pm_engine) is unit-tested in
 //! isolation over hand-built structs, and nothing there joins
 //! `compute_augmentation_env` → the overlay → a real spawn. That uncovered join
