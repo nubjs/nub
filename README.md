@@ -61,6 +61,9 @@ curl -fsSL https://nubjs.com/install.sh | bash
 # Windows (PowerShell)
 irm https://nubjs.com/install.ps1 | iex
 
+# Windows (winget)
+winget install Nub.Nub
+
 # Homebrew (macOS / Linux)
 brew install nub
 
