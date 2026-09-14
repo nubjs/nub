@@ -50,6 +50,14 @@ pub(super) const NUB: Embedder = Embedder {
     // still looks installed: the engine stamp, and the preload chainer dir
     // `prepare_preload_chain` writes when the project configures a preload.
     hidden_modules_dir_entries: &[".nub-engine", ".nub"],
+    // Filled in by `profile` from the running executable: a `const` cannot
+    // name a path only this process knows. Without it a git-hosted dependency
+    // that pins a package manager is prepared with whatever the machine has.
+    pnpm_execpath: None,
+    // The shims the lifecycle augmentation puts in front of scripts. Supplied
+    // here rather than on this process's `PATH`, because the directory is
+    // named per run and the engine hashes `PATH` into its build-cache key.
+    script_bin_dir: Some(engine_script_bin_dir),
     // A nub project's configuration is `nub.jsonc`, `package.json` and
     // `.npmrc`, never pnpm's files; `profile` supplies what nub resolved.
     reads_pnpm_config: false,
@@ -423,7 +431,13 @@ fn profile(selection: Selection, cwd: &Path, clean_install: bool) -> Result<Embe
         project_identity::check_install_block(identity, path, &loaded.values.install)?;
     }
     Ok(match identity {
-        ProjectIdentity::Pnpm => Embedder::PNPM,
+        // `pnpm_execpath` even here: pnpm prepares such a dependency with its
+        // own executable, and under nub that executable is nub's. Everything
+        // else stays pnpm's own profile.
+        ProjectIdentity::Pnpm => Embedder {
+            pnpm_execpath: nub_execpath(),
+            ..Embedder::PNPM
+        },
         ProjectIdentity::Nub => {
             let install = loaded
                 .map(|loaded| loaded.values.install)
@@ -442,6 +456,8 @@ fn profile(selection: Selection, cwd: &Path, clean_install: bool) -> Result<Embe
             publish_host_settings(host_settings::resolve(cwd, &install, clean_install)?);
             warn_about_a_stray_workspace_yaml(cwd);
             Embedder {
+                // Same reason as the pnpm arm above: the running executable is nub's.
+                pnpm_execpath: nub_execpath(),
                 workspace_settings: Some(host_workspace_settings),
                 compat_package_extensions: Some(host_compat_rules()),
                 ..NUB
@@ -622,6 +638,30 @@ pub(super) fn lifecycle_node_execpath() -> Option<&'static Path> {
     LIFECYCLE_NODE_PATH.get().map(PathBuf::as_path)
 }
 
+/// The directory of nub's per-run shims, handed to the engine so it can put
+/// them on a spawned script's `PATH`.
+///
+/// It used to go on THIS process's `PATH` instead, which reached the same
+/// scripts and also moved every cache key the engine derives from the
+/// environment: the build pipeline hashes `PATH`, and the directory carries a
+/// pid and a nonce, so the Cargo cache was written and never restored.
+static SCRIPT_BIN_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// What [`Embedder::script_bin_dir`] answers with. `None` until the session
+/// prologue has created the directory, which the engine allows for.
+fn engine_script_bin_dir() -> Option<&'static Path> {
+    SCRIPT_BIN_DIR.get().map(PathBuf::as_path)
+}
+
+/// nub's own executable, for the engine to prepare a git-hosted dependency
+/// that pins a package manager. pnpm answers this with itself when the
+/// running program is `pnpm`; under nub the running program is nub.
+fn nub_execpath() -> Option<&'static Path> {
+    static PATH: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| nub_core::node::spawn::current_nub_binary().ok())
+        .as_deref()
+}
+
 /// Put nub's runtime augmentation on THIS process's environment, so every
 /// lifecycle script the engine spawns inherits it.
 ///
@@ -699,14 +739,13 @@ fn apply_lifecycle_augmentation(cwd: &Path, compat: bool) -> Result<()> {
     for (key, value) in overlay {
         unsafe { std::env::set_var(key, value) };
     }
-    if !path_prepends.is_empty() {
-        let mut entries = path_prepends;
-        if let Some(existing) = std::env::var_os("PATH") {
-            entries.extend(std::env::split_paths(&existing));
-        }
-        if let Ok(joined) = std::env::join_paths(entries) {
-            unsafe { std::env::set_var("PATH", joined) };
-        }
+    // The engine puts this on each script's own `PATH` through
+    // `Embedder::script_bin_dir`. Putting it on this process's `PATH` reached
+    // the same scripts, but the directory is named per run, and the engine
+    // hashes `PATH` into the build pipeline's Cargo cache key — so the cache
+    // was written on every run and restored on none.
+    if let Some(shim_dir) = path_prepends.into_iter().next() {
+        let _ = SCRIPT_BIN_DIR.set(shim_dir);
     }
     Ok(())
 }

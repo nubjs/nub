@@ -130,13 +130,13 @@ nub-settings = { path = "../nub-settings" }
 # branch (v12.4.1 plus the embedder patches). Move `rev` to re-pin.
 # The engine takes its compatibility rules as an `IndexMap`, so the host names the type.
 indexmap = { version = "2" }
-pnpm-cli = { git = "https://github.com/nubjs/pnpm", rev = "1012f06d98f8a0a653bf2228cd203fee075cc0a7" }
-pnpm-config = { git = "https://github.com/nubjs/pnpm", rev = "1012f06d98f8a0a653bf2228cd203fee075cc0a7" }
-pnpm-diagnostics = { git = "https://github.com/nubjs/pnpm", rev = "1012f06d98f8a0a653bf2228cd203fee075cc0a7" }
-pnpm-lockfile = { git = "https://github.com/nubjs/pnpm", rev = "1012f06d98f8a0a653bf2228cd203fee075cc0a7" }
-pnpm-package-manager = { git = "https://github.com/nubjs/pnpm", rev = "1012f06d98f8a0a653bf2228cd203fee075cc0a7" }
-pnpm-store-dir = { git = "https://github.com/nubjs/pnpm", rev = "1012f06d98f8a0a653bf2228cd203fee075cc0a7" }
-pnpm-workspace = { git = "https://github.com/nubjs/pnpm", rev = "1012f06d98f8a0a653bf2228cd203fee075cc0a7" }
+pnpm-cli = { git = "https://github.com/nubjs/pnpm", rev = "36fe6dfd424276ed8c66ab30cf92049c73079fb6" }
+pnpm-config = { git = "https://github.com/nubjs/pnpm", rev = "36fe6dfd424276ed8c66ab30cf92049c73079fb6" }
+pnpm-diagnostics = { git = "https://github.com/nubjs/pnpm", rev = "36fe6dfd424276ed8c66ab30cf92049c73079fb6" }
+pnpm-lockfile = { git = "https://github.com/nubjs/pnpm", rev = "36fe6dfd424276ed8c66ab30cf92049c73079fb6" }
+pnpm-package-manager = { git = "https://github.com/nubjs/pnpm", rev = "36fe6dfd424276ed8c66ab30cf92049c73079fb6" }
+pnpm-store-dir = { git = "https://github.com/nubjs/pnpm", rev = "36fe6dfd424276ed8c66ab30cf92049c73079fb6" }
+pnpm-workspace = { git = "https://github.com/nubjs/pnpm", rev = "36fe6dfd424276ed8c66ab30cf92049c73079fb6" }
 miette = { version = "7", features = ["fancy"] }
 anyhow.workspace = true
 base64 = "0.22"
