@@ -299,11 +299,13 @@ fn config_reports_env_sourced_values() {
         ("npm_config_node_linker", "hoisted"),
     ];
 
+    // Unset, the command reports the directory the install defaults to, which
+    // is not the override, so the rows below can only pass off the env tier.
     let (unset, _) = run(&fx, &[], &["config", "get", "cache-dir"]);
-    assert_eq!(
+    assert_ne!(
         unset.trim(),
-        "undefined",
-        "control: unset must read as undefined, or the rows below prove nothing"
+        dir,
+        "control: unset must not report the override, or the rows below prove nothing"
     );
 
     let (value, _) = run(&fx, env, &["config", "get", "cache-dir"]);
