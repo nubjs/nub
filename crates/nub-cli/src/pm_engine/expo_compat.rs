@@ -54,10 +54,9 @@ pub(crate) fn expo_below_gvs_floor(root: &Path, workspace_members: &[PathBuf]) -
 
 /// Every declared range of direct dependency `name` across the root manifest
 /// and each workspace member's, in that order. `workspace_members` is the
-/// caller's one-shot discovery for `root` (`nub_setting_defaults` runs it once
-/// and shares it with the injected-deps check); the engine's own trigger scan
-/// checks every importer, so a version gate that read only the root would let
-/// a member-declared framework keep GVS. Uses the shared mtime-cached parse so
+/// caller's one-shot discovery for `root` ([`super::store_locality_breaker`]
+/// runs it once and shares it across the framework gates); a version gate that
+/// read only the root would let a member-declared framework keep GVS. Uses the shared mtime-cached parse so
 /// the extra reads are free. Shared with the other version-gated ejects
 /// ([`super::remix_compat`]).
 pub(super) fn declared_direct_ranges(

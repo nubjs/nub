@@ -37,7 +37,7 @@ pub(super) const NUB: Embedder = Embedder {
     // installed before the rename still holds `lock.yaml`, and the engine has
     // to resolve from it or every such project reports no lockfile at all.
     lockfile_legacy_basenames: &[LEGACY_LOCKFILE],
-    virtual_store_dirname: ".store",
+    virtual_store_dirname: super::PROJECT_VIRTUAL_STORE_LEAF,
     // What a diagnostic tells the user to edit when a setting has to change by
     // hand — the `minimumReleaseAgeExclude` prompts above all. The engine's own
     // answer is `pnpm-workspace.yaml`, which a nub project never reads, so the

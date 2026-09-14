@@ -13,7 +13,7 @@ Nub's default layout links **one symlink per package**. Package files live in a 
 
 ```console
 $ nub store path
-/Users/you/.local/share/nub/store/v1
+/Users/you/.cache/nub/store/v11
 ```
 
 Each store entry holds a package version's real files plus symlinks to its **declared** dependencies. The project's `node_modules` then symlinks each package straight into the store:
@@ -21,8 +21,8 @@ Each store entry holds a package version's real files plus symlinks to its **dec
 ```text
 my-app/
 └── node_modules/
-    ├── ms     →  ~/.local/share/nub/store/…/ms@2.1.3
-    └── react  →  ~/.local/share/nub/store/…/react@19.2.0
+    ├── ms     →  ~/.cache/nub/store/…/ms@2.1.3
+    └── react  →  ~/.cache/nub/store/…/react@19.2.0
 ```
 
 Two properties follow:

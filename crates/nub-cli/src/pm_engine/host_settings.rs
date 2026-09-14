@@ -88,6 +88,40 @@ pub(crate) fn resolve(start_dir: &Path, install: &InstallConfig) -> Result<Works
         .context("nub could not hand its install settings to the package manager")
 }
 
+/// nub's own defaults for the project containing `start_dir`, as `nub config`
+/// reports them: what the install fills in where no source set a value.
+///
+/// Read off the install's own merge rather than kept as a second list. Whether
+/// the shared store is on depends on the layout the project asked for, on CI
+/// and on the frameworks it declares, and the list this replaced had drifted:
+/// it named the previous engine's store directory and settings pnpm 12 does
+/// not have. `nodeLinker` and `minimumReleaseAge` are the engine's own
+/// defaults, listed because an unconfigured nub project uses both. A setting
+/// nub refuses to write is left out, so the listing never offers what `config
+/// set` refuses.
+pub(crate) fn defaults(start_dir: &Path) -> Vec<(String, String)> {
+    let install = crate::project_config::load_project_config(start_dir)
+        .ok()
+        .flatten()
+        .map(|loaded| loaded.values.install)
+        .unwrap_or_default();
+    let sources = gather(start_dir, &install);
+    // A source the install would refuse leaves the defaults standing, so one
+    // malformed line does not blank every answer beside it.
+    let supplied = merge_sources(&sources).unwrap_or_default();
+    let mut merged = supplied.clone();
+    fill_install_defaults(&mut merged, &sources);
+    merged.entry("nodeLinker").or_insert(json!("isolated"));
+    merged.entry("minimumReleaseAge").or_insert(json!(1440));
+    merged
+        .into_iter()
+        .filter(|(key, _)| {
+            !supplied.contains_key(key) && nub_settings::meta::unsupported_for_key(key).is_none()
+        })
+        .filter_map(|(key, value)| Some((key, super::config_read::render(value)?)))
+        .collect()
+}
+
 /// What `nub.jsonc` and the environment SUPPLY, spelled as engine settings.
 ///
 /// `nub config get`/`list` report this tier rather than the merged map the
@@ -217,6 +251,13 @@ fn announce_dropped_root_install_fields(manifest: &Map<String, Value>) {
 }
 
 fn merge(sources: &Sources) -> Result<Map<String, Value>> {
+    let mut merged = merge_sources(sources)?;
+    fill_install_defaults(&mut merged, sources);
+    Ok(merged)
+}
+
+/// Every source's settings, before any of nub's defaults.
+fn merge_sources(sources: &Sources) -> Result<Map<String, Value>> {
     let known = known_keys();
     let mut merged = Map::new();
 
@@ -248,7 +289,11 @@ fn merge(sources: &Sources) -> Result<Map<String, Value>> {
         }
         merged.insert(key, value);
     }
+    Ok(merged)
+}
 
+/// Fill nub's defaults under what the sources set.
+fn fill_install_defaults(merged: &mut Map<String, Value>, sources: &Sources) {
     // nub's defaults fill only what no source set. The shared store is a
     // symlink layout, so it has nothing to say to a hoisted one — and a
     // project declaring a framework that resolves through symlinks to a single
@@ -269,8 +314,7 @@ fn merge(sources: &Sources) -> Result<Map<String, Value>> {
     {
         merged.insert("enableGlobalVirtualStore".to_owned(), Value::Bool(true));
     }
-    fill_defaults(&mut merged, sources.cache_root.as_deref());
-    Ok(merged)
+    fill_defaults(merged, sources.cache_root.as_deref());
 }
 
 /// nub's own defaults, filling only what no source set.
@@ -1016,6 +1060,34 @@ mod tests {
         );
         assert_eq!(merged["minimumReleaseAgeStrict"], json!(true));
         assert_eq!(merged["minimumReleaseAgeExclude"], json!(["@internal/*"]));
+    }
+
+    /// `pnp` parses but has no write path, so the reservation is enforced where
+    /// the block is lowered. The code is asserted, not just the failure: it is
+    /// what tells an author their `linker` was understood and refused rather
+    /// than mis-parsed into something else.
+    #[test]
+    fn a_pnp_linker_is_reserved_and_refused() {
+        let install = InstallConfig {
+            linker: Some(LinkerConfig::Pnp),
+            ..InstallConfig::default()
+        };
+        let err = merge(&sources(&install)).unwrap_err().to_string();
+        assert!(err.contains("ERR_NUB_CONFIG_UNSUPPORTED"), "{err}");
+    }
+
+    /// A positive sub-minute release age is a whole minute, never zero: rounding
+    /// down would switch the gate off.
+    #[test]
+    fn a_sub_minute_release_age_rounds_up_to_one_minute() {
+        for seconds in [1, 30, 59, 60] {
+            let install = InstallConfig {
+                minimum_release_age: Some(Duration::from_secs(seconds)),
+                ..InstallConfig::default()
+            };
+            let merged = merge(&sources(&install)).expect("merge");
+            assert_eq!(merged["minimumReleaseAge"], json!(1), "{seconds}s");
+        }
     }
 
     /// The shared store is nub's default only where it can apply: off in CI,

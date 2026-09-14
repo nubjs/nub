@@ -217,14 +217,12 @@ pub(super) fn stamp_virgin_dev_engines(cwd: &Path) {
     let Some(root) = find_manifest_root(cwd) else {
         return;
     };
-    // Defensive symmetric-brand-boundary guard. The `truly_fresh` gate derives
-    // virginity from aube's lockfile detection, which does NOT recognize two
-    // foreign PM signals: bun's pre-1.2 BINARY lockfile `bun.lockb` (only the
-    // text `bun.lock` is a detection candidate) and a lone yarn-berry
-    // `.yarnrc.yml` config with no `yarn.lock` yet. Without this re-check a nub
-    // `devEngines.packageManager` stamp could land in a bun/yarn-owned project —
-    // exactly the brand imposition the virgin predicate forbids. Walk up like
-    // `is_truly_fresh_project` does for pnpm-named files, and bail on a hit.
+    // Defensive symmetric-brand-boundary guard. The virgin check
+    // (`pnpm_engine::project_is_virgin`) keys on lockfiles and pnpm-named files;
+    // this walk also refuses bun's pre-1.2 BINARY lockfile `bun.lockb` and a lone
+    // yarn-berry `.yarnrc.yml` with no `yarn.lock` yet, so a nub
+    // `devEngines.packageManager` stamp never lands in a bun/yarn-owned project —
+    // exactly the brand imposition the virgin predicate forbids.
     if dir_walk_up_has_any(cwd, &["bun.lockb", ".yarnrc.yml"]) {
         return;
     }
@@ -246,7 +244,7 @@ pub(super) fn stamp_virgin_dev_engines(cwd: &Path) {
             .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
         if let Some(dev) = dev.as_object_mut() {
             // Never overwrite an existing `devEngines.packageManager`. The
-            // `truly_fresh` gate keys on lockfiles + pnpm-named files, NOT on the
+            // virgin check keys on lockfiles + pnpm-named files, NOT on the
             // manifest's declaration fields, so a hand-written foreign
             // `devEngines.packageManager` (e.g. `{name:"pnpm"}`) can coexist with
             // a virgin lockfile state — and clobbering it would impose nub's
@@ -462,7 +460,7 @@ mod tests {
     }
 
     /// The stamp NEVER overwrites an existing `devEngines.packageManager`. The
-    /// `truly_fresh` gate keys on lockfiles + pnpm-named files, not on manifest
+    /// virgin check keys on lockfiles + pnpm-named files, not on manifest
     /// declarations, so a hand-written foreign `devEngines.packageManager` can
     /// reach this path — and imposing nub's brand over it would break the
     /// symmetric brand boundary. A sibling `devEngines` entry is left intact.

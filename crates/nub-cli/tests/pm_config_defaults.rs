@@ -443,44 +443,36 @@ fn an_env_overlay_does_not_count_as_a_nub_jsonc_field() {
     );
 }
 
-/// The shadow set is computed with the REAL embedder defaults, so an injected
-/// dependency changes which settings count as supplied.
-///
-/// Under `linker: global-virtual-store` the lowering pushes
-/// `enableGlobalVirtualStore` only when the defaults do NOT already carry
-/// `hoist=true`. An injected dependency puts it there, the push is suppressed,
-/// and the engine takes that setting from `.npmrc` after all — so refusing the
-/// write would reject configuration the install honors. Computing the set with
-/// empty defaults inverts exactly this one case, which is why the two halves
-/// differ only by `dependenciesMeta`.
+/// `config get` in a nub project answers with the defaults its install uses:
+/// the store `nub store path` names and the trust policy no file sets. A
+/// setting the previous engine defaulted and pnpm 12 does not have reports
+/// nothing.
 #[test]
-fn an_injected_dependency_changes_what_counts_as_supplied() {
-    let gvs = r#"{ "install": { "linker": "global-virtual-store" } }"#;
-
-    let injected = fixture("injected");
-    std::fs::write(
-        injected.join("package.json"),
-        r#"{"name":"app","version":"1.0.0","dependenciesMeta":{"dep":{"injected":true}}}"#,
-    )
-    .unwrap();
-    std::fs::write(injected.join("nub.jsonc"), gvs).unwrap();
-    let (_out, err, code, _) = spawn_in(&injected, &["set", "enableGlobalVirtualStore", "false"]);
-    assert_eq!(
-        code, 0,
-        "an injected dep suppresses the lowering's push, so .npmrc still answers: {err}"
-    );
-
-    // Control: identical but for `dependenciesMeta`. Here the lowering DOES
-    // push the setting, so the same write is genuinely unreadable.
-    let plain = fixture("not-injected");
-    std::fs::write(plain.join("nub.jsonc"), gvs).unwrap();
-    let (_out, err, code, _) = spawn_in(&plain, &["set", "enableGlobalVirtualStore", "false"]);
-    assert_ne!(
-        code, 0,
-        "without an injected dep this must be refused: {err}"
-    );
+fn config_get_reports_the_defaults_the_install_uses() {
+    let project = fixture("install-defaults");
+    let home = project.parent().unwrap().join("home");
+    let out = Command::new(nub_binary())
+        .args(["store", "path"])
+        .current_dir(&project)
+        .env("NUB_SELF_SHIM", "0")
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("XDG_CONFIG_HOME", home.join("xdg-config"))
+        .env("XDG_DATA_HOME", home.join("xdg-data"))
+        .env("XDG_CACHE_HOME", home.join("xdg-cache"))
+        .output()
+        .expect("nub store path must run");
+    let store = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let get = |key: &str| {
+        let (stdout, stderr, code, _) = spawn_in(&project, &["get", key]);
+        assert_eq!(code, 0, "`config get {key}` failed: {stderr}");
+        stdout.trim().to_string()
+    };
+    let store_dir = get("storeDir");
     assert!(
-        err.contains("install.linker"),
-        "the refusal must name the field that wins: {err}"
+        !store.is_empty() && store.starts_with(&store_dir),
+        "`config get storeDir` must name the store `store path` reports: {store_dir} vs {store}"
     );
+    assert_eq!(get("trustPolicy"), "no-downgrade");
+    assert_eq!(get("defaultLockfileFormat"), "undefined");
 }

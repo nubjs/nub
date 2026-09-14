@@ -66,7 +66,7 @@ mod tests {
         dir
     }
 
-    /// What `nub_setting_defaults` hands the gate: the discovered members.
+    /// What `store_locality_breaker` hands the gate: the discovered members.
     fn ejects(root: &Path) -> bool {
         let members = crate::pm_engine::workspace_members(root);
         remix_needs_project_local_store(root, &members)

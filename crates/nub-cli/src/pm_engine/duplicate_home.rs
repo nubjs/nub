@@ -1,11 +1,11 @@
 //! Engine settings a `nub.jsonc` field ALSO supplies, and the refusal that
 //! keeps a write out of the file that loses.
 //!
-//! Twelve engine settings can be supplied by a `nub.jsonc` field. The lowering
-//! in [`super::lower_native_install_settings`] injects them at the engine's
-//! `project_config` tier, which outranks every file source — `project_npmrc`
-//! included — so once the owning field is set, an `.npmrc` line for the same
-//! setting is read by nothing. `nub config set` reports success, the file gains
+//! Ten engine settings can be supplied by a `nub.jsonc` field. The field
+//! outranks every file source — `.npmrc` included — both where the install
+//! lowers the `install` block ([`super::host_settings::supplied_settings`]) and
+//! where [`crate::verify_deps`] reads `verifyDeps`, so once the owning field is
+//! set, an `.npmrc` line for the same setting is read by nothing. `nub config set` reports success, the file gains
 //! a line, and no resolve ever consults it: the same silent no-op
 //! [`super::store_config_family::npmrc_first`] refuses elsewhere, reached from
 //! the other side. There the key was never readable; here it is readable in
@@ -40,15 +40,14 @@ struct DuplicateHome {
 }
 
 /// Every engine setting reachable from a `nub.jsonc` field, with the field that
-/// owns it. Derived from [`super::lower_native_install_settings`] and
+/// owns it. Derived from [`super::host_settings::supplied_settings`] and
 /// [`crate::verify_deps::resolve_policy`] — when either learns to supply
 /// another setting, it belongs here too, and
 /// `every_entry_names_a_real_setting_and_a_real_field` fails if a name here
 /// stops being real.
 const HOMES: &[DuplicateHome] = &[
     // `install.linker` lowers to a whole layout group: the strategy, where the
-    // virtual store lives, and the hidden hoist tree that injected dependencies
-    // need.
+    // virtual store lives, and the hidden hoist tree.
     DuplicateHome {
         setting: "nodeLinker",
         field: "install.linker",
@@ -65,14 +64,6 @@ const HOMES: &[DuplicateHome] = &[
         setting: "hoistPattern",
         field: "install.linker",
     },
-    DuplicateHome {
-        setting: "disableGlobalVirtualStoreForPackages",
-        field: "install.linker",
-    },
-    DuplicateHome {
-        setting: "diskMaterializePackages",
-        field: "install.linker",
-    },
     // Naming public-hoist patterns is always a narrowing, so the lowering also
     // forces the blanket flag off — both belong to the one field.
     DuplicateHome {
@@ -83,8 +74,7 @@ const HOMES: &[DuplicateHome] = &[
         setting: "shamefullyHoist",
         field: "install.publicHoist",
     },
-    // Release-age resolution. Admitted only under nub's own identity, which is
-    // why the caller gates these on `native_mode` before consulting the table.
+    // Release-age resolution.
     DuplicateHome {
         setting: "minimumReleaseAge",
         field: "install.minimumReleaseAge",

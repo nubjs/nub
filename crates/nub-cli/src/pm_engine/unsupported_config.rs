@@ -10,13 +10,6 @@
 //!      mode (same path `--frozen-lockfile` takes).
 //!   3. `enableScripts: false` (yarn) → force a block-all-builds policy that
 //!      overrides even nub's curated default-trust floor.
-//!   4. `dependenciesMeta.*.injected` → the carve-out from the GVS-aware
-//!      hoisting default: a non-injected project pushes no `hoist` (it resolves
-//!      to the default `true`, which under nub's `gvs_over_default_hoist` profile
-//!      lets GVS engage without a hidden hoist tree), but injected copies
-//!      materialize only with the hidden hoist tree on, so an injected project
-//!      pushes an EXPLICIT `hoist=true` — vetoing GVS (per-project + hidden
-//!      tree, always).
 //!
 //! (`minimumReleaseAge` from bunfig is wired in [`super::bun_config`] — it maps
 //! to a synthetic `.npmrc` entry the settings registry already reads.)
@@ -40,42 +33,6 @@ static CONFIG_TEXT_CACHE: MtimeCache<String> = MtimeCache::new();
 /// on those paths, just deduplicated across repeated readers in one command.
 fn read_config_text(path: &Path) -> Option<Arc<String>> {
     CONFIG_TEXT_CACHE.get_or_read(path, || std::fs::read_to_string(path).ok())
-}
-
-/// Whether the root (or any workspace member) manifest declares
-/// `dependenciesMeta.<pkg>.injected: true`. aube materializes injected copies
-/// only with the hidden hoist tree on, so an injected project is the carve-out
-/// from the GVS-aware hoisting default: instead of leaving `hoist` at its
-/// default (which lets GVS engage), it pushes an EXPLICIT `hoist=true` that
-/// vetoes GVS (per-project + hidden tree), rather than silently dropping the
-/// directive.
-/// `workspace_members` is the caller's one-shot workspace discovery for `root`
-/// (see `nub_setting_defaults`), shared with the version gates that scan the
-/// same manifests.
-pub(crate) fn injected_deps_present(root: &Path, workspace_members: &[PathBuf]) -> bool {
-    manifest_has_injected(&root.join("package.json"))
-        || workspace_members
-            .iter()
-            .any(|dir| manifest_has_injected(&dir.join("package.json")))
-}
-
-fn manifest_has_injected(manifest_path: &Path) -> bool {
-    let Some(manifest) = super::cached_aube_manifest(manifest_path) else {
-        return false;
-    };
-    let Some(meta) = manifest
-        .extra
-        .get("dependenciesMeta")
-        .and_then(|v| v.as_object())
-    else {
-        return false;
-    };
-    meta.values().any(|v| {
-        v.as_object()
-            .and_then(|o| o.get("injected"))
-            .and_then(|b| b.as_bool())
-            == Some(true)
-    })
 }
 
 // ───────────────────────── npmrc reading ─────────────────────────
@@ -161,27 +118,4 @@ fn strip_inline_value(raw: &str) -> String {
         }
     }
     v.to_string()
-}
-
-// ───────────────────────── bunfig reading ─────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-
-    fn tmp() -> tempfile::TempDir {
-        tempfile::tempdir().unwrap()
-    }
-
-    #[test]
-    fn injected_deps_detected_in_root_manifest() {
-        let d = tmp();
-        fs::write(
-            d.path().join("package.json"),
-            r#"{"name":"x","dependenciesMeta":{"foo":{"injected":true}}}"#,
-        )
-        .unwrap();
-        assert!(injected_deps_present(d.path(), &[]));
-    }
 }

@@ -165,13 +165,6 @@ pub(super) struct SourceIndex {
     project_npmrc: Vec<(String, String)>,
     user_npmrc: Vec<(String, String)>,
     embedder_defaults: Vec<(String, String)>,
-    /// Every package name any importer DECLARES, across the root manifest and
-    /// each workspace member. Not a settings tier — it is the other half of the
-    /// store decision: `disableGlobalVirtualStoreForPackages` is matched against
-    /// this set, and a hit forces the whole install project-local. Held here
-    /// because the layout row must answer that question and only `load` has the
-    /// project root.
-    declared_packages: Vec<String>,
     /// Whether the project's `.npmrc` asks for a `node_modules` layout in npm's
     /// own keys, a request Nub does not honor.
     branded_layout_ignored: bool,
@@ -185,28 +178,10 @@ pub(super) struct SourceIndex {
     /// always. Reading it once at `load`, where every other tier is also
     /// snapshotted, makes the layout decision a pure function of this struct.
     ci: bool,
-    /// Whether the engine this run uses applies the two whole-install store
-    /// opt-outs the layout row can otherwise DERIVE: a declared package
-    /// matching `disableGlobalVirtualStoreForPackages`, and the injected-deps
-    /// `hoist=true` veto.
-    ///
-    /// Both belong to the vendored engine. pnpm 12 declares neither setting as
-    /// a field of the settings struct nub hands it, and nub's own settings
-    /// layer pushes neither value, so under that engine nothing but an
-    /// explicit `enableGlobalVirtualStore` or CI takes the store project-local
-    /// — and a row naming Next as the reason would describe a tree the install
-    /// does not build. Snapshotted for the same reason `ci` is: it keeps the
-    /// layout decision a pure function of this struct rather than of the
-    /// ambient engine selection, which no test could then vary.
-    /// The declared framework whose resolver cannot reach a shared store, when
-    /// this engine is the one that has to decide that itself. `None` under the
-    /// vendored engine, which is handed the candidate names as a setting and
-    /// matches them against [`Self::declared_packages`] instead — the two
-    /// routes read one definition ([`super::store_locality_breaker`]), so the
-    /// row cannot name a framework the install ignored, or stay silent about
-    /// one it acted on.
+    /// The declared framework whose resolver cannot reach a shared store, as the
+    /// install decides it ([`super::store_locality_breaker`]), so the row names
+    /// the framework the install acted on and stays silent about one it did not.
     store_locality_breaker: Option<&'static str>,
-    derives_store_optouts: bool,
 }
 
 impl SourceIndex {
@@ -239,29 +214,19 @@ impl SourceIndex {
             .into_iter()
             .filter_map(|(key, value)| Some((key, super::config_read::render(value)?)))
             .collect();
-        // The engine is the only engine, so the report never derives these:
-        // the vendored engine was the one that needed them derived. The field
-        // stays because the rendering below still branches on it and both
-        // arms are unit-tested.
-        let derives_store_optouts = false;
         Self {
             cli: cli.to_vec(),
             env: super::host_settings::env_settings_sourced(),
             project_config,
             project_npmrc,
             user_npmrc,
-            embedder_defaults: super::nub_config_defaults(cwd),
-            declared_packages: if derives_store_optouts {
-                declared_packages(&root)
-            } else {
-                Vec::new()
-            },
+            embedder_defaults: super::host_settings::defaults(cwd),
             branded_layout_ignored: npm_layout_key_present(cwd),
             ci: std::env::var_os("CI").is_some(),
-            store_locality_breaker: (!derives_store_optouts)
-                .then(|| super::store_locality_breaker(&root, &super::workspace_members(&root)))
-                .flatten(),
-            derives_store_optouts,
+            store_locality_breaker: super::store_locality_breaker(
+                &root,
+                &super::workspace_members(&root),
+            ),
         }
     }
 
@@ -363,40 +328,8 @@ fn npm_layout_key_present(cwd: &Path) -> bool {
         })
 }
 
-/// Every package name declared by the root manifest and by each workspace
-/// member — the importer set the whole-install store opt-out is matched
-/// against.
-///
-/// Discovered through nub's own workspace walk, which reads the neutral
-/// `workspaces` field and falls back to `pnpm-workspace.yaml` only under a
-/// pnpm incumbent. That gate is the point: a member list assembled from a
-/// branded file nub does not otherwise read would answer with packages no
-/// install of this project resolves.
-fn declared_packages(root: &Path) -> Vec<String> {
-    read_manifest(&root.join("package.json"))
-        .into_iter()
-        .chain(
-            nub_core::workspace::filter::discover_members(root)
-                .into_iter()
-                .map(|member| member.manifest),
-        )
-        .flat_map(|manifest| {
-            ["dependencies", "devDependencies", "optionalDependencies"]
-                .into_iter()
-                .filter_map(|field| manifest.get(field)?.as_object())
-                .flat_map(|deps| deps.keys().cloned())
-                .collect::<Vec<_>>()
-        })
-        .collect()
-}
-
-fn read_manifest(path: &Path) -> Option<serde_json::Value> {
-    let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(nub_core::strip_utf8_bom(&text)).ok()
-}
-
 /// The `nub.jsonc` field a lowered engine setting came from, for the settings
-/// `lower_native_install_settings` writes. Mapping the setting back to what the
+/// the install lowers the `install` block to ([`super::host_settings`]). Mapping the setting back to what the
 /// user typed is the whole point of the parenthetical — naming the engine key
 /// would send them looking for a field their config does not have.
 fn project_config_field(setting: &str) -> Option<&'static str> {
@@ -404,9 +337,6 @@ fn project_config_field(setting: &str) -> Option<&'static str> {
         "nodeLinker" | "enableGlobalVirtualStore" => "install.linker",
         "hoist" | "hoistPattern" => "install.linker.hoist",
         "shamefullyHoist" | "publicHoistPattern" => "install.publicHoist",
-        "disableGlobalVirtualStoreForPackages" | "diskMaterializePackages" => {
-            "install.linker.eject"
-        }
         "minimumReleaseAge" | "minimumReleaseAgeStrict" => "install.minimumReleaseAge",
         "minimumReleaseAgeExclude" => "install.minimumReleaseAgeExclude",
         _ => return None,
@@ -549,34 +479,20 @@ fn at_default(value: &str, default: &str) -> bool {
     }
 }
 
-/// The layout value, in the vocabulary the reader's own config uses. Both
-/// symlink layouts lower to the engine's `isolated`, differing only in
-/// `enableGlobalVirtualStore`, so printing the raw engine value would answer a
-/// project that asked for `global-virtual-store` with the word `isolated` —
-/// while the parenthetical points at the very field that says otherwise.
+/// The layout the install builds, and what decided it.
 ///
-/// When nothing set the store bit, the engine's own default decides it, and
-/// that default is the shared store. Reporting the raw `isolated` there
-/// described a tree nobody gets: with no config at all the packages symlink
-/// into the machine-global store, which is what `global-virtual-store` names.
+/// An isolated layout with nothing set is the machine-global virtual store,
+/// so the row says `global-virtual-store` rather than the raw `isolated`: with
+/// no config at all the packages symlink into the shared store.
 ///
-/// Four things flip it back to a project-local store, and they arrive by
-/// different routes — which is why this cannot simply read one setting. An
-/// explicit `enableGlobalVirtualStore=false` and the `hoist=true` nub pushes
-/// for injected dependencies both land in the settings index. The other two do
-/// not. A CI environment is derived from the `CI` variable where the engine
-/// plans the store, so the only way to report it is to ask the same question.
-/// And a declared package on `disableGlobalVirtualStoreForPackages` — the
-/// vendored engine seeds `next` and `react-native`, so a stock Next.js project
-/// with no config at all takes this route — is a fact about the MANIFEST, not
-/// about any setting: it reads as unset here while the engine turns it into a
-/// whole-install opt-out. Those two get their own [`Source`] variants rather
-/// than no parenthetical at all: they are precisely the layouts a reader cannot
-/// account for by opening their config, so leaving them bare showed a value
-/// that contradicts the documented default with nothing to explain it.
-///
-/// The last two routes are the VENDORED engine's alone, which is what
-/// [`SourceIndex::derives_store_optouts`] gates — see that field.
+/// Three things take the store project-local, and they arrive by different
+/// routes, which is why this cannot read one setting. An explicit
+/// `enableGlobalVirtualStore=false` lands in the settings index. CI and a
+/// declared framework the shared store cannot serve are decided where the
+/// install plans the store, so the row asks the same questions
+/// ([`SourceIndex::ci`], [`SourceIndex::store_locality_breaker`]). Those two
+/// get their own [`Source`] variants rather than no parenthetical: they are the
+/// layouts a reader cannot account for by opening their config.
 fn layout_row(index: &SourceIndex) -> (String, Option<Source>) {
     let isolated = |source: Option<Source>| ("isolated".to_string(), source);
     let (linker, linker_source) = index
@@ -585,9 +501,15 @@ fn layout_row(index: &SourceIndex) -> (String, Option<Source>) {
     if linker != "isolated" {
         return (linker, linker_source);
     }
-    // Then the four routes to a project-local store, in the order the engine
-    // settles them; the first that fires owns both the word and the note.
-    if let Some((shared, source)) = index.resolve("enableGlobalVirtualStore") {
+    // Then the routes to a project-local store, in the order the install
+    // settles them; the first that fires owns both the word and the note. nub's
+    // own default for the store bit is not one of them: the shared store is what
+    // an unconfigured project gets, and crediting it to `default` would put a
+    // parenthetical on the one line every install prints.
+    if let Some((shared, source)) = index
+        .resolve("enableGlobalVirtualStore")
+        .filter(|(_, source)| *source != Some(Source::Default))
+    {
         return if is_true(&shared) {
             ("global-virtual-store".to_string(), source)
         } else {
@@ -597,51 +519,10 @@ fn layout_row(index: &SourceIndex) -> (String, Option<Source>) {
     if index.ci {
         return isolated(Some(Source::Ci));
     }
-    if index.derives_store_optouts {
-        if let Some((_, source)) = index.resolve("hoist").filter(|(hoist, _)| is_true(hoist)) {
-            return isolated(source);
-        }
-        if let Some(name) = gvs_incompatible_package(index) {
-            return isolated(Some(Source::IncompatiblePackage(name)));
-        }
-    } else if let Some(name) = &index.store_locality_breaker {
-        // The same opt-out under the other engine, reached through the
-        // predicate rather than the setting. There is no
-        // `disableGlobalVirtualStoreForPackages` for this engine to read, so
-        // the match happens in nub and the install acts on the answer
-        // directly ([`super::host_settings`]); a report that still asked the
-        // setting would say `global-virtual-store` for exactly the projects
-        // the install now keeps project-local.
-        return isolated(Some(Source::IncompatiblePackage((*name).to_string())));
+    if let Some(name) = index.store_locality_breaker {
+        return isolated(Some(Source::IncompatiblePackage(name.to_string())));
     }
     ("global-virtual-store".to_string(), None)
-}
-
-/// The declared package that matches `disableGlobalVirtualStoreForPackages`,
-/// the whole-install opt-out `resolve_global_virtual_store_override` applies
-/// when nothing set the store bit explicitly. Mirrors that function's guards:
-/// `virtualStoreOnly` suppresses the opt-out, and the CI case is already
-/// decided by the caller before this is reached.
-///
-/// Returns the PACKAGE, not the pattern that caught it: `next` is the name the
-/// reader recognizes from their own manifest, where a glob out of nub's seeded
-/// list is one more thing to go look up. The first match wins — the opt-out is
-/// whole-install, so a second one changes nothing about the layout.
-fn gvs_incompatible_package(index: &SourceIndex) -> Option<String> {
-    if index
-        .resolve("virtualStoreOnly")
-        .is_some_and(|(value, _)| is_true(&value))
-    {
-        return None;
-    }
-    let (raw, _) = index.resolve("disableGlobalVirtualStoreForPackages")?;
-    comma_items(&raw).find_map(|pattern| {
-        index
-            .declared_packages
-            .iter()
-            .find(|name| aube_linker::package_name_matches(pattern, name))
-            .cloned()
-    })
 }
 
 /// What the layout row says in place of provenance when the project asked for a
@@ -821,10 +702,6 @@ mod tests {
     /// An index no tier claims anything in, to be filled one tier at a time with
     /// `..empty_index()`. Spelling the whole struct out per test buried which
     /// field each one was actually about.
-    ///
-    /// `derives_store_optouts` is true here so every layout arm stays
-    /// exercisable; the one test about the engine that DOESN'T derive them
-    /// turns it off explicitly, which is what makes the difference legible.
     fn empty_index() -> SourceIndex {
         SourceIndex {
             cli: Vec::new(),
@@ -833,11 +710,9 @@ mod tests {
             project_npmrc: Vec::new(),
             user_npmrc: Vec::new(),
             embedder_defaults: Vec::new(),
-            declared_packages: Vec::new(),
             store_locality_breaker: None,
             branded_layout_ignored: false,
             ci: false,
-            derives_store_optouts: true,
         }
     }
 
@@ -960,21 +835,9 @@ mod tests {
             ("global-virtual-store".to_string(), None)
         );
 
-        // The injected-deps carve-out: nub pushes an explicit `hoist=true` for a
-        // project that declares one, and the hidden tree it needs only exists
-        // under a project-local store.
-        let injected = SourceIndex {
-            embedder_defaults: vec![
-                ("nodeLinker".to_string(), "isolated".to_string()),
-                ("hoist".to_string(), "true".to_string()),
-            ],
-            ..unset
-        };
-        assert_eq!(layout_row(&injected).0, "isolated");
-
         let hoisted = SourceIndex {
             embedder_defaults: vec![("nodeLinker".to_string(), "hoisted".to_string())],
-            ..injected
+            ..unset
         };
         assert_eq!(layout_row(&hoisted).0, "hoisted");
 
@@ -1027,136 +890,20 @@ mod tests {
             // credited a value the install never took.
             assert_eq!(layout_row(&index).0, "global-virtual-store");
         }
-
-        // The other direction, and the one that used to read backwards: a
-        // `hoist` the install refuses must not veto the shared store here.
-        assert_eq!(
-            layout_row(&with_npmrc("hoist", "1")).0,
-            "global-virtual-store",
-            "`hoist=1` is a value the install refuses, not a hidden-tree request"
-        );
-        assert_eq!(
-            layout_row(&with_npmrc("hoist", "true")).0,
-            "isolated",
-            "`hoist=true` still vetoes the shared store"
-        );
-
-        // `virtualStoreOnly` suppresses the package opt-out engine-side, and
-        // only its literal spelling does.
-        let store_only = |value: &str| SourceIndex {
-            embedder_defaults: named(&[
-                ("nodeLinker", "isolated"),
-                ("disableGlobalVirtualStoreForPackages", "next"),
-            ]),
-            declared_packages: vec!["next".to_string()],
-            ..with_npmrc("virtualStoreOnly", value)
-        };
-        assert_eq!(layout_row(&store_only("true")).0, "global-virtual-store");
-        assert_eq!(
-            layout_row(&store_only("1")).0,
-            "isolated",
-            "an unreadable `virtualStoreOnly` suppresses nothing"
-        );
     }
 
-    /// The two whole-install store opt-outs the layout row DERIVES FROM
-    /// SETTINGS belong to the vendored engine alone. pnpm 12 declares neither
-    /// setting as a field of the settings struct nub hands it, so a row reading
-    /// them under that engine would answer from values nothing consumes.
-    ///
-    /// The framework opt-out itself did not go away with the setting — it moved.
-    /// Nub does the matching now and the install acts on the answer, so the row
-    /// reads the same verdict the install did
-    /// ([`SourceIndex::store_locality_breaker`]) rather than re-deriving it
-    /// from a setting. What the engine arm below pins is that the SETTING is
-    /// inert there, not that the behaviour is.
-    #[test]
-    fn the_derived_store_optouts_are_the_vendored_engines_alone() {
-        let vendored = SourceIndex {
-            embedder_defaults: named(&[
-                ("nodeLinker", "isolated"),
-                ("disableGlobalVirtualStoreForPackages", "next"),
-                ("hoist", "true"),
-            ]),
-            declared_packages: vec!["next".to_string()],
-            ..empty_index()
-        };
-        assert_eq!(layout_row(&vendored).0, "isolated");
-
-        let engine = SourceIndex {
-            derives_store_optouts: false,
-            ..vendored
-        };
-        assert_eq!(
-            layout_row(&engine),
-            ("global-virtual-store".to_string(), None),
-            "neither the seeded package nor the injected-deps hoist decides \
-             anything under the engine that carries neither setting"
-        );
-
-        // The two routes that survive, because the engine really does take
-        // them: an explicit store bit, and CI.
-        let explicit = SourceIndex {
-            project_npmrc: named(&[("enable-global-virtual-store", "false")]),
-            ..engine
-        };
-        assert_eq!(
-            layout_row(&explicit),
-            ("isolated".to_string(), Some(Source::Npmrc))
-        );
-
-        let in_ci = SourceIndex {
-            project_npmrc: Vec::new(),
-            ci: true,
-            ..explicit
-        };
-        assert_eq!(
-            layout_row(&in_ci),
-            ("isolated".to_string(), Some(Source::Ci))
-        );
-
-        // And the route the framework opt-out takes NOW: the same declared
-        // `next`, with the verdict already resolved for the install rather
-        // than read off a setting. The row follows the install.
-        let resolved = SourceIndex {
-            derives_store_optouts: false,
-            store_locality_breaker: Some("next"),
-            embedder_defaults: named(&[("nodeLinker", "isolated")]),
-            ..empty_index()
-        };
-        assert_eq!(
-            layout_row(&resolved),
-            (
-                "isolated".to_string(),
-                Some(Source::IncompatiblePackage("next".to_string()))
-            ),
-            "the row must follow the install's own store decision, and name \
-             the framework that forced it"
-        );
-    }
-
-    /// A package the shared store cannot serve takes the store project-local
-    /// without any setting saying so — nub seeds `next`, so a stock Next.js
-    /// project with no config at all lands here. The store bit reads as unset,
-    /// which is why the manifest has to be consulted: reporting the settings
-    /// index alone told that project `global-virtual-store` while every package
-    /// on disk was a real project-local directory.
+    /// A framework the shared store cannot serve takes the store project-local
+    /// without any setting saying so, and a stock Next.js project with no config
+    /// at all lands here. The install decides it from the manifest
+    /// ([`super::super::store_locality_breaker`]), so the row names the framework
+    /// rather than reporting a store no package on disk is in.
     #[test]
     fn a_gvs_incompatible_dependency_reports_the_project_local_store() {
         let index = SourceIndex {
-            embedder_defaults: vec![
-                ("nodeLinker".to_string(), "isolated".to_string()),
-                (
-                    "disableGlobalVirtualStoreForPackages".to_string(),
-                    "next,react-native".to_string(),
-                ),
-            ],
-            declared_packages: vec!["next".to_string(), "debug".to_string()],
+            embedder_defaults: named(&[("nodeLinker", "isolated")]),
+            store_locality_breaker: Some("next"),
             ..empty_index()
         };
-        // Named, not bare: `next` is the whole reason this project reads
-        // `isolated` where the documented default is the shared store, and it
-        // appears in no config file the reader could check.
         assert_eq!(
             layout_row(&index),
             (
@@ -1165,38 +912,26 @@ mod tests {
             )
         );
 
-        // Only a DECLARED name triggers it; the seed on its own must not drag
-        // every project off the shared store.
-        let untriggered = SourceIndex {
-            declared_packages: vec!["debug".to_string()],
-            ..index
-        };
-        assert_eq!(
-            layout_row(&untriggered),
-            ("global-virtual-store".to_string(), None)
-        );
-
-        // `virtualStoreOnly` suppresses the opt-out engine-side, so the label
-        // must not claim the project-local store the engine will not build.
-        let store_only = SourceIndex {
-            declared_packages: vec!["next".to_string()],
-            project_npmrc: vec![("virtualStoreOnly".to_string(), "true".to_string())],
-            ..untriggered
-        };
-        assert_eq!(layout_row(&store_only).0, "global-virtual-store");
-
-        // CI outranks the package trigger: the engine's own resolution only
-        // reaches the opt-out when the run is not CI, and the layout is
-        // project-local either way, so the row must attribute it to the reason
-        // that actually decided.
-        let in_ci = SourceIndex {
-            ci: true,
-            declared_packages: vec!["next".to_string()],
-            ..store_only
-        };
+        // CI outranks the framework: the install settles CI first, and the
+        // layout is project-local either way, so the row credits what decided.
+        let in_ci = SourceIndex { ci: true, ..index };
         assert_eq!(
             layout_row(&in_ci),
             ("isolated".to_string(), Some(Source::Ci))
+        );
+
+        // nub's own default for the store bit is not a reason, so an
+        // unconfigured project's row carries no parenthetical.
+        let unconfigured = SourceIndex {
+            embedder_defaults: named(&[
+                ("nodeLinker", "isolated"),
+                ("enableGlobalVirtualStore", "true"),
+            ]),
+            ..empty_index()
+        };
+        assert_eq!(
+            layout_row(&unconfigured),
+            ("global-virtual-store".to_string(), None)
         );
     }
 
@@ -1306,11 +1041,7 @@ mod tests {
 
         let incompatible = SourceIndex {
             ci: false,
-            embedder_defaults: vec![(
-                "disableGlobalVirtualStoreForPackages".to_string(),
-                "next".to_string(),
-            )],
-            declared_packages: vec!["next".to_string()],
+            store_locality_breaker: Some("next"),
             ..in_ci
         };
         assert_eq!(
@@ -1466,8 +1197,6 @@ mod tests {
             "hoistPattern",
             "shamefullyHoist",
             "publicHoistPattern",
-            "disableGlobalVirtualStoreForPackages",
-            "diskMaterializePackages",
             "minimumReleaseAge",
             "minimumReleaseAgeStrict",
             "minimumReleaseAgeExclude",

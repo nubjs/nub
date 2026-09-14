@@ -19,7 +19,7 @@
 //!
 //! - **Unit B (Vite < 8.1): backport Vite's own 8.1 sniff.** The sniff predates
 //!   the majority of installed Vite, so for < 8.1 nub disk-materializes just the
-//!   `vite` package project-local (the linker's `diskMaterializePackages` path —
+//!   `vite` package project-local (the engine's materialize policy —
 //!   the shared CAS store stays pristine, only the local ejected copy is touched)
 //!   and codegen-inserts the sniff at Vite's own `allowDirs` declaration in the
 //!   bundled (non-minified) dist, APPENDING the store dir to whatever `fs.allow`
@@ -34,7 +34,7 @@
 //! Both units are gated ONLY on `vite` being in the installed graph (and the
 //! machine-global store locality) — there is NO user opt-out: this is core GVS
 //! correctness, so it is unconditional (maintainer 2026-07-07). The
-//! materialization decision lives in [`super::mod`]'s setting defaults; this
+//! materialization decision is the eject seed in [`super::phantom_hooks`]; this
 //! module writes the file and patches the ejected copy post-install. Fail-open
 //! throughout: a missing anchor / unwritable copy is a no-op, never a corrupt
 //! Vite.
@@ -54,9 +54,8 @@ const INTERNAL_COMPAT_DISABLE_VAR: &str = "__NUB_VITE_COMPAT_DISABLE";
 
 /// Whether the Vite compat behavior is enabled. Unconditionally ON for users —
 /// this is core GVS correctness, not a preference (maintainer 2026-07-07). Off
-/// ONLY under the internal A/B seam ([`INTERNAL_COMPAT_DISABLE_VAR`]). Read at
-/// the setting-defaults site (materialize decision) and here (the post-install
-/// writer/patcher) so the two stay in lockstep.
+/// ONLY under the internal A/B seam ([`INTERNAL_COMPAT_DISABLE_VAR`]). Read by
+/// the post-install writer/patcher; the eject itself does not consult it.
 pub(crate) fn enabled() -> bool {
     !compat_disabled(std::env::var(INTERNAL_COMPAT_DISABLE_VAR).ok().as_deref())
 }
@@ -189,24 +188,6 @@ fn read_vite_version(pkg_dir: &Path) -> Option<String> {
     let start = rest.find('"')? + 1;
     let end = rest[start..].find('"')? + start;
     Some(rest[start..end].to_string())
-}
-
-/// Whether the project manifest at `root` declares `vite` as a DIRECT dependency
-/// (any of dependencies / devDependencies / optionalDependencies). Drives the
-/// disk-materialize decision: only a direct-dep Vite is loaded from the ejected
-/// project-local copy the backport patches, so ejecting for a library-embedded
-/// Vite (which loads its store copy) would be wasted dedup. Best-effort — an
-/// unreadable/absent manifest ⇒ `false`.
-pub(crate) fn manifest_declares_vite(root: &Path) -> bool {
-    let Ok(raw) = std::fs::read_to_string(root.join("package.json")) else {
-        return false;
-    };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return false;
-    };
-    ["dependencies", "devDependencies", "optionalDependencies"]
-        .iter()
-        .any(|field| json.get(field).and_then(|v| v.get("vite")).is_some())
 }
 
 /// Whether a semver version string is below 8.1.0 (the floor at which Vite's
@@ -558,28 +539,6 @@ mod tests {
             original,
             "the CAS-shared inode must be untouched — the write broke the hardlink"
         );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn manifest_declares_vite_scans_all_dep_fields() {
-        let dir = std::env::temp_dir().join(format!("nub-vite-decl-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let write = |body: &str| std::fs::write(dir.join("package.json"), body).unwrap();
-
-        write(r#"{"devDependencies":{"vite":"^7"}}"#);
-        assert!(manifest_declares_vite(&dir), "devDependencies");
-        write(r#"{"dependencies":{"vite":"7"}}"#);
-        assert!(manifest_declares_vite(&dir), "dependencies");
-        // Library-embedded: framework declared, Vite only transitive ⇒ not direct.
-        write(r#"{"dependencies":{"astro":"^7","@astrojs/react":"^4"}}"#);
-        assert!(
-            !manifest_declares_vite(&dir),
-            "transitive vite is not a direct dep"
-        );
-        // No manifest ⇒ false, no panic.
-        std::fs::remove_file(dir.join("package.json")).unwrap();
-        assert!(!manifest_declares_vite(&dir));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

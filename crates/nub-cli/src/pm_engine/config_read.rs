@@ -9,7 +9,7 @@
 //! one thing to the install and another to `config get`.
 //!
 //! The merged view reports what an install would ACT ON, so it opens with the
-//! defaults nub itself applies ([`super::nub_config_defaults`]) and lets each
+//! defaults nub itself applies ([`super::host_settings::defaults`]) and lets each
 //! file override them: `minimumReleaseAge` reads `1440` in a project that has
 //! never configured it, because that is the quarantine the next install
 //! applies. A key nothing defaults and nobody set reports `undefined`, which is
@@ -480,16 +480,15 @@ pub(crate) fn registry_at(root: &Path) -> String {
 
 /// The defaults nub itself applies, lowest precedence of all.
 ///
-/// Sourced from the install's own list ([`super::nub_config_defaults`]) rather
-/// than from the settings TABLE. The distinction is what the layout axis rests
+/// Sourced from the install's own defaults ([`super::host_settings::defaults`])
+/// rather than from the settings TABLE. The distinction is what the layout axis rests
 /// on: the table declares a default for every setting it describes, including
 /// layout ones nub deliberately does not default here, so a table-wide tier
 /// would answer `shamefullyHoist` with `false` where the correct answer is that
 /// nothing set it. The list also carries values the table cannot know — the
-/// store and state directories, and whether a fresh project writes nub's own
-/// lockfile format.
+/// store and cache directories, and whether the shared store is on.
 fn default_entries(root: &Path) -> Vec<(String, String)> {
-    super::nub_config_defaults(root)
+    super::host_settings::defaults(root)
         .into_iter()
         .map(|(key, value)| (canonical_list_key(&key), value))
         .collect()

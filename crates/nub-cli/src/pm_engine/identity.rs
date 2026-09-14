@@ -202,9 +202,8 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     // hidden hoist tree is built wherever GVS is OFF (CI, `nub ci`, a
     // next/nuxt/parcel trigger, an explicit `enableGlobalVirtualStore=false`,
     // dlx) — restoring ambient `@types/*` resolution for store-resident
-    // packages. Only an EXPLICIT `hoist=true` (nub's injected-deps push, or a
-    // user setting) vetoes GVS. Nub therefore no longer pushes `hoist=false`;
-    // see `nub_setting_defaults`.
+    // packages. Only an EXPLICIT `hoist=true` vetoes GVS, so nub no longer
+    // pushes `hoist=false`.
     gvs_over_default_hoist: true,
     primer_ttl: None,
     // Cap aube's CPU-bound pools (linker rayon pool, tokio worker seed) to the

@@ -687,15 +687,15 @@ trustPolicy=off                     # disable the check entirely
 
 ## Store and disk layout
 
-Regardless of the incumbent, Nub installs through a global content-addressed store and links into an isolated virtual store — aube's scheme, under Nub's own directory names.
+Nub installs through a global content-addressed store and links into an isolated virtual store, under Nub's own directory names. A pnpm project keeps pnpm's own store.
 
 ### Global content store
 
-Package files are deduplicated by content hash in a global store at `$XDG_DATA_HOME/nub/store/v1/` (default `~/.local/share/nub/store/v1/`). Every install imports from it, so a given package version is on disk once and is shared across projects.
+Package files are deduplicated by content hash in a global store at `$XDG_CACHE_HOME/nub/store/v11/` (default `~/.cache/nub/store/v11/`). Every install imports from it, so a given package version is on disk once and is shared across projects.
 
 ```console
 $ nub store path
-/Users/you/.local/share/nub/store/v1
+/Users/you/.cache/nub/store/v11
 ```
 
 Files materialize into `node_modules` by reflink (APFS/btrfs), hardlink (ext4), or copy fallback — whichever the filesystem supports — so a populated tree costs little extra disk.

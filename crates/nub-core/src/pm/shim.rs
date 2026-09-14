@@ -641,8 +641,7 @@ pub const SHIMS_LEAF_PUBLIC: &str = SHIMS_LEAF;
 ///
 /// Read on EVERY platform, deliberately. An explicitly-set `XDG_DATA_HOME` wins
 /// on Windows too, matching `node::discovery::cache_dir` ("an explicit
-/// `XDG_CACHE_HOME` still wins everywhere"), `pm_engine::nub_data_dir_from`, and
-/// the tools nub sits beside — pnpm's `getDataDir` reads it above its
+/// `XDG_CACHE_HOME` still wins everywhere") and the tools nub sits beside — pnpm's `getDataDir` reads it above its
 /// darwin/win32 switch, and corepack reads `XDG_CACHE_HOME` above `LOCALAPPDATA`.
 /// The platform only ever supplies the FALLBACK default.
 pub(crate) fn xdg_data_home() -> Option<PathBuf> {

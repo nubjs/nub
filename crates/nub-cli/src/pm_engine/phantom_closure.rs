@@ -21,14 +21,9 @@
 
 use std::sync::{LazyLock, PoisonError, RwLock};
 
-/// nub's own embedder-default names that may seed the eject set. Native
-/// `install.linker.eject` entries are admitted separately; incumbent
-/// `.npmrc`/env/workspace values remain ignored. Standalone aube installs no
-/// hook and honors its full `diskMaterializePackages` knob unchanged.
-///
-/// SHARED with [`super::nub_setting_defaults`], which seeds exactly this name as
-/// the embedder default — sourcing both from one const so a future internal
-/// default can't be added in one place and silently dropped by the other.
+/// nub's own names that always seed the eject set. The project's
+/// `install.linker.eject` entries are admitted separately; `.npmrc`, env and
+/// workspace-file values are not read for it.
 pub(super) const NUB_INTERNAL_DISK_MATERIALIZE_SEED: &[&str] = &["vite"];
 
 /// `install.linker.eject` from the project's `nub.jsonc`, published by

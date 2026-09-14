@@ -24,13 +24,6 @@
 //! `aubx`/`aubr` are not rewritten (they never appear in the embedded
 //! command layer's messages).
 
-/// Render a failing engine report for nub's stderr: miette's fancy Debug
-/// render (exactly what aube's own `cli_main` prints), then the brand
-/// rewrite.
-pub(crate) fn render_report(report: &miette::Report) -> String {
-    rewrite(&format!("{report:?}"))
-}
-
 /// Warning passthrough for family verbs (stderr, rewritten). Use for
 /// non-fatal engine-adjacent notices.
 #[allow(dead_code)] // first consumers land with the family fill-ins
@@ -379,7 +372,7 @@ mod tests {
             code = aube_codes::errors::ERR_AUBE_NO_LOCKFILE,
             "no lockfile found and --frozen-lockfile is set"
         );
-        let rendered = render_report(&report);
+        let rendered = rewrite(&format!("{report:?}"));
         assert!(
             rendered.contains("ERR_NUB_NO_LOCKFILE"),
             "rendered report must carry the rewritten code: {rendered}"
