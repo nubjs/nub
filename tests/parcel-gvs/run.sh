@@ -15,7 +15,9 @@
 #   default versions: 2.9.3 2.10.3 2.11.0 2.12.0 2.13.3 2.16.4
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-NUB="${1:?usage: run.sh <nub-binary> [version ...]}"
+NUB_ARG="${1:?usage: run.sh <nub-binary> [version ...]}"
+# Absolute, because each install and build runs from inside its fixture.
+NUB="$(cd "$(dirname "$NUB_ARG")" && pwd)/$(basename "$NUB_ARG")"
 shift || true
 VERSIONS=("$@")
 [ ${#VERSIONS[@]} -eq 0 ] && VERSIONS=(2.9.3 2.10.3 2.11.0 2.12.0 2.13.3 2.16.4)
@@ -26,12 +28,17 @@ for V in "${VERSIONS[@]}"; do
   DEST=$(mktemp -d "/tmp/nub-parcel-gvs-$V-XXXXXX")
   ISO=$(mktemp -d "/tmp/nub-parcel-gvs-iso-$V-XXXXXX")
   "$HERE/make-fixture.sh" "$DEST" "$V" >/dev/null
+  # CI switches the global virtual store off, so it is unset rather than trusted.
   ( cd "$DEST"
-    XDG_CACHE_HOME="$ISO/cache" XDG_DATA_HOME="$ISO/data" \
+    env -u CI XDG_CACHE_HOME="$ISO/cache" XDG_DATA_HOME="$ISO/data" \
       NPM_CONFIG_ENABLE_GLOBAL_VIRTUAL_STORE=true "$NUB" install >install.log 2>&1
   ); IEXIT=$?
-  VS="$ISO/cache/nub/pm/virtual-store"
-  CORES=$(ls -1 "$VS" 2>/dev/null | grep -cE '^@parcel\+core@' || true)
+  # A copy lives in the shared store, at links/<scope>/<name>/<version>/<hash>,
+  # or in the project's own node_modules/.store when nub materializes it there
+  # for a phantom dependency. Both count: two copies anywhere is the split.
+  SHARED=$(ls -d "$ISO"/cache/nub/store/v*/links/@parcel/core/*/* 2>/dev/null | wc -l | tr -d ' ')
+  LOCAL=$(find "$DEST/node_modules/.store" -maxdepth 1 -type d -name '@parcel+core@*' 2>/dev/null | wc -l | tr -d ' ')
+  CORES=$((SHARED + LOCAL))
   ( cd "$DEST"
     XDG_CACHE_HOME="$ISO/cache" XDG_DATA_HOME="$ISO/data" "$NUB" run build >build.log 2>&1
   ); BEXIT=$?

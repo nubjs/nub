@@ -1,24 +1,27 @@
 # Parcel under the global virtual store — regression harness
 
-This directory regression-tests a global-virtual-store (GVS) bug that broke `parcel build`: the shared store materialized `@parcel/core` as two byte-identical directories, so the main thread and a worker thread loaded different `@parcel/core` instances, ended up with two module-scoped serializer registries, and threw `DataCloneError` at worker-farm startup.
+This directory guards `parcel build` under the global virtual store (GVS). Parcel's main thread and its worker threads must load the same `@parcel/core` instance: the package keeps a module-scoped serializer registry, and with two copies installed the worker farm fails at startup with `DataCloneError`.
 
-## The bug
+## The failure it guards
 
-The resolver widens its graph with every common platform's optional native deps so the committed lockfile is portable. The link phase runs `filter_graph` to trim that back to the host before hashing. The GVS prewarm materializer — which populates the shared store concurrently with fetch — hashed the **widened** graph instead. Any package whose subtree contains a platform-specific optional native dep (all of Parcel's tree: `@parcel/watcher-<platform>`, `@swc/core-<platform>`, `lmdb`, `msgpackr`) then hashed differently in the two phases, so the same `dep_path` landed at two shared-store directories. The existence-gated link step never rewired over the prewarm cohort, so `parcel` resolved one copy of `@parcel/core` and `@parcel/workers` resolved the other.
-
-The fix host-filters the prewarm graph to match the link phase (`run_gvs_prewarm_materializer` in `vendor/aube/crates/aube/src/commands/install/materialize.rs`). A hermetic unit test guards the graph-hash agreement invariant: `gvs_prewarm_and_link_agree_only_after_host_filtering_the_widened_graph` in `vendor/aube/crates/aube-resolver/src/platform.rs`.
+A lockfile stays portable because resolution keeps every common platform's optional native dependencies, while linking keeps only the host's. Parcel's tree is full of them (`@parcel/watcher-<platform>`, `@swc/core-<platform>`, `lmdb`, `msgpackr-extract`). If one install step names a package's shared-store directory from the portable graph and another from the host graph, the same package lands in two directories, and `parcel` resolves one `@parcel/core` while `@parcel/workers` resolves the other. Nub's previous package-manager engine split this way until both steps hashed the host-filtered graph. The harness checks the outcome, so it holds for any engine.
 
 ## Running the harness
 
 ```sh
 tests/parcel-gvs/run.sh target/fast/nub                      # default version matrix
-tests/parcel-gvs/run.sh target/fast/nub 2.12.0 2.16.4        # specific versions
+tests/parcel-gvs/run.sh target/fast/nub 2.9.3 2.16.4         # specific versions
 ```
 
-For each Parcel version, `run.sh` builds a minimal worker-farm fixture (`make-fixture.sh`), installs it into a **fresh, isolated** global store with the GVS forced on, and asserts exactly one `@parcel/core` store directory plus a `parcel build` that exits 0. Store isolation (`XDG_CACHE_HOME`/`XDG_DATA_HOME` per version) is load-bearing: a polluted machine-global store accumulates directories across installs and masks the over-split.
+For each Parcel version, `run.sh` builds a minimal worker-farm fixture (`make-fixture.sh`), installs it into a fresh, isolated store with the GVS forced on, and asserts one copy of `@parcel/core` plus a `parcel build` that exits 0.
 
-Verified against 2.9.3, 2.10.3, 2.11.0, 2.12.0, 2.13.3, and 2.16.4.
+- **Copies are counted wherever a package can live:** the shared store (`$XDG_CACHE_HOME/nub/store/v*/links/@parcel/core/<version>/<hash>`) and the project's own `node_modules/.store`, where nub places a package it keeps out of the shared store. Parcel 2.9.3's `@parcel/core` lands in the shared store and 2.16.4's in the project store.
+- **Store isolation is load-bearing.** Each version gets its own `XDG_CACHE_HOME` and `XDG_DATA_HOME`: a machine-global store accumulates directories across installs and masks a split.
+- **`CI` is unset for the install**, because nub turns the GVS off in CI.
+- **The fixture decides Parcel's install scripts `false` in `allowScripts`.** Those packages ship prebuilt platform binaries and their scripts are fallbacks, so the install passes the approve-builds gate without compiling anything.
+
+Verified on Node 24 against 2.9.3 and 2.16.4.
 
 ## Why an end-to-end harness
 
-The runtime failure only reproduces against a real Parcel dependency tree materialized into a real shared store — the split is in on-disk store-directory naming and Parcel's own module-singleton assumption, neither of which a Rust unit test can stand in for. The unit test covers the hashing invariant; this harness covers the whole install-and-build path across Parcel versions.
+The failure only reproduces against a real Parcel tree materialized into a real shared store: the split is in on-disk directory naming and in Parcel's own module-singleton assumption, and no unit test stands in for either.

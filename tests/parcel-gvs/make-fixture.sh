@@ -12,13 +12,22 @@ DEST="${1:-/tmp/nub-parcel-gvs-fixture}"
 VERSION="${2:-2.12.0}"
 rm -rf "$DEST"
 mkdir -p "$DEST/src"
+# Parcel's native dependencies ship prebuilt platform packages and their install
+# scripts are fallbacks, so the fixture decides them false: the install passes
+# the approve-builds gate without compiling anything.
 cat > "$DEST/package.json" <<EOF
 {
   "name": "nub-parcel-gvs-fixture",
   "version": "1.0.0",
   "source": "src/index.html",
   "scripts": { "build": "parcel build --no-cache" },
-  "devDependencies": { "parcel": "$VERSION" }
+  "devDependencies": { "parcel": "$VERSION" },
+  "allowScripts": {
+    "@parcel/watcher": false,
+    "@swc/core": false,
+    "lmdb": false,
+    "msgpackr-extract": false
+  }
 }
 EOF
 cat > "$DEST/src/index.html" <<'EOF'
