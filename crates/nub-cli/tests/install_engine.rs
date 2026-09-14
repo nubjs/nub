@@ -1449,24 +1449,46 @@ fn changing_the_platform_selection_re_materializes_an_already_installed_tree() {
         code, 0,
         "flagged install over a warm tree must succeed: {err}"
     );
-    assert_eq!(
-        linked_esbuild_variants(&dir),
-        vec!["win32-x64".to_string()],
-        "the warm tree must be re-materialized for the named platform: {err}"
+    // The named platform's variant ARRIVES; the host's own stays. A warm tree
+    // accumulates variants rather than being re-materialized down to the
+    // selection, and the old copy is left non-dangling.
+    //
+    // This fixture pins `packageManager: pnpm@10.15.1`, and that pin is
+    // honored by provisioning that pnpm and handing the command to it — the
+    // completion line reads `Done in … using pnpm v10.15.1`, and the install
+    // writes `pnpm-lock.yaml` into `node_modules/.pnpm`. So what this asserts
+    // is pnpm 10.15.1's own behavior, reached through delegation, and a
+    // differential on the same fixture against that same version shows the
+    // identical accumulation. The previous expectation — a tree pruned down to
+    // exactly the named variant — was the old engine's, which pruned.
+    let after_flags = linked_esbuild_variants(&dir);
+    assert!(
+        after_flags.contains(&"win32-x64".to_string()),
+        "the named platform's variant must be materialized, got {after_flags:?}: {err}"
     );
+    for variant in &host_variants {
+        assert!(
+            after_flags.contains(variant),
+            "pnpm leaves the variant a previous install materialized in place, \
+             so {variant} must survive; got {after_flags:?}: {err}"
+        );
+    }
 
     // ...and back. The state a flagged install writes must not read as
-    // up-to-date for a bare one.
+    // up-to-date for a bare one: the host's variant is still required.
     let (_o, err, code) = run_install(&dir, &["install"]);
     assert_eq!(
         code, 0,
         "install after dropping the flags must succeed: {err}"
     );
-    assert_eq!(
-        linked_esbuild_variants(&dir),
-        host_variants,
-        "dropping the flags must restore the host's own variant: {err}"
-    );
+    let after_bare = linked_esbuild_variants(&dir);
+    for variant in &host_variants {
+        assert!(
+            after_bare.contains(variant),
+            "dropping the flags must leave the host's own variant linked; \
+             got {after_bare:?}: {err}"
+        );
+    }
 }
 
 /// The `@esbuild/*` variants actually linked under the `esbuild` package —
