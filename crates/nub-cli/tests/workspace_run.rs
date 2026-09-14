@@ -137,6 +137,98 @@ fn recursive_run_discovers_object_form_workspace_packages() {
     assert!(combined.contains("OBJECT:web"), "web must run\n{combined}");
 }
 
+/// A pnpm project runs the projects pnpm 12 runs. The nearest
+/// `pnpm-workspace.yaml` names them — the root alone when `packages` is absent,
+/// and none at all for `packages: []` — and `package.json` `workspaces` is not
+/// read. With no workspace file a recursive run walks every package below the
+/// project, the root included and `node_modules` excluded.
+#[test]
+fn a_pnpm_project_runs_the_projects_pnpm_runs() {
+    const TAGS: [&str; 5] = ["root", "a", "b", "z", "hidden"];
+    let package = |dir: &Path, tag: &str| {
+        write(
+            &dir.join("package.json"),
+            &format!(
+                r#"{{"name":"probe-{tag}","version":"1.0.0","scripts":{{"x":"echo RAN_{tag}"}}}}"#
+            ),
+        );
+    };
+    let ran = |tag: &str, files: &[(&str, &str)], members: &[(&str, &str)]| {
+        let root = tmp_workspace(tag);
+        package(&root, "root");
+        for (path, contents) in files {
+            write(&root.join(path), contents);
+        }
+        for (dir, member) in members {
+            package(&root.join(dir), member);
+        }
+        let (stdout, stderr, code) = run_nub(&root, &["run", "-r", "x"]);
+        assert_eq!(code, 0, "{tag}:\n{stdout}\n{stderr}");
+        let ran: Vec<&str> = TAGS
+            .into_iter()
+            .filter(|tag| stdout.contains(&format!("RAN_{tag}")))
+            .collect();
+        (ran, stderr)
+    };
+
+    let (both, _) = ran(
+        "pnpm-both",
+        &[
+            (
+                "package.json",
+                r#"{"name":"probe-root","version":"1.0.0","workspaces":["json/*"],"scripts":{"x":"echo RAN_root"}}"#,
+            ),
+            (
+                "pnpm-workspace.yaml",
+                "packages:\n  - yaml/*\nverifyDepsBeforeRun: false\n",
+            ),
+        ],
+        &[("yaml/a", "a"), ("json/b", "b")],
+    );
+    assert_eq!(both, ["a"], "the workspace file names the members");
+
+    let (walked, stderr) = ran(
+        "pnpm-lockfile-only",
+        &[("pnpm-lock.yaml", "lockfileVersion: '9.0'\n")],
+        &[
+            ("a", "a"),
+            ("x/y/z", "z"),
+            ("node_modules/hidden", "hidden"),
+        ],
+    );
+    assert_eq!(
+        walked,
+        ["root", "a", "z"],
+        "no workspace file walks the tree"
+    );
+    assert!(stderr.contains("Scope: all 3 projects"), "{stderr}");
+
+    let (root_only, _) = ran(
+        "pnpm-no-packages-key",
+        &[("pnpm-workspace.yaml", "verifyDepsBeforeRun: false\n")],
+        &[("a", "a")],
+    );
+    assert_eq!(
+        root_only,
+        ["root"],
+        "an absent `packages` is the root alone"
+    );
+
+    let (none, stderr) = ran(
+        "pnpm-empty-packages",
+        &[(
+            "pnpm-workspace.yaml",
+            "packages: []\nverifyDepsBeforeRun: false\n",
+        )],
+        &[("a", "a")],
+    );
+    assert!(none.is_empty(), "`packages: []` runs nothing: {none:?}");
+    assert!(
+        stderr.contains("Scope: 0 of 1 workspace projects"),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn recursive_run_with_no_matching_script_anywhere_notifies_and_exits_zero() {
     let root = script_workspace("none-have-it");

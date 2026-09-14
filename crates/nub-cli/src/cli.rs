@@ -4967,22 +4967,33 @@ fn run_workspace_target(
     let project =
         nub_core::workspace::detect::detect_project(&cwd).ok_or_else(|| no_manifest_error(&cwd))?;
     let project = &project;
-    let ws_root = project
-        .workspace_root
-        .as_deref()
-        .or(if ws.workspace_root {
-            Some(project.root.as_path())
-        } else {
-            None
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "not in a workspace (no package.json#workspaces or pnpm-workspace.yaml found)"
-            )
-        })?;
+    // A pnpm project walks the projects pnpm walks, the root among them.
+    let mut pnpm = crate::pm_engine::recursive_projects::find(&cwd, &project.root)?;
+    let pnpm_members = pnpm
+        .as_mut()
+        .map(|found| std::mem::take(&mut found.projects));
+    let ws_root = match &pnpm {
+        Some(found) => found.root.as_path(),
+        None => project
+            .workspace_root
+            .as_deref()
+            .or(if ws.workspace_root {
+                Some(project.root.as_path())
+            } else {
+                None
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "not in a workspace (no package.json#workspaces or pnpm-workspace.yaml found)"
+                )
+            })?,
+    };
 
-    let mut members = nub_core::workspace::filter::discover_members(ws_root);
-    if members.is_empty() && !ws.include_workspace_root {
+    let mut members = match pnpm_members {
+        Some(members) => members,
+        None => nub_core::workspace::filter::discover_members(ws_root),
+    };
+    if pnpm.is_none() && members.is_empty() && !ws.include_workspace_root {
         bail!("no workspace packages found under {}", ws_root.display());
     }
 
@@ -4990,7 +5001,9 @@ fn run_workspace_target(
     // so synthesize it and always add it to the run set (npm semantics: it's an
     // *addition* to the recursive set, distinct from --workspace-root which
     // targets only the root). Its index is the appended slot.
-    let root_idx = if ws.include_workspace_root {
+    let root_idx = if let Some(found) = &pnpm {
+        members.iter().position(|member| member.dir == found.root)
+    } else if ws.include_workspace_root {
         if let Ok(content) = std::fs::read_to_string(ws_root.join("package.json")) {
             if let Ok(manifest) =
                 serde_json::from_str::<serde_json::Value>(nub_core::strip_utf8_bom(&content))
@@ -5035,9 +5048,26 @@ fn run_workspace_target(
     };
 
     // --include-workspace-root always adds the root regardless of the filter set.
-    if let Some(idx) = root_idx {
-        matched_set.insert(idx);
+    // In a pnpm project the root is already a member, and it stays in the run
+    // only when that flag, an inclusion filter that matches it, or pnpm's
+    // root-only workspace keeps it (a filter list of exclusions alone drops it).
+    match (&pnpm, root_idx) {
+        (Some(found), Some(idx)) => {
+            if ws.include_workspace_root || (found.keeps_root && ws.filter.is_empty()) {
+                matched_set.insert(idx);
+            } else if !found.keeps_root && !ws.filter.iter().any(|f| !f.starts_with('!')) {
+                matched_set.remove(&idx);
+            }
+        }
+        (None, Some(idx)) => {
+            matched_set.insert(idx);
+        }
+        _ => {}
     }
+    let projects_noun = match &pnpm {
+        Some(found) if !found.is_workspace => "projects",
+        _ => "workspace projects",
+    };
 
     // Zero-match handling. A filter that selects nothing is a clean exit-0
     // no-op (matching pnpm: `No projects matched the filters in "<dir>"`), not
@@ -5060,6 +5090,8 @@ fn run_workspace_target(
                 "No projects matched the filters in \"{}\"",
                 ws_root.display()
             );
+        } else if pnpm.is_some() {
+            eprintln!("Scope: 0 of {} {projects_noun}", members.len());
         }
         return Ok(0);
     }
@@ -5078,9 +5110,9 @@ fn run_workspace_target(
     let selected = matched_set.len();
     if selected > 1 {
         if selected == total_projects {
-            eprintln!("Scope: all {total_projects} workspace projects");
+            eprintln!("Scope: all {total_projects} {projects_noun}");
         } else {
-            eprintln!("Scope: {selected} of {total_projects} workspace projects");
+            eprintln!("Scope: {selected} of {total_projects} {projects_noun}");
         }
     }
 
