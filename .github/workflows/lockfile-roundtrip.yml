@@ -16,7 +16,7 @@ name: Lockfile round-trip
 #     two installs + a mutation per leg).
 #
 # Both harnesses invoke pnpm/npm/bun/yarn by name off PATH (NOT npx-pinned like
-# tests/aube-conformance/run.sh), so this workflow pins each one deterministically
+# tests/lockfile-conformance/run.sh), so this workflow pins each one deterministically
 # on PATH before running — see the "Pin package managers" step. Keep these pins
 # in sync with the tool/version matrices documented in each harness README and
 # with BUN_PIN/PNPM_PIN/NPM_PIN defaults in the run.sh scripts.

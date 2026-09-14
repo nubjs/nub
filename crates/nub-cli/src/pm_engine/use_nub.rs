@@ -1026,8 +1026,8 @@ pub(crate) fn run_use_nub(root: &Path, exact_pin: Option<&str>) -> Result<i32> {
         println!("  - corepack-enabled shells hard-error on packageManager \"nub@…\" —");
         println!("    fix: install nub (npm i -g @nubjs/nub) or `corepack disable`");
     }
-    println!("  - real pnpm refuses to run here (ERR_PNPM_OTHER_PM_EXPECTED) — by design;");
-    println!("    `nub pm use pnpm` reverses this switch completely");
+    println!("  - real pnpm ignores {NUB_LOCKFILE} and resolves its own pnpm-lock.yaml;");
+    println!("    `nub pm use pnpm` hands the project back, lockfile bytes intact");
     println!("  - turbo requires a recognized packageManager + lockfile name and will error");
     println!("  - hosted update bots (Renovate/Dependabot) can't regenerate {NUB_LOCKFILE} yet");
     println!("  - lockfile-sniffing deploy platforms won't auto-detect a PM — run installs");

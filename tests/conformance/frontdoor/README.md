@@ -105,7 +105,7 @@ This suite exists to catch false greens, so its OWN cells must not be vacuous. T
 
 ## Deferred / covered elsewhere
 
-- **Lockfile round-trip** — fully covered by `tests/conformance/run.sh` (both directions, all PMs, pnpm-11 leg) and `tests/aube-conformance/`. Not duplicated here.
+- **Lockfile round-trip** — fully covered by `tests/conformance/run.sh` (both directions, all PMs, pnpm-11 leg) and `tests/lockfile-conformance/`. Not duplicated here.
 - **Config-write per-field incumbent-aware shared-ness** (the `pm-config-field-level-audit` known gap) — a TODO row per affected scalar once that audit lands; this harness is its natural regression home.
 - **Detection-chain tail** (installed-PM `--version` / lockfile-version-signal refinement, gap G9) — deliberately unwired; no cell until the posture changes.
 - **The `REF=1` yarn-berry leg** — host `yarn` is v1; berry round-trip fidelity lives in `aube-lockfile` unit tests (see the sibling README). The berry *config-read* cell here is doc-mode only.

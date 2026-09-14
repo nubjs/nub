@@ -7,10 +7,5 @@
   },
   "overrides": {
     "supports-color": "8.1.1"
-  },
-  "pnpm": {
-    "overrides": {
-      "supports-color": "8.1.1"
-    }
   }
 }

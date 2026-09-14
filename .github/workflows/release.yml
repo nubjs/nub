@@ -338,30 +338,26 @@ jobs:
       - run: cargo test
 
   conformance:
-    name: Lockfile conformance gate (real PMs)
+    name: Lockfile conformance gate (real pnpm)
     needs: verify
-    # Tag + stable-dispatch only — same rationale as the `test` gate above: the
-    # aube-parity workflow covers main, and canary doesn't re-gate.
+    # Tag + stable-dispatch only, the same rationale as the `test` gate above;
+    # canary doesn't re-gate.
     if: ${{ needs.verify.outputs.is_canary != 'true' }}
-    # The lockfile-compat regression gate that 0.0.35/0.0.36 slipped through:
-    # those releases shipped with the conformance suite RED because publish only
-    # gated on the fast `test:` job, and the conformance/daily-driver/native-dep
-    # suites live in SEPARATE workflows (aube-parity.yml, …) that don't gate the
-    # release. This reproduces tests/aube-conformance/run.sh — nub writes each
-    # foreign lockfile format in a hermetic sandbox and the REAL pinned package
-    # manager judges it (pnpm/npm frozen-accept + zero-churn rewrite, bun
-    # frozen-accept, yarn-mutation refusal, the nub round-trip) — and `publish`
-    # `needs:` it, so a lockfile-compat regression now blocks the release.
+    # The lockfile regression gate that 0.0.35/0.0.36 slipped through: those
+    # releases shipped with the conformance suite RED because publish only
+    # gated on the fast `test:` job. This runs tests/lockfile-conformance/run.sh
+    # — nub writes the lockfile of a pnpm project and of a nub project in a
+    # hermetic sandbox, switches a project between the two, and the REAL pinned
+    # pnpm judges each result (frozen accept + zero-churn rewrite) — and
+    # `publish` `needs:` it, so a lockfile regression blocks the release.
     #
     # Its OWN serial job (needs: verify only — NOT folded into the build matrix),
     # deliberately, to avoid the runner-exhaustion the `test:` gate's comment
-    # warns about: this is one real-registry install matrix, run once on ubuntu,
-    # not fanned out across the 8 platform runners. Mirrors the aube-conformance
-    # job in aube-parity.yml (same setup: nub-cli build + pinned pnpm/npm via npx
-    # + pinned bun). Known-red scenarios live in expected-failures.txt and must
-    # shrink — a stale entry fails the job. The addon is NOT needed here: the
-    # harness exercises the PM engine (install/add/pm use), not the data-format
-    # loaders.
+    # warns about: one real-registry install matrix, run once on ubuntu, not
+    # fanned out across the 8 platform runners. Known-red scenarios live in
+    # expected-failures.txt and must shrink — a stale entry fails the job. The
+    # addon is NOT needed here: the harness exercises the package manager, not
+    # the data-format loaders.
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -377,14 +373,10 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5 # zizmor: ignore[cache-poisoning] conformance gate; nothing built here is published
         with:
           node-version: "24"
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2 # zizmor: ignore[cache-poisoning] bun only judges lockfiles in the conformance gate; nothing published
-        with:
-          # Keep in sync with BUN_PIN in tests/aube-conformance/run.sh.
-          bun-version: "1.3.14"
       - name: Build nub
         run: cargo build -p nub-cli
       - name: Run lockfile conformance matrix
-        run: tests/aube-conformance/run.sh target/debug/nub
+        run: tests/lockfile-conformance/run.sh target/debug/nub
 
   build:
     name: Build (${{ matrix.platform }})

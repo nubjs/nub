@@ -1,6 +1,0 @@
-# Known-red conformance scenarios: "<fixture> <format> <reason>".
-# Same discipline as tests/aube-bats/known-gaps.txt — this list must SHRINK.
-# A listed scenario that passes fails the run (XPASS-STALE) so the green flip
-# is recorded by deleting the entry in the same commit as the fix.
-# All entries are fork-fixable lockfile-writer bugs (vendor/aube); scenarios
-# the ecosystem makes impossible are skip_reason() in run.sh instead.

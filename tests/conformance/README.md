@@ -58,7 +58,7 @@ Direction A: pnpm 11 writes `pnpm-lock.yaml` (lockfileVersion 9.0) → nub `--fr
 | `peers` | peer dependencies — `react-dom@18` with a `peerDep` on `react@18`, exercising peer resolution and auto-install |
 | `has-install-script` | npm's per-package verbatim keys — Direction A asserts nub reads a real npm `hasInstallScript` (on `esbuild`) and re-emits it with zero churn; scoped to npm via `skip_reason()` since no other PM's lockfile encodes them. (The `deprecated`/`inBundle`/`hasShrinkwrap`/`bundleDependencies` siblings round-trip through the same verbatim path; `aube-lockfile`'s `test_roundtrip_preserves_npm_verbatim_meta_fields` covers all five.) |
 
-Both are small by design; the goal is a fast, signal-dense suite. The aube-conformance harness (`tests/aube-conformance/`) covers larger fixtures (workspaces, overrides, platform-conditionals, patched deps, git deps) for the Direction B side; this harness adds Direction A and is the regression guard for the bidirectional contract.
+Both are small by design; the goal is a fast, signal-dense suite. The lockfile-conformance harness (`tests/lockfile-conformance/`) covers larger fixtures (workspaces, overrides, platform-conditionals, patched deps, git deps) for the Direction B side; this harness adds Direction A and is the regression guard for the bidirectional contract.
 
 ### Differential feature fixtures (pnpm-only)
 
@@ -104,10 +104,10 @@ Requirements: network access to the npm registry (these are real installs), `nod
 
 The sandbox redirects `HOME` and all `XDG_*` dirs to a fresh temp root so no dev-box `.npmrc`, caches, or PM stores leak in and nothing leaks out. On failure the sandbox is kept and the per-leg log (`logs/<fixture>--<dir>--<pm>.log`) and staged project (`runs/<fixture>--<dir>--<pm>/`) are available for forensics.
 
-## Relation to aube-conformance
+## Relation to lockfile-conformance
 
-`tests/aube-conformance/` is the comprehensive Direction B suite (nub writes → real PM reads), spanning eight fixtures and a `nub pm use` round-trip leg. This harness is complementary:
+`tests/lockfile-conformance/` is the comprehensive Direction B suite (nub writes → real PM reads), spanning eight fixtures and a `nub pm use` round-trip leg. This harness is complementary:
 
 - **New in this harness:** Direction A (real PM writes → nub reads frozen). This direction was not tested anywhere before 2026-06-11.
-- **Shared coverage:** Direction B with the `simple` and `peers` fixtures is redundant with what `aube-conformance` covers — both suites pass, and that's healthy (two independent witnesses for the same property).
-- **Where to add harder cases:** complicated fixtures (workspaces, overrides, platform-conditionals, patched deps) belong in `tests/aube-conformance/fixtures/`; run both harnesses to cover both directions for those shapes.
+- **Shared coverage:** Direction B with the `simple` and `peers` fixtures is redundant with what `lockfile-conformance` covers — both suites pass, and that's healthy (two independent witnesses for the same property).
+- **Where to add harder cases:** complicated fixtures (workspaces, overrides, platform-conditionals, patched deps) belong in `tests/lockfile-conformance/fixtures/`; run both harnesses to cover both directions for those shapes.

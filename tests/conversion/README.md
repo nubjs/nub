@@ -160,5 +160,5 @@ Both are adapted from `tests/conformance/fixtures/` and kept small for fast iter
 ## Relation to other harnesses
 
 - `tests/conformance/` — bidirectional drop-in: real PM writes → nub frozen-reads (Dir A); nub writes → real PM frozen-reads (Dir B). Does not test cross-format conversion.
-- `tests/aube-conformance/` — nub writes → real PM judges, plus the `pm use nub` / `pm use pnpm` round-trip within pnpm format. Does not test npm or bun as conversion source.
+- `tests/lockfile-conformance/` — nub writes → real PM judges, plus the `pm use nub` / `pm use pnpm` round-trip within pnpm format. Does not test npm or bun as conversion source.
 - **This harness** adds the cross-format dimension: every (source, target) combination over {npm, pnpm, bun, yarn}.

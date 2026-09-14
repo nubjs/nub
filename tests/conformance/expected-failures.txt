@@ -1,5 +1,5 @@
 # Known-red drop-in conformance scenarios: "<fixture> <direction> <pm> <reason>".
-# Same discipline as tests/aube-conformance/expected-failures.txt — this list
+# Same discipline as tests/lockfile-conformance/expected-failures.txt — this list
 # must SHRINK. A listed scenario that passes fails the run (XPASS-STALE) so the
 # green flip is recorded by deleting the entry in the same commit as the fix.
 # All entries are fixable lockfile-writer bugs (vendor/aube fork); scenarios

@@ -93,4 +93,4 @@ nub-env-gate-no-aube	nub	env-gate	doc	env-gate-aube-ignored	store-dir	AUBE_STORE
 # env-gate: pnpm_config_* honored under pnpm, ignored elsewhere;
 #   BUN_CONFIG_REGISTRY honored under bun only.
 # config-write: per-field incumbent-aware shared-ness (pm-config-field-level-audit).
-# lockfile round-trip: covered by tests/conformance/run.sh + aube-conformance.
+# lockfile round-trip: covered by tests/conformance/run.sh + lockfile-conformance.

@@ -50,7 +50,7 @@ REF="${REF:-0}"
 NET="${NET:-0}"
 
 # Hermetic sandbox HOME so the dev box's ~/.npmrc / caches / stores don't leak
-# in or get clobbered. (Same discipline as tests/aube-conformance/run.sh.)
+# in or get clobbered. (Same discipline as tests/lockfile-conformance/run.sh.)
 CREATED_SANDBOX=0
 if [ -z "${SANDBOX_ROOT:-}" ]; then
   SANDBOX_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/nub-cmdconf.XXXXXX")"
