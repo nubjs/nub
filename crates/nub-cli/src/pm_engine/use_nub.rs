@@ -128,7 +128,6 @@ const NPMRC_KEYS: &[&str] = &[
     "recursiveInstall",
     "registry",
     "registrySupportsTimeField",
-    "requiredScripts",
     "resolutionMode",
     "resolvePeersFromWorkspaceRoot",
     "savePrefix",
@@ -168,9 +167,7 @@ const NPMRC_KEYS: &[&str] = &[
     "access",
     "provenance",
     // Keys only the previous engine wrote into a workspace yaml; all have npmrc homes.
-    "defaultLockfileFormat",
     "defaultTrust",
-    "deprecationWarnings",
     "advisoryCheck",
     "advisoryCheckOnInstall",
     "advisoryBloomCheck",
@@ -179,10 +176,6 @@ const NPMRC_KEYS: &[&str] = &[
     "allowedUnpopularPackages",
     "securityScanner",
     "paranoid",
-    "jailBuilds",
-    "jailBuildExclusions",
-    "strictStoreIntegrity",
-    "linkConcurrency",
     "hoistingLimits",
     "disableGlobalVirtualStoreForPackages",
     "diskMaterializePackages",
@@ -261,8 +254,8 @@ const ENGINE_UNSUPPORTED: &[(&str, &str)] = &[
 /// Keys with no destination: transient CLI flags persisted in yaml, features
 /// without a surviving home, and the keys still awaiting a design decision
 /// (`includeWorkspaceRoot`, `pnpmfile`, `workspaceConcurrency`, `saveExact`,
-/// `jailBuildPermissions`, `pnpmfilePath` — conservative warn-tail until
-/// ruled). Listed loudly in the summary, never silently dropped.
+/// `pnpmfilePath` — conservative warn-tail until ruled). Listed loudly in the
+/// summary, never silently dropped.
 const WARN_TAIL: &[&str] = &[
     "agent",
     "aggregateOutput",
@@ -292,7 +285,6 @@ const WARN_TAIL: &[&str] = &[
     "includeWorkspaceRoot",
     "initPackageManager",
     "initType",
-    "jailBuildPermissions",
     "legacyDirFiltering",
     "lockfileOnly",
     "message",

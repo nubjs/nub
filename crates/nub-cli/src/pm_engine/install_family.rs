@@ -497,8 +497,8 @@ mod tests {
         );
     }
     /// Stamp ONLY when nub wrote its own neutral lockfile. A virgin project that
-    /// resolved to a FOREIGN lockfile format (e.g. `default_lockfile_format=pnpm`
-    /// writes `pnpm-lock.yaml`, not nub's lockfile) is NOT stamped — that
+    /// holds a FOREIGN lockfile format (`pnpm-lock.yaml`, not nub's lockfile) is
+    /// NOT stamped — that
     /// lockfile is already the PM signal, and a nub claim beside it would
     /// misrepresent the project.
     #[test]

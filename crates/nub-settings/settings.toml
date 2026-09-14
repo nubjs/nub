@@ -56,14 +56,6 @@ sources.env = []
 sources.npmrc = ["allowedDeprecatedVersions"]
 sources.workspaceYaml = ["allowedDeprecatedVersions"]
 
-[deprecationWarnings]
-type = '"none" | "direct" | "all" | "summary"'
-default = "\"direct\""
-sources.cli = ["--deprecation-warnings"]
-sources.env = ["npm_config_deprecation_warnings", "NPM_CONFIG_DEPRECATION_WARNINGS"]
-sources.npmrc = ["deprecationWarnings"]
-sources.workspaceYaml = ["deprecationWarnings"]
-
 ["updateConfig.ignoreDependencies"]
 type = "list<string>"
 default = "undefined"
@@ -152,14 +144,6 @@ sources.cli = []
 sources.env = ["npm_config_minimum_release_age", "NPM_CONFIG_MINIMUM_RELEASE_AGE"]
 sources.npmrc = ["minimumReleaseAge"]
 sources.workspaceYaml = ["minimumReleaseAge"]
-
-[minimumPackageAge]
-type = "int"
-default = "43200"
-sources.cli = []
-sources.env = ["npm_config_minimum_package_age", "NPM_CONFIG_MINIMUM_PACKAGE_AGE"]
-sources.npmrc = ["minimumPackageAge"]
-sources.workspaceYaml = ["minimumPackageAge"]
 
 [minimumReleaseAgeExclude]
 type = "list<string>"
@@ -473,21 +457,6 @@ sources.env = ["npm_config_verify_store_integrity", "NPM_CONFIG_VERIFY_STORE_INT
 sources.npmrc = ["verify-store-integrity", "verifyStoreIntegrity"]
 sources.workspaceYaml = ["verifyStoreIntegrity"]
 
-[strictStoreIntegrity]
-type = "bool"
-default = "false"
-sources.cli = ["strict-store-integrity"]
-sources.env = ["npm_config_strict_store_integrity", "NPM_CONFIG_STRICT_STORE_INTEGRITY"]
-sources.npmrc = ["strict-store-integrity", "strictStoreIntegrity"]
-sources.workspaceYaml = ["strictStoreIntegrity"]
-
-[useRunningStoreServer]
-type = "bool"
-default = "false"
-sources.cli = []
-sources.env = ["npm_config_use_running_store_server", "NPM_CONFIG_USE_RUNNING_STORE_SERVER"]
-sources.npmrc = ["use-running-store-server", "useRunningStoreServer"]
-
 [strictStorePkgContentCheck]
 type = "bool"
 default = "true"
@@ -554,17 +523,6 @@ sources.cli = []
 sources.env = ["npm_config_lockfile", "NPM_CONFIG_LOCKFILE"]
 sources.npmrc = ["lockfile"]
 sources.workspaceYaml = ["lockfile"]
-
-[defaultLockfileFormat]
-type = '"nub" | "pnpm" | "npm" | "yarn" | "bun"'
-default = "\"nub\""
-sources.cli = []
-sources.env = [
-  "npm_config_default_lockfile_format",
-  "NPM_CONFIG_DEFAULT_LOCKFILE_FORMAT",
-]
-sources.npmrc = ["defaultLockfileFormat", "default-lockfile-format"]
-sources.workspaceYaml = ["defaultLockfileFormat"]
 
 [lockfileDir]
 type = "path"
@@ -687,12 +645,6 @@ sources.env = ["npm_config_fetch_timeout", "NPM_CONFIG_FETCH_TIMEOUT"]
 sources.npmrc = ["fetch-timeout", "fetchTimeout"]
 npmShared = true
 
-[fetchStallTimeout]
-type = "int"
-default = "60000"
-sources.env = ["npm_config_fetch_stall_timeout", "NPM_CONFIG_FETCH_STALL_TIMEOUT"]
-sources.npmrc = ["fetch-stall-timeout", "fetchStallTimeout"]
-
 [fetchWarnTimeoutMs]
 type = "int"
 default = "10000"
@@ -706,20 +658,6 @@ default = "50"
 sources.cli = []
 sources.env = ["npm_config_fetch_min_speed_ki_bps", "NPM_CONFIG_FETCH_MIN_SPEED_KI_BPS"]
 sources.npmrc = ["fetchMinSpeedKiBps"]
-
-[packumentMaxBytes]
-type = "int"
-default = "209715200"
-sources.cli = []
-sources.env = ["npm_config_packument_max_bytes", "NPM_CONFIG_PACKUMENT_MAX_BYTES"]
-sources.npmrc = ["packumentMaxBytes"]
-
-[tarballMaxBytes]
-type = "int"
-default = "1073741824"
-sources.cli = []
-sources.env = ["npm_config_tarball_max_bytes", "NPM_CONFIG_TARBALL_MAX_BYTES"]
-sources.npmrc = ["tarballMaxBytes"]
 
 # ========================================= Peer Dependencies =========================================
 
@@ -891,30 +829,6 @@ default = "false"
 sources.cli = []
 sources.env = ["npm_config_side_effects_cache_readonly", "NPM_CONFIG_SIDE_EFFECTS_CACHE_READONLY"]
 sources.npmrc = ["sideEffectsCacheReadonly"]
-
-[jailBuilds]
-type = "bool"
-default = "false"
-sources.cli = []
-sources.env = ["npm_config_jail_builds", "NPM_CONFIG_JAIL_BUILDS"]
-sources.npmrc = ["jail-builds", "jailBuilds"]
-sources.workspaceYaml = ["jailBuilds"]
-
-[jailBuildExclusions]
-type = "list<string>"
-default = "[]"
-sources.cli = []
-sources.env = ["npm_config_jail_build_exclusions", "NPM_CONFIG_JAIL_BUILD_EXCLUSIONS"]
-sources.npmrc = ["jailBuildExclusions", "jail-build-exclusions"]
-sources.workspaceYaml = ["jailBuildExclusions"]
-
-[jailBuildPermissions]
-type = "object"
-default = "undefined"
-sources.cli = []
-sources.env = []
-sources.npmrc = []
-sources.workspaceYaml = ["jailBuildPermissions"]
 
 [unsafePerm]
 type = "bool"
@@ -1098,13 +1012,6 @@ sources.env = ["npm_config_update_notifier", "NPM_CONFIG_UPDATE_NOTIFIER"]
 sources.npmrc = ["updateNotifier"]
 npmShared = true
 
-[updateRewritesSpecifier]
-type = "bool"
-default = "true"
-sources.cli = []
-sources.env = ["npm_config_update_rewrites_specifier", "NPM_CONFIG_UPDATE_REWRITES_SPECIFIER"]
-sources.npmrc = ["updateRewritesSpecifier"]
-
 [preferSymlinkedExecutables]
 type = "bool"
 default = "true under `nodeLinker=hoisted`, false otherwise"
@@ -1133,13 +1040,6 @@ sources.cli = []
 sources.env = ["npm_config_registry_supports_time_field", "NPM_CONFIG_REGISTRY_SUPPORTS_TIME_FIELD"]
 sources.npmrc = ["registry-supports-time-field", "registrySupportsTimeField"]
 sources.workspaceYaml = ["registrySupportsTimeField"]
-
-[forceMetadataPrimer]
-type = "bool"
-default = "false"
-sources.cli = []
-sources.env = ["npm_config_force_metadata_primer", "NPM_CONFIG_FORCE_METADATA_PRIMER"]
-sources.npmrc = ["force-metadata-primer", "forceMetadataPrimer"]
 
 [extendNodePath]
 type = "bool"
@@ -1170,13 +1070,6 @@ default = "true"
 sources.cli = []
 sources.env = ["npm_config_optimistic_repeat_install", "NPM_CONFIG_OPTIMISTIC_REPEAT_INSTALL"]
 sources.npmrc = ["optimisticRepeatInstall"]
-
-[requiredScripts]
-type = "list<string>"
-default = "undefined"
-sources.cli = []
-sources.env = ["npm_config_required_scripts", "NPM_CONFIG_REQUIRED_SCRIPTS"]
-sources.npmrc = ["requiredScripts"]
 
 [enablePrePostScripts]
 type = "bool"
@@ -1228,11 +1121,3 @@ sources.cli = []
 sources.env = ["npm_config_cleanup_unused_catalogs", "NPM_CONFIG_CLEANUP_UNUSED_CATALOGS"]
 sources.npmrc = ["cleanupUnusedCatalogs"]
 sources.workspaceYaml = ["cleanupUnusedCatalogs"]
-
-[linkConcurrency]
-type = "int"
-default = "platform-specific"
-sources.cli = []
-sources.env = ["npm_config_link_concurrency", "NPM_CONFIG_LINK_CONCURRENCY"]
-sources.npmrc = ["link-concurrency", "linkConcurrency"]
-sources.workspaceYaml = ["linkConcurrency"]

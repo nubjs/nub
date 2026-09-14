@@ -425,5 +425,4 @@ fn config_get_reports_the_defaults_the_install_uses() {
         "`config get storeDir` must name the store `store path` reports: {store_dir} vs {store}"
     );
     assert_eq!(get("trustPolicy"), "no-downgrade");
-    assert_eq!(get("defaultLockfileFormat"), "undefined");
 }
