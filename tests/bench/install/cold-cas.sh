@@ -24,7 +24,7 @@
 #          relink-against-warm-store path.
 #
 # HERMETIC REGISTRY:
-#   Sources vendor/aube/benchmarks/hermetic.bash, which brings up a no-uplink
+#   Sources tests/bench/install/hermetic.bash, which brings up a no-uplink
 #   Verdaccio on port 4874 (BENCH_VERDACCIO_PORT) serving a one-time-warmed
 #   local storage so every tarball fetch hits localhost, not npmjs. nub is
 #   pointed at it via `nub install --registry $BENCH_REGISTRY_URL`. Falls back
@@ -49,7 +49,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 NUB="${NUB:-$REPO_ROOT/target/release/nub}"
 FIXTURE_DIR="$REPO_ROOT/tests/bench/install/fixtures"
-HERMETIC_BASH="$REPO_ROOT/vendor/aube/benchmarks/hermetic.bash"
+HERMETIC_BASH="$REPO_ROOT/tests/bench/install/hermetic.bash"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 
 RUN_COLD=1
@@ -139,16 +139,16 @@ if [[ "$USE_HERMETIC" -eq 1 ]]; then
     # hermetic.bash resolves its own dir from BASH_SOURCE; SCRIPT_DIR helps it.
     SCRIPT_DIR="$(dirname "$HERMETIC_BASH")"
     # Scope the one-time registry warm to the tools nub actually needs cached
-    # (pnpm-family resolution). The default aube warm also runs yarn/deno/bun
-    # legs; those are slow and, in some host setups (e.g. a package-manager
-    # shim that prompts), can stall the warm. nub only needs the npm/pnpm/aube
-    # tarballs, and populate_registry pulls each fixture's exact tarballs via
-    # uplink regardless, so dropping yarn/deno/bun here is safe. Override with
+    # (pnpm-family resolution). The default warm also runs yarn/deno/bun legs;
+    # those are slow and, in some host setups (e.g. a package-manager shim that
+    # prompts), can stall it. nub only needs the npm/pnpm tarballs, and
+    # populate_registry pulls each fixture's exact tarballs via uplink
+    # regardless, so dropping yarn/deno/bun here is safe. Override with
     # BENCH_TOOLS=... in the environment if you want the full warm set.
-    export BENCH_TOOLS="${BENCH_TOOLS:-aube,pnpm,npm}"
+    export BENCH_TOOLS="${BENCH_TOOLS:-nub,pnpm,npm}"
     # shellcheck disable=SC1090
     source "$HERMETIC_BASH"
-    export AUBE_BIN="$NUB"   # warm step skips aube if unset; nub serves the same role
+    export NUB_BIN="$NUB"   # the warm step skips nub when this is unset
     echo "[hermetic] bringing up Verdaccio (port ${BENCH_VERDACCIO_PORT:-4874})..." >&2
     if hermetic_start; then
       REGISTRY_LABEL="hermetic Verdaccio ($BENCH_REGISTRY_URL)"
@@ -186,8 +186,8 @@ setup_workdir() {
 
 # Pre-populate the hermetic Verdaccio storage with THIS fixture's own tarballs.
 #
-# hermetic.bash's one-time warm only caches the packages in aube's
-# benchmarks/fixture.package.json — not our `simple`/`fat` fixtures. Against the
+# hermetic.bash's one-time warm only caches the packages in its own
+# fixture.package.json — not our `simple`/`fat` fixtures. Against the
 # no-uplink (cold) config those tarballs would 404. So before the timed loop we
 # swap Verdaccio to the warm (uplink-enabled) config, run a throwaway nub install
 # (its own scratch store, discarded) to pull+cache the fixture's tarballs from

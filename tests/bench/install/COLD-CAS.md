@@ -30,7 +30,7 @@ Options:
 
 ## What "cold-CAS" means
 
-The CAS store lives at `$XDG_DATA_HOME/nub/store/v1/files` and the packument/index cache at `$XDG_CACHE_HOME/nub/pm` (the namespaces come from nub's embedder profile; the store path itself is aube's `dirs::store_dir()`). A cold run points both `XDG_DATA_HOME` and `XDG_CACHE_HOME` at fresh empty directories, so the install pays the full fetch+decode+unpack+link cost rather than relinking from a warm store.
+The CAS store lives at `$XDG_CACHE_HOME/nub/store/v11/files` and the packument/index cache at `$XDG_CACHE_HOME/nub/pm` (both namespaces come from nub's embedder profile — confirmed by `nub store path` and `nub config get cache-dir`). A cold run points both `XDG_DATA_HOME` and `XDG_CACHE_HOME` at fresh empty directories, so the install pays the full fetch+decode+unpack+link cost rather than relinking from a warm store.
 
 hyperfine's `--prepare` wipes and re-creates those directories before **each** timed run, so every iteration starts fully cold. `--prepare` is excluded from the measured wall-clock.
 
@@ -40,11 +40,11 @@ GVS is pinned **off** for both legs (`CI=1`), so the timed path is the materiali
 
 ## Hermetic registry
 
-The harness sources `vendor/aube/benchmarks/hermetic.bash`, which brings up a no-uplink Verdaccio on port 4874 (`BENCH_VERDACCIO_PORT`) serving a one-time-warmed local storage so every tarball fetch hits localhost rather than npmjs — the numbers measure nub's code path, not CDN jitter. nub is pointed at it with `nub install --registry "$BENCH_REGISTRY_URL"`.
+The harness sources `tests/bench/install/hermetic.bash`, which brings up a no-uplink Verdaccio on port 4874 (`BENCH_VERDACCIO_PORT`) serving a one-time-warmed local storage so every tarball fetch hits localhost rather than npmjs — the numbers measure nub's code path, not CDN jitter. nub is pointed at it with `nub install --registry "$BENCH_REGISTRY_URL"`.
 
-The first hermetic run warms the Verdaccio storage from npmjs (a one-time network fetch into `~/.cache/aube-bench/registry/`) and installs Verdaccio globally if it is not on `PATH`. Subsequent runs are fully offline. Wipe `~/.cache/aube-bench/registry/` to force a re-warm. The registry warm is scoped to `BENCH_TOOLS=aube,pnpm,npm` (the pnpm-family tarballs nub needs); the harness then pulls each fixture's exact tarballs via uplink before the timed runs, so the warm does not need the slower yarn/deno/bun legs. Override `BENCH_TOOLS` in the environment for the full warm set.
+The first hermetic run warms the Verdaccio storage from npmjs (a one-time network fetch into `~/.cache/nub-bench/registry/`) and installs Verdaccio globally if it is not on `PATH`. Subsequent runs are fully offline. Wipe `~/.cache/nub-bench/registry/` to force a re-warm. The registry warm is scoped to `BENCH_TOOLS=nub,pnpm,npm` (the pnpm-family tarballs nub needs); the harness then pulls each fixture's exact tarballs via uplink before the timed runs, so the warm does not need the slower yarn/deno/bun legs. Override `BENCH_TOOLS` in the environment for the full warm set.
 
-To avoid colliding with another benchmark sharing the default port 4874 + `~/.cache/aube-bench` (e.g. a sibling run of aube's own `bench.sh`), give this harness a private registry:
+To avoid colliding with another benchmark sharing the default port 4874 + `~/.cache/nub-bench`, give this harness a private registry:
 
 ```bash
 BENCH_VERDACCIO_PORT=4894 \
@@ -85,7 +85,7 @@ By default the script writes JSON to a temp directory. Pass `--save` to update c
 
 ## Caveats
 
-- Cold-reset correctness depends on `XDG_DATA_HOME` + `XDG_CACHE_HOME` fully controlling the store + cache. nub's store/cache resolution honors both (`aube-store/src/dirs.rs`, `nub-cli/src/pm_engine`); a stray pre-existing `~/.cache/nub` or `~/.local/share/nub` is NOT consulted because the timed command overrides both env vars.
+- Cold-reset correctness depends on `XDG_DATA_HOME` + `XDG_CACHE_HOME` fully controlling the store + cache. nub's store/cache resolution honors both (`nub-cli/src/pm_engine/host_settings.rs`); a stray pre-existing `~/.cache/nub` or `~/.local/share/nub` is NOT consulted because the timed command overrides both env vars.
 - RSS is the peak of a single representative install, not an average — it is the right metric for the chunk-size memory ceiling but is noisier run-to-run than the wall-clock median.
 - Run on a quiet machine. Install timings are sensitive to filesystem load, CPU contention, Spotlight indexing, and concurrent builds.
-- The default registry warm is scoped to `aube,pnpm,npm` because the full aube warm set also runs yarn/deno/bun legs, and a host that routes `yarn`/`pnpm` through an interactive package-manager shim can stall those legs. nub only needs the pnpm-family tarballs, so the scoped warm is both faster and more robust.
+- The default registry warm is scoped to `nub,pnpm,npm` because the full warm set also runs yarn/deno/bun legs, and a host that routes `yarn`/`pnpm` through an interactive package-manager shim can stall those legs. nub only needs the pnpm-family tarballs, so the scoped warm is both faster and more robust.
