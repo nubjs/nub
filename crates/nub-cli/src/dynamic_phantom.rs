@@ -74,11 +74,23 @@ fn eject_disabled(raw: Option<&str>) -> bool {
     )
 }
 
-/// The effective phantom-eject setting as a stable token, folded into aube's
-/// install-state `settings_hash` through the embedder `extra_settings_fingerprint`
-/// hook (nub's [`crate::pm_engine::identity::NUB`] profile points that hook here).
-/// The setting is nub's, not an aube setting, so it can't ride the resolved-settings
+/// The effective phantom-eject setting as a stable token, folded into the
+/// vendored engine's install-state `settings_hash` through its embedder
+/// `extra_settings_fingerprint` hook (that engine's
+/// [`crate::pm_engine::identity::NUB`] profile points the hook here). The setting
+/// is nub's own rather than the engine's, so it cannot ride the resolved-settings
 /// hash — this seam is what makes it invalidate the warm tree.
+///
+/// ⛔ **INERT UNDER THE pnpm ENGINE, WHICH IS THE ONE THAT RUNS INSTALLS.** That
+/// engine's `Embedder` has no `extra_settings_fingerprint` field, so nothing
+/// calls this and none of the invalidation described below happens: bumping
+/// [`PHANTOM_SCANNER_VERSION`] or [`GVS_EJECT_ALGO_VERSION`] re-scans content
+/// into a new sidecar path but no longer forces the warm tree to re-link, so an
+/// existing install keeps serving the old shape. The rest of this comment
+/// describes the mechanism as it works on the vendored engine, and is kept
+/// because whatever replaces the hook has to reproduce it. Choosing that
+/// replacement is its own migration — it needs a seam on the pnpm side — so it
+/// is deliberately not decided here.
 ///
 /// For users the token is CONSTANT-ON: the dead on/off toggle is gone, so it folds
 /// [`PHANTOM_SCANNER_VERSION`] plus the curated-eject list token
