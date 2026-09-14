@@ -84,6 +84,37 @@ fn registry_reachable() -> bool {
         })
 }
 
+/// The virtual store an install actually used, read from
+/// `node_modules/.modules.yaml` rather than assumed. Under nub identity the
+/// global virtual store relocates it outside the project entirely — a
+/// `../`-heavy relative path into the XDG cache; under CI, or for a package
+/// on the GVS-incompatibility list, it stays project-local at
+/// `node_modules/.store`. A test that hardcodes the project-local path is a
+/// statement about that setting, not about the layout it means to check;
+/// reading the field keeps it a statement about the latter.
+///
+/// The file is JSON for a nub-identity project but real YAML for a
+/// faithfully-mirrored pnpm-compat one (`packageManager: pnpm@<v>`) — nub
+/// mirrors the incumbent's own format there. `virtualStoreDir` is a scalar
+/// in both, so a line scan reads either without pulling in a YAML parser for
+/// one field.
+fn virtual_store_dir(node_modules: &Path) -> PathBuf {
+    let raw = std::fs::read_to_string(node_modules.join(".modules.yaml"))
+        .expect("node_modules/.modules.yaml must exist after an install");
+    let value = raw
+        .lines()
+        .find_map(|line| {
+            let line = line.trim();
+            line.strip_prefix("\"virtualStoreDir\":")
+                .or_else(|| line.strip_prefix("virtualStoreDir:"))
+        })
+        .unwrap_or_else(|| panic!(".modules.yaml must carry a virtualStoreDir field: {raw}"))
+        .trim()
+        .trim_end_matches(',')
+        .trim_matches(|c| c == '"' || c == '\'');
+    node_modules.join(value)
+}
+
 #[test]
 fn install_dir_initializes_one_project_snapshot_from_final_cwd() {
     let outer = pm_tmpdir("dir-snapshot-outer");
@@ -142,10 +173,12 @@ fn install_dir_initializes_one_project_snapshot_from_final_cwd() {
 
 /// Truly-fresh project (no lockfile, no PM declaration, no pnpm-named file):
 /// nub claims identity via the neutral lockfile only. The engine resolves, links
-/// the isolated (pnpm-style) layout under `node_modules/.store`, and writes nub's
-/// neutral `nub.lock` — the quiet identity marker. It must NOT auto-stamp
-/// `packageManager` / `devEngines` into `package.json`: that exclusivity claim
-/// is reserved for the explicit `nub pm use nub` command.
+/// the isolated (pnpm-style) layout, and writes nub's neutral `nub.lock` — the
+/// quiet identity marker. The top-level entry is a symlink into whichever
+/// virtual store `.modules.yaml` reports — the global virtual store outside
+/// the project by default. It must NOT auto-stamp `packageManager` /
+/// `devEngines` into `package.json`: that exclusivity claim is reserved for
+/// the explicit `nub pm use nub` command.
 #[test]
 #[ignore = "network: resolves + fetches is-positive@3.1.0 from the npm registry"]
 fn install_truly_fresh_project_claims_nub_identity() {
@@ -171,7 +204,9 @@ fn install_truly_fresh_project_claims_nub_identity() {
     );
 
     // Isolated layout: the top-level entry is a symlink into the virtual
-    // store, which nub relocates to `node_modules/.store`.
+    // store `.modules.yaml` reports — the global virtual store outside the
+    // project by default, so a bare "contains .store" check would really be
+    // a statement about that setting rather than about the layout.
     let dep = dir.join("node_modules/is-positive");
     assert!(
         dep.join("package.json").is_file(),
@@ -179,13 +214,17 @@ fn install_truly_fresh_project_claims_nub_identity() {
     );
     assert!(
         dep.symlink_metadata().unwrap().file_type().is_symlink(),
-        "no-lockfile projects default to the isolated layout (symlink into .store)"
+        "no-lockfile projects default to the isolated layout (symlink into the virtual store)"
     );
-    let target = std::fs::read_link(&dep).unwrap();
+    let store = virtual_store_dir(&dir.join("node_modules"));
     assert!(
-        target.to_string_lossy().contains(".store/"),
-        "the virtual store must live under node_modules/.store, got: {}",
-        target.display()
+        dep.canonicalize()
+            .unwrap()
+            .starts_with(store.canonicalize().unwrap()),
+        "the top-level entry must resolve into the virtual store `.modules.yaml` \
+         reports ({}), got target {}",
+        store.display(),
+        std::fs::read_link(&dep).unwrap().display()
     );
     assert!(
         !dir.join("node_modules/.aube").exists(),
@@ -1350,8 +1389,9 @@ fn platform_flags_override_the_named_axis_and_leave_the_others_configured() {
     let (_out, err, code) = run_install(&dir, &["install", "--os", "linux"]);
     assert_eq!(code, 0, "flagged install must succeed: {err}");
 
-    let mut got: Vec<String> = std::fs::read_dir(dir.join("node_modules/.store"))
-        .unwrap_or_else(|e| panic!("no virtual store: {e}: {err}"))
+    let store = virtual_store_dir(&dir.join("node_modules"));
+    let mut got: Vec<String> = std::fs::read_dir(&store)
+        .unwrap_or_else(|e| panic!("no virtual store at {}: {e}: {err}", store.display()))
         .filter_map(|e| {
             let name = e.unwrap().file_name().to_string_lossy().to_string();
             name.strip_prefix("@esbuild+")
@@ -1432,7 +1472,8 @@ fn changing_the_platform_selection_re_materializes_an_already_installed_tree() {
 /// The `@esbuild/*` variants actually linked under the `esbuild` package —
 /// resolvable ones only, so a dangling link never counts as present.
 fn linked_esbuild_variants(dir: &Path) -> Vec<String> {
-    let nested = dir.join("node_modules/.store/esbuild@0.25.10/node_modules/@esbuild");
+    let store = virtual_store_dir(&dir.join("node_modules"));
+    let nested = store.join("esbuild@0.25.10/node_modules/@esbuild");
     let mut out: Vec<String> = std::fs::read_dir(&nested)
         .unwrap_or_else(|e| panic!("no nested @esbuild dir at {}: {e}", nested.display()))
         .map(|e| e.unwrap().path())
