@@ -39,9 +39,7 @@ fn main() -> Result<()> {
     // process environment, which is only sound while nub is single-threaded.
     cli::normalize_invocation_environment();
 
-    // Engine-aware subscriber: surfaces the embedded engine's warning
-    // channel (brand-rewritten) by default; RUST_LOG still owns the
-    // filter when set. See pm_engine::log.
+    // Tracing stays silent unless RUST_LOG sets a filter. See pm_engine::log.
     pm_engine::log::init();
 
     let exit_code = cli::run()?;
