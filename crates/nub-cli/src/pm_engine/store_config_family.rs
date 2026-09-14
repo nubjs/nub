@@ -526,9 +526,8 @@ fn try_nub_config(parsed: &ConfigArgs, global: bool) -> Option<i32> {
     if let Some(code) = try_nub_field(parsed, global) {
         return Some(code);
     }
-    const KEY: &str = "exec.implicitDlx";
-    const KEY_ALIAS: &str = "exec.implicit-dlx";
-    let is_key = |k: &str| k == KEY || k == KEY_ALIAS;
+    const KEY: &str = IMPLICIT_DLX;
+    let is_key = |k: &str| k == IMPLICIT_DLX || k == IMPLICIT_DLX_ALIAS;
     match &parsed.command {
         Some(ConfigCommand::Set(set)) if is_key(&set.key) => {
             let Some(value) = ImplicitDlx::parse(&set.value) else {
@@ -566,6 +565,15 @@ fn try_nub_config(parsed: &ConfigArgs, global: bool) -> Option<i32> {
         }
         _ => None,
     }
+}
+
+const IMPLICIT_DLX: &str = "exec.implicitDlx";
+const IMPLICIT_DLX_ALIAS: &str = "exec.implicit-dlx";
+
+/// Whether `key` names one of nub's own settings, which live in `nub.jsonc`
+/// rather than in any package manager's files.
+pub(super) fn is_nub_config_key(key: &str) -> bool {
+    crate::config_fields::field(key).is_some() || matches!(key, IMPLICIT_DLX | IMPLICIT_DLX_ALIAS)
 }
 
 /// Route a `nub.jsonc` field to [`crate::config_fields`], or `None` when the key

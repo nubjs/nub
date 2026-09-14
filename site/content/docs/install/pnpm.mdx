@@ -3,7 +3,7 @@ title: pnpm
 description: Nub mirrors pnpm most closely — native version-9 lockfile read and write, the full dependency-verb surface, workspace selectors, an isolated dependency tree, and pnpm-owned config, all gated on pnpm being the incumbent.
 ---
 
-Nub mirrors pnpm most closely: the CLI surface, the isolated `node_modules` layout, and the lockfile. When pnpm is the incumbent — a `packageManager: "pnpm@…"` field or an existing `pnpm-lock.yaml` — Nub reads and writes pnpm's own `pnpm-lock.yaml` in its native format, and honors pnpm's config. Everything below is gated on that.
+Nub mirrors pnpm most closely: the CLI surface, the isolated `node_modules` layout, and the lockfile. When pnpm is the incumbent — a `packageManager: "pnpm@…"` field, an existing `pnpm-lock.yaml`, or a `pnpm-workspace.yaml` — Nub reads and writes pnpm's own `pnpm-lock.yaml` in its native format, and honors pnpm's config. Everything below is gated on that.
 
 ## Commands
 
@@ -46,7 +46,7 @@ Nub mirrors pnpm most closely: the CLI surface, the isolated `node_modules` layo
     { feature: <><code>onlyBuiltDependencies</code> / <code>neverBuiltDependencies</code></>, status: 'yes' },
     { feature: <><code>packageManager</code> / <code>engines</code></>, status: 'yes' },
     // ── Workspaces ────────────────────────────────────────────────────
-    { feature: <><code>workspaces</code> / <code>pnpm-workspace.yaml</code></>, status: 'yes', note: 'Workspace and resolution settings; layout keys are not read.' },
+    { feature: <><code>workspaces</code> / <code>pnpm-workspace.yaml</code></>, status: 'yes', note: 'Workspace, resolution, and layout settings.' },
     { feature: <><code>catalog:</code> / <code>catalogs:</code></>, status: 'yes' },
     { feature: <><code>workspace:</code> protocol</>, status: 'yes' },
     { feature: <><code>namedRegistries</code></>, status: 'yes', note: 'Alias-to-registry map; built-in gh: alias for GitHub Packages.' },
@@ -60,7 +60,7 @@ Nub mirrors pnpm most closely: the CLI surface, the isolated `node_modules` layo
     // ── Lockfiles ─────────────────────────────────────────────────────
     { feature: <><code>pnpm-lock.yaml</code> v9</>, status: 'yes', note: 'v6/v5.4 declined — re-lock under pnpm 9+.' },
     // ── Linking / hoisting ────────────────────────────────────────────
-    { feature: <code>nodeLinker</code>, status: 'partial', note: 'Set in nub.jsonc or .npmrc under every pnpm major. No PnP.' },
+    { feature: <code>nodeLinker</code>, status: 'yes', note: 'Read from pnpm-workspace.yaml or --node-linker, as pnpm 12 reads it.' },
   ]}
 />
 
@@ -99,7 +99,7 @@ The refusal names the detected version (v5.4 reads `(pnpm 7)`). Migrate by runni
 
 When pnpm is the incumbent, Nub honors pnpm's own settings:
 
-- `pnpm-workspace.yaml` — `packages:` globs, the `catalog:` / `catalogs:` maps, and pnpm 11 resolution settings. Layout keys are not read.
+- `pnpm-workspace.yaml` — `packages:` globs, the `catalog:` / `catalogs:` maps, and the settings pnpm keeps there, layout included. `nub config` reads and writes them as `pnpm config` does.
 - `namedRegistries` — an alias-to-registry-URL map from `pnpm-workspace.yaml` or the global pnpm `config.yaml`; a dependency spec prefixed `<alias>:` (e.g. `"@work/constants": "work:1.x.x"`) resolves from that registry, the built-in `gh:` alias points at GitHub Packages, and auth rides existing `//host/:_authToken=` entries in `.npmrc`.
 - `pnpm.overrides` — version pins applied during resolution, written into the lockfile's `overrides:` block.
 - `pnpm.packageExtensions` — extra dependency/peer metadata merged onto resolved packages, hashed into the lockfile's `packageExtensionsChecksum`.
@@ -146,19 +146,13 @@ Under Nub identity, a default `.pnpmfile.cjs` / `.pnpmfile.mjs` is ignored silen
 
 The default `node_modules` layout is **isolated** — pnpm's symlink-into-a-virtual-store scheme. The `--node-linker hoisted` flag gives the flat npm-style layout.
 
-Nub does not read `nodeLinker` or the hoisting keys from `pnpm-workspace.yaml` or pnpm's global `config.yaml`. Set layout with [`install.linker` and `install.publicHoist` in `nub.jsonc`](/docs/config#install), their `.npmrc` spellings, or command-line flags. All three sources work under every pnpm major.
+Nub reads `nodeLinker` and the hoisting keys from `pnpm-workspace.yaml`, as pnpm 12 does.
 
 <Callout>
 Read the [full docs](https://pnpm.io/settings/node-modules#nodelinker) on pnpm.io.
 </Callout>
 
-There is no `pnp` linker. A `pnp` value in `.npmrc` or `nub.jsonc`, and a `--node-linker pnp` flag, are refused rather than silently downgraded. A branded `nodeLinker: pnp` in pnpm YAML is ignored with the other branded layout settings.
-
-```console
-$ nub install
-  × node-linker=pnp is not supported by nub; use `isolated` (default) or   # ❌
-  │ `hoisted`
-```
+A `pnp` linker behaves as it does under pnpm 12: the install writes a `.pnp.cjs` next to the isolated `node_modules` tree.
 
 Lifecycle scripts for dependencies are skipped by default, as pnpm 10 does. A package runs install scripts only when allowlisted via `pnpm.onlyBuiltDependencies` (or `pnpm.allowBuilds`), or when Nub's gated default-trust floor vouches for it (see [the default-trust floor](/docs/install#default-trust-floor)); `nub approve-builds` adds an entry and builds the approved packages in the same invocation. `pnpm.neverBuiltDependencies` is a denylist that wins over any allow and over the floor.
 

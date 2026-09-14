@@ -873,7 +873,7 @@ Config reads are symmetric with the lockfile: under each incumbent Nub reads tha
       href: '/docs/install/pnpm',
       items: [
         { code: 'pnpm-lock.yaml', ok: true, note: 'v6/v5.4 declined — re-lock under pnpm 9+.' },
-        { code: 'pnpm-workspace.yaml', ok: true, note: 'Workspace and resolution settings; layout keys are not read.' },
+        { code: 'pnpm-workspace.yaml', ok: true, note: 'Workspace, resolution, and layout settings.' },
         { code: '.pnpmfile.cjs', ok: true },
         { code: '.npmrc', ok: true },
         { code: 'package.json#pnpm', ok: true },
@@ -975,16 +975,16 @@ Declaring the same pin in both fields is portable and stays silent, since the ig
 
 ### Layout settings
 
-Nub does not mirror layout settings from an incumbent's branded config file. The rest of that file — registries, auth, resolution settings, overrides — is read normally.
+A pnpm project takes its layout from pnpm's own configuration, as pnpm 12 does. A Nub project never reads another package manager's layout settings:
 
-| Package manager | Its own layout settings | Under Nub |
+| Package manager | Its own layout settings | In a Nub project |
 |---|---|---|
 | **npm** | `install-strategy`, `global-style`, `legacy-bundling` | Not read |
 | **pnpm** | `nodeLinker`, `hoist`, `symlink`, and related keys in `pnpm-workspace.yaml` or global `config.yaml` | Not read |
 | **Yarn** | `nodeLinker`, `nmHoistingLimits`, `nmMode` | Not read. Plug'n'Play is refused outright, before any write — there is no `node_modules` tree for Nub to install into |
 | **Bun** | `linker`, under `[install]` in `bunfig.toml` | Not read |
 
-Set layout with [`install.linker` and `install.publicHoist` in `nub.jsonc`](/docs/config#install), their neutral `.npmrc` spellings, or command-line flags. Those sources work under every incumbent. Nub reports a branded layout setting when it finds one so the ignored request is not silent.
+In a Nub project, set layout with [`install.linker` and `install.publicHoist` in `nub.jsonc`](/docs/config#install), their neutral `.npmrc` spellings, or command-line flags. Nub reports npm's layout keys when it finds them in `.npmrc`, so the ignored request is not silent.
 
 ### Switching to Nub
 

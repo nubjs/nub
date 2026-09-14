@@ -776,7 +776,9 @@ nub config get --local nodeCompat   # project file only
 nub config get preload --json       # ["./setup.ts","tsx/esm"]
 ```
 
-A key that is not a field of this file reads and writes `.npmrc`, so the value stays visible to npm, Yarn, and pnpm. Nub picks whichever file will read the key back, so under a pnpm 11 project the settings pnpm moved out of `.npmrc` are written to `pnpm-workspace.yaml` instead. Registry and auth keys stay in `.npmrc` on every project.
+A key that is not a field of this file reads and writes `.npmrc`, so the value stays visible to npm, Yarn, and pnpm.
+
+In a pnpm project, that key goes to pnpm's own `config` command instead. It reads and writes pnpm's files, takes pnpm's `--location` flag, and prints what `pnpm config` prints. The fields of this file, `config init`, and `config path` behave the same in both kinds of project.
 
 Nub refuses a key it would never read back rather than writing a line nothing consults, and names the surface that works instead. Two kinds are refused: a setting only the underlying engine's own CLI acts on, and a setting `.npmrc` has no spelling for.
 

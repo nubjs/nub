@@ -293,16 +293,30 @@ fn selection() -> Selection {
     }
 }
 
+/// The identity a command line runs under in the project at `cwd`.
+fn identity_of(selection: Selection, cwd: &Path) -> ProjectIdentity {
+    match selection {
+        Selection::Forced(identity) => identity,
+        Selection::Auto => project_identity::detect(cwd),
+    }
+}
+
+/// Whether the engine would run `argv` under pnpm's own profile.
+///
+/// For the front door, which has to settle a verb both grammars name before
+/// either one parses it. Answered by the rule [`profile`] applies, in the
+/// directory [`run`] would anchor at.
+pub(super) fn runs_as_pnpm(argv: &[std::ffi::OsString]) -> bool {
+    host_base_dir(argv).is_ok_and(|cwd| identity_of(selection(), &cwd) == ProjectIdentity::Pnpm)
+}
+
 /// The profile this invocation runs the engine under.
 ///
 /// This is also where a configuration that cannot be honoured is refused,
 /// because it is the first point at which both the identity and nub's own
 /// config file are in hand.
 fn profile(selection: Selection, cwd: &Path) -> Result<Embedder> {
-    let identity = match selection {
-        Selection::Forced(identity) => identity,
-        Selection::Auto => project_identity::detect(cwd),
-    };
+    let identity = identity_of(selection, cwd);
     let loaded = crate::project_config::load_project_config(cwd)?;
     if let Some(loaded) = &loaded
         && let Some(path) = loaded.source.path.as_deref()
@@ -698,7 +712,7 @@ pub(crate) fn run(mut argv: Vec<std::ffi::OsString>) -> Result<i32> {
     // Also asked before, and for a third reason: the answer is a COMPARISON
     // against the lockfile as it stands now.
     let legacy = legacy_lockfile_pending(embedder, command.as_deref(), &cwd);
-    report_resolved_layout(command.as_deref(), &argv, &cwd);
+    report_resolved_layout(embedder, command.as_deref(), &argv, &cwd);
     match pnpm_cli::run(argv, embedder) {
         Ok(()) => {
             if let Some(foreign) = pending {
@@ -804,6 +818,10 @@ pub(crate) fn engine_install(dir: Option<&std::path::Path>) -> Result<i32> {
 /// Print the install report's resolved-layout header ahead of the engine's
 /// progress display, where the vendored engine's own install path prints it.
 ///
+/// A pnpm project gets none of it. pnpm prints no such header, and each row
+/// names where a nub project's layout comes from, so under pnpm the block
+/// reported sources that install never read.
+///
 /// Only the second half of that report can follow the engine here. The
 /// materialization digest is fed by `record_plan`, which the VENDORED engine's
 /// disk-materialize expansion hook fills from the resolved graph; this engine
@@ -816,8 +834,15 @@ pub(crate) fn engine_install(dir: Option<&std::path::Path>) -> Result<i32> {
 /// owns the grammar and hands the parse back to nobody. Both readers admit
 /// only what the settings table declares, so neither can mistake a host flag
 /// for a setting.
-fn report_resolved_layout(command: Option<&str>, argv: &[std::ffi::OsString], cwd: &Path) {
-    if !command.is_some_and(|name| RESOLVING_COMMANDS.contains(&name)) {
+fn report_resolved_layout(
+    embedder: Embedder,
+    command: Option<&str>,
+    argv: &[std::ffi::OsString],
+    cwd: &Path,
+) {
+    if embedder.program_name == Embedder::PNPM.program_name
+        || !command.is_some_and(|name| RESOLVING_COMMANDS.contains(&name))
+    {
         return;
     }
     super::install_report::print_resolved_layout(

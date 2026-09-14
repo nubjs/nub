@@ -1,6 +1,7 @@
-//! Nub chooses the `node_modules` layout from `nub.jsonc`, `.npmrc`, or the
-//! command line under every incumbent. Branded manager files remain usable for
-//! resolution settings but not layout.
+//! Where the `node_modules` layout comes from follows the project's identity.
+//! A pnpm project takes it from pnpm's own configuration, read the way pnpm 12
+//! reads it, and `nub config` answers from the same files. A nub project takes
+//! it from `nub.jsonc`, `.npmrc`, or the command line.
 //!
 //! Yarn PnP is deliberately not retested here — refusing to build a tree Nub
 //! cannot produce is not the same as honoring a layout preference, and
@@ -62,156 +63,85 @@ fn config_get(dir: &Path, key: &str) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-const PNPM_LOCK: &str = "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n";
-
-#[test]
-fn a_pnpm_workspace_yaml_supplies_resolution_config_but_not_layout() {
-    let files = [
-        (
-            "package.json",
-            r#"{"name":"app","version":"1.0.0","packageManager":"pnpm@10.4.1"}"#,
-        ),
-        ("pnpm-lock.yaml", PNPM_LOCK),
-        (
-            "pnpm-workspace.yaml",
-            "nodeLinker: hoisted\nshamefullyHoist: true\nautoInstallPeers: false\n",
-        ),
-    ];
-
-    let dir = project("pnpm", &files);
-    assert_eq!(
-        config_get(&dir, "autoInstallPeers"),
-        "false",
-        "resolution config from pnpm-workspace.yaml must still be mirrored"
-    );
-    assert_eq!(
-        config_get(&dir, "nodeLinker"),
-        "isolated",
-        "the file's layout key must not displace nub's default linker"
-    );
-    assert_eq!(
-        config_get(&dir, "shamefullyHoist"),
-        "undefined",
-        "nor any other layout key in it"
-    );
-
-    let neutral = project("pnpm-npmrc", &files);
-    std::fs::write(
-        neutral.join(".npmrc"),
-        "nodeLinker=hoisted\nshamefully-hoist=true\n",
-    )
-    .unwrap();
-    assert_eq!(config_get(&neutral, "nodeLinker"), "hoisted");
-    assert_eq!(config_get(&neutral, "shamefullyHoist"), "true");
-}
-
-/// Pnpm 11 takes resolution settings from workspace YAML. Nub keeps layout in
-/// `nub.jsonc`, `.npmrc`, or the command line under every pnpm major.
-#[test]
-fn a_pnpm_11_project_takes_resolution_from_workspace_yaml_but_never_layout() {
-    let files = [
-        (
-            "package.json",
-            r#"{"name":"app","version":"1.0.0","packageManager":"pnpm@11.3.0"}"#,
-        ),
-        ("pnpm-lock.yaml", PNPM_LOCK),
-        (
-            "pnpm-workspace.yaml",
-            "nodeLinker: hoisted\nshamefullyHoist: true\nautoInstallPeers: false\n",
-        ),
-    ];
-
-    let dir = project("pnpm11", &files);
-    assert_eq!(
-        config_get(&dir, "autoInstallPeers"),
-        "false",
-        "resolution config from pnpm-workspace.yaml must still be mirrored"
-    );
-    assert_eq!(
-        config_get(&dir, "nodeLinker"),
-        "isolated",
-        "the file's layout key must not displace Nub's default linker"
-    );
-    assert_eq!(
-        config_get(&dir, "shamefullyHoist"),
-        "undefined",
-        "nor any other layout key in it"
-    );
-
-    // The paired half: refusing the YAML as a layout source is what keeps
-    // `.npmrc` layout keys readable under pnpm 11's otherwise auth-only allowlist.
-    let neutral = project("pnpm11-npmrc", &files);
-    std::fs::write(
-        neutral.join(".npmrc"),
-        "nodeLinker=hoisted\nshamefully-hoist=true\n",
-    )
-    .unwrap();
-    assert_eq!(config_get(&neutral, "nodeLinker"), "hoisted");
-    assert_eq!(config_get(&neutral, "shamefullyHoist"), "true");
-}
-
-#[test]
-fn a_pnpm_11_global_config_reports_ignored_layout_but_keeps_resolution() {
-    // A RANGE, where its two siblings above pin an exact version. This row is
-    // the only one that runs a real install, and an exact pin is a config
-    // dependency the engine provisions from the network — even when it names
-    // the embedded version — so under `--offline` it can never resolve. A range
-    // is satisfied by the embedded engine and runs locally, while
-    // `declared_pnpm_major` reads the same field and still sees major 11, which
-    // is the fact this test is about.
-    let files = [
-        (
-            "package.json",
-            r#"{"name":"app","version":"1.0.0","packageManager":"pnpm@11"}"#,
-        ),
-        ("pnpm-lock.yaml", PNPM_LOCK),
-    ];
-    let dir = project("pnpm11-global", &files);
-    let global = dir.join("xdg-config/pnpm");
-    std::fs::create_dir_all(&global).unwrap();
-    std::fs::write(
-        global.join("config.yaml"),
-        "nodeLinker: hoisted\npublicHoistPattern:\n  - '*'\nautoInstallPeers: false\n",
-    )
-    .unwrap();
-
-    assert_eq!(config_get(&dir, "nodeLinker"), "isolated");
-    assert_eq!(config_get(&dir, "publicHoistPattern"), "undefined");
-    assert_eq!(
-        config_get(&dir, "autoInstallPeers"),
-        "false",
-        "non-layout settings in pnpm's global config must remain readable"
-    );
-
-    let out = run(&dir, &["install", "--offline", "--ignore-scripts"]);
+/// Install in `dir` and return everything it printed, failing if it failed.
+fn install(dir: &Path) -> String {
+    let out = run(dir, &["install", "--offline"]);
     let report = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(out.status.success(), "install failed:\n{report}");
-    assert!(
-        report.contains(
-            "configurable via nub.jsonc install.linker, .npmrc node-linker, or --node-linker"
-        ),
-        "the install report must disclose the ignored global layout setting:\n{report}"
+    report
+}
+
+/// The install report's first row, which a nub install always prints.
+fn has_layout_header(report: &str) -> bool {
+    report
+        .lines()
+        .any(|line| line.trim_start().starts_with("linker "))
+}
+
+const PNPM_LOCK: &str = "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n";
+
+/// pnpm 12 reads `nodeLinker` from `pnpm-workspace.yaml` and not from a
+/// project `.npmrc`, and prints no layout header of nub's.
+#[test]
+fn a_pnpm_project_takes_its_layout_from_pnpm_workspace_yaml() {
+    let dir = project(
+        "pnpm",
+        &[
+            ("package.json", r#"{"name":"app","version":"1.0.0"}"#),
+            ("pnpm-lock.yaml", PNPM_LOCK),
+            (
+                "pnpm-workspace.yaml",
+                "nodeLinker: hoisted\nautoInstallPeers: false\n",
+            ),
+        ],
     );
+    assert_eq!(config_get(&dir, "nodeLinker"), "hoisted");
+    assert_eq!(config_get(&dir, "autoInstallPeers"), "false");
+    let report = install(&dir);
     assert!(
-        report.contains("auto-install-peers=false (pnpm global config.yaml)"),
-        "the report must still attribute the readable global resolution setting:\n{report}"
+        !has_layout_header(&report),
+        "pnpm prints no layout header:\n{report}"
+    );
+
+    let npmrc = project(
+        "pnpm-npmrc",
+        &[
+            ("package.json", r#"{"name":"app","version":"1.0.0"}"#),
+            ("pnpm-lock.yaml", PNPM_LOCK),
+            (".npmrc", "node-linker=hoisted\n"),
+        ],
+    );
+    assert_eq!(config_get(&npmrc, "nodeLinker"), "undefined");
+}
+
+/// A nub project takes its layout from its own sources, and its install
+/// reports the layout it resolved.
+#[test]
+fn a_nub_project_takes_its_layout_from_npmrc() {
+    let dir = project(
+        "nub",
+        &[(
+            "package.json",
+            r#"{"name":"app","version":"1.0.0","packageManager":"nub@0.1.0"}"#,
+        )],
+    );
+    assert_eq!(config_get(&dir, "nodeLinker"), "isolated");
+    std::fs::write(dir.join(".npmrc"), "nodeLinker=hoisted\n").unwrap();
+    assert_eq!(config_get(&dir, "nodeLinker"), "hoisted");
+    let report = install(&dir);
+    assert!(
+        has_layout_header(&report),
+        "a nub install reports its layout:\n{report}"
     );
 }
 
-/// A yarn incumbent supplies nub with NO config at all, and its layout key is
-/// no more special than the rest of the file.
-///
-/// The registry half of this row used to assert the opposite — that
-/// `npmRegistryServer` from `.yarnrc.yml` was mirrored into nub's own view.
-/// Nub no longer reads yarn configuration for any setting: `nub pm migrate`
-/// converts a yarn lockfile once, and after that the project is nub's. What
-/// survives is the layout claim, which never depended on reading the file:
-/// nub takes `nodeLinker` from `nub.jsonc`, `.npmrc` or the command line
-/// under every incumbent.
+/// A yarn declaration makes a nub project, which reads no yarn configuration:
+/// `nub pm migrate` converts a yarn lockfile once, and after that the project
+/// is nub's. Its layout key is no more special than the rest of the file.
 #[test]
 fn a_yarnrc_supplies_no_config_and_no_layout() {
     let files = [
