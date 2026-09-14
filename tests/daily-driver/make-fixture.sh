@@ -31,7 +31,7 @@ cat > package.json <<'JSON'
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "packageManager": "pnpm@10.12.1",
+  "packageManager": "pnpm@12.4.1",
   "scripts": {
     "build":      "vite build",
     "type-check": "tsc --noEmit",

@@ -8,7 +8,8 @@
 #   4. `nub run <script>` invokes a package.json script with augmentation active.
 #   5. `nub install` (PM engine) installs a real package from the npm registry and
 #      the installed module is require()-loadable — the installed artifact works.
-#   6. Augmentation is branded correctly: no aube/jdx.dev identity in any output.
+#   6. A nub project's install carries nub's identity, and pnpm's does not leak
+#      into it — the engine serves both, so the guard is scoped by identity.
 #
 # This is a black-box check on the complete nub binary — the same surface a user
 # encounters after `npm install -g @nubjs/nub` on a fresh machine.
@@ -84,15 +85,20 @@ load_out="$(cd "$PROJ_PM" && node -e "const k = require('kleur'); console.log('P
 echo "$load_out" | grep -q "PM-SMOKE-OK function" || fail "installed module not loadable: $load_out"
 pass "PM install + module load: kleur materialized and loadable"
 
-# ── 5. No engine branding leaked into any of the above output ─────────────────
-# Install output is the highest-risk surface; the brand-sweep job covers it more
-# exhaustively, but a quick check here catches obvious regressions in the binary
-# before it even reaches CI.
-if echo "$install_out" | grep -qiE 'aube|jdx\.dev'; then
+# ── 5. The install above carries nub's identity ───────────────────────────────
+# The fixture declares no pnpm marker, so the engine runs under nub's profile and
+# must say so. Under a pnpm marker the OPPOSITE is required — pnpm's codes and
+# links are correct there — which is why this is scoped by identity rather than
+# by a bare name grep. Install output is the highest-risk surface; brand-sweep
+# covers it exhaustively, and this catches an obvious regression in the shipped
+# binary before it reaches CI.
+echo "$install_out" | grep -q 'using nub v' \
+  || { echo "$install_out"; fail "the install summary does not name nub (above)"; }
+if echo "$install_out" | grep -qE 'ERR_PNPM_|WARN_PNPM_|pnpm\.io'; then
   echo "$install_out"
-  fail "engine-branded identity in install output (above)"
+  fail "pnpm's identity reached a nub project's output (above)"
 fi
-pass "no aube/jdx.dev identity in install output"
+pass "a nub project's install carries nub's identity"
 
 echo ""
 echo "docker-smoke: all checks passed (glibc: $(ldd --version 2>&1 | head -1); node: $(node --version); nub: $ver)"

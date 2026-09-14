@@ -10,7 +10,7 @@ This harness verifies the built Linux nub binary in a clean, dependency-free con
 | `nub <file.ts>` transpiles + runs TypeScript | Augmentation layer is wired; the nub-native addon loaded |
 | `nub run <script>` executes a package.json script | `compute_augmentation_env` NODE_OPTIONS path works end-to-end |
 | `nub install` + module loads | PM engine boots and materializes a real package from registry |
-| No `aube`/`jdx.dev` identity in output | Brand boundary holds in the final binary |
+| A nub project's install names nub, with no `ERR_PNPM_`/`pnpm.io` | The identity boundary holds in the final binary |
 
 ## The loop
 

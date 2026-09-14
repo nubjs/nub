@@ -66,9 +66,15 @@ echo "── install ───────────────────�
 install_out="$("$NUB" install 2>&1)"
 [ -d node_modules/vite ] || fail install "node_modules/vite not present after install. Output: $install_out"
 [ -d node_modules/react ] || fail install "node_modules/react not present after install. Output: $install_out"
-if echo "$install_out" | grep -qiE 'aube|jdx\.dev'; then
+# The fixture pins the version nub embeds, so the engine runs IN-PROCESS under
+# pnpm's own identity — pnpm's codes and links are correct here and nub's must
+# not leak in. A pin naming any OTHER pnpm version is a different path entirely:
+# nub provisions that pnpm and delegates the command to it.
+echo "$install_out" | grep -q 'using pnpm v' \
+  || fail install "the install summary does not name pnpm. Output: $install_out"
+if echo "$install_out" | grep -qE 'ERR_NUB_|WARN_NUB_'; then
   echo "$install_out"
-  fail install "engine-branded identity in install output"
+  fail install "nub's identity reached a pnpm project's output"
 fi
 pass "install (pnpm project, real registry)"
 
