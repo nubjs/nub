@@ -865,6 +865,11 @@ fn install_links_yarn_workspace_member_into_consumer() {
 /// install warm-hits the first's node_modules + CAS — the realistic
 /// warm-satisfied loop, unlike [`run_install`] which isolates a fresh store
 /// per call.
+/// Both streams, joined, because which one a line lands on is not part of what
+/// these tests are checking — and getting it wrong reads as a missing message.
+/// `Already up to date` goes to STDOUT, here and in real pnpm 12.4.1 (verified
+/// on the same fixture with the streams separated); reading only stderr made a
+/// passing short-circuit look like a lost one.
 fn run_install_in_store(dir: &Path, store: &Path, cache: &Path, args: &[&str]) -> (String, i32) {
     let out = Command::new(nub_binary())
         .args(args)
@@ -874,7 +879,11 @@ fn run_install_in_store(dir: &Path, store: &Path, cache: &Path, args: &[&str]) -
         .output()
         .expect("failed to spawn nub");
     (
-        String::from_utf8_lossy(&out.stderr).to_string(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
         out.status.code().unwrap_or(-1),
     )
 }
@@ -906,24 +915,24 @@ fn warm_satisfied_install_short_circuits_under_no_downgrade() {
     .unwrap();
 
     // Cold install populates node_modules + the freshness state sidecar.
-    let (cold_stderr, cold_code) = run_install_in_store(&dir, &store, &cache, &["install"]);
-    assert_eq!(cold_code, 0, "cold install must succeed: {cold_stderr}");
+    let (cold_output, cold_code) = run_install_in_store(&dir, &store, &cache, &["install"]);
+    assert_eq!(cold_code, 0, "cold install must succeed: {cold_output}");
     assert!(
         dir.join("node_modules/is-positive/package.json").is_file(),
-        "is-positive must be installed by the cold pass: {cold_stderr}"
+        "is-positive must be installed by the cold pass: {cold_output}"
     );
     assert!(
-        !cold_stderr.contains("Already up to date"),
-        "the COLD install must NOT report up-to-date (it did real work): {cold_stderr}"
+        !cold_output.contains("Already up to date"),
+        "the COLD install must NOT report up-to-date (it did real work): {cold_output}"
     );
 
     // Second install, online, default trust posture — must short-circuit.
-    let (warm_stderr, warm_code) = run_install_in_store(&dir, &store, &cache, &["install"]);
-    assert_eq!(warm_code, 0, "warm install must succeed: {warm_stderr}");
+    let (warm_output, warm_code) = run_install_in_store(&dir, &store, &cache, &["install"]);
+    assert_eq!(warm_code, 0, "warm install must succeed: {warm_output}");
     assert!(
-        warm_stderr.contains("Already up to date"),
+        warm_output.contains("Already up to date"),
         "a warm-satisfied online install must short-circuit to 'Already up to date' \
-         under the default trustPolicy=no-downgrade, got: {warm_stderr}"
+         under the default trustPolicy=no-downgrade, got: {warm_output}"
     );
 }
 
