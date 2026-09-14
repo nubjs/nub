@@ -1,22 +1,25 @@
-// A registry that stalls on purpose, in the two shapes that actually break nub.
+// A self-contained registry that stalls on purpose. It serves one package,
+// `stall-probe@1.0.0`, with a real packument and a real tarball built in
+// memory, and stalls exactly one kind of request in one shape. No network.
 //
-//   --mode blackhole
-//       Accepts the TCP connection, reads the request, and never writes a byte
-//       back. This is the "connection accepted, then silence" case: no response
-//       head ever arrives, so only a bound on the *head* wait can end it.
+//   node stall-registry.mjs --port 4999 --shape <shape> [--trickle-ms 1000]
 //
-//   --mode proxy --stall-at N
-//       Forwards every request to the real registry, except the Nth, where it
-//       sends the real status and headers plus ~4 KB of the real body and then
-//       stops forever without closing. This is the "stream dies mid-body" case,
-//       which is what issue #715's reporter was hitting; it surfaces elsewhere
-//       as `error decoding response body`.
+// Shapes (every stalled socket is held open: a closed socket errors promptly
+// on its own and proves nothing about the client's own bounds):
 //
-// Both keep the socket open, which is the point: a closed socket produces a
-// prompt error on its own and proves nothing about nub's own timeouts.
+//   ok                   serve everything; the positive control
+//   meta-silent          accept the connection, read the request, never answer
+//   meta-partial-head    send a status line and one header, then nothing
+//   meta-partial-body    send full headers and half the packument, then nothing
+//   meta-trickle         send headers, then one packument byte per --trickle-ms
+//   tarball-partial-body packument served normally; the tarball stops halfway
+//   tarball-trickle      packument served normally; the tarball trickles
+//
+// Every request is logged with its arrival time, so a run's log shows how
+// many attempts the client made and how far apart they were.
 import http from "node:http";
-import https from "node:https";
-import net from "node:net";
+import crypto from "node:crypto";
+import zlib from "node:zlib";
 
 const args = process.argv.slice(2);
 const arg = (name, fallback) => {
@@ -25,72 +28,124 @@ const arg = (name, fallback) => {
 };
 
 const port = Number(arg("port", 4999));
-const mode = arg("mode", "blackhole");
-const stallAt = Number(arg("stall-at", 800));
-const upstream = arg("upstream", "registry.npmjs.org");
-
-const stamp = () => new Date().toISOString();
-
-if (mode === "blackhole") {
-  net
-    .createServer((sock) => {
-      console.log(`${stamp()} ACCEPTED ${sock.remoteAddress}:${sock.remotePort}`);
-      sock.on("data", (d) =>
-        console.log(`${stamp()} REQ ${d.toString("utf8").split("\r\n")[0]}`),
-      );
-      sock.on("close", () => console.log(`${stamp()} CLOSED (client gave up)`));
-      sock.on("error", (e) => console.log(`${stamp()} ERR ${e.code}`));
-      // Deliberately never respond.
-    })
-    .listen(port, "127.0.0.1", () =>
-      console.log(`blackhole registry on 127.0.0.1:${port}`),
-    );
-} else if (mode === "proxy") {
-  let seen = 0;
-  // Holds the stalled response objects so nothing is garbage collected and the
-  // socket stays open for the whole run.
-  const held = [];
-  http
-    .createServer((req, res) => {
-      const n = ++seen;
-      const headers = { ...req.headers, host: upstream };
-      const preq = https.request(
-        { host: upstream, path: req.url, method: req.method, headers },
-        (pres) => {
-          res.writeHead(pres.statusCode, pres.headers);
-          if (n !== stallAt) {
-            pres.pipe(res);
-            return;
-          }
-          console.log(`${stamp()} STALLING request #${n} ${req.url}`);
-          let sent = 0;
-          pres.on("data", (chunk) => {
-            if (sent < 4096) {
-              res.write(chunk);
-              sent += chunk.length;
-            } else {
-              pres.pause(); // never deliver the rest, never end the response
-            }
-          });
-          held.push({ req, res, pres });
-        },
-      );
-      preq.on("error", () => {
-        try {
-          res.writeHead(502);
-          res.end();
-        } catch {
-          // client already gone
-        }
-      });
-      req.pipe(preq);
-    })
-    .listen(port, "127.0.0.1", () =>
-      console.log(
-        `stall proxy on 127.0.0.1:${port} -> ${upstream}, stalling request #${stallAt}`,
-      ),
-    );
-} else {
-  console.error(`unknown --mode ${mode} (expected "blackhole" or "proxy")`);
+const shape = arg("shape", "ok");
+const trickleMs = Number(arg("trickle-ms", 1000));
+const SHAPES = [
+  "ok",
+  "meta-silent",
+  "meta-partial-head",
+  "meta-partial-body",
+  "meta-trickle",
+  "tarball-partial-body",
+  "tarball-trickle",
+];
+if (!SHAPES.includes(shape)) {
+  console.error(`unknown --shape ${shape} (expected one of: ${SHAPES.join(", ")})`);
   process.exit(2);
 }
+
+const started = Date.now();
+const stamp = () => `+${((Date.now() - started) / 1000).toFixed(1)}s`;
+
+// A one-file tar (package/package.json), gzipped. Padding matters: a tarball
+// the extractor rejects would fail the `ok` control for the wrong reason.
+function tarball() {
+  const body = Buffer.from(JSON.stringify({ name: "stall-probe", version: "1.0.0" }));
+  const header = Buffer.alloc(512);
+  const put = (text, offset, length) => header.write(text, offset, length, "ascii");
+  put("package/package.json", 0, 100);
+  put("0000644\0", 100, 8);
+  put("0000000\0", 108, 8);
+  put("0000000\0", 116, 8);
+  put(`${body.length.toString(8).padStart(11, "0")}\0`, 124, 12);
+  put("00000000000\0", 136, 12);
+  put("        ", 148, 8);
+  put("0", 156, 1);
+  put("ustar\0", 257, 6);
+  put("00", 263, 2);
+  const sum = header.reduce((total, byte) => total + byte, 0);
+  put(`${sum.toString(8).padStart(6, "0")}\0 `, 148, 8);
+  const pad = Buffer.alloc((512 - (body.length % 512)) % 512);
+  return zlib.gzipSync(Buffer.concat([header, body, pad, Buffer.alloc(1024)]));
+}
+
+const tgz = tarball();
+const integrity = `sha512-${crypto.createHash("sha512").update(tgz).digest("base64")}`;
+// Backdated so a minimum-release-age policy never filters the only version.
+const published = "2020-01-01T00:00:00.000Z";
+const packument = (origin) =>
+  Buffer.from(
+    JSON.stringify({
+      name: "stall-probe",
+      "dist-tags": { latest: "1.0.0" },
+      modified: published,
+      time: { created: published, modified: published, "1.0.0": published },
+      versions: {
+        "1.0.0": {
+          name: "stall-probe",
+          version: "1.0.0",
+          dist: { tarball: `${origin}/stall-probe/-/stall-probe-1.0.0.tgz`, integrity },
+        },
+      },
+    }),
+  );
+
+// Stalled responses are kept reachable so nothing is collected mid-run.
+const held = [];
+
+function trickle(res, bytes) {
+  let i = 0;
+  const timer = setInterval(() => {
+    if (i >= bytes.length || res.destroyed) {
+      clearInterval(timer);
+      if (!res.destroyed) res.end();
+      return;
+    }
+    res.write(bytes.subarray(i, i + 1));
+    i += 1;
+  }, trickleMs);
+  res.on("close", () => clearInterval(timer));
+}
+
+function serve(req, res, bytes, type, stall) {
+  if (stall === "silent") {
+    held.push(res);
+    return;
+  }
+  if (stall === "partial-head") {
+    // Bypass the http module's buffering so the partial head reaches the wire.
+    req.socket.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n");
+    held.push(res);
+    return;
+  }
+  res.writeHead(200, { "Content-Type": type, "Content-Length": bytes.length });
+  if (stall === "partial-body") {
+    res.write(bytes.subarray(0, Math.floor(bytes.length / 2)));
+    held.push(res);
+    return;
+  }
+  if (stall === "trickle") {
+    held.push(res);
+    trickle(res, bytes);
+    return;
+  }
+  res.end(bytes);
+}
+
+let seen = 0;
+http
+  .createServer((req, res) => {
+    const n = ++seen;
+    const isTarball = req.url.endsWith(".tgz");
+    const isMeta = !isTarball && /^\/stall-probe\/?$/.test(req.url.split("?")[0]);
+    let stall = null;
+    if (isMeta && shape.startsWith("meta-")) stall = shape.slice("meta-".length);
+    if (isTarball && shape.startsWith("tarball-")) stall = shape.slice("tarball-".length);
+    console.log(`${stamp()} REQ #${n} ${req.method} ${req.url}${stall ? ` STALL ${stall}` : ""}`);
+    req.socket.on("close", () => console.log(`${stamp()} CLOSED #${n}`));
+    if (isTarball) return serve(req, res, tgz, "application/octet-stream", stall);
+    if (isMeta) return serve(req, res, packument(`http://127.0.0.1:${port}`), "application/json", stall);
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end('{"error":"not found"}');
+  })
+  .listen(port, "127.0.0.1", () => console.log(`stall registry on 127.0.0.1:${port}, shape ${shape}`));

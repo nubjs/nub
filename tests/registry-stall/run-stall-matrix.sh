@@ -1,25 +1,33 @@
 #!/usr/bin/env bash
-# Drives a real nub binary against a registry that never answers, and asserts
-# on how long each configuration takes to give up. Elapsed time IS the
-# assertion here: every case pins a different bound, so a bound that silently
-# stops being read shows up as the wrong number rather than as a pass.
+# Drives a real nub binary against a local registry that stalls, and asserts
+# on how the package manager's request bounds end each stall. The bounds are
+# time-shaped, so the assertions are too: how many times the stalled URL was
+# requested, and how long from the first of those requests to the last socket
+# closing. Both are read from the registry's own log, so the time a loaded
+# machine spends starting the process is not part of the measurement.
 #
-# Usage: run-stall-matrix.sh [path-to-nub] [port]
+# Usage: run-stall-matrix.sh [path-to-nub] [base-port]
 #
-# Runs all five cases and exits non-zero if any of them missed its window.
-# Deliberately not fail-fast: the whole matrix is about three minutes, and
-# seeing which bounds moved together is what tells you where a regression is.
+#   STALL_ONLY=a,b                 run only the named cases
+#   STALL_OMIT=key,key             drop these settings from every case
+#   STALL_SET=key=value,key=value  force these settings into every case
+#   STALL_TRICKLE_MS=n             override the trickle interval
+#
+# STALL_OMIT and STALL_SET are the break controls: removing the setting a case
+# pins has to move it out of its window, or the case is not testing it.
+#
+# Cases run in parallel, each with its own registry and port, and the matrix
+# exits non-zero if any case fails or if an expected failure starts passing.
 set -uo pipefail
 
 NUB="${1:-target/fast/nub}"
-PORT="${2:-4999}"
+BASE_PORT="${2:-4990}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/nub-stall-matrix.XXXXXX")"
-SERVER_PID=""
-FAILURES=0
+PIDS=()
 
 cleanup() {
-  [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null
+  for pid in ${PIDS[@]+"${PIDS[@]}"}; do kill "$pid" 2>/dev/null; done
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -30,110 +38,163 @@ if [ ! -x "$NUB" ]; then
   echo "  then pass \"\$(scripts/rust-build.sh --print-target)/fast/nub\"" >&2
   exit 2
 fi
+NUB="$(cd "$(dirname "$NUB")" && pwd)/$(basename "$NUB")"
 
-# A binary that predates the stall bound is the failure mode this harness is
-# most likely to hit in practice, because the wrapper's target dir is a
-# content-hashed bucket that moves when a depended-on crate changes — so a
-# stale artifact can sit at the expected path looking perfectly valid. It would
-# not error; it would take ~300s on the first case and report a confusing
-# out-of-window failure. Name it up front instead.
-# `grep -c` rather than `grep -q`: under `pipefail`, a `-q` grep exits on the
-# first match and SIGPIPEs `strings`, which fails the whole pipeline and makes
-# this warn on a perfectly good binary. `-c` consumes all input; `|| true`
-# absorbs grep's exit 1 when there is genuinely no match.
-STALL_SYMBOLS=$(strings "$NUB" 2>/dev/null | grep -c fetchStallTimeout || true)
-if [ "${STALL_SYMBOLS:-0}" -eq 0 ]; then
-  echo "warning: $NUB has no fetchStallTimeout — it predates the stall bound." >&2
-  echo "         Expect the first case to take ~300s (the old fetchTimeout) and fail." >&2
-  echo "         Rebuild and re-check which artifact you are pointing at." >&2
-fi
+# Every ambient package-manager setting is dropped: an exported
+# npm_config_fetch_timeout, or a user .npmrc reached through HOME or
+# npm_config_userconfig, outranks the fixture and would silently change what a
+# case measures. Proxy variables go too, or a machine behind a proxy would
+# route the fixture away from 127.0.0.1.
+SCRUB=()
+while IFS='=' read -r key _; do
+  case "$key" in
+    npm_config_*|NPM_CONFIG_*|pnpm_config_*|PNPM_*|NUB_*) SCRUB+=(-u "$key") ;;
+    HTTPS_PROXY|https_proxy|HTTP_PROXY|http_proxy|ALL_PROXY|all_proxy|PROXY|proxy|NO_PROXY|no_proxy)
+      SCRUB+=(-u "$key") ;;
+  esac
+done < <(env)
 
-node "$HERE/stall-registry.mjs" --port "$PORT" --mode blackhole > "$WORK/server.log" 2>&1 &
-SERVER_PID=$!
-sleep 1
+camel() { awk -F- '{ out = $1; for (i = 2; i <= NF; i++) out = out toupper(substr($i, 1, 1)) substr($i, 2); print out }' <<< "$1"; }
 
-# name | npmrc body | env prefix | low bound (s) | high bound (s) | expected "still waiting" lines
+# Applies STALL_OMIT and STALL_SET to one case's kebab-case settings.
+effective_settings() {
+  local settings="$1" out=() item key forced omit
+  IFS=',' read -r -a omit <<< "${STALL_OMIT:-}"
+  IFS=',' read -r -a forced <<< "${STALL_SET:-}"
+  for item in $settings; do
+    key="${item%%=*}"
+    [[ " ${omit[*]+${omit[*]}} " == *" $key "* ]] && continue
+    [[ ",${STALL_SET:-}," == *",$key="* ]] && continue
+    out+=("$item")
+  done
+  for item in ${forced[@]+"${forced[@]}"}; do out+=("$item"); done
+  echo "${out[*]+${out[*]}}"
+}
+
+# name | project (nub, pnpm) | shape | settings | env setting | requests | span lo | span hi | cap | expect
 run_case() {
-  local name="$1" npmrc="$2" envs="$3" lo="$4" hi="$5" want_lines="$6"
-  local dir="$WORK/$name"
-  mkdir -p "$dir"
-  echo '{"name":"stall-case","private":true,"dependencies":{"react":"^19.0.0"}}' > "$dir/package.json"
-  { echo "registry=http://127.0.0.1:$PORT/"; printf '%b\n' "$npmrc"; } > "$dir/.npmrc"
-
-  # Scrub the ambient settings env. `env` outranks `project_npmrc` in the
-  # precedence chain (aube-settings/src/values.rs), so a developer who happens
-  # to export npm_config_registry or npm_config_fetch_stall_timeout would have
-  # it silently beat the fixture's .npmrc and the case would measure something
-  # other than what it claims. Each case's own env is applied after the -u
-  # flags, so it still wins.
-  local -a scrub=()
-  local key
-  while IFS='=' read -r key _; do
-    case "$key" in
-      npm_config_*|NPM_CONFIG_*|pnpm_config_*|PNPM_CONFIG_*|AUBE_*|NUB_*)
-        scrub+=(-u "$key") ;;
-      # The proxy family too: `NpmConfig` fills http_proxy from HTTPS_PROXY,
-      # then HTTP_PROXY, then PROXY whenever the npmrc layer left it unset
-      # (config/apply.rs), and the fixture npmrc deliberately sets none of
-      # them. On a machine behind a corporate proxy every case would then be
-      # routed away from the 127.0.0.1 stall server it is supposed to measure.
-      HTTPS_PROXY|https_proxy|HTTP_PROXY|http_proxy|PROXY|proxy|NO_PROXY|no_proxy)
-        scrub+=(-u "$key") ;;
-    esac
-  done < <(env)
-
-  # An array rather than an unquoted scalar. The difference is pathname
-  # expansion, and only that: `read -r -a` splits on IFS exactly as unquoted
-  # expansion does, so neither form survives a value containing a space. What
-  # unquoted expansion additionally does is glob — with a file named `FOO=x`
-  # present, `set -- FOO=*` yields `FOO=x` while `read -r -a` keeps the
-  # literal. Measured under bash, which is what runs this file.
+  local name="$1" project="$2" shape="$3" settings="$4" env_setting="$5" want_reqs="$6" lo="$7" hi="$8" cap="$9" expect="${10}"
+  local port="${11}" dir="$WORK/$name"
+  mkdir -p "$dir/project" "$dir/home" || return
+  settings="$(effective_settings "$settings")"
   local -a case_env=()
-  [ -n "$envs" ] && read -r -a case_env <<< "$envs"
-
-  local start elapsed rc lines
-  start=$(date +%s)
-  ( cd "$dir" && env ${scrub[@]+"${scrub[@]}"} XDG_CACHE_HOME="$dir/cache" \
-      ${case_env[@]+"${case_env[@]}"} timeout 700 "$NUB" install --lockfile-only ) \
-      > "$dir/out.log" 2>&1
-  rc=$?
-  elapsed=$(( $(date +%s) - start ))
-  lines=$(tr '\r' '\n' < "$dir/out.log" | grep -c "still waiting on")
-
-  local verdict="ok"
-  if [ "$elapsed" -lt "$lo" ] || [ "$elapsed" -gt "$hi" ]; then
-    verdict="FAIL (wanted ${lo}-${hi}s)"
-    FAILURES=$((FAILURES + 1))
-  elif [ "$rc" -eq 0 ]; then
-    verdict="FAIL (expected a non-zero exit; a stalled registry must not succeed)"
-    FAILURES=$((FAILURES + 1))
-  elif [ "$want_lines" = "some" ] && [ "$lines" -eq 0 ]; then
-    verdict="FAIL (expected 'still waiting' output)"
-    FAILURES=$((FAILURES + 1))
-  elif [ "$want_lines" = "none" ] && [ "$lines" -ne 0 ]; then
-    verdict="FAIL (expected silence, got $lines lines)"
-    FAILURES=$((FAILURES + 1))
+  if [ -n "$env_setting" ]; then
+    local env_key="${env_setting%%=*}"
+    if [[ ",${STALL_OMIT:-}," != *",$env_key,"* ]]; then
+      case_env=("npm_config_${env_key//-/_}=${env_setting#*=}")
+    fi
   fi
-  printf '%-22s elapsed=%-5s rc=%-3s waiting-lines=%-3s %s\n' \
-    "$name" "${elapsed}s" "$rc" "$lines" "$verdict"
+
+  node "$HERE/stall-registry.mjs" --port "$port" --shape "$shape" \
+    --trickle-ms "${STALL_TRICKLE_MS:-1000}" > "$dir/server.log" 2>&1 &
+  local server=$!
+  local tries=0
+  until grep -q "stall registry on" "$dir/server.log" 2>/dev/null; do
+    tries=$((tries + 1)); [ "$tries" -gt 100 ] && break; sleep 0.1
+  done
+
+  echo "registry=http://127.0.0.1:$port/" > "$dir/project/.npmrc"
+  local item
+  if [ "$project" = pnpm ]; then
+    echo '{"name":"stall-case","private":true,"packageManager":"pnpm@12.4.1","dependencies":{"stall-probe":"1.0.0"}}' > "$dir/project/package.json"
+    : > "$dir/project/pnpm-workspace.yaml"
+    for item in $settings; do echo "$(camel "${item%%=*}"): ${item#*=}" >> "$dir/project/pnpm-workspace.yaml"; done
+  else
+    echo '{"name":"stall-case","private":true,"dependencies":{"stall-probe":"1.0.0"}}' > "$dir/project/package.json"
+    for item in $settings; do echo "$item" >> "$dir/project/.npmrc"; done
+  fi
+
+  local start rc
+  start=$(date +%s)
+  ( cd "$dir/project" && env ${SCRUB[@]+"${SCRUB[@]}"} HOME="$dir/home" \
+      XDG_CACHE_HOME="$dir/home/.cache" XDG_DATA_HOME="$dir/home/.local/share" \
+      XDG_CONFIG_HOME="$dir/home/.config" XDG_STATE_HOME="$dir/home/.local/state" \
+      ${case_env[@]+"${case_env[@]}"} timeout "$cap" "$NUB" install ) > "$dir/out.log" 2>&1
+  rc=$?
+  local elapsed=$(( $(date +%s) - start ))
+  kill "$server" 2>/dev/null
+
+  local reqs span
+  reqs=$(grep -c " STALL " "$dir/server.log")
+  span=$(awk '
+    / REQ .* STALL / { id = $3; t = substr($1, 2) + 0; if (first == "") first = t; stalled[id] = 1 }
+    / CLOSED / { if (stalled[$3]) last = substr($1, 2) + 0 }
+    END { if (first != "" && last != "") printf "%.1f", last - first; else print "-" }' "$dir/server.log")
+
+  local problem=""
+  if [ "$rc" -eq 124 ]; then
+    problem="unbounded: still running when the ${cap}s cap killed it"
+  elif [ "$rc" -eq 0 ]; then
+    problem="exit 0: a stalled registry must not produce a successful install"
+  elif [ "$reqs" -ne "$want_reqs" ]; then
+    problem="$reqs request(s) to the stalled URL, wanted $want_reqs"
+  elif [ "$span" = "-" ] || awk -v s="$span" -v lo="$lo" -v hi="$hi" 'BEGIN { exit !(s < lo || s > hi) }'; then
+    problem="stall lasted ${span}s, wanted ${lo}-${hi}s"
+  fi
+
+  local verdict
+  case "$expect:$problem" in
+    pass:) verdict="ok" ;;
+    pass:*) verdict="FAIL ($problem)" ;;
+    xfail:) verdict="XPASS (expected failure now passes; make this case a pass)" ;;
+    xfail:*) verdict="xfail ($problem)" ;;
+  esac
+  printf '%-26s span=%-7s elapsed=%-6s rc=%-4s requests=%-3s %s\n' \
+    "$name" "${span}s" "${elapsed}s" "$rc" "$reqs" "$verdict" > "$dir/result"
+  if [ "$verdict" != "ok" ] && [ "${verdict%% *}" != "xfail" ]; then
+    { echo "--- $name: nub output"; tail -15 "$dir/out.log"; echo "--- $name: registry log"; cat "$dir/server.log"; } > "$dir/detail"
+  fi
+}
+
+NAMES=()
+case_def() {
+  local name="$1"
+  if [ -n "${STALL_ONLY:-}" ] && [[ ",$STALL_ONLY," != *",$name,"* ]]; then return; fi
+  NAMES+=("$name")
+  run_case "$@" "$((BASE_PORT + ${#NAMES[@]}))" &
+  PIDS+=($!)
 }
 
 echo "nub: $NUB"
 echo
 
-# The default idle bound. Without fetchStallTimeout this took the whole
-# 300s fetchTimeout, which is what made #715 look like a permanent hang.
-run_case "default-60s"        "fetch-retries=0"                                        "" 55  90  some
-# Proves the .npmrc key reaches the client. Only a changed elapsed shows that.
-run_case "npmrc-5s"           "fetch-retries=0\nfetch-stall-timeout=5000"               "" 3   15  none
-# Same, via env. The AUBE_* spelling is inert under nub (env_prefix is None),
-# so npm_config_* is the only env route and this is what guards it.
-run_case "env-20s"            "fetch-retries=0"     "npm_config_fetch_stall_timeout=20000" 17  40  some
-# 0 must DISABLE the idle bound and fall back to fetchTimeout alone.
-run_case "disabled-falls-back" "fetch-retries=0\nfetch-stall-timeout=0\nfetch-timeout=30000" "" 27 55 some
-# fetchWarnTimeoutMs=0 is documented as disabling the warning; it must silence
-# the in-flight line too, without touching the bound.
-run_case "warn-disabled"      "fetch-retries=0\nfetch-warn-timeout-ms=0"                "" 55  90  none
+# Each request may make no progress for fetch-timeout. Waiting for a response
+# head and waiting inside a body are separate code paths behind the same bound.
+case_def fetch-timeout          nub  meta-silent       "fetch-timeout=4000 fetch-retries=0" "" 1 3 12 120 pass
+case_def fetch-timeout-body     nub  meta-partial-body "fetch-timeout=4000 fetch-retries=0" "" 1 3 12 120 pass
+case_def fetch-timeout-env      nub  meta-silent       "fetch-retries=0" "fetch-timeout=4000" 1 3 12 120 pass
+# The default bound: 60s per attempt. Without it a stalled registry is a hang.
+case_def default-fetch-timeout  nub  meta-silent       "fetch-retries=0" "" 1 50 80 150 pass
+# A pnpm project reads the same bounds from pnpm-workspace.yaml, not .npmrc.
+case_def pnpm-workspace-yaml    pnpm meta-silent       "fetch-timeout=4000 fetch-retries=0" "" 1 3 12 120 pass
+# Retry count and backoff: attempts are retries + 1, and the wait before
+# attempt n+1 is min(mintimeout * factor^n, maxtimeout). Each case picks values
+# where dropping its own setting moves the result by several seconds.
+case_def fetch-retries          nub  meta-silent       "fetch-timeout=3000 fetch-retries=1 fetch-retry-mintimeout=1000" "" 2 6 12 120 pass
+case_def fetch-retry-factor     nub  meta-silent       "fetch-timeout=3000 fetch-retries=2 fetch-retry-mintimeout=1000 fetch-retry-factor=3" "" 3 11 17 120 pass
+case_def fetch-retry-maxtimeout nub  meta-silent       "fetch-timeout=3000 fetch-retries=2 fetch-retry-mintimeout=1000 fetch-retry-factor=10 fetch-retry-maxtimeout=3000" "" 3 11 17 120 pass
+# A tarball is requested under two budgets in sequence: the download started
+# during resolution, then the install's own fetch once that one has failed.
+case_def fetch-timeout-tarball  nub  tarball-partial-body "fetch-timeout=4000 fetch-retries=0" "" 2 7 20 180 pass
+# Known defect: fetch-retries=0 still requests a stalled tarball twice, so every
+# tarball stall costs double the configured budget (500s at the defaults).
+case_def fetch-retries-tarball  nub  tarball-partial-body "fetch-timeout=4000 fetch-retries=0" "" 1 3 12 180 xfail
+# Known gap: fetch-timeout restarts on every byte received, and nothing bounds a
+# response that keeps trickling, so a registry sending one byte a second is never
+# cut off. fetchMinSpeedKiBps only warns, and only after a download succeeds.
+case_def trickle                nub  meta-trickle      "fetch-timeout=3000 fetch-retries=0" "" 1 2 12 30 xfail
+
+wait
+
+FAILURES=0
+for name in ${NAMES[@]+"${NAMES[@]}"}; do
+  cat "$WORK/$name/result"
+  line=$(cat "$WORK/$name/result")
+  case "$line" in *" FAIL "*|*" XPASS "*) FAILURES=$((FAILURES + 1)) ;; esac
+done
+for name in ${NAMES[@]+"${NAMES[@]}"}; do
+  [ -f "$WORK/$name/detail" ] && { echo; cat "$WORK/$name/detail"; }
+done
 
 echo
 if [ "$FAILURES" -ne 0 ]; then

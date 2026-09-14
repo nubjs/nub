@@ -1,49 +1,76 @@
-# Registry-stall harness — how the fetch timeout bounds are iterated on
+# Registry-stall harness
 
-This directory is the working system for nub's behavior when a registry accepts a connection and then goes quiet. It exists because the defect class here is invisible to unit tests: a stalled stream is not an error, so nothing fails, nothing logs, and the resolver simply blocks at 0% CPU until some bound expires. The bug that motivated it ([#715](https://github.com/nubjs/nub/issues/715)) presented as "`nub install` hangs forever" and was really a 970-second wait — a distinction only wall-clock can make.
-
-`wiki/` carries no decision record for this; the mechanism is documented in `vendor/aube/crates/aube-registry/src/client/retry_policy.rs` and the `fetchStallTimeout` entry in `vendor/aube/crates/aube-settings/settings.toml`. This README documents the *loop*.
+This directory checks what `nub install` does when a registry accepts a request and then stops making progress. Unit tests cannot see this defect class. A stalled stream is not an error, so nothing fails and nothing logs, and the install waits at 0% CPU until a bound expires. The report that started this harness ([#715](https://github.com/nubjs/nub/issues/715)) described "`nub install` hangs forever". The real cause was a very long wait, and only a wall clock can tell those two apart.
 
 ## The loop
 
 1. Build a binary: `scripts/rust-build.sh build -p nub-cli --profile fast`.
 2. Run the matrix: `tests/registry-stall/run-stall-matrix.sh "$(scripts/rust-build.sh --print-target)/fast/nub"`.
 
-It takes about three minutes, needs no network, runs all five cases, and exits non-zero if any of them missed its window. It is deliberately not fail-fast: which bounds moved *together* is what localises a regression, and that is only visible if every case runs.
+It needs no network and takes about 70 seconds. The default-bound case sets that time. Every case runs in parallel against its own local registry, and the script exits non-zero if any case fails. It is not fail-fast, because a regression shows where it is by the cases that move together.
 
-Each case runs with the ambient `npm_config_*` / `AUBE_*` / `NUB_*` environment stripped, because `env` outranks the project `.npmrc` in the settings precedence chain — without that, a developer who exports `npm_config_registry` would silently measure something other than what the case claims.
+Each case gets a fresh project, `HOME` and `XDG_*` directories, and an environment with every `npm_config_*`, `NPM_CONFIG_*`, `pnpm_config_*`, `PNPM_*`, `NUB_*` and proxy variable removed. An exported setting or a user `.npmrc` outranks the fixture, and would change the measurement without any warning.
 
-**Pass the binary path explicitly.** The build wrapper writes to a content-hashed bucket that moves whenever a depended-on crate (`vendor/aube`, `nub-core`) changes, so a stale artifact can sit at the obvious path looking valid. That is not hypothetical — it happened while this harness was being written, and a stale binary reports a confusing out-of-window failure rather than an error. The script warns when the binary has no `fetchStallTimeout` symbol.
+**Pass the binary path explicitly.** The build wrapper writes to a content-hashed directory, so an old binary can sit at the obvious path and still look valid.
 
-## Why elapsed time is the assertion
+## What the assertions read
 
-Every case pins a *different* bound, so the number is the test. A bound that silently stops being read does not throw — it falls back to another bound and the wait changes. That is exactly how two defects shipped in the original fix: the setting declared a CLI flag that did not exist, and its only env alias was one the nub profile disables, so the knob had no env route at all. Both were invisible to `cargo test` and to code review, and both show up here as a case landing in the wrong window.
+`stall-registry.mjs` logs each request and each socket close with a timestamp. A case asserts on two numbers from that log:
 
-| Case | Pins | Fails if |
-| --- | --- | --- |
-| `default-60s` | `fetchStallTimeout` default (60s) fires on a silent connection | the idle bound is gone; falls back to the 300s `fetchTimeout` |
-| `npmrc-5s` | the `.npmrc` key reaches the client | settings plumbing breaks between `settings.toml` and `FetchPolicy` |
-| `env-20s` | `npm_config_fetch_stall_timeout` reaches the client | the env route is dropped, or only an `AUBE_*` alias is declared (inert under nub, whose `env_prefix` is `None`) |
-| `disabled-falls-back` | `0` disables the idle bound and `fetchTimeout` alone applies | `0` is treated as a real value, or the disable path stops falling back |
-| `warn-disabled` | `fetchWarnTimeoutMs=0` silences the in-flight line without moving the bound | the "still waiting" ticker ignores the documented disable |
+- **requests**: how many times the client asked for the stalled URL, which is the retry count;
+- **span**: the time from the first stalled request to the last socket close, which is the bound.
 
-The last one guards a real regression: the first implementation of the ticker turned `fetchWarnTimeoutMs=0` into *one warning every 10 seconds*, the exact inverse of what the setting documents.
+Neither number includes process startup, so the windows stay tight on a loaded machine. The case also fails if the install exits 0, or if the cap kills it.
 
-## The two stall shapes
+## The cases
 
-`stall-registry.mjs` serves both, because they exercise different bounds and only one of them is reachable with a mock HTTP server.
+The package manager bounds each request with `fetch-timeout`, which is the longest time a request may go without receiving data (default 60s). Waiting for the connection, the response head, and each body chunk all count. A failed request is tried again `fetch-retries` times (default 2). Before retry *n* it waits `min(fetch-retry-mintimeout × fetch-retry-factor^n, fetch-retry-maxtimeout)`, which is 10s, then 60s at the defaults. So a stalled metadata request ends after 250s at the defaults.
 
-- `--mode blackhole` accepts the connection and never writes a byte. No response head ever arrives, so only a bound on the head wait ends it. This is what the matrix uses.
-- `--mode proxy --stall-at N` forwards everything to the real registry except the Nth response, which gets its real headers and ~4 KB of real body and then stops forever. This is the shape [#715](https://github.com/nubjs/nub/issues/715)'s reporter hit, and it is how you reproduce the original symptom against a real dependency graph:
+A Nub project reads these settings from `.npmrc` and `npm_config_*`. A pnpm project reads them from `pnpm-workspace.yaml`, like pnpm does, and ignores them in `.npmrc`.
 
-  ```sh
-  node tests/registry-stall/stall-registry.mjs --port 4998 --mode proxy --stall-at 800
-  # then, in a workspace with registry=http://127.0.0.1:4998/ in .npmrc:
-  nub install --lockfile-only
-  ```
+| Case | Stall | Pins | Break control |
+| --- | --- | --- | --- |
+| `fetch-timeout` | no response head | `fetch-timeout` from `.npmrc` | `STALL_OMIT=fetch-timeout`: 60s |
+| `fetch-timeout-body` | half a body | the same bound on the body-read path | `STALL_OMIT=fetch-timeout`: 60s |
+| `fetch-timeout-env` | no response head | `npm_config_fetch_timeout` | `STALL_OMIT=fetch-timeout`: 60s |
+| `default-fetch-timeout` | no response head | the 60s default | `STALL_SET=fetch-timeout=20000`: 20s |
+| `pnpm-workspace-yaml` | no response head | `fetchTimeout` in a pnpm project's `pnpm-workspace.yaml` | `STALL_OMIT=fetch-timeout`: 60s |
+| `fetch-retries` | no response head | the attempt count, and `fetch-retry-mintimeout` | `STALL_OMIT=fetch-retries`: 3 requests; `STALL_OMIT=fetch-retry-mintimeout`: 16s |
+| `fetch-retry-factor` | no response head | `fetch-retry-factor` | `STALL_OMIT=fetch-retry-factor`: 20s |
+| `fetch-retry-maxtimeout` | no response head | `fetch-retry-maxtimeout` | `STALL_OMIT=fetch-retry-maxtimeout`: 20s |
+| `fetch-timeout-tarball` | half a tarball | the same bound on the tarball path | `STALL_OMIT=fetch-timeout`: 120s |
 
-  Watch the resolver go to 0% CPU and the progress bar freeze, which is what the reporter saw. It surfaces elsewhere as `error decoding response body`, and confirming those are the same underlying condition is what this mode is for.
+Use `STALL_ONLY=<case>` to run one case with its break control. A case that stays green when you remove the setting it names does not test that setting.
 
-## What this cannot test
+## Expected failures
 
-`reqwest`'s read timeout resets on every delivered frame, so a large-but-progressing response is never cut off. Neither mode here proves that: the blackhole delivers nothing, and the proxy stalls permanently rather than dribbling. A genuine test of the per-frame reset needs a server that spaces body frames on a timer, which neither `wiremock` (used by the Rust unit tests) nor this proxy does. The positive control for it is a real cold resolve of a workspace pulling a multi-megabyte packument — `@remotion/google-fonts` is ~11.7 MB and is the one to watch.
+Two cases are marked `xfail`. Each one describes a stall that is not bounded by the settings above. The matrix passes while the case fails for the reason it states. If the case starts to pass, the matrix reports `XPASS` and exits non-zero, so change that case to `pass` in the same change as the fix.
+
+- **`fetch-retries-tarball`**: the client requests a stalled tarball twice, even with `fetch-retries=0`. The download that starts during resolution uses one full retry budget. When it fails, it clears its cache slot, and the install then fetches the tarball again with a second budget. At the defaults a stalled tarball takes 500s, which is twice the metadata bound. pnpm 12.4.1 does the same.
+- **`trickle`**: a response that sends one byte a second is never cut off. `fetch-timeout` restarts on every byte, and no total deadline or minimum speed applies. `fetchMinSpeedKiBps` only prints a warning, and only after a download succeeds. pnpm uses the same design on purpose, so that a large download on a slow link can finish ([pnpm/pnpm#14604](https://github.com/pnpm/pnpm/issues/14604)). The case records that a registry which keeps dribbling data can still hold an install open forever.
+
+To check that the `XPASS` path works, run `STALL_TRICKLE_MS=100000 STALL_ONLY=trickle`. That trickle is slower than `fetch-timeout`, so the bound ends it.
+
+## Stall shapes
+
+`stall-registry.mjs` serves one package, `stall-probe@1.0.0`, with a real packument and a gzipped tarball built in memory. It stalls one kind of request, and the shape sets how:
+
+| Shape | What the registry sends |
+| --- | --- |
+| `ok` | everything; the fixture's positive control |
+| `meta-silent` | nothing after it reads the request |
+| `meta-partial-head` | a status line and one header |
+| `meta-partial-body` | full headers and half the packument |
+| `meta-trickle` | headers, then one packument byte per `--trickle-ms` |
+| `tarball-partial-body` | the packument, then half the tarball |
+| `tarball-trickle` | the packument, then one tarball byte per `--trickle-ms` |
+
+Every stalled socket stays open. A closed socket makes the client fail at once, so it would prove nothing about the bounds. `meta-partial-head` behaves the same as `meta-silent` and is not in the matrix. It is there for when those two paths need to be told apart.
+
+To watch a shape by hand:
+
+```sh
+node tests/registry-stall/stall-registry.mjs --port 4999 --shape meta-partial-body
+# then, in a project with registry=http://127.0.0.1:4999/ in .npmrc and "stall-probe": "1.0.0" in dependencies:
+nub install
+```
