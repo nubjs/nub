@@ -231,10 +231,19 @@ fn transient_runs_do_not_error_on_multi_lockfile_projects() {
         "dlx must not raise the ambiguity guard in a multi-lockfile project: {stderr}"
     );
     // Positive proof it cleared the identity preflight and reached the (dead-port)
-    // registry, rather than no-op-passing on some unrelated early exit.
+    // registry, rather than no-op-passing on some unrelated early exit. The code
+    // is the engine's resolution failure now that dlx runs on it, spelled with
+    // nub's prefix — which is the second thing this arm proves.
     assert!(
-        stderr.contains("ERR_NUB_REGISTRY_ERROR"),
+        stderr.contains("ERR_NUB_PACKAGE_MANAGER_ADD_RESOLVE_LATEST"),
         "dlx should get past identity to the registry fetch: {stderr}"
+    );
+    // The brand rewrite reaches this path. It did not once: dlx reported through
+    // the vendored engine's presenter, which knows only `ERR_AUBE_*`, so the
+    // engine's own code reached the user's terminal verbatim.
+    assert!(
+        !stderr.contains("ERR_PNPM_"),
+        "no engine-branded code may reach the user: {stderr}"
     );
 
     // The reported repro, exactly: invoked as `nubx`. argv0 dispatch selects the
@@ -264,8 +273,12 @@ fn transient_runs_do_not_error_on_multi_lockfile_projects() {
         // Confirms argv0 actually routed to the nubx DLX fallback (not an
         // unrelated help/early exit that would no-op-pass the assert above).
         assert!(
-            stderr.contains("ERR_NUB_REGISTRY_ERROR"),
+            stderr.contains("ERR_NUB_PACKAGE_MANAGER_ADD_RESOLVE_LATEST"),
             "nubx should get past identity to the registry fetch: {stderr}"
+        );
+        assert!(
+            !stderr.contains("ERR_PNPM_"),
+            "no engine-branded code may reach the user: {stderr}"
         );
     }
 }

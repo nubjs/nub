@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use super::{VerbSpec, present, stub_error};
+use super::{VerbSpec, stub_error};
 
 /// Settles the family verbs the engine deliberately does NOT take. Anything
 /// else that reaches here is unwired, and falls through to the shared stub
@@ -118,6 +118,20 @@ pub fn run_dlx_for_nubx(
         // is reading the environment yet.
         unsafe { std::env::set_var(key, value) };
     }
+    // The engine spawns the fetched tool, so everything nub augments it with
+    // has to be on THIS process's environment before the call — the same seam
+    // the install path uses, and the reason it is shared rather than inlined
+    // there. Without it the tool runs on ambient Node with no runtime config:
+    // the fetched bin's `node` shebang re-enters nub through the PATH shim this
+    // installs, which is what gives a transient tool augmentation at all.
+    // Non-fatal, because a tool that runs unaugmented beats one that does not
+    // run.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let _ = super::pnpm_engine::session_prologue(&cwd, compat_mode);
+    // The same collapsed cause chain every other engine failure renders with.
+    // Without it this one path prints causes the engine states in full a level
+    // up, which reads as a different error rather than a different renderer.
+    pnpm_diagnostics::install_report_handler();
     // `nub`'s embedder rather than the project's: `nubx <tool>` is a transient
     // fetch-and-run whose cache is nub's, and it must not inherit a pnpm
     // incumbent's profile — including the one that would make a failed child
@@ -131,7 +145,16 @@ pub fn run_dlx_for_nubx(
             // Everything else failed BEFORE the tool ran — a 404, a resolution
             // error, no such bin. `fetched_ok` stays false so the caller never
             // records consent for a spec that was never published.
-            None => Ok((present::emit_report(&report), false)),
+            //
+            // Reported through the engine's own path, NOT `present`: that one
+            // rewrites the vendored engine's `ERR_AUBE_*` and resolves exit
+            // codes against its table, so an engine diagnostic came out of it
+            // still spelled `ERR_PNPM_*` — a brand leak straight to the user's
+            // terminal, and the only engine call site that had one.
+            None => {
+                super::pnpm_engine::report_engine_error(&report, super::pnpm_engine::NUB);
+                Ok((1, false))
+            }
         },
     }
 }
@@ -248,6 +271,10 @@ fn dir_walk_up_has_any(cwd: &Path, names: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Test-only since the dlx path stopped reporting through it: the bin and
+    // its test target are separate compilations, so a module-level import used
+    // only here reads as dead in the non-test one.
+    use crate::pm_engine::present;
 
     /// A bare `nubx <tool>` DLX fallback (run when the bin is absent from
     /// `node_modules/.bin`) hands the tool to the engine's `dlx` as a plain

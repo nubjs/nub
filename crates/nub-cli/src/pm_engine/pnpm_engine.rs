@@ -462,12 +462,17 @@ fn rewrite_suggestions(rendered: &str, program: &str) -> String {
 /// no snapshot and answers with the built-in defaults, so a project's own
 /// runtime settings would never reach a lifecycle script — and nothing
 /// would report it, because the augmentation still looks applied.
-fn session_prologue(cwd: &Path) -> Result<()> {
+///
+/// `compat` is false for every install: PM verbs run augmented and there is no
+/// `--node` lifecycle path. It is a parameter only because `nubx --node <tool>`
+/// runs a TRANSIENT session through the same prologue, and there the flag is
+/// the user's.
+pub(super) fn session_prologue(cwd: &Path, compat: bool) -> Result<()> {
     crate::cli::initialize_config_snapshot_at(cwd, false, false)?;
     // macOS leaves the soft descriptor limit at 256, which a large
     // concurrent install exhausts with `Too many open files`.
     nub_core::resource_limits::raise_nofile_limit();
-    apply_lifecycle_augmentation(cwd)
+    apply_lifecycle_augmentation(cwd, compat)
 }
 
 /// The Node the lifecycle augmentation resolved for this run, for the install
@@ -491,7 +496,7 @@ static LIFECYCLE_NODE_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock
 /// Silent when augmentation cannot be computed — no nub binary to point
 /// at, no runtime config — which leaves the engine's own behaviour
 /// exactly as it was.
-fn apply_lifecycle_augmentation(cwd: &Path) -> Result<()> {
+fn apply_lifecycle_augmentation(cwd: &Path, compat: bool) -> Result<()> {
     let discovered = nub_core::node::discovery::discover_node(&super::lifecycle_node_anchor(cwd));
     let Ok(nub_binary) = nub_core::node::spawn::current_nub_binary() else {
         return Ok(());
@@ -507,12 +512,16 @@ fn apply_lifecycle_augmentation(cwd: &Path) -> Result<()> {
     let runtime_node_options = crate::cli::lifecycle_node_options(&mut runtime, &node)?;
     let runtime_json = crate::cli::runtime_config_json(&runtime)?;
     let pnp_ctx = nub_core::pnp::detect(cwd);
-    // Lifecycle scripts are never compat: PM verbs run augmented, and there
-    // is no `--node` lifecycle path.
+    // False for every install — PM verbs run augmented and there is no
+    // `--node` lifecycle path. A transient `nubx --node <tool>` is the one
+    // caller that passes true, and it has to: the fetched bin's own `node`
+    // shebang re-enters nub through the shim this overlay installs, so
+    // computing the overlay as augmented would hand the tool augmentation the
+    // user asked not to have.
     let Some(mut aug) = nub_core::node::spawn::compute_augmentation_env(
         &nub_binary,
         node.version.clone(),
-        false,
+        compat,
         pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),
         &runtime_node_options,
     ) else {
@@ -635,7 +644,7 @@ fn host_base_dir(argv: &[std::ffi::OsString]) -> Result<PathBuf> {
 pub(crate) fn run(argv: Vec<std::ffi::OsString>) -> Result<i32> {
     let cwd = host_base_dir(&argv)?;
     let embedder = profile(selection(), &cwd)?;
-    session_prologue(&cwd)?;
+    session_prologue(&cwd, false)?;
     // The engine's own entry point installs this before it can print. It
     // drops each cause the level above already states in full, so a host
     // that leaves miette at its default renders chains the engine collapses
@@ -695,21 +704,7 @@ pub(crate) fn run(argv: Vec<std::ffi::OsString>) -> Result<i32> {
             Ok(0)
         }
         Err(report) => {
-            // The engine skips its own render for a command that has
-            // already printed its report, and answers for which those are,
-            // so nothing here has to track the list across a pin move.
-            if !pnpm_cli::is_reported_error(&report) {
-                // The `Error: ` prefix is the engine's own, not decoration:
-                // without it a pnpm-incumbent project's stderr differs from
-                // real pnpm's on every failure.
-                let rendered = format!("Error: {report:?}");
-                // A pnpm-incumbent project must see pnpm's own output verbatim.
-                if embedder.program_name == Embedder::PNPM.program_name {
-                    eprintln!("{rendered}");
-                } else {
-                    eprintln!("{}", rebrand(&rendered, embedder));
-                }
-            }
+            report_engine_error(&report, embedder);
             // The same hint the success arm prints, because a FAILURE is where
             // it matters most: `ci` is headless, so in a repo carrying only
             // another package manager's lockfile it cannot do anything but
@@ -724,6 +719,34 @@ pub(crate) fn run(argv: Vec<std::ffi::OsString>) -> Result<i32> {
             }
             Ok(1)
         }
+    }
+}
+
+/// Render a failing engine report to stderr, the one way every engine call
+/// site has to render one.
+///
+/// Shared rather than inlined because the alternative was measured: the `nubx`
+/// dlx path reported through [`super::present`] instead, which rewrites the
+/// VENDORED engine's `ERR_AUBE_*` and knows nothing of this one's codes, so a
+/// resolution failure reached the user spelled `ERR_PNPM_*`.
+///
+/// Three things have to happen together. The engine skips its own render for a
+/// command that has already printed its report and answers for which those are,
+/// so nothing here tracks that list across a pin move. The `Error: ` prefix is
+/// the engine's own, not decoration: without it a pnpm-incumbent project's
+/// stderr differs from real pnpm's on every failure. And under any other
+/// identity the rendered text is rebranded, because the engine bakes ~800
+/// `ERR_PNPM_*` codes into compile-time attributes that no runtime setting can
+/// reach.
+pub(super) fn report_engine_error(report: &miette::Report, embedder: Embedder) {
+    if pnpm_cli::is_reported_error(report) {
+        return;
+    }
+    let rendered = format!("Error: {report:?}");
+    if embedder.program_name == Embedder::PNPM.program_name {
+        eprintln!("{rendered}");
+    } else {
+        eprintln!("{}", rebrand(&rendered, embedder));
     }
 }
 

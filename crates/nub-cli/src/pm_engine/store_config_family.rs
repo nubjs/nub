@@ -10,7 +10,7 @@
 //! pnpm's grammar, so the CLI front door takes them and the module had no
 //! reachable code left. The shape here is unchanged: one stamped
 //! `usage_rs::Cli` root per verb, brand-rewritten help and usage, an engine
-//! session preflight, and failures through [`present::emit_report`].
+//! session preflight, and failures through [`super::pnpm_engine::report_engine_error`].
 //!
 //! Family notes:
 //! - `store path` prints the *resolved* store-version dir on stdout — under

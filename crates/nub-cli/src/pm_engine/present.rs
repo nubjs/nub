@@ -2,7 +2,7 @@
 //! nub's stdout/stderr flows through here — error reports, warnings, and the
 //! occasional informational line a family verb relays.
 //!
-//! Three jobs (the maintainer's hard requirement: no `ERR_AUBE_*`/`WARN_AUBE_*`
+//! Two jobs (the maintainer's hard requirement: no `ERR_AUBE_*`/`WARN_AUBE_*`
 //! strings and no engine-doc URLs (`aube.sh`, `aube.jdx.dev`) may reach nub's output; the rewrite
 //! happens at presentation time, never by renaming codes in the fork):
 //!
@@ -14,12 +14,7 @@
 //!    `aube-workspace.yaml`, `.aube-state`, path segments like
 //!    `share/aube/store`) that genuinely exist in the user's project or
 //!    filesystem.
-//! 2. **Exit codes**: map a failing report's diagnostic code through the
-//!    engine's own exit table (`aube_codes::exit::EXIT_TABLE`), mirroring
-//!    aube's `cli_main` (`vendor/aube/crates/aube/src/lib.rs::
-//!    report_exit_code`): codeless or unlisted codes exit
-//!    [`aube_codes::exit::EXIT_GENERIC`] (1).
-//! 3. **Passthrough**: [`warn`] / [`info`] for family code that emits its
+//! 2. **Passthrough**: [`warn`] / [`info`] for family code that emits its
 //!    own lines — both route through the same rewrite so no call site can
 //!    bypass the brand boundary.
 //!
@@ -34,24 +29,6 @@
 /// rewrite.
 pub(crate) fn render_report(report: &miette::Report) -> String {
     rewrite(&format!("{report:?}"))
-}
-
-/// Print a failing engine report to stderr and return the exit code its
-/// diagnostic maps to. The one-stop failure path for family verbs.
-pub(crate) fn emit_report(report: &miette::Report) -> i32 {
-    eprintln!("{}", render_report(report));
-    exit_code(report)
-}
-
-/// Resolve a report's exit code against the engine's own table, mirroring
-/// `vendor/aube/crates/aube/src/lib.rs::report_exit_code`: the diagnostic's
-/// `code()` is looked up in `aube_codes::exit::EXIT_TABLE`; no code or no
-/// entry falls back to `EXIT_GENERIC` (1).
-pub(crate) fn exit_code(report: &miette::Report) -> i32 {
-    report
-        .code()
-        .and_then(|code| aube_codes::exit::exit_code_for(&code.to_string()))
-        .unwrap_or(aube_codes::exit::EXIT_GENERIC)
 }
 
 /// Warning passthrough for family verbs (stderr, rewritten). Use for
@@ -527,17 +504,5 @@ mod tests {
         );
         // The actionable verb spelling still rebrands and survives.
         assert!(out.contains("`nub install --no-frozen-lockfile`"), "{out}");
-    }
-
-    #[test]
-    fn exit_codes_follow_the_engine_exit_table() {
-        // ERR_AUBE_NO_LOCKFILE carries bespoke exit 10 in the engine's
-        // EXIT_TABLE (lockfile range); drift upstream should fail here.
-        let coded = miette::miette!(code = aube_codes::errors::ERR_AUBE_NO_LOCKFILE, "x");
-        assert_eq!(exit_code(&coded), 10);
-        // Codeless reports (e.g. the ci missing-lockfile error) fall back
-        // to the generic exit, matching aube's own cli_main.
-        let plain = miette::miette!("no lockfile found");
-        assert_eq!(exit_code(&plain), aube_codes::exit::EXIT_GENERIC);
     }
 }
