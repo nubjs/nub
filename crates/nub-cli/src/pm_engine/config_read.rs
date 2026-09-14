@@ -15,17 +15,15 @@
 //! applies. A key nothing defaults and nobody set reports `undefined`, which is
 //! what `pnpm config get` and `npm config get` both print.
 //!
-//! Under a pnpm incumbent the branded files join the chain ([`branded_yaml`]):
-//! that project's own `pnpm-workspace.yaml`, and pnpm's global `config.yaml`
-//! for the majors that keep settings there. Reading the incumbent's own files
-//! is what compatibility means — the brand boundary governs a NUB project,
-//! where neither is read. LAYOUT settings are dropped from both whatever the
-//! incumbent, because nub takes the `node_modules` layout from `nub.jsonc`,
-//! `.npmrc` or the command line alone. The previous engine's `config.toml`
-//! went with that engine and has no successor.
+//! In a pnpm project `config` is pnpm's own command
+//! ([`super::verb_routing::engine_takes`]), so these verbs answer a nub
+//! project, where no pnpm-named file is read. The branded files join the chain
+//! under a pnpm incumbent ([`branded_yaml`]) for one caller, [`registry_at`],
+//! which `nub run` asks in either kind of project. The previous engine's
+//! `config.toml` went with that engine and has no successor.
 //!
-//! The scope flags select which sources answer: `--global` the user's `.npmrc`
-//! plus pnpm's global config, `--local` the project's files, neither the merged
+//! The scope flags select which sources answer: `--global` the user's `.npmrc`,
+//! `--local` the project's files, neither the merged
 //! view. Neither scope reports defaults or `npm_config_*` — each names a FILE,
 //! so answering one from elsewhere would answer a question nobody asked.
 
@@ -499,7 +497,7 @@ fn default_entries(root: &Path) -> Vec<(String, String)> {
 
 /// The two pnpm-named files a config read may consult.
 #[derive(Clone, Copy)]
-pub(super) enum BrandedSource {
+enum BrandedSource {
     /// `$XDG_CONFIG_HOME/pnpm/config.yaml`.
     GlobalConfig,
     /// The project's `pnpm-workspace.yaml`.
@@ -516,11 +514,9 @@ pub(super) enum BrandedSource {
 /// in pnpm 11, so reading it under a v10 incumbent would report a value that
 /// project's own pnpm ignores.
 ///
-/// LAYOUT settings are dropped from both, whatever the incumbent. Nub chooses
-/// the `node_modules` layout from `nub.jsonc`, `.npmrc` or the command line
-/// only, so mirroring a `nodeLinker` out of a branded file would report a
-/// layout the very next install does not build.
-pub(super) fn branded_yaml(root: &Path, source: BrandedSource) -> Vec<(String, String)> {
+/// LAYOUT settings are dropped from both. Under a pnpm incumbent the one caller
+/// left is [`registry_at`], so the drop changes no answer this module gives.
+fn branded_yaml(root: &Path, source: BrandedSource) -> Vec<(String, String)> {
     let Some(map) = branded_yaml_map(root, source) else {
         return Vec::new();
     };
@@ -564,29 +560,6 @@ fn branded_yaml_map(
     let path = branded_yaml_path(root, source)?;
     let text = std::fs::read_to_string(&path).ok()?;
     serde_yaml::from_str(&text).ok()
-}
-
-/// Whether either pnpm-named file asks for a `node_modules` layout that
-/// [`branded_yaml`] drops.
-///
-/// The install report is the only surface that dropped request reaches, and
-/// what it prints is the neutral surface to move the setting to — so a layout
-/// setting with no `.npmrc` spelling is deliberately not disclosed: there
-/// would be nowhere to send the reader.
-pub(super) fn branded_yaml_layout_dropped(root: &Path) -> bool {
-    [BrandedSource::WorkspaceYaml, BrandedSource::GlobalConfig]
-        .into_iter()
-        .filter_map(|source| branded_yaml_map(root, source))
-        .any(|map| {
-            settings_meta::all().any(|meta| {
-                meta.layout
-                    && !meta.npmrc_keys.is_empty()
-                    && meta
-                        .workspace_yaml_keys
-                        .iter()
-                        .any(|key| map.contains_key(*key))
-            })
-        })
 }
 
 fn branded_yaml_path(root: &Path, source: BrandedSource) -> Option<PathBuf> {
@@ -853,16 +826,6 @@ fn run_delete(args: KeyArgs) -> Result<()> {
 
     if path.exists() && remove_npmrc_keys(&path, &aliases, &args.key)? {
         removed.push(path.clone());
-    }
-
-    // The workspace-yaml scalar route only exists at project scope, and only
-    // under a pnpm incumbent — the same condition `config set` routes on.
-    if matches!(location, Location::Project)
-        && let Some(meta) = setting_for_key(&args.key)
-        && let Some(yaml) = super::store_config_family::workspace_yaml_scalar_path(&args.key)
-        && super::store_config_family::remove_workspace_yaml_scalar(&yaml, meta)?
-    {
-        removed.push(yaml);
     }
 
     if removed.is_empty() {

@@ -9,9 +9,9 @@
 //! PROVENANCE IS EXACT, NOT INFERRED. Under nub's own identity the chain that
 //! can supply a value is short, and every tier in it is readable from here:
 //! explicit install CLI flags → `npm_config_*` env → project config
-//! (`nub.jsonc`) → `pnpm-workspace.yaml` (non-empty only when pnpm is the
-//! incumbent) → pnpm's global `config.yaml` (pnpm 11+ incumbents only) →
-//! project `.npmrc` → user `.npmrc` → nub's own defaults. Every tier is read
+//! (`nub.jsonc`) → project `.npmrc` → user `.npmrc` → nub's own defaults. The
+//! report prints in a nub project only, so no other package manager's file is
+//! one of them. Every tier is read
 //! through the SAME nub-side code the install itself resolves settings with
 //! ([`super::host_settings`], [`super::config_read`]), so the report cannot
 //! describe a chain the install does not walk. Anything this walk cannot read
@@ -46,8 +46,6 @@ pub(super) enum Source {
     Env(String),
     /// The project's `nub.jsonc`, with the field the user wrote.
     ProjectConfig(&'static str),
-    WorkspaceYaml,
-    GlobalConfigYaml,
     Npmrc,
     /// nub's own built-in value — nothing in the project asked for it.
     Default,
@@ -130,8 +128,6 @@ impl fmt::Display for Source {
             Source::Cli(flag) => f.write_str(flag),
             Source::Env(var) => f.write_str(var),
             Source::ProjectConfig(field) => write!(f, "nub.jsonc {field}"),
-            Source::WorkspaceYaml => f.write_str("pnpm-workspace.yaml"),
-            Source::GlobalConfigYaml => f.write_str("pnpm global config.yaml"),
             Source::Npmrc => f.write_str(".npmrc"),
             Source::Default => f.write_str("default"),
             Source::Ci => f.write_str("global virtual store auto-disabled in CI"),
@@ -152,11 +148,7 @@ impl Source {
     fn is_authored_layout_surface(&self) -> bool {
         matches!(
             self,
-            Source::Cli(_)
-                | Source::Env(_)
-                | Source::ProjectConfig(_)
-                | Source::GlobalConfigYaml
-                | Source::Npmrc
+            Source::Cli(_) | Source::Env(_) | Source::ProjectConfig(_) | Source::Npmrc
         )
     }
 }
@@ -170,13 +162,6 @@ pub(super) struct SourceIndex {
     /// environment tier has already collapsed the two spellings of each one.
     env: Vec<(String, String, String)>,
     project_config: Vec<(String, String)>,
-    /// What a `pnpm-workspace.yaml` supplies, keyed by the YAML key as written.
-    /// Layout keys never appear: the same reader the `nub config` surface uses
-    /// drops them, which is the whole layout axis.
-    workspace_yaml: Vec<(String, String)>,
-    /// The same, from pnpm's global `config.yaml` — non-empty only under a
-    /// pnpm 11+ incumbent, the first major that keeps settings there.
-    global_config_yaml: Vec<(String, String)>,
     project_npmrc: Vec<(String, String)>,
     user_npmrc: Vec<(String, String)>,
     embedder_defaults: Vec<(String, String)>,
@@ -187,8 +172,8 @@ pub(super) struct SourceIndex {
     /// because the layout row must answer that question and only `load` has the
     /// project root.
     declared_packages: Vec<String>,
-    /// Whether a branded config file this project's incumbent owns asks for a
-    /// `node_modules` layout — a request Nub no longer honors from there.
+    /// Whether the project's `.npmrc` asks for a `node_modules` layout in npm's
+    /// own keys, a request Nub does not honor.
     branded_layout_ignored: bool,
     /// Whether the engine will read this run as CI, where the global virtual
     /// store is off by default.
@@ -263,14 +248,6 @@ impl SourceIndex {
             cli: cli.to_vec(),
             env: super::host_settings::env_settings_sourced(),
             project_config,
-            workspace_yaml: super::config_read::branded_yaml(
-                &root,
-                super::config_read::BrandedSource::WorkspaceYaml,
-            ),
-            global_config_yaml: super::config_read::branded_yaml(
-                &root,
-                super::config_read::BrandedSource::GlobalConfig,
-            ),
             project_npmrc,
             user_npmrc,
             embedder_defaults: super::nub_config_defaults(cwd),
@@ -279,10 +256,7 @@ impl SourceIndex {
             } else {
                 Vec::new()
             },
-            branded_layout_ignored: branded_layout_ignored(
-                cwd,
-                super::config_read::branded_yaml_layout_dropped(&root),
-            ),
+            branded_layout_ignored: npm_layout_key_present(cwd),
             ci: std::env::var_os("CI").is_some(),
             store_locality_breaker: (!derives_store_optouts)
                 .then(|| super::store_locality_breaker(&root, &super::workspace_members(&root)))
@@ -340,18 +314,6 @@ impl SourceIndex {
                 ));
             }
         }
-        for (entries, source) in [
-            (&self.workspace_yaml, Source::WorkspaceYaml),
-            (&self.global_config_yaml, Source::GlobalConfigYaml),
-        ] {
-            if let Some((_, raw)) = entries
-                .iter()
-                .find(|(key, _)| meta.workspace_yaml_keys.contains(&key.as_str()))
-                && let Some(value) = readable_value(meta, raw)
-            {
-                return Some((value, Some(source)));
-            }
-        }
         for entries in [&self.project_npmrc, &self.user_npmrc] {
             if let Some(value) = entries.iter().rev().find_map(|(key, raw)| {
                 npmrc_key_names(meta, key)
@@ -399,21 +361,6 @@ fn npm_layout_key_present(cwd: &Path) -> bool {
                 value.is_empty() || value.eq_ignore_ascii_case("true")
             })
         })
-}
-
-/// Whether a branded config file Nub reads for this project asks for a
-/// `node_modules` layout that Nub does not take from that source. The install
-/// header is the only place that ignored request can surface.
-///
-/// Two sources, and there used to be four. The pnpm check covers the project
-/// `pnpm-workspace.yaml` and the global `config.yaml`; npm's keys need no gate
-/// because they live in the neutral `.npmrc` cascade. The yarn and bun arms are
-/// gone with the postures that fed them: Nub reads yarn and bun configuration
-/// for NO setting now, so a `nodeLinker` in `.yarnrc.yml` is not a layout
-/// request Nub declined but a file Nub never opened — and sending the reader to
-/// `nub.jsonc` over it would explain the wrong thing.
-fn branded_layout_ignored(cwd: &Path, in_pnpm_yaml: bool) -> bool {
-    in_pnpm_yaml || npm_layout_key_present(cwd)
 }
 
 /// Every package name declared by the root manifest and by each workspace
@@ -883,8 +830,6 @@ mod tests {
             cli: Vec::new(),
             env: Vec::new(),
             project_config: Vec::new(),
-            workspace_yaml: Vec::new(),
-            global_config_yaml: Vec::new(),
             project_npmrc: Vec::new(),
             user_npmrc: Vec::new(),
             embedder_defaults: Vec::new(),
@@ -1389,17 +1334,15 @@ mod tests {
     /// Nub reads yarn and bun configuration for NO setting now, so those files
     /// are not layout requests nub declined — they are files nub never opened,
     /// and pointing their author at `nub.jsonc install.linker` would explain
-    /// the wrong thing. What remains is what nub still reads: pnpm's YAML
-    /// under a pnpm incumbent, and npm's keys in the neutral `.npmrc`.
+    /// the wrong thing. What remains is npm's keys in the neutral `.npmrc`: the report
+    /// prints in a nub project only, where pnpm's YAML is not read either.
     #[test]
     fn each_branded_layout_source_is_detected() {
-        // A pnpm incumbent, because that is the gate on reading the branded
-        // YAML at all — without it the file is simply not nub's to read.
         let project = |files: &[(&str, &str)]| {
             let dir = tempfile::tempdir().unwrap();
             std::fs::write(
                 dir.path().join("package.json"),
-                r#"{"name":"app","version":"1.0.0","packageManager":"pnpm@10.4.1"}"#,
+                r#"{"name":"app","version":"1.0.0","packageManager":"nub@0.1.0"}"#,
             )
             .unwrap();
             for (name, body) in files {
@@ -1411,8 +1354,6 @@ mod tests {
             |dir: &tempfile::TempDir| SourceIndex::load(dir.path(), &[]).branded_layout_ignored;
 
         for (file, body) in [
-            ("pnpm-workspace.yaml", "nodeLinker: hoisted\n"),
-            ("pnpm-workspace.yaml", "modulesDir: vendor_modules\n"),
             // npm's keys live in `.npmrc`, which nub reads under every
             // incumbent. `install-strategy=nested` used to ABORT; dropping that
             // must not trade a loud refusal for silence.
@@ -1430,13 +1371,6 @@ mod tests {
         assert!(
             !detected(&project(&[])),
             "a project with none of these files must print the row it always has"
-        );
-        assert!(
-            !detected(&project(&[(
-                "pnpm-workspace.yaml",
-                "autoInstallPeers: false\n"
-            )])),
-            "the probe keys on a layout setting, not on the file's presence"
         );
         // npm's default for both booleans. A project that spells out the default
         // has asked for nothing, so disclosing would be noise.
@@ -1492,11 +1426,6 @@ mod tests {
             "nub.jsonc install.publicHoist"
         );
         assert_eq!(Source::Npmrc.to_string(), ".npmrc");
-        assert_eq!(Source::WorkspaceYaml.to_string(), "pnpm-workspace.yaml");
-        assert_eq!(
-            Source::GlobalConfigYaml.to_string(),
-            "pnpm global config.yaml"
-        );
         assert_eq!(Source::Default.to_string(), "default");
         assert_eq!(
             Source::Env("npm_config_node_linker".to_string()).to_string(),
@@ -1628,8 +1557,6 @@ mod tests {
             cli: named(&[("auto-install-peers", "false")]),
             env: env(&[("npm_config_auto_install_peers", "autoInstallPeers", "true")]),
             project_config: named(&[("autoInstallPeers", "true")]),
-            workspace_yaml: named(&[("autoInstallPeers", "true")]),
-            global_config_yaml: named(&[("autoInstallPeers", "true")]),
             project_npmrc: named(&[("auto-install-peers", "true")]),
             user_npmrc: named(&[("auto-install-peers", "true")]),
             embedder_defaults: named(&[("autoInstallPeers", "true")]),
@@ -1642,128 +1569,6 @@ mod tests {
                 Some(Source::Cli("--auto-install-peers=false".to_string()))
             ))
         );
-    }
-
-    /// pnpm v11's global config sits below the project workspace file but above
-    /// either `.npmrc` scope. Both YAML tiers arrive only under a pnpm
-    /// incumbent, so a nub-identity project leaves them empty rather than
-    /// inventing a branded source.
-    #[test]
-    fn global_config_yaml_has_the_engine_precedence_tier() {
-        let index = SourceIndex {
-            global_config_yaml: named(&[("autoInstallPeers", "false")]),
-            project_npmrc: named(&[("auto-install-peers", "true")]),
-            user_npmrc: named(&[("auto-install-peers", "true")]),
-            ..empty_index()
-        };
-        assert_eq!(
-            index.resolve("autoInstallPeers"),
-            Some(("false".to_string(), Some(Source::GlobalConfigYaml)))
-        );
-        let project_workspace = SourceIndex {
-            workspace_yaml: named(&[("autoInstallPeers", "true")]),
-            ..index
-        };
-        assert_eq!(
-            project_workspace.resolve("autoInstallPeers"),
-            Some(("true".to_string(), Some(Source::WorkspaceYaml)))
-        );
-    }
-
-    /// Run the real `pnpm-workspace.yaml` reader against the two shapes it has
-    /// to tell apart, on one file: a resolution setting it supplies, and a
-    /// hoisting pattern it does not.
-    ///
-    /// CONTRACT CHANGE. This row used to assert the opposite of its second
-    /// half — a YAML `publicHoistPattern` reaching the hoisting row with
-    /// `(pnpm-workspace.yaml)` beside it — because the vendored engine's reader
-    /// was asked for it with the layout suppression turned OFF. Every hoisting
-    /// setting is `layout`-flagged, and nub takes layout from `nub.jsonc`,
-    /// `.npmrc` or the command line alone, so NO hoisting row can ever carry a
-    /// branded-YAML source. What the file can still supply is the resolution
-    /// row, which is what this now pins — along with the disclosure that the
-    /// dropped key earns.
-    ///
-    /// The manifest declares pnpm because that incumbency is the only thing
-    /// that makes the file nub's to read at all: under nub's own identity the
-    /// tier is empty by design, and a fixture without the declaration would
-    /// assert a reader works while it reads nothing.
-    #[test]
-    fn a_pnpm_workspace_yaml_supplies_resolution_and_never_hoisting() {
-        let project = tempfile::tempdir().unwrap();
-        std::fs::write(
-            project.path().join("package.json"),
-            r#"{"name":"app","version":"1.0.0","packageManager":"pnpm@11.3.0"}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            project.path().join("pnpm-workspace.yaml"),
-            "autoInstallPeers: false\npublicHoistPattern:\n  - vitest\n  - '@types/*'\n",
-        )
-        .unwrap();
-
-        let index = SourceIndex::load(project.path(), &[]);
-        assert_eq!(
-            index.resolve("autoInstallPeers"),
-            Some(("false".to_string(), Some(Source::WorkspaceYaml)))
-        );
-        assert_eq!(
-            index.resolve("publicHoistPattern"),
-            None,
-            "a hoisting pattern is a layout setting, which this file never supplies"
-        );
-
-        let rows = resolved_rows(&index);
-        let resolution = rows.iter().find(|row| row.label == "resolution").unwrap();
-        assert_eq!(resolution.values, vec!["auto-install-peers=false"]);
-        assert_eq!(resolution.note.as_deref(), Some("(pnpm-workspace.yaml)"));
-        assert!(
-            rows.iter().all(|row| row.label != "hoisting"),
-            "no hoisting row, because nothing nub reads asked for one"
-        );
-        // The dropped key is not silently gone: the linker row says where a
-        // layout CAN be set, which is the whole point of dropping it.
-        let linker = rows.iter().find(|row| row.label == "linker").unwrap();
-        assert_eq!(
-            linker.note.as_deref(),
-            Some(&format!("({LAYOUT_POINTER})")[..])
-        );
-    }
-
-    /// Either YAML tier reaches the resolution ROW with its own name on it, and
-    /// a settled multi-entry row still collapses to one parenthetical when both
-    /// entries came from the same file.
-    #[test]
-    fn pnpm_yaml_tiers_preserve_resolution_provenance() {
-        let index = SourceIndex {
-            workspace_yaml: named(&[
-                ("autoInstallPeers", "false"),
-                ("strictPeerDependencies", "true"),
-            ]),
-            project_npmrc: named(&[("auto-install-peers", "true")]),
-            ..empty_index()
-        };
-        let resolution = |index: &SourceIndex| {
-            resolved_rows(index)
-                .into_iter()
-                .find(|row| row.label == "resolution")
-                .unwrap()
-        };
-        let workspace = resolution(&index);
-        assert_eq!(
-            workspace.values,
-            vec!["auto-install-peers=false", "strict-peer-dependencies"]
-        );
-        assert_eq!(workspace.note.as_deref(), Some("(pnpm-workspace.yaml)"));
-
-        let global = resolution(&SourceIndex {
-            workspace_yaml: Vec::new(),
-            global_config_yaml: named(&[("autoInstallPeers", "false")]),
-            project_npmrc: Vec::new(),
-            ..index
-        });
-        assert_eq!(global.values, vec!["auto-install-peers=false"]);
-        assert_eq!(global.note.as_deref(), Some("(pnpm global config.yaml)"));
     }
 
     /// Within either `.npmrc` scope, the last assignment wins. This is distinct

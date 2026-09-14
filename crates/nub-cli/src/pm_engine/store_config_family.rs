@@ -24,36 +24,15 @@
 //!   engine resolved, which is how `pm_env_matrix` pins it. Paths printed by
 //!   `cache view --json` / `cache delete` are real on-disk paths, which the
 //!   rewrite policy deliberately preserves.
-//! - `config` write routing is pnpm-VERSION-AWARE (decision 2026-06-20,
-//!   supersedes the earlier "npmrc-first" routing; **no `config.toml`, ever**).
-//!   The config home for non-layout SCALAR settings is pnpm-version-dependent —
-//!   there is no single file that round-trips on every pnpm — so the router
-//!   gates on the incumbent pnpm version (see [`config_model`] +
-//!   [`project_scalar_home`]).
-//!   npm-shared keys (`registry`, proxies, per-host auth templates,
-//!   `@scope:registry`, bare auth scalars, …) → `.npmrc` (engine writer), so
-//!   npm/yarn/pnpm of every version see the same value (unchanged). Non-shared
-//!   non-layout scalars under a pnpm-v11+ incumbent → `pnpm-workspace.yaml` (created if
-//!   absent), because v11 reads scalars SOLELY from the workspace yaml
-//!   (`isIniConfigKey` keeps only auth/network in `.npmrc`) so a `.npmrc` scalar
-//!   would no-op. Layout scalars always go to `.npmrc`: Nub does not read layout
-//!   from branded YAML, and the paired settings allowlist keeps their neutral
-//!   aliases readable under pnpm 11. Non-shared scalars under a pnpm-v10/v9 incumbent, the
-//!   UNKNOWN-pnpm-version default, and nub identity / npm / yarn / bun → the
-//!   *project* `.npmrc` (the neutral home): v10/v9 read scalars from `.npmrc`,
-//!   and the unknown default picks `.npmrc` as the safest target for the
-//!   dominant v9/v10 base (a v11-shaped yaml written into a v10 project silently
-//!   no-ops). Never a pnpm-branded file for these, never `config.toml`;
-//!   `--global`/`--local` selectors do not change that project target. READS are
-//!   version-AGNOSTIC and need no gate for non-layout settings: the resolver
-//!   reads those from both `pnpm-workspace.yaml` and `.npmrc`, while layout reads
-//!   only from `.npmrc`.
-//!   Workspace *map* settings (`allowBuilds.<pkg>`, `overrides.<pkg>`, bare
-//!   `allowBuilds`, …) are refused with a pnpm-workspace.yaml pointer at any
-//!   incumbency/version (upstream's fallback would write a
+//! - `config` writes a nub project's settings to `.npmrc` (**no `config.toml`,
+//!   ever**); in a pnpm project `config` is pnpm's own command
+//!   ([`super::verb_routing::engine_takes`]). npm-shared keys (`registry`,
+//!   proxies, per-host auth templates, `@scope:registry`, bare auth scalars, …)
+//!   and every other scalar go to the project `.npmrc`, which npm, Yarn and pnpm
+//!   all read. Workspace *map* settings (`allowBuilds.<pkg>`, `overrides.<pkg>`,
+//!   bare `allowBuilds`, …) are refused (upstream's fallback would write a
 //!   `package.json#aube.<map>` field, and `.npmrc` lines for map entries are
-//!   unread). A free-form unknown key has no workspace-yaml schema, so it goes
-//!   to `.npmrc` verbatim even under a pnpm-v11 incumbent.
+//!   unread).
 //! - **GLOBAL config reads follow identity; writes stay neutral:**
 //!     - **Reads:** the neutral user `~/.npmrc` is always eligible. Pnpm's
 //!       branded global `config.yaml` and `auth.ini` are eligible only under a
@@ -105,8 +84,7 @@
 //!   tables that parse — the two cannot disagree.
 
 use super::config_read::{ConfigArgs, ConfigCommand};
-use anyhow::{Context, Result};
-use nub_settings::meta::SettingMeta;
+use anyhow::Result;
 
 use super::verb_parse::{Parsed, verb_cli};
 use super::{VerbSpec, stub_error};
@@ -412,13 +390,11 @@ fn config_is_global(parsed: &ConfigArgs) -> bool {
 /// POINTS (their scalar settings live in `.npmrc` for the versions nub targets,
 /// so they take the neutral default — add a row if a future major moves a home).
 ///
-/// This governs ONLY the project WRITE target for a non-auth SCALAR setting.
-/// Auth/registry keys always go to `.npmrc`; map settings are refused; global
-/// writes are neutral (`~/.npmrc`); READS are version-agnostic (the resolver
-/// reads scalars from both `.npmrc` and the workspace yaml at once).
+/// It gates one READ now: whether pnpm's global `config.yaml` is consulted
+/// ([`pnpm_v11_scalar_home`]). A nub project's writes all go to `.npmrc`, and a
+/// pnpm project's `config` is pnpm's own command.
 mod config_model {
-    /// Where a non-auth scalar setting must be WRITTEN so the incumbent PM
-    /// reads it back — the home that round-trips, per PM+major.
+    /// Where the incumbent PM reads non-auth scalar settings from, per PM+major.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(super) enum ScalarHome {
         /// Project `.npmrc` (INI). The lowest-common-denominator home: read by
@@ -454,24 +430,20 @@ mod config_model {
     }
 }
 
-/// Resolve the project's scalar config-WRITE home. Detection: the declared
+/// Resolve where the project's pnpm keeps scalar settings. Detection: the declared
 /// `packageManager` / `devEngines` pin (`declared_pm_raw`, packageManager
 /// first) gives the pnpm major. The installed-PM `--version` probe and
 /// lockfile-version signal from the agreed detection chain are intentionally
 /// NOT consulted: both only matter to move an UNKNOWN version off its default,
 /// and the pnpm-unknown default is already the dominant/most-compatible home
 /// (`.npmrc`) — so a brittle subprocess probe buys nothing. `pnpm_incumbent`
-/// (the resolved config surface) gates whether a pnpm-branded yaml may be
-/// written at all (brand boundary): when false (non-pnpm / nub identity) the
+/// (the resolved config surface) gates whether a pnpm-branded file may be
+/// read at all (brand boundary): when false (non-pnpm / nub identity) the
 /// home is always the neutral `.npmrc`.
-/// Whether a non-shared project scalar belongs in `pnpm-workspace.yaml`:
-/// true only under a pnpm **11+** incumbent, which is the first major that
-/// reads scalars from there rather than from `.npmrc`.
-///
-/// One predicate for the write route and for the config READ of pnpm's global
-/// `config.yaml`, because they turn on the same fact — a v10 incumbent's own
-/// pnpm ignores both files for scalars, so nub writing or reporting one would
-/// name a value that project never acts on.
+/// Whether the project's pnpm keeps scalar settings in YAML: true only under a
+/// pnpm **11+** incumbent, the first major that reads them there rather than
+/// from `.npmrc`. Gates the read of pnpm's global `config.yaml`, since a v10
+/// incumbent's own pnpm ignores that file for scalars.
 pub(super) fn pnpm_v11_scalar_home() -> bool {
     let pnpm_incumbent = std::env::current_dir().is_ok_and(|cwd| {
         matches!(
@@ -487,12 +459,12 @@ fn project_scalar_home(pnpm_incumbent: bool) -> config_model::ScalarHome {
         // Non-pnpm incumbent or nub identity: never a pnpm-branded file.
         return config_model::ScalarHome::Npmrc;
     }
-    // The version may only select the pnpm yaml/version-gated route when the
+    // The version may only select the pnpm version-gated read when the
     // declared name is LITERALLY "pnpm". `resolve_config_surface` maps an
     // UNKNOWN declared tool name (e.g. `deno`, `vlt`) to `PnpmOrFresh` too
     // (conservative — keeps the full pnpm-compat surface live), so without this
     // name-gate a `packageManager: "deno@11.0.0"` would feed major 11 into the
-    // pnpm gate and leak a `pnpm-workspace.yaml` (brand boundary). Gating the
+    // pnpm gate and read pnpm's global config (brand boundary). Gating the
     // version on `name == "pnpm"` means any non-pnpm / unknown declared name —
     // and a genuine fresh / lockfile-only pnpm project, which has NO declaration
     // (name `None`) — resolves to major `None` → the `.npmrc` model.
@@ -635,11 +607,9 @@ fn dispatch_config(parsed: ConfigArgs) -> Result<i32> {
         // know which PM's global file the user means. npm-shared/auth keys go
         // to `~/.npmrc` (every tool reads it); every other scalar goes to
         // nub's neutral global home (also `~/.npmrc` — the resolver reads each
-        // setting's `.npmrc` alias from the user file). PROJECT writes mirror
-        // pnpm v11's `getConfigFileInfo`: npm-shared → `.npmrc`; non-shared
-        // scalar → `pnpm-workspace.yaml` under a pnpm incumbent (parity) else
-        // the neutral project `.npmrc`; maps refused. The pnpm-incumbent
-        // signal is the resolved config surface (project scope only).
+        // setting's `.npmrc` alias from the user file). PROJECT writes go to
+        // the project `.npmrc`; maps refused. A pnpm project's `config set` is
+        // pnpm's own command and never reaches here.
         Some(ConfigCommand::Set(set)) => {
             super::engine_brand_preflight();
             if global {
@@ -667,28 +637,17 @@ fn dispatch_config(parsed: ConfigArgs) -> Result<i32> {
                     return npmrc_first::set_user_npmrc(&set.key, &set.value);
                 }
             } else {
-                // A non-shared scalar lands in `pnpm-workspace.yaml` ONLY under
-                // a pnpm-v11+ incumbent (v11 reads scalars solely from YAML); a
-                // pnpm-v10/v9 incumbent — and the unknown-version default — keep
-                // scalars in the neutral project `.npmrc` (v9/v10 read them from
-                // there, and v11 still reads auth from there). Non-pnpm and
-                // nub-identity surfaces also keep `.npmrc` (read_branded off).
-                let scalar_to_yaml = pnpm_v11_scalar_home();
-                let route = npmrc_first::classify_set(&set.key, scalar_to_yaml);
+                let route = npmrc_first::classify_set(&set.key);
                 // `nub.jsonc` outranks every file home for the settings it
                 // supplies, so a write of one is read by nothing. Asked AFTER
-                // the route is chosen, for two reasons: the refusal can name the
-                // file it actually blocked — a non-shared scalar under a pnpm 11
-                // incumbent was bound for `pnpm-workspace.yaml`, not `.npmrc` —
-                // and a key the engine handles, or already refuses, never pays
-                // for the project lookup at all.
+                // the route is chosen, so a key the engine handles, or already
+                // refuses, never pays for the project lookup at all.
                 //
                 // The answer is a refusal rather than a different destination:
                 // the two surfaces do not share a value grammar, and moving the
                 // write would desynchronize `get` from `set`. See the
                 // duplicate_home module docs.
                 let blocked_home = match &route {
-                    npmrc_first::SetRoute::ProjectWorkspaceYaml => Some("pnpm-workspace.yaml"),
                     npmrc_first::SetRoute::ProjectNpmrc => Some(".npmrc"),
                     npmrc_first::SetRoute::Engine | npmrc_first::SetRoute::Refuse(_) => None,
                 };
@@ -704,9 +663,6 @@ fn dispatch_config(parsed: ConfigArgs) -> Result<i32> {
                     // npm-shared at project scope: the neutral project `.npmrc`.
                     npmrc_first::SetRoute::Engine => {
                         return npmrc_first::set_project_npmrc(&set.key, &set.value);
-                    }
-                    npmrc_first::SetRoute::ProjectWorkspaceYaml => {
-                        return npmrc_first::set_project_workspace_yaml(&set.key, &set.value);
                     }
                     npmrc_first::SetRoute::ProjectNpmrc => {
                         return npmrc_first::set_project_npmrc(&set.key, &set.value);
@@ -755,151 +711,6 @@ fn run_config_get_registry(parsed: ConfigArgs, json: bool) -> Result<i32> {
         }
     })?;
     Ok(code)
-}
-
-/// A `pnpm-workspace.yaml` to write `key` into, when the project has one and
-/// the setting has a top-level key there. `None` sends the write to `.npmrc`.
-pub(super) fn workspace_yaml_scalar_path(key: &str) -> Option<std::path::PathBuf> {
-    let meta = npmrc_first::setting_for_key(key)?;
-    // A nested key (`updateConfig.ignoreDependencies`) needs a sub-mapping edit
-    // this writer does not do; the `.npmrc` fallback is the honest answer.
-    meta.workspace_yaml_keys.iter().find(|k| !k.contains('.'))?;
-    // Not gated on the file existing: a project that has never needed one is
-    // exactly the project a first `config set` has to create it for, which is
-    // what the previous writer did through its edit helper.
-    Some(npmrc_first::project_root().join("pnpm-workspace.yaml"))
-}
-
-/// Write `raw` under `key`'s workspace-yaml name, as a LINE edit rather than a
-/// parse-and-reserialize.
-///
-/// The file is the user's, and round-tripping YAML through a parser loses the
-/// comments and the key order they wrote. A top-level key owns one line plus
-/// whatever is indented beneath it, so replacing exactly that span leaves
-/// every other byte alone — the same shape the `.npmrc` writer uses, for the
-/// same reason.
-pub(super) fn set_workspace_yaml_scalar(
-    path: &std::path::Path,
-    meta: &'static SettingMeta,
-    key: &str,
-    raw: &str,
-) -> Result<()> {
-    let yaml_key = meta
-        .workspace_yaml_keys
-        .iter()
-        .find(|k| !k.contains('.'))
-        .ok_or_else(|| anyhow::anyhow!("{key} has no pnpm-workspace.yaml key"))?;
-    let rendered = render_yaml_scalar(meta, yaml_key, raw)?;
-    let original = std::fs::read_to_string(path).unwrap_or_default();
-    let mut out = strip_top_level_key(&original, yaml_key);
-    out.push(rendered);
-    let mut text = out.join("\n");
-    text.push('\n');
-    std::fs::write(path, text).with_context(|| format!("failed to write {}", path.display()))
-}
-
-/// Drop `meta`'s top-level workspace-yaml keys. `true` when one was there.
-pub(super) fn remove_workspace_yaml_scalar(
-    path: &std::path::Path,
-    meta: &'static SettingMeta,
-) -> Result<bool> {
-    let original = std::fs::read_to_string(path).unwrap_or_default();
-    let mut lines: Vec<String> = original.lines().map(str::to_string).collect();
-    let before = lines.len();
-    for yaml_key in meta.workspace_yaml_keys.iter().filter(|k| !k.contains('.')) {
-        lines = strip_top_level_key(&lines.join("\n"), yaml_key);
-    }
-    if lines.len() == before {
-        return Ok(false);
-    }
-    let mut text = lines.join("\n");
-    if !text.is_empty() {
-        text.push('\n');
-    }
-    std::fs::write(path, text).with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(true)
-}
-
-/// Every line of `source` except the one introducing top-level `key` and the
-/// block indented under it.
-fn strip_top_level_key(source: &str, key: &str) -> Vec<String> {
-    let head = format!("{key}:");
-    let mut out: Vec<String> = Vec::new();
-    let mut skipping = false;
-    for line in source.lines() {
-        if skipping {
-            // The block ends at the next line that starts in column zero; a
-            // blank line inside a block does not end it.
-            if line.trim().is_empty() || line.starts_with([' ', '\t']) {
-                continue;
-            }
-            skipping = false;
-        }
-        if line.starts_with(&head) && !line.starts_with([' ', '\t']) {
-            skipping = true;
-            continue;
-        }
-        out.push(line.to_string());
-    }
-    while out.last().is_some_and(|l| l.trim().is_empty()) {
-        out.pop();
-    }
-    out
-}
-
-/// `key: value`, typed the way the setting's own metadata says. A list becomes
-/// a block sequence, which is how pnpm writes one.
-fn render_yaml_scalar(meta: &SettingMeta, yaml_key: &str, raw: &str) -> Result<String> {
-    match meta.type_ {
-        "bool" => {
-            let value = match raw.trim() {
-                "true" | "yes" | "1" => "true",
-                "false" | "no" | "0" | "" => "false",
-                other => anyhow::bail!("{} expects a boolean value, got `{other}`", meta.name),
-            };
-            Ok(format!("{yaml_key}: {value}"))
-        }
-        "int" => {
-            let value: i64 = raw
-                .trim()
-                .parse()
-                .map_err(|_| anyhow::anyhow!("{} expects an integer value", meta.name))?;
-            Ok(format!("{yaml_key}: {value}"))
-        }
-        "list<string>" => {
-            let items: Vec<String> = raw
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(|s| format!("  - {}", yaml_quote(s)))
-                .collect();
-            if items.is_empty() {
-                return Ok(format!("{yaml_key}: []"));
-            }
-            Ok(format!("{yaml_key}:\n{}", items.join("\n")))
-        }
-        _ => Ok(format!("{yaml_key}: {}", yaml_quote(raw))),
-    }
-}
-
-/// Quote a scalar unless it is plainly safe unquoted. Erring toward quoting is
-/// free — YAML reads a quoted scalar as the same string — while erring the
-/// other way turns a value like `yes` or `1.0` into a bool or a float.
-fn yaml_quote(value: &str) -> String {
-    let plain = !value.is_empty()
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.' | '@'))
-        && !value.parse::<f64>().is_ok()
-        && !matches!(
-            value.to_ascii_lowercase().as_str(),
-            "true" | "false" | "yes" | "no" | "on" | "off" | "null" | "~"
-        );
-    if plain {
-        value.to_string()
-    } else {
-        format!("{:?}", value)
-    }
 }
 
 /// The engine prints reference docs for these straight to stdout (no
@@ -1008,39 +819,17 @@ mod npmrc_first {
         /// nub's `isIniConfigKey` equivalent: registry/auth/`@scope:`/`//host`
         /// keys npm + yarn + pnpm all read from `.npmrc`.
         Engine,
-        /// Non-layout, non-shared scalar under a pnpm-**v11+** incumbent →
-        /// `pnpm-workspace.yaml`. v11 reads scalar settings SOLELY from the
-        /// workspace yaml (`isIniConfigKey` keeps only auth/network in
-        /// `.npmrc`), so a scalar written to `.npmrc` would no-op; nub mirrors
-        /// v11 and creates the yaml so a subsequent `pnpm config get` / install
-        /// reads it back. Only fires under a provable pnpm-v11+ incumbent — a
-        /// pnpm-named file is never written for v10/v9 (they read `.npmrc`), nor
-        /// for non-pnpm / nub identity (brand boundary).
-        ProjectWorkspaceYaml,
-        /// Layout scalar under every incumbent, or another non-shared scalar
-        /// outside pnpm v11 → the project `.npmrc` (the
-        /// neutral home: every tool reads it, no pnpm-branded file emitted,
-        /// never `config.toml`). Covers pnpm v10/v9 (they read scalars from
-        /// `.npmrc`), the unknown-pnpm-version default (safest for the dominant
-        /// v9/v10 base), and nub identity / npm / yarn / bun. Matches what
-        /// `nub pm use nub` migration writes for a nub-identity project.
+        /// Any other scalar → the project `.npmrc`, the neutral home every tool
+        /// reads (no pnpm-branded file, never `config.toml`). Matches what
+        /// `nub pm use nub` migration writes for a nub project.
         ProjectNpmrc,
         /// Workspace map settings and scalar-nested misuses.
         Refuse(anyhow::Error),
     }
 
     /// Classify a `config set` key. Pure (no fs) so the routing table is
-    /// unit-testable; the write itself happens in [`set_project_npmrc`] /
-    /// [`set_project_workspace_yaml`].
-    ///
-    /// `scalar_to_yaml` is true ONLY for a pnpm-**v11+** incumbent — the one
-    /// version whose config home for non-layout scalar settings is
-    /// `pnpm-workspace.yaml` (see `pnpm_uses_yaml_scalar_home`). It decides ONLY
-    /// where a non-shared, non-layout scalar lands: `pnpm-workspace.yaml` under v11, the neutral project
-    /// `.npmrc` for pnpm v10/v9, the unknown-version default, and every
-    /// non-pnpm / nub-identity surface. npm-shared keys (`.npmrc`) and map
-    /// refusals are independent of this signal.
-    pub(super) fn classify_set(key: &str, scalar_to_yaml: bool) -> SetRoute {
+    /// unit-testable; the write itself happens in [`set_project_npmrc`].
+    pub(super) fn classify_set(key: &str) -> SetRoute {
         // A setting nub's embedder profile declares it does not consume. First,
         // and its own arm rather than a case of the `setting_for_key` match
         // below — that lookup is embedder-FILTERED, so an unsupported setting
@@ -1054,40 +843,23 @@ mod npmrc_first {
         if is_npm_shared_key(key) {
             return SetRoute::Engine;
         }
-        let scalar_route = if scalar_to_yaml {
-            SetRoute::ProjectWorkspaceYaml
-        } else {
-            SetRoute::ProjectNpmrc
-        };
         match setting_for_key(key) {
             // Bare map setting (`allowBuilds`, `overrides`, …): a single
             // scalar can't represent it, and upstream's per-entry fallback
             // writes `package.json#aube.<map>` — a foreign-brand manifest
             // field nub must never produce.
             Some(meta) if meta.type_ == "object" => SetRoute::Refuse(map_setting_error(meta.name)),
-            // A layout scalar never goes to `pnpm-workspace.yaml`, whatever the
-            // incumbent, because Nub never reads layout from that file.
-            // Routing these by the pnpm-v11 scalar home would write
-            // a key the very next install ignores — `config set` reporting
-            // success, then the install header pointing at `nub.jsonc` /
-            // `.npmrc` about the setting just written. `.npmrc` is
-            // where the paired `keep_layout` allowlist reads them back from.
-            Some(meta) if meta.layout => SetRoute::ProjectNpmrc,
             // A known scalar with NO `.npmrc` alias cannot be read back out of
             // the file this route writes: `write_plan` falls back to the key
             // verbatim, so the line lands, `config set` reports success, and
             // every reader looks somewhere else — the same silent no-op an
             // unsupported setting used to produce. Refused rather than declared
-            // unsupported, because the surfaces these DO have (a CLI flag, the
-            // workspace yaml under a pnpm incumbent) keep working and must keep
-            // reading. Only the `.npmrc` route is decided here; the yaml route's
-            // own `.npmrc` fallback re-asks in [`set_project_npmrc`].
-            Some(meta) if !scalar_to_yaml && meta.npmrc_keys.is_empty() => {
-                SetRoute::Refuse(no_npmrc_home_error(meta))
-            }
+            // unsupported, because the surfaces these DO have, such as a CLI
+            // flag, keep working and must keep reading.
+            Some(meta) if meta.npmrc_keys.is_empty() => SetRoute::Refuse(no_npmrc_home_error(meta)),
             // Known scalar (including canonical dotted names like
             // `peerDependencyRules.allowedVersions`).
-            Some(_) => scalar_route,
+            Some(_) => SetRoute::ProjectNpmrc,
             None => {
                 if let Some((prefix, _)) = key.split_once('.')
                     && let Some(meta) = setting_for_key(prefix)
@@ -1097,38 +869,11 @@ mod npmrc_first {
                     }
                     return SetRoute::Refuse(scalar_nested_error(meta, key));
                 }
-                // Free-form unknown key → project `.npmrc` verbatim. Even
-                // under a pnpm incumbent an unknown key has no workspace-yaml
-                // schema, so `.npmrc` (free-form) is the only safe home — this
+                // Free-form unknown key → project `.npmrc` verbatim, which
                 // matches the engine's own unknown-key handling.
                 SetRoute::ProjectNpmrc
             }
         }
-    }
-
-    /// Write a non-shared scalar to `pnpm-workspace.yaml` (force-creating it),
-    /// via the engine's typed, comment-preserving workspace-yaml writer. Falls
-    /// back to the project `.npmrc` when the setting has no workspace-yaml key
-    /// (e.g. a known scalar that only exists as an `.npmrc` alias) — keeping
-    /// the value readable rather than dropping it.
-    pub(super) fn set_project_workspace_yaml(key: &str, value: &str) -> Result<i32> {
-        // The same refusal the `.npmrc` route opens with. This is a SECOND
-        // entry to the write path, taken instead of that one under a pnpm
-        // incumbent, so a guard on only one of them leaves the key writable
-        // through the other.
-        if let Some(err) = unsupported_setting_refusal(key) {
-            return Err(err);
-        }
-        let Some(path) = super::workspace_yaml_scalar_path(key) else {
-            // No workspace-yaml mapping for this scalar → neutral `.npmrc`.
-            return set_project_npmrc(key, value);
-        };
-        let Some(meta) = setting_for_key(key) else {
-            return set_project_npmrc(key, value);
-        };
-        super::set_workspace_yaml_scalar(&path, meta, key, value)?;
-        present::info(&format!("set {key}={value} ({})", path.display()));
-        Ok(0)
     }
 
     /// Write `key=value` to the project `.npmrc`, sweeping alias spellings
@@ -1328,9 +1073,8 @@ mod npmrc_first {
     /// `None` for every other key — including an unknown one, which is free-form
     /// and legitimately lands in `.npmrc` verbatim.
     ///
-    /// The choke point every `.npmrc` write asks, so the yaml route's own
-    /// fallback and the global writer are covered as well as
-    /// [`classify_set`]'s direct route.
+    /// The choke point every `.npmrc` write asks, so the global writer is
+    /// covered as well as [`classify_set`]'s direct route.
     pub(super) fn no_npmrc_home_refusal(key: &str) -> Option<anyhow::Error> {
         setting_for_key(key)
             .filter(|meta| meta.npmrc_keys.is_empty())
@@ -1429,136 +1173,59 @@ mod npmrc_first {
         }
 
         #[test]
-        fn npm_shared_and_map_routing_is_independent_of_incumbency() {
-            // registry is npm-shared → engine (.npmrc), regardless of incumbent.
-            for pnpm in [true, false] {
-                assert!(matches!(classify_set("registry", pnpm), SetRoute::Engine));
-            }
-
+        fn npm_shared_and_map_routing() {
+            assert!(matches!(classify_set("registry"), SetRoute::Engine));
             // Map settings: bare and dotted forms both refuse (upstream would
             // write package.json#aube.<map> — brand boundary), and a nested
             // spelling of a scalar setting refuses with the direct-set hint.
-            // Refusal is independent of incumbency.
-            for pnpm in [true, false] {
-                for refused in ["allowBuilds", "allowBuilds.esbuild", "autoInstallPeers.x"] {
-                    assert!(
-                        matches!(classify_set(refused, pnpm), SetRoute::Refuse(_)),
-                        "{refused} must be refused (pnpm_incumbent={pnpm})"
-                    );
-                }
+            for refused in ["allowBuilds", "allowBuilds.esbuild", "autoInstallPeers.x"] {
+                assert!(
+                    matches!(classify_set(refused), SetRoute::Refuse(_)),
+                    "{refused} must be refused"
+                );
             }
         }
 
+        /// Every non-shared scalar a project writes lands in its `.npmrc`,
+        /// layout included, and so does a free-form key the settings table does
+        /// not know.
         #[test]
-        fn non_shared_scalar_routes_by_scalar_home() {
-            // `scalar_to_yaml = true` is the pnpm-v11+ case: a non-shared scalar
-            // lands in pnpm-workspace.yaml (v11 reads scalars solely from yaml)…
-            assert!(matches!(
-                classify_set("autoInstallPeers", true),
-                SetRoute::ProjectWorkspaceYaml
-            ));
-            assert!(matches!(
-                classify_set("auto-install-peers", true),
-                SetRoute::ProjectWorkspaceYaml
-            ));
-            // …`false` is pnpm v10/v9, the unknown-version default, and every
-            // non-pnpm / nub-identity surface: the neutral project `.npmrc` (no
-            // pnpm-branded file emitted — brand boundary; v9/v10 read `.npmrc`).
-            assert!(matches!(
-                classify_set("autoInstallPeers", false),
-                SetRoute::ProjectNpmrc
-            ));
-            assert!(matches!(
-                classify_set("auto-install-peers", false),
-                SetRoute::ProjectNpmrc
-            ));
-
-            // A known scalar `some-custom-key` is unknown to the registry, so
-            // it's free-form → `.npmrc` even in the yaml-home (v11) case (no
-            // workspace-yaml schema for an arbitrary key).
-            assert!(matches!(
-                classify_set("some-custom-key", true),
-                SetRoute::ProjectNpmrc
-            ));
-            assert!(matches!(
-                classify_set("some-custom-key", false),
-                SetRoute::ProjectNpmrc
-            ));
-        }
-
-        /// A layout scalar ignores the scalar home entirely. Routing it by the
-        /// pnpm-v11 rule would write `pnpm-workspace.yaml`, which nothing reads
-        /// back for layout — `config set` would report success and the very next
-        /// install would point back at `nub.jsonc` / `.npmrc` about the key just
-        /// written. The `autoInstallPeers` pair is the control: a
-        /// non-layout scalar must still follow the scalar home.
-        #[test]
-        fn a_layout_scalar_never_routes_to_workspace_yaml() {
+        fn a_non_shared_scalar_routes_to_the_project_npmrc() {
             for key in [
+                "autoInstallPeers",
+                "auto-install-peers",
                 "nodeLinker",
                 "node-linker",
                 "shamefully-hoist",
                 "hoist-pattern",
                 "modules-dir",
                 "virtual-store-dir",
+                "some-custom-key",
             ] {
-                for scalar_to_yaml in [true, false] {
-                    assert!(
-                        matches!(classify_set(key, scalar_to_yaml), SetRoute::ProjectNpmrc),
-                        "{key} is layout and must land in .npmrc (scalar_to_yaml={scalar_to_yaml})"
-                    );
-                }
+                assert!(
+                    matches!(classify_set(key), SetRoute::ProjectNpmrc),
+                    "{key} must land in .npmrc"
+                );
             }
-            assert!(
-                matches!(
-                    classify_set("autoInstallPeers", true),
-                    SetRoute::ProjectWorkspaceYaml
-                ),
-                "control: a non-layout scalar still follows the pnpm-v11 scalar home"
-            );
         }
 
-        /// A real setting with NO `.npmrc` alias is refused on the `.npmrc`
-        /// route and still allowed on the yaml one.
-        ///
-        /// Both halves matter and they pull opposite ways. `write_plan` falls
+        /// A real setting with NO `.npmrc` alias is refused: `write_plan` falls
         /// back to the key verbatim, so without the refusal the line lands and
-        /// nothing reads it; but `pnpmfilePath` DOES have a workspace-yaml key,
-        /// which a pnpm-v11 incumbent reads back — so a blanket refusal would
-        /// take away the one home that works. The invariant is per-ROUTE, not
-        /// per-setting. `autoInstallPeers` is the control: an ordinary scalar
-        /// with an `.npmrc` alias is untouched on both routes.
+        /// nothing reads it. `autoInstallPeers` is the control, and an UNKNOWN
+        /// key names no setting, so it is free-form config and still legal.
         #[test]
-        fn a_setting_with_no_npmrc_alias_is_refused_on_the_npmrc_route() {
+        fn a_setting_with_no_npmrc_alias_is_refused() {
             for key in ["pnpmfilePath", "globalPnpmfile"] {
                 assert!(
-                    matches!(classify_set(key, false), SetRoute::Refuse(_)),
+                    matches!(classify_set(key), SetRoute::Refuse(_)),
                     "{key} has no .npmrc alias and must not be written there"
                 );
             }
-            assert!(
-                matches!(
-                    classify_set("pnpmfilePath", true),
-                    SetRoute::ProjectWorkspaceYaml
-                ),
-                "pnpmfilePath has a workspace-yaml key a pnpm-v11 incumbent reads back"
-            );
-            for scalar_to_yaml in [true, false] {
-                assert!(
-                    no_npmrc_home_refusal("autoInstallPeers").is_none(),
-                    "control: a setting with an .npmrc alias is never refused for lacking one"
-                );
-                assert!(
-                    !matches!(
-                        classify_set("autoInstallPeers", scalar_to_yaml),
-                        SetRoute::Refuse(_)
-                    ),
-                    "control: the ordinary scalar route is untouched (scalar_to_yaml={scalar_to_yaml})"
-                );
-            }
-            // An UNKNOWN key names no setting, so it is free-form config and
-            // still legal in `.npmrc`. Guarding by "has no alias" rather than by
-            // "is a known setting" would have refused every custom key.
+            assert!(no_npmrc_home_refusal("autoInstallPeers").is_none());
+            assert!(!matches!(
+                classify_set("autoInstallPeers"),
+                SetRoute::Refuse(_)
+            ));
             assert!(no_npmrc_home_refusal("some-custom-key").is_none());
         }
 
