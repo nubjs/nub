@@ -302,6 +302,37 @@ fn merge(sources: &Sources) -> Result<Map<String, Value>> {
     merged
         .entry("minimumReleaseAgeIgnoreMissingTime")
         .or_insert(Value::Bool(false));
+    // The supply-chain trust gate. The engine implements exactly the check nub
+    // documents — reject a version whose trust evidence
+    // (`_npmUser.trustedPublisher`, `dist.attestations.provenance`) is weaker
+    // than an earlier-published version's — but defaults it OFF, so that
+    // embedding it changes no existing pnpm install's behavior. Nub's default
+    // is the opposite and always has been, so without this line the migration
+    // would have turned the gate off for every project silently: a stolen-token
+    // publish into an old release line would install with no error at all.
+    merged
+        .entry("trustPolicy")
+        .or_insert(Value::String("no-downgrade".to_owned()));
+    // The window without which the gate above is unusable, and it is not a
+    // softening — it is what makes the check mean "takeover" rather than "old
+    // release line". The scan is date-ordered across the WHOLE package, so a
+    // legitimate maintenance backport trips it whenever a newer major adopted
+    // provenance first: `semver@6.3.1` (2023-07-10) is flagged because `7.5.4`
+    // (2023-07-07) carries provenance and no 6.x ever did, which fails the
+    // install of anything depending on semver 6 — most of the ecosystem.
+    // Past the window un-yanked, such a version is overwhelmingly a real
+    // backport and is exempted; a freshly published weak-evidence version is
+    // still scanned against the full history, which is the window a
+    // stolen-token publish into an old line actually lives in.
+    //
+    // ⛔ `trustPolicyIgnoreAfter: 0` does NOT mean "no window" here. It is a
+    // cutoff in minutes, so zero exempts everything and switches the check off;
+    // measured against real pnpm 12.4.1, both `0` and `20160` install
+    // `node-gyp@10.3.0` while the policy alone refuses it. Omitting the key is
+    // what asks for the unwindowed check.
+    merged
+        .entry("trustPolicyIgnoreAfter")
+        .or_insert(Value::from(14 * 24 * 60));
     // The engine's update notifier checks the registry for a newer pnpm and
     // tells the user how to install it. nub ships the engine and updates it
     // through `nub upgrade`, so the advice would name a release nub does not

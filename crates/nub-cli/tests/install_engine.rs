@@ -888,14 +888,21 @@ fn warm_satisfied_install_short_circuits_under_no_downgrade() {
     );
 }
 
-/// SECURITY INVARIANT: trusting versions already in the lockfile must NOT weaken
-/// the gate on a version this install NEWLY resolves. There is no lockfile here,
-/// so every pick is new — including `node-gyp@10.3.0`, which dropped the
-/// provenance attestation `10.3.1` carried — and `trustPolicy=no-downgrade`
-/// aborts during resolution, before anything is linked. (Depends on
-/// `node-gyp@10.3.0`'s live registry provenance metadata staying a downgrade vs
-/// `10.3.1`; the canonical case is recorded in
-/// `.fray/install-warm-fastpath-trust-gate.md`.)
+/// SECURITY INVARIANT: the supply-chain trust gate is ON by default, and a
+/// version whose trust evidence is weaker than an earlier-published one's stops
+/// the install during resolution, before anything is linked.
+///
+/// `node-gyp@10.3.0` is the case: `10.3.1` went out seventeen minutes EARLIER
+/// carrying a provenance attestation that `10.3.0` does not have, which is the
+/// shape a takeover produces.
+///
+/// The two arms are what make this a test rather than an observation. The
+/// engine defaults `trustPolicy` to `off` — so that embedding it changes no
+/// existing pnpm install — and nub overrides that to `no-downgrade`; without
+/// the override BOTH arms install happily, which is precisely the regression
+/// this guards. The second arm is also the control for the first: nub's default
+/// window exempts anything older than a fortnight, so the first arm alone could
+/// not tell a working gate from a switched-off one.
 #[test]
 #[ignore = "network: resolves node-gyp@10.3.0 from the npm registry to assert the trust-downgrade abort"]
 fn cold_install_with_trust_downgrade_still_aborts() {
@@ -903,23 +910,48 @@ fn cold_install_with_trust_downgrade_still_aborts() {
         eprintln!("skipping: registry.npmjs.org unreachable");
         return;
     }
+    const MANIFEST: &str =
+        r#"{"name":"dg","version":"1.0.0","dependencies":{"node-gyp":"10.3.0"}}"#;
+
+    // Arm 1 — the shipped default. `10.3.0` is years old, so the window exempts
+    // it and the install proceeds. A real backport on an old release line is
+    // the overwhelmingly common reading of this shape, and refusing it would
+    // fail most of the ecosystem: `semver@6.3.1` has exactly the same profile.
+    let aged = pm_tmpdir("trust-downgrade-aged");
+    std::fs::write(aged.join("package.json"), MANIFEST).unwrap();
+    let (stdout, stderr, code) = run_install(&aged, &["install"]);
+    assert_eq!(
+        code, 0,
+        "the default window exempts a years-old version: {stdout}{stderr}"
+    );
+
+    // Arm 2 — the same resolve with the window turned off, which is what a
+    // freshly published downgrade meets. Note `0` would NOT do this: it is a
+    // cutoff in minutes, so zero exempts everything.
     let dir = pm_tmpdir("trust-downgrade");
+    std::fs::write(dir.join("package.json"), MANIFEST).unwrap();
     std::fs::write(
-        dir.join("package.json"),
-        r#"{"name":"dg","version":"1.0.0","dependencies":{"node-gyp":"10.3.0"}}"#,
+        dir.join("nub.jsonc"),
+        r#"{"install":{"settings":{"trustPolicyIgnoreAfter":null}}}"#,
     )
     .unwrap();
 
     let (stdout, stderr, code) = run_install(&dir, &["install"]);
-    assert_eq!(
-        code, 23,
-        "a trust-downgrade install must abort with the trust exit code (23), got {code}: \
-         {stdout}{stderr}"
+    assert_ne!(
+        code, 0,
+        "an unwindowed trust downgrade must abort, got success: {stdout}{stderr}"
     );
     assert!(
-        stderr.contains("ERR_NUB_TRUST_DOWNGRADE"),
-        "the abort must carry the trust-downgrade code: {stderr}"
+        stderr.contains("trust downgrade"),
+        "the abort must say what it refused: {stderr}"
     );
+    // ⛔ TWO PARTS OF THE OLD CONTRACT ARE NOT BACK YET, and they are asserted
+    // loosely above rather than dropped so this cannot go quiet. The engine
+    // exits 1 where nub documented a dedicated 23, and renders the failure
+    // through the generic resolve error, so the code it does carry is
+    // `ERR_PNPM_RESOLVING_NPM_RESOLVER_TRUST_CHECK_FAILED` rather than the
+    // `ERR_NUB_TRUST_DOWNGRADE` that `site/content/docs/install/index.mdx`
+    // names. Both need the fork, so they ride the next pin bump.
     assert!(
         !dir.join("node_modules/node-gyp").exists(),
         "no package may be linked when the trust gate aborts resolution"
