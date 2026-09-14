@@ -102,9 +102,9 @@ fn proc_loglevel() -> Option<LogLevel> {
     u8_to_loglevel(PROC_LOGLEVEL.load(Ordering::Relaxed))
 }
 
-/// `--reporter` values nub accepts, mirroring pnpm's. `ndjson` is deliberately
-/// absent: a machine-readable event stream is a separate feature from quieting
-/// and is not yet wired through the embedder — see the issue thread.
+/// `--reporter` values nub's own commands accept, mirroring pnpm's. `ndjson` is
+/// absent: nub's own commands have no event stream. A command line the engine
+/// takes keeps it, because the engine judges its own `--reporter`.
 // Variant names kebab-case into the accepted words, which is what makes
 // `AppendOnly` spell `append-only` without a rename attribute.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, usage_rs::ValueEnum)]

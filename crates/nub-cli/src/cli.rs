@@ -1814,6 +1814,10 @@ fn is_normalizable_leading_flag_verb(verb: &str) -> bool {
 /// `nub <file>`, eval — leaves the args untouched, so file/passthrough/eval
 /// dispatch is unaffected. Returns `None` when no normalization applies. Keep the
 /// flag lists in sync with the `Run` subcommand's `#[arg]` set.
+///
+/// pnpm's working-directory spellings (`-C`, `--dir`, `--prefix`) move as nub's
+/// `--cwd`, and a leading `--reporter` moves onto `run`, which has its own. In
+/// front of any other verb both stay where they are: the engine reads them there.
 fn normalize_leading_run_flags(args: &[String]) -> Option<Vec<String>> {
     const BOOL_FLAGS: &[&str] = &[
         "-r",
@@ -1833,6 +1837,7 @@ fn normalize_leading_run_flags(args: &[String]) -> Option<Vec<String>> {
         "--sequential",
         "--stream",
         "--node",
+        "--if-present",
     ];
     const VALUE_FLAGS: &[&str] = &[
         "-F",
@@ -1842,14 +1847,31 @@ fn normalize_leading_run_flags(args: &[String]) -> Option<Vec<String>> {
         "--resume-from",
         "--workspace-concurrency",
     ];
+    const DIR_FLAGS: &[&str] = &["-C", "--dir", "--prefix"];
     let mut i = 0;
     let mut leading: Vec<String> = Vec::new();
+    let mut names_dir = false;
+    let mut names_reporter = false;
     while i < args.len() {
         let bare = args[i].split('=').next().unwrap_or("");
         if BOOL_FLAGS.contains(&bare) {
             leading.push(args[i].clone());
             i += 1;
-        } else if VALUE_FLAGS.contains(&bare) {
+        } else if DIR_FLAGS.contains(&bare) {
+            names_dir = true;
+            leading.push("--cwd".to_string());
+            let inline_value = args[i].split_once('=').map(|(_, value)| value.to_string());
+            i += 1;
+            match inline_value {
+                Some(value) => leading.push(value),
+                None if i < args.len() => {
+                    leading.push(args[i].clone());
+                    i += 1;
+                }
+                None => {}
+            }
+        } else if VALUE_FLAGS.contains(&bare) || bare == "--reporter" {
+            names_reporter |= bare == "--reporter";
             let has_inline_value = args[i].contains('=');
             leading.push(args[i].clone());
             i += 1;
@@ -1861,10 +1883,12 @@ fn normalize_leading_run_flags(args: &[String]) -> Option<Vec<String>> {
             break; // not a run-flag — stop scanning
         }
     }
+    let verb = args.get(i).map(String::as_str);
+    let verb_is = |verbs: &[&str]| verb.is_some_and(|v| verbs.contains(&v));
     if !leading.is_empty()
-        && args
-            .get(i)
-            .is_some_and(|v| is_normalizable_leading_flag_verb(v))
+        && verb.is_some_and(is_normalizable_leading_flag_verb)
+        && (!names_dir || verb_is(&["run", "exec"]))
+        && (!names_reporter || verb_is(&["run"]))
     {
         let mut out = Vec::with_capacity(args.len());
         out.push(args[i].clone()); // subcommand first
@@ -2226,22 +2250,15 @@ fn run_nub() -> Result<i32> {
     if silent {
         crate::pm_engine::output::set_global_silent();
     }
-    if let Some(ref value) = reporter_val
-        && let Err(bad) = crate::pm_engine::output::set_global_reporter_str(value)
-    {
-        bail!(
-            "invalid value '{bad}' for '--reporter <NAME>'\n  \
-             [possible values: default, append-only, silent]"
-        );
-    }
-    if let Some(ref value) = loglevel_val
-        && let Err(bad) = crate::pm_engine::output::set_global_loglevel_str(value)
-    {
-        bail!(
-            "invalid value '{bad}' for '--loglevel <LEVEL>'\n  \
-             [possible values: silent, error, warn, info, debug]"
-        );
-    }
+    // A value outside nub's own set is the engine's to judge when the engine
+    // takes the command line (pnpm accepts `--reporter=ndjson install`), so the
+    // usage error waits until the engine has declined it.
+    let reporter_error = reporter_val
+        .as_deref()
+        .and_then(|value| crate::pm_engine::output::set_global_reporter_str(value).err());
+    let loglevel_error = loglevel_val
+        .as_deref()
+        .and_then(|value| crate::pm_engine::output::set_global_loglevel_str(value).err());
 
     if let Some(ref dir) = cwd {
         env::set_current_dir(dir)?;
@@ -2319,6 +2336,18 @@ fn run_nub() -> Result<i32> {
         ))
     {
         return crate::pm_engine::run_pnpm_engine(argv);
+    }
+    if let Some(bad) = reporter_error {
+        bail!(
+            "invalid value '{bad}' for '--reporter <NAME>'\n  \
+             [possible values: default, append-only, silent]"
+        );
+    }
+    if let Some(bad) = loglevel_error {
+        bail!(
+            "invalid value '{bad}' for '--loglevel <LEVEL>'\n  \
+             [possible values: silent, error, warn, info, debug]"
+        );
     }
 
     // If a subcommand was found, delegate to the parser for structured parsing.
@@ -12171,6 +12200,22 @@ mod tests {
             norm(&["-r", "-F", "x", "exec", "tsc"]),
             Some(v(&["exec", "-r", "-F", "x", "tsc"]))
         );
+        // pnpm's directory spellings become `--cwd`; `--reporter` moves onto run.
+        assert_eq!(
+            norm(&["--dir", "packages/a", "run", "build"]),
+            Some(v(&["run", "--cwd", "packages/a", "build"]))
+        );
+        assert_eq!(
+            norm(&["-C=packages/a", "--if-present", "exec", "tsc"]),
+            Some(v(&["exec", "--cwd", "packages/a", "--if-present", "tsc"]))
+        );
+        assert_eq!(
+            norm(&["--reporter=ndjson", "run", "build"]),
+            Some(v(&["run", "--reporter=ndjson", "build"]))
+        );
+        // The engine reads both where they are written.
+        assert_eq!(norm(&["--dir", "packages/a", "install"]), None);
+        assert_eq!(norm(&["--reporter=silent", "install"]), None);
 
         // Left untouched (None):
         assert_eq!(norm(&["run", "-r", "build"]), None); // already canonical
