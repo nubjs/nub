@@ -213,14 +213,10 @@ pub fn discover_members(workspace_root: &Path) -> Vec<WorkspacePackage> {
     let patterns = match workspace_patterns_from_manifest(&manifest) {
         Some(patterns) => patterns,
         _ => {
-            // Fall back to `pnpm-workspace.yaml` ONLY when pnpm is the incumbent
-            // PM. The brand hard gate (AGENTS.md): when the project's PM is not
-            // pnpm, nub must never read a pnpm-NAMED path, `pnpm-workspace.yaml`
-            // included — the gate is on the NAME, impact-irrelevant. A committed
-            // `pnpm-lock.yaml` at the workspace root is the incumbent signal
-            // (file-presence detection, not config-consumption — the same signal
-            // the CLI's `detect_package_manager` keys pnpm off). No lockfile →
-            // pnpm is not provably incumbent → leave the file unread.
+            // Fall back to `pnpm-workspace.yaml` ONLY in a project that is
+            // pnpm's. The brand hard gate (AGENTS.md): a nub project never reads
+            // a pnpm-NAMED path — the gate is on the NAME, impact-irrelevant.
+            // What counts as pnpm's is [`pnpm_is_incumbent`].
             if pnpm_is_incumbent(workspace_root) {
                 if let Some(patterns) = read_pnpm_workspace(workspace_root) {
                     patterns
@@ -399,15 +395,19 @@ fn collect_package_dirs(
     }
 }
 
-/// Whether pnpm is the project's incumbent PM at `workspace_root` — the gate that
-/// guards every read of a pnpm-NAMED path. A committed `pnpm-lock.yaml` is the
-/// signal: it can only exist if pnpm has run here, so its presence proves pnpm is
-/// incumbent. This is detection (file presence), not config-consumption, so the
-/// brand hard gate permits it; it mirrors the pnpm branch of the CLI's
-/// `detect_package_manager`. Checked at the workspace root only — the lockfile
-/// lives beside `pnpm-workspace.yaml`.
-pub(crate) fn pnpm_is_incumbent(workspace_root: &Path) -> bool {
-    workspace_root.join("pnpm-lock.yaml").is_file()
+/// Whether the project at `dir` is pnpm's — the gate on every read of a
+/// pnpm-NAMED path here.
+///
+/// The rule is [`crate::pm::identity`]'s, the one the CLI picks an install's
+/// profile with, so a `pnpm-workspace.yaml` names members exactly when the
+/// install treats the project as pnpm's: the yaml alone, a `pnpm-lock.yaml`,
+/// or a pnpm pin, and never beside a declaration naming nub. This gate used to
+/// demand the lockfile, which is only proof that pnpm has already RUN — so a
+/// pnpm workspace that had not been installed yet installed as pnpm's while
+/// `run -r` and `--filter` refused it as no workspace at all.
+pub(crate) fn pnpm_is_incumbent(dir: &Path) -> bool {
+    use crate::pm::identity::{ProjectIdentity, identity_of_dir};
+    identity_of_dir(dir) == Some(ProjectIdentity::Pnpm)
 }
 
 fn read_pnpm_workspace(workspace_root: &Path) -> Option<Vec<String>> {
@@ -1387,10 +1387,9 @@ mod tests {
 
     // --- pnpm-workspace.yaml brand hard gate (AGENTS.md) ---------------------
     //
-    // `pnpm-workspace.yaml` is a pnpm-NAMED path: nub may read it ONLY when pnpm
-    // is the project's incumbent PM. The incumbent signal is a committed
-    // `pnpm-lock.yaml` at the workspace root. These two tests pin both sides of
-    // the gate end to end through `discover_members`.
+    // `pnpm-workspace.yaml` is a pnpm-NAMED path: nub reads it ONLY in a project
+    // that is pnpm's, by the same rule the install's identity follows. These two
+    // tests pin both sides of the gate end to end through `discover_members`.
 
     fn ws_fixture(tag: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -1413,34 +1412,42 @@ mod tests {
     }
 
     #[test]
-    fn pnpm_workspace_yaml_unread_when_pnpm_not_incumbent() {
-        // Stray `pnpm-workspace.yaml`, no `pnpm-lock.yaml`, no package.json#workspaces:
-        // the incumbent is npm/nub, so the pnpm-named file must NOT be read. With no
-        // other member source, discovery finds nothing.
-        let dir = ws_fixture("no-lock");
-        std::fs::write(dir.join("package.json"), r#"{"name":"root"}"#).unwrap();
+    fn pnpm_workspace_yaml_names_members_with_or_without_a_lockfile() {
+        // The yaml alone makes the project pnpm's — the same rule the install's
+        // identity follows — so a workspace that has not been installed yet
+        // still has its members.
+        for lockfile in [false, true] {
+            let dir = ws_fixture(if lockfile { "with-lock" } else { "no-lock" });
+            std::fs::write(dir.join("package.json"), r#"{"name":"root"}"#).unwrap();
+            if lockfile {
+                std::fs::write(dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+            }
+            let names: Vec<String> = discover_members(&dir).into_iter().map(|m| m.name).collect();
+            assert!(
+                names.iter().any(|n| n == "@x/a"),
+                "pnpm-workspace.yaml must name its members (lockfile: {lockfile}); got {names:?}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn pnpm_workspace_yaml_unread_in_a_project_that_declares_nub() {
+        // The brand gate: a project that names nub as its owner never reads a
+        // pnpm-NAMED path, so the same fixture with a nub declaration has no
+        // members — which is also what makes the test above discriminate.
+        let dir = ws_fixture("declares-nub");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"root","packageManager":"nub@0.9.0"}"#,
+        )
+        .unwrap();
 
         let members = discover_members(&dir);
         assert!(
             members.is_empty(),
-            "pnpm-workspace.yaml must be ignored without pnpm-lock.yaml; got members: {:?}",
+            "a nub project must leave pnpm-workspace.yaml unread; got members: {:?}",
             members.iter().map(|m| &m.name).collect::<Vec<_>>()
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn pnpm_workspace_yaml_read_when_pnpm_lock_present() {
-        // A committed `pnpm-lock.yaml` proves pnpm is incumbent → the
-        // pnpm-workspace.yaml member (`@x/a`) is discovered.
-        let dir = ws_fixture("with-lock");
-        std::fs::write(dir.join("package.json"), r#"{"name":"root"}"#).unwrap();
-        std::fs::write(dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
-
-        let names: Vec<String> = discover_members(&dir).into_iter().map(|m| m.name).collect();
-        assert!(
-            names.iter().any(|n| n == "@x/a"),
-            "pnpm-workspace.yaml member must be discovered when pnpm-lock.yaml is present; got {names:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

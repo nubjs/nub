@@ -32,11 +32,12 @@ pub struct Project {
 /// reports the freshness stamp observed when it was cached. That input surface is
 /// the full set the walk consults — the `package.json` mtime/size at the project
 /// (and distinct workspace) root, PLUS the *presence* of `pnpm-workspace.yaml`
-/// and `pnpm-lock.yaml` at each directory the walk visited (both gate
-/// `workspace_root`; see [`detect_project_uncached`]). The in-process PM engine
-/// can rewrite `package.json` mid-command (`nub install`/`add`/`pm use`) and an
-/// install can create or remove a `pnpm-lock.yaml`/`pnpm-workspace.yaml`; any
-/// such change flips a stamp, so the next lookup misses and the walk re-runs.
+/// at each directory the walk visited and the `package.json` beside every one
+/// found, whose declaration decides whether that yaml counts (see
+/// [`detect_project_uncached`]). The in-process PM engine can rewrite
+/// `package.json` mid-command (`nub install`/`add`/`pm use`) and create or
+/// remove a `pnpm-workspace.yaml`; any such change flips a stamp, so the next
+/// lookup misses and the walk re-runs.
 /// A same-length rewrite landing inside the manifest's own mtime quantum flips no
 /// stamp at all, which is what [`Entry::cached_at`] exists to catch.
 ///
@@ -68,10 +69,9 @@ pub fn detect_project(cwd: &Path) -> Option<Project> {
     // after it is never trusted on an unchanged stamp — see `Entry::cached_at`.
     let cached_at = SystemTime::now();
     let (project, walked_dirs) = detect_project_walk(cwd)?;
-    // Validate the cached value against the FULL input surface the walk read: the
-    // project-root manifest, the workspace-root manifest when distinct, plus the
-    // presence of the two pnpm-named files at every dir the walk visited. A change
-    // to any of them invalidates the entry on the next lookup.
+    // Validate the cached value against the FULL input surface the walk read (see
+    // [`freshness_stamps`]). A change to any of it invalidates the entry on the
+    // next lookup.
     let stamps = freshness_stamps(&project, &walked_dirs);
     let value = Arc::new(project);
     cache().insert(key, stamps, cached_at, Arc::clone(&value));
@@ -94,9 +94,9 @@ fn detect_project_uncached(cwd: &Path) -> Option<Project> {
 
 /// The walk, returning the resulting [`Project`] alongside the directories it
 /// CONSULTED. The walked-dirs list is what the freshness stamp covers for the
-/// pnpm-named files: a `pnpm-lock.yaml`/`pnpm-workspace.yaml` appearing or
-/// disappearing at any dir the walk visited could move `workspace_root`, so the
-/// memo must invalidate on it (see [`freshness_stamps`]). [`detect_project`]
+/// pnpm-named file: a `pnpm-workspace.yaml` appearing or disappearing at any dir
+/// the walk visited could move `workspace_root`, so the memo must invalidate on
+/// it (see [`freshness_stamps`]). [`detect_project`]
 /// keeps the walked dirs; [`detect_project_uncached`] discards them.
 fn detect_project_walk(cwd: &Path) -> Option<(Project, Vec<PathBuf>)> {
     #[cfg(test)]
@@ -131,12 +131,11 @@ fn detect_project_walk(cwd: &Path) -> Option<(Project, Vec<PathBuf>)> {
             }
         }
 
-        // Also check for pnpm-workspace.yaml — but ONLY when pnpm is the
-        // incumbent PM here. The brand hard gate (AGENTS.md): when the project's
-        // PM is not pnpm, nub must never read a pnpm-NAMED path. A committed
-        // `pnpm-lock.yaml` beside it is the incumbent signal (file-presence
-        // detection, not config-consumption). Without it, a stray
-        // `pnpm-workspace.yaml` must not make this dir the workspace root.
+        // Also check for pnpm-workspace.yaml — but ONLY in a project that is
+        // pnpm's. The brand hard gate (AGENTS.md): a nub project never reads a
+        // pnpm-NAMED path, so a yaml beside a declaration naming nub must not
+        // make this dir the workspace root. What counts as pnpm's is the
+        // install's own identity rule (`pnpm_is_incumbent`).
         let pnpm_ws = dir.join("pnpm-workspace.yaml");
         if pnpm_ws.is_file() && crate::workspace::filter::pnpm_is_incumbent(&dir) {
             workspace_root = Some(dir.clone());
@@ -180,14 +179,16 @@ fn stamp_of(path: &Path) -> Option<(SystemTime, u64)> {
 struct FreshnessStamp {
     /// `(package.json path, (mtime, size))` for the project root, plus the
     /// workspace root when distinct (the same two manifests
-    /// [`crate::pm::resolve`]'s manifest cache keys on). A rewrite bumps a stamp.
+    /// [`crate::pm::resolve`]'s manifest cache keys on), plus the manifest beside
+    /// every `pnpm-workspace.yaml` the walk passed. That last one can sit above
+    /// the project root without being the workspace root — a yaml beside a
+    /// declaration naming nub does not count — and dropping the declaration
+    /// turns the yaml on. A rewrite bumps a stamp.
     manifests: Vec<(PathBuf, (SystemTime, u64))>,
-    /// `(pnpm-named-file path, present)` for `pnpm-workspace.yaml` and
-    /// `pnpm-lock.yaml` at every dir the walk visited. Both gate `workspace_root`
-    /// (a `pnpm-lock.yaml` proves pnpm incumbent → its sibling
-    /// `pnpm-workspace.yaml` makes the dir the workspace root). An install
-    /// creating/removing either file flips a bool here and invalidates the memo,
-    /// so a mid-command pnpm-file change can never serve a stale `workspace_root`.
+    /// `(path, present)` for `pnpm-workspace.yaml` at every dir the walk
+    /// visited. An install creating or removing one flips a bool here and
+    /// invalidates the memo, so a mid-command change can never serve a stale
+    /// `workspace_root`.
     pnpm_presence: Vec<(PathBuf, bool)>,
 }
 
@@ -199,19 +200,24 @@ fn freshness_stamps(project: &Project, walked_dirs: &[PathBuf]) -> FreshnessStam
     {
         manifest_paths.push(ws.join("package.json"));
     }
+
+    let mut pnpm_presence = Vec::with_capacity(walked_dirs.len());
+    for dir in walked_dirs {
+        let path = dir.join("pnpm-workspace.yaml");
+        let present = path.is_file();
+        if present {
+            let beside = dir.join("package.json");
+            if !manifest_paths.contains(&beside) {
+                manifest_paths.push(beside);
+            }
+        }
+        pnpm_presence.push((path, present));
+    }
+
     let manifests = manifest_paths
         .into_iter()
         .filter_map(|p| stamp_of(&p).map(|s| (p, s)))
         .collect();
-
-    let mut pnpm_presence = Vec::with_capacity(walked_dirs.len() * 2);
-    for dir in walked_dirs {
-        for name in ["pnpm-workspace.yaml", "pnpm-lock.yaml"] {
-            let path = dir.join(name);
-            let present = path.is_file();
-            pnpm_presence.push((path, present));
-        }
-    }
 
     FreshnessStamp {
         manifests,
@@ -348,31 +354,37 @@ mod tests {
         );
     }
 
-    // pnpm-workspace.yaml brand hard gate (AGENTS.md): `detect_project` may treat
-    // a dir as a workspace root via `pnpm-workspace.yaml` ONLY when pnpm is the
-    // incumbent PM (a committed `pnpm-lock.yaml`). A root package.json with no
-    // `workspaces` field isolates the pnpm-workspace.yaml signal.
+    // pnpm-workspace.yaml brand hard gate (AGENTS.md): `detect_project` treats a
+    // dir as a workspace root via `pnpm-workspace.yaml` exactly when the project
+    // is pnpm's by the install's own identity rule — the yaml alone is enough,
+    // and a declaration naming nub beside it keeps it unread. A root
+    // package.json with no `workspaces` field isolates the yaml signal. Each
+    // test is the other's control.
 
     #[test]
-    fn pnpm_workspace_yaml_does_not_set_root_when_pnpm_not_incumbent() {
+    fn pnpm_workspace_yaml_sets_the_root_without_a_lockfile() {
         let dir = fixture("no-lock");
         let proj = detect_project(&dir).expect("root package.json detected");
         assert_eq!(
-            proj.workspace_root, None,
-            "a stray pnpm-workspace.yaml (no pnpm-lock.yaml) must not make this a workspace root"
+            proj.workspace_root.as_deref(),
+            Some(dir.as_path()),
+            "a pnpm workspace that has not been installed yet is still a workspace"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn pnpm_workspace_yaml_sets_root_when_pnpm_lock_present() {
-        let dir = fixture("with-lock");
-        std::fs::write(dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+    fn pnpm_workspace_yaml_does_not_set_root_beside_a_nub_declaration() {
+        let dir = fixture("declares-nub");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"root","packageManager":"nub@0.9.0"}"#,
+        )
+        .unwrap();
         let proj = detect_project(&dir).expect("root package.json detected");
         assert_eq!(
-            proj.workspace_root.as_deref(),
-            Some(dir.as_path()),
-            "pnpm-lock.yaml proves pnpm incumbent → pnpm-workspace.yaml sets the workspace root"
+            proj.workspace_root, None,
+            "a nub project must leave its pnpm-workspace.yaml unread"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -501,47 +513,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // The pullfrog vector (detect.rs): `workspace_root` also depends on the
-    // PRESENCE of `pnpm-lock.yaml`/`pnpm-workspace.yaml`, not just package.json
-    // mtime/size. An install creating a `pnpm-lock.yaml` (with the
-    // pnpm-workspace.yaml already there) flips the dir into the workspace root —
-    // WITHOUT touching package.json. The memo must invalidate on that, or it
+    // Whether a `pnpm-workspace.yaml` counts is the declaration in ITS OWN
+    // directory's manifest, which can sit above the project root while being
+    // neither root, so neither root's stamp covers it. Dropping a `nub`
+    // declaration there turns the yaml on without touching the project's
+    // manifest or any pnpm-named file; the memo must invalidate on that, or it
     // serves a stale `workspace_root: None`.
     #[test]
-    fn pnpm_lock_appearing_invalidates_the_memo() {
-        // fixture() writes both package.json AND pnpm-workspace.yaml, but no
-        // pnpm-lock.yaml — so pnpm is not yet incumbent and workspace_root is None.
-        let dir = fixture("pnpm-lock-appear");
-        let cwd = std::fs::canonicalize(&dir).unwrap();
-        let pkg = cwd.join("package.json");
-        let cached_mtime = mtime_of(&pkg);
+    fn a_declaration_beside_a_workspace_yaml_invalidates_the_memo() {
+        let dir = fixture("yaml-declaration");
+        let root = std::fs::canonicalize(&dir).unwrap();
+        let root_pkg = root.join("package.json");
+        std::fs::write(&root_pkg, r#"{"name":"root","packageManager":"nub@0.9.0"}"#).unwrap();
+        age(&root_pkg, 60);
+        let member = root.join("pkgs").join("a");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(member.join("package.json"), r#"{"name":"a"}"#).unwrap();
+        // Aged too: an unaged project manifest is never cached, which would make
+        // the second walk below happen whether or not the stamp covers the root.
+        age(&member.join("package.json"), 60);
 
-        let first = detect_project(&cwd).expect("root detected");
+        let first = detect_project(&member).expect("member detected");
         assert_eq!(
             first.workspace_root, None,
-            "no pnpm-lock.yaml yet → pnpm not incumbent → not a workspace root"
+            "a yaml beside a nub declaration is not a workspace root"
         );
-        assert_eq!(walks_of(&cwd), 1, "first detect is a miss → one walk");
+        assert_eq!(walks_of(&member), 1, "first detect is a miss → one walk");
 
-        // An install lands a pnpm-lock.yaml beside the existing pnpm-workspace.yaml.
-        // package.json is UNTOUCHED — the manifest stamp alone would not catch this.
-        std::fs::write(cwd.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
-        assert_eq!(
-            mtime_of(&pkg),
-            cached_mtime,
-            "package.json must be untouched — this isolates the pnpm-file vector"
-        );
+        std::fs::write(&root_pkg, r#"{"name":"root"}"#).unwrap();
+        age(&root_pkg, 30);
 
-        let second = detect_project(&cwd).expect("root detected");
+        let second = detect_project(&member).expect("member detected");
         assert_eq!(
-            walks_of(&cwd),
+            walks_of(&member),
             2,
-            "a pnpm-lock.yaml appearing at a consulted dir must force a fresh walk (miss)"
+            "a rewrite of the manifest beside a consulted yaml must force a fresh walk (miss)"
         );
         assert_eq!(
             second.workspace_root.as_deref(),
-            Some(cwd.as_path()),
-            "the re-walk must see pnpm now incumbent → this dir is the workspace root"
+            Some(root.as_path()),
+            "the re-walk must see the yaml count now → the parent is the workspace root"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -552,7 +563,6 @@ mod tests {
     #[test]
     fn pnpm_workspace_yaml_removal_invalidates_the_memo() {
         let dir = fixture("pnpm-ws-remove");
-        std::fs::write(dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
         let cwd = std::fs::canonicalize(&dir).unwrap();
         let pkg = cwd.join("package.json");
         let cached_mtime = mtime_of(&pkg);
@@ -561,7 +571,7 @@ mod tests {
         assert_eq!(
             first.workspace_root.as_deref(),
             Some(cwd.as_path()),
-            "pnpm-lock.yaml + pnpm-workspace.yaml → this dir is the workspace root"
+            "pnpm-workspace.yaml → this dir is the workspace root"
         );
         assert_eq!(walks_of(&cwd), 1, "first detect is a miss → one walk");
 

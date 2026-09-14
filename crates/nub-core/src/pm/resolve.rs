@@ -518,7 +518,9 @@ pub fn project_pm_identity(cwd: &Path) -> Option<PmIdentity> {
 /// array; an array yields its LAST named entry, the one the spec's
 /// ignore-earlier/error-last semantics make govern). The identity probe's
 /// reader; [`pin_from_manifest`] stays the strict, warning-emitting one.
-fn raw_pin_name_version(manifest: &serde_json::Value) -> Option<(String, Option<String>)> {
+pub(crate) fn raw_pin_name_version(
+    manifest: &serde_json::Value,
+) -> Option<(String, Option<String>)> {
     if let Some(spec) = manifest.get("packageManager").and_then(|v| v.as_str()) {
         let spec = spec.trim();
         let (name, version) = match spec.split_once('@') {

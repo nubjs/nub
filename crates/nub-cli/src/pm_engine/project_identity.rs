@@ -20,19 +20,17 @@
 //! a nub project nested inside a pnpm monorepo is nub's, and a pnpm project
 //! nested inside a nub one is pnpm's. The one bound on that walk is nub's own
 //! PM cache root, which an install running inside must not escape (#489).
+//!
+//! What a single directory declares is [`nub_core::pm::identity`]'s rule, not
+//! this module's: workspace detection reads the same answer to decide which
+//! members `run -r` and `--filter` see, and a second copy is how the two once
+//! disagreed about a pnpm workspace with no lockfile yet.
 
 use crate::project_config::InstallConfig;
 use anyhow::{Result, bail};
+pub(crate) use nub_core::pm::identity::ProjectIdentity;
+use nub_core::pm::identity::identity_of_dir;
 use std::path::Path;
-
-/// The rules a project runs under. See the module docs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProjectIdentity {
-    /// The project declares pnpm. Behave exactly like pnpm 12.
-    Pnpm,
-    /// Everything else, including a fresh project.
-    Nub,
-}
 
 /// The identity of the project containing `start_dir`.
 ///
@@ -65,72 +63,6 @@ fn detect_within(start_dir: &Path, clamp: Option<&Path>) -> ProjectIdentity {
         }
     }
     ProjectIdentity::Nub
-}
-
-/// The identity `dir` declares on its own, or `None` when it declares
-/// nothing and the search should keep walking up.
-///
-/// pnpm's markers are checked first: a directory holding both a
-/// `pnpm-lock.yaml` and a `nub.lock` is a project mid-migration, and until
-/// the migration finishes the incumbent is still pnpm.
-fn identity_of_dir(dir: &Path) -> Option<ProjectIdentity> {
-    let declared = declared_package_manager(dir);
-    // A project that names NUB as its owner is nub's, whatever pnpm-named
-    // file is lying beside it. That file is an artifact — `pm use nub`
-    // leaves one behind, and so does adding the declaration by hand — and
-    // nub already answers it with a warning naming the file unread and the
-    // two ways to resolve it. Reading the artifact instead refused the
-    // project outright, in the engine's own words: `This project is
-    // configured to use nub. pnpm cannot provide nub.`
-    //
-    // Only that way round. A declaration naming anything ELSE keeps the
-    // files ahead of it: npm, yarn and bun confer no identity at all now,
-    // so a foreign name is no statement of ownership, while a real
-    // `pnpm-lock.yaml` beside it still is.
-    if declared.as_deref() == Some("nub") {
-        return Some(ProjectIdentity::Nub);
-    }
-    if dir.join("pnpm-lock.yaml").exists() || dir.join("pnpm-workspace.yaml").exists() {
-        return Some(ProjectIdentity::Pnpm);
-    }
-    match declared {
-        Some(name) if name == "pnpm" => Some(ProjectIdentity::Pnpm),
-        Some(_) => Some(ProjectIdentity::Nub),
-        None => dir
-            .join("nub.lock")
-            .exists()
-            .then_some(ProjectIdentity::Nub),
-    }
-}
-
-/// The package manager `dir`'s manifest names, from `packageManager` or
-/// `devEngines.packageManager`, without its version.
-///
-/// Best-effort: an absent, unreadable or malformed manifest declares
-/// nothing, and the install reports a real parse error properly later. A
-/// name nub does not recognise still counts as a declaration — the project
-/// named an owner that is not pnpm, which is the nub-incumbent path per the
-/// module docs.
-fn declared_package_manager(dir: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(dir.join("package.json")).ok()?;
-    let manifest: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let spec = manifest
-        .get("packageManager")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
-        .or_else(|| {
-            manifest
-                .get("devEngines")?
-                .get("packageManager")?
-                .get("name")?
-                .as_str()
-                .map(str::to_owned)
-        })?;
-    // `packageManager` is `name@version`; `devEngines` carries the bare name.
-    // A scoped name has no leading `@` here, so splitting on the first `@` is
-    // enough for both spellings.
-    let name = spec.split('@').next().unwrap_or_default().trim();
-    (!name.is_empty()).then(|| name.to_owned())
 }
 
 /// Reject an `install` block written in a project pnpm already owns.

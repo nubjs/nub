@@ -2,7 +2,8 @@
 //! consumer (resolution, provisioning, the `nub pm` CLI surface).
 //!
 //! There is exactly ONE [`Pm`] enum, ONE pin reader ([`resolve`]), ONE yarn
-//! classifier, and ONE `.npmrc` reader (`workspace::scripts::npmrc_value`).
+//! classifier, ONE `.npmrc` reader (`workspace::scripts::npmrc_value`), and ONE
+//! per-directory identity rule ([`identity`]).
 //!
 //! [`registry`] resolves a spec (exact / dist-tag / range) to a tarball + dist
 //! integrity; [`extract`] unpacks the `.tgz`; [`provision`] ties them together
@@ -10,6 +11,7 @@
 //! install — reusing the same provisioning skeleton as Node.
 
 pub(crate) mod extract;
+pub mod identity;
 pub mod lockfile_version;
 pub mod provision;
 pub mod registry;
