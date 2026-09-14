@@ -1,5 +1,3 @@
-# Known-red cross-format conversion legs: "<fixture> <src_pm> <tgt_pm> <reason>".
-# Same discipline as tests/conformance/expected-failures.txt — this list must
-# SHRINK. A listed leg that now passes is reported XPASS-STALE and fails the
-# run, so the green flip is recorded by deleting the entry in the same commit
-# as the fix. Reasons cite the tracking issue.
+# Known-red conversion scenarios: "<fixture> <source> <target> <reason>".
+# This list must SHRINK. A listed scenario that passes fails the run
+# (XPASS-STALE), so the fix and the entry's deletion land in one commit.

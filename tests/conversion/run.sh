@@ -1,36 +1,33 @@
 #!/usr/bin/env bash
-# Cross-format lockfile conversion harness — proves `nub pm use <target>` produces
-# a lockfile the real target PM accepts frozen.
+# Foreign-lockfile conversion harness — proves nub takes a project off npm, yarn
+# or bun once, and that what it writes is a lockfile the receiving tool accepts.
 #
-# MATRIX:
-#   source PMs:  npm, pnpm, bun, yarn
-#   target PMs:  npm, pnpm, bun  (yarn is write-refused — tested as a special leg)
-#   skip source==target (no conversion needed)
+# nub writes no npm, yarn or bun lockfile, so there is nothing to convert TO
+# those formats. A project arriving with one has exactly two destinations:
 #
-# For each (source, target) pair the harness:
-#   1. Generates a real lockfile with the SOURCE pm on a clean fixture copy.
-#   2. Runs `nub pm use <target>[@<pin>]` to convert the lockfile.
-#   3. Wipes node_modules and runs the TARGET pm's frozen-install.
-#      The real PM is the honest judge — if it accepts the file, the conversion works.
-#   4. Asserts every direct dep exists in node_modules.
+#   → nub   `nub pm migrate` converts the foreign lockfile to nub.lock and
+#           removes the source. nub must then frozen-install from it, and — since
+#           nub.lock is pnpm v9 format — real pnpm must frozen-accept the same
+#           bytes renamed into a pnpm-declaring copy. The rename judge is what
+#           makes the format claim testable by something other than nub.
+#   → pnpm  `nub pm use pnpm@<pin>` converts it to pnpm-lock.yaml and declares
+#           pnpm. Real pnpm must frozen-install from it.
 #
-# yarn-as-target converts the source lockfile into a classic (v1) yarn.lock and
-# checks real yarn frozen-accepts it unchanged — the classic writer is proven
-# against real yarn, so this is the normal convert→frozen-accept leg (the old
-# "must refuse" contract was lifted). yarn→yarn keeps the existing yarn.lock.
+# Real pnpm is fetched through npx at PNPM_PIN so the judge is deterministic; the
+# SOURCE package managers are driven off PATH, because the point is whatever
+# lockfile a real project actually arrives carrying.
 #
 # Usage:  run.sh [<path-to-nub>] [fixture ...]
 # Env:
 #   SANDBOX_ROOT=<dir>    reuse/inspect the sandbox (implies KEEP)
 #   KEEP=1                keep the sandbox on success
-#   SKIP_YARN=1           skip yarn legs even if yarn is on PATH
-#   SKIP_BUN=1            skip bun legs even if bun is on PATH
-#   PNPM_PIN=<ver>        pnpm version to pin in `nub pm use pnpm@<ver>`
-#                         (defaults to installed pnpm version, or 10.15.1)
-#   NPM_PIN=<ver>         npm version for `nub pm use npm@<ver>` (defaults to installed)
-#   BUN_PIN=<ver>         bun version for `nub pm use bun@<ver>` (defaults to installed)
+#   SKIP_YARN=1           skip yarn sources even if yarn is on PATH
+#   SKIP_BUN=1            skip bun sources even if bun is on PATH
+#   PNPM_PIN=<ver>        the pnpm nub embeds; the judge and the `pm use` pin
+#   TARGETS="nub pnpm"    subset of targets to run
 #
-# Exit: 0 = all runnable legs pass; 1 = at least one FAIL.
+# Exit: 0 = every leg passes or is an expected red;
+#       1 = at least one unexpected FAIL or stale expected-failure entry.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,27 +45,23 @@ NUB="$(cd "$(dirname "$NUB")" && pwd)/$(basename "$NUB")"
 [ -x "$NUB" ] || { echo "error: nub binary not found/executable: $NUB" >&2; exit 2; }
 
 NUB_VERSION="$("$NUB" --version 2>/dev/null || echo '?')"
+PNPM_PIN="${PNPM_PIN:-12.4.1}"
 
 ALL_FIXTURES=(simple peers empty-root-importer)
 FIXTURES=("$@")
 [ ${#FIXTURES[@]} -gt 0 ] || FIXTURES=("${ALL_FIXTURES[@]}")
+read -r -a TARGET_LIST <<<"${TARGETS:-nub pnpm}"
 
-# Detect available PMs.
+# The sources are the three FOREIGN formats. pnpm is not one of them: a
+# pnpm-lock.yaml is already the format nub.lock is, so `pm migrate` refuses it
+# outright ("there is nothing to migrate") and the pnpm-to-nub hand-over is
+# `pm use nub`, which tests/lockfile-conformance/ owns.
 HAVE_NPM=0;  command -v npm  >/dev/null 2>&1 && HAVE_NPM=1
-HAVE_PNPM=0; command -v pnpm >/dev/null 2>&1 && HAVE_PNPM=1
 HAVE_YARN=0; command -v yarn >/dev/null 2>&1 && [ "${SKIP_YARN:-0}" != "1" ] && HAVE_YARN=1
 HAVE_BUN=0;  command -v bun  >/dev/null 2>&1 && [ "${SKIP_BUN:-0}"  != "1" ] && HAVE_BUN=1
-
-NPM_VERSION="$(npm   --version 2>/dev/null || echo MISSING)"
-PNPM_VERSION="$(pnpm --version 2>/dev/null || echo MISSING)"
+NPM_VERSION="$(npm  --version 2>/dev/null || echo MISSING)"
 YARN_VERSION="$(yarn --version 2>/dev/null || echo MISSING)"
-BUN_VERSION="$(bun   --version 2>/dev/null || echo MISSING)"
-
-# PM pins for `nub pm use <pm>@<pin>` — pin to the installed version so the
-# converted lockfile's packageManager declaration matches what's on PATH.
-PNPM_PIN="${PNPM_PIN:-${PNPM_VERSION:-10.15.1}}"
-NPM_PIN="${NPM_PIN:-${NPM_VERSION:-11.13.0}}"
-BUN_PIN="${BUN_PIN:-${BUN_VERSION:-1.3.14}}"
+BUN_VERSION="$(bun  --version 2>/dev/null || echo MISSING)"
 
 # Hermetic sandbox.
 CREATED_SANDBOX=0
@@ -84,15 +77,23 @@ export XDG_CONFIG_HOME="$HOME/.config"
 export XDG_STATE_HOME="$HOME/.local/state"
 mkdir -p "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME"
 
-# Clear any PM env that could steer lockfile format decisions.
-unset npm_config_default_lockfile_format NPM_CONFIG_DEFAULT_LOCKFILE_FORMAT 2>/dev/null || true
+# Settings a runner or a developer exported must not steer these installs.
+for var in $(env | grep -oE '^(npm_config_|NPM_CONFIG_|pnpm_config_|PNPM_)[A-Za-z0-9_]*' || true); do
+  unset "$var"
+done
+# npm's audit endpoint is a separate service with its own outages and nothing to
+# say about a lockfile; a degraded one stalled every npm case for 100-300 s.
+export npm_config_audit=false npm_config_fund=false npm_config_update_notifier=false
 
-echo "=== nub cross-format lockfile conversion harness ==="
+run_pnpm() { npx -y "pnpm@$PNPM_PIN" "$@"; }
+
+echo "=== nub foreign-lockfile conversion ==="
 echo "nub:      $NUB ($NUB_VERSION)"
-echo "npm:      $NPM_VERSION  (HAVE=$HAVE_NPM, pin=$NPM_PIN)"
-echo "pnpm:     $PNPM_VERSION  (HAVE=$HAVE_PNPM, pin=$PNPM_PIN)"
+echo "node:     $(node --version)"
+echo "pnpm:     $PNPM_PIN (pinned via npx — judge and pm-use pin)"
+echo "npm:      $NPM_VERSION  (HAVE=$HAVE_NPM)"
 echo "yarn:     $YARN_VERSION  (HAVE=$HAVE_YARN)"
-echo "bun:      $BUN_VERSION  (HAVE=$HAVE_BUN, pin=$BUN_PIN)"
+echo "bun:      $BUN_VERSION  (HAVE=$HAVE_BUN)"
 echo "sandbox:  $SANDBOX_ROOT"
 echo ""
 
@@ -106,40 +107,105 @@ wipe_node_modules() {
   find "$1" -name node_modules -type d -prune -exec rm -rf {} +
 }
 
+# A `pnpm-workspace.yaml` is one of the markers that makes a project
+# pnpm-incumbent, so a fixture carrying one is a pnpm project and `pm migrate`
+# correctly targets pnpm's format there. The nub destination stages without it;
+# the workspace still resolves, from the neutral `workspaces` field.
 stage_fixture() {
-  local fixture="$1" proj="$2"
+  local fixture="$1" proj="$2" target="$3"
   rm -rf "$proj"
   mkdir -p "$proj"
   cp -R "$HERE/fixtures/$fixture/." "$proj/"
+  [ "$target" = nub ] && rm -f "$proj/pnpm-workspace.yaml"
+  return 0
 }
 
-# assert_node_modules <proj> <log>
+# assert_node_modules <proj> <log> — every direct dep of every package.json in
+# the project must exist, so a workspace fixture is checked member by member.
 assert_node_modules() {
-  local proj="$1" log="$2"
-  local pkg="$proj/package.json"
-  local failed=0
-  local deps
-  deps=$(node -e "
-    const p = require('$pkg');
-    const all = Object.keys({...p.dependencies, ...p.devDependencies});
-    all.forEach(d => console.log(d));
-  " 2>/dev/null) || { echo "FAILED: could not parse package.json" >>"$log"; return 1; }
-  while IFS= read -r dep; do
-    [ -z "$dep" ] && continue
-    if [ ! -d "$proj/node_modules/$dep" ]; then
-      echo "FAILED: node_modules/$dep missing after frozen install" >>"$log"
-      failed=1
-    fi
-  done <<< "$deps"
+  local proj="$1" log="$2" failed=0 manifest dir dep
+  while IFS= read -r manifest; do
+    dir="$(dirname "$manifest")"
+    while IFS= read -r dep; do
+      [ -z "$dep" ] && continue
+      [ -d "$dir/node_modules/$dep" ] || [ -d "$proj/node_modules/$dep" ] || {
+        echo "FAILED: node_modules/$dep missing for $manifest" >>"$log"; failed=1
+      }
+    done < <(node -e '
+      const p = require(process.argv[1]);
+      Object.keys({ ...p.dependencies, ...p.devDependencies }).forEach((d) => console.log(d));
+    ' "$manifest" 2>/dev/null)
+  done < <(find "$proj" -name package.json -not -path '*/node_modules/*')
   return $failed
 }
 
-# expected_reason <fixture> <src_pm> <tgt_pm> — look up a known-red conversion.
-# Lines in expected-failures.txt: "<fixture> <src> <tgt> <reason...>".
-# Mirrors the discipline in tests/conformance/expected-failures.txt — the list
-# must SHRINK: a listed leg that now passes is reported XPASS-STALE and fails
-# the run, so the green flip is recorded by deleting the entry in the same
-# commit as the fix.
+# write_source <pm> <proj> <log> — the lockfile the project arrives carrying.
+write_source() {
+  local pm="$1" proj="$2" log="$3" lockfile
+  case "$pm" in
+    npm)  ( cd "$proj" && step "$log" "npm install" npm install ) ; lockfile=package-lock.json ;;
+    yarn) ( cd "$proj" && step "$log" "yarn install" yarn install ) ; lockfile=yarn.lock ;;
+    bun)  ( cd "$proj" && step "$log" "bun install" bun install ) ; lockfile=bun.lock ;;
+  esac || { echo "FAILED: $pm install failed" >>"$log"; return 1; }
+  [ -f "$proj/$lockfile" ] || { echo "FAILED: $pm wrote no $lockfile" >>"$log"; return 1; }
+  wipe_node_modules "$proj"
+}
+
+# to_nub — `nub pm migrate` converts the foreign lockfile once, nub frozen-reads
+# it, and real pnpm frozen-accepts the same bytes renamed into a pnpm copy.
+to_nub() {
+  local proj="$1" log="$2"
+  ( cd "$proj" && step "$log" "nub pm migrate" "$NUB" pm migrate ) \
+    || { echo "FAILED: nub pm migrate failed" >>"$log"; return 1; }
+  [ -f "$proj/nub.lock" ] || { echo "FAILED: pm migrate wrote no nub.lock" >>"$log"; return 1; }
+  for stale in package-lock.json yarn.lock bun.lock pnpm-lock.yaml; do
+    [ -e "$proj/$stale" ] && { echo "FAILED: pm migrate left $stale behind" >>"$log"; return 1; }
+  done
+  ( cd "$proj" && step "$log" "nub install --frozen-lockfile" "$NUB" install --frozen-lockfile ) \
+    || { echo "FAILED: nub rejected the lockfile it just migrated" >>"$log"; return 1; }
+  assert_node_modules "$proj" "$log" || return 1
+
+  # nub.lock is pnpm v9 format, so real pnpm is the judge of that claim: the same
+  # bytes under pnpm's name, in a copy that declares pnpm, must frozen-install.
+  local judge="$proj.judge"
+  rm -rf "$judge"; mkdir -p "$judge"
+  cp -R "$proj/." "$judge/"
+  wipe_node_modules "$judge"
+  mv "$judge/nub.lock" "$judge/pnpm-lock.yaml"
+  # The judge copy declares NO package manager. A manifest that pins pnpm makes
+  # pnpm demand its own env lockfile document, which nub.lock legitimately does
+  # not carry — nub manages no package-manager versions — and pnpm then refuses
+  # the frozen install with ERR_PNPM_FROZEN_LOCKFILE_WITH_OUTDATED_LOCKFILE
+  # before it ever reads the project graph. Real pnpm needs no declaration to
+  # install; the lockfile under its own name is the whole input being judged.
+  ( cd "$judge" && node -e '
+    const fs = require("fs");
+    const manifest = JSON.parse(fs.readFileSync("package.json", "utf8"));
+    delete manifest.packageManager;
+    delete manifest.devEngines;
+    fs.writeFileSync("package.json", JSON.stringify(manifest, null, 2) + "\n");
+  ' )
+  ( cd "$judge" && step "$log" "real pnpm frozen-accepts nub.lock renamed" run_pnpm install --frozen-lockfile ) \
+    || { echo "FAILED: real pnpm rejected nub.lock renamed to pnpm-lock.yaml" >>"$log"; return 1; }
+  assert_node_modules "$judge" "$log"
+}
+
+# to_pnpm — `nub pm use pnpm@<pin>` hands the project to pnpm, which must
+# frozen-install from what nub wrote.
+to_pnpm() {
+  local proj="$1" log="$2"
+  ( cd "$proj" && step "$log" "nub pm use pnpm@$PNPM_PIN" "$NUB" pm use "pnpm@$PNPM_PIN" ) \
+    || { echo "FAILED: nub pm use pnpm failed" >>"$log"; return 1; }
+  [ -f "$proj/pnpm-lock.yaml" ] || { echo "FAILED: pm use pnpm wrote no pnpm-lock.yaml" >>"$log"; return 1; }
+  for stale in package-lock.json yarn.lock bun.lock nub.lock; do
+    [ -e "$proj/$stale" ] && { echo "FAILED: pm use pnpm left $stale behind" >>"$log"; return 1; }
+  done
+  ( cd "$proj" && step "$log" "real pnpm frozen accept" run_pnpm install --frozen-lockfile ) \
+    || { echo "FAILED: real pnpm rejected nub's converted lockfile" >>"$log"; return 1; }
+  assert_node_modules "$proj" "$log"
+}
+
+# expected_reason <fixture> <source> <target>
 expected_reason() {
   awk -v f="$1" -v s="$2" -v t="$3" \
     '$1==f && $2==s && $3==t { $1=""; $2=""; $3=""; sub(/^  */,""); print; exit }' \
@@ -150,206 +216,64 @@ RESULTS=()
 FAILS=0
 XPASSES=0
 
-# leg <fixture> <source_pm> <target_pm> <proj> <log>
-# Runs one conversion leg: source PM installs → nub converts → target PM frozen-installs.
-leg() {
-  local fixture="$1" src_pm="$2" tgt_pm="$3" proj="$4" log="$5"
-
-  # ── Step 1: source PM writes its lockfile ─────────────────────────────────
-  case "$src_pm" in
-    npm)
-      # Run npm in-place (cd), NOT via `npm install --prefix "$proj"`: for a
-      # WORKSPACE fixture `--prefix <abs-path>` makes npm key the lockfile by
-      # absolute `../../<path>/node_modules/...` paths and drop the workspace
-      # children's transitive package entries — a malformed source lockfile that
-      # has nothing to do with nub. `cd` (like every other src PM below) yields
-      # npm's real in-place workspace lockfile.
-      ( cd "$proj" && step "$log" "npm install (write lockfile)" \
-        npm install ) \
-        || { echo "FAILED: npm install failed" >>"$log"; return 1; }
-      [ -f "$proj/package-lock.json" ] \
-        || { echo "FAILED: no package-lock.json written" >>"$log"; return 1; }
-      ;;
-    pnpm)
-      ( cd "$proj" && step "$log" "pnpm install (write lockfile)" \
-        pnpm install --no-frozen-lockfile ) \
-        || { echo "FAILED: pnpm install failed" >>"$log"; return 1; }
-      [ -f "$proj/pnpm-lock.yaml" ] \
-        || { echo "FAILED: no pnpm-lock.yaml written" >>"$log"; return 1; }
-      ;;
-    bun)
-      ( cd "$proj" && step "$log" "bun install (write lockfile)" \
-        bun install ) \
-        || { echo "FAILED: bun install failed" >>"$log"; return 1; }
-      [ -f "$proj/bun.lock" ] \
-        || { echo "FAILED: no bun.lock written" >>"$log"; return 1; }
-      ;;
-    yarn)
-      ( cd "$proj" && step "$log" "yarn install (write lockfile)" \
-        yarn install ) \
-        || { echo "FAILED: yarn install failed" >>"$log"; return 1; }
-      [ -f "$proj/yarn.lock" ] \
-        || { echo "FAILED: no yarn.lock written" >>"$log"; return 1; }
-      ;;
-  esac
-
-  # ── Step 2: nub pm use <target> converts the lockfile ─────────────────────
-  local nub_pm_arg
-  case "$tgt_pm" in
-    npm)  nub_pm_arg="npm@$NPM_PIN"   ;;
-    pnpm) nub_pm_arg="pnpm@$PNPM_PIN" ;;
-    bun)  nub_pm_arg="bun@$BUN_PIN"   ;;
-    yarn)
-      # yarn-as-target: nub converts the source lockfile into a classic (v1)
-      # yarn.lock (the classic writer is proven frozen-accepted by real yarn —
-      # the old refusal gate was lifted). yarn→yarn keeps the existing file.
-      local nub_exit=0
-      ( cd "$proj" && step "$log" "nub pm use yarn" \
-        "$NUB" pm use yarn ) >>"$log" 2>&1 || nub_exit=$?
-      if [ "$nub_exit" -ne 0 ]; then
-        echo "FAILED: $src_pm->yarn: nub pm use yarn exited $nub_exit" >>"$log"
-        return 1
-      fi
-      [ -f "$proj/yarn.lock" ] \
-        || { echo "FAILED: $src_pm->yarn: nub pm use yarn wrote no yarn.lock" >>"$log"; return 1; }
-      cp "$proj/yarn.lock" "$log.converted-lock"
-      wipe_node_modules "$proj"
-      ( cd "$proj" && step "$log" "yarn install --frozen-lockfile (frozen accept)" \
-        yarn install --frozen-lockfile --non-interactive ) \
-        || { echo "FAILED: $src_pm->yarn: yarn rejected the converted yarn.lock (--frozen-lockfile)" >>"$log"; return 1; }
-      cmp -s "$log.converted-lock" "$proj/yarn.lock" \
-        || { echo "FAILED: $src_pm->yarn: yarn rewrote the converted yarn.lock (churn)" >>"$log"; return 1; }
-      assert_node_modules "$proj" "$log" || return 1
-      return 0
-      ;;
-  esac
-
-  local nub_exit=0
-  ( cd "$proj" && step "$log" "nub pm use $nub_pm_arg" \
-    "$NUB" pm use "$nub_pm_arg" ) || nub_exit=$?
-  if [ "$nub_exit" -ne 0 ]; then
-    echo "FAILED: nub pm use $nub_pm_arg exited $nub_exit" >>"$log"
-    return 1
-  fi
-
-  # Confirm target lockfile exists.
-  local target_lockfile
-  case "$tgt_pm" in
-    npm)  target_lockfile="$proj/package-lock.json" ;;
-    pnpm) target_lockfile="$proj/pnpm-lock.yaml"    ;;
-    bun)  target_lockfile="$proj/bun.lock"          ;;
-  esac
-  [ -f "$target_lockfile" ] \
-    || { echo "FAILED: nub pm use $nub_pm_arg wrote no $tgt_pm lockfile at $target_lockfile" >>"$log"; return 1; }
-
-  # Capture converted lockfile for diff on failure.
-  cp "$target_lockfile" "$log.converted-lock"
-
-  # ── Step 3: wipe node_modules, target PM frozen-install ───────────────────
-  wipe_node_modules "$proj"
-
-  case "$tgt_pm" in
-    npm)
-      ( cd "$proj" && step "$log" "npm ci (frozen accept)" \
-        npm ci ) \
-        || { echo "FAILED: npm ci rejected the converted lockfile" >>"$log"; return 1; }
-      ;;
-    pnpm)
-      ( cd "$proj" && step "$log" "pnpm install --frozen-lockfile (frozen accept)" \
-        pnpm install --frozen-lockfile ) \
-        || { echo "FAILED: pnpm install --frozen-lockfile rejected the converted lockfile" >>"$log"; return 1; }
-      ;;
-    bun)
-      ( cd "$proj" && step "$log" "bun install --frozen-lockfile (frozen accept)" \
-        bun install --frozen-lockfile ) \
-        || { echo "FAILED: bun install --frozen-lockfile rejected the converted lockfile" >>"$log"; return 1; }
-      ;;
-  esac
-
-  # ── Step 4: assert node_modules correctness ───────────────────────────────
-  assert_node_modules "$proj" "$log" || return 1
-
-  return 0
-}
-
 for fixture in "${FIXTURES[@]}"; do
-  [ -d "$HERE/fixtures/$fixture" ] \
-    || { echo "error: unknown fixture '$fixture'" >&2; exit 2; }
+  [ -d "$HERE/fixtures/$fixture" ] || { echo "error: unknown fixture '$fixture'" >&2; exit 2; }
 
-  # Source PMs: all four (yarn only if available).
-  declare -a src_pms=()
-  [ "$HAVE_NPM"  -eq 1 ] && src_pms+=(npm)
-  [ "$HAVE_PNPM" -eq 1 ] && src_pms+=(pnpm)
-  [ "$HAVE_BUN"  -eq 1 ] && src_pms+=(bun)
-  [ "$HAVE_YARN" -eq 1 ] && src_pms+=(yarn)
+  declare -a sources=()
+  [ "$HAVE_NPM"  -eq 1 ] && sources+=(npm)
+  [ "$HAVE_YARN" -eq 1 ] && sources+=(yarn)
+  [ "$HAVE_BUN"  -eq 1 ] && sources+=(bun)
 
-  # Target PMs: npm, pnpm, bun (real frozen judge) + yarn (refusal judge).
-  declare -a tgt_pms=()
-  [ "$HAVE_NPM"  -eq 1 ] && tgt_pms+=(npm)
-  [ "$HAVE_PNPM" -eq 1 ] && tgt_pms+=(pnpm)
-  [ "$HAVE_BUN"  -eq 1 ] && tgt_pms+=(bun)
-  # yarn as target: always test if yarn is available — it's a refusal assertion.
-  [ "$HAVE_YARN" -eq 1 ] && tgt_pms+=(yarn)
-
-  for src_pm in "${src_pms[@]}"; do
-    for tgt_pm in "${tgt_pms[@]}"; do
-      # No need to convert same format — skip (not a conversion).
-      # Exception: yarn→yarn exercises the "lockfile kept as-is" path.
-      if [ "$src_pm" = "$tgt_pm" ] && [ "$src_pm" != "yarn" ]; then
-        continue
-      fi
-
-      label="$fixture | $src_pm → $tgt_pm"
+  for source in "${sources[@]}"; do
+    for target in "${TARGET_LIST[@]}"; do
+      label="$fixture: $source → $target"
       echo "--- $label"
-
-      proj="$SANDBOX_ROOT/runs/$fixture--${src_pm}-to-${tgt_pm}"
-      log="$SANDBOX_ROOT/logs/$fixture--${src_pm}-to-${tgt_pm}.log"
+      proj="$SANDBOX_ROOT/runs/$fixture--$source--$target"
+      log="$SANDBOX_ROOT/logs/$fixture--$source--$target.log"
       : >"$log"
-      stage_fixture "$fixture" "$proj"
+      stage_fixture "$fixture" "$proj" "$target"
 
       ok=0
-      leg "$fixture" "$src_pm" "$tgt_pm" "$proj" "$log" || ok=$?
+      if write_source "$source" "$proj" "$log"; then
+        case "$target" in
+          nub)  to_nub  "$proj" "$log" || ok=$? ;;
+          pnpm) to_pnpm "$proj" "$log" || ok=$? ;;
+        esac
+      else
+        ok=1
+      fi
 
-      reason="$(expected_reason "$fixture" "$src_pm" "$tgt_pm")"
+      reason="$(expected_reason "$fixture" "$source" "$target")"
       if [ "$ok" -eq 0 ] && [ -z "$reason" ]; then
         echo "    PASS"
-        RESULTS+=("$fixture|${src_pm}→${tgt_pm}|PASS|-")
+        RESULTS+=("$fixture|$source → $target|PASS")
       elif [ "$ok" -eq 0 ] && [ -n "$reason" ]; then
-        # Stale expected-failure entry: fix landed without removing the entry.
         echo "    XPASS-STALE: now passes — remove from expected-failures.txt: $reason"
         XPASSES=$((XPASSES + 1))
-        RESULTS+=("$fixture|${src_pm}→${tgt_pm}|XPASS-STALE|$reason")
+        RESULTS+=("$fixture|$source → $target|XPASS-STALE")
       elif [ -n "$reason" ]; then
         echo "    expected red: $reason"
-        RESULTS+=("$fixture|${src_pm}→${tgt_pm}|RED (expected)|$reason")
+        RESULTS+=("$fixture|$source → $target|RED (expected)")
       else
         FAILS=$((FAILS + 1))
         echo "    FAIL — log: $log"
-        tail -n 25 "$log" | sed 's/^/    | /'
-        # On fail, also show the converted lockfile if it exists.
-        if [ -f "$log.converted-lock" ]; then
-          echo "    | --- converted lockfile ($tgt_pm) ---"
-          head -n 30 "$log.converted-lock" | sed 's/^/    | /'
-        fi
-        # Capture error summary
-        local_err="$(grep -E 'FAILED|Error:|error:' "$log" | head -3 | tr '\n' ';')"
-        RESULTS+=("$fixture|${src_pm}→${tgt_pm}|FAIL|$local_err")
+        tail -n 20 "$log" | sed 's/^/    | /'
+        RESULTS+=("$fixture|$source → $target|FAIL")
       fi
     done
   done
 done
 
-[ "$HAVE_NPM"  -eq 0 ] && echo "NOTE: npm not on PATH — npm legs skipped"
-[ "$HAVE_PNPM" -eq 0 ] && echo "NOTE: pnpm not on PATH — pnpm legs skipped"
-[ "$HAVE_YARN" -eq 0 ] && echo "NOTE: yarn not on PATH (or SKIP_YARN=1) — yarn legs skipped"
-[ "$HAVE_BUN"  -eq 0 ] && echo "NOTE: bun not on PATH (or SKIP_BUN=1) — bun legs skipped"
+[ "$HAVE_NPM"  -eq 0 ] && echo "NOTE: npm not on PATH — npm sources skipped"
+[ "$HAVE_YARN" -eq 0 ] && echo "NOTE: yarn not on PATH (or SKIP_YARN=1) — yarn sources skipped"
+[ "$HAVE_BUN"  -eq 0 ] && echo "NOTE: bun not on PATH (or SKIP_BUN=1) — bun sources skipped"
 
 echo ""
 echo "=== results ==="
-printf '%-12s %-20s %-6s %s\n' "fixture" "conversion" "result" "notes"
+printf '%-22s %-16s %s\n' "fixture" "conversion" "result"
 for row in "${RESULTS[@]}"; do
-  IFS='|' read -r f conv status notes <<<"$row"
-  printf '%-12s %-20s %-6s %s\n' "$f" "$conv" "$status" "$notes"
+  IFS='|' read -r f c s <<<"$row"
+  printf '%-22s %-16s %s\n' "$f" "$c" "$s"
 done
 echo ""
 
