@@ -10,6 +10,17 @@ npm install --save-dev @nubjs/runner
 nubr app.ts
 ```
 
+## From the nub installer
+
+The `nub` binary answers to the name `nubr` too. Installing it puts the command on your `PATH` with no npm step, and with no Node either: the binary provisions one when none is installed.
+
+```sh
+curl -fsSL https://nubjs.com/install.sh | bash   # macOS / Linux
+irm https://nubjs.com/install.ps1 | iex           # Windows (PowerShell)
+```
+
+Both installs run the same runner, so a file behaves the same under either.
+
 ## Running scripts
 
 The command also runs a script from your `package.json`, so a project can adopt the runner without changing how anyone invokes it:

@@ -30,6 +30,9 @@ nub run build
 # Execute a local or remote binary
 nubx vitest --run
 
+# One name for a file, a script, or an installed bin
+nubr app.ts
+
 # Watch mode — restart on change
 nub watch server.ts
 ```
