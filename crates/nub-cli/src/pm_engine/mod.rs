@@ -45,17 +45,26 @@
 //! [`install_family::run_install`] / [`install_family::run_ci`]. `init` is
 //! not in the registry either — the spelling is reserved for nub's own
 //! project init; cli.rs's bareword arm answers it with a "coming" note.
-//! Every other registered verb is wired to the engine through its family
-//! module, except the deliberate exclusions — `recursive` (no meta-verb;
-//! use `-r`/`--filter` on the verb), `clean`/`purge` (nub doesn't delete
-//! node_modules for you) and `deploy` (not yet wired) — which error with
-//! honest per-verb messages in their family dispatchers.
+//! Every other registered verb goes to the engine, and the front door is
+//! what sends it there: `engine_takes` claims any command line pnpm's own
+//! grammar can parse, so a family dispatcher only ever sees what is left.
 //!
-//! `sbom` was a fifth exclusion and is not one any more: the engine serves
-//! it, and the document it writes matches real pnpm 12.4.1. The reason the
-//! exclusion existed has outlived it — the engine still names ITSELF in the
-//! SBOM's `metadata.tools`, which is a brand leak to fix where the name is
-//! written rather than by refusing the verb.
+//! ONE exclusion still holds at run time — `recursive`, which has no
+//! meta-verb here; the recursion goes on the verb, as `-r` or `--filter`.
+//! It survives only because a bare `nub recursive` gives pnpm nothing to
+//! parse, so the front door declines and nub's own dispatch takes it.
+//!
+//! The other four exclusions this doc used to list are dead letters, each
+//! measured by running the built binary. `clean` and `purge` reach the
+//! engine and really do remove `node_modules` now, which is the opposite of
+//! the "nub doesn't delete node_modules for you" they were excluded for.
+//! `deploy` is wired: with a filter it writes a complete deployment.
+//! `sbom` writes a valid CycloneDX 1.7 document matching pnpm 12.4.1. Their
+//! refusals remain reachable by calling a dispatcher directly, which is
+//! what the tests do, and by nothing a user can type. `sbom`'s exclusion
+//! had a reason that outlived it: the engine names ITSELF in the SBOM's
+//! `metadata.tools`, a brand leak to fix where the name is written rather
+//! than by refusing the verb.
 
 mod bun_config;
 mod compat_db;
