@@ -3367,19 +3367,39 @@ console.log(`shim-hardlink:${shimStat.dev === sourceStat.dev && shimStat.ino ===
     std::fs::remove_dir_all(root).unwrap();
 }
 
-/// Nub must not inject a `nub` global or any `NUB_*` environment
-/// variables — the brand stops at the binary boundary.
+/// Nub must not inject a `nub` global or any `NUB_*` environment variables.
+///
+/// The inherited `NUB_*` slots are cleared before the spawn, because the probe
+/// can only count what the child SEES and the claim is about what nub INJECTS.
+/// Three of those names are sanctioned user config (`NUB_CACHE_DIR`,
+/// `NUB_CONCURRENCY`, `NUB_PRIMER_TTL`), so without the strip a developer who
+/// sets one fails a test they have not broken — as did the remote ad-hoc VM,
+/// which hands every job a `NUB_BIN` and so went red on a clean box while this
+/// passed on the dev machine.
 #[test]
 fn brand_boundary_no_globals_no_env() {
-    let (stdout, stderr, code) = run_nub("vanilla-ts", "brand_check.ts");
-    assert_eq!(code, 0, "stderr: {stderr}");
+    let fixture = fixtures_dir().join("vanilla-ts");
+    let mut cmd = Command::new(nub_binary());
+    cmd.arg(fixture.join("brand_check.ts").to_str().unwrap())
+        .current_dir(&fixture)
+        .env("XDG_CACHE_HOME", unique_test_cache());
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("NUB_") {
+            cmd.env_remove(&key);
+        }
+    }
+    let output = cmd.output().expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
     assert!(
         stdout.contains("nub-global:undefined"),
         "expected no globalThis.nub, got: {stdout:?}\nstderr: {stderr}"
     );
     assert!(
         stdout.contains("nub-env:0"),
-        "expected no NUB_* env vars, got: {stdout:?}\nstderr: {stderr}"
+        "expected nub to inject no NUB_* env vars, got: {stdout:?}\nstderr: {stderr}"
     );
 }
 
@@ -7413,6 +7433,15 @@ fn exec_bin_reports_role_aware_user_agent() {
             .args(&args)
             .current_dir(dir)
             .env("XDG_CACHE_HOME", unique_test_cache())
+            // The probe reads the UA out of its own environment, so an
+            // inherited one is indistinguishable from one nub set. It is the
+            // `--node` arm that this actually decides: compat mode is vanilla
+            // and passes the parent environment through untouched, so on a
+            // machine whose shell exports `npm_config_user_agent` — any machine
+            // where an npm script has run, and this one permanently — the child
+            // correctly reports the inherited value and the `<unset>`
+            // expectation reads that correct behavior as a regression.
+            .env_remove("npm_config_user_agent")
             .output()
             .expect("failed to spawn nub exec");
         assert_eq!(
