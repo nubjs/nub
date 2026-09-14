@@ -102,9 +102,9 @@ jobs:
           $links = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links'
           $env:PATH = "$links;$env:PATH"
 
-          Write-Host "=== smoke: nub --version / nubx --version ==="
+          # Only `nub` is aliased: the zip carries one executable, and winget needs a
+          # distinct file per portable alias (see the installer manifest).
+          Write-Host "=== smoke: nub --version ==="
           nub --version
           if ($LASTEXITCODE -ne 0) { Write-Error "nub --version failed"; exit 1 }
-          nubx --version
-          if ($LASTEXITCODE -ne 0) { Write-Error "nubx --version failed"; exit 1 }
-          Write-Host "OK: nub installed from the local winget manifest and both verbs run."
+          Write-Host "OK: nub installed from the local winget manifest and runs."

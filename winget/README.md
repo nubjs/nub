@@ -19,10 +19,14 @@ holds:
 | --- | --- |
 | PackageIdentifier | `Nubjs.Nub` |
 | Moniker | `nub` (so `winget install nub` resolves once published) |
-| Installer | per-arch `.zip` (x64, arm64), portable `nub.exe` + `nubx.exe` |
+| Installer | per-arch `.zip` (x64, arm64), one portable `nub.exe` |
 
 The publisher/casing (`Nubjs.Nub`, `nub contributors`) follows winget convention and
 can be adjusted on review before the first submission.
+
+Only `nub` is registered as a command alias. `nubx` and `nubr` are the same binary dispatched
+on argv[0], and winget refuses a duplicate `RelativeFilePath`, so each alias needs its own
+file in the zip before it can be listed.
 
 ## Confidence chain — why a broken manifest cannot reach users
 
@@ -42,18 +46,16 @@ can be adjusted on review before the first submission.
 
 `.github/workflows/winget-validate.yml` runs on `windows-latest` whenever the manifest
 or the workflow changes, and on manual `workflow_dispatch`. It `winget validate`s the
-manifest, then `winget install --manifest`s it and asserts `nub --version` and
-`nubx --version` succeed. This needs **no** winget-pkgs publication — it tests the
+manifest, then `winget install --manifest`s it and asserts `nub --version` succeeds. This needs **no** winget-pkgs publication — it tests the
 manifest directly.
 
 ### Manual local test (a Windows machine)
 
 ```powershell
-winget validate --manifest .\winget\manifests\n\Nubjs\Nub\0.2.5
-winget install --manifest .\winget\manifests\n\Nubjs\Nub\0.2.5 `
+winget validate --manifest .\winget\manifests\n\Nubjs\Nub\0.9.2
+winget install --manifest .\winget\manifests\n\Nubjs\Nub\0.9.2 `
   --accept-package-agreements --accept-source-agreements
 nub --version
-nubx --version
 ```
 
 ### Highest-fidelity local test — Windows Sandbox
@@ -63,7 +65,7 @@ manifest through the same flow the validation bot uses — a 1:1 mirror of the m
 On a Windows host with Windows Sandbox enabled, from a `microsoft/winget-pkgs` checkout:
 
 ```powershell
-.\Tools\SandboxTest.ps1 <path-to>\winget\manifests\n\Nubjs\Nub\0.2.5
+.\Tools\SandboxTest.ps1 <path-to>\winget\manifests\n\Nubjs\Nub\0.9.2
 ```
 
 This is the most faithful pre-submission check; it is not run in CI (it requires
@@ -89,9 +91,9 @@ nothing without a secret.
 
 1. **Bootstrap the first version.** winget-releaser *updates* an existing package; the
    first `Nubjs.Nub` version is submitted manually from the committed manifest. Either
-   open a PR to `microsoft/winget-pkgs` adding `manifests/n/Nubjs/Nub/0.2.5/` (the files
+   open a PR to `microsoft/winget-pkgs` adding `manifests/n/Nubjs/Nub/0.9.2/` (the files
    here), or run [`wingetcreate`](https://github.com/microsoft/winget-create):
-   `wingetcreate submit --token <PAT> .\winget\manifests\n\Nubjs\Nub\0.2.5`.
+   `wingetcreate submit --token <PAT> .\winget\manifests\n\Nubjs\Nub\0.9.2`.
    Verify CI/Sandbox green first.
 2. **Create the PAT.** Under the account that will own the winget-pkgs fork, create a
    classic PAT with the `public_repo` scope (or a fine-grained token with
