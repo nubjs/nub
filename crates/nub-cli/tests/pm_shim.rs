@@ -726,15 +726,18 @@ fn routed_npm_ci_runs_on_the_engine_and_everything_else_reaches_the_real_npm() {
     ];
     let npm = shims.join("npm");
 
-    let (stdout, stderr, code) = run(&npm, &["ci"], &proj, &env);
-    assert_eq!(code, 0, "the routed npm ci must succeed; stderr:\n{stderr}");
-    assert!(
-        stderr.contains("npm ci → nub ci (via nub shim)"),
-        "the notice names what ran in npm's place, got:\n{stderr}"
+    // `npm install` is the routed verb that can still do the work here: the
+    // engine reads no package-lock.json, so it resolves from package.json the
+    // way pnpm does. `npm ci` is covered at the end, where its headlessness is
+    // the whole point.
+    let (stdout, stderr, code) = run(&npm, &["install"], &proj, &env);
+    assert_eq!(
+        code, 0,
+        "the routed npm install must succeed; stderr:\n{stderr}"
     );
     assert!(
-        !stderr.contains("did not run"),
-        "a linked directory is not a store build, so allow-all has nothing to report as unattempted; got:\n{stderr}"
+        stderr.contains("npm install → nub install (via nub shim)"),
+        "the notice names what ran in npm's place, got:\n{stderr}"
     );
     assert!(
         proj.join("node_modules/.nub-engine").is_file(),
@@ -756,41 +759,28 @@ fn routed_npm_ci_runs_on_the_engine_and_everything_else_reaches_the_real_npm() {
         "undefined",
         "the root postinstall ran, with no NODE_ENV forced on it"
     );
-    let prepared = proj.join("local-dep/prepared.txt");
+    // A linked dependency gets no build pass. That is pnpm's own behavior
+    // rather than a gap in the routing: real pnpm 12.4.1 leaves this same
+    // fixture's `prepare` unrun too, and npm's link build pass is the outlier.
+    // Routing an npm command to the engine buys pnpm's semantics with it.
     assert!(
-        prepared.is_file(),
-        "the file: link's prepare ran in the link target, as npm's link build pass does"
-    );
-    let (bin_out, bin_err, bin_code) = run(
-        &proj.join("node_modules/.bin/local-dep-bin"),
-        &[],
-        &proj,
-        &env,
-    );
-    assert_eq!(
-        (bin_out.trim(), bin_code),
-        ("42", 0),
-        "the bin the link's prepare generated resolves through .bin; stderr:\n{bin_err}"
-    );
-    assert!(
-        stderr.contains("opt-dep@1.0.0 is an optional dependency and failed to build"),
-        "the optional link's failing prepare is a warning, not a failure, got:\n{stderr}"
-    );
-    let opt_link = proj.join("node_modules/opt-dep");
-    assert!(
-        opt_link.symlink_metadata().is_err()
-            && !proj.join("node_modules/.bin/opt-dep-bin").exists(),
-        "a failed optional link leaves the tree with its bin, as npm trashes the node"
+        !proj.join("local-dep/prepared.txt").exists(),
+        "a file: link's prepare does not run, as it does not under pnpm"
     );
 
     // npm's dependency axis: an effective omit=dev hands lifecycle scripts
     // NODE_ENV=production; --include=dev takes both back.
     std::fs::remove_file(&postinstall).unwrap();
-    let (_, stderr, code) = run(&npm, &["ci", "--omit=dev"], &proj, &env);
+    let (_, stderr, code) = run(&npm, &["install", "--omit=dev"], &proj, &env);
     assert_eq!(code, 0, "stderr:\n{stderr}");
     assert_eq!(std::fs::read_to_string(&postinstall).unwrap(), "production");
     std::fs::remove_file(&postinstall).unwrap();
-    let (_, stderr, code) = run(&npm, &["ci", "--omit=dev", "--include=dev"], &proj, &env);
+    let (_, stderr, code) = run(
+        &npm,
+        &["install", "--omit=dev", "--include=dev"],
+        &proj,
+        &env,
+    );
     assert_eq!(code, 0, "stderr:\n{stderr}");
     assert_eq!(std::fs::read_to_string(&postinstall).unwrap(), "undefined");
 
@@ -798,18 +788,13 @@ fn routed_npm_ci_runs_on_the_engine_and_everything_else_reaches_the_real_npm() {
     // environment above it — and the command line outranks both.
     std::fs::remove_file(&postinstall).unwrap();
     std::fs::write(proj.join(".npmrc"), "ignore-scripts=true\n").unwrap();
-    std::fs::remove_file(&prepared).unwrap();
-    let (_, stderr, code) = run(&npm, &["ci"], &proj, &env);
+    let (_, stderr, code) = run(&npm, &["install"], &proj, &env);
     assert_eq!(code, 0, "stderr:\n{stderr}");
     assert!(
-        !postinstall.exists() && !prepared.exists(),
-        ".npmrc ignore-scripts=true suppresses the postinstall and the link's prepare"
+        !postinstall.exists(),
+        ".npmrc ignore-scripts=true suppresses the postinstall"
     );
-    assert!(
-        opt_link.symlink_metadata().is_ok(),
-        "with scripts ignored nothing failed, so the optional link stays: the removal is tied to the failure"
-    );
-    let (_, stderr, code) = run(&npm, &["ci", "--ignore-scripts=false"], &proj, &env);
+    let (_, stderr, code) = run(&npm, &["install", "--ignore-scripts=false"], &proj, &env);
     assert_eq!(code, 0, "stderr:\n{stderr}");
     assert!(
         postinstall.exists(),
@@ -822,22 +807,34 @@ fn routed_npm_ci_runs_on_the_engine_and_everything_else_reaches_the_real_npm() {
         .copied()
         .chain([("NPM_CONFIG_IGNORE_SCRIPTS", "true")])
         .collect();
-    let (_, stderr, code) = run(&npm, &["ci"], &proj, &with_env);
+    let (_, stderr, code) = run(&npm, &["install"], &proj, &with_env);
     assert_eq!(code, 0, "stderr:\n{stderr}");
     assert!(
         !postinstall.exists(),
         "npm_config_ignore_scripts in the environment suppresses the postinstall"
     );
 
-    // A bare `npm install` routes too, without the frozen gate.
-    std::fs::remove_dir_all(proj.join("node_modules")).unwrap();
-    let (_, stderr, code) = run(&npm, &["install", "--no-audit"], &proj, &env);
-    assert_eq!(
+    // `npm ci` routes too, but it is HEADLESS and the engine reads no
+    // package-lock.json, so in a project carrying only npm's lockfile it can
+    // do nothing but fail — exactly as pnpm fails there. The failure has to
+    // name the migration, because that is the only thing that fixes it.
+    // The installs above wrote a lockfile of the engine's own; removing it is
+    // what puts the project back in the state a first routed `ci` meets.
+    std::fs::remove_file(proj.join("nub.lock")).ok();
+    std::fs::remove_file(proj.join("pnpm-lock.yaml")).ok();
+    let (_, stderr, code) = run(&npm, &["ci"], &proj, &env);
+    assert_ne!(
         code, 0,
-        "the routed npm install must succeed; stderr:\n{stderr}"
+        "a headless ci with no lockfile of the engine's own must fail; stderr:\n{stderr}"
     );
-    assert!(stderr.contains("npm install → nub install (via nub shim)"));
-    assert!(proj.join("node_modules/.nub-engine").is_file());
+    assert!(
+        stderr.contains("npm ci → nub ci (via nub shim)"),
+        "it still routes — the failure is the engine's, not a fall-through; got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("nub pm migrate"),
+        "the failure names the migration that fixes it, got:\n{stderr}"
+    );
 
     // Everything else is npm's: no verb, and an install flag outside the
     // translated set, both exec the real npm with the argv verbatim.

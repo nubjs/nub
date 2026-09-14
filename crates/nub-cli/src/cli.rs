@@ -11109,9 +11109,11 @@ enum ShimPlan {
     Refuse { message: String },
     /// `npm ci` / `npm install` under `nub pm shim --route-installs`: run the
     /// install on nub's engine, in this process (`nub ci` / `nub install
-    /// --no-frozen-lockfile` with npm's flags translated, every lifecycle
-    /// script allowed as npm allows them). `ignore_scripts` is npm's
-    /// effective value: the command line, else its config.
+    /// --no-frozen-lockfile` with npm's flags translated). A dependency's
+    /// build scripts face the engine's own approved-builds gate, not npm's
+    /// blanket allowance. `ignore_scripts` is npm's effective value — the
+    /// command line, else its config — and is always passed on, in whichever
+    /// spelling says so, rather than left for the engine to re-derive.
     EngineInstall {
         route: nub_core::pm::shim::NpmEngineInstall,
         ignore_scripts: bool,
@@ -11167,13 +11169,11 @@ fn run_shim_engine_install(
     ignore_scripts: bool,
 ) -> Result<i32> {
     use nub_core::pm::shim::NpmInstallVerb;
-    // npm hands every lifecycle script `NODE_ENV=production` exactly when
-    // dev dependencies are effectively omitted (`buildOmitList` in npm's
-    // config definitions). Per child through the engine's overlay, never the
-    // process environment (A19).
-    // The engine spawns lifecycle scripts as children of this process, so this
-    // rides the process environment, the same way the rest of nub's lifecycle
-    // augmentation reaches them.
+    // npm hands every lifecycle script `NODE_ENV=production` exactly when dev
+    // dependencies are effectively omitted (`buildOmitList` in npm's config
+    // definitions). The engine spawns those scripts as children of this
+    // process, so this rides the process environment, the same way the rest of
+    // nub's lifecycle augmentation reaches them.
     if route.prod {
         unsafe { std::env::set_var("NODE_ENV", "production") };
     }
@@ -11203,9 +11203,20 @@ fn run_shim_engine_install(
     if route.prod {
         argv.push("--prod".into());
     }
-    if ignore_scripts {
-        argv.push("--ignore-scripts".into());
-    }
+    // Both spellings, always — never "push the flag only when it is true".
+    // `ignore_scripts` is npm's EFFECTIVE answer, already resolved from npm's
+    // command line over npm's own config, so the engine must be told it rather
+    // than left to re-derive one. Saying nothing for a false lets the engine
+    // read the project's `.npmrc` itself, and an `ignore-scripts=true` there
+    // then silently overturns the `--ignore-scripts=false` npm was handed.
+    argv.push(
+        if ignore_scripts {
+            "--ignore-scripts"
+        } else {
+            "--no-ignore-scripts"
+        }
+        .into(),
+    );
     if route.no_optional {
         argv.push("--no-optional".into());
     }
