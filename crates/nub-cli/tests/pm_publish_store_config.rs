@@ -374,17 +374,16 @@ fn pack_phantom_fixture(tag: &str) -> PathBuf {
 /// Every store tier — CAS and phantom sidecar alike — landed under `relocated`,
 /// and the default store location was never even created.
 ///
-/// The two tiers carry different version suffixes on purpose. `files` is the
-/// engine's CAS and sits under its store schema version, `v11`; `phantom` is
-/// nub's own sidecar, versioned independently because nothing in the engine
-/// reads it.
+/// Both tiers sit under the engine's store schema version, `v11`: the sidecar is
+/// derived from the store handle the engine resolved, so it cannot name a
+/// different store than the CAS it caches verdicts for.
 fn assert_every_tier_relocated(home: &Path, relocated: &Path) {
     assert!(
         relocated.join("v11/files").is_dir(),
         "the CAS files tier must land under the override"
     );
     assert!(
-        count_files(&relocated.join("v1/phantom")) > 0,
+        count_files(&relocated.join("v11/phantom")) > 0,
         "the phantom sidecar tier must move with the store override"
     );
     let default_store = home.join("xdg-cache/nub/store");
