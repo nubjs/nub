@@ -398,4 +398,3 @@ yarn_workspaces_field::a_repeat_install_taking_the_up_to_date_path_warns_too  # 
 yarn_workspaces_field::an_install_warns_about_a_workspaces_field_with_no_pnpm_workspace_yaml  # identity/nub-project: the fixture writes no pnpm marker, so nub applies its own project identity (its verbs, lockfile, configuration and ERR_NUB_* codes)
 
 # bug/pnpm-project (1)
-deploy::shared_lockfile_deploy_refuses_a_linked_workspace_package_with_an_ambiguous_peer  # bug/pnpm-project: ERR_PNPM_DEPLOY_AMBIGUOUS_PEER is raised, but the diagnostic is hard-wrapped mid-sentence, so the asserted wording never appears on one line
