@@ -67,9 +67,31 @@ fn run_install_in_store(dir: &Path, store: &Path, cache: &Path, args: &[&str]) -
 
 /// Whether the virtual store under `node_modules/.store` holds any version of
 /// `name`.
+///
+/// The store's on-disk shape belongs to the engine, not to these tests: it
+/// keeps a flat `node_modules/<name>` tree, and the earlier layout named each
+/// cell `<name>@<version>` at the store root. Both are accepted, because what
+/// these tests assert is that the package was INSTALLED — never where the
+/// engine chose to put it.
+///
+/// Panics when the store root is missing rather than answering `false`. That
+/// silent `false` is exactly what let a layout change masquerade as "the
+/// extension was never applied" in all three tests at once: `read_dir` on a
+/// missing path is an error, and a bare presence check cannot tell it apart
+/// from a genuine absence.
 fn store_has(dir: &Path, name: &str) -> bool {
+    let root = dir.join("node_modules/.store");
+    assert!(
+        root.is_dir(),
+        "no virtual store at {}, so a presence check proves nothing — the \
+         install laid down no store at all",
+        root.display()
+    );
+    if root.join("node_modules").join(name).exists() {
+        return true;
+    }
     let prefix = format!("{name}@");
-    std::fs::read_dir(dir.join("node_modules/.store"))
+    std::fs::read_dir(&root)
         .into_iter()
         .flatten()
         .flatten()
