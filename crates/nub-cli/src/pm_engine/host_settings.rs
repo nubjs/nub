@@ -279,7 +279,10 @@ fn merge_sources(sources: &Sources) -> Result<Map<String, Value>> {
         }
     }
 
-    merged.extend(curated(sources.install)?);
+    // Kept rather than merged straight in: the passthrough table below is the
+    // other spelling of these same settings, and it has to be able to say so.
+    let curated = curated(sources.install)?;
+    merged.extend(curated.clone());
     let passthrough = sources.install.settings.as_ref();
     for (key, value) in passthrough.into_iter().flatten() {
         if !known.contains(key) {
@@ -287,6 +290,12 @@ fn merge_sources(sources: &Sources) -> Result<Map<String, Value>> {
         }
         if let Some(advice) = nub_settings::unsupported_advice(key) {
             bail!("install.settings.{key} is not a setting nub reads. {advice}");
+        }
+        if curated.contains_key(key) {
+            bail!(
+                "install.settings.{key} sets the same thing as install.{} in nub.jsonc; keep one of the two",
+                curated_field(key)
+            );
         }
         check(key, value).map_err(|error| anyhow!("install.settings.{key}: {error}"))?;
         merged.insert(key.clone(), value.clone());
@@ -437,6 +446,22 @@ pub(crate) fn lifecycle_user_agent() -> String {
     let engine = pnpm_config::default_user_agent();
     let rest = engine.split_once(' ').map_or("", |(_, rest)| rest);
     format!("nub/{} {rest}", env!("CARGO_PKG_VERSION"))
+}
+
+/// The `install` key whose lowering produced this engine setting, for the
+/// message a collision with `install.settings` raises. One curated key can
+/// lower to several engine settings, so the mapping runs this way round; a new
+/// curated key adds its rows here as it gains them in [`curated`].
+fn curated_field(engine_key: &str) -> &str {
+    match engine_key {
+        "nodeLinker" | "enableGlobalVirtualStore" | "hoist" | "hoistPattern" => "linker",
+        "shamefullyHoist" | "publicHoistPattern" => "publicHoist",
+        "minimumReleaseAge" | "minimumReleaseAgeStrict" => "minimumReleaseAge",
+        "minimumReleaseAgeExclude" => "minimumReleaseAgeExclude",
+        // `curated` inserts nothing else. Naming the engine setting keeps the
+        // message true rather than wrong if one is ever added without a row.
+        other => other,
+    }
 }
 
 /// `nub.jsonc`'s curated `install` keys, spelled as the engine's settings and
@@ -1122,6 +1147,25 @@ mod tests {
         );
         assert_eq!(merged["minimumReleaseAgeStrict"], json!(true));
         assert_eq!(merged["minimumReleaseAgeExclude"], json!(["@internal/*"]));
+    }
+
+    /// The curated keys and the passthrough table are two spellings of one
+    /// setting, so writing both is an authoring mistake rather than a
+    /// precedence question. Before this the passthrough silently won.
+    #[test]
+    fn a_setting_given_both_curated_and_passthrough_is_refused() {
+        let install = InstallConfig {
+            linker: Some(LinkerConfig::Hoisted),
+            settings: settings(json!({ "nodeLinker": "isolated" })),
+            ..InstallConfig::default()
+        };
+        let error = merge(&sources(&install))
+            .expect_err("nodeLinker written both ways")
+            .to_string();
+        assert!(
+            error.contains("install.settings.nodeLinker") && error.contains("install.linker"),
+            "{error}"
+        );
     }
 
     /// `pnp` parses but has no write path, so the reservation is enforced where
