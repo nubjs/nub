@@ -32,7 +32,7 @@ test('the repo external-tools.json passes checkPins', () => {
 test('checkPins flags missing pins, bad SRIs, and asset entries with no integrity', () => {
   assert.equal(checkPins({ a: {} }).length, 1)
   assert.equal(checkPins({ a: { version: '1.0.0', integrity: 'sha256-abc' } }).length, 1)
-  assert.equal(checkPins({ a: { version: '1.0.0', release: 'asset' } }).length, 1)
+  assert.equal(checkPins({ a: { version: '1.0.0', origin: 'gh-asset' } }).length, 1)
 })
 
 // A key `platformKey()` cannot produce is a DEAD pin: the tool silently has
@@ -334,7 +334,7 @@ test('installTool rejects unknown tools, foreign purls, and shapeless pins', asy
   )
   await assert.rejects(installTool('y', { y: { version: '1.0.0' } }), /no installable shape/)
   await assert.rejects(
-    installTool('z', { z: { release: 'asset', version: '1.0.0', platforms: {} } }),
+    installTool('z', { z: { origin: 'gh-asset', version: '1.0.0', platforms: {} } }),
     /no pinned asset for/,
   )
 })
@@ -354,10 +354,10 @@ test('installTool resolves the sfw flavor from SOCKET_SECURITY_KEY', async t => 
   )
 })
 
-test('installTool prints the uvx line for uv-project pins without installing', async () => {
+test('installTool prints the uvx line for manager pins without installing', async () => {
   const tools = JSON.parse(readFileSync(EXTERNAL_TOOLS_JSON, 'utf8')).tools
-  const uv = Object.keys(tools).find(name => tools[name].release === 'uv-project')
-  assert.ok(uv, 'the manifest is expected to pin at least one uv project')
+  const uv = Object.keys(tools).find(name => tools[name].origin === 'manager')
+  assert.ok(uv, 'the manifest is expected to pin at least one manager project')
   await installTool(uv!, tools)
 })
 

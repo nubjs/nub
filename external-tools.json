@@ -5,7 +5,6 @@
       "version": "11.24.0",
       "packageManager": "pnpm",
       "repository": "github:pnpm/pnpm",
-      "release": "asset",
       "notes": [
         "Latest soaked pnpm — CI downloads + SRI-verifies (sha512) the pinned asset",
         "darwin-x64 has no SEA asset upstream; its pin is the npm registry tarball"
@@ -43,7 +42,8 @@
           "asset": "pnpm-win32-x64.zip",
           "integrity": "sha512-ScYF853vPjdyJQeysSV7QXDo9YY+rnJoAblMrJK+6fzF1NXDhHCPLytpLnpxsbVDXP3iicAHyM5MhBKxbSMeaw=="
         }
-      }
+      },
+      "origin": "gh-asset"
     },
     "npm": {
       "notes": [
@@ -53,13 +53,13 @@
       "description": "npm — pinned, SRI-verified registry tarball; installed without self-update",
       "repository": "npm:npm",
       "version": "12.0.2",
-      "integrity": "sha512-uIXokLlBj6FpNUTQX1PmT5pz7BlIN9QlixX+zdaSNHsd0qUXsbDLr50xzY6Sw7cJVr0uzHKDOle0swmPW/p5Qw=="
+      "integrity": "sha512-uIXokLlBj6FpNUTQX1PmT5pz7BlIN9QlixX+zdaSNHsd0qUXsbDLr50xzY6Sw7cJVr0uzHKDOle0swmPW/p5Qw==",
+      "origin": "npm"
     },
     "sfw-free": {
       "description": "Socket Firewall (free tier) — malware gate on dep installs.",
       "version": "1.15.1",
       "repository": "github:SocketDev/sfw-free",
-      "release": "asset",
       "binaryName": "sfw",
       "notes": [
         "Used when SOCKET_SECURITY_KEY is not set",
@@ -99,13 +99,13 @@
           "asset": "sfw-free-windows-arm64.exe",
           "integrity": "sha512-Js7zoNMFf/iUjFb30vyAs6ffSg7CXMVHuwrPUWIKh5qjAKVtDDTOdaLuUzf/KQSj8XdFfFIImrNyB1vkwce49w=="
         }
-      }
+      },
+      "origin": "gh-asset"
     },
     "sfw-enterprise": {
       "description": "Socket Firewall (enterprise tier) — selected when SOCKET_SECURITY_KEY is set.",
       "version": "1.15.1",
       "repository": "github:SocketDev/firewall-release",
-      "release": "asset",
       "binaryName": "sfw",
       "notes": [
         "Used when SOCKET_SECURITY_KEY is set (the one env var every Socket product reads)",
@@ -145,13 +145,13 @@
           "asset": "sfw-windows-arm64.exe",
           "integrity": "sha512-IVQ7FWCGT1ivaA13G2Gcau28eyjtjEorLrgSrjeZGaQQzrB9b+1yQ9V/oplk0JFBLOA116P4kUvZunP/rxRkrw=="
         }
-      }
+      },
+      "origin": "gh-asset"
     },
     "zizmor": {
       "description": "GitHub Actions security linter — audits .github/ for workflow-injection / credential-leak patterns.",
       "version": "1.29.0",
       "repository": "github:zizmorcore/zizmor",
-      "release": "asset",
       "notes": [
         "Required: CI (blocks merges on medium+ findings)",
         "Installed by the setup-and-install composite; SRI-verified (sha512) per platform"
@@ -177,19 +177,21 @@
           "asset": "zizmor-x86_64-pc-windows-msvc.zip",
           "integrity": "sha512-r6YP+e2GsOklaxEf9JHrixkeR0NNkVAaMGcvwLxkt1JlYJpxFizH/LzhcsMmPSrLkELf6LNB2JL8hpDa5dBAww=="
         }
-      }
+      },
+      "origin": "gh-asset"
     },
     "agentshield": {
       "description": "Claude AI config security scanner (prompt injection, secrets)",
       "purl": "pkg:npm/ecc-agentshield@1.4.0",
-      "integrity": "sha512-R98OO1Ujyk2lezDLb+iQmMhF6FwTJCHajy3G4FCB6x7wkSTqR9f8+eAelC5KDzYDsGSbc0sOZvjXOOPRBtMpDg=="
+      "integrity": "sha512-R98OO1Ujyk2lezDLb+iQmMhF6FwTJCHajy3G4FCB6x7wkSTqR9f8+eAelC5KDzYDsGSbc0sOZvjXOOPRBtMpDg==",
+      "origin": "npm"
     },
     "skillspector": {
       "description": "NVIDIA's third-party-skill security scanner (LangGraph-based; YARA + AST + OSV.dev CVE lookups + optional LLM analysis). No PyPI release / no GH tags upstream — pinned to a git SHA on main + installed via a locked uv project (pyproject.toml + uv.lock, `uv sync --locked`; the fleet uv pin + exclude-newer make it reproducible). Sibling to AgentShield: AgentShield audits the operator's .claude/ config; SkillSpector audits untrusted upstream skills before install.",
-      "release": "uv-project",
       "repository": "github:NVIDIA/skillspector",
       "version": "2eb84478",
-      "versionDate": "2026-05-18"
+      "versionDate": "2026-05-18",
+      "origin": "manager"
     }
   }
 }
