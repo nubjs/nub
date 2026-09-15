@@ -427,6 +427,27 @@ Writes the project's lockfile from another package manager's lockfile, without i
 nub import   # package-lock.json / yarn.lock / bun.lock → nub.lock
 ```
 
+### `nub clean`
+
+Empties `node_modules` — installed packages, `.bin`, and the virtual store — in the current project and in every workspace project. The directories themselves stay, and anything inside them Nub did not install is left alone.
+
+```bash
+nub clean              # empty node_modules
+nub clean --lockfile   # also remove nub.lock
+```
+
+Each directory is named as it is emptied:
+
+```text
+Removing node_modules
+Removing packages/alpha/node_modules
+Removing packages/beta/node_modules
+```
+
+Nothing asks for confirmation, on a terminal or in a script. Run `nub install` to restore the tree.
+
+A `clean` script in `package.json` takes precedence, and the built-in never runs. The `nub purge` alias behaves identically, except that a `purge` script is what overrides it — so a project that defines one of the two as a script can still reach the built-in through the other.
+
 The full verb set:
 
 ```text
