@@ -15,8 +15,10 @@
 //! `actions/setup-node`, so the gating only hides them on developer
 //! machines that don't have the full nvm matrix.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 fn nub_binary() -> PathBuf {
     let mut path = std::env::current_exe().unwrap();
@@ -123,6 +125,142 @@ fn run_nub_against_node(
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let code = output.status.code().unwrap_or(-1);
     Some((stdout, stderr, code))
+}
+
+/// `run_nub_against_node` for an invocation with Node flags ahead of the file, and
+/// bounded by a deadline: the failure this exists to catch is a process that never
+/// exits, which `Output` alone would wait on forever. The exit code is `None` when
+/// the deadline killed it.
+fn run_nub_args_against_node(
+    want: (u32, u32, u32),
+    fixture: &str,
+    args: &[&str],
+    deadline: Duration,
+) -> Option<(String, String, Option<i32>)> {
+    let bin_dir = find_node_bin_dir(want)?;
+    let fixture_path = fixtures_dir().join(fixture);
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![bin_dir];
+    paths.extend(std::env::split_paths(&existing));
+    let new_path = std::env::join_paths(paths).expect("join PATH");
+
+    let mut child = Command::new(nub_binary())
+        .args(args)
+        .current_dir(&fixture_path)
+        .env("PATH", new_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn nub");
+    // Both pipes drain on their own threads, so a chatty child can neither block
+    // nor be blocked by the wait below.
+    let stdout = slurp(child.stdout.take().unwrap());
+    let stderr = slurp(child.stderr.take().unwrap());
+    let started = Instant::now();
+    let code = loop {
+        if let Some(status) = child.try_wait().expect("wait on nub") {
+            break status.code();
+        }
+        if started.elapsed() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    Some((stdout.join().unwrap(), stderr.join().unwrap(), code))
+}
+
+/// Like `run_nub_args_against_node` for a process that is not expected to exit — a
+/// server. Waits for a stderr line containing `needle` (or the deadline), hands that
+/// line to `ready` while the process is still up, kills it, and returns what `ready`
+/// made of it (`None` when the line never came) beside everything stdout said.
+fn run_nub_args_until<T>(
+    want: (u32, u32, u32),
+    fixture: &str,
+    args: &[&str],
+    needle: &str,
+    deadline: Duration,
+    ready: impl FnOnce(&str) -> T,
+) -> Option<(Option<T>, String)> {
+    let bin_dir = find_node_bin_dir(want)?;
+    let fixture_path = fixtures_dir().join(fixture);
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![bin_dir];
+    paths.extend(std::env::split_paths(&existing));
+    let new_path = std::env::join_paths(paths).expect("join PATH");
+
+    let mut child = Command::new(nub_binary())
+        .args(args)
+        .current_dir(&fixture_path)
+        .env("PATH", new_path)
+        .env("PORT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn nub");
+    let stdout = slurp(child.stdout.take().unwrap());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stderr = child.stderr.take().unwrap();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::BufReader::new(stderr)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if tx.send(line).is_err() {
+                return;
+            }
+        }
+    });
+    let started = Instant::now();
+    let seen = loop {
+        let left = deadline.saturating_sub(started.elapsed());
+        match rx.recv_timeout(left) {
+            Ok(line) if line.contains(needle) => break Some(ready(&line)),
+            Ok(_) => continue,
+            Err(_) => break None,
+        }
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    Some((seen, stdout.join().unwrap()))
+}
+
+/// One `GET /` against the server a `Listening on http://<host>:<port>` line
+/// announced, as a body. Raw sockets, like the fetch-handler suite: no client crate.
+fn get_root(listening: &str) -> String {
+    use std::io::{Read as _, Write as _};
+    let authority = listening
+        .trim()
+        .strip_prefix("Listening on http://")
+        .unwrap_or_else(|| panic!("not a listening line: {listening:?}"));
+    let (host, port) = authority.rsplit_once(':').unwrap();
+    let host = host.trim_matches(|c| c == '[' || c == ']');
+    let mut stream = std::net::TcpStream::connect((host, port.parse::<u16>().unwrap())).unwrap();
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).unwrap();
+    let raw = String::from_utf8_lossy(&raw);
+    let (_, body) = raw.split_once("\r\n\r\n").unwrap();
+    // A short body arrives chunked from node:http; strip the one chunk's framing.
+    let body = body.trim_end_matches("0\r\n\r\n").trim_end();
+    match body.split_once("\r\n") {
+        Some((size, rest)) if usize::from_str_radix(size, 16).is_ok() => rest.to_string(),
+        _ => body.to_string(),
+    }
+}
+
+fn slurp<R: Read + Send + 'static>(mut pipe: R) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = pipe.read_to_end(&mut buf);
+        String::from_utf8_lossy(&buf).into_owned()
+    })
 }
 
 /// Node 22.13.0 is the compat-tier representative: above the 18.19 floor,
@@ -962,6 +1100,156 @@ fn cjs_preload_runs_once_after_hooks_on_both_tiers() {
         assert!(
             stdout.find("preload:") < stdout.find("main:done"),
             "Node {maj}.{min}.{pat}: the preload must run before the entry: stdout={stdout:?}"
+        );
+    }
+}
+
+/// A configured ESM preload whose top-level `await` crosses an event-loop turn
+/// still finishes before the entry starts, on both tiers.
+///
+/// The tiers carry it differently, and each is its own way for something armed in
+/// nub's preload to slip between the user's `await` and the entry: the compat
+/// tier's `--import` preload awaits the chain itself, while the fast tier hands the
+/// chain its own `--import` token behind nub's `--require`. The fetch-handler
+/// detection pass did exactly that on the compat tier when it was armed ahead of the
+/// awaited chain — its `setImmediate` landed in the turn the preload's timer yielded,
+/// and its `import()` ran the entry there.
+#[test]
+fn esm_preload_awaits_a_macrotask_before_the_entry_on_both_tiers() {
+    for want in [(22, 13, 0), (22, 15, 0)] {
+        let (maj, min, pat) = want;
+        let Some((stdout, stderr, code)) =
+            run_nub_against_node(want, "esm-preload-await", "main.mjs")
+        else {
+            eprintln!(
+                "skipping: Node {maj}.{min}.{pat} not installed \
+                 (set TEST_NODE_BIN_{maj}_{min}_{pat} or nvm install)"
+            );
+            continue;
+        };
+
+        assert_eq!(
+            code, 0,
+            "Node {maj}.{min}.{pat}: an awaiting .mjs preload must run without aborting: stderr={stderr}"
+        );
+        assert_eq!(
+            stdout, "preload:start\npreload:done\nmain:done\n",
+            "Node {maj}.{min}.{pat}: the entry must not start until the preload's await settles"
+        );
+    }
+}
+
+/// A foreign resolve hook that rewrites the entry's URL — a cache-busting query, the
+/// shape a hot-reload loader adds — must neither hold the process open nor run the
+/// entry twice, on the tiers whose hooks run in a loader worker. Both happened once:
+/// the port that worker announces the entry on was referenced while the pass waited
+/// for an announcement that never came, so a finished plain script never exited; and
+/// the pass then imported the entry by its plain file URL, which the hook — keyed on
+/// the entry having no parent — left alone, so the file evaluated a second time as
+/// a different module. The exact stdout is what catches the second one.
+#[test]
+fn a_foreign_hook_rewriting_the_entry_url_does_not_hold_the_process() {
+    for want in [(22, 13, 0), (20, 11, 0)] {
+        let (maj, min, pat) = want;
+        let Some((stdout, stderr, code)) = run_nub_args_against_node(
+            want,
+            "entry-url-rewrite",
+            &["--import", "./rewrite.mjs", "plain.mjs"],
+            Duration::from_secs(60),
+        ) else {
+            eprintln!(
+                "skipping: Node {maj}.{min}.{pat} not installed \
+                 (set TEST_NODE_BIN_{maj}_{min}_{pat} or nvm install)"
+            );
+            continue;
+        };
+
+        assert_eq!(
+            code,
+            Some(0),
+            "Node {maj}.{min}.{pat}: a plain script behind a URL-rewriting hook must exit \
+             rather than hang: stdout={stdout:?} stderr={stderr:?}"
+        );
+        // The rewrite has to have taken, or the run proved nothing about it — and it
+        // has to have run the entry exactly once.
+        assert_eq!(
+            stdout, "plain:?v=1\n",
+            "Node {maj}.{min}.{pat}: the hook must have rewritten the entry's URL, and the entry must evaluate once"
+        );
+    }
+}
+
+/// The same hook in front of a handler whose module holds the loop: the pass cannot
+/// wait for idleness, so it has to recognize the entry's load under the rewritten
+/// URL — matched without its query — and then import THAT URL, which is the job
+/// Node already made. Matched exactly, the announcement never came and the handler
+/// stayed unbound.
+#[test]
+fn a_rewritten_entry_that_holds_the_loop_is_still_served_once() {
+    for want in [(22, 13, 0), (20, 11, 0)] {
+        let (maj, min, pat) = want;
+        let Some((listening, stdout)) = run_nub_args_until(
+            want,
+            "entry-url-rewrite",
+            &["--import", "./rewrite.mjs", "holds.mjs"],
+            "Listening on",
+            Duration::from_secs(60),
+            |_| (),
+        ) else {
+            eprintln!(
+                "skipping: Node {maj}.{min}.{pat} not installed \
+                 (set TEST_NODE_BIN_{maj}_{min}_{pat} or nvm install)"
+            );
+            continue;
+        };
+        assert!(
+            listening.is_some(),
+            "Node {maj}.{min}.{pat}: a handler behind a URL-rewriting hook must still bind: stdout={stdout:?}"
+        );
+        assert_eq!(
+            stdout, "holds:?v=1\n",
+            "Node {maj}.{min}.{pat}: the entry must evaluate exactly once, under the rewritten URL"
+        );
+    }
+}
+
+/// A preload that imports the entry ahead of the program under a query of its own
+/// is a second module, not the entry: the load hooks may only take Node's own load
+/// of the entry for it — the one after Node resolved it as the main, with no parent.
+/// Matched on pathname alone, the preload's import was taken for the entry and its
+/// handler served while Node went on to evaluate the real one.
+#[test]
+fn a_preload_import_of_the_entry_is_not_served_in_its_place() {
+    for want in [(22, 13, 0), (20, 11, 0)] {
+        let (maj, min, pat) = want;
+        let Some((body, stdout)) = run_nub_args_until(
+            want,
+            "entry-url-rewrite",
+            &[
+                "--import",
+                "./rewrite.mjs",
+                "--import",
+                "./warm.mjs",
+                "holds.mjs",
+            ],
+            "Listening on",
+            Duration::from_secs(60),
+            get_root,
+        ) else {
+            eprintln!(
+                "skipping: Node {maj}.{min}.{pat} not installed \
+                 (set TEST_NODE_BIN_{maj}_{min}_{pat} or nvm install)"
+            );
+            continue;
+        };
+        assert_eq!(
+            body.as_deref(),
+            Some("held:?v=1"),
+            "Node {maj}.{min}.{pat}: the served handler must be the entry Node loaded, not the preload's copy: stdout={stdout:?}"
+        );
+        assert_eq!(
+            stdout, "holds:?warm\nholds:?v=1\n",
+            "Node {maj}.{min}.{pat}: the preload's copy first, the entry once, and nothing more"
         );
     }
 }

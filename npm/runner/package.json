@@ -50,6 +50,7 @@
     "pnp-util.cjs",
     "floor-builtin.mjs",
     "cache-evict.mjs",
+    "fetch-serve.cjs",
     "README.md",
     "LICENSE"
   ],

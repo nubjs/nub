@@ -267,6 +267,62 @@ pub const NEUTRALIZE_LOCALSTORAGE_ENV: &str = "__NUB_NEUTRALIZE_LOCALSTORAGE";
 /// plain-Node user would have seen. Plumbing, not a user-facing option.
 pub const ARGV_ONLY_FLAGS_ENV: &str = "__NUB_ARGV_ONLY_FLAGS";
 
+/// Internal child-process signal marking a spawn as a TOP-LEVEL file run, so the
+/// preload's deferred pass may serve an entry whose default export is a `fetch`
+/// handler (`installServeEntry`, preload-common.cjs). Plumbing, not a user-facing
+/// option: the feature's real gate is the shape of the user's own default export.
+///
+/// Set only by the two launchers a user reaches by typing `nub` — the plain
+/// `nub <file>` run and `nub watch <file>`. Deliberately NOT set for a bin launch
+/// (`nubx`, `nub exec`), for `--node`/`NODE_COMPAT`, or for the `node` PATH hijack:
+/// binding a port is a visible behavior change, and `node <file>` has to keep
+/// meaning what `node` means even inside a subtree the user opted into. A script that
+/// runs `node server.js` therefore gets Node's behavior, while `nub server.js` gets
+/// the listener.
+///
+/// The value is the launcher's own argv — every token handed to Node after nub's
+/// injected flags, as a JSON array ([`serve_entry_marker`]) — and not a bare `1`,
+/// because the process nub spawns is not always the application. An env-owner
+/// loader or a configured `prefix` sits in FRONT of Node, and a Node-based one
+/// (`varlock` is a `#!/usr/bin/env node` script) inherits nub's `NODE_OPTIONS` and
+/// so runs this preload itself. A bare flag was consumed there, by the wrapper, and
+/// the application it then launched never saw it. Carrying the argv lets the
+/// preload tell which process it is in: the application is the one whose own argv
+/// IS this list from the entry on — Node has already `path.resolve`d `argv[1]` by
+/// the time a preload runs, and everything after the entry reaches `process.argv`
+/// verbatim — and every other process leaves the marker in place for its child.
+/// Rust names no token as THE entry — `nub --require x server.mjs` puts `x` first —
+/// because Node is the one that knows which one it picked; the preload matches the
+/// whole tail rather than any one token, so an argument that happens to name the
+/// wrapper's own bin cannot make the wrapper claim it.
+///
+/// The application's preload DELETES it before user code runs, which is what keeps
+/// one listener per launch: a `child_process` spawn or a `Worker` copies
+/// `process.env` after the delete, so a server that forks a worker pool does not
+/// give every worker its own port.
+pub const SERVE_ENTRY_ENV: &str = "__NUB_SERVE_ENTRY";
+
+/// The compiled-artifact counterpart of [`SERVE_ENTRY_ENV`], set by the launcher —
+/// or, in a single executable, by the blob's own main (`compile-sea-loader.cjs`) —
+/// and consumed by the compile preamble (`serveCompiledEntry`). A bare `1`: the
+/// program root is the entry by construction, so nothing has to be told apart. Its
+/// own variable rather than the same one because an artifact launched from inside a
+/// nub-augmented process inherits nub's `NODE_OPTIONS` preload, whose claim would
+/// read a bare value as unaddressed and, with no `argv[1]` in the inline shape,
+/// delete it before the preamble looked. Only a top-level launch is marked, never a
+/// re-exec of the artifact by its own program.
+pub const COMPILED_SERVE_ENTRY_ENV: &str = "__NUB_COMPILED_SERVE_ENTRY";
+
+/// The [`SERVE_ENTRY_ENV`] value for a launch whose Node argv (after nub's own
+/// flags) is `tokens`: a JSON array of them. An argument may hold any byte but NUL,
+/// so no separator is safe to reserve — ASCII unit separator was, and Node hands it
+/// through `process.argv` unchanged, where it split one argument into two and moved
+/// the entry off its position.
+pub fn serve_entry_marker<'a>(tokens: impl IntoIterator<Item = &'a str>) -> String {
+    serde_json::to_string(&tokens.into_iter().collect::<Vec<_>>())
+        .expect("a list of strings serializes")
+}
+
 /// Internal child-process signal carrying the matrix's runtime V8 flags — the
 /// [`super::feature_matrix::Mitigation::RuntimeV8Flag`] rows — for the preload to turn
 /// on with `v8.setFlagsFromString` the first time it loads a module that needs one.
