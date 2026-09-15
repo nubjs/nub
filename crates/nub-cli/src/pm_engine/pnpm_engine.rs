@@ -838,6 +838,14 @@ fn host_base_dir(argv: &[std::ffi::OsString]) -> Result<PathBuf> {
 /// before the verb and acts on them itself, and the engine's grammar has
 /// no spelling for those, so what it runs on is what nub left.
 pub(crate) fn run(mut argv: Vec<std::ffi::OsString>) -> Result<i32> {
+    // FIRST, before anything below can build a `miette::Report`, which is
+    // where the engine's own entry installs it. A Report captures the hook AT
+    // CONSTRUCTION and `install_report_handler` leaves an already-installed
+    // one alone, so a single Report built while resolving the cwd, the profile
+    // or the session would pin miette's DEFAULT for the rest of the process --
+    // and the default does not drop the causes a level above already states in
+    // full, which is the whole reason the engine installs a hook at all.
+    pnpm_diagnostics::install_report_handler();
     let cwd = host_base_dir(&argv)?;
     // The engine's grammar names the command, so `ci`'s aliases arrive as `ci`.
     let command = pnpm_cli::command_name(&argv);
@@ -847,12 +855,6 @@ pub(crate) fn run(mut argv: Vec<std::ffi::OsString>) -> Result<i32> {
     // In a pnpm project too: nub resolves the Node either way, and pnpm hands
     // scripts a real Node rather than a shim.
     embedder.node_execpath = lifecycle_node_execpath();
-    // The engine's own entry point installs this before it can print. It
-    // drops each cause the level above already states in full, so a host
-    // that leaves miette at its default renders chains the engine collapses
-    // — a divergence invisible on a one-level diagnostic and plain on a
-    // deep one.
-    pnpm_diagnostics::install_report_handler();
     // A few flags nub reads past pnpm's grammar, in its own projects only: a
     // pnpm-incumbent command line reaches the engine exactly as pnpm reads it.
     if embedder.program_name != Embedder::PNPM.program_name
