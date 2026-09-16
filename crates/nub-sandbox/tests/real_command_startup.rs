@@ -87,6 +87,74 @@ fn node_starts_and_runs_a_script_with_every_read_brokered() {
     );
 }
 
+/// What read-brokering COSTS per open, measured where it is actually paid.
+///
+/// Ignored by default because it is a measurement, not a contract: it has no failing condition
+/// beyond the run itself, and its number is only meaningful against the same run with
+/// `NUB_SANDBOX_READ_BROKER=off`. Drive both arms on one host, back to back:
+///
+/// ```text
+/// cargo test -p nub-sandbox --test real_command_startup -- --ignored --nocapture
+/// NUB_SANDBOX_READ_BROKER=off cargo test … -- --ignored --nocapture
+/// ```
+///
+/// A plain `node -e` start is NOT the workload to read this off — it makes about 18 `openat`
+/// calls, so the round trips disappear into process startup. This one opens the same granted
+/// file `NUB_OPEN_LOOPS` times (default 20000), which is what a real dependency graph does.
+#[test]
+#[ignore = "measurement, not a contract: meaningful only as an A/B against NUB_SANDBOX_READ_BROKER=off"]
+fn node_open_throughput_under_the_broker() {
+    let node = locate("node");
+    let loops: u32 = std::env::var("NUB_OPEN_LOOPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20_000);
+    let root = tempfile::tempdir().expect("fixture root");
+    let project = root.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("index.js"), "ordinary-source").unwrap();
+
+    let policy = compile(
+        &json!({
+            "fs": {(project.to_string_lossy()): "rw", "$tmp": "rw"},
+            "net": false,
+        }),
+        &ctx(root.path()),
+    )
+    .expect("the fixture policy compiles");
+    let sandbox = Sandbox::new(&policy).expect("the supervised backend acquires");
+    let script = format!(
+        "const fs=require('fs');for(let i=0;i<{loops};i++)fs.readFileSync('index.js');         process.stdout.write('done')"
+    );
+    let prepared = sandbox
+        .prepare(
+            CommandSpec::new(&node)
+                .args(["-e", &script])
+                .cwd(&project)
+                .redact_stdout(true)
+                .redact_stderr(true),
+        )
+        .expect("the child prepares");
+    let started = std::time::Instant::now();
+    let output = tool_output::output(prepared);
+    let elapsed = started.elapsed();
+    assert!(
+        output.status.success(),
+        "throughput child failed:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let broker = if std::env::var("NUB_SANDBOX_READ_BROKER").as_deref() == Ok("off") {
+        "off"
+    } else {
+        "on"
+    };
+    println!(
+        "OPEN_THROUGHPUT broker={broker} loops={loops} elapsed_ms={} per_open_us={:.2}",
+        elapsed.as_millis(),
+        elapsed.as_secs_f64() * 1e6 / f64::from(loops),
+    );
+}
+
 fn ctx(root: &Path) -> CompileCtx {
     let project = root.join("project");
     CompileCtx::new(
