@@ -76,7 +76,27 @@ fn policy_from(path: &Path, cwd: &Path) -> Result<nub_sandbox::SandboxPolicy> {
     // A policy file holds the axes object directly, or under a `sandbox` key. The pointer base
     // above stays the WHOLE file either way, which is what lets a `sandbox` block reuse a
     // `#/shared/…` sibling that is not itself an axis.
-    let surface = document.get("sandbox").unwrap_or(&document);
+    //
+    // ⛔ WRITING BOTH SHAPES AT ONCE IS AN ERROR, not a precedence rule. Taking the `sandbox`
+    // block and ignoring a top-level `fs` would hand the user a policy they did not write, and
+    // it would do it silently — the command still runs, just under different rules. That is the
+    // one failure this frontend refuses everywhere else, so it refuses it here too.
+    let surface = match document.get("sandbox") {
+        Some(block) => {
+            if let Some(stray) = ["fs", "net", "vars", "secrets"]
+                .into_iter()
+                .find(|axis| document.get(axis).is_some())
+            {
+                bail!(
+                    "`{}` has a `sandbox` block AND a top-level `{stray}` axis — the axes go in \
+                     one place or the other, or one of them is silently ignored",
+                    path.display()
+                );
+            }
+            block
+        }
+        None => &document,
+    };
     let (policy, warnings) = compile_with_warnings(surface, &ctx)
         .map_err(|e| anyhow!("{e}"))
         .with_context(|| format!("compiling `{}`", path.display()))?;

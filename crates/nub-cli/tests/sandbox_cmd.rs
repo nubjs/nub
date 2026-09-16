@@ -287,4 +287,24 @@ fn a_wrapped_policy_resolves_its_own_reuse_pointers() {
         assert!(!out.status.success(), "the sandbox is Linux-only");
         assert!(!marker.exists(), "the command ran on an unsupported host");
     }
+
+    // The two shapes are alternatives, not a precedence rule: a document carrying both would
+    // otherwise run under the `sandbox` block with the top-level axis silently discarded.
+    let mixed = dir.join("mixed.json");
+    std::fs::write(
+        &mixed,
+        r#"{"fs": {"/": "r"}, "sandbox": {"fs": true, "net": false}}"#,
+    )
+    .unwrap();
+    let out = Command::new(nub_binary())
+        .args(["sandbox", "--policy", mixed.to_str().unwrap(), "/bin/true"])
+        .current_dir(&dir)
+        .output()
+        .expect("nub runs");
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("one place or the other"),
+        "a document carrying both shapes must be refused by name:\n{}",
+        String::from_utf8_lossy(&out.stderr),
+    );
 }
