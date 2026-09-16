@@ -212,3 +212,79 @@ fn a_confined_command_runs_and_owns_the_flags_that_follow_it() {
     // and the script would never have run.
     assert_eq!(stdout.trim(), "--help", "stderr:\n{stderr}");
 }
+
+/// A real policy FILE is more than an axes object, and the loader has to hand the compiler the
+/// right piece of it.
+///
+/// Three things were wrong here and each failed silently in its own way. The frontend passed the
+/// whole file as the policy surface, so a document holding its axes under a `sandbox` key — one of
+/// the two shapes the docs describe — was rejected as an unknown key. It set no pointer base, so
+/// every `...:#/pointer` in a real policy was a dangling one. And it never told the compiler which
+/// file the policy came from, so the self-exclusion that keeps a confined command from reading the
+/// rules confining it was simply absent.
+///
+/// The assertion is on the ERROR TEXT rather than on success, because this test also runs where no
+/// sandbox exists: off Linux the command is refused by platform, and what distinguishes a loader
+/// bug from that refusal is WHICH failure arrives. A compile error names the key or the pointer.
+#[test]
+fn a_wrapped_policy_resolves_its_own_reuse_pointers() {
+    let dir = fixture("wrapped-policy");
+    let (program, args, marker) = verified_marker_command(&dir);
+    let policy = dir.join("policy.json");
+    std::fs::write(
+        &policy,
+        format!(
+            r#"{{"shared": {{"fs": {{"{}": "rw"}}}},
+                 "sandbox": {{"fs": {{"...:#/shared/fs": true}}, "net": false}}}}"#,
+            dir.display().to_string().replace('\\', "\\\\"),
+        ),
+    )
+    .unwrap();
+
+    let out = Command::new(nub_binary())
+        .args(["sandbox", "--policy", policy.to_str().unwrap(), &program])
+        .args(&args)
+        .current_dir(&dir)
+        .output()
+        .expect("nub runs");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    for bug in ["unknown key", "pointer", "compiling"] {
+        assert!(
+            !stderr.contains(bug),
+            "the policy file failed to COMPILE (`{bug}`), which is a loader bug rather than a \
+             platform refusal:\n{stderr}",
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        assert!(out.status.success(), "stderr:\n{stderr}");
+        assert!(
+            marker.exists(),
+            "the spliced grant must reach the command:\n{stderr}",
+        );
+        // The policy file names itself, so the confined command must not be able to read it.
+        let read = Command::new(nub_binary())
+            .args([
+                "sandbox",
+                "--policy",
+                policy.to_str().unwrap(),
+                "/bin/cat",
+                policy.to_str().unwrap(),
+            ])
+            .current_dir(&dir)
+            .output()
+            .expect("nub runs");
+        assert!(
+            !read.status.success(),
+            "a confined command read the policy confining it:\n{}",
+            String::from_utf8_lossy(&read.stdout),
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        assert!(!out.status.success(), "the sandbox is Linux-only");
+        assert!(!marker.exists(), "the command ran on an unsupported host");
+    }
+}

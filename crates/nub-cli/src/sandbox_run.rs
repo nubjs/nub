@@ -55,13 +55,29 @@ fn policy_from(path: &Path, cwd: &Path) -> Result<nub_sandbox::SandboxPolicy> {
     // The policy file is the user's own, so it carries the full scope capabilities: env
     // substitution and credential brokering are both things they are entitled to ask for in a
     // document they wrote. A dependency-authored policy would not be compiled through here.
+    //
+    // THREE THINGS THE DOCUMENT IS USED FOR, AND ONLY ONE OF THEM IS THE POLICY ITSELF.
+    // `with_policy_files` is what denies the confined command its own policy file, read and
+    // write, so it can neither learn the rules confining it nor edit them for the next run;
+    // `with_document` is the base a `...:#/pointer` resolves against, and without it every
+    // reuse pointer in a real policy file is a dangling one. Both are easy to leave out and
+    // silent when you do: the policy still compiles, just weaker and with reuse broken.
     let ctx = CompileCtx::new(
         homes(cwd),
         cwd.to_path_buf(),
         ScopeCapabilities::approved(),
         ambient,
-    );
-    let (policy, warnings) = compile_with_warnings(&document, &ctx)
+    )
+    .with_policy_files(vec![
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
+    ])
+    .with_document(document.clone());
+
+    // A policy file holds the axes object directly, or under a `sandbox` key. The pointer base
+    // above stays the WHOLE file either way, which is what lets a `sandbox` block reuse a
+    // `#/shared/…` sibling that is not itself an axis.
+    let surface = document.get("sandbox").unwrap_or(&document);
+    let (policy, warnings) = compile_with_warnings(surface, &ctx)
         .map_err(|e| anyhow!("{e}"))
         .with_context(|| format!("compiling `{}`", path.display()))?;
     for warning in &warnings {

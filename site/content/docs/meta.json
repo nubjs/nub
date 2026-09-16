@@ -8,6 +8,7 @@
     "nubx",
     "standalone",
     "compile",
+    "sandbox",
     "init",
     "install",
     "node",
