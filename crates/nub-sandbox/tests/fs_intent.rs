@@ -67,19 +67,28 @@ fn fs_intent_child() {
         // host-wide mode rewriting on anything the uid owns. The control is the case that
         // falsified a blanket ceiling deny — node-gyp chmods its own built addon.
         "chmod" => {
-            assert_eq!(
-                chmod(&project.join("writable.txt"), 0o600),
-                0,
-                "a chmod inside a write grant must still run",
-            );
-            assert!(
-                chmod(&readonly.join("keep.txt"), 0o777) < 0,
-                "a read-only grant must not permit rewriting a file's mode",
-            );
-            assert!(
-                chmod(&outside.join("victim.txt"), 0o777) < 0,
-                "an ungranted path must not be chmod-able",
-            );
+            // BOTH SPELLINGS, independently. glibc's `chmod()` emits the x86_64 legacy
+            // `SYS_chmod`, so a test written only against it passes with `SYS_fchmodat`
+            // untrapped — a falsification run proved exactly that, and the modern number went
+            // unguarded until this arm was added.
+            for (label, call) in [
+                ("chmod", &chmod as &dyn Fn(&Path, libc::mode_t) -> i32),
+                ("fchmodat", &raw_fchmodat),
+            ] {
+                assert_eq!(
+                    call(&project.join("writable.txt"), 0o600),
+                    0,
+                    "{label} inside a write grant must still run",
+                );
+                assert!(
+                    call(&readonly.join("keep.txt"), 0o777) < 0,
+                    "{label} rewrote a mode inside a read-only grant",
+                );
+                assert!(
+                    call(&outside.join("victim.txt"), 0o777) < 0,
+                    "{label} rewrote a mode on an ungranted path",
+                );
+            }
         }
         // The fd form carries no path, so the descriptor is read back through
         // `/proc/<tid>/fd/<n>`. A read-only grant hands out a read-only fd that would
@@ -144,6 +153,20 @@ fn raw_open(path: &Path) -> i64 {
 fn chmod(path: &Path, mode: libc::mode_t) -> i32 {
     let c = CString::new(path.to_string_lossy().as_bytes()).unwrap();
     unsafe { libc::chmod(c.as_ptr(), mode) }
+}
+
+/// The modern number, issued directly. glibc never emits it on x86_64, so nothing else here
+/// reaches it.
+fn raw_fchmodat(path: &Path, mode: libc::mode_t) -> i32 {
+    let c = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+    unsafe {
+        libc::syscall(
+            libc::SYS_fchmodat,
+            libc::AT_FDCWD,
+            c.as_ptr(),
+            mode as libc::c_uint,
+        ) as i32
+    }
 }
 
 fn utimes(path: &Path) -> i32 {
