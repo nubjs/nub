@@ -26,10 +26,8 @@ use crate::proxy::mitm::{BrokerSession, MitmEngine, RuntimeCredentialBroker};
 use crate::proxy::{EgressProxy, StaticDecider};
 #[cfg(target_os = "linux")]
 use std::ffi::CString;
-use std::ffi::OsString;
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::OnceLock;
 
 #[cfg(unix)]
 mod unix_tmp;
@@ -64,17 +62,6 @@ pub fn landlock_abi() -> Option<u32> {
 // The macOS and Windows backends were deleted when the sandbox became Linux-only. See
 // `A2b` in the effort's TASKS.md: the crate still COMPILES everywhere (so the macOS dev
 // host can run `cargo check`), but off Linux `apply` returns `Effect::Unsupported`.
-
-// Publishing a nub-owned, AppContainer-readable copy of a tool tree the jail must RUN — the
-// escape from writing an ACE where a standard user cannot. Same cfg as `windows`: the copy half is
-// ordinary fs work and is tested on the dev host, only the ace needs Windows.
-#[cfg(any(target_os = "windows", test))]
-pub mod windows_jail_bin;
-
-// The window-station / desktop ACE machinery the AppContainer backend needs (a USER32-importing
-// child on a non-interactive station dies in loader init without it).
-#[cfg(target_os = "windows")]
-mod windows_ace;
 
 // The OS-agnostic Linux mount-plan derivation. Compiled on Linux (its real consumer)
 // and under `test` on any host so authored-order and rejection invariants are tested
@@ -207,19 +194,6 @@ pub struct CommandSpec {
     /// through [`Prepared::spawn_with_signal_target`] rather than assume that the
     /// command remains in the host's terminal process group.
     pub reap_descendants: bool,
-    /// A label naming THIS launch in the kernel's own denial records, so a failed script can be
-    /// told what the jail refused instead of only that it failed.
-    ///
-    /// macOS ONLY, and the mechanism is why: Seatbelt's `(with message …)` modifier rides the
-    /// profile's `(deny default)` and the kernel echoes it verbatim on every denial the launch
-    /// provokes, where an unprivileged reader retrieves it. Linux Landlock's audit channel needs
-    /// kernel 6.15 plus audit privilege, and Windows LowBox Permissive Learning Mode needs
-    /// administrator AND stops enforcing — neither has an unprivileged twin, so those backends
-    /// ignore this field. Retrieval: [`macos_denials`](crate::macos_denials).
-    ///
-    /// UNIQUE PER LAUNCH or it is wrong, not merely imprecise: the retrieval predicate IS this
-    /// string, so two concurrent launches sharing one label cross-attribute each other's denials.
-    pub audit_label: Option<String>,
 }
 
 impl CommandSpec {
@@ -232,7 +206,6 @@ impl CommandSpec {
             redact_stdout: false,
             redact_stderr: false,
             reap_descendants: false,
-            audit_label: None,
         }
     }
     pub fn arg(mut self, a: impl Into<std::ffi::OsString>) -> Self {
@@ -295,10 +268,6 @@ impl CommandSpec {
     }
     pub fn reap_descendants(mut self, reap: bool) -> Self {
         self.reap_descendants = reap;
-        self
-    }
-    pub fn audit_label(mut self, label: impl Into<String>) -> Self {
-        self.audit_label = Some(label.into());
         self
     }
 }
@@ -445,7 +414,7 @@ pub struct PreparedChild {
     #[cfg(target_os = "windows")]
     windows_child: Option<windows::WindowsChild>,
     child_id: u32,
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     guardian: Option<unix_guardian::UnixGuardian>,
     #[cfg(unix)]
     signal_target: Option<i32>,
@@ -493,16 +462,6 @@ impl Sandbox {
     /// for the broker session and are never re-read for later command submissions.
     pub fn new(policy: &SandboxPolicy) -> Result<Self, Degradation> {
         Self::new_impl(policy, false)
-    }
-
-    /// Acquire an AppContainer session with the embedded native compatibility adapter.
-    ///
-    /// The adapter supplies null-device access, DOS path translation and private
-    /// runtime coordination objects. It follows child processes; it does not add
-    /// filesystem grants or permit unconfined fallback. [`Self::new`] remains raw.
-    #[cfg(windows)]
-    pub fn with_windows_native_compat(policy: &SandboxPolicy) -> Result<Self, Degradation> {
-        Self::new_impl(policy, true)
     }
 
     fn new_impl(policy: &SandboxPolicy, native_compat: bool) -> Result<Self, Degradation> {
@@ -816,7 +775,7 @@ impl PreparedChild {
     }
 
     fn release_resources(&mut self) {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(target_os = "linux")]
         self.guardian.take();
         // Drop order matters: the proxy before the private tmp dir it may have written into.
         self._proxy.take();
@@ -1032,7 +991,7 @@ impl Prepared {
             if self.redact_stderr {
                 self.command.stderr(std::process::Stdio::piped());
             }
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(target_os = "linux")]
             let guardian = {
                 let guardian = unix_guardian::UnixGuardian::start()?;
                 guardian.join_command(&mut self.command);
@@ -1048,7 +1007,7 @@ impl Prepared {
             self._inherited_files.clear();
             // A failed guardian pre-exec hook fails spawn. Retain the backend's
             // requested membership cross-check before handing a negative target out.
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(target_os = "linux")]
             if self.signal_process_group
                 && !confirm_group_membership(child.id() as i32, guardian.process_group_id())
             {
@@ -1057,15 +1016,15 @@ impl Prepared {
                     "sandbox command did not join its owner-death guardian",
                 ));
             }
-            #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+            #[cfg(all(unix, not(target_os = "linux")))]
             let signal_process_group = self.signal_process_group
                 && confirm_group_membership(child.id() as i32, child.id() as i32);
             // Negative targets name the private guardian group, never the host group.
             #[cfg(unix)]
             let signal_target = {
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                #[cfg(target_os = "linux")]
                 let target = -guardian.process_group_id();
-                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                #[cfg(not(target_os = "linux"))]
                 let target = if signal_process_group {
                     -(child.id() as i32)
                 } else {
@@ -1085,7 +1044,7 @@ impl Prepared {
                 #[cfg(target_os = "linux")]
                 supervised_child: None,
                 child_id,
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                #[cfg(target_os = "linux")]
                 guardian: Some(guardian),
                 #[cfg(unix)]
                 signal_target,
@@ -1435,8 +1394,6 @@ fn prepare_with_resources(
     // in this explicit session intentionally share that private state. `None` for Shared/Deny.
     let tmp_dir = resources.private_tmp.as_ref().map(|d| d.path());
 
-    #[cfg(target_os = "macos")]
-    let mut prepared = macos::apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;
     // The Landlock build-jail arm ignores the proxy pair (coarse seccomp family ceiling, no netns);
     // the supervised arm redirects an allowed connect through the loopback proxy (epic 5.1).
     #[cfg(target_os = "linux")]
@@ -1446,9 +1403,11 @@ fn prepare_with_resources(
         tmp_dir,
         &resources.retained_grants,
         linux_preflight,
-        proxy_port,
-        proxy_token,
-        ca_bundle,
+        linux::ProxyAttachment {
+            port: proxy_port,
+            token: proxy_token,
+            ca_bundle,
+        },
     )?;
     #[cfg(target_os = "windows")]
     let mut prepared = windows::apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;
@@ -1468,7 +1427,7 @@ fn prepare_with_resources(
             }
         }
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     let mut prepared = generic_apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;
 
     // Announce TLS inspection only when preparation retained its network enforcement.
@@ -1722,7 +1681,7 @@ fn set_tmp_env(command: &mut Command, dir: &std::path::Path) {
 
 /// Env-scrub-only skeleton for an OS with no wired backend. Reports fs and net as
 /// not-enforced so a caller never mistakes the skeleton for confinement.
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn generic_apply(
     policy: &SandboxPolicy,
     spec: CommandSpec,
@@ -1803,11 +1762,8 @@ fn generic_apply(
 /// `Shared` (nothing to enforce). A backend that DOES enforce the mode never calls this;
 /// one that doesn't pushes the axis into `lost` so the caller never mistakes an
 /// unenforced private/deny-tmp for a real one (fail-safe honesty, never silent).
-/// macOS ENFORCES the mode in its SBPL, so it never consults this (hence the cfg).
-#[cfg(any(
-    target_os = "windows",
-    not(any(target_os = "macos", target_os = "linux", target_os = "windows"))
-))]
+/// The Linux backend DOES enforce the mode, so it never consults this (hence the cfg).
+#[cfg(not(target_os = "linux"))]
 fn tmp_lost_axis(policy: &SandboxPolicy) -> Option<&'static str> {
     match policy.fs.tmp {
         crate::policy::TmpMode::Shared => None,
@@ -1818,7 +1774,7 @@ fn tmp_lost_axis(policy: &SandboxPolicy) -> Option<&'static str> {
 
 /// Whether the fs policy actually confines anything (a non-relaxed base or any
 /// entry). A relaxed fs axis (allow-all, no rules) is not a lost enforcement.
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn fs_confines(policy: &SandboxPolicy) -> bool {
     !matches!(policy.fs.rules.default_effect, crate::policy::Effect::Allow)
         || !policy.fs.rules.entries.is_empty()

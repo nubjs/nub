@@ -1,18 +1,6 @@
 //! Shared compiler defaults: curated environment handling, filesystem subtree
 //! expansion, and compatibility classifiers used by backend controls.
 
-/// Legacy classifier retained for the Windows pure-allowlist control test. It is not
-/// emitted by the compiler: broad filesystem grants are literal positive grants.
-#[cfg(test)]
-pub(crate) const ENV_DENY_LEAF_GLOBS: &[&str] = &[
-    "**/.env*",
-    ".env*",
-    "**/.npmrc",
-    ".npmrc",
-    "**/node_modules/npm/npmrc",
-    "node_modules/npm/npmrc",
-];
-
 /// Case-insensitive substring test for a secret name-word anywhere in a key. Used by
 /// [`is_npm_config_credential`] for the registry-credential family.
 pub fn word_in_substr(word: &str, key: &str) -> bool {
@@ -347,8 +335,8 @@ const BUILD_JAIL_EXTRA_EXACT: &[&str] = &[
 /// `npm_config_*` minus registry credentials) plus the build-jail additions
 /// ([`BUILD_JAIL_EXTRA_PREFIXES`]/[`BUILD_JAIL_EXTRA_EXACT`]); everything else is
 /// DENIED. [`is_credential_env_key`] is applied first as a belt-and-suspenders reject
-/// so a credential-shaped name can never ride an allowed prefix in. Case-sensitive on
-/// POSIX, case-insensitive on Windows (the env-name contract).
+/// so a credential-shaped name can never ride an allowed prefix in. Matching is
+/// case-sensitive, as Linux env names are.
 pub fn build_jail_env_allowed(key: &str) -> bool {
     if is_credential_env_key(key) {
         return false;
@@ -356,199 +344,17 @@ pub fn build_jail_env_allowed(key: &str) -> bool {
     if baseline_allows(key) {
         return true;
     }
-    #[cfg(windows)]
-    {
-        // WINDOWS ONLY, and safe ONLY because the jail STAMPS it: `build_jail.rs` writes
-        // nub's own value into `ambient` before this scrub runs, so an ambient user value is
-        // already overwritten and can never ride this entry in. `NODE_OPTIONS` carries
-        // `--import`, so admitting an ambient one would hand a dependency's lifecycle script
-        // an arbitrary-code channel. The entry and the stamp move together, in both
-        // directions: this was removed once when the stamp was withdrawn, and comes back with
-        // the stdio shim (`windows_build_jail_node_options`). No other platform stamps it, and
-        // none may admit it.
-        if key.eq_ignore_ascii_case("NODE_OPTIONS") {
-            return true;
-        }
-        // `build_jail.rs` first removes every ambient spelling, then restores this only for
-        // the normal confined node-gyp compatibility adapter. The exception stays in this
-        // Windows-only arm: a generic compiler caller must not turn `PYTHONPATH` into
-        // lifecycle code on another backend.
-        if key.eq_ignore_ascii_case("PYTHONPATH") {
-            return true;
-        }
-        BUILD_JAIL_EXTRA_EXACT
-            .iter()
-            .any(|e| e.eq_ignore_ascii_case(key))
-            || BUILD_JAIL_EXTRA_PREFIXES.iter().any(|p| {
-                key.get(..p.len())
-                    .is_some_and(|s| s.eq_ignore_ascii_case(p))
-            })
-    }
-    #[cfg(not(windows))]
-    {
-        BUILD_JAIL_EXTRA_EXACT.contains(&key)
-            || BUILD_JAIL_EXTRA_PREFIXES.iter().any(|p| key.starts_with(p))
-    }
+    BUILD_JAIL_EXTRA_EXACT.contains(&key)
+        || BUILD_JAIL_EXTRA_PREFIXES.iter().any(|p| key.starts_with(p))
 }
 
-/// The `NODE_OPTIONS` route to the Windows realpath defect. NOT SHIPPED — retained as the
-/// measured record of a repair that works and is still the wrong one, and as the string the
-/// branch-scoped probe keeps measuring.
-///
-/// THE DEFECT. Node's JS `realpathSync` walks a path component by component and, on Windows,
-/// `lstat`s the VOLUME ROOT first. The jail grants leaf-only and leans on traverse-bypass
-/// (`SeChangeNotifyPrivilege` + `FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL`), which exempts
-/// INTERMEDIATE components of a single open — it does not make an ancestor openable as a
-/// TARGET. So every `require()` of an absolute path dies on `EPERM: lstat 'C:\'`.
-///
-/// WHAT SHIPS INSTEAD — the ancestor chain, repaired as far as an unprivileged token reaches:
-/// a non-inherited traverse ACE, written wherever the user holds `WRITE_DAC`, which is
-/// `%USERPROFILE%` and below (`ancestor_chain` in `backend/windows.rs`). `C:\` and `C:\Users`
-/// stay UNREPAIRED — measured refused across three images including a genuine workstation.
-/// A second prong once requested the capability SIDs those two roots already carry; it never
-/// took effect (`NtCreateLowBoxToken` refuses the `S-1-15-3-65536-…` AppSilo RID class, and the
-/// launch fell back on every attempt in both principals) and has been DELETED. Raw capability
-/// SIDs are indeed requestable unprivileged — `internetClient` is — but not these, so do not
-/// read the privilege point as making those two roots reachable.
-///
-/// WHICH MEANS A REALPATH WALK STILL DIES ON ITS FIRST COMPONENT de-elevated, whatever the ACE
-/// half repaired further down. That is why this preload exists, and why it tolerates a refused
-/// STRICT ANCESTOR of a granted root rather than any refused component.
-///
-/// WHY NOT REDIRECT REALPATH AT ITS NATIVE TWIN. That was the first candidate, and it is
-/// REFUTED by measurement: `fs.realpathSync.native` is refused under this jail too, with
-/// `EPERM ... realpath` on a file the jail GRANTED and Node can `readFileSync` in the same
-/// breath (run 30460192608, re-measured with attribution in 30513204884 — both images, every
-/// path shape tried, including one whose whole ancestor chain is AAP-granted bar `C:\`).
-///
-/// ⛔ THE MECHANISM RECORDED HERE HAS NOW BEEN WRONG TWICE, IN THE SAME DIRECTION BOTH TIMES —
-/// each version blamed an EARLIER step than the real one. The OBSERVATION is unchanged and still
-/// holds: `fs.realpathSync.native` really is refused `EPERM` on a granted path. Only the cause
-/// below is corrected, and it matters because the previous cause CLOSED a route that is in fact
-/// OPEN.
-///
-/// It first said `GetFinalPathNameByHandleW` needs more than the leaf handle the jail allows;
-/// that call's documented per-component sensitivity is scoped to SMB, which on local NTFS would
-/// have left it available. It then said the refusal is EARLIER still — that libuv's `fs__realpath`
-/// opens with `dwShareMode=0`, so a successful `CreateFileW` would have surfaced as
-/// ERROR_SHARING_VIOLATION when the file was held open elsewhere, and since it stayed `EPERM` the
-/// OPEN itself must be refused.
-///
-/// THAT INFERENCE CANNOT HOLD, AND THE CODE IS WHY: `fs__realpath` reports the failed open and the
-/// failed name query through the SAME `SET_REQ_WIN32_ERROR(req, GetLastError())`, so both arrive as
-/// one indistinguishable errno. `EPERM` was therefore never evidence about WHICH call failed.
-///
-/// MEASURED DIRECTLY IN A LIVE LOWBOX (`TokenIsAppContainer` read from the token as the control),
-/// calling `CreateFileW` at libuv's exact shape — `dwDesiredAccess=0`, `dwShareMode=0`,
-/// `FILE_FLAG_BACKUP_SEMANTICS`: THE OPEN SUCCEEDS. Across 48 cells there were no
-/// jail-attributable open refusals at all; the only `err=5` rows were directory opens WITHOUT
-/// backup semantics, which fail identically unjailed because that is the Win32 rule. What is
-/// refused is the NAME QUERY, and only its DOS/GUID volume forms: `VOLUME_NAME_DOS` and
-/// `VOLUME_NAME_GUID` fail `err=5` while `VOLUME_NAME_NT`, `VOLUME_NAME_NONE` and
-/// `GetFileInformationByHandleEx(FileNameInfo)` all SUCCEED on the very same handle. The root
-/// cause is that `QueryDosDeviceW("C:")` is refused in the container, so the `\??\C:`
-/// object-manager symlink cannot be resolved — exactly what the DOS and GUID forms need and the NT
-/// form does not. A widest-possible ACL changes nothing either way, which is what shows this is not
-/// an ACL question at any level.
-///
-/// ⛔ SO THIS ROUTE IS REOPENED, NOT CLOSED. libuv hardcodes `VOLUME_NAME_DOS` (`fs.c`, the
-/// `GetFinalPathNameByHandleW` calls in `fs__realpath_handle`), so Node cannot take the NT route
-/// unpatched — but the NT path round-trips: `\\?\GLOBALROOT\Device\HarddiskVolumeN\...` OPENS
-/// from inside the jail, and a device-to-letter map can be computed OUTSIDE the container at launch,
-/// where `QueryDosDeviceW` still works. `--preserve-symlinks` below remains the shipped mitigation
-/// because it is measured and cheap, not because the native twin is unreachable.
-///
-/// THE HELD-OPEN SUB-EXPERIMENT IS SETTLED, by a second 120-cell measurement on a separate host:
-/// the ERROR_SHARING_VIOLATION cell appears in the UNJAILED arm too, so it was never a container
-/// effect, and the earlier `EPERM` was the name query throughout. Nothing here rests on it now.
-///
-/// THE CHEAPEST REPAIR NEEDS NO INJECTED TABLE. Open the handle — which always succeeds — ask for
-/// `VOLUME_NAME_NONE`, and re-prefix the drive letter the CALLER already supplied. That touches
-/// none of the refused calls. The `VOLUME_NAME_NT` route works too but wants a device-to-letter
-/// map built outside the container, so it is strictly more machinery for the same answer. The
-/// refusal is scoped to the VOLUME DEVICE and was pinned three ways: jailed,
-/// `CreateFileW("\\\\.\\C:")`, `GetVolumeNameForVolumeMountPointW` and `QueryDosDeviceW` all
-/// fail 5, while `GetLogicalDriveStringsW` and `GetVolumePathNameW` succeed in BOTH arms.
-///
-/// WHAT IT WOULD DO. `--preserve-symlinks-main` clears the realpath in `resolveMainPath`
-/// (`internal/modules/run_main.js`) and `--preserve-symlinks` clears the ones in `_findPath`
-/// and the ESM `finalizeResolution`, so module resolution never walks a path to the volume
-/// root. Measured on Windows CI (run 30463527647), that is sufficient: the entry point runs,
-/// dependency `require`s resolve, and a lifecycle script body completes under the real
-/// build-jail policy.
-///
-/// WHY IT IS NOT STAMPED ANYWAY — the disqualifying measurement. nub's DEFAULT node-linker is
-/// `Isolated` (`aube-linker/src/lib.rs`), which materialises each package in its own store
-/// cell and wires dependencies as symlinks. `--preserve-symlinks` makes a dependency resolve
-/// under its LINK path, so the parent-directory walk from `node_modules/<pkg>` skips the store
-/// cell that holds that package's private dependencies and lands on the project's top-level
-/// `node_modules` instead. Against a fixture mirroring the real
-/// `.aube/<dep_path>/node_modules/<name>` layout, a package whose private dependency is
-/// `bar@2.0.0` resolved `bar@1.0.0` — the unrelated top-level copy — and threw NOTHING:
-///
-/// ```text
-/// without the flag:  foo sees bar@2.0.0
-/// with the flag:     foo sees bar@1.0.0
-/// ```
-///
-/// A lifecycle script that builds against the wrong dependency version and exits 0 is worse
-/// than one that cannot start, so this stays unwired even now that a working repair exists
-/// beside it. (`preserve_symlinks_isolated_layout` is the standing regression test; if it ever
-/// stops reproducing, this becomes available again and the test says so.)
-///
-/// AND THE OBVIOUS SALVAGE IS CLOSED TOO — do not re-derive it. The wrong-version hazard above is
-/// attributable to `--preserve-symlinks` ALONE (`preserve_symlinks_isolated_layout` measures
-/// main-only leaving the same fixture correct), so `--preserve-symlinks-main` by itself looks like
-/// a repair that dodges the disqualification. It is not, because it does not repair enough:
-/// `Module._findPath` realpaths every NON-main resolution unless `--preserve-symlinks` is set, so
-/// main-only clears `resolveMainPath` and then every `require()` dies `EPERM` anyway. There is no
-/// cache to lean on — `toRealPath` memoises only what a SUCCESSFUL walk populated, and under this
-/// jail none succeeds. `realpath_unavailable_resolution` measures both halves (entry point runs,
-/// requires fail) against a process where realpath is refused exactly as the AppContainer refuses
-/// it. So the flag pair is the only configuration that WORKS and it is disqualified, while the one
-/// configuration that is not disqualified does not work.
-#[cfg(windows)]
-pub fn windows_realpath_node_options() -> String {
-    "--preserve-symlinks-main --preserve-symlinks".to_string()
-}
-
-/// Retained for the probe's differential arm: the refuted native-realpath shim, kept so
-/// `windows_realpath_ancestors` measures the SAME string that was rejected rather than a
-/// restatement of it, and so a future Node that grants `GetFinalPathNameByHandleW` under an
-/// AppContainer can be re-tested against it directly.
-///
-/// `data:` is load-bearing: `defaultResolve` short-circuits on that protocol before any
-/// filesystem access, which is the only way a preload can be delivered into a jail whose
-/// realpath is broken. `--import` preloads run AFTER `resolveMainPath`, which is why the
-/// entry point still needs `--preserve-symlinks-main` alongside.
-#[cfg(windows)]
-#[doc(hidden)]
-pub fn windows_native_realpath_shim_node_options() -> String {
-    // Percent-encoded because NODE_OPTIONS is whitespace-separated; only space and quote
-    // need it here.
-    let shim = "import fs from \"node:fs\";\
-                const n=fs.realpathSync.native;n.native=n;fs.realpathSync=n;"
-        .replace(' ', "%20")
-        .replace('"', "%22");
-    format!("--preserve-symlinks-main --import data:text/javascript,{shim}")
-}
-
-/// The JS the Windows build jail preloads into every confined Node. Kept as a FILE rather
-/// than a Rust string so it stays readable, greppable and lintable; the delivery encoding is
-/// [`build_jail_node_options`]'s job.
-///
-/// Not `#[cfg(windows)]`: only the STAMPING DECISION is Windows-specific (see
-/// [`windows_build_jail_node_options`]), and gating the bytes as well would make the
-/// composition untestable on the machines people develop on. An unused `include_str!` costs a
-/// string in the binary, not a behaviour.
-const WINDOWS_STDIO_SHIM: &str = include_str!("../backend/windows_stdio_shim.js");
-
-/// Drop whole-line comments and indentation before a payload is encoded. Applied to EVERY
-/// stamped shim — stdio, net gate and realpath — so the sources stay densely commented (which is
-/// where their provenance lives) while the delivered payload does not carry the prose.
+/// Drop whole-line comments and indentation before a payload is encoded. Applied to the stamped
+/// net-gate shim, so the source stays densely commented (which is where its provenance lives)
+/// while the delivered payload does not carry the prose. The stdio and realpath shims it also
+/// served were Windows-only and went with the AppContainer backend.
 ///
 /// The composed stamp must fit downstream tools' environment APIs as well as process launch.
-/// `stamped_node_options_fits_the_env_block` checks all three compressed preloads together.
+/// `stamped_node_options_fits_the_env_block` checks the compressed preload against that budget.
 ///
 /// WHOLE LINES ONLY, and NOT a step on the way to a character-level stripper. Deciding what a
 /// mid-line `/` means is context-sensitive grammar — regex-literal versus division is settled by
@@ -576,252 +382,6 @@ fn strip_js_comments(src: &str) -> String {
         "strip_js_comments is unsound where a string or template literal spans a newline"
     );
     out
-}
-
-/// The JS actually delivered to a confined Node.
-pub fn build_jail_stdio_preload_js() -> String {
-    strip_js_comments(WINDOWS_STDIO_SHIM)
-}
-
-/// The `NODE_OPTIONS` the Windows build jail STAMPS over any ambient value, delivering the
-/// `child_process` stdio shim ([`WINDOWS_STDIO_SHIM`]) and the per-package network gate
-/// ([`net_gate_node_options`]) as two `--import` terms on one value.
-///
-/// WHY A STAMP AND NOT A GRANT. The blocker is the OBJECT NAMESPACE, not a permission: under
-/// one policy and one grant set, `\\.\pipe\LOCAL\…` was CREATED while `\\.\pipe\…` was
-/// REFUSED (run 30473523088). Global NPFS is closed to a LowBox token, the AppContainer's
-/// private namespace is open, and libuv spells only the former. No filesystem rule reaches
-/// `\Device\NamedPipe` — a maximally loose policy still hung — so there is nothing to grant.
-///
-/// WHY IT MUST OVERWRITE. `NODE_OPTIONS` carries `--import`. Admitting the key to the
-/// lifecycle env allowlist ([`build_jail_env_allowed`]) is only sound because this value
-/// replaces whatever the user's environment held; the two are wired together deliberately and
-/// must be removed together if either goes.
-///
-/// `data:` is load-bearing twice over: `defaultResolve` short-circuits on that protocol before
-/// touching the filesystem, so the preload needs no grant of its own and cannot be tampered
-/// with by the package it confines.
-///
-/// REQUIRES `--import`, i.e. Node 18.18+ or 19+. The caller gates on the interpreter's version rather
-/// than stamping blind — an unknown flag in `NODE_OPTIONS` aborts Node at startup, which would
-/// turn a missing repair into a broken install.
-#[cfg(windows)]
-pub fn windows_build_jail_node_options(
-    package_name: Option<&str>,
-    package_version: Option<&str>,
-) -> String {
-    build_jail_node_options(package_name, package_version)
-}
-
-/// Explicit compatibility preload for `cpu-features@0.0.10`'s BuildCheck discovery.
-///
-/// BuildCheck repeats Visual Studio discovery through a PowerShell-hosted COM probe, even
-/// after Nub has already resolved and stamped the node-gyp toolchain. AppContainers cannot
-/// activate that COM server, so the caller supplies the same accepted toolchain metadata as a
-/// package-scoped compatibility adapter. It changes no raw or unconfined Node execution.
-#[cfg(windows)]
-pub fn windows_buildcheck_msvc_node_options(
-    vs_root: &str,
-    version: &str,
-    sdk_root: &str,
-    sdk_version: &str,
-) -> String {
-    let policy = serde_json::json!({
-        "vsRoot": vs_root,
-        "version": version,
-        "sdkRoot": sdk_root,
-        "sdkVersion": sdk_version,
-    });
-    let js = strip_js_comments(WINDOWS_BUILDCHECK_MSVC).replace(
-        BUILDCHECK_MSVC_PLACEHOLDER,
-        &serde_json::to_string(&policy).expect("a toolchain policy of strings always serializes"),
-    );
-    debug_assert!(
-        !js.contains(BUILDCHECK_MSVC_PLACEHOLDER),
-        "windows_buildcheck_msvc.js must contain its policy placeholder"
-    );
-    data_url_import(&js)
-}
-
-#[cfg(windows)]
-const WINDOWS_BUILDCHECK_MSVC: &str = include_str!("windows_buildcheck_msvc.js");
-#[cfg(windows)]
-const BUILDCHECK_MSVC_PLACEHOLDER: &str = "__NUB_BUILDCHECK_MSVC_JSON__";
-
-/// Explicit Node compatibility preloads for a Windows sandbox session.
-///
-/// Pass the result as the policy's constructed `NODE_OPTIONS` before acquisition.
-/// This adapts subprocess streams and realpath traversal without adding filesystem
-/// grants or the build jail's package-specific network gate. The OS policy remains
-/// the security boundary. Requires Node 18.18+ or 19+ (`--import`).
-///
-/// `roots` must name the caller's granted anchors and interpreter installation.
-/// The realpath adapter preserves dependency symlink resolution, but the main entry
-/// uses `--preserve-symlinks-main`: callers should supply its resolved path. Stream
-/// adaptation buffers synchronous output and rejects advanced IPC serialization
-/// and handle passing. This is opt-in, not unchanged raw Node execution.
-#[cfg(windows)]
-pub fn windows_node_compat_options(roots: &[std::path::PathBuf]) -> String {
-    format!(
-        "{} {}",
-        data_url_import(&strip_js_comments(WINDOWS_STDIO_SHIM)),
-        realpath_shim_node_options(roots)
-    )
-    .trim_end()
-    .to_owned()
-}
-
-/// Both build-jail preloads on one `NODE_OPTIONS`, as two `--import` terms.
-///
-/// ORDER IS NOT SIGNIFICANT, AND ONE THING IS WHAT MAKES THAT TRUE. Both shims patch the same
-/// `child_process` seams, and each is idempotent behind its own `globalThis` sentinel, so either
-/// order composes — measured 6/6 by `probe/net-gate/compose-check.cjs` and pinned by
-/// `tests/net_gate_semantics.rs`.
-///
-/// ⛔ THE LOAD-BEARING PART IS THAT NEITHER SHIM ACQUIRES `child_process` WITH A STATIC `import`.
-/// A builtin's ESM named exports are a snapshot taken when its facade is first created, so a
-/// shim that imports the module builds that facade from the ORIGINAL functions and freezes the
-/// OTHER shim's repair out of `import { spawnSync } from "node:child_process"`. While the net
-/// gate still imported it, this really was order-dependent: measured on Node 26, the stdio
-/// shim's repair reads PATCHED in the order below and ORIGINAL with the two terms swapped, with
-/// no error and no failing test either way. Both now acquire it through `createRequire`. ⛔ If a
-/// third preload joins this line, it assigns top-level exports only on a `require`d module.
-///
-/// Platform-independent for the same reason [`WINDOWS_STDIO_SHIM`] is: what is Windows-specific
-/// is the DECISION to stamp, which lives in [`windows_build_jail_node_options`] and in the
-/// lifecycle env allowlist that admits `NODE_OPTIONS` only there.
-pub fn build_jail_node_options(
-    package_name: Option<&str>,
-    package_version: Option<&str>,
-) -> String {
-    format!(
-        "{} {}",
-        data_url_import(&strip_js_comments(WINDOWS_STDIO_SHIM)),
-        net_gate_node_options(package_name, package_version)
-    )
-}
-
-/// The JS that repairs `fs.realpath*` inside a confined Node. Kept as a FILE for the same
-/// reasons [`WINDOWS_STDIO_SHIM`] is, and un-gated for the same reason: the repair is a Windows
-/// fact, but whether the walk reproduces Node's own resolution is not, and gating the bytes
-/// would leave the part most likely to break untestable off Windows.
-const WINDOWS_REALPATH_SHIM: &str = include_str!("../backend/windows_realpath_shim.js");
-
-/// The token the realpath shim reserves for the jail's granted anchors. Substituted, never
-/// appended — the shim reads it as a bare initializer, so a MISSING placeholder yields a module
-/// that throws on an undefined identifier and aborts the confined Node at startup rather than
-/// degrading to one whose tolerance rule is scoped to nothing.
-const REALPATH_ROOTS_PLACEHOLDER: &str = "__NUB_REALPATH_ROOTS_JSON__";
-
-/// The `--import` term repairing module resolution under the AppContainer, plus the
-/// `--preserve-symlinks-main` the entry point needs alongside it.
-///
-/// THE DEFECT. Node's JS `realpathSync` opens every path prefix as a TARGET, starting with the
-/// volume root. Bypass-traverse exempts INTERMEDIATE components of one open; it does not make
-/// an ancestor openable as a target. So `lstat 'C:\'` is refused and every `require()` of an
-/// absolute path dies `EPERM` on a file the same process can `readFileSync`.
-///
-/// WHY THIS EXISTS ALONGSIDE THE BACKEND'S ANCESTOR REPAIR, not instead of it. `windows.rs`
-/// writes a non-inherited traverse ACE on each ancestor the unprivileged user can write one
-/// on, and that repair is best-effort BY DESIGN: a refused ACE write is skipped. Above the
-/// profile nothing repairs the chain at all — no standard user can re-ACE `C:\` or `C:\Users`,
-/// and the capability-SID route that once covered them is kernel-refused and has since been
-/// deleted rather than kept as an inert hedge. This term is what keeps the
-/// jail working in exactly those cases, and it costs nothing when the ancestor repair did land:
-/// with every `lstat` succeeding, the tolerance rule never fires and the walk is Node's own.
-///
-/// WHY NOT THE PRESERVE-SYMLINKS PAIR, which also works. Under nub's default `Isolated` linker
-/// `--preserve-symlinks` resolves a dependency under its LINK path, so the parent walk skips the
-/// store cell holding that package's private dependencies and silently binds an unrelated
-/// top-level version — see [`windows_realpath_node_options`], which stays unwired for that
-/// reason. This repair keeps resolution intact instead: it only asserts that a component the
-/// jail refuses to interrogate is a plain directory, and those are exactly the ones above every
-/// grant.
-///
-/// `--preserve-symlinks-main` IS still required: `--import` preloads run inside
-/// `executeUserEntryPoint`, after `resolveMainPath` (`internal/modules/run_main.js`), so the
-/// entry point's own realpath happens before the shim exists. Its known residual — an entry
-/// reached THROUGH a symlink roots the `node_modules` walk at the link path — does not arise for
-/// a lifecycle spawn: aube hands the script a store-cell REAL path as `package_dir`
-/// (`materialized_pkg_dir`, used as `current_dir` in `install/lifecycle.rs`), so no lifecycle
-/// entry arrives through a link.
-///
-/// An empty `roots` yields an empty string: with nothing to scope the tolerance to, the shim
-/// would be inert anyway, and stamping an inert preload only widens the `NODE_OPTIONS` surface.
-///
-/// EVERY ROOT IS STAMPED IN BOTH SPELLINGS ON WINDOWS — see [`with_alternate_spellings`]. The
-/// shim's tolerance rule is a string prefix test, so a root and a walked component that name the
-/// same directory in different spellings do not match, and the tolerance silently never fires.
-/// Each root, plus its canonical filesystem spelling where that differs — Windows only.
-///
-/// WHY THIS IS NOT COSMETIC, measured. The shim decides whether to tolerate a refused component
-/// by testing whether it is a strict path-boundary PREFIX of a root, over lowercased
-/// `path.resolve` output. That is a STRING test, so two spellings of one directory do not match,
-/// and Windows hands a process both: `%TEMP%` arrives 8.3-SHORT (`C:\Users\RUNNER~1\…`) while the
-/// working directory and a junction's `readlink` target arrive LONG (`C:\Users\runneradmin\…`).
-/// Whichever spelling the roots carry, the walk meets the other one and the tolerance never
-/// fires — a silent, spelling-dependent failure rather than a loud one.
-///
-/// Measured both directions on one fixture, de-elevated, realpath preload stamped, run
-/// 30569197328: SHORT-form roots lose the bare-specifier-through-a-junction cell on
-/// `EPERM … lstat 'C:\Users\runneradmin'`; LONG-form roots lose that cell AND the absolute-entry
-/// cell AND npm's own entry, all on `EPERM … lstat 'C:\Users\RUNNER~1'`. Same fixture, same
-/// jail, opposite spellings, both thrown from `lstatOrTolerate`.
-///
-/// The `\\?\` verbatim prefix is a THIRD spelling of the same problem, already handled inside the
-/// shim (`stripLongPrefix`) after it measured as `native-longpath-granted=ERR`. This is the same
-/// bug class one level out, fixed where the roots are chosen rather than where they are compared,
-/// so the shim keeps one comparison rule instead of accreting per-spelling special cases.
-///
-/// Adding a spelling cannot widen the jail: the tolerance only ever asserts that a component the
-/// OS refused to interrogate is a plain directory, and both spellings name the same directory.
-/// Non-Windows is returned untouched — 8.3 aliasing is a Windows fact, and canonicalizing on a
-/// POSIX host would resolve symlinks and quietly change which paths the rule covers.
-fn with_alternate_spellings(roots: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
-    #[cfg(not(windows))]
-    {
-        roots.to_vec()
-    }
-    #[cfg(windows)]
-    {
-        let mut out: Vec<std::path::PathBuf> = Vec::with_capacity(roots.len() * 2);
-        for root in roots {
-            if !out.contains(root) {
-                out.push(root.clone());
-            }
-            // A root under a not-yet-created directory is the COMMON case for a build, and bare
-            // `canonicalize` errs on it — keeping only the as-built spelling, so a walk that meets
-            // the other spelling of an existing ancestor still refuses. Resolve the longest
-            // existing prefix and re-apply the tail lexically instead; the same shape Bazel uses.
-            let canonical = crate::matcher::path::canonicalize_including_nonexistent(root);
-            if !out.contains(&canonical) {
-                out.push(canonical);
-            }
-        }
-        out
-    }
-}
-
-pub fn realpath_shim_node_options(roots: &[std::path::PathBuf]) -> String {
-    if roots.is_empty() {
-        return String::new();
-    }
-    let roots = with_alternate_spellings(roots);
-    let json = serde_json::to_string(
-        &roots
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect::<Vec<_>>(),
-    )
-    .expect("a list of strings always serializes");
-    // Stripped BEFORE substitution so the injected roots never pass through the stripper; the
-    // assertion below then doubles as the check that stripping did not eat the placeholder line.
-    let js = strip_js_comments(WINDOWS_REALPATH_SHIM).replace(REALPATH_ROOTS_PLACEHOLDER, &json);
-    debug_assert!(
-        !js.contains(REALPATH_ROOTS_PLACEHOLDER),
-        "windows_realpath_shim.js must contain exactly one {REALPATH_ROOTS_PLACEHOLDER}"
-    );
-    format!("--preserve-symlinks-main {}", data_url_import(&js))
 }
 
 /// The JS enforcing per-package egress inside the confined Node. Kept as a FILE rather than a
@@ -889,7 +449,7 @@ pub fn net_gate_node_options(package_name: Option<&str>, package_version: Option
         "allow": super::preset::build_jail_net_allowed_for(package_name, package_version),
     });
 
-    // Stripped before substitution, for the reason given in `realpath_shim_node_options`.
+    // Stripped before substitution, for the reason given on `strip_js_comments`.
     let js = strip_js_comments(NET_GATE_SHIM).replace(
         NET_GATE_POLICY_PLACEHOLDER,
         &serde_json::to_string(&policy).expect("a policy of strings and bools always serializes"),
@@ -1244,30 +804,24 @@ mod tests {
     /// silently loads half a shim, or an option fragment Node aborts on. Both are quiet, so
     /// the encoding is asserted rather than eyeballed.
     #[test]
-    fn both_shims_compose_on_one_value() {
-        let stamped = build_jail_node_options(Some("chalk"), Some("5.6.2"));
+    fn the_stamped_shim_is_one_whole_import_term() {
+        let stamped = net_gate_node_options(Some("chalk"), Some("5.6.2"));
         let terms: Vec<&str> = stamped.split(' ').collect();
         assert_eq!(
             terms.len(),
-            4,
-            "expected two `--import <url>` pairs and nothing else: {stamped}"
+            2,
+            "expected one `--import <url>` pair and nothing else: {stamped}"
         );
         assert_eq!(terms[0], "--import");
-        assert_eq!(terms[2], "--import");
-        for url in [terms[1], terms[3]] {
-            assert!(url.starts_with("data:text/javascript;base64,"));
-        }
-        // The whole payload must arrive, not merely its opening — an identifier from each
+        assert!(terms[1].starts_with("data:text/javascript;base64,"));
+        // The whole payload must arrive, not merely its opening — an identifier from the
         // shim's tail is what makes a truncation visible. Decoded rather than matched against
         // a re-encoding, because base64 is offset-sensitive: the encoding of a substring is
         // not generally a substring of the encoding.
-        assert!(decode_import(terms[1]).contains("writableScratchDir"));
-        assert!(decode_import(terms[3]).contains("ERR_NUB_JAIL_NET_DENIED"));
-        for url in [terms[1], terms[3]] {
-            let source = decode_import(url);
-            assert!(source.contains("allowScripts"));
-            assert!(!source.contains("allowBuilds"));
-        }
+        let source = decode_import(terms[1]);
+        assert!(source.contains("ERR_NUB_JAIL_NET_DENIED"));
+        assert!(source.contains("allowScripts"));
+        assert!(!source.contains("allowBuilds"));
     }
 
     /// Round-trips an `--import data:…;base64,…` term back to its JS, so an assertion can be
@@ -1441,76 +995,33 @@ mod tests {
         );
     }
 
-    /// MSBuild must be able to copy the whole value through SetEnvironmentVariable, not merely
-    /// launch with it. Exercise deep roots as well as all three compressed preloads.
+    /// The stamp must fit a downstream tool's environment APIs as well as process launch, so the
+    /// budget is asserted on the composed value rather than left to the launcher to discover.
     #[test]
     fn stamped_node_options_fits_the_env_block() {
         const BUDGET: usize = 26_000;
-        let roots: Vec<std::path::PathBuf> = [
-            r"C:\Users\runneradmin\AppData\Local\nub\store\v1\registry.npmjs.org\esbuild\0.21.5\node_modules\esbuild",
-            r"C:\Users\runneradmin\work\monorepo\packages\web-app\node_modules\.pnpm\esbuild@0.21.5\node_modules\esbuild",
-            r"C:\Users\RUNNER~1\AppData\Local\Temp\nub-build-jail-scratch-8f3c1a2b",
-        ]
-        .iter()
-        .map(std::path::PathBuf::from)
-        .collect();
-        let stamped = format!(
-            "{} {}",
-            build_jail_node_options(Some("esbuild"), Some("0.21.5")),
-            realpath_shim_node_options(&roots)
-        );
+        let stamped = net_gate_node_options(Some("esbuild"), Some("0.21.5"));
         assert!(
             stamped.len() <= BUDGET,
-            "the stamped NODE_OPTIONS is {} chars, over the {BUDGET} budget for downstream Windows tools",
+            "the stamped NODE_OPTIONS is {} chars, over the {BUDGET} budget",
             stamped.len()
         );
 
         // Asserted on what the child will EVALUATE, not on the constants, so a call site that
         // forgets the stripper is caught alongside a stripper that stops working. Stripping must
-        // remove PROSE and nothing else: a tail identifier per shim proves the code survived past
-        // the point a truncation would bite, and the absence of a line-leading `//` proves the
-        // prose did not.
-        let payloads: Vec<String> = stamped
-            .split(' ')
-            .filter(|t| t.starts_with("data:"))
-            .map(decode_import)
-            .collect();
-        assert_eq!(payloads.len(), 3, "stdio, net gate and realpath: {stamped}");
-        // The realpath marker tracks the LAST thing in that shim, which is now the binding seam's
-        // Node-18 ctx branch — `fs.promises.realpath` moved into the middle when the seam landed
-        // and would no longer catch a truncation of everything after it.
-        for (payload, tail) in payloads.iter().zip([
-            "writableScratchDir",
-            "origCpSpawnSync",
-            "ctx.syscall = \"realpath\"",
-        ]) {
-            assert!(payload.contains(tail), "{tail} missing from a payload");
-            assert!(
-                !payload.lines().any(|line| line.starts_with("//")),
-                "whole-line comments must be gone from every delivered payload"
-            );
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn reusable_node_options_include_only_explicit_compatibility_preloads() {
-        let stdio = data_url_import(&strip_js_comments(WINDOWS_STDIO_SHIM));
-        assert_eq!(windows_node_compat_options(&[]), stdio);
-        let roots = vec![std::path::PathBuf::from(r"C:\sandbox fixture\project")];
-        let options = windows_node_compat_options(&roots);
-        assert_eq!(
-            options,
-            format!("{stdio} {}", realpath_shim_node_options(&roots))
+        // remove PROSE and nothing else: a tail identifier proves the code survived past the point
+        // a truncation would bite, and the absence of a line-leading `//` proves the prose did not.
+        let payload = decode_import(
+            stamped
+                .split(' ')
+                .find(|t| t.starts_with("data:"))
+                .expect("the stamp carries one data: payload"),
         );
-        assert_eq!(
-            options
-                .split_whitespace()
-                .filter(|word| *word == "--import")
-                .count(),
-            2
+        assert!(payload.contains("origCpSpawnSync"));
+        assert!(
+            !payload.lines().any(|line| line.starts_with("//")),
+            "whole-line comments must be gone from the delivered payload"
         );
-        assert!(options.encode_utf16().count() < 26_000);
     }
 
     #[test]

@@ -239,14 +239,6 @@ static NO_ENV_FILE: OnceLock<bool> = OnceLock::new();
 /// restarted child before user preloads run.
 const WATCH_ENV_GUARD_ENV: &str = "__NUB_WATCH_ENV_GUARD";
 
-/// Hidden internal re-entry that runs nub as the Windows co-package egress-proxy helper for the
-/// zero-privilege per-host sandbox funnel. `nub-sandbox`'s AppContainer backend launches nub with
-/// this as argv[1] and a base64(JSON) net policy as argv[2]; the dispatch in [`run`] hands off to
-/// `nub_sandbox::serve_windows_egress_helper`. Registered as the helper launch command in
-/// `main`. An internal re-entry belonging to its parent (like
-/// `__node-gyp-bootstrap`), so it is exempt from the fresh-invocation environment restore.
-pub(crate) const EGRESS_FUNNEL_HELPER_FLAG: &str = "__egress-funnel-helper";
-
 /// True iff the user passed `--no-env-file`. The authoritative kill-switch read
 /// by every env-file consumer ([`merge_child_env`], [`overlay_env_file_vars`],
 /// [`apply_env_file_vars`], and the auto-discovery load sites).
@@ -740,9 +732,7 @@ pub fn normalize_invocation_environment() {
     unsafe { capture_argv0_override() };
 
     let internal_reentry = env::args_os().nth(1).is_some_and(|arg| {
-        (cfg!(unix) && arg == "__pdeath-watch")
-            || arg == "__node-gyp-bootstrap"
-            || (cfg!(windows) && arg == EGRESS_FUNNEL_HELPER_FLAG)
+        (cfg!(unix) && arg == "__pdeath-watch") || arg == "__node-gyp-bootstrap"
     });
     if internal_reentry || matches!(Argv0::detect(), Argv0::Node) {
         return;
@@ -1725,15 +1715,6 @@ pub enum DropArg {
 
 /// Top-level entry point. Returns the process exit code.
 pub fn run() -> Result<i32> {
-    // The Windows co-package egress-proxy HELPER re-entry (zero-privilege per-host sandbox funnel).
-    // `nub-sandbox`'s AppContainer backend launches nub with this hidden flag and a base64(JSON)
-    // net policy; hand off before any argv0 detection or shim bookkeeping — it is an internal
-    // re-entry belonging to its parent, and it must not touch PATH-shim dirs. Never returns.
-    #[cfg(windows)]
-    if env::args().nth(1).as_deref() == Some(EGRESS_FUNNEL_HELPER_FLAG) {
-        nub_sandbox::serve_windows_egress_helper();
-    }
-
     // The macOS parent-death watcher (#480) re-invokes `current_exe()` under
     // the private launcher mode, with its `<child-pgid> <read-fd>` payload as
     // ordinary arguments. `current_exe()` is whatever NAME nub is running

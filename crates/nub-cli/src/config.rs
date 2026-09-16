@@ -124,7 +124,6 @@ pub(crate) const PROJECT_INIT_TEMPLATE: &str = r#"{
 
   // installs — applied only when Nub is the project's package manager
   // "install": {
-  //   "buildJail": true, // confine approved dependency build scripts
   //   "linker": "global-virtual-store", // global-virtual-store | isolated | hoisted
   //   "publicHoist": ["@types/*"],
   //   "minimumReleaseAge": "3d", // <integer><s|m|h|d|w>
@@ -160,7 +159,6 @@ pub(crate) const GLOBAL_INIT_TEMPLATE: &str = r#"{
 
   // installs — personal defaults for projects where Nub is the package manager
   // "install": {
-  //   "buildJail": true, // confine approved dependency build scripts
   //   "linker": "global-virtual-store", // global-virtual-store | isolated | hoisted
   //   "publicHoist": ["@types/*"],
   //   "minimumReleaseAge": "3d", // <integer><s|m|h|d|w>

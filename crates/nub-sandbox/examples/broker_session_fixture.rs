@@ -22,8 +22,6 @@ const WITHHELD: &str = "NUB_NATIVE_BROKER_WITHHELD";
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
-        #[cfg(windows)]
-        Some("--relay") => nub_sandbox::serve_windows_egress_helper(),
         Some("--child") => child(),
         _ => parent(),
     }
@@ -111,8 +109,6 @@ fn tunnel(token: &str, endpoint: &str, target: &str) -> (TcpStream, String) {
 }
 
 fn child() {
-    #[cfg(windows)]
-    assert!(nub_sandbox::windows_token_report().contains("is_appcontainer=true"));
     assert!(std::fs::read(std::env::var_os(WITHHELD).unwrap()).is_err());
     let marker = std::env::var(SECRET).unwrap();
     assert!(
@@ -259,7 +255,6 @@ fn upstream(
 
 fn parent() {
     let exe = std::env::current_exe().unwrap();
-    nub_sandbox::set_windows_egress_helper_command(vec![exe.clone().into(), "--relay".into()]);
     let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap();
     let root = tempfile::Builder::new()
         .prefix(".nub-broker-native-")

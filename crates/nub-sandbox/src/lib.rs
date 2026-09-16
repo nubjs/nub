@@ -13,25 +13,19 @@
 //! [`Prepared::status`], or [`Prepared::output`] so process cleanup and session resources
 //! retain their owners.
 //!
-//! Linux uses Landlock and seccomp, macOS uses Seatbelt, and Windows uses AppContainer.
-//! None requires an elevated helper, account creation, or an early bootstrap capability.
-//! Environment filtering constructs the child's environment rather than editing the parent.
-//! Unsupported platforms report filesystem and network enforcement as unavailable.
+//! **Enforcement is Linux-only.** Linux uses Landlock plus a seccomp `USER_NOTIF` supervisor,
+//! and needs no elevated helper, account creation, or early bootstrap capability. Every other
+//! platform reports filesystem and network enforcement as unavailable and refuses the launch
+//! rather than running the command unconfined. Environment filtering constructs the child's
+//! environment rather than editing the parent.
 //!
 //! # Embedder obligations and limits
 //!
 //! Supply toolchain read paths for interpreters installed outside system directories.
 //! Assign capabilities per configuration source; dependency-authored policy must not gain
 //! the dynamic environment or credential-broker capabilities of root-authored policy.
-//! Windows per-host networking requires a registered co-package egress helper through
-//! [`set_windows_egress_helper_command`], not a machine-wide loopback exemption.
-//! Its helper supports connection rules; unsupported TLS-inspection/broker policies fail closed.
-//!
-//! The build jail is a compatibility-oriented profile. In particular, its Windows full-disk
-//! catalog tier omits the AppContainer token and therefore has no OS filesystem/network
-//! boundary. Environment filtering still applies. Other reported losses are carried by
+//! The build jail is a compatibility-oriented profile. Reported losses are carried by
 //! [`Prepared::degradation`]; an embedder must surface them rather than claiming enforcement.
-//! Windows also rejects an already-shared working root that would defeat its allowlist.
 //!
 #![cfg_attr(
     all(test, windows),
@@ -102,36 +96,10 @@ pub mod matcher;
 pub mod policy;
 pub mod proxy;
 
-/// Python startup source repairing private-directory creation inside AppContainer.
-///
-/// Execute it from an embedder-owned `sitecustomize.py` available on `PYTHONPATH`.
-/// It preserves the protected owner/admin/system ACL and adds only the current
-/// package SID. Other mkdir modes and non-AppContainer processes are unchanged.
-/// Python isolated/no-site modes do not load this hook. This opt-in adapter adds
-/// no filesystem grants and cannot repair native descendants' device/IPC access.
-pub fn windows_python_compat_source() -> &'static str {
-    include_str!("backend/windows_python_compat.py")
-}
-
-/// What the kernel refused a confined launch, keyed by [`CommandSpec::audit_label`]. macOS
-/// answers from the unified log; every other host answers with an empty list. Failure path only.
-pub use backend::macos_denials;
-#[cfg(target_os = "windows")]
-pub use backend::windows_publish_appcontainer_read;
 pub use backend::{
     CommandArgs, CommandSpec, Degradation, Prepared, PreparedChild, PreparedSignalTarget, Sandbox,
     apply, cleanup,
 };
-// The Windows zero-privilege per-host egress FUNNEL seam: an embedder registers HOW to launch nub
-// as the co-package egress-proxy helper (`set_...`, OS-agnostic so nub-cli registers with no
-// `cfg`), and nub-cli dispatches its hidden re-entry to `serve_...` (Windows-only).
-pub use backend::set_windows_egress_helper_command;
-#[cfg(target_os = "windows")]
-pub use backend::{serve_windows_egress_helper, windows_token_report};
-#[cfg(target_os = "windows")]
-#[doc(hidden)]
-pub use backend::{windows_leaf_grant_redundant, windows_object_traverse_ace};
-
 /// The Linux enforcement suites' Landlock ABI skip gate. Test support, not an embedder API.
 #[cfg(target_os = "linux")]
 #[doc(hidden)]
@@ -143,15 +111,9 @@ pub use compiler::jail_private_home;
 pub use compiler::{
     CommandRunner, CompileCtx, CompileError, CompileWarning, DOWNLOAD_HOSTS,
     PACKAGE_NETWORK_ALLOWED, PROJECT_VIRTUAL_STORE_LEAF, ScopeCapabilities, build_jail_net_allowed,
-    build_jail_net_allowed_for, build_jail_node_options, build_jail_stdio_preload_js, compile,
-    compile_build_jail, compile_build_jail_with_global_virtual_store, compile_with_warnings,
-    download_hosts, net_gate_node_options, package_network_allowed, realpath_shim_node_options,
-};
-#[cfg(windows)]
-pub use compiler::{
-    windows_build_jail_node_options, windows_buildcheck_msvc_node_options,
-    windows_native_realpath_shim_node_options, windows_node_compat_options,
-    windows_realpath_node_options,
+    build_jail_net_allowed_for, compile, compile_build_jail,
+    compile_build_jail_with_global_virtual_store, compile_with_warnings, download_hosts,
+    net_gate_node_options, package_network_allowed,
 };
 pub use matcher::Homes;
 

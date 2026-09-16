@@ -29,17 +29,7 @@ mod reuse;
 // never become a second semver dialect.
 pub(crate) mod version_scope;
 
-/// Exposed on EVERY platform, unlike the stamp itself, so `stdio_shim_semantics` drives the
-/// payload that actually ships rather than the source file it is derived from — comment-stripping
-/// is part of the delivery, so testing the unstripped file would leave it unmeasured.
-pub use defaults::build_jail_stdio_preload_js;
-pub use defaults::{build_jail_node_options, net_gate_node_options, realpath_shim_node_options};
-#[cfg(windows)]
-pub use defaults::{
-    windows_build_jail_node_options, windows_buildcheck_msvc_node_options,
-    windows_native_realpath_shim_node_options, windows_node_compat_options,
-    windows_realpath_node_options,
-};
+pub use defaults::net_gate_node_options;
 pub use package_network::{
     PACKAGE_NETWORK_ALLOWED, build_jail_net_allowed, package_network_allowed,
 };
@@ -55,11 +45,6 @@ pub use resolve::{CommandRunner, ShellRunner};
 /// [`download_hosts`] is the accessor every consumer should read — it honours the dev-only
 /// catalog override; the `const` is the compiled floor behind it.
 pub use builtin_sets::{DOWNLOAD_HOSTS, download_hosts};
-
-/// Legacy secret-path classifier, re-exported for the Windows pure-allowlist control test.
-/// It is not emitted by the compiler; filesystem grants are literal positive entries.
-#[cfg(test)]
-pub(crate) use defaults::ENV_DENY_LEAF_GLOBS;
 
 use crate::matcher::path::Homes;
 use crate::policy::{Effect, EnvPolicy, FsPolicy, Inspection, NetPolicy, ProxyMode, SandboxPolicy};

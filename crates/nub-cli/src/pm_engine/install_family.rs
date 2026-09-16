@@ -436,7 +436,6 @@ fn finish_code_quieted(
 /// Map an engine result to nub's exit contract: success → 0, failure →
 /// rendered through the presentation layer + the engine's exit table.
 fn finish(result: miette::Result<()>) -> Result<i32> {
-    super::build_jail::report_jail_failures();
     match result {
         Ok(()) => Ok(0),
         Err(report) => Ok(present::emit_report(&report)),
@@ -1855,7 +1854,6 @@ fn run_engine(
         aube_util::diag::flush();
         result
     });
-    super::build_jail::report_jail_failures();
     match result {
         Ok(()) => Ok(0),
         // Frozen-drift on a gated yarn project: the install *would* rewrite

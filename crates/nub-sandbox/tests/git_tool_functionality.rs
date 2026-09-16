@@ -787,7 +787,7 @@ fn lfs_hook_startup_ladder(root: &Path, clone: &Path, policy: &nub_sandbox::Sand
                             .iter()
                             .map(|(key, value)| ((*key).into(), value.clone())),
                     );
-                    let sandbox = nub_sandbox::Sandbox::with_windows_native_compat(&policy)
+                    let sandbox = nub_sandbox::Sandbox::new(&policy)
                         .map_err(|error| format!("acquire: {error:?}"))?;
                     let prepared = sandbox
                         .prepare(

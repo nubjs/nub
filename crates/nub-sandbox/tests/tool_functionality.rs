@@ -215,10 +215,6 @@ fn git_global_config_updates_an_existing_xdg_config_and_its_lock() {
     let git = require_git();
     let confined_git =
         |program, args: &[&str], root: &Path, policy: &nub_sandbox::SandboxPolicy| {
-            // Test the config grant independently of Windows' raw null-device limit.
-            #[cfg(windows)]
-            let sandbox = Sandbox::with_windows_native_compat(policy).unwrap();
-            #[cfg(not(windows))]
             let sandbox = Sandbox::new(policy).unwrap();
             confined_in(&sandbox, program, args, root)
         };

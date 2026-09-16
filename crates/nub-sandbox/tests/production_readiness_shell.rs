@@ -66,7 +66,7 @@ fn msys_preserves_native_arguments_and_denied_file_paths() {
             .collect();
         let (shell, args) = tool_msys::command(&node, args, &project);
         let output = if confined {
-            let sandbox = Sandbox::with_windows_native_compat(&policy).unwrap();
+            let sandbox = Sandbox::new(&policy).unwrap();
             let prepared = sandbox
                 .prepare(
                     CommandSpec::new(shell)

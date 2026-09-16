@@ -289,14 +289,6 @@ fn specs() -> Vec<KeySpec> {
             set_empty: Some(|c| c.dlx.consent = Some(ImplicitDlx::Never)),
             is_empty: Some(|c| c.dlx.consent == Some(ImplicitDlx::Never)),
         },
-        KeySpec {
-            key: ConfigKey::InstallBuildJail,
-            name: "install.buildJail",
-            set: |c, t| c.install.build_jail = Some(t.is_multiple_of(2)),
-            matches: |c, t| c.install.build_jail == Some(t.is_multiple_of(2)),
-            set_empty: Some(|c| c.install.build_jail = Some(false)),
-            is_empty: Some(|c| c.install.build_jail == Some(false)),
-        },
     ]
 }
 

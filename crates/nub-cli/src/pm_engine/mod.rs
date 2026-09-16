@@ -51,8 +51,6 @@
 //! branding in the document body — info_family module doc) — which error
 //! with honest per-verb messages in their family dispatchers.
 
-pub mod build_jail;
-mod build_prefetch;
 mod bun_config;
 mod compat_db;
 pub mod config_scope;
@@ -62,8 +60,6 @@ pub mod identity;
 pub mod info_family;
 pub mod install_family;
 mod install_report;
-mod jail_bin;
-mod jail_msvc;
 pub mod log;
 pub mod min_release_age;
 pub mod output;
@@ -3932,7 +3928,6 @@ mod tests {
     /// settings lowered once and scoped two ways.
     fn both_axes() -> InstallConfig {
         InstallConfig {
-            build_jail: None,
             linker: Some(LinkerConfig::Hoisted),
             public_hoist: Some(vec!["@types/*".to_string()]),
             minimum_release_age: Some(std::time::Duration::from_secs(3600)),
