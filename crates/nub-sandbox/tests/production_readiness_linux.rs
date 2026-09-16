@@ -44,6 +44,7 @@ fn linux_production_child() {
         "inherited-fd" => inherited_fd_child(),
         "proc" => proc_child(),
         "sockets" => sockets_child(),
+        "dns-window" => dns_window_child(),
         "self-proc-race" => self_proc_race_child(),
         "late-speculative" => assert_unavailable(root.join("late-speculative/secret")),
         "dynamic-exec" => dynamic_exec_child(),
@@ -85,6 +86,10 @@ fn fixture() -> tempfile::TempDir {
 }
 
 fn policy(root: &Path, self_stat: bool) -> SandboxPolicy {
+    policy_net(root, self_stat, Value::Bool(false))
+}
+
+fn policy_net(root: &Path, self_stat: bool, net: Value) -> SandboxPolicy {
     let project = root.join("project");
     let mut fs = Map::new();
     fs.insert(project.display().to_string(), json!("rw"));
@@ -104,7 +109,7 @@ fn policy(root: &Path, self_stat: bool) -> SandboxPolicy {
     }
     let mut input = Map::new();
     input.insert("fs".into(), Value::Object(fs));
-    input.insert("net".into(), Value::Bool(false));
+    input.insert("net".into(), net);
     let ctx = CompileCtx::new(
         Homes {
             home: root.join("withheld-home"),
@@ -144,6 +149,53 @@ fn session(
 
 fn sandbox(root: &Path, case: &str, self_stat: bool, extra_env: &[(&str, String)]) -> Sandbox {
     session(policy(root, self_stat), root, case, extra_env)
+}
+
+/// The DNS observation window pins every IP datagram socket into a fixed 64-descriptor range,
+/// and `SECCOMP_ADDFD_FLAG_SETFD` installs at a chosen number with dup2 semantics — so the 65th
+/// socket has to go somewhere that is not on top of a live one.
+///
+/// ⛔ THIS IS WHAT WENT WRONG BEFORE THE GUARD, measured in a confined child: descriptors wrapped
+/// 960 → 965, SIX live sockets were silently replaced, and the process exited 0. `fstat`'s inode
+/// identifies a socket uniquely, so comparing it across the wrap needs no traffic at all — only a
+/// net axis fine-grained enough that `socket` is trapped.
+fn dns_window_child() {
+    const MADE: usize = 70;
+    const WINDOW: std::ops::Range<RawFd> = 960..1024;
+
+    let mut sockets = Vec::with_capacity(MADE);
+    for index in 0..MADE {
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+        assert!(fd >= 0, "socket {index} was refused under a net allowlist");
+        sockets.push((fd, socket_inode(fd)));
+    }
+
+    // ⛔ THE CONTROLS COME FIRST, because the assertion below passes trivially against a run that
+    // never filled the window. The window holds 64, so 70 sockets must overflow it: if they all
+    // fitted, the wrap was never exercised and the inode check proves nothing.
+    let windowed = sockets.iter().filter(|(fd, _)| WINDOW.contains(fd)).count();
+    assert!(
+        windowed <= 64,
+        "{windowed} sockets occupy a 64-slot window, so slots were reused while still live",
+    );
+    assert!(
+        MADE > windowed,
+        "every socket fitted inside the window, so saturation was never reached",
+    );
+
+    for (index, (fd, inode)) in sockets.iter().enumerate() {
+        assert_eq!(
+            socket_inode(*fd),
+            *inode,
+            "socket {index} on fd {fd} was silently replaced by a later one",
+        );
+    }
+}
+
+fn socket_inode(fd: RawFd) -> u64 {
+    let mut info: libc::stat = unsafe { std::mem::zeroed() };
+    assert_eq!(unsafe { libc::fstat(fd, &mut info) }, 0, "fstat on fd {fd}");
+    info.st_ino as u64
 }
 
 fn command(root: &Path) -> CommandSpec {
@@ -498,6 +550,19 @@ fn procfs_injection_exposes_only_the_requested_self_file() {
 fn net_false_closes_socket_and_io_uring_bypasses() {
     let root = fixture();
     let session = sandbox(root.path(), "sockets", false, &[]);
+    output(&session, root.path());
+}
+
+/// Saturating the DNS observation window must not cost the child a socket it still holds.
+#[test]
+fn a_saturated_dns_window_never_replaces_a_live_socket() {
+    let root = fixture();
+    let session = session(
+        policy_net(root.path(), false, json!(["example.com"])),
+        root.path(),
+        "dns-window",
+        &[],
+    );
     output(&session, root.path());
 }
 
