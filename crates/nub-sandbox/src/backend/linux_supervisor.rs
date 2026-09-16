@@ -389,6 +389,13 @@ fn notifier_program(
         Ins::Jump(jeq, nr(libc::SYS_recvmsg), "dnscheck", "n8"),
         Ins::Label("n8"),
     ];
+    // Signal scoping rides every supervised launch; see `SIGNAL_INTENT_NRS` for why it carries no
+    // gate of its own.
+    for (i, syscall) in SIGNAL_INTENT_NRS.iter().enumerate() {
+        let after: &'static str = SIGNAL_INTENT_LABELS[i];
+        p.push(Ins::Jump(jeq, nr(*syscall), "notify", after));
+        p.push(Ins::Label(after));
+    }
     if self_proc {
         p.push(Ins::Jump(
             jeq,
@@ -561,6 +568,9 @@ struct SupState {
     proxy_port: Option<u16>,
     /// The bearer the supervisor presents to the loopback proxy. Present iff `proxy_port` is.
     proxy_token: Option<String>,
+    /// The guardian's private process group — the confined tree, and the whole of it. Set after
+    /// the guardian starts, so it is `None` only for a state that never reached a launch.
+    tree_pgid: Option<libc::pid_t>,
 }
 
 impl SupState {
@@ -663,6 +673,7 @@ impl SupState {
             upstream_addr_be: upstream_resolver(),
             proxy_port: policy.proxy_port,
             proxy_token: policy.proxy_token,
+            tree_pgid: None,
         }
     }
 }
@@ -1340,6 +1351,35 @@ struct OpenHow {
 }
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 
+/// The signal-sending syscalls, notified on EVERY supervised launch and gated on nothing.
+///
+/// THE GAP THIS CLOSES: there is no PID namespace, so before this a confined command could signal
+/// any process sharing its uid — the user's editor, a sibling agent, or the nub process that
+/// launched it. Nothing else mediated them: the seccomp ceiling covers sockets and the keyring,
+/// and Landlock is a filesystem LSM that never sees a signal. This is the affordable half of the
+/// process isolation the mechanism deliberately does not otherwise claim (A2.3).
+///
+/// Unlike the fs set these are NOT conditioned on a policy carrying carve-outs. An fs deny is what
+/// makes brokering opens meaningful; signal scoping is meaningful for every confining policy, and
+/// signals are rare enough that the notification round trip never shows up in a workload.
+const SIGNAL_INTENT_NRS: &[libc::c_long] = &[
+    libc::SYS_kill,
+    libc::SYS_tkill,
+    libc::SYS_tgkill,
+    libc::SYS_pidfd_send_signal,
+    libc::SYS_rt_sigqueueinfo,
+    libc::SYS_rt_tgsigqueueinfo,
+];
+
+/// Fall-through labels for the signal dispatch chain, indexed for the same reason
+/// [`FS_INTENT_LABELS`] is: a hand-written parallel list desyncs silently.
+const SIGNAL_INTENT_LABELS: &[&str] = &["sig0", "sig1", "sig2", "sig3", "sig4", "sig5", "sig6"];
+const _: () = assert!(SIGNAL_INTENT_NRS.len() <= SIGNAL_INTENT_LABELS.len());
+
+fn is_signal_intent(nr: libc::c_long) -> bool {
+    SIGNAL_INTENT_NRS.contains(&nr)
+}
+
 fn is_fs_intent(nr: libc::c_long) -> bool {
     FS_INTENT_NRS.contains(&nr) || FS_INTENT_LEGACY_NRS.contains(&nr)
 }
@@ -1665,6 +1705,89 @@ fn child_fd_path(tid: u32, fd: RawFd) -> Option<Vec<u8>> {
         return None;
     }
     Some(out)
+}
+
+/// Refuse a signal aimed outside the confined process tree.
+///
+/// THE TREE IS EXACTLY THE GUARDIAN'S PROCESS GROUP, and that equivalence is what makes this
+/// decidable at all: `linux_lifetime::program(true)` answers `setsid` and `setpgid` with EPERM,
+/// and a seccomp filter is inherited across both fork and exec, so every descendant is placed in
+/// the group once at launch and can never leave it. A target's pgid is therefore a sound answer
+/// to "is this one of ours" — if that freeze is ever relaxed, this check goes with it.
+///
+/// AN ALLOWED SIGNAL IS ANSWERED WITH `CONTINUE`, NOT PERFORMED HERE, and that is safe for exactly
+/// the reason the fs broker's `CONTINUE` is not (A6): every argument this decision reads is a
+/// SCALAR captured in the notification at trap time, so there is no pointer for the kernel to
+/// re-read out of child memory afterwards — which is the entirety of the fs TOCTOU. Performing the
+/// signal here instead would also rewrite the delivered `si_pid` to the supervisor's, which job
+/// control and anything else inspecting the sender would see.
+///
+/// ⚠️ RESIDUAL, stated rather than hidden: a target can exit and its pid be recycled between this
+/// check and the kernel's delivery. `pidfd_open` pins `struct pid` across the lookup, so the
+/// process judged is the process resolved; what is left is the window after the reply, and closing
+/// it needs an attacker to land an OUT-OF-TREE process on one specific recycled pid — every
+/// process it can fork itself inherits the group and is in-tree.
+fn handle_signal_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
+    let nr = req.data.nr as libc::c_long;
+    let a = &req.data.args;
+    let Some(tree) = state.tree_pgid else {
+        // No private group means there is nothing to scope against, and refusing every signal
+        // would break a command legitimately signalling its own children. Unreachable from
+        // `spawn_supervised_with_ready`, which starts a guardian before handing the state over.
+        reply_continue(nfd, req.id);
+        return;
+    };
+    let in_tree = |pid: libc::pid_t| -> bool {
+        if pid <= 0 {
+            return false;
+        }
+        // Pin the target first: `pidfd_open` holds the `struct pid` the NUMBER is allocated from,
+        // so the process cannot exit and have its pid reused underneath the `getpgid` below.
+        let pinned = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::c_long, 0) };
+        let answer = unsafe { libc::getpgid(pid) } == tree;
+        if pinned >= 0 {
+            unsafe { libc::close(pinned as RawFd) };
+        }
+        answer
+    };
+    let allowed = match nr {
+        n if n == libc::SYS_kill => match a[0] as libc::pid_t {
+            // The caller's own group, which the freeze above makes ours by construction.
+            0 => true,
+            // Every process the uid may signal. Nothing in tree needs it and nothing narrows it.
+            -1 => false,
+            target if target < -1 => -target == tree,
+            target => in_tree(target),
+        },
+        // `pidfd_send_signal` names its target by DESCRIPTOR, so resolve it the way procfs
+        // reports it; a descriptor naming no live process is refused rather than passed through.
+        n if n == libc::SYS_pidfd_send_signal => {
+            fdinfo_pid(req.pid, a[0] as RawFd).is_some_and(in_tree)
+        }
+        // `tkill`/`tgkill`/`rt_sigqueueinfo`/`rt_tgsigqueueinfo` all take a positive pid or tgid
+        // in argument zero. Threads share their thread group's process group, so one lookup
+        // answers the thread-directed forms too.
+        _ => in_tree(a[0] as libc::pid_t),
+    };
+    if allowed {
+        reply_continue(nfd, req.id);
+    } else {
+        suplog!("SUP DENY signal nr={nr} target={} -> EPERM", a[0] as i64);
+        reply(nfd, req.id, -libc::EPERM);
+    }
+}
+
+/// The pid a descriptor names, read out of the CHILD's `fdinfo`. `None` when the descriptor is not
+/// a pidfd at all, or names a process already reaped — procfs spells that `Pid:\t-1`.
+fn fdinfo_pid(tid: u32, fd: RawFd) -> Option<libc::pid_t> {
+    let text = std::fs::read_to_string(format!("/proc/{tid}/fdinfo/{fd}")).ok()?;
+    let value = text
+        .lines()
+        .find_map(|line| line.strip_prefix("Pid:"))?
+        .trim()
+        .parse::<libc::pid_t>()
+        .ok()?;
+    (value > 0).then_some(value)
 }
 
 fn handle_fs_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
@@ -2421,9 +2544,16 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
             continue;
         }
 
-        // Write-intent syscalls: the deny-inside-allow broker. Only reached when the filter was
-        // built with the write branch (a policy carried carve-outs), so this is inert for the
-        // build jail.
+        // Signal-sending syscalls: scoped to the guardian's process group. Trapped on every
+        // supervised launch, so this arm is always live.
+        if is_signal_intent(nr) {
+            handle_signal_intent(&state, nfd, &req);
+            continue;
+        }
+
+        // Filesystem syscalls: the deny-inside-allow broker, plus the metadata calls Landlock has
+        // no hook for. Reached only when the filter was built with that branch — a policy carrying
+        // carve-outs, which since the secret floor is every read-granting policy.
         if is_fs_intent(nr) {
             handle_fs_intent(&state, nfd, &req);
             continue;
@@ -3244,7 +3374,7 @@ pub(super) fn spawn_supervised_with_ready(
         policy.read_broker(),
         !policy.self_proc.is_empty(),
     );
-    let state = SupState::new(policy);
+    let mut state = SupState::new(policy);
     let control = Arc::new(WorkerControl::new()?);
 
     if launch.argv.is_empty() {
@@ -3254,6 +3384,9 @@ pub(super) fn spawn_supervised_with_ready(
         ));
     }
     let guardian = super::unix_guardian::UnixGuardian::start()?;
+    // The confined tree, handed to the supervisor so `handle_signal_intent` can scope to it. Read
+    // after `start`, which is where the private group becomes real.
+    state.tree_pgid = Some(guardian.process_group_id());
     let lifetime_filter = super::linux_lifetime::program(true)?;
     let (c2p_read, c2p_write) = pipe_owned()?;
     let (p2c_read, p2c_write) = pipe_owned()?;
