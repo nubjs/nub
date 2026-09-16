@@ -187,7 +187,14 @@ fn sandbox(root: &std::path::Path, case: &str) -> Sandbox {
         },
         project,
         ScopeCapabilities::approved(),
-        BTreeMap::new(),
+        // ⛔ Seeded, not empty, for the reason spelled out in `self_proc.rs`: the confined child
+        // asserts `SANDBOX_PARENT_SECRET` is absent, and with an empty map that assertion could
+        // never fail — no `vars` entry admits this name, so its absence now means the env axis
+        // withheld it rather than that nobody ever set it.
+        BTreeMap::from([(
+            "SANDBOX_PARENT_SECRET".to_string(),
+            "must-not-reach-the-child".to_string(),
+        )]),
     );
     let permissions = if case == "tooldirs" {
         for (key, suffix) in [

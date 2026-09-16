@@ -18,7 +18,16 @@ fn context(root: &Path) -> CompileCtx {
         },
         root.into(),
         ScopeCapabilities::approved(),
-        BTreeMap::new(),
+        // ⛔ THE AMBIENT MAP MUST CONTAIN THE WITHHELD SECRET OR THE ASSERTION ABOUT IT IS A
+        // TEST THAT CANNOT FAIL. `WITHHELD_AMBIENT_SECRET` is asserted absent from the confined
+        // child below; with an EMPTY map here nothing ever offered it to the compiler, so that
+        // assertion held identically whether or not the env axis enforced anything at all — it
+        // was checking that a variable nobody sets is unset. Seeded here, it is a real ambient
+        // value that no `vars` entry admits, so the child sees it only if filtering breaks.
+        BTreeMap::from([(
+            "WITHHELD_AMBIENT_SECRET".to_string(),
+            "must-not-reach-the-child".to_string(),
+        )]),
     )
 }
 
