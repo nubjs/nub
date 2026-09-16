@@ -3029,10 +3029,43 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
             };
             let is_dgram = (typ & 0xff) == libc::SOCK_DGRAM;
             if is_dgram {
-                af.flags = SECCOMP_ADDFD_FLAG_SETFD;
-                let slot = dns_slot % 64;
-                dns_slot = dns_slot.wrapping_add(1);
-                af.newfd = DNS_FD_LO + slot;
+                // ⛔ NEVER CLOBBER A LIVE DESCRIPTOR. `SETFD` has dup2 semantics, so installing
+                // the 65th datagram socket at the slot the first still occupies REPLACES it —
+                // silently, with no error to the child, whose descriptor simply becomes a
+                // different socket. MEASURED before this guard: 70 sockets in one confined child,
+                // fds wrapping 960→965, SIX of them silently replaced, and the child exited 0.
+                // A plain file the child happened to open at 960 was equally at risk.
+                //
+                // `close(2)` is deliberately not trapped — tracking slot liveness properly is the
+                // exact cost this window exists to avoid — so the only way to know whether a slot
+                // is free is to ask the child's own descriptor table. Only EBADF means free; any
+                // other answer is treated as occupied, which errs toward the safe direction.
+                //
+                // Falling back to a plain ADDFD when every slot is live is the deliberate trade.
+                // That socket lands outside the window, so its replies are never peeked and any
+                // name it resolves goes unobserved — and THAT direction fails CLOSED, because an
+                // unattributed connect presents the IP literal, which the proxy's host gate
+                // refuses without an explicit address rule. Clobbering fails silently and wrongly.
+                let tgid = tgid_of(req.pid);
+                let mut chosen = None;
+                for step in 0..64u32 {
+                    let slot = (dns_slot + step) % 64;
+                    let probe = duplicate_child_fd(tgid, (DNS_FD_LO + slot) as RawFd);
+                    if matches!(probe, Err(libc::EBADF)) {
+                        chosen = Some(slot);
+                        break;
+                    }
+                }
+                match chosen {
+                    Some(slot) => {
+                        dns_slot = slot.wrapping_add(1);
+                        af.flags = SECCOMP_ADDFD_FLAG_SETFD;
+                        af.newfd = DNS_FD_LO + slot;
+                    }
+                    None => suplog!(
+                        "SUP DNS-window full: socket installed outside it, replies unobserved"
+                    ),
+                }
             }
             let mut newfd = ioctl_notif(nfd, notif_addfd(), &mut af as *mut _ as *mut libc::c_void);
             unsafe { libc::close(s) };
