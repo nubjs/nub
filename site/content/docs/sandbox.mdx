@@ -407,15 +407,15 @@ A plain key is required and fails compilation if the variable is absent. Make it
 
 ## `secrets`
 
-The `secrets` axis carries sensitive environment variables. The child receives the real value, but Nub scrubs that value from the command's stdout and stderr before forwarding them — so a leaked secret does not persist in a terminal or CI log — and never prints a secret's value in its own errors. A secret can also be brokered so the child never holds the real value at all. Like `vars`, each entry becomes an environment variable in the child; the only difference is protection.
+The `secrets` axis carries sensitive environment variables. Like `vars`, each entry becomes an environment variable in the child; the difference is protection — Nub keeps a secret's value out of its own diagnostics, and a secret can be brokered so the child never holds the real value at all.
 
 <Callout type="warn">
-Scrubbing the command's output is log hygiene, not containment: it removes secret values from stdout and stderr as Nub forwards them, but a command that writes a secret elsewhere — the network, a file, a descriptor Nub does not forward — can still surface it. Scrubbing engages when output is captured to a file, a pipe, or a CI log; on an interactive terminal the value is shown as it would be on a plain run.
+Nub does not scrub the command's own output. A command that prints a secret shows it in stdout or stderr exactly as it would on a plain run, and it can surface one by other routes too — the network, a file, a descriptor. Brokering is the containment tool: a secret the child never holds cannot be printed or sent anywhere but the broker's own host.
 </Callout>
 
 ### Name the secrets
 
-The array form lists the secrets to pass through. The child receives the real value; Nub scrubs it from the command's output.
+The array form lists the secrets to pass through. The child receives the real value, kept out of Nub's own diagnostics; broker it (below) to withhold the value from the child entirely.
 
 ```jsonc
 { "secrets": ["DATABASE_URL", "STRIPE_KEY"] }
@@ -449,7 +449,7 @@ Add `brokerTo` and the child receives a random marker instead of the real value 
 
 ## Credential brokering
 
-Brokering lets a command authenticate to a host without ever holding the real secret. At startup Nub reads the secret and replaces it, in the child's environment, with a random marker. The child uses the variable however it likes — any header, query parameter, or body. When Nub's proxy sees that marker in a request to a brokered host, it swaps in the real value; a marker sent anywhere else stays an inert hash.
+Brokering lets a command authenticate to a host without ever holding the real secret. At startup Nub reads the secret and replaces it, in the child's environment, with a random marker. The child uses the variable however it likes — typically an `Authorization` or other request header. When Nub's proxy sees that marker in a request header to a brokered host, it swaps in the real value; a marker sent anywhere else stays an inert hash.
 
 ```jsonc
 {
@@ -460,7 +460,7 @@ Brokering lets a command authenticate to a host without ever holding the real se
 }
 ```
 
-Because the child never holds the secret, a dependency that reads `GITHUB_TOKEN` and posts it to another host leaks only the marker. Brokering is placement-agnostic — Nub substitutes the marker wherever the child already put it, and never attaches or rewrites a header itself. Brokering does not open the network: a brokered host must also appear in `net`.
+Because the child never holds the secret, a dependency that reads `GITHUB_TOKEN` and posts it to another host leaks only the marker. Nub substitutes the marker in request header values — where credentials normally travel — and never attaches or rewrites a header itself. A marker placed in the URL or request body is left untouched, so it stays an inert hash there; keep a brokered credential in a header. Brokering does not open the network: a brokered host must also appear in `net`.
 
 ## Composition and nesting
 
@@ -481,6 +481,7 @@ The sandbox is a **policy boundary over paths and destinations**. It stops a com
 - **A denied path still reports that it exists.** An open on a denied file fails with "permission denied", not "no such file". The sandbox controls access, not visibility, so a command can still learn the shape of the filesystem around it.
 - **Other processes stay visible.** A confined command runs in the machine's own process namespace, so it can list what else is running. It cannot read another process's memory or environment, but it can see that the process is there.
 - **The network is filtered, not separated.** Egress is decided per destination, by hostname or address. The command shares the machine's network interfaces rather than getting its own.
+- **A hostname allow is checked by TLS server name, and for cleartext by address.** For an HTTPS destination Nub matches the server name in the handshake, so the allow is per hostname. Plain HTTP and raw TCP carry no server name, so the gate falls back to the address the allowed hostname resolved to — another site sharing that address is then reachable over cleartext, even against an explicit deny. Prefer HTTPS where a host shares an address with names you have not allowed.
 
 A confined command also cannot install a second sandbox inside itself: Linux allows one syscall supervisor per process, so `nub sandbox` inside another `nub sandbox` — or inside another tool that installs one — is refused rather than run half-confined.
 
