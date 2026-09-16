@@ -34,6 +34,7 @@ use crate::policy::{Effect, FsAccess, FsRuleSet};
 use std::collections::BTreeSet;
 
 mod self_proc;
+use std::cell::RefCell;
 use std::ffi::CString;
 use std::io;
 use std::mem::MaybeUninit;
@@ -723,23 +724,70 @@ fn tgid_of(tid: u32) -> u32 {
     tid
 }
 
-/// Read `len` bytes at `off` from the target's `/proc/<pid>/mem`.
+thread_local! {
+    /// One open `/proc/<tid>/mem` per thread the supervisor has seen.
+    ///
+    /// WHY A CACHE AT ALL: opening and closing this descriptor is two syscalls on the hottest
+    /// path in the broker, and with reads brokered that path runs on EVERY `openat` the child
+    /// makes. Measured at 20 000 opens from a confined `node`, the whole notification cost
+    /// ~88 µs against ~6 µs unbrokered, so every syscall removed here is paid back 20 000 times.
+    ///
+    /// WHY IT IS SAFE: a procfs mem descriptor is bound to the task it was opened for and is
+    /// never re-resolved, so a recycled tid cannot make it read a different process. It simply
+    /// starts failing, and a failed read evicts the entry and reopens. The supervisor runs one
+    /// notification at a time per thread, so the borrowed descriptor cannot be closed underneath
+    /// a caller.
+    static CHILD_MEM: RefCell<Vec<(u32, OwnedFd)>> = const { RefCell::new(Vec::new()) };
+}
+
+const CHILD_MEM_CAP: usize = 8;
+
+fn child_mem_fd(tid: u32) -> Option<RawFd> {
+    CHILD_MEM.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some((_, fd)) = cache.iter().find(|(seen, _)| *seen == tid) {
+            return Some(fd.as_raw_fd());
+        }
+        let path = CString::new(format!("/proc/{tid}/mem")).ok()?;
+        let raw = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+        if raw < 0 {
+            return None;
+        }
+        if cache.len() >= CHILD_MEM_CAP {
+            cache.remove(0);
+        }
+        cache.push((tid, unsafe { OwnedFd::from_raw_fd(raw) }));
+        Some(raw)
+    })
+}
+
+fn forget_child_mem(tid: u32) {
+    CHILD_MEM.with(|cache| cache.borrow_mut().retain(|(seen, _)| *seen != tid));
+}
+
+/// `pread` the child's memory through the cached descriptor, reopening once if the cached one has
+/// gone stale. Returns `-1` on failure, matching the raw `pread` contract its callers expect.
 unsafe fn read_child_mem(pid: u32, off: u64, buf: &mut [u8]) -> isize {
-    let path = CString::new(format!("/proc/{pid}/mem")).unwrap();
-    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY) };
-    if fd < 0 {
-        return -1;
+    for attempt in 0..2 {
+        let Some(fd) = child_mem_fd(pid) else {
+            return -1;
+        };
+        let n = unsafe {
+            libc::pread(
+                fd,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len(),
+                off as libc::off_t,
+            )
+        };
+        // EIO/ESRCH means the descriptor outlived its task; a genuine EFAULT (an unmapped page)
+        // is the caller's business and must not cost a reopen on every boundary read.
+        if n >= 0 || attempt == 1 || !matches!(errno(), libc::EIO | libc::ESRCH) {
+            return n;
+        }
+        forget_child_mem(pid);
     }
-    let n = unsafe {
-        libc::pread(
-            fd,
-            buf.as_mut_ptr() as *mut libc::c_void,
-            buf.len(),
-            off as libc::off_t,
-        )
-    };
-    unsafe { libc::close(fd) };
-    n
+    -1
 }
 
 fn ioctl_notif(nfd: RawFd, req: libc::c_ulong, arg: *mut libc::c_void) -> libc::c_int {
@@ -1327,11 +1375,7 @@ fn read_child_str(tid: u32, addr: u64, max: usize) -> Option<Vec<u8>> {
     // Latent until reads were brokered: write-intent opens are rare and their paths are usually
     // mid-heap, so the boundary case almost never came up. Every `openat` goes through here now.
     const PAGE: u64 = 4096;
-    let path = CString::new(format!("/proc/{tid}/mem")).ok()?;
-    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY) };
-    if fd < 0 {
-        return None;
-    }
+    let fd = child_mem_fd(tid)?;
     let mut out: Vec<u8> = Vec::with_capacity(128);
     let mut cur = addr;
     let found = loop {
@@ -1363,7 +1407,6 @@ fn read_child_str(tid: u32, addr: u64, max: usize) -> Option<Vec<u8>> {
             }
         }
     };
-    unsafe { libc::close(fd) };
     found?;
     // BYTES, not a `String`. A filename is an arbitrary NUL-free byte string on Linux, and this
     // used to end in `String::from_utf8(...).ok()` — so a legal non-UTF-8 name read as a FAULT
@@ -1422,6 +1465,21 @@ fn resolve_parent(tid: u32, dirfd: i32, path_in: &[u8]) -> Result<(RawFd, Vec<u8
     if base.is_empty() || base == b"." || base == b".." {
         return Err(libc::EINVAL);
     }
+    // FAST PATH. An ABSOLUTE directory part is a complete cache key on its own: it depends on
+    // neither the child's cwd nor a descriptor number the child can close and reuse. The slow
+    // path below costs a `realpath` (an lstat/readlink per component), an `openat2` and a
+    // `readlink`; a hit costs a `readlink` and a `dup`, and a confined process opens thousands of
+    // files from a handful of directories.
+    //
+    // The canonical path is RE-READ from the cached descriptor on every hit rather than stored,
+    // so the policy is always checked against where that descriptor points RIGHT NOW. A child
+    // that swaps a symlink under a cached directory can therefore only redirect the operation to
+    // somewhere this broker also approves — never past it.
+    if dirpart.first() == Some(&b'/')
+        && let Some((fd, canon)) = cached_parent(&dirpart)
+    {
+        return Ok((fd, canon, base));
+    }
     let dp = dirpart.strip_prefix(b"/".as_slice()).unwrap_or(&dirpart);
     let mut joined = start.clone();
     joined.push(b'/');
@@ -1452,12 +1510,66 @@ fn resolve_parent(tid: u32, dirfd: i32, path_in: &[u8]) -> Result<(RawFd, Vec<u8
         return Err(errno());
     }
     match fd_path(pfd) {
-        Some(canon) => Ok((pfd, canon, base)),
+        Some(canon) => {
+            if dirpart.first() == Some(&b'/') {
+                remember_parent(&dirpart, pfd);
+            }
+            Ok((pfd, canon, base))
+        }
         None => {
             unsafe { libc::close(pfd) };
             Err(libc::EIO)
         }
     }
+}
+
+thread_local! {
+    /// Resolved parent directories, keyed by the absolute directory path the child NAMED (not by
+    /// its realpath — that is what the cached descriptor already encodes).
+    static PARENT_DIRS: RefCell<Vec<(Vec<u8>, OwnedFd)>> = const { RefCell::new(Vec::new()) };
+}
+
+const PARENT_DIRS_CAP: usize = 64;
+
+/// A fresh descriptor to a cached parent, plus where it points right now. `None` on a miss, and
+/// on a stale entry — procfs spells a vanished directory with a ` (deleted)` suffix, and a
+/// descriptor to a directory that has been replaced would otherwise keep answering for the old
+/// inode forever.
+fn cached_parent(dirpart: &[u8]) -> Option<(RawFd, Vec<u8>)> {
+    PARENT_DIRS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let index = cache.iter().position(|(key, _)| key == dirpart)?;
+        let canon = fd_path(cache[index].1.as_raw_fd());
+        match canon {
+            Some(canon) if !canon.ends_with(b" (deleted)") => {
+                let dup =
+                    unsafe { libc::fcntl(cache[index].1.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+                if dup < 0 {
+                    cache.remove(index);
+                    return None;
+                }
+                Some((dup, canon))
+            }
+            _ => {
+                cache.remove(index);
+                None
+            }
+        }
+    })
+}
+
+fn remember_parent(dirpart: &[u8], pfd: RawFd) {
+    let dup = unsafe { libc::fcntl(pfd, libc::F_DUPFD_CLOEXEC, 0) };
+    if dup < 0 {
+        return;
+    }
+    PARENT_DIRS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= PARENT_DIRS_CAP {
+            cache.remove(0);
+        }
+        cache.push((dirpart.to_vec(), unsafe { OwnedFd::from_raw_fd(dup) }));
+    });
 }
 
 /// Join a verified parent's canonical path and a final component into the full canonical path.
