@@ -119,6 +119,14 @@ pub enum Decline {
     /// A statically traced `new Worker(...)`. Its chunk is loaded by URL from inside
     /// the program rather than imported by another chunk, and `new Worker` does not
     /// take a `data:` URL.
+    ///
+    /// [`Mode::Sea`] only: a worker is a fresh realm, and `Module.registerHooks` is
+    /// per-thread, so a worker started on a payload URL cannot load it — measured on
+    /// 22.20, 24.19 and 26.7 as `ERR_UNSUPPORTED_ESM_URL_SCHEME`. The single-executable
+    /// loader closes that by replacing `Worker` with one that starts a payload target
+    /// on a generated bootstrap which reinstalls the hooks first. Nothing equivalent
+    /// exists for the no-extract launcher, where the container is the `data:` URL this
+    /// reason names.
     StaticWorker,
     /// A payload file that is not a generated `.mjs` chunk — a `--sourcemap=linked`
     /// map is the one that occurs in practice, and a linked map cannot be fetched
@@ -325,7 +333,7 @@ pub fn classify(
     if !inputs.sealed_module_graph {
         return Ok(Err(Decline::UnsealedGraph));
     }
-    if inputs.worker_roots != 0 || inputs.worker_wrappers != 0 {
+    if mode == Mode::Inline && (inputs.worker_roots != 0 || inputs.worker_wrappers != 0) {
         return Ok(Err(Decline::StaticWorker));
     }
     // `Linked` needs a file no container can reach. Everything else is a question
@@ -841,6 +849,58 @@ mod tests {
     /// made before [`rewrite_chunk`] shifts the code it describes, so admitting it
     /// there hands an error tracker a map that resolves to the wrong line and says
     /// nothing about it.
+    /// Only the no-extract launcher declines a worker chunk.
+    ///
+    /// The asymmetry is the whole point and it is easy to revert by accident, so it
+    /// is pinned from both sides. The single-executable container serves the worker
+    /// through a `Worker` replacement in its loader, which starts a payload target
+    /// on a bootstrap that reinstalls the module hooks in the new realm. The
+    /// no-extract launcher has no such route: its chunks live in `data:` URLs, and
+    /// `new Worker` does not take one.
+    ///
+    /// Both counters are exercised because a payload can carry either without the
+    /// other — `worker_wrappers` is empty when the generated entry collides away,
+    /// and a `worker_roots` of zero with a wrapper present is what a shim build
+    /// looks like.
+    #[test]
+    fn only_the_no_extract_launcher_declines_a_worker_chunk() {
+        let files = vec![
+            AppFile::plain(
+                nub_core::compile::COMPILE_BOOTSTRAP_NAME.to_string(),
+                b"// bootstrap\n".to_vec(),
+            ),
+            AppFile::plain("main.mjs".to_string(), b"console.log(1);\n".to_vec()),
+        ];
+        let decline = |roots, wrappers, mode| {
+            let mut inputs = sealed("main.mjs");
+            inputs.worker_roots = roots;
+            inputs.worker_wrappers = wrappers;
+            classify(&files, &inputs, mode)
+                .expect("classification succeeds")
+                .err()
+        };
+
+        for (roots, wrappers) in [(1, 1), (1, 0), (0, 1)] {
+            assert_eq!(
+                decline(roots, wrappers, Mode::Sea),
+                None,
+                "{roots} worker roots and {wrappers} wrappers in a single-executable: its \
+                 loader starts a payload worker on a hook-installing bootstrap"
+            );
+            assert_eq!(
+                decline(roots, wrappers, Mode::Inline),
+                Some(Decline::StaticWorker),
+                "{roots} worker roots and {wrappers} wrappers in a no-extract launcher: a \
+                 worker chunk is loaded by URL and `new Worker` does not take a `data:` URL"
+            );
+        }
+        assert_eq!(
+            decline(0, 0, Mode::Inline),
+            None,
+            "a payload with no worker at all is not what this declines"
+        );
+    }
+
     #[test]
     fn each_container_declines_only_the_source_maps_it_cannot_honour() {
         use bundle::SourcemapMode::{External, Inline as InlineMap, Linked, None as NoMap};

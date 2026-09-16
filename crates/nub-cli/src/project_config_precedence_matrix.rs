@@ -91,6 +91,15 @@ fn specs() -> Vec<KeySpec> {
             is_empty: None,
         },
         KeySpec {
+            key: ConfigKey::Prefix,
+            name: "prefix",
+            set: |c, t| c.prefix = Some(strings(t)),
+            matches: |c, t| c.prefix == Some(strings(t)),
+            // An empty command names no program, so the parser refuses it.
+            set_empty: None,
+            is_empty: None,
+        },
+        KeySpec {
             key: ConfigKey::Preload,
             name: "preload",
             set: |c, t| c.preload = Some(strings(t)),
@@ -319,7 +328,7 @@ fn ordinal(key: ConfigKey) -> usize {
         ConfigKey::InstallMinimumReleaseAge => 18,
         ConfigKey::InstallMinimumReleaseAgeExclude => 19,
         ConfigKey::DlxConsent => 20,
-        ConfigKey::InstallBuildJail => 21,
+        ConfigKey::Prefix => 21,
     }
 }
 

@@ -27,9 +27,13 @@ jobs:
         # Prereleases are excluded: the rolling `canary` release is deleted and
         # recreated by every nightly canary build, so its asset counts reset and
         # would corrupt the between-snapshot deltas.
+        # `--slurp` folds every page into one outer array; `gh api --paginate --jq`
+        # instead runs the filter per page and emits one array per line, which
+        # broke the parse below the day the release list crossed 100 entries
+        # (2026-09-01 through 2026-09-11 have no snapshot for that reason).
         run: |
-          gh api repos/nubjs/nub/releases --paginate \
-            --jq '[.[] | select(.prerelease | not) | {tag: .tag_name, assets: [.assets[] | {name: .name, download_count: .download_count}]}]' \
+          gh api repos/nubjs/nub/releases --paginate --slurp \
+            | jq '[.[][] | select(.prerelease | not) | {tag: .tag_name, assets: [.assets[] | {name: .name, download_count: .download_count}]}]' \
             > /tmp/gh-releases.json
 
       - name: Fetch npm download counts

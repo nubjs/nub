@@ -23,6 +23,8 @@ on:
       - 'tests/compile-hide-console/**'
       - '.github/workflows/compile-native.yml'
   pull_request:
+    # PR CI is opt-in — request a run with `gh pr edit <n> --add-label ci`. Rationale: ci.yml.
+    types: [labeled]
     branches: [main]
     paths:
       - 'Cargo.toml'
@@ -54,6 +56,7 @@ env:
 jobs:
   native-host:
     name: Native islands (${{ matrix.platform }})
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     strategy:
       fail-fast: false
       matrix:
@@ -294,6 +297,7 @@ jobs:
   # would not exercise musl's dynamic-loader, N-API addon, or compiled app path.
   native-musl:
     name: Native islands (linux-x64-musl)
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     permissions:

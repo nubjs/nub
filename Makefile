@@ -77,8 +77,10 @@ install-dev: addon-fast qos-global
 	  test -x $$t/fast/nub || { echo "install-dev: no binary at $$t/fast/nub" >&2; exit 1; }; \
 	  ln -sf $$t/fast/nub $(BIN_DIR)/nub-dev; \
 	  ln -sf $$t/fast/nub $(BIN_DIR)/nubx-dev; \
+	  ln -sf $$t/fast/nub $(BIN_DIR)/nubr-dev; \
 	  echo "Installed: $(BIN_DIR)/nub-dev -> $$t/fast/nub"; \
-	  echo "Installed: $(BIN_DIR)/nubx-dev -> $$t/fast/nub"
+	  echo "Installed: $(BIN_DIR)/nubx-dev -> $$t/fast/nub"; \
+	  echo "Installed: $(BIN_DIR)/nubr-dev -> $$t/fast/nub"
 	@echo ""
 	@nub-dev --version
 
@@ -128,8 +130,8 @@ build-slots-on:
 	@rm -f $${NUB_BUILD_SEM_DIR:-$$HOME/.cache/nub/build-sem}/off && echo "build slots ON"
 
 uninstall-dev:
-	rm -f $(BIN_DIR)/nub-dev $(BIN_DIR)/nubx-dev
-	@echo "Removed nub-dev and nubx-dev from $(BIN_DIR)"
+	rm -f $(BIN_DIR)/nub-dev $(BIN_DIR)/nubx-dev $(BIN_DIR)/nubr-dev
+	@echo "Removed nub-dev, nubx-dev and nubr-dev from $(BIN_DIR)"
 
 test:
 	$(CARGO) test
@@ -206,7 +208,11 @@ version:
 	@# nub-launcher is also its own workspace and records nub-core's inlined
 	@# version, so every version bump must refresh its lock before --locked builds.
 	@cd crates/nub-launcher && cargo update -p nub-core --precise $(V)
-	@echo "✓ All packages, Cargo.toml, all three Cargo.lock files, and runtime/version.mjs set to $(V)"
+	@# nub-phantom is the fourth workspace: it depends on nub-phantom-core and
+	@# nub-phantom-scan by path, and ci.yml checks it --locked, so its lock must
+	@# record the stamped versions too (v0.9.1 shipped without this line and went red).
+	@cd crates/nub-phantom && cargo update -p nub-phantom-core -p nub-phantom-scan --precise $(V)
+	@echo "✓ All packages, Cargo.toml, all four Cargo.lock files, and runtime/version.mjs set to $(V)"
 
 # Verify version consistency across npm packages, Cargo.toml, and version.mjs,
 # AND that @oxc-project/runtime (the emit-helper runtime) is exact-pinned and
@@ -244,9 +250,9 @@ version-check:
 			if (types.version !== v) errors.push('npm/nub-types/package.json has ' + types.version + ', expected ' + v); \
 		} catch { errors.push('missing or unreadable npm/nub-types/package.json'); } \
 		try { \
-			const loader = JSON.parse(fs.readFileSync('npm/loader/package.json', 'utf8')); \
-			if (loader.version !== v) errors.push('npm/loader/package.json has ' + loader.version + ', expected ' + v); \
-			for (const [dep, ver] of Object.entries(loader.optionalDependencies || {})) { \
+			const runner = JSON.parse(fs.readFileSync('npm/runner/package.json', 'utf8')); \
+			if (runner.version !== v) errors.push('npm/runner/package.json has ' + runner.version + ', expected ' + v); \
+			for (const [dep, ver] of Object.entries(runner.optionalDependencies || {})) { \
 				if (ver !== v) errors.push(dep + ' optionalDependency pinned at ' + ver + ', expected ' + v); \
 				const pkg = 'npm/' + dep.replace('@nubjs/', '') + '/package.json'; \
 				try { \
@@ -254,9 +260,9 @@ version-check:
 					if (p.version !== v) errors.push(pkg + ' has ' + p.version + ', expected ' + v); \
 				} catch { errors.push('missing or unreadable ' + pkg); } \
 			} \
-			const lrt = (loader.dependencies || {})['@oxc-project/runtime']; \
-			if (!lrt) errors.push('npm/loader/package.json: @oxc-project/runtime missing from dependencies'); \
-		} catch { errors.push('missing or unreadable npm/loader/package.json'); } \
+			const runnerOxc = (runner.dependencies || {})['@oxc-project/runtime']; \
+			if (!runnerOxc) errors.push('npm/runner/package.json: @oxc-project/runtime missing from dependencies'); \
+		} catch { errors.push('missing or unreadable npm/runner/package.json'); } \
 		const cargo = fs.readFileSync('Cargo.toml', 'utf8'); \
 		const cm = cargo.match(/^version = \x22([^\x22]*)\x22/m); \
 		if (!cm) errors.push('Cargo.toml: workspace version line not found'); \

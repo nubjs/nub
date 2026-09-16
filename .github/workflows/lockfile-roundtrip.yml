@@ -34,6 +34,8 @@ name: Lockfile round-trip
 
 on:
   pull_request:
+    # PR CI is opt-in — request a run with `gh pr edit <n> --add-label ci`. Rationale: ci.yml.
+    types: [labeled]
     branches: [main]
     paths:
       - "tests/conformance/**"
@@ -79,7 +81,7 @@ jobs:
   conformance-pr:
     name: drop-in round-trip, tight set (ubuntu)
     # Skip the scheduled run — the nightly job covers the full set.
-    if: github.event_name != 'schedule'
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (github.event_name != 'schedule')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -118,7 +120,7 @@ jobs:
   # ── Nightly: full conformance matrix + full conversion matrix ─────────────
   conformance-nightly:
     name: drop-in round-trip, full matrix (ubuntu)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -152,7 +154,7 @@ jobs:
 
   conversion-nightly:
     name: cross-format conversion, full matrix (ubuntu)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -193,7 +195,7 @@ jobs:
   # write-path mutation), so this matrix is npm/pnpm/bun and skips the yarn pin.
   mutation-nightly:
     name: lockfile mutation differential, full matrix (ubuntu)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     permissions:
       contents: read

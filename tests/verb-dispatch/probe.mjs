@@ -1,4 +1,4 @@
-// Verb-dispatch probe: prove `nub` and `nubx` both dispatch correctly when the
+// Verb-dispatch probe: prove `nub`, `nubx` and `nubr` all dispatch correctly when the
 // platform package ships ONE binary.
 //
 // The platform packages used to ship two byte-identical copies of the 45 MB binary,
@@ -50,7 +50,7 @@ const hostPkg = path.join(root, "node_modules", "@nubjs", "nub-host");
 fs.mkdirSync(path.join(launcher, "bin"), { recursive: true });
 fs.mkdirSync(path.join(hostPkg, "bin"), { recursive: true });
 
-for (const f of ["nub", "nubx", "launch.js"]) {
+for (const f of ["nub", "nubx", "nubr", "launch.js"]) {
   const dest = path.join(launcher, "bin", f);
   fs.copyFileSync(path.join(repo, "npm", "nub", "bin", f), dest);
   // npm sets 0o755 on every `bin`-field entry at install time regardless of the mode in
@@ -85,7 +85,9 @@ shipped.length === 1 && shipped[0] === `nub${exe}`
 
 // ── helpers ───────────────────────────────────────────────────────────────────────
 const NUBX_MARK = "Run a tool from";       // nubx --help
+const NUBR_MARK = "run TypeScript on Node"; // nubr --help (runtime/nubr.mjs's usage)
 const NUB_MARK = "all-in-one";             // nub --help
+const VERBS = ["nub", "nubx", "nubr"];
 
 // Merge both streams and fold the exit status into the label. A silent failure here
 // (non-executable stub, missing binary) otherwise reads as an empty string, which says
@@ -93,6 +95,7 @@ const NUB_MARK = "all-in-one";             // nub --help
 function verbOf(res) {
   const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;
   if (out.includes(NUBX_MARK)) return "nubx";
+  if (out.includes(NUBR_MARK)) return "nubr";
   if (out.includes(NUB_MARK)) return "nub";
   const why = res.error ? res.error.message : `exit=${res.status}`;
   return `??(${why}: ${out.replace(/\s+/g, " ").trim().slice(0, 80) || "<no output>"})`;
@@ -105,9 +108,9 @@ const runNode = (stub, env = {}) =>
 
 // ── 1. the Node launcher path — Windows takes this on EVERY call ─────────────────
 console.log(`== node launcher path (${process.platform}) ==`);
-for (const [stub, want] of [["nub", "nub"], ["nubx", "nubx"]]) {
+for (const stub of VERBS) {
   const got = verbOf(runNode(stub));
-  got === want ? ok(`node bin/${stub} -> ${want} mode`) : no(`node bin/${stub} -> ${got}, want ${want}`);
+  got === stub ? ok(`node bin/${stub} -> ${stub} mode`) : no(`node bin/${stub} -> ${got}, want ${stub}`);
 }
 
 // ── 2. the healed fast path — POSIX only (heal is a no-op on Windows) ────────────
@@ -118,11 +121,11 @@ if (!isWin) {
   console.log("== healed fast path (posix) ==");
   const binDir = path.join(root, "bin");
   fs.mkdirSync(binDir, { recursive: true });
-  for (const v of ["nub", "nubx"]) fs.symlinkSync(path.join(launcher, "bin", v), path.join(binDir, v));
+  for (const v of VERBS) fs.symlinkSync(path.join(launcher, "bin", v), path.join(binDir, v));
   const env = { ...process.env, PATH: `${binDir}${path.delimiter}${process.env.PATH}` };
   const call = (v) => spawnSync(path.join(binDir, v), ["--help"], { encoding: "utf8", env });
 
-  for (const v of ["nub", "nubx"]) {
+  for (const v of VERBS) {
     const first = verbOf(call(v));
     first === v ? ok(`${v} call 1 -> ${v} mode`) : no(`${v} call 1 -> ${first}`);
 
@@ -130,11 +133,11 @@ if (!isWin) {
     healed.startsWith("#!/bin/sh")
       ? ok(`${v} entry healed to sh trampoline`)
       : no(`${v} entry not healed: ${healed.slice(0, 40)}`);
-    // nub needs no assignment (it is the default); nubx must carry one.
-    if (v === "nubx") {
-      healed.includes("__NUB_ARGV0='nubx'")
-        ? ok("nubx trampoline carries __NUB_ARGV0")
-        : no(`nubx trampoline missing __NUB_ARGV0: ${healed.split("\n")[1]?.slice(0, 90)}`);
+    // nub needs no assignment (it is the default); every other verb must carry one.
+    if (v !== "nub") {
+      healed.includes(`__NUB_ARGV0='${v}'`)
+        ? ok(`${v} trampoline carries __NUB_ARGV0`)
+        : no(`${v} trampoline missing __NUB_ARGV0: ${healed.split("\n")[1]?.slice(0, 90)}`);
     }
 
     const second = verbOf(call(v));

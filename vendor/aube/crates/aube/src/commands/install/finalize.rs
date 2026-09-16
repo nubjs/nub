@@ -4,7 +4,8 @@ use super::bin_linking::{
 };
 use super::dep_selection::DepSelection;
 use super::lifecycle::{
-    JailBuildPolicy, run_dep_lifecycle_scripts, run_root_lifecycle, unreviewed_dep_builds,
+    JailBuildPolicy, run_dep_lifecycle_scripts, run_importer_lifecycle, run_link_lifecycle_scripts,
+    trash_failed_optional_links, unreviewed_dep_builds,
 };
 use super::side_effects_cache::{
     SideEffectsCacheConfig, SideEffectsCacheLocation, side_effects_cache_root,
@@ -60,6 +61,9 @@ pub(super) struct FinalizePhaseInput<'a> {
     pub(super) strict_dep_builds_setting: bool,
     pub(super) ignore_scripts: bool,
     pub(super) skip_root_lifecycle: bool,
+    /// The lockfile read was npm's, so a `file:` directory link carries
+    /// npm's link build pass ([`run_link_lifecycle_scripts`]).
+    pub(super) npm_link_lifecycle: bool,
     pub(super) workspace_filter_empty: bool,
     pub(super) dep_selection: DepSelection,
     pub(super) cli_flags: &'a [(String, String)],
@@ -81,6 +85,7 @@ fn dep_build_policy_hash(
     build_policy: &aube_scripts::BuildPolicy,
     default_trust_floor: &super::default_trust::DefaultTrustFloor,
     node_version: Option<&str>,
+    shell_id: &str,
 ) -> String {
     let policy = build_policy.fingerprint();
     let floor = default_trust_floor.fingerprint();
@@ -95,6 +100,15 @@ fn dep_build_policy_hash(
     hasher.update(floor.as_bytes());
     hasher.update(&(engine.len() as u64).to_le_bytes());
     hasher.update(engine.as_bytes());
+    // The shell the builds run under, for the engine's reason: output from
+    // another shell can be wrong (`cmd.exe` exits 0 having written `${VAR}`
+    // literally), so a shell change must widen the scan. The platform default
+    // adds nothing, so a hash written before this existed still matches and an
+    // upgrade does not force a full rescan everywhere.
+    if shell_id != aube_scripts::PLATFORM_DEFAULT_SHELL_ID {
+        hasher.update(&(shell_id.len() as u64).to_le_bytes());
+        hasher.update(shell_id.as_bytes());
+    }
     hasher.finalize().to_hex().to_string()
 }
 
@@ -247,6 +261,7 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
         strict_dep_builds_setting,
         ignore_scripts,
         skip_root_lifecycle,
+        npm_link_lifecycle,
         workspace_filter_empty,
         dep_selection,
         cli_flags,
@@ -259,6 +274,39 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
     } = input;
 
     let placements_ref = stats.hoisted_placements.as_ref();
+
+    // Regenerate every `.bin/` shim against post-build targets. A build can
+    // replace a bin — a JS launcher becomes a native binary (esbuild, #394)
+    // — and the link phase shimmed it as `node <target>` before any script
+    // ran, so the shim now wraps a native binary and fails; and a bin a
+    // link's `prepare` generates did not exist to shim at all.
+    // `create_bin_shim` re-classifies each target and emits a direct-exec
+    // symlink/wrapper for the ones that turned native. Shared by the
+    // dependency build pass and npm's link build pass below.
+    let relink_bins = |graph: &aube_lockfile::LockfileGraph| -> miette::Result<()> {
+        let preserved = remove_managed_bin_links(managed_bin_links)?;
+        let relinked = link_all_bins(LinkAllBinsInput {
+            project_dir: cwd,
+            settings_ctx,
+            modules_dir_name,
+            aube_dir,
+            graph,
+            virtual_store_dir_max_length,
+            placements: placements_ref,
+            ws_dirs,
+            manifests,
+            manifest,
+            node_linker,
+            has_workspace,
+            virtual_store_only,
+            ignore_scripts,
+            has_any_allow_rule: build_policy.has_any_allow_rule(),
+            floor_may_allow_any: default_trust_floor.may_allow_any(),
+            preserved: Some(&preserved),
+        })?;
+        remove_unclaimed_preserved_bin_links(managed_bin_links, &preserved, &relinked)?;
+        Ok(())
+    };
 
     // Tear down the progress display before running post-link lifecycle
     // scripts or printing the final summary — scripts write directly to
@@ -324,8 +372,12 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
     }
 
     let filtered_install = !workspace_filter_empty || dep_selection.is_filtered();
-    let dep_build_policy_hash =
-        dep_build_policy_hash(build_policy, default_trust_floor, node_version);
+    let dep_build_policy_hash = dep_build_policy_hash(
+        build_policy,
+        default_trust_floor,
+        node_version,
+        &aube_scripts::resolved_shell_id(),
+    );
     let lifecycle_delta_filter = if ignore_scripts {
         None
     } else {
@@ -408,41 +460,46 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
         }
         phase_timings.record("dep_lifecycle", phase_start.elapsed());
 
-        // Regenerate every `.bin/` shim against the post-build targets. A
-        // build can replace a bin — a JS launcher becomes a native binary
-        // (esbuild, #394) — and the link phase shimmed it as `node <target>`
-        // before this phase ran, so the shim now wraps a native binary and
-        // fails. `create_bin_shim` re-classifies each target and emits a
-        // direct-exec symlink/wrapper for the ones that turned native.
-        //
         // Gated on `package_contents_changed`, NOT on the script count: a
         // `sideEffectsCache` restore (default on) recreates the package dir
         // with the already-native bin and returns a zero script count, yet
         // still needs the shim regenerated.
         if lifecycle_outcome.package_contents_changed {
             let phase_start = std::time::Instant::now();
-            let preserved = remove_managed_bin_links(managed_bin_links)?;
-            let relinked = link_all_bins(LinkAllBinsInput {
-                project_dir: cwd,
-                settings_ctx,
-                modules_dir_name,
-                aube_dir,
-                graph: graph_for_link,
-                virtual_store_dir_max_length,
-                placements: placements_ref,
-                ws_dirs,
-                manifests,
-                manifest,
-                node_linker,
-                has_workspace,
-                virtual_store_only,
-                ignore_scripts,
-                has_any_allow_rule: build_policy.has_any_allow_rule(),
-                floor_may_allow_any: default_trust_floor.may_allow_any(),
-                preserved: Some(&preserved),
-            })?;
-            remove_unclaimed_preserved_bin_links(managed_bin_links, &preserved, &relinked)?;
+            relink_bins(graph_for_link)?;
             tracing::debug!("phase:relink_bins {:.1?}", phase_start.elapsed());
+            phase_timings.record("relink_bins", phase_start.elapsed());
+        }
+    }
+
+    // 7a. npm's link build pass, between the dependency builds and the
+    //     root's own hooks, where npm runs it. Same gates as 7b, minus the
+    //     root-lifecycle skip: a link target is not the root.
+    if npm_link_lifecycle && !ignore_scripts && !virtual_store_only {
+        let phase_start = std::time::Instant::now();
+        let outcome =
+            run_link_lifecycle_scripts(cwd, modules_dir_name, graph_for_link, lifecycle_manifests)
+                .await?;
+        phase_timings.record("link_lifecycle", phase_start.elapsed());
+        if !outcome.failed_optional.is_empty() {
+            // A failed optional link leaves the tree, its bins with it, and
+            // the state write below carries it as not attempted so the next
+            // install retries the build.
+            let mut pruned = graph_for_link.clone();
+            trash_failed_optional_links(
+                cwd,
+                modules_dir_name,
+                &mut pruned,
+                &outcome.failed_optional,
+            )?;
+            builds_not_attempted
+                .extend(outcome.failed_optional.iter().map(|link| link.spec.clone()));
+            let phase_start = std::time::Instant::now();
+            relink_bins(&pruned)?;
+            phase_timings.record("relink_bins", phase_start.elapsed());
+        } else if outcome.ran {
+            let phase_start = std::time::Instant::now();
+            relink_bins(graph_for_link)?;
             phase_timings.record("relink_bins", phase_start.elapsed());
         }
     }
@@ -464,12 +521,13 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
                 aube_scripts::LifecycleHook::PostInstall,
                 aube_scripts::LifecycleHook::Prepare,
             ] {
-                run_root_lifecycle(
+                run_importer_lifecycle(
+                    cwd,
                     &project_dir,
+                    importer_path,
                     modules_dir_name,
                     importer_manifest,
                     hook,
-                    root_provenance,
                 )
                 .await?;
             }
@@ -835,7 +893,9 @@ mod tests {
             policy(),
             super::super::default_trust::DefaultTrustFloor::disabled(),
         );
-        let h = |v: Option<&str>| dep_build_policy_hash(&policy, &floor, v);
+        let h = |v: Option<&str>| {
+            dep_build_policy_hash(&policy, &floor, v, aube_scripts::PLATFORM_DEFAULT_SHELL_ID)
+        };
 
         assert_ne!(
             h(Some("22.15.0")),
@@ -851,6 +911,23 @@ mod tests {
             h(None),
             h(Some("22.15.0")),
             "an unresolved version must not collide with a resolved one"
+        );
+    }
+
+    #[test]
+    fn dep_build_policy_hash_tracks_a_non_default_lifecycle_shell() {
+        // Output from another shell can be wrong rather than stale, so a shell
+        // change has to widen the lifecycle scan the way a Node major switch does.
+        let (policy, floor) = (
+            policy(),
+            super::super::default_trust::DefaultTrustFloor::disabled(),
+        );
+        let h = |shell: &str| dep_build_policy_hash(&policy, &floor, Some("26.5.0"), shell);
+        let other = if cfg!(windows) { "sh" } else { "bash" };
+        assert_ne!(
+            h(aube_scripts::PLATFORM_DEFAULT_SHELL_ID),
+            h(other),
+            "a lifecycle shell change must widen the lifecycle scan"
         );
     }
 

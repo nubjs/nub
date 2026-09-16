@@ -64,6 +64,24 @@ The compatibility tier routes module loading through an async `module.register()
 - **[Modern APIs](/docs/runtime/modern-apis)** — modern globals and built-ins (Temporal, URLPattern, WebSocket, EventSource, node:sqlite, and more) are present, polyfilled or unflagged per Node-version band.
 - **[Workers](/docs/runtime/workers)** — the browser-shape `Worker` global runs your `.ts` entry points, wrapping `node:worker_threads`.
 - **[Web Storage](/docs/runtime/web-storage)** — `localStorage` / `sessionStorage` behavior and the opt-in that backs persistent storage.
+- **[Threadpool](/docs/runtime/threadpool)** — libuv's threadpool is sized to the cores available to the process instead of Node's fixed four, with the extra threads at a lower priority on Linux.
+
+## Memory-constrained launches
+
+On Linux x64, direct Node launches use a 16 MiB V8 semi-space within the following cgroup memory budgets. This includes file runs and Node-backed `nub exec`/`nubx` binaries.
+
+| Node release | Memory budget, inclusive |
+|---|---|
+| 22.23.2 | 512 MiB–1 GiB |
+| 24.20.0 | 512 MiB |
+
+The ranges are benchmarked, not a universal larger-heap policy. Node 24.20.0 already chooses 16 MiB immediately above 512 MiB. Larger Node 22 budgets and Node 26 keep stock defaults because the larger nursery regressed production-mode SSR, despite improving some allocation-heavy fixtures. Budgets below 512 MiB are excluded because smaller-container pressure tests found additional OOM kills. Other releases and platforms also keep Node's defaults.
+
+Nub checks both the leaf cgroup limit that Node uses for sizing and tighter ancestor limits. A tighter ancestor cannot enable tuning for an oversized or unlimited leaf, and any effective budget below 512 MiB disables it. This changes the main heap only; Workers retain their own defaults and explicit `resourceLimits`.
+
+Nub skips this tuning when Node options or preloads are supplied through argv, `NODE_OPTIONS`, or project configuration, or when PnP, a command prefix, or an external environment loader owns startup. Unknown memory limits, watch mode, compiled executables, and inherited augmented processes keep their existing behavior. Application arguments after the entry path do not disable tuning.
+
+The larger nursery can reduce garbage collection for allocation-heavy workloads, but it is not a process memory cap. Workers, native allocations, and other processes can share the same container budget. Use [explicit V8 flags](/docs/config#v8flags) for an application-specific budget, or [compatibility mode](#compatibility-mode) for unchanged Node defaults.
 
 ## Modern APIs
 
@@ -72,7 +90,10 @@ Modern globals — TC39, web-platform, and newer Node built-ins — are availabl
 ```ts
 const now = Temporal.Now.plainDateTimeISO();
 const route = new URLPattern({ pathname: "/u/:id" });
-const { me, feed } = await Promise.allKeyed({ me: getMe(), feed: getFeed() });
+const { me, feed } = await Promise.allKeyed({
+  me: getMe(),
+  feed: getFeed(),
+});
 ```
 
 See [Modern APIs](/docs/runtime/modern-apis) for the complete version-aware reference and examples.
@@ -143,9 +164,9 @@ Settings you want on every run go in a [nub.jsonc](/docs/config) at the project 
 
 ```jsonc title="nub.jsonc"
 {
-  "preload": ["./instrumentation.ts", "tsx/esm"], // loaded before the entry file
-  "nodeOptions": ["--enable-source-maps"],        // Node options for every run
-  "v8Flags": ["--expose-gc"]                      // V8 flags, on Node's argv
+  "preload": ["./instrumentation.ts", "tsx/esm"], // before the entry
+  "nodeOptions": ["--enable-source-maps"],        // on every run
+  "v8Flags": ["--expose-gc"]                      // on Node's argv
 }
 ```
 
@@ -172,7 +193,7 @@ Setting a truthy `NODE_COMPAT` (`1`, `true`, or `yes`, case-insensitive) has the
 
 ```bash
 export NODE_COMPAT=1     # every nub/node in this shell now runs vanilla
-nub script.ts            # plain Node, still on the project's pinned version
+nub script.ts            # plain Node, still on the pinned version
 ```
 
 ### `nodeCompat`

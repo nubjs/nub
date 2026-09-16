@@ -109,6 +109,8 @@ test_install() {
         || throw 'file does not exist' "$dir/bin/nub"
     test -f "$dir/bin/nubx" \
         || throw 'file does not exist' "$dir/bin/nubx"
+    test -f "$dir/bin/nubr" \
+        || throw 'file does not exist' "$dir/bin/nubr"
     test -f "$dir/.nub-receipt" \
         || throw 'install receipt not written' "$dir/.nub-receipt"
 }

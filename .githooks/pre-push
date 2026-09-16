@@ -312,6 +312,23 @@ PUSHREFS
 
 [ "$site_touched" = 1 ] || [ "$undecidable" = 1 ] || exit 0
 
+# Code-block width, before the build. An over-long fenced line gives the docs a
+# horizontal scrollbar, which `next build` is perfectly happy about — so nothing
+# else catches it. Pure Node with no dependencies, so it runs even in a worktree
+# whose site deps are absent, and it costs milliseconds.
+if [ -f "$ROOT/site/scripts/lint-code-line-length.mjs" ]; then
+  if ! (cd "$ROOT/site" && node scripts/lint-code-line-length.mjs) >&2; then
+    cat >&2 <<'MSG'
+
+pre-push: CODE LINE-LENGTH FAILED — those lines scroll sideways in the docs.
+          Shorten the line, move a trailing comment above it, or mark a
+          verbatim transcript with a `wide` token on its fence.
+          Bypass: git push --no-verify
+MSG
+    exit 1
+  fi
+fi
+
 if [ ! -x "$ROOT/site/node_modules/.bin/next" ]; then
   if ! command -v pnpm >/dev/null 2>&1; then
     echo "pre-push: site/ changed, but site deps are absent and pnpm is not on PATH — skipping." >&2

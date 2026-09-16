@@ -51,6 +51,7 @@ const { installSyncPolyfills } = __require("./polyfills.cjs");
 // Publish process.versions.nub (self-identification marker) before user code runs.
 // Tier-independent — same call in the fast entry (preload.cjs).
 common.installVersionMarker();
+common.installThreadpoolPolicy();
 
 // ── Tier detection ──────────────────────────────────────────────────
 // This `.mjs` preload should only ever be `--import`ed for the compat tier (the

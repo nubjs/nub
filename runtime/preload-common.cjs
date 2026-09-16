@@ -231,6 +231,10 @@ function installWatchReporting(core) {
 // `type` (transpile — there is no user hook to do it, and Node's strip-only mode
 // can't handle enums/namespaces). See makeHooks().load.
 let __userHooksRegistered = false;
+// Narrower: a user registration that brought a `load` hook, so it can transform
+// what nub hands back. A resolve-only user hook that labels a `.ts` file with a
+// bare `commonjs`/`module` still relies on nub as the transformer.
+let __userLoadHookRegistered = false;
 function installUserHookDetector() {
   if (typeof module_.registerHooks !== "function") return;
   const orig = module_.registerHooks;
@@ -238,7 +242,10 @@ function installUserHookDetector() {
   let seen = 0;
   const wrapped = function (...args) {
     // Call #1 is nub's own preload registration; #2+ are user hooks.
-    if (seen >= 1) __userHooksRegistered = true;
+    if (seen >= 1) {
+      __userHooksRegistered = true;
+      if (args[0] && typeof args[0].load === "function") __userLoadHookRegistered = true;
+    }
     seen += 1;
     return orig.apply(this, args);
   };
@@ -698,8 +705,8 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
       const source = readFileSync(path);
       const pkgType = core.getPackageType(dirname(path));
       const format = core.moduleFormatFor(ext, pkgType, path, source.toString("utf8"));
-      if (format === "commonjs") return { format: "commonjs", source: null, shortCircuit: true };
-      return { format, source, shortCircuit: true };
+      if (format === "commonjs") return { format: "commonjs", source: null, responseURL: url, shortCircuit: true };
+      return { format, source, responseURL: url, shortCircuit: true };
     } catch {
       return null;
     }
@@ -773,7 +780,22 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
     // user's outer hook, which does the real ESM->CJS conversion, matching Node.
     // Native 'module-typescript'/'commonjs-typescript' formats still fall through to
     // nub's transpile below, so normal augmentation is unchanged.
-    if (__userHooksRegistered && context && context.format === "typescript") {
+    //
+    // tsx 4.2x writes the bare `commonjs`/`module` form instead of 'typescript'
+    // (`outerHookOwnsFormat`), and the hook that wrote it must also be able to
+    // transform what it gets back: a user registration WITH a load hook
+    // (`__userLoadHookRegistered`), or a loader registered through
+    // `module.register` (`userAsyncLoaderActive`), which the registerHooks counter
+    // cannot see and which nub has no way to inspect. A resolve-only user hook
+    // that labels a `.ts` file keeps nub as its transformer. The 'typescript'
+    // branch keeps its own narrower gate: a non-transpiling async loader (a
+    // telemetry `--import`) must not turn a bare 'typescript' from Node's own
+    // CJS loader into a step-aside.
+    if (context && (
+      (__userHooksRegistered && context.format === "typescript") ||
+      ((__userLoadHookRegistered || userAsyncLoaderActive(foreignLoaderFlagPresent)) &&
+        core.outerHookOwnsFormat(context.format, ext) && !core.isDependency(url))
+    )) {
       return nextLoad(url, context);
     }
 
@@ -1027,10 +1049,36 @@ function installCjsRequireHooks(core, withClassicTranspile) {
   // missing. An explicit `require("dep/x/sub.cjs")` is unaffected either way — an
   // exact path is found by stat, without consulting the extension list at all.
   const NUB_ADDED_EXTS = [".ts", ".cts", ".mts", ".tsx", ".jsx", ".cjs"];
+  // A `require.extensions` handler that is ALREADY registered for one of these
+  // when this runs belongs to a transpiler the user chose, and it stays in charge
+  // of that extension: nub's classic shim neither replaces it nor pre-judges its
+  // files as ES modules at resolve time. Every `--require` runs before any `--import`, so on
+  // the compat tier — where nub's own preload is an `--import` — tsx's
+  // `--require`d preflight installs its `.ts` handler FIRST; nub then overwrote
+  // it, and a file tsx would have compiled to CJS (mixed `import` + `require`,
+  // the shape its ESM hook hands to the CJS loader) died in nub's handler as
+  // "Cannot require() this file — it is an ES module". Node itself registers only
+  // `.js`/`.json`/`.node`, so nothing but a user transpiler holds one of these
+  // keys here.
+  const foreignExts = new Set(
+    [...core.TRANSPILE_EXTS, ...core.allDataExts(), ...NUB_ADDED_EXTS].filter((ext) =>
+      ext !== ".js" && ext !== ".json" && ext !== ".node" && Object.hasOwn(module_._extensions, ext)),
+  );
+  // Ownership of a key is decided per lookup, never frozen at start-up: user code
+  // may install or replace a handler after nub's preload (`--import tsx` runs
+  // after every `--require`), and from then on that key is the user's own
+  // widening of LOAD_AS_FILE, exactly as under plain Node plus their handler —
+  // `require("dep/sub")` finding a dependency's `sub.ts` through it is the answer
+  // to preserve. A key is nub's only while BOTH hold: nub introduced it (it was
+  // not in `foreignExts` — a user's `.cjs` handler that nub merely wraps still
+  // counts as theirs) and it still holds a function nub registered below
+  // (`nubHandlers`). Anything else is not nub's to strip, nor to pre-judge.
+  const nubHandlers = new Set();
+  const nubOwnsExt = (ext) => !foreignExts.has(ext) && nubHandlers.has(module_._extensions[ext]);
   const withoutNubAddedExtensions = (fn) => {
     const saved = [];
     for (const ext of NUB_ADDED_EXTS) {
-      if (Object.hasOwn(module_._extensions, ext)) {
+      if (nubOwnsExt(ext)) {
         saved.push([ext, module_._extensions[ext]]);
         delete module_._extensions[ext];
       }
@@ -1043,7 +1091,7 @@ function installCjsRequireHooks(core, withClassicTranspile) {
   };
   const isDepAddedExtHit = (filename) =>
     typeof filename === "string" &&
-    NUB_ADDED_EXTS.includes(pathExtname(filename)) &&
+    nubOwnsExt(pathExtname(filename)) &&
     core.isDependency(pathToFileURL(filename).href);
 
   module_._resolveFilename = function (request, parent, isMain, options) {
@@ -1066,7 +1114,8 @@ function installCjsRequireHooks(core, withClassicTranspile) {
       // and 4 from `require.resolve` up to 22.14, but 22.15 and 22.16 pass 4 for both
       // while still lacking native TS — and the translator crash is present on
       // exactly those versions. A clean error beats an opaque crash, so this stays.
-      if (withClassicTranspile && core.requireTargetIsEsm(resolved, pathExtname(resolved))) {
+      if (withClassicTranspile && nubOwnsExt(pathExtname(resolved)) &&
+          core.requireTargetIsEsm(resolved, pathExtname(resolved))) {
         throw requireEsmError(resolved);
       }
       return resolved;
@@ -1195,6 +1244,7 @@ function installCjsRequireHooks(core, withClassicTranspile) {
     if (core.TRANSPILE_EXTS.has(ext)) return transpileExtension(mod, filename);
     return nativeJs.call(module_._extensions, mod, filename);
   };
+  nubHandlers.add(nubExtension);
 
   // Registered for every extension either path may claim, so the dispatcher is
   // reached at all; `nubExtension` then decides. Node's own `.js`/`.json`/`.node`
@@ -1215,7 +1265,7 @@ function installCjsRequireHooks(core, withClassicTranspile) {
   // resolution identical across tiers.
   const CODE_EXTS = new Set([".ts", ".cts", ".mts", ".tsx", ".jsx"]);
   for (const ext of new Set([...core.TRANSPILE_EXTS, ...core.allDataExts()])) {
-    if (ext === ".js" || ext === ".json" || ext === ".node") continue;
+    if (ext === ".js" || ext === ".json" || ext === ".node" || foreignExts.has(ext)) continue;
     Object.defineProperty(module_._extensions, ext, {
       value: nubExtension,
       enumerable: CODE_EXTS.has(ext),
@@ -1243,7 +1293,7 @@ function installCjsRequireHooks(core, withClassicTranspile) {
   // (`nativeJs` is captured above, before the TS handlers are registered.)
   for (const ext of [".js", ".cjs"]) {
     const origExtension = module_._extensions[ext] || nativeJs;
-    module_._extensions[ext] = (mod, filename) => {
+    const plainJsExtension = (mod, filename) => {
       // (0) The project pointed this extension at a data loader (`{".js":"text"}`),
       // which the ESM path honors. These two extensions are skipped by the
       // registration loop above because THIS wrapper owns them and runs after it,
@@ -1266,6 +1316,8 @@ function installCjsRequireHooks(core, withClassicTranspile) {
       }
       return origExtension.call(module_._extensions, mod, filename); // (3)
     };
+    module_._extensions[ext] = plainJsExtension;
+    nubHandlers.add(plainJsExtension);
   }
 }
 
@@ -1705,6 +1757,90 @@ function installVersionMarker() {
   } catch {}
 }
 
+// ── libuv threadpool policy ──────────────────────────────────────────
+// The launcher sized the pool (`UV_THREADPOOL_SIZE = max(4, cores)`, spawn.rs) and
+// Node read it at startup, so the variable has done its work for THIS process.
+// Two things remain, both about the cores the extra threads would take:
+//
+//  1. Children keep Node's default. A `cluster` or PM2 fork, or any `child_process`
+//     spawn, inherits `process.env`; N workers each carrying a cores-sized pool is
+//     the oversubscription Node's own maintainers closed nodejs/node#61533 over.
+//     So nub's OWN value is deleted from `process.env`. Ownership is two markers
+//     the launcher stamps (spawn.rs `RestorableVar`): the value equals the
+//     `__NUB_AUGMENTED_*` record of what the launcher handed Node, AND the compat
+//     presence mask says the variable was ABSENT before the outermost nub ran (bit
+//     1 << 5 is this variable's slot). A shell value, an env-file value, or a value
+//     the launcher merely passed through fails one of the two and inherits as it
+//     would under plain Node. The markers themselves stay, which is how a nested
+//     `nub` knows to size its child again. libuv reads the variable LAZILY, at the
+//     first pool use, and a `process.env` delete reaches the C environment, so the
+//     pool is created (one `fs.access`) before the variable goes; otherwise libuv
+//     would find nothing and build Node's four. A pool of four is Node's default,
+//     so the variable goes at once and nothing is demoted.
+//  2. The threads beyond Node's four run at a lower priority on Linux, so they only
+//     take cycles nothing else on the box wants (Chromium's best-effort tier, nice
+//     10). Measured on 16 vCPU beside twelve busy processes: the neighbours keep
+//     98.6% of their CPU instead of 92.5%, the server still gains 20% over four
+//     threads, and an idle box loses nothing. libuv creates every worker
+//     synchronously inside the first pool submit, so one `fs.access` call makes
+//     them all exist (`access` never takes the io_uring path that lets stat, read
+//     and open skip the pool); the new thread ids (or the `libuv-worker` name) name
+//     them, and `os.setPriority(tid)` targets one thread on Linux. The thread ids
+//     are exact only across the call that builds the pool: the fast tier's
+//     `--require` preload runs before any pool use and builds it here, but the
+//     compat tier's `--import` preload is itself read through the pool, so the
+//     launcher `--require`s threadpool-snapshot.cjs ahead of it to build the pool
+//     and record its threads there.
+const THREADPOOL_ENV = "UV_THREADPOOL_SIZE";
+const THREADPOOL_MARK_ENV = "__NUB_AUGMENTED_UV_THREADPOOL_SIZE";
+const COMPAT_PRESENT_ENV = "__NUB_COMPAT_PRESENT";
+const THREADPOOL_PRESENT_BIT = 1 << 5;
+const THREADPOOL_NODE_DEFAULT = 4;
+const THREADPOOL_EXTRA_NICE = 10;
+const THREADPOOL_WORKERS = Symbol.for("nub.threadpool.workers");
+
+function installThreadpoolPolicy() {
+  const size = process.env[THREADPOOL_ENV];
+  if (size === undefined || size !== process.env[THREADPOOL_MARK_ENV]) return;
+  if ((Number(process.env[COMPAT_PRESENT_ENV]) || 0) & THREADPOOL_PRESENT_BIT) return;
+  if (!(Number(size) > THREADPOOL_NODE_DEFAULT)) {
+    // Node's own size: nothing to demote, and libuv builds the same four whether
+    // it still finds the variable or not, so it goes at once.
+    delete process.env[THREADPOOL_ENV];
+    return;
+  }
+  try {
+    // The `--require` preload re-runs inside every loader worker; the pool is
+    // process-wide, so only the main thread touches it.
+    if (!require("node:worker_threads").isMainThread) return;
+    const fs = require("node:fs");
+    const linux = process.platform === "linux";
+    const tids = () => fs.readdirSync("/proc/self/task").map(Number).filter(Boolean);
+    let workers = linux ? process[THREADPOOL_WORKERS] : undefined;
+    if (workers === undefined) {
+      const before = linux ? new Set(tids()) : null;
+      fs.access("/", () => {});
+      const isWorker = (t) => {
+        if (!before.has(t)) return true;
+        try {
+          return fs.readFileSync(`/proc/self/task/${t}/comm`, "latin1").trim() === "libuv-worker";
+        } catch {
+          return false;
+        }
+      };
+      if (linux) workers = tids().filter(isWorker);
+    }
+    delete process.env[THREADPOOL_ENV];
+    if (!linux) return;
+    const os = require("node:os");
+    for (const t of workers.sort((a, b) => a - b).slice(THREADPOOL_NODE_DEFAULT)) {
+      try {
+        os.setPriority(t, THREADPOOL_EXTRA_NICE);
+      } catch {}
+    }
+  } catch {}
+}
+
 // ── User preloads (`nub.jsonc` `preload`) ───────────────────────────
 // nub loads the user's preload entries HERE rather than emitting one NODE_OPTIONS
 // token per entry. Two reasons, and the first is a correctness bug in the wild:
@@ -1756,6 +1892,7 @@ async function importUserPreloadChain() {
 
 module.exports = {
   installVersionMarker,
+  installThreadpoolPolicy,
   installWatchReporting,
   registerLoaderWorker,
   makeHooks,

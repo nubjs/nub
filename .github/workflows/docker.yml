@@ -43,6 +43,8 @@ on:
       - ".dockerignore"
       - ".github/workflows/docker.yml"
   pull_request:
+    # PR CI is opt-in — request a run with `gh pr edit <n> --add-label ci`. Rationale: ci.yml.
+    types: [labeled]
     branches: [main]
     paths:
       - "docker/**"
@@ -83,6 +85,7 @@ permissions:
 jobs:
   build:
     name: Build + smoke (${{ matrix.variant }})
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:

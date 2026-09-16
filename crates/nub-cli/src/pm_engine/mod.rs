@@ -54,6 +54,7 @@
 pub mod build_jail;
 mod build_prefetch;
 mod bun_config;
+mod compat_db;
 pub mod config_scope;
 mod duplicate_home;
 mod expo_compat;
@@ -71,7 +72,7 @@ pub mod platform_flags;
 pub mod present;
 pub mod publish_family;
 mod remix_compat;
-mod resource_limits;
+use nub_core::resource_limits;
 pub mod store_config_family;
 pub mod unsupported_config;
 pub mod use_align;
@@ -101,6 +102,24 @@ use aube_lockfile::LockfileKind;
 /// is stable for the reader's duration. Cheap (`std::sync::Mutex`), test-only.
 #[cfg(test)]
 pub(crate) static ENGINE_GLOBAL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Environment a frontend adds to every lifecycle-script spawn of this
+/// process's one install, on top of the runtime-augmentation overlay
+/// [`apply_lifecycle_augmentation`] builds. Set once, before the engine
+/// session opens; the npm-routing shim fills it with npm's
+/// `NODE_ENV=production` under an effective `omit=dev`. Per child, never the
+/// process environment (A19).
+static LIFECYCLE_ENV_EXTRA: std::sync::OnceLock<Vec<(std::ffi::OsString, std::ffi::OsString)>> =
+    std::sync::OnceLock::new();
+
+pub fn set_lifecycle_env(pairs: Vec<(String, String)>) {
+    let _ = LIFECYCLE_ENV_EXTRA.set(
+        pairs
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect(),
+    );
+}
 
 /// The four engine verb families. One module per family; each family module
 /// owns the wiring (args parsing, options construction, output routing) for
@@ -564,6 +583,17 @@ pub(crate) fn run_node_gyp_bootstrap(args: &[String]) -> Result<i32> {
     let project = std::path::Path::new(project_dir);
     match rt.block_on(aube::embed::bootstrap_node_gyp(project)) {
         Ok(binary) => {
+            // node-gyp runs next, under the project's Node, so put that Node's
+            // headers where node-gyp looks before it downloads them
+            // (`nub_core::node::headers`). Plain discovery, never provisioning:
+            // the version logic fires only where node-version-management puts
+            // it. Best effort, since node-gyp's own download stays the fallback.
+            if let Ok(node) = nub_core::node::discovery::discover_node(project) {
+                nub_core::node::headers::seed_node_gyp_cache(
+                    node.path.as_std_path(),
+                    &node.version.to_string(),
+                );
+            }
             println!("{}", binary.display());
             Ok(0)
         }
@@ -893,6 +923,11 @@ fn engine_session_inner(
     // compiled against ambient Node instead of the project's. Default-empty
     // overlay when augmentation can't engage ⇒ behavior preserved.
     apply_lifecycle_augmentation(&cwd)?;
+    if let Some(extra) = LIFECYCLE_ENV_EXTRA.get() {
+        let extra = extra.clone();
+        aube_util::update_engine_context(move |c| c.env_overlay.extend(extra));
+    }
+    apply_lifecycle_script_shell();
     Ok(EngineSession {
         detected,
         runtime: build_runtime()?,
@@ -1864,6 +1899,9 @@ fn augmentation_to_lifecycle_overlay(
     aug.apply_localstorage_env(|k, v| {
         overlay.push((OsString::from(k), OsString::from(v)));
     });
+    aug.apply_threadpool_size(|k, v| {
+        overlay.push((OsString::from(k), v.to_os_string()));
+    });
     // Pin npm_node_execpath to the provisioned Node — the ABI fix. Independent
     // of the shim: it flows even on the no-shim path so node-gyp never falls
     // back to ambient. (npm_node_execpath stays the REAL binary, not the shim:
@@ -1928,7 +1966,7 @@ fn apply_lifecycle_augmentation(cwd: &Path) -> Result<()> {
     };
     let node = discovered.unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
     let mut runtime = crate::project_config::runtime_config()?;
-    let runtime_node_options = crate::cli::runtime_node_options(&mut runtime, &node)?;
+    let runtime_node_options = crate::cli::lifecycle_node_options(&mut runtime, &node)?;
     let runtime_json = crate::cli::runtime_config_json(&runtime)?;
     let pnp_ctx = nub_core::pnp::detect(cwd);
     let Some(mut aug) = nub_core::node::spawn::compute_augmentation_env(
@@ -1990,6 +2028,66 @@ fn apply_lifecycle_augmentation(cwd: &Path) -> Result<()> {
         c.runtime_node_bin = runtime_node_bin;
     });
     Ok(())
+}
+
+/// Replace the engine's Windows default lifecycle shell with nub's bundled
+/// busybox-w32 `sh`, so a dependency's `postinstall` gets the same POSIX shell
+/// `nub run` already uses (`crate::cli::resolve_bundled_busybox`) instead of
+/// `cmd.exe`. No-op on Unix, where the engine default is already `sh`.
+///
+/// Three reasons:
+///
+/// 1. ONE SHELL. `nub run` already defaults to busybox on Windows, so leaving
+///    the lifecycle path on `cmd.exe` meant one POSIX script body behaved
+///    differently depending on which nub surface ran it. This removes a
+///    divergence rather than creating one.
+/// 2. NO COMPATIBILITY COST, AND TWO FIXES. A sweep of the 344 widely-used
+///    packages that run install scripts found ZERO of 363 script bodies using
+///    cmd-only syntax (no `%VAR%`, `%~dp0`, `if exist`, `copy`/`del`/`rd`,
+///    `>nul`, `call`, `set VAR=`, caret escapes, `.cmd`/`.bat` invocation) —
+///    `sh` parses all 363. Two (`detox-recorder`, `svf-lib`) invoke `./*.sh`
+///    and only work under `sh`.
+/// 3. ROBUSTNESS UNDER THE SANDBOX. Confined in an AppContainer with no
+///    ancestor repair at all, busybox's `cd`, globbing, redirection, reads and
+///    whole spawn battery are byte-identical to unconfined. `cmd.exe` instead
+///    depends on the sandbox's ancestor repair (`nub-sandbox`'s traverse ACEs
+///    plus the capability SIDs it harvests off each ancestor's DACL) to report
+///    the filesystem correctly — and that repair is best-effort BY DESIGN: a
+///    refused ACE write is skipped rather than fatal, and an ancestor whose
+///    DACL names no harvestable capability yields nothing to request. A shell
+///    that needs no repair cannot be degraded by one that partially failed.
+///
+/// A user's explicit `script-shell` still wins — aube consults this only when
+/// that is unset. A missing sidecar (a broken install; `nub run` is equally
+/// dead in that state) warns and leaves the engine on `cmd.exe` rather than
+/// failing read-only verbs like `nub list` that never spawn a script.
+fn apply_lifecycle_script_shell() {
+    if !cfg!(windows) {
+        return;
+    }
+    match crate::cli::resolve_bundled_busybox() {
+        Ok(busybox) => aube_util::update_engine_context(|c| {
+            c.default_script_shell = Some(busybox_script_shell(&busybox));
+        }),
+        Err(err) => tracing::warn!(
+            "{err:#}\ndependency lifecycle scripts will run under cmd.exe, which does not \
+             support POSIX script bodies"
+        ),
+    }
+}
+
+/// busybox is a multi-call binary: it dispatches on `argv[0]`, or on a leading
+/// applet name. Spawned as `busybox.exe` the applet name must LEAD, so a bare
+/// `-c` would not select `sh` at all. Split out of the Windows-gated caller so
+/// the form is pinned by a test on every platform — dropping `"sh"` breaks only
+/// Windows, where no other test in this suite would see it.
+fn busybox_script_shell(busybox: &str) -> aube_util::ScriptShell {
+    aube_util::ScriptShell {
+        program: PathBuf::from(busybox),
+        args: vec!["sh".to_string(), "-c".to_string()],
+        // busybox-w32 up-cases every environment name it loads.
+        restore_env_casing: true,
+    }
 }
 
 /// `--dir` / `-C` (and the global `--cwd`, which dispatch applies earlier):
@@ -2288,6 +2386,16 @@ pub(crate) fn engine_brand_preflight() {
         // carry no checksum (npm/yarn/bun locks), where stored and computed both
         // resolve to `None`. Standalone aube leaves the default `false`.
         c.enforce_package_extensions_checksum = true;
+        // The bundled compatibility database, on top of the vendored Yarn and
+        // pnpm catalogs the engine already applies. Lowest precedence and purely
+        // additive, so a curated upstream rule always wins on a key both carry —
+        // and since extensions merge per DEPENDENCY NAME rather than per
+        // selector, an entry this database extends beyond Yarn's still lands.
+        //
+        // Read only when resolving a package, never by the lockfile checksum, so
+        // refreshing the dataset cannot drift an existing lockfile. Gated with
+        // the vendored catalogs by the one `ignoreCompatibilityDb` escape hatch.
+        c.bundled_package_extensions = Some(compat_db::bundled_package_extensions().clone());
     });
     match surface {
         ConfigSurface::NubIdentity(dir) => {
@@ -4905,6 +5013,7 @@ mod tests {
             shim_dir: Some("/shim".to_string()),
             node_path: Some(OsString::from("/rt/node_path")),
             neutralize_localstorage: true,
+            threadpool_size: Some("8".to_string()),
         };
         let runtime_json = r#"{"nodeCompat":false}"#;
         let (overlay, prepends) =
@@ -4955,6 +5064,16 @@ mod tests {
             Some("1"),
             "neutralize signal must flow to build-script node children when set"
         );
+        assert_eq!(
+            find("UV_THREADPOOL_SIZE").as_deref(),
+            Some("8"),
+            "the threadpool size must reach lifecycle node children"
+        );
+        assert_eq!(
+            find("__NUB_AUGMENTED_UV_THREADPOOL_SIZE").as_deref(),
+            Some("8"),
+            "a compat boundary may remove the pool size only while it still holds nub's value"
+        );
     }
 
     /// No shim set up (re-entrant / broken install) → no NODE override and no
@@ -4969,6 +5088,7 @@ mod tests {
             shim_dir: None,
             node_path: None,
             neutralize_localstorage: false,
+            threadpool_size: None,
         };
         let (overlay, prepends) = augmentation_to_lifecycle_overlay(&aug, "/pinned/bin/node", None);
         assert!(prepends.is_empty());
@@ -5308,6 +5428,24 @@ mod tests {
             "a member install builds the workspace's one shared tree, so anchoring \
              Node discovery anywhere but the root keys the ABI caches to a Node the \
              install state never saw"
+        );
+    }
+
+    #[test]
+    fn busybox_lifecycle_shell_leads_with_the_sh_applet_name() {
+        let spec = busybox_script_shell(r"C:\nub\bin\busybox.exe");
+        assert_eq!(spec.program, PathBuf::from(r"C:\nub\bin\busybox.exe"));
+        assert_eq!(
+            spec.args,
+            ["sh", "-c"],
+            "busybox dispatches on argv[0] or a leading applet name, so spawned as \
+             `busybox.exe` it needs `sh` before `-c` — `busybox.exe -c <body>` runs \
+             no shell. This test exists because that mistake is invisible off Windows."
+        );
+        assert!(
+            spec.restore_env_casing,
+            "busybox-w32 up-cases environment names, so `$npm_package_name` in a lifecycle \
+             body expands to nothing unless the spawn re-binds the lowercase names"
         );
     }
 }

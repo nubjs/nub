@@ -99,11 +99,12 @@ The same rule covers hoisting keys, the modules directory, and virtual-store pat
 Yarn Plug'n'Play is refused rather than ignored, because Nub installs a `node_modules` tree and a PnP project has none:
 
 ```console
-$ nub install
-Error: nub: this project is configured for Yarn Plug'n'Play (nodeLinker: pnp,   # ❌
-or Yarn Berry's default) — nub installs a node_modules tree and doesn't support
-PnP yet, so the result would diverge from yarn's. Install with yarn, or set
-`nodeLinker: node-modules` in .yarnrc.yml. [ERR_NUB_PNP_UNSUPPORTED]
+$ nub install                                                    # ❌
+Error: nub: this project is configured for Yarn Plug'n'Play (nodeLinker:
+pnp, or Yarn Berry's default) — nub installs a node_modules tree and
+doesn't support PnP yet, so the result would diverge from yarn's. Install
+with yarn, or set `nodeLinker: node-modules` in .yarnrc.yml.
+[ERR_NUB_PNP_UNSUPPORTED]
 ```
 
 ## Flat vs project-local
@@ -145,8 +146,9 @@ Nub records every project that installs against the shared store. A prune keeps 
 The extracted-tree cache, the copy of each package that the linker clones into projects, is held rather than collected. The first prune to find an entry unreferenced reports it; only a prune that still finds it unreferenced 30 days later removes it. Installing in a project that needs the entry clears the hold.
 
 ```
-Holding 30029 entries of the extracted-tree cache unreferenced for 30 days before removal.
-Install in any project that still needs them and they are kept.
+Holding 30029 entries of the extracted-tree cache unreferenced for 30 days
+before removal. Install in any project that still needs them and they are
+kept.
 ```
 
 That delay is what makes the command safe to run on a store you have had for a while. A project only becomes visible to the prune once it has installed at least once, so on the day you upgrade every project you have not touched yet looks unreferenced. Without the hold, one install followed by one prune would delete the rest.
@@ -154,8 +156,8 @@ That delay is what makes the command safe to run on a store you have had for a w
 With nothing registered at all, a prune skips that cache rather than treating an empty registry as an empty store:
 
 ```
-No projects are registered against the store; skipping the extracted-tree cache.
-Run an install in each project you want kept, then prune again.
+No projects are registered against the store; skipping the extracted-tree
+cache. Run an install in each project you want kept, then prune again.
 ```
 
 <Callout>

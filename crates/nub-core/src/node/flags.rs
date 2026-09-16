@@ -714,6 +714,22 @@ mod tests {
     }
 
     #[test]
+    fn async_context_frame_injected_only_where_flag_exists_and_is_required() {
+        // AsyncLocalStorage on AsyncContextFrame: flag landed 22.7.0 but throws on
+        // 22.7–22.8 (#54503), so the floor is 22.9.0; default-on and renamed at 24.0.0,
+        // where the `--experimental-` spelling is a "bad option" abort.
+        let acf = "--experimental-async-context-frame";
+        assert!(!compute_inject_flags(v(22, 8, 0), &[], None, false, None).contains(&acf)); // flag throws
+        assert!(compute_inject_flags(v(22, 9, 0), &[], None, false, None).contains(&acf)); // floor
+        assert!(compute_inject_flags(v(22, 23, 2), &[], None, false, None).contains(&acf)); // 22 LTS
+        assert!(compute_inject_flags(v(23, 11, 0), &[], None, false, None).contains(&acf)); // 23.x
+        assert!(!compute_inject_flags(v(24, 0, 0), &[], None, false, None).contains(&acf)); // default-on, flag renamed
+        // The Node-standard negation opts out.
+        let argv = vec!["--no-experimental-async-context-frame".to_string()];
+        assert!(!compute_inject_flags(v(22, 23, 2), &argv, None, false, None).contains(&acf));
+    }
+
+    #[test]
     fn websocket_injected_only_on_flag_gated_band() {
         // WebSocket global is flag-gated on [20.10.0, 22.0.0): exists on 20.10+ and all
         // 21.x, default-on from 22.0.0. Below 20.10 the flag doesn't exist ("bad option").

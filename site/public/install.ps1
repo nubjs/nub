@@ -93,7 +93,7 @@ try {
         if (Test-Path $BinDir) { Remove-Item -Recurse -Force $BinDir }
         if (Test-Path "$InstallDir\runtime") { Remove-Item -Recurse -Force "$InstallDir\runtime" }
     } else {
-        Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath "$BinDir\nub.exe", "$BinDir\nubx.exe"
+        Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath "$BinDir\nub.exe", "$BinDir\nubx.exe", "$BinDir\nubr.exe"
     }
     Expand-Archive -Path $TmpZip -DestinationPath $InstallDir -Force
 } catch {
@@ -110,13 +110,15 @@ if (-not (Test-Path $Exe)) {
     exit 1
 }
 
-# `nubx` is the same binary as `nub`, dispatched on argv[0] (cli.rs reads
-# args_os()[0].file_stem(): "nubx" -> exec). The release archive ships only
-# bin\nub.exe, so create the nubx alias. On Windows we COPY rather than symlink:
-# symlinks require admin/Developer Mode, and a copy reliably yields argv[0]
-# "nubx.exe". Re-extract on upgrade wipes bin\, so this is recreated each run.
-$Exex = "$BinDir\nubx.exe"
-Copy-Item -Path $Exe -Destination $Exex -Force
+# `nubx` and `nubr` are the same binary as `nub`, dispatched on argv[0] (cli.rs
+# reads args_os()[0].file_stem(): "nubx" -> exec, "nubr" -> the unified runner).
+# The release archive ships only bin\nub.exe, so create each alias. On Windows we
+# COPY rather than symlink: symlinks require admin/Developer Mode, and a copy
+# reliably yields argv[0] "nubx.exe". Re-extract on upgrade wipes bin\, so these
+# are recreated each run.
+foreach ($alias in @("nubx", "nubr")) {
+    Copy-Item -Path $Exe -Destination "$BinDir\$alias.exe" -Force
+}
 
 # `nub pm shim` HARDLINKS %USERPROFILE%\.nub\shims\{npm,npx,…}.exe at the nub
 # binary, so the re-extract above left every one of them pinned to the previous
@@ -218,7 +220,7 @@ $Receipt = @'
 '@
 Set-Content -LiteralPath "$InstallDir\.nub-receipt" -Value $Receipt
 
-Write-Host "Installed nub (with nubx) to $Exe" -ForegroundColor Green
+Write-Host "Installed nub (with nubx and nubr) to $Exe" -ForegroundColor Green
 
 # --- PATH setup ---
 # Honor NUB_NO_MODIFY_PATH: skip the User PATH edit and just print the dir to add

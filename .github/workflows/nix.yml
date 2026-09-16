@@ -22,6 +22,8 @@ on:
       - "**/*.nix"
       - ".github/workflows/nix.yml"
   pull_request:
+    # PR CI is opt-in — request a run with `gh pr edit <n> --add-label ci`. Rationale: ci.yml.
+    types: [labeled]
     branches: [main]
     paths:
       - "flake.nix"
@@ -38,6 +40,7 @@ permissions: {}
 jobs:
   check:
     name: nix flake check
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     runs-on: ubuntu-latest
     permissions:
       contents: read

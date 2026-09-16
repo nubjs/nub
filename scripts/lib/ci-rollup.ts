@@ -15,8 +15,19 @@
 // modern `node` type-strips it with no build step — same constraint as its
 // importers.
 
+// The aggregate check every requested CI run ends on. It is the ONLY rollup item
+// that proves nub's own CI ran: a pull request carries third-party app checks
+// (Vercel, review bots) that go green entirely on their own, so "some check is
+// green" stopped meaning anything once PR CI became opt-in.
+const CI_GATE_CHECK = "CI gate";
+
 const FAILURE_CONCLUSIONS = new Set(["FAILURE", "CANCELLED", "TIMED_OUT", "STARTUP_FAILURE", "ACTION_REQUIRED", "STALE"]);
-const OK_CONCLUSIONS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
+// SKIPPED is deliberately NOT here. A skipped check ran nothing, so it verifies
+// nothing — and since PR CI became opt-in (a `labeled` trigger plus a per-job guard;
+// see .github/workflows/ci.yml) an entirely-skipped rollup is the ROUTINE shape of a
+// pull request nobody has requested CI for. Counting it green was the false-green
+// this carve-out exists to prevent. `itemState` classifies it as terminal-but-skipped.
+const OK_CONCLUSIONS = new Set(["SUCCESS", "NEUTRAL"]);
 
 type RollupItem = { name?: string; context?: string; status?: string; conclusion?: string; state?: string; startedAt?: string };
 
@@ -34,20 +45,21 @@ function itemName(it: RollupItem): string {
 // CheckRun with an empty conclusion is treated as non-failing (matches the prior
 // classifier: only a KNOWN-bad conclusion fails); an item with neither status nor
 // state is treated as a non-terminal ghost rather than a failure.
-function itemState(it: RollupItem): { terminal: boolean; failed: boolean } {
+function itemState(it: RollupItem): { terminal: boolean; failed: boolean; skipped: boolean } {
   if (it.status !== undefined) {
-    if ((it.status || "").toUpperCase() !== "COMPLETED") return { terminal: false, failed: false };
+    if ((it.status || "").toUpperCase() !== "COMPLETED") return { terminal: false, failed: false, skipped: false };
     const c = (it.conclusion || "").toUpperCase();
-    if (c === "" || OK_CONCLUSIONS.has(c)) return { terminal: true, failed: false };
-    return { terminal: true, failed: true };
+    if (c === "SKIPPED") return { terminal: true, failed: false, skipped: true };
+    if (c === "" || OK_CONCLUSIONS.has(c)) return { terminal: true, failed: false, skipped: false };
+    return { terminal: true, failed: true, skipped: false };
   }
   if (it.state !== undefined) {
     const s = (it.state || "").toUpperCase();
-    if (s === "" || s === "PENDING") return { terminal: false, failed: false };
-    if (s === "SUCCESS") return { terminal: true, failed: false };
-    return { terminal: true, failed: true };
+    if (s === "" || s === "PENDING") return { terminal: false, failed: false, skipped: false };
+    if (s === "SUCCESS") return { terminal: true, failed: false, skipped: false };
+    return { terminal: true, failed: true, skipped: false };
   }
-  return { terminal: false, failed: false };
+  return { terminal: false, failed: false, skipped: false };
 }
 
 // The partition that drives every verdict. GHOSTS are the never-hang carve-out:
@@ -60,6 +72,9 @@ type Buckets = {
   failures: string[];
   realPending: string[];
   ghosts: string[];
+  // Terminal-but-skipped named checks. Tracked separately from greenNamed so a
+  // rollup that only ever skipped can never be mistaken for a verified one.
+  skipped: string[];
   greenNamed: number;
   total: number;
   requiredMissing: string[]; // populated only when a required set is supplied
@@ -70,6 +85,7 @@ function classifyRollup(rollup: RollupItem[], required: Set<string>): Buckets {
   const failures: string[] = [];
   const realPending: string[] = [];
   const ghosts: string[] = [];
+  const skipped: string[] = [];
   let greenNamed = 0;
   for (const it of rollup) {
     const name = itemName(it);
@@ -84,6 +100,7 @@ function classifyRollup(rollup: RollupItem[], required: Set<string>): Buckets {
     }
     if (st.terminal) {
       if (st.failed) failures.push(name || "(unnamed)");
+      else if (st.skipped) skipped.push(name || "(unnamed)");
       else if (name) greenNamed++;
       continue;
     }
@@ -100,11 +117,11 @@ function classifyRollup(rollup: RollupItem[], required: Set<string>): Buckets {
   if (scoped) {
     for (const rname of required) {
       const matches = rollup.filter((it) => itemName(it) === rname);
-      const allGreen = matches.length > 0 && matches.every((it) => { const st = itemState(it); return st.terminal && !st.failed; });
+      const allGreen = matches.length > 0 && matches.every((it) => { const st = itemState(it); return st.terminal && !st.failed && !st.skipped; });
       if (!allGreen) requiredMissing.push(rname);
     }
   }
-  return { failures, realPending, ghosts, greenNamed, total: rollup.length, requiredMissing };
+  return { failures, realPending, ghosts, skipped, greenNamed, total: rollup.length, requiredMissing };
 }
 
 // ghostsOnly marks the STUCK-but-safe shape: no real/required check is pending,
@@ -130,10 +147,17 @@ function verdictForBuckets(b: Buckets, hasRequired: boolean): Verdict {
   }
   if (b.realPending.length > 0)
     return { kind: "pending", reason: `${b.realPending.length} check(s) pending: ${joinCapped(b.realPending, 4)}`, ghostsOnly: false, realPending: b.realPending, ghosts: b.ghosts, greenNamed: b.greenNamed };
+  // Nothing actually RAN. Ordered ahead of the ghost carve-out on purpose: that
+  // branch reports ghostsOnly, which callers read as "every real check is green,
+  // safe to --admin merge" — a verdict that must never be reached by a rollup whose
+  // checks all skipped. PR CI is opt-in, so this is what an unrequested pull request
+  // looks like, and the reason string carries the one command that fixes it.
+  if (b.greenNamed === 0)
+    return { kind: "pending", reason: `no check has run — ${b.skipped.length} skipped, 0 green (PR CI is opt-in: request a run with \`gh pr edit <n> --add-label ci\`)`, ghostsOnly: false, realPending: [], ghosts: b.ghosts, greenNamed: 0 };
   if (b.ghosts.length > 0)
     return { kind: "pending", reason: `${b.greenNamed} named check(s) green; ${b.ghosts.length} non-terminal ghost check(s) that may never report: ${joinCapped(b.ghosts, 4)}`, ghostsOnly: true, realPending: [], ghosts: b.ghosts, greenNamed: b.greenNamed };
-  return { kind: "success", reason: `${b.total} check(s) green` };
+  return { kind: "success", reason: `${b.greenNamed} check(s) green${b.skipped.length > 0 ? `, ${b.skipped.length} skipped` : ""} (of ${b.total} total)` };
 }
 
-export { FAILURE_CONCLUSIONS, OK_CONCLUSIONS, itemName, itemState, classifyRollup, joinCapped, verdictForBuckets };
+export { CI_GATE_CHECK, FAILURE_CONCLUSIONS, OK_CONCLUSIONS, itemName, itemState, classifyRollup, joinCapped, verdictForBuckets };
 export type { RollupItem, Buckets, Verdict };

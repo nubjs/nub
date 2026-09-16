@@ -34,6 +34,8 @@ on:
       - "*.md"
       - ".claude/**"
   pull_request:
+    # PR CI is opt-in — request a run with `gh pr edit <n> --add-label ci`. Rationale: ci.yml.
+    types: [labeled]
     branches: [main]
     paths-ignore:
       - "site/**"
@@ -64,6 +66,7 @@ jobs:
   # the heavy legs entirely (the lightweight smoke still runs on a tier-boundary subset).
   plan:
     name: Plan
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -124,6 +127,7 @@ jobs:
   # Build nub + the native addon ONCE; publish as an artifact the matrix legs reuse.
   build:
     name: Build nub (once)
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -174,6 +178,7 @@ jobs:
   smoke:
     name: Smoke (node ${{ matrix.node }})
     needs: [plan, build]
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -210,7 +215,7 @@ jobs:
   real-apps:
     name: Real apps (node ${{ matrix.node }})
     needs: [plan, build]
-    if: ${{ needs.plan.outputs.run_realapps == 'true' }}
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.plan.outputs.run_realapps == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -249,7 +254,7 @@ jobs:
   node-matrix-gate:
     name: Node matrix gate
     needs: [smoke, real-apps]
-    if: always()
+    if: always() && (github.event_name != 'pull_request' || github.event.label.name == 'ci')
     runs-on: ubuntu-latest
     permissions: {}
     steps:

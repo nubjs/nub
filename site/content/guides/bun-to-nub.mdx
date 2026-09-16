@@ -34,7 +34,7 @@ Nub's package-manager surface mirrors pnpm's command grammar:
 bun install                   # → nub install   (alias: nub i)
 bun add <pkg>                 # → nub add <pkg>
 bun remove <pkg>              # → nub remove <pkg>
-bunx <pkg>                    # → nubx <pkg>     (always fetch: nub dlx <pkg>)
+bunx <pkg>                    # → nubx <pkg>     (fetch: nub dlx <pkg>)
 ```
 
 Nub is **lockfile-compatible** with what your project already uses — it round-trips npm, pnpm, and bun lockfiles and reads yarn's — so you do not have to convert your lockfile to adopt Nub. The CLI grammar is pnpm's, but lockfile support is not limited to pnpm's format. If you want Nub to own resolution as a Nub-identity project (consuming only neutral, cross-tool config), drop the bun-branded `bunfig.toml` and let Nub write a neutral `.npmrc`; if you keep an incumbent PM, Nub mirrors that PM faithfully.
@@ -129,7 +129,8 @@ Bun ships `Bun.sql`, a Postgres client modeled on [postgres.js](https://github.c
   ```ts
   import { Pool } from "pg";
   const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-  const { rows } = await pool.query("select * from users where id = $1", [id]);
+  const sql = "select * from users where id = $1";
+  const { rows } = await pool.query(sql, [id]);
   ```
 
 If you use Prisma, the migration is mostly about *raw* queries — your Prisma models are unaffected by the runtime swap. Pick one raw-query client and use it consistently.

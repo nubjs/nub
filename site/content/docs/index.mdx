@@ -19,8 +19,8 @@ Every augmentation uses Node's own public extension surfaces, and the package ma
 
 - **A runtime** — execute `.{js,cjs,mjs,jsx,ts,cts,mts,tsx}` files with full TypeScript support, on the stock `node` binary. See [files](/docs/runtime).
 - **A package manager** — a pnpm-compatible installer that round-trips your existing npm, pnpm, or bun lockfile. See [install](/docs/install).
-- **A script runner** — run `package.json` scripts 24× faster than `pnpm run`, with the full workspace and lifecycle-hook surface preserved. See [run](/docs/runner/run).
-- **A bin runner** — run a local CLI an order of magnitude faster than `npx`, or fetch and run an uninstalled one from the registry. See [nubx](/docs/runner).
+- **A script runner** — run `package.json` scripts 24× faster than `pnpm run`, with the full workspace and lifecycle-hook surface preserved. See [run](/docs/run).
+- **A bin runner** — run a local CLI an order of magnitude faster than `npx`, or fetch and run an uninstalled one from the registry. See [nubx](/docs/nubx).
 - **A Node version manager** — pin a version and Nub provisions it from nodejs.org on demand, replacing `nvm` and `fnm`. See [node](/docs/node).
 - **A watcher** — restart on changes to your source, your `.env*` files, and your `tsconfig.json`, driven by the dependency graph. See [watch](/docs/watch).
 - **A GitHub Action** — swap `actions/setup-node` for `nubjs/setup-nub` to install Nub, warm the project's Node, and cache Nub's store in CI. See [GitHub Action](/docs/deployment/github-action).
@@ -43,7 +43,7 @@ Every augmentation uses Node's own public extension surfaces, and the package ma
 npm install -g @nubjs/nub
 ```
 
-Both `pnpm add -g @nubjs/nub` and `yarn global add @nubjs/nub` work too. That installs the Rust binary plus the platform-specific N-API addons, and puts `nub` and `nubx` on your `PATH`. On macOS and Linux, install with Homebrew:
+Both `pnpm add -g @nubjs/nub` and `yarn global add @nubjs/nub` work too. That installs the Rust binary plus the platform-specific N-API addons, and puts `nub`, `nubx` and `nubr` on your `PATH`. On macOS and Linux, install with Homebrew:
 
 ```bash
 brew install nub
@@ -83,7 +83,7 @@ The same binaries are attached to the rolling [canary release](https://github.co
 The installer is pnpm-compatible at the CLI surface and lockfile-compatible with whatever your project already uses. It infers the incumbent package manager and mirrors it — npm, pnpm, and bun lockfiles round-trip cleanly; yarn is read-only.
 
 ```bash
-nub install              # resolve + link node_modules into existing lockfile
+nub install              # resolve + link node_modules, existing lockfile
 nub add -E -D react      # exact pin, devDeps — pnpm flag spelling
 nub remove lodash
 nub update
@@ -100,12 +100,12 @@ To change a default, put a `nub.jsonc` at the project root:
 {
   "$schema": "https://nubjs.com/schema/latest.json",
 
-  "preload": ["./instrumentation.ts"],   // load a module before the entry file
-  "envFile": [".env.local"],             // read these env files instead of the default set
-  "tsconfig": "./tsconfig.runtime.json", // the TypeScript config the runtime uses
+  "preload": ["./instrumentation.ts"],   // loaded before the entry file
+  "envFile": [".env.local"],             // these instead of the defaults
+  "tsconfig": "./tsconfig.runtime.json", // the runtime's TypeScript config
 
   "install": {
-    "minimumReleaseAge": "3d"            // refuse dependencies published in the last 3 days
+    "minimumReleaseAge": "3d"            // refuse deps newer than 3 days
   }
 }
 ```
@@ -120,3 +120,13 @@ Unknown keys and invalid values stop the command with an error. See [nub.jsonc](
 ## Next steps
 
 - Quick answers: the [FAQ](/docs/faq).
+
+### Offline docs
+
+Nub bundles the documentation for offline access. The default command prints usage and a table of contents; select a page to read its Markdown.
+
+```sh
+nub agent docs
+nub agent docs --page /docs/run
+nub agent docs --list            # only the table of contents
+```

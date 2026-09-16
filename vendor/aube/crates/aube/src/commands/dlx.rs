@@ -275,12 +275,14 @@ pub async fn run_in(
         let bin_dir = super::project_modules_dir(&project_dir).join(".bin");
         let path_dirs = crate::runtime::path_entries_with_project_bins(vec![bin_dir]);
         let new_path = aube_scripts::prepend_paths(&path_dirs);
-        let mut cmd = aube_scripts::spawn_shell(&line);
+        let mut cmd = aube_scripts::shell_without_body();
         crate::runtime::apply_child_env(&mut cmd);
         cmd.env("PATH", &new_path)
             .envs(&child_env)
             .current_dir(&prev_cwd)
             .stderr(aube_scripts::child_stderr());
+        // Last, so a casing-restoring shell re-binds the names set above.
+        aube_scripts::append_shell_body(&mut cmd, &line);
         crate::process_guard::spawn_and_wait(cmd)
             .await
             .into_diagnostic()

@@ -3,7 +3,7 @@
 // transform-core loads the `nub-native` N-API addon at its own module evaluation
 // (fast tier: eagerly, the moment the module body runs), probing a sibling
 // `./addons/nub-native.node` first. Under the nub CLI that sibling always exists
-// (the extracted runtime dir); in the standalone loader package the addon rides a
+// (the extracted runtime dir); in the standalone runner package the addon rides a
 // per-platform npm package instead, so this module resolves it and hands the
 // absolute path over via the internal `__NUB_ADDON_PATH` plumbing var — see
 // ensureAddonEnv in loader-platform.cjs for the probe-order and worker-thread

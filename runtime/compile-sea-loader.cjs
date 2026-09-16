@@ -40,6 +40,10 @@
   const ENTRY = "__NUB_SEA_ENTRY__";
   // Every payload file the module loader may be asked for, by payload name.
   const FILES = __NUB_SEA_FILES__;
+  // The subset of `FILES` a `new Worker(...)` is allowed to name — the generated
+  // wrapper the compiler emits per traced worker root, and nothing else. A payload
+  // with no worker leaves the `Worker` replacement below unbuilt entirely.
+  const WORKERS = __NUB_SEA_WORKERS__;
   // Whether this Node's `localStorage` getter throws without a storage file, and
   // so has to be neutralized by the preamble. The launcher sets the same signal in
   // the child's environment; here the artifact sets it on itself, because a SEA
@@ -121,47 +125,161 @@
     }
   }
 
-  const files = new Set(FILES);
-  // An absolute `ROOT` URL names a payload file and nothing else, so it needs no
-  // parent to disambiguate. A bare `./name` does: these hooks are process-global,
-  // and a module loaded from DISK whose own relative import happens to spell a
-  // payload name would otherwise be handed the embedded file instead. Nothing can
-  // reach that today — every route to a disk module (an `--external` package, a
-  // retained computed `import()`, a computed `require`) also refuses this
-  // container — but the scoping is what makes that safety local rather than a
-  // consequence of an unrelated eligibility rule.
-  const nameOf = (specifier, parentURL) => {
-    if (specifier.startsWith(ROOT)) return specifier.slice(ROOT.length);
-    if (specifier.startsWith("./") && (parentURL ?? "").startsWith(ROOT)) {
-      return specifier.slice(2);
-    }
-    return null;
-  };
-  // `.cjs` is the extension every generated CommonJS support file carries, and
-  // the payload names are nub's own, so the extension is a reliable format tag
-  // here in a way it would not be for arbitrary user files.
-  const formatOf = (name) => (name.endsWith(".cjs") ? "commonjs" : "module");
+  // Everything a realm needs to reach the payload, written as ONE function because
+  // a worker is a realm that has to install all of it again. It reinstalls by
+  // evaluating this same text, which it receives from `Function.prototype.toString`
+  // — see the `Worker` replacement at the bottom of the body. The loader ships
+  // verbatim rather than bundled, so what that returns is what is written here.
+  //
+  // Nothing outside the body is referenced, and nothing can be: a worker realm
+  // holds none of this scope, so every binding the body needs is a parameter or a
+  // global. `process.getBuiltinModule` in place of the bootstrap's accessor is the
+  // same rule — and it arrived in 22.3, far below the 22.20 / 24.7 floor this
+  // container already carries for the blob's own `execArgv`. In a worker it is
+  // also the only route: the bootstrap that publishes that accessor has not run
+  // there yet, because this is what starts the module that runs it.
+  function installPayloadContainer(root, names, workerNames) {
+    const sea = process.getBuiltinModule("node:sea");
+    const Module = process.getBuiltinModule("node:module");
+    const files = new Set(names);
+    // An absolute `root` URL names a payload file and nothing else, so it needs no
+    // parent to disambiguate. A relative specifier does: these hooks are
+    // process-global, and a module loaded from DISK whose own relative import
+    // happens to spell a payload name would otherwise be handed the embedded file
+    // instead. Nothing can reach that today — every route to a disk module (an
+    // `--external` package, a retained computed `import()`, a computed `require`)
+    // also refuses this container — but the scoping is what makes that safety
+    // local rather than a consequence of an unrelated eligibility rule.
+    //
+    // RESOLVED against the parent rather than sliced, because a payload name is
+    // not always a bare word: `--include` moves every chunk under a layout prefix,
+    // and a generated worker wrapper reaches the bootstrap through `../`.
+    const nameOf = (specifier, parentURL) => {
+      if (specifier.startsWith(root)) return specifier.slice(root.length);
+      if (!specifier.startsWith("./") && !specifier.startsWith("../")) return null;
+      if (!(parentURL ?? "").startsWith(root)) return null;
+      const resolved = new URL(specifier, parentURL).href;
+      return resolved.startsWith(root) ? resolved.slice(root.length) : null;
+    };
+    // `.cjs` is the extension every generated CommonJS support file carries, and
+    // the payload names are nub's own, so the extension is a reliable format tag
+    // here in a way it would not be for arbitrary user files.
+    const formatOf = (name) => (name.endsWith(".cjs") ? "commonjs" : "module");
 
-  Module.registerHooks({
-    resolve(specifier, context, next) {
-      const name = nameOf(specifier, context.parentURL);
-      if (name !== null && files.has(name)) {
-        return { url: ROOT + name, format: formatOf(name), shortCircuit: true };
+    Module.registerHooks({
+      resolve(specifier, context, next) {
+        const name = nameOf(specifier, context.parentURL);
+        if (name !== null && files.has(name)) {
+          return { url: root + name, format: formatOf(name), shortCircuit: true };
+        }
+        return next(specifier, context);
+      },
+      load(url, context, next) {
+        // A load URL is always the absolute one `resolve` returned, so the parent
+        // is not consulted and cannot be.
+        const name = nameOf(url, root);
+        if (name !== null && files.has(name)) {
+          // The ArrayBuffer straight out of the mapped blob. Node decodes it in
+          // C++; handing it a string instead costs a copy of the whole chunk.
+          return { source: sea.getRawAsset(name), format: formatOf(name), shortCircuit: true };
+        }
+        return next(url, context);
+      },
+    });
+
+    // Workers, which need all of the above installed in a realm that cannot see it.
+    //
+    // `Module.registerHooks` is per-THREAD. Measured on 22.20, 24.19 and 26.7: a
+    // worker importing a specifier the parent thread's resolve hook invents fails
+    // with `ERR_UNSUPPORTED_ESM_URL_SCHEME`, because the hook never ran there. A
+    // worker started on a payload URL could therefore never load it, which is why a
+    // payload carrying one kept the launcher until now.
+    //
+    // The replacement starts such a worker on a generated CommonJS bootstrap that
+    // calls THIS function — so a worker's own worker is served exactly as the main
+    // thread's is, at any depth, which is what the extracted shape gets for free
+    // from having real paths. Three measured facts carry it, and any one of them
+    // being false would sink the approach:
+    //
+    //   * Replacing `Worker` here reaches a static `import { Worker }` in the
+    //     application. The builtin's ESM facade is built lazily on first ESM
+    //     import, and this runs from CommonJS before any — so no chunk rewriting
+    //     and no bundler change are needed.
+    //   * `node:sea` answers on a worker thread: `isSea()` is true and
+    //     `getRawAsset` returns the same bytes, so a worker serves chunks straight
+    //     out of the blob exactly as the main thread does.
+    //   * A direct `import()` from that bootstrap REACHES the hooks. It does not
+    //     from the blob's MAIN, where `import()` is the embedder's and refuses
+    //     anything that is not a builtin — the reason the entry shim below exists.
+    //     An `eval: true` worker runs through the ordinary CommonJS loader instead,
+    //     so it needs no such trick.
+    //
+    // Gated on the payload actually carrying a worker, because reading
+    // `node:worker_threads` LOADS it: 1.4 ms on a quiet box, against the ~3.7 ms a
+    // whole compiled application costs to start. Same reason the compile bootstrap
+    // strips its own `needsWorker` region.
+    if (workerNames.length === 0) return;
+    const threads = process.getBuiltinModule("node:worker_threads");
+    const OriginalWorker = threads.Worker;
+    // The payload root as a PATH, derived rather than written down: on Windows
+    // `file:///N:/$nub/` is `N:\$nub\`.
+    const rootPath = process.getBuiltinModule("node:url").fileURLToPath(root);
+    const workers = new Set(workerNames);
+
+    // The same worker reaches this constructor spelled two ways. The traced form
+    // the compiler emits — `new Worker(new URL("./w.mjs", import.meta.url))` —
+    // arrives as a payload URL, because a chunk's `import.meta.url` IS its payload
+    // URL. The WHATWG `globalThis.Worker` the runtime polyfills converts a `file:`
+    // URL to a path before it delegates here (`worker-polyfill.mjs`), so the same
+    // worker arrives as `/N:/$nub/w.mjs`.
+    //
+    // Anything else is passed straight through. A bare string is a filesystem path
+    // resolved against the cwd rather than a specifier resolved against the
+    // importing module, so a payload whose worker really is a file on disk keeps
+    // reaching that file.
+    const payloadWorker = (target) => {
+      const spec =
+        target instanceof URL ? target.href : typeof target === "string" ? target : null;
+      if (spec === null) return null;
+      let name = null;
+      if (spec.startsWith(root)) name = spec.slice(root.length);
+      else if (spec.startsWith(rootPath)) {
+        name = spec.slice(rootPath.length).split("\\").join("/");
       }
-      return next(specifier, context);
-    },
-    load(url, context, next) {
-      // A load URL is always the absolute one `resolve` returned, so the parent is
-      // not consulted and cannot be.
-      const name = nameOf(url, ROOT);
-      if (name !== null && files.has(name)) {
-        // The ArrayBuffer straight out of the mapped blob. Node decodes it in
-        // C++; handing it a string instead costs a copy of the whole chunk.
-        return { source: sea.getRawAsset(name), format: formatOf(name), shortCircuit: true };
+      return name !== null && workers.has(name) ? name : null;
+    };
+
+    // Built per construction rather than once, so a payload that never starts a
+    // worker does not pay to serialize its own file list.
+    const bootstrapFor = (name) =>
+      `(${installPayloadContainer})(${JSON.stringify(root)}, ${JSON.stringify(names)}, ` +
+      `${JSON.stringify(workerNames)});\n` +
+      // The entry failing to LOAD is reported the same way a throw inside it is:
+      // rethrown out of the microtask queue, so it becomes this thread's uncaught
+      // exception and the parent's `error` event. An unhandled rejection would
+      // reach the same place under Node's default, but only by that default.
+      `import(${JSON.stringify(root + name)}).catch((error) => {\n` +
+      `  setImmediate(() => {\n    throw error;\n  });\n});\n`;
+
+    class Worker extends OriginalWorker {
+      constructor(target, options) {
+        // `eval: true` means the target is SOURCE rather than a location, so none
+        // of this applies to it.
+        const name = options?.eval === true ? null : payloadWorker(target);
+        if (name === null) {
+          super(target, options);
+          return;
+        }
+        // `eval` last, so an application that passed `eval: false` beside a payload
+        // target cannot turn the generated bootstrap back into a path. Everything
+        // else — `workerData`, `env`, `execArgv`, `transferList` — passes through.
+        super(bootstrapFor(name), { ...options, eval: true });
       }
-      return next(url, context);
-    },
-  });
+    }
+    threads.Worker = Worker;
+  }
+
+  installPayloadContainer(ROOT, FILES, WORKERS);
 
   // The backstop for the one thing the build-time scan cannot promise.
   //

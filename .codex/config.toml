@@ -4,6 +4,12 @@ inherit = "core"
 [shell_environment_policy.set]
 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1"
 
+[mcp_servers.lat]
+command = "npx"
+args = ["--yes", "lat.md@0.12.2", "mcp"]
+startup_timeout_sec = 60
+tool_timeout_sec = 600
+
 [mcp_servers.chrome-devtools]
 command = "npx"
 args = [

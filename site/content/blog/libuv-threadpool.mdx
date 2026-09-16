@@ -1,0 +1,100 @@
+---
+title: "Sizing libuv's threadpool to the machine"
+description: A libuv threadpool sized to the cores of the machine, with the threads beyond Node's four at a lower priority, and why Node itself declined the same default.
+author: The Nub Team
+# Hidden from the built site until v0.10, the release that carries nubjs/nub#919, ships. With
+# the release: delete this line and set `date`. If the number moves, the first and last
+# paragraphs name it.
+unpublished: true
+# PLACEHOLDER — set this to the release date when `unpublished` comes off; it is the
+# publication date and sorts the blog index.
+date: 2026-09-09
+---
+
+Nub 0.10 sizes libuv's threadpool to the cores of the machine and runs the threads beyond Node's four at a lower priority.
+
+Node sends async `fs`, `dns.lookup`, `zlib` and `crypto` calls to a pool of four threads. Native addons such as `bcrypt` and `sharp` queue on the same four. The pool is four threads on a laptop and four on a 64-core server.
+
+<Figure
+  src="/blog/threadpool-16vcpu-light.svg"
+  darkSrc="/blog/threadpool-16vcpu-dark.svg"
+  alt="Four pool-bound routes on a 16 vCPU box, node against nub. bcrypt hashing: 18 to 66 requests per second, 3.7 times faster. sharp thumbnails: 57 to 179 requests per second, 3.1 times faster. pbkdf2 derivation: 46 to 131 requests per second, 2.9 times faster. RSA keygen: 89 to 201 requests per second, 2.3 times faster."
+  caption={<>Fastify routes on a c3d-standard-16 (16 vCPU), Node 26.8.1, autocannon at 64 connections for 15 seconds, mean of three rounds; <code>node</code> is the same binary with the pool left at four (<a href="https://github.com/nubjs/nub/blob/main/tests/bench/runtime/pool-bound.sh">benchmark</a>).</>}
+/>
+
+<details>
+<summary>The same routes on an 8-vCPU box</summary>
+
+<Figure
+  src="/blog/threadpool-8vcpu-light.svg"
+  darkSrc="/blog/threadpool-8vcpu-dark.svg"
+  alt="The same four routes on an 8 vCPU box, node against nub. bcrypt hashing: 18 to 33 requests per second, 1.8 times faster. sharp thumbnails: 55 to 91 requests per second, 1.7 times faster. pbkdf2 derivation: 47 to 65 requests per second, 1.4 times faster. RSA keygen: 87 to 100 requests per second, 1.2 times faster."
+  caption={<>The same routes on a c3d-standard-8 (8 vCPU, 4 physical cores), same method (<a href="https://github.com/nubjs/nub/blob/main/tests/bench/runtime/pool-bound.sh">benchmark</a>).</>}
+/>
+
+</details>
+
+Routes that use the pool lightly are unchanged. Five interleaved rounds of a 270 KB file read, a `stat` and a 55 KB gzip on the 16-vCPU box read within noise of plain Node. A burst of 400 `dns.lookup` calls finished in 59 ms instead of 84 ms.
+
+## The threadpool
+
+libuv is Node's I/O library. It keeps a pool of worker threads for the calls that block. Node's own [`UV_THREADPOOL_SIZE`](https://nodejs.org/api/cli.html#uv_threadpool_sizesize) environment variable sets the size. libuv reads it once, the first time the pool is used, so only the environment can change it. The usual fix is a line in a Dockerfile:
+
+```bash
+UV_THREADPOOL_SIZE=16 node server.js
+```
+
+Most deployments never set it. Nub sets it when it starts Node, on every launcher: the direct file run, `nub run`, `nubx`, `nub watch` and lifecycle scripts. The value is the larger of four and the cores available to the process. A container gets its cgroup quota, not the host's core count. On four cores or fewer, nothing changes.
+
+## Node's own attempt
+
+In January, a member of Node's performance team proposed the same default for Node itself, in [nodejs/node#61533](https://github.com/nodejs/node/pull/61533). The pull request collected eight approvals over six months.
+
+<Figure
+  src="/blog/uv-threadpool-pr-61533.png"
+  alt="The header of nodejs/node pull request 61533, titled src: set UV_THREADPOOL_SIZE based on available parallelism, in the Closed state, with several approving reviewers in the sidebar."
+  href="https://github.com/nodejs/node/pull/61533"
+  caption={<><a href="https://github.com/nodejs/node/pull/61533">nodejs/node#61533</a> by <a href="https://github.com/RafaelGSS">Rafael Gonzaga</a>, opened January 2026, under <a href="https://github.com/nodejs/performance/issues/193">nodejs/performance#193</a>.</>}
+/>
+
+The author closed it in August.
+
+<Figure
+  src="/blog/uv-threadpool-pr-61533-closed.png"
+  alt="A GitHub comment by RafaelGSS: After talking with @mcollina, we agreed that this is not ideal. Just because there are many CPUs in a host, it doesn't mean they are free. Saturating the CPU is worse than queuing I/O tasks."
+  href="https://github.com/nodejs/node/pull/61533#issuecomment-5244734518"
+  caption={<><a href="https://github.com/nodejs/node/pull/61533#issuecomment-5244734518">The closing comment</a>, August 2026.</>}
+/>
+
+A pool sized to the host takes every core it can see. On a box shared with other processes, that is a regression for them. The thread also [reports](https://github.com/nodejs/node/pull/61533#issuecomment-3861852577) a file-read benchmark at −15% with sixteen threads on 16 vCPU. On Windows, each pool thread [commits about 8 MB of stack](https://github.com/nodejs/node/issues/57911). The objection is not to the size. It is to taking the cores unconditionally.
+
+## The mitigations
+
+The size is the one Node's team proposed. Three things around it answer the objections.
+
+### Extra threads run at a lower priority
+
+On Linux, the threads beyond Node's four run at [nice](https://man7.org/linux/man-pages/man7/sched.7.html) 10. Node's four keep their normal priority. A nice 10 thread has about a tenth of the scheduler weight of a normal one. On an idle box it runs at full speed. Under contention it yields most of the CPU to the other work on the machine. Chromium [uses the same level](https://chromium.googlesource.com/chromium/src/+/main/base/threading/platform_thread_linux.cc) for its background threads.
+
+<Figure
+  src="/blog/threadpool-busy-host-light.svg"
+  darkSrc="/blog/threadpool-busy-host-dark.svg"
+  alt="A bcrypt server on a 16 vCPU box, node with 4 threads against nub with 16, beside twelve busy-loop processes. Idle box: 18 to 66 requests per second, 3.7 times faster. Busy box: 17 to 20 requests per second, 18 percent more. The twelve neighbours' throughput on the busy box: 1781 against 1763 million loops per second, 1.0 percent less."
+  caption={<>The bcrypt route beside twelve processes spinning at normal priority, same box and load as above, two rounds; the neighbours' throughput is their loop rate while the server is under load (<a href="https://github.com/nubjs/nub/blob/main/tests/bench/runtime/pool-priority-nub.sh">benchmark</a>).</>}
+/>
+
+The same twelve processes beside a sixteen-thread pool at normal priority lose 7.5% of their throughput. At nice 10 they lose about 1%, and the idle number is unchanged.
+
+### Children keep Node's default
+
+A `cluster` worker, a PM2 fork or any `child_process` spawn starts with Node's four threads. Nub removes its own value from `process.env` once the pool exists, so children do not inherit it. Eight workers with sixteen threads each is the oversubscription raised upstream. A child that runs through `nub` is sized again. A value you set yourself, in the shell or in an env file, inherits as it does under Node.
+
+### Windows stops at eight
+
+Each pool thread commits its full stack up front on Windows. The pool is capped at eight there instead of sized to the machine.
+
+## Opting out
+
+An explicit `UV_THREADPOOL_SIZE` is used as is. `nub --node` and `NODE_COMPAT=1` leave the pool at Node's default, with the rest of what Nub adds.
+
+The change is in [nubjs/nub#919](https://github.com/nubjs/nub/pull/919) and ships in Nub 0.10. The docs page is [Threadpool](/docs/runtime/threadpool).

@@ -50,17 +50,20 @@ const ENV_FILE_DENYLIST: &[&str] = &[
     "__NUB_COMPAT_NODE",
     "__NUB_COMPAT_NODE_COMPILE_CACHE",
     "__NUB_COMPAT_PATH",
+    "__NUB_COMPAT_UV_THREADPOOL_SIZE",
     "__NUB_COMPAT_PRESENT",
     "__NUB_AUGMENTED_NODE_OPTIONS",
     "__NUB_AUGMENTED_NODE_PATH",
     "__NUB_AUGMENTED_NODE",
     "__NUB_AUGMENTED_NODE_COMPILE_CACHE",
     "__NUB_AUGMENTED_PATH",
+    "__NUB_AUGMENTED_UV_THREADPOOL_SIZE",
     "__NUB_AUGMENTED_NODE_OPTIONS_PRESENT",
     "__NUB_AUGMENTED_NODE_PATH_PRESENT",
     "__NUB_AUGMENTED_NODE_PRESENT",
     "__NUB_AUGMENTED_NODE_COMPILE_CACHE_PRESENT",
     "__NUB_AUGMENTED_PATH_PRESENT",
+    "__NUB_AUGMENTED_UV_THREADPOOL_SIZE_PRESENT",
 ];
 
 /// The runtime-control keys Nub refuses to source from env files.
@@ -336,7 +339,7 @@ fn load_env_files_raw_reporting(
                 // (development/production/test), selects `.env.<NODE_ENV>` files above
                 // as the clamped fallback — only a `.env`-FILE `NODE_ENV` is dropped
                 // below.
-                if std::env::var_os(&key).is_some() {
+                if !env_file_may_set(&key) {
                     continue;
                 }
                 // dotenv / @next/env / Vite parity: a `.env` FILE never sets
@@ -388,10 +391,32 @@ fn warn_node_env_from_dotenv_ignored() {
     });
 }
 
+/// Whether an env file may set `key`. The shell wins: a key already in this
+/// process's environment is left alone. The one exception is nub's own automatic
+/// threadpool size, which is a default rather than a user value (see
+/// [`crate::node::spawn::threadpool_size_is_nub_default`]); every env-file
+/// consumer routes its shell-wins check through here so the exception holds on
+/// each launch path.
+pub fn env_file_may_set(key: &str) -> bool {
+    std::env::var_os(key).is_none()
+        || (env_keys_equal(key, crate::node::spawn::THREADPOOL_SIZE_ENV)
+            && crate::node::spawn::threadpool_size_is_nub_default())
+}
+
+/// Environment-key equality on this platform: Windows collapses ASCII case,
+/// Unix keeps `FOO` and `foo` distinct.
+pub fn env_keys_equal(left: &str, right: &str) -> bool {
+    if cfg!(windows) {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
 /// Load .env* files from the project root, returning the key-value
 /// pairs to inject into the child process environment. Shell env
 /// (from the parent process) always wins — values already set in
-/// the process environment are not overridden.
+/// the process environment are not overridden ([`env_file_may_set`]).
 pub fn load_env_files(project_root: &Path) -> HashMap<String, String> {
     let (mut result, node_env_ignored, denied_keys) = load_env_files_raw_reporting(project_root);
 

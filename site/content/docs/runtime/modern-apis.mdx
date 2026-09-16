@@ -103,7 +103,8 @@ The fallback returns generator-backed helper objects. Iteration, laziness, valid
 The supplied helpers are:
 
 ```text
-map  filter  take  drop  flatMap  reduce  toArray  some  every  find  forEach
+map  filter  take  drop  flatMap  reduce  toArray
+some  every  find  forEach
 ```
 
 ### `Iterator.concat()`
@@ -332,7 +333,8 @@ Feature-detected JavaScript polyfill before Node 25; native on Node 25+.
 
 ```ts
 const bytes = new TextEncoder().encode("hello");
-const encoded = bytes.toBase64({ alphabet: "base64url", omitPadding: true });
+const opts = { alphabet: "base64url", omitPadding: true };
+const encoded = bytes.toBase64(opts);
 const decoded = Uint8Array.fromBase64(encoded, { alphabet: "base64url" });
 
 console.log(decoded.toHex());
@@ -598,6 +600,26 @@ import { DatabaseSync } from "node:sqlite";
 
 const database = new DatabaseSync("app.db");
 const row = database.prepare("SELECT count(*) AS count FROM users").get();
+```
+
+### `AsyncLocalStorage`
+
+Node 24 rebuilt [`AsyncLocalStorage`](https://nodejs.org/api/async_context.html#class-asynclocalstorage) on V8's context frames, which cuts the cost of carrying a store across every `await` roughly in half. Nub turns that implementation on for Node 22 and 23.
+
+<Callout title="Delivery">
+Version-gated Node behavior, default on Node 24+. Nub passes `--experimental-async-context-frame` on Node 22.9–23.x. Tracing SDKs, request-context plugins, and frameworks that read the store on each request get the faster path with no code change.
+</Callout>
+
+```ts
+import { AsyncLocalStorage } from "node:async_hooks";
+
+const requestId = new AsyncLocalStorage<string>();
+
+// every hop below reads the store; propagation is what got cheaper
+await requestId.run("req-1", async () => {
+  await fetchUser();
+  console.log(requestId.getStore()); // "req-1"
+});
 ```
 
 ### Native addon imports

@@ -322,6 +322,17 @@ fn bundle_inner(
         // ONLY for `(Node, Cjs)` and leaves verbatim everywhere else — and under a
         // CJS format Rolldown already declares both globals, so the plugin is
         // redundant there and should simply be skipped.
+        //
+        // A CJS shape was built behind an env gate and removed, so the reason is
+        // worth keeping: its only purpose was a V8 startup snapshot, which needs a
+        // CommonJS main (`minimalRunCjs` rejects an ESM entry). Snapshots do not
+        // pay here. On code-shaped init — classes, closures, registries, i.e. what
+        // an app is — one measured 0.95x, SLOWER than plain, winning 2 of 13
+        // rounds; the 1.48x a snapshot wins on data-shaped init does not transfer,
+        // and the blob runs 30 MB for 0.2 MB of source. A graph touching
+        // `node:http` cannot be snapshotted at all, because `HTTPParser` carries
+        // V8 embedder fields. Precompilation does NOT imply CJS in general:
+        // Bun ships `format: "esm"` with `bytecode: true`.
         format: Some(OutputFormat::Esm),
         platform: Some(Platform::Node),
         // An authored ESM module has no `require` binding. Rolldown's Node ESM
@@ -368,7 +379,23 @@ fn bundle_inner(
         },
         resolve: Some(ResolveOptions {
             alias: alias_entries(&opts.alias)?,
-            condition_names: (!opts.conditions.is_empty()).then(|| opts.conditions.clone()),
+            // Nub's runtime key leads the set, so a package resolves to the same
+            // branch here as it does on a `nub <file>` run. `exports` is resolved
+            // at BUILD time in a compiled binary, so a bundler that omitted the
+            // condition would silently ship a different file than the one the same
+            // program loads uninstalled. Additive, not substitutive — the defaults
+            // still apply (see
+            // `a_custom_condition_is_added_to_the_defaults_not_substituted_for_them`).
+            condition_names: Some(
+                std::iter::once(crate::cli::NUB_CONDITION.to_string())
+                    .chain(
+                        opts.conditions
+                            .iter()
+                            .filter(|name| name.as_str() != crate::cli::NUB_CONDITION)
+                            .cloned(),
+                    )
+                    .collect(),
+            ),
             // `module` BEFORE `main`, inverting Rolldown's node-platform default
             // (`["main", "module"]`) to Rollup's order. A legacy dual package
             // with no `exports` map points `main` at a UMD build whose factory
@@ -1695,6 +1722,41 @@ fn compile_commonjs_require_intro() -> String {
 const ROLLDOWN_MODULE_WRAPPERS: [&str; 4] = ["__commonJS", "__commonJSMin", "__esm", "__esmMin"];
 const ROLLDOWN_COMMONJS_WRAPPERS: [&str; 2] = ["__commonJS", "__commonJSMin"];
 
+/// The re-entrancy guard nub wraps every ASYNC module initializer in, and the
+/// reason it exists: Rolldown lowers each import edge into its own `await`, which
+/// is correct for a DAG and wrong inside a cycle.
+///
+/// Real ESM never has a module wait on another module in its own strongly
+/// connected component. `InnerModuleEvaluation` only registers a pending async
+/// dependency when the required module has already left the stack; a requirement
+/// that is still EVALUATING is in the same SCC, so the spec records a
+/// `[[DFSAncestorIndex]]` and moves on. The whole SCC's top-level awaits are then
+/// joined at its cycle root.
+///
+/// Rolldown's lowering has no such rule, so `a -> b -> c -> a` compiles to three
+/// initializers that each await the next. By the time the third calls back into
+/// the first, the memo holds the first's IN-FLIGHT PROMISE, and awaiting it is a
+/// deadlock: the program exits 13 with "Detected unsettled top-level await" and
+/// nothing else. Plain Node runs the same source.
+///
+/// This restores the spec's rule dynamically. An initializer that is re-entered
+/// while its own promise is still pending is, by construction, being reached
+/// through a cycle, so the guard returns `undefined` rather than the promise the
+/// caller would deadlock on. The first caller still holds the real promise, so
+/// the SCC completes before anything downstream of it runs.
+///
+/// The guard returns the initializer's OWN promise and only attaches a settled
+/// observer to it. Returning a `.then()` chain instead would be equivalent, and
+/// measured 1.19x slower over a 318-chunk app (0 of 15 paired rounds won): every
+/// initializer await would pay an extra microtask hop, and there are hundreds of
+/// them before `main`. Rejections still reach the caller, because the promise
+/// handed back is the unaltered one.
+///
+/// It is applied ONLY to async wrappers. A synchronous initializer must finish
+/// synchronously — its callers do not await it — so routing one through a promise
+/// would let them run before it had.
+const COMPILE_CYCLE_INIT_HELPER: &str = "function __nubCycleInit(state, run) { if (state.s === 2) return state.p; if (state.s === 1) return; state.s = 1; var p = run(); p.then(() => { state.s = 2 }, () => { state.s = 2 }); return state.p = p; }\n";
+
 /// Rewrite every top-level Rolldown module wrapper in one chunk. Returns `None`
 /// when the chunk has none, so an untouched chunk keeps its original bytes.
 ///
@@ -1717,6 +1779,7 @@ fn hoist_module_wrappers(code: &str) -> Result<Option<String>> {
 
     let mut magic = MagicString::new(code.to_owned());
     let mut rewrote = false;
+    let mut needs_cycle_helper = false;
     for statement in &parsed.program.body {
         let Statement::VariableDeclaration(decl) = statement else {
             continue;
@@ -1745,28 +1808,50 @@ fn hoist_module_wrappers(code: &str) -> Result<Option<String>> {
         } else {
             String::new()
         };
+        // Only an ASYNC wrapper can deadlock a cycle, and only an async one may
+        // be routed through a promise — see [`COMPILE_CYCLE_INIT_HELPER`].
+        let is_async = call
+            .arguments
+            .first()
+            .and_then(|argument| argument.as_expression())
+            // oxc keeps parentheses in the tree, and Rolldown emits the wrapper
+            // argument parenthesized, so the arrow is one level down.
+            .map(|expression| expression.get_inner_expression())
+            .is_some_and(|expression| match expression {
+                Expression::ArrowFunctionExpression(arrow) => arrow.r#async,
+                Expression::FunctionExpression(function) => function.r#async,
+                _ => false,
+            });
         // `var <lazy>; function <name>() { [const require = …;] return (<lazy> ??= `
         // replaces everything up to the wrapper call, dropping the
         // `/* @__PURE__ */` with it — tree-shaking has already run by
         // render_chunk, so the annotation has no reader left. The spans come from
         // this same parse, so a failed range is a bug, and it surfaces as one.
-        magic
-            .update(
-                decl.span.start,
-                call.span.start,
-                format!("var {lazy}; function {name}() {{ {bind_require}return ({lazy} ??= "),
+        let (open, close) = if is_async {
+            let state = format!("__nub_cycle_{name}");
+            (
+                format!(
+                    "var {lazy}; var {state} = {{ s: 0, p: void 0 }};                      function {name}() {{ {bind_require}return __nubCycleInit({state}, () => ({lazy} ??= "
+                ),
+                ").apply(this, arguments)) }".to_string(),
             )
-            .and_then(|magic| {
-                magic.update(
-                    call.span.end,
-                    decl.span.end,
-                    ").apply(this, arguments) }".to_string(),
-                )
-            })
+        } else {
+            (
+                format!("var {lazy}; function {name}() {{ {bind_require}return ({lazy} ??= "),
+                ").apply(this, arguments) }".to_string(),
+            )
+        };
+        needs_cycle_helper |= is_async;
+        magic
+            .update(decl.span.start, call.span.start, open)
+            .and_then(|magic| magic.update(call.span.end, decl.span.end, close))
             .map_err(|err| {
                 anyhow!("rewriting the module wrapper `{name}` in a compiled chunk: {err}")
             })?;
         rewrote = true;
+    }
+    if needs_cycle_helper {
+        magic.prepend(COMPILE_CYCLE_INIT_HELPER.to_string());
     }
     Ok(rewrote.then(|| magic.to_string()))
 }
@@ -5711,9 +5796,11 @@ fn reject_unresolved(
         "\n\x20\x20A .node addon is a platform binary the bundler cannot inline, and packages\n\
          \x20\x20pick one at run time from a list of per-platform variants — so the specifier\n\
          \x20\x20above is not something you can make static in the package's own source.\n\
-         \x20\x20If the machine you ship to will have this package installed, --external\n\
-         \x20\x20<package> leaves it to be resolved there. A self-contained binary carrying\n\
-         \x20\x20its own copy of a native package is not supported yet."
+         \x20\x20--unbundled <package> ships a package's whole installed layout inside the\n\
+         \x20\x20binary, addon and all. nub does that on its own for a package its rules\n\
+         \x20\x20recognize, and the flag is how you name one they missed. --external\n\
+         \x20\x20<package> is the other answer: it leaves the package out of the binary, to\n\
+         \x20\x20be resolved on the machine you ship to."
     } else {
         ""
     };
@@ -5805,7 +5892,7 @@ fn reject_unresolved(
     // there: the package ships in its installed layout, so its own require() and
     // __dirname resolve against real files exactly as they did before compiling.
     //
-    // Withheld for a native addon, which has its own hint naming --external, and
+    // Withheld for a native addon, which has its own hint naming both flags, and
     // under the two whole-tree explanations whose fix comes first.
     let dependency_site_hint = if any_dependency_site && !any_native && !uninstalled && !pnp {
         "\n\n\x20\x20At least one site above is inside a dependency rather than your own source,\n\
@@ -6142,6 +6229,39 @@ mod tests {
         assert!(
             emits_literal(&default, "import"),
             "without --conditions the import branch must win; got:\n{default}"
+        );
+    }
+
+    /// Nub's runtime key reaches the bundler's resolver with no flag passed, so a
+    /// package's `nub` branch picks the file a `nub <file>` run would load.
+    ///
+    /// `exports` is resolved at BUILD time here, and a resolution that skipped the key
+    /// would fail silently: the compiled binary ships the `default` branch while the
+    /// same program run uncompiled loads the other one. The negative half is what
+    /// catches that, since a bundle that resolved nothing also fails the first
+    /// assertion.
+    #[test]
+    fn the_nub_runtime_key_selects_its_exports_branch_with_no_flag() {
+        const PKG: &str = r#"{
+            "name": "keyed",
+            "exports": { ".": { "nub": "./nub.js", "default": "./default.js" } }
+        }"#;
+        const FILES: &[(&str, &str)] = &[
+            ("nub.js", "export const WHICH = 'runtime-key';\n"),
+            ("default.js", "export const WHICH = 'default-branch';\n"),
+        ];
+        const SRC: &str = "import { WHICH } from 'keyed';\nglobalThis.OUT = WHICH;\n";
+
+        let mut plain = opts();
+        plain.minify = false;
+        let selected = bundle_with_package(SRC, "keyed", PKG, FILES, &plain);
+        assert!(
+            emits_literal(&selected, "runtime-key"),
+            "the bundler must resolve the `nub` branch with no flag passed; got:\n{selected}"
+        );
+        assert!(
+            !emits_literal(&selected, "default-branch"),
+            "and it must not also pull the default branch in; got:\n{selected}"
         );
     }
 
@@ -8253,6 +8373,58 @@ mod tests {
     }
 
     #[test]
+    fn an_async_module_cycle_is_guarded_against_re_entry() {
+        // Every member of this cycle has a real top-level await, which is what
+        // makes each initializer async and the cycle a deadlock without the
+        // guard: config -> migrate -> back to config, with the memo holding an
+        // in-flight promise by the time the second edge is taken. Plain Node
+        // runs this source; before the guard the compiled binary exited 13 with
+        // "Detected unsettled top-level await".
+        let dir = fixture_dir("async-cycle");
+        std::fs::write(
+            dir.join("config.mjs"),
+            "import { migrate } from './migrate.mjs';\n             export const settings = { name: 'cfg' };\n             await Promise.resolve();\n             export function load() { return settings.name + ':' + migrate() }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("migrate.mjs"),
+            "import { settings } from './config.mjs';\n             await Promise.resolve();\n             export function migrate() { return 'm(' + settings.name + ')' }\n",
+        )
+        .unwrap();
+        let entry = dir.join("entry.mjs");
+        std::fs::write(
+            &entry,
+            "import { load } from './config.mjs'; console.log(load());\n",
+        )
+        .unwrap();
+
+        let mut o = opts();
+        o.minify = false;
+        let res = bundle(&entry, &o).expect("a cyclic async graph must compile");
+        let all = res
+            .files
+            .iter()
+            .map(|file| String::from_utf8_lossy(&file.bytes).into_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            all.contains("function __nubCycleInit(state, run)"),
+            "a chunk with async initializers must carry the cycle guard:\n{all}"
+        );
+        assert!(
+            all.contains("__nubCycleInit(__nub_cycle_init_config"),
+            "the async initializer for a cycle member must be guarded:\n{all}"
+        );
+        // The preamble initializer is synchronous and its callers do not await
+        // it, so routing it through a promise would let them run before it had.
+        assert!(
+            !all.contains("__nubCycleInit(__nub_cycle_init__nub_compile_preamble"),
+            "a synchronous initializer must not be routed through a promise:\n{all}"
+        );
+    }
+
+    #[test]
     fn module_wrappers_and_require_are_hoisted_declarations() {
         let dir = fixture_dir("hoisted-wrappers");
         let pkg = dir.join("node_modules/cjsdep");
@@ -10296,6 +10468,49 @@ const pkg = require("./package.json");
         assert!(
             !own_source.to_string().contains("--unbundled"),
             "the author's own site must not be sent to --unbundled: {own_source}"
+        );
+    }
+
+    /// An unresolved `.node` require is pointed at BOTH flags, and told nothing
+    /// false about what a compiled binary can carry.
+    ///
+    /// This text claimed for a long time that "a self-contained binary carrying
+    /// its own copy of a native package is not supported yet", which is not true
+    /// and never was: a package the unbundlable rules recognize is copied into the
+    /// binary in its own installed layout, addon and all — measured on `sharp`,
+    /// which ships a 7.2 MB island and runs with `node_modules` deleted. What the
+    /// message is really reporting is narrower, that the rules did not reach this
+    /// site, and `--unbundled` is exactly the flag for that case
+    /// ([`unbundlable::Reason::Forced`], whose own comment says no detector reaches
+    /// every package). Naming only `--external` sent someone with a shippable
+    /// payload to the one answer that requires the package to already be installed
+    /// on the machine they ship to.
+    #[test]
+    fn an_unresolved_native_addon_is_pointed_at_both_flags() {
+        let native = DynamicSite {
+            module: "/p/node_modules/some-native-pkg/index.js".into(),
+            kind: SiteKind::Indirect,
+            snippet: "require('./build/Release/binding.node')".into(),
+            ..dynamic_site()
+        };
+        let err = reject_unresolved(&[native], &[], &[], Path::new("/p"), false, false)
+            .expect_err("must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--unbundled") && msg.contains("--external"),
+            "both ways out must be named, got: {msg}"
+        );
+        assert!(
+            !msg.contains("not supported yet"),
+            "a self-contained binary DOES carry native packages, so the message must not \
+             say otherwise: {msg}"
+        );
+        // The generic indirect-require advice is "depend on the package's ESM
+        // build", which for a per-platform `.node` names something that does not
+        // exist and lives in somebody else's package either way.
+        assert!(
+            !msg.contains("the package's ESM build"),
+            "the indirect-require hint must stay withheld for a native site: {msg}"
         );
     }
 

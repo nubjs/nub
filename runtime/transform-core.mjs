@@ -207,6 +207,20 @@ export const TRANSPILE_EXTS = new Set([".ts", ".tsx", ".mts", ".cts", ".jsx"]);
 // `maybeTranspilePlainJs` gate); a no-op plain-JS file falls through to Node's
 // native loader untouched, byte-identical. node_modules is excluded at the gate.
 export const PLAIN_JS_EXTS = new Set([".js", ".mjs", ".cjs"]);
+// A bare `commonjs`/`module` format on a file nub would transpile can only have
+// been assigned by a hook layered ABOVE nub's. Node's resolver labels a `.ts` file
+// `commonjs-typescript`/`module-typescript` (or `typescript` when the package has
+// no `type`) and leaves `.jsx` unlabelled, and nub's own resolve returns no format;
+// the bare form is what tsx's resolve hook writes (getFormatFromFileUrl), and its
+// load hook then expects the RAW source back from `nextLoad` so it can run its own
+// module-format transform — a mixed `import` + `require` file becomes CJS there,
+// where nub's syntax detection would make it ESM and `require` undefined. Both
+// tiers step aside on this signal, the fast tier only once the user registration
+// is known to carry a load hook (preload-common.cjs). Plain JS is excluded: Node
+// assigns those the bare form itself.
+export function outerHookOwnsFormat(format, ext) {
+  return (format === "commonjs" || format === "module") && TRANSPILE_EXTS.has(ext) && !PLAIN_JS_EXTS.has(ext);
+}
 // The data loaders nub SHIPS — a runtime feature, not a project setting, so they stay
 // in force inside node_modules too (see dataExtsFor).
 const BUILTIN_DATA_EXTS = { ".jsonc": "jsonc", ".json5": "json5", ".toml": "toml", ".yaml": "yaml", ".yml": "yaml", ".txt": "txt" };
@@ -920,10 +934,10 @@ export function noteRuntimeV8FlagSource(result) {
 // from extension alone), so a CommonJS-syntax `.ts` is reported `commonjs` — the
 // fix that makes `require()` of a TS file work on the compat tier, where Node's
 // CJS translator loads it via this hook and keys on the returned format.
-export function loadTranspile(url, ext) {
+export function loadTranspile(url, ext, source) {
   __ensureBuiltins();
   const filePath = fileURLToPath(url);
-  const source = readFileSync(filePath, "utf8");
+  source ??= readFileSync(filePath, "utf8");
   const dir = dirname(filePath);
   // The transform-relevant compilerOptions slice + the byte-for-byte cache-key
   // component (`tsconfigHash`) both come from the native tsconfig reader.
@@ -1007,7 +1021,15 @@ export function loadTranspile(url, ext) {
     const details = result.errors.map((e) => e.codeframe || e.message).join("\n\n");
     throw new Error(`Transpile error in ${filePath}:\n${details}`);
   }
-  return { format: result.format, source: result.code, shortCircuit: true };
+  // `responseURL` is what an OUTER user hook keys on. Node's default load sets it
+  // to the file URL, and tsx's load hook takes its CommonJS branch only when the
+  // result `nextLoad` hands back carries a `file:` responseURL — without it, tsx
+  // re-transformed a `.ts` file nub had already emitted as CJS in its ESM branch,
+  // and `require` was undefined at run time (`tsx script.ts` under `nub run`).
+  // Node itself defaults a missing responseURL to the URL, so only a hook layered
+  // above nub's can observe the difference; every file-URL result nub
+  // short-circuits carries it for that reason.
+  return { format: result.format, source: result.code, responseURL: url, shortCircuit: true };
 }
 
 // Project-source plain JS (`.js`/`.mjs`/`.cjs`) gate. Returns a transpiled load
@@ -1024,7 +1046,7 @@ export function loadTranspile(url, ext) {
 // sites (the byte-parity boundary). JSX-in-`.js` is out of scope for the syntax
 // gate (lang is "ts", which does not parse JSX); use `.jsx`, or say so explicitly
 // with a `loader` entry, which takes the unconditional path below instead.
-export function maybeTranspilePlainJs(url, ext) {
+export function maybeTranspilePlainJs(url, ext, source) {
   __ensureBuiltins();
   // An explicit `loader` entry pointing this extension at a code dialect moved it
   // into TRANSPILE_EXTS, which for every other member means "always compile". Only
@@ -1035,11 +1057,10 @@ export function maybeTranspilePlainJs(url, ext) {
   // while the ESM path transpiles the same file on both tiers. The registration
   // loop deliberately skips `.js`/`.cjs` because this wrapper owns them, so there
   // is nothing else downstream to catch it.
-  if (TRANSPILE_EXTS.has(ext)) return loadTranspile(url, ext);
+  if (TRANSPILE_EXTS.has(ext)) return loadTranspile(url, ext, source);
   const filePath = fileURLToPath(url);
-  let source;
   try {
-    source = readFileSync(filePath, "utf8");
+    source ??= readFileSync(filePath, "utf8");
   } catch {
     // Unreadable here → let Node's loader surface its own error.
     return null;
@@ -1050,10 +1071,10 @@ export function maybeTranspilePlainJs(url, ext) {
     return null; // no-op: Node's native loader handles it, byte-identical.
   }
   // Transformable: run the SAME pipeline as TS/JSX (target es2022 lowering, tsconfig,
-  // source maps, the Stage-3 decorator guard, format detection, cache). loadTranspile
-  // re-reads + re-parses, but only for the rare file that actually needs lowering.
+  // source maps, the Stage-3 decorator guard, format detection, cache), reusing
+  // the bytes already inspected by the gate.
   try {
-    return loadTranspile(url, ext);
+    return loadTranspile(url, ext, source);
   } catch (err) {
     // #225: a plain-JS file the transformable verdict flagged (a `using` decl or
     // `v`-flag RegExp somewhere) but whose transform oxc then REJECTS — V8 tolerates
@@ -1127,7 +1148,7 @@ export function loadData(url, ext) {
   const parsed = dataValue(url, ext);
 
   if (parsed == null) {
-    return { format: "module", source: "export default undefined;\n", shortCircuit: true };
+    return { format: "module", source: "export default undefined;\n", responseURL: url, shortCircuit: true };
   }
 
   // Default export only. Data modules deliberately do NOT emit per-key named
@@ -1137,7 +1158,7 @@ export function loadData(url, ext) {
   // default — `import cfg from "./c.yaml"; const { host } = cfg;` — which the
   // `@nubjs/types` `Record<string, unknown>` default type makes sound.
   const code = `export default ${JSON.stringify(parsed)};\n`;
-  return { format: "module", source: code, shortCircuit: true };
+  return { format: "module", source: code, responseURL: url, shortCircuit: true };
 }
 
 // Import Text: `import s from "./any.file" with { type: "text" }` → the raw file
@@ -1153,5 +1174,5 @@ export function loadData(url, ext) {
 const __textDecoder = new TextDecoder();
 export function loadTextImport(url) {
   const text = __textDecoder.decode(readFileSync(fileURLToPath(url)));
-  return { format: "module", source: `export default ${JSON.stringify(text)};\n`, shortCircuit: true };
+  return { format: "module", source: `export default ${JSON.stringify(text)};\n`, responseURL: url, shortCircuit: true };
 }

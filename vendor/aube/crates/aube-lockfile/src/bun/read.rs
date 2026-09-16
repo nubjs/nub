@@ -3,9 +3,10 @@ use super::raw::{BunEntry, RawBunLockfile};
 use super::source::{
     bin_value_to_map, bun_key_to_alias_name, classify_bun_ident,
     rebase_workspace_scoped_local_source, resolve_nested_bun, resolve_workspace_dep, split_ident,
-    unrecognized_protocol,
 };
-use crate::{DepType, DirectDep, Error, LockedPackage, LockfileGraph, PeerDepMeta};
+use crate::{
+    DepType, DirectDep, Error, LockedPackage, LockfileGraph, PeerDepMeta, version_protocol,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -116,12 +117,15 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
             &workspace_dirs,
         )?;
         // A protocol-shaped tail that fell through the classifier means a
-        // source this reader can't resolve. Withhold the entry so the edge
-        // sites below fatal / warn+skip instead of resolving to a bogus
-        // registry pin.
+        // source this reader can't resolve — an unknown or future bun
+        // protocol, or a malformed spec like a `git+…` tail
+        // `parse_git_spec` rejected. Withhold the entry so the edge sites
+        // below fatal / warn+skip instead of resolving to a bogus registry
+        // pin. Consulted only under `strict_unsupported_source`; the
+        // lenient default keeps the historical reclassify behavior.
         if strict
             && local_source.is_none()
-            && let Some(protocol) = unrecognized_protocol(&raw_version)
+            && let Some(protocol) = version_protocol(&raw_version)
         {
             unsupported.insert(
                 key.clone(),

@@ -7,7 +7,7 @@ Watch mode (`nub watch`) runs your entry point and restarts it whenever a file i
 
 The engine underneath is Node's own `--watch` (run with `--watch-preserve-output`), with a Nub-side layer that reports the in-memory-transpiled dependency graph — plus the off-graph files that still invalidate a process — back to Node's watcher.
 
-For how `nub` runs files in the first place, see [Running files](/docs/runtime); for scripts, [Running scripts](/docs/runner/run).
+For how `nub` runs files in the first place, see [Running files](/docs/runtime); for scripts, [Running scripts](/docs/run).
 
 ## Watching a file
 
@@ -19,7 +19,7 @@ nub watch src/server.ts
 
 TypeScript, JSX, `.env*` loading, `tsconfig.json` paths — everything `nub <file>` gives you is active here too, because `nub watch` runs the same augmented Node underneath. A project [`nub.jsonc`](/docs/config) is in force on every restart: preloads, environment files, loaders, conditions, TypeScript transforms, and the selected tsconfig.
 
-A `--watch` placed after a script name is forwarded *to the script* like any other argument — `nub run test --watch` runs your test tool's own watch mode, it does not invoke Nub's watcher. See [`nub run` → Forward arguments](/docs/runner/run#argument-forwarding).
+A `--watch` placed after a script name is forwarded *to the script* like any other argument — `nub run test --watch` runs your test tool's own watch mode, it does not invoke Nub's watcher. See [`nub run` → Forward arguments](/docs/run#argument-forwarding).
 
 ## `--watch`
 
@@ -35,7 +35,8 @@ Nub runs Node's watcher with `--watch-preserve-output`, so a restart prints Node
 
 ```console
 $ nub watch src/server.ts
-Completed running 'src/server.ts'. Waiting for file changes before restarting...
+Completed running 'src/server.ts'. Waiting for file changes before
+restarting...
 Restarting 'src/server.ts'
 ```
 
@@ -74,6 +75,6 @@ Read the [full docs](https://nodejs.org/api/cli.html#--watch) for Node's `--watc
 ## Related
 
 - [Running files](/docs/runtime) — how `nub <file>` executes TypeScript and JSX.
-- [Running scripts](/docs/runner/run) — `nub run` and its workspace surface.
-- [nubx](/docs/runner) — running local CLIs from `node_modules/.bin`.
+- [Script runner](/docs/run) — `nub run` and its workspace surface.
+- [Bin runner](/docs/nubx) — `nubx`, running local CLIs from `node_modules/.bin`.
 - [FAQ](/docs/faq) — short answers across the whole surface.

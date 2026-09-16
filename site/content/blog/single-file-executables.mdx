@@ -3,16 +3,16 @@ title: "Introducing `nub compile` — single-file executables for Node.js"
 hnTitle: "Introducing `nub compile` — single-file executables for Node.js"
 description: Single-file self-extracting executables for Node.js with support for all major operating systems, Node addons, and cross-compilation to every target from any machine.
 author: Colin
-# Hidden from the built site until v0.9 ships. With the release: delete this line, set
+# Hidden from the built site until v0.10 ships. With the release: delete this line, set
 # `date`, and re-capture every transcript and both recordings under `public/ansi/` with the
 # release binary — each intro line still reads `nub 0.8.3`.
 unpublished: true
-# PLACEHOLDER — set this to the v0.9 release date when `unpublished` comes off; it is
+# PLACEHOLDER — set this to the v0.10 release date when `unpublished` comes off; it is
 # the publication date and sorts the blog index.
 date: 2026-09-02
 ---
 
-Nub 0.9 adds `nub compile`, which bundles a TypeScript or JavaScript entrypoint into a single-file executable.
+Nub 0.10 adds `nub compile`, which bundles a TypeScript or JavaScript entrypoint into a single-file executable.
 
 <AnsiPlayer
   src="/ansi/compile-cli.json"
@@ -239,7 +239,7 @@ A stock `node` binary is 145 MB on darwin-arm64. Stripped and recompressed, it f
   accent="acid"
   unit="MB"
   max={143.6}
-  caption="The same hello world under each tool, macOS arm64, Node 26.7.0. nub 0.9; @yao-pkg/pkg 6.22.0 on its patched Node 26.5.1; Node SEA via node --build-sea."
+  caption="The same hello world under each tool, macOS arm64, Node 26.7.0. nub 0.10; @yao-pkg/pkg 6.22.0 on its patched Node 26.5.1; Node SEA via node --build-sea."
   rows={[
     { cmd: 'nub compile', ms: 29.3, us: true },
     { cmd: 'pkg', ms: 77.2, label: '2.6× larger' },
@@ -258,7 +258,7 @@ Time to first output, measured warm — after the one-time extraction on first r
   accent="acid"
   unit="ms"
   max={51.0}
-  caption="hyperfine, macOS arm64, median of 150 interleaved runs. nub 0.9, node and Node SEA 26.7.0, @yao-pkg/pkg 6.22.0 on its patched Node 26.5.1."
+  caption="hyperfine, macOS arm64, median of 150 interleaved runs. nub 0.10, node and Node SEA 26.7.0, @yao-pkg/pkg 6.22.0 on its patched Node 26.5.1."
   rows={[
     { cmd: 'node hello.js', ms: 37.6 },
     { cmd: 'node --build-sea', ms: 38.1 },
@@ -306,7 +306,8 @@ Windows resources cross-compile too:
 $ nub compile cli.ts --platform win32-x64 --icon icon.ico
 \e[35m\e[1mnub\e[22m\e[39m \e[2m0.8.3\e[22m \e[2m·\e[22m compiling cli.ts \e[2m→\e[22m \e[96mcli.exe\e[39m
 Stripped the embedded Node
-note: cross-compiled for win32-x64 — payload verified statically; the run-it self-check needs a win32-x64 host
+note: cross-compiled for win32-x64 — payload verified statically; the
+      run-it self-check needs a win32-x64 host
 
     \e[2moutput\e[22m  \e[96mcli.exe\e[39m  29.9 MB\e[2m  (node 28.6 MB · app 57 KB · launcher 1.2 MB)\e[22m
    \e[2mruntime\e[22m  Node 26.7.0, embedded\e[2m  (package.json#engines.node)\e[22m
@@ -345,7 +346,7 @@ The `--smol` flag can be used to dramatically reduce the resulting executable si
   accent="acid"
   unit="MB"
   max={143.6}
-  caption="The earlier chart, with the runtime-free shape added. macOS arm64, Node 26.7.0; nub 0.9, @yao-pkg/pkg 6.22.0, Node SEA."
+  caption="The earlier chart, with the runtime-free shape added. macOS arm64, Node 26.7.0; nub 0.10, @yao-pkg/pkg 6.22.0, Node SEA."
   rows={[
     { cmd: 'nub compile --smol', ms: 0.92, us: true },
     { cmd: 'nub compile', ms: 29.3, label: '32× larger' },
@@ -446,7 +447,7 @@ Capability by capability, against the ones still maintained:
     'Bun': 'https://bun.sh/docs/bundler/executables',
     'Deno': 'https://docs.deno.com/runtime/reference/cli/compile/',
   }}
-  caption="nub 0.9 · Node SEA on 26.7.0 · @yao-pkg/pkg 6.22.0 · Bun 1.3.14 · Deno 2.8.1, measured on macOS arm64. Hover an amber mark for the caveat."
+  caption="nub 0.10 · Node SEA on 26.7.0 · @yao-pkg/pkg 6.22.0 · Bun 1.3.14 · Deno 2.8.1, measured on macOS arm64. Hover an amber mark for the caveat."
   rows={[
     { feature: 'Single file, no runtime on the target machine', cells: ['yes', 'yes', 'yes', 'yes', 'yes'] },
     { feature: 'Embeds data files and assets', cells: ['yes', 'yes', 'yes', 'yes', 'yes'] },
@@ -504,4 +505,4 @@ The result runs on darwin-arm64, linux-x64, linux-arm64, linux-arm64-musl, and w
 
 <GetStarted />
 
-Nub 0.9 ships `nub compile`, and [the compile docs](/docs/compile) cover every flag.
+Nub 0.10 ships `nub compile`, and [the compile docs](/docs/compile) cover every flag.

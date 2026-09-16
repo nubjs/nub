@@ -1,0 +1,186 @@
+name: npm corpus
+# Real npm-incumbent projects, pinned by commit, frozen-installed under nub from their own
+# package-lock.json on a cold store and checked against that lockfile. The verdict per
+# project is the contract `npm ci` gives them: the install completes, lifecycle scripts
+# included, and every declared dependency resolves at the pinned version. Harness, corpus
+# and classification rules: tests/npm-corpus/README.md.
+#
+# nub is built ONCE and reused across every project leg; each leg runs on the Node version
+# the project's own CI uses (actions/setup-node), so a leg failing for a version-banded
+# reason fails on the version that project would actually hit. Legs are capped in parallel
+# because each one is a network-bound install of hundreds to thousands of packages.
+#
+# Cadence: push to main and PRs that touch the package-manager surface (opt-in through the
+# `ci` label, per ci.yml), a nightly run that also times `npm ci` on every project as the
+# control, and on demand with an optional project filter.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "vendor/aube/**"
+      - "crates/nub-cli/src/pm_engine/**"
+      - "crates/nub-cli/src/cli.rs"
+      - "tests/npm-corpus/**"
+      - ".github/workflows/npm-corpus.yml"
+  pull_request:
+    # PR CI is opt-in — request a run with `gh pr edit <n> --add-label ci`. Rationale: ci.yml.
+    types: [labeled]
+    branches: [main]
+    paths:
+      - "vendor/aube/**"
+      - "crates/nub-cli/src/pm_engine/**"
+      - "crates/nub-cli/src/cli.rs"
+      - "tests/npm-corpus/**"
+      - ".github/workflows/npm-corpus.yml"
+  schedule:
+    # Nightly at 09:00 UTC, offset from the lockfile-roundtrip (07:00) and pnpm-conformance
+    # (08:00) nightlies so the three sweeps do not contend for the same runner slots.
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+    inputs:
+      repos:
+        description: "Projects to run (owner/repo, comma-separated); empty runs the whole corpus"
+        default: ""
+        type: string
+      control:
+        description: "When to run `npm ci` as the control"
+        default: "on-failure"
+        type: choice
+        options: [on-failure, always, never]
+
+permissions: {}
+
+# The push and schedule triggers share refs/heads/main, so a nightly cancels an in-flight
+# push run; the gate below accepts `cancelled` for exactly that reason.
+concurrency:
+  group: npm-corpus-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    name: Plan
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "24"
+      - id: plan
+        env:
+          # `inputs` is defined only for workflow_dispatch; `github.event.inputs` is empty elsewhere.
+          REPOS: ${{ github.event.inputs.repos || '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          matrix="$(node tests/npm-corpus/matrix.mjs "$REPOS")"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "$matrix" | node -e 'const m = JSON.parse(require("fs").readFileSync(0, "utf8")); console.log(`${m.include.length} project(s):`, m.include.map((e) => `${e.repo}@node${e.node}`).join(" "))'
+
+  build:
+    name: Build nub (once)
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          shared-key: npm-corpus
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          workspaces: |
+            .
+            crates/nub-native
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "24"
+      - name: Build nub + native addon
+        shell: bash
+        run: |
+          cargo build -p nub-cli
+          (cd crates/nub-native && cargo build)
+          mkdir -p runtime/addons
+          cp target/debug/libnub_native.so runtime/addons/nub-native.node
+      - name: Stage the reusable nub bundle
+        shell: bash
+        run: |
+          mkdir -p nub-bundle
+          cp target/debug/nub nub-bundle/nub
+          cp -r runtime nub-bundle/runtime
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: nub-corpus-bundle
+          path: nub-bundle
+          retention-days: 1
+
+  corpus:
+    name: ${{ matrix.repo }} (node ${{ matrix.node }})
+    needs: [plan, build]
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: nub-corpus-bundle
+          path: nub-bundle
+      - name: Frozen-install under nub and check the tree
+        env:
+          REPO: ${{ matrix.repo }}
+          # The nightly times `npm ci` on every project; other runs only classify a red.
+          CONTROL: ${{ github.event_name == 'schedule' && 'always' || (github.event.inputs.control || 'on-failure') }}
+        shell: bash
+        run: |
+          chmod +x nub-bundle/nub tests/npm-corpus/run.sh
+          tests/npm-corpus/run.sh "$PWD/nub-bundle/nub" "$REPO"
+
+  # Always-green aggregator so one stable check name summarises the fan-out. It needs the
+  # prerequisites too: a failed plan or build skips the fan-out, and a skipped fan-out must
+  # read as that failure rather than as nothing to report.
+  npm-corpus-gate:
+    name: npm corpus gate
+    needs: [plan, build, corpus]
+    if: always() && (github.event_name != 'pull_request' || github.event.label.name == 'ci')
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - shell: bash
+        run: |
+          set -euo pipefail
+          plan='${{ needs.plan.result }}'
+          build='${{ needs.build.result }}'
+          corpus='${{ needs.corpus.result }}'
+          echo "plan=$plan build=$build corpus=$corpus"
+          # Every job here shares the gate's own trigger condition, so none is skipped on its
+          # own account: a skipped fan-out means a prerequisite failed. `cancelled` is accepted
+          # because the push and nightly triggers share a concurrency group (see the top of
+          # the file); a leg that genuinely fails aggregates to `failure`, never `cancelled`.
+          ok() { [[ "$1" == "success" || "$1" == "cancelled" ]]; }
+          ok "$plan"   || { echo "plan failed"; exit 1; }
+          ok "$build"  || { echo "build failed"; exit 1; }
+          ok "$corpus" || { echo "npm corpus failed"; exit 1; }
+          echo "npm corpus gate: OK"

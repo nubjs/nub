@@ -21,6 +21,7 @@ mod jsonc;
 mod nubx_consent;
 mod phantom_scan;
 mod pm_engine;
+mod prefix;
 mod project_config;
 mod self_shim;
 mod verify_deps;

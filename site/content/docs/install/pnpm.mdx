@@ -155,8 +155,8 @@ Read the [full docs](https://pnpm.io/settings/node-modules#nodelinker) on pnpm.i
 There is no `pnp` linker. A `pnp` value in `.npmrc` or `nub.jsonc`, and a `--node-linker pnp` flag, are refused rather than silently downgraded. A branded `nodeLinker: pnp` in pnpm YAML is ignored with the other branded layout settings.
 
 ```console
-$ nub install
-  × node-linker=pnp is not supported by nub; use `isolated` (default) or   # ❌
+$ nub install                                                    # ❌
+  × node-linker=pnp is not supported by nub; use `isolated` (default) or
   │ `hoisted`
 ```
 

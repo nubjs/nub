@@ -1,11 +1,11 @@
 ---
 name: babysit
-description: Bring one nubjs/nub pull request to merge-readiness — pull the inline reviews, verify each finding against the code, re-verify every fix round locally, fix CI, and loop. Invoke (via the Skill tool) when asked to babysit a PR, to get one merge-ready, or when you own a PR and are waiting on reviews or CI. Scope — babysit ENDS at merge-readiness and hands back; only an instruction to babysit it TO MERGE authorizes the merge, and that phrasing also delegates the readiness judgment, so decide rather than ask. Carries the traps that each cost a round trip: the GitHub CLI's PR-view JSON silently omits the inline review comments where the real findings live, the CI gate aggregator check registers LAST so a partial green rollup is not done, and re-basing a stacked PR fires no workflow event, so its low check count is a false green.
+description: Bring one nubjs/nub pull request to merge-readiness — pull the inline reviews, verify each finding against the code, re-verify every fix round locally, fix CI, and loop. Invoke (via the Skill tool) when asked to babysit a PR, to get one merge-ready, or when you own a PR and are waiting on reviews or CI. Scope — babysit ENDS at merge-readiness and hands back; only an instruction to babysit it TO MERGE authorizes the merge, and that phrasing also delegates the readiness judgment, so decide rather than ask. Carries the traps that each cost a round trip: the GitHub CLI's PR-view JSON silently omits the inline review comments where the real findings live, the CI gate aggregator check registers LAST so a partial green rollup is not done, and PR CI is opt-in, so a pull request nobody labelled has no checks at all and a re-based or re-targeted branch keeps the checks of its old head.
 ---
 
 # Babysit a PR (nubjs/nub)
 
-Loop: pull reviews → verify each finding → fix → re-verify locally → push → watch CI → repeat.
+Loop: pull reviews → verify each finding → fix → re-verify locally → push → repeat. CI comes ONCE, at the end: PR CI is opt-in, so a push starts nothing and the run is requested with `gh pr edit <n> --add-label ci` when the head is final.
 
 **Babysit ends at merge-ready.** Report that state and stop; the merge is the maintainer's. Only an instruction to babysit it *to merge* authorizes one — and that phrasing delegates the readiness judgment too, so decide against the criteria below instead of asking.
 
@@ -35,13 +35,18 @@ gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$
 
 A review-driven fix earns the same gate as the original change. Run `make verify`. For a behavior change, sweep adversarial fixtures against the branch's MERGE-BASE build ([`ad-hoc-test`](../ad-hoc-test/SKILL.md)) — a run that only re-confirms the reported case tests your intent, not your fix. Escalate to the `impact-analysis` skill when the fix widened the blast radius. A one-line typo fix skips both.
 
-Then push once. Each push costs roughly five workflows across eight platforms, and fix-after-fix pushes starve the shared runner pool.
+Then push. Pushing is free — PR CI is opt-in and nothing fires until it is asked for — so push each round as it lands and hold the CI request until the review loop is done. A requested run is roughly five workflows across eight platforms, and asking round after round is what starves the shared runner pool.
 
 ## CI
 
+Ask for the run, then watch it. Both steps — the request is not optional, and until it lands the pull request has no checks at all:
+
 ```bash
+gh pr edit <N> --add-label ci      # requests CI against the current head; the label is removed again immediately
 nub scripts/ci-watch.ts --pr <N> --required "CI gate" --timeout 90
 ```
+
+Push a further commit after that and the run you were watching is stale — its checks belong to the old head, so ask again. `ci-watch` will not cover for a forgotten request: an empty or all-skipped rollup reports as pending, never green.
 
 The `CI gate` job is an `if: always()` aggregator over every path-gated job, so it registers LAST: fifty green checks with it still pending means the run is not done. A raw `gh pr checks --watch` exits 0 while the run is queued with no jobs registered, so watch through [`scripts/ci-watch.ts`](../../../scripts/ci-watch.ts).
 

@@ -5,20 +5,37 @@ import type { ReactNode } from 'react';
    image in a link (a screenshot of a comment links to the comment). A plain
    `<img>` rather than next/image: the sources are static files under
    `public/` with no dimension metadata, and the layout is a full-width figure
-   inside a prose column, so there is nothing for the optimizer to size against. */
+   inside a prose column, so there is nothing for the optimizer to size against.
+   `darkSrc` names a second, dark-theme rendering of the same image (the
+   transparent chart pair the nub-charts skill emits); the site toggles themes
+   with the `dark` class, not a media query, so the swap is two images gated
+   by that class rather than a `<picture>` source. A chart carries no border:
+   its bars are the edge. */
 export function Figure({
   src,
+  darkSrc,
   alt,
   caption,
   href,
 }: {
   src: string;
+  darkSrc?: string;
   alt: string;
   caption: ReactNode;
   href?: string;
 }) {
-  // eslint-disable-next-line @next/next/no-img-element
-  const img = <img src={src} alt={alt} className="w-full rounded-lg border border-fd-border" />;
+  const frame = darkSrc ? 'w-full' : 'w-full rounded-lg border border-fd-border';
+  const img = darkSrc ? (
+    <>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src={src} alt={alt} className={`${frame} dark:hidden`} />
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src={darkSrc} alt={alt} className={`${frame} hidden dark:block`} />
+    </>
+  ) : (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img src={src} alt={alt} className={frame} />
+  );
   return (
     <figure className="not-prose my-8">
       {href ? (

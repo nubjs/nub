@@ -36,8 +36,10 @@
     "remotes:check": "node scripts/soak/remotes.mts --check",
     "remotes:fix": "node scripts/soak/remotes.mts --fix",
     "dockerignore:update": "untracked --write .dockerignore",
+    "lat": "npx --yes lat.md@0.12.2",
+    "lat:index": "npx --yes lat.md@0.12.2 reindex --local --yes",
     "lat:check": "npx --yes lat.md@0.12.2 check",
-    "test:scripts": "node --test 'scripts/**/*.test.m[jt]s'"
+    "test:scripts": "node --test 'scripts/**/*.test.m[jt]s' 'tests/cross-runtime/*.test.mjs'"
   },
   "untracked": {
     "whitelist": [

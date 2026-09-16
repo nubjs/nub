@@ -32,6 +32,8 @@ on:
       - "tests/aube-bats/**"
       - "tests/aube-conformance/**"
   pull_request:
+    # PR CI is opt-in — request a run with `gh pr edit <n> --add-label ci`. Rationale: ci.yml.
+    types: [labeled]
     branches: [main]
     paths:
       - "vendor/aube/**"
@@ -62,6 +64,7 @@ env:
 jobs:
   aube-parity:
     name: aube cargo test (ubuntu)
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     # ubuntu-latest only for now; macOS legs come later (10×-billed runners,
     # same budgeting rationale as release.yml's linux_only debug mode).
     runs-on: ubuntu-latest
@@ -93,6 +96,7 @@ jobs:
 
   aube-parity-windows:
     name: aube cargo test (windows)
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     # UNLIKE the conformance Windows leg below, this one DOES gate pull
     # requests. The linker's Windows arm is a genuinely separate
     # implementation — NTFS junctions instead of symlinks, reparse-point
@@ -129,6 +133,7 @@ jobs:
 
   aube-bats-nub:
     name: aube bats, nub-adapted (ubuntu)
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     # Runs the curated install-family subset of aube's own bats e2e suite
     # against NUB's PM surface (tests/aube-bats/run.sh: an `aube` shim that
     # exec's nub, the offline Verdaccio registry, and the two skip lists —
@@ -158,6 +163,7 @@ jobs:
 
   aube-conformance:
     name: lockfile conformance, real PMs (ubuntu)
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     # nub writes each foreign lockfile format in a hermetic sandbox and the
     # REAL pinned package manager judges it (tests/aube-conformance/run.sh):
     # pnpm/npm frozen-accept + zero-churn rewrite, bun frozen-accept, and the
@@ -195,7 +201,7 @@ jobs:
     # Gated off pull_request to keep Windows runners off the PR hot path; runs on
     # push (main / aube-integration, on a vendor/aube bump) and the nightly
     # schedule. The Linux conformance legs above still gate every PR.
-    if: github.event_name != 'pull_request'
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (github.event_name != 'pull_request')
     # Windows leg of the conformance matrix (the maintainer 2026-06-10). Budgeted
     # subset: the pnpm + npm judge legs over the simple, peer-heavy, and
     # workspace fixtures — the signal is lockfile semantics crossed with

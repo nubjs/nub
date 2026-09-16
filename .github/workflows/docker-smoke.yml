@@ -24,6 +24,8 @@ on:
       - ".dockerignore"
       - ".github/workflows/docker-smoke.yml"
   pull_request:
+    # PR CI is opt-in — request a run with `gh pr edit <n> --add-label ci`. Rationale: ci.yml.
+    types: [labeled]
     branches: [main]
     paths:
       - "crates/**"
@@ -43,6 +45,7 @@ permissions: {}
 jobs:
   glibc:
     name: Docker smoke (glibc, node:22-slim)
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     runs-on: ubuntu-latest
     # Rust compile inside Docker + the smoke install can take a while on a cold runner.
     timeout-minutes: 30
@@ -68,6 +71,7 @@ jobs:
 
   musl:
     name: Docker smoke (musl, node:22-alpine)
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

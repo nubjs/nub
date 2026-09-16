@@ -3,8 +3,10 @@ name: ci-watch
 description: >-
   Watch GitHub Actions CI correctly with the gh CLI — block until a run / PR
   check rollup is TRULY terminal, then trust the exit code. Invoke (via the Skill
-  tool) whenever you need to wait on CI after a push, tag, or PR-open and act on
-  the result (merge-on-green, release-on-green, fail-fast on red). Encodes the
+  tool) whenever you need to wait on CI after REQUESTING a pull-request run
+  (`gh pr edit <n> --add-label ci` — PR CI is opt-in, so a push starts nothing),
+  after a push to main, or after a tag, and act on the result (merge-on-green,
+  release-on-green, fail-fast on red). Encodes the
   premature-exit pitfall (raw `gh run watch` / `gh pr checks --watch` exit 0
   while the run is still QUEUED with no jobs registered, and exit non-zero on a
   transient API blip) and the blessed fix: `scripts/ci-watch.ts`, which waits for
@@ -86,11 +88,11 @@ For a merge-queue drain, prefer `scripts/merge-cascade.ts` (it gates positively 
 
 **Merge-on-green (the default).** The orchestrator runs the blocking watcher as its own `run_in_background` Bash task:
 
-1. **Enqueue:** append `{"pr":N,"branch":"…","thread":"…","note":"…"}` (optional `"hold":true`) to `.frizz/merge-queue.jsonl`. Enqueue UNHELD only once the PR's FINAL head is pushed — a stale head can be green-but-wrong.
+1. **Enqueue:** append `{"pr":N,"branch":"…","thread":"…","note":"…"}` (optional `"hold":true`) to `.frizz/merge-queue.jsonl`. Enqueue UNHELD only once the PR's FINAL head is pushed AND `gh pr edit <n> --add-label ci` has requested a run against it — a stale head can be green-but-wrong, and an unrequested one never goes green at all, so the queue would hold it until the cascade times out.
 2. **Watch:** the orchestrator runs `node scripts/merge-cascade.ts --max-minutes 40` with `run_in_background: true`. It gates positively on the required `CI gate` (present + SUCCESS) + mergeable, merges `--squash --admin`, ff-pulls, dequeues, exits → re-invokes the orchestrator. It shares ci-watch's ghost carve-out (`scripts/lib/ci-rollup.ts`), so a still-running or failed REQUIRED gate always blocks and a red PR is never mis-merged.
-3. **Landing agents PUSH-THEN-EXIT** — they never watch; they report `pushed <sha>, queued`.
+3. **Landing agents PUSH-THEN-EXIT** — they push, request CI with `gh pr edit <n> --add-label ci`, and report `pushed <sha>, CI requested, queued`. They never watch.
 
-**Self-contained landing agent** (one agent traces push→merge): push the branch; launch `node scripts/merge-cascade.ts --max-minutes 40` (or `ci-watch.ts`) for its OWN PR via `run_in_background: true`; end its turn; it is re-invoked when the command exits, reports merged/red, and iterates. **Do not preempt a landing agent's background watch** by checking CI yourself and merging manually mid-trace — that impatience is what breaks the flow.
+**Self-contained landing agent** (one agent traces push→merge): push the branch; request the run with `gh pr edit <n> --add-label ci`; launch `node scripts/merge-cascade.ts --max-minutes 40` (or `ci-watch.ts`) for its OWN PR via `run_in_background: true`; end its turn; it is re-invoked when the command exits, reports merged/red, and iterates. **Do not preempt a landing agent's background watch** by checking CI yourself and merging manually mid-trace — that impatience is what breaks the flow.
 
 **Foreground chunk loop (fallback only)** — for an agent that must actively iterate and cannot rest:
 

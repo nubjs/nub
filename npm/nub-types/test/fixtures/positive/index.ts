@@ -126,7 +126,7 @@ console.log(instant.toString(), duration.total("minutes"));
 const fromDate: Temporal.Instant = new Date().toTemporalInstant();
 console.log(fromDate.epochMilliseconds);
 
-// import.meta.hot (undefined unless `nub watch --hot`, but the shape must typecheck).
+// import.meta.hot (undefined at runtime, but the shape must typecheck).
 if (import.meta.hot) {
   import.meta.hot.accept((mod) => console.log(mod));
   import.meta.hot.dispose((data) => console.log(data));

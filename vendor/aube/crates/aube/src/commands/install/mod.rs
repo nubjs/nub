@@ -64,8 +64,8 @@ pub(crate) use lifecycle::{
     run_dep_lifecycle_scripts,
 };
 use lifecycle::{
-    resolve_link_strategy, run_import_on_blocking, run_root_lifecycle, run_root_lifecycle_script,
-    validate_required_scripts,
+    resolve_link_strategy, run_import_on_blocking, run_importer_lifecycle,
+    run_root_lifecycle_script, validate_required_scripts,
 };
 
 pub(crate) fn resolve_active_lockfile_dir(
@@ -888,8 +888,10 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         let phase_start = std::time::Instant::now();
         for (importer_path, importer_manifest) in &lifecycle_manifests {
             let project_dir = importer_project_dir(&cwd, importer_path);
-            run_root_lifecycle(
+            run_importer_lifecycle(
+                &cwd,
                 &project_dir,
+                importer_path,
                 &modules_dir_name,
                 importer_manifest,
                 aube_scripts::LifecycleHook::PreInstall,
@@ -993,15 +995,31 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             .unwrap_or_else(|| aube_settings::resolved::minimum_release_age(&settings_ctx))
             > 0
         && crate::state::release_policy_changed_since_last_run(&cwd, &opts.cli_flags);
-    // Resolver reuse can accept a locked package without fetching its publish
-    // time, which would bypass the age gate we are here to revalidate. Match
-    // `--force` for this one path by withholding the existing-graph hint.
-    let existing_for_resolver: Option<&aube_lockfile::LockfileGraph> = if revalidate_release_policy
-    {
-        None
-    } else {
-        lockfile_pre_parse.as_ref().map(|(g, _)| g)
-    };
+    // The project's effective packageExtensions checksum, for the lockfile
+    // drift check. Computed only under an enforcing embedder (nub); standalone
+    // aube leaves it `None` and the drift check (gated on the same posture) is
+    // a no-op. Uses the same `effective_package_extensions` the stamp path
+    // does, so a fresh install and the drift check agree.
+    let effective_package_extensions_checksum =
+        if aube_util::engine_context().enforce_package_extensions_checksum {
+            aube_lockfile::pnpm::package_extensions_checksum(
+                &settings::effective_package_extensions(&manifest, &settings_ctx),
+            )
+        } else {
+            None
+        };
+    // Withhold the resolver's existing-graph hint when reuse would defeat the
+    // very thing this install is re-resolving for — an age gate being
+    // revalidated, or a packageExtensions edit whose effect only lands when a
+    // packument is fetched. Scoped to real drift, so a steady-state install
+    // keeps full reuse: a lockfile written WITH the extensions already carries
+    // the extended deps, and reusing those is correct.
+    let existing_for_resolver: Option<&aube_lockfile::LockfileGraph> = resolve::existing_graph_hint(
+        lockfile_pre_parse.as_ref(),
+        revalidate_release_policy,
+        aube_util::engine_context().enforce_package_extensions_checksum,
+        effective_package_extensions_checksum.as_deref(),
+    );
 
     // `preResolution` runs here — once, on every install, before any
     // branch on frozen mode or lockfile freshness, which is where pnpm
@@ -1057,20 +1075,6 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         )
         .await?;
     }
-
-    // The project's effective packageExtensions checksum, for the lockfile
-    // drift check. Computed only under an enforcing embedder (nub); standalone
-    // aube leaves it `None` and the drift check (gated on the same posture) is
-    // a no-op. Uses the same `effective_package_extensions` the stamp path
-    // does, so a fresh install and the drift check agree.
-    let effective_package_extensions_checksum =
-        if aube_util::engine_context().enforce_package_extensions_checksum {
-            aube_lockfile::pnpm::package_extensions_checksum(
-                &settings::effective_package_extensions(&manifest, &settings_ctx),
-            )
-        } else {
-            None
-        };
 
     // `--lockfile-only` short-circuit. Resolves (or reuses a fresh
     // lockfile), writes the new lockfile, and exits before any tarball
@@ -3084,6 +3088,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         strict_dep_builds_setting,
         ignore_scripts: opts.ignore_scripts,
         skip_root_lifecycle: opts.skip_root_lifecycle,
+        npm_link_lifecycle: matches!(source_kind_before, Some(aube_lockfile::LockfileKind::Npm)),
         workspace_filter_empty: opts.workspace_filter.is_empty(),
         dep_selection: opts.dep_selection,
         cli_flags: &opts.cli_flags,

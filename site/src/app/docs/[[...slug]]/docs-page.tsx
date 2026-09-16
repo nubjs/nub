@@ -62,10 +62,8 @@ export function DocsPageView({ page }: { page: DocsPageData }) {
    fall back to a plain "Documentation" label. */
 const EYEBROW_BY_URL: Record<string, string> = {
   '/docs/runtime': 'nub <file>',
-  '/docs/runner': 'nubx',
-  '/docs/runner/run': 'nub run',
-  '/docs/runner/exec': 'nub exec',
-  '/docs/runner/dlx': 'nub dlx',
+  '/docs/run': 'nub run',
+  '/docs/nubx': 'nubx',
   '/docs/install': 'nub install',
   '/docs/node': 'nub node',
   '/docs/pm': 'nub pm',

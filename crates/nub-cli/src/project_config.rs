@@ -36,6 +36,7 @@ pub(crate) const ROOT_KEYS: &[&str] = &[
     "$schema",
     "nodeCompat",
     "nodeExecutable",
+    "prefix",
     "preload",
     "nodeOptions",
     "v8Flags",
@@ -212,6 +213,10 @@ pub struct ProjectConfig {
     /// `nub_core::node::discovery`, lazily, so a command runs only on an
     /// invocation that really needs a Node (see [`publish_node_executable`]).
     pub node_executable: Option<String>,
+    /// The `prefix` command as argv: a string form is split like a shell word
+    /// list at parse time, an array form is taken as written. Never empty. The
+    /// program word is resolved by [`crate::prefix`] at launch, not here.
+    pub prefix: Option<Vec<String>>,
     pub preload: Option<Vec<String>>,
     pub node_options: Option<Vec<String>>,
     pub v8_flags: Option<Vec<String>>,
@@ -426,6 +431,7 @@ pub struct LoadedConfig {
 pub enum ConfigKey {
     NodeCompat,
     NodeExecutable,
+    Prefix,
     Preload,
     NodeOptions,
     V8Flags,
@@ -733,6 +739,41 @@ pub(crate) fn declared_env_file_setting() -> Option<EnvFileSetting> {
         .flatten()
 }
 
+/// The `prefix` command as argv, with a path-form program anchored to the file
+/// that declared it — `./tools/wrap` in a project file is that project's, and
+/// `~/bin/wrap` in the global file expands the same way `preload` does. A bare
+/// name stays bare for [`crate::prefix`] to look up at launch.
+pub(crate) fn effective_prefix() -> Option<Vec<String>> {
+    let effective = effective_config()?;
+    let words = effective.values.prefix.as_ref()?;
+    let (program, args) = words.split_first()?;
+    let program = if is_path_like(program) {
+        effective
+            .resolve_path(ConfigKey::Prefix, program)
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        program.clone()
+    };
+    Some(
+        std::iter::once(program)
+            .chain(args.iter().cloned())
+            .collect(),
+    )
+}
+
+/// Where the winning `prefix` came from, for a diagnostic: the file's path when
+/// a file set it, else the scope name.
+pub(crate) fn prefix_source_label() -> String {
+    effective_config()
+        .and_then(|effective| effective.sources.get(&ConfigKey::Prefix))
+        .map(|source| match &source.path {
+            Some(path) => path.display().to_string(),
+            None => format!("{:?}", source.kind).to_lowercase(),
+        })
+        .unwrap_or_else(|| "nub.jsonc".to_string())
+}
+
 /// Hand the resolved `nodeExecutable` to discovery, which owns both of its forms
 /// (a path, or a `$(command)` it runs) and every route that resolves a Node —
 /// including the ones inside `nub-core` that no CLI parameter reaches.
@@ -1032,6 +1073,7 @@ fn merge_layer(
 
     merge!(node_compat, ConfigKey::NodeCompat);
     merge!(node_executable, ConfigKey::NodeExecutable);
+    merge!(prefix, ConfigKey::Prefix);
     merge!(preload, ConfigKey::Preload);
     merge!(node_options, ConfigKey::NodeOptions);
     merge!(v8_flags, ConfigKey::V8Flags);
@@ -1128,6 +1170,51 @@ fn as_string_array(v: &Value, path: &str) -> Result<Vec<String>> {
     arr.iter()
         .map(|e| as_str(e, path).map(str::to_string))
         .collect()
+}
+
+/// A command line (`prefix`): a string split like a POSIX shell word list, or an
+/// array of arguments taken as written. Refused when it names no program — an
+/// empty string, an unbalanced quote, an empty array — because the field's whole
+/// job is to put something in front of the command, and refused when the string
+/// form carries a backslash, which the lexer would silently eat.
+fn as_command_words(v: &Value, path: &str) -> Result<Vec<String>> {
+    let words = match v {
+        Value::String(s) => {
+            // A backslash is an ESCAPE to the lexer, which drops it and keeps the
+            // next character, so `C:\tools\wrap.exe` would launch `C:toolswrap.exe`.
+            // As a program that surfaces as a puzzling not-found; as an ARGUMENT it
+            // is a silent wrong answer, because the wrapper starts and receives a
+            // mangled path. The lexer cannot switch on the host — a config file is
+            // committed and read on every platform — so refuse the character and
+            // point at the array form, which takes arguments as written.
+            if s.contains('\\') {
+                return Err(ConfigError::Value {
+                    path: path.into(),
+                    message: "a backslash is a shell escape in the string form — \
+                              use the array form, which takes arguments as written"
+                        .into(),
+                });
+            }
+            shlex::split(s).ok_or_else(|| ConfigError::Value {
+                path: path.into(),
+                message: "unbalanced quotes in the command".into(),
+            })?
+        }
+        Value::Array(_) => as_string_array(v, path)?,
+        _ => {
+            return Err(ConfigError::Type {
+                path: path.into(),
+                expected: "a command string or an array of arguments",
+            });
+        }
+    };
+    if words.first().is_none_or(String::is_empty) {
+        return Err(ConfigError::Value {
+            path: path.into(),
+            message: "must name a program".into(),
+        });
+    }
+    Ok(words)
 }
 
 /// A `{ string: string }` map (`loader`) — every value must be a string.
@@ -1265,6 +1352,9 @@ fn validate_root(
     }
     if let Some(v) = obj.get("nodeExecutable") {
         cfg.node_executable = Some(as_nonempty_str(v, "nodeExecutable")?.to_string());
+    }
+    if let Some(v) = obj.get("prefix") {
+        cfg.prefix = Some(as_command_words(v, "prefix")?);
     }
     if let Some(v) = obj.get("preload") {
         cfg.preload = Some(as_string_array(v, "preload")?);
@@ -1779,6 +1869,67 @@ mod tests {
         assert!(
             matches!(err, ConfigError::Type { ref path, .. } if path == "nodeExecutable"),
             "{err}"
+        );
+    }
+
+    /// Both spellings reach the same argv. The string form is split like a
+    /// shell so a quoted argument survives as one word; the array form is the
+    /// spelling for an argument that would otherwise need escaping.
+    #[test]
+    fn prefix_is_a_command_string_or_an_argv_array_and_never_empty() {
+        let cfg =
+            parse_project_config(r#"{ "prefix": "dotenvx run -f '.env local' --" }"#).unwrap();
+        assert_eq!(
+            cfg.prefix.as_deref(),
+            Some(&["dotenvx", "run", "-f", ".env local", "--"].map(String::from)[..])
+        );
+        let cfg = parse_project_config(r#"{ "prefix": ["nice", "-n", "10"] }"#).unwrap();
+        assert_eq!(
+            cfg.prefix.as_deref(),
+            Some(&["nice", "-n", "10"].map(String::from)[..])
+        );
+        for raw in [r#""""#, r#""  ""#, "[]", r#"[""]"#, r#""dotenvx 'run""#] {
+            let err = parse_project_config(&format!(r#"{{ "prefix": {raw} }}"#)).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::Value { ref path, .. } if path == "prefix"),
+                "{raw} must be refused as a value: {err}"
+            );
+        }
+        let err = parse_project_config(r#"{ "prefix": true }"#).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Type { ref path, .. } if path == "prefix"),
+            "{err}"
+        );
+    }
+
+    /// A Windows path in the string form is the case the shell lexer silently
+    /// corrupts: it eats each backslash and joins the segments. Refusing the
+    /// character is what turns that into an error, and the array form — the
+    /// spelling the error names — has to carry the same path untouched.
+    #[test]
+    fn prefix_refuses_a_backslash_in_the_string_form() {
+        for raw in [
+            r#""C:\\tools\\wrap.exe --""#,
+            r#""wrap -f C:\\dir\\.env""#,
+            r#""wrap C:\\""#,
+        ] {
+            let err = parse_project_config(&format!(r#"{{ "prefix": {raw} }}"#)).unwrap_err();
+            let ConfigError::Value { path, message } = &err else {
+                panic!("{raw} must be refused as a value, got {err}");
+            };
+            assert_eq!(path, "prefix");
+            assert!(
+                message.contains("array form"),
+                "{raw} must be refused with the spelling that works: {message}"
+            );
+        }
+
+        let cfg =
+            parse_project_config(r#"{ "prefix": ["C:\\tools\\wrap.exe", "-f", "C:\\dir\\.env"] }"#)
+                .unwrap();
+        assert_eq!(
+            cfg.prefix.as_deref(),
+            Some(&[r"C:\tools\wrap.exe", "-f", r"C:\dir\.env"].map(String::from)[..])
         );
     }
 
@@ -2376,6 +2527,23 @@ mod tests {
         assert_eq!(
             enum_values(&schema, "/properties/dlx/properties/consent/enum"),
             expected(&["prompt", "never"])
+        );
+
+        // `prefix`'s string branch is the one field whose validity is a PATTERN
+        // rather than a key or an enum, so neither check above reaches it. The
+        // pattern must reject what `as_command_words` rejects: a backslash, which
+        // the shell splitting would eat, and a value with no program in it. Pinned
+        // as a literal because nub-cli takes no regex dependency and adding one to
+        // run the cases here would move the root lockfile for a single assertion —
+        // `prefix_refuses_a_backslash_in_the_string_form` covers the parser side,
+        // so the two together fail whichever half drifts.
+        assert_eq!(
+            schema
+                .pointer("/properties/prefix/oneOf/0/pattern")
+                .and_then(Value::as_str),
+            Some(r"^[^\\]*[^\\\s][^\\]*$"),
+            "prefix: the schema must refuse a backslash in the string form, or an \
+             editor blesses a Windows path the parser rejects"
         );
 
         // `loader` spells its vocabulary three times: the open map, plus a

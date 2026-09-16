@@ -72,6 +72,12 @@ struct WriteNpmPackage<'a> {
     link: bool,
     dev: bool,
     optional: bool,
+    /// npm `peer: true` — every path from the root to this package
+    /// crosses a peer edge, i.e. it is installed only because something
+    /// declares it as a peer. Recomputed from reachability like `dev` and
+    /// `optional`, over the peer edges the reader records by placement
+    /// and the peer pass merges into `dependencies`.
+    peer: bool,
     /// npm `bundleDependencies: ["name", …]` — a JSON array, so it
     /// sorts with the non-object scalars (at `b`, before `cpu`).
     /// Round-trip fidelity for packages declaring bundled deps.
@@ -169,6 +175,9 @@ impl Serialize for WriteNpmPackage<'_> {
         }
         if !self.os.is_empty() {
             map.serialize_entry("os", &self.os)?;
+        }
+        if self.peer {
+            map.serialize_entry("peer", &true)?;
         }
         // `workspaces` is the one key whose BUCKET depends on its value,
         // because `json-stringify-nice` sorts on the runtime type and npm
@@ -350,6 +359,72 @@ pub fn write(
             .or_insert(pkg);
     }
 
+    // Resolve each workspace member's identity (name/version/peers).
+    // A `LocalSource::Link` package exists only when the graph was
+    // *read* from an npm lockfile (the reader synthesizes it from the
+    // `node_modules/<name>: {link:true}` pair). On a fresh resolve from
+    // package.json there is no such package, so recover the member's
+    // name/version/peers from its own `package.json` on disk — the same
+    // best-effort disk read the pnpm and bun writers use. Without this
+    // fallback every member importer + its child deps were dropped and
+    // `npm ci` rejected the lockfile with `Missing: <member> from lock
+    // file`.
+    // Pre-read every member's `package.json` once, up front, so the
+    // borrowed name/version/peer strings live as long as `packages`
+    // (the `WriteNpmPackage` arena borrows them). Only read for importers
+    // without a `LocalSource::Link` package — i.e. a fresh resolve.
+    let project_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let member_manifests: BTreeMap<&str, aube_manifest::PackageJson> = graph
+        .importers
+        .keys()
+        .filter(|p| p.as_str() != ".")
+        .filter(|p| workspace_package_for_importer(graph, p).is_none())
+        .map(|p| {
+            let m =
+                aube_manifest::PackageJson::from_path(&project_dir.join(p).join("package.json"))
+                    .unwrap_or_default();
+            (p.as_str(), m)
+        })
+        .collect();
+
+    // A required peer the root or a member declares, and nothing else
+    // provides, is entered on its importer as a production direct dep —
+    // the shape the resolver seeds under auto-install-peers, and the one
+    // the freshness check compares the manifest against. npm flags such a
+    // provider `peer: true` all the same: no dependency edge reaches it.
+    // Recognized by its shape — a production direct dep whose specifier is
+    // the importer's declared peer range and that no dependency section
+    // declares — since `DirectDep` carries no provenance.
+    let synthesized_peer = |importer_path: &str, dep: &DirectDep| -> bool {
+        if dep.dep_type != DepType::Production {
+            return false;
+        }
+        let (peer_range, declared) = if importer_path == "." {
+            (
+                manifest.peer_dependencies.get(&dep.name),
+                manifest.dependencies.contains_key(&dep.name)
+                    || manifest.dev_dependencies.contains_key(&dep.name)
+                    || manifest.optional_dependencies.contains_key(&dep.name),
+            )
+        } else if let Some(pkg) = workspace_package_for_importer(graph, importer_path) {
+            (
+                pkg.peer_dependencies.get(&dep.name),
+                pkg.declared_dependencies.contains_key(&dep.name)
+                    || pkg.optional_dependencies.contains_key(&dep.name),
+            )
+        } else if let Some(m) = member_manifests.get(importer_path) {
+            (
+                m.peer_dependencies.get(&dep.name),
+                m.dependencies.contains_key(&dep.name)
+                    || m.dev_dependencies.contains_key(&dep.name)
+                    || m.optional_dependencies.contains_key(&dep.name),
+            )
+        } else {
+            return false;
+        };
+        !declared && peer_range.is_some_and(|range| dep.specifier.as_deref() == Some(range))
+    };
+
     // Compute reachability for dev/optional flags, matching npm's
     // path-based semantics: a package is `dev: true` iff *every* path
     // from the root crosses a dev edge, `optional: true` iff every
@@ -363,17 +438,51 @@ pub fn write(
         .values()
         .flat_map(|deps| deps.iter().cloned())
         .collect();
-    let any_reach = reachable_without(&canonical, &all_roots, &[]);
-    let non_dev_reach = reachable_without(&canonical, &all_roots, &[DepType::Dev]);
-    let non_opt_reach = reachable_without(&canonical, &all_roots, &[DepType::Optional]);
-    let prod_reach = reachable_without(&canonical, &all_roots, &[DepType::Dev, DepType::Optional]);
+    let any_reach = reachable_without(&canonical, &all_roots, &[], true);
+    let non_dev_reach = reachable_without(&canonical, &all_roots, &[DepType::Dev], true);
+    let non_opt_reach = reachable_without(&canonical, &all_roots, &[DepType::Optional], true);
+    let prod_reach = reachable_without(
+        &canonical,
+        &all_roots,
+        &[DepType::Dev, DepType::Optional],
+        true,
+    );
+    // `peer: true` is the fourth flag: a package no path reaches without
+    // crossing a peer edge — an importer's own synthesized peer included.
+    let declared_roots: Vec<DirectDep> = graph
+        .importers
+        .iter()
+        .flat_map(|(importer_path, deps)| {
+            deps.iter()
+                .filter(move |dep| !synthesized_peer(importer_path, dep))
+                .cloned()
+        })
+        .collect();
+    let non_peer_reach = reachable_without(&canonical, &declared_roots, &[], false);
 
     // Build a hoist/nest tree keyed by a sequence of "node_modules"
     // path segments — e.g. `["foo"]` for `node_modules/foo`,
     // `["foo", "bar"]` for `node_modules/foo/node_modules/bar`. Shared
     // with bun (which renders the same segment list as `foo/bar`).
-    let root_tree_roots = non_link_roots(graph, &roots);
+    let mut root_tree_roots = non_link_roots(graph, &roots);
     let preferred_roots = preferred_root_placements(path, &canonical);
+    // npm hoists a workspace member's dependency to the root `node_modules`
+    // when nothing conflicts and keeps it there on a later install. The
+    // preferred placements above are gated on reachability from the tree's
+    // roots, which a member-only dep never is, so one the existing file
+    // hoisted joins the roots at that version: the rewrite then keeps npm's
+    // placement instead of nesting the dep, and its subtree, under the
+    // member. A fresh write, with no file to prefer, still nests.
+    let mut root_names: BTreeSet<String> =
+        root_tree_roots.iter().map(|dep| dep.name.clone()).collect();
+    for (_, importer_roots) in graph.importers.iter().filter(|(p, _)| *p != ".") {
+        for dep in non_link_roots(graph, importer_roots) {
+            let key = super::canonical_key_from_dep_path(&dep.dep_path);
+            if preferred_roots.get(&dep.name) == Some(&key) && root_names.insert(dep.name.clone()) {
+                root_tree_roots.push(dep);
+            }
+        }
+    }
     let tree = super::build_hoist_tree(&canonical, &root_tree_roots, Some(&preferred_roots));
     // For the npm writer, re-key the tree by install_path strings.
     let mut placed: BTreeMap<String, String> = tree
@@ -426,34 +535,6 @@ pub fn write(
     // they need no reservation set; the members' do, and theirs is built
     // below once the member identities are known.
     emit_file_dep_links(graph, &roots, ".", &Default::default(), &mut packages);
-
-    // Resolve each workspace member's identity (name/version/peers).
-    // A `LocalSource::Link` package exists only when the graph was
-    // *read* from an npm lockfile (the reader synthesizes it from the
-    // `node_modules/<name>: {link:true}` pair). On a fresh resolve from
-    // package.json there is no such package, so recover the member's
-    // name/version/peers from its own `package.json` on disk — the same
-    // best-effort disk read the pnpm and bun writers use. Without this
-    // fallback every member importer + its child deps were dropped and
-    // `npm ci` rejected the lockfile with `Missing: <member> from lock
-    // file`.
-    // Pre-read every member's `package.json` once, up front, so the
-    // borrowed name/version/peer strings live as long as `packages`
-    // (the `WriteNpmPackage` arena borrows them). Only read for importers
-    // without a `LocalSource::Link` package — i.e. a fresh resolve.
-    let project_dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let member_manifests: BTreeMap<&str, aube_manifest::PackageJson> = graph
-        .importers
-        .keys()
-        .filter(|p| p.as_str() != ".")
-        .filter(|p| workspace_package_for_importer(graph, p).is_none())
-        .map(|p| {
-            let m =
-                aube_manifest::PackageJson::from_path(&project_dir.join(p).join("package.json"))
-                    .unwrap_or_default();
-            (p.as_str(), m)
-        })
-        .collect();
 
     // Every name that will end up owning a root `node_modules/<name>`
     // entry, gathered before the member loop writes anything: each
@@ -528,12 +609,24 @@ pub fn write(
             (None, None) => BTreeMap::new(),
         };
 
-        let (dependencies, dev_dependencies, optional_dependencies) =
+        let (mut dependencies, dev_dependencies, optional_dependencies) =
             dep_sections_from_direct_deps(importer_roots);
+        // The member's synthesized peer is listed under `peerDependencies`
+        // only, as npm writes it.
+        dependencies.retain(|name, _| {
+            !importer_roots
+                .iter()
+                .any(|dep| dep.name == *name && synthesized_peer(importer_path, dep))
+        });
+        // npm names a member entry only when the package name differs from
+        // the directory's basename (`packages/browsers` → `@puppeteer/browsers`
+        // carries one, `packages/puppeteer` does not), measured on real
+        // lockfiles; always writing it churns every plainly named member.
+        let dir_name = importer_path.rsplit('/').next().unwrap_or(importer_path);
         packages.insert(
             importer_path.clone(),
             WriteNpmPackage {
-                name: Some(member_name),
+                name: (member_name != dir_name).then_some(member_name),
                 version: member_version,
                 dependencies,
                 dev_dependencies,
@@ -606,10 +699,21 @@ pub fn write(
         // treats that as a corrupt lockfile, and `npm install`
         // would refetch the dropped package. Matches the bun and
         // yarn writers, which filter the same way.
+        // A peer that reached `dependencies` as a graph edge — recorded by
+        // placement in the npm reader's second pass, or merged by the peer
+        // pass — is not a declared dependency: npm lists it under
+        // `peerDependencies` only, so it is emitted there and nowhere else,
+        // an optional one included. A name a package declares in both
+        // sections keeps both.
+        let placed_peer = |n: &str| -> bool {
+            pkg.peer_dependencies.contains_key(n) && !pkg.declared_dependencies.contains_key(n)
+        };
         let optional_deps: BTreeMap<&str, &str> = pkg
             .optional_dependencies
             .iter()
-            .filter(|(n, value)| canonical.contains_key(&super::child_canonical_key(n, value)))
+            .filter(|(n, value)| {
+                !placed_peer(n) && canonical.contains_key(&super::child_canonical_key(n, value))
+            })
             .map(|(n, value)| {
                 // Prefer the declared range from the package's own
                 // manifest (what npm itself writes) over the resolved
@@ -629,6 +733,7 @@ pub fn write(
             .iter()
             .filter(|(n, value)| {
                 !pkg.optional_dependencies.contains_key(*n)
+                    && !placed_peer(n)
                     && canonical.contains_key(&super::child_canonical_key(n, value))
             })
             .map(|(n, value)| {
@@ -664,6 +769,7 @@ pub fn write(
         // optional chain). The all-paths-dev-and-optional case
         // collapses into the same flag.
         let is_dev_opt = is_reachable && !prod_reach.contains(canonical_key);
+        let peer = is_reachable && !non_peer_reach.contains(canonical_key);
         let dev_optional = (is_dev && is_opt) || (is_dev_opt && !is_dev && !is_opt);
         let dev = is_dev && !is_opt;
         let optional = is_opt && !is_dev;
@@ -740,6 +846,7 @@ pub fn write(
                     .map(|url| WriteNpmFunding { url }),
                 dev,
                 optional,
+                peer,
                 dev_optional,
                 bundle_dependencies: pkg
                     .bundled_dependencies
@@ -1034,11 +1141,15 @@ fn dep_sections_from_direct_deps(deps: &[DirectDep]) -> DepSections<'_> {
 /// type; below the root the only typed edges are
 /// `optionalDependencies` (a dependency's `devDependencies` are
 /// never installed), so the `Dev` exclusion filters seeds only,
-/// while the `Optional` exclusion also filters child edges.
+/// while the `Optional` exclusion also filters child edges. A peer edge
+/// — a child the package declares only as a peer, recorded by placement
+/// or merged by the peer pass — is crossed unless `cross_peer_edges` is
+/// off, which is how npm's `peer` flag is derived.
 fn reachable_without(
     canonical: &BTreeMap<String, &LockedPackage>,
     roots: &[DirectDep],
     excluded: &[DepType],
+    cross_peer_edges: bool,
 ) -> BTreeSet<String> {
     let mut out: BTreeSet<String> = BTreeSet::new();
     let mut queue: VecDeque<String> = VecDeque::new();
@@ -1058,6 +1169,12 @@ fn reachable_without(
         for (child_name, child_value) in &pkg.dependencies {
             if excluded.contains(&DepType::Optional)
                 && pkg.optional_dependencies.contains_key(child_name)
+            {
+                continue;
+            }
+            if !cross_peer_edges
+                && pkg.peer_dependencies.contains_key(child_name)
+                && !pkg.declared_dependencies.contains_key(child_name)
             {
                 continue;
             }

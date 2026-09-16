@@ -150,7 +150,7 @@ declare var Worker: __NubUseLibDomIfAvailable<
 
 // ── import.meta.hot (Vite-compatible — v0.x, shape committed v0.1) ──
 // Forward-compat commitment: ships now so framework authors can code against the
-// shape. `import.meta.hot` is `undefined` unless `nub watch --hot` is active.
+// shape. No Nub run defines `import.meta.hot`, so it is `undefined` at runtime.
 interface ImportMeta {
   readonly hot?: {
     readonly data: Record<string, any>;

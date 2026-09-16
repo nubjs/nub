@@ -266,7 +266,7 @@ fn overlay_env_file_vars(env_map: &mut HashMap<String, String>) {
     }
     if let Some(vars) = ENV_FILE_VARS.get() {
         for (k, v) in vars {
-            if env::var_os(k).is_none() {
+            if nub_core::workspace::env::env_file_may_set(k) {
                 env_map.insert(k.clone(), v.clone());
             }
         }
@@ -308,7 +308,7 @@ fn merge_child_env(
     // Overlay the explicit vars: shell env still wins; `--env-file` overrides any
     // `.env` value that survives (only relevant when no flag was passed).
     for (k, v) in explicit_vars {
-        if env::var_os(k).is_none() {
+        if nub_core::workspace::env::env_file_may_set(k) {
             env_map.insert(k.clone(), v.clone());
         }
     }
@@ -580,11 +580,22 @@ fn apply_env_file_vars(cmd: &mut std::process::Command) {
     }
     if let Some(vars) = ENV_FILE_VARS.get() {
         for (k, v) in vars {
-            if env::var_os(k).is_none() {
+            if nub_core::workspace::env::env_file_may_set(k) {
                 cmd.env(k, v);
             }
         }
     }
+}
+
+/// Whether the explicit `--env-file` layer sets `key` for the child. A launcher
+/// that installs nub's threadpool default checks this first: the file's value is
+/// the user's, and the default must not land on top of it.
+fn env_file_sets(key: &str) -> bool {
+    !no_env_file()
+        && ENV_FILE_VARS.get().is_some_and(|vars| {
+            vars.keys()
+                .any(|k| nub_core::workspace::env::env_keys_equal(k, key))
+        })
 }
 
 /// Build the fetched tool's env overlay. The engine spawns the tool itself, so
@@ -609,7 +620,7 @@ pub(crate) fn dlx_child_env(compat_mode: bool) -> BTreeMap<String, String> {
         return values;
     }
     for (key, value) in ENV_FILE_VARS.get().into_iter().flatten() {
-        if env::var_os(key).is_none() {
+        if nub_core::workspace::env::env_file_may_set(key) {
             values.insert(key.clone(), value.clone());
         }
     }
@@ -623,6 +634,8 @@ pub enum Argv0 {
     Nub,
     /// Invoked as `nubx` — enter `exec` directly.
     Nubx,
+    /// Invoked as `nubr` — the unified runner (`runtime/nubr.mjs`), see [`run_nubr`].
+    Nubr,
     /// Invoked as `node` via the PATH shim — augmented top-level execution.
     Node,
     /// Invoked as `npm`/`npx`/`pnpm`/`pnpx`/`yarn`/`yarnpkg` via a
@@ -637,8 +650,8 @@ static ARGV0_OVERRIDE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock
 
 /// Read `__NUB_ARGV0` into [`ARGV0_OVERRIDE`] and REMOVE it from the environment.
 ///
-/// The platform packages ship ONE binary. `nub` and `nubx` are the same file, and
-/// the verb normally comes from argv[0]'s basename — but the launcher's healed sh
+/// The platform packages ship ONE binary. `nub`, `nubx` and `nubr` are the same file,
+/// and the verb normally comes from argv[0]'s basename — but the launcher's healed sh
 /// trampoline `exec`s that file by its real path, and POSIX `sh` has no portable way
 /// to set argv[0] (`exec -a` is a bash/zsh-ism; dash, which is `/bin/sh` on Debian
 /// and Ubuntu, rejects it). So the launcher passes the verb in this variable instead.
@@ -697,6 +710,7 @@ impl Argv0 {
         let name = basename.strip_suffix("-dev").unwrap_or(basename);
         match name {
             "nubx" => Self::Nubx,
+            "nubr" => Self::Nubr,
             "node" => Self::Node,
             // `file_stem` already stripped any `.exe`, so the same parse serves
             // the Windows shim names.
@@ -1791,6 +1805,7 @@ pub fn run() -> Result<i32> {
 
     match argv0 {
         Argv0::Nubx => run_nubx(),
+        Argv0::Nubr => run_nubr(),
         Argv0::Node => run_as_node(),
         Argv0::PmShim(name) => {
             // The PM owns its argv — no nub flag parsing, everything after
@@ -3444,6 +3459,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 node_linker,
                 registry,
                 dir,
+                allow_all_builds: false,
                 filter: crate::pm_engine::WorkspaceFilterFlags {
                     filter,
                     filter_prod,
@@ -3479,6 +3495,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 no_optional,
                 registry,
                 dir,
+                allow_all_builds: false,
                 filter: crate::pm_engine::WorkspaceFilterFlags {
                     filter,
                     filter_prod,
@@ -3494,6 +3511,39 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
         Some(Command::Node { .. }) => unreachable!("`node` is handled before parser dispatch"),
         None => unreachable!(),
     }
+}
+
+/// `nubr` — the unified runner: a file, a `package.json` script, or an installed
+/// bin, resolved most-specific-first under one name. It is the command
+/// `@nubjs/runner` ships, and this arm runs the SAME `runtime/nubr.mjs` out of the
+/// embedded runtime on the resolved Node, so the binary alias and the npm package
+/// behave identically by construction; nothing about resolution or the spawn is
+/// reimplemented here. The full CLI keeps its three verbs (`nub <file>`, `nub
+/// run`, `nubx`) — this is the one-bin shape, not a change to them.
+fn run_nubr() -> Result<i32> {
+    let args: Vec<String> = env::args().skip(1).collect();
+    // `nubr.mjs` reads its version from the package.json beside it, which the
+    // extracted runtime does not carry; the binary knows its own version. Same
+    // spelling as the package (bare, no `v`), same first-argument-only rule.
+    if matches!(args.first().map(String::as_str), Some("-v" | "--version")) {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        return Ok(0);
+    }
+    let cwd = env::current_dir().context("could not determine the current directory")?;
+    let node = nub_core::node::discovery::discover_or_provision_node(&cwd)?;
+    nub_core::node::discovery::check_min_version(&node)?;
+    let nub_binary = nub_core::node::spawn::current_nub_binary()?;
+    let runtime = nub_core::node::spawn::find_runtime_dir(&nub_binary)
+        .context("nubr: the nub runtime could not be located")?;
+    let mut cmd = std::process::Command::new(node.path.as_str());
+    cmd.arg(runtime.join("nubr.mjs"))
+        .args(&args)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+    let status = nub_core::node::spawn::status_forwarding_signals(&mut cmd)
+        .with_context(|| format!("nubr: failed to spawn {}", node.path))?;
+    Ok(nub_core::node::spawn::exit_code_from_status(&status))
 }
 
 fn run_nubx() -> Result<i32> {
@@ -3614,6 +3664,10 @@ fn run_as_node() -> Result<i32> {
     // (temp-dir shim, inside a `nub …` subtree the user opted into) keeps
     // augment-by-default. `--node`/`NODE_COMPAT` force vanilla in either case.
     let compat = compat_flag || nub_core::node::shim::invoked_as_persistent_node_shim();
+    // The hijack resolves a version; it does not add a launch wrapper. The
+    // configured `prefix` belongs to the `nub` entrypoints (see `crate::prefix`),
+    // and this is the one flag `run_file_in_dir` has to tell the two apart.
+    NODE_HIJACK.store(true, Ordering::Relaxed);
     initialize_runtime_config_snapshot(compat, false)?;
     if compat {
         run_file_with_compat(&forwarded, true)
@@ -3621,6 +3675,9 @@ fn run_as_node() -> Result<i32> {
         run_file(&forwarded)
     }
 }
+
+/// Set when this process is the `node` PATH hijack rather than a `nub` verb.
+static NODE_HIJACK: AtomicBool = AtomicBool::new(false);
 
 /// Leading-only `--node` scan for the `node` PATH-hijack. Real `node` reads
 /// options until the ENTRY POINT — the script file, `-`/stdin, an `-e`/`--eval`
@@ -4028,6 +4085,7 @@ fn prepare_preload_chain(
             } else {
                 path.to_string_lossy().into_owned()
             },
+            sidecar: None,
         }),
     )
 }
@@ -4086,12 +4144,15 @@ fn write_preload_chain(dir: &Path, esm: bool, entries: &[String]) -> Result<Opti
 
 /// A resolver for BARE `nub.jsonc` `preload` entries, with the condition set the
 /// chainer's channel implies (`import` for the `.mjs` chainer, `require` for the
-/// `.cjs` one) — the same conditions Node itself would use for that flag.
+/// `.cjs` one) — the same conditions Node itself would use for that flag. That set
+/// includes [`NUB_CONDITION`], because this resolves a specifier the child Node
+/// would otherwise resolve for itself, with the runtime key already on its argv.
 ///
 fn bare_preload_resolver(esm: bool) -> oxc_resolver::Resolver {
     oxc_resolver::Resolver::new(oxc_resolver::ResolveOptions {
         condition_names: vec![
             "node".to_string(),
+            NUB_CONDITION.to_string(),
             if esm { "import" } else { "require" }.to_string(),
         ],
         extensions: vec![".js".into(), ".json".into(), ".node".into()],
@@ -4214,11 +4275,45 @@ fn ensure_tsconfig_parses(dir: &str, explicit: Option<&str>) -> Result<()> {
     );
 }
 
+/// Nub's runtime key, set as an `exports`/`imports` condition on every run the CLI
+/// augments and honored by the compile bundler, which resolves `exports` ahead of
+/// time and so has to pick the same file.
+///
+/// The key follows the WinterTC runtime-keys convention
+/// (<https://runtime-keys.proposal.wintertc.org/>); the registry entry is proposed
+/// separately and this does not wait on it.
+pub(crate) const NUB_CONDITION: &str = "nub";
+
 pub(crate) fn runtime_node_options(
     runtime: &mut crate::project_config::RuntimeConfig,
     node: &nub_core::node::discovery::ResolvedNode,
 ) -> Result<Vec<String>> {
-    runtime_node_options_with(runtime, node, FoldInherited::Yes)
+    runtime_node_options_with(runtime, node, FoldInherited::Yes, TsconfigGate::Required)
+}
+
+/// The options a PM verb hands its lifecycle scripts. Same set as a run, except a
+/// tsconfig that will not read is tolerated: the install is what makes the
+/// `extends` target exist (ava's `"extends": "@sindresorhus/tsconfig"` is a
+/// devDependency), so refusing here left every fresh clone unable to install.
+pub(crate) fn lifecycle_node_options(
+    runtime: &mut crate::project_config::RuntimeConfig,
+    node: &nub_core::node::discovery::ResolvedNode,
+) -> Result<Vec<String>> {
+    runtime_node_options_with(runtime, node, FoldInherited::Yes, TsconfigGate::BestEffort)
+}
+
+/// What an unreadable tsconfig does to the run whose options are being built.
+///
+/// `Required` is every path that executes the user's program (#731: running under
+/// options the author never wrote is the silent wrong answer). `BestEffort` is the
+/// lifecycle-script path of the PM verbs, where the config's `extends` target is
+/// routinely a package the verb is about to install: the run proceeds without the
+/// config-derived conditions and without a report — nothing is guessed at, and the
+/// child that re-enters nub to run a TypeScript file still applies the gate itself.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum TsconfigGate {
+    Required,
+    BestEffort,
 }
 
 /// Whether inherited `NODE_OPTIONS` preloads may be folded into nub's chainer.
@@ -4238,6 +4333,7 @@ pub(crate) fn runtime_node_options_with(
     runtime: &mut crate::project_config::RuntimeConfig,
     node: &nub_core::node::discovery::ResolvedNode,
     fold: FoldInherited,
+    tsconfig_gate: TsconfigGate,
 ) -> Result<Vec<String>> {
     let accepted = nub_core::node::discovery::accepted_env_flags(node.path.as_std_path());
     let mut options = Vec::new();
@@ -4248,6 +4344,19 @@ pub(crate) fn runtime_node_options_with(
     }
 
     let mut seen_conditions = std::collections::HashSet::new();
+    // Nub's runtime key, in the slot `bun`, `deno` and `workerd` occupy. It rides
+    // every run the CLI augments so a package can point an `exports` branch at what
+    // nub adds — TypeScript source above all — and is absent under `--node`/
+    // `NODE_COMPAT`, which skip this function entirely and so run with Node's own
+    // condition set. Conditions are a SET: this only ever offers a branch a package
+    // opted into, and a package with no `nub` key resolves as it does under plain Node.
+    //
+    // Scoped to the CLI on purpose. The standalone `@nubjs/runner` installs the same
+    // transform hooks but deliberately does NOT add this, because its contract is that
+    // a file resolves identically under it, under tsx, and under plain Node — the brand
+    // stays in the outer invocation and out of the user's import graph.
+    seen_conditions.insert(NUB_CONDITION.to_string());
+    options.push(format!("--conditions={NUB_CONDITION}"));
     for condition in &runtime.conditions {
         if condition.is_empty() || condition.chars().any(char::is_whitespace) {
             bail!("nub.jsonc `conditions` entries must be non-empty and contain no whitespace");
@@ -4272,6 +4381,8 @@ pub(crate) fn runtime_node_options_with(
     // `extends`. Skipped entirely in compat mode by the caller, like every other
     // config-derived flag.
     if let Ok(cwd) = std::env::current_dir() {
+        let cwd = cwd.to_string_lossy();
+        let explicit = runtime.tsconfig.as_deref();
         // A tsconfig that will not parse is FATAL, not a warning (#731). Reporting it
         // and carrying on still runs the program under options its author never
         // wrote — the same silent-wrong-answer the issue reported, only quieter — and
@@ -4280,11 +4391,22 @@ pub(crate) fn runtime_node_options_with(
         // out `strict`, `target` and `paths`, so the base is usually where the load
         // lives. `--node` / `NODE_COMPAT` skip this whole function, so the escape
         // hatch for a config nub cannot read is the one that already turns off every
-        // other config-derived behavior.
-        ensure_tsconfig_parses(&cwd.to_string_lossy(), runtime.tsconfig.as_deref())?;
-        for condition in
-            nub_tsconfig::custom_conditions(&cwd.to_string_lossy(), runtime.tsconfig.as_deref())
-        {
+        // other config-derived behavior. The lifecycle path (`BestEffort`) is the one
+        // exception, and it takes the same "guess at nothing" line: no conditions at
+        // all from a config it cannot read.
+        let conditions = match tsconfig_gate {
+            TsconfigGate::Required => {
+                ensure_tsconfig_parses(&cwd, explicit)?;
+                nub_tsconfig::custom_conditions(&cwd, explicit)
+            }
+            TsconfigGate::BestEffort
+                if nub_tsconfig::probe_diagnostics(&cwd, explicit).is_empty() =>
+            {
+                nub_tsconfig::custom_conditions(&cwd, explicit)
+            }
+            TsconfigGate::BestEffort => Vec::new(),
+        };
+        for condition in conditions {
             // A condition name with whitespace is a user error in THEIR tsconfig that
             // `tsc` itself tolerates, so it cannot be fatal here the way a bad
             // nub.jsonc entry is: skip it and leave the rest of the set intact.
@@ -4400,7 +4522,7 @@ fn load_runtime_env_sources_raw(paths: &[PathBuf]) -> Result<HashMap<String, Str
             )
         })?;
         for (key, value) in nub_core::workspace::env::parse_env(&content) {
-            if env::var_os(&key).is_some()
+            if !nub_core::workspace::env::env_file_may_set(&key)
                 || runtime_env_keys_equal(&key, "NODE_ENV", cfg!(windows))
             {
                 continue;
@@ -4638,6 +4760,31 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
             crate::env_owner::wrapped_marker(schema_dir),
         );
     }
+    // The configured `prefix` wraps a `nub <file>` run only: a bin launched for
+    // `nubx` / `nub exec` (`exec_ua`) and the `node` hijack are outside its scope,
+    // and compat mode is plain Node — the escape hatch stays a bare spawn, as it
+    // does for the env-owner loader.
+    let prefix = if exec_ua || compat_mode || NODE_HIJACK.load(Ordering::Relaxed) {
+        None
+    } else {
+        crate::prefix::Prefix::resolve(
+            project_root.unwrap_or(cwd),
+            &project
+                .as_ref()
+                .map(|project| {
+                    nub_core::workspace::scripts::bin_dirs(
+                        &project.root,
+                        project.workspace_root.as_deref(),
+                    )
+                })
+                .unwrap_or_default(),
+        )?
+    };
+    let prefix_argv = prefix.as_ref().map(crate::prefix::Prefix::argv);
+    if let Some(prefix) = prefix.as_ref() {
+        let (key, value) = prefix.marker();
+        env_vars.insert(key.to_string(), value);
+    }
 
     // Bin-exec parity with `nub run`: when this spawn is nub LAUNCHING a resolved
     // node bin (a `nubx`/`nub exec` scaffolder — `exec_ua`), set the same role-
@@ -4693,10 +4840,12 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     // `!compat_mode`, so `--node` skips it regardless).
     let pnp_ctx = nub_core::pnp::detect(cwd);
     let config = nub_core::node::spawn::SpawnConfig {
+        runtime_has_preloads: !runtime.preload.is_empty(),
         // Put the loader in front of Node when one owns this project.
         env_owner: env_owner
             .as_ref()
             .and_then(crate::env_owner::EnvOwner::spawn_target),
+        prefix: prefix_argv.as_deref(),
         node: &node,
         user_args: args,
         compat_mode,
@@ -5649,8 +5798,10 @@ enum StreamMode {
 /// relocates `nub.exe`. Must match `SHELL_SUBDIR` in `npm/nub/bin/launch.js`.
 const NUB_SHELL_SUBDIR: &str = "nub-sh";
 
-/// Resolve the bundled busybox-w32 POSIX-`sh` sidecar that backs `nub run` script
-/// bodies on Windows. `__NUB_BUSYBOX_EXE` overrides the location — an internal
+/// Resolve the bundled busybox-w32 POSIX-`sh` sidecar that backs every script body
+/// nub runs on Windows — `nub run` here, and dependency lifecycle scripts through the
+/// engine-context default `pm_engine` installs (`apply_lifecycle_script_shell`).
+/// `__NUB_BUSYBOX_EXE` overrides the location — an internal
 /// test/CI seam that lets the Rust suite and the branch-scoped Windows probe supply a
 /// busybox without the release-packaging step; it is NOT a documented user knob
 /// (`--script-shell` is the user-facing override).
@@ -5674,55 +5825,7 @@ const NUB_SHELL_SUBDIR: &str = "nub-sh";
 /// fallback — that would resurrect the non-POSIX script semantics busybox replaces.
 /// Only reached on Windows (the `cfg!(windows)` default arm); cross-platform std so
 /// it compiles everywhere.
-/// Re-bind, inside the script body, the lowercase environment names nub set.
-///
-/// busybox-w32's shell UP-CASES every name when it loads the Windows environment,
-/// so a script body sees `NPM_PACKAGE_NAME` and `$npm_package_name` expands to
-/// nothing — while npm, pnpm, yarn and bun all deliver the lowercase name on the
-/// same fixture. Upstream considers the up-casing correct and declined the
-/// preserve-casing patch (rmyorston/busybox-w32#125), so the restoration is nub's
-/// to do.
-///
-/// One `export` prologue fixes all three symptoms at once, because busybox's own
-/// variable lookup is case-SENSITIVE: `$npm_package_name` expands, the lowercase
-/// name is back in the environment every child inherits, and `Object.keys` sees
-/// it — for a consumer in any language, not only the Node children nub augments.
-///
-/// It re-binds NAMES, never values, so nothing needs quoting and a value carrying
-/// quotes or newlines cannot break the body. Derived from the command's own env
-/// rather than from a hand-kept list, so a variable added later is covered
-/// without anyone remembering this function.
-///
-/// Scope is deliberately what NUB set, not the whole inherited environment. busybox
-/// up-cases an inherited lowercase name too, but restoring those means re-exporting
-/// arbitrary host variables into every script body to undo a shell's documented
-/// behavior, which is a much larger claim than fixing the names nub is responsible
-/// for. It also keeps the prologue small: measured at 15 exportable names and 741
-/// bytes against a 32767-byte command line, and the real figure is lower because
-/// `get_envs` sees only what nub set rather than what it inherited.
-fn lowercase_env_prologue(command: &std::process::Command) -> String {
-    let mut names: Vec<&str> = command
-        .get_envs()
-        // A `None` value is a REMOVAL, and re-exporting one would put the name back.
-        .filter(|(_, value)| value.is_some())
-        .filter_map(|(name, _)| name.to_str())
-        .filter(|name| {
-            // An uppercase-only name is unaffected by the up-casing, and a name
-            // that is not a shell identifier cannot be exported at all.
-            name.contains(|c: char| c.is_ascii_lowercase())
-                && !name.starts_with(|c: char| c.is_ascii_digit())
-                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        })
-        .collect();
-    names.sort_unstable();
-    names.dedup();
-    names
-        .iter()
-        .map(|name| format!("export {name}=\"${}\"; ", name.to_ascii_uppercase()))
-        .collect()
-}
-
-fn resolve_bundled_busybox() -> Result<String> {
+pub(crate) fn resolve_bundled_busybox() -> Result<String> {
     let to_utf8 = |p: PathBuf| -> Result<String> {
         p.to_str()
             .map(str::to_string)
@@ -5866,6 +5969,9 @@ fn build_script_command(
     // can confine it (an in-process interpreter could do neither). This replaces
     // the former implicit `cmd.exe` default. busybox is a multi-call binary, so
     // its `sh` applet name precedes `-c`; every other shell here takes plain `-c`.
+    // The engine's dependency-lifecycle spawn resolves the same sidecar the same
+    // way (`pm_engine::apply_lifecycle_script_shell`), so one POSIX script body
+    // behaves identically whether `nub run` or a `postinstall` runs it.
     let custom_shell = script_shell_override
         .map(str::to_string)
         .or_else(|| nub_core::workspace::scripts::script_shell(&project.root));
@@ -5916,7 +6022,30 @@ fn build_script_command(
     // former implicit Windows `cmd` default — the sole `windowsVerbatimArguments`
     // consumer — is gone; an explicit `script-shell=cmd` still takes this path
     // with cmd-escaped args (unchanged), it was never the verbatim default.
-    let mut command = StdCommand::new(&shell);
+    // A configured `prefix` wraps the SHELL, so a body that never starts Node
+    // still runs behind it; the marker it carries stops a `nub run` inside the
+    // body from wrapping the same project again. Not in compat mode, which is a
+    // bare spawn on every surface.
+    let prefix = if compat_mode {
+        None
+    } else {
+        crate::prefix::Prefix::resolve(
+            &project.root,
+            &nub_core::workspace::scripts::bin_dirs(
+                &project.root,
+                project.workspace_root.as_deref(),
+            ),
+        )?
+    };
+    let mut command = match prefix.as_ref() {
+        Some(prefix) => {
+            let mut command = prefix.command();
+            command.args(nub_core::node::spawn::cmd_shim_for(Path::new(&shell)));
+            command.arg(&shell);
+            command
+        }
+        None => StdCommand::new(&shell),
+    };
     command.args(&shell_args);
     command.current_dir(&project.root);
 
@@ -6028,6 +6157,13 @@ fn build_script_command(
         aug.apply_localstorage_env(|k, v| {
             command.env(k, v);
         });
+        // An explicit `--env-file` pool size (in `env_vars`, applied below) is
+        // the user's; nub's default and its ownership marker stand down.
+        if !env_file_sets(nub_core::node::spawn::THREADPOOL_SIZE_ENV) {
+            aug.apply_threadpool_size(|k, v| {
+                command.env(k, v);
+            });
+        }
     }
     if let Some(runtime_json) = runtime_json {
         command.env(crate::project_config::RUNTIME_CONFIG_ENV, runtime_json);
@@ -6134,7 +6270,7 @@ fn build_script_command(
     // The script body goes on LAST, because on Windows its prologue is derived
     // from every `command.env` call above.
     let prologue = if uses_bundled_busybox {
-        lowercase_env_prologue(&command)
+        aube_scripts::lowercase_env_prologue(&command)
     } else {
         String::new()
     };
@@ -6970,7 +7106,12 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         let status = nub_core::node::spawn::status_forwarding_signals(&mut cmd)?;
         return Ok(nub_core::node::spawn::exit_code_from_status(&status));
     }
-    let runtime_node_options = runtime_node_options_with(&mut runtime, &node, FoldInherited::No)?;
+    let runtime_node_options = runtime_node_options_with(
+        &mut runtime,
+        &node,
+        FoldInherited::No,
+        TsconfigGate::Required,
+    )?;
     let runtime_v8_flags = runtime_v8_flags(&runtime)?;
     let runtime_json = runtime_config_json(&runtime)?;
 
@@ -7077,8 +7218,12 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // observable preload order — and BEFORE the project-config preloads, so
     // those load with nub's hooks already active. Both `NODE_OPTIONS` assemblies
     // below place the token accordingly, matching the non-watch spawn order.
+    // Every token the injection carries (the compat tier's threadpool sidecar rides
+    // ahead of the preload), joined as one part; the parts are space-joined below.
     let nub_preload_token = preload_path.as_deref().map(|preload| {
-        nub_core::node::spawn::preload_injection(preload, &node.version).node_options_token()
+        nub_core::node::spawn::preload_injection(preload, &node.version)
+            .node_options_tokens()
+            .join(" ")
     });
 
     let mut node_args = vec!["--watch".to_string(), "--watch-preserve-output".to_string()];
@@ -7156,25 +7301,61 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // supervisor re-execs the child inside it. Values therefore freeze across
     // restarts, which is the trade-off this path already makes for every
     // expansion-dependent var it injects.
-    let mut cmd = match env_owner
+    //
+    // The configured `prefix` goes in front of all of that, the loader included,
+    // exactly as `spawn_node` orders it — and, like the loader, not in compat mode.
+    let prefix = if compat_mode {
+        None
+    } else {
+        crate::prefix::Prefix::resolve(
+            project
+                .as_ref()
+                .map_or(cwd.as_path(), |project| project.root.as_path()),
+            &project
+                .as_ref()
+                .map(|project| {
+                    nub_core::workspace::scripts::bin_dirs(
+                        &project.root,
+                        project.workspace_root.as_deref(),
+                    )
+                })
+                .unwrap_or_default(),
+        )?
+    };
+    let owner_target = env_owner
         .as_ref()
-        .and_then(crate::env_owner::EnvOwner::spawn_target)
-    {
-        Some((loader, schema_dir)) => {
+        .and_then(crate::env_owner::EnvOwner::spawn_target);
+    let mut cmd = match (prefix.as_ref(), owner_target) {
+        (Some(prefix), owner) => {
+            let mut cmd = prefix.command();
+            if let Some((loader, schema_dir)) = owner {
+                cmd.args(nub_core::node::spawn::cmd_shim_for(loader));
+                cmd.arg(loader)
+                    .arg("run")
+                    .arg("--path")
+                    .arg(schema_dir)
+                    .arg("--");
+            }
+            cmd.arg(node.path.as_str());
+            cmd
+        }
+        (None, Some((loader, schema_dir))) => {
             let mut cmd = nub_core::node::spawn::loader_command(loader);
             cmd.arg("run")
                 .arg("--path")
                 .arg(schema_dir)
                 .arg("--")
                 .arg(node.path.as_str());
-            cmd.env(
-                crate::env_owner::WRAPPED_ENV,
-                crate::env_owner::wrapped_marker(schema_dir),
-            );
             cmd
         }
-        None => std::process::Command::new(node.path.as_str()),
+        (None, None) => std::process::Command::new(node.path.as_str()),
     };
+    if let Some((_, schema_dir)) = owner_target {
+        cmd.env(
+            crate::env_owner::WRAPPED_ENV,
+            crate::env_owner::wrapped_marker(schema_dir),
+        );
+    }
     cmd.args(&node_args)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
@@ -7235,6 +7416,44 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
                 launcher_owned_env_keys.push(key.to_string());
             },
         );
+        // libuv threadpool sizing, the same install every other augmented launcher
+        // makes (spawn.rs THREADPOOL_SIZE_ENV); watch's supervisor re-execs the
+        // child with this environment, so it survives every restart. An env-file
+        // value is the user's: a forwarded file reaches Node as `--env-file`,
+        // which never overrides a value already in the command environment, so
+        // the install stands down — and an inherited nub default (a `nub run`
+        // script running `nub watch`) is removed so the file's value can land.
+        {
+            use nub_core::node::spawn::THREADPOOL_SIZE_ENV;
+            let file_sets_pool = env_vars
+                .keys()
+                .any(|k| nub_core::workspace::env::env_keys_equal(k, THREADPOOL_SIZE_ENV));
+            let nub_default = nub_core::node::spawn::threadpool_size_is_nub_default();
+            let expected = if file_sets_pool {
+                if nub_default {
+                    cmd.env_remove(THREADPOOL_SIZE_ENV);
+                }
+                None
+            } else if env::var_os(THREADPOOL_SIZE_ENV).is_none() {
+                Some(nub_core::node::spawn::threadpool_size().to_string())
+            } else {
+                None
+            };
+            if let Some(size) = &expected {
+                cmd.env(THREADPOOL_SIZE_ENV, size);
+                launcher_owned_env_keys.push(THREADPOOL_SIZE_ENV.to_string());
+            }
+            if file_sets_pool || expected.is_some() {
+                nub_core::node::spawn::apply_expected_augmentation_marker(
+                    THREADPOOL_SIZE_ENV,
+                    expected.as_deref().map(std::ffi::OsStr::new),
+                    |key, value| {
+                        cmd.env(key, value);
+                        launcher_owned_env_keys.push(key.to_string());
+                    },
+                );
+            }
+        }
     }
     // Node's Windows watch supervisor first registers the long-spelled env-file
     // directory, then registers module paths reported by the watched child. If
@@ -7288,6 +7507,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         let token = nub_core::node::spawn::PreloadInjection {
             flag: "--require",
             value: cleanup_preload.to_string(),
+            sidecar: None,
         }
         .node_options_token();
 
@@ -7697,6 +7917,14 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Resul
     aug.apply_localstorage_env(|k, v| {
         cmd.env(k, v);
     });
+    // `apply_env_file_vars` staged the explicit `--env-file` values before this
+    // augmentation, and a pool size among them is the user's: nub's default must
+    // not overwrite it (the other augmentation vars deliberately do, A19).
+    if !env_file_sets(nub_core::node::spawn::THREADPOOL_SIZE_ENV) {
+        aug.apply_threadpool_size(|k, v| {
+            cmd.env(k, v);
+        });
+    }
     cmd.env(crate::project_config::RUNTIME_CONFIG_ENV, runtime_json);
     // Stamp the env-owner markers wherever the adapter is injected — without them
     if let Some((k, val)) = force_async_tier {
@@ -8543,22 +8771,23 @@ fn perform_selfowned_upgrade(
     #[cfg(not(windows))]
     ensure_bin_executable(&install_dir.join("bin").join(NUB_EXE))?;
 
-    // Recreate the `nubx` alias install.sh creates (relative symlink → nub; the CLI
-    // dispatches on argv[0], so only the alias NAME matters — see Argv0::detect).
-    // BEST-EFFORT per the resilience contract above: the binary is already swapped
-    // and executable, so `nub` works regardless. nubx is a derived convenience —
-    // its recreation failing (an exotic FS, a permissions quirk) must NOT abort an
-    // otherwise-successful upgrade; warn and continue rather than bail. POSIX-only:
-    // on Windows the nubx COPY is refreshed inside `swap_bin_files_windows`.
+    // Recreate the `nubx` / `nubr` aliases install.sh creates (relative symlinks →
+    // nub; the CLI dispatches on argv[0], so only the alias NAME matters — see
+    // Argv0::detect). BEST-EFFORT per the resilience contract above: the binary is
+    // already swapped and executable, so `nub` works regardless. The aliases are a
+    // derived convenience — their recreation failing (an exotic FS, a permissions
+    // quirk) must NOT abort an otherwise-successful upgrade; warn and continue
+    // rather than bail. POSIX-only: on Windows the alias COPIES are refreshed
+    // inside `swap_bin_files_windows`.
     #[cfg(unix)]
-    {
-        let nubx = install_dir.join("bin").join("nubx");
-        let _ = std::fs::remove_file(&nubx);
-        if let Err(e) = std::os::unix::fs::symlink("nub", &nubx) {
+    for alias in ["nubx", "nubr"] {
+        let link = install_dir.join("bin").join(alias);
+        let _ = std::fs::remove_file(&link);
+        if let Err(e) = std::os::unix::fs::symlink("nub", &link) {
             eprintln!(
-                "nub upgrade: warning: could not recreate the nubx alias at {} ({e}); \
-                 `nub` is upgraded and usable. Re-run the installer to restore nubx.",
-                nubx.display()
+                "nub upgrade: warning: could not recreate the {alias} alias at {} ({e}); \
+                 `nub` is upgraded and usable. Re-run the installer to restore {alias}.",
+                link.display()
             );
         }
     }
@@ -8596,13 +8825,13 @@ fn swap_bin_files_windows(install_dir: &Path, staged_bin: &Path) -> Result<()> {
         .with_context(|| format!("could not create {}", display_path(&bin_dir)))?;
     let nub = bin_dir.join("nub.exe");
     let nub_old = bin_dir.join("nub.exe.old");
-    let nubx = bin_dir.join("nubx.exe");
-    let nubx_old = bin_dir.join("nubx.exe.old");
     let busybox = bin_dir.join("busybox.exe");
     let busybox_old = bin_dir.join("busybox.exe.old");
 
     let _ = std::fs::remove_file(&nub_old);
-    let _ = std::fs::remove_file(&nubx_old);
+    for alias in ["nubx", "nubr"] {
+        let _ = std::fs::remove_file(bin_dir.join(format!("{alias}.exe.old")));
+    }
     let _ = std::fs::remove_file(&busybox_old);
 
     if nub.exists() {
@@ -8622,18 +8851,22 @@ fn swap_bin_files_windows(install_dir: &Path, staged_bin: &Path) -> Result<()> {
             .with_context(|| format!("nub upgrade: could not install {}", display_path(&nub)));
     }
 
-    // nubx refresh is BEST-EFFORT per the resilience contract: `nub` is already
-    // swapped and authoritative. A running nubx.exe blocks the delete but not
-    // the rename-aside; if even that fails, warn and leave the stale copy.
-    if nubx.exists() && std::fs::remove_file(&nubx).is_err() {
-        let _ = std::fs::rename(&nubx, &nubx_old);
-    }
-    if let Err(e) = std::fs::copy(&nub, &nubx) {
-        eprintln!(
-            "nub upgrade: warning: could not refresh the nubx alias at {} ({e}); \
-             `nub` is upgraded and usable. Re-run the installer to restore nubx.",
-            display_path(&nubx)
-        );
+    // The nubx / nubr alias refresh is BEST-EFFORT per the resilience contract:
+    // `nub` is already swapped and authoritative. A running alias .exe blocks the
+    // delete but not the rename-aside; if even that fails, warn and leave the
+    // stale copy.
+    for alias in ["nubx", "nubr"] {
+        let exe = bin_dir.join(format!("{alias}.exe"));
+        if exe.exists() && std::fs::remove_file(&exe).is_err() {
+            let _ = std::fs::rename(&exe, bin_dir.join(format!("{alias}.exe.old")));
+        }
+        if let Err(e) = std::fs::copy(&nub, &exe) {
+            eprintln!(
+                "nub upgrade: warning: could not refresh the {alias} alias at {} ({e}); \
+                 `nub` is upgraded and usable. Re-run the installer to restore {alias}.",
+                display_path(&exe)
+            );
+        }
     }
 
     // busybox.exe is nub's bundled POSIX shell for `nub run`, and unlike nubx it
@@ -9765,7 +9998,9 @@ fn run_pm(args: &[String]) -> Result<i32> {
              \x20 pin [<version>]    lock this project to an exact nub version (default: the running nub)\n\
              \x20 update             re-resolve within the pinned range and bump the pin (alias: up)\n\
              \x20 cache [clear]      list cached package managers (or clear the cache)\n\
-             \x20 shim               link npm/pnpm/yarn shims onto PATH (re-run after `nub upgrade`)\n\
+             \x20 shim               link npm/pnpm/yarn shims onto PATH (re-run after `nub upgrade`);\n\
+             \x20                    --route-installs runs `npm ci` / `npm install` on nub's engine\n\
+             \x20                    (--no-route-installs turns that back off)\n\
              \x20 unshim             remove the shims and their PATH block"
         );
         return Ok(0);
@@ -9980,7 +10215,7 @@ fn run_pm(args: &[String]) -> Result<i32> {
         // `nub node pin <version>`.
         "pin" => run_pm_pin(args.get(1).map(String::as_str), &cwd),
         // Install / remove the PM shims (spec: `package-manager-shims` (no such document)).
-        "shim" => run_pm_shim_install(),
+        "shim" => run_pm_shim_install(&args[1..]),
         "unshim" => run_pm_unshim(),
         // `switch` (the old cross-PM, declaration-only verb) was replaced by
         // `use` (2026-06-10, identity-policy ratification) — name the successor
@@ -10589,8 +10824,22 @@ fn list_pm_cache(pm_cache: &Path) -> Vec<String> {
 /// in `~/.nub/shims`, write the marked PATH block into the shell profile
 /// (install.sh's mechanism), and verify reachability. Idempotent — re-running
 /// re-links, which is also how shims are refreshed after `nub upgrade`.
-fn run_pm_shim_install() -> Result<i32> {
+fn run_pm_shim_install(args: &[String]) -> Result<i32> {
     use nub_core::pm::shim::{self, ProfileOutcome, ShimAction};
+
+    // `--route-installs` / `--no-route-installs` set or clear the marker; a
+    // re-run without either leaves the current choice alone, so re-linking
+    // after `nub upgrade` never silently switches routing off.
+    let mut route_installs: Option<bool> = None;
+    for arg in args {
+        match arg.as_str() {
+            "--route-installs" => route_installs = Some(true),
+            "--no-route-installs" => route_installs = Some(false),
+            other => bail!(
+                "nub pm shim: unexpected argument {other:?} (accepted: --route-installs, --no-route-installs)"
+            ),
+        }
+    }
 
     // Canonicalized, so a symlinked `nub` on PATH links the real bytes (the
     // same posture as every other `current_nub_binary` call site).
@@ -10610,6 +10859,9 @@ fn run_pm_shim_install() -> Result<i32> {
     }
 
     let report = shim::install_shims(&nub_binary)?;
+    if let Some(on) = route_installs {
+        shim::set_route_installs(&dir, on)?;
+    }
 
     let count = |action: ShimAction| report.iter().filter(|s| s.action == action).count();
     let (created, relinked, current) = (
@@ -10638,6 +10890,11 @@ fn run_pm_shim_install() -> Result<i32> {
         dir.display(),
         parts.join(", ")
     );
+    if shim::route_installs_enabled(&dir) {
+        println!(
+            "  npm ci and npm install run on nub's engine (--no-route-installs turns this off)"
+        );
+    }
     if report.iter().any(|s| s.copied) {
         println!(
             "  note: {} is on a different filesystem than the nub binary — \
@@ -10954,6 +11211,15 @@ enum ShimPlan {
     },
     /// The strict agreement check refused: print `message` on stderr, exit 1.
     Refuse { message: String },
+    /// `npm ci` / `npm install` under `nub pm shim --route-installs`: run the
+    /// install on nub's engine, in this process (`nub ci` / `nub install
+    /// --no-frozen-lockfile` with npm's flags translated, every lifecycle
+    /// script allowed as npm allows them). `ignore_scripts` is npm's
+    /// effective value: the command line, else its config.
+    EngineInstall {
+        route: nub_core::pm::shim::NpmEngineInstall,
+        ignore_scripts: bool,
+    },
 }
 
 /// The corepack-style "which PM am I running" notice for the shim-dispatch
@@ -10990,6 +11256,54 @@ fn run_pm_shim(invoked: nub_core::pm::shim::ShimName, args: &[String]) -> Result
             Ok(1)
         }
         ShimPlan::Exec { program, args, env } => exec_program(&program, &args, &env),
+        ShimPlan::EngineInstall {
+            route,
+            ignore_scripts,
+        } => run_shim_engine_install(route, ignore_scripts),
+    }
+}
+
+/// The routed install: the corepack-style notice names what runs in place of
+/// npm, then the engine runs in-process exactly as `nub ci` / `nub install`
+/// would from this cwd.
+fn run_shim_engine_install(
+    route: nub_core::pm::shim::NpmEngineInstall,
+    ignore_scripts: bool,
+) -> Result<i32> {
+    use nub_core::pm::shim::NpmInstallVerb;
+    // npm hands every lifecycle script `NODE_ENV=production` exactly when
+    // dev dependencies are effectively omitted (`buildOmitList` in npm's
+    // config definitions). Per child through the engine's overlay, never the
+    // process environment (A19).
+    if route.prod {
+        crate::pm_engine::set_lifecycle_env(vec![("NODE_ENV".into(), "production".into())]);
+    }
+    let (from, to) = match route.verb {
+        NpmInstallVerb::Ci => ("npm ci", "nub ci"),
+        NpmInstallVerb::Install => ("npm install", "nub install"),
+    };
+    let line = format!("{from} → {to} (via nub shim)");
+    if crate::pm_engine::scope_warning_uses_dim() {
+        eprintln!("\x1b[2m{line}\x1b[0m");
+    } else {
+        eprintln!("{line}");
+    }
+    match route.verb {
+        NpmInstallVerb::Ci => crate::pm_engine::run_ci(crate::pm_engine::CiFlags {
+            prod: route.prod,
+            ignore_scripts,
+            no_optional: route.no_optional,
+            allow_all_builds: true,
+            ..Default::default()
+        }),
+        NpmInstallVerb::Install => crate::pm_engine::run_install(crate::pm_engine::InstallFlags {
+            no_frozen_lockfile: true,
+            prod: route.prod,
+            ignore_scripts,
+            no_optional: route.no_optional,
+            allow_all_builds: true,
+            ..Default::default()
+        }),
     }
 }
 
@@ -11002,9 +11316,22 @@ fn shim_plan(
     args: &[String],
     cwd: &Path,
 ) -> Result<ShimPlan> {
+    let route_installs =
+        nub_core::pm::shim::route_installs_enabled(&nub_core::pm::shim::shim_dir()?);
+    shim_plan_with(invoked, args, cwd, route_installs)
+}
+
+/// [`shim_plan`] with the `--route-installs` opt-in passed in, so the routing
+/// branch is unit-testable without a real shim dir.
+fn shim_plan_with(
+    invoked: nub_core::pm::shim::ShimName,
+    args: &[String],
+    cwd: &Path,
+    route_installs: bool,
+) -> Result<ShimPlan> {
     use nub_core::pm::Pm;
     use nub_core::pm::resolve::{self, PmTarget};
-    use nub_core::pm::shim::{self, Nesting, ShimDecision};
+    use nub_core::pm::shim::{self, Nesting, ShimDecision, ShimName};
 
     let target = resolve::resolve_target(cwd);
     let pin_state = shim_pin_state(cwd, target.as_ref());
@@ -11023,13 +11350,46 @@ fn shim_plan(
     // cross-PM project-pin refusal does not apply — `decide` lets it fall through.
     let global = shim::is_global_invocation(invoked, args);
 
-    match shim::decide(
+    let decision = shim::decide(
         invoked,
         &pin_state,
         args.first().map(String::as_str),
         nesting,
         global,
-    ) {
+    );
+
+    // `nub pm shim --route-installs`: a top-level `npm ci` / bare `npm
+    // install` in a project whose lockfile is npm's runs on nub's engine. Only
+    // where npm itself would have run (the matrix did not refuse), only at top
+    // level (a lifecycle script's nested `npm install` keeps the real npm —
+    // the engine is already running one layer up), never for a global op, and
+    // only for an argv the engine honors verbatim ([`shim::npm_install_route`]).
+    // Without an npm lockfile there is nothing frozen to install from, so the
+    // real npm keeps that case too.
+    if route_installs
+        && invoked == ShimName::Npm
+        && nesting == Nesting::TopLevel
+        && !global
+        && matches!(
+            decision,
+            ShimDecision::RunPinned { pm: Pm::Npm, .. } | ShimDecision::FallThrough { .. }
+        )
+        && let Some(route) = shim::npm_install_route(args, node_env_is_production())
+    {
+        let root = shim_lockfile_root(cwd);
+        if root.join("package-lock.json").is_file() || root.join("npm-shrinkwrap.json").is_file() {
+            // The command line outranks npm's config, as it does for npm.
+            let ignore_scripts = route
+                .ignore_scripts
+                .unwrap_or_else(|| shim::npm_ignore_scripts_configured(&root));
+            return Ok(ShimPlan::EngineInstall {
+                route,
+                ignore_scripts,
+            });
+        }
+    }
+
+    match decision {
         ShimDecision::Refuse {
             pinned_pm,
             provenance,
@@ -11125,6 +11485,11 @@ fn shim_plan(
             exec_under_project_node(cwd, bin, args)
         }
     }
+}
+
+/// npm reads `NODE_ENV=production` as `--omit=dev`; the routed install does too.
+fn node_env_is_production() -> bool {
+    env::var("NODE_ENV").is_ok_and(|v| v == "production")
 }
 
 /// Derive the decision core's [`PinState`] from the resolved [`PmTarget`].
@@ -12968,12 +13333,14 @@ mod tests {
             0,
             "upgraded bin/nub must be executable (the 0644-from-CI bug fix)"
         );
-        let nubx = install.join("bin").join("nubx");
-        assert_eq!(
-            std::fs::read_link(&nubx).unwrap(),
-            Path::new("nub"),
-            "self-owned upgrade must recreate the nubx → nub alias"
-        );
+        for alias in ["nubx", "nubr"] {
+            let link = install.join("bin").join(alias);
+            assert_eq!(
+                std::fs::read_link(&link).unwrap(),
+                Path::new("nub"),
+                "self-owned upgrade must recreate the {alias} → nub alias"
+            );
+        }
         assert!(
             !install.join("runtime").exists(),
             "single-binary upgrade must remove a stale pre-single-binary runtime/ sidecar"
@@ -13374,11 +13741,13 @@ mod tests {
         // Release names dispatch to their mode…
         assert_eq!(Argv0::classify("nub"), Argv0::Nub);
         assert_eq!(Argv0::classify("nubx"), Argv0::Nubx);
+        assert_eq!(Argv0::classify("nubr"), Argv0::Nubr);
         assert_eq!(Argv0::classify("node"), Argv0::Node);
         // …and the `-dev` symlinks `make install-dev` creates map identically
         // (the bug this guards: `nubx-dev` used to fall through to plain Nub).
         assert_eq!(Argv0::classify("nub-dev"), Argv0::Nub);
         assert_eq!(Argv0::classify("nubx-dev"), Argv0::Nubx);
+        assert_eq!(Argv0::classify("nubr-dev"), Argv0::Nubr);
         assert_eq!(Argv0::classify("node-dev"), Argv0::Node);
         // A PM-shim name still classifies as a shim, dev-suffixed or not.
         assert!(matches!(Argv0::classify("pnpm"), Argv0::PmShim(_)));
@@ -14112,40 +14481,6 @@ mod tests {
         );
     }
 
-    /// The prologue restores the lowercase names busybox-w32 up-cases, and the
-    /// filters are the whole contract: re-exporting the wrong thing is worse than
-    /// re-exporting nothing, because it puts a name back into the environment that
-    /// the caller had removed, or writes a line the shell refuses to parse.
-    #[test]
-    fn the_casing_prologue_rebinds_only_the_names_a_shell_can_export() {
-        let mut command = std::process::Command::new("sh");
-        command.env("npm_package_name", "acme");
-        command.env("npm_config_user_agent", "nub/0.9");
-        // Already uppercase: busybox leaves it alone, so re-binding it is noise.
-        command.env("NODE_OPTIONS", "--x");
-        // Not a shell identifier, and not exportable under any casing.
-        command.env("weird-name", "v");
-        command.env("2fast", "v");
-        // A REMOVAL. Re-exporting it would resurrect the name.
-        command.env_remove("npm_lifecycle_event");
-
-        let prologue = lowercase_env_prologue(&command);
-
-        assert_eq!(
-            prologue,
-            "export npm_config_user_agent=\"$NPM_CONFIG_USER_AGENT\"; \
-             export npm_package_name=\"$NPM_PACKAGE_NAME\"; ",
-            "only lowercase, exportable, still-set names belong in the prologue"
-        );
-
-        // A body prefixed with it is still one shell word away from the original.
-        let body = format!("{prologue}echo $npm_package_name");
-        assert!(
-            body.ends_with("; echo $npm_package_name"),
-            "the prologue must end in a separator so the body is a fresh command: {body}"
-        );
-    }
-
     #[test]
     fn shim_plan_refuses_a_mismatched_pm_naming_pin_provenance_and_paste() {
         use nub_core::pm::shim::ShimName;
@@ -14199,6 +14534,91 @@ mod tests {
             ),
             other => panic!("pnpm in a yarnPath project must refuse, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn shim_plan_routes_npm_installs_only_when_opted_in_with_an_npm_lockfile() {
+        use nub_core::pm::shim::{NpmInstallVerb, ShimName};
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"p","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        let ci = vec!["ci".to_string()];
+        // No npm lockfile: nothing frozen to install from, so npm keeps it.
+        assert!(
+            !matches!(
+                shim_plan_with(ShimName::Npm, &ci, &dir, true).unwrap(),
+                ShimPlan::EngineInstall { .. }
+            ),
+            "without package-lock.json the real npm runs"
+        );
+        std::fs::write(
+            dir.join("package-lock.json"),
+            r#"{"lockfileVersion":3,"packages":{}}"#,
+        )
+        .unwrap();
+        match shim_plan_with(ShimName::Npm, &ci, &dir, true).unwrap() {
+            ShimPlan::EngineInstall {
+                route,
+                ignore_scripts,
+            } => {
+                assert_eq!(route.verb, NpmInstallVerb::Ci);
+                assert!(!ignore_scripts, "no config and no flag: scripts run");
+            }
+            other => {
+                panic!("an opted-in npm ci with an npm lockfile runs on the engine, got {other:?}")
+            }
+        }
+        assert!(
+            !matches!(
+                shim_plan_with(ShimName::Npm, &ci, &dir, false).unwrap(),
+                ShimPlan::EngineInstall { .. }
+            ),
+            "without the opt-in the real npm runs"
+        );
+        // npm's config decides when the command line is silent, and the
+        // command line wins when it is not.
+        std::fs::write(dir.join(".npmrc"), "ignore-scripts=true\n").unwrap();
+        assert!(matches!(
+            shim_plan_with(ShimName::Npm, &ci, &dir, true).unwrap(),
+            ShimPlan::EngineInstall {
+                ignore_scripts: true,
+                ..
+            }
+        ));
+        let explicit = vec!["ci".to_string(), "--ignore-scripts=false".to_string()];
+        assert!(matches!(
+            shim_plan_with(ShimName::Npm, &explicit, &dir, true).unwrap(),
+            ShimPlan::EngineInstall {
+                ignore_scripts: false,
+                ..
+            }
+        ));
+        std::fs::remove_file(dir.join(".npmrc")).unwrap();
+        // A pinned npm still routes the install; the pin governs npm's other verbs.
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"p","version":"1.0.0","packageManager":"npm@11.0.0"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            shim_plan_with(ShimName::Npm, &ci, &dir, true).unwrap(),
+            ShimPlan::EngineInstall { .. }
+        ));
+        // A project pinned to another PM refuses as before — routing never
+        // overrides the matrix.
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"p","version":"1.0.0","packageManager":"pnpm@9.0.0"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            shim_plan_with(ShimName::Npm, &ci, &dir, true).unwrap(),
+            ShimPlan::Refuse { .. }
+        ));
     }
 
     #[test]

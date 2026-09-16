@@ -124,12 +124,30 @@ fi
 untracked=$(git -C "$root" ls-files --others --exclude-standard -- \
   vendor/aube vendor/libsui crates runtime $leaves 2>/dev/null || true)
 
+# Digest binary, resolved EXPLICITLY rather than off PATH. A PATH-resolved
+# `shasum` can be a third-party perl build that HANGS rather than failing: on
+# the maintainer's Mac, MacPorts' `/opt/local/bin/shasum` never returns and
+# ignores SIGTERM, so even `timeout` cannot kill it. The `|| true` below guards
+# a non-zero exit and is no help against a hang — this wedged `make install-dev`
+# for three hours, twice, with the script producing no output at all because it
+# blocks before its own banner. Prefer coreutils `sha1sum` (a C binary, present
+# on the Linux builders and in CI), then the system perl `shasum` on macOS.
+# Every candidate is SHA-1 over the same bytes and prints `<hash>  -`, so the
+# 12-char key is unchanged and existing warm buckets stay valid.
+if command -v sha1sum >/dev/null 2>&1; then
+  digest=sha1sum
+elif [ -x /usr/bin/shasum ]; then
+  digest=/usr/bin/shasum
+else
+  digest=shasum
+fi
+
 # The content key names the bucket AND, when isolating, names the seed to clone
 # from — so it is computed unconditionally. `ls-files -s` emits the staged blob
 # OIDs, so this is a pure content hash of the depended-on crates. ~0.2s.
 # shellcheck disable=SC2086
 key=$(git -C "$root" ls-files -s -- vendor/aube vendor/libsui crates runtime $leaves 2>/dev/null \
-  | shasum 2>/dev/null | cut -c1-12 || true)
+  | "$digest" 2>/dev/null | cut -c1-12 || true)
 if [ "$keyed" = 1 ]; then
   bucket="$shared${key:+-$key}"
 else
@@ -332,4 +350,17 @@ fi
 unset NUB_SHARED_TARGET NUB_BUILD_JOBS NUB_BUILD_FG NUB_BUILD_TARGET_OUT
 # $qos and $wrapper_off word-split deliberately (each empty, or one assignment).
 # shellcheck disable=SC2086
+# nub-cli's build script bakes site/content/docs into the binary and records an
+# ABSOLUTE rerun-if-changed path, so in a shared bucket a sharer reuses whichever
+# tree baked last — a branch that moves docs pages tests a sibling's tree. A
+# rerun-if-env-changed on a cargo-set variable cannot catch that (cargo tracks only
+# the variables it receives), so hand it one: a content hash of the working-tree
+# docs, which the build script declares. Same tree, same key, no rerun. The
+# digest covers each file's RELATIVE path and its own digest, so a rename, a move
+# or an added empty page changes the key while an identical tree in another
+# worktree does not.
+__NUB_DOCS_KEY=$(cd "$root" && find site/content/docs -type f -print0 2>/dev/null | sort -z \
+  | xargs -0 "$digest" 2>/dev/null | "$digest" 2>/dev/null | cut -c1-12 || true)
+export __NUB_DOCS_KEY
+
 exec env CARGO_TARGET_DIR="$target" $wrapper_off $qos cargo "$@"

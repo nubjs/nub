@@ -22,7 +22,7 @@ The choice of per-file hooks over a bundler pass is in [[research/augmentation-l
 
 Nub supports Node 18.19 and above. Across that range a feature may be native, gated behind a flag, or absent — so making it work means a different action per version.
 
-All of it lives in one table, 47 features deep. Each carries sorted, non-overlapping version bands, and each band names exactly one mitigation:
+All of it lives in one table, 48 features deep. Each carries sorted, non-overlapping version bands, and each band names exactly one mitigation:
 
 | Mitigation | What Nub does |
 | --- | --- |
@@ -33,7 +33,7 @@ All of it lives in one table, 47 features deep. Each carries sorted, non-overlap
 | Unflag on argv | Injects a V8 flag Node accepts only on the command line, never through `NODE_OPTIONS` |
 | Runtime V8 flag | Turns a V8 flag on from inside the process, the first time a module that uses its syntax is loaded |
 
-Twelve distinct flags are injected this way, covering `node:sqlite`, EventSource, WebSocket, Web Storage, and the vm, wasm, addon and text-import module kinds. A thirteenth, `--js-defer-import-eval` for `import defer`, never rides the command line at all. Node refuses it in `NODE_OPTIONS` by name, and a V8 flag that is non-default at startup makes Node reject its embedded code cache for every internal module compiled afterwards, which cost every program on Node 26.4+ several milliseconds while the flag rode argv. So the preload turns it on with `v8.setFlagsFromString` the first time it loads a module whose source uses the syntax, which V8 honors because it reads that flag only in the parser, and a program that never uses the syntax runs with V8's default flags. The polyfilled set is web and TC39 globals: Temporal, URLPattern, Worker, `navigator`, Float16Array, the disposable stack types, and the iterator, promise and collection helpers.
+Thirteen distinct flags are injected this way. They gate builtin modules (`node:sqlite`, `node:ffi`, `node:vfs`, `node:stream/iter`), web globals (EventSource, WebSocket, Web Storage), module kinds (vm, wasm, addon, text import), module-syntax detection, and one performance path: `AsyncLocalStorage` on V8 context frames, Node 24's default, on the 22 and 23 lines. A fourteenth, `--js-defer-import-eval` for `import defer`, never rides the command line at all. Node refuses it in `NODE_OPTIONS` by name, and a V8 flag that is non-default at startup makes Node reject its embedded code cache for every internal module compiled afterwards, which cost every program on Node 26.4+ several milliseconds while the flag rode argv. So the preload turns it on with `v8.setFlagsFromString` the first time it loads a module whose source uses the syntax, which V8 honors because it reads that flag only in the parser, and a program that never uses the syntax runs with V8's default flags. The polyfilled set is web and TC39 globals: Temporal, URLPattern, Worker, `navigator`, Float16Array, the disposable stack types, and the iterator, promise and collection helpers.
 
 Below a feature's floor no band matches and Nub does nothing — the feature is unavailable rather than half-present.
 
@@ -56,7 +56,7 @@ The 23.x exclusion is not a special case, it is the tier definition applied corr
 
 Using `--require` on the fast tier is a correctness mechanism, not an optimization. An `--import` preload forces eager ESM loader initialization, which routes even a CommonJS entry point through the async module job and breaks `executionAsyncId`, sync exception origin, `require.main.id` and `module.parent`. Coverage and composition behavior of the hooks API is measured in [[research/registerhooks-coverage-matrix]].
 
-The standalone loader also accepts `--import @nubjs/loader`. Its own preload is excluded from foreign-loader detection, while additional loader flags and runtime hook registrations retain the composition guards. Earlier foreign `--require` preloads conservatively disable the CommonJS cache repair because they may register hooks before detection starts. When it is the only loader, imported CommonJS dependencies retain their `require.cache`, `require.extensions` and `require.resolve.paths` APIs.
+The standalone runner also accepts `--import @nubjs/runner`. Its own preload is excluded from foreign-loader detection, while additional loader flags and runtime hook registrations retain the composition guards. Earlier foreign `--require` preloads conservatively disable the CommonJS cache repair because they may register hooks before detection starts. When it is the only loader, imported CommonJS dependencies retain their `require.cache`, `require.extensions` and `require.resolve.paths` APIs.
 
 ## TypeScript and resolution
 
@@ -65,6 +65,8 @@ Both ride the same hook pair, and both run in Rust behind a single call across t
 The load hook handles type stripping, the non-erasable syntax other strippers refuse (enums, parameter properties, `namespace`, `import =`), JSX, legacy decorators with metadata emission, down-levelling of `using` and the RegExp `v` flag, and the YAML, TOML, JSON5 and JSONC loaders. Output is content-addressed on disk with the source map already inlined, so a cache hit does no work in JavaScript. Stage 3 decorators are not transformed; the runtime raises a diagnostic rather than emitting wrong code.
 
 The resolve hook is additive only. It layers tsconfig path aliases, extensionless probing for TypeScript extensions, and Yarn Plug'n'Play reads on top of Node's own resolver, and returns nothing when it has no additive answer — at which point resolution falls straight through. There is no reimplementation of Node's resolution algorithm anywhere in Nub, which confines the risk to what Nub adds. That is validated by running Node's own resolution test subset twice, once in passthrough and once augmented, and asserting parity: [[research/resolution-conformance]].
+
+When JavaScript syntax inspection identifies a required transform, the transform reuses the inspected bytes instead of reading the file again. Loader execution order remains unchanged on both tiers.
 
 Background: [[research/tsgo-vs-oxc-for-transpile]], [[research/wasm-vs-napi-for-transpile]], [[research/emit-decorator-metadata]], [[research/tsconfig-paths]], [[research/ts-extension-precedence]].
 
@@ -81,6 +83,23 @@ The persistent shim installed by `nub node shim` is the opposite: it runs the re
 Both `--node` and a truthy `NODE_COMPAT` disable runtime augmentation — no hooks, no preload, no injected flags, no path shim. They compose, and `NODE_COMPAT` is stamped tree-wide so every descendant inherits it.
 
 Two details make the switch trustworthy. Compat mode does not merely skip augmentation; it restores a parent's augmented environment to its pre-Nub state. And version provisioning stays on, because running on stock Node and running on no particular Node are different requests.
+
+## Main-heap memory tuning
+
+Direct Node launches on Linux x64 use a small semi-space floor only in a measured, closed set of Node releases and cgroup budgets. File runs and Node-backed `exec`/`nubx` binaries share this launch path.
+
+The policy in [[crates/nub-core/src/node/gc.rs#eligible]] requires at least 512 MiB after accounting for ancestors and physical memory. The leaf budget must also be within the release-specific range below; a tighter parent alone cannot enable an override of an already-large nursery.
+
+| Node release | Eligible leaf budget, inclusive | Default semi-space in that range |
+|---|---|---|
+| 22.23.2 | 512 MiB–1 GiB | 1–4 MiB |
+| 24.20.0 | 512 MiB | 1 MiB |
+
+Node 24's own nursery reaches 16 MiB immediately above its upper bound. Node 22 above 1 GiB and Node 26 retain their defaults because production-mode SSR regressed with the larger nursery, despite gains in retained-object workloads. Smaller budgets retain Node's defaults because the larger nursery can increase cgroup OOM kills under allocation pressure. Explicit startup options, PnP, environment-owner loaders, compatibility mode, and inherited augmented processes disable it. Watch and compiled launchers do not apply this policy.
+
+The launcher supplies `--max-semi-space-size=16` for main-isolate initialization. Before any application preload or entry code runs, the fast CJS preload resets the process-global flag to zero. V8 has already stored main's limit, while later Worker isolates can still apply their own `resourceLimits`. Keeping the global override would silently replace explicit Worker young-generation limits, even with an empty `execArgv`.
+
+This is a one-shot, release-specific startup operation, not a live GC controller. Adding a release requires auditing V8's flag readers and Node's preload ordering, then running constrained-memory and Worker/fork acceptance tests. The startup helper also rides argv so Workers with a replacement environment still run its argument cleanup. Both injected arguments are hidden from `process.execArgv`; application-created child processes do not inherit them as explicit heap settings. User heap flags remain visible and unchanged.
 
 ## Environment files
 

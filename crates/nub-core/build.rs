@@ -163,13 +163,18 @@ fn main() {
     // BLAKE3 — see the runtime dep note. Hashing the STAGED file is equivalent to
     // hashing the EXTRACTED file (tar is byte-exact), which the
     // `embedded_blob_verifies_clean` test confirms end-to-end against the real blob.
-    // All five are required (fail loud): release.yml always stages the real addon,
+    // All entrypoints are required (fail loud): release.yml always stages the real addon,
     // and the addon-less ubuntu `embed-runtime` PR job stages a placeholder — so a
     // release can never silently ship an unhashed entrypoint.
     for (rel, var) in [
         ("preload.mjs", "NUB_RUNTIME_HASH_PRELOAD_MJS"),
         ("preload.cjs", "NUB_RUNTIME_HASH_PRELOAD_CJS"),
+        ("gc-startup.cjs", "NUB_RUNTIME_HASH_GC_STARTUP"),
         ("watch-env-guard.cjs", "NUB_RUNTIME_HASH_WATCH_ENV_GUARD"),
+        (
+            "threadpool-snapshot.cjs",
+            "NUB_RUNTIME_HASH_THREADPOOL_SNAPSHOT",
+        ),
         ("compile-preamble.mjs", "NUB_RUNTIME_HASH_COMPILE_PREAMBLE"),
         ("addons/nub-native.node", "NUB_RUNTIME_HASH_ADDON"),
     ] {

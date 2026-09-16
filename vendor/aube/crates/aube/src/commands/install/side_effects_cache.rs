@@ -104,6 +104,24 @@ struct SideEffectsMarker {
     output_hash: String,
 }
 
+use aube_scripts::PLATFORM_DEFAULT_SHELL_ID;
+
+/// Add the lifecycle shell to the engine key. A build run under a different
+/// shell can be WRONG, not merely stale: `cmd.exe` exits 0 while writing an
+/// unexpanded `${VAR:-default}` literally, so a Windows tree cached under
+/// `cmd.exe` must be rebuilt, not restored, once scripts run under POSIX `sh`.
+///
+/// The platform default adds no segment. Every entry written before the shell
+/// was keyed was built by that default, so those entries stay valid, and an
+/// upgrade does not rebuild every cached native addon on macOS and Linux.
+fn keyed_on_shell(engine: String, shell_id: &str) -> String {
+    if shell_id == PLATFORM_DEFAULT_SHELL_ID {
+        engine
+    } else {
+        format!("{engine}-{shell_id}")
+    }
+}
+
 pub(super) enum SideEffectsCacheRestore {
     Miss,
     Restored,
@@ -127,12 +145,7 @@ impl SideEffectsCacheEntry {
             Some(v) => aube_lockfile::graph_hash::engine_name_default(v).0,
             None => aube_lockfile::graph_hash::platform_name(),
         };
-        // Cache identity includes the shell and confinement as well as the Node ABI.
-        let engine = format!(
-            "{engine}-{}-{}",
-            aube_scripts::resolved_shell_id(),
-            confinement.id()
-        );
+        let engine = keyed_on_shell(engine, &aube_scripts::resolved_shell_id());
         let current_hash = hash_dir_for_side_effects_cache(package_dir)?;
         // A marker naming a different engine cannot authorize the
         // already-applied skip: the tree it describes was built against
@@ -758,6 +771,22 @@ mod tests {
                 .contains(&aube_lockfile::graph_hash::platform_name()),
             "unresolved Node version should still key on the platform: {}",
             unknown.display()
+        );
+    }
+
+    #[test]
+    fn a_non_default_lifecycle_shell_gets_its_own_cache_key() {
+        let engine = "win32-x64-node26".to_string();
+        assert_eq!(
+            keyed_on_shell(engine.clone(), PLATFORM_DEFAULT_SHELL_ID),
+            engine,
+            "entries built under the platform default shell must keep their existing key"
+        );
+        let other = if cfg!(windows) { "sh" } else { "bash" };
+        assert_eq!(
+            keyed_on_shell(engine.clone(), other),
+            format!("{engine}-{other}"),
+            "a build from another shell must not be restorable under the default shell"
         );
     }
 

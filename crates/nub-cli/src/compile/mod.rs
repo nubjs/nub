@@ -18,6 +18,7 @@
 use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use nub_core::compile::{
@@ -34,6 +35,7 @@ use unicode_normalization::UnicodeNormalization;
 mod assets;
 pub mod bundle;
 mod closure;
+mod code_cache;
 mod external;
 mod icu;
 mod inject;
@@ -290,6 +292,13 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         shim_plan.needed(),
         &layout.entry_prefix,
     )?;
+    // The payload names those wrappers land under, which is the only spelling a
+    // `new Worker(...)` inside the artifact can name. `assemble_app` applies the
+    // same `bundle_path`, so this reads the layout rather than predicting it.
+    let worker_entries: Vec<String> = worker_wrappers
+        .iter()
+        .map(|(name, _)| layout.bundle_path(name))
+        .collect();
     let mut entry_name = layout.bundle_path(&bundled.entry);
     let mut app_files = assemble_app(&bundled, &layout, &worker_wrappers, &target)?;
     if shim_plan.needed() {
@@ -375,7 +384,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     // loader serves them from `module.registerHooks` at real `file:` URLs, where
     // `import.meta.url` and every relative specifier already mean what they mean in
     // the extracted tree. See `compile::sea::payload`.
-    let (app_files, inline_app, app_delivery) = if use_sea {
+    let (mut app_files, inline_app, app_delivery) = if use_sea {
         (app_files, false, AppDelivery::Sea)
     } else {
         match inline::rewrite(app_files, &no_extract_inputs)? {
@@ -400,7 +409,6 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
             }
         }
     };
-    let app_sha = sha256_of_app(&app_files);
     if !layout.assets.is_empty() {
         live.phase("embedding", &format!("{} files", layout.assets.len()));
     }
@@ -487,6 +495,29 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         (exact, None, node, summary)
     };
 
+    let has_code_cache = if !opts.smol
+        && !use_sea
+        && !inline_app
+        && target.is_host()
+        && node_version.0.major >= 24
+    {
+        match node
+            .path
+            .as_deref()
+            .map(|path| code_cache::attach(&mut app_files, path))
+            .transpose()
+        {
+            Ok(attached) => attached.unwrap_or(false),
+            Err(error) => {
+                note(&format!("Skipping build-time code cache: {error}"));
+                false
+            }
+        }
+    } else {
+        false
+    };
+    let app_sha = sha256_of_app(&app_files);
+
     // Compress AFTER `sha256_of_app` above: that hash is the extraction cache key
     // and must stay over the semantic content, not over whatever this zstd version
     // happens to emit. Per file rather than per region because `nub_core::compile`
@@ -532,7 +563,14 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
                             .with_context(|| format!("brotli-compressing {}", file.name))?
                     }
                 } else {
-                    zstd::encode_all(&file.bytes[..], 19)
+                    // The cache pack stays compressed after extraction. Another
+                    // high-level pass over it saves little and can dominate a build.
+                    let level = if has_code_cache && file.name == code_cache::PACK_NAME {
+                        1
+                    } else {
+                        19
+                    };
+                    zstd::encode_all(&file.bytes[..], level)
                         .with_context(|| format!("zstd-compressing {}", file.name))?
                 };
                 Ok::<_, anyhow::Error>(nub_core::compile::AppFile {
@@ -589,6 +627,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         inline_app,
         // An inline payload runs the bootstrap as `-e` and has no preload to save.
         standalone_preamble: !inline_app
+            && !has_code_cache
             && bundled.bootstrap_optional
             && supports_standalone_preamble(opts.bundle.target_node),
     };
@@ -612,6 +651,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         let blob = sea::build_blob(&sea::Inputs {
             app_files: &app_files,
             entry: &manifest.entry,
+            workers: &worker_entries,
             app_sha: &manifest.app_sha256,
             node_license: &node.license,
             node_version: &node_version,
@@ -2635,6 +2675,8 @@ enum NodeDelivery {
 
 #[derive(Default)]
 struct EmbeddedNode {
+    /// The provisioned executable, used only by native-target build helpers.
+    path: Option<PathBuf>,
     /// The Node bytes as they go into the artifact: zstd-19 compressed under
     /// [`NodeDelivery::Compressed`], the prepared image itself under
     /// [`NodeDelivery::Verbatim`].
@@ -2694,6 +2736,7 @@ fn build_node_blob(
     // the ~20 s zstd-19 pass on a cache miss below.
     if delivery == NodeDelivery::Verbatim {
         return Ok(EmbeddedNode {
+            path: Some(node_bin),
             size: bytes.len() as u64,
             blob: bytes,
             sha256: sha,
@@ -2730,6 +2773,7 @@ fn build_node_blob(
     };
     let license = zstd::encode_all(&license[..], 19).context("zstd-19 compressing Node LICENSE")?;
     Ok(EmbeddedNode {
+        path: Some(node_bin),
         blob,
         sha256: sha,
         blake3: b3,
@@ -3671,11 +3715,92 @@ fn same_filesystem(_a: &Path, _b: &Path) -> bool {
     true
 }
 
+/// How long the publish rename keeps re-trying a lock it expects to clear.
+///
+/// The window being waited out is Windows releasing the image section of a
+/// process that has already exited. Its length is NOT measured here — the
+/// failures it was drawn from are CI races that cannot be reproduced on demand —
+/// so the budget is set by what it costs to be wrong rather than by a reading.
+/// Too short and the build still fails; too long and a destination something
+/// really holds reports the error it always did, two seconds later. The second
+/// is much the cheaper mistake, and it is paid only on a path that was going to
+/// fail anyway.
+const PUBLISH_RETRY_BUDGET: Duration = Duration::from_secs(2);
+
+/// Whether a failed publish rename is the transient lock left behind by the
+/// self-probe, rather than a real refusal.
+///
+/// `verify_artifact` SPAWNS the staged executable, and the publish rename follows
+/// as soon as it exits. On Windows the loader can still hold that image's section
+/// object after the process is gone, so `MoveFileExW` reports
+/// `ERROR_SHARING_VIOLATION` (32) — or `ERROR_ACCESS_DENIED` (5) once the name is
+/// delete-pending — for a file nothing is really using. The lock is therefore
+/// self-inflicted and always clears; the same two codes are what
+/// `runtime_cache::classify_target_rename_failure` already keys on.
+///
+/// Observed twice in CI on the same day, on both Windows architectures and on
+/// different fixtures, with the artifact fully built and verified: the compile
+/// failed at the last step having done all of the work. Naming each build's
+/// output uniquely does NOT prevent it, because the handle is on the STAGED file
+/// that was just probed rather than on a name reused from an earlier build.
+///
+/// Windows-only on purpose. A POSIX rename does not consult the image of a
+/// running or recently-exited program at all, and the two codes mean unrelated
+/// things there (2 is ENOENT, 32 is EPIPE), so reading them as a lock off
+/// Windows would sleep on real failures. Everywhere else this answers false and
+/// the rename keeps its single attempt.
+fn publish_rename_is_transient(error: &std::io::Error) -> bool {
+    #[cfg(not(windows))]
+    let _ = error;
+    #[cfg(windows)]
+    if matches!(error.raw_os_error(), Some(5 | 32)) {
+        return true;
+    }
+    false
+}
+
 fn publish_staged_with<F>(staged: &Path, destination: &Path, rename: F) -> Result<()>
 where
-    F: FnOnce(&Path, &Path) -> std::io::Result<()>,
+    F: FnMut(&Path, &Path) -> std::io::Result<()>,
 {
-    rename(staged, destination).with_context(|| {
+    publish_staged_retrying(staged, destination, rename, publish_rename_is_transient)
+}
+
+/// The retry itself, with the "is this worth another go?" question passed in.
+///
+/// Taking the predicate is what makes the loop testable AT ALL: the compile unit
+/// tests run on one CI leg and it is Linux (`ci.yml`, `matrix.os ==
+/// 'ubuntu-latest'`), so a `#[cfg(windows)]` test of this would compile
+/// everywhere and execute nowhere. The platform knowledge stays in
+/// [`publish_rename_is_transient`], which is two lines and has nothing to get
+/// wrong; the termination and attempt behaviour is what a test needs to reach.
+fn publish_staged_retrying<F, P>(
+    staged: &Path,
+    destination: &Path,
+    mut rename: F,
+    transient: P,
+) -> Result<()>
+where
+    F: FnMut(&Path, &Path) -> std::io::Result<()>,
+    P: Fn(&std::io::Error) -> bool,
+{
+    let mut waited = Duration::ZERO;
+    let mut backoff = Duration::from_millis(5);
+    let error = loop {
+        match rename(staged, destination) {
+            Ok(()) => return Ok(()),
+            Err(error) if waited < PUBLISH_RETRY_BUDGET && transient(&error) => {
+                std::thread::sleep(backoff);
+                waited += backoff;
+                // Short at first because the wait is usually over in one hop, then
+                // capped so a destination held by something real is polled at a
+                // steady rate rather than slept on for most of the budget.
+                backoff = (backoff * 2).min(Duration::from_millis(100));
+            }
+            Err(error) => break error,
+        }
+    };
+    Err(error).with_context(|| {
         format!(
             "atomically replacing {} with staged output {}",
             destination.display(),
@@ -4186,14 +4311,110 @@ mod tests {
         let staged = StagedArtifact::new(&destination, "test").unwrap();
         fs::write(staged.path(), b"new-artifact").unwrap();
 
+        let mut attempts = 0;
         let error = publish_staged_with(staged.path(), &destination, |_staged, _destination| {
+            attempts += 1;
             Err(std::io::Error::other("injected late publish failure"))
         })
         .unwrap_err();
         assert!(format!("{error:#}").contains("late publish failure"));
         assert_eq!(fs::read(&destination).unwrap(), b"known-good");
+        // The retry below exists for ONE transient condition. A real refusal — a
+        // read-only directory, a staging file that vanished — must surface at once
+        // rather than be slept on for the budget.
+        assert_eq!(attempts, 1, "a failure that is not a lock is not retried");
         drop(staged);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `verify_artifact` spawns the staged executable, so Windows can still hold
+    /// its image section when the publish rename runs a moment later. Retrying is
+    /// what stops that from failing a build whose artifact is already written and
+    /// verified — seen twice in CI on one day, on both Windows architectures.
+    ///
+    /// The predicate is injected rather than left to default, so this runs on the
+    /// one leg the compile unit tests have. `publish_rename_is_transient` answers
+    /// false off Windows, which would otherwise make this assert nothing.
+    #[test]
+    fn the_publish_rename_waits_out_a_lock_that_clears() {
+        let dir = fresh_dir("publish-lock-clears");
+        let destination = dir.join("app");
+        let mut attempts = 0;
+        publish_staged_retrying(
+            &dir.join("staged"),
+            &destination,
+            |_staged, _destination| {
+                attempts += 1;
+                if attempts < 3 {
+                    // ERROR_SHARING_VIOLATION, exactly what MoveFileExW reported.
+                    Err(std::io::Error::from_raw_os_error(32))
+                } else {
+                    Ok(())
+                }
+            },
+            |_| true,
+        )
+        .expect("a lock that clears must not fail the publish");
+        assert_eq!(attempts, 3, "every attempt is a fresh rename");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A destination something really is holding — the user running the previous
+    /// artifact — must still fail, with the message it always had. What this is
+    /// really guarding is that the loop TERMINATES: drop the budget or stop
+    /// accumulating the wait and it spins forever, which costs a CI timeout
+    /// rather than a red assertion.
+    #[test]
+    fn a_lock_that_never_clears_gives_up_and_reports_it() {
+        let dir = fresh_dir("publish-lock-persists");
+        let destination = dir.join("app");
+        let mut attempts = 0;
+        let error = publish_staged_retrying(
+            &dir.join("staged"),
+            &destination,
+            |_staged, _destination| {
+                attempts += 1;
+                Err(std::io::Error::from_raw_os_error(32))
+            },
+            |_| true,
+        )
+        .unwrap_err();
+        assert!(attempts > 1, "a lock is retried before it is believed");
+        assert!(format!("{error:#}").contains("atomically replacing"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Only the two codes the self-probe's lock reports are worth waiting on. A
+    /// missing staging file or a read-only directory is a real refusal, and the
+    /// mapping is what keeps the loop above from sleeping on one.
+    #[test]
+    fn only_the_windows_lock_codes_are_treated_as_transient() {
+        assert!(!publish_rename_is_transient(&std::io::Error::other(
+            "not an OS error at all"
+        )));
+        // ERROR_FILE_NOT_FOUND. A staged file that vanished never comes back.
+        assert!(!publish_rename_is_transient(
+            &std::io::Error::from_raw_os_error(2)
+        ));
+        #[cfg(windows)]
+        {
+            // ERROR_ACCESS_DENIED once the name is delete-pending, and
+            // ERROR_SHARING_VIOLATION while the image section is still mapped.
+            assert!(publish_rename_is_transient(
+                &std::io::Error::from_raw_os_error(5)
+            ));
+            assert!(publish_rename_is_transient(
+                &std::io::Error::from_raw_os_error(32)
+            ));
+        }
+        #[cfg(not(windows))]
+        {
+            // Those codes mean unrelated things elsewhere (2 is ENOENT, 32 is
+            // EPIPE), so nothing off Windows may read them as a lock.
+            assert!(!publish_rename_is_transient(
+                &std::io::Error::from_raw_os_error(32)
+            ));
+        }
     }
 
     /// Staging must survive an output directory whose PARENT is a read-only

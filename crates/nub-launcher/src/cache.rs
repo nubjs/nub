@@ -44,6 +44,7 @@ enum Reject {
     /// The source env var is unset or empty.
     Unset,
     /// The filesystem is mounted read-only.
+    #[cfg(any(unix, test))]
     ReadOnly,
     /// Mounted `noexec`: writable, but nothing under it can be exec'd.
     NoExec,
@@ -62,6 +63,7 @@ impl fmt::Display for Reject {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Reject::Unset => write!(f, "not set"),
+            #[cfg(any(unix, test))]
             Reject::ReadOnly => write!(f, "read-only filesystem"),
             Reject::NoExec => write!(f, "mounted noexec"),
             Reject::ForeignOwner => write!(f, "owned by another user"),

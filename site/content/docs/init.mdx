@@ -1,5 +1,5 @@
 ---
-title: Creating a project
+title: Creating a Nub project
 description: Scaffold a new TypeScript-first project — manifest, tsconfig, entry file, git, and installed dev dependencies — in one command.
 ---
 
@@ -42,7 +42,11 @@ The manifest carries the same `packageManager` pin and `devEngines` range that [
   "type": "module",
   "packageManager": "nub@0.5.0",
   "devEngines": {
-    "packageManager": { "name": "nub", "version": "^0.5.0", "onFail": "ignore" }
+    "packageManager": {
+      "name": "nub",
+      "version": "^0.5.0",
+      "onFail": "ignore"
+    }
   },
   "scripts": {
     "start": "nub index.ts"
@@ -97,7 +101,8 @@ When any target file already exists, init refuses and names the conflicts — no
 
 ```console
 $ nub init -y
-Error: nub: refusing to overwrite existing files: package.json, tsconfig.json, index.ts, .gitignore, README.md
+Error: nub: refusing to overwrite existing files: package.json,
+tsconfig.json, index.ts, .gitignore, README.md
   (pass --force to overwrite)
 ```
 

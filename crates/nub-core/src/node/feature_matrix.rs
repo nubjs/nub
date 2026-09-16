@@ -477,6 +477,45 @@ static FEATURES: &[Feature] = &[
         )],
         evidence: "node:stream/iter added Node 25.9.0 (#62066); absent 25.8.1; default-off through Node 27 nightly",
     },
+    // ── AsyncLocalStorage on AsyncContextFrame ───────────────────────────────
+    // A PERFORMANCE unflag, the only one in the table: `AsyncLocalStorage` rebuilt
+    // on V8's continuation-preserved embedder data instead of async_hooks (#48528,
+    // landed 22.7.0 behind `--experimental-async-context-frame`; Node 24.0.0 made it
+    // the default via #55552 and renamed the switch `--no-async-context-frame`, so
+    // the `--experimental-` spelling is a "bad option" abort on 24+). Every request
+    // hop that reads the store — OpenTelemetry, Sentry, request-context plugins,
+    // Next.js — pays roughly half the propagation cost: measured 2× on a
+    // request-shaped store/await loop on 22.11 and 22.23, and Node 24's default
+    // shows the same 2× against its own `--no-async-context-frame`.
+    //
+    // Floor is 22.9.0, not the 22.7.0 landing: 22.7 and 22.8 throw
+    // `TypeError: Method Map.prototype.set called on incompatible receiver` under the
+    // flag (#54503, fixed by #54510 in 22.9.0). From 22.16.0 the implementation file
+    // is byte-identical to 24.0's default apart from the option name, so this band
+    // ships the Node 24 behavior to the 22 LTS line. A user `--no-experimental-
+    // async-context-frame` in argv or NODE_OPTIONS opts out through the ordinary
+    // negation subtraction. Rides argv like every other gated flag, so an embedded
+    // Electron below the tree never sees it (Electron keeps the async_hooks model
+    // because Chromium uses the same V8 embedder-data slot — the reason the old path
+    // survives, per the `--no-async-context-frame` docs).
+    //
+    // Not a memory regression on the 22 line, measured by store liveness (a WeakRef per
+    // store, the issue's request shape, counted after GC): with the flag an idle HTTP
+    // parser keeps the last request's store until it is reused (#61882, fixed on 24.15
+    // by #61995, no 22 backport), so 22.23.2 holds 50 stores at concurrency 50, 1 at
+    // concurrency 1, and 5 with `http.setMaxIdleHTTPParsers(5)`. Without the flag the
+    // legacy async_hooks path holds 52 and 3 on the same runs, through a different
+    // pooled resource (the parser cap does not move it). Both are flat from 500 to
+    // 5000 requests and bounded by peak concurrency; only the fixed 24 line reaches 0.
+    // Injecting the flag moves the retainer, not the amount retained.
+    Feature {
+        name: "async-context-frame",
+        mitigations: &[(
+            band((22, 9, 0), Some((24, 0, 0))),
+            Mitigation::Unflag("--experimental-async-context-frame"),
+        )],
+        evidence: "rewrite #48528 landed 22.7.0; #54503 TypeError fixed 22.9.0 (#54510); default + renamed --no-async-context-frame at 24.0.0 (#55552); verified 22.6 rejects, 22.7/22.11/22.23.2/23.0 accept, 24.0 rejects",
+    },
     // ── WebSocket global ────────────────────────────────────────────────────
     // Flag-gated on [20.10.0, 22.0.0) — the global exists on 20.10+ and all of the
     // 21.x line behind `--experimental-websocket`, then becomes default-on at

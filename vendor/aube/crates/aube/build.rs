@@ -85,9 +85,7 @@ fn generate_bundled_package_extensions() {
     for (name, optional) in peer_meta {
         writeln!(generated, "    ({name:?}, {optional}),").unwrap();
     }
-    generated.push_str(
-        "];\nstatic STANDALONE_BUNDLED_PACKAGE_EXTENSIONS: &[BundledPackageExtension] = &[\n",
-    );
+    generated.push_str("];\nstatic VENDORED_COMPAT_EXTENSIONS: &[BundledPackageExtension] = &[\n");
     for extension in extensions {
         writeln!(
             generated,

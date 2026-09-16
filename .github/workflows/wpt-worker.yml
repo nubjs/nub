@@ -30,6 +30,8 @@ on:
       - "*.md"
       - ".claude/**"
   pull_request:
+    # PR CI is opt-in — request a run with `gh pr edit <n> --add-label ci`. Rationale: ci.yml.
+    types: [labeled]
     branches: [main]
     paths-ignore:
       - "site/**"
@@ -50,6 +52,7 @@ env:
 jobs:
   build:
     name: Build nub (WPT)
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -116,6 +119,7 @@ jobs:
   conformance:
     name: WPT (node ${{ matrix.node }})
     needs: [build]
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -146,7 +150,7 @@ jobs:
   wpt-worker-gate:
     name: WPT Worker gate
     needs: [conformance]
-    if: always()
+    if: always() && (github.event_name != 'pull_request' || github.event.label.name == 'ci')
     runs-on: ubuntu-latest
     steps:
       - shell: bash

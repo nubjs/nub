@@ -115,6 +115,13 @@ EOF
 
 Report the PR URL. Do NOT merge your own PR.
 
+PR CI is opt-in, so opening the pull request starts nothing. When the head is final, request the run and watch it:
+
+```sh
+gh pr edit <n> --add-label ci
+nub scripts/ci-watch.ts --pr <n> --required "CI gate" --timeout 90
+```
+
 ## Step 5 — On merge, comment the resolution
 
 `Closes #N` auto-closes the issue silently, so add a brief factual comment. Extremely concise — don't re-explain what was done or the process of doing it; the PR carries that. Thank an external reporter:

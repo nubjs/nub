@@ -1,0 +1,145 @@
+{
+  "date": "2026-09-08",
+  "machine": "c3d-standard-16 (GCE spot), 16 vCPU",
+  "node": "v26.8.1",
+  "bench": "tests/bench/runtime/pool-priority.sh",
+  "load": "bcrypt cost 12 route, autocannon -c 64 -d 15, two rounds; hogs are 12 nice-0 busy-loop node processes; plain node with UV_THREADPOOL_SIZE set and a preload that renices libuv workers 5..16",
+  "conditions": {
+    "pool4/hogs=0": {
+      "pool": 4,
+      "extraNice": 0,
+      "hogs": 0,
+      "rps": [
+        17.9,
+        17.9
+      ],
+      "p50": [
+        3536,
+        3536
+      ],
+      "hogMloopsPerSec": [
+        0,
+        0
+      ]
+    },
+    "pool16/hogs=0": {
+      "pool": 16,
+      "extraNice": 0,
+      "hogs": 0,
+      "rps": [
+        66.1,
+        66.1
+      ],
+      "p50": [
+        952,
+        952
+      ],
+      "hogMloopsPerSec": [
+        0,
+        0
+      ]
+    },
+    "pool16-n10/hogs=0": {
+      "pool": 16,
+      "extraNice": 10,
+      "hogs": 0,
+      "rps": [
+        66.5,
+        66.4
+      ],
+      "p50": [
+        950,
+        951
+      ],
+      "hogMloopsPerSec": [
+        0,
+        0
+      ]
+    },
+    "pool16-n19/hogs=0": {
+      "pool": 16,
+      "extraNice": 19,
+      "hogs": 0,
+      "rps": [
+        66.3,
+        66.4
+      ],
+      "p50": [
+        951,
+        951
+      ],
+      "hogMloopsPerSec": [
+        0,
+        0
+      ]
+    },
+    "pool4/hogs=12": {
+      "pool": 4,
+      "extraNice": 0,
+      "hogs": 12,
+      "rps": [
+        17.1,
+        16.8
+      ],
+      "p50": [
+        3738,
+        3739
+      ],
+      "hogMloopsPerSec": [
+        1781,
+        1782
+      ]
+    },
+    "pool16/hogs=12": {
+      "pool": 16,
+      "extraNice": 0,
+      "hogs": 12,
+      "rps": [
+        35.9,
+        38.1
+      ],
+      "p50": [
+        1735,
+        1646
+      ],
+      "hogMloopsPerSec": [
+        1647,
+        1631
+      ]
+    },
+    "pool16-n10/hogs=12": {
+      "pool": 16,
+      "extraNice": 10,
+      "hogs": 12,
+      "rps": [
+        20.5,
+        20.9
+      ],
+      "p50": [
+        2532,
+        2514
+      ],
+      "hogMloopsPerSec": [
+        1756,
+        1751
+      ]
+    },
+    "pool16-n19/hogs=12": {
+      "pool": 16,
+      "extraNice": 19,
+      "hogs": 12,
+      "rps": [
+        17.1,
+        17.4
+      ],
+      "p50": [
+        3012,
+        2902
+      ],
+      "hogMloopsPerSec": [
+        1774,
+        1779
+      ]
+    }
+  }
+}

@@ -2,7 +2,7 @@
 // Pure classifier/resolver only (no gh, no real clock). Run: node --test scripts/ci-watch.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyRollup, verdictForBuckets, classifyPr, signatureOf, resolvePendingExit } from "./ci-watch.ts";
+import { classifyRollup, verdictForBuckets, classifyPr, classifyRun, signatureOf, resolvePendingExit } from "./ci-watch.ts";
 
 const NP_MS = 8 * 60_000;
 // Config with a far-future overall deadline so tests exercise the no-progress
@@ -11,7 +11,7 @@ const cfg = (over = {}) => ({ deadline: Date.now() + 60 * 60_000, chunkDeadline:
 
 const check = (name, conclusion) => ({ __typename: "CheckRun", name, status: "COMPLETED", conclusion, startedAt: "t", completedAt: "t" });
 const ghost = () => ({ __typename: "CheckRun", status: "IN_PROGRESS" }); // nameless, never-terminating (the #327 shape)
-const the327 = () => [...Array.from({ length: 51 }, (_, i) => check(`check ${i}`, "SUCCESS")), ghost()];
+const the327 = () => [check("CI gate", "SUCCESS"), ...Array.from({ length: 50 }, (_, i) => check(`check ${i}`, "SUCCESS")), ghost()];
 
 test("#327 shape: 51 green named checks + 1 nameless ghost → ghostsOnly, not success/failure", () => {
   const v = verdictForBuckets(classifyRollup(the327(), new Set()), false);
@@ -96,7 +96,7 @@ test("empty rollup → pending 'no checks registered yet' (wait-for-existence pr
 });
 
 test("all checks terminal + green, no ghost → clean SUCCESS (exit 0 path)", () => {
-  const v = classifyPr(JSON.stringify({ statusCheckRollup: [check("a", "SUCCESS"), check("b", "NEUTRAL"), check("c", "SKIPPED")] }), new Set());
+  const v = classifyPr(JSON.stringify({ statusCheckRollup: [check("CI gate", "SUCCESS"), check("b", "NEUTRAL"), check("c", "SKIPPED")] }), new Set());
   assert.equal(v.kind, "success");
 });
 
@@ -140,3 +140,80 @@ test("deadline fires during a gh-failure streak: chunk cap on a null verdict →
   assert.equal(exit.code, 2);
   assert.match(exit.summary, /RERUN/);
 });
+
+// ---- opt-in PR CI: a SKIPPED check verifies nothing -------------------------
+// Every PR-gated workflow now guards its jobs on the `ci` label, so a pull request
+// nobody requested CI for produces skipped checks rather than green ones. These pin
+// the carve-out that keeps that from reading as a pass.
+
+test("all checks SKIPPED → pending 'no check has run', never success", () => {
+  const v = verdictForBuckets(classifyRollup([check("CI gate", "SKIPPED"), check("Check", "SKIPPED")], new Set()), false);
+  assert.equal(v.kind, "pending", "an unrequested PR must never classify green");
+  assert.match(v.reason, /no check has run/);
+  assert.match(v.reason, /--add-label ci/, "the reason must carry the command that fixes it");
+  assert.equal(v.greenNamed, 0);
+});
+
+test("all checks SKIPPED alongside a ghost → NOT ghostsOnly (never 'safe to --admin merge')", () => {
+  const v = verdictForBuckets(classifyRollup([check("CI gate", "SKIPPED"), ghost()], new Set()), false);
+  assert.equal(v.kind, "pending");
+  assert.equal(v.ghostsOnly, false, "exit 4 means every real check is green — a skipped rollup is not that");
+});
+
+test("--required mode: a SKIPPED required gate blocks the merge, it does not satisfy it", () => {
+  const v = verdictForBuckets(classifyRollup([check("CI gate", "SKIPPED")], new Set(["CI gate"])), true);
+  assert.equal(v.kind, "pending");
+  assert.deepEqual(v.realPending, ["CI gate"]);
+});
+
+test("path-gated skips alongside a real pass still SUCCEED (docs-only PR that DID opt in)", () => {
+  const rollup = [check("CI gate", "SUCCESS"), check("Check", "SKIPPED"), check("Clippy", "SKIPPED")];
+  assert.equal(verdictForBuckets(classifyRollup(rollup, new Set()), false).kind, "success");
+  assert.equal(verdictForBuckets(classifyRollup(rollup, new Set(["CI gate"])), true).kind, "success");
+});
+
+test("a run whose every job was gated off (conclusion SKIPPED) is not green", () => {
+  const v = classifyRun(JSON.stringify({ status: "completed", conclusion: "skipped", jobs: [] }));
+  assert.equal(v.kind, "failure");
+  assert.match(v.reason, /no job ran/);
+});
+
+// ---- opt-in PR CI: third-party app checks cannot stand in for the gate --------
+// Measured on the probe pull request that verified the opt-in change: a PR nobody
+// requested CI for still carries Vercel + review-bot checks, and they go green on
+// their own. Before this rule those three greens were a clean `success`.
+
+test("app checks green but no `CI gate` → pending, never success", () => {
+  const v = classifyPr(JSON.stringify({ statusCheckRollup: [
+    check("Vercel Preview Comments", "SUCCESS"), check("Vercel", "SUCCESS"), check("pullfrog", "SUCCESS"),
+  ] }), new Set());
+  assert.equal(v.kind, "pending");
+  assert.match(v.reason, /CI gate` is not green/);
+  assert.match(v.reason, /--add-label ci/);
+});
+
+test("app checks green + a green `CI gate` → success", () => {
+  const v = classifyPr(JSON.stringify({ statusCheckRollup: [
+    check("Vercel", "SUCCESS"), check("pullfrog", "SUCCESS"), check("CI gate", "SUCCESS"),
+  ] }), new Set());
+  assert.equal(v.kind, "success");
+});
+
+test("app checks green + a SKIPPED `CI gate` → pending (the unrequested-PR shape)", () => {
+  const v = classifyPr(JSON.stringify({ statusCheckRollup: [
+    check("Vercel", "SUCCESS"), check("CI gate", "SKIPPED"),
+  ] }), new Set());
+  assert.equal(v.kind, "pending");
+});
+
+test("no gate + a ghost is NOT ghostsOnly — exit 4 must never fire without the gate", () => {
+  const v = classifyPr(JSON.stringify({ statusCheckRollup: [check("Vercel", "SUCCESS"), ghost()] }), new Set());
+  assert.equal(v.kind, "pending");
+  assert.equal(v.ghostsOnly, false, "exit 4 tells the caller it is safe to --admin merge");
+});
+
+test("an explicit --required set still decides on its own (no implicit gate on top)", () => {
+  const v = classifyPr(JSON.stringify({ statusCheckRollup: [check("lat check", "SUCCESS")] }), new Set(["lat check"]));
+  assert.equal(v.kind, "success");
+});
+
