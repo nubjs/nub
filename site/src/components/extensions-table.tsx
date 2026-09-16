@@ -271,7 +271,13 @@ function Phantom({
       <PopoverContent
         side="top"
         align="start"
-        className="max-w-[22rem] p-3 text-[13px] leading-relaxed"
+        // `!bg-fd-popover` overrides fumadocs' own `bg-fd-popover/60`. That 60%
+        // alpha plus a backdrop blur is built for floating over busy content;
+        // over this page it composited the popover to within ~3 of 255 of the
+        // page background, so the panel had no edge but its border and read as
+        // text printed on the page. At full opacity the token does what it was
+        // picked for — one step up from the background, no more.
+        className="max-w-[22rem] !bg-fd-popover p-3 text-[13px] leading-relaxed"
         // Neither auto-focus: focus moving INTO the content would fire the
         // trigger's pointer-leave and close it, and focus returning to the
         // trigger on close paints a focus ring on every name the pointer has
@@ -369,7 +375,13 @@ export function ExtensionsTable() {
       {/* Its own line under the filter rather than beside it: the label is the
           long piece of text in the header, and wrapped into the flex row it
           pushed the count off the end on a phone. */}
-      <label className="mb-3 flex cursor-pointer items-start gap-2 text-sm text-fd-muted-foreground">
+      <label
+        // The count rides in the tooltip rather than the label. Spelled out it
+        // was the longest string in the header and wrapped to two lines on a
+        // phone, and the readout beside the filter already says 696 of 791.
+        title={`${NUMBER.format(OUTGROWN_ROWS)} packages are covered only by rules their current release has moved past`}
+        className="mb-3 flex w-fit cursor-pointer items-center gap-2 text-sm text-fd-muted-foreground"
+      >
         <input
           type="checkbox"
           checked={historical}
@@ -377,12 +389,9 @@ export function ExtensionsTable() {
             setHistorical(event.target.checked);
             goTo(1);
           }}
-          className="mt-[3px] shrink-0 accent-fd-primary"
+          className="shrink-0 accent-fd-primary"
         />
-        <span>
-          Include {NUMBER.format(OUTGROWN_ROWS)} packages whose rules apply only to versions before
-          their current release
-        </span>
+        <span>Include non-latest versions</span>
       </label>
 
       {/* `relative` on the scroll container, as on the tool matrix: the sr-only
