@@ -1,10 +1,13 @@
-//! Linux zero-privilege enforcement: the Landlock build-jail backend and the shared
-//! seccomp filter it installs.
+//! Linux zero-privilege enforcement: the seccomp `USER_NOTIF` supervised arm and the ceiling it
+//! installs.
 //!
-//! [`preflight`] selects the Landlock build-jail arm or the seccomp `USER_NOTIF` supervised
-//! arm. The bubblewrap backend was removed with the curated zero-privilege import; non-build-jail
-//! policies are enforced by the supervisor rather than falling back to an unconstrained child.
-//! [`build_seccomp`] compiles the socket/keyring/metadata ceiling shared by both paths.
+//! THERE IS ONE ARM, and [`preflight`] no longer chooses. A standalone Landlock launch — a ruleset
+//! and no supervisor — was the build jail's only mechanism and died with it, and the bubblewrap
+//! backend went earlier with the curated zero-privilege import. Every confining policy reaches the
+//! supervisor; a policy that enforces no axis runs the child plain. Landlock is very much alive
+//! underneath as the coarse layer the supervised child `restrict_self`s — what died is the idea
+//! that it could stand alone, because it can express no deny and would drop the secret floor in
+//! silence. [`build_seccomp`] compiles the socket and keyring ceiling.
 #![cfg(target_os = "linux")]
 
 use crate::backend::linux_grants::fs_confines;
@@ -494,13 +497,14 @@ impl Default for SandboxSyscalls {
 /// for `Permitted` want the same two families for UNRELATED reasons, and reading the flag as
 /// "the proxy/netns tier is active" is now wrong.
 ///
-/// - the retained-monitor path asks because the child sits in an EMPTY netns whose only route
-///   out is a bridge to nub's proxy, so an IP socket reaches the proxy and nothing else;
-/// - the Landlock build jail asks because the catalog GRANTED this package egress and there is
-///   no netns to route through — the grant is coarse (see [`apply_landlock`]).
+/// Both callers it used to name are gone — the retained-monitor path with its empty netns and
+/// bridge to nub's proxy, and the Landlock build jail with its coarse per-package catalog grant.
+/// The supervised arm is what asks now, and it has no netns either: an IP socket is permitted so
+/// that `connect` can be notified and redirected to the policy proxy, which is where the host
+/// decision is actually made.
 ///
-/// It never widens past those two families, so neither caller can turn it into a general
-/// socket escape.
+/// It never widens past those two families, so the caller cannot turn it into a general socket
+/// escape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum IpEgress {
     Denied,
@@ -749,12 +753,12 @@ pub(super) fn prepend_x86_64_unsupported_abi_guard(
 
 /// The socket ceiling the compiled net axis asks for, read out of the IR.
 ///
-/// An Allow rule IS the catalog verdict: `build_jail_net` emits a catch-all `["*"]` for a package
-/// the catalog names and `false` for one it does not. Deriving from the IR rather than re-consulting
-/// the catalog keeps this backend a pure IR translator, so it cannot grant something the compiled
-/// policy did not. A relaxed axis (`default_effect == Allow`) counts too — it admits every host,
-/// which no build-jail policy emits, but reading it as a deny would UNDER-permit a policy that
-/// says "everything".
+/// Any Allow rule at all lifts the ceiling, because the ceiling is a socket-FAMILY gate and cannot
+/// see hosts: whether a given host is permitted is the proxy's decision, downstream of this.
+/// Deriving it from the IR rather than from the policy source keeps this backend a pure IR
+/// translator, so it cannot grant something the compiled policy did not. A relaxed axis
+/// (`default_effect == Allow`) counts too — it admits every host, and reading it as a deny would
+/// UNDER-permit a policy that says "everything".
 fn ip_egress_for(net: &crate::policy::NetPolicy) -> IpEgress {
     let admits_anything = net.default_effect == Effect::Allow
         || net.rules.iter().any(|rule| rule.effect == Effect::Allow);
