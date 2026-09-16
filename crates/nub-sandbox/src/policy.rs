@@ -514,9 +514,11 @@ pub enum EnvFormat {
 
 // ── pid ──────────────────────────────────────────────────────────────────────
 
-/// PID/isolation posture. `isolate` requests env-read isolation on Linux (§2.4);
-/// Bubblewrap supplies a private PID namespace and fresh procfs whenever a Linux
-/// policy needs enforcement.
+/// PID/isolation posture.
+///
+/// ⚠️ `isolate` IS INERT, and no backend reads it. It requested the private PID namespace and
+/// fresh procfs that the Bubblewrap backend supplied; that backend is gone, and the supervised arm
+/// has no PID namespace at all — isolating processes is outside what this mechanism claims.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PidPolicy {
     pub isolate: bool,

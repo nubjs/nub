@@ -869,12 +869,15 @@ mod tests {
     fn every_confining_policy_routes_to_the_supervisor() {
         let spec = CommandSpec::new(std::path::PathBuf::from("/bin/true"));
         let mut policy = SandboxPolicy::default();
-        // The four inputs `preflight` actually reads, cleared explicitly rather than assumed off
-        // the default — `SandboxPolicy::default()` enforces the env axis, which is what made the
-        // first spelling of this test fail on the gate.
+        // Every input `preflight` reads, cleared EXPLICITLY rather than assumed off the default.
+        // A default `SandboxPolicy` confines on two counts, and each one failed a spelling of this
+        // test in turn: it enforces the env axis, and its fs ruleset denies by default, which is
+        // the safe default and not something to change. There is no relaxed policy to reach for,
+        // so the relaxed half has to build one.
         policy.net.enforce = false;
         policy.env.enforce = false;
         policy.fs.tmp = TmpMode::Shared;
+        policy.fs.rules.default_effect = Effect::Allow;
         assert!(
             !fs_confines(&policy.fs),
             "the relaxed half of this test needs a non-confining fs axis to mean anything",
