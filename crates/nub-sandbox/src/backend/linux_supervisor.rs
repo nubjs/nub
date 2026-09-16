@@ -1358,6 +1358,18 @@ fn direct_dial_allowed(proxy_endpoint: bool, observed_name_allowed: bool) -> boo
     proxy_endpoint || observed_name_allowed
 }
 
+/// The authority the supervisor presents to the egress proxy for a child's TCP connect.
+///
+/// THE OBSERVED DNS NAME IS THE POINT: a bare-TCP client (`git`, `ssh`, a database driver) sends
+/// no SNI and no `Host`, so the name recorded from its own earlier lookup is the only thing that
+/// can carry a hostname policy for it. Falling back to the IP literal when nothing was observed
+/// is the fail-closed half — the proxy's host gate admits a literal only against an explicit CIDR
+/// or IP rule, so an unattributed connect (a hardcoded address, a DoH-resolved one, a lookup that
+/// went out over TCP) is refused rather than let through unnamed.
+fn connect_authority(observed_name: Option<&str>, ip: &str) -> String {
+    observed_name.map_or_else(|| ip.to_string(), str::to_string)
+}
+
 fn upstream_resolver() -> u32 {
     std::fs::read_to_string("/etc/resolv.conf")
         .ok()
@@ -3097,7 +3109,7 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
                 // per-host gate — closing the shared-IP leak 1.5 left (a DENIED host riding an
                 // ALLOWED host's IP is dropped at the SNI gate). On ANY dial/handshake failure we
                 // deny; never fall back to a direct dial, which would bypass the SNI gate. (5.1 L3/L4)
-                let authority = name.clone().unwrap_or_else(|| ip.clone());
+                let authority = connect_authority(name.as_deref(), &ip);
                 s = proxy_connect_tcp(&control, pport, &ptoken, &authority, port);
                 if s >= 0 {
                     verdict_err = 0;
@@ -3981,6 +3993,176 @@ mod lifecycle_tests {
         assert!(first.allowed(first.lookup(libc::AF_INET, &[192, 0, 2, 1]).as_deref()));
         assert!(!second.allowed(Some("first.example")));
         assert_eq!(second.lookup(libc::AF_INET, &[192, 0, 2, 1]), None);
+    }
+
+    // ── observed-DNS attribution ─────────────────────────────────────────────────
+    //
+    // These build REAL DNS reply bytes rather than calling `record` directly, because the half
+    // that had no coverage at all is the wire parse: `parse_response` is what turns a peeked
+    // reply into the `address -> name` map, and a break in it is silent. It does not fail a
+    // connect loudly — attribution just returns `None`, the authority falls back to the IP
+    // literal, and every bare-TCP connect under a hostname policy starts being refused.
+    //
+    // The answer's owner name is written as the compression pointer `0xC0 0x0C` that a real
+    // resolver sends, so the fixture exercises the shape production actually meets.
+
+    fn dns_labels(name: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        for label in name.split('.') {
+            out.push(label.len() as u8);
+            out.extend_from_slice(label.as_bytes());
+        }
+        out.push(0);
+        out
+    }
+
+    /// One resource record: owner name, type, and rdata, with the CLASS/TTL a resolver sends.
+    fn dns_answer(owner: &[u8], rtype: u16, rdata: &[u8]) -> Vec<u8> {
+        let mut a = owner.to_vec();
+        a.extend_from_slice(&rtype.to_be_bytes());
+        a.extend_from_slice(&1u16.to_be_bytes());
+        a.extend_from_slice(&60u32.to_be_bytes());
+        a.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        a.extend_from_slice(rdata);
+        a
+    }
+
+    /// A complete reply: header, the question echoed back, then the answers.
+    fn dns_reply(question: &str, answers: &[Vec<u8>]) -> Vec<u8> {
+        let mut p = vec![0x12, 0x34, 0x81, 0x80];
+        p.extend_from_slice(&1u16.to_be_bytes());
+        p.extend_from_slice(&(answers.len() as u16).to_be_bytes());
+        p.extend_from_slice(&[0, 0, 0, 0]);
+        p.extend_from_slice(&dns_labels(question));
+        p.extend_from_slice(&1u16.to_be_bytes());
+        p.extend_from_slice(&1u16.to_be_bytes());
+        for a in answers {
+            p.extend_from_slice(a);
+        }
+        p
+    }
+
+    /// The pointer form `0xC0 0x0C` — "the name at offset 12", i.e. the question's own name.
+    const QNAME_PTR: [u8; 2] = [0xC0, 0x0C];
+
+    #[test]
+    fn an_observed_reply_attributes_a_later_connect_to_the_queried_name() {
+        let mut st = SupState::new(policy("allowed.example"));
+        parse_response(
+            &mut st,
+            &dns_reply(
+                "allowed.example",
+                &[dns_answer(&QNAME_PTR, 1, &[192, 0, 2, 7])],
+            ),
+        );
+
+        assert_eq!(
+            st.lookup(libc::AF_INET, &[192, 0, 2, 7]).as_deref(),
+            Some("allowed.example"),
+        );
+        assert!(st.allowed(st.lookup(libc::AF_INET, &[192, 0, 2, 7]).as_deref()));
+        // The control: an address no reply ever mentioned stays unattributed, and an
+        // unattributed connect is refused. Without it a policy that admitted everything
+        // would satisfy the assertion above.
+        assert_eq!(st.lookup(libc::AF_INET, &[192, 0, 2, 8]), None);
+        assert!(!st.allowed(st.lookup(libc::AF_INET, &[192, 0, 2, 8]).as_deref()));
+    }
+
+    #[test]
+    fn a_cname_chain_attributes_the_address_to_the_name_the_policy_names() {
+        // THE DECISIVE SEMANTIC, and the reason the parser keys on the QUESTION name rather
+        // than each answer's own owner. Almost every real host worth naming in a policy is a
+        // CNAME onto a CDN, so the A record is owned by a name the user never wrote and could
+        // not have written. Keying on the owner would attribute the address to `cdn.example`
+        // and refuse a connect the policy plainly allows.
+        let mut st = SupState::new(policy("allowed.example"));
+        let cname = dns_answer(&QNAME_PTR, 5, &dns_labels("cdn.example"));
+        let a = dns_answer(&dns_labels("cdn.example"), 1, &[192, 0, 2, 9]);
+        parse_response(&mut st, &dns_reply("allowed.example", &[cname, a]));
+
+        assert_eq!(
+            st.lookup(libc::AF_INET, &[192, 0, 2, 9]).as_deref(),
+            Some("allowed.example"),
+        );
+        // …and the two names really are distinguished by the policy, so the assertion above
+        // is not just "any name passes".
+        assert!(!st.allowed(Some("cdn.example")));
+    }
+
+    #[test]
+    fn an_observed_aaaa_reply_attributes_the_v6_address() {
+        let mut st = SupState::new(policy("allowed.example"));
+        let v6 = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        parse_response(
+            &mut st,
+            &dns_reply("allowed.example", &[dns_answer(&QNAME_PTR, 28, &v6)]),
+        );
+
+        assert_eq!(
+            st.lookup(libc::AF_INET6, &v6).as_deref(),
+            Some("allowed.example"),
+        );
+        // The families are separate maps, so the v6 bytes must not answer a v4 lookup.
+        assert_eq!(st.lookup(libc::AF_INET, &v6[..4]), None);
+    }
+
+    #[test]
+    fn a_malformed_reply_attributes_nothing_and_still_returns() {
+        // A reply is attacker-influenced bytes on a hot supervisor thread, so the two ways a
+        // name decoder classically dies are what this pins: a compression pointer that loops
+        // forever, and a record whose length runs off the end of the packet. Each must leave
+        // the map untouched AND return — a hang here would wedge the notifier for every
+        // syscall the child makes, not just this one.
+        //
+        // ⛔ EACH CASE PARSES A GOOD REPLY FIRST. An assertion that nothing was recorded
+        // passes just as happily against a parser that records nothing ever, so the good
+        // reply is what proves the instrument was live when the malformed one was rejected.
+        // The first answer's own offset: the 12-byte header, the question's labels, and the
+        // 4 bytes of QTYPE+QCLASS that `dns_reply` writes after them.
+        let answer_at = 12 + dns_labels("allowed.example").len() + 4;
+
+        // A pointer to its own offset: the decoder jumps to itself until the hop cap fires.
+        let looping = dns_answer(&[0xC0, answer_at as u8], 1, &[192, 0, 2, 10]);
+        // An A record claiming 4 bytes of rdata with only 2 present.
+        let mut truncated = dns_answer(&QNAME_PTR, 1, &[192, 0, 2, 11]);
+        truncated.truncate(truncated.len() - 2);
+
+        for (case, answer) in [("pointer loop", looping), ("truncated rdata", truncated)] {
+            let mut st = SupState::new(policy("allowed.example"));
+            parse_response(
+                &mut st,
+                &dns_reply(
+                    "allowed.example",
+                    &[dns_answer(&QNAME_PTR, 1, &[192, 0, 2, 7])],
+                ),
+            );
+            assert_eq!(
+                st.lookup(libc::AF_INET, &[192, 0, 2, 7]).as_deref(),
+                Some("allowed.example"),
+                "{case}: the control reply must record, or the absence below proves nothing",
+            );
+
+            parse_response(&mut st, &dns_reply("allowed.example", &[answer]));
+            assert_eq!(
+                st.lookup(libc::AF_INET, &[192, 0, 2, 10]),
+                None,
+                "{case}: a malformed reply attributed an address",
+            );
+            assert_eq!(
+                st.lookup(libc::AF_INET, &[192, 0, 2, 11]),
+                None,
+                "{case}: a malformed reply attributed an address",
+            );
+        }
+    }
+
+    #[test]
+    fn an_unattributed_connect_presents_the_ip_literal_to_the_proxy() {
+        assert_eq!(
+            connect_authority(Some("allowed.example"), "192.0.2.7"),
+            "allowed.example"
+        );
+        assert_eq!(connect_authority(None, "192.0.2.7"), "192.0.2.7");
     }
 
     #[test]
