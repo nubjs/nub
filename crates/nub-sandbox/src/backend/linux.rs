@@ -25,7 +25,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The system read floor a `RootView::Minimal` sandbox mounts before any authored grant:
+/// The system read floor every confining policy gets before any authored grant:
 /// what a process needs to START, not what it might find useful. Every entry is
 /// package-manager-owned and world-readable; an absent one is skipped, so this is a
 /// superset that degrades to whatever the host actually has.
@@ -1382,12 +1382,11 @@ mod tests {
         }
     }
 
-    /// The IR→ceiling mapping, the other half of the fix: ANY Allow — the catch-all `["*"]` the
-    /// build jail now emits for a catalogued package, or a named host from a `nub sandbox`
-    /// policy — must reach `Permitted`, and the deny-all an uncatalogued package compiles to must
-    /// not. Pinned apart
-    /// from the BPF assertions above because a correct filter reached through the wrong verdict is
-    /// still a granted package with no network.
+    /// The IR→ceiling mapping, the other half of the fix: ANY Allow — a named host, or the
+    /// catch-all `["*"]` a fully-open axis folds to — must reach `Permitted`, and a deny-all
+    /// axis must not. Pinned apart from the BPF assertions above because a correct filter
+    /// reached through the wrong verdict is still a policy that grants a host and then hands
+    /// the child no socket to reach it with.
     #[test]
     fn the_ir_decides_the_ceiling_and_a_deny_all_axis_grants_nothing() {
         use crate::policy::{NetPolicy, NetRule, NetTarget};

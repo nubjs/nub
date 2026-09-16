@@ -127,9 +127,7 @@ pub(crate) const RESERVED_KERNEL_TREES: &[&str] = &["/proc", "/sys", "/dev"];
 
 /// Non-secret operational env keys that pass through in the `sandbox: true`
 /// curated baseline: PATH + system/locale/toolchain-discovery vars + the
-/// build-hint `npm_config_*` subset. Ambient secrets never ride this list. The
-/// exact baseline is the deferred build-jail thread's product surface; this is a
-/// usable, safe default for the frontend-less engine.
+/// build-hint `npm_config_*` subset. Ambient secrets never ride this list.
 ///
 /// The Windows container-essential block (`SystemRoot` … `PROCESSOR_ARCHITECTURE`)
 /// is load-bearing: `CreateProcessW` with a constructed environment block that
@@ -232,7 +230,7 @@ fn is_npm_config_credential(remainder: &str) -> bool {
 }
 
 /// Build the curated-baseline child env from the ambient env (the `sandbox: true`
-/// / build-jail env posture). Only the non-secret operational allowlist passes.
+/// posture). Only the non-secret operational allowlist passes.
 pub fn curated_baseline_env(
     ambient: &std::collections::BTreeMap<String, String>,
 ) -> std::collections::BTreeMap<String, String> {
@@ -265,10 +263,13 @@ pub fn curated_baseline_env(
 ///  - `TMP` — the other half of Node's `os.tmpdir()` fallback pair (`lib/os.js`:
 ///    `TEMP || TMP || <SystemRoot>\temp`); without the pair, AppContainer temp work
 ///    lands in a non-writable dir.
-///  - `LOCALAPPDATA` — the AppContainer essential. The ENFORCING path (fs/net
-///    confined → a LowBox AppContainer) resolves the per-container profile dir
-///    (`%LOCALAPPDATA%\Packages\…`) from the env, so a block missing it fails
-///    `CreateProcessW` with `ERROR_ENVVAR_NOT_FOUND` (203). The VM subset sweep
+///  - `LOCALAPPDATA` — ⚠️ MEASURED AGAINST A BACKEND THAT NO LONGER SHIPS, and kept
+///    because the measurement is about `CreateProcessW`, not about confinement. A LowBox
+///    AppContainer resolved its per-container profile dir (`%LOCALAPPDATA%\Packages\…`)
+///    from the env, so a block missing it failed `CreateProcessW` with
+///    `ERROR_ENVVAR_NOT_FOUND` (203). Nothing enforces on Windows now — `compile()` is a
+///    pure function an embedder may call from any host, and this is the Windows env set it
+///    still returns there. The VM subset sweep
 ///    pinned it: `{SystemRoot}` and `{SystemRoot,USERPROFILE}` both fail 203,
 ///    `{SystemRoot,LOCALAPPDATA}` is the smallest that starts. It embeds the OS
 ///    username, but that disclosure is REDUNDANT (the child runs AS that user and
@@ -366,7 +367,7 @@ fn insert_env_with_case(
 
 /// Add the OS bootstrap variables after every constraining env fold. These are
 /// mechanism values, not user-provided capabilities: Windows must retain them for
-/// `CreateProcessW`/AppContainer startup even when an array or object allowlist
+/// `CreateProcessW` to start the child at all, even when an array or object allowlist
 /// otherwise excludes them. Existing policy entries win, including an explicit
 /// literal override.
 pub(crate) fn add_os_essential_env(

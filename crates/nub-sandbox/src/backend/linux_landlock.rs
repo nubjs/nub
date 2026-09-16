@@ -2,8 +2,11 @@
 //!
 //! `landlock_restrict_self` requires neither a namespace nor an elevated helper.
 //! Landlock grants union together: the policy compiler must lower filesystem rules
-//! to the allowlist consumed here. Both sandbox and build-jail profiles use
-//! [`compile_mount_plan`]; there is no Bubblewrap fallback.
+//! to the allowlist consumed here, which every confining policy reaches through
+//! [`compile_mount_plan`]. There is ONE profile and one lowering: the build jail took its
+//! standalone Landlock arm with it, and the bubblewrap backend went earlier. Bubblewrap is
+//! named throughout this file as the design that was MEASURED against, never as a fallback
+//! that still exists — the contrasts are why the rules below are shaped as they are.
 
 use super::linux_grants::{MountAccess, MountGrant, compile_mount_plan};
 use crate::policy::SandboxPolicy;
@@ -515,11 +518,11 @@ fn policy_grants(policy: &SandboxPolicy) -> Result<Vec<LandlockGrant>, String> {
 ///
 /// Bubblewrap applies binds in order, so "writable parent, read-only child" is a real and
 /// supported shape there. Landlock unions its rules, so the same pair yields a WRITABLE
-/// child — silently wider than the policy asked for. The build jail never authors that
-/// shape (its plan is a read-only dependency tree with the package dir writable INSIDE it,
-/// which unions correctly), so this is a guard against a future policy change quietly
-/// losing enforcement, not a limitation being worked around. Fail closed instead of
-/// under-enforcing.
+/// child — silently wider than the policy asked for. NOTHING IN TREE AUTHORS THAT SHAPE
+/// today; the ordinary nesting is the opposite one — a read-only tree with a directory
+/// writable INSIDE it, which unions correctly. So this is a guard against a future policy
+/// change quietly losing enforcement, not a limitation being worked around. Fail closed
+/// instead of under-enforcing.
 fn reject_narrowing_grants(plan: &[MountGrant]) -> Result<(), String> {
     for (index, grant) in plan.iter().enumerate() {
         // Every narrowing shape, not just `ReadOnly`: a `ListOnly` node nested in a
@@ -771,7 +774,7 @@ struct CapData {
 }
 
 /// Drop every capability from the calling thread — the analogue of bubblewrap's
-/// `--cap-drop ALL`, which the Landlock path loses along with the user namespace.
+/// `--cap-drop ALL` — which this backend has no user namespace to get it from.
 ///
 /// This matters precisely where this backend is most needed. `nub install` inside a
 /// container commonly runs as root, and Docker's default set still carries `CAP_CHOWN`,
@@ -974,9 +977,9 @@ mod tests {
         );
     }
 
-    /// The build jail's own shape — a read-only dependency tree with the package dir
-    /// writable INSIDE it — unions correctly and must keep compiling. Control for the test
-    /// above: without this, the guard could reject everything and still pass.
+    /// The ordinary nesting — a read-only dependency tree with one directory writable
+    /// INSIDE it — unions correctly and must keep compiling. Control for the test above:
+    /// without this, the guard could reject everything and still pass.
     #[test]
     fn a_writable_grant_inside_a_read_only_tree_still_compiles() {
         let dir = tempfile::tempdir().unwrap();
@@ -997,7 +1000,7 @@ mod tests {
             .flatten()
             .collect(),
         ))
-        .expect("the build jail's own nesting must compile");
+        .expect("a writable grant nested in a read-only tree must compile");
         assert_eq!(
             grants
                 .iter()
@@ -1016,9 +1019,9 @@ mod tests {
         );
     }
 
-    /// Landlock has no root view, so everything bubblewrap gets from `RootView::Minimal`
-    /// has to be an explicit rule. A policy that granted only its own paths would leave the
-    /// child unable to exec the loader.
+    /// Landlock has no root view, so the system read floor a mount-namespace sandbox gets
+    /// from its base mounts has to be an explicit rule here. A policy that granted only its
+    /// own paths would leave the child unable to exec the loader.
     #[test]
     fn the_system_closure_and_devices_are_granted_explicitly() {
         let grants = derive_grants_for_test(&policy(Vec::new())).unwrap();

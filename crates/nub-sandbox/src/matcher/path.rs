@@ -177,8 +177,8 @@ pub fn canonicalize_including_nonexistent(path: &Path) -> PathBuf {
 /// `std::fs::canonicalize` prepends. An IR path MUST be a plain path: the verbatim
 /// prefix is not merely cosmetic — after `normalize_slashes` its `?` reads as a glob
 /// metacharacter, so `has_glob_meta`/`literal_subtree` mis-classify a fully-literal
-/// grant as an unenforceable embedded-glob and DROP it (the Windows AppContainer
-/// backend then denies the project its own dir). No-op on a non-verbatim path (the
+/// grant as an unenforceable embedded-glob and DROP it, so the compiled policy silently
+/// stops granting the project its own dir. No-op on a non-verbatim path (the
 /// prefix never appears off Windows). Bounded to normal-length paths, which is all a
 /// project/work dir is; a genuine >MAX_PATH path that needs the prefix is out of scope.
 ///

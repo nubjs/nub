@@ -780,8 +780,8 @@ fn fold_net_entry(s: &str, path: &str, policy: &mut NetPolicy) -> Result<(), Com
         policy.rules.extend(builtin_sets::trusted_net_rules(effect));
         return Ok(());
     }
-    // `$downloads` is the build jail's install-time artifact set — same expansion
-    // contract, a deliberately separate membership (see `builtin_sets`).
+    // `$downloads` is the install-scoped artifact set — same expansion contract as
+    // `$trusted`, a deliberately separate membership (see `builtin_sets`).
     if pattern == "$downloads" {
         policy
             .rules
@@ -1082,7 +1082,7 @@ pub fn fold_env_axes(
     }
     construct_env(&entries, ctx, &mut policy)?;
     // An allowlist can legitimately omit every ambient key, but a Windows child still
-    // needs the small bootstrap set for process/AppContainer startup. POSIX receives
+    // needs the small bootstrap set for `CreateProcessW` to start it at all. POSIX receives
     // no additions because its essential set is empty. This also floors a `vars: []`
     // / `false` (no entries) to the strip-all posture (OS essentials only), matching
     // the complete-statement floor and `strip_all_env`.

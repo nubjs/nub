@@ -141,13 +141,13 @@ pub struct FsRule {
 /// Whether a path was named or guessed.
 ///
 /// Some grants are speculated rather than authored: `$tooldirs` enumerates a dozen
-/// ecosystems' cache dirs, and the build jail grants a provisioned toolchain's header
-/// and module dirs sight-unseen. Most of those exist on no given machine. That makes
-/// "the source is missing" mean opposite things by origin — an authored path that is
-/// not there is an authoring mistake worth refusing, while an absent speculated one is
-/// simply a machine without that toolchain and grants nothing either way. Backends that
-/// must materialize a grant (the Bubblewrap bind plan) need the distinction; matchers,
-/// which only ever narrow, do not.
+/// ecosystems' cache dirs sight-unseen, and most of those exist on no given machine.
+/// That makes "the source is missing" mean opposite things by origin — an authored path
+/// that is not there is an authoring mistake worth refusing, while an absent speculated
+/// one is simply a machine without that toolchain and grants nothing either way. A
+/// backend that must resolve a grant to a real object needs the distinction — Landlock
+/// keys a rule on an inode, so it can only attach one to a path that exists — while
+/// matchers, which only ever narrow, do not.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FsOrigin {
@@ -160,38 +160,6 @@ pub enum FsOrigin {
     /// Conventional tool coordination state initialized at acquisition when writable.
     /// Shared with ordinary tool invocations, so it is not sandbox-owned cleanup data.
     SharedToolState,
-    /// Speculative, PLUS: the subtree is one NUB ITSELF owns and it holds only public
-    /// bytes — the PM store, the tools dir, provisioned Node headers. Absent-tolerant
-    /// exactly like [`Speculative`](FsOrigin::Speculative); the extra claim is about
-    /// WHOSE data it is, which lets a backend satisfy the grant with a persistent,
-    /// machine-wide read instead of a per-run one.
-    ///
-    /// ⛔ ONLY FOR nub's OWN PUBLIC CACHES. Never a project path, never a user home,
-    /// never anything carrying user data or credentials: a backend is licensed to make
-    /// this readable to sandboxed processes OTHER than the one being launched.
-    ///
-    /// WHY IT EXISTS. On Windows a LowBox token reaches a file only where that file's
-    /// DACL names its AppContainer SID, and the SID is minted PER RUN — so a grant means
-    /// writing an ACE and removing it again every launch. Windows inheritance is STATIC,
-    /// so setting an inheritable ACE rewrites every existing child's DACL right then:
-    /// measured in-product, the PM store grant plus its revoke is 10,553 ms of a
-    /// 13,845 ms fixed per-launch cost across 25,526 entries, i.e. 76% of it, and it
-    /// scales linearly (2,000 entries ⇒ 886 ms). Marking the subtree lets the backend
-    /// publish it ONCE to `ALL APPLICATION PACKAGES` instead, after which
-    /// `already_granted_to_appcontainers` skips it on every later launch — the same
-    /// reason `%ProgramFiles%\nodejs` costs nothing today.
-    ///
-    /// The exposure that buys it, stated: other sandboxed apps on the machine can read
-    /// nub's store. It does NOT widen what the jailed script reaches (it already reads
-    /// the store to read its own dependencies), and the store holds public npm package
-    /// content a script could fetch anyway. Private-REGISTRY package content is the one
-    /// non-public thing there; if that is ever deemed sensitive, the alternative is the
-    /// per-closure narrowing behind `NUB_SANDBOX_NARROW_STORE_READS`.
-    ///
-    /// POSIX ignores the distinction entirely: Seatbelt compiles an SBPL ruleset and
-    /// Landlock installs one, both evaluated at access time, so a path costs nothing to
-    /// add and there is no per-run ACE to avoid.
-    NubOwnedPublic,
 }
 
 impl FsOrigin {
@@ -202,10 +170,7 @@ impl FsOrigin {
     /// Whether an ABSENT source is ordinary rather than an authoring mistake. Both
     /// speculated origins tolerate absence; only [`Authored`](FsOrigin::Authored) does not.
     pub fn tolerates_absent(&self) -> bool {
-        matches!(
-            self,
-            FsOrigin::Speculative | FsOrigin::NubOwnedPublic | FsOrigin::SharedToolState
-        )
+        matches!(self, FsOrigin::Speculative | FsOrigin::SharedToolState)
     }
 }
 

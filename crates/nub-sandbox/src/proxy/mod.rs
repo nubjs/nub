@@ -62,8 +62,8 @@ pub trait GrantDecider: Send + Sync + 'static {
     /// Whether the policy EXPLICITLY opted into private-range (RFC1918 / IPv6-ULA)
     /// egress via a `<private>` target. Consulted by the SSRF guard to lift the
     /// default private-range block on the resolved upstream IP. Defaults to `false`
-    /// (fail-closed: a decider that hasn't opted in keeps private egress blocked), so
-    /// the interactive/build-jail decider stays safe without overriding this.
+    /// (fail-closed: a decider that hasn't opted in keeps private egress blocked), so a
+    /// decider is safe by default and must override this to widen.
     fn allows_private(&self) -> bool {
         false
     }

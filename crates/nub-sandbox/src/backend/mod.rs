@@ -1524,9 +1524,10 @@ mod tests {
     }
 
     /// A bypass key the child inherited must not survive, or the whole per-host policy is
-    /// advisory: the build jail's env allowlist admits `NO_PROXY` and `npm_config_proxy`
-    /// (a build script legitimately configures a proxy), and a fetcher that honors either
-    /// direct-dials past the loopback gate and dies against the deny layer instead.
+    /// advisory. `NO_PROXY` and `npm_config_proxy` are the ones that matter: a command may
+    /// legitimately carry either from the environment that launched it, and a fetcher that
+    /// honors one direct-dials past the loopback gate and dies against the deny layer
+    /// instead — a confusing failure for a host the policy actually permits.
     #[test]
     fn set_proxy_env_clears_the_bypass_keys_the_child_inherited() {
         let mut cmd = Command::new("true");
