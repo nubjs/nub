@@ -45,6 +45,7 @@ fn linux_production_child() {
         "proc" => proc_child(),
         "sockets" => sockets_child(),
         "dns-window" => dns_window_child(),
+        "sendmmsg-replay" => sendmmsg_replay_child(),
         "self-proc-race" => self_proc_race_child(),
         "late-speculative" => assert_unavailable(root.join("late-speculative/secret")),
         "dynamic-exec" => dynamic_exec_child(),
@@ -190,6 +191,61 @@ fn dns_window_child() {
             "socket {index} on fd {fd} was silently replaced by a later one",
         );
     }
+}
+
+/// `sendmmsg` must reach the per-message replay path, not the blanket `ENOSYS` it used to answer.
+///
+/// ⛔ THIS IS THE REGRESSION GUARD FOR THE DNS FIX, and it is hermetic on purpose. The supervisor
+/// once refused every `sendmmsg` with `ENOSYS` on the theory that callers fall back to `sendmsg` —
+/// but glibc's resolver batches an `AF_UNSPEC` lookup's two queries into one `sendmmsg` with no
+/// fallback compiled in, so every confined hostname lookup failed with the query never sent. The
+/// comprehensive replay test needs a live resolver and is `#[ignore]`d; this one needs no network.
+///
+/// A batch carrying an explicit destination address is REFUSED by the replay path with `EPERM`
+/// (the supervisor cannot re-address a connected send it replays from its own socket). The point
+/// is not the refusal — it is that the call was EVALUATED rather than stubbed: the old code
+/// returned `ENOSYS` here, and `EPERM` is only reachable once the message is actually snapshotted.
+fn sendmmsg_replay_child() {
+    let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+    assert!(
+        fd >= 0,
+        "a datagram socket is refused under a net allowlist"
+    );
+
+    let mut peer: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+    peer.sin_family = libc::AF_INET as libc::sa_family_t;
+    peer.sin_port = (53u16).to_be();
+    peer.sin_addr.s_addr = u32::from_ne_bytes([1, 1, 1, 1]);
+
+    let payload = b"query";
+    let mut iov = libc::iovec {
+        iov_base: payload.as_ptr() as *mut libc::c_void,
+        iov_len: payload.len(),
+    };
+    let mut message: libc::mmsghdr = unsafe { std::mem::zeroed() };
+    message.msg_hdr.msg_name = &mut peer as *mut _ as *mut libc::c_void;
+    message.msg_hdr.msg_namelen = size_of::<libc::sockaddr_in>() as libc::socklen_t;
+    message.msg_hdr.msg_iov = &mut iov;
+    message.msg_hdr.msg_iovlen = 1;
+
+    let sent = unsafe { libc::sendmmsg(fd, &mut message, 1, 0) };
+    let error = std::io::Error::last_os_error();
+    unsafe { libc::close(fd) };
+
+    assert_eq!(
+        sent, -1,
+        "a named-destination batch must be refused, not replayed blind"
+    );
+    assert_ne!(
+        error.raw_os_error(),
+        Some(libc::ENOSYS),
+        "sendmmsg was answered ENOSYS — the batch path is stubbed, so every confined DNS lookup fails",
+    );
+    assert_eq!(
+        error.raw_os_error(),
+        Some(libc::EPERM),
+        "a named destination must be refused with EPERM once the batch is evaluated; got {error:?}",
+    );
 }
 
 fn socket_inode(fd: RawFd) -> u64 {
@@ -550,6 +606,19 @@ fn procfs_injection_exposes_only_the_requested_self_file() {
 fn net_false_closes_socket_and_io_uring_bypasses() {
     let root = fixture();
     let session = sandbox(root.path(), "sockets", false, &[]);
+    output(&session, root.path());
+}
+
+/// The batched send path is reached and evaluated, rather than stubbed with `ENOSYS`.
+#[test]
+fn a_batched_send_is_evaluated_rather_than_refused_wholesale() {
+    let root = fixture();
+    let session = session(
+        policy_net(root.path(), false, json!(["example.com"])),
+        root.path(),
+        "sendmmsg-replay",
+        &[],
+    );
     output(&session, root.path());
 }
 
