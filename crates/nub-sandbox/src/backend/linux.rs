@@ -430,10 +430,10 @@ fn build_supervised_plan(
                 Some(&program_abs),
                 &retained.0,
             )
-                .map_err(|reason| Degradation {
-                    lost: vec!["fs".to_string()],
-                    reason: Some(reason),
-                })?,
+            .map_err(|reason| Degradation {
+                lost: vec!["fs".to_string()],
+                reason: Some(reason),
+            })?,
         )
     } else {
         None

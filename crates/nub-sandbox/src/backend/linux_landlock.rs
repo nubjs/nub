@@ -8,6 +8,7 @@
 use super::linux_grants::{MountAccess, MountGrant, compile_mount_plan};
 use crate::policy::SandboxPolicy;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -590,8 +591,10 @@ pub(crate) fn fs_broker_ruleset(
     let grants = fixed_grants(policy, tmp_dir, entry_program)
         .into_iter()
         .chain(retained.0.iter().map(|r| LandlockGrant {
-            path: super::linux_supervisor::fd_path(r.fd.as_raw_fd())
-                .map_or_else(|| r.grant.path.clone(), PathBuf::from),
+            path: super::linux_supervisor::fd_path(r.fd.as_raw_fd()).map_or_else(
+                || r.grant.path.clone(),
+                |bytes| PathBuf::from(std::ffi::OsString::from_vec(bytes)),
+            ),
             access: r.grant.access,
         }));
     for grant in grants {

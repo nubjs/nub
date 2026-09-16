@@ -38,6 +38,7 @@ use std::ffi::CString;
 use std::io;
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
@@ -353,7 +354,11 @@ fn notifier_program(
         p.push(Ins::Jump(
             jeq,
             nr(libc::SYS_openat),
-            if read_broker { "notify" } else { "openat_flags" },
+            if read_broker {
+                "notify"
+            } else {
+                "openat_flags"
+            },
             "w_openat",
         ));
         p.push(Ins::Label("w_openat"));
@@ -1221,8 +1226,8 @@ fn is_write_intent(nr: libc::c_long) -> bool {
 /// matching rule is an Allow granting ReadWrite. A Deny, a read-only Allow, or no match (the
 /// allow-only base's default Deny) all forbid the write. This is the WHOLE fs decision, because
 /// the broker performs the op outside Landlock and so must enforce the base, not just the denies.
-pub(crate) fn write_allowed(matcher: &PathMatcher, canon: &str) -> bool {
-    let d = matcher.decide(Path::new(canon));
+pub(crate) fn write_allowed(matcher: &PathMatcher, canon: &[u8]) -> bool {
+    let d = matcher.decide(Path::new(std::ffi::OsStr::from_bytes(canon)));
     d.effect == Effect::Allow && d.access == FsAccess::ReadWrite
 }
 
@@ -1233,13 +1238,16 @@ pub(crate) fn write_allowed(matcher: &PathMatcher, canon: &str) -> bool {
 /// This is the half Landlock structurally cannot do. Its rules UNION and never subtract, so a
 /// `.env` inside a granted project tree is readable no matter what the policy says; the only
 /// place that deny can be applied is here, per open, on the resolved canonical path.
-pub(crate) fn read_allowed(matcher: &PathMatcher, canon: &str) -> bool {
-    matcher.decide(Path::new(canon)).effect == Effect::Allow
+pub(crate) fn read_allowed(matcher: &PathMatcher, canon: &[u8]) -> bool {
+    matcher
+        .decide(Path::new(std::ffi::OsStr::from_bytes(canon)))
+        .effect
+        == Effect::Allow
 }
 
 /// Read a NUL-terminated string at `addr` from the target's `/proc/<tid>/mem`, without the NUL.
 /// `None` on a fault or no terminator within `max` bytes.
-fn read_child_str(tid: u32, addr: u64, max: usize) -> Option<String> {
+fn read_child_str(tid: u32, addr: u64, max: usize) -> Option<Vec<u8>> {
     // PAGE-BOUNDED, AND THAT IS THE WHOLE POINT. `pread` on `/proc/<pid>/mem` fails the ENTIRE
     // range with EFAULT if any byte of it is unmapped, so a single `PATH_MAX` read of a short
     // path sitting near the end of a mapping reads as a fault and the child gets EFAULT for a
@@ -1287,11 +1295,17 @@ fn read_child_str(tid: u32, addr: u64, max: usize) -> Option<String> {
     };
     unsafe { libc::close(fd) };
     found?;
-    String::from_utf8(out).ok()
+    // BYTES, not a `String`. A filename is an arbitrary NUL-free byte string on Linux, and this
+    // used to end in `String::from_utf8(...).ok()` — so a legal non-UTF-8 name read as a FAULT
+    // and the child got EFAULT for a file it could perfectly well open. Harmless while only
+    // write-intent syscalls were trapped and almost nothing hit it; a hard failure once every
+    // read comes through here. Nothing downstream needs UTF-8: the matcher takes a `Path`, which
+    // is bytes, and the only textual use is the decision log, which lossily converts for display.
+    Some(out)
 }
 
 /// readlink(`/proc/self/fd/<fd>`) — where one of the SUPERVISOR's own fds really points.
-pub(crate) fn fd_path(fd: RawFd) -> Option<String> {
+pub(crate) fn fd_path(fd: RawFd) -> Option<Vec<u8>> {
     let link = CString::new(format!("/proc/self/fd/{fd}")).ok()?;
     let mut buf = vec![0u8; 4096];
     let n = unsafe {
@@ -1304,7 +1318,7 @@ pub(crate) fn fd_path(fd: RawFd) -> Option<String> {
     if n < 0 {
         return None;
     }
-    String::from_utf8(buf[..n as usize].to_vec()).ok()
+    Some(buf[..n as usize].to_vec())
 }
 
 /// Resolve `(tid, dirfd, path)` to a VERIFIED `O_PATH` fd of the PARENT directory, the parent's
@@ -1312,32 +1326,36 @@ pub(crate) fn fd_path(fd: RawFd) -> Option<String> {
 /// hint, then reopened with `RESOLVE_NO_SYMLINKS` and its real target read back, so a symlink
 /// swapped in after the hint either fails the open or is seen where it truly lands. The final
 /// component is deliberately NOT followed here; the caller re-checks an opened fd's real path.
-fn resolve_parent(tid: u32, dirfd: i32, path_in: &str) -> Result<(RawFd, String, String), i32> {
+fn resolve_parent(tid: u32, dirfd: i32, path_in: &[u8]) -> Result<(RawFd, Vec<u8>, Vec<u8>), i32> {
     // "/proc/self/…" / "/proc/thread-self/…" name the CHILD's process, not the supervisor's.
-    let path: String = if let Some(rest) = path_in.strip_prefix("/proc/self/") {
-        format!("/proc/{tid}/{rest}")
-    } else if let Some(rest) = path_in.strip_prefix("/proc/thread-self/") {
-        format!("/proc/{tid}/{rest}")
-    } else {
-        path_in.to_string()
-    };
-    let start = if path.starts_with('/') {
-        "/".to_string()
+    let strip = |prefix: &str| path_in.strip_prefix(prefix.as_bytes());
+    let path: Vec<u8> =
+        if let Some(rest) = strip("/proc/self/").or_else(|| strip("/proc/thread-self/")) {
+            let mut v = format!("/proc/{tid}/").into_bytes();
+            v.extend_from_slice(rest);
+            v
+        } else {
+            path_in.to_vec()
+        };
+    let start: Vec<u8> = if path.first() == Some(&b'/') {
+        b"/".to_vec()
     } else if dirfd == libc::AT_FDCWD {
-        format!("/proc/{tid}/cwd")
+        format!("/proc/{tid}/cwd").into_bytes()
     } else {
-        format!("/proc/{tid}/fd/{dirfd}")
+        format!("/proc/{tid}/fd/{dirfd}").into_bytes()
     };
-    let (dirpart, base) = match path.rfind('/') {
-        None => (".".to_string(), path.clone()),
-        Some(0) => ("/".to_string(), path[1..].to_string()),
-        Some(i) => (path[..i].to_string(), path[i + 1..].to_string()),
+    let (dirpart, base): (Vec<u8>, Vec<u8>) = match path.iter().rposition(|b| *b == b'/') {
+        None => (b".".to_vec(), path.clone()),
+        Some(0) => (b"/".to_vec(), path[1..].to_vec()),
+        Some(i) => (path[..i].to_vec(), path[i + 1..].to_vec()),
     };
-    if base.is_empty() || base == "." || base == ".." {
+    if base.is_empty() || base == b"." || base == b".." {
         return Err(libc::EINVAL);
     }
-    let dp = dirpart.strip_prefix('/').unwrap_or(&dirpart);
-    let joined = format!("{start}/{dp}");
+    let dp = dirpart.strip_prefix(b"/".as_slice()).unwrap_or(&dirpart);
+    let mut joined = start.clone();
+    joined.push(b'/');
+    joined.extend_from_slice(dp);
     let joined_c = CString::new(joined).map_err(|_| libc::EINVAL)?;
     let mut real = vec![0u8; libc::PATH_MAX as usize];
     let rp = unsafe { libc::realpath(joined_c.as_ptr(), real.as_mut_ptr() as *mut libc::c_char) };
@@ -1345,8 +1363,7 @@ fn resolve_parent(tid: u32, dirfd: i32, path_in: &str) -> Result<(RawFd, String,
         return Err(errno());
     }
     let real_len = unsafe { libc::strlen(real.as_ptr() as *const libc::c_char) };
-    let real_str = String::from_utf8_lossy(&real[..real_len]).into_owned();
-    let real_c = CString::new(real_str).map_err(|_| libc::EIO)?;
+    let real_c = CString::new(real[..real_len].to_vec()).map_err(|_| libc::EIO)?;
     let how = OpenHow {
         flags: (libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC) as u64,
         mode: 0,
@@ -1374,12 +1391,15 @@ fn resolve_parent(tid: u32, dirfd: i32, path_in: &str) -> Result<(RawFd, String,
 }
 
 /// Join a verified parent's canonical path and a final component into the full canonical path.
-fn join_full(canon: &str, base: &str) -> String {
-    if canon == "/" {
-        format!("/{base}")
+fn join_full(canon: &[u8], base: &[u8]) -> Vec<u8> {
+    let mut out = if canon == b"/" {
+        Vec::new()
     } else {
-        format!("{canon}/{base}")
-    }
+        canon.to_vec()
+    };
+    out.push(b'/');
+    out.extend_from_slice(base);
+    out
 }
 
 /// Service one write-intent notification: read the path(s) once from the child, resolve the
@@ -1471,9 +1491,25 @@ fn handle_write_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
         }
         _ => true,
     };
+    // A RE-OPEN of a descriptor the child already holds — `/proc/self/fd/<n>`, which
+    // `resolve_parent` rewrites to the child's own pid. It is not a location, so there is no
+    // filesystem grant to check: whatever the descriptor points at, the child has it open
+    // already and re-opening reaches nothing new. Landlock does not govern this either, which is
+    // how the sealed CA-bundle memfd reaches a confined child at all — a memfd lives on an
+    // internal mount that Landlock refuses as a rule target, so it is handed over as an
+    // inherited fd and named `/proc/self/fd/<n>` in the child's environment.
+    //
+    // ⚠️ RESIDUAL, stated rather than hidden: a re-open may request a wider access MODE than the
+    // descriptor was opened with, and for a regular file Landlock would judge that against the
+    // underlying path where this does not. Narrow, and the alternative is refusing an fd the
+    // child demonstrably already has.
+    let own_fd_dir = format!("/proc/{}/fd", tgid_of(req.pid)).into_bytes();
     // The one policy predicate for this notification, so the pre-check and the post-open
     // readback below cannot drift into judging the same op two different ways.
-    let permits = |canon: &str| {
+    let permits = |canon: &[u8]| {
+        if canon.starts_with(&own_fd_dir) {
+            return true;
+        }
         if wants_write {
             write_allowed(&matcher, canon)
         } else {
@@ -1504,16 +1540,17 @@ fn handle_write_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
         let full = join_full(&canon, &base);
         if !permits(&full) {
             suplog!(
-                "SUP DENY {} {full} -> EPERM",
-                if wants_write { "write" } else { "read" }
+                "SUP DENY {} {} -> EPERM",
+                if wants_write { "write" } else { "read" },
+                String::from_utf8_lossy(&full)
             );
             err = libc::EPERM;
             break 'act;
         }
 
-        let mut base2 = String::new();
+        let mut base2: Vec<u8> = Vec::new();
         if resolves_second {
-            let path2_ref = path2.as_deref().unwrap_or("");
+            let path2_ref = path2.as_deref().unwrap_or_default();
             let (p2, canon2, b2) = match resolve_parent(req.pid, dfd2, path2_ref) {
                 Ok(v) => v,
                 Err(e) => {
@@ -1525,7 +1562,10 @@ fn handle_write_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
             base2 = b2;
             let full2 = join_full(&canon2, &base2);
             if !write_allowed(&matcher, &full2) {
-                suplog!("SUP DENY write {full2} -> EPERM");
+                suplog!(
+                    "SUP DENY write {} -> EPERM",
+                    String::from_utf8_lossy(&full2)
+                );
                 err = libc::EPERM;
                 break 'act;
             }
@@ -1542,8 +1582,7 @@ fn handle_write_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
                 let refused = match ok {
                     Some(true) => {
                         let len = unsafe { libc::strlen(srcreal.as_ptr() as *const libc::c_char) };
-                        let real = String::from_utf8_lossy(&srcreal[..len]).into_owned();
-                        !write_allowed(&matcher, &real)
+                        !write_allowed(&matcher, &srcreal[..len])
                     }
                     _ => true, // could not resolve the source → refuse
                 };
@@ -1639,7 +1678,7 @@ fn handle_write_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
                 }
             }
             n if n == libc::SYS_symlinkat => {
-                let target = cstr(path2.as_deref().unwrap_or(""));
+                let target = cstr(path2.as_deref().unwrap_or_default());
                 if unsafe { libc::symlinkat(target.as_ptr(), pfd, cstr(&base).as_ptr()) } < 0 {
                     err = errno();
                 }
@@ -1748,7 +1787,7 @@ fn handle_write_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
 
 /// A `CString` for a path component, empty on an interior NUL (which cannot occur in a real
 /// path component but keeps the perform step total).
-fn cstr(s: &str) -> CString {
+fn cstr(s: &[u8]) -> CString {
     CString::new(s).unwrap_or_default()
 }
 

@@ -61,7 +61,13 @@ fn open_path(
     // NON-metadata one, which handed it to the fs broker, which has no rule for per-process
     // procfs (that capability is `fs.self_proc`, not an fs rule) and refused it.
     let raw = read_child_str(req.pid, pointer, 64);
-    let selected = raw.as_deref().and_then(metadata_path);
+    // A non-UTF-8 byte string is definitionally not one of the `/proc/self/…` literals this
+    // handler recognises, so failing the conversion lands on the same `None` arm a wrong path
+    // takes and the fs broker judges it.
+    let selected = raw
+        .as_deref()
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .and_then(metadata_path);
     let Some((file, suffix)) = selected else {
         // Not a self-process metadata path, so this handler has no business deciding it: hand it
         // back to the fs broker whenever one is armed. CONTINUE here would let the child's own
@@ -117,7 +123,7 @@ fn open_path(
     // A numeric task component is resolved beneath this process's task directory;
     // a TID belonging to a different process is not present there. No path supplied
     // by the caller can select another process or traverse a procfs magic link.
-    let path = cstr(&format!("/proc/{pid}/{suffix}"));
+    let path = cstr(format!("/proc/{pid}/{suffix}").as_bytes());
     let fd = unsafe { libc::open(path.as_ptr(), flags as i32 | libc::O_CLOEXEC) };
     if fd < 0 {
         reply(nfd, req.id, -errno());

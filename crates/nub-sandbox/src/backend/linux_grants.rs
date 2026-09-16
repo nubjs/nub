@@ -70,11 +70,16 @@ pub(crate) fn compile_mount_plan(policy: &SandboxPolicy) -> Result<Vec<MountGran
             if rule.effect != Effect::Allow {
                 continue;
             }
-            if has_denies {
-                return Err(
-                    "a whole-filesystem grant cannot be combined with filesystem denies".into(),
-                );
-            }
+            // A whole-root grant with denies used to be refused outright, because Landlock
+            // cannot subtract from `/` — its rules union — so the denies would have been
+            // silently dropped and the policy enforced weaker than it read. The supervisor's
+            // broker now carries them: a deny is exactly what arms it, and it decides every
+            // trapped open against the full ruleset. So the combination is expressible, and
+            // refusing it would reject every whole-disk policy the moment the secret floor made
+            // denies universal.
+            //
+            // ⛔ The two are COUPLED. If the broker ever stops arming on a deny, this refusal has
+            // to come back, or a `fs: {"/": "rw"}` policy silently loses its `.env*` floor.
             let grant = MountGrant {
                 path: PathBuf::from("/"),
                 access: if rule.access == FsAccess::ReadWrite {
