@@ -821,7 +821,6 @@ mod tests {
     /// container and on a CI runner, where file mode blocks nothing.
     ///
     /// Asserted as coverage rather than as a literal list copy, so it pins the CONTRACT and
-
     /// not the spelling: reordering or adding a genuinely-essential path keeps it green.
     #[test]
     fn the_essential_read_floor_excludes_the_credential_surface_it_used_to_mount() {
@@ -1014,7 +1013,6 @@ mod tests {
                 keyctl: i64::from(X86_64_KEYCTL),
                 add_key: i64::from(X86_64_ADD_KEY),
                 request_key: i64::from(X86_64_REQUEST_KEY),
-                ..Default::default()
             },
         )
         .unwrap();
@@ -1087,7 +1085,6 @@ mod tests {
                     keyctl: i64::from(GENERIC_KEYCTL),
                     add_key: i64::from(GENERIC_ADD_KEY),
                     request_key: i64::from(GENERIC_REQUEST_KEY),
-                    ..Default::default()
                 },
             )
             .unwrap();
@@ -1162,7 +1159,6 @@ mod tests {
                     keyctl: KEYCTL,
                     add_key: ADD_KEY,
                     request_key: REQUEST_KEY,
-                    ..Default::default()
                 },
             )
             .unwrap()
@@ -1294,7 +1290,6 @@ mod tests {
             keyctl: 250,
             add_key: 248,
             request_key: 249,
-            ..Default::default()
         };
         let permitted = build_seccomp_for(
             TargetArch::x86_64,
