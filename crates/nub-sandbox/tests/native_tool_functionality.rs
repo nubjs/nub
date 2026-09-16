@@ -1,7 +1,5 @@
 //! Native Cargo/rustup, Go, JVM, NuGet, and Composer tool-directory controls.
 
-#[path = "common/tool_msys.rs"]
-mod tool_msys;
 #[path = "common/tool_output.rs"]
 mod tool_output;
 #[path = "common/tool_sandbox.rs"]
@@ -13,9 +11,6 @@ use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 
 #[derive(Deserialize)]
 struct Tool {
@@ -189,7 +184,6 @@ fn policy(
     tooldirs: bool,
 ) -> nub_sandbox::SandboxPolicy {
     let mut fs = Map::new();
-    tool_msys::grant(&mut fs);
     if std::env::var_os("NUB_NATIVE_ADAPTER_PROBE_ENABLE").is_some() {
         let adapter = std::env::var("NUB_NATIVE_ADAPTER_PROBE_DIR").unwrap();
         fs.insert(adapter, Value::String("r".into()));
@@ -298,7 +292,7 @@ fn run(
         .cloned()
         .chain(args.iter().map(|arg| (*arg).to_string()))
         .collect::<Vec<_>>();
-    let (program, args) = tool_msys::command(&tool.program, args, &root.join("project"));
+    let program = tool.program.clone();
     match policy {
         Some(policy) => {
             let sandbox = tool_sandbox::acquire(policy).expect("sandbox acquires");
@@ -649,64 +643,8 @@ fn run_case(name: &str, tooldirs: Option<bool>) {
     operations(name, &tool, root.path(), &env, policy.as_ref());
 }
 
-#[cfg(windows)]
-#[test]
-#[ignore = "child process for the MSYS execution-count control"]
-fn msys_execution_count_child() {
-    let root =
-        std::env::var_os("SANDBOX_MSYS_EXECUTION_COUNT").expect("execution-count child marker");
-    std::fs::write(
-        Path::new(&root).join(format!("{}.txt", std::process::id())),
-        "one native execution",
-    )
-    .unwrap();
-}
-
-#[cfg(windows)]
-fn msys_execution_count(root: &Path, env: &BTreeMap<String, String>, tooldirs: Option<bool>) {
-    let binary = std::env::current_exe().unwrap();
-    let tool = Tool {
-        name: "MSYS execution-count control".into(),
-        tool_root: binary.parent().unwrap().to_owned(),
-        program: binary,
-        prefix: vec![
-            "--exact".into(),
-            "native_tool_functionality_probe::msys_execution_count_child".into(),
-            "--ignored".into(),
-            "--nocapture".into(),
-        ],
-        version: "current test binary".into(),
-        runtime_roots: vec![],
-        tool_env: BTreeMap::new(),
-        maven_seed: None,
-    };
-    for sample in 0..3 {
-        let count_root = root.join(format!("project/exec-count-{sample}"));
-        std::fs::create_dir(&count_root).unwrap();
-        let mut env = env.clone();
-        env.insert(
-            "SANDBOX_MSYS_EXECUTION_COUNT".into(),
-            count_root.to_string_lossy().into_owned(),
-        );
-        let policy = tooldirs.map(|value| policy(root, &tool, env.clone(), value));
-        let output = run(&tool, &[], root, &env, policy.as_ref());
-        let executions: Vec<_> = std::fs::read_dir(&count_root)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name())
-            .collect();
-        eprintln!(
-            "MSYS_EXECUTION_COUNT sample={sample} executions={executions:?} output={output:?}"
-        );
-        assert_ok(&tool, "single execution", output);
-        assert_eq!(
-            executions.len(),
-            1,
-            "MSYS executed a command more than once: {executions:?}"
-        );
-    }
-}
-
-#[cfg(unix)]
+// Linux-only: its two callers are, and the sandbox no longer runs on any other unix.
+#[cfg(target_os = "linux")]
 fn run_nuget_self_proc(tooldirs: bool) {
     let tool = tool("nuget");
     let root = fixture();
@@ -809,56 +747,6 @@ fn linux_self_proc_nuget_exact() {
 #[ignore = "requires pinned .NET SDK"]
 fn linux_self_proc_nuget_tooldirs() {
     run_nuget_self_proc(true);
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-#[ignore = "requires pinned .NET SDK"]
-fn macos_self_proc_nuget_tooldirs() {
-    run_nuget_self_proc(true);
-}
-
-#[cfg(windows)]
-#[test]
-#[ignore = "requires pinned Gradle; diagnoses the explicitly acknowledged net-full limit"]
-fn windows_gradle_with_limited_network() {
-    let tool = tool("gradle");
-    let root = fixture();
-    let env = env_for(root.path(), &tool);
-    write_projects(root.path());
-    let policy = policy(root.path(), &tool, env.clone(), true);
-    let sandbox = tool_sandbox::acquire(&policy).expect("limited-network sandbox acquires");
-    for tail in [
-        &["--offline", "--no-daemon", "--stacktrace", "fixture"][..],
-        &["--offline", "--no-daemon", "--stacktrace", "fixture"][..],
-        &["--stop"][..],
-    ] {
-        let args: Vec<_> = tool
-            .prefix
-            .iter()
-            .cloned()
-            .chain(tail.iter().map(|arg| (*arg).to_owned()))
-            .collect();
-        let spec = CommandSpec::new(std::env::var_os("COMSPEC").unwrap())
-            .verbatim_command_line(format!(
-                "/d /s /c \"{}\"",
-                command_line(&tool.program, &args)
-            ))
-            .cwd(root.path().join("project"))
-            .redact_stdout(true)
-            .redact_stderr(true);
-        let prepared = sandbox
-            .prepare(spec)
-            .expect("limited-network command prepares");
-        // This diagnostic explicitly accepts a narrower network capability than
-        // net:true requested. The strict raw fixture above still refuses it.
-        assert_eq!(prepared.degradation.lost, vec!["net-full".to_owned()]);
-        eprintln!("GRADLE_LIMITED_NETWORK {:?} {tail:?}", prepared.degradation);
-        let output = tool_output::output(prepared);
-        assert_ok(&tool, "limited-network execution", output);
-    }
-    sandbox.close();
-    nub_sandbox::cleanup().expect("limited-network resources are reclaimed");
 }
 
 fn cargo_project_target(tooldirs: Option<bool>) {

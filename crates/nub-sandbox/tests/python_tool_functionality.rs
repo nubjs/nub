@@ -111,7 +111,6 @@ fn policy(root: &Path, fs: Value, env: BTreeMap<String, String>) -> nub_sandbox:
         Value::Object(entries) => entries,
         _ => panic!("fixture filesystem policy must be an object"),
     };
-    tool_msys::grant(&mut fs);
     if std::env::var_os("NUB_NATIVE_ADAPTER_PROBE_ENABLE").is_some() {
         let adapter = std::env::var("NUB_NATIVE_ADAPTER_PROBE_DIR").unwrap();
         fs.insert(adapter, Value::String("r".into()));
@@ -147,8 +146,6 @@ fn exact_grants(paths: &[(&Path, &str)]) -> Value {
     Value::Object(entries)
 }
 
-#[path = "common/tool_msys.rs"]
-mod tool_msys;
 #[path = "common/tool_output.rs"]
 mod tool_output;
 #[path = "common/tool_sandbox.rs"]
@@ -161,7 +158,7 @@ fn confined(
     policy: &nub_sandbox::SandboxPolicy,
 ) -> Output {
     eprintln!("CONFINED {} {args:?}", program.display());
-    let (program, args) = tool_msys::command(program, args.to_vec(), &root.join("project"));
+    let args = args.to_vec();
     let sandbox = tool_sandbox::acquire(policy).expect("Python sandbox acquires");
     let prepared = sandbox
         .prepare(
@@ -187,7 +184,7 @@ fn unconfined(
     env: &BTreeMap<String, String>,
 ) -> Output {
     eprintln!("UNCONFINED {} {args:?}", program.display());
-    let (program, args) = tool_msys::command(program, args.to_vec(), &root.join("project"));
+    let args = args.to_vec();
     let mut command = Command::new(program);
     command.args(args).current_dir(root.join("project"));
     command.env_clear();
@@ -635,156 +632,6 @@ fn run_tool_control(name: &str, label: &str, tooldirs: Option<bool>) {
         }
         _ => unreachable!("tool matrix was validated above"),
     }
-}
-
-#[cfg(windows)]
-fn run_python_adapter(name: &str, tooldirs: bool, readable_ancestors: bool) {
-    let tool = tool(name);
-    let root = fixture();
-    let paths = configured_paths(root.path());
-    initialize_configured_roots(&paths);
-    let mut env = env_for(root.path(), &tool, &paths);
-    let startup = root.path().join("project/python-startup");
-    std::fs::create_dir(&startup).unwrap();
-    std::fs::write(
-        startup.join("sitecustomize.py"),
-        nub_sandbox::windows_python_compat_source(),
-    )
-    .unwrap();
-    let existing = env.get("PYTHONPATH").unwrap();
-    env.insert(
-        "PYTHONPATH".into(),
-        format!("{};{existing}", startup.display()),
-    );
-    let mut policy = grant_policy(&tool, root.path(), &paths, env.clone(), tooldirs);
-    if readable_ancestors {
-        use nub_sandbox::policy::{CanonGlob, Effect, FsAccess, FsOrigin, FsRule};
-        let mut ancestors = std::collections::BTreeSet::new();
-        for rule in &policy.fs.rules.entries {
-            let path = rule.matcher.as_str().trim_end_matches("/**");
-            if !path.contains('*') {
-                ancestors.extend(Path::new(path).ancestors().skip(1).map(Path::to_path_buf));
-            }
-        }
-        // A bounded diagnostic: read directory nodes, never their descendants.
-        // Distinguish missing ancestor metadata from native canonicalization limits.
-        for path in ancestors {
-            if !path.as_os_str().is_empty() {
-                policy.fs.rules.entries.push(FsRule {
-                    matcher: CanonGlob(path.to_string_lossy().into_owned()),
-                    effect: Effect::Allow,
-                    access: FsAccess::Read,
-                    origin: FsOrigin::Speculative,
-                });
-            }
-        }
-    }
-    let retained = tool_sandbox::acquire(&policy).unwrap();
-    // Separate one-shot acquisitions share this live resource throughout the sequence.
-    let probe = r#"import os, pathlib, tempfile
-assert getattr(os.mkdir, '_appcontainer_compatible', False)
-p = pathlib.Path(tempfile.mkdtemp())
-(p / 'allowed').write_text('OK')
-assert (p / 'allowed').read_text() == 'OK'
-try:
-    os.mkdir(p, 0o700)
-except FileExistsError:
-    pass
-else:
-    raise AssertionError('existing private directory must fail')
-try:
-    os.mkdir('bad\0path', 0o700)
-except ValueError:
-    pass
-else:
-    raise AssertionError('embedded NUL must fail')
-os.mkdir(p / 'nested', 0o700)
-(p / 'nested' / 'allowed').write_text('NESTED')
-os.mkdir(p / 'ordinary', 0o777)
-import ctypes
-from ctypes import wintypes
-api = ctypes.WinDLL('advapi32', use_last_error=True)
-api.GetNamedSecurityInfoW.argtypes = [wintypes.LPWSTR, ctypes.c_int, wintypes.DWORD,
-    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
-    ctypes.POINTER(ctypes.c_void_p)]
-api.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [ctypes.c_void_p,
-    wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(wintypes.LPWSTR), ctypes.c_void_p]
-free = ctypes.WinDLL('kernel32').LocalFree
-free.argtypes = [ctypes.c_void_p]
-descriptor = ctypes.c_void_p()
-assert api.GetNamedSecurityInfoW(str(p), 1, 4, None, None, None, None, ctypes.byref(descriptor)) == 0
-text = wintypes.LPWSTR()
-try:
-    assert api.ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor, 1, 4, ctypes.byref(text), None)
-    acl = text.value
-    assert acl.startswith('D:P'), acl
-    assert acl.count('(A;') == 4, acl
-    assert ';;;AC)' not in acl and ';;;S-1-15-2-1)' not in acl, acl
-    assert ';;;S-1-15-2-' in acl, acl
-    print('PRIVATE_DIRECTORY_ACL', acl)
-finally:
-    if text: free(text)
-    free(descriptor)
-print('PRIVATE_DIRECTORY_OK')
-"#;
-    assert_success(
-        &tool,
-        "private directory adapter",
-        &invoke_python(&tool, &["-c", probe], root.path(), &env, Some(&policy)),
-    );
-    match name {
-        "pip" => run_pip_operations(&tool, root.path(), &env, Some(&policy)),
-        "uv" => run_uv_operations(&tool, root.path(), &env, Some(&policy), &paths.uv_cache),
-        _ => unreachable!(),
-    }
-    let secret = root.path().join("denied-secret");
-    std::fs::write(&secret, "WITHHELD").unwrap();
-    let canary = format!(
-        "from pathlib import Path\ntry:\n Path({}).read_text()\nexcept PermissionError:\n print('CANARY_DENIED')\nelse:\n raise AssertionError('canary exposed')",
-        serde_json::to_string(secret.to_str().unwrap()).unwrap()
-    );
-    assert_success(
-        &tool,
-        "adapter permission canary",
-        &invoke_python(&tool, &["-c", &canary], root.path(), &env, Some(&policy)),
-    );
-    retained.close();
-    nub_sandbox::cleanup().unwrap();
-}
-
-#[cfg(windows)]
-#[test]
-#[ignore = "requires the pinned native Python tool matrix"]
-fn windows_adapter_pip_exact() {
-    run_python_adapter("pip", false, false);
-}
-
-#[cfg(windows)]
-#[test]
-#[ignore = "requires the pinned native Python tool matrix"]
-fn windows_adapter_pip_tooldirs() {
-    run_python_adapter("pip", true, false);
-}
-
-#[cfg(windows)]
-#[test]
-#[ignore = "requires the pinned native Python tool matrix"]
-fn windows_adapter_uv_exact() {
-    run_python_adapter("uv", false, false);
-}
-
-#[cfg(windows)]
-#[test]
-#[ignore = "requires the pinned native Python tool matrix"]
-fn windows_adapter_uv_tooldirs() {
-    run_python_adapter("uv", true, false);
-}
-
-#[cfg(windows)]
-#[test]
-#[ignore = "requires the pinned native Python tool matrix"]
-fn windows_adapter_uv_readable_ancestors() {
-    run_python_adapter("uv", true, true);
 }
 
 macro_rules! python_tool_test {
