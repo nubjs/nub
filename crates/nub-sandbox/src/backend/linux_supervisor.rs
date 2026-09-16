@@ -884,11 +884,15 @@ fn reply_continue(nfd: RawFd, id: u64) {
 // kernel's `UIO_MAXIOV` batch bound and keep a malicious request from making the supervisor
 // allocate without limit.  Ordinary DNS, TLS, and package-registry writes are far below 16 MiB.
 const MAX_SEND_IOV: usize = 1024;
+/// `sendmmsg`'s array length, capped at the kernel's own `UIO_MAXIOV`. The kernel silently
+/// truncates a longer batch rather than failing it, so matching the cap keeps the emulation's
+/// return value identical to the real call's.
+const MAX_SEND_BATCH: usize = 1024;
 const MAX_SEND_BYTES: usize = 16 * 1024 * 1024;
 
-/// A connected IP send copied out of target memory.  USER_NOTIF cannot safely write the
-/// `sendmmsg` result array, and cannot preserve AF_UNIX sender credentials, so those operations
-/// return ENOSYS rather than being emulated against a different process identity.
+/// A connected IP send copied out of target memory.  USER_NOTIF cannot preserve AF_UNIX sender
+/// credentials, so those operations return ENOSYS rather than being emulated against a different
+/// process identity.  One snapshot is one message: a `sendmmsg` batch makes one per array slot.
 #[derive(Debug)]
 struct SendSnapshot {
     bytes: Vec<u8>,
@@ -897,9 +901,14 @@ struct SendSnapshot {
 /// Keep a `/proc/<tid>/mem` description open from the first ID check through every read.  This
 /// binds reads to the notified address space even if a dead TID is quickly reused; the final
 /// `NOTIF_ID_VALID` check below additionally proves the blocked syscall still belongs to it.
-fn open_child_mem(tid: u32) -> io::Result<OwnedFd> {
+fn open_child_mem(tid: u32, writable: bool) -> io::Result<OwnedFd> {
     let path = CString::new(format!("/proc/{tid}/mem")).unwrap();
-    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    let mode = if writable {
+        libc::O_RDWR
+    } else {
+        libc::O_RDONLY
+    };
+    let fd = unsafe { libc::open(path.as_ptr(), mode | libc::O_CLOEXEC) };
     if fd < 0 {
         Err(io::Error::last_os_error())
     } else {
@@ -920,6 +929,27 @@ fn child_pread(mem: RawFd, off: u64, buf: &mut [u8]) -> Result<(), i32> {
         Ok(())
     } else {
         Err(if got < 0 { errno() } else { libc::EFAULT })
+    }
+}
+
+/// The ONLY write this supervisor makes into target memory, and it exists for one field:
+/// `sendmmsg`'s per-message `msg_len` output.  Callers bracket it with `notification_is_live`,
+/// which is what makes it sound — while the notification is live the target is parked inside the
+/// syscall, so the array is still the argument it passed rather than storage it has since
+/// returned from and reused.
+fn child_pwrite(mem: RawFd, off: u64, buf: &[u8]) -> Result<(), i32> {
+    let put = unsafe {
+        libc::pwrite(
+            mem,
+            buf.as_ptr() as *const libc::c_void,
+            buf.len(),
+            off as libc::off_t,
+        )
+    };
+    if put == buf.len() as isize {
+        Ok(())
+    } else {
+        Err(if put < 0 { errno() } else { libc::EFAULT })
     }
 }
 
@@ -2787,14 +2817,6 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
             continue;
         }
 
-        // `sendmmsg` writes `msg_len` output to target memory.  The USER_NOTIF ABI has no safe
-        // way to make that write: a cancelled target may have already reused the address.  Give
-        // callers ENOSYS so their usual sendmsg/sendto fallback remains available.
-        if nr == libc::SYS_sendmmsg {
-            reply(nfd, req.id, -libc::ENOSYS);
-            continue;
-        }
-
         // Replay connected IP sendto/sendmsg from supervisor-owned snapshots.  CONTINUE is
         // unsafe after fd classification because a concurrent dup2 can replace the numeric fd
         // before the kernel executes it.  Non-IP sockets deliberately return ENOSYS: replaying
@@ -2826,7 +2848,7 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
                 continue;
             }
 
-            let mem = match open_child_mem(req.pid) {
+            let mem = match open_child_mem(req.pid, nr == libc::SYS_sendmmsg) {
                 Ok(mem) => mem,
                 Err(_) => {
                     reply(nfd, req.id, -libc::EPERM);
@@ -2836,6 +2858,101 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
             if !notification_is_live(nfd, req.id) {
                 continue;
             }
+            // `sendmmsg` is EMULATED IN FULL rather than refused, and the refusal it replaces
+            // was not a small gap. It used to answer ENOSYS on the stated grounds that callers
+            // keep a `sendmsg`/`sendto` fallback — measured false: glibc's resolver batches the A
+            // and AAAA queries of one `AF_UNSPEC` lookup into a single `sendmmsg`, and where
+            // `__ASSUME_SENDMMSG` holds its fallback is compiled out entirely. So every hostname
+            // lookup from a confined program failed with the query never leaving the box, while
+            // `getent` — which sends its two queries separately — worked. That asymmetry made it
+            // read as a DNS policy bug rather than a missing syscall.
+            //
+            // Each slot is snapshotted and replayed exactly like a single `sendmsg`, so a named
+            // destination or attached credentials are refused here on the same terms.
+            if nr == libc::SYS_sendmmsg {
+                let base = req.data.args[1];
+                // ⛔ ARG 3, NOT ARG 2. `sendmmsg(fd, msgvec, vlen, flags)` puts the length where
+                // `sendmsg` puts the flags, so the shared `else` below would have read the batch
+                // length as a flag word. Harmless while this returned ENOSYS; a live defect now.
+                let flags = req.data.args[3] as i32;
+                let vlen = (req.data.args[2] as usize).min(MAX_SEND_BATCH);
+                let mut lengths: Vec<u32> = Vec::with_capacity(vlen);
+                let mut failure: Option<i32> = None;
+                let mut abandoned = false;
+                for slot in 0..vlen {
+                    let at = match slot
+                        .checked_mul(size_of::<libc::mmsghdr>())
+                        .and_then(|step| base.checked_add(step as u64))
+                    {
+                        Some(at) => at,
+                        None => {
+                            failure = Some(libc::EFAULT);
+                            break;
+                        }
+                    };
+                    let entry = match child_struct::<libc::mmsghdr>(mem.as_raw_fd(), at) {
+                        Ok(entry) => entry,
+                        Err(error) => {
+                            failure = Some(error);
+                            break;
+                        }
+                    };
+                    let snapshot = match snapshot_msghdr(mem.as_raw_fd(), entry.msg_hdr) {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => {
+                            failure = Some(error);
+                            break;
+                        }
+                    };
+                    if !notification_is_live(nfd, req.id) {
+                        abandoned = true;
+                        break;
+                    }
+                    match send_snapshot(&control, nfd, req.id, socket.as_raw_fd(), &snapshot, flags)
+                    {
+                        Ok(sent) => lengths.push(sent as u32),
+                        Err(SendReplayError::Errno(error)) => {
+                            failure = Some(error);
+                            break;
+                        }
+                        Err(SendReplayError::Abandoned) => {
+                            abandoned = true;
+                            break;
+                        }
+                    }
+                }
+                if abandoned {
+                    continue;
+                }
+                // A partly-sent batch is a SUCCESS of that many messages, which is exactly how
+                // the kernel reports it; only an empty one carries the errno.
+                if lengths.is_empty() {
+                    let error = failure.unwrap_or(libc::EINVAL);
+                    suplog!("SUP DENY sendmmsg: nothing sent -> errno={error}");
+                    if notification_is_live(nfd, req.id) {
+                        reply(nfd, req.id, -error);
+                    }
+                    continue;
+                }
+                if !notification_is_live(nfd, req.id) {
+                    continue;
+                }
+                for (slot, sent) in lengths.iter().enumerate() {
+                    let at = base
+                        + (slot * size_of::<libc::mmsghdr>()
+                            + std::mem::offset_of!(libc::mmsghdr, msg_len))
+                            as u64;
+                    if let Err(error) = child_pwrite(mem.as_raw_fd(), at, &sent.to_ne_bytes()) {
+                        suplog!("SUP sendmmsg: msg_len write failed at slot {slot}: errno={error}");
+                        break;
+                    }
+                }
+                if notification_is_live(nfd, req.id) {
+                    reply_value(nfd, req.id, lengths.len() as i64);
+                }
+                continue;
+            }
+
             let snapshot = if nr == libc::SYS_sendto {
                 snapshot_sendto(mem.as_raw_fd(), &req)
             } else {
@@ -4203,7 +4320,7 @@ mod lifecycle_tests {
             msg_controllen: 64 * 1024,
             msg_flags: 0,
         };
-        let mem = open_child_mem(std::process::id()).unwrap();
+        let mem = open_child_mem(std::process::id(), false).unwrap();
         assert_eq!(
             snapshot_msghdr(mem.as_raw_fd(), hdr).unwrap_err(),
             libc::EPERM
@@ -4461,7 +4578,12 @@ mod lifecycle_tests {
         let correct = if mode == "batch" {
             let mut message: libc::mmsghdr = unsafe { std::mem::zeroed() };
             message.msg_hdr = hdr;
-            (unsafe { libc::sendmmsg(fd, &mut message, 1, 0) }) == -1 && errno() == libc::ENOSYS
+            // POISONED ON PURPOSE. `msg_len` is the supervisor's only write into target memory,
+            // and a zeroed field would be indistinguishable from a send it never wrote back — so
+            // the fixture pre-fills a value the emulation must overwrite.
+            message.msg_len = 0xdead_beef;
+            (unsafe { libc::sendmmsg(fd, &mut message, 1, 0) }) == 1
+                && message.msg_len == bytes.len() as u32
         } else {
             (unsafe { libc::sendmsg(fd, &hdr, 0) }) == bytes.len() as isize
         };
@@ -4528,13 +4650,14 @@ mod lifecycle_tests {
             io::ErrorKind::WouldBlock
         );
 
-        // sendmmsg falls back explicitly, without reading or writing its target mmsghdr array.
+        // A batch is replayed like any other connected send, so the datagram must actually land
+        // at the granted peer — and only there. The child has already checked that the call
+        // returned 1 and that `msg_len` came back overwritten; this is the other half, that the
+        // bytes went somewhere real rather than being accounted for and dropped.
         let (first, second, mut child) = launch("batch");
         assert_eq!(child.wait().unwrap().code(), Some(0));
-        assert_eq!(
-            first.recv_from(&mut bytes).unwrap_err().kind(),
-            io::ErrorKind::WouldBlock
-        );
+        let (len, _) = first.recv_from(&mut bytes).unwrap();
+        assert_eq!(&bytes[..len], b"supervised-udp");
         assert_eq!(
             second.recv_from(&mut bytes).unwrap_err().kind(),
             io::ErrorKind::WouldBlock
