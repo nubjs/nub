@@ -2298,8 +2298,7 @@ fn run_nub() -> Result<i32> {
             .first()
             .map(String::as_str)
             .filter(|s| is_help_routable(s));
-        run_help(sub, help_verbose);
-        return Ok(0);
+        return run_help(sub, help_verbose);
     }
 
     // AFTER the version/help short-circuits: neither consumes project config, and
@@ -2369,8 +2368,7 @@ fn run_nub() -> Result<i32> {
         }
         // Orient the first-time user instead of exiting silently — the curated
         // page (same as `nub -h`), returning cleanly rather than process-exiting.
-        run_help(None, false);
-        Ok(0)
+        run_help(None, false)
     } else {
         let first = &rest[0];
         // A leading `-` is treated as Node passthrough (`nub --inspect file.js`).
@@ -3168,8 +3166,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             // `nub help <cmd>` routes to that command's help; `nub help` alone →
             // the curated top-level page. Same router as `nub <cmd> -h`.
             let sub = command.as_deref().filter(|s| is_help_routable(s));
-            run_help(sub, false);
-            Ok(0)
+            run_help(sub, false)
         }
         // `node` is intercepted at the top of `dispatch_subcommand` (manual
         // sub-verb match in `run_node`) and never reaches the parser here.
@@ -3201,8 +3198,7 @@ fn run_nubx() -> Result<i32> {
         }
         match arg.as_str() {
             "--help" | "-h" => {
-                run_help(Some("nubx"), arg == "--help");
-                return Ok(0);
+                return run_help(Some("nubx"), arg == "--help");
             }
             "--version" | "-v" | "-V" => {
                 print_version();
@@ -9133,7 +9129,15 @@ pub(crate) fn group_help_requested(args: &[String]) -> bool {
 /// `nub <cmd> -h`, `nub help <cmd>`, and leaf forms. Engine verbs dispatch their
 /// real `--help` through the embedded engine; `node`/`pm`/`agent` use their
 /// bespoke usage; native verbs render the parser's help.
-fn run_help(command: Option<&str>, verbose: bool) {
+/// Renders help for `command`, or the top-level page for `None`.
+///
+/// Returns the exit code of whatever rendered it. Help is not always a
+/// success: every route below can fail before it reaches the help text —
+/// resolving the cwd, reading `nub.jsonc`, checking the project's identity —
+/// and `nub <verb> --help` reports those. Discarding them here made
+/// `nub help <verb>` print nothing and exit 0 on a project the other spelling
+/// refuses, which is the divergence this function exists to close.
+fn run_help(command: Option<&str>, verbose: bool) -> Result<i32> {
     let Some(cmd) = command else {
         print!(
             "{}",
@@ -9143,7 +9147,7 @@ fn run_help(command: Option<&str>, verbose: bool) {
                 render_curated_help()
             }
         );
-        return;
+        return Ok(0);
     };
 
     // `node` / `pm` / `agent` / `global`: bespoke usage (their own help guards print the
@@ -9152,24 +9156,12 @@ fn run_help(command: Option<&str>, verbose: bool) {
     match cmd {
         "dlx" | "x" | "create" => {
             print_dlx_help(cmd);
-            return;
+            return Ok(0);
         }
-        "node" => {
-            let _ = run_node(&["--help".to_string()]);
-            return;
-        }
-        "pm" => {
-            let _ = run_pm(&["--help".to_string()]);
-            return;
-        }
-        "agent" => {
-            let _ = crate::agent::run(&["--help".to_string()]);
-            return;
-        }
-        "global" => {
-            let _ = run_global(&["--help".to_string()]);
-            return;
-        }
+        "node" => return run_node(&["--help".to_string()]),
+        "pm" => return run_pm(&["--help".to_string()]),
+        "agent" => return crate::agent::run(&["--help".to_string()]),
+        "global" => return run_global(&["--help".to_string()]),
         _ => {}
     }
 
@@ -9187,8 +9179,7 @@ fn run_help(command: Option<&str>, verbose: bool) {
         None,
         None,
     )) {
-        let _ = crate::pm_engine::run_pnpm_engine(argv);
-        return;
+        return crate::pm_engine::run_pnpm_engine(argv);
     }
 
     // Engine verbs (`add`/`remove`/`why`/…): dispatch the verb's own `--help` so
@@ -9199,8 +9190,7 @@ fn run_help(command: Option<&str>, verbose: bool) {
             .ok()
             .map(|d| suggest_package_manager(&d))
             .unwrap_or_else(|| "npm".to_string());
-        let _ = crate::pm_engine::dispatch_verb(spec, cmd, &["--help".to_string()], &pm);
-        return;
+        return crate::pm_engine::dispatch_verb(spec, cmd, &["--help".to_string()], &pm);
     }
 
     // Native subcommands (and any other word): the parser renders the help. For a
@@ -9214,6 +9204,7 @@ fn run_help(command: Option<&str>, verbose: bool) {
     if let usage_rs::embedded::Outcome::Exit(exit) = Cli::embedded_outcome(&words) {
         print_parser_response(&exit);
     }
+    Ok(0)
 }
 
 /// Bold a header for the help pages when color is on for stdout. Plain text
@@ -13454,11 +13445,8 @@ mod tests {
         // new one still does, in `metadata.tools`, tracked as a fork fix
         // rather than a refusal to run the verb.
         for (verb, expect) in [
-            ("deploy", "not yet supported"),
             ("recursive", "not supported"),
             ("multi", "not supported"), // recursive alias keeps the message
-            ("clean", "not supported"),
-            ("purge", "not supported"),
         ] {
             let spec = crate::pm_engine::lookup_verb(verb)
                 .unwrap_or_else(|| panic!("{verb} must be registered"));

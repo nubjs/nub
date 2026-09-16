@@ -12,11 +12,10 @@
 //!   the one a user can still reach: a bare `nub recursive` gives pnpm's
 //!   parser nothing to work with, so the front door declines and the command
 //!   lands here, refused because nub has no meta-verb — the recursion goes on
-//!   the verb, as `-r` or `--filter`. The `clean`/`purge` and `deploy` arms
-//!   are dead letters kept for their tests, which call this function
-//!   directly; the pm_engine module doc records what the built binary
-//!   actually does with those verbs now. Anything else falls through to the
-//!   shared stub error.
+//!   the verb, as `-r` or `--filter`. `clean`, `purge` and `deploy` once had
+//!   arms here too; the engine serves all three now, so `engine_takes` routes
+//!   them long before this function, and the refusals they used to print had
+//!   become false. Anything else falls through to the shared stub error.
 //! - [`run_dlx_for_nubx`], the DLX fallback behind the `nubx` entry point,
 //!   and the only live engine call left here. The tool's own nonzero exit
 //!   comes back inside the engine's error report
@@ -50,26 +49,14 @@ pub(crate) fn run_verb(
     // separate fixtures shows both writing the dependency and materializing
     // it, so nothing was lost with the host-side alias.
     match spec.canonical {
-        // Exclusions. `recursive` is the only one a user can still reach —
-        // a bare `nub recursive` gives pnpm's parser nothing to work with, so
-        // the front door declines and the command lands here. The other two
-        // are reachable only by calling this function directly, which is what
-        // their tests do; the module doc says why they are kept.
+        // The one exclusion left. A bare `nub recursive` gives pnpm's parser
+        // nothing to work with, so the front door declines and the command
+        // lands here.
         "recursive" => Err(anyhow::anyhow!(
             "nub {typed}: not supported — nub has no recursive meta-verb.\n\
              \x20\x20Use the verb's own workspace flags instead: `nub -r <verb>` /\n\
              \x20\x20`nub <verb> -r` or `--filter <pattern>` (e.g. `nub run -r build`,\n\
              \x20\x20`nub update -r`)."
-        )),
-        "clean" | "purge" => Err(anyhow::anyhow!(
-            "nub {typed}: not supported — nub does not delete node_modules for you.\n\
-             \x20\x20Remove it directly (`rm -rf node_modules`) and reinstall with\n\
-             \x20\x20`nub install`; `nub ci` does the clean + frozen install in one step."
-        )),
-        "deploy" => Err(anyhow::anyhow!(
-            "nub {typed}: not yet supported — the engine's deploy (copy a workspace\n\
-             \x20\x20package + its production deps into a self-contained directory) hasn't\n\
-             \x20\x20been wired. For now: pnpm deploy"
         )),
         _ => Err(stub_error(typed, args, pm_hint)),
     }

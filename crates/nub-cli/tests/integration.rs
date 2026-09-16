@@ -8010,6 +8010,51 @@ fn engine_verb_help_routes_consistently() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The two help spellings have to agree when the project is BROKEN too, not
+/// only when the help renders.
+///
+/// Both routes resolve the cwd, read `nub.jsonc` and check the project's
+/// identity before any help text exists, so both can fail before printing.
+/// `nub help <verb>` used to discard that error and exit 0 with nothing on
+/// either stream, while `nub <verb> --help` reported it — so a project with a
+/// malformed `nub.jsonc` got silence from one spelling and a diagnostic from
+/// the other.
+#[test]
+fn help_reports_a_broken_config_the_same_way_the_flag_spelling_does() {
+    let dir = unique_test_cache();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"broken","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("nub.jsonc"),
+        "{ this is not valid jsonc at all ][ }\n",
+    )
+    .unwrap();
+
+    for args in [vec!["help", "add"], vec!["add", "--help"]] {
+        let output = Command::new(nub_binary())
+            .args(&args)
+            .current_dir(&dir)
+            .output()
+            .expect("failed to spawn nub");
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        assert_ne!(
+            output.status.code(),
+            Some(0),
+            "{args:?} must not report success on an unreadable nub.jsonc",
+        );
+        assert!(
+            stderr.contains("nub.jsonc"),
+            "{args:?} must name the file it could not read, got stderr: {stderr:?}",
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn nubx_basic() {
     let fixture = fixtures_dir().join("nubx-test");
