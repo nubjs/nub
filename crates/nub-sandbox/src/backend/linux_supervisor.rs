@@ -80,6 +80,33 @@ const SECCOMP_USER_NOTIF_FLAG_CONTINUE: u32 = 1;
 /// SECCOMP_ADDFD_FLAG_SETFD — install at a caller-chosen descriptor number.
 const SECCOMP_ADDFD_FLAG_SETFD: u32 = 1;
 
+/// What a pre-exec `_exit` code from the confined child means.
+///
+/// The child runs between `fork` and `execve` under async-signal-safe rules, so it cannot format
+/// a message, allocate, or take a lock — an exit code is the entire channel it has. This is the
+/// other end of it, kept beside the codes so the two cannot drift apart.
+///
+/// ⚠️ 17 IS THE ONE A USER IS MOST LIKELY TO MEET, and it is not a bug in nub: the kernel allows
+/// ONE notifying filter per task, so launching this sandbox inside another that already installed
+/// one fails with `EBUSY` (measured, `sandbox-netprobes/nest.c`). That is a real deployment limit
+/// on agent platforms, and "another sandbox is already active" is the only useful thing to say.
+fn preexec_reason(code: libc::c_int) -> &'static str {
+    match code {
+        10 => "it could not join the sandbox's process group",
+        11 => "the process that launched it exited first",
+        12 => "its standard streams could not be set up",
+        13 => "the kernel refused NO_NEW_PRIVS or the process-lifetime filter",
+        14 => "its capabilities could not be dropped",
+        15 => "the Landlock ruleset could not be applied",
+        16 => "the seccomp ceiling could not be installed",
+        17 => {
+            "the syscall supervisor could not be installed — another sandbox is already active \
+               on this process, and Linux allows only one"
+        }
+        _ => "it exited before the sandbox finished starting",
+    }
+}
+
 /// `struct seccomp_data` — the classic-BPF input record.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -3659,7 +3686,25 @@ pub(super) fn spawn_supervised_with_ready(
     stdout.child.take();
     stderr.child.take();
     let mut child_nfd_bytes = [0u8; 4];
-    std::fs::File::from(c2p_read).read_exact(&mut child_nfd_bytes)?;
+    if let Err(e) = std::fs::File::from(c2p_read).read_exact(&mut child_nfd_bytes) {
+        // THE CHILD DIED BEFORE HANDING THE LISTENER BACK, so the pipe closed early. It fails
+        // CLOSED — nothing has been `execve`d and nothing will be — but the bare error here is
+        // `failed to fill whole buffer`, which names none of the twelve ways the pre-exec run
+        // can end. Reaping it turns the `_exit` code into the reason, and the codes are the
+        // only channel available: the child is post-fork and async-signal-safe, so it cannot
+        // allocate a message.
+        let mut status: libc::c_int = 0;
+        let reaped = unsafe { libc::waitpid(pid, &mut status, 0) };
+        pending.0 = 0;
+        let code = (reaped == pid && libc::WIFEXITED(status)).then(|| libc::WEXITSTATUS(status));
+        return Err(match code {
+            Some(c) => io::Error::other(format!(
+                "the confined child could not start: {}",
+                preexec_reason(c)
+            )),
+            None => e,
+        });
+    }
     let child_nfd = i32::from_ne_bytes(child_nfd_bytes);
     let pf = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as RawFd;
     let nfd = if pf >= 0 {
