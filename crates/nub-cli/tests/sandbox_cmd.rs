@@ -57,11 +57,20 @@ fn marker_command(dir: &Path) -> (String, Vec<String>, PathBuf) {
     }
     #[cfg(windows)]
     {
+        // ⛔ NO REDIRECTION OPERATOR, and that is the whole point. The obvious spelling —
+        // `/c` plus one argument reading `echo ran > "<path>"` — FAILED on CI with "The
+        // filename, directory name, or volume label syntax is incorrect": Rust quotes that
+        // argument as a unit, so `cmd` receives quotes nested inside quotes and parses neither.
+        // `copy NUL <path>` carries no shell metacharacter at all, so each token survives
+        // Rust's quoting and `cmd` sees three plain arguments. It writes an empty file, which
+        // is all a marker has to be.
         (
             "cmd".to_string(),
             vec![
                 "/c".to_string(),
-                format!("echo ran > \"{}\"", marker.display()),
+                "copy".to_string(),
+                "NUL".to_string(),
+                marker.display().to_string(),
             ],
             marker,
         )
