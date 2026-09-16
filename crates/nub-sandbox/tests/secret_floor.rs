@@ -48,6 +48,13 @@ fn secret_floor_child() {
         "policy-file" => &["sandbox.json"],
         other => panic!("unknown secret-floor case: {other}"),
     };
+    // SECOND POSITIVE CONTROL, and the one the WRITE half below rests on: the tree is granted
+    // read-WRITE, so an ordinary write inside it must succeed. Without this, a tree that was
+    // merely read-only would make every write refusal below pass for the wrong reason — the
+    // floor would look enforced while nothing but the missing grant was stopping anything.
+    fs::write(project.join("scratch.txt"), "ordinary-write")
+        .expect("the granted project tree is writable");
+
     for leaf in denied {
         let path = project.join(leaf);
         let read = fs::read_to_string(&path);
@@ -56,6 +63,20 @@ fn secret_floor_child() {
             "{} was readable inside a granted project tree: {:?}",
             path.display(),
             read,
+        );
+
+        // THE WRITE HALF. A floor that only refused reads would leave the more damaging half
+        // open: `fs::write` is `O_WRONLY|O_CREAT|O_TRUNC`, so a command that cannot READ
+        // `.npmrc` could still TRUNCATE it, or replace it with a registry line pointing at an
+        // attacker's host for whatever runs next. Landlock alone cannot refuse this — the tree
+        // is granted `rw` and its rules only ever union — so the refusal has to come from the
+        // broker, exactly as it does for the read.
+        let wrote = fs::write(&path, "overwritten-by-the-confined-command");
+        assert!(
+            wrote.is_err(),
+            "{} was WRITABLE inside a granted project tree: the floor refused the read and let \
+             the overwrite through",
+            path.display(),
         );
     }
 }
