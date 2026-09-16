@@ -396,5 +396,3 @@ whoami::fails_when_the_registry_rejects_the_request  # identity/nub-project: the
 with::with_current_bypasses_the_package_manager_check_when_an_unrelated_manager_is_pinned  # identity/nub-project: the fixture writes no pnpm marker, so nub applies its own project identity (its verbs, lockfile, configuration and ERR_NUB_* codes)
 yarn_workspaces_field::a_repeat_install_taking_the_up_to_date_path_warns_too  # identity/nub-project: the fixture writes no pnpm marker, so nub applies its own project identity (its verbs, lockfile, configuration and ERR_NUB_* codes)
 yarn_workspaces_field::an_install_warns_about_a_workspaces_field_with_no_pnpm_workspace_yaml  # identity/nub-project: the fixture writes no pnpm marker, so nub applies its own project identity (its verbs, lockfile, configuration and ERR_NUB_* codes)
-
-# bug/pnpm-project (1)
