@@ -610,14 +610,11 @@ pub(crate) fn fs_broker_ruleset(
         // child an fd to a file Landlock would have refused, turning a listing grant into a
         // read grant. Every other arm covers its subtree, because Landlock's rights are
         // inherited by everything beneath the path.
-        let patterns: &[String] = if grant.access == LandlockAccess::ListDir {
-            &[base.clone()]
-        } else {
-            &[base.clone(), format!("{}/**", base.trim_end_matches('/'))]
-        };
-        for pattern in patterns {
+        let subtree = (grant.access != LandlockAccess::ListDir)
+            .then(|| format!("{}/**", base.trim_end_matches('/')));
+        for pattern in std::iter::once(base).chain(subtree) {
             entries.push(FsRule {
-                matcher: CanonGlob(pattern.clone()),
+                matcher: CanonGlob(pattern),
                 effect: Effect::Allow,
                 access,
                 origin: FsOrigin::Authored,
