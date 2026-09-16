@@ -424,7 +424,12 @@ fn build_supervised_plan(
     let has_explicit_deny = has_explicit_fs_deny(policy);
     let fs_policy = if ruleset.is_some() && has_explicit_deny {
         Some(
-            super::linux_landlock::fs_broker_ruleset(policy, tmp_dir, Some(&program_abs))
+            super::linux_landlock::fs_broker_ruleset(
+                policy,
+                tmp_dir,
+                Some(&program_abs),
+                &retained.0,
+            )
                 .map_err(|reason| Degradation {
                     lost: vec!["fs".to_string()],
                     reason: Some(reason),

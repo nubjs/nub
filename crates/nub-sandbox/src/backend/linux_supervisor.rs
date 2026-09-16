@@ -2439,6 +2439,14 @@ impl EgressPolicy {
     /// trip, where a write-only broker trapped almost nothing. That is the price of the `.env*`
     /// floor meaning anything for reads, which is the direction that matters for a secret.
     fn read_broker(&self) -> bool {
+        // INTERNAL differential pin, for COST measurement only. Read-brokering costs a supervisor
+        // round trip on every `openat`, and the only honest way to price that is to run the same
+        // workload on ONE host with it on and off. Not a user knob, not documented as one, and it
+        // can only ever make the sandbox WEAKER — so it is spelled as an opt-out that must be
+        // typed exactly, never as a policy the compiler can reach.
+        if std::env::var("NUB_SANDBOX_READ_BROKER").as_deref() == Ok("off") {
+            return false;
+        }
         self.fs_policy.as_ref().is_some_and(|set| {
             set.entries
                 .iter()

@@ -391,13 +391,19 @@ pub(crate) fn capture_policy_grants(
     Ok(RetainedPolicyGrants(retained))
 }
 
-/// Derive the full grant list for `policy`.
+/// The REFERENCE composition of a policy's full grant list: the runtime's own grants plus the
+/// policy's. Landlock restricts access without replacing the filesystem view, so the system
+/// files and device nodes need explicit grants alongside whatever the policy names; the policy
+/// half comes from [`compile_mount_plan`], including glob reduction, absent-path tolerance and
+/// deny-shadow dropping.
 ///
-/// The policy's rules come from [`compile_mount_plan`], including glob reduction,
-/// absent-path tolerance and deny-shadow dropping. Landlock restricts access without
-/// replacing the filesystem view, so the runtime's system files and device nodes
-/// need explicit grants too.
-pub(crate) fn derive_grants(
+/// TEST-ONLY, and deliberately so. Both production sites compose the same two halves but take
+/// the policy half from the fds `capture_policy_grants` PINNED at acquisition, not from a fresh
+/// read of the filesystem — see [`fs_broker_ruleset`] for what re-deriving at prepare time
+/// costs. Keeping the reference here lets the tests assert the composition without giving
+/// production a third, subtly different way to build it.
+#[cfg(test)]
+fn derive_grants(
     policy: &SandboxPolicy,
     tmp_dir: Option<&Path>,
     entry_program: Option<&Path>,
@@ -563,19 +569,41 @@ pub(crate) fn fs_broker_ruleset(
     policy: &SandboxPolicy,
     tmp_dir: Option<&Path>,
     entry_program: Option<&Path>,
+    retained: &RetainedPolicyGrants,
 ) -> Result<crate::policy::FsRuleSet, String> {
     use crate::policy::{CanonGlob, Effect, FsAccess, FsOrigin, FsRule, FsRuleSet};
     let mut entries: Vec<FsRule> = Vec::new();
-    for grant in derive_grants(policy, tmp_dir, entry_program)? {
+    // THE SAME TWO SOURCES `build` COMPOSES, in the same order, and that is load-bearing rather
+    // than tidiness. Re-deriving with `derive_grants` here instead looks equivalent — it is
+    // `fixed_grants` plus `policy_grants`, and `capture_policy_grants` is a loop over
+    // `policy_grants` — but the retained half was captured at ACQUISITION and holds open fds,
+    // while a re-derivation runs at PREPARE and re-reads the filesystem. A granted path deleted
+    // between the two makes the re-derivation REFUSE ("filesystem mount source does not exist")
+    // for a session Landlock is still happily enforcing against the fds it already holds.
+    let grants = fixed_grants(policy, tmp_dir, entry_program)
+        .into_iter()
+        .chain(retained.0.iter().map(|r| r.grant.clone()));
+    for grant in grants {
         let access = if grant.access.grants_write() {
             FsAccess::ReadWrite
         } else {
             FsAccess::Read
         };
         let base = grant.path.to_string_lossy().into_owned();
-        for pattern in [base.clone(), format!("{}/**", base.trim_end_matches('/'))] {
+        // A `ListDir` grant is the node and NOT its subtree: Landlock gives it `READ_DIR`
+        // without `READ_FILE`, so the directory lists and nothing below it opens. Emitting the
+        // `/**` twin for one would let the broker — which opens OUTSIDE Landlock — hand the
+        // child an fd to a file Landlock would have refused, turning a listing grant into a
+        // read grant. Every other arm covers its subtree, because Landlock's rights are
+        // inherited by everything beneath the path.
+        let patterns: &[String] = if grant.access == LandlockAccess::ListDir {
+            &[base.clone()]
+        } else {
+            &[base.clone(), format!("{}/**", base.trim_end_matches('/'))]
+        };
+        for pattern in patterns {
             entries.push(FsRule {
-                matcher: CanonGlob(pattern),
+                matcher: CanonGlob(pattern.clone()),
                 effect: Effect::Allow,
                 access,
                 origin: FsOrigin::Authored,
