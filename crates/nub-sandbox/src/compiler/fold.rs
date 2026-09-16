@@ -123,8 +123,12 @@ pub fn fold_fs(
             ));
         }
     }
-    // Authored filesystem policy is positive-only. Credentials are handled through the
-    // environment policy; filesystem grants are not implicitly subtracted.
+    // The only two non-positive bands on the fs axis. Everything above is a literal grant;
+    // these subtract, in this order, because a policy file is never named `.env*` so the two
+    // are disjoint and the fixed order simply keeps the emission stable for the tests that
+    // pin it. See `finalize_policy_file_deny` / `finalize_env_deny` for why they exist at all.
+    finalize_policy_file_deny(&mut set, ctx.compile);
+    finalize_env_deny(&mut set);
     let mut self_proc = std::collections::BTreeSet::new();
     for rule in &set.entries {
         if let Some(file) = SelfProcFile::from_path(rule.matcher.as_str()) {
@@ -291,6 +295,57 @@ fn fold_tooldirs_object_entry(
     #[cfg(target_os = "linux")]
     out.extend(builtin_sets::tool_metadata_rules());
     Ok(true)
+}
+
+/// Append the `.env*` / `.npmrc` secret floor as the last two bands of the fs axis.
+///
+/// WHY THIS EXISTS, because it is the one place the fs axis is not purely positive. The
+/// sandbox's contract is generous-read-MINUS-SECRETS: a `nub sandbox` scope that grants the
+/// project tree is meant to hand over the source, not the credentials sitting in it. Without
+/// this band, `fs: ["."]` reads `./.env` and `./.npmrc`, which is the single most likely way a
+/// confined command walks off with a token. Restored 2026-09-16: a refactor narrowed the floor
+/// from "every read-granting policy" to "the secure preset only", and deleting the build jail
+/// then took the preset — and with it the floor — away entirely, which no decision asked for.
+///
+/// It is also what makes deny-inside-allow REACHABLE. The public grammar has no deny form
+/// (`fold_fs_array_entry` / `fold_fs_object_entry` reject one outright), so these two bands and
+/// `finalize_policy_file_deny` below are the only producers of an `Effect::Deny` fs rule in the
+/// crate. With no producer, `has_explicit_fs_deny` is permanently false and the supervisor's
+/// write broker never arms.
+///
+/// Skipped in exactly two cases, both of which make the band meaningless rather than unsafe: a
+/// FULLY-relaxed axis (`fs: true` / `sandbox: false` — the explicit escape hatch, where the
+/// author has asked for no filesystem confinement at all), and a policy that grants no reads,
+/// where there is nothing for a deny to sit inside.
+fn finalize_env_deny(set: &mut FsRuleSet) {
+    if !grants_read(set) {
+        return;
+    }
+    set.entries.extend(defaults::env_deny_leaf_rules());
+    set.entries.extend(defaults::env_deny_subtree_rules());
+}
+
+/// Deny the file(s) the policy was read from, read AND write, so a confined command can
+/// neither learn the rules confining it nor edit them for the next run. Exact paths, so unlike
+/// the `.env*` band this needs no glob. Same two skips, for the same reasons.
+fn finalize_policy_file_deny(set: &mut FsRuleSet, ctx: &CompileCtx) {
+    if ctx.policy_files.is_empty() || !grants_read(set) {
+        return;
+    }
+    set.entries.extend(
+        ctx.policy_files
+            .iter()
+            .map(|file| defaults::policy_file_deny_rule(file)),
+    );
+}
+
+/// Whether a floor band would mean anything on this axis: the policy must grant SOMETHING to
+/// read, and must not be the whole-disk escape hatch (an allow base with no entries at all).
+fn grants_read(set: &FsRuleSet) -> bool {
+    let fully_relaxed = set.default_effect == Effect::Allow && set.entries.is_empty();
+    let grants = set.default_effect == Effect::Allow
+        || set.entries.iter().any(|rule| rule.effect == Effect::Allow);
+    !fully_relaxed && grants
 }
 
 /// One entry of the fs Array form — the per-item body, shared by direct entries and
@@ -607,8 +662,11 @@ fn deprecated_angle_sentinel_msg(p: &str) -> String {
 
 /// `sandbox: true`'s positive filesystem default: its project tree is readable,
 /// writes remain denied, and a managed private tmp supplies scratch space. The default
-/// deny applies everywhere else. Broad explicit user grants are deliberately literal;
-/// the compiler does not subtract secret or policy-file paths from them.
+/// deny applies everywhere else.
+///
+/// It carries the same secret floor an authored policy gets, and needs it MORE, not less: this
+/// is the posture someone selects by typing `true`, so the project tree it grants is exactly
+/// where a committed `.env` lives.
 pub(super) fn secure_default_fs(ctx: &CompileCtx) -> FsPolicy {
     let mut set = FsRuleSet {
         entries: Vec::new(),
@@ -624,6 +682,8 @@ pub(super) fn secure_default_fs(ctx: &CompileCtx) -> FsPolicy {
                 origin: FsOrigin::Authored,
             }),
     );
+    finalize_policy_file_deny(&mut set, ctx);
+    finalize_env_deny(&mut set);
     FsPolicy {
         rules: set,
         tmp: TmpMode::Private,

@@ -269,7 +269,11 @@ const WRITE_INTENT_NRS: &[libc::c_long] = &[
 /// window. When `write_broker` is set, the write-intent syscalls above are also notified —
 /// `openat` gated on its flags carrying a write bit — so the deny-inside-allow broker can
 /// mediate them; otherwise those syscalls are never trapped and cost nothing.
-fn notifier_program(write_broker: bool, self_proc: bool) -> Vec<seccompiler::sock_filter> {
+fn notifier_program(
+    write_broker: bool,
+    read_broker: bool,
+    self_proc: bool,
+) -> Vec<seccompiler::sock_filter> {
     let nr = |n: libc::c_long| n as u32;
     let ld = BPF_LD | BPF_W | BPF_ABS;
     let jeq = BPF_JMP | BPF_JEQ | BPF_K;
@@ -344,11 +348,12 @@ fn notifier_program(write_broker: bool, self_proc: bool) -> Vec<seccompiler::soc
         }
     }
     if write_broker {
-        // `openat` routes to the flags check; the rest go straight to the notifier.
+        // `openat` routes to the flags check — unless reads are brokered too, in which case
+        // every open is notified and the flags no longer decide anything.
         p.push(Ins::Jump(
             jeq,
             nr(libc::SYS_openat),
-            "openat_flags",
+            if read_broker { "notify" } else { "openat_flags" },
             "w_openat",
         ));
         p.push(Ins::Label("w_openat"));
@@ -366,7 +371,7 @@ fn notifier_program(write_broker: bool, self_proc: bool) -> Vec<seccompiler::soc
     p.push(Ins::Jump(jge, DNS_FD_LO, "dnschi", "allow"));
     p.push(Ins::Label("dnschi"));
     p.push(Ins::Jump(jge, DNS_FD_HI, "allow", "notify"));
-    if write_broker {
+    if write_broker && !read_broker {
         // openat flags: masked write bits == 0 → read-only → allow; else notify.
         p.push(Ins::Label("openat_flags"));
         p.push(Ins::Stmt(ld, OFF_ARG2));
@@ -570,7 +575,7 @@ impl SupState {
             allow_all: policy.allow_all,
             allow: policy.allow,
             write_matcher: policy
-                .write_policy
+                .fs_policy
                 .as_ref()
                 .map(|s| Arc::new(PathMatcher::new(s))),
             dns_map: Vec::new(),
@@ -1216,9 +1221,20 @@ fn is_write_intent(nr: libc::c_long) -> bool {
 /// matching rule is an Allow granting ReadWrite. A Deny, a read-only Allow, or no match (the
 /// allow-only base's default Deny) all forbid the write. This is the WHOLE fs decision, because
 /// the broker performs the op outside Landlock and so must enforce the base, not just the denies.
-fn write_allowed(matcher: &PathMatcher, canon: &str) -> bool {
+pub(crate) fn write_allowed(matcher: &PathMatcher, canon: &str) -> bool {
     let d = matcher.decide(Path::new(canon));
     d.effect == Effect::Allow && d.access == FsAccess::ReadWrite
+}
+
+/// Whether the fs policy permits a READ at `canon`: the last matching rule is an Allow, at
+/// either access. Only a Deny or no match at all refuses. Same whole-decision responsibility as
+/// [`write_allowed`] — the broker opens outside Landlock, so the base is its job too.
+///
+/// This is the half Landlock structurally cannot do. Its rules UNION and never subtract, so a
+/// `.env` inside a granted project tree is readable no matter what the policy says; the only
+/// place that deny can be applied is here, per open, on the resolved canonical path.
+pub(crate) fn read_allowed(matcher: &PathMatcher, canon: &str) -> bool {
+    matcher.decide(Path::new(canon)).effect == Effect::Allow
 }
 
 /// Read a NUL-terminated string at `addr` from the target's `/proc/<tid>/mem`, without the NUL.
@@ -1378,12 +1394,50 @@ fn handle_write_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
         return; // child gone: nothing to answer
     }
 
-    // The broker is THE write-intent authority for a supervised launch (it performs opens
-    // outside Landlock), so it must apply the FULL fs write policy — the allow-only base AND the
-    // deny carve-outs — not just the denies (A6). No matcher ⇒ not armed; let the child run.
+    // The broker is THE authority for every op it traps (it performs them outside Landlock), so
+    // it must apply the FULL fs policy — the allow base AND the deny carve-outs — not just the
+    // denies. No matcher ⇒ not armed; let the child run.
     let Some(matcher) = state.write_matcher() else {
         reply_continue(nfd, req.id);
         return;
+    };
+
+    // Which direction to judge this op in. Every trapped syscall but `open{at,at2}` mutates by
+    // definition; an open is whichever its flags say. When reads are not brokered the filter
+    // never delivers a read-only open here at all, so this is simply always `true` then.
+    //
+    // `openat2` carries its flags in a `struct open_how` IN THE CHILD, so the fetch can fail. A
+    // failed fetch judges the op as a WRITE, which is the strict direction: a read misjudged as
+    // a write can only be refused, never wrongly allowed. The perform step below re-reads the
+    // struct for its own use rather than threading this copy through, because the ID re-check
+    // between here and there is what makes the second read the authoritative one.
+    let wants_write = match nr {
+        n if n == libc::SYS_openat => a[2] as u32 & write_open_mask() != 0,
+        n if n == libc::SYS_openat2 => {
+            let mut how = OpenHow::default();
+            let got = unsafe {
+                read_child_mem(
+                    req.pid,
+                    a[2],
+                    std::slice::from_raw_parts_mut(
+                        &mut how as *mut OpenHow as *mut u8,
+                        std::mem::size_of::<OpenHow>(),
+                    ),
+                )
+            };
+            got != std::mem::size_of::<OpenHow>() as isize
+                || how.flags as u32 & write_open_mask() != 0
+        }
+        _ => true,
+    };
+    // The one policy predicate for this notification, so the pre-check and the post-open
+    // readback below cannot drift into judging the same op two different ways.
+    let permits = |canon: &str| {
+        if wants_write {
+            write_allowed(&matcher, canon)
+        } else {
+            read_allowed(&matcher, canon)
+        }
     };
 
     let resolves_second =
@@ -1407,8 +1461,11 @@ fn handle_write_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
         };
         pfd = p;
         let full = join_full(&canon, &base);
-        if !write_allowed(&matcher, &full) {
-            suplog!("SUP DENY write {full} -> EPERM");
+        if !permits(&full) {
+            suplog!(
+                "SUP DENY {} {full} -> EPERM",
+                if wants_write { "write" } else { "read" }
+            );
             err = libc::EPERM;
             break 'act;
         }
@@ -1474,10 +1531,10 @@ fn handle_write_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
                     break 'act;
                 }
                 if fd_path(fd)
-                    .map(|w| !write_allowed(&matcher, &w))
+                    .map(|w| !permits(&w))
                     // Fail CLOSED: a failed readback of the just-opened fd's real path cannot
                     // prove the open did not escape the allow-set through a final-component
-                    // symlink swap, so refuse the write rather than addfd an unverified fd.
+                    // symlink swap, so refuse rather than addfd an unverified fd.
                     .unwrap_or(true)
                 {
                     unsafe { libc::close(fd) };
@@ -1517,10 +1574,10 @@ fn handle_write_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
                     break 'act;
                 }
                 if fd_path(fd)
-                    .map(|w| !write_allowed(&matcher, &w))
+                    .map(|w| !permits(&w))
                     // Fail CLOSED: a failed readback of the just-opened fd's real path cannot
                     // prove the open did not escape the allow-set through a final-component
-                    // symlink swap, so refuse the write rather than addfd an unverified fd.
+                    // symlink swap, so refuse rather than addfd an unverified fd.
                     .unwrap_or(true)
                 {
                     unsafe { libc::close(fd) };
@@ -1596,10 +1653,10 @@ fn handle_write_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
                     break 'act;
                 }
                 if fd_path(fd)
-                    .map(|w| !write_allowed(&matcher, &w))
+                    .map(|w| !permits(&w))
                     // Fail CLOSED: a failed readback of the just-opened fd's real path cannot
                     // prove the open did not escape the allow-set through a final-component
-                    // symlink swap, so refuse the write rather than addfd an unverified fd.
+                    // symlink swap, so refuse rather than addfd an unverified fd.
                     .unwrap_or(true)
                 {
                     unsafe { libc::close(fd) };
@@ -2307,11 +2364,10 @@ pub struct EgressPolicy {
     pub self_proc: BTreeSet<SelfProcFile>,
     pub allow_all: bool,
     pub allow: Vec<String>,
-    /// `Some` ⇒ arm the write broker as THE write-intent authority, enforcing this whole fs
-    /// policy (allow-only base + deny carve-outs). `None` ⇒ no filesystem confinement on this
-    /// launch, so the filter traps no write-intent syscall (the build jail's coarse path, and any
-    /// net-only policy).
-    pub write_policy: Option<FsRuleSet>,
+    /// `Some` ⇒ arm the fs broker as THE authority for the opens it traps, enforcing this whole
+    /// fs policy (allow base + deny carve-outs). `None` ⇒ no filesystem confinement on this
+    /// launch, so the filter traps no fs syscall at all (any net-only policy).
+    pub fs_policy: Option<FsRuleSet>,
     /// `Some` ⇒ a loopback SNI-inspecting egress proxy is running; the connect-notifier redirects
     /// an allowed TCP connect THROUGH it (speaking the cooperative `CONNECT` handshake on the
     /// child's behalf) instead of dialing the destination directly, so per-host precision comes
@@ -2329,7 +2385,24 @@ impl EgressPolicy {
     /// Whether this policy arms the write broker. Governs whether the BPF filter includes the
     /// write-intent dispatch, so a launch that does not confine the filesystem pays nothing.
     fn write_broker(&self) -> bool {
-        self.write_policy.is_some()
+        self.fs_policy.is_some()
+    }
+
+    /// Whether to trap READ-intent opens too. Gated on the policy actually carrying a Deny,
+    /// because that is the only thing Landlock cannot already enforce: with no deny, Landlock's
+    /// allow-only ruleset IS the read answer and every notification would be a round trip to
+    /// reach the same verdict. With one, a read of the denied path is invisible to Landlock and
+    /// this is the only layer that can refuse it.
+    ///
+    /// The cost is real and deliberate — every `openat` in the child becomes a supervisor round
+    /// trip, where a write-only broker trapped almost nothing. That is the price of the `.env*`
+    /// floor meaning anything for reads, which is the direction that matters for a secret.
+    fn read_broker(&self) -> bool {
+        self.fs_policy.as_ref().is_some_and(|set| {
+            set.entries
+                .iter()
+                .any(|rule| rule.effect == crate::policy::Effect::Deny)
+        })
     }
 }
 
@@ -2612,7 +2685,11 @@ pub(super) fn spawn_supervised_with_ready(
 ) -> io::Result<SupervisedChild> {
     // Built in the PARENT and copied into the child by `fork`; the child installs it without
     // allocating. The write-intent dispatch is present only when the policy carries carve-outs.
-    let filter = notifier_program(policy.write_broker(), !policy.self_proc.is_empty());
+    let filter = notifier_program(
+        policy.write_broker(),
+        policy.read_broker(),
+        !policy.self_proc.is_empty(),
+    );
     let state = SupState::new(policy);
     let control = Arc::new(WorkerControl::new()?);
 
@@ -2963,7 +3040,7 @@ mod lifecycle_tests {
             self_proc: BTreeSet::new(),
             allow_all: false,
             allow: vec![host.into()],
-            write_policy: None,
+            fs_policy: None,
             proxy_port: None,
             proxy_token: None,
         }

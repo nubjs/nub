@@ -546,14 +546,20 @@ fn reject_narrowing_grants(plan: &[MountGrant]) -> Result<(), String> {
 /// absent AUTHORED policy path; what reaches here additionally includes the system closure,
 /// which is deliberately distro-spanning (`/libx32`, `/etc/pki`, `/etc/crypto-policies`
 /// exist almost nowhere at once), so refusing on absence would abort every confined run.
-/// The fs policy the supervised WRITE BROKER enforces. The broker performs write-intent opens
-/// from the unrestricted supervisor, so it cannot lean on the child's Landlock ruleset and must
-/// decide writes itself against exactly what Landlock would grant: every write-granting
-/// [`derive_grants`] path (authored `rw`, device nodes, the private tmp) becomes an `Allow(rw)`
-/// rule and its `/**` subtree twin, then the policy's own Deny rules are appended LAST so a
-/// deny-inside-allow carve-out (`.git/hooks`, `.env*`, the policy file) wins by last-match. The
-/// base is `Deny`, so anything Landlock would not write-grant is refused.
-pub(crate) fn write_broker_ruleset(
+/// The fs policy the supervised BROKER enforces. The broker performs the open from the
+/// unrestricted supervisor, so it cannot lean on the child's Landlock ruleset and must decide
+/// itself against exactly what Landlock would grant: every [`derive_grants`] path (authored
+/// grants, the system read closure, device nodes, the private tmp) becomes an `Allow` rule
+/// carrying ITS OWN access and its `/**` subtree twin, then the policy's own Deny rules are
+/// appended LAST so a deny-inside-allow carve-out (`.env*`, the policy file) wins by last-match.
+/// The base is `Deny`, so anything Landlock would not grant is refused.
+///
+/// ONE ruleset serves both directions, which is why read grants are carried rather than skipped
+/// as they were when only writes were brokered: [`super::linux_supervisor::write_allowed`] asks
+/// for an `Allow` whose access grants write, and `read_allowed` asks only for an `Allow`. A
+/// read-only grant therefore answers the write question exactly as its ABSENCE used to — `false`,
+/// via the deny base — so carrying it changes no write decision.
+pub(crate) fn fs_broker_ruleset(
     policy: &SandboxPolicy,
     tmp_dir: Option<&Path>,
     entry_program: Option<&Path>,
@@ -561,15 +567,17 @@ pub(crate) fn write_broker_ruleset(
     use crate::policy::{CanonGlob, Effect, FsAccess, FsOrigin, FsRule, FsRuleSet};
     let mut entries: Vec<FsRule> = Vec::new();
     for grant in derive_grants(policy, tmp_dir, entry_program)? {
-        if !grant.access.grants_write() {
-            continue;
-        }
+        let access = if grant.access.grants_write() {
+            FsAccess::ReadWrite
+        } else {
+            FsAccess::Read
+        };
         let base = grant.path.to_string_lossy().into_owned();
         for pattern in [base.clone(), format!("{}/**", base.trim_end_matches('/'))] {
             entries.push(FsRule {
                 matcher: CanonGlob(pattern),
                 effect: Effect::Allow,
-                access: FsAccess::ReadWrite,
+                access,
                 origin: FsOrigin::Authored,
             });
         }

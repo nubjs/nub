@@ -63,11 +63,14 @@ fn open_path(
         .and_then(|end| std::str::from_utf8(&path[..end]).ok())
         .and_then(metadata_path);
     let Some((file, suffix)) = selected else {
-        // CONTINUE cannot grant a racing replacement path: Landlock remains the
-        // authority for every ordinary open, including all other procfs paths.
-        if state.write_matcher.is_some()
-            && flags.is_none_or(|flags| flags & u64::from(write_open_mask()) != 0)
-        {
+        // Not a self-process metadata path, so this handler has no business deciding it: hand it
+        // back to the fs broker whenever one is armed. CONTINUE here would let the child's own
+        // syscall run and leave Landlock as the only authority — fine for a write-only broker,
+        // because Landlock already refuses every write the policy denies, but WRONG once reads
+        // are brokered: Landlock cannot subtract, so a CONTINUEd read of a denied path inside a
+        // granted tree succeeds. The gate is therefore "is a broker armed", not "does this open
+        // carry write intent".
+        if state.write_matcher.is_some() {
             return false;
         }
         reply_continue(nfd, req.id);

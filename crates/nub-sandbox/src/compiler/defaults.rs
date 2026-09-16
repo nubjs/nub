@@ -1,6 +1,80 @@
 //! Shared compiler defaults: curated environment handling, filesystem subtree
 //! expansion, and compatibility classifiers used by backend controls.
 
+use crate::policy::{CanonGlob, Effect, FsAccess, FsOrigin, FsRule};
+
+/// The secret-FILE deny floor — the ONLY rules a `nub sandbox` policy carries that are not
+/// a positive grant, and the reason the sandbox is described as generous-read-MINUS-SECRETS
+/// rather than generous-read. `.env*` files hold exactly the secrets the env axis scrubs, and
+/// a project-local `.npmrc` can hardcode a registry token inside an ordinary `./` read grant;
+/// a policy that grants the project tree and stops would hand both to the confined command.
+///
+/// The set splits into a LEAF band (the file itself) and a SUBTREE band (`**/.env*/**`, for a
+/// `.env.d/`-style DIRECTORY of per-target secrets; an npmrc is always a file, so it has no
+/// subtree twin). Both are appended as the LAST entries, so under last-match-wins no directory
+/// grant, glob, or even an exact-file allow can reopen them. Each glob carries a rootless twin
+/// for a depth-0 match; canonical candidates are absolute, so `**/…` is the form that bites.
+///
+/// These two arrays are the SINGLE SOURCE OF TRUTH: [`env_deny_leaf_rules`] and
+/// [`env_deny_subtree_rules`] emit them and every consumer derives from them rather than
+/// restating the list, which silently desyncs on the next edit here.
+pub(crate) const ENV_DENY_LEAF_GLOBS: &[&str] = &[
+    "**/.env*",
+    ".env*",
+    "**/.npmrc",
+    ".npmrc",
+    "**/node_modules/npm/npmrc",
+    "node_modules/npm/npmrc",
+];
+pub(crate) const ENV_DENY_SUBTREE_GLOBS: &[&str] = &["**/.env*/**", ".env*/**"];
+
+/// The LEAF secret-file deny entries — the `.env*` / `.npmrc` file itself, matched by
+/// basename at any depth rather than anchored under a root.
+pub(crate) fn env_deny_leaf_rules() -> Vec<FsRule> {
+    ENV_DENY_LEAF_GLOBS
+        .iter()
+        .map(|g| deny_rule((*g).to_string()))
+        .collect()
+}
+
+/// The SUBTREE `.env*` deny entries — the CONTENTS of a `.env*`-named directory. Emitted
+/// LAST so nothing reopens its children.
+pub(crate) fn env_deny_subtree_rules() -> Vec<FsRule> {
+    ENV_DENY_SUBTREE_GLOBS
+        .iter()
+        .map(|g| deny_rule((*g).to_string()))
+        .collect()
+}
+
+/// The policy SOURCE-FILE self-exclusion — an EXACT-path deny on one file the rules were
+/// sourced from, so a confined command can neither read the policy that confines it nor
+/// rewrite it. The caller emits one per `CompileCtx::policy_files` entry.
+///
+/// Canonicalized through the SAME function the matcher runs a candidate through
+/// (`canonicalize_including_nonexistent`) and then slash-normalized, so a grant reaching the
+/// file by a different spelling still lands on this deny and the rule string is byte-identical
+/// to the candidate string. `globset::escape` keeps a metacharacter in a directory segment
+/// (`[id]`) from reading as a glob and dodging the deny.
+pub(crate) fn policy_file_deny_rule(policy_file: &std::path::Path) -> FsRule {
+    let canon = crate::matcher::path::canonicalize_including_nonexistent(policy_file);
+    let normalized = crate::matcher::path::normalize_slashes(&canon.to_string_lossy());
+    FsRule {
+        matcher: CanonGlob(globset::escape(&normalized)),
+        effect: Effect::Deny,
+        access: FsAccess::DENY,
+        origin: FsOrigin::Authored,
+    }
+}
+
+fn deny_rule(glob: String) -> FsRule {
+    FsRule {
+        matcher: CanonGlob(crate::matcher::path::canonicalize_glob_prefix(&glob)),
+        effect: Effect::Deny,
+        access: FsAccess::DENY,
+        origin: FsOrigin::Authored,
+    }
+}
+
 /// Case-insensitive substring test for a secret name-word anywhere in a key. Used by
 /// [`is_npm_config_credential`] for the registry-credential family.
 pub fn word_in_substr(word: &str, key: &str) -> bool {

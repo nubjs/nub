@@ -417,14 +417,14 @@ fn build_supervised_plan(
     } else {
         None
     };
-    // Landlock's allow-only ruleset is authoritative for a positive policy. The expensive
-    // userspace write broker exists solely for legacy explicit deny-inside-allow carve-outs;
-    // arming it for every positive write would trap ordinary filesystem operations and leave
-    // cancellation vulnerable to a deliberately blocking legacy broker operation.
+    // Landlock's allow-only ruleset is authoritative for a purely positive policy, so the
+    // userspace broker arms ONLY for a deny-inside-allow carve-out — the one thing Landlock
+    // cannot express. With no deny, every notification would round-trip to the same verdict
+    // Landlock already reached, so the filter traps nothing and the launch pays nothing.
     let has_explicit_deny = has_explicit_fs_deny(policy);
-    let write_policy = if ruleset.is_some() && has_explicit_deny {
+    let fs_policy = if ruleset.is_some() && has_explicit_deny {
         Some(
-            super::linux_landlock::write_broker_ruleset(policy, tmp_dir, Some(&program_abs))
+            super::linux_landlock::fs_broker_ruleset(policy, tmp_dir, Some(&program_abs))
                 .map_err(|reason| Degradation {
                     lost: vec!["fs".to_string()],
                     reason: Some(reason),
@@ -437,7 +437,7 @@ fn build_supervised_plan(
         egress: super::linux_supervisor::EgressPolicy {
             allow_all,
             allow,
-            write_policy,
+            fs_policy,
             self_proc: policy.fs.self_proc.clone(),
             proxy_port,
             proxy_token: proxy_token.map(str::to_string),
