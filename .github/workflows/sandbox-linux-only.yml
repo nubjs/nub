@@ -58,3 +58,26 @@ jobs:
       # frontend's real behaviour would never run anywhere. Scoped to the one test rather than
       # the whole crate, whose suite is long and unrelated to this branch.
       - run: cargo test --locked -p nub-cli --test sandbox_cmd --no-fail-fast
+
+  # THE OTHER HALF OF THE PLATFORM CLAIM. The sandbox must run on Linux AND must refuse, clearly,
+  # on the two hosts where it cannot enforce — and that refusal had never been executed on Windows
+  # at all. Only the frontend test runs here: nothing else on this branch is platform-dependent,
+  # and nub-cli's full suite is long and unrelated to it.
+  refuses-off-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          shared-key: sandbox-refuses-${{ matrix.os }}
+      - run: cargo test --locked -p nub-cli --test sandbox_cmd --no-fail-fast
