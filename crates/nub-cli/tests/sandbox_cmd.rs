@@ -314,3 +314,54 @@ fn a_wrapped_policy_resolves_its_own_reuse_pointers() {
         String::from_utf8_lossy(&out.stderr),
     );
 }
+
+/// A declared secret's VALUE never reaches the user's terminal — the host drainer scrubs it as it
+/// forwards the child's stdout. The command prints `$NUB_SCRUB_SECRET`, which the child holds
+/// because `secrets` resolved it from nub's ambient env into the child's constructed env. The
+/// assertion is that the surrounding `value=` text survives while the value itself becomes the
+/// token, so a run that merely handed the child an EMPTY var could not pass. Forcing the inherit
+/// path (reverting the drainer) leaks the raw value and turns this RED.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_declared_secret_is_scrubbed_from_the_child_output() {
+    let dir = fixture("scrub");
+    let policy = dir.join("policy.json");
+    std::fs::write(
+        &policy,
+        format!(
+            r#"{{"fs": {{"{}": "rw"}}, "net": false, "secrets": ["NUB_SCRUB_SECRET"]}}"#,
+            dir.display()
+        ),
+    )
+    .unwrap();
+
+    let out = Command::new(nub_binary())
+        .args([
+            "sandbox",
+            "--policy",
+            policy.to_str().unwrap(),
+            "/bin/sh",
+            "-c",
+            "printf 'value=%s\\n' \"$NUB_SCRUB_SECRET\"",
+        ])
+        .current_dir(&dir)
+        .env("NUB_SCRUB_SECRET", "s3cr3t-abc-XYZ")
+        .output()
+        .expect("nub runs");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "the confined command must run:\nstdout:\n{stdout}\nstderr:\n{stderr}",
+    );
+    assert!(
+        stdout.contains("value=[redacted]"),
+        "the secret value must be replaced by the token (the `value=` prefix proves the var was \
+         non-empty):\nstdout:\n{stdout}",
+    );
+    assert!(
+        !stdout.contains("s3cr3t-abc-XYZ"),
+        "the secret value LEAKED into the user's stdout:\nstdout:\n{stdout}",
+    );
+}

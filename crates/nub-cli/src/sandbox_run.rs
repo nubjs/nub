@@ -115,20 +115,36 @@ pub(crate) fn run_confined(policy_path: &Path, argv: &[String]) -> Result<i32> {
     let policy = policy_from(policy_path, &cwd)?;
 
     let sandbox = Sandbox::new(&policy).map_err(|d| refused("cannot acquire the sandbox", &d))?;
+
+    // Scrub declared secret VALUES out of the child's output. `sensitive_keys` names the
+    // secret-classified keys; their values live in `constructed`. A brokered secret is named in
+    // `sensitive_keys` but withheld from `constructed`, so it is correctly absent — the child never
+    // receives its value, so there is nothing in the child's output to scrub for it. An empty value
+    // would match everywhere, so it is dropped.
+    let secret_values: Vec<Vec<u8>> = policy
+        .env
+        .sensitive_keys
+        .iter()
+        .filter_map(|key| policy.env.constructed.get(key))
+        .filter(|value| !value.is_empty())
+        .map(|value| value.clone().into_bytes())
+        .collect();
+    let redact = !secret_values.is_empty();
+
+    // With no secret to scrub, stdio stays INHERITED: the child keeps its TTY, colors, and live
+    // streaming, and the path is byte-for-byte what it was. With secrets, both fds are piped so the
+    // host drainer can see the bytes. Piping REQUIRES that drainer: `redact_stdout(true)` sets
+    // `Stdio::piped()`, and a piped fd nothing reads makes the child block forever once it fills the
+    // pipe buffer. `sandbox_redact::drain_confined` reads both fds on their own threads as it
+    // scrubs, concurrently with `wait()`, so that deadlock cannot form.
+    let mut spec = CommandSpec::new(program.as_str())
+        .args(args.iter().map(String::as_str))
+        .cwd(&cwd);
+    if redact {
+        spec = spec.redact_stdout(true).redact_stderr(true);
+    }
     let prepared = sandbox
-        .prepare(
-            // ⛔ REDACTION IS DELIBERATELY OFF, and turning it on here is a trap I already fell
-            // into. `redact_stdout(true)` sets `Stdio::piped()` so a HOST can drain the child
-            // through a redactor — but `Prepared::status()` only spawns and waits. Nothing reads
-            // those pipes, so the user sees NO output at all, and a command writing more than the
-            // pipe buffer blocks forever against a parent sitting in `wait()`. Inheriting is also
-            // what makes an interactive command work: a TTY, colors, and live streaming. Scrubbing
-            // granted secret VALUES out of the output is worth having, and it needs a drainer that
-            // forwards as it scrubs — its own change, not a flag flipped here.
-            CommandSpec::new(program.as_str())
-                .args(args.iter().map(String::as_str))
-                .cwd(&cwd),
-        )
+        .prepare(spec)
         .map_err(|d| refused("cannot confine this command", &d))?;
 
     // ⛔ A PARTIAL ENFORCEMENT IS A REFUSAL, NOT A WARNING. Running the command with an axis
@@ -146,7 +162,13 @@ pub(crate) fn run_confined(policy_path: &Path, argv: &[String]) -> Result<i32> {
         );
     }
 
-    let status = prepared.status().context("running the confined command")?;
+    let status = if redact {
+        let child = prepared.spawn().context("spawning the confined command")?;
+        crate::sandbox_redact::drain_confined(child, secret_values)
+            .context("running the confined command")?
+    } else {
+        prepared.status().context("running the confined command")?
+    };
     // A signal-terminated child has no code. 128+signo is the shell convention, and inventing a
     // plain 1 here would make "killed" indistinguishable from "exited 1".
     Ok(status.code().unwrap_or_else(|| {
