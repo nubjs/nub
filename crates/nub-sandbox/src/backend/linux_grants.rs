@@ -563,12 +563,20 @@ mod tests {
         assert_eq!(grants[1].access, MountAccess::ReadOnly);
     }
 
+    /// A whole-root grant CARRYING denies now compiles, and this test used to assert the
+    /// opposite. The refusal was correct while Landlock was the only fs authority — its rules
+    /// union, so it cannot subtract from `/`, and the denies would have been silently dropped.
+    /// The supervisor's broker carries them now, and a deny is exactly what arms it, so the
+    /// combination is expressible. ⛔ If the broker ever stops arming on a deny, the refusal has
+    /// to come back or `fs: {"/": "rw"}` silently loses its secret floor.
     #[test]
-    fn whole_root_cannot_promise_deny_exclusions() {
-        assert!(
+    fn whole_root_keeps_its_denies_for_the_broker_to_carry() {
+        let grants =
             compile_mount_plan(&policy(vec![allow("**", FsAccess::Read), deny("/secret")]))
-                .is_err()
-        );
+                .expect("a whole-root grant with denies compiles; the broker enforces the denies");
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].path, PathBuf::from("/"));
+        assert_eq!(grants[0].access, MountAccess::ReadOnly);
     }
 
     #[test]

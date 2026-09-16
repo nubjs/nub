@@ -66,6 +66,13 @@ libc = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 seccompiler = "0.5"
 
+# Integration tests that issue RAW syscalls: the x86_64 legacy entry points a hostile binary
+# would use to walk past a filter matching only the `*at` numbers, and the fd forms of the
+# metadata calls. No safe wrapper reaches either, and `libc` is already a dependency of the
+# crate on this target, so nothing new enters the graph.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 tempfile = "3"
 serde_json = { workspace = true }

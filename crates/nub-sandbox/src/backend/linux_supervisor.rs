@@ -246,13 +246,33 @@ fn write_open_mask() -> u32 {
     (libc::O_WRONLY | libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC) as u32
 }
 
-/// The write-intent syscalls the broker mediates. Notified only when `write_broker` is set
-/// (a policy carries deny/protect carve-outs), so the build jail's write-heavy workload —
-/// which has none — pays nothing. `openat` is notified conditionally on its flags word; the
-/// rest are unconditional. Legacy non-`*at` entry points (`open`/`rename`/…) are not present
-/// on aarch64 and are folded into these on x86_64 by glibc, so the `*at` set is the portable
-/// floor; a production sweep of the remaining x86_64 legacy numbers is tracked in 5.2.
-const WRITE_INTENT_NRS: &[libc::c_long] = &[
+/// The filesystem syscalls the broker mediates, in their `*at` spelling. Notified only when
+/// `write_broker` is set (a policy carries deny carve-outs); `openat` is additionally gated on
+/// its flags word unless reads are brokered too.
+///
+/// THE METADATA HALF IS HERE BECAUSE LANDLOCK HAS NO METADATA HOOK AT ANY ABI. `chmod`,
+/// `chown`, `utimes` and the xattr calls take a PATH and are governed by nothing else, so
+/// before this a confined command could `chmod 0777` any file its uid owns anywhere on the
+/// host — the residual `build_seccomp`'s `deny_metadata` comment names as "the part with
+/// teeth". The ceiling's answer was a blanket EPERM, which a measured matrix falsified (it
+/// breaks 4 of 5 native installs, because node-gyp chmods its own built addon). The broker's
+/// answer is per-path: a chmod inside a write grant runs, one outside it does not, and the
+/// workload that motivated the carve-out is unaffected. That is why `deny_metadata` stays
+/// false for `nub sandbox` — this list supersedes it rather than duplicating it.
+///
+/// The fd forms (`fchmod`, `fchown`, and `utimensat` with a NULL path) carry no path at all,
+/// and the descriptor behind one proves only that an OPEN was allowed: a read-only grant hands
+/// out a read-only fd these would then use to rewrite the file's mode, owner or timestamps.
+/// They are resolved back to a path through `/proc/<tid>/fd/<n>` and judged as the path form.
+///
+/// THE XATTR FAMILY IS DELIBERATELY ABSENT. `build_seccomp`'s `deny_metadata` comment records
+/// the measurement: `user.*` xattrs are inert, and `security.*`/`trusted.*` need a capability
+/// the confined child does not hold, so there is nothing for a rule to protect. Brokering them
+/// would mean copying an arbitrary value blob out of child memory on every call — new unsafe
+/// surface bought for no enforcement. If the posture ever changes, that same comment carries a
+/// blanket ceiling deny already measured safe across five native installs; this is not the
+/// place to add it.
+const FS_INTENT_NRS: &[libc::c_long] = &[
     libc::SYS_openat,
     libc::SYS_openat2,
     libc::SYS_mkdirat,
@@ -262,12 +282,54 @@ const WRITE_INTENT_NRS: &[libc::c_long] = &[
     libc::SYS_renameat,
     libc::SYS_renameat2,
     libc::SYS_truncate,
+    libc::SYS_fchmodat,
+    libc::SYS_fchmod,
+    libc::SYS_utimensat,
+    libc::SYS_fchownat,
+    libc::SYS_fchown,
+    libc::SYS_faccessat,
+    libc::SYS_faccessat2,
 ];
+
+/// The metadata syscalls whose FIRST argument is an open descriptor rather than a directory
+/// fd plus a path. `utimensat` joins them dynamically when its path pointer is NULL — the
+/// `futimens` spelling — which is why the set is consulted alongside a `pa == 0` test rather
+/// than on its own.
+const FD_FORM_NRS: &[libc::c_long] = &[libc::SYS_fchmod, libc::SYS_fchown];
+
+/// ⛔ THE x86_64 LEGACY ENTRY POINTS, AND THEY ARE NOT COSMETIC. A seccomp filter matches a
+/// syscall NUMBER, so a binary that issues `open(2)` rather than `openat(2)` — a static musl
+/// build, a Go runtime, hand-written asm — walked straight past the broker. Landlock does not
+/// cover the gap: it is syscall-agnostic, but it cannot express a DENY at all, so the `.env*`
+/// floor is broker-only and `open("/project/.env", O_RDONLY)` under this number read the
+/// secret while every test stayed green, because Rust and glibc both emit `openat`.
+///
+/// aarch64 has none of these numbers, so the list is empty there.
+#[cfg(target_arch = "x86_64")]
+const FS_INTENT_LEGACY_NRS: &[libc::c_long] = &[
+    libc::SYS_open,
+    libc::SYS_creat,
+    libc::SYS_mkdir,
+    libc::SYS_rmdir,
+    libc::SYS_unlink,
+    libc::SYS_symlink,
+    libc::SYS_link,
+    libc::SYS_rename,
+    libc::SYS_chmod,
+    libc::SYS_chown,
+    libc::SYS_lchown,
+    libc::SYS_access,
+    libc::SYS_utime,
+    libc::SYS_utimes,
+    libc::SYS_futimesat,
+];
+#[cfg(not(target_arch = "x86_64"))]
+const FS_INTENT_LEGACY_NRS: &[libc::c_long] = &[];
 
 /// Build the notifier BPF program. `connect`/`socket`/`send{to,msg,mmsg}` become `USER_NOTIF`;
 /// `io_uring_setup` becomes a scalar `EPERM` (its SQEs never re-enter this filter, so it cannot
 /// be mediated per-op); `read`/`recv{from,msg}` are notified ONLY for descriptors in the DNS
-/// window. When `write_broker` is set, the write-intent syscalls above are also notified —
+/// window. When `write_broker` is set, the fs-intent syscalls above are also notified —
 /// `openat` gated on its flags carrying a write bit — so the deny-inside-allow broker can
 /// mediate them; otherwise those syscalls are never trapped and cost nothing.
 fn notifier_program(
@@ -359,11 +421,21 @@ fn notifier_program(
             } else {
                 "openat_flags"
             },
-            "w_openat",
+            FS_INTENT_LABELS[0],
         ));
-        p.push(Ins::Label("w_openat"));
-        for (i, syscall) in WRITE_INTENT_NRS.iter().enumerate().skip(1) {
-            let after: &'static str = WRITE_INTENT_LABELS[i];
+        p.push(Ins::Label(FS_INTENT_LABELS[0]));
+        // The legacy numbers ride the same chain, and x86_64's `open` is notified
+        // UNCONDITIONALLY rather than through the flags gate: its flags sit at a different
+        // argument index, and a second flags block would buy nothing — the gate only matters
+        // when reads are not brokered, which with the secret floor in place is the
+        // measurement pin and nothing else.
+        for (i, syscall) in FS_INTENT_NRS
+            .iter()
+            .chain(FS_INTENT_LEGACY_NRS)
+            .enumerate()
+            .skip(1)
+        {
+            let after: &'static str = FS_INTENT_LABELS[i];
             p.push(Ins::Jump(jeq, nr(*syscall), "notify", after));
             p.push(Ins::Label(after));
         }
@@ -412,19 +484,17 @@ fn notifier_program(
     assemble(&p)
 }
 
-/// Per-index fall-through labels for [`WRITE_INTENT_NRS`], so the dispatch loop can name the
-/// instruction after each write-intent test without allocating a label string at runtime.
-const WRITE_INTENT_LABELS: &[&str] = &[
-    "w_openat",
-    "w_openat2",
-    "w_mkdirat",
-    "w_unlinkat",
-    "w_symlinkat",
-    "w_linkat",
-    "w_renameat",
-    "w_renameat2",
-    "w_truncate",
+/// Fall-through labels for the fs-intent dispatch chain, indexed rather than named: a parallel
+/// list of hand-written names has to be edited in lockstep with the syscall tables above, and
+/// a desync there silently drops a syscall out of the chain. The const assert below is what
+/// makes the pool large enough a compile error, not a runtime panic.
+const FS_INTENT_LABELS: &[&str] = &[
+    "fs00", "fs01", "fs02", "fs03", "fs04", "fs05", "fs06", "fs07", "fs08", "fs09", "fs10", "fs11",
+    "fs12", "fs13", "fs14", "fs15", "fs16", "fs17", "fs18", "fs19", "fs20", "fs21", "fs22", "fs23",
+    "fs24", "fs25", "fs26", "fs27", "fs28", "fs29", "fs30", "fs31", "fs32", "fs33", "fs34", "fs35",
+    "fs36", "fs37", "fs38", "fs39",
 ];
+const _: () = assert!(FS_INTENT_NRS.len() + FS_INTENT_LEGACY_NRS.len() <= FS_INTENT_LABELS.len());
 
 /// Install a pre-built notifier filter and return the listener descriptor (or `-errno`). The
 /// filter is BUILT IN THE PARENT and passed in by reference: `fork` copies it into the child,
@@ -1218,8 +1288,8 @@ struct OpenHow {
 }
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 
-fn is_write_intent(nr: libc::c_long) -> bool {
-    WRITE_INTENT_NRS.contains(&nr)
+fn is_fs_intent(nr: libc::c_long) -> bool {
+    FS_INTENT_NRS.contains(&nr) || FS_INTENT_LEGACY_NRS.contains(&nr)
 }
 
 /// Whether the fs policy permits a WRITE at `canon` (an absolute canonical path): the last
@@ -1407,10 +1477,85 @@ fn join_full(canon: &[u8], base: &[u8]) -> Vec<u8> {
 /// allowed — perform the operation itself relative to the verified parent, splicing any opened
 /// fd back with `ADDFD`. The child's memory is never consulted after the single read, so there
 /// is nothing to race. Replies to `nfd` itself (errno on denial/failure, value on success).
-fn handle_write_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
-    let nr = req.data.nr as libc::c_long;
-    let a = &req.data.args;
+/// Rewrite an x86_64 legacy entry point as its `*at` sibling, so the resolve / permit / perform
+/// path below is written once. Every fold is an exact re-spelling: `AT_FDCWD` for the implicit
+/// cwd, and the flag word the sibling takes explicitly where the legacy call took it by name
+/// (`rmdir` is `unlinkat(AT_REMOVEDIR)`, `lchown` is `fchownat(AT_SYMLINK_NOFOLLOW)`, `creat`
+/// is the three `open` flags). The time calls are NOT folded — their argument is a different
+/// struct — so they keep their own number and get their own arm.
+#[cfg(target_arch = "x86_64")]
+fn fold_legacy(nr: libc::c_long, a: &[u64; 6]) -> (libc::c_long, [u64; 6]) {
+    let at = libc::AT_FDCWD as u64;
+    match nr {
+        libc::SYS_open => (libc::SYS_openat, [at, a[0], a[1], a[2], 0, 0]),
+        libc::SYS_creat => (
+            libc::SYS_openat,
+            [
+                at,
+                a[0],
+                (libc::O_CREAT | libc::O_WRONLY | libc::O_TRUNC) as u64,
+                a[1],
+                0,
+                0,
+            ],
+        ),
+        libc::SYS_mkdir => (libc::SYS_mkdirat, [at, a[0], a[1], 0, 0, 0]),
+        libc::SYS_rmdir => (
+            libc::SYS_unlinkat,
+            [at, a[0], libc::AT_REMOVEDIR as u64, 0, 0, 0],
+        ),
+        libc::SYS_unlink => (libc::SYS_unlinkat, [at, a[0], 0, 0, 0, 0]),
+        // symlink(target, linkpath) -> symlinkat(target, AT_FDCWD, linkpath).
+        libc::SYS_symlink => (libc::SYS_symlinkat, [a[0], at, a[1], 0, 0, 0]),
+        libc::SYS_link => (libc::SYS_linkat, [at, a[0], at, a[1], 0, 0]),
+        libc::SYS_rename => (libc::SYS_renameat, [at, a[0], at, a[1], 0, 0]),
+        libc::SYS_chmod => (libc::SYS_fchmodat, [at, a[0], a[1], 0, 0, 0]),
+        libc::SYS_chown => (libc::SYS_fchownat, [at, a[0], a[1], a[2], 0, 0]),
+        libc::SYS_lchown => (
+            libc::SYS_fchownat,
+            [at, a[0], a[1], a[2], libc::AT_SYMLINK_NOFOLLOW as u64, 0],
+        ),
+        libc::SYS_access => (libc::SYS_faccessat, [at, a[0], a[1], 0, 0, 0]),
+        _ => (nr, *a),
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn fold_legacy(nr: libc::c_long, a: &[u64; 6]) -> (libc::c_long, [u64; 6]) {
+    (nr, *a)
+}
+
+/// The path a descriptor the CHILD holds currently names, read from the supervisor through
+/// `/proc/<tid>/fd/<n>`. `None` when the descriptor names no filesystem object a policy rule
+/// could be about — an anon inode, a socket, a pipe, a memfd, or a file already unlinked.
+fn child_fd_path(tid: u32, fd: RawFd) -> Option<Vec<u8>> {
+    let link = CString::new(format!("/proc/{tid}/fd/{fd}")).ok()?;
+    let mut buf = vec![0u8; libc::PATH_MAX as usize];
+    let n = unsafe {
+        libc::readlink(
+            link.as_ptr(),
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len() - 1,
+        )
+    };
+    if n < 0 {
+        return None;
+    }
+    let out = buf[..n as usize].to_vec();
+    // procfs spells a vanished or anonymous object as a NON-path: `socket:[…]`,
+    // `anon_inode:…`, or a real path with a ` (deleted)` suffix. Neither is reachable by name,
+    // so no filesystem rule names it either.
+    if out.first() != Some(&b'/') || out.ends_with(b" (deleted)") {
+        return None;
+    }
+    Some(out)
+}
+
+fn handle_fs_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
+    let (nr, folded) = fold_legacy(req.data.nr as libc::c_long, &req.data.args);
+    let a = &folded;
     // Per-syscall argument layout: which args hold (dirfd, path) and the optional second pair.
+    // A `pa` of 0 marks a call carrying an open DESCRIPTOR instead, resolved below.
     let (dfd, pa, dfd2, pa2): (i32, u64, i32, u64) = match nr {
         n if n == libc::SYS_openat => (a[0] as i32, a[1], libc::AT_FDCWD, 0),
         n if n == libc::SYS_openat2 => (a[0] as i32, a[1], libc::AT_FDCWD, 0),
@@ -1422,15 +1567,47 @@ fn handle_write_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
         n if n == libc::SYS_renameat => (a[0] as i32, a[1], a[2] as i32, a[3]),
         n if n == libc::SYS_renameat2 => (a[0] as i32, a[1], a[2] as i32, a[3]),
         n if n == libc::SYS_truncate => (libc::AT_FDCWD, a[0], libc::AT_FDCWD, 0),
+        n if n == libc::SYS_fchmodat
+            || n == libc::SYS_fchownat
+            || n == libc::SYS_utimensat
+            || n == libc::SYS_faccessat
+            || n == libc::SYS_faccessat2 =>
+        {
+            (a[0] as i32, a[1], libc::AT_FDCWD, 0)
+        }
+        // The fd forms: arg 0 is the descriptor, and `pa` of 0 routes it through the readback.
+        n if FD_FORM_NRS.contains(&n) => (libc::AT_FDCWD, 0, libc::AT_FDCWD, 0),
+        #[cfg(target_arch = "x86_64")]
+        n if n == libc::SYS_utime || n == libc::SYS_utimes => {
+            (libc::AT_FDCWD, a[0], libc::AT_FDCWD, 0)
+        }
+        #[cfg(target_arch = "x86_64")]
+        n if n == libc::SYS_futimesat => (a[0] as i32, a[1], libc::AT_FDCWD, 0),
         _ => {
             reply_continue(nfd, req.id);
             return;
         }
     };
 
-    let Some(path) = read_child_str(req.pid, pa, libc::PATH_MAX as usize) else {
-        reply(nfd, req.id, -libc::EFAULT);
-        return;
+    // A descriptor in place of a path: judged — and PERFORMED — on the path the descriptor
+    // currently names. That is TOCTOU-safe in the direction that matters, because a child
+    // racing `dup2` onto the descriptor can only redirect the operation to another path this
+    // broker also approved, never to one it refused. A descriptor naming nothing reachable by
+    // name is refused rather than passed through: `CONTINUE` would hand the kernel the fd
+    // NUMBER back, which the child can still swap.
+    let (dfd, path) = if pa == 0 {
+        let Some(resolved) = child_fd_path(req.pid, a[0] as RawFd) else {
+            suplog!("SUP DENY fd-form nr={nr} fd={} -> EPERM", a[0]);
+            reply(nfd, req.id, -libc::EPERM);
+            return;
+        };
+        (libc::AT_FDCWD, resolved)
+    } else {
+        let Some(path) = read_child_str(req.pid, pa, libc::PATH_MAX as usize) else {
+            reply(nfd, req.id, -libc::EFAULT);
+            return;
+        };
+        (dfd, path)
     };
     let path2 = if pa2 != 0 {
         match read_child_str(req.pid, pa2, libc::PATH_MAX as usize) {
@@ -1489,6 +1666,11 @@ fn handle_write_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
             got != std::mem::size_of::<OpenHow>() as isize
                 || how.flags as u32 & write_open_mask() != 0
         }
+        // `access(W_OK)` asks a write question; `R_OK`/`X_OK`/`F_OK` ask a read one. Judging it
+        // at all is what stops `test -r` reporting a secret-floor file as readable when an
+        // actual open of it would be refused — the answer now comes from the same rule set the
+        // open would consult, so the two can no longer disagree.
+        n if n == libc::SYS_faccessat || n == libc::SYS_faccessat2 => a[2] as i32 & libc::W_OK != 0,
         _ => true,
     };
     // A RE-OPEN of a descriptor the child already holds — `/proc/self/fd/<n>`, which
@@ -1503,13 +1685,17 @@ fn handle_write_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
     // descriptor was opened with, and for a regular file Landlock would judge that against the
     // underlying path where this does not. Narrow, and the alternative is refusing an fd the
     // child demonstrably already has.
-    let own_fd_dir = format!("/proc/{}/fd", tgid_of(req.pid)).into_bytes();
+    // Both spellings the child can use for its OWN descriptor directory. `resolve_parent`
+    // rewrites `/proc/self/` to the notification's tid, and a child naming its tgid outright
+    // reaches the same place; every OTHER pid stays a policy question, which is what keeps this
+    // from becoming a way to read another process's descriptors.
+    let own_fd_dirs = [
+        format!("/proc/{}/fd", req.pid).into_bytes(),
+        format!("/proc/{}/fd", tgid_of(req.pid)).into_bytes(),
+    ];
     // The one policy predicate for this notification, so the pre-check and the post-open
     // readback below cannot drift into judging the same op two different ways.
     let permits = |canon: &[u8]| {
-        if canon.starts_with(&own_fd_dir) {
-            return true;
-        }
         if wants_write {
             write_allowed(&matcher, canon)
         } else {
@@ -1538,7 +1724,19 @@ fn handle_write_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
         };
         pfd = p;
         let full = join_full(&canon, &base);
-        if !permits(&full) {
+        // A RE-OPEN of a descriptor the child already holds is not a location, so the policy
+        // has nothing to say about it — neither here nor at the readback below. Whatever the
+        // descriptor points at, the child has it open already and re-opening reaches nothing
+        // new. The readback half is the one that matters in practice: the sealed CA-bundle
+        // memfd reads back as `/memfd:… (deleted)`, which no fs rule can ever name, so a
+        // policy check there refuses the one fd the supervisor deliberately handed over.
+        //
+        // ⚠️ RESIDUAL, stated rather than hidden: a re-open may request a wider access MODE
+        // than the descriptor was opened with, and for a regular file Landlock would judge that
+        // against the underlying path where this does not. Narrow, and the alternative is
+        // refusing an fd the child demonstrably already has.
+        let own_fd = own_fd_dirs.iter().any(|dir| full.starts_with(dir));
+        if !own_fd && !permits(&full) {
             suplog!(
                 "SUP DENY {} {} -> EPERM",
                 if wants_write { "write" } else { "read" },
@@ -1610,12 +1808,13 @@ fn handle_write_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
                     err = errno();
                     break 'act;
                 }
-                if fd_path(fd)
-                    .map(|w| !permits(&w))
-                    // Fail CLOSED: a failed readback of the just-opened fd's real path cannot
-                    // prove the open did not escape the allow-set through a final-component
-                    // symlink swap, so refuse rather than addfd an unverified fd.
-                    .unwrap_or(true)
+                if !own_fd
+                    && fd_path(fd)
+                        .map(|w| !permits(&w))
+                        // Fail CLOSED: a failed readback of the just-opened fd's real path
+                        // cannot prove the open did not escape the allow-set through a
+                        // final-component symlink swap, so refuse rather than addfd it.
+                        .unwrap_or(true)
                 {
                     unsafe { libc::close(fd) };
                     err = libc::EPERM;
@@ -1653,12 +1852,13 @@ fn handle_write_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
                     err = errno();
                     break 'act;
                 }
-                if fd_path(fd)
-                    .map(|w| !permits(&w))
-                    // Fail CLOSED: a failed readback of the just-opened fd's real path cannot
-                    // prove the open did not escape the allow-set through a final-component
-                    // symlink swap, so refuse rather than addfd an unverified fd.
-                    .unwrap_or(true)
+                if !own_fd
+                    && fd_path(fd)
+                        .map(|w| !permits(&w))
+                        // Fail CLOSED: a failed readback of the just-opened fd's real path
+                        // cannot prove the open did not escape the allow-set through a
+                        // final-component symlink swap, so refuse rather than addfd it.
+                        .unwrap_or(true)
                 {
                     unsafe { libc::close(fd) };
                     err = libc::EPERM;
@@ -1732,12 +1932,13 @@ fn handle_write_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
                     err = errno();
                     break 'act;
                 }
-                if fd_path(fd)
-                    .map(|w| !permits(&w))
-                    // Fail CLOSED: a failed readback of the just-opened fd's real path cannot
-                    // prove the open did not escape the allow-set through a final-component
-                    // symlink swap, so refuse rather than addfd an unverified fd.
-                    .unwrap_or(true)
+                if !own_fd
+                    && fd_path(fd)
+                        .map(|w| !permits(&w))
+                        // Fail CLOSED: a failed readback of the just-opened fd's real path
+                        // cannot prove the open did not escape the allow-set through a
+                        // final-component symlink swap, so refuse rather than addfd it.
+                        .unwrap_or(true)
                 {
                     unsafe { libc::close(fd) };
                     err = libc::EPERM;
@@ -1747,6 +1948,128 @@ fn handle_write_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
                     err = errno();
                 }
                 unsafe { libc::close(fd) };
+            }
+            // ---- the metadata arms: Landlock has no hook for any of these at any ABI ----
+            // All of them perform against the PINNED parent fd and the verified final
+            // component, so the path the policy approved is the path that gets mutated.
+            n if n == libc::SYS_fchmodat || n == libc::SYS_fchmod => {
+                // `fchmodat`'s flag word is dropped deliberately: the kernel's fchmodat takes
+                // no `AT_SYMLINK_NOFOLLOW` (glibc emulates it through /proc), and following the
+                // final symlink is what the unflagged call already does.
+                let mode = if nr == libc::SYS_fchmod { a[1] } else { a[2] } as libc::mode_t;
+                if unsafe { libc::fchmodat(pfd, cstr(&base).as_ptr(), mode, 0) } < 0 {
+                    err = errno();
+                }
+            }
+            n if n == libc::SYS_fchownat || n == libc::SYS_fchown => {
+                let (uid, gid, flags) = if nr == libc::SYS_fchown {
+                    (a[1] as libc::uid_t, a[2] as libc::gid_t, 0)
+                } else {
+                    (a[2] as libc::uid_t, a[3] as libc::gid_t, a[4] as i32)
+                };
+                if unsafe { libc::fchownat(pfd, cstr(&base).as_ptr(), uid, gid, flags) } < 0 {
+                    err = errno();
+                }
+            }
+            n if n == libc::SYS_utimensat => {
+                // The `timespec[2]` lives in CHILD memory, so it is copied across before the
+                // call; a NULL pointer means "now" and is passed through as NULL.
+                let mut ts = [libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                }; 2];
+                if a[2] != 0 {
+                    let got = unsafe {
+                        read_child_mem(
+                            req.pid,
+                            a[2],
+                            std::slice::from_raw_parts_mut(
+                                ts.as_mut_ptr() as *mut u8,
+                                std::mem::size_of_val(&ts),
+                            ),
+                        )
+                    };
+                    if got != std::mem::size_of_val(&ts) as isize {
+                        err = libc::EFAULT;
+                        break 'act;
+                    }
+                }
+                let times = if a[2] == 0 {
+                    std::ptr::null()
+                } else {
+                    ts.as_ptr()
+                };
+                if unsafe { libc::utimensat(pfd, cstr(&base).as_ptr(), times, a[3] as i32) } < 0 {
+                    err = errno();
+                }
+            }
+            // x86_64's three pre-`utimensat` spellings, which carry a `utimbuf` or a
+            // `timeval[2]` rather than a `timespec[2]`. Converted here instead of folded, since
+            // a fold cannot change the shape of the struct the child wrote.
+            #[cfg(target_arch = "x86_64")]
+            n if n == libc::SYS_utime || n == libc::SYS_utimes || n == libc::SYS_futimesat => {
+                let times_ptr = if n == libc::SYS_futimesat { a[2] } else { a[1] };
+                let mut ts = [libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                }; 2];
+                if times_ptr != 0 {
+                    let mut raw = [0i64; 4];
+                    let want = if n == libc::SYS_utime { 16 } else { 32 };
+                    let got = unsafe {
+                        read_child_mem(
+                            req.pid,
+                            times_ptr,
+                            std::slice::from_raw_parts_mut(raw.as_mut_ptr() as *mut u8, want),
+                        )
+                    };
+                    if got != want as isize {
+                        err = libc::EFAULT;
+                        break 'act;
+                    }
+                    if n == libc::SYS_utime {
+                        // struct utimbuf { time_t actime; time_t modtime; }
+                        ts[0].tv_sec = raw[0];
+                        ts[1].tv_sec = raw[1];
+                    } else {
+                        // struct timeval[2] { time_t tv_sec; suseconds_t tv_usec; }
+                        ts[0].tv_sec = raw[0];
+                        ts[0].tv_nsec = raw[1] * 1000;
+                        ts[1].tv_sec = raw[2];
+                        ts[1].tv_nsec = raw[3] * 1000;
+                    }
+                }
+                let times = if times_ptr == 0 {
+                    std::ptr::null()
+                } else {
+                    ts.as_ptr()
+                };
+                if unsafe { libc::utimensat(pfd, cstr(&base).as_ptr(), times, 0) } < 0 {
+                    err = errno();
+                }
+            }
+            n if n == libc::SYS_faccessat || n == libc::SYS_faccessat2 => {
+                // Answered from the real filesystem once the policy has allowed the question,
+                // so a granted-but-genuinely-unreadable file still reports EACCES. The
+                // supervisor runs as the same uid as the child, so the kernel's answer is the
+                // child's answer. `faccessat2`'s flag word is honoured; `faccessat` has none.
+                let flags = if nr == libc::SYS_faccessat2 {
+                    a[3] as i32
+                } else {
+                    0
+                };
+                if unsafe {
+                    libc::syscall(
+                        libc::SYS_faccessat2,
+                        pfd,
+                        cstr(&base).as_ptr(),
+                        a[2] as i32,
+                        flags,
+                    )
+                } < 0
+                {
+                    err = errno();
+                }
             }
             _ => {}
         }
@@ -1958,8 +2281,8 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
         // Write-intent syscalls: the deny-inside-allow broker. Only reached when the filter was
         // built with the write branch (a policy carried carve-outs), so this is inert for the
         // build jail.
-        if is_write_intent(nr) {
-            handle_write_intent(&state, nfd, &req);
+        if is_fs_intent(nr) {
+            handle_fs_intent(&state, nfd, &req);
             continue;
         }
 
