@@ -801,12 +801,6 @@ fn run_lfs_with_runtime(control: Control, mut runtime: Vec<PathBuf>) {
             let output = invoke(root.path(), &clone, &args, control, policy.as_ref(), &[]);
             eprintln!("LFS_HOOK_DIAGNOSTIC {args:?} {output:?}");
         }
-        #[cfg(windows)]
-        if std::env::var_os("NUB_NATIVE_EMBEDDED_ADAPTER").is_some()
-            && let Some(policy) = policy.as_ref()
-        {
-            lfs_hook_startup_ladder(root.path(), &clone, policy);
-        }
     }
     assert_success("push LFS object", pushed);
     let consumer = project.join("lfs-consumer");

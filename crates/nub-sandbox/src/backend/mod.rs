@@ -960,14 +960,6 @@ fn start_session_proxy(
     policy: &SandboxPolicy,
     runtime_brokers: Vec<RuntimeCredentialBroker>,
 ) -> Result<Option<SessionProxy>, Degradation> {
-    start_proxy_if_needed(policy, runtime_brokers)
-}
-
-#[cfg(not(windows))]
-fn start_proxy_if_needed(
-    policy: &SandboxPolicy,
-    runtime_brokers: Vec<RuntimeCredentialBroker>,
-) -> Result<Option<EgressProxy>, Degradation> {
     proxy_context(policy, runtime_brokers)?
         .map(|context| {
             context.start().map_err(|error| Degradation {

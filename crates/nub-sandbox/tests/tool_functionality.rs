@@ -650,6 +650,8 @@ fn run_self_proc_tool_control(name: &str, tooldirs: bool, unconfined: bool, samp
     run_retained_tool_control(name, tooldirs, unconfined, sample);
 }
 
+// Linux-only, like every caller: the sandbox runs nowhere else.
+#[cfg(target_os = "linux")]
 fn run_retained_tool_control(name: &str, tooldirs: bool, unconfined: bool, sample: Option<usize>) {
     let tools = tools();
     let tool = tools.iter().find(|tool| tool.name == name).unwrap();
@@ -773,20 +775,20 @@ fn run_retained_tool_control(name: &str, tooldirs: bool, unconfined: bool, sampl
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "requires pinned Bun versions; full sequence with cache-parent control"]
 fn unix_bun132_retained_bundle() {
     run_retained_tool_control("bun132", true, false, None);
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "requires pinned Bun versions; full sequence with cache-parent control"]
 fn unix_bun140_retained_bundle() {
     run_retained_tool_control("bun140", true, false, None);
 }
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn bun_shared_cache_control(name: &str, host_tmp: bool) {
     if host_tmp {
         assert_eq!(
@@ -897,21 +899,21 @@ fn bun_shared_cache_control(name: &str, host_tmp: bool) {
     sandbox.close();
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "requires pinned Bun; populated shared-cache enforcement control"]
 fn unix_bun132_shared_cache_is_not_writable() {
     bun_shared_cache_control("bun132", false);
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "requires pinned Bun; populated shared-cache enforcement control"]
 fn unix_bun140_shared_cache_is_not_writable() {
     bun_shared_cache_control("bun140", false);
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "requires pinned Bun on disposable CI: removes the user's host bunx caches"]
 fn unix_bun132_explicit_host_temp_cache_cleanup() {

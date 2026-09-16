@@ -636,10 +636,6 @@ fn run_case(name: &str, tooldirs: Option<bool>) {
         assert!(!String::from_utf8_lossy(&output.stdout).contains("WITHHELD"));
         eprintln!("NATIVE_CANARY_DENIED {output:?}");
     }
-    #[cfg(windows)]
-    if name == "cargo" && std::env::var_os("NUB_SANDBOX_TOOL_MSYS_ROOT").is_some() {
-        msys_execution_count(root.path(), &env, tooldirs);
-    }
     operations(name, &tool, root.path(), &env, policy.as_ref());
 }
 
