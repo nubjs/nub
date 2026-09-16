@@ -137,17 +137,10 @@ pub(super) const ESSENTIAL_READ_PATHS: &[&str] = &[
 ];
 
 pub(crate) struct LinuxPreflight {
-    /// Set when confinement is required but the Landlock build-jail mechanism was NOT selected.
-    /// [`apply`] launches this arm through the seccomp `USER_NOTIF` supervisor. Distinct from
-    /// "no confinement at all", which leaves both this and `landlock` unset.
+    /// Whether this policy confines anything at all. Set ⇒ [`apply`] launches it through the
+    /// seccomp `USER_NOTIF` supervisor, which is now the only arm; unset ⇒ the policy enforces no
+    /// axis and the child runs plain.
     confine_without_landlock: bool,
-    /// Set when the Landlock build-jail mechanism was selected. It needs no runtime image or
-    /// namespace; other constrained policies use the supervised arm above.
-    landlock: Option<LandlockPreflight>,
-}
-
-struct LandlockPreflight {
-    abi: u32,
 }
 
 /// Filesystem objects captured when a reusable sandbox is acquired.
@@ -180,59 +173,17 @@ pub(crate) fn preflight(
         reason: Some(reason),
     })?;
     let confine_fs = fs_confines(&policy.fs);
-    if !policy.fs.self_proc.is_empty() {
-        if std::env::var("NUB_SANDBOX_MECHANISM").as_deref() == Ok("landlock") {
-            return Err(Degradation {
-                lost: vec!["fs-self-proc".into()],
-                reason: Some("self-process metadata requires the seccomp supervisor, not the Landlock build-jail arm".into()),
-            });
-        }
-        return Ok(LinuxPreflight {
-            confine_without_landlock: true,
-            landlock: None,
-        });
-    }
     let sandboxing =
         confine_fs || policy.net.enforce || policy.env.enforce || policy.fs.tmp != TmpMode::Shared;
-    if !sandboxing {
-        return Ok(LinuxPreflight {
-            confine_without_landlock: false,
-            landlock: None,
-        });
-    }
-    // THE BUILD JAIL'S ONLY MECHANISM. There is no bubblewrap arm below this for a build-jail
-    // policy — bubblewrap needs a user namespace, which is not universally available
-    // unprivileged, and universal unprivileged operation is what defines this product.
-    // Landlock or nothing, decided here and nowhere else.
-    match super::linux_landlock::landlock_availability(policy) {
-        Ok(abi) => {
-            return Ok(LinuxPreflight {
-                confine_without_landlock: false,
-                landlock: Some(LandlockPreflight { abi }),
-            });
-        }
-        // Fail closed on unavailable confinement. The historical differential pin now
-        // selects the unprivileged supervisor, never the removed bubblewrap backend.
-        Err(super::linux_landlock::LandlockUnavailable::PinnedToBubblewrap) => {}
-        Err(super::linux_landlock::LandlockUnavailable::NotPinnedToLandlock) => {}
-        Err(reason) => {
-            return Err(Degradation {
-                lost: vec!["fs".to_string(), "net".to_string()],
-                reason: Some(format!(
-                    "the dependency build jail requires Landlock ABI 3+ (introduced in Linux \
-                     6.2) for complete filesystem enforcement, which this kernel does not \
-                     provide: {reason:?}"
-                )),
-            });
-        }
-    }
-    // The bubblewrap backend that confined every non-Landlock policy was removed with the
-    // curated zero-privilege import (epic 1.1). The two arms that fall through here — a policy
-    // pinned away from Landlock, and one that is not a build jail — are enforced by the
-    // seccomp `USER_NOTIF` supervisor in `apply`.
+    // ONE ARM, and the choice that used to be made here is gone with the build jail. A STANDALONE
+    // Landlock launch — a ruleset and no supervisor — was the build jail's only mechanism, and
+    // nothing has selected it since: it can express no deny, so a `nub sandbox` policy routed
+    // there would have enforced the grants while silently dropping the secret floor. Landlock is
+    // still very much alive underneath, as the COMPOSED coarse layer the supervised child
+    // `restrict_self`s (`build_supervised_plan` -> `SupervisedPlan::ruleset`); what died is the
+    // idea that it could stand on its own.
     Ok(LinuxPreflight {
-        confine_without_landlock: true,
-        landlock: None,
+        confine_without_landlock: sandboxing,
     })
 }
 
@@ -258,9 +209,6 @@ pub fn apply(
     preflight: LinuxPreflight,
     proxy: ProxyAttachment<'_>,
 ) -> Result<Prepared, Degradation> {
-    if let Some(landlock) = preflight.landlock {
-        return apply_landlock(policy, spec, landlock, tmp_dir, retained);
-    }
     if preflight.confine_without_landlock {
         // The supervised (seccomp USER_NOTIF) launch — a policy that needs confinement but is not
         // a build-jail Landlock policy. NET is transparent per-host egress through the in-process
@@ -457,14 +405,15 @@ fn build_supervised_plan(
         // hypervisor over AF_VSOCK, or a raw socket, bypassing the per-host net policy entirely.
         // Install the SAME ceiling the Landlock build-jail path uses: it denies every non-IP
         // family (lifting only AF_INET/AF_INET6 when the policy admits IP egress) and blocks all
-        // three io_uring entry points so a socket cannot be created off the filter. `deny_metadata`
-        // stays false here — `nub sandbox` runs user-chosen commands where a refused chown would
-        // surprise; the socket ceiling and the keyring deny are the egress-relevant halves.
+        // three io_uring entry points so a socket cannot be created off the filter. The metadata
+        // half of the ceiling went with the standalone arm: a BLANKET `chmod`/`utimensat` deny
+        // was measured to break 4 of 5 native installs (node-gyp chmods its own built addon from
+        // inside a make recipe), and the supervisor's broker now refuses those PER PATH instead —
+        // see `FS_INTENT_NRS`, which carries the measurement.
         seccomp_ceiling: build_seccomp(
             net.enforce,
             ip_egress_for(net),
             protects_ambient_credentials(policy),
-            false,
             false,
         )
         .map_err(|reason| Degradation {
@@ -521,16 +470,6 @@ struct SandboxSyscalls {
     keyctl: i64,
     add_key: i64,
     request_key: i64,
-    setxattr: i64,
-    lsetxattr: i64,
-    removexattr: i64,
-    lremovexattr: i64,
-    fchownat: i64,
-    /// x86_64 keeps the legacy path-based `chown`/`lchown`; arm64's generic syscall ABI
-    /// dropped them, leaving `fchownat` as glibc's only path-form entry point — hence
-    /// `None` there rather than a number that does not exist.
-    chown: Option<i64>,
-    lchown: Option<i64>,
 }
 
 #[cfg(test)]
@@ -546,13 +485,6 @@ impl Default for SandboxSyscalls {
             keyctl: 250,
             add_key: 248,
             request_key: 249,
-            setxattr: 188,
-            lsetxattr: 189,
-            removexattr: 197,
-            lremovexattr: 198,
-            fchownat: 260,
-            chown: Some(92),
-            lchown: Some(94),
         }
     }
 }
@@ -580,9 +512,8 @@ pub(super) fn build_seccomp(
     ip_egress: IpEgress,
     deny_keyring: bool,
     permit_keyring_join: bool,
-    deny_metadata: bool,
 ) -> Result<Option<BpfProgram>, String> {
-    if !restrict_network && !deny_keyring && !deny_metadata {
+    if !restrict_network && !deny_keyring {
         return Ok(None);
     }
     let arch = TargetArch::try_from(std::env::consts::ARCH)
@@ -593,7 +524,6 @@ pub(super) fn build_seccomp(
         ip_egress,
         deny_keyring,
         permit_keyring_join,
-        deny_metadata,
         SandboxSyscalls {
             socket: libc::SYS_socket,
             io_uring_setup: libc::SYS_io_uring_setup,
@@ -602,19 +532,6 @@ pub(super) fn build_seccomp(
             keyctl: libc::SYS_keyctl,
             add_key: libc::SYS_add_key,
             request_key: libc::SYS_request_key,
-            setxattr: libc::SYS_setxattr,
-            lsetxattr: libc::SYS_lsetxattr,
-            removexattr: libc::SYS_removexattr,
-            lremovexattr: libc::SYS_lremovexattr,
-            fchownat: libc::SYS_fchownat,
-            #[cfg(target_arch = "x86_64")]
-            chown: Some(libc::SYS_chown),
-            #[cfg(not(target_arch = "x86_64"))]
-            chown: None,
-            #[cfg(target_arch = "x86_64")]
-            lchown: Some(libc::SYS_lchown),
-            #[cfg(not(target_arch = "x86_64"))]
-            lchown: None,
         },
     )
     .map(Some)
@@ -626,7 +543,6 @@ fn build_seccomp_for(
     ip_egress: IpEgress,
     deny_keyring: bool,
     permit_keyring_join: bool,
-    deny_metadata: bool,
     syscalls: SandboxSyscalls,
 ) -> Result<BpfProgram, String> {
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
@@ -740,48 +656,6 @@ fn build_seccomp_for(
         }
     }
 
-    if deny_metadata {
-        // Landlock has no metadata hook at ANY ABI, so ownership and xattr rewriting is
-        // otherwise unmediated here — see `drop_all_capabilities`, which handles the
-        // capability half of the same problem. seccomp is the only other lever without a
-        // mount namespace, and this is the subset of it that costs nothing.
-        //
-        // WHAT IS ABSENT MATTERS MORE THAN WHAT IS PRESENT. A denial matrix over five real
-        // native installs (better-sqlite3, sqlite3, esbuild, simple-git-hooks, bufferutil)
-        // on kernel 6.8 found these two families free at BOTH uid 1000 and root, while:
-        //   - `chmod`/`fchmodat` breaks 4 of 5 with EPERM — node-gyp chmods the built addon
-        //     from inside a make recipe, so denying it kills every from-source build.
-        //   - `utimensat` breaks sqlite3 and bufferutil, in either the path or the fd form.
-        // Both were proposed off an strace showing zero calls and falsified by actually
-        // denying them. Anything added here needs that matrix re-run, not a trace.
-        //
-        // The fd forms (`fchown`, `fsetxattr`) are deliberately absent. As root, node-tar's
-        // `preserveOwner` flips on and the extractors chown heavily through them; the path
-        // forms below are attempted too (6 `fchownat` calls in a cold-cache root install of
-        // sqlite3) but every one is best-effort and swallowed, so EPERM there costs nothing
-        // while EPERM on the fd form is untested and needlessly risks a root regression.
-        //
-        // Honest value: these two families are safe to deny because nothing uses them, and
-        // nothing uses them because they achieve little — chown to another uid already fails
-        // under DAC, and `user.*` xattrs are inert. This narrows the metadata surface; the
-        // residual it leaves (host-wide `chmod` on anything the jailed uid owns, plus
-        // arbitrary mtime rewriting) is the part with teeth, and it survives intact.
-        // See wiki/design/build-jail-linux.md.
-        for syscall in [
-            syscalls.setxattr,
-            syscalls.lsetxattr,
-            syscalls.removexattr,
-            syscalls.lremovexattr,
-            syscalls.fchownat,
-        ]
-        .into_iter()
-        .chain(syscalls.chown)
-        .chain(syscalls.lchown)
-        {
-            rules.insert(syscall, Vec::new());
-        }
-    }
-
     let program = SeccompFilter::new(
         rules,
         SeccompAction::Allow,
@@ -873,85 +747,6 @@ pub(super) fn prepend_x86_64_unsupported_abi_guard(
     Ok(guarded)
 }
 
-fn apply_landlock(
-    policy: &SandboxPolicy,
-    spec: CommandSpec,
-    plan: LandlockPreflight,
-    tmp_dir: Option<&Path>,
-    retained: &RetainedLinuxGrants,
-) -> Result<Prepared, Degradation> {
-    let seccomp = build_seccomp(
-        policy.net.enforce,
-        ip_egress_for(&policy.net),
-        protects_ambient_credentials(policy),
-        false,
-        // Metadata denial is scoped to THIS backend, which is the build jail's only
-        // mechanism. `nub sandbox` runs commands the user chose, where a refused chown
-        // would be a surprise; a dependency's install script has no comparable claim.
-        true,
-    )
-    .map_err(|reason| Degradation {
-        lost: vec!["net".to_string()],
-        reason: Some(reason),
-    })?;
-
-    let mut command = base_command(&spec, policy);
-    // No mount namespace means no `/tmp` rebind, so the child is pointed at the per-run
-    // scratch dir by its real host path instead.
-    if let Some(tmp) = tmp_dir {
-        command.env("TMPDIR", tmp);
-    }
-    // Resolve the entry program the same way the bubblewrap path does, so it can be granted
-    // in its own right even when it lives outside the system read floor.
-    let child_cwd = spec
-        .cwd
-        .clone()
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("/"));
-    let entry_program = resolve_program(&spec.program, &child_cwd, target_path(policy).as_deref());
-
-    let (command, ruleset) = super::linux_landlock::prepare_launch(
-        policy,
-        command,
-        seccomp,
-        tmp_dir,
-        entry_program.as_deref(),
-        &retained.0,
-    )
-    .map_err(|reason| Degradation {
-        lost: vec!["fs".to_string()],
-        reason: Some(reason),
-    })?;
-
-    tracing::debug!(
-        abi = plan.abi,
-        rules = ruleset.rules_added,
-        "confining lifecycle spawn with landlock"
-    );
-
-    Ok(Prepared {
-        command,
-        // Fully enforced, and the per-package boolean is what "fully" means on this axis — see
-        // the fn doc. NOT reported as a lost `net-per-host`: the catalog's documented contract
-        // IS the boolean (`data/build-jail-catalog.json` `enforcementStatus`), so there is no
-        // host-granularity promise to fall short of, and a per-spawn "reduced mode" warning on
-        // every one of the 181 granted packages would be noise asserting something false.
-        degradation: Degradation::full(),
-        proxy: None,
-        session: None,
-        // Holds the ruleset descriptor open until the child is spawned; `pre_exec` consumes
-        // it after fork, so dropping it any earlier would leave the hook restricting nothing.
-        _inherited_files: vec![std::fs::File::from(ruleset.into_fd())],
-        // The Landlock hook makes the child a session leader, so its descendants are
-        // reachable as a process group — this path's only handle on them.
-        signal_process_group: true,
-        _private_tmp: None,
-        redact_stdout: false,
-        redact_stderr: false,
-        supervised: None,
-    })
-}
-
 /// The socket ceiling the compiled net axis asks for, read out of the IR.
 ///
 /// An Allow rule IS the catalog verdict: `build_jail_net` emits a catch-all `["*"]` for a package
@@ -1026,6 +821,7 @@ mod tests {
     /// container and on a CI runner, where file mode blocks nothing.
     ///
     /// Asserted as coverage rather than as a literal list copy, so it pins the CONTRACT and
+
     /// not the spelling: reordering or adding a genuinely-essential path keeps it green.
     #[test]
     fn the_essential_read_floor_excludes_the_credential_surface_it_used_to_mount() {
@@ -1062,6 +858,37 @@ mod tests {
         ] {
             assert!(!covered(withheld), "the floor must not mount {withheld}");
         }
+    }
+
+    /// THERE IS ONE ARM, and this pins it. A standalone Landlock launch — a ruleset and no
+    /// supervisor — was the build jail's only mechanism, and Landlock can express no deny: a
+    /// `nub sandbox` policy routed there would enforce the grants while silently dropping the
+    /// secret floor, which reads as confinement and is not. The two tests this replaces asserted
+    /// that the old SELECTOR refused such a policy; with the selector gone, the honest assertion
+    /// is that every confining policy reaches the supervisor and a relaxed one reaches nothing.
+    #[test]
+    fn every_confining_policy_routes_to_the_supervisor() {
+        let spec = CommandSpec::new(std::path::PathBuf::from("/bin/true"));
+        let mut policy = SandboxPolicy::default();
+        assert!(
+            !preflight(&policy, &spec)
+                .expect("a relaxed policy preflights")
+                .confine_without_landlock,
+            "a policy that enforces no axis must run the child plain",
+        );
+        policy.net.enforce = true;
+        policy.fs.rules.entries.push(FsRule {
+            matcher: CanonGlob("/project/secret".to_string()),
+            effect: Effect::Deny,
+            access: FsAccess::DENY,
+            origin: FsOrigin::Authored,
+        });
+        assert!(
+            preflight(&policy, &spec)
+                .expect("a confining policy preflights")
+                .confine_without_landlock,
+            "a deny-carrying policy must reach the supervised arm, not be refused",
+        );
     }
 
     #[test]
@@ -1179,7 +1006,6 @@ mod tests {
             IpEgress::Denied,
             true,
             false,
-            false,
             SandboxSyscalls {
                 socket: i64::from(X86_64_SOCKET),
                 io_uring_setup: i64::from(IO_URING_SETUP),
@@ -1253,7 +1079,6 @@ mod tests {
                 IpEgress::Denied,
                 true,
                 false,
-                false,
                 SandboxSyscalls {
                     socket: i64::from(GENERIC_SOCKET),
                     io_uring_setup: i64::from(IO_URING_SETUP),
@@ -1318,7 +1143,7 @@ mod tests {
         let killed = u32::from(SeccompAction::KillProcess);
 
         assert!(
-            build_seccomp(false, IpEgress::Denied, false, false, false)
+            build_seccomp(false, IpEgress::Denied, false, false)
                 .unwrap()
                 .is_none()
         );
@@ -1329,7 +1154,6 @@ mod tests {
                 IpEgress::Denied,
                 keyring,
                 permit_join,
-                false,
                 SandboxSyscalls {
                     socket: SOCKET,
                     io_uring_setup: IO_URING_SETUP,
@@ -1478,7 +1302,6 @@ mod tests {
             IpEgress::Permitted,
             false,
             false,
-            false,
             syscalls(),
         )
         .unwrap();
@@ -1486,7 +1309,6 @@ mod tests {
             TargetArch::x86_64,
             true,
             IpEgress::Denied,
-            false,
             false,
             false,
             syscalls(),
@@ -1607,7 +1429,7 @@ mod tests {
             }
         }
 
-        let program = build_seccomp(true, IpEgress::Denied, false, false, false)
+        let program = build_seccomp(true, IpEgress::Denied, false, false)
             .unwrap()
             .unwrap();
         let child = unsafe { libc::fork() };

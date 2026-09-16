@@ -10,7 +10,6 @@ use crate::policy::SandboxPolicy;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 const SYS_LANDLOCK_CREATE_RULESET: libc::c_long = 444;
 const SYS_LANDLOCK_ADD_RULE: libc::c_long = 445;
@@ -317,18 +316,11 @@ struct PathBeneathAttr {
 #[derive(Debug)]
 pub(crate) struct LandlockRuleset {
     fd: OwnedFd,
-    pub(crate) rules_added: usize,
 }
 
 impl LandlockRuleset {
     pub(crate) fn as_raw_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
-    }
-
-    /// Surrender the descriptor to the caller, which must keep it open until the child is
-    /// spawned — `landlock_restrict_self` runs after `fork` and needs it live.
-    pub(crate) fn into_fd(self) -> OwnedFd {
-        self.fd
     }
 }
 
@@ -670,26 +662,21 @@ pub(crate) fn build(
     // SAFETY: the syscall returned a fresh, owned descriptor.
     let ruleset = unsafe { OwnedFd::from_raw_fd(fd) };
 
-    let mut rules_added = 0usize;
+    // `add_rule`'s bool says whether a rule was actually added; the count it used to feed was
+    // read only by the standalone arm, and a path that has vanished since acquisition is a
+    // NON-event here — the grant simply covers nothing.
     for grant in &grants {
-        if add_rule(ruleset.as_raw_fd(), grant, abi)? {
-            rules_added += 1;
-        }
+        add_rule(ruleset.as_raw_fd(), grant, abi)?;
     }
     for retained_grant in &retained.0 {
-        if add_rule_fd(
+        add_rule_fd(
             ruleset.as_raw_fd(),
             &retained_grant.grant,
             retained_grant.fd.as_raw_fd(),
             abi,
-        )? {
-            rules_added += 1;
-        }
+        )?;
     }
-    Ok(LandlockRuleset {
-        fd: ruleset,
-        rules_added,
-    })
+    Ok(LandlockRuleset { fd: ruleset })
 }
 
 /// Attach one grant. Returns whether a rule was actually added (`false` = path absent).
@@ -842,203 +829,6 @@ pub(crate) unsafe fn restrict_self(ruleset_fd: RawFd) -> Result<(), libc::c_int>
             .unwrap_or(libc::EINVAL));
     }
     Ok(())
-}
-
-/// Why the Landlock mechanism cannot be used for a given policy/host.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum LandlockUnavailable {
-    /// Kernel without Landlock ABI 3, including an older ABI, a disabled kernel, or an
-    /// `lsm=` configuration without Landlock.
-    NoKernelSupport,
-    /// The policy carries a deny rule. Landlock unions rules and has no deny primitive at
-    /// any ABI, so a deny is inexpressible — it would silently not restrict.
-    PolicyHasDenyRules,
-    /// `NUB_SANDBOX_MECHANISM=bubblewrap` pinned the selector for a differential run.
-    PinnedToBubblewrap,
-    /// Nothing selected Landlock. It is reachable only through the differential pin now
-    /// that the build jail — the profile it existed to enforce — is gone; a `nub sandbox`
-    /// scope needs deny-inside-allow, which Landlock cannot express at any ABI.
-    NotPinnedToLandlock,
-}
-
-/// Whether Landlock can confine `policy` on this host, and at what ABI.
-///
-/// The answer is `Err` for every production policy today. Landlock was the build jail's only
-/// mechanism and the build jail is gone; a `nub sandbox` scope needs deny-inside-allow, which
-/// Landlock cannot express at any ABI, so nothing but the differential pin below selects it.
-///
-/// BELOW THE KERNEL FLOOR (Landlock ABI 3, introduced in Linux 6.2) the answer is REFUSE, not
-/// run-unconfined-with-a-warning. Everything here fails closed: the code being confined is
-/// precisely the code whose whole reason for being confined is that it is untrusted, and a
-/// warning printed after it has already run is not a substitute for refusing to run it.
-pub(crate) fn landlock_availability(policy: &SandboxPolicy) -> Result<u32, LandlockUnavailable> {
-    // INTERNAL mechanism pin, for differential testing only. Two enforcement primitives are
-    // only comparable by running both on ONE host, which needs a way to hold the selector
-    // still. Not a user knob and not documented as one.
-    let pinned_to_landlock = match std::env::var("NUB_SANDBOX_MECHANISM").as_deref() {
-        Ok("bubblewrap") => return Err(LandlockUnavailable::PinnedToBubblewrap),
-        // A HARD pin: a differential arm that silently fell back would compare the mechanism
-        // against itself, so the scope gate below is bypassed and any real unavailability
-        // surfaces as an error rather than a quiet substitution.
-        Ok("landlock") => true,
-        _ => false,
-    };
-    availability_under_pin(policy, pinned_to_landlock)
-}
-
-/// The half below the environment read, so a test can reach the checks past the scope gate
-/// without writing `NUB_SANDBOX_MECHANISM` — a process global that would race any sibling
-/// test under cargo's threaded runner.
-fn availability_under_pin(
-    policy: &SandboxPolicy,
-    pinned_to_landlock: bool,
-) -> Result<u32, LandlockUnavailable> {
-    // SCOPE GATE. Landlock was the build jail's mechanism and only its mechanism, so with the
-    // build jail gone nothing selects it but the pin above: a `nub sandbox` scope needs
-    // deny-inside-allow, and routing one here would enforce the grants while silently dropping
-    // every deny. Landlock's real future here is as a COMPOSED coarse layer underneath the
-    // supervisor (it closes cross-process `/proc/<pid>/environ`, which the supervisor does not),
-    // not as an alternative to it — that composition is not wired yet.
-    if !pinned_to_landlock {
-        return Err(LandlockUnavailable::NotPinnedToLandlock);
-    }
-    let abi = probe_abi().ok_or(LandlockUnavailable::NoKernelSupport)?;
-    // An INVARIANT check, not a routing decision. Landlock unions rules and would carry a deny
-    // away to nothing rather than enforce it, so a policy that reaches here carrying one gets
-    // refused loudly instead of enforced weaker than it reads.
-    if policy
-        .fs
-        .rules
-        .entries
-        .iter()
-        .any(|rule| rule.effect == crate::policy::Effect::Deny)
-    {
-        return Err(LandlockUnavailable::PolicyHasDenyRules);
-    }
-    // `Sandbox::new` validates and pins policy grants at acquisition.  Recompiling the
-    // path plan here would consult mutable host pathnames on every prepared command and
-    // reject a session whose retained object was merely renamed or unlinked.
-    Ok(abi)
-}
-
-/// Install the child-side confinement hook on `command`: Landlock, then the syscall filter,
-/// then the descriptor sweep, all between `fork` and `execve`.
-///
-/// This is the whole reason the Landlock path cannot reuse the bubblewrap monitor. That
-/// monitor is itself launched THROUGH bubblewrap (`--unshare-user --unshare-pid …`), so it
-/// needs the very user namespace this mechanism exists to avoid — which means the three
-/// things it did for the target (no-new-privs, the seccomp install, and the descriptor
-/// sweep) have to be re-established here.
-///
-/// THE DESCRIPTOR SWEEP IS LOAD-BEARING, not hygiene. An fd nub already holds open — a
-/// registry socket, the proxy connection, a log file — is inherited by the jailed script and
-/// is usable WITHOUT reopening it, so it passes straight through both layers: Landlock
-/// governs `open`, not an already-open descriptor, and seccomp's `socket()` ceiling never
-/// sees a syscall. A descriptor egressing this way was MEASURED during the prototype. It is
-/// marked CLOEXEC rather than closed so the child's exec-error report — the pipe Rust's own
-/// spawn machinery relies on to tell the parent that `execve` failed — still works; `execve`
-/// then closes the whole marked range atomically.
-///
-/// # Safety
-/// `ruleset_fd` must outlive the spawn. The caller retains the [`LandlockRuleset`] on the
-/// returned `Prepared` for exactly that reason.
-unsafe fn install_confinement_pre_exec<C: std::os::unix::process::CommandExt>(
-    command: &mut C,
-    ruleset_fd: RawFd,
-    seccomp: Option<std::sync::Arc<Vec<seccompiler::sock_filter>>>,
-    terminal_filter: Vec<seccompiler::sock_filter>,
-) {
-    let owner_pid = unsafe { libc::getpid() };
-    let hook = move || -> std::io::Result<()> {
-        // The launch joins its owner-death guardian's group before exec. Stay in
-        // the same session so that join is possible; ioctl argument filtering below
-        // independently blocks terminal-input injection.
-        if unsafe { libc::setpgid(0, 0) } < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        if unsafe { libc::getppid() } != owner_pid {
-            return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
-        }
-        // FIRST, before any restriction is installed: the sweep's fallback path opens
-        // `/proc/self/fd`, which the ruleset below makes unreadable. Ordering it here keeps
-        // that fallback usable on a kernel without `CLOSE_RANGE_CLOEXEC`.
-        super::linux_supervisor::mark_inherited_fds_cloexec()?;
-        // Both Landlock and seccomp REFUSE an unprivileged caller that could still gain
-        // privileges through a setuid execve, so this gates everything below it.
-        if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        super::linux_lifetime::install(&terminal_filter)
-            .map_err(std::io::Error::from_raw_os_error)?;
-        unsafe { drop_all_capabilities() }?;
-        unsafe { restrict_self(ruleset_fd) }.map_err(std::io::Error::from_raw_os_error)?;
-        if let Some(filter) = &seccomp {
-            super::linux_supervisor::install_target_seccomp(filter)
-                .map_err(std::io::Error::from_raw_os_error)?;
-        }
-        Ok(())
-    };
-    // SAFETY: the hook runs between fork and execve and performs only raw syscalls — no
-    // allocation, and nothing that can take a lock the forking parent held.
-    unsafe { command.pre_exec(hook) };
-}
-
-/// Build the fully-confined child command for the Landlock mechanism.
-///
-/// Returns the command plus the ruleset, which the caller MUST retain until the child is
-/// spawned — the descriptor is consumed by `landlock_restrict_self` after `fork`.
-pub(crate) fn prepare_launch(
-    policy: &SandboxPolicy,
-    mut command: Command,
-    seccomp: Option<Vec<seccompiler::sock_filter>>,
-    tmp_dir: Option<&Path>,
-    entry_program: Option<&Path>,
-    retained: &RetainedPolicyGrants,
-) -> Result<(Command, LandlockRuleset), String> {
-    let ruleset = install_landlock_confinement(
-        &mut command,
-        policy,
-        seccomp,
-        tmp_dir,
-        entry_program,
-        retained,
-    )?;
-    Ok((command, ruleset))
-}
-
-/// The engine seam (build-jail path): build the Landlock ruleset for `policy` and install the
-/// confinement `pre_exec` hook onto a caller-OWNED command — any [`CommandExt`], so an embedder's
-/// `tokio::process::Command` works without nub-sandbox taking a tokio dependency. The returned
-/// [`LandlockRuleset`] holds the ruleset descriptor open; the caller MUST keep it alive until the
-/// command is spawned (the hook consumes the fd after fork). This is what lets aube-scripts' own
-/// async lifecycle command be confined by the shared engine rather than a second Landlock
-/// implementation. `prepare_launch` is the in-crate caller that owns its `std::process::Command`.
-///
-/// [`CommandExt`]: std::os::unix::process::CommandExt
-pub(crate) fn install_landlock_confinement<C: std::os::unix::process::CommandExt>(
-    command: &mut C,
-    policy: &SandboxPolicy,
-    seccomp: Option<Vec<seccompiler::sock_filter>>,
-    tmp_dir: Option<&Path>,
-    entry_program: Option<&Path>,
-    retained: &RetainedPolicyGrants,
-) -> Result<LandlockRuleset, String> {
-    let ruleset = build(policy, tmp_dir, entry_program, retained)?;
-    let fd = ruleset.as_raw_fd();
-    let terminal_filter =
-        super::linux_lifetime::program(false).map_err(|error| error.to_string())?;
-    unsafe {
-        install_confinement_pre_exec(
-            command,
-            fd,
-            seccomp.map(std::sync::Arc::new),
-            terminal_filter,
-        )
-    };
-    Ok(ruleset)
 }
 
 #[cfg(test)]
@@ -1220,34 +1010,6 @@ mod tests {
                 .map(|g| g.access)
                 .expect("the package dir is granted"),
             LandlockAccess::ReadWrite
-        );
-    }
-
-    /// Landlock cannot express a deny at any ABI, so an ordinary `nub sandbox` scope must
-    /// never reach it: enforcing the grants while dropping the denies reads as confinement
-    /// and is not. Nothing but the differential pin selects it.
-    ///
-    /// Only the refusal is asserted. The pinned arm is env-driven and `NUB_SANDBOX_MECHANISM`
-    /// is a process global, so a control here would race any sibling test that sets it.
-    #[test]
-    fn an_ordinary_scope_is_never_routed_to_landlock() {
-        assert_eq!(
-            landlock_availability(&policy(Vec::new())),
-            Err(LandlockUnavailable::NotPinnedToLandlock),
-            "a nub sandbox scope must never be routed to landlock"
-        );
-    }
-
-    /// Landlock unions rules and cannot subtract, so a policy carrying any deny must fall
-    /// back rather than be enforced with the deny silently dropped.
-    #[test]
-    fn a_deny_rule_disqualifies_landlock() {
-        // Past the scope gate via the pin, so the deny refusal is what the assertion reads
-        // rather than the gate that precedes it.
-        let denied = policy(vec![rule("/tmp/secret", Effect::Deny, FsAccess::DENY)]);
-        assert_eq!(
-            availability_under_pin(&denied, true),
-            Err(LandlockUnavailable::PolicyHasDenyRules)
         );
     }
 

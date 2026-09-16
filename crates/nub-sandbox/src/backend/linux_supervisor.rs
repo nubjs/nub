@@ -253,26 +253,30 @@ fn write_open_mask() -> u32 {
 ///
 /// THE METADATA HALF IS HERE BECAUSE LANDLOCK HAS NO METADATA HOOK AT ANY ABI. `chmod`,
 /// `chown`, `utimes` and the xattr calls take a PATH and are governed by nothing else, so
-/// before this a confined command could `chmod 0777` any file its uid owns anywhere on the
-/// host — the residual `build_seccomp`'s `deny_metadata` comment names as "the part with
-/// teeth". The ceiling's answer was a blanket EPERM, which a measured matrix falsified (it
-/// breaks 4 of 5 native installs, because node-gyp chmods its own built addon). The broker's
-/// answer is per-path: a chmod inside a write grant runs, one outside it does not, and the
-/// workload that motivated the carve-out is unaffected. That is why `deny_metadata` stays
-/// false for `nub sandbox` — this list supersedes it rather than duplicating it.
+/// before this a confined command could `chmod 0777` any file its uid owns anywhere on the host.
+///
+/// THE MEASUREMENT THAT DECIDED THE SHAPE, kept here because the ceiling that used to hold it is
+/// gone. A denial matrix over five real native installs (better-sqlite3, sqlite3, esbuild,
+/// simple-git-hooks, bufferutil) on kernel 6.8 falsified a BLANKET seccomp deny: `chmod` breaks
+/// 4 of 5 with EPERM, because node-gyp chmods the built addon from inside a make recipe, and
+/// `utimensat` breaks sqlite3 and bufferutil in either the path or the fd form. Both had been
+/// proposed off an strace showing zero calls. The xattr and `chown` families were free at BOTH
+/// uid 1000 and root — nothing uses them, because they achieve little: chown to another uid
+/// already fails under DAC and `user.*` xattrs are inert.
+///
+/// Per-path brokering is what that matrix could not reach: a chmod inside a write grant runs and
+/// one outside it does not, so the workload that falsified the ceiling is unaffected and the
+/// residual the ceiling left behind — host-wide mode and mtime rewriting — is closed.
 ///
 /// The fd forms (`fchmod`, `fchown`, and `utimensat` with a NULL path) carry no path at all,
 /// and the descriptor behind one proves only that an OPEN was allowed: a read-only grant hands
 /// out a read-only fd these would then use to rewrite the file's mode, owner or timestamps.
 /// They are resolved back to a path through `/proc/<tid>/fd/<n>` and judged as the path form.
 ///
-/// THE XATTR FAMILY IS DELIBERATELY ABSENT. `build_seccomp`'s `deny_metadata` comment records
-/// the measurement: `user.*` xattrs are inert, and `security.*`/`trusted.*` need a capability
-/// the confined child does not hold, so there is nothing for a rule to protect. Brokering them
-/// would mean copying an arbitrary value blob out of child memory on every call — new unsafe
-/// surface bought for no enforcement. If the posture ever changes, that same comment carries a
-/// blanket ceiling deny already measured safe across five native installs; this is not the
-/// place to add it.
+/// THE XATTR FAMILY IS DELIBERATELY ABSENT, per the same matrix: `user.*` xattrs are inert, and
+/// `security.*`/`trusted.*` need a capability the confined child does not hold, so there is
+/// nothing for a rule to protect. Brokering them would mean copying an arbitrary value blob out
+/// of child memory on every call — new unsafe surface bought for no enforcement.
 const FS_INTENT_NRS: &[libc::c_long] = &[
     libc::SYS_openat,
     libc::SYS_openat2,
