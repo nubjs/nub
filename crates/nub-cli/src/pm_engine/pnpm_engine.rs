@@ -227,9 +227,14 @@ fn record_allow_scripts(dir: &std::path::Path, decisions: &[(&str, bool)]) -> st
 /// refuses to link at all, which is the right default and the wrong answer
 /// here, because nub already reads this field.
 ///
-/// An entry REPLACES the selector it names and leaves the rest alone: the user
-/// is linking one package at a time.
-fn record_overrides(dir: &std::path::Path, entries: &[(&str, &str)]) -> std::io::Result<()> {
+/// An entry naming a specifier REPLACES the selector it names and leaves the
+/// rest alone: the user is linking one package at a time. An entry naming
+/// `None` drops the selector, which is what `nub unlink` does -- the same
+/// writer both ways, so a link nub can create is a link nub can undo.
+fn record_overrides(
+    dir: &std::path::Path,
+    entries: &[(&str, Option<&str>)],
+) -> std::io::Result<()> {
     nub_core::pm::resolve::edit_root_manifest(dir, |manifest| {
         // Edited in place where the field already exists, so a link moves
         // nothing else in the file; a malformed value is replaced, since the
@@ -238,14 +243,21 @@ fn record_overrides(dir: &std::path::Path, entries: &[(&str, &str)]) -> std::io:
             manifest.get_mut(host_settings::OVERRIDES_FIELD)
         {
             pin(pins, entries);
+            // An unlink that empties the field takes the field with it, rather
+            // than leaving `"overrides": {}` behind as a scar.
+            if pins.is_empty() {
+                manifest.shift_remove(host_settings::OVERRIDES_FIELD);
+            }
             return;
         }
         let mut pins = serde_json::Map::new();
         pin(&mut pins, entries);
-        manifest.insert(
-            host_settings::OVERRIDES_FIELD.to_owned(),
-            serde_json::Value::Object(pins),
-        );
+        if !pins.is_empty() {
+            manifest.insert(
+                host_settings::OVERRIDES_FIELD.to_owned(),
+                serde_json::Value::Object(pins),
+            );
+        }
     })
     .map_err(std::io::Error::other)?;
     Ok(())
@@ -335,13 +347,21 @@ fn apply_patch_edits(
     }
 }
 
-/// Apply each override, replacing whatever the field said about that selector.
-fn pin(pins: &mut serde_json::Map<String, serde_json::Value>, entries: &[(&str, &str)]) {
+/// Apply each override, replacing whatever the field said about that selector,
+/// or dropping the selector when the edit names no specifier.
+fn pin(pins: &mut serde_json::Map<String, serde_json::Value>, entries: &[(&str, Option<&str>)]) {
     for (selector, specifier) in entries {
-        pins.insert(
-            (*selector).to_owned(),
-            serde_json::Value::String((*specifier).to_owned()),
-        );
+        match specifier {
+            Some(specifier) => {
+                pins.insert(
+                    (*selector).to_owned(),
+                    serde_json::Value::String((*specifier).to_owned()),
+                );
+            }
+            None => {
+                pins.shift_remove(*selector);
+            }
+        }
     }
 }
 
