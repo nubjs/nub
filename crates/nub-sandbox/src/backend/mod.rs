@@ -21,6 +21,12 @@
 //! Callers launch through [`Prepared::spawn`], [`Prepared::status`], or
 //! [`Prepared::output`], preserving startup verification and resource ownership.
 
+// Off Linux the entire launch path below is unreachable BY CONSTRUCTION: `Sandbox::new`
+// refuses before any of it runs. Enumerating that with a `cfg` per helper would put a dozen
+// per-OS attributes back into the file this module spent a whole pass taking them out of, and
+// it buys nothing — on the one platform where this code RUNS, dead-code detection is intact.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
 use crate::policy::{Effect, Inspection, ProxyMode, SandboxPolicy};
 use crate::proxy::mitm::{BrokerSession, MitmEngine, RuntimeCredentialBroker};
 use crate::proxy::{EgressProxy, StaticDecider};
@@ -101,79 +107,11 @@ impl Degradation {
     }
 }
 
-/// How the child's argument tail is spelled on the wire.
-///
-/// Windows has no argv: `CreateProcessW` takes ONE command-line string, and every
-/// program decides for itself how to split it. Rust's encoder targets the
-/// `CommandLineToArgvW` rules, which `cmd.exe` does NOT implement — it treats `\"` as
-/// two literal characters, so a script carrying interior quotes
-/// (`node -e "require('is-odd')(3)"`) arrives mangled. aube therefore encodes the
-/// `cmd.exe` line itself with `CommandExt::raw_arg` (see `spawn_shell_with_settings` in
-/// `aube-scripts`); [`Verbatim`](Self::Verbatim) is how that already-encoded line
-/// survives the trip through this crate to `CreateProcessW` instead of being
-/// re-encoded into a line `cmd.exe` cannot parse.
-///
-/// NOT a general "skip the quoting" escape hatch: [`validate_apply_inputs`] refuses a
-/// `Verbatim` tail off Windows, and refuses one whose program is not the Windows
-/// command interpreter — the only program nub launches that parses its own line. Every
-/// other spawn stays [`Argv`](Self::Argv) with byte-identical quoting to before.
-#[derive(Debug, Clone)]
-pub enum CommandArgs {
-    /// Ordinary argv: each element is ONE argument, quoted by the launcher.
-    Argv(Vec<std::ffi::OsString>),
-    /// A pre-encoded Windows command-line TAIL, appended after the program name and
-    /// handed to `CreateProcessW` byte-for-byte. Windows-only; see the type doc.
-    Verbatim(std::ffi::OsString),
-}
-
-impl Default for CommandArgs {
-    fn default() -> Self {
-        Self::Argv(Vec::new())
-    }
-}
-
-impl CommandArgs {
-    /// The argv elements, or the whole verbatim line as a single item — the shape the
-    /// NUL scan wants, where "which token" only matters for the error text.
-    fn tokens(&self) -> impl Iterator<Item = &std::ffi::OsStr> {
-        match self {
-            Self::Argv(v) => Box::new(v.iter().map(std::ffi::OsString::as_os_str))
-                as Box<dyn Iterator<Item = &std::ffi::OsStr>>,
-            Self::Verbatim(line) => Box::new(std::iter::once(line.as_os_str())),
-        }
-    }
-
-    /// Apply to a plain `std::process::Command` (the paths that spawn without a custom
-    /// `CreateProcessW`).
-    pub(crate) fn apply_to(&self, command: &mut Command) {
-        match self {
-            Self::Argv(v) => {
-                command.args(v);
-            }
-            Self::Verbatim(line) => {
-                #[cfg(windows)]
-                {
-                    use std::os::windows::process::CommandExt;
-                    command.raw_arg(line);
-                }
-                #[cfg(not(windows))]
-                {
-                    let _ = line;
-                    debug_assert!(
-                        false,
-                        "a verbatim command line is rejected off Windows by validate_apply_inputs"
-                    );
-                }
-            }
-        }
-    }
-}
-
 /// The command to launch under a policy. Host-provided (Boundary B).
 #[derive(Debug, Clone)]
 pub struct CommandSpec {
     pub program: std::ffi::OsString,
-    pub args: CommandArgs,
+    pub args: Vec<std::ffi::OsString>,
     /// Working directory for the child, if the caller pins one.
     pub cwd: Option<std::path::PathBuf>,
     /// Directories whose existing immediate children may be materialized for
@@ -200,7 +138,7 @@ impl CommandSpec {
     pub fn new(program: impl Into<std::ffi::OsString>) -> Self {
         Self {
             program: program.into(),
-            args: CommandArgs::default(),
+            args: Vec::new(),
             cwd: None,
             deny_search_roots: Vec::new(),
             redact_stdout: false,
@@ -209,7 +147,7 @@ impl CommandSpec {
         }
     }
     pub fn arg(mut self, a: impl Into<std::ffi::OsString>) -> Self {
-        self.argv_mut().push(a.into());
+        self.args.push(a.into());
         self
     }
     pub fn args<I, S>(mut self, args: I) -> Self
@@ -217,29 +155,8 @@ impl CommandSpec {
         I: IntoIterator<Item = S>,
         S: Into<std::ffi::OsString>,
     {
-        self.argv_mut().extend(args.into_iter().map(Into::into));
+        self.args.extend(args.into_iter().map(Into::into));
         self
-    }
-    /// Hand the launcher a command line the caller has ALREADY encoded for the
-    /// program's own parser, bypassing argv quoting. Replaces the whole tail — the two
-    /// shapes are alternatives, never mixed. Accepted only for a Windows `cmd.exe`
-    /// launch; see [`CommandArgs`] for why, and [`validate_apply_inputs`] for the gate.
-    pub fn verbatim_command_line(mut self, line: impl Into<std::ffi::OsString>) -> Self {
-        self.args = CommandArgs::Verbatim(line.into());
-        self
-    }
-    fn argv_mut(&mut self) -> &mut Vec<std::ffi::OsString> {
-        if let CommandArgs::Verbatim(_) = self.args {
-            debug_assert!(
-                false,
-                "arg()/args() after verbatim_command_line() discards the encoded line"
-            );
-            self.args = CommandArgs::Argv(Vec::new());
-        }
-        match &mut self.args {
-            CommandArgs::Argv(v) => v,
-            CommandArgs::Verbatim(_) => unreachable!("converted to argv above"),
-        }
     }
     pub fn cwd(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         self.cwd = Some(dir.into());
@@ -302,10 +219,6 @@ pub struct Prepared {
     /// a process group after the kernel confirms the backend's requested grouping.
     #[cfg(unix)]
     pub(crate) signal_process_group: bool,
-    /// Native Windows launch plan, including the plain compatibility path. Every
-    /// Windows command receives creation-time process-tree ownership.
-    #[cfg(target_os = "windows")]
-    pub(crate) launch: Option<windows::WindowsLaunch>,
     /// Compatibility owner for a one-shot private tmp directory. Reusable sessions retain
     /// their stable managed tmp root in [`SessionResources`] instead.
     pub(crate) _private_tmp: Option<PrivateTemp>,
@@ -411,8 +324,6 @@ pub struct PreparedChild {
     child: Option<std::process::Child>,
     #[cfg(target_os = "linux")]
     supervised_child: Option<linux_supervisor::SupervisedChild>,
-    #[cfg(target_os = "windows")]
-    windows_child: Option<windows::WindowsChild>,
     child_id: u32,
     #[cfg(target_os = "linux")]
     guardian: Option<unix_guardian::UnixGuardian>,
@@ -444,15 +355,8 @@ pub(crate) struct SessionResources {
     private_tmp: Option<PrivateTemp>,
     #[cfg(target_os = "linux")]
     retained_grants: linux::RetainedLinuxGrants,
-    #[cfg(windows)]
-    windows_leases: std::sync::Mutex<std::collections::BTreeMap<String, windows::WindowsLease>>,
-    #[cfg(windows)]
-    native_compat: bool,
 }
 
-#[cfg(windows)]
-type SessionProxy = crate::proxy::ProxyContext;
-#[cfg(not(windows))]
 type SessionProxy = EgressProxy;
 
 impl Sandbox {
@@ -460,26 +364,8 @@ impl Sandbox {
     ///
     /// This is the sole compatibility ambient lookup: credential values are captured here
     /// for the broker session and are never re-read for later command submissions.
+    #[cfg(target_os = "linux")]
     pub fn new(policy: &SandboxPolicy) -> Result<Self, Degradation> {
-        Self::new_impl(policy, false)
-    }
-
-    fn new_impl(policy: &SandboxPolicy, native_compat: bool) -> Result<Self, Degradation> {
-        if native_compat && !cfg!(target_env = "msvc") {
-            return Err(Degradation {
-                lost: vec!["native-compat".into()],
-                reason: Some("native compatibility requires an MSVC build".into()),
-            });
-        }
-        #[cfg(not(windows))]
-        debug_assert!(!native_compat);
-        #[cfg(not(target_os = "linux"))]
-        if !policy.fs.self_proc.is_empty() {
-            return Err(Degradation {
-                lost: vec!["fs-self-proc".into()],
-                reason: Some("self-process procfs grants are supported only on Linux".into()),
-            });
-        }
         if !policy.env.resolved {
             return Err(Degradation {
                 lost: vec!["env-unresolved".to_string()],
@@ -504,12 +390,16 @@ impl Sandbox {
                 private_tmp,
                 #[cfg(target_os = "linux")]
                 retained_grants,
-                #[cfg(windows)]
-                windows_leases: std::sync::Mutex::new(std::collections::BTreeMap::new()),
-                #[cfg(windows)]
-                native_compat,
             }),
         })
+    }
+
+    /// Off Linux there is nothing to acquire. Refusing HERE rather than at launch keeps a
+    /// sandbox that can never run from starting a proxy, minting a bearer token and making a
+    /// private tmp root on the way to the same answer.
+    #[cfg(not(target_os = "linux"))]
+    pub fn new(_policy: &SandboxPolicy) -> Result<Self, Degradation> {
+        Err(unsupported_platform())
     }
 
     /// Alias for [`Sandbox::new`], spelling the lifecycle operation used by embedders that
@@ -548,15 +438,12 @@ fn initialize_shared_tool_state(policy: &SandboxPolicy) -> Result<(), Degradatio
     Ok(())
 }
 
-/// Remove idle persistent sandbox resources, recovering interrupted cleanup first.
-/// Active leases are never removed. Unix backends have no persistent OS grants.
-/// Cleanup failures are returned and their ownership records remain available for retry.
+/// Remove idle sandbox scratch directories, recovering interrupted cleanup first.
+/// Failures are returned and their ownership records remain available for retry.
 pub fn cleanup() -> std::io::Result<()> {
-    #[cfg(target_os = "windows")]
-    return windows::cleanup_resources();
     #[cfg(unix)]
     return unix_tmp::cleanup();
-    #[cfg(not(any(unix, target_os = "windows")))]
+    #[cfg(not(unix))]
     Ok(())
 }
 
@@ -597,10 +484,6 @@ impl PreparedChild {
         if let Some(child) = self.supervised_child.as_mut() {
             return child.take_stdout();
         }
-        #[cfg(target_os = "windows")]
-        if let Some(child) = self.windows_child.as_mut() {
-            return child.take_stdout();
-        }
         self.child.as_mut().and_then(|c| c.stdout.take())
     }
 
@@ -608,10 +491,6 @@ impl PreparedChild {
     pub fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
         #[cfg(target_os = "linux")]
         if let Some(child) = self.supervised_child.as_mut() {
-            return child.take_stderr();
-        }
-        #[cfg(target_os = "windows")]
-        if let Some(child) = self.windows_child.as_mut() {
             return child.take_stderr();
         }
         self.child.as_mut().and_then(|c| c.stderr.take())
@@ -623,22 +502,12 @@ impl PreparedChild {
         if let Some(child) = self.supervised_child.as_mut() {
             return child.take_stdin();
         }
-        #[cfg(target_os = "windows")]
-        if let Some(child) = self.windows_child.as_mut() {
-            return child.take_stdin();
-        }
         self.child.as_mut().and_then(|c| c.stdin.take())
     }
 
     pub fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         #[cfg(target_os = "linux")]
         if let Some(mut child) = self.supervised_child.take() {
-            let result = child.wait();
-            self.release_resources();
-            return result;
-        }
-        #[cfg(target_os = "windows")]
-        if let Some(mut child) = self.windows_child.take() {
             let result = child.wait();
             self.release_resources();
             return result;
@@ -691,26 +560,6 @@ impl PreparedChild {
                     ));
                 }
                 child.wait_for_exit_event()?;
-                continue;
-            }
-            #[cfg(target_os = "windows")]
-            if let Some(child) = self.windows_child.as_mut() {
-                if let Some(status) = child.try_wait()? {
-                    self.windows_child.take();
-                    self.release_resources();
-                    return Ok(status);
-                }
-                if cancelled.load(std::sync::atomic::Ordering::Acquire) {
-                    let mut child = self.windows_child.take().expect("checked above");
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    self.release_resources();
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Interrupted,
-                        "sandbox launch cancelled",
-                    ));
-                }
-                std::thread::sleep(std::time::Duration::from_millis(20));
                 continue;
             }
             let child = self
@@ -795,11 +644,6 @@ impl Drop for PreparedChild {
     fn drop(&mut self) {
         #[cfg(target_os = "linux")]
         if self.supervised_child.take().is_some() {
-            self.release_resources();
-            return;
-        }
-        #[cfg(target_os = "windows")]
-        if self.windows_child.take().is_some() {
             self.release_resources();
             return;
         }
@@ -893,36 +737,10 @@ fn try_wait_child_eintr(
 }
 
 impl Prepared {
-    #[cfg(windows)]
-    fn acquire_windows_resource(
-        &self,
-        launch: windows::WindowsLaunch,
-    ) -> std::io::Result<windows::WindowsResource> {
-        let Some(session) = &self.session else {
-            return launch.acquire();
-        };
-        let mut retained = session
-            .windows_leases
-            .lock()
-            .map_err(|_| std::io::Error::other("sandbox session lease lock poisoned"))?;
-        let resource = launch.acquire_reusing(&retained)?;
-        if let (Some(identity), Some(lease)) = (resource.identity(), resource.lease()) {
-            retained.insert(identity.to_owned(), lease);
-        }
-        Ok(resource)
-    }
     /// Spawn the child without exposing the backend command. The returned handle
     /// owns every launch resource and kills/reaps on an early drop.
     pub fn spawn(self) -> std::io::Result<PreparedChild> {
         self.spawn_with_signal_target(|_| Ok(()))
-    }
-
-    /// Whether this launch confines through the Windows AppContainer path.
-    #[cfg(target_os = "windows")]
-    pub fn will_confine(&self) -> bool {
-        self.launch
-            .as_ref()
-            .is_some_and(windows::WindowsLaunch::is_appcontainer)
     }
 
     /// Install a signal target while a supervised Linux child is still blocked.
@@ -931,25 +749,6 @@ impl Prepared {
         mut self,
         ready: impl FnOnce(PreparedSignalTarget) -> std::io::Result<()>,
     ) -> std::io::Result<PreparedChild> {
-        #[cfg(target_os = "windows")]
-        {
-            let launch = self.launch.take().ok_or_else(|| {
-                std::io::Error::other("Windows command is missing its owned launch plan")
-            })?;
-            let resource = self.acquire_windows_resource(launch)?;
-            let child = resource.spawn()?;
-            let child_id = child.id();
-            let _ = ready;
-            Ok(PreparedChild {
-                child: None,
-                windows_child: Some(child),
-                child_id,
-                _proxy: self.proxy.take(),
-                _private_tmp: self._private_tmp.take(),
-                _session: self.session.take(),
-            })
-        }
-        #[cfg(not(windows))]
         {
             #[cfg(target_os = "linux")]
             if let Some(plan) = self.supervised.take() {
@@ -1085,25 +884,6 @@ impl Prepared {
 
     /// Launch, wait, and capture stdout/stderr through the supervised seam.
     pub fn output(mut self) -> std::io::Result<std::process::Output> {
-        #[cfg(target_os = "windows")]
-        if let Some(launch) = self.launch.take() {
-            let resource = self.acquire_windows_resource(launch)?;
-            let child = resource.spawn_with_stdio(
-                windows::WindowsStdio::Null,
-                windows::WindowsStdio::Piped,
-                windows::WindowsStdio::Piped,
-            )?;
-            let child_id = child.id();
-            return PreparedChild {
-                child: None,
-                windows_child: Some(child),
-                child_id,
-                _proxy: self.proxy.take(),
-                _private_tmp: self._private_tmp.take(),
-                _session: self.session.take(),
-            }
-            .wait_with_output();
-        }
         #[cfg(target_os = "linux")]
         if let Some(plan) = self.supervised.take() {
             let child = plan.spawn(
@@ -1333,6 +1113,7 @@ pub fn apply(policy: &SandboxPolicy, spec: CommandSpec) -> Result<Prepared, Degr
 
 /// Compatibility implementation behind [`Sandbox::prepare`]. The policy and every resource
 /// it refers to were frozen at acquisition, so this function must not consult ambient state.
+#[cfg(target_os = "linux")]
 fn prepare_with_resources(
     resources: &Arc<SessionResources>,
     spec: CommandSpec,
@@ -1346,23 +1127,8 @@ fn prepare_with_resources(
     let redact_stderr = spec.redact_stderr;
     #[cfg(target_os = "linux")]
     let linux_preflight = linux::preflight(policy, &spec)?;
-    // Linux raw host rules use the supervisor's parent proxy; catalog coarse
-    // networking starts none. Windows retains TLS state at acquisition and binds
-    // a separate parent proxy per command so cancellation cannot stop a sibling.
-    #[cfg(not(windows))]
     let proxy_port = resources.proxy.as_ref().map(EgressProxy::port);
-    #[cfg(windows)]
-    let proxy_port = None;
-    #[cfg(not(windows))]
     let proxy_token = resources.proxy.as_ref().map(EgressProxy::token);
-    #[cfg(windows)]
-    let proxy_token = None;
-    #[cfg(not(target_os = "linux"))]
-    let ca_bundle = resources
-        .proxy
-        .as_ref()
-        .and_then(|proxy| proxy.ca_bundle_path());
-    #[cfg(target_os = "linux")]
     let ca_bundle = resources
         .proxy
         .as_ref()
@@ -1380,9 +1146,8 @@ fn prepare_with_resources(
     // in this explicit session intentionally share that private state. `None` for Shared/Deny.
     let tmp_dir = resources.private_tmp.as_ref().map(|d| d.path());
 
-    // The Landlock build-jail arm ignores the proxy pair (coarse seccomp family ceiling, no netns);
-    // the supervised arm redirects an allowed connect through the loopback proxy (epic 5.1).
-    #[cfg(target_os = "linux")]
+    // The Landlock arm ignores the proxy pair (coarse seccomp family ceiling, no netns); the
+    // supervised arm redirects an allowed connect through the loopback proxy (epic 5.1).
     let mut prepared = linux::apply(
         policy,
         spec,
@@ -1395,29 +1160,8 @@ fn prepare_with_resources(
             ca_bundle,
         },
     )?;
-    #[cfg(target_os = "windows")]
-    let mut prepared = windows::apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;
-    #[cfg(windows)]
-    if let Some(windows::WindowsLaunch::AppContainer(plan)) = prepared.launch.as_mut() {
-        plan.proxy_context = resources.proxy.clone();
-    }
-    #[cfg(windows)]
-    if resources.native_compat {
-        match prepared.launch.as_mut() {
-            Some(windows::WindowsLaunch::AppContainer(plan)) => plan.native_compat = true,
-            _ => {
-                return Err(Degradation {
-                    lost: vec!["native-compat".into()],
-                    reason: Some("native compatibility requires AppContainer confinement".into()),
-                });
-            }
-        }
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    let mut prepared = generic_apply(policy, spec, proxy_port, proxy_token, ca_bundle, tmp_dir)?;
 
     // Announce TLS inspection only when preparation retained its network enforcement.
-    // A Windows command still must start its relay successfully before any child runs.
     if ca_bundle_present
         && !prepared
             .degradation
@@ -1434,16 +1178,34 @@ fn prepare_with_resources(
     Ok(prepared)
 }
 
-/// Whether `program` names `cmd.exe` — the sole program whose command line nub hands
-/// over verbatim. Matched on the file name so it holds for the bare name aube passes
-/// and for an absolute `System32` path alike; case-insensitive because Windows paths
-/// are. Deliberately NOT extended to `powershell`/`pwsh`: neither is on the lifecycle
-/// spawn path, and each would need its own audited encoder before it could opt in.
-fn program_is_windows_command_interpreter(program: &std::ffi::OsStr) -> bool {
-    std::path::Path::new(program)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n.eq_ignore_ascii_case("cmd.exe") || n.eq_ignore_ascii_case("cmd"))
+/// The non-Linux half of [`prepare_with_resources`]: there isn't one.
+///
+/// The crate still COMPILES on macOS and Windows — the dev host is macOS, and a crate that
+/// cannot be `cargo check`ed there forces every typo fix onto a remote box — but no other
+/// platform has a mechanism that enforces this policy at zero privilege. The honest answer is
+/// to refuse the launch. The alternative it replaces was worse than nothing: a skeleton that
+/// ran the command UNCONFINED and reported the missing axes as `Degradation`, which reads as
+/// a sandbox to anyone who does not check the losses.
+#[cfg(not(target_os = "linux"))]
+fn prepare_with_resources(
+    resources: &Arc<SessionResources>,
+    spec: CommandSpec,
+) -> Result<Prepared, Degradation> {
+    validate_apply_inputs(&resources.policy, &spec)?;
+    Err(unsupported_platform())
+}
+
+/// The refusal every non-Linux entry point returns. One place, so the wording cannot drift
+/// between the acquisition gate and the launch gate.
+#[cfg(not(target_os = "linux"))]
+fn unsupported_platform() -> Degradation {
+    Degradation {
+        lost: vec!["fs".into(), "net".into(), "vars".into(), "secrets".into()],
+        reason: Some(format!(
+            "the sandbox runs on Linux only; this is {}",
+            std::env::consts::OS
+        )),
+    }
 }
 
 fn validate_apply_inputs(policy: &SandboxPolicy, spec: &CommandSpec) -> Result<(), Degradation> {
@@ -1545,31 +1307,8 @@ fn validate_apply_inputs(policy: &SandboxPolicy, spec: &CommandSpec) -> Result<(
         }
     };
     reject_nul("entry program", &spec.program)?;
-    for (index, argument) in spec.args.tokens().enumerate() {
+    for (index, argument) in spec.args.iter().enumerate() {
         reject_nul(&format!("argument {index}"), argument)?;
-    }
-    if let CommandArgs::Verbatim(_) = spec.args {
-        // The ONLY sanctioned verbatim caller is aube's `cmd.exe` script line, so the
-        // opt-in is confined to exactly that shape rather than left open as a
-        // skip-the-quoting hatch any future caller could reach for. Fail closed: a
-        // verbatim tail anywhere else is a programming error, not a degradation to
-        // absorb, and silently re-encoding it would reintroduce the original bug.
-        if !cfg!(windows) {
-            return Err(Degradation {
-                lost: vec!["process-input".to_string()],
-                reason: Some("a verbatim command line is a Windows-only encoding".to_string()),
-            });
-        }
-        if !program_is_windows_command_interpreter(&spec.program) {
-            return Err(Degradation {
-                lost: vec!["process-input".to_string()],
-                reason: Some(format!(
-                    "a verbatim command line is only accepted for the Windows command \
-                     interpreter, not {}",
-                    std::path::Path::new(&spec.program).display()
-                )),
-            });
-        }
     }
     if let Some(cwd) = &spec.cwd {
         reject_nul("working directory", cwd.as_os_str())?;
@@ -1665,102 +1404,8 @@ fn set_tmp_env(command: &mut Command, dir: &std::path::Path) {
     }
 }
 
-/// Env-scrub-only skeleton for an OS with no wired backend. Reports fs and net as
-/// not-enforced so a caller never mistakes the skeleton for confinement.
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
-fn generic_apply(
-    policy: &SandboxPolicy,
-    spec: CommandSpec,
-    proxy_port: Option<u16>,
-    proxy_token: Option<&str>,
-    ca_bundle: Option<&std::path::Path>,
-    tmp_dir: Option<&std::path::Path>,
-) -> Result<Prepared, Degradation> {
-    if !policy.net.brokers.is_empty() {
-        return Err(Degradation {
-            lost: vec!["credential-broker".to_string()],
-            reason: Some(
-                "this OS backend cannot force brokered traffic through the credential proxy"
-                    .to_string(),
-            ),
-        });
-    }
-    let mut command = Command::new(&spec.program);
-    spec.args.apply_to(&mut command);
-    if let Some(cwd) = &spec.cwd {
-        command.current_dir(cwd);
-    }
-
-    // Env axis — construction, not interception.
-    command.env_clear();
-    for (k, v) in &policy.env.constructed {
-        command.env(k, v);
-    }
-    if let Some(port) = proxy_port {
-        set_proxy_env(&mut command, port, proxy_token);
-    }
-    if let Some(bundle) = ca_bundle {
-        set_ca_env(&mut command, bundle);
-    }
-    if let Some(dir) = tmp_dir {
-        set_tmp_env(&mut command, dir);
-    }
-
-    // fs/net: honestly report what the skeleton does not yet enforce. The skeleton has
-    // NO OS deny-layer, so even with the proxy running it cannot FORCE the child
-    // through it — net is reported unenforced regardless.
-    let mut lost = Vec::new();
-    if fs_confines(policy) {
-        lost.push("fs".to_string());
-    }
-    if policy.net.enforce {
-        lost.push("net".to_string());
-    }
-    if let Some(axis) = tmp_lost_axis(policy) {
-        lost.push(axis.to_string());
-    }
-    let degradation = if lost.is_empty() {
-        Degradation::full()
-    } else {
-        Degradation {
-            lost,
-            reason: Some("no OS backend wired in this build (Stage 1)".to_string()),
-        }
-    };
-    Ok(Prepared {
-        command,
-        degradation,
-        proxy: None,
-        session: None,
-        #[cfg(target_os = "linux")]
-        _inherited_files: Vec::new(),
-        #[cfg(unix)]
-        signal_process_group: false,
-        _private_tmp: None,
-        redact_stdout: false,
-        redact_stderr: false,
-    })
-}
-
-/// The degradation axis name for a backend that does NOT enforce the requested
-/// [`TmpMode`] — `tmp-private` (a private per-run tmp was requested but the shared
-/// system tmp is not hidden) / `tmp-deny` (tmp was to be denied but is not). `None` for
-/// `Shared` (nothing to enforce). A backend that DOES enforce the mode never calls this;
-/// one that doesn't pushes the axis into `lost` so the caller never mistakes an
-/// unenforced private/deny-tmp for a real one (fail-safe honesty, never silent).
-/// The Linux backend DOES enforce the mode, so it never consults this (hence the cfg).
-#[cfg(not(target_os = "linux"))]
-fn tmp_lost_axis(policy: &SandboxPolicy) -> Option<&'static str> {
-    match policy.fs.tmp {
-        crate::policy::TmpMode::Shared => None,
-        crate::policy::TmpMode::Private => Some("tmp-private"),
-        crate::policy::TmpMode::Deny => Some("tmp-deny"),
-    }
-}
-
 /// Whether the fs policy actually confines anything (a non-relaxed base or any
 /// entry). A relaxed fs axis (allow-all, no rules) is not a lost enforcement.
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn fs_confines(policy: &SandboxPolicy) -> bool {
     !matches!(policy.fs.rules.default_effect, crate::policy::Effect::Allow)
         || !policy.fs.rules.entries.is_empty()
@@ -1891,55 +1536,6 @@ mod tests {
         policy.net.brokers[0].env = vec!["HTTPS_PROXY".to_string()];
         let err = validate_apply_inputs(&policy, &CommandSpec::new("/usr/bin/true")).unwrap_err();
         assert_eq!(err.lost, vec!["credential-broker"]);
-    }
-
-    /// The verbatim command line exists for ONE caller — aube's already-encoded `cmd.exe`
-    /// script tail — and must never become a general "skip argv quoting" hatch, which
-    /// would let a future caller hand an arbitrary program an unquoted, attacker-shaped
-    /// line. Both halves of the gate are asserted here rather than left to review.
-    #[test]
-    fn a_verbatim_command_line_is_confined_to_the_windows_command_interpreter() {
-        let policy = SandboxPolicy::default();
-
-        let spec = CommandSpec::new("node.exe").verbatim_command_line("-e \"boom\"");
-        let err = validate_apply_inputs(&policy, &spec).unwrap_err();
-        assert_eq!(err.lost, vec!["process-input"]);
-        assert!(
-            err.reason.as_deref().is_some_and(|r| r
-                .contains("only accepted for the Windows command interpreter")
-                || r.contains("Windows-only encoding")),
-            "an off-interpreter verbatim line must be refused by name, got {:?}",
-            err.reason
-        );
-
-        // The sanctioned shape: `cmd.exe` by bare name (what aube passes) and by absolute
-        // path (what a resolved program would be), each accepted only on Windows.
-        for program in ["cmd.exe", "CMD.EXE", r"C:\Windows\System32\cmd.exe"] {
-            let spec = CommandSpec::new(program).verbatim_command_line("/d /s /c \" echo hi \"");
-            let verdict = validate_apply_inputs(&policy, &spec);
-            assert_eq!(
-                verdict.is_ok(),
-                cfg!(windows),
-                "{program} verbatim acceptance must track the platform, got {verdict:?}"
-            );
-        }
-
-        // Ordinary argv is untouched by the gate on every platform.
-        let spec = CommandSpec::new("node.exe").args(["-e", "boom"]);
-        assert!(validate_apply_inputs(&policy, &spec).is_ok());
-    }
-
-    /// The two shapes are alternatives, never a mix — a spec cannot carry an encoded line
-    /// AND argv, because a launcher would have to guess which one the caller meant.
-    #[test]
-    fn setting_one_argument_shape_replaces_the_other() {
-        let spec = CommandSpec::new("cmd.exe")
-            .args(["-c", "ignored"])
-            .verbatim_command_line("/d /s /c \" echo hi \"");
-        match &spec.args {
-            CommandArgs::Verbatim(line) => assert_eq!(line, "/d /s /c \" echo hi \""),
-            other => panic!("expected the verbatim line to win, got {other:?}"),
-        }
     }
 
     /// A bypass key the child inherited must not survive, or the whole per-host policy is

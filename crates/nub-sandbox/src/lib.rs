@@ -58,8 +58,8 @@ pub mod policy;
 pub mod proxy;
 
 pub use backend::{
-    CommandArgs, CommandSpec, Degradation, Prepared, PreparedChild, PreparedSignalTarget, Sandbox,
-    apply, cleanup,
+    CommandSpec, Degradation, Prepared, PreparedChild, PreparedSignalTarget, Sandbox, apply,
+    cleanup,
 };
 /// The Linux enforcement suites' Landlock ABI skip gate. Test support, not an embedder API.
 #[cfg(target_os = "linux")]

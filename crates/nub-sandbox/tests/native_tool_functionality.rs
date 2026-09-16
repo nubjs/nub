@@ -30,7 +30,6 @@ struct Tool {
     #[serde(rename = "toolEnv", default)]
     tool_env: BTreeMap<String, String>,
     #[serde(default)]
-    shell: bool,
     #[serde(rename = "mavenSeed")]
     maven_seed: Option<PathBuf>,
 }
@@ -299,30 +298,15 @@ fn run(
         .cloned()
         .chain(args.iter().map(|arg| (*arg).to_string()))
         .collect::<Vec<_>>();
-    let (program, args) = if tool.shell {
-        (tool.program.clone(), args)
-    } else {
-        tool_msys::command(&tool.program, args, &root.join("project"))
-    };
+    let (program, args) = tool_msys::command(&tool.program, args, &root.join("project"));
     match policy {
         Some(policy) => {
             let sandbox = tool_sandbox::acquire(policy).expect("sandbox acquires");
-            let spec = if tool.shell {
-                CommandSpec::new(std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into()))
-                    .verbatim_command_line(format!(
-                        "/d /s /c \"{}\"",
-                        command_line(&tool.program, &args)
-                    ))
-                    .cwd(root.join("project"))
-                    .redact_stdout(true)
-                    .redact_stderr(true)
-            } else {
-                CommandSpec::new(program.to_string_lossy().into_owned())
-                    .args(args.iter().cloned())
-                    .cwd(root.join("project"))
-                    .redact_stdout(true)
-                    .redact_stderr(true)
-            };
+            let spec = CommandSpec::new(program.to_string_lossy().into_owned())
+                .args(args.iter().cloned())
+                .cwd(root.join("project"))
+                .redact_stdout(true)
+                .redact_stderr(true);
             let prepared = sandbox.prepare(spec).expect("tool prepares");
             assert!(
                 prepared.degradation.lost.is_empty(),
@@ -333,22 +317,8 @@ fn run(
             tool_output::output(prepared)
         }
         None => {
-            let mut command = if tool.shell {
-                let mut command =
-                    Command::new(std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into()));
-                #[cfg(windows)]
-                command.raw_arg(format!(
-                    "/d /s /c \"{}\"",
-                    command_line(&tool.program, &args)
-                ));
-                #[cfg(not(windows))]
-                command.args(["/d", "/s", "/c", &command_line(&tool.program, &args)]);
-                command
-            } else {
-                let mut command = Command::new(&program);
-                command.args(&args);
-                command
-            };
+            let mut command = Command::new(&program);
+            command.args(&args);
             command
                 .current_dir(root.join("project"))
                 .env_clear()
@@ -356,14 +326,6 @@ fn run(
             command.output().expect("unconfined tool launches")
         }
     }
-}
-
-fn command_line(program: &Path, args: &[String]) -> String {
-    std::iter::once(program.to_string_lossy().into_owned())
-        .chain(args.iter().cloned())
-        .map(|arg| format!("\"{}\"", arg.replace('"', "\\\"")))
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn assert_ok(tool: &Tool, phase: &str, output: Output) {
@@ -591,7 +553,6 @@ foreach (['pipes', 'nul', 'files'] as $mode) {
                     tool_root: tool.tool_root.clone(),
                     runtime_roots: tool.runtime_roots.clone(),
                     tool_env: tool.tool_env.clone(),
-                    shell: false,
                     maven_seed: None,
                 };
                 let output = run(&php, &[diagnostic.to_str().unwrap()], root, env, policy);
@@ -717,7 +678,6 @@ fn msys_execution_count(root: &Path, env: &BTreeMap<String, String>, tooldirs: O
         version: "current test binary".into(),
         runtime_roots: vec![],
         tool_env: BTreeMap::new(),
-        shell: false,
         maven_seed: None,
     };
     for sample in 0..3 {
