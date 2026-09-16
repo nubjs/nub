@@ -430,7 +430,13 @@ fn fixed_grants(
     tmp_dir: Option<&Path>,
     entry_program: Option<&Path>,
 ) -> Vec<LandlockGrant> {
-    if !crate::backend::linux_grants::fs_confines(&policy.fs) {
+    // `default_effect == Allow` is the true "grant everything" marker (`fs: true`), NOT
+    // `!fs_confines`: a secrets policy injects a `/proc` deny band even under `fs: true`
+    // (`finalize_escape_hatch_proc_deny`), which makes `entries` non-empty and flips `fs_confines`
+    // true — but the axis is still whole-disk, so it must keep the single FullDisk grant and let
+    // the broker carry the `/proc` denies. Keying on the deny-free `!fs_confines` here would drop
+    // `fs: true`+secrets to the confined read floor.
+    if policy.fs.rules.default_effect == crate::policy::Effect::Allow {
         return vec![LandlockGrant {
             path: PathBuf::from("/"),
             access: LandlockAccess::FullDisk,
@@ -484,7 +490,10 @@ fn fixed_grants(
 /// from [`fixed_grants`]: a reused session consumes the captured fds below rather
 /// than re-resolving these spellings for each command.
 fn policy_grants(policy: &SandboxPolicy) -> Result<Vec<LandlockGrant>, String> {
-    if !crate::backend::linux_grants::fs_confines(&policy.fs) {
+    // Mirror `fixed_grants`: a whole-disk axis (`default_effect == Allow`) has no authored
+    // positive grants to compile — its access is the single FullDisk rule from `fixed_grants`,
+    // and any `/proc` secret denies it carries ride the broker, not Landlock.
+    if policy.fs.rules.default_effect == crate::policy::Effect::Allow {
         return Ok(Vec::new());
     }
     let plan = compile_mount_plan(policy)?;

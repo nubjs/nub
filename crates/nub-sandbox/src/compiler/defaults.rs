@@ -831,7 +831,8 @@ mod tests {
         // asserted before the floor was restored — a bare count would pass just as well if a
         // future change started denying something else. The floor is the case-folded `.env*` /
         // `.npmrc` band (folded so `.ENV` cannot slip past on a case-sensitive fs), then the
-        // cross-process `/proc` secret band, in injection order.
+        // cross-process `/proc` secret band (it rides every read-granting policy), in injection
+        // order.
         let denied: Vec<_> = policy
             .fs
             .rules
@@ -872,6 +873,58 @@ mod tests {
             matcher.decide(&homes.home.join(".npmrc")).effect,
             Effect::Deny,
             "a path outside the project remains denied"
+        );
+    }
+
+    /// The cross-process `/proc` secret band rides EVERY read-granting policy (secret or not), and
+    /// — new in 6.1 — the escape hatch (`fs: true`) too, but there ONLY when a secret is declared:
+    /// `fs: true` grants no tree for the floor to sit inside, so a declared secret is the trigger
+    /// (maintainer 2026-09-16). This pins the compiler half; the enforcement half — the broker
+    /// actually refusing the read — lives in `production_readiness_linux`.
+    #[test]
+    fn the_proc_band_rides_read_grants_and_the_escape_hatch_only_with_secrets() {
+        fn has_proc_deny(input: serde_json::Value, ambient: &[(&str, &str)]) -> bool {
+            let h = homes();
+            let project = h.project.clone();
+            let ctx = crate::compiler::CompileCtx::new(
+                h,
+                project,
+                crate::compiler::ScopeCapabilities::approved(),
+                ambient
+                    .iter()
+                    .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                    .collect(),
+            );
+            let policy = crate::compiler::compile(&input, &ctx).expect("policy compiles");
+            policy.fs.rules.entries.iter().any(|rule| {
+                rule.effect == Effect::Deny && rule.matcher.as_str().starts_with("/proc/")
+            })
+        }
+
+        // A read-granting tree always carries the band — secret or not.
+        assert!(
+            has_proc_deny(serde_json::json!({"fs": ["."]}), &[]),
+            "a granted tree must carry the /proc band",
+        );
+        assert!(
+            has_proc_deny(
+                serde_json::json!({"fs": ["."], "secrets": ["TK"]}),
+                &[("TK", "v")]
+            ),
+            "a granted tree with a secret must carry the /proc band",
+        );
+        // The escape hatch (`fs: true`) carries it ONLY with a declared secret — the one shape the
+        // file floor cannot reach, and the property 6.1 adds.
+        assert!(
+            has_proc_deny(
+                serde_json::json!({"fs": true, "secrets": ["TK"], "net": false}),
+                &[("TK", "v")],
+            ),
+            "fs:true + a declared secret must inject the /proc band",
+        );
+        assert!(
+            !has_proc_deny(serde_json::json!({"fs": true, "net": false}), &[]),
+            "fs:true without secrets must not inject the /proc band",
         );
     }
 }

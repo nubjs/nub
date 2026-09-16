@@ -381,10 +381,16 @@ fn compile_object(
     // Derive the proxy posture + inspection tier (pure function of enforce/allow/brokers).
     finalize_net_inspection(&mut net);
     withhold_brokered_env(&net, &mut env, ctx);
-    let fs = match obj.get("fs") {
+    let mut fs = match obj.get("fs") {
         Some(v) => fold::fold_fs(v, ctx, &env, "fs")?,
         None => floor_fs(),
     };
+    // `finalize_env_deny` (inside the fold above) already carries the cross-process /proc secret
+    // band for every read-granting policy. The escape hatch (`fs: true`) skips that, so add the
+    // band back HERE for the escape hatch when a secret is declared — the one place both the folded
+    // fs rules and the resolved env are in hand. It is the one shape the `.env` file floor cannot
+    // reach, so a declared secret under `fs: true` cannot leak through a peer's `/proc/<pid>/environ`.
+    fold::finalize_escape_hatch_proc_deny(&mut fs.rules, &env);
     Ok(SandboxPolicy { fs, net, env })
 }
 

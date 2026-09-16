@@ -152,6 +152,34 @@ fn whole_root_policy(root: &Path) -> SandboxPolicy {
     compile(&Value::Object(input), &ctx).expect("a whole-root policy compiles")
 }
 
+/// The escape hatch (`fs: true`) that ALSO declares a secret, so the cross-process `/proc` band
+/// injects there — the one shape the `.env`/`/proc` file floor cannot reach, since `fs: true`
+/// grants no tree for a deny to sit inside, so a declared secret is the only trigger. `vars: true`
+/// keeps the child's ambient env so the re-exec'd test binary still starts; `SANDBOX_SECRET`,
+/// marked sensitive, is the key that arms the band.
+fn fs_true_policy(root: &Path) -> SandboxPolicy {
+    let project = root.join("project");
+    let mut input = Map::new();
+    input.insert("fs".into(), Value::Bool(true));
+    input.insert("net".into(), Value::Bool(false));
+    input.insert("vars".into(), Value::Bool(true));
+    input.insert("secrets".into(), json!(["SANDBOX_SECRET"]));
+    let mut ambient: BTreeMap<String, String> = std::env::vars().collect();
+    ambient.insert("SANDBOX_SECRET".into(), "top-secret".into());
+    let ctx = CompileCtx::new(
+        Homes {
+            home: root.join("withheld-home"),
+            cache: root.join("withheld-cache"),
+            tmp: root.join("tmp"),
+            project: project.clone(),
+        },
+        project,
+        ScopeCapabilities::approved(),
+        ambient,
+    );
+    compile(&Value::Object(input), &ctx).expect("an fs:true + secret policy compiles")
+}
+
 fn session(
     mut policy: SandboxPolicy,
     root: &Path,
@@ -675,6 +703,24 @@ fn a_whole_root_grant_still_refuses_cross_process_proc_secrets() {
     let root = fixture();
     let session = session(
         whole_root_policy(root.path()),
+        root.path(),
+        "proc-whole-root",
+        &[],
+    );
+    output(&session, root.path());
+}
+
+/// The escape hatch (`fs: true`) with a declared secret — the one shape the `.env` file floor can
+/// never cover, because `fs: true` grants no tree for a deny to sit inside. The child holds the
+/// whole filesystem yet still cannot read a peer's `/proc/<pid>/environ`: the /proc band is gated
+/// on secrets, not on the grant, so it rides the broker even when Landlock grants everything. This
+/// is the primary property of 6.1 (maintainer 2026-09-16). Reverting `finalize_escape_hatch_proc_deny`
+/// turns it RED.
+#[test]
+fn fs_true_with_a_secret_still_refuses_cross_process_proc_secrets() {
+    let root = fixture();
+    let session = session(
+        fs_true_policy(root.path()),
         root.path(),
         "proc-whole-root",
         &[],

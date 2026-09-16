@@ -313,10 +313,10 @@ fn fold_tooldirs_object_entry(
 /// then took the preset — and with it the floor — away entirely, which no decision asked for.
 ///
 /// It is also what makes deny-inside-allow REACHABLE. The public grammar has no deny form
-/// (`fold_fs_array_entry` / `fold_fs_object_entry` reject one outright), so these two bands and
-/// `finalize_policy_file_deny` below are the only producers of an `Effect::Deny` fs rule in the
-/// crate. With no producer, `has_explicit_fs_deny` is permanently false and the supervisor's
-/// write broker never arms.
+/// (`fold_fs_array_entry` / `fold_fs_object_entry` reject one outright), so these bands,
+/// `finalize_policy_file_deny` below, and `finalize_escape_hatch_proc_deny` are the only producers
+/// of an `Effect::Deny` fs rule in the crate. With no producer, `has_explicit_fs_deny` is
+/// permanently false and the supervisor's write broker never arms.
 ///
 /// Skipped in exactly two cases, both of which make the band meaningless rather than unsafe: a
 /// FULLY-relaxed axis (`fs: true` / `sandbox: false` — the explicit escape hatch, where the
@@ -328,10 +328,30 @@ fn finalize_env_deny(set: &mut FsRuleSet) {
     }
     set.entries.extend(defaults::env_deny_leaf_rules());
     set.entries.extend(defaults::env_deny_subtree_rules());
-    // The cross-process /proc secret band rides the SAME injection: it is a secret floor the
-    // broker carries under a whole-root grant, and it is meaningless under the same two skips
-    // (`fs: true` opts out of fs confinement entirely; a no-read policy has nothing to sit inside).
+    // The cross-process /proc secret band: a confined child that can reach /proc could otherwise
+    // read a peer's or its supervisor's `/proc/<pid>/environ` and recover the ambient env withheld
+    // from it (a brokered secret among it). It rides the same `grants_read` gate as the `.env`
+    // floor. The escape hatch (`fs: true`) skips this whole function and is covered by
+    // `finalize_escape_hatch_proc_deny`.
     set.entries.extend(defaults::proc_secret_deny_rules());
+}
+
+/// Add the cross-process `/proc` secret band for the ESCAPE HATCH (`fs: true`) when a secret is
+/// declared. [`finalize_env_deny`] already carries the band for every read-granting policy, but
+/// the escape hatch skips it (`grants_read` is false — `fs: true` grants no tree for a deny to sit
+/// inside), so a declared secret there would otherwise leak through a peer's `/proc/<pid>/environ`.
+/// This is the one shape the `.env` file floor cannot reach. Maintainer 2026-09-16: enforce the
+/// /proc band under the escape hatch when secrets are specified. `sensitive_keys` is populated
+/// before brokered names are withheld, so it counts a brokered secret too. A read-granting policy
+/// already has the band, secret or not, so this adds nothing there.
+///
+/// Runs at the granular assembly point ([`super::compile_object`]) rather than inside `fold_fs`,
+/// because that is the one place both the fs rules and the resolved env are in hand.
+pub(super) fn finalize_escape_hatch_proc_deny(set: &mut FsRuleSet, env: &EnvPolicy) {
+    let is_escape_hatch = set.default_effect == Effect::Allow;
+    if is_escape_hatch && !env.sensitive_keys.is_empty() {
+        set.entries.extend(defaults::proc_secret_deny_rules());
+    }
 }
 
 /// Deny the file(s) the policy was read from, read AND write, so a confined command can
