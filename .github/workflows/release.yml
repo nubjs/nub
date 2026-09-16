@@ -927,6 +927,17 @@ jobs:
           (cd crates/nub-launcher && $CMD build --locked --release --target "$MATRIX_TARGET")
         shell: bash
 
+      # The Windows alias stub: the file the release zip ships as bin/nubx.exe and
+      # bin/nubr.exe (crates/nub-alias). Its own workspace like the launcher, and
+      # Windows only — the Unix archives carry the aliases as symlinks to bin/nub,
+      # which the packaging job creates. Both Windows legs build natively.
+      - name: Build nub-alias stub (windows)
+        if: startsWith(matrix.platform, 'win32')
+        env:
+          MATRIX_TARGET: ${{ matrix.target }}
+        run: (cd crates/nub-alias && cargo build --locked --release --target "$MATRIX_TARGET")
+        shell: bash
+
       # CI GATE: the built binary must embed a NON-EMPTY metadata primer.
       # vendor/aube's build.rs generates a PRIMER_INDEX of package-NAME string
       # literals (crates/aube-resolver/src/primer.rs `include!`s it and references
@@ -976,8 +987,10 @@ jobs:
           # not two: the launcher passes the verb in `__NUB_ARGV0` rather than relying
           # on a separately-named `nubx` file (npm/nub/bin/launch.js,
           # Argv0::capture_argv0_override). This is what keeps every platform package
-          # under cnpm/npmmirror's 80 MiB sync cap, and it halves the release archive
-          # too — the archive is tarred from THIS directory further down.
+          # under cnpm/npmmirror's 80 MiB sync cap. The release archive is tarred from
+          # THIS directory further down and adds the nubx/nubr aliases itself — as
+          # symlinks on Unix and as the ~300 KB nub-alias stub on Windows — so it
+          # too carries one copy of the binary.
           PKG="npm/nub-$MATRIX_PLATFORM"
           EXE=""; [[ "$MATRIX_PLATFORM" == win32-* ]] && EXE=".exe"
           mkdir -p "$PKG/bin"
@@ -995,6 +1008,15 @@ jobs:
             echo "$SHA  $SRC" | sha256sum -c - \
               || { echo "::error::vendored busybox ($SRC) failed its pinned SHA-256 — refusing to ship a drifted shell binary"; exit 1; }
             cp "$SRC" "$PKG/bin/busybox.exe"
+            # The alias stub travels in the artifact OUTSIDE bin/: the npm platform
+            # package publishes bin/ alone and stays one binary (its launcher carries
+            # the verb), while the release zip gets the stub as bin/nubx.exe and
+            # bin/nubr.exe in the packaging job (see "Package release archives").
+            STUB="crates/nub-alias/target/$MATRIX_TARGET/release/nub-alias.exe"
+            test -f "$STUB" \
+              || { echo "::error::missing nub-alias stub for $MATRIX_PLATFORM at $STUB — the release zip would ship without nubx.exe and nubr.exe."; exit 1; }
+            mkdir -p "$PKG/alias"
+            cp "$STUB" "$PKG/alias/nub-alias.exe"
           else
             cp "target/$MATRIX_TARGET/release/nub" "$PKG/bin/nub"
             chmod +x "$PKG/bin/nub"
@@ -1953,6 +1975,22 @@ jobs:
             # The transitional empty runtime/ (see step comment). Created here, not in
             # the npm package, so only the self-owned upgrade archive carries it.
             mkdir -p "$PKG/runtime"
+            # The aliases ride in the archive. nubx and nubr are nub under other
+            # names (argv[0] dispatch, Argv0::detect), and every channel that unpacks
+            # these archives — install.sh, install.ps1, `nub upgrade`, mise's github
+            # backend, asdf — finds them in bin/ instead of each manufacturing its
+            # own. Unix: relative symlinks, which tar carries and the `-type f` chmod
+            # below skips. Windows: the nub-alias stub under each name (a symlink
+            # there needs Developer Mode, and a third copy of a 50 MB binary is not
+            # an archive); the build job stages it outside bin/ so the npm platform
+            # package, which publishes bin/ alone, stays one binary.
+            for alias in nubx nubr; do
+              if [[ "$platform" == win32-* ]]; then
+                cp "$PKG/alias/nub-alias.exe" "$PKG/bin/$alias.exe"
+              else
+                ln -sfn nub "$PKG/bin/$alias"
+              fi
+            done
             find "$PKG/bin" -type d -exec chmod 755 {} +
             find "$PKG/bin" -type f -exec chmod 755 {} +
             chmod 755 "$PKG/runtime"
@@ -1974,6 +2012,18 @@ jobs:
               (cd "$PKG" && tar --sort=name --mtime="@$ARCHIVE_MTIME" --owner=0 --group=0 --numeric-owner --mode='u+rwX,go+rX,go-w' -cf - bin runtime | gzip -n > "$GITHUB_WORKSPACE/release-archives/$archive")
             fi
             (cd release-archives && sha256sum "$archive" > "$archive.sha256")
+            # Prove the aliases are in the archive as shipped — a symlink entry on
+            # Unix, a file on Windows. A channel that takes them from the archive
+            # would otherwise lose both names on the next release, silently.
+            for alias in nubx nubr; do
+              if [[ "$platform" == win32-* ]]; then
+                unzip -l "release-archives/$archive" | grep -qE " bin/$alias\.exe$" \
+                  || { echo "::error::$archive lacks bin/$alias.exe"; exit 1; }
+              else
+                tar -tzvf "release-archives/$archive" | grep -qE " bin/$alias -> nub$" \
+                  || { echo "::error::$archive lacks the bin/$alias -> nub symlink"; exit 1; }
+              fi
+            done
             # The `nub compile` launcher template as a STANDALONE asset, so a
             # cross-compile can fetch the one platform it needs (a few hundred KB)
             # instead of a whole release archive. This job is the only place all
@@ -2263,6 +2313,15 @@ jobs:
             PKG="artifacts/nub-$platform"
             [ -d "$PKG" ] || { echo "skip $platform (not built)"; continue; }
             mkdir -p "$PKG/runtime"
+            # The nubx / nubr aliases, exactly as stable packages them: symlinks
+            # on Unix, the staged nub-alias stub on Windows.
+            for alias in nubx nubr; do
+              if [[ "$platform" == win32-* ]]; then
+                cp "$PKG/alias/nub-alias.exe" "$PKG/bin/$alias.exe"
+              else
+                ln -sfn nub "$PKG/bin/$alias"
+              fi
+            done
             find "$PKG/bin" -type d -exec chmod 755 {} +
             find "$PKG/bin" -type f -exec chmod 755 {} +
             chmod 755 "$PKG/runtime"
@@ -2276,6 +2335,15 @@ jobs:
               (cd "$PKG" && tar --sort=name --mtime="@$ARCHIVE_MTIME" --owner=0 --group=0 --numeric-owner --mode='u+rwX,go+rX,go-w' -cf - bin runtime | gzip -n > "$GITHUB_WORKSPACE/release-archives/$archive")
             fi
             (cd release-archives && sha256sum "$archive" > "$archive.sha256")
+            for alias in nubx nubr; do
+              if [[ "$platform" == win32-* ]]; then
+                unzip -l "release-archives/$archive" | grep -qE " bin/$alias\.exe$" \
+                  || { echo "::error::$archive lacks bin/$alias.exe"; exit 1; }
+              else
+                tar -tzvf "release-archives/$archive" | grep -qE " bin/$alias -> nub$" \
+                  || { echo "::error::$archive lacks the bin/$alias -> nub symlink"; exit 1; }
+              fi
+            done
             LEXE=""; [[ "$platform" == win32-* ]] && LEXE=".exe"
             LSRC="$PKG/bin/nub-launcher-$platform$LEXE"
             test -f "$LSRC" \
@@ -2679,6 +2747,15 @@ jobs:
             PKG="artifacts/nub-$platform"
             [ -d "$PKG" ] || { echo "skip $platform (not built)"; continue; }
             mkdir -p "$PKG/runtime"
+            # The nubx / nubr aliases, exactly as stable packages them: symlinks
+            # on Unix, the staged nub-alias stub on Windows.
+            for alias in nubx nubr; do
+              if [[ "$platform" == win32-* ]]; then
+                cp "$PKG/alias/nub-alias.exe" "$PKG/bin/$alias.exe"
+              else
+                ln -sfn nub "$PKG/bin/$alias"
+              fi
+            done
             find "$PKG/bin" -type d -exec chmod 755 {} +
             find "$PKG/bin" -type f -exec chmod 755 {} +
             chmod 755 "$PKG/runtime"
@@ -2692,6 +2769,15 @@ jobs:
               (cd "$PKG" && tar --sort=name --mtime="@$ARCHIVE_MTIME" --owner=0 --group=0 --numeric-owner --mode='u+rwX,go+rX,go-w' -cf - bin runtime | gzip -n > "$GITHUB_WORKSPACE/release-archives/$archive")
             fi
             (cd release-archives && sha256sum "$archive" > "$archive.sha256")
+            for alias in nubx nubr; do
+              if [[ "$platform" == win32-* ]]; then
+                unzip -l "release-archives/$archive" | grep -qE " bin/$alias\.exe$" \
+                  || { echo "::error::$archive lacks bin/$alias.exe"; exit 1; }
+              else
+                tar -tzvf "release-archives/$archive" | grep -qE " bin/$alias -> nub$" \
+                  || { echo "::error::$archive lacks the bin/$alias -> nub symlink"; exit 1; }
+              fi
+            done
             LEXE=""; [[ "$platform" == win32-* ]] && LEXE=".exe"
             LSRC="$PKG/bin/nub-launcher-$platform$LEXE"
             test -f "$LSRC" \

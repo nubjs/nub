@@ -92,6 +92,8 @@ __pycache__/
 # nub-launcher (the `nub compile` runtime half) is its own size-tuned workspace;
 # a local build lands its target/ in-tree.
 /crates/nub-launcher/target/
+# nub-alias (the Windows nubx.exe / nubr.exe stub) is its own workspace the same way.
+/crates/nub-alias/target/
 /dist/
 /build/
 /coverage/

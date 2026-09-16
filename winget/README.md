@@ -15,7 +15,9 @@ Nub is installable on Windows with `winget install Nub.Nub`. This directory hold
 
 ### One executable, three aliases
 
-The zip carries one `bin\nub.exe`; `nubx` and `nubr` are that binary dispatched on argv[0]. winget creates one command alias per `NestedInstallerFiles` entry and refuses a repeated `RelativeFilePath`, comparing the literal string — so each alias names the same file in a different spelling (`bin/nub.exe`, `./bin/nub.exe`, `bin\nub.exe`). The published manifests have carried `nub` + `nubx` this way since 0.1.0; the fixture adds `nubr` the same way, and the validate workflow proves all three run.
+Through 0.9.3 the zip carries one `bin\nub.exe`; `nubx` and `nubr` are that binary dispatched on argv[0]. winget creates one command alias per `NestedInstallerFiles` entry and refuses a repeated `RelativeFilePath`, comparing the literal string — so each alias names the same file in a different spelling (`bin/nub.exe`, `./bin/nub.exe`, `bin\nub.exe`). The published manifests have carried `nub` + `nubx` this way since 0.1.0; the fixture adds `nubr` the same way, and the validate workflow proves all three run.
+
+From the next release the zip also ships `bin\nubx.exe` and `bin\nubr.exe`, each a small stub (`crates/nub-alias`) that runs the sibling `nub.exe` with its verb. A manifest for such a release can point the two aliases at those real files instead of the spellings; both forms install.
 
 ## Confidence chain — why a broken manifest cannot reach users
 

@@ -8713,9 +8713,8 @@ fn perform_selfowned_upgrade(
     swap_dir(install_dir, "bin", &new_bin)?;
     let _ = std::fs::remove_dir_all(install_dir.join("runtime"));
 
-    // The release tarball ships `bin/nub` — one binary; there is no `bin/nubx` any
-    // more, and `install.sh` / this upgrade path both create that alias themselves as
-    // a symlink. It arrives at mode 0644 — the
+    // The release tarball ships one binary, `bin/nub`, plus `bin/nubx` and
+    // `bin/nubr` as symlinks to it. The binary arrives at mode 0644 — the
     // upload-artifact → download-artifact round-trip in CI strips the executable
     // bit, so the published archive is non-executable. install.sh heals fresh
     // installs with its own `chmod +x`; the self-owned upgrade path must do the
@@ -8726,13 +8725,15 @@ fn perform_selfowned_upgrade(
     #[cfg(not(windows))]
     ensure_bin_executable(&install_dir.join("bin").join(NUB_EXE))?;
 
-    // Recreate the `nubx` / `nubr` aliases install.sh creates (relative symlinks →
-    // nub; the CLI dispatches on argv[0], so only the alias NAME matters — see
-    // Argv0::detect). BEST-EFFORT per the resilience contract above: the binary is
-    // already swapped and executable, so `nub` works regardless. The aliases are a
-    // derived convenience — their recreation failing (an exotic FS, a permissions
-    // quirk) must NOT abort an otherwise-successful upgrade; warn and continue
-    // rather than bail. POSIX-only: on Windows the alias COPIES are refreshed
+    // Recreate the `nubx` / `nubr` aliases (relative symlinks → nub; the CLI
+    // dispatches on argv[0], so only the alias NAME matters — see Argv0::detect).
+    // The archive carries them and the bin/ swap above brought them along; an
+    // archive from before they shipped has none, so recreate them regardless.
+    // BEST-EFFORT per the resilience contract above: the binary is already swapped
+    // and executable, so `nub` works either way. The aliases are a derived
+    // convenience — their recreation failing (an exotic FS, a permissions quirk)
+    // must NOT abort an otherwise-successful upgrade; warn and continue rather
+    // than bail. POSIX-only: on Windows the alias stubs are moved into place
     // inside `swap_bin_files_windows`.
     #[cfg(unix)]
     for alias in ["nubx", "nubr"] {
@@ -8809,13 +8810,22 @@ fn swap_bin_files_windows(install_dir: &Path, staged_bin: &Path) -> Result<()> {
     // The nubx / nubr alias refresh is BEST-EFFORT per the resilience contract:
     // `nub` is already swapped and authoritative. A running alias .exe blocks the
     // delete but not the rename-aside; if even that fails, warn and leave the
-    // stale copy.
+    // stale copy. The archive carries each alias as the nub-alias stub (a small
+    // exe that runs the sibling nub.exe with the verb), so it is moved into place
+    // from the staged bin/; an archive from before the stubs shipped has no such
+    // file, and the alias falls back to a copy of nub.exe under that name.
     for alias in ["nubx", "nubr"] {
         let exe = bin_dir.join(format!("{alias}.exe"));
         if exe.exists() && std::fs::remove_file(&exe).is_err() {
             let _ = std::fs::rename(&exe, bin_dir.join(format!("{alias}.exe.old")));
         }
-        if let Err(e) = std::fs::copy(&nub, &exe) {
+        let staged = staged_bin.join(format!("{alias}.exe"));
+        let installed = if staged.is_file() {
+            std::fs::rename(&staged, &exe)
+        } else {
+            std::fs::copy(&nub, &exe).map(|_| ())
+        };
+        if let Err(e) = installed {
             eprintln!(
                 "nub upgrade: warning: could not refresh the {alias} alias at {} ({e}); \
                  `nub` is upgraded and usable. Re-run the installer to restore {alias}.",

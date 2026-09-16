@@ -197,10 +197,10 @@ chmod +x "$exe" || error "Failed to set permissions on $exe"
 
 # `nubx` and `nubr` are the same binary as `nub`, dispatched on argv[0] (cli.rs
 # reads args_os()[0].file_stem(): "nubx" -> exec, "nubr" -> the unified runner).
-# The release archive ships only bin/nub, so create each alias as a relative
-# symlink alongside it. `-f` makes this idempotent across reinstall/upgrade and
-# harmless if a future archive ever ships its own aliases. Relative target keeps
-# it valid if ~/.nub moves.
+# The release archive carries each alias as a relative symlink beside bin/nub,
+# which tar restored above. Recreate them anyway: an archive from before they
+# shipped has none, and `-f` makes this idempotent across reinstall/upgrade.
+# Relative target keeps it valid if ~/.nub moves.
 for alias in nubx nubr; do
     ln -sf nub "$bin_dir/$alias" || error "Failed to create $alias symlink in $bin_dir"
 done

@@ -88,9 +88,10 @@ class Nub < Formula
     # and ignore runtime/.
     bin.install "bin/nub"
     # \`nubx\` is the same binary under a second name: nub reads its verb from the
-    # argv[0] basename (Argv0::detect in crates/nub-cli/src/cli.rs). Only one copy
-    # ships, so the alias is created here — install.sh, install.ps1 and flake.nix
-    # each do the same for their own channel.
+    # argv[0] basename (Argv0::detect in crates/nub-cli/src/cli.rs). The archive
+    # carries bin/nubx as a symlink, but \`bin.install "bin/nub"\` above takes the
+    # one file, so the alias is created here — flake.nix does the same for its
+    # channel.
     bin.install_symlink bin/"nub" => "nubx"
     # \`nubr\` is the third name: the unified runner (a file, a package.json
     # script, or an installed bin), the command \`@nubjs/runner\` ships, run out of
