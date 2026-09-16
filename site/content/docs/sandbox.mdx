@@ -4,7 +4,7 @@ description: Run a command with access to only the files, hosts, and environment
 unpublished: true
 ---
 
-`nub sandbox` runs a command under a policy you write. The policy grants the command only the files, hosts, and environment variables it needs; everything else is refused. It has four axes — the filesystem (`fs`), the network (`net`), and environment variables, split into `vars` for ordinary ones and `secrets` for sensitive ones.
+Nub runs a command under a policy you write, granting it only the files, hosts, and environment variables the policy names. Everything else is refused. A policy has four axes: the filesystem (`fs`), the network (`net`), and environment variables, split into `vars` for ordinary ones and `secrets` for sensitive ones.
 
 <Callout type="warn">
 The sandbox enforces on **Linux only**. On macOS and Windows `nub sandbox` refuses to run the command and names the axes it could not enforce, rather than running it unconfined.
@@ -30,7 +30,7 @@ There is no default policy. Without `--policy` the command is refused rather tha
 
 ## Where a policy lives
 
-A policy lives in its own file, which is what lets Nub exclude that file from the filesystem grant. It holds the axes object directly, or under a `sandbox` key. Unspecified keys fail closed.
+A policy lives in its own file, which is what lets Nub exclude that file from the filesystem grant. It holds the axes object directly, or under a single `sandbox` key — one or the other, never both, since a file carrying both shapes would leave one of them silently unused. Unspecified keys fail closed.
 
 ```jsonc title="sandbox.jsonc"
 {
