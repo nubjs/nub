@@ -691,7 +691,6 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     project_dir: &std::path::Path,
     modules_dir_name: &str,
     aube_dir: &std::path::Path,
-    global_virtual_store_dir: &std::path::Path,
     graph: &aube_lockfile::LockfileGraph,
     policy: &aube_scripts::BuildPolicy,
     // The `defaultTrust` floor, consulted only when `policy` leaves a
@@ -1095,7 +1094,6 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     for job in jobs {
         let sem = semaphore.clone();
         let project_dir = project_dir.clone();
-        let global_virtual_store_dir = global_virtual_store_dir.to_path_buf();
         let modules_dir_name = modules_dir_name.clone();
         let node_gyp_bin_dir = node_gyp_bin_dir.clone();
         let jail_policy = jail_policy.clone();
@@ -2212,7 +2210,6 @@ mod tests {
             &project,
             "node_modules",
             &aube_dir,
-            &gvs,
             &graph,
             &policy,
             &super::super::default_trust::DefaultTrustFloor::disabled(),

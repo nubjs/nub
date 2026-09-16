@@ -214,7 +214,7 @@ pub(crate) fn preflight(
         // Fail closed on unavailable confinement. The historical differential pin now
         // selects the unprivileged supervisor, never the removed bubblewrap backend.
         Err(super::linux_landlock::LandlockUnavailable::PinnedToBubblewrap) => {}
-        Err(super::linux_landlock::LandlockUnavailable::NotABuildJail) => {}
+        Err(super::linux_landlock::LandlockUnavailable::NotPinnedToLandlock) => {}
         Err(reason) => {
             return Err(Degradation {
                 lost: vec!["fs".to_string(), "net".to_string()],
@@ -271,13 +271,7 @@ pub fn apply(
         // pointed at it; Deny tmp grants nothing, so the shared `/tmp` is simply never in the
         // allow-set. The managed tmp root is stable for one explicit session (Env is enforced
         // by construction — `base_command`/`envp` — always.)
-        let plan = build_supervised_plan(
-            policy,
-            &spec,
-            tmp_dir,
-            retained,
-            proxy,
-        )?;
+        let plan = build_supervised_plan(policy, &spec, tmp_dir, retained, proxy)?;
         return Ok(Prepared {
             command: base_command(&spec, policy),
             degradation: Degradation::full(),

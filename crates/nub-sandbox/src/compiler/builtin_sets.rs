@@ -287,13 +287,23 @@ pub fn trusted_net_rules(effect: Effect) -> Vec<NetRule> {
 // credential-scoping grounds. The confinement of attacker-authored dependency code
 // inherits none of those exceptions — `registry.npmjs.org` is absent precisely because
 // `npm publish` is a PUT to the host that serves the read.
-include!(concat!(env!("OUT_DIR"), "/download_hosts.rs"));
+/// The install-time artifact hosts `$downloads` expands to.
+///
+/// A plain literal since the build-jail catalog that generated it was removed: four hosts
+/// do not earn a build script, and there is no longer a prefetcher reading the same list.
+/// The one consumer is the `$downloads` token in the `nub sandbox` policy language, where
+/// the supervisor enforces per-host egress.
+pub const DOWNLOAD_HOSTS: &[&str] = &[
+    "nodejs.org",
+    "binaries.prisma.sh",
+    "download.cypress.io",
+    "cdn.cypress.io",
+];
 
-/// The `$downloads` hosts in force: [`DOWNLOAD_HOSTS`], unless the dev-only catalog override
-/// replaced it. Every consumer must read the set through here rather than the `const`, or a
-/// dev override would apply to some call sites and not others.
+/// The `$downloads` hosts in force. Retained as an accessor rather than letting callers read
+/// the `const`, so a future source for the set has one place to land.
 pub fn download_hosts() -> &'static [&'static str] {
-    crate::catalog_override::download_hosts().unwrap_or(DOWNLOAD_HOSTS)
+    DOWNLOAD_HOSTS
 }
 
 /// Expand `$downloads` into one [`NetRule`] per host with the given effect (Allow for a

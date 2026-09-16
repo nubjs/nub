@@ -6,7 +6,6 @@
 //! # Compile and apply
 //!
 //! [`compile`] resolves a surface and [`CompileCtx`] into a [`SandboxPolicy`].
-//! [`compile_build_jail`] resolves the catalog-driven dependency-build profile.
 //! [`Sandbox::acquire`] retains resolved policy resources for reusable commands; combine it
 //! with a [`CommandSpec`] through [`Sandbox::prepare`]. [`apply`] remains the one-shot
 //! compatibility adapter returning a [`Prepared`] launch. Launch through [`Prepared::spawn`],
@@ -24,8 +23,8 @@
 //! Supply toolchain read paths for interpreters installed outside system directories.
 //! Assign capabilities per configuration source; dependency-authored policy must not gain
 //! the dynamic environment or credential-broker capabilities of root-authored policy.
-//! The build jail is a compatibility-oriented profile. Reported losses are carried by
-//! [`Prepared::degradation`]; an embedder must surface them rather than claiming enforcement.
+//! Reported losses are carried by [`Prepared::degradation`]; an embedder must surface them
+//! rather than claiming enforcement.
 //!
 #![cfg_attr(
     all(test, windows),
@@ -35,11 +34,11 @@
     )
 )]
 
-pub mod arm;
 // Reuse the integration fixtures in the test-only native adapter experiment.
 #[cfg(all(test, windows))]
 extern crate self as nub_sandbox;
 pub mod backend;
+pub mod compiler;
 #[cfg(all(test, windows))]
 #[path = "../tests/git_tool_functionality.rs"]
 mod git_tool_functionality_probe;
@@ -52,44 +51,6 @@ mod native_tool_functionality_probe;
 #[cfg(all(test, windows))]
 #[path = "../tests/python_tool_functionality.rs"]
 mod python_tool_functionality_probe;
-// The catalog PARSER is compiled into the crate only for the dev-only override; `build.rs`
-// pulls the same file in with `#[path]` and always runs it. A shipped build therefore
-// contains no catalog-parsing code at all — the strongest form of "the dev path is absent,
-// not merely inert". See `catalog_override`.
-#[cfg(feature = "build-jail-catalog-override")]
-pub mod catalog;
-pub mod catalog_override;
-/// The SHIPPED catalog-update path, compiled into every build — unlike [`catalog_override`]'s loader,
-/// which is dev-only because it takes its path from an env var. This one takes no path from anyone: the
-/// location is fixed under nub's data directory, so there is no input that can redirect it, which is
-/// exactly what makes it shippable. Without it, a package measured after a release stays uncatalogued
-/// until the next release, by construction.
-pub mod catalog_update;
-/// The v2 catalog parser, compiled into EVERY build — unlike [`catalog`] above, which stays
-/// dev-only. It has to be: a shipped build now embeds `data/build-jail-catalog-v2.json` and parses
-/// it once at first use (`catalog_override::baked_v2`), so the v2 grants are the ones the jail
-/// actually runs on rather than an override-only path. `build.rs` pulls this same file in with
-/// `#[path]` and parses the same bytes at BUILD time, which is what keeps a malformed catalog from
-/// ever reaching a user.
-pub mod catalog_v2;
-pub mod compiler;
-
-/// The v2 grant for one package AT ONE VERSION, for an embedder that must act on it AFTER a
-/// lifecycle script has run — today the `writePaths` move. Exposed here rather than making the
-/// override module public, so the seam stays one function wide. Version selection lives behind
-/// this call, so an embedder cannot resolve a different band than the compiler did.
-/// ⛔ NOT FEATURE-GATED, AND GATING IT WAS THE BUG. This was `#[cfg(feature =
-/// "build-jail-catalog-override")]`, which forced its only caller — the `writePaths` promotion in
-/// nub-cli — to be gated too, so promotion was compiled out of every shipped build. The effect was
-/// silent: the jail confined the write correctly and then the cached artefact was discarded, so every
-/// install re-downloaded it. The catalog this reads is BAKED IN and always present; nothing about
-/// resolving a grant needs the dev-only override path.
-pub fn catalog_override_v2_grant(
-    package: &str,
-    version: Option<&str>,
-) -> Option<&'static catalog_v2::Grant> {
-    catalog_override::v2_grant_for(package, version)
-}
 
 pub mod conformance;
 pub mod matcher;
@@ -107,30 +68,14 @@ pub mod host_probe {
     pub use crate::backend::landlock_abi;
 }
 
-pub use compiler::jail_private_home;
 pub use compiler::{
-    CommandRunner, CompileCtx, CompileError, CompileWarning, DOWNLOAD_HOSTS,
-    PACKAGE_NETWORK_ALLOWED, PROJECT_VIRTUAL_STORE_LEAF, ScopeCapabilities, build_jail_net_allowed,
-    build_jail_net_allowed_for, compile, compile_build_jail,
-    compile_build_jail_with_global_virtual_store, compile_with_warnings, download_hosts,
-    net_gate_node_options, package_network_allowed,
+    CommandRunner, CompileCtx, CompileError, CompileWarning, DOWNLOAD_HOSTS, ScopeCapabilities,
+    compile, compile_with_warnings, download_hosts,
 };
 pub use matcher::Homes;
 
 pub use policy::SandboxPolicy;
 pub use proxy::{Decision, EgressProxy, GrantDecider, Host, StaticDecider};
-
-/// Relax a compiled policy's READ axis to the whole disk. A whole-root `/` read grant is
-/// deliberately DROPPED by the Landlock lowering (`backend::linux_grants::compile_mount_plan`),
-/// so this front-inserts explicit disk-read allows while preserving pre-existing (more specific)
-/// write grants under last-match-wins.
-///
-/// The build-jail embedder seam uses this to reproduce the generous read posture dependency
-/// lifecycle scripts need — a `node` interpreter must read its own runtime/preload, its module
-/// tree, and system libs — while keeping WRITES allow-only.
-pub fn relax_reads_to_disk(policy: &mut SandboxPolicy) {
-    compiler::relax_fs_read_to_disk(policy);
-}
 
 /// Whether applying this policy needs the embedder to supply bounded current-path
 /// roots for wildcard deny inventory. Exact denies are enforced directly and need

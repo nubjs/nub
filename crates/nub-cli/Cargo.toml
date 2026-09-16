@@ -15,8 +15,6 @@ path = "src/main.rs"
 
 [features]
 prefetch-github-hosts = []
-build-jail-project-grant-arm = ["nub-sandbox/build-jail-project-grant-arm"]
-build-jail-catalog-override = ["nub-sandbox/build-jail-catalog-override"]
 # Single self-contained binary: embed the `runtime/` tree as a compressed blob and
 # JIT-extract it on first run (forwards to nub-core, where the extract module +
 # build.rs blob generation live). OFF by default — the `--profile fast` dev loop

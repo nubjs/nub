@@ -28,15 +28,6 @@ pub struct SandboxPolicy {
     pub net: NetPolicy,
     pub env: EnvPolicy,
     pub pid: PidPolicy,
-    /// This policy uses Nub's dependency-lifecycle build-jail profile.
-    /// Set only by [`crate::compile_build_jail`]. Both profiles use the same
-    /// unprivileged backends; this marker selects build-specific grants and behavior.
-    ///
-    /// Skipped in serde deliberately: it is a provenance marker for backend selection, not
-    /// part of the policy IR, and adding it to the serialized form would churn every dump
-    /// and snapshot without describing any confinement.
-    #[serde(skip)]
-    pub build_jail: bool,
 }
 
 /// Allow or Deny — the verdict of a single rule and the base of a ruleset.

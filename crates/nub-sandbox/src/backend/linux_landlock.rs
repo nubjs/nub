@@ -808,32 +808,26 @@ pub(crate) enum LandlockUnavailable {
     PolicyHasDenyRules,
     /// `NUB_SANDBOX_MECHANISM=bubblewrap` pinned the selector for a differential run.
     PinnedToBubblewrap,
-    /// A `nub sandbox` scope rather than the build jail. Out of scope by design.
-    NotABuildJail,
+    /// Nothing selected Landlock. It is reachable only through the differential pin now
+    /// that the build jail — the profile it existed to enforce — is gone; a `nub sandbox`
+    /// scope needs deny-inside-allow, which Landlock cannot express at any ABI.
+    NotPinnedToLandlock,
 }
 
 /// Whether Landlock can confine `policy` on this host, and at what ABI.
 ///
-/// THE BUILD JAIL HAS NO OTHER MECHANISM. Bubblewrap is not a fallback here, not even where
-/// it happens to work: it needs a user namespace, unprivileged availability of which is not
-/// universal, and universal unprivileged operation is the requirement that defines this
-/// product. Bubblewrap belongs to `nub sandbox`, which pays for it with escalation. So this
-/// is an AVAILABILITY question, not a mechanism-selection one — there is nothing to select
-/// between, and the caller fails the launch closed on `Err`.
+/// The answer is `Err` for every production policy today. Landlock was the build jail's only
+/// mechanism and the build jail is gone; a `nub sandbox` scope needs deny-inside-allow, which
+/// Landlock cannot express at any ABI, so nothing but the differential pin below selects it.
 ///
 /// BELOW THE KERNEL FLOOR (Landlock ABI 3, introduced in Linux 6.2) the answer is REFUSE, not
-/// run-unconfined-with-a-warning. The jail's contract everywhere else is fail-closed, and a
-/// dependency's install script is precisely the code whose whole reason for being confined is
-/// that it is untrusted — running it unconfined because the kernel is old inverts the
-/// product. A warning is not a substitute: it is printed to a log nobody reads, after the
-/// script has already run. The affected population is a small and shrinking tail, and it gets
-/// an actionable error naming the kernel requirement rather than silent exposure.
+/// run-unconfined-with-a-warning. Everything here fails closed: the code being confined is
+/// precisely the code whose whole reason for being confined is that it is untrusted, and a
+/// warning printed after it has already run is not a substitute for refusing to run it.
 pub(crate) fn landlock_availability(policy: &SandboxPolicy) -> Result<u32, LandlockUnavailable> {
-    // INTERNAL mechanism pin, for differential testing only. The two backends enforce the
-    // same policy through different primitives, so "did behaviour change?" is only
-    // answerable by running both on ONE host — which needs a way to hold the selector
-    // still. Not a user knob and not documented as one. It is the ONLY way a build-jail
-    // spawn can reach bubblewrap: the production path has no bubblewrap arm at all.
+    // INTERNAL mechanism pin, for differential testing only. Two enforcement primitives are
+    // only comparable by running both on ONE host, which needs a way to hold the selector
+    // still. Not a user knob and not documented as one.
     let pinned_to_landlock = match std::env::var("NUB_SANDBOX_MECHANISM").as_deref() {
         Ok("bubblewrap") => return Err(LandlockUnavailable::PinnedToBubblewrap),
         // A HARD pin: a differential arm that silently fell back would compare the mechanism
@@ -842,19 +836,29 @@ pub(crate) fn landlock_availability(policy: &SandboxPolicy) -> Result<u32, Landl
         Ok("landlock") => true,
         _ => false,
     };
-    // SCOPE GATE, and it runs in BOTH directions. Landlock is the build jail's mechanism and
-    // only its mechanism: a `nub sandbox` scope needs deny-inside-allow plus the mount/PID/net
-    // namespaces, and enforcing one here would silently drop every namespace-backed axis it
-    // depends on — the tests for those axes fail loudly under Landlock precisely because the
-    // mechanism cannot carry them.
-    if !policy.build_jail && !pinned_to_landlock {
-        return Err(LandlockUnavailable::NotABuildJail);
+    availability_under_pin(policy, pinned_to_landlock)
+}
+
+/// The half below the environment read, so a test can reach the checks past the scope gate
+/// without writing `NUB_SANDBOX_MECHANISM` — a process global that would race any sibling
+/// test under cargo's threaded runner.
+fn availability_under_pin(
+    policy: &SandboxPolicy,
+    pinned_to_landlock: bool,
+) -> Result<u32, LandlockUnavailable> {
+    // SCOPE GATE. Landlock was the build jail's mechanism and only its mechanism, so with the
+    // build jail gone nothing selects it but the pin above: a `nub sandbox` scope needs
+    // deny-inside-allow, and routing one here would enforce the grants while silently dropping
+    // every deny. Landlock's real future here is as a COMPOSED coarse layer underneath the
+    // supervisor (it closes cross-process `/proc/<pid>/environ`, which the supervisor does not),
+    // not as an alternative to it — that composition is not wired yet.
+    if !pinned_to_landlock {
+        return Err(LandlockUnavailable::NotPinnedToLandlock);
     }
     let abi = probe_abi().ok_or(LandlockUnavailable::NoKernelSupport)?;
-    // An INVARIANT check, not a routing decision. `enforce_pure_allowlist` strips every deny
-    // from a build-jail policy, so a deny reaching here means that guarantee broke upstream —
-    // and Landlock would union the rule away to nothing rather than enforce it. Refuse loudly
-    // instead of enforcing something weaker than the policy says.
+    // An INVARIANT check, not a routing decision. Landlock unions rules and would carry a deny
+    // away to nothing rather than enforce it, so a policy that reaches here carrying one gets
+    // refused loudly instead of enforced weaker than it reads.
     if policy
         .fs
         .rules
@@ -1172,22 +1176,18 @@ mod tests {
         );
     }
 
-    /// The scope boundary between the two products. A `nub sandbox` scope leans on the
-    /// mount/PID/net namespaces Landlock does not have, so routing one here would silently
-    /// drop those axes; only the build jail is eligible.
+    /// Landlock cannot express a deny at any ABI, so an ordinary `nub sandbox` scope must
+    /// never reach it: enforcing the grants while dropping the denies reads as confinement
+    /// and is not. Nothing but the differential pin selects it.
+    ///
+    /// Only the refusal is asserted. The pinned arm is env-driven and `NUB_SANDBOX_MECHANISM`
+    /// is a process global, so a control here would race any sibling test that sets it.
     #[test]
-    fn only_a_build_jail_policy_is_landlock_eligible() {
-        let mut scope = policy(Vec::new());
+    fn an_ordinary_scope_is_never_routed_to_landlock() {
         assert_eq!(
-            landlock_availability(&scope),
-            Err(LandlockUnavailable::NotABuildJail),
+            landlock_availability(&policy(Vec::new())),
+            Err(LandlockUnavailable::NotPinnedToLandlock),
             "a nub sandbox scope must never be routed to landlock"
-        );
-        scope.build_jail = true;
-        assert_ne!(
-            landlock_availability(&scope),
-            Err(LandlockUnavailable::NotABuildJail),
-            "control: the same policy marked as the build jail clears the scope gate"
         );
     }
 
@@ -1195,10 +1195,11 @@ mod tests {
     /// back rather than be enforced with the deny silently dropped.
     #[test]
     fn a_deny_rule_disqualifies_landlock() {
-        let mut denied = policy(vec![rule("/tmp/secret", Effect::Deny, FsAccess::DENY)]);
-        denied.build_jail = true;
+        // Past the scope gate via the pin, so the deny refusal is what the assertion reads
+        // rather than the gate that precedes it.
+        let denied = policy(vec![rule("/tmp/secret", Effect::Deny, FsAccess::DENY)]);
         assert_eq!(
-            landlock_availability(&denied),
+            availability_under_pin(&denied, true),
             Err(LandlockUnavailable::PolicyHasDenyRules)
         );
     }

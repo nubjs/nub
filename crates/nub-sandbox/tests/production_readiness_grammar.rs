@@ -1,8 +1,6 @@
 use nub_sandbox::conformance::{Fixture, run_fixture};
-use nub_sandbox::policy::{Effect, FsAccess, Inspection, ProxyMode};
-use nub_sandbox::{
-    CommandRunner, CompileCtx, Homes, ScopeCapabilities, compile, compile_build_jail,
-};
+use nub_sandbox::policy::{Effect, Inspection, ProxyMode};
+use nub_sandbox::{CommandRunner, CompileCtx, Homes, ScopeCapabilities, compile};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -267,40 +265,4 @@ fn explicit_reuse_is_ordered_and_unlisted_axes_floor() {
     assert_eq!(floored.net.mode, ProxyMode::Disabled);
     assert!(floored.env.enforce);
     assert!(!floored.env.constructed.contains_key("PATH"));
-}
-
-#[test]
-fn generated_build_jail_policy_is_positive_only_and_marks_its_provenance() {
-    let homes = Homes {
-        home: PathBuf::from("/home/sandbox"),
-        cache: PathBuf::from("/cache"),
-        tmp: PathBuf::from("/tmp"),
-        project: PathBuf::from("/project"),
-    };
-    let policy = compile_build_jail(
-        homes,
-        std::path::Path::new("/project/node_modules/example"),
-        Some("example"),
-        Some("1.0.0"),
-        vec![PathBuf::from("/toolchain/bin/node")],
-        vec![PathBuf::from("/toolchain/include/node")],
-        BTreeMap::from([("PATH".to_string(), "/usr/bin".to_string())]),
-    )
-    .expect("generated build-jail policy compiles");
-    assert!(policy.build_jail);
-    assert_eq!(policy.fs.rules.default_effect, Effect::Deny);
-    assert!(
-        policy
-            .fs
-            .rules
-            .entries
-            .iter()
-            .all(|rule| rule.effect == Effect::Allow)
-    );
-    assert!(policy.fs.rules.entries.iter().any(|rule| {
-        rule.matcher
-            .as_str()
-            .contains("/project/node_modules/example")
-            && rule.access == FsAccess::ReadWrite
-    }));
 }

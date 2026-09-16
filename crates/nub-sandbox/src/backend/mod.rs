@@ -1175,25 +1175,11 @@ fn capture_runtime_brokers(
     Ok(session.into_brokers())
 }
 
-/// Acquire parent-owned proxy state once. Windows binds one listener per command;
-/// Unix backends share the session listener. Linux catalog build-jail policies without
-/// brokers use the coarse socket ceiling rather than the raw-policy supervisor.
+/// Acquire parent-owned proxy state once, shared by every command in the session.
 fn start_session_proxy(
     policy: &SandboxPolicy,
     runtime_brokers: Vec<RuntimeCredentialBroker>,
 ) -> Result<Option<SessionProxy>, Degradation> {
-    #[cfg(target_os = "linux")]
-    {
-        if policy.build_jail && policy.net.brokers.is_empty() {
-            return Ok(None);
-        }
-        start_proxy_if_needed(policy, runtime_brokers)
-    }
-    #[cfg(target_os = "windows")]
-    {
-        proxy_context(policy, runtime_brokers)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     start_proxy_if_needed(policy, runtime_brokers)
 }
 

@@ -1255,7 +1255,6 @@ fn a_build_that_never_calls_node_gyp_installs_with_no_registry() {
     );
 }
 
-
 /// A cold CI install must link only the optional platform variants it actually
 /// materializes. The resolver widens the graph with every platform's optional
 /// native dep so the committed lockfile stays portable, and the virtual-store

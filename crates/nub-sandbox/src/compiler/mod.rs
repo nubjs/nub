@@ -12,7 +12,6 @@
 
 mod builtin_sets;
 mod clobber;
-mod curated;
 // Crate-visible rather than module-private so the Linux mount planner's tests can run the
 // whole-disk read allow-set this module emits straight into `compile_mount_plan`. While it was
 // private neither side could test the seam between them, which is exactly where the
@@ -20,30 +19,14 @@ mod curated;
 pub(crate) mod defaults;
 mod env_grammar;
 mod fold;
-mod package_network;
 mod preset;
 mod resolve;
 mod reuse;
-// Crate-visible rather than module-private: `catalog_v2::Entry::grant_for` resolves its version
-// bands through the SAME range matcher the compiler's own scoped tables use, so the v2 bands
-// never become a second semver dialect.
-pub(crate) mod version_scope;
 
-pub use defaults::net_gate_node_options;
-pub use package_network::{
-    PACKAGE_NETWORK_ALLOWED, build_jail_net_allowed, package_network_allowed,
-};
-pub use preset::build_jail_net_allowed_for;
-pub use preset::{
-    PROJECT_VIRTUAL_STORE_LEAF, compile_build_jail, compile_build_jail_with_global_virtual_store,
-    jail_private_home, relax_fs_read_to_disk,
-};
 pub use resolve::{CommandRunner, ShellRunner};
 
-/// The `$downloads` host set, re-exported for the EMBEDDER's out-of-jail prefetch alone,
-/// which derives its fetch allowlist FROM this array rather than restating it.
-/// [`download_hosts`] is the accessor every consumer should read — it honours the dev-only
-/// catalog override; the `const` is the compiled floor behind it.
+/// The `$downloads` host set. [`download_hosts`] is the accessor every consumer should
+/// read; the `const` is the floor behind it.
 pub use builtin_sets::{DOWNLOAD_HOSTS, download_hosts};
 
 use crate::matcher::path::Homes;
@@ -354,19 +337,7 @@ pub(crate) fn compile_scope(
         Value::String(s) => match classify_string(s) {
             StringKind::Preset => {
                 let expanded = preset::resolve(s)?;
-                let mut policy = compile_object(&expanded, ctx, caps, warnings)?;
-                // build-jail read-set closure. Both grants are post-fold because they need
-                // SPECULATIVE origin (absent on a host that has neither installed the
-                // project's dependencies nor bootstrapped node-gyp) and the surface fold
-                // marks every entry AUTHORED.
-                preset::grant_build_jail_dependency_reads(s, &mut policy, ctx, None);
-                // The provisioned interpreter lives under nub's store (not `/usr`), so the
-                // tight-read base does not reach it.
-                preset::grant_build_jail_interpreter(s, &mut policy, ctx);
-                // The build jail is a pure allowlist: strip every deny the fold added, so
-                // the policy is grants-only and the allowlist backends can enforce it.
-                preset::enforce_pure_allowlist(s, &mut policy);
-                Ok(policy)
+                compile_object(&expanded, ctx, caps, warnings)
             }
             StringKind::FileRef => Err(CompileError::FileRefUnresolved {
                 path: String::new(),
@@ -465,7 +436,6 @@ fn compile_object(
         env,
         pid: Default::default(),
         // A generic scope, not the build jail; `compile_build_jail` sets the marker itself.
-        build_jail: false,
     })
 }
 
@@ -609,7 +579,6 @@ fn unjailed(ctx: &CompileCtx) -> SandboxPolicy {
             ..Default::default()
         },
         pid: Default::default(),
-        build_jail: false,
     }
 }
 
@@ -636,7 +605,6 @@ fn secure_default(ctx: &CompileCtx) -> Result<SandboxPolicy, CompileError> {
         net: secure_default_net(),
         env: secure_default_env(ctx),
         pid: Default::default(),
-        build_jail: false,
     })
 }
 

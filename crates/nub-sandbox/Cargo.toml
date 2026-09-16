@@ -8,11 +8,9 @@ repository.workspace = true
 
 # The OS-enforced sandbox ENGINE for nub — PM-PURE by construction (Boundary B):
 # it takes only already-parsed data (a serde value + host-provided paths/env) and
-# has ZERO dependency on nub-cli / nub-core / vendor/aube. This is what keeps the
-# future build-jail embedder seam clean — aube's lifecycle.rs will wire to
-# compile()/apply() without dragging any PM type across the boundary. Do NOT add a
+# has ZERO dependency on nub-cli / nub-core / vendor/aube. Do NOT add a
 # nub-cli/nub-core/aube dependency here; an impact-analysis review leg asserts the
-# graph. See epics/sandbox/design.md §2 (the two boundaries).
+# graph.
 
 [dependencies]
 serde = { workspace = true }
@@ -31,12 +29,6 @@ globset = "0.4"
 regex = "1"
 ipnet = { version = "2", features = ["serde"] }
 sha2 = { workspace = true }
-# The build-jail catalog's optional per-entry `versions` range: validated at BUILD time by
-# the shared parser and matched at policy-compile time against the installer-resolved
-# version. Cargo range semantics rather than npm's, because these ranges are nub-authored
-# catalog text and never a package's own dependency spec — the dialect only has to be one
-# this repo writes. Already in the workspace lockfile via nub-cli/nub-core.
-semver = "1"
 
 # Per-session egress-proxy token: getrandom mints the 256-bit bearer (OS CSPRNG, no
 # userspace-seeded PRNG); base64 decodes the client's HTTP `Proxy-Authorization: Basic`
@@ -74,12 +66,14 @@ libc = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 seccompiler = "0.5"
 
-# windows-sys backs the Windows AppContainer backend: the LowBox launch
-# (CreateProcessW + STARTUPINFOEX + SECURITY_CAPABILITIES), per-run inheritable
-# allow-ACE grants (Get/SetNamedSecurityInfoW + SetEntriesInAclW), the
-# CreateAppContainerProfile identity, and the Job-Object KILL_ON_JOB_CLOSE reap.
-# 0.61 is already in the workspace lockfile (transitive via clap/anstyle) — no
-# new supply-chain surface. Raw FFI (no COM), gated `#[cfg(target_os = "windows")]`.
+# windows-sys backs what still COMPILES on Windows after the AppContainer backend was
+# removed: the egress proxy's platform-root reader and its named-pipe relay. Enforcement
+# does not run on Windows at all, so nothing here confines anything. 0.61 is already in the
+# workspace lockfile (transitive via clap/anstyle) — no new supply-chain surface.
+#
+# The feature list is WIDER than those two consumers need. It is left alone deliberately:
+# narrowing it is only verifiable on a real Windows build, and an unused feature costs
+# compile time rather than correctness. Trim it when a Windows leg is next run.
 [target.'cfg(target_os = "windows")'.dependencies.windows-sys]
 version = "0.61"
 features = [
@@ -108,29 +102,15 @@ features = [
   "Win32_UI_Shell",
 ]
 
-# build.rs bakes data/build-jail-catalog.json into `static` Rust, so the jail's carve-outs
-# have no runtime parse and a malformed catalog fails the BUILD rather than a user's
-# install. serde_json is already a normal dependency above — no new supply-chain surface.
-# `preserve_order` is deliberately NOT requested: the generator emits list order as
-# written, and none of the catalog's objects carry last-match-wins semantics.
-[build-dependencies]
-cc = "1"
-serde_json = { workspace = true }
-# The shared validator (`src/catalog.rs`, pulled into build.rs with `#[path]`) parses each
-# entry's `versions` range, so the build-script copy needs the same crate the library one does.
-semver = "1"
-
 [dev-dependencies]
 tempfile = "3"
 serde_json = { workspace = true }
 # Proxy integration tests build the client-side `Proxy-Authorization: Basic` credential.
 base64 = "0.22"
 
-# The Windows enforcement probe is BOTH the runner and the AppContainer child, so it
-# needs a little FFI (token-query + process-liveness) beyond what the lib exposes.
-# Win32_Security_Authorization is the residual probe's own ACL surface (it places and
-# inspects deny-ACEs the backend never emits); declared here rather than inherited from
-# the lib target's feature set, which unification would otherwise supply invisibly.
+# `tests/git_tool_functionality.rs` is the one Windows-touching test target left; it needs a
+# little FFI beyond what the lib exposes. Same standing as the lib's list above — wider than
+# the surviving consumer needs, and trimmed when a Windows leg is next run.
 [target.'cfg(target_os = "windows")'.dev-dependencies.windows-sys]
 version = "0.61"
 features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Isolation", "Win32_System_Threading", "Win32_System_Diagnostics_Debug", "Win32_System_Pipes", "Win32_Storage_FileSystem",
@@ -150,31 +130,3 @@ workspace = true
 # chain, which no longer exist. The zero-privilege Landlock + seccomp-supervisor tier defines its
 # own harnesses in a later epic phase.
 
-# The zero-privilege curated-import skeleton (epic row 0.3) drops the privileged-tier
-# integration tests along with the backends they drove; the `tests/` tree is not vendored
-# here. These `windows-sandbox-probe` / `build-jail-*-arm` features stay: they gate LIBRARY
-# behavior the compiler and backends still read.
-[features]
-windows-sandbox-probe = []
-# TEST-ONLY. Lets a run DROP the build jail's curated project-file read grant, so the
-# build-jail corpus study's project-grant arm is a runtime setting instead of one patched
-# binary per shard. Compile-time and off by default for the same reason as nub-cli's
-# `prefetch-github-hosts`: neither a user nor a dependency can turn it on. The seam is
-# drop-only and carries no path channel, so it can never widen the allowlist. Rationale:
-# src/arm.rs module doc.
-build-jail-project-grant-arm = []
-# TEST-ONLY, and a CONTROL rather than a capability. Drops the Windows `APPDATA` redirect so
-# the corpus can measure that change against an otherwise byte-identical binary — the two
-# arms then differ by this feature and nothing else, which a comparison across 23 commits of
-# unrelated tree movement is not. Drop-only and carries no path channel, exactly like the arm
-# above, so its only reachable effect is strictly LESS access than the default build. The
-# featured build announces itself on stderr so a run asserts the arm engaged from its own
-# output instead of trusting the build flags. Rationale: compiler/preset.rs, at the redirect.
-build-jail-appdata-arm = []
-# DEVELOPMENT-ONLY. Lets a run load the build-jail catalog from a path at startup instead of
-# the copy build.rs bakes in, so a corpus iteration is an edit and a re-run rather than a full
-# Rust rebuild. Compile-time and off by default for the same reason as the arm above: an env
-# var alone would be one stray export away from a user pointing the jail at an attacker's
-# file. Without this feature the catalog PARSER is not compiled into the crate at all — the
-# dev path is absent, not merely inert. Rationale: src/catalog_override.rs module doc.
-build-jail-catalog-override = []
