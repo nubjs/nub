@@ -2847,24 +2847,83 @@ Commands:\n\
     crate::pm_engine::dispatch_verb(spec, "global config", &args, &pm)
 }
 
+const SANDBOX_HELP: &str = "\
+Usage: nub sandbox [--policy <file>] <command> [args...]
+       nub sandbox cleanup
+
+Run a command confined by a policy document.
+
+  --policy, -p <file>   the policy to enforce (JSON or JSONC)
+  cleanup               release abandoned private temp directories and ownership records
+
+The sandbox enforces on Linux only. On any other host the command is refused rather than
+run unconfined, naming the axes it could not enforce.";
+
 fn run_sandbox(args: &[String]) -> Result<i32> {
-    if args.is_empty()
-        || args
-            .iter()
-            .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
-    {
-        println!(
-            "Usage: nub sandbox cleanup\n\nRemove idle Windows profiles and owned grants, or abandoned Unix private temp directories.\nRecover interrupted cleanup; retain active sandboxes and caller-owned files."
-        );
+    if args.is_empty() {
+        println!("{SANDBOX_HELP}");
         return Ok(0);
     }
-    if args.len() != 1 || args[0] != "cleanup" {
-        bail!("nub sandbox expects `cleanup` — see `nub sandbox --help`");
+    if args[0] == "cleanup" {
+        if args.len() != 1 {
+            bail!("nub sandbox cleanup takes no arguments");
+        }
+        nub_sandbox::cleanup()
+            .context("sandbox cleanup failed; ownership records retained for retry")?;
+        println!("Idle sandbox cleanup completed. Active sandboxes were retained.");
+        return Ok(0);
     }
-    nub_sandbox::cleanup()
-        .context("sandbox cleanup failed; ownership records retained for retry")?;
-    println!("Idle sandbox cleanup completed. Active sandboxes were retained.");
-    Ok(0)
+
+    // Flags are read only UNTIL the command appears, so `nub sandbox -p p.json curl --help`
+    // gives `--help` to curl. Scanning the whole vector would silently eat a flag the child
+    // owns, and the user would see nub's help with no hint that their command never ran.
+    let mut policy: Option<std::path::PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        match arg {
+            "-h" | "--help" => {
+                println!("{SANDBOX_HELP}");
+                return Ok(0);
+            }
+            "--policy" | "-p" => {
+                let value = args.get(i + 1).ok_or_else(|| {
+                    anyhow::anyhow!("nub sandbox {arg}: expected a policy file path after `{arg}`")
+                })?;
+                policy = Some(std::path::PathBuf::from(value));
+                i += 2;
+            }
+            "--" => {
+                i += 1;
+                break;
+            }
+            _ if arg.starts_with("--policy=") => {
+                policy = Some(std::path::PathBuf::from(&arg["--policy=".len()..]));
+                i += 1;
+            }
+            // An unknown leading flag is refused rather than passed through: it is far more
+            // likely a typo of one of nub's own than a flag the user meant for a command they
+            // have not named yet. `--` forces the other reading.
+            _ if arg.starts_with('-') && arg.len() > 1 => {
+                bail!("nub sandbox: unknown option `{arg}` — see `nub sandbox --help`")
+            }
+            _ => break,
+        }
+    }
+
+    let argv = &args[i..];
+    if argv.is_empty() {
+        bail!("nub sandbox: provide a command to run — see `nub sandbox --help`");
+    }
+    // ⛔ NO IMPLICIT DEFAULT POLICY. Running with a policy nobody wrote would either confine
+    // nothing (and lie) or confine something the user never described. The `nub.jsonc` bridge
+    // that will supply one is not built here yet, so the absence is an error, not a fallback.
+    let Some(policy) = policy else {
+        bail!(
+            "nub sandbox: no policy given — pass `--policy <file>`. A command with no policy would run unconfined."
+        );
+    };
+    crate::sandbox_run::run_confined(&policy, argv)
 }
 
 fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
@@ -9581,7 +9640,7 @@ nub {v} — the all-in-one Node.js toolkit
   Store and config:
     store / cache            manage the content-addressable store
     config / get / set       manage configuration
-    sandbox cleanup          remove idle sandbox resources
+    sandbox                  run a command under a policy (Linux); `cleanup` frees resources
 
 {nubopts}
   --cwd <dir>          run as if started in <dir>

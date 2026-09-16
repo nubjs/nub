@@ -52,3 +52,9 @@ jobs:
       # Default profile and default thread count, exactly as ci.yml's `cargo test` will
       # run it after the merge. A test that only passes single-threaded is a defect.
       - run: cargo test --locked -p nub-sandbox --no-fail-fast
+      # The `nub sandbox` FRONTEND lives in nub-cli, and its decisive case is Linux-only: the
+      # arm proving a confined command actually runs is `#[cfg(target_os = "linux")]`, so a dev
+      # Mac executes only the refusal arms and reports 3 green either way. Without this step the
+      # frontend's real behaviour would never run anywhere. Scoped to the one test rather than
+      # the whole crate, whose suite is long and unrelated to this branch.
+      - run: cargo test --locked -p nub-cli --test sandbox_cmd --no-fail-fast
