@@ -7,17 +7,19 @@
 //! loss in [`Degradation`] so the caller surfaces a WARNING; a hard fail-closed
 //! (a required axis unenforceable) is `Err(Degradation)`.
 //!
-//! BACKEND STATUS: macOS (Seatbelt, [`macos`]), Linux (Landlock and seccomp,
-//! [`linux`]), and Windows (AppContainer LowBox, [`windows`]) are wired; any other
-//! OS runs the env-scrub-only [`generic_apply`] skeleton — which constructs the
-//! child env and reports fs/net as NOT enforced. Every path preserves the API shape
-//! (`apply(policy, spec) -> Result<Prepared, Degradation>`).
+//! BACKEND STATUS: **Linux only.** [`linux`] (Landlock plus a seccomp `USER_NOTIF`
+//! supervisor) is the sole enforcing backend. The macOS Seatbelt and Windows
+//! AppContainer backends were removed when the sandbox became Linux-only: neither
+//! OS can express the grammar's deny-inside-allow and per-hostname egress at zero
+//! privilege, and Seatbelt additionally cannot nest inside another profile at all.
+//!
+//! This module still COMPILES on every OS so the macOS dev host can type-check it,
+//! but off Linux there is no enforcement path — see [`generic_apply`], which reports
+//! the sandbox as unsupported rather than silently running the command unconfined.
 //!
 //! LAUNCH SEAM: every backend returns a [`Prepared`] plan whose command is private.
 //! Callers launch through [`Prepared::spawn`], [`Prepared::status`], or
 //! [`Prepared::output`], preserving startup verification and resource ownership.
-//! Windows AppContainer launches own CreateProcessW, Job Object and ACL lifetimes.
-//! Windows launches own a process-tree Job from process creation, with or without a LowBox token.
 
 use crate::policy::{Effect, Inspection, ProxyMode, SandboxPolicy};
 use crate::proxy::mitm::{BrokerSession, MitmEngine, RuntimeCredentialBroker};
@@ -36,53 +38,11 @@ use unix_tmp::PrivateTemp;
 #[cfg(not(unix))]
 type PrivateTemp = tempfile::TempDir;
 
-/// How an embedder launches nub as the Windows co-package byte relay — the argv the
-/// AppContainer backend uses as the image + command line for a per-host net launch's helper
-/// process (typically `[current_exe(), "<hidden-flag>"]`). The backend passes only inherited
-/// pipe endpoints, never serialized policy or credentials. `None` (unset) ⇒ the backend cannot spawn
-/// the helper, so a per-host policy fails closed. No elevated fallback exists.
-///
-/// OS-agnostic by design: the setter compiles everywhere so an embedder registers once at startup
-/// without a `cfg`; only the Windows backend reads it (via [`windows_egress_helper_command`]).
-static WINDOWS_EGRESS_HELPER_COMMAND: OnceLock<Vec<OsString>> = OnceLock::new();
-
-/// Register the co-package egress-helper launch command (see [`WINDOWS_EGRESS_HELPER_COMMAND`]).
-/// Set-once; the first call wins. Call at process startup, before any confined per-host launch.
-pub fn set_windows_egress_helper_command(argv: Vec<OsString>) {
-    let _ = WINDOWS_EGRESS_HELPER_COMMAND.set(argv);
-}
-
-/// The registered co-package egress-helper launch command, if an embedder installed one. Read only
-/// by the Windows backend (`apply` / `launch_egress_helper`), so a
-/// non-Windows build derives the seam but never consults it — kept compiled everywhere so a change
-/// to it is type-checked on the dev host, matching this file's `set_ca_env`/`set_proxy_env` idiom.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub(crate) fn windows_egress_helper_command() -> Option<&'static [OsString]> {
-    WINDOWS_EGRESS_HELPER_COMMAND.get().map(Vec::as_slice)
-}
-
-/// Run the registered Windows relay entry. Its only authority is inherited pipe
-/// endpoints and same-package loopback; policy, credentials and upstream sockets
-/// remain in the parent. No runtime adapter is installed in the command.
-#[cfg(target_os = "windows")]
-pub fn serve_windows_egress_helper() -> ! {
-    let result = crate::proxy::relay::serve();
-    std::process::exit(if result.is_ok() { 0 } else { 2 });
-}
-
-#[cfg(target_os = "macos")]
-mod macos;
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 mod unix_guardian;
 
 #[cfg(target_os = "linux")]
 mod linux_lifetime;
-
-// NOT macOS-gated, unlike its siblings: only the `log show` call inside is, and compiling the
-// module everywhere keeps its record parser under test on every platform's CI leg rather than the
-// one runner that can also enforce Seatbelt.
-pub mod macos_denials;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -101,24 +61,9 @@ pub fn landlock_abi() -> Option<u32> {
     linux_landlock::probe_abi()
 }
 
-// The Windows AppContainer backend. Compiled on Windows (its real consumer) and
-// under `test` on any host — so its OS-agnostic IR→plan derivation (grant carve,
-// capability selection, dangerous-root guard) is unit-tested on the macOS dev host
-// without a Windows machine (the FFI launcher itself stays `#[cfg(windows)]`).
-#[cfg(any(target_os = "windows", test))]
-mod windows;
-#[cfg(all(test, target_os = "windows"))]
-mod windows_native_adapter_probe;
-#[cfg(windows)]
-mod windows_native_compat;
-
-#[cfg(target_os = "windows")]
-pub use windows::windows_publish_appcontainer_read;
-#[cfg(target_os = "windows")]
-pub use windows::windows_token_report;
-#[cfg(target_os = "windows")]
-#[doc(hidden)]
-pub use windows::{windows_leaf_grant_redundant, windows_object_traverse_ace};
+// The macOS and Windows backends were deleted when the sandbox became Linux-only. See
+// `A2b` in the effort's TASKS.md: the crate still COMPILES everywhere (so the macOS dev
+// host can run `cargo check`), but off Linux `apply` returns `Effect::Unsupported`.
 
 // Publishing a nub-owned, AppContainer-readable copy of a tool tree the jail must RUN — the
 // escape from writing an ACE where a standard user cannot. Same cfg as `windows`: the copy half is
