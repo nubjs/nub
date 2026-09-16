@@ -396,6 +396,12 @@ fn notifier_program(
         p.push(Ins::Jump(jeq, nr(*syscall), "notify", after));
         p.push(Ins::Label(after));
     }
+    // Inbound sockets, for the same reason and on the same terms.
+    for (i, syscall) in INBOUND_NRS.iter().enumerate() {
+        let after: &'static str = INBOUND_LABELS[i];
+        p.push(Ins::Jump(jeq, nr(*syscall), "notify", after));
+        p.push(Ins::Label(after));
+    }
     if self_proc {
         p.push(Ins::Jump(
             jeq,
@@ -1378,6 +1384,144 @@ const _: () = assert!(SIGNAL_INTENT_NRS.len() <= SIGNAL_INTENT_LABELS.len());
 
 fn is_signal_intent(nr: libc::c_long) -> bool {
     SIGNAL_INTENT_NRS.contains(&nr)
+}
+
+/// The inbound-socket syscalls, notified on every supervised launch alongside the signal set.
+///
+/// THE GAP THIS CLOSES: the socket ceiling is a FAMILY gate, so the moment a policy admits any
+/// egress at all it admits `AF_INET`/`AF_INET6` — and nothing then stopped the command binding
+/// `0.0.0.0` and serving. A confined agent or dependency could open a port on every interface the
+/// host has, which is a inbound channel the `net` axis never granted: that axis names egress
+/// DESTINATIONS, and no host grant is a statement about who may reach in.
+///
+/// LOOPBACK IS ALLOWED, and that is the whole design. A confined command running a dev server on
+/// `127.0.0.1:3000` is the ordinary case for an agent sandbox and breaking it would make the
+/// sandbox unusable for the thing it is for; a loopback listener is reachable only from the host
+/// that already runs the command. Anything else is refused.
+const INBOUND_NRS: &[libc::c_long] = &[libc::SYS_bind, libc::SYS_listen];
+
+const INBOUND_LABELS: &[&str] = &["inb0", "inb1", "inb2"];
+const _: () = assert!(INBOUND_NRS.len() <= INBOUND_LABELS.len());
+
+fn is_inbound_intent(nr: libc::c_long) -> bool {
+    INBOUND_NRS.contains(&nr)
+}
+
+/// Whether a `sockaddr` the child supplied names a loopback address.
+///
+/// `None` for a family this does not judge, which is every non-IP socket — those are the ceiling's
+/// business, and their sockaddr cannot become an IP one (see [`handle_inbound_intent`]).
+fn loopback_sockaddr(raw: &[u8]) -> Option<bool> {
+    let family = u16::from_ne_bytes([*raw.first()?, *raw.get(1)?]) as libc::c_int;
+    match family {
+        libc::AF_INET => {
+            // sockaddr_in: u16 family, u16 port, then 4 address bytes in network order.
+            let a = raw.get(4..8)?;
+            Some(a[0] == 127)
+        }
+        libc::AF_INET6 => {
+            // sockaddr_in6: u16 family, u16 port, u32 flowinfo, then 16 address bytes. `::1`, and
+            // `::ffff:127.0.0.0/8` because a v4-mapped bind on a dual-stack socket is the same
+            // reachability as the v4 form.
+            let a = raw.get(8..24)?;
+            let v4_mapped = a[..10].iter().all(|b| *b == 0) && a[10] == 0xff && a[11] == 0xff;
+            Some(
+                a == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+                    || (v4_mapped && a[12] == 127),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// Refuse a listening socket reachable from anywhere but this host.
+///
+/// THE SOCKET'S FAMILY DECIDES WHICH CALLS ARE EVEN IN SCOPE, and reading it from the `sk` table
+/// rather than from the supplied `sockaddr` is what makes the check sound. A family is fixed at
+/// `socket(2)` time and cannot be changed afterwards, so a child that swaps the address buffer
+/// after the decision cannot turn a `AF_UNIX` bind into an IP one — the kernel rejects a mismatched
+/// sockaddr outright. An address buffer, by contrast, is CHILD MEMORY the kernel re-reads after a
+/// `CONTINUE`, which is the A6 filesystem TOCTOU exactly.
+///
+/// So an IP `bind` is PERFORMED here on a descriptor duplicated out of the child, never continued:
+/// the address the supervisor validated is the address the kernel commits. ⛔ A non-IP bind is
+/// continued instead of performed ON PURPOSE — an `AF_UNIX` bind creates a socket FILE, and the
+/// supervisor is not under the child's Landlock ruleset, so performing one here would hand the
+/// child a filesystem write through a process that is not confined. Landlock already governs it:
+/// `LandlockAccess::ReadWrite` withholds `MAKE_SOCK`.
+///
+/// `listen` carries no pointer at all, so it is judged from `getsockname` on the duplicated
+/// descriptor — the kernel's own committed binding rather than anything the child can restate —
+/// and answered with `CONTINUE`. It needs its own arm because `listen` on an UNBOUND socket
+/// implicitly binds to the wildcard address, which is the case a `bind`-only check would miss.
+fn handle_inbound_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
+    let nr = req.data.nr as libc::c_long;
+    let cfd = req.data.args[0] as RawFd;
+    let tgid = tgid_of(req.pid);
+    let domain = state
+        .sk
+        .iter()
+        .find(|e| e.tgid == tgid && e.fd == cfd)
+        .map(|e| e.dom);
+    // A descriptor the supervisor never saw created is not an IP socket it is responsible for.
+    if !matches!(domain, Some(libc::AF_INET) | Some(libc::AF_INET6)) {
+        reply_continue(nfd, req.id);
+        return;
+    }
+    let Ok(sock) = duplicate_child_fd(tgid, cfd) else {
+        // The socket cannot be inspected, so it cannot be judged. Refuse rather than continue.
+        suplog!("SUP DENY inbound nr={nr} fd={cfd} (no descriptor) -> EPERM");
+        reply(nfd, req.id, -libc::EPERM);
+        return;
+    };
+    let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let raw = unsafe {
+        std::slice::from_raw_parts_mut(
+            &mut storage as *mut _ as *mut u8,
+            std::mem::size_of::<libc::sockaddr_storage>(),
+        )
+    };
+    if nr == libc::SYS_listen {
+        let mut len = raw.len() as libc::socklen_t;
+        let got = unsafe {
+            libc::getsockname(
+                sock.as_raw_fd(),
+                &mut storage as *mut _ as *mut libc::sockaddr,
+                &mut len,
+            )
+        };
+        let ok = got == 0 && loopback_sockaddr(raw).unwrap_or(false);
+        if ok {
+            reply_continue(nfd, req.id);
+        } else {
+            suplog!("SUP DENY listen fd={cfd} -> EPERM");
+            reply(nfd, req.id, -libc::EPERM);
+        }
+        return;
+    }
+    // `bind`: copy the address across, judge it, then commit it here.
+    let len = req.data.args[2] as usize;
+    if len < 2 || len > raw.len() {
+        reply(nfd, req.id, -libc::EINVAL);
+        return;
+    }
+    if unsafe { read_child_mem(req.pid, req.data.args[1], &mut raw[..len]) } != len as isize {
+        reply(nfd, req.id, -libc::EFAULT);
+        return;
+    }
+    if !loopback_sockaddr(&raw[..len]).unwrap_or(false) {
+        suplog!("SUP DENY bind fd={cfd} (not loopback) -> EPERM");
+        reply(nfd, req.id, -libc::EPERM);
+        return;
+    }
+    let rc = unsafe {
+        libc::bind(
+            sock.as_raw_fd(),
+            &storage as *const _ as *const libc::sockaddr,
+            len as libc::socklen_t,
+        )
+    };
+    reply(nfd, req.id, if rc < 0 { -errno() } else { 0 });
 }
 
 fn is_fs_intent(nr: libc::c_long) -> bool {
@@ -2548,6 +2692,12 @@ fn supervisor(listener: OwnedFd, mut state: SupState, control: Arc<WorkerControl
         // supervised launch, so this arm is always live.
         if is_signal_intent(nr) {
             handle_signal_intent(&state, nfd, &req);
+            continue;
+        }
+
+        // Inbound sockets: a listener must be reachable only from this host.
+        if is_inbound_intent(nr) {
+            handle_inbound_intent(&state, nfd, &req);
             continue;
         }
 
