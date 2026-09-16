@@ -24,6 +24,8 @@ use std::path::Path;
 
 const CASE: &str = "NUB_SECRET_FLOOR_CASE";
 const PROJECT: &str = "NUB_SECRET_FLOOR_PROJECT";
+/// Set only for the whole-disk case, where the child owes one extra control.
+const WIDE: &str = "NUB_SECRET_FLOOR_WHOLE_DISK";
 
 /// The confined half. Reads the control, then asserts the denied path is refused.
 #[test]
@@ -48,6 +50,23 @@ fn secret_floor_child() {
         "policy-file" => &["sandbox.json"],
         other => panic!("unknown secret-floor case: {other}"),
     };
+    // THE WHOLE-DISK CASE OWES A THIRD CONTROL, and it is the one that makes that case mean
+    // anything. Under `fs: {"/": "rw"}` Landlock binds `/` read-write and contributes NOTHING —
+    // its rules union, so every floor deny is dropped on the way in and the broker is the only
+    // thing left refusing. Reading a file OUTSIDE the project is what proves the grant really is
+    // whole-disk: a narrower grant would refuse this read, and then the refusals below would be
+    // the grant's doing rather than the floor's.
+    if std::env::var_os(WIDE).is_some() {
+        let outside = project.parent().expect("fixture root").join("outside.txt");
+        assert_eq!(
+            fs::read_to_string(&outside).unwrap_or_else(|e| panic!(
+                "{} must be readable under a whole-disk grant: {e}",
+                outside.display()
+            )),
+            "outside-the-project",
+        );
+    }
+
     // SECOND POSITIVE CONTROL, and the one the WRITE half below rests on: the tree is granted
     // read-WRITE, so an ordinary write inside it must succeed. Without this, a tree that was
     // merely read-only would make every write refusal below pass for the wrong reason — the
@@ -161,10 +180,30 @@ fn fixture() -> tempfile::TempDir {
     fs::write(project.join(".npmrc"), "//registry/:_authToken=secret").unwrap();
     fs::write(project.join(".env.d/production"), "TOKEN=secret").unwrap();
     fs::write(project.join("sandbox.json"), "{}").unwrap();
+    fs::write(root.path().join("outside.txt"), "outside-the-project").unwrap();
     root
 }
 
+/// A whole-disk grant is the shape where Landlock stops helping and the broker is alone.
+///
+/// `compile_mount_plan` binds `/` and DROPS every deny, because Landlock cannot subtract from a
+/// root grant — a refusal it used to make outright, and now delegates. `linux_grants.rs` records
+/// that the two are coupled and that losing the broker's arming would silently take the floor
+/// with it; this is what notices. Every other case here grants a project subtree, where Landlock
+/// is also constraining, so none of them can tell a live broker from a narrow grant.
+#[test]
+fn a_whole_disk_grant_still_refuses_the_secret_floor() {
+    run_with("env", Some("/"));
+    run_with("npmrc", Some("/"));
+}
+
 fn run(case: &str) {
+    run_with(case, None);
+}
+
+/// `grant` names the fs root to hand the child: `None` ⇒ the project tree, `Some(path)` ⇒ that
+/// path, which the case above uses to grant the whole disk.
+fn run_with(case: &str, grant: Option<&str>) {
     let root = fixture();
     let project = root.path().join("project");
     let mut ctx = ctx(root.path());
@@ -173,12 +212,13 @@ fn run(case: &str) {
     }
     // The tree granted WHOLE and read-write: the floor has to win over a grant strictly broader
     // than the files it denies, which is the case a merely-narrower grant would never test.
-    let mut policy = compile(
-        &json!({"fs": {(project.to_string_lossy()): "rw"}, "net": false}),
-        &ctx,
-    )
-    .expect("a project grant compiles");
+    let granted = grant.map_or_else(|| project.to_string_lossy().into_owned(), str::to_string);
+    let mut policy = compile(&json!({"fs": {granted: "rw"}, "net": false}), &ctx)
+        .expect("a project grant compiles");
     policy.env.constructed.insert(CASE.into(), case.into());
+    if grant.is_some() {
+        policy.env.constructed.insert(WIDE.into(), "1".into());
+    }
     policy
         .env
         .constructed
