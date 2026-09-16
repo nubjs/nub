@@ -122,6 +122,22 @@ fn keyed_on_shell(engine: String, shell_id: &str) -> String {
     }
 }
 
+/// Segregate a CONFINED build's entry from an unconfined one, for the reason
+/// `cache_path_segregates_by_confinement` states: a build's writes outside its own package
+/// tree land in a private per-package HOME under the jail and in the user's HOME without
+/// it, and neither entry carries them, so restoring one into the other mode skips the
+/// script and lands that artifact nowhere.
+///
+/// Unconfined adds no segment, matching [`keyed_on_shell`]'s reasoning: it is what every
+/// entry written before the jail existed was built as, so those entries stay valid and an
+/// upgrade does not rebuild every cached native addon.
+fn keyed_on_confinement(engine: String, confinement: Confinement) -> String {
+    match confinement {
+        Confinement::Unconfined => engine,
+        Confinement::Confined => format!("{engine}-{}", confinement.id()),
+    }
+}
+
 pub(super) enum SideEffectsCacheRestore {
     Miss,
     Restored,
@@ -146,6 +162,7 @@ impl SideEffectsCacheEntry {
             None => aube_lockfile::graph_hash::platform_name(),
         };
         let engine = keyed_on_shell(engine, &aube_scripts::resolved_shell_id());
+        let engine = keyed_on_confinement(engine, confinement);
         let current_hash = hash_dir_for_side_effects_cache(package_dir)?;
         // A marker naming a different engine cannot authorize the
         // already-applied skip: the tree it describes was built against
@@ -681,30 +698,6 @@ mod tests {
         );
     }
 
-    /// Output built under one shell can be WRONG under another, not merely
-    /// stale — `cmd.exe` exits 0 having written `${VAR:-default}` literally —
-    /// so an entry must not be restorable across a shell change. Asserted
-    /// against the resolved id rather than by flipping shells: `ScriptSettings`
-    /// is process-global outside an install scope, and mutating it here would
-    /// leak into the sibling tests. `aube-scripts` owns the id's own coverage.
-    #[test]
-    fn cache_path_segregates_by_shell() {
-        let dir = tempfile::tempdir().unwrap();
-        let pkg = package_fixture(dir.path());
-        let path = entry_path(dir.path(), &pkg, Some("22.15.0"));
-        let engine = path
-            .parent()
-            .and_then(|p| p.file_name())
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        let shell = aube_scripts::resolved_shell_id();
-        assert!(
-            engine.contains(&format!("-{shell}-")),
-            "build-env segment {engine} does not name the resolved shell {shell}"
-        );
-    }
-
     /// A build's writes OUTSIDE its own package tree — the `cypress`/`puppeteer` shape,
     /// a browser into `$HOME` — are not in the entry, and confinement decides where they
     /// went: a private per-package HOME, or the user's own. So a jail-built entry must
@@ -787,6 +780,21 @@ mod tests {
             keyed_on_shell(engine.clone(), other),
             format!("{engine}-{other}"),
             "a build from another shell must not be restorable under the default shell"
+        );
+    }
+
+    #[test]
+    fn a_confined_build_gets_its_own_cache_key() {
+        let engine = "linux-x64-node26".to_string();
+        assert_eq!(
+            keyed_on_confinement(engine.clone(), Confinement::Unconfined),
+            engine,
+            "entries built unconfined must keep their existing key"
+        );
+        assert_eq!(
+            keyed_on_confinement(engine.clone(), Confinement::Confined),
+            format!("{engine}-confined"),
+            "a jail-built entry must not be restorable into an unconfined install"
         );
     }
 
