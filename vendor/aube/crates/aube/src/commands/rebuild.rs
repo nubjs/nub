@@ -81,8 +81,7 @@ pub async fn run(
             &modules_dir_name,
             &manifest,
             LifecycleHook::PreInstall,
-            aube_scripts::RootProvenance::UserAuthored,
-            &[],
+                &[],
         )
         .await
         .map_err(|e| miette!("{}", e))?;
@@ -236,7 +235,6 @@ pub async fn run(
                 &jail_policy,
                 None,
                 selected.as_ref(),
-                true,
             )
             .await?;
             let preserved = super::install::remove_managed_bin_links(&managed_bin_links)?;
@@ -273,8 +271,7 @@ pub async fn run(
                 &modules_dir_name,
                 &manifest,
                 hook,
-                aube_scripts::RootProvenance::UserAuthored,
-                &[],
+                        &[],
             )
             .await
             .map_err(|e| miette!("{}", e))?;

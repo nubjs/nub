@@ -48,7 +48,6 @@ static MYTOOL: Embedder = Embedder {
     trust_policy_ignore_after_default: None,
     extra_settings_fingerprint: None,
     unsupported_settings: &[],
-    embedder_owns_lifecycle_sandbox: false,
 };
 
 #[test]

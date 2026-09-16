@@ -24,7 +24,6 @@ pub(super) struct FinalizePhaseInput<'a> {
     /// git-dep `prepare` install roots at the FETCHED checkout, so its root scripts are
     /// third-party and must be confined like a dependency rather than inheriting the
     /// user-project exemption.
-    pub(super) root_provenance: aube_scripts::RootProvenance<'a>,
     pub(super) settings_ctx: &'a aube_settings::ResolveCtx<'a>,
     pub(super) store: &'a aube_store::Store,
     pub(super) graph: &'a aube_lockfile::LockfileGraph,
@@ -270,7 +269,6 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
         start,
         prog_ref,
         phase_timings,
-        root_provenance,
     } = input;
 
     let placements_ref = stats.hoisted_placements.as_ref();
@@ -445,7 +443,6 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
             jail_policy,
             lifecycle_delta_filter.as_ref(),
             None,
-            matches!(root_provenance, aube_scripts::RootProvenance::UserAuthored),
         )
         .await?;
         // An allowed build the phase could not attempt leaves the tree

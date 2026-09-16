@@ -194,7 +194,6 @@ pub(crate) async fn run_root_lifecycle_script(
         &modules_dir_name,
         manifest,
         script_name,
-        aube_scripts::RootProvenance::UserAuthored,
         &[],
     )
     .await

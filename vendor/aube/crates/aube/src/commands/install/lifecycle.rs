@@ -21,7 +21,6 @@ pub(super) async fn run_importer_lifecycle(
     modules_dir_name: &str,
     manifest: &aube_manifest::PackageJson,
     hook: aube_scripts::LifecycleHook,
-    provenance: aube_scripts::RootProvenance<'_>,
 ) -> miette::Result<()> {
     let script_name = hook.script_name();
     if !manifest.scripts.contains_key(script_name) {
@@ -258,45 +257,19 @@ pub(super) async fn run_root_lifecycle_script(
     modules_dir_name: &str,
     manifest: &aube_manifest::PackageJson,
     script_name: &str,
-    provenance: aube_scripts::RootProvenance<'_>,
 ) -> miette::Result<()> {
     // Only announce when the hook is actually defined, so projects without
     // lifecycle scripts don't get noise in their install output.
     if !manifest.scripts.contains_key(script_name) {
         return Ok(());
     }
-    let prepared_bin = if let aube_scripts::RootProvenance::Fetched { checkout_root } = provenance
-        && aube_util::engine_context()
-            .lifecycle_sandbox
-            .is_some_and(|sandbox| sandbox.would_confine(None, None, checkout_root))
-    {
-        match node_gyp_bootstrap::ensure_bin_dir_for_jail(
-            &project_dir.join(modules_dir_name).join(".bin"),
-            project_dir,
-        )
-        .await
-        {
-            Ok(dir) => dir,
-            Err(err) => {
-                tracing::warn!(
-                    code = aube_codes::warnings::WARN_AUBE_NODE_GYP_BOOTSTRAP_FAILED,
-                    "could not prepare node-gyp for jailed builds: {err:#}"
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
-    let extra_bins: Vec<&std::path::Path> = prepared_bin.as_deref().into_iter().collect();
     tracing::debug!("Running {script_name} script...");
     aube_scripts::run_root_script_by_name(
         project_dir,
         modules_dir_name,
         manifest,
         script_name,
-        provenance,
-        &extra_bins,
+        &[],
     )
     .await
     .map_err(|e| miette!("root {script_name} script failed: {e}"))?;
@@ -413,17 +386,8 @@ impl JailBuildPolicy {
     ) -> (Self, Vec<String>) {
         // `paranoid=true` forces the jail on regardless of `jailBuilds`.
         //
-        // ⛔ An embedder that OWNS lifecycle confinement gates aube's own jail off
-        // entirely, whatever the user configured. The two mechanisms are mutually
-        // exclusive by construction — the embedder interposes its own sandbox through
-        // `EngineContext::lifecycle_sandbox`, and `run_script`'s hook arm assumes `jail`
-        // is `None` on that path. Forcing it here rather than trusting the settings is
-        // what stops a user `jailBuilds=true`/`paranoid=true` swapping the host's jail
-        // back to aube's. Standalone aube leaves the flag false, so this is a no-op and
-        // the built-in jail behaves byte-for-byte as before.
-        let enabled = !aube_util::embedder().embedder_owns_lifecycle_sandbox
-            && (aube_settings::resolved::jail_builds(ctx)
-                || aube_settings::resolved::paranoid(ctx));
+        let enabled =
+            aube_settings::resolved::jail_builds(ctx) || aube_settings::resolved::paranoid(ctx);
         let jail_exclusions = aube_settings::resolved::jail_build_exclusions(ctx);
         let (denylist, denylist_warnings) = aube_scripts::BuildPolicy::denylist(&jail_exclusions);
         let mut warnings = denylist_warnings
@@ -661,11 +625,10 @@ pub(super) fn resolve_link_strategy(
             }
         }
     };
-    Ok(jail_forces_copy(
-        strategy,
-        cfg!(windows),
-        embedder_confines_any(cwd),
-    ))
+    // No embedder interposes a lifecycle sandbox any more, so nothing here confines: the
+    // AppContainer grant this guarded against cannot arise. aube's own jail does not need it.
+    let _ = cwd;
+    Ok(jail_forces_copy(strategy, cfg!(windows), false))
 }
 
 // Hardlinked CAS files retain their original Windows security descriptor rather
@@ -683,31 +646,14 @@ fn jail_forces_copy(
     }
 }
 
-fn embedder_confines_any(project_dir: &std::path::Path) -> bool {
-    aube_util::embedder().embedder_owns_lifecycle_sandbox
-        && aube_util::engine_context()
-            .lifecycle_sandbox
-            .as_ref()
-            .is_some_and(|hook| hook.would_confine(None, None, project_dir))
-}
-
 fn dep_confinement(
     jail_policy: &JailBuildPolicy,
     name: &str,
     version: &str,
     source_key: Option<&str>,
     git_repository_key: Option<&str>,
-    package_name: Option<&str>,
-    project_dir: &std::path::Path,
 ) -> Confinement {
-    let embedder_confines = aube_util::embedder().embedder_owns_lifecycle_sandbox
-        && aube_util::engine_context()
-            .lifecycle_sandbox
-            .as_ref()
-            .is_some_and(|hook| {
-                hook.would_confine(package_name, package_name.map(|_| version), project_dir)
-            });
-    if embedder_confines || jail_policy.should_jail(name, version, source_key, git_repository_key) {
+    if jail_policy.should_jail(name, version, source_key, git_repository_key) {
         Confinement::Confined
     } else {
         Confinement::Unconfined
@@ -771,7 +717,6 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     // gates which ones actually run. Match is by `pkg.name`, matching
     // pnpm's `pnpm rebuild <name>`.
     selected_names: Option<&std::collections::HashSet<String>>,
-    root_is_user_authored: bool,
 ) -> miette::Result<DepLifecycleOutcome> {
     // Pass 1 (serial, cheap): walk the graph, keep only the packages
     // the policy allows AND that actually define at least one dep
@@ -965,8 +910,6 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             &pkg.version,
             pkg.source_approval_key().as_deref(),
             pkg.git_repository_approval_key().as_deref(),
-            root_is_user_authored.then_some(pkg.registry_name()),
-            project_dir,
         );
         let cache_entry = side_effects_cache
             .location()
@@ -1071,8 +1014,6 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             &job.version,
             job.source_key.as_deref(),
             job.git_repository_key.as_deref(),
-            root_is_user_authored.then_some(job.registry_name.as_str()),
-            project_dir,
         ) == Confinement::Confined
     });
     let node_gyp_bin_dir = std::sync::Arc::new(if any_jailed {
@@ -1142,11 +1083,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     let project_dir = project_dir.to_path_buf();
     let modules_dir_name = modules_dir_name.to_string();
     let should_restore_side_effects_cache = side_effects_cache.should_restore();
-    let restore_mode = if cfg!(windows) && embedder_confines_any(&project_dir) {
-        CopyMode::Copy
-    } else {
-        CopyMode::HardlinkOrCopy
-    };
+    let restore_mode = CopyMode::HardlinkOrCopy;
     let should_save_side_effects_cache = side_effects_cache.should_save();
     let overwrite_side_effects_cache = side_effects_cache.overwrite_existing();
     let jail_policy = std::sync::Arc::new((*jail_policy).clone());
@@ -1254,19 +1191,6 @@ pub(crate) async fn run_dep_lifecycle_scripts(
                 &project_dir,
             );
             let _jail_home_cleanup = jail.as_ref().map(aube_scripts::ScriptJailHomeCleanup::new);
-            // The scope an embedder-owned sandbox confines this dependency by. The name and
-            // version are the INSTALLER-RESOLVED identity (`job.registry_name`), not the
-            // manifest's self-declared `name` — the same identity the build policy decided
-            // on — so an embedder can key a per-package policy on it. Fetched roots retain
-            // that catalog identity without gaining authority to opt out of confinement.
-            let scope = aube_scripts::SandboxScope {
-                package_dir: &job.package_dir,
-                project_root: &project_dir,
-                global_virtual_store_dir: Some(&global_virtual_store_dir),
-                package_name: Some(job.registry_name.as_str()),
-                package_version: Some(job.version.as_str()),
-                root_is_user_authored,
-            };
             let mut ran_here = 0usize;
             for hook in aube_scripts::DEP_LIFECYCLE_HOOKS {
                 let did_run = aube_scripts::run_dep_hook_with_bin_dir(
@@ -1278,7 +1202,6 @@ pub(crate) async fn run_dep_lifecycle_scripts(
                     hook,
                     &tool_dirs,
                     jail.as_ref(),
-                    Some(scope),
                 )
                 .await
                 .map_err(|e| {
@@ -2301,7 +2224,6 @@ mod tests {
             &jail_policy,
             None,
             Some(&selected),
-            false,
         )
         .await
         .unwrap();

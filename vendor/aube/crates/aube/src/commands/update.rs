@@ -250,7 +250,6 @@ async fn run_inner(
             false,
             args.lockfile_only,
             Some("update"),
-            aube_scripts::RootProvenance::UserAuthored,
         )
         .await?;
     }
@@ -1919,7 +1918,6 @@ async fn run_filtered(
         false,
         args.lockfile_only,
         Some("update"),
-        aube_scripts::RootProvenance::UserAuthored,
     )
     .await?;
     args.dev_preinstall_already_run = true;

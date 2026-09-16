@@ -870,7 +870,6 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             opts.dry_run,
             lockfile_only_effective,
             None,
-            root_provenance(&opts, &cwd),
         )
         .await?;
     }
@@ -895,7 +894,6 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 &modules_dir_name,
                 importer_manifest,
                 aube_scripts::LifecycleHook::PreInstall,
-                root_provenance(&opts, &cwd),
             )
             .await?;
         }
@@ -3054,7 +3052,6 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         lockfile_write_overlap::join(handle).await?;
     }
     finalize::run_finalize_phase(finalize::FinalizePhaseInput {
-        root_provenance: root_provenance(&opts, &cwd),
         cwd: &cwd,
         settings_ctx: &settings_ctx,
         store: store.as_ref(),
@@ -3343,7 +3340,6 @@ pub(crate) async fn run_dev_preinstall(
     dry_run: bool,
     lockfile_only: bool,
     initialize_environment_for: Option<&str>,
-    provenance: aube_scripts::RootProvenance<'_>,
 ) -> miette::Result<()> {
     if ignore_scripts || dry_run || lockfile_only {
         return Ok(());
@@ -3361,7 +3357,6 @@ pub(crate) async fn run_dev_preinstall(
         &modules_dir_name,
         &root_manifest,
         "pnpm:devPreinstall",
-        provenance,
     )
     .await
 }
@@ -3412,24 +3407,6 @@ mod computed_integrity_tests {
     }
 }
 
-/// Who authored the code at this install's ROOT.
-///
-/// `git_prepare_depth > 0` is the signal, and it is already carried for the nesting cap:
-/// a non-zero depth means this install was started by `run_git_dep_prepare` against a
-/// FETCHED clone, so the root is third-party code and its lifecycle scripts must be
-/// confined like a dependency's. The anchor is the install root (the clone dir), never
-/// the importer — a git dep may be a workspace whose own `workspaces` globs choose an
-/// importer outside the fetched tree.
-fn root_provenance<'a>(
-    opts: &InstallOptions,
-    cwd: &'a std::path::Path,
-) -> aube_scripts::RootProvenance<'a> {
-    if opts.git_prepare_depth > 0 {
-        aube_scripts::RootProvenance::Fetched { checkout_root: cwd }
-    } else {
-        aube_scripts::RootProvenance::UserAuthored
-    }
-}
 
 #[cfg(test)]
 mod explicit_store_dir_override_tests {
