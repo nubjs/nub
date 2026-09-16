@@ -69,7 +69,7 @@ pub(crate) fn proc_secret_deny_rules() -> Vec<FsRule> {
 pub(crate) fn env_deny_leaf_rules() -> Vec<FsRule> {
     ENV_DENY_LEAF_GLOBS
         .iter()
-        .map(|g| deny_rule((*g).to_string()))
+        .map(|g| deny_rule(case_fold_glob(g)))
         .collect()
 }
 
@@ -78,7 +78,7 @@ pub(crate) fn env_deny_leaf_rules() -> Vec<FsRule> {
 pub(crate) fn env_deny_subtree_rules() -> Vec<FsRule> {
     ENV_DENY_SUBTREE_GLOBS
         .iter()
-        .map(|g| deny_rule((*g).to_string()))
+        .map(|g| deny_rule(case_fold_glob(g)))
         .collect()
 }
 
@@ -109,6 +109,29 @@ fn deny_rule(glob: String) -> FsRule {
         access: FsAccess::DENY,
         origin: FsOrigin::Authored,
     }
+}
+
+/// Rewrite each ASCII letter of a glob into a two-case character class (`env` → `[eE][nN][vV]`),
+/// leaving glob metacharacters (`*`, `/`, `.`) untouched. The `.env*`/`.npmrc` secret floor must
+/// catch `.Env`/`.ENV` on a case-sensitive filesystem — a checkout made on a case-insensitive host
+/// (macOS/Windows) can carry either spelling — so it matches the env-VARIABLE floor, which is
+/// case-insensitive by the same reasoning ("an uppercase can't slip past"). Only these built-in
+/// secret denies are folded; user-authored fs grants stay OS-mirrored (case-sensitive on POSIX),
+/// and the kernel-fixed `/proc` names need no folding. globset supports `[...]` classes, and the
+/// floor globs contain no literal `[`/`]` to escape.
+fn case_fold_glob(glob: &str) -> String {
+    let mut out = String::with_capacity(glob.len());
+    for ch in glob.chars() {
+        if ch.is_ascii_alphabetic() {
+            out.push('[');
+            out.push(ch.to_ascii_lowercase());
+            out.push(ch.to_ascii_uppercase());
+            out.push(']');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 /// Case-insensitive substring test for a secret name-word anywhere in a key. Used by
@@ -806,7 +829,9 @@ mod tests {
         // The secure default grants positively and subtracts exactly one thing: the secret
         // floor. Pinned by MEMBERSHIP rather than by "no denies at all", which is what this
         // asserted before the floor was restored — a bare count would pass just as well if a
-        // future change started denying something else.
+        // future change started denying something else. The floor is the case-folded `.env*` /
+        // `.npmrc` band (folded so `.ENV` cannot slip past on a case-sensitive fs), then the
+        // cross-process `/proc` secret band, in injection order.
         let denied: Vec<_> = policy
             .fs
             .rules
@@ -815,14 +840,15 @@ mod tests {
             .filter(|rule| rule.effect == Effect::Deny)
             .map(|rule| rule.matcher.as_str().to_string())
             .collect();
-        let floor: Vec<_> = super::ENV_DENY_LEAF_GLOBS
+        let floor: Vec<String> = super::ENV_DENY_LEAF_GLOBS
             .iter()
             .chain(super::ENV_DENY_SUBTREE_GLOBS)
-            .map(|g| g.to_string())
+            .map(|g| super::case_fold_glob(g))
+            .chain(super::PROC_SECRET_DENY_GLOBS.iter().map(|g| g.to_string()))
             .collect();
         assert_eq!(
             denied, floor,
-            "the secure default must subtract the secret floor and nothing else"
+            "the secure default must subtract the secret floor (env + /proc bands) and nothing else"
         );
         assert_eq!(policy.fs.tmp, crate::policy::TmpMode::Private);
         let project_input = matcher.decide(&homes.project.join("src/input.js"));

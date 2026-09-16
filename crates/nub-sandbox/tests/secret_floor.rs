@@ -48,6 +48,9 @@ fn secret_floor_child() {
         "npmrc" => &[".npmrc"],
         "env-dir" => &[".env.d/production"],
         "policy-file" => &["sandbox.json"],
+        // Uppercase spellings a case-sensitive glob would read through — the floor is
+        // case-insensitive so it catches them, matching the env-VARIABLE floor.
+        "env-case" => &[".ENV", ".Env", ".NPMRC"],
         other => panic!("unknown secret-floor case: {other}"),
     };
     // THE WHOLE-DISK CASE OWES A THIRD CONTROL, and it is the one that makes that case mean
@@ -110,6 +113,15 @@ fn a_granted_project_tree_still_refuses_its_dotenv_files() {
 #[test]
 fn a_granted_project_tree_still_refuses_a_project_npmrc() {
     run("npmrc");
+}
+
+/// The floor is case-INSENSITIVE, matching the env-VARIABLE floor's reasoning ("an uppercase
+/// can't slip past"). A checkout made on a case-insensitive host (macOS/Windows) can carry
+/// `.ENV`/`.NPMRC`; a case-sensitive glob would read them through on Linux. Reverting
+/// `case_fold_glob` in the compiler defaults turns exactly this red.
+#[test]
+fn a_granted_project_tree_refuses_uppercase_secret_file_variants() {
+    run("env-case");
 }
 
 /// The SUBTREE half: a `.env.d/`-style directory of per-target secrets. The leaf band matches
@@ -180,6 +192,11 @@ fn fixture() -> tempfile::TempDir {
     fs::write(project.join(".npmrc"), "//registry/:_authToken=secret").unwrap();
     fs::write(project.join(".env.d/production"), "TOKEN=secret").unwrap();
     fs::write(project.join("sandbox.json"), "{}").unwrap();
+    // Uppercase spellings for the case-insensitivity case. Distinct files from their lowercase
+    // siblings on Linux's case-sensitive fs, so the floor must match every case to catch them.
+    fs::write(project.join(".ENV"), "TOKEN=secret").unwrap();
+    fs::write(project.join(".Env"), "TOKEN=secret").unwrap();
+    fs::write(project.join(".NPMRC"), "//registry/:_authToken=secret").unwrap();
     fs::write(root.path().join("outside.txt"), "outside-the-project").unwrap();
     root
 }

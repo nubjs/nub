@@ -456,16 +456,24 @@ fn an_authored_filesystem_policy_subtracts_the_secret_floor_and_the_policy_file_
         denied,
         vec![
             "/project/policy.jsonc",
-            "**/.env*",
-            ".env*",
-            "**/.npmrc",
-            ".npmrc",
-            "**/node_modules/npm/npmrc",
-            "node_modules/npm/npmrc",
-            "**/.env*/**",
-            ".env*/**",
+            "**/.[eE][nN][vV]*",
+            ".[eE][nN][vV]*",
+            "**/.[nN][pP][mM][rR][cC]",
+            ".[nN][pP][mM][rR][cC]",
+            "**/[nN][oO][dD][eE]_[mM][oO][dD][uU][lL][eE][sS]/[nN][pP][mM]/[nN][pP][mM][rR][cC]",
+            "[nN][oO][dD][eE]_[mM][oO][dD][uU][lL][eE][sS]/[nN][pP][mM]/[nN][pP][mM][rR][cC]",
+            "**/.[eE][nN][vV]*/**",
+            ".[eE][nN][vV]*/**",
+            "/proc/*/environ",
+            "/proc/*/mem",
+            "/proc/*/maps",
+            "/proc/*/smaps",
+            "/proc/*/task/*/environ",
+            "/proc/*/task/*/mem",
+            "/proc/*/task/*/maps",
         ],
-        "the policy file is subtracted first, then the secret floor's leaf and subtree bands",
+        "the policy file is subtracted first, then the case-folded secret floor (leaf, then \
+         subtree), then the cross-process /proc secret band",
     );
     assert!(
         policy

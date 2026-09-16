@@ -430,14 +430,14 @@ mod linux {
         ] {
             let bundle = compile(&json!({"fs": fs}), &context(root.path())).unwrap();
             assert_eq!(bundle.fs.self_proc.len(), 8);
-            assert!(
-                bundle
-                    .fs
-                    .rules
-                    .entries
-                    .iter()
-                    .all(|rule| !rule.matcher.as_str().starts_with("/proc/"))
-            );
+            // The self-proc metadata (the 8 files above) lands in `self_proc`, never as an
+            // ordinary GRANT — so no /proc path is ALLOWED in `rules.entries`. The cross-process
+            // secret floor does add /proc DENY rules here (it rides every grants-read policy);
+            // those are the floor, not a leak, so this boundary check is for allow rules only.
+            assert!(bundle.fs.rules.entries.iter().all(|rule| {
+                rule.effect != nub_sandbox::policy::Effect::Allow
+                    || !rule.matcher.as_str().starts_with("/proc/")
+            }));
         }
     }
 
