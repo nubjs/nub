@@ -81,7 +81,7 @@ pub async fn run(
             &modules_dir_name,
             &manifest,
             LifecycleHook::PreInstall,
-                &[],
+            &[],
         )
         .await
         .map_err(|e| miette!("{}", e))?;
@@ -261,15 +261,9 @@ pub async fn run(
             LifecycleHook::PostInstall,
             LifecycleHook::Prepare,
         ] {
-            aube_scripts::run_root_hook(
-                &cwd,
-                &modules_dir_name,
-                &manifest,
-                hook,
-                        &[],
-            )
-            .await
-            .map_err(|e| miette!("{}", e))?;
+            aube_scripts::run_root_hook(&cwd, &modules_dir_name, &manifest, hook, &[])
+                .await
+                .map_err(|e| miette!("{}", e))?;
         }
     }
 

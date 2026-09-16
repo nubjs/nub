@@ -3407,7 +3407,6 @@ mod computed_integrity_tests {
     }
 }
 
-
 #[cfg(test)]
 mod explicit_store_dir_override_tests {
     use super::has_explicit_store_dir_override;
