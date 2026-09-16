@@ -54,14 +54,14 @@ fn open_path(
     pointer: u64,
     flags: Option<u64>,
 ) -> bool {
-    let mut path = [0u8; 64];
-    let read = unsafe { read_child_mem(req.pid, pointer, &mut path) };
-    let read = usize::try_from(read).unwrap_or(0).min(path.len());
-    let selected = path[..read]
-        .iter()
-        .position(|byte| *byte == 0)
-        .and_then(|end| std::str::from_utf8(&path[..end]).ok())
-        .and_then(metadata_path);
+    // Through `read_child_str` rather than a bare `read_child_mem` of a fixed buffer: that
+    // buffer could span into an unmapped page, and `pread` on `/proc/<pid>/mem` fails the WHOLE
+    // range when it does. A `/proc/self/maps` literal in rodata sits near a segment end often
+    // enough that this was not theoretical — the failed read made the path look like a
+    // NON-metadata one, which handed it to the fs broker, which has no rule for per-process
+    // procfs (that capability is `fs.self_proc`, not an fs rule) and refused it.
+    let raw = read_child_str(req.pid, pointer, 64);
+    let selected = raw.as_deref().and_then(metadata_path);
     let Some((file, suffix)) = selected else {
         // Not a self-process metadata path, so this handler has no business deciding it: hand it
         // back to the fs broker whenever one is armed. CONTINUE here would let the child's own

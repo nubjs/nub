@@ -580,9 +580,20 @@ pub(crate) fn fs_broker_ruleset(
     // while a re-derivation runs at PREPARE and re-reads the filesystem. A granted path deleted
     // between the two makes the re-derivation REFUSE ("filesystem mount source does not exist")
     // for a session Landlock is still happily enforcing against the fds it already holds.
+    //
+    // The retained half is read back through its own DESCRIPTOR rather than taken from the
+    // recorded path. Landlock enforces by inode, so a granted directory renamed after
+    // acquisition is still granted — the pinned fd follows it. The broker enforces by PATH, so
+    // it would deny the new spelling and be stricter than the layer it exists to extend.
+    // `readlink(/proc/self/fd/N)` is where that fd points RIGHT NOW, which closes the gap for
+    // every rename up to this point; the recorded path is the fallback when the readback fails.
     let grants = fixed_grants(policy, tmp_dir, entry_program)
         .into_iter()
-        .chain(retained.0.iter().map(|r| r.grant.clone()));
+        .chain(retained.0.iter().map(|r| LandlockGrant {
+            path: super::linux_supervisor::fd_path(r.fd.as_raw_fd())
+                .map_or_else(|| r.grant.path.clone(), PathBuf::from),
+            access: r.grant.access,
+        }));
     for grant in grants {
         let access = if grant.access.grants_write() {
             FsAccess::ReadWrite

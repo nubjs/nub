@@ -123,12 +123,6 @@ pub fn fold_fs(
             ));
         }
     }
-    // The only two non-positive bands on the fs axis. Everything above is a literal grant;
-    // these subtract, in this order, because a policy file is never named `.env*` so the two
-    // are disjoint and the fixed order simply keeps the emission stable for the tests that
-    // pin it. See `finalize_policy_file_deny` / `finalize_env_deny` for why they exist at all.
-    finalize_policy_file_deny(&mut set, ctx.compile);
-    finalize_env_deny(&mut set);
     let mut self_proc = std::collections::BTreeSet::new();
     for rule in &set.entries {
         if let Some(file) = SelfProcFile::from_path(rule.matcher.as_str()) {
@@ -143,6 +137,17 @@ pub fn fold_fs(
     }
     set.entries
         .retain(|rule| SelfProcFile::from_path(rule.matcher.as_str()).is_none());
+    // The only two non-positive bands on the fs axis. Everything above is a literal grant;
+    // these subtract, in this order, because a policy file is never named `.env*` so the two are
+    // disjoint and the fixed order just keeps the emission stable for the tests that pin it.
+    //
+    // AFTER the self-process extraction above, not before. `fs: {"/proc/self/maps": "r"}` folds
+    // to a `self_proc` capability and NO fs rule, so running the floor first would see an allow
+    // that is about to be removed, append nine denies to a policy that ends up granting no files
+    // at all, and — because a deny is what arms the broker — trap every open for a policy with
+    // no filesystem grants to enforce.
+    finalize_policy_file_deny(&mut set, ctx.compile);
+    finalize_env_deny(&mut set);
     Ok(FsPolicy {
         rules: set,
         tmp,

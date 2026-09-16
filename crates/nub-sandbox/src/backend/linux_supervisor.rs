@@ -1291,7 +1291,7 @@ fn read_child_str(tid: u32, addr: u64, max: usize) -> Option<String> {
 }
 
 /// readlink(`/proc/self/fd/<fd>`) — where one of the SUPERVISOR's own fds really points.
-fn fd_path(fd: RawFd) -> Option<String> {
+pub(crate) fn fd_path(fd: RawFd) -> Option<String> {
     let link = CString::new(format!("/proc/self/fd/{fd}")).ok()?;
     let mut buf = vec![0u8; 4096];
     let n = unsafe {
