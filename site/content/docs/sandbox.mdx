@@ -484,6 +484,16 @@ The sandbox is a **policy boundary over paths and destinations**. It stops a com
 
 A confined command also cannot install a second sandbox inside itself: Linux allows one syscall supervisor per process, so `nub sandbox` inside another `nub sandbox` — or inside another tool that installs one — is refused rather than run half-confined.
 
+## Running inside a container
+
+The sandbox needs no privilege and works with every Linux capability dropped. It does need one system call, `pidfd_getfd`, which is how Nub takes over a socket the confined command opened — and Docker's default seccomp profile withholds that call unless the container has `CAP_SYS_PTRACE`. Without it the command is refused rather than run unconfined, so the failure is safe but opaque.
+
+```sh
+docker run --cap-drop=ALL --cap-add=SYS_PTRACE ...
+```
+
+Everything else can stay dropped. Nub clears the confined command's own capability sets before running it, so adding the capability to the container does not hand it to the command.
+
 ## Complete examples
 
 ### Build without network access
