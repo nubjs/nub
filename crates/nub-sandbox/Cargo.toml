@@ -66,61 +66,11 @@ libc = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 seccompiler = "0.5"
 
-# windows-sys backs what still COMPILES on Windows after the AppContainer backend was
-# removed: the egress proxy's platform-root reader and its named-pipe relay. Enforcement
-# does not run on Windows at all, so nothing here confines anything. 0.61 is already in the
-# workspace lockfile (transitive via clap/anstyle) — no new supply-chain surface.
-#
-# The feature list is WIDER than those two consumers need. It is left alone deliberately:
-# narrowing it is only verifiable on a real Windows build, and an unused feature costs
-# compile time rather than correctness. Trim it when a Windows leg is next run.
-[target.'cfg(target_os = "windows")'.dependencies.windows-sys]
-version = "0.61"
-features = [
-  "Win32_Foundation",
-  "Win32_Security",
-  "Win32_Security_Authorization",
-  "Win32_Security_Isolation",
-  "Win32_System_Threading",
-  "Win32_System_JobObjects",
-  "Win32_System_Diagnostics_ToolHelp",
-  "Win32_Storage_FileSystem",
-  # Window-station / desktop aces for the launch. A non-interactive caller (a service, an SSH
-  # session, a CI agent) runs on a per-logon `Service-0x0-…$` station, NOT `WinSta0`, and the
-  # Secondary Logon service's auto-grant does not cover it — without an explicit ace the child
-  # dies in loader init with STATUS_DLL_INIT_FAILED (VM-diagnosed 2026-07-24).
-  "Win32_System_StationsAndDesktops",
-  # `GetConsoleMode` is the launch's console-handle test. The confined child runs on its OWN
-  # console (`CREATE_NO_WINDOW`), which makes one of nub's console handles a silent bit-bucket for
-  # it, so each such std handle is replaced by a relayed pipe. This is the one call that tells a
-  # console apart from a pipe, a file and `NUL` — `GetFileType == FILE_TYPE_CHAR` also matches `NUL`.
-  "Win32_System_Console",
-  "Win32_System_Pipes",
-  "Win32_System_IO",
-  "Win32_System_RemoteDesktop",
-  "Win32_System_Com",
-  "Win32_UI_Shell",
-]
-
 [dev-dependencies]
 tempfile = "3"
 serde_json = { workspace = true }
 # Proxy integration tests build the client-side `Proxy-Authorization: Basic` credential.
 base64 = "0.22"
-
-# `tests/git_tool_functionality.rs` is the one Windows-touching test target left; it needs a
-# little FFI beyond what the lib exposes. Same standing as the lib's list above — wider than
-# the surviving consumer needs, and trimmed when a Windows leg is next run.
-[target.'cfg(target_os = "windows")'.dev-dependencies.windows-sys]
-version = "0.61"
-features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Isolation", "Win32_System_Threading", "Win32_System_Diagnostics_Debug", "Win32_System_Pipes", "Win32_Storage_FileSystem",
-  # The de-elevation probe's administrative-authority oracle: OpenSCManagerW for
-  # SC_MANAGER_CREATE_SERVICE succeeds only for an administrator and mutates nothing, which
-  # is what lets the paired arms be gated on an access check rather than a token flag.
-  "Win32_System_Services",
-  # `NtCreateLowBoxToken` is resolved by name from ntdll: it is the only way to build a LowBox
-  # token from a chosen BASE token, which is the composed-token experiment's whole mechanism.
-  "Win32_System_LibraryLoader"]
 
 [lints]
 workspace = true

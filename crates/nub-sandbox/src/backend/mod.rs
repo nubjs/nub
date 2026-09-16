@@ -1404,7 +1404,6 @@ fn set_tmp_env(command: &mut Command, dir: &std::path::Path) {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]

@@ -25,8 +25,6 @@
 mod ca;
 mod handshake;
 pub mod mitm;
-#[cfg(any(windows, test))]
-pub(crate) mod relay;
 mod sni;
 
 use crate::matcher::HostMatcher;
@@ -306,11 +304,6 @@ pub(crate) struct ProxyContext {
 impl ProxyContext {
     pub(crate) fn start(&self) -> io::Result<EgressProxy> {
         EgressProxy::start(self.decider.clone(), self.mitm.clone())
-    }
-
-    #[cfg(windows)]
-    pub(crate) fn ca_bundle_path(&self) -> Option<&std::path::Path> {
-        self.mitm.as_ref().map(|engine| engine.bundle_path())
     }
 }
 
@@ -1332,12 +1325,6 @@ mod tests {
 
     #[test]
     fn live_tls_broker_releases_marker_only_to_the_exact_verified_upstream() {
-        for via_relay in [false, true] {
-            live_tls_broker_transport(via_relay);
-        }
-    }
-
-    fn live_tls_broker_transport(via_relay: bool) {
         use base64::Engine as _;
         use rcgen::{CertifiedKey, generate_simple_self_signed};
         use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
@@ -1413,9 +1400,7 @@ mod tests {
         )
         .unwrap();
         let auth = base64::engine::general_purpose::STANDARD.encode(format!("{}:", proxy.token()));
-        let relay = via_relay.then(|| relay::tests::TestRelay::start(proxy.port()));
-        let port = relay.as_ref().map_or(proxy.port(), |relay| relay.port);
-        let mut socket = TcpStream::connect((IpAddr::from([127, 0, 0, 1]), port)).unwrap();
+        let mut socket = TcpStream::connect((IpAddr::from([127, 0, 0, 1]), proxy.port())).unwrap();
         write!(
             socket,
             "CONNECT localhost:{upstream_port} HTTP/1.1\r\nHost: localhost:{upstream_port}\r\nProxy-Authorization: Basic {auth}\r\n\r\n"
