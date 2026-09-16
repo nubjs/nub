@@ -119,24 +119,6 @@ pub struct CompileCtx {
     /// to the whole parsed file via [`CompileCtx::with_document`]. All fields on this ctx
     /// are already-parsed host data (the Boundary-B contract), so an owned `Value` fits.
     pub document: Value,
-    /// The build-jail interpreter-closure paths — the Node binaries the lifecycle
-    /// scripts run under. The build-jail preset grants each (and its bin dir) READ,
-    /// because nub provisions its OWN Node under its store rather than `/usr`, so the
-    /// Linux `RootView::Minimal` auto-mount of `ESSENTIAL_READ_PATHS` (which covers a
-    /// system-installed interpreter) does NOT reach it — the empirically-load-bearing
-    /// grant the build-jail read-set spike identified. It is a SET, not one path,
-    /// because under nub a bare `node` resolves via a PATH-prepended shim (`$NODE`)
-    /// while `npm_node_execpath` names the real provisioned binary — both must be
-    /// readable/executable. Empty (the default) for a policy with no interpreter to
-    /// grant (`--sandbox <file>`, the static `build-jail` preset). Set per-spawn by the
-    /// lifecycle interposition via [`CompileCtx::with_interpreter`].
-    pub interpreter: Vec<std::path::PathBuf>,
-    /// The install's already-resolved global virtual-store root, when the host is
-    /// compiling a lifecycle policy. This stays separate from [`Homes::cache`]:
-    /// `cacheDir` is a complete engine cache directory rather than the public
-    /// `$cache` symbolic base, and `globalVirtualStoreDir` may point elsewhere.
-    /// `None` retains the static build-jail preset's `$cache/nub/pm/store` root.
-    pub global_virtual_store: Option<std::path::PathBuf>,
     /// The `$(…)` command runner (production shells out; tests inject a stub).
     pub runner: Box<dyn CommandRunner>,
 }
@@ -155,11 +137,6 @@ impl CompileCtx {
         // carry a `=`-named key into `constructed` and fail the spawn under any cmd.exe
         // ancestor. Filtering at ingestion also keeps them out of `withheld`, where they
         // would read as policy decisions about variables that were never variables.
-        //
-        // It does NOT cover the build jail: `compile_build_jail` hands its own unfiltered
-        // `ambient_env` to `lifecycle_scrubbed_env`, never routing it through here. That
-        // posture is safe by its default-deny allowlist — no admitted name starts with
-        // `=` — not by this filter.
         ambient_env.retain(|key, _| !crate::policy::is_shell_positional_env_key(key));
         Self {
             homes,
@@ -168,8 +145,6 @@ impl CompileCtx {
             caps,
             ambient_env,
             document: Value::Null,
-            interpreter: Vec::new(),
-            global_virtual_store: None,
             runner: Box::new(ShellRunner),
         }
     }
@@ -189,26 +164,6 @@ impl CompileCtx {
     /// block) so a `#/shared/*` sibling pointer reaches its target. See [`CompileCtx::document`].
     pub fn with_document(mut self, document: Value) -> Self {
         self.document = document;
-        self
-    }
-
-    /// Attach the build-jail interpreter-closure paths (the provisioned Node + shim the
-    /// lifecycle script runs under). The `build-jail` preset then grants each path + its
-    /// bin dir READ. Empty (the default) leaves the preset with no interpreter grant.
-    /// See [`CompileCtx::interpreter`].
-    pub fn with_interpreter(mut self, interpreter: Vec<std::path::PathBuf>) -> Self {
-        self.interpreter = interpreter;
-        self
-    }
-
-    /// Attach the actual global virtual-store root selected for this install.
-    /// The engine resolves it once and passes it through the lifecycle spawn;
-    /// recompiling configuration here would risk granting a different root.
-    pub fn with_global_virtual_store(
-        mut self,
-        global_virtual_store: Option<std::path::PathBuf>,
-    ) -> Self {
-        self.global_virtual_store = global_virtual_store;
         self
     }
 }
@@ -430,12 +385,7 @@ fn compile_object(
         Some(v) => fold::fold_fs(v, ctx, &env, "fs")?,
         None => floor_fs(),
     };
-    Ok(SandboxPolicy {
-        fs,
-        net,
-        env,
-        // A generic scope, not the build jail; `compile_build_jail` sets the marker itself.
-    })
+    Ok(SandboxPolicy { fs, net, env })
 }
 
 /// Reject a broker the final net policy cannot serve. Brokering does NOT itself open
@@ -632,8 +582,8 @@ fn secure_default_fs(ctx: &CompileCtx) -> FsPolicy {
 }
 
 fn secure_default_net() -> NetPolicy {
-    // Enforce with a deny-all base and no committed allowlist (the build-jail
-    // baseline owns the trusted-host allows).
+    // Enforce with a deny-all base and no committed allowlist: an authored `net` array is the
+    // only thing that admits a host.
     NetPolicy {
         enforce: true,
         default_effect: Effect::Deny,
