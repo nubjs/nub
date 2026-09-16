@@ -766,14 +766,26 @@ mod tests {
             .expect("secure defaults compile");
         let matcher = crate::matcher::path::PathMatcher::new(&policy.fs.rules);
 
-        assert!(
-            policy
-                .fs
-                .rules
-                .entries
-                .iter()
-                .all(|rule| rule.effect != Effect::Deny),
-            "the secure default must emit positive grants only"
+        // The secure default grants positively and subtracts exactly one thing: the secret
+        // floor. Pinned by MEMBERSHIP rather than by "no denies at all", which is what this
+        // asserted before the floor was restored — a bare count would pass just as well if a
+        // future change started denying something else.
+        let denied: Vec<_> = policy
+            .fs
+            .rules
+            .entries
+            .iter()
+            .filter(|rule| rule.effect == Effect::Deny)
+            .map(|rule| rule.matcher.as_str().to_string())
+            .collect();
+        let floor: Vec<_> = super::ENV_DENY_LEAF_GLOBS
+            .iter()
+            .chain(super::ENV_DENY_SUBTREE_GLOBS)
+            .map(|g| g.to_string())
+            .collect();
+        assert_eq!(
+            denied, floor,
+            "the secure default must subtract the secret floor and nothing else"
         );
         assert_eq!(policy.fs.tmp, crate::policy::TmpMode::Private);
         let project_input = matcher.decide(&homes.project.join("src/input.js"));

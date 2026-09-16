@@ -250,8 +250,10 @@ fn lexical_normalize(path: &Path) -> PathBuf {
     out
 }
 
-/// Compiled filesystem grants. Positive-only sets union access, matching native backends;
-/// legacy internal sets containing an actual deny retain ordered effect resolution.
+/// Compiled filesystem grants. Overlapping ALLOWS union their access, matching what the native
+/// backends do — Landlock unions its rules and has no way to subtract — so a later read-only
+/// grant never takes write access away from an earlier `rw` one. A DENY is the one genuine
+/// subtraction and always wins by order.
 pub struct PathMatcher {
     /// One per COMPILABLE ruleset entry: (compiled glob, effect, access, source index).
     /// The source index is the position in the original `FsRuleSet`, which a malformed
@@ -259,7 +261,6 @@ pub struct PathMatcher {
     /// mount operations by that authored position, so it must be the ruleset's.
     entries: Vec<(GlobMatcher, Effect, FsAccess, usize)>,
     default_effect: Effect,
-    positive_only: bool,
 }
 
 /// A decision for a candidate path: the winning effect and, when allowed, the
@@ -288,7 +289,6 @@ impl PathMatcher {
         Self {
             entries,
             default_effect: set.default_effect,
-            positive_only: set.entries.iter().all(|rule| rule.effect == Effect::Allow),
         }
     }
 
@@ -327,11 +327,22 @@ impl PathMatcher {
     }
 
     fn decide_normalized(&self, first: &str, second: Option<&str>) -> FsDecision {
-        let mut winner = (self.positive_only && self.default_effect == Effect::Allow)
-            .then_some((Effect::Allow, FsAccess::ReadWrite));
+        let mut winner =
+            (self.default_effect == Effect::Allow).then_some((Effect::Allow, FsAccess::ReadWrite));
         for (glob, effect, access, _) in &self.entries {
             if glob.is_match(first) || second.is_some_and(|path| glob.is_match(path)) {
-                if self.positive_only && winner == Some((Effect::Allow, FsAccess::ReadWrite)) {
+                // ALLOWS UNION; ONLY A DENY SUBTRACTS. `{"./out": "rw", "./out/logs": "r"}` reads
+                // as "and the logs are readable too", not "and writing them is revoked" — the
+                // author narrowed nothing, and Landlock could not honour it if they had.
+                //
+                // This skip used to be conditioned on the whole ruleset being deny-free, which
+                // was fine while nothing emitted a deny: the `.env*` floor now puts one in EVERY
+                // read-granting policy, and that flipped every such policy from union to strict
+                // ordering — silently revoking write access from any path covered by a broader
+                // `rw` grant and a narrower `r` one. Keying the skip on THIS rule being an allow
+                // keeps the floor's denies authoritative while leaving allow-vs-allow alone.
+                if *effect == Effect::Allow && winner == Some((Effect::Allow, FsAccess::ReadWrite))
+                {
                     continue;
                 }
                 winner = Some((*effect, *access));

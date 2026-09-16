@@ -426,22 +426,56 @@ fn tooldirs_include_the_current_os_js_package_manager_layouts() {
     }
 }
 
+/// An authored filesystem policy subtracts the secret floor and the policy file, and NOTHING
+/// else. Both are the deliberate exceptions to an otherwise positive-only axis: a read grant is
+/// meant to hand over the source, not the credentials sitting in it, and a confined command has
+/// no business reading the rules that confine it.
+///
+/// This replaces an assertion that the axis carried no deny AT ALL, which pinned a 2026-09-08
+/// narrowing of the floor to the (since-deleted) secure preset. Restored per `sandbox-epic.md`
+/// 0c, which calls the floor load-bearing for `nub sandbox` specifically.
+///
+/// Asserted as an exact set rather than "some deny exists", because the risk worth guarding is a
+/// future change quietly subtracting something ELSE from a policy the author wrote positively.
 #[test]
-fn authored_filesystem_policy_has_no_implicit_secret_or_policy_file_denies() {
+fn an_authored_filesystem_policy_subtracts_the_secret_floor_and_the_policy_file_only() {
     let policy = compile(
         &json!({"fs": ["."]}),
         &ctx(&[]).with_policy_files(vec![PathBuf::from("/project/policy.jsonc")]),
     )
-    .expect("positive-only authored filesystem policy compiles");
+    .expect("an authored filesystem policy compiles");
+    let denied: Vec<_> = policy
+        .fs
+        .rules
+        .entries
+        .iter()
+        .filter(|rule| rule.effect == nub_sandbox::policy::Effect::Deny)
+        .map(|rule| rule.matcher.as_str().to_string())
+        .collect();
+    assert_eq!(
+        denied,
+        vec![
+            "/project/policy.jsonc",
+            "**/.env*",
+            ".env*",
+            "**/.npmrc",
+            ".npmrc",
+            "**/node_modules/npm/npmrc",
+            "node_modules/npm/npmrc",
+            "**/.env*/**",
+            ".env*/**",
+        ],
+        "the policy file is subtracted first, then the secret floor's leaf and subtree bands",
+    );
     assert!(
         policy
             .fs
             .rules
             .entries
             .iter()
-            .all(|rule| rule.effect == nub_sandbox::policy::Effect::Allow)
+            .filter(|rule| rule.effect == nub_sandbox::policy::Effect::Allow)
+            .any(|rule| rule.matcher.as_str().contains("project")),
+        "the authored grant itself must survive: {:?}",
+        policy.fs.rules.entries,
     );
-    assert!(!policy.fs.rules.entries.iter().any(|rule| {
-        rule.matcher.as_str().contains(".env") || rule.matcher.as_str().contains("policy.jsonc")
-    }));
 }

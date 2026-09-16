@@ -1240,13 +1240,54 @@ pub(crate) fn read_allowed(matcher: &PathMatcher, canon: &str) -> bool {
 /// Read a NUL-terminated string at `addr` from the target's `/proc/<tid>/mem`, without the NUL.
 /// `None` on a fault or no terminator within `max` bytes.
 fn read_child_str(tid: u32, addr: u64, max: usize) -> Option<String> {
-    let mut buf = vec![0u8; max];
-    let got = unsafe { read_child_mem(tid, addr, &mut buf) };
-    if got <= 0 {
+    // PAGE-BOUNDED, AND THAT IS THE WHOLE POINT. `pread` on `/proc/<pid>/mem` fails the ENTIRE
+    // range with EFAULT if any byte of it is unmapped, so a single `PATH_MAX` read of a short
+    // path sitting near the end of a mapping reads as a fault and the child gets EFAULT for a
+    // perfectly valid open. Reading up to the next page boundary and stopping at the first NUL
+    // touches only pages the string actually occupies.
+    //
+    // Latent until reads were brokered: write-intent opens are rare and their paths are usually
+    // mid-heap, so the boundary case almost never came up. Every `openat` goes through here now.
+    const PAGE: u64 = 4096;
+    let path = CString::new(format!("/proc/{tid}/mem")).ok()?;
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY) };
+    if fd < 0 {
         return None;
     }
-    let end = buf[..got as usize].iter().position(|&b| b == 0)?;
-    String::from_utf8(buf[..end].to_vec()).ok()
+    let mut out: Vec<u8> = Vec::with_capacity(128);
+    let mut cur = addr;
+    let found = loop {
+        if out.len() >= max {
+            break None;
+        }
+        let chunk = ((PAGE - cur % PAGE) as usize).min(max - out.len());
+        let mut buf = vec![0u8; chunk];
+        let got = unsafe {
+            libc::pread(
+                fd,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len(),
+                cur as libc::off_t,
+            )
+        };
+        if got <= 0 {
+            break None;
+        }
+        let got = got as usize;
+        match buf[..got].iter().position(|&b| b == 0) {
+            Some(end) => {
+                out.extend_from_slice(&buf[..end]);
+                break Some(());
+            }
+            None => {
+                out.extend_from_slice(&buf[..got]);
+                cur += got as u64;
+            }
+        }
+    };
+    unsafe { libc::close(fd) };
+    found?;
+    String::from_utf8(out).ok()
 }
 
 /// readlink(`/proc/self/fd/<fd>`) — where one of the SUPERVISOR's own fds really points.
