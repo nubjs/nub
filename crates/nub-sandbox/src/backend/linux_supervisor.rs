@@ -1595,7 +1595,11 @@ fn handle_fs_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
     // broker also approved, never to one it refused. A descriptor naming nothing reachable by
     // name is refused rather than passed through: `CONTINUE` would hand the kernel the fd
     // NUMBER back, which the child can still swap.
-    let (dfd, path) = if pa == 0 {
+    // Whether this call names its target by DESCRIPTOR rather than by path. Declared, never
+    // inferred from a null path pointer: a genuine `openat(AT_FDCWD, NULL, …)` must still answer
+    // EFAULT, and reading its `AT_FDCWD` as a descriptor turned that into EPERM.
+    let fd_form = FD_FORM_NRS.contains(&nr) || (nr == libc::SYS_utimensat && a[1] == 0);
+    let (dfd, path) = if fd_form {
         let Some(resolved) = child_fd_path(req.pid, a[0] as RawFd) else {
             suplog!("SUP DENY fd-form nr={nr} fd={} -> EPERM", a[0]);
             reply(nfd, req.id, -libc::EPERM);
@@ -1735,7 +1739,12 @@ fn handle_fs_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
         // than the descriptor was opened with, and for a regular file Landlock would judge that
         // against the underlying path where this does not. Narrow, and the alternative is
         // refusing an fd the child demonstrably already has.
-        let own_fd = own_fd_dirs.iter().any(|dir| full.starts_with(dir));
+        // A DESCRIPTOR under that directory, never the directory itself: `/proc/self/fd` is a
+        // listing of what the child holds open, and a bare `starts_with` handed that listing
+        // over — `production_readiness_linux` and the CA test both caught it.
+        let own_fd = own_fd_dirs
+            .iter()
+            .any(|dir| full.starts_with(dir) && full.get(dir.len()) == Some(&b'/'));
         if !own_fd && !permits(&full) {
             suplog!(
                 "SUP DENY {} {} -> EPERM",
