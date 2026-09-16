@@ -152,18 +152,24 @@ fn a_confined_command_cannot_signal_outside_its_own_process_tree() {
     // THE DECISIVE ASSERTION, and it is behavioural rather than an errno: the process the child
     // aimed SIGKILL at is still there. An errno can be produced by a dozen accidents; a live
     // victim can only mean the signal never reached it.
+    //
+    // It is asserted BEFORE the child's exit status deliberately. A falsification run trips both,
+    // and whichever fires first is what the reader sees — "the out-of-tree process was killed" is
+    // the finding, where a bare non-zero child exit is only its symptom. A victim that survived
+    // leaves the status assertion below to report the child's own stderr, which is the useful
+    // diagnostic for every other way this test can fail.
     let alive = victim.try_wait().expect("check the victim").is_none();
     let _ = victim.kill();
     let _ = victim.wait();
+    assert!(
+        alive,
+        "the out-of-tree process was killed by the confined command"
+    );
     assert!(
         output.status.success(),
         "signal scoping failed:\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
-    );
-    assert!(
-        alive,
-        "the out-of-tree process was killed by the confined command"
     );
 }
 

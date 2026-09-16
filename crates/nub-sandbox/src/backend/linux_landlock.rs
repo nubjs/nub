@@ -102,7 +102,9 @@ fn system_read_paths() -> impl Iterator<Item = &'static str> {
 /// The unjailed nub parent's `environ` stays denied in EVERY shape, wholesale grant included.
 /// ⇒ **Neither shape may be adopted**, and "it repairs six packages" does not outweigh handing
 /// one dependency another's environment — that is the disclosure this jail exists to prevent.
-/// Full five-by-five table: `wiki/design/build-jail-linux.md`.
+/// ⛔ The five-by-five table this used to cite lived at `wiki/design/build-jail-linux.md`, which
+/// went with the build jail. Nothing re-checks a path written as prose, so it sat here pointing at
+/// a deleted file; the measurements that still matter are inline above.
 ///
 /// Per-process entries are unreachable either way, INCLUDING the child's own, and the reason
 /// is deeper than the build order: a rule pins the INODE resolved when the ruleset is built,
@@ -401,9 +403,10 @@ fn derive_grants(
     tmp_dir: Option<&Path>,
     entry_program: Option<&Path>,
 ) -> Result<Vec<LandlockGrant>, String> {
-    // THE CATALOG'S FULL-DISK TIER, and the only fs shape this backend answers with a single
-    // rule. An fs axis that confines nothing (`entries: []`, `default_effect: Allow`) is what
-    // `preset::relax_fs_to_full_disk` compiles a `fullDisk` grant to; Landlock cannot express
+    // THE UNCONFINED FS AXIS, and the only fs shape this backend answers with a single rule.
+    // `entries: []` with `default_effect: Allow` is what an authored `"fs": true` folds to
+    // (`fold.rs`, the `Value::Bool(true)` arm); the catalog tier that used to produce it went
+    // with the build jail, and the shape outlived it. Landlock cannot express
     // it by ABSENCE, because a child under a ruleset sees the whole host filesystem and is
     // restricted by what the ruleset omits — so an empty ruleset denies EVERYTHING, the exact
     // inverse. One rule on `/` carrying every handled right is the expression, and the rest of
@@ -778,11 +781,11 @@ struct CapData {
 /// install script and host-wide metadata rewriting, and `CAP_DAC_OVERRIDE` removes DAC.
 /// Unprivileged callers hold nothing to drop and this is a no-op for them.
 ///
-/// Two of those four are now ALSO seccomp-denied for build-jail launches (`deny_metadata`
-/// in `linux.rs`'s `build_seccomp`), so DAC is no longer the only lever against `chown`
-/// and `setxattr`. `chmod` and `utime` still ride on it alone: denying either breaks real
-/// packages, and seccomp cannot scope a denial to a path. This drop is what covers them
-/// when the caller is root.
+/// All four are now brokered PER PATH by the supervisor (`FS_INTENT_NRS`), which is what the
+/// blanket `deny_metadata` ceiling this used to name could never do — it was measured to break 4
+/// of 5 native installs, and it went with the standalone Landlock arm. So the capability drop is
+/// no longer the only lever on any of them; it is the arm that covers a ROOT caller, for whom DAC
+/// concedes what the broker still refuses.
 ///
 /// The BOUNDING set is dropped first, because doing so needs `CAP_SETPCAP` in the effective
 /// set; zeroing the sets first would make the bounding drop fail. A bounding drop that fails

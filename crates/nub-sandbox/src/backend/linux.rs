@@ -191,9 +191,7 @@ pub(crate) fn preflight(
 }
 
 /// One launch's attachment to the loopback egress proxy. The three travel together because a
-/// proxy is either running for this command or it is not, and the Landlock build-jail arm ignores
-/// all three alike — it has no supervisor to redirect and confines egress with the coarse seccomp
-/// family ceiling — so they flow only into the supervised plan. (5.1)
+/// proxy is either running for this command or it is not. (5.1)
 pub(crate) struct ProxyAttachment<'a> {
     /// The proxy's loopback port and bearer token.
     pub port: Option<u16>,
@@ -213,9 +211,8 @@ pub fn apply(
     proxy: ProxyAttachment<'_>,
 ) -> Result<Prepared, Degradation> {
     if preflight.confine_without_landlock {
-        // The supervised (seccomp USER_NOTIF) launch — a policy that needs confinement but is not
-        // a build-jail Landlock policy. NET is transparent per-host egress through the in-process
-        // supervisor;
+        // The supervised (seccomp USER_NOTIF) launch, which is what every confining policy gets.
+        // NET is transparent per-host egress through the in-process supervisor;
         // FS (allow-only) rides a Landlock ruleset the child `restrict_self`s; write-intent ops
         // ride the USER_NOTIF broker. Private tmp is the per-run scratch dir `make_private_tmp`
         // created (threaded in as `tmp_dir`), granted rw by the ruleset + broker with `TMPDIR`
@@ -352,7 +349,7 @@ fn build_supervised_plan(
             _ => None,
         })
         .collect();
-    // Allow-only FS boundary: build the same Landlock ruleset the build-jail path uses, granting
+    // Allow-only FS boundary: the Landlock ruleset the supervised child `restrict_self`s, granting
     // the authored allow-set plus the system read floor plus the entry program. `None` when the
     // policy does not confine the filesystem (a pure net/env policy) — the child then skips
     // `restrict_self`. The Landlock UNION cannot subtract, so a Deny rule INSIDE a granted
@@ -406,7 +403,7 @@ fn build_supervised_plan(
         // The connect-notifier mediates only AF_INET/AF_INET6, so without a socket-family ceiling
         // a confined child reaches host daemons over AF_UNIX (docker.sock, systemd), the
         // hypervisor over AF_VSOCK, or a raw socket, bypassing the per-host net policy entirely.
-        // Install the SAME ceiling the Landlock build-jail path uses: it denies every non-IP
+        // Install the socket ceiling: it denies every non-IP
         // family (lifting only AF_INET/AF_INET6 when the policy admits IP egress) and blocks all
         // three io_uring entry points so a socket cannot be created off the filter. The metadata
         // half of the ceiling went with the standalone arm: a BLANKET `chmod`/`utimensat` deny

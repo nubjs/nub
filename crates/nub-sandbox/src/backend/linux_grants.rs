@@ -20,12 +20,13 @@ pub(crate) struct MountGrant {
 pub(crate) enum MountAccess {
     /// LIST the directory node, and open NOTHING under it — the IR's node-only read.
     ///
-    /// The compiler spells a subtree as the PAIR `[P, P/**]` (`defaults::subtree_globs`),
-    /// so a bare `P` with no twin names the directory NODE alone; its authors are
-    /// `preset::project_cwd_node` (the build jail's unconditional project-root cwd grant,
-    /// on EVERY policy) and `curated::project_cwd`. Collapsing that into `ReadOnly` handed the
-    /// granted package a read of the CONSUMER'S WHOLE PROJECT, because a Landlock rule's
-    /// rights are inherited by everything beneath the path it is attached to.
+    /// The compiler spells a subtree as the PAIR `[P, P/**]` (`defaults::subtree_globs`), so a
+    /// bare `P` with no twin names the directory NODE alone. Collapsing that into `ReadOnly`
+    /// hands the command a read of everything BENEATH the node, because a Landlock rule's rights
+    /// are inherited by the whole hierarchy under the path it is attached to. The producers that
+    /// made this load-bearing were the build jail's project-root cwd grant and the curated
+    /// package set, both gone; the distinction survives them because the widening is a property
+    /// of Landlock, not of who authored the rule.
     ListOnly,
     ReadOnly,
     ReadWrite,
@@ -54,8 +55,10 @@ pub(crate) fn compile_mount_plan(policy: &SandboxPolicy) -> Result<Vec<MountGran
     // finishing. Building the `PathMatcher` is itself n glob compilations on top.
     //
     // A ruleset carrying no Deny cannot shadow anything, so both are skippable OUTRIGHT rather
-    // than approximated — and the build jail is exactly that ruleset by construction, since
-    // `preset::enforce_pure_allowlist` strips every deny as the last step of its compile.
+    // than approximated. ⚠️ That skip is now the UNCOMMON path, not the common one: the secret
+    // floor injects denies into every read-granting policy, so most compiles pay the scan. The
+    // guard stays because the cost it avoids is a hang rather than a slowdown, and a policy that
+    // grants only writes still reaches it.
     let has_denies = policy
         .fs
         .rules
@@ -365,11 +368,8 @@ mod tests {
     }
 
     /// A read grant with no `/**` twin is the directory NODE, and must not widen into the
-    /// subtree. Its authors are `preset::project_cwd_node` and `curated::project_cwd`, where
-    /// the widening handed the granted package a read of the consumer's entire project — and
-    /// the first of those is on every build-jail policy, so the stake is no longer a handful
-    /// of curated packages. Landlock inherits a rule's
-    /// rights down the whole hierarchy beneath the path it is attached to.
+    /// subtree: Landlock inherits a rule's rights down the whole hierarchy beneath the path it is
+    /// attached to, so collapsing the node-only grant into `ReadOnly` reads everything under it.
     ///
     /// Paired with the twin arm so the assertion cannot pass against a compiler that
     /// classifies every read as node-only, which would break every dependency-tree grant.
