@@ -1746,12 +1746,30 @@ fn handle_fs_intent(state: &SupState, nfd: RawFd, req: &SeccompNotif) {
             .iter()
             .any(|dir| full.starts_with(dir) && full.get(dir.len()) == Some(&b'/'));
         if !own_fd && !permits(&full) {
+            // WHICH errno a refusal carries is part of the contract for `access`, and getting it
+            // wrong broke `git config --global`. `access` is a QUESTION about permission whose
+            // callers branch on the answer: git's `access_or_die` treats ENOENT and EACCES as
+            // "no" and everything else as fatal, so answering EPERM turned a probe for a
+            // `~/.gitconfig` that does not even exist into `fatal: unable to access`. Say what a
+            // permission failure normally says — and when the path is genuinely absent, say
+            // THAT, which is true and reveals nothing the policy protects (A2.3 already concedes
+            // the mechanism cannot hide a path's existence). Every other trapped syscall keeps
+            // EPERM: those PERFORM something, and a refusal to act is not a missing file.
+            err = match nr {
+                n if n == libc::SYS_faccessat || n == libc::SYS_faccessat2 => {
+                    let absent = unsafe {
+                        libc::faccessat(pfd, cstr(&base).as_ptr(), libc::F_OK, 0) < 0
+                            && errno() == libc::ENOENT
+                    };
+                    if absent { libc::ENOENT } else { libc::EACCES }
+                }
+                _ => libc::EPERM,
+            };
             suplog!(
-                "SUP DENY {} {} -> EPERM",
+                "SUP DENY {} {} -> {err}",
                 if wants_write { "write" } else { "read" },
                 String::from_utf8_lossy(&full)
             );
-            err = libc::EPERM;
             break 'act;
         }
 

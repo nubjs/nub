@@ -110,16 +110,25 @@ fn fs_intent_child() {
             );
         }
         // `access` now answers from the same rule set the open would consult, so the two can no
-        // longer disagree about a secret-floor file.
+        // longer disagree about a secret-floor file. THE ERRNO IS PART OF THE CONTRACT: callers
+        // branch on it, and git's `access_or_die` treats ENOENT and EACCES as "no" but anything
+        // else as fatal — answering EPERM for a `~/.gitconfig` that does not exist is what broke
+        // `git config --global`.
         "access" => {
             assert_eq!(
                 access(&project.join("index.js")),
                 0,
                 "a granted file must report readable",
             );
-            assert!(
-                access(&project.join(".env")) < 0,
-                "access reported a secret-floor file readable while an open of it is refused",
+            assert_eq!(
+                access_errno(&project.join(".env")),
+                Some(libc::EACCES),
+                "a secret-floor file that EXISTS must refuse the way a permission failure does",
+            );
+            assert_eq!(
+                access_errno(&outside.join("absent.txt")),
+                Some(libc::ENOENT),
+                "an ungranted path that is not even there must say so, not claim EPERM",
             );
         }
         other => panic!("unknown fs-intent case: {other}"),
@@ -155,6 +164,11 @@ fn utimes(path: &Path) -> i32 {
 fn access(path: &Path) -> i32 {
     let c = CString::new(path.to_string_lossy().as_bytes()).unwrap();
     unsafe { libc::access(c.as_ptr(), libc::R_OK) }
+}
+
+fn access_errno(path: &Path) -> Option<i32> {
+    assert!(access(path) < 0, "{} unexpectedly readable", path.display());
+    std::io::Error::last_os_error().raw_os_error()
 }
 
 #[test]
