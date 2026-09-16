@@ -43,6 +43,7 @@ fn linux_production_child() {
         "filesystem" => filesystem_child(&root),
         "inherited-fd" => inherited_fd_child(),
         "proc" => proc_child(),
+        "proc-whole-root" => proc_whole_root_child(),
         "sockets" => sockets_child(),
         "dns-window" => dns_window_child(),
         "sendmmsg-replay" => sendmmsg_replay_child(),
@@ -123,6 +124,32 @@ fn policy_net(root: &Path, self_stat: bool, net: Value) -> SandboxPolicy {
         BTreeMap::new(),
     );
     compile(&Value::Object(input), &ctx).expect("production policy compiles")
+}
+
+/// A whole-root READ grant — `fs: {"/": "r"}` — the shape the brokering docs example widens to
+/// (`{"/":"r","./":"rw"}`) and the one a scoped-grant proc test can never exercise. Landlock binds
+/// `/` and unions in all of `/proc`, and its rules only ever union, so it cannot subtract the
+/// secret band back out. The cross-process `/proc/<pid>/environ` refusal therefore has to come
+/// from the broker floor, exactly as the `.env` floor does under a whole-disk grant.
+fn whole_root_policy(root: &Path) -> SandboxPolicy {
+    let project = root.join("project");
+    let mut fs = Map::new();
+    fs.insert("/".into(), json!("r"));
+    let mut input = Map::new();
+    input.insert("fs".into(), Value::Object(fs));
+    input.insert("net".into(), Value::Bool(false));
+    let ctx = CompileCtx::new(
+        Homes {
+            home: root.join("withheld-home"),
+            cache: root.join("withheld-cache"),
+            tmp: root.join("tmp"),
+            project: project.clone(),
+        },
+        project,
+        ScopeCapabilities::approved(),
+        BTreeMap::new(),
+    );
+    compile(&Value::Object(input), &ctx).expect("a whole-root policy compiles")
 }
 
 fn session(
@@ -394,6 +421,40 @@ fn proc_child() {
     assert_unavailable(format!("/proc/{parent}/fd/{secret_fd}"));
 }
 
+/// The whole-root counterpart to `proc_child`: the same cross-process secret band, but under a
+/// grant where Landlock allows all of `/proc` so only the broker floor can refuse. `proc_child`
+/// runs under a scoped grant, where Landlock denies `/proc` outright and every refusal below would
+/// pass for the wrong reason.
+fn proc_whole_root_child() {
+    let parent = std::env::var(PARENT_PID).unwrap();
+
+    // POSITIVE CONTROL: the parent's `stat` is readable. It witnesses two things at once — the
+    // grant really is whole-root (a scoped grant would refuse this cross-process read), and the
+    // floor is SURGICAL: it denies the secret files, not `/proc` wholesale, so ordinary
+    // introspection survives. If `stat` were refused the environ assertion below would be
+    // Landlock's doing rather than the floor's, and the test would measure nothing.
+    let stat = std::fs::read_to_string(format!("/proc/{parent}/stat"))
+        .expect("a whole-root grant unions /proc in and the floor leaves stat readable");
+    assert_eq!(
+        stat.split_whitespace().next().unwrap(),
+        parent,
+        "read the wrong process's stat",
+    );
+
+    // THE BREACH the floor closes. The parent `nub` supervisor's environ carries the real brokered
+    // secret and every withheld variable, and Yama does not gate a same-uid `PTRACE_MODE_READ` of
+    // `environ`/`maps` — so with `/proc` unioned in, nothing but the broker deny-band stops this
+    // read. Reverting `proc_secret_deny_rules` turns exactly this RED.
+    for leaf in ["environ", "maps"] {
+        assert_unavailable(format!("/proc/{parent}/{leaf}"));
+    }
+    // The child's own secret files ride the same band under a whole-root grant. (`mem` is left to
+    // Yama cross-process, so it is not a discriminating assertion here.)
+    for path in ["/proc/self/environ", "/proc/self/maps"] {
+        assert_unavailable(path);
+    }
+}
+
 fn root_path(leaf: &str) -> PathBuf {
     PathBuf::from(std::env::var_os(ROOT).expect("child root")).join(leaf)
 }
@@ -598,6 +659,25 @@ fn procfs_injection_exposes_only_the_requested_self_file() {
         "proc",
         true,
         &[(PARENT_SECRET_FD, secret.as_raw_fd().to_string())],
+    );
+    output(&session, root.path());
+}
+
+/// A whole-root grant must still refuse the cross-process `/proc` secret band. This is the shape
+/// the brokering docs example uses (`{"/":"r","./":"rw"}`) and the breach the secret broker exists
+/// for: with `/proc` unioned in by Landlock, a confined child could otherwise read its `nub`
+/// supervisor's `/proc/<ppid>/environ` and recover the real brokered secret and every withheld
+/// variable. `procfs_injection_exposes_only_the_requested_self_file` runs the same probe under a
+/// scoped grant, where Landlock denies `/proc` outright — so only this one exercises the broker
+/// floor, and only this one goes RED when `proc_secret_deny_rules` is removed.
+#[test]
+fn a_whole_root_grant_still_refuses_cross_process_proc_secrets() {
+    let root = fixture();
+    let session = session(
+        whole_root_policy(root.path()),
+        root.path(),
+        "proc-whole-root",
+        &[],
     );
     output(&session, root.path());
 }
