@@ -310,71 +310,82 @@ impl<'a> Cursor<'a> {
     }
 }
 
+// ── test fixtures ────────────────────────────────────────────────────────────
+//
+// MODULE SCOPE, not inside `mod tests`, because the PROXY GATE's tests need the same bytes
+// this parser's tests use. `read_and_check_sni` lives in `super` and its verdict comes from
+// whatever this builder encodes, so a second hand-rolled copy of the framing over there would
+// be a fixture free to drift away from the parser it is supposed to be feeding.
+
+/// Build a minimal but well-formed TLS ClientHello record carrying `sni` (or none
+/// when empty). Single record, real field framing — the parser must accept it.
+#[cfg(test)]
+pub(super) fn client_hello(sni: Option<&str>) -> Vec<u8> {
+    let mut exts = Vec::new();
+    if let Some(host) = sni {
+        exts.extend_from_slice(&server_name_extension(&[host]));
+    }
+    client_hello_with_extensions(Some(&exts), &[])
+}
+
+/// Build a ClientHello with a supplied extension vector. `None` omits the
+/// extensions field entirely, as legacy TLS ClientHellos may do.
+#[cfg(test)]
+fn client_hello_with_extensions(exts: Option<&[u8]>, trailing: &[u8]) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&[0x03, 0x03]); // legacy_version TLS1.2
+    body.extend_from_slice(&[0u8; 32]); // random
+    body.push(0); // session_id len 0
+    body.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]); // cipher_suites: len2 + one suite
+    body.extend_from_slice(&[0x01, 0x00]); // compression_methods: len1 + null
+    if let Some(exts) = exts {
+        body.extend_from_slice(&(exts.len() as u16).to_be_bytes());
+        body.extend_from_slice(exts);
+    }
+    body.extend_from_slice(trailing);
+
+    let mut hs = Vec::new();
+    hs.push(HS_CLIENT_HELLO);
+    let l = body.len();
+    hs.extend_from_slice(&[(l >> 16) as u8, (l >> 8) as u8, l as u8]);
+    hs.extend_from_slice(&body);
+
+    framed_records(&hs, hs.len())
+}
+
+#[cfg(test)]
+fn server_name_extension(hosts: &[&str]) -> Vec<u8> {
+    let mut list = Vec::new();
+    for host in hosts {
+        list.push(SNI_NAME_TYPE_HOST);
+        list.extend_from_slice(&(host.len() as u16).to_be_bytes());
+        list.extend_from_slice(host.as_bytes());
+    }
+    let mut ext = Vec::new();
+    ext.extend_from_slice(&EXT_SERVER_NAME.to_be_bytes());
+    ext.extend_from_slice(&((list.len() + 2) as u16).to_be_bytes());
+    ext.extend_from_slice(&(list.len() as u16).to_be_bytes());
+    ext.extend_from_slice(&list);
+    ext
+}
+
+/// Wrap handshake bytes into TLS records of at most `chunk` payload bytes each
+/// (chunk < hs.len() exercises multi-record fragmentation).
+#[cfg(test)]
+fn framed_records(hs: &[u8], chunk: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    for part in hs.chunks(chunk.max(1)) {
+        out.push(CONTENT_HANDSHAKE);
+        out.extend_from_slice(&[0x03, 0x01]); // record version
+        out.extend_from_slice(&(part.len() as u16).to_be_bytes());
+        out.extend_from_slice(part);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Build a minimal but well-formed TLS ClientHello record carrying `sni` (or none
-    /// when empty). Single record, real field framing — the parser must accept it.
-    fn client_hello(sni: Option<&str>) -> Vec<u8> {
-        let mut exts = Vec::new();
-        if let Some(host) = sni {
-            exts.extend_from_slice(&server_name_extension(&[host]));
-        }
-        client_hello_with_extensions(Some(&exts), &[])
-    }
-
-    /// Build a ClientHello with a supplied extension vector. `None` omits the
-    /// extensions field entirely, as legacy TLS ClientHellos may do.
-    fn client_hello_with_extensions(exts: Option<&[u8]>, trailing: &[u8]) -> Vec<u8> {
-        let mut body = Vec::new();
-        body.extend_from_slice(&[0x03, 0x03]); // legacy_version TLS1.2
-        body.extend_from_slice(&[0u8; 32]); // random
-        body.push(0); // session_id len 0
-        body.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]); // cipher_suites: len2 + one suite
-        body.extend_from_slice(&[0x01, 0x00]); // compression_methods: len1 + null
-        if let Some(exts) = exts {
-            body.extend_from_slice(&(exts.len() as u16).to_be_bytes());
-            body.extend_from_slice(exts);
-        }
-        body.extend_from_slice(trailing);
-
-        let mut hs = Vec::new();
-        hs.push(HS_CLIENT_HELLO);
-        let l = body.len();
-        hs.extend_from_slice(&[(l >> 16) as u8, (l >> 8) as u8, l as u8]);
-        hs.extend_from_slice(&body);
-
-        framed_records(&hs, hs.len())
-    }
-
-    fn server_name_extension(hosts: &[&str]) -> Vec<u8> {
-        let mut list = Vec::new();
-        for host in hosts {
-            list.push(SNI_NAME_TYPE_HOST);
-            list.extend_from_slice(&(host.len() as u16).to_be_bytes());
-            list.extend_from_slice(host.as_bytes());
-        }
-        let mut ext = Vec::new();
-        ext.extend_from_slice(&EXT_SERVER_NAME.to_be_bytes());
-        ext.extend_from_slice(&((list.len() + 2) as u16).to_be_bytes());
-        ext.extend_from_slice(&(list.len() as u16).to_be_bytes());
-        ext.extend_from_slice(&list);
-        ext
-    }
-
-    /// Wrap handshake bytes into TLS records of at most `chunk` payload bytes each
-    /// (chunk < hs.len() exercises multi-record fragmentation).
-    fn framed_records(hs: &[u8], chunk: usize) -> Vec<u8> {
-        let mut out = Vec::new();
-        for part in hs.chunks(chunk.max(1)) {
-            out.push(CONTENT_HANDSHAKE);
-            out.extend_from_slice(&[0x03, 0x01]); // record version
-            out.extend_from_slice(&(part.len() as u16).to_be_bytes());
-            out.extend_from_slice(part);
-        }
-        out
-    }
 
     #[test]
     fn extracts_sni_from_single_record() {

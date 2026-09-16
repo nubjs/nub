@@ -1208,8 +1208,11 @@ fn make_sockaddr_in(addr_be: u32, port: u16) -> libc::sockaddr_in {
 /// `-1` on any failure (the caller denies — never a direct-dial fallback, which would bypass the
 /// proxy's SNI gate). `authority`/`dport` name the child's intended destination (the observed DNS
 /// name when known, else the IP literal); the proxy re-resolves and applies its host + SNI gates.
-/// `token` is presented as `Proxy-Authorization: Basic base64("<token>:")` — the same credential
-/// `set_proxy_env` hands a cooperating client. Runs in the supervisor thread (unconfined), all raw
+/// `token` is presented as `Proxy-Authorization: Basic base64("<token>:")`, which is what stops a
+/// SIBLING same-user process borrowing the tunnel. The supervisor is now the ONLY thing that
+/// presents it: the cooperative env path that used to hand the same credential to a well-behaved
+/// client is deleted, because this redirect covers every client whether it cooperates or not.
+/// Runs in the supervisor thread (unconfined), all raw
 /// libc + blocking I/O; a 10s recv timeout guards the handshake read and is cleared before the
 /// socket is handed back, so the tunnel the child inherits has no timeout. (epic 5.1)
 fn proxy_connect_tcp(

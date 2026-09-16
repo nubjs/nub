@@ -1305,6 +1305,46 @@ mod tests {
         );
     }
 
+    /// A DENIED host riding an ALLOWED host's IP is refused, and this is the single reason the
+    /// proxy stays authoritative for EVERY connect instead of only the brokered ones.
+    ///
+    /// THE SHARED ADDRESS IS THE ORDINARY CASE, not a contrived one: a CDN serves thousands of
+    /// names from one address, so an allowed host and a denied host routinely share an `A`
+    /// record. The supervisor's own attribution maps an ADDRESS back to an observed DNS name, so
+    /// on a shared address it cannot separate the two and admits the denied one — that is the leak
+    /// this gate closes. What it reads instead is the name the client itself put in its
+    /// ClientHello, which the client cannot falsify and still complete the handshake it needs.
+    ///
+    /// ⛔ Narrowing the proxy to `secrets.brokerTo` hosts would reopen this for every host that is
+    /// merely allowed rather than brokered. TERMINATION is brokered-scoped (`should_terminate`);
+    /// GATING is not, and the two must not be collapsed.
+    ///
+    /// The control sends the same bytes under the allowed name, so a gate that refused everything
+    /// would fail here rather than read as enforcement.
+    #[test]
+    fn a_denied_sni_is_refused_even_when_the_connection_reached_an_allowed_address() {
+        let d = StaticDecider::new(net(
+            vec![host("allowed.example", Effect::Allow)],
+            Effect::Deny,
+        ));
+
+        let mut denied = std::io::Cursor::new(sni::client_hello(Some("denied.example")));
+        let (_, admitted, name) = read_and_check_sni(&mut denied, &d).unwrap();
+        assert_eq!(name.as_deref(), Some("denied.example"));
+        assert!(
+            !admitted,
+            "a denied host must not ride an allowed address past the SNI gate",
+        );
+
+        let mut allowed = std::io::Cursor::new(sni::client_hello(Some("allowed.example")));
+        let (_, admitted, name) = read_and_check_sni(&mut allowed, &d).unwrap();
+        assert_eq!(name.as_deref(), Some("allowed.example"));
+        assert!(
+            admitted,
+            "the control must pass, or the case above shows only that the gate denies everything",
+        );
+    }
+
     #[test]
     fn static_decider_last_match_wins() {
         // `["*", "!*.evil.example"]`: allow-all then deny a subtree.
