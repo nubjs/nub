@@ -45,15 +45,21 @@ fn marker_command(dir: &Path) -> (String, Vec<String>, PathBuf) {
     let marker = dir.join("marker");
     #[cfg(unix)]
     {
-        let script = dir.join("touch-marker.sh");
-        std::fs::write(
-            &script,
-            format!("#!/bin/sh\necho ran > '{}'\n", marker.display()),
+        // ⛔ NO WRITE-THEN-EXEC, and that is not style. Writing a script here and running it
+        // races every sibling test in this file: `execve` refuses with ETXTBSY while ANY process
+        // holds the file open for writing, and a sibling thread that forks between this write's
+        // `open` and its `close` hands the forked child a copy of that writing fd. `O_CLOEXEC`
+        // does not save it — the kernel's write-count check happens before the fd table is
+        // flushed on exec. It went red on the aarch64 leg exactly once and would have kept doing
+        // so. `/bin/sh` already exists and is never written, so there is no race to lose.
+        (
+            "/bin/sh".to_string(),
+            vec![
+                "-c".to_string(),
+                format!("echo ran > '{}'", marker.display()),
+            ],
+            marker,
         )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        (script.to_string_lossy().into_owned(), Vec::new(), marker)
     }
     #[cfg(windows)]
     {
