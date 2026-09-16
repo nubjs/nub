@@ -341,7 +341,7 @@ fn build_supervised_plan(
         program_abs.as_os_str().as_bytes(),
         "entry program",
     )?];
-    for arg in spec.args.tokens() {
+    for arg in &spec.args {
         argv.push(to_cstring(arg.as_bytes(), "argument")?);
     }
     let mut envp = Vec::with_capacity(policy.env.constructed.len() + 3 + super::CA_ENV_KEYS.len());
@@ -491,7 +491,7 @@ fn validate_process_inputs(spec: &CommandSpec) -> Result<(), String> {
         }
     };
     reject_nul("entry program", &spec.program)?;
-    for (index, arg) in spec.args.tokens().enumerate() {
+    for (index, arg) in spec.args.iter().enumerate() {
         reject_nul(&format!("argument {index}"), arg)?;
     }
     if let Some(cwd) = &spec.cwd {
@@ -967,7 +967,7 @@ fn ip_egress_for(net: &crate::policy::NetPolicy) -> IpEgress {
 
 fn base_command(spec: &CommandSpec, policy: &SandboxPolicy) -> Command {
     let mut command = Command::new(&spec.program);
-    spec.args.apply_to(&mut command);
+    command.args(&spec.args);
     if let Some(cwd) = &spec.cwd {
         command.current_dir(cwd);
     }

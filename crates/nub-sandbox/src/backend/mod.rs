@@ -1404,12 +1404,6 @@ fn set_tmp_env(command: &mut Command, dir: &std::path::Path) {
     }
 }
 
-/// Whether the fs policy actually confines anything (a non-relaxed base or any
-/// entry). A relaxed fs axis (allow-all, no rules) is not a lost enforcement.
-fn fs_confines(policy: &SandboxPolicy) -> bool {
-    !matches!(policy.fs.rules.default_effect, crate::policy::Effect::Allow)
-        || !policy.fs.rules.entries.is_empty()
-}
 
 #[cfg(test)]
 mod tests {

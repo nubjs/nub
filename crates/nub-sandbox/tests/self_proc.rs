@@ -437,6 +437,8 @@ mod linux {
         for (close_exec, nonblock) in [(0, 0), (libc::O_CLOEXEC, libc::O_NONBLOCK)] {
             let flags = close_exec | nonblock;
             let how = [flags as u64, 0, 0];
+            // `SYS_open` is x86_64-only, so only that arch pushes onto this.
+            #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
             let mut fds = vec![
                 unsafe { libc::syscall(libc::SYS_openat, libc::AT_FDCWD, path.as_ptr(), flags, 0) },
                 unsafe {
