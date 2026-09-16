@@ -28,6 +28,42 @@ pub(crate) const ENV_DENY_LEAF_GLOBS: &[&str] = &[
 ];
 pub(crate) const ENV_DENY_SUBTREE_GLOBS: &[&str] = &["**/.env*/**", ".env*/**"];
 
+/// The cross-process procfs deny band — a SECRET floor, not a filesystem one.
+///
+/// A whole-root GRANT (`fs: {"/": "r"}`, the shape the brokering docs example uses) unions in all
+/// of `/proc`, and there is no PID namespace, so without this a confined command reads
+/// `/proc/<pid>/environ` of its own nub supervisor — which holds the real brokered secret and every
+/// withheld variable in cleartext — plus any peer's environ and memory map. That defeats the
+/// secrets axis under a grant the fs axis otherwise honors, exactly the way an un-floored `.env`
+/// would. `tests/proc_isolation.rs` already states the intent ("a grant that quietly widened to
+/// `/proc` would reopen it"); this is what makes it hold under the whole-root grant its own test
+/// did not exercise.
+///
+/// `*` is one path segment, so `/proc/*/environ` covers `/proc/1234/environ`, `/proc/self/environ`
+/// and `/proc/thread-self/environ` alike; the `task/*` twins cover the per-thread views. Only the
+/// secret/memory-layout files are denied — `stat`, `status`, `cmdline` and the rest of `/proc/<pid>`
+/// stay readable, so ordinary process introspection under a whole-root grant is unaffected. An
+/// explicit `/proc` grant is refused outright elsewhere (`is_reserved_tree`); this covers the
+/// whole-root path that refusal cannot see.
+pub(crate) const PROC_SECRET_DENY_GLOBS: &[&str] = &[
+    "/proc/*/environ",
+    "/proc/*/mem",
+    "/proc/*/maps",
+    "/proc/*/smaps",
+    "/proc/*/task/*/environ",
+    "/proc/*/task/*/mem",
+    "/proc/*/task/*/maps",
+];
+
+/// The cross-process procfs deny entries. Absolute globs (procfs is always at `/proc`), so unlike
+/// the `.env*` band they carry no rootless twin.
+pub(crate) fn proc_secret_deny_rules() -> Vec<FsRule> {
+    PROC_SECRET_DENY_GLOBS
+        .iter()
+        .map(|g| deny_rule((*g).to_string()))
+        .collect()
+}
+
 /// The LEAF secret-file deny entries — the `.env*` / `.npmrc` file itself, matched by
 /// basename at any depth rather than anchored under a root.
 pub(crate) fn env_deny_leaf_rules() -> Vec<FsRule> {

@@ -328,6 +328,10 @@ fn finalize_env_deny(set: &mut FsRuleSet) {
     }
     set.entries.extend(defaults::env_deny_leaf_rules());
     set.entries.extend(defaults::env_deny_subtree_rules());
+    // The cross-process /proc secret band rides the SAME injection: it is a secret floor the
+    // broker carries under a whole-root grant, and it is meaningless under the same two skips
+    // (`fs: true` opts out of fs confinement entirely; a no-read policy has nothing to sit inside).
+    set.entries.extend(defaults::proc_secret_deny_rules());
 }
 
 /// Deny the file(s) the policy was read from, read AND write, so a confined command can
