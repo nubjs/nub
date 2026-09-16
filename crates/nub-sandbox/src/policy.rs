@@ -27,7 +27,6 @@ pub struct SandboxPolicy {
     pub fs: FsPolicy,
     pub net: NetPolicy,
     pub env: EnvPolicy,
-    pub pid: PidPolicy,
 }
 
 /// Allow or Deny — the verdict of a single rule and the base of a ruleset.
@@ -510,18 +509,6 @@ pub enum EnvFormat {
     Integer,
     Number,
     Port,
-}
-
-// ── pid ──────────────────────────────────────────────────────────────────────
-
-/// PID/isolation posture.
-///
-/// ⚠️ `isolate` IS INERT, and no backend reads it. It requested the private PID namespace and
-/// fresh procfs that the Bubblewrap backend supplied; that backend is gone, and the supervised arm
-/// has no PID namespace at all — isolating processes is outside what this mechanism claims.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PidPolicy {
-    pub isolate: bool,
 }
 
 // ── canonical glob ───────────────────────────────────────────────────────────

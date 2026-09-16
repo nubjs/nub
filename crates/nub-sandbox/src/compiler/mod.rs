@@ -434,7 +434,6 @@ fn compile_object(
         fs,
         net,
         env,
-        pid: Default::default(),
         // A generic scope, not the build jail; `compile_build_jail` sets the marker itself.
     })
 }
@@ -578,7 +577,6 @@ fn unjailed(ctx: &CompileCtx) -> SandboxPolicy {
             constructed: ctx.ambient_env.clone(),
             ..Default::default()
         },
-        pid: Default::default(),
     }
 }
 
@@ -604,7 +602,6 @@ fn secure_default(ctx: &CompileCtx) -> Result<SandboxPolicy, CompileError> {
         fs: secure_default_fs(ctx),
         net: secure_default_net(),
         env: secure_default_env(ctx),
-        pid: Default::default(),
     })
 }
 
