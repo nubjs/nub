@@ -5,6 +5,8 @@
 //! matcher or the backend's unit-test helpers.
 #![cfg(target_os = "linux")]
 
+#[path = "common/resource_counts.rs"]
+mod resource_counts;
 #[path = "common/tool_output.rs"]
 mod tool_output;
 
@@ -565,12 +567,12 @@ fn reused_session_releases_per_command_workers_and_descriptors() {
     }
     let root = fixture();
     let session = sandbox(root.path(), "basic", false, &[]);
-    let baseline = resource_counts();
+    let baseline = resource_counts::settled();
     for _ in 0..24 {
         output(&session, root.path());
     }
     assert_eq!(
-        resource_counts(),
+        resource_counts::settled(),
         baseline,
         "per-command resources leaked across reuse"
     );
@@ -608,13 +610,6 @@ fn wait_for_exit(pid: i32, timeout: Duration) {
         unsafe { libc::kill(pid, libc::SIGKILL) };
         panic!("sandbox command {pid} survived owner loss/cancellation");
     }
-}
-
-fn resource_counts() -> (usize, usize) {
-    (
-        std::fs::read_dir("/proc/self/fd").unwrap().count(),
-        std::fs::read_dir("/proc/self/task").unwrap().count(),
-    )
 }
 
 /// A test-owned ordinary process.  Unlike `PreparedChild`, `std::process::Child` does not reap

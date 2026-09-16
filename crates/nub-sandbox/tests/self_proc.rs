@@ -1,3 +1,7 @@
+#[cfg(target_os = "linux")]
+#[path = "common/resource_counts.rs"]
+mod resource_counts;
+
 use nub_sandbox::policy::SelfProcFile;
 use nub_sandbox::{CompileCtx, Homes, SandboxPolicy, ScopeCapabilities, compile};
 use serde_json::json;
@@ -565,12 +569,7 @@ mod linux {
             return;
         }
         let (root, sandbox) = fixture(&["maps", "stat"]);
-        let counts = || {
-            (
-                std::fs::read_dir("/proc/self/fd").unwrap().count(),
-                std::fs::read_dir("/proc/self/task").unwrap().count(),
-            )
-        };
+        let counts = crate::resource_counts::settled;
         // Warm the process-global owner guardian before establishing the baseline.
         assert!(
             sandbox
