@@ -407,10 +407,10 @@ A plain key is required and fails compilation if the variable is absent. Make it
 
 ## `secrets`
 
-The `secrets` axis carries sensitive environment variables. Like `vars`, each entry becomes an environment variable in the child; the difference is protection — Nub keeps a secret's value out of its own diagnostics, and a secret can be brokered so the child never holds the real value at all.
+The `secrets` axis carries sensitive environment variables. Like `vars`, each entry becomes an environment variable in the child; the difference is protection — Nub keeps a secret's value out of its own diagnostics, scrubs it from the command's output, and can broker it so the child never holds the real value at all.
 
 <Callout type="warn">
-Nub does not scrub the command's own output. A command that prints a secret shows it in stdout or stderr exactly as it would on a plain run, and it can surface one by other routes too — the network, a file, a descriptor. Brokering is the containment tool: a secret the child never holds cannot be printed or sent anywhere but the broker's own host.
+Nub scrubs a declared secret's value from the command's own output: each occurrence in stdout or stderr is replaced with `[redacted]`. This matches the literal value only — a secret the command transforms (base64, URL-encoding) or sends by another route, such as the network, a file, or a descriptor, is not caught. Brokering is the stronger containment: a secret the child never holds cannot be printed or sent anywhere but the broker's own host.
 </Callout>
 
 ### Name the secrets
