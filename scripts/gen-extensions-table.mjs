@@ -56,6 +56,7 @@ function fetchDataset(packageSpec) {
 
 /** `@scope/name@range` and `name@range` both split at the LAST `@`. */
 const packageName = (selector) => selector.slice(0, selector.lastIndexOf('@'));
+const packageRange = (selector) => selector.slice(selector.lastIndexOf('@') + 1);
 
 // Mirrors the dataset's own collector: three attempts with exponential backoff,
 // a long floor on 429 so a rate-limit does not turn into a retry storm, and 404
@@ -156,28 +157,44 @@ const { pkg, data } = fetchDataset(spec);
 // contributed that the scan never flagged. `findings` then annotates each edge
 // with its class where it has one. Every finding target appears in the
 // extension, so nothing is lost by walking the extension instead.
+//
+// A row is keyed by package NAME, but a selector can be narrower than the
+// package: 128 of the carried rules are scoped to the versions that had the
+// phantom (`redux-thunk@<=2.3.0` — 2.4.0 declared the peer), so each edge keeps
+// its selector's range. Dropping it once made the table claim a phantom against
+// every version of a package whose current release declares the dependency.
 const edges = new Map();
 for (const [selector, extension] of Object.entries(data.packageExtensions)) {
   const name = packageName(selector);
+  const range = packageRange(selector);
   if (!edges.has(name)) edges.set(name, new Map());
   const row = edges.get(name);
-  for (const target of Object.keys(extension.dependencies ?? {})) row.set(target, 'd');
+  const set = (target, field) => row.set(target, { field, range });
+  for (const target of Object.keys(extension.dependencies ?? {})) set(target, 'd');
   for (const target of Object.keys(extension.peerDependencies ?? {}))
     if (!row.has(target))
-      row.set(target, extension.peerDependenciesMeta?.[target]?.optional ? 'p' : 'q');
+      set(target, extension.peerDependenciesMeta?.[target]?.optional ? 'p' : 'q');
   // A `peerDependenciesMeta` key with no matching `peerDependencies` entry is a
   // different KIND of rule: the package already declares the peer and Yarn only
   // relaxes it to optional. Twelve of the carried rules are this shape, and
   // reading the two dependency fields alone leaves those rows with nothing to
   // show.
   for (const target of Object.keys(extension.peerDependenciesMeta ?? {}))
-    if (!row.has(target)) row.set(target, 'o');
+    if (!row.has(target)) set(target, 'o');
 }
 
 const classes = new Map();
 for (const finding of data.findings)
   for (const target of finding.targets)
-    classes.set(`${finding.package} ${target.target}`, CLASS_CODE[target.class] ?? '-');
+  {
+    // `-` means "carried from Yarn, never scanned", so a class this script does
+    // not know must not fall through to it: the harness also defines a
+    // `deep-path` class that 1.0.4 happens not to ship, and the day it does,
+    // the row should fail here rather than read as a Yarn rule.
+    const code = CLASS_CODE[target.class];
+    if (!code) throw new Error(`unknown class "${target.class}" on ${finding.package} -> ${target.target}`);
+    classes.set(`${finding.package} ${target.target}`, code);
+  }
 
 const fromYarn = new Set(data.yarnKeys.map(packageName));
 
@@ -187,7 +204,11 @@ const { start, end, downloads } = await collectDownloads(names);
 const rows = names
   .map((name) => {
     const targets = [...edges.get(name)]
-      .map(([target, field]) => [target, `${classes.get(`${name} ${target}`) ?? '-'}${field}`])
+      .map(([target, { field, range }]) => {
+        const edge = [target, `${classes.get(`${name} ${target}`) ?? '-'}${field}`];
+        if (range !== '*') edge.push(range);
+        return edge;
+      })
       .sort(
         (a, b) =>
           CLASS_RANK[a[1][0]] - CLASS_RANK[b[1][0]] ||
@@ -209,7 +230,7 @@ const header = {
     n: 'package name',
     d: 'weekly npm downloads, null when npm returned no count',
     y: 'present when the rule was carried from @yarnpkg/extensions',
-    t: '[target, "<class><field>"]; class r=runtime a=adapter g=guarded t=types -=not-scanned, field d=dependencies p=optional-peer q=required-peer o=existing-peer-relaxed-to-optional',
+    t: '[target, "<class><field>", range?]; class r=runtime a=adapter g=guarded t=types -=not-scanned, field d=dependencies p=optional-peer q=required-peer o=existing-peer-relaxed-to-optional; range is the selector\'s version range, present when it is not *',
   },
   version: pkg.version,
   generated: data.generated,

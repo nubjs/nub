@@ -13,8 +13,12 @@ import data from '@/data/package-extensions.json';
 // has to be instant, the whole dataset is ~70 KB of short-keyed JSON, and a
 // blog post that needs a running API to render its own evidence is worse.
 
-/** `[target, "<class><field>"]`, both single characters. See the JSON legend. */
-type Edge = [target: string, code: string];
+/**
+ * `[target, "<class><field>", range?]`: two single characters, then the
+ * selector's version range when the rule is narrower than the whole package.
+ * See the JSON legend.
+ */
+type Edge = [target: string, code: string, range?: string];
 type Row = { n: string; d: number | null; t: Edge[]; y?: number };
 
 const PAGE_SIZE = 25;
@@ -31,8 +35,13 @@ const RANK = new Map(ROWS.map((row, index) => [row.n, index + 1]));
 // this package fail to declare? — is answered by the names alone. Both survive
 // in the name's tooltip, as sentences that name the two packages: how the
 // import goes undeclared, then what the rule does about it.
-function describe(pkg: string, target: string, code: string) {
-  const P = <Name>{pkg}</Name>;
+// A ranged rule names the package WITH its range, everywhere the package is
+// named: `redux-thunk@<=2.3.0` imports `redux` without declaring it, and
+// `redux-thunk` does not — 2.4.0 declared the peer, which is why Yarn bounded
+// the rule. Naming the bare package here is how the table came to accuse a
+// current release of a phantom that only its old versions had.
+function describe(pkg: string, target: string, code: string, range?: string) {
+  const P = <Name>{range ? `${pkg}@${range}` : pkg}</Name>;
   const T = <Name>{target}</Name>;
   // A carried rule whose peer the package ALREADY declares is not a phantom at
   // all — Yarn only relaxes it to optional — so it gets its own sentence rather
@@ -56,8 +65,9 @@ function describe(pkg: string, target: string, code: string) {
     ),
     a: (
       <>
-        {P} imports {T} but never declares it as a peer. The application normally supplies it, but a
-        strict linker cannot connect the two until the peer is declared.
+        {P} imports {T} from one of its <Name>exports</Name> subpaths, the adapter a consumer opts
+        into, and never declares it. The consumer normally has {T} installed, but a strict linker
+        cannot connect the two until the peer is declared.
       </>
     ),
     g: (
@@ -106,6 +116,12 @@ function Name({ children }: { children: string }) {
   );
 }
 
+/** The one version range every edge on the row carries, or `undefined`. */
+function sharedRange(row: Row) {
+  const ranges = new Set(row.t.map((edge) => edge[2]));
+  return ranges.size === 1 ? [...ranges][0] : undefined;
+}
+
 // Fixed locale: a client component still renders on the server, and letting
 // Intl pick the runtime default makes the two disagree and trip hydration.
 const NUMBER = new Intl.NumberFormat('en-US');
@@ -133,7 +149,17 @@ function compactDownloads(value: number) {
 // appear, renders two sentences in the OS's smallest type, and never shows on a
 // touch screen. The popover is portalled, so the scroll pane's overflow cannot
 // clip it, and Radix flips it to whichever side has room.
-function Phantom({ pkg, target, code }: { pkg: string; target: string; code: string }) {
+function Phantom({
+  pkg,
+  target,
+  code,
+  range,
+}: {
+  pkg: string;
+  target: string;
+  code: string;
+  range?: string;
+}) {
   const [open, setOpen] = useState(false);
   // Radix toggles on click, which on a mouse would CLOSE a popover that hover
   // just opened. A click that arrives while hovered is cancelled before Radix
@@ -173,7 +199,7 @@ function Phantom({ pkg, target, code }: { pkg: string; target: string; code: str
         onOpenAutoFocus={(event) => event.preventDefault()}
         onCloseAutoFocus={(event) => event.preventDefault()}
       >
-        {describe(pkg, target, code)}
+        {describe(pkg, target, code, range)}
       </PopoverContent>
     </Popover>
   );
@@ -186,13 +212,13 @@ function Edges({ pkg, edges }: { pkg: string; edges: Edge[] }) {
     // any Tailwind utility whatever its specificity. Left alone it put 17.5px of
     // margin above and below every cell's list and drove a one-line row to 89px.
     <ul className="!m-0 flex list-none flex-wrap gap-x-1.5 gap-y-1.5 !p-0">
-      {edges.map(([target, code]) => (
+      {edges.map(([target, code, range]) => (
         // `min-w-0` defeats the flexbox automatic minimum size. Without it a
         // flex item refuses to shrink below its content's min-content width, so
         // on a phone a long scoped name ran past the cell's right edge instead
         // of wrapping inside it.
         <li key={target} className="!m-0 min-w-0 !p-0">
-          <Phantom pkg={pkg} target={target} code={code} />
+          <Phantom pkg={pkg} target={target} code={code} range={range} />
         </li>
       ))}
     </ul>
@@ -318,6 +344,16 @@ export function ExtensionsTable() {
                   >
                     {row.n}
                   </a>
+                  {/* The range a reader scanning the Package column needs: when
+                      every rule on the row is scoped to the same versions, the
+                      row says so beside the name. A row mixing ranges, or mixing
+                      a ranged rule with an unranged one, keeps the range in each
+                      popover instead of showing one that is only half true. */}
+                  {sharedRange(row) ? (
+                    <span className="break-all font-mono text-[13px] text-fd-muted-foreground">
+                      @{sharedRange(row)}
+                    </span>
+                  ) : null}
                 </td>
                 <td className="px-2 py-2.5 text-right align-top text-xs tabular-nums text-fd-muted-foreground sm:px-3 sm:text-sm">
                   {row.d === null ? (
