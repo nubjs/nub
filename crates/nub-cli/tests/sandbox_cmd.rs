@@ -365,3 +365,80 @@ fn a_declared_secret_is_scrubbed_from_the_child_output() {
         "the secret value LEAKED into the user's stdout:\nstdout:\n{stdout}",
     );
 }
+
+/// Run a command under a DEADLINE, failing loudly rather than hanging if it overruns.
+///
+/// `Command::output()` waits forever, and the defect below is a HANG — so a regression would stall
+/// the CI job to its own timeout instead of producing a red test anyone can read. Killing at the
+/// deadline turns "it hung again" into a named failure. The killed path deliberately does not read
+/// the pipes: a surviving grandchild would hold them open, and `wait()` on the SIGKILLed child
+/// returns promptly either way.
+#[cfg(target_os = "linux")]
+fn output_within(mut cmd: Command, deadline: std::time::Duration) -> std::process::Output {
+    let mut child = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("nub runs");
+    let start = std::time::Instant::now();
+    while child.try_wait().expect("polling the launch").is_none() {
+        if start.elapsed() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the launch did not exit within {deadline:?} — it hung instead of refusing");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    child.wait_with_output().expect("reaping the launch")
+}
+
+/// A sandbox inside a sandbox is refused BY NAME, before the inner launch acquires anything. Linux
+/// allows one syscall supervisor per process, so the inner run could never be fully confined — and
+/// without this check the failure lands deep in the inner launch, reading as whatever broke FIRST
+/// under the outer policy (measured: "filesystem grant disappeared", or a stall with nothing to
+/// read). The outer marks the child's environment and the inner reads that mark first; removing
+/// either half turns this RED. The `INNER_RAN` assertion is the positive control that the inner
+/// command never executed.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_sandbox_inside_a_sandbox_is_refused_by_name() {
+    let dir = fixture("nested");
+    let policy = dir.join("policy.json");
+    std::fs::write(
+        &policy,
+        format!(r#"{{"fs": {{"{}": "rw"}}, "net": false}}"#, dir.display()),
+    )
+    .unwrap();
+    let nub = nub_binary();
+    let policy_arg = policy.to_str().unwrap().to_string();
+
+    let mut cmd = Command::new(&nub);
+    cmd.args([
+        "sandbox",
+        "--policy",
+        &policy_arg,
+        nub.to_str().unwrap(),
+        "sandbox",
+        "--policy",
+        &policy_arg,
+        "/bin/echo",
+        "INNER_RAN",
+    ])
+    .current_dir(&dir);
+    let out = output_within(cmd, std::time::Duration::from_secs(60));
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a nested sandbox must be refused:\nstdout:\n{stdout}\nstderr:\n{stderr}",
+    );
+    assert!(
+        stderr.contains("another sandbox is already active"),
+        "the refusal must name the cause rather than whatever broke first:\nstderr:\n{stderr}",
+    );
+    assert!(
+        !stdout.contains("INNER_RAN"),
+        "the inner command must never run:\nstdout:\n{stdout}",
+    );
+}

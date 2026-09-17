@@ -106,13 +106,47 @@ fn policy_from(path: &Path, cwd: &Path) -> Result<nub_sandbox::SandboxPolicy> {
     Ok(policy)
 }
 
+/// The marker nub sets in every confined child's environment so a nested `nub sandbox` can see the
+/// enclosing one. Internal plumbing, never a documented user knob — the brand boundary permits a
+/// `__NUB_*` sentinel for exactly this.
+const NESTED_SENTINEL: &str = "__NUB_SANDBOX_ACTIVE";
+
 /// Run `argv` confined by the policy document at `policy_path`, returning its exit code.
 pub(crate) fn run_confined(policy_path: &Path, argv: &[String]) -> Result<i32> {
+    // ⛔ A SANDBOX INSIDE A SANDBOX IS REFUSED BEFORE ANY WORK, and being first is the point.
+    // Linux allows ONE seccomp user-notification listener per process — a second
+    // `SECCOMP_FILTER_FLAG_NEW_LISTENER` returns EBUSY (measured, kernel 6.17) — so the inner
+    // launch can never get its own syscall supervisor, and running half-confined is what this
+    // frontend refuses everywhere else. The engine does fail closed on its own, but only deep in
+    // the launch, after the proxy, the ruleset and the fork, where the cause is no longer legible:
+    // it surfaces as whatever broke FIRST under the OUTER policy's confinement — a "filesystem
+    // grant disappeared", or a stall with nothing to read. Refusing here, before anything is
+    // acquired, is what makes the message name the real cause and the exit immediate.
+    //
+    // The kernel limit is not permanent, so this refusal is not either: an upstream series adds an
+    // opt-in `SECCOMP_FILTER_FLAG_ALLOW_NESTED_LISTENERS`, under which every listener in the chain
+    // that sets the flag may be stacked. It is still under review rather than in a released kernel.
+    // When it lands, the flag goes on the supervisor's own filter and this check narrows to "the
+    // enclosing sandbox did not opt in" — which still covers a foreign sandbox that holds the slot.
+    if std::env::var_os(NESTED_SENTINEL).is_some() {
+        bail!(
+            "nub sandbox: another sandbox is already active on this process, and Linux allows \
+             only one — run this command outside the enclosing sandbox"
+        );
+    }
     let (program, args) = argv
         .split_first()
         .ok_or_else(|| anyhow!("nub sandbox: provide a command to run"))?;
     let cwd = std::env::current_dir().context("resolving the working directory")?;
-    let policy = policy_from(policy_path, &cwd)?;
+    let mut policy = policy_from(policy_path, &cwd)?;
+    // Mark the child so a nested `nub sandbox` refuses immediately instead of discovering the
+    // one-listener limit deep in its own launch. Set AFTER compiling so it rides whatever `vars`
+    // does: the child's environment IS `constructed`, and this is nub's own plumbing rather than a
+    // variable the policy is describing.
+    policy
+        .env
+        .constructed
+        .insert(NESTED_SENTINEL.to_string(), "1".to_string());
 
     let sandbox = Sandbox::new(&policy).map_err(|d| refused("cannot acquire the sandbox", &d))?;
 
