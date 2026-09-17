@@ -305,6 +305,12 @@ jobs:
       # fast` for the same reason nub-phantom does: its workspace defines no such
       # profile, only `[profile.release]`.
       - run: cd crates/nub-launcher && cargo clippy --locked --all-targets -- -D warnings && cargo build --locked && cargo test --locked
+      # microbe (the incubated minimal installer) is its own workspace too, and is
+      # linked by nothing in the nub binary — so no gate above builds a line of it.
+      # Lint and test it from inside the crate, in BOTH feature configurations: the
+      # host-transport chain and the in-binary TLS client are mutually exclusive
+      # cfg branches, so one configuration lints nothing of the other.
+      - run: cd crates/microbe && cargo clippy --locked --all-targets -- -D warnings && cargo clippy --locked --all-targets --features tls -- -D warnings && cargo test --locked
       # Static brand-boundary gate: no AUBE_*-branded env-var READS in nub crate
       # source (the embedded engine's brand is never nub's config surface). Cheap
       # grep, no build — runs alongside clippy on the same run_rust gate.
