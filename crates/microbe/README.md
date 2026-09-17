@@ -15,14 +15,15 @@ microbe <name[@spec]> <dir> [--registry <url>]
 
 ## Size
 
-Stripped, `opt-level = "z"` with fat LTO, measured on aarch64-apple-darwin:
+Stripped, `opt-level = "z"` with fat LTO:
 
-| Build | Size |
-| --- | --- |
-| default | 493 KB |
-| `--features tls` | 805 KB |
+| Target | default | `--features tls` |
+| --- | --- | --- |
+| aarch64-apple-darwin | 493 KB | 805 KB |
+| x86_64-unknown-linux-gnu | 614 KB | 1.73 MB |
+| x86_64-unknown-linux-musl (static) | 615 KB | 1.72 MB |
 
-The budget is decided by TLS and nothing else. The default build links none: it borrows an HTTPS client the host already has, so the resolve, verify, and extract core is all that remains. Turning on `tls` adds a real client — platform TLS on macOS and Windows, rustls elsewhere, where it costs roughly a megabyte and puts a static Linux binary over budget.
+The budget is decided by TLS and nothing else. The default build links none: it borrows an HTTPS client the host already has, so the resolve, verify, and extract core is all that remains, and even a fully static musl binary comes in at 615 KB. Turning on `tls` adds a real client — platform TLS on macOS and Windows, rustls and ring elsewhere, where it costs about 1.1 MB and takes a Linux binary over budget.
 
 ## How it reaches the network
 

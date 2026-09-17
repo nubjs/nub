@@ -8,11 +8,12 @@
 # Build from inside the crate (`cd crates/microbe && cargo build --release`); the .cargo
 # config routes the target dir to the repo root `target/`.
 #
-# Size budget: under 1 MB stripped. Measured 2026-09-17 on aarch64-apple-darwin at
-# `opt-level = "z"` + fat LTO: 455 KB with no in-binary TLS, 790 KB with platform TLS,
-# 1.30 MB with rustls + ring (1.76 MB static x86_64 musl). The budget is therefore decided
-# by TLS alone, which is why in-binary TLS is opt-in (`--features tls`) and the default
-# build reaches the network through what the host already has — see src/transport.rs.
+# Size budget: under 1 MB stripped, and every default build clears it — 493 KB on
+# darwin-arm64, 614 KB on linux-gnu, 615 KB static on linux-musl (opt-level "z" + fat
+# LTO, measured 2026-09-17). TLS is the entire budget: `--features tls` costs about
+# 1.1 MB, which fits on macOS/Windows platform TLS (806 KB total) and does not on Linux
+# (1.73 MB). Hence in-binary TLS is opt-in and the default build reaches the network
+# through a client the host already has — see src/transport.rs.
 [package]
 name = "microbe"
 version = "0.0.0"
