@@ -90,6 +90,12 @@ const SECCOMP_ADDFD_FLAG_SETFD: u32 = 1;
 /// ONE notifying filter per task, so launching this sandbox inside another that already installed
 /// one fails with `EBUSY` (measured, `sandbox-netprobes/nest.c`). That is a real deployment limit
 /// on agent platforms, and "another sandbox is already active" is the only useful thing to say.
+///
+/// It is now reached by a FOREIGN holder of the listener slot — an agent platform's own sandbox,
+/// or WSL2's init, which installs one for Windows interop and is inherited by every process in the
+/// distro. A nub-inside-nub launch no longer gets this far: the CLI refuses it upfront, because
+/// arriving here means the failure has already been misattributed to whatever the OUTER policy
+/// broke first. Keep this message anyway — it is the backstop for every holder nub cannot mark.
 fn preexec_reason(code: libc::c_int) -> &'static str {
     match code {
         10 => "it could not join the sandbox's process group",
