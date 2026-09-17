@@ -1,0 +1,63 @@
+# microbe — the smallest embeddable npm package installer. A library (plus a thin
+# `microbe` binary) that fetches ONE package and its dependency tree from the registry into
+# a directory the caller names, verifies integrity, and reports the bin entries. Nothing
+# else: no lockfile, no node_modules reconciliation, no lifecycle scripts, no store.
+#
+# Its OWN workspace (like nub-native and nub-launcher) so it carries a size-tuned release
+# profile and its own Cargo.lock, and so nothing from the nub dependency graph can leak in.
+# Build from inside the crate (`cd crates/microbe && cargo build --release`); the .cargo
+# config routes the target dir to the repo root `target/`.
+#
+# Size budget: under 1 MB stripped, and every default build clears it — 493 KB on
+# darwin-arm64, 614 KB on linux-gnu, 615 KB static on linux-musl (opt-level "z" + fat
+# LTO, measured 2026-09-17). TLS is the entire budget: `--features tls` costs about
+# 1.1 MB, which fits on macOS/Windows platform TLS (806 KB total) and does not on Linux
+# (1.73 MB). Hence in-binary TLS is opt-in and the default build reaches the network
+# through a client the host already has — see src/transport.rs.
+[package]
+name = "microbe"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+publish = false
+description = "The smallest embeddable npm package installer: one package and its dependency tree, into a directory."
+
+[features]
+default = []
+# In-binary TLS. Platform TLS (Security.framework / SChannel) on macOS and Windows, where it
+# costs ~330 KB; rustls + ring elsewhere, where it costs ~1 MB. Off by default because the
+# host-provided transports below cost nothing.
+tls = ["dep:ureq"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Pure-Rust inflate; the C zlib backend would need a toolchain and buys nothing at this size.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tar = { version = "0.4", default-features = false }
+sha2 = "0.10"
+# Legacy `dist.shasum` for packages published before `integrity` existed.
+sha1 = "0.10"
+base64 = "0.22"
+# Same crate vendor/aube resolves with, so range semantics match nub's own installer.
+node-semver = "2"
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+ureq = { version = "3", default-features = false, features = ["gzip", "native-tls"], optional = true }
+
+[target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
+ureq = { version = "3", default-features = false, features = ["gzip", "rustls"], optional = true }
+
+[[bin]]
+name = "microbe"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[workspace]

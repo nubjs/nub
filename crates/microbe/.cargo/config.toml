@@ -1,0 +1,4 @@
+# Route this workspace's output into the repo-root target dir, as nub-native does. Cargo
+# reads this file by walking up from the CWD, so build with the CWD inside the crate.
+[build]
+target-dir = "../../target"
