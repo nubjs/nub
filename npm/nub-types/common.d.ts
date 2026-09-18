@@ -16,6 +16,10 @@
 // script file. (Adding `export {}` turns this into a module and silently breaks
 // the data-import wildcards.) Globals are declared bare (`declare function …`,
 // `declare var …`, `declare namespace …`) for the same reason.
+//
+// An `export` INSIDE a `declare module "…"` block is not that top-level export and
+// does not convert the file — only a top-level one does. That is what lets the
+// handler section at the bottom publish a named type from this same script.
 
 // ── Data-format module imports (Nub load hook) ──
 // Default export ONLY — data modules expose no named exports (a named import
@@ -294,4 +298,36 @@ interface Uint8ArrayConstructor {
 // (matching native Node, which ships it once Temporal is native).
 interface Date {
   toTemporalInstant(): Temporal.Instant;
+}
+
+// ── Default-export `fetch` handler (runtime/fetch-serve.cjs) ──
+// A file whose default export has a `fetch` method is served over HTTP by
+// `nub <file>`. Nothing checks that shape today, so a misspelled key or a handler
+// returning the wrong thing makes the program exit with no error and no port bound;
+// `satisfies ExportedHandler` turns each into a compile error.
+//
+// MODULE-SCOPED ON PURPOSE, and this is the one declaration here that must not be a
+// global. Cloudflare owns a global `ExportedHandler` — `@cloudflare/workers-types`
+// and `wrangler types --include-runtime` both put it in the global scope — and a
+// second global declaration of that name MERGES with it. Measured against
+// workers-types 5.20260914.1: the `fetch` members collide (TS2717, reported inside
+// Cloudflare's own file), and under `skipLibCheck: true` the error disappears while
+// Nub's signature silently wins, so Cloudflare's three-argument handlers start
+// failing in the user's own source. Nothing can detect Cloudflare's declaration to
+// step aside from it the way `Worker` steps aside from lib.dom — workers-types
+// declares its distinctive globals with `const`/`class`, which never reach
+// `typeof globalThis`. A module-scoped type cannot merge with a global at all, so
+// the name is safe to share here and a project may use both types in one file.
+//
+// ONE argument. `fetch(request)` is the intersection of Workers' `(request, env,
+// ctx)`, Bun's `(request, server)` and Deno's `(request, info)`; a second stays
+// additive for whenever WinterTC's http-server proposal settles what belongs in it.
+// No other key is read — the listener's address comes from `PORT` and `HOST` — so a
+// Bun-style `port` or `hostname` key fails to compile here instead of being
+// silently ignored at run time.
+declare module "@nubjs/types" {
+  export type FetchHandler = (request: Request) => Response | Promise<Response>;
+  export interface ExportedHandler {
+    fetch: FetchHandler;
+  }
 }

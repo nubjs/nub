@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "lib": ["es2024"],
+    "types": ["node", "@nubjs/types"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": false,
+    "moduleResolution": "bundler",
+    "module": "esnext",
+    "target": "es2024"
+  },
+  "include": ["index.ts"]
+}

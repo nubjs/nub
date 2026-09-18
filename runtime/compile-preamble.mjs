@@ -90,7 +90,7 @@ import { installCompiledFloat16LazyGlobals } from "./compile-lazy-float16.cjs";
 import { installCompiledTemporalLazyGlobal } from "./compile-lazy-temporal.cjs";
 // #endregion
 import { installSyncPolyfills } from "./polyfills.cjs";
-import { installCompiledChildProcess } from "./preload-common.cjs";
+import { installCompiledChildProcess, serveIfHandler } from "./preload-common.cjs";
 // #region nub:polyfill:navigator
 import {
   installNavigatorShim,
@@ -116,7 +116,21 @@ import {
 // executable with nothing on disk.
 import { blobUrlSource, installBlobUrlSupport } from "./worker-blob-url.cjs";
 
+// Whether this process was marked to serve a default-exported `fetch` handler
+// (`flags::COMPILED_SERVE_ENTRY_ENV`) — by the launcher, or by a single executable's
+// own main (compile-sea-loader.cjs). Read and DELETED here, ahead of the program, for
+// the same containment `nub <file>` has: a child the program spawns copies its
+// environment after the marker is gone. Only a top-level launch is marked — a
+// re-exec of the executable by its own program (`fork`, `cluster`,
+// `spawn(process.execPath)`) is not, as under `nub <file>` such a child is plain
+// `node` and never serves.
+let serveEntry = false;
+
 export function installCompilePreamble() {
+  if (process.env.__NUB_COMPILED_SERVE_ENTRY !== undefined) {
+    serveEntry = true;
+    delete process.env.__NUB_COMPILED_SERVE_ENTRY;
+  }
   // Node 18/20 lack process.getBuiltinModule, so keep builtin lookup tied to the
   // early fixed-root bootstrap rather than the bundle or an installed runtime path.
   // #region nub:polyfill:navigator
@@ -187,6 +201,15 @@ export function installCompilePreamble() {
   // #region nub:polyfill:temporal
   installCompiledTemporalLazyGlobal();
   // #endregion
+}
+
+// The program root wrapper calls this with the entry's namespace once the entry
+// has evaluated, top-level await included. An artifact has to reproduce `nub <file>`,
+// not merely `node <file>`, and a server is the program most worth compiling.
+export function serveCompiledEntry(namespace) {
+  if (!serveEntry) return;
+  serveEntry = false;
+  serveIfHandler(namespace.default);
 }
 
 installCompilePreamble();
