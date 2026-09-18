@@ -63,7 +63,8 @@ interface ToolPin {
   description?: string
   version?: string
   repository?: string
-  release?: string
+  origin?: string
+  manager?: string
   binaryName?: string
   purl?: string
   integrity?: string
@@ -124,7 +125,7 @@ export function checkPins(tools: Record<string, ToolPin>): string[] {
       ...(pin.integrity ? [pin.integrity] : []),
       ...Object.values(pin.platforms ?? {}).map(p => p.integrity),
     ]
-    if (pin.release === 'asset' && integrities.length === 0) {
+    if (pin.origin === 'gh-asset' && integrities.length === 0) {
       out.push(`${name}: release asset without any integrity pin`)
     }
     for (const sri of integrities) {
@@ -549,7 +550,7 @@ export async function installTool(name: string, tools: Record<string, ToolPin>):
   if (!pin) {
     throw new Error(`unknown tool ${name} (see external-tools.json)`)
   }
-  if (pin.release === 'asset') {
+  if (pin.origin === 'gh-asset') {
     await installAssetTool(name, pin)
     return
   }
@@ -570,15 +571,28 @@ export async function installTool(name: string, tools: Record<string, ToolPin>):
     await installNpmTarball(name, pin.repository.slice('npm:'.length), pin.version!, pin.integrity!)
     return
   }
-  if (pin.release === 'uv-project') {
-    // Git-SHA-pinned python project; not auto-installed (needs uv).
+  if (pin.origin === 'npm') {
+    // npm registry tarball named only by `origin`. Pins that carry a `purl`
+    // or an `npm:` repository are already claimed by the branches above, so
+    // the package name here is always the tool name.
+    const pkg = name
+    if (!pin.version || !pin.integrity) {
+      throw new Error(`${name}: npm pin missing version or integrity`)
+    }
+    await installNpmTarball(name, pkg, pin.version, pin.integrity)
+    return
+  }
+  if (pin.origin === 'manager') {
+    // Git-SHA-pinned python project installed via an external package
+    // manager (uv); not auto-installed here.
     const repo = pin.repository!.replace(/^github:/, '')
+    const mgr = pin.manager ?? 'uv'
     console.log(
-      `[external-tools] ${name} is a uv project — run: uvx --from git+https://github.com/${repo}@${pin.version} ${name}`,
+      `[external-tools] ${name} is a ${mgr} project — run: uvx --from git+https://github.com/${repo}@${pin.version} ${name}`,
     )
     return
   }
-  throw new Error(`${name}: no installable shape (release=${pin.release ?? 'none'})`)
+  throw new Error(`${name}: no installable shape (origin=${pin.origin ?? 'none'})`)
 }
 
 /**
