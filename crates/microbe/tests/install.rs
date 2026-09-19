@@ -325,6 +325,91 @@ fn optional_dependency_mirrored_into_dependencies_stays_optional() {
 }
 
 #[test]
+fn failure_inside_an_optional_subtree_drops_the_branch_not_the_install() {
+    // `opt` is optional; its REQUIRED dependency `ghost` is unpublished. npm drops `opt`
+    // and everything only `opt` needed, and the install still succeeds.
+    let reg = FakeRegistry::publish(&[
+        Pkg {
+            deps: &[("kept", "*")],
+            optional: &[("opt", "*")],
+            ..pkg("root", "1.0.0")
+        },
+        Pkg {
+            deps: &[("ghost", "*"), ("only-for-opt", "*")],
+            ..pkg("opt", "1.0.0")
+        },
+        pkg("only-for-opt", "1.0.0"),
+        pkg("kept", "1.0.0"),
+    ]);
+    let dir = tempdir();
+    let installed = microbe(&reg).install("root", dir.path()).unwrap();
+    let nm = dir.path().canonicalize().unwrap().join("node_modules");
+    assert!(nm.join("kept").is_dir());
+    assert!(!nm.join("opt").exists(), "a broken optional package stayed");
+    assert!(
+        !nm.join("only-for-opt").exists(),
+        "a dependency owned only by the dropped branch stayed"
+    );
+    assert_eq!(installed.packages, 2, "root and kept");
+}
+
+#[test]
+fn corrupt_tarball_inside_an_optional_subtree_is_cleaned_up() {
+    // Same shape, but the failure only shows at download time, after `opt` and its sibling
+    // dependency have been extracted in parallel. Both must be removed again.
+    let reg = FakeRegistry::publish(&[
+        Pkg {
+            optional: &[("opt", "*")],
+            ..pkg("root", "1.0.0")
+        },
+        Pkg {
+            deps: &[("bad", "*"), ("only-for-opt", "*")],
+            ..pkg("opt", "1.0.0")
+        },
+        pkg("bad", "1.0.0"),
+        pkg("only-for-opt", "1.0.0"),
+    ]);
+    reg.corrupt_tarball("bad", "1.0.0");
+    let dir = tempdir();
+    let installed = microbe(&reg).install("root", dir.path()).unwrap();
+    let nm = dir.path().canonicalize().unwrap().join("node_modules");
+    for gone in ["opt", "bad", "only-for-opt"] {
+        assert!(!nm.join(gone).exists(), "{gone} survived a dropped branch");
+    }
+    assert_eq!(installed.packages, 1);
+}
+
+#[test]
+fn package_reached_first_through_an_optional_branch_is_still_required() {
+    // `shared` is planned at depth 2 under the optional `opt`, and only later reached over
+    // the required path root -> a -> b -> shared. Its failure must fail the install.
+    let reg = FakeRegistry::publish(&[
+        Pkg {
+            deps: &[("a", "*")],
+            optional: &[("opt", "*")],
+            ..pkg("root", "1.0.0")
+        },
+        Pkg {
+            deps: &[("shared", "*")],
+            ..pkg("opt", "1.0.0")
+        },
+        Pkg {
+            deps: &[("b", "*")],
+            ..pkg("a", "1.0.0")
+        },
+        Pkg {
+            deps: &[("shared", "*")],
+            ..pkg("b", "1.0.0")
+        },
+        pkg("shared", "1.0.0"),
+    ]);
+    reg.corrupt_tarball("shared", "1.0.0");
+    let dir = tempdir();
+    let err = microbe(&reg).install("root", dir.path()).unwrap_err();
+    assert!(matches!(err, Error::Integrity { .. }), "{err}");
+}
+
+#[test]
 fn integrity_mismatch_fails_the_install() {
     let reg = FakeRegistry::publish(&[pkg("root", "1.0.0")]);
     reg.corrupt_tarball("root", "1.0.0");

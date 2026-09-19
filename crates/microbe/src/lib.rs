@@ -13,6 +13,11 @@
 //! every planned tarball downloaded, verified and extracted in parallel. The split is what
 //! makes the install latency-bound on the slowest single fetch rather than on their sum.
 //!
+//! Optionality is a property of the GRAPH, not of a package: the plan records every edge, a
+//! package is required when the root reaches it over non-optional edges alone, and a failure
+//! climbs toward the root until an optional edge absorbs it (the branch is dropped, as npm
+//! does) or it reaches something required (the install fails). See [`settle`].
+//!
 //! What it deliberately does not do: run lifecycle scripts (reported instead, see
 //! [`Installed::skipped_install_scripts`]), honour `peerDependencies`, write a lockfile, keep
 //! a cache or store, or reconcile with an existing `node_modules`. Those are the parts of a
@@ -27,7 +32,7 @@ pub use error::Error;
 pub use transport::Transport;
 
 use registry::{Manifest, Packument};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -95,8 +100,8 @@ impl Microbe {
         let (name, range) = split_spec(spec);
         std::fs::create_dir_all(dir)?;
         let root = dir.canonicalize()?;
-        let plan = self.plan(&root, name, range)?;
-        let extracted = self.materialize(&plan)?;
+        let mut plan = self.plan(&root, name, range)?;
+        let live = self.materialize(&mut plan)?;
         let head = &plan.packages[0];
         let mut bins = BTreeMap::new();
         for (cmd, rel) in head.manifest.bin.entries(name) {
@@ -104,17 +109,16 @@ impl Microbe {
             make_executable(&path)?;
             bins.insert(cmd, path);
         }
+        let kept = || plan.packages.iter().zip(&live).filter(|(_, l)| **l);
         Ok(Installed {
             name: name.to_string(),
             version: head.version.clone(),
             dir: head.dir.clone(),
             bins,
-            packages: extracted,
-            skipped_install_scripts: plan
-                .packages
-                .iter()
-                .filter(|p| p.manifest.has_install_script)
-                .map(|p| format!("{}@{}", p.name, p.version))
+            packages: kept().filter(|(p, _)| p.fetch).count(),
+            skipped_install_scripts: kept()
+                .filter(|(p, _)| p.manifest.has_install_script)
+                .map(|(p, _)| format!("{}@{}", p.name, p.version))
                 .collect(),
         })
     }
@@ -125,113 +129,135 @@ impl Microbe {
     /// before any of that level is placed.
     fn plan(&self, root: &Path, name: &str, range: &str) -> Result<Plan, Error> {
         let mut plan = Plan::default();
-        let mut level: VecDeque<Want> = VecDeque::from([Want {
-            parent: root.to_path_buf(),
+        let mut level = VecDeque::from([Want {
+            parent: None,
+            parent_dir: root.to_path_buf(),
             name: name.to_string(),
             range: range.to_string(),
-            optional: false,
+            optional_edge: false,
+            soft: false,
         }]);
         while !level.is_empty() {
             self.prefetch(level.iter().map(|w| w.name.as_str()));
             let mut next = VecDeque::new();
             for want in level.drain(..) {
-                if let Some(planned) = self.place(root, &mut plan, &want)? {
-                    next.extend(planned.wants());
+                if let Some(i) = self.place(root, &mut plan, &want)? {
+                    next.extend(plan.packages[i].wants(i, want.soft));
                 }
             }
             level = next;
         }
         if plan.packages.is_empty() {
-            // The root was already present at a satisfying version; plan it anyway so the
-            // caller gets its manifest and bins.
+            // The root was already on disk at a satisfying version; plan it unfetched so
+            // the caller still gets its manifest and bins.
             let (version, dir) = plan
                 .satisfied(root, root, name, range)?
                 .expect("root either planned or found");
             let manifest = self.manifest_for(name, &version)?;
-            plan.packages
-                .push(Planned::existing(name, version, dir, manifest));
+            plan.push(Planned {
+                name: name.to_string(),
+                version,
+                dir,
+                manifest,
+                fetch: false,
+                children: Vec::new(),
+            });
         }
         Ok(plan)
     }
 
-    /// Decide where one wanted package goes, or that nothing needs doing. Returns the new
-    /// entry when a fetch is needed so the caller can enqueue its dependencies.
-    fn place(&self, root: &Path, plan: &mut Plan, want: &Want) -> Result<Option<Planned>, Error> {
-        let Want {
-            parent,
-            name,
-            range,
-            optional,
-        } = want;
-        if plan.satisfied(root, parent, name, range)?.is_some() {
+    /// Decide where one wanted package goes. Returns the index of a newly planned package so
+    /// the caller can enqueue its dependencies; `None` when the want was already satisfied,
+    /// was skipped, or failed softly.
+    fn place(&self, root: &Path, plan: &mut Plan, want: &Want) -> Result<Option<usize>, Error> {
+        if let Some((_, dir)) = plan.satisfied(root, &want.parent_dir, &want.name, &want.range)? {
+            // An edge to a package planned earlier. It is what lets a package first reached
+            // through an optional branch turn out to be required after all.
+            if let Some(&child) = plan.index.get(&dir) {
+                plan.link(want, child);
+            }
             return Ok(None);
         }
-        let picked = self.with_packument(name, |p| {
-            registry::pick(p, name, range).map(|(v, m)| (v.to_string(), m.clone()))
+        let picked = self.with_packument(&want.name, |p| {
+            registry::pick(p, &want.name, &want.range).map(|(v, m)| (v.to_string(), m.clone()))
         });
         let (version, manifest) = match picked {
             Ok(Ok(vm)) => vm,
-            // An optional dependency may be unpublished, or fail to resolve; npm proceeds.
-            Err(_) | Ok(Err(_)) if *optional => return Ok(None),
+            // An optional dependency that is unpublished or unresolvable is simply absent.
+            Err(_) | Ok(Err(_)) if want.optional_edge => return Ok(None),
+            // A required dependency of a package that is itself only optionally reachable
+            // (so far): charge the failure to that package and let `settle` decide.
+            Err(e) | Ok(Err(e)) if want.soft => {
+                if let Some(parent) = want.parent {
+                    plan.failures.push((parent, e));
+                }
+                return Ok(None);
+            }
             Err(e) | Ok(Err(e)) => return Err(e),
         };
-        if *optional && !registry::platform_allowed(&manifest) {
+        if want.optional_edge && !registry::platform_allowed(&manifest) {
             return Ok(None);
         }
-        let flat = root.join("node_modules").join(name);
-        let dir = if plan.placed.contains_key(&flat) || installed_version(&flat)?.is_some() {
-            parent.join("node_modules").join(name)
+        let flat = root.join("node_modules").join(&want.name);
+        let dir = if plan.index.contains_key(&flat) || installed_version(&flat)?.is_some() {
+            want.parent_dir.join("node_modules").join(&want.name)
         } else {
             flat
         };
-        plan.placed.insert(dir.clone(), version.clone());
-        let planned = Planned {
-            name: name.clone(),
+        let child = plan.push(Planned {
+            name: want.name.clone(),
             version,
             dir,
             manifest,
-            optional: *optional,
             fetch: true,
-        };
-        plan.packages.push(planned.clone());
-        Ok(Some(planned))
+            children: Vec::new(),
+        });
+        plan.link(want, child);
+        Ok(Some(child))
     }
 
-    /// Phase two: every planned tarball, `concurrency` at a time. A failed optional package
-    /// is dropped and its directory removed; any other failure aborts the install.
-    fn materialize(&self, plan: &Plan) -> Result<usize, Error> {
-        let todo: Vec<&Planned> = plan.packages.iter().filter(|p| p.fetch).collect();
+    /// Phase two: every live planned tarball, `concurrency` at a time, then one more
+    /// [`settle`] with the fetch failures folded in. Returns which packages are live, and
+    /// removes from disk whatever a dropped branch had already extracted.
+    fn materialize(&self, plan: &mut Plan) -> Result<Vec<bool>, Error> {
+        let before = settle(&plan.packages, std::mem::take(&mut plan.failures))?;
+        let todo: Vec<usize> = (0..plan.packages.len())
+            .filter(|&i| before.live[i] && plan.packages[i].fetch)
+            .collect();
         let next = AtomicUsize::new(0);
-        let extracted = AtomicUsize::new(0);
-        let failures: Mutex<Vec<Error>> = Mutex::new(Vec::new());
+        let failed: Mutex<Vec<(usize, Error)>> = Mutex::new(Vec::new());
         std::thread::scope(|s| {
             for _ in 0..self.concurrency.min(todo.len()) {
                 s.spawn(|| {
                     loop {
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(p) = todo.get(i) else { break };
-                        match self.fetch_one(p) {
-                            Ok(()) => {
-                                extracted.fetch_add(1, Ordering::Relaxed);
-                            }
-                            Err(_) if p.optional => {
-                                let _ = std::fs::remove_dir_all(&p.dir);
-                            }
-                            Err(e) => {
-                                if let Ok(mut f) = failures.lock() {
-                                    f.push(e);
-                                }
-                            }
+                        let n = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(&i) = todo.get(n) else { break };
+                        if let Err(e) = self.fetch_one(&plan.packages[i])
+                            && let Ok(mut f) = failed.lock()
+                        {
+                            f.push((i, e));
                         }
                     }
                 });
             }
         });
-        let mut failures = failures.into_inner().unwrap_or_default();
-        if !failures.is_empty() {
-            return Err(failures.remove(0));
+        let mut failed = failed.into_inner().unwrap_or_default();
+        if failed.is_empty() {
+            return Ok(before.live);
         }
-        Ok(extracted.into_inner())
+        // Completion order is nondeterministic; report the same failure every time.
+        failed.sort_by_key(|(i, _)| *i);
+        let seeds = before.dropped_seeds.into_iter().map(|i| (i, None));
+        let after = settle_seeded(
+            &plan.packages,
+            seeds.chain(failed.into_iter().map(|(i, e)| (i, Some(e)))),
+        )?;
+        for &i in &todo {
+            if !after.live[i] {
+                let _ = std::fs::remove_dir_all(&plan.packages[i].dir);
+            }
+        }
+        Ok(after.live)
     }
 
     fn fetch_one(&self, p: &Planned) -> Result<(), Error> {
@@ -249,7 +275,7 @@ impl Microbe {
             let Ok(cache) = self.packuments.lock() else {
                 return;
             };
-            let mut seen = std::collections::HashSet::new();
+            let mut seen = HashSet::new();
             names
                 .filter(|n| !cache.contains_key(*n) && seen.insert(*n))
                 .collect()
@@ -316,46 +342,44 @@ impl Microbe {
 
 /// One dependency edge waiting to be placed.
 struct Want {
-    parent: PathBuf,
+    /// Index of the dependent in the plan; `None` for the requested package itself.
+    parent: Option<usize>,
+    parent_dir: PathBuf,
     name: String,
     range: String,
-    optional: bool,
+    /// The edge itself is an `optionalDependencies` entry.
+    optional_edge: bool,
+    /// The dependent was reached only through an optional edge SO FAR, so a failure here
+    /// must not abort planning. Provisional: a later required path can still claim it, which
+    /// is why failures are recorded for [`settle`] rather than swallowed.
+    soft: bool,
 }
 
-#[derive(Clone)]
 struct Planned {
     name: String,
     version: String,
     dir: PathBuf,
     manifest: Manifest,
-    optional: bool,
     /// False for a package already on disk at a satisfying version.
     fetch: bool,
+    /// `(child index, edge is optional)`.
+    children: Vec<(usize, bool)>,
 }
 
 impl Planned {
-    fn existing(name: &str, version: String, dir: PathBuf, manifest: Manifest) -> Self {
-        Planned {
-            name: name.to_string(),
-            version,
-            dir,
-            manifest,
-            optional: false,
-            fetch: false,
-        }
-    }
-
     /// The edges this package adds to the next level. A name listed under
     /// `optionalDependencies` is optional even when it also appears under `dependencies`,
     /// because `npm publish` mirrors it there; a bundled name ships inside the tarball.
-    fn wants(&self) -> Vec<Want> {
+    fn wants(&self, index: usize, soft: bool) -> Vec<Want> {
         let m = &self.manifest;
         let bundled = |n: &str| m.bundle_dependencies.contains(n);
-        let want = |n: &String, r: &String, optional: bool| Want {
-            parent: self.dir.clone(),
+        let want = |n: &String, r: &String, optional_edge: bool| Want {
+            parent: Some(index),
+            parent_dir: self.dir.clone(),
             name: n.clone(),
             range: r.clone(),
-            optional,
+            optional_edge,
+            soft: soft || optional_edge,
         };
         m.dependencies
             .iter()
@@ -375,11 +399,27 @@ impl Planned {
 struct Plan {
     /// In placement order; the first entry is the requested package.
     packages: Vec<Planned>,
-    /// Directory → version, for every package this plan will produce.
-    placed: HashMap<PathBuf, String>,
+    /// Directory → index into `packages`.
+    index: HashMap<PathBuf, usize>,
+    /// `(package to drop, why)`: a package whose required dependency could not be resolved.
+    failures: Vec<(usize, Error)>,
 }
 
 impl Plan {
+    fn push(&mut self, p: Planned) -> usize {
+        self.index.insert(p.dir.clone(), self.packages.len());
+        self.packages.push(p);
+        self.packages.len() - 1
+    }
+
+    fn link(&mut self, want: &Want, child: usize) {
+        if let Some(parent) = want.parent {
+            self.packages[parent]
+                .children
+                .push((child, want.optional_edge));
+        }
+    }
+
     /// Walk from the dependent's directory up to the install root looking for `name` at a
     /// version satisfying `range`, in the plan first and then on disk — Node's own resolution
     /// order, so whatever is found here is what `require` will find too.
@@ -393,8 +433,8 @@ impl Plan {
         let mut dir = Some(parent);
         while let Some(d) = dir {
             let candidate = d.join("node_modules").join(name);
-            let version = match self.placed.get(&candidate) {
-                Some(v) => Some(v.clone()),
+            let version = match self.index.get(&candidate) {
+                Some(&i) => Some(self.packages[i].version.clone()),
                 None => installed_version(&candidate)?,
             };
             if let Some(v) = version
@@ -409,6 +449,82 @@ impl Plan {
         }
         Ok(None)
     }
+}
+
+struct Settled {
+    /// Per package: still part of the install.
+    live: Vec<bool>,
+    /// The packages that were dropped for their own reasons, kept so a second pass can add
+    /// more without recomputing the first.
+    dropped_seeds: Vec<usize>,
+}
+
+fn settle(packages: &[Planned], failures: Vec<(usize, Error)>) -> Result<Settled, Error> {
+    settle_seeded(packages, failures.into_iter().map(|(i, e)| (i, Some(e))))
+}
+
+/// Decide what survives. Each seed names a package that cannot be installed. A dropped
+/// package drops every dependent that reaches it over a NON-optional edge, transitively; an
+/// optional edge absorbs the failure. If that climb reaches a package the root requires —
+/// reachable over non-optional edges alone — the install fails with the first seed's error.
+/// Whatever is then unreachable from the root through surviving packages is not live, which
+/// is what removes a dropped branch's own dependencies along with it.
+fn settle_seeded(
+    packages: &[Planned],
+    seeds: impl Iterator<Item = (usize, Option<Error>)>,
+) -> Result<Settled, Error> {
+    let mut dropped = vec![false; packages.len()];
+    let mut dropped_seeds = Vec::new();
+    let mut first_error = None;
+    for (i, e) in seeds {
+        dropped[i] = true;
+        dropped_seeds.push(i);
+        if first_error.is_none() {
+            first_error = e;
+        }
+    }
+    loop {
+        let mut changed = false;
+        for (i, p) in packages.iter().enumerate() {
+            if !dropped[i]
+                && p.children
+                    .iter()
+                    .any(|&(c, optional)| !optional && dropped[c])
+            {
+                dropped[i] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let reach = |follow_optional: bool, skip: &[bool]| {
+        let mut seen = vec![false; packages.len()];
+        let mut stack = vec![0];
+        while let Some(i) = stack.pop() {
+            if seen[i] || skip[i] {
+                continue;
+            }
+            seen[i] = true;
+            for &(c, optional) in &packages[i].children {
+                if follow_optional || !optional {
+                    stack.push(c);
+                }
+            }
+        }
+        seen
+    };
+    let none = vec![false; packages.len()];
+    let required = reach(false, &none);
+    if (0..packages.len()).any(|i| required[i] && dropped[i]) {
+        return Err(first_error
+            .unwrap_or_else(|| Error::Transport("a required package failed to install".into())));
+    }
+    Ok(Settled {
+        live: reach(true, &dropped),
+        dropped_seeds,
+    })
 }
 
 fn installed_version(pkg_dir: &Path) -> Result<Option<String>, Error> {

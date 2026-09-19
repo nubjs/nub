@@ -319,21 +319,65 @@ mod tests {
         assert!(!available("microbe-definitely-not-a-program"));
     }
 
-    #[test]
-    fn node_transport_multiplexes_concurrent_requests() {
-        let Some(t) = NodeFetch::spawn() else { return };
-        // Eight failures racing through one child: every caller must get ITS reply back,
-        // whatever order the child finishes in, and none may hang.
-        std::thread::scope(|s| {
-            for i in 0..8 {
-                let t = &t;
-                s.spawn(move || {
-                    let err = t
-                        .get(&format!("https://registry.invalid/{i}"), "*/*")
-                        .unwrap_err();
-                    assert!(matches!(err, Error::Transport(_)), "{err}");
+    /// A local HTTP server whose `/slow` reply is held until `/fast` has been REQUESTED. A
+    /// transport that sends one request at a time can never release it, so `/slow` times out
+    /// into a 504 and the test fails; no wall-clock threshold is involved, so a loaded host
+    /// cannot flake it. Distinct bodies prove each reply reached its own caller.
+    fn barrier_server() -> u16 {
+        use std::net::TcpListener;
+        use std::sync::Condvar;
+        use std::time::Duration;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let fast_seen = Arc::new((Mutex::new(false), Condvar::new()));
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let fast_seen = Arc::clone(&fast_seen);
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut line = String::new();
+                    if BufReader::new(&stream).read_line(&mut line).is_err() {
+                        return;
+                    }
+                    let (flag, cv) = &*fast_seen;
+                    let (status, body) = if line.contains("/fast") {
+                        *flag.lock().unwrap() = true;
+                        cv.notify_all();
+                        ("200 OK", "fast-body")
+                    } else {
+                        let seen = flag.lock().unwrap();
+                        let (seen, _) = cv
+                            .wait_timeout_while(seen, Duration::from_secs(10), |s| !*s)
+                            .unwrap();
+                        if *seen {
+                            ("200 OK", "slow-body")
+                        } else {
+                            ("504 Gateway Timeout", "never saw /fast")
+                        }
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
                 });
             }
+        });
+        port
+    }
+
+    #[test]
+    fn node_transport_overlaps_requests_and_routes_each_reply_to_its_caller() {
+        let Some(t) = NodeFetch::spawn() else { return };
+        let port = barrier_server();
+        std::thread::scope(|s| {
+            let slow = s.spawn(|| t.get(&format!("http://127.0.0.1:{port}/slow"), "*/*"));
+            // Give `/slow` a head start so it is in flight first; correctness does not
+            // depend on this, only the strength of the check does.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let fast = s.spawn(|| t.get(&format!("http://127.0.0.1:{port}/fast"), "*/*"));
+            assert_eq!(fast.join().unwrap().unwrap(), b"fast-body");
+            assert_eq!(slow.join().unwrap().unwrap(), b"slow-body");
         });
     }
 

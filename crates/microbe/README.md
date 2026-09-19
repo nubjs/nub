@@ -19,9 +19,9 @@ Stripped, `opt-level = "z"` with fat LTO:
 
 | Target | default | `--features tls` |
 | --- | --- | --- |
-| aarch64-apple-darwin | 526 KB | 821 KB |
-| x86_64-unknown-linux-gnu | 670 KB | 1.76 MB |
-| x86_64-unknown-linux-musl (static) | 680 KB | 1.74 MB |
+| aarch64-apple-darwin | 542 KB | 837 KB |
+| x86_64-unknown-linux-gnu | 679 KB | 1.76 MB |
+| x86_64-unknown-linux-musl (static) | 690 KB | 1.75 MB |
 
 The budget is decided by TLS and nothing else. The default build links none: it borrows an HTTPS client the host already has, so the resolve, verify, and extract core is all that remains, and even a fully static musl binary stays well under a megabyte. Turning on `tls` adds a real client — platform TLS on macOS and Windows, rustls and ring elsewhere, where it costs about 1.1 MB and takes a Linux binary over budget.
 
@@ -53,7 +53,7 @@ Node comes first because it is the only one of the three the use case guarantees
 
 ## What it implements
 
-Packages land flat under `<dir>/node_modules`. A version conflict nests the loser under its dependent, which is what Node's resolver walks up to find, and placement is deterministic: the same request always produces the same tree. Resolution is first-wins over `dependencies` plus platform-matching `optionalDependencies`, one abbreviated packument fetch per package name. A name listed under `optionalDependencies` is optional even when it also appears under `dependencies`, because `npm publish` mirrors it there; a name listed under `bundleDependencies` ships inside its parent's tarball and is never fetched. Tarballs are checked against `dist.integrity`, falling back to the pre-SRI `dist.shasum`. A tarball entry whose path would escape its package directory is refused.
+Packages land flat under `<dir>/node_modules`. A version conflict nests the loser under its dependent, which is what Node's resolver walks up to find, and placement is deterministic: the same request always produces the same tree. Resolution is first-wins over `dependencies` plus platform-matching `optionalDependencies`, one abbreviated packument fetch per package name. A name listed under `optionalDependencies` is optional even when it also appears under `dependencies`, because `npm publish` mirrors it there. Optionality covers the whole branch: when anything an optional dependency itself requires cannot be resolved or fails its integrity check, that optional dependency is dropped along with every package only it needed, and the install succeeds, unless a required path reaches the same package, in which case the install fails. A name listed under `bundleDependencies` ships inside its parent's tarball and is never fetched. Tarballs are checked against `dist.integrity`, falling back to the pre-SRI `dist.shasum`. A tarball entry whose path would escape its package directory is refused.
 
 `peerDependencies` are ignored and install scripts are not run. Packages that declare one are named in `Installed::skipped_install_scripts` so the caller can decide what that means — for a prebuilt-binary package like esbuild or biome the postinstall is a no-op, because the platform package carrying the binary is an optional dependency that microbe already installed.
 
