@@ -551,18 +551,21 @@ That field applies in a Nub project, and npm 12 reads the same map for the same 
 A failed build fails the install. The one exception is a package reachable only through `optionalDependencies`, which the project has declared it can work without: that failure is reported and the install continues, matching npm and pnpm.
 
 ```console
-# captured: nub 0.7.5, optfail@1.0.0 whose postinstall exits 3, allowScripts entry present
+# captured: optfail@1.0.0 whose postinstall exits 3, allowScripts entry present
 $ nub install
-WARN optfail@1.0.0 is an optional dependency and failed to build; continuing
-     without it: lifecycle script postinstall failed for optfail@1.0.0: script
-     `postinstall` exited with code 3   code=WARN_NUB_OPTIONAL_BUILD_FAILED
+Packages: +1
++
+Progress: resolved 1, reused 0, downloaded 1, added 1, done
+.../node_modules/optfail postinstall$ exit 3
+.../node_modules/optfail postinstall: Failed
+
 optionalDependencies:
-+ optfail@1.0.0
++ optfail 1.0.0
 ```
 
 Optionality is a property of the edge, not the package. A package that anything reaches through a normal dependency is required, and its build failure still fails the install, even when something else depends on it optionally.
 
-The warning is emitted by the install that runs the build. A later install with nothing to do skips the package along with everything else, so it does not repeat. Run `nub rebuild <pkg>` to attempt the build again and see the failure.
+The failure is printed by the install that runs the build, as the script's own `Failed` line; there is no separate warning, and the exit code stays 0. A later install with nothing to do skips the package along with everything else, so it does not repeat. Run `nub rebuild <pkg>` to attempt the build again and see the failure.
 
 ### Cooling window
 
@@ -620,15 +623,7 @@ Publish dates come from the registry's `time` metadata, and the outcome depends 
 | No per-version dates, document older than the window | Allowed — the document's own timestamp bounds every version in it |
 | No per-version dates, document newer than the window | Blocked |
 
-Registries that publish no dates at all — some private mirrors, older Verdaccio — fall under the last row. The refusal is its own error, `ERR_NUB_RELEASE_AGE_MISSING_TIME`, rather than the too-new one.
-
-This is the one case where `nub outdated` warns: staying silent would report no work to do on a project where every install refuses. The warning goes to stderr, leaving stdout as data:
-
-```console
-$ nub outdated
-warn: internal-pkg has no registry publish times, so minimumReleaseAge cannot admit any version; `nub update` will fail for it
-All dependencies up to date.
-```
+Registries that publish no dates at all — some private mirrors, older Verdaccio — fall under the last row. The refusal is its own error, `ERR_NUB_MISSING_TIME`, rather than the too-new one.
 
 Two remedies:
 
@@ -637,7 +632,7 @@ minimumReleaseAgeExclude=internal-pkg   # exempt one package (comma-separated)
 minimumReleaseAge=0                     # turn the window off
 ```
 
-Setting pnpm's `minimumReleaseAgeStrict=false` also gets past both, and Nub reads it for compatibility — but it makes an undateable version count as *clearing* the gate, so the window appears enforced but is not. Prefer `minimumReleaseAge=0`.
+Setting pnpm's `minimumReleaseAgeIgnoreMissingTime=true` also gets past both — but it makes an undateable version count as *clearing* the gate, so the window appears enforced but is not. Prefer `minimumReleaseAge=0`.
 
 ### Unapproved builds
 
