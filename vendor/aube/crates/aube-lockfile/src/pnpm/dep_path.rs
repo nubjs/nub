@@ -289,8 +289,7 @@ fn is_package_name(name: &str) -> bool {
 
 fn is_name_part(s: &str) -> bool {
     !s.is_empty()
-        && s
-            .chars()
+        && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~'))
 }
 
