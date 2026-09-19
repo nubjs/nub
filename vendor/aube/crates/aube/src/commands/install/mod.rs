@@ -1937,12 +1937,11 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                     // natives (`@next/swc-*` from a preview build),
                     // which carry their manifest's platform arrays.
                     if !aube_resolver::is_supported(
-                            &pkg.os,
-                            &pkg.cpu,
-                            &pkg.libc,
-                            &fetch_supported_arch,
-                        )
-                    {
+                        &pkg.os,
+                        &pkg.cpu,
+                        &pkg.libc,
+                        &fetch_supported_arch,
+                    ) {
                         tracing::debug!(
                             "deferring tarball fetch for {}@{}: platform mismatch (catch-up will cover survivors)",
                             pkg.name,
