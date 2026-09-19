@@ -419,7 +419,7 @@ The output is an ES module, but a CommonJS dependency bundled into it still has 
 module.exports.config = () => join(__dirname, "config.json");
 ```
 
-Reading that gives `ENOENT` — an error the code can catch, rather than the crash it used to be. `--include` does not help here, because it embeds the file at its own source-tree path rather than beside the entry. A package that reads a file it ships this way needs [`--external`](#--external), which leaves it installed and unbundled.
+If the dependency stays bundled, reading that path gives `ENOENT`. Nub detects many packages that read adjacent files and ships them unbundled, preserving their installed layout inside the executable. If detection misses one, use [`--unbundled`](#--unbundled); unlike `--external`, it keeps the package in the binary. The `--include` flag does not move a dependency's file beside the bundled entry.
 
 An ES module is left alone. Node gives ESM no `__dirname`, so code that throws `ReferenceError` under `node` throws the same error in the compiled binary.
 
@@ -528,18 +528,20 @@ Installing the target's platform package fixes an operating-system or architectu
 
 ### Addons the build cannot find
 
-The addon has to be reachable by following static requires. A specifier written inline is followed; one that reaches the require through a variable is not, and neither is a path assembled at runtime:
+Static addon imports can be bundled directly. Computed paths need the package's installed layout:
 
 ```js
-require(`pkg-${process.platform}`)             // followed
+require(`pkg-${process.platform}`)             // statically followed
 
 const name = `pkg-${process.platform}`;
-require(name);                                 // not followed
+require(name);                                 // computed lookup
 
 require("bindings")("better_sqlite3.node")  // searches the disk at run
 ```
 
-Nothing is embedded for the last two, and the require fails when the executable runs. Compile those packages with `--external` instead, which leaves them to be resolved on the machine that runs the binary.
+Nub detects native packages through manifest signals such as a dependency on `bindings` or `node-gyp-build`. It ships those packages unbundled inside the executable, so their runtime lookups still work. For example, `better-sqlite3` is detected automatically and needs no `--external` flag.
+
+Detection cannot identify every computed dependency. Use [`--unbundled`](#--unbundled) when a package needs its installed layout preserved. Use [`--external`](#--external) only when the package should stay outside the executable and be installed on the target machine. An arbitrary computed lookup in application code still needs its target included explicitly.
 
 ## `--node-options`
 
