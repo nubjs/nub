@@ -101,7 +101,7 @@ jobs:
           shim: false   # the strict contract: npm IS the fronted Node's own; shim-default covers the shims
       - name: bare executables resolve to the specified Node 20.x
         shell: bash
-        run: |
+        run: | # zizmor: ignore[adhoc-packages] the global install is what this step tests
           set -euo pipefail
           node_path="$(command -v node)"
           npm_path="$(command -v npm)"
