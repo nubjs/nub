@@ -317,6 +317,51 @@ fn a_stale_key_from_an_older_nub_can_still_be_deleted() {
     );
 }
 
+/// A `nub.jsonc` value the install refuses is refused by the config surface
+/// too, with the install's own error, instead of being reported as unset.
+///
+/// `install.linker: "pnp"` is reserved and every install stops on it. The
+/// config verbs used to default the refusal away: `get nodeLinker` printed
+/// `isolated`, `list` showed the layout defaults, and `set nodeLinker` wrote an
+/// `.npmrc` line that the field already outranks — three answers for a project
+/// whose install never reads any of them.
+#[test]
+fn the_config_surface_refuses_the_linker_the_install_refuses() {
+    let project = fixture("pnp-linker");
+    std::fs::write(
+        project.join("nub.jsonc"),
+        r#"{ "install": { "linker": "pnp" } }"#,
+    )
+    .unwrap();
+    for args in [
+        &["get", "nodeLinker"][..],
+        &["list"],
+        &["set", "nodeLinker", "hoisted"],
+    ] {
+        let (out, err, code, _) = spawn_in(&project, args);
+        assert_ne!(
+            code,
+            0,
+            "`config {}` must fail:\n{out}\n{err}",
+            args.join(" ")
+        );
+        assert!(
+            err.contains("ERR_NUB_CONFIG_UNSUPPORTED"),
+            "`config {}` must carry the install's error: {err}",
+            args.join(" ")
+        );
+        assert!(
+            !out.contains("isolated"),
+            "`config {}` must not answer with the default: {out}",
+            args.join(" ")
+        );
+    }
+    assert!(
+        !project.join(".npmrc").exists(),
+        "a refused write must leave no .npmrc behind"
+    );
+}
+
 /// A setting the project's own `nub.jsonc` supplies is refused on the `.npmrc`
 /// route — and the SAME key is written normally when it does not.
 ///

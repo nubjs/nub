@@ -357,7 +357,7 @@ pub(crate) fn read_user_entries() -> Vec<(String, String)> {
     out
 }
 
-pub(crate) fn read_project_entries() -> Vec<(String, String)> {
+pub(crate) fn read_project_entries() -> Result<Vec<(String, String)>> {
     let root = project_root();
     let project = root.join(".npmrc");
     // A project whose root IS the home directory would otherwise report the
@@ -368,8 +368,8 @@ pub(crate) fn read_project_entries() -> Vec<(String, String)> {
         read_npmrc(&project)
     };
     out.extend(branded_yaml(&root, BrandedSource::WorkspaceYaml));
-    out.extend(nub_jsonc_entries(&root));
-    out
+    out.extend(nub_jsonc_entries(&root)?);
+    Ok(out)
 }
 
 /// The environment's overlay, which belongs to the merged view and to no
@@ -425,16 +425,26 @@ fn pnpm_env_settings() -> serde_json::Map<String, Value> {
 /// and never the member's own `.npmrc`, and pnpm's `config get` answers the
 /// same way. `config set` still writes the member's file, as pnpm's does, so
 /// only this merged view moves.
-pub(crate) fn read_merged() -> Vec<(String, String)> {
+pub(crate) fn read_merged() -> Result<Vec<(String, String)>> {
     let root = merged_root();
     let mut out = default_entries(&root);
-    out.extend(configured_entries(&root));
-    out
+    out.extend(configured_entries(&root)?);
+    Ok(out)
 }
 
 /// The merged view without nub's defaults: every source something actually
 /// set, lowest precedence first.
-fn configured_entries(root: &Path) -> Vec<(String, String)> {
+fn configured_entries(root: &Path) -> Result<Vec<(String, String)>> {
+    let mut out = file_entries(root);
+    out.extend(nub_jsonc_entries(root)?);
+    // Last because it is highest.
+    out.extend(env_entries(root));
+    Ok(out)
+}
+
+/// The `.npmrc` chain and the branded YAML files, lowest precedence first:
+/// every file source but `nub.jsonc`, which is the one that can refuse.
+fn file_entries(root: &Path) -> Vec<(String, String)> {
     let mut out = Vec::new();
     if let Some(user) = user_npmrc_path() {
         out.extend(read_npmrc(&user));
@@ -447,9 +457,6 @@ fn configured_entries(root: &Path) -> Vec<(String, String)> {
     }
     out.extend(branded_yaml(root, BrandedSource::GlobalConfig));
     out.extend(branded_yaml(root, BrandedSource::WorkspaceYaml));
-    out.extend(nub_jsonc_entries(root));
-    // Last because it is highest.
-    out.extend(env_entries(root));
     out
 }
 
@@ -471,7 +478,13 @@ fn merged_root() -> PathBuf {
 /// that runs before every script.
 pub(crate) fn registry_at(root: &Path) -> String {
     let aliases = resolve_aliases("registry");
-    configured_entries(root)
+    // A script run never installs, so a `nub.jsonc` value the install refuses
+    // must not stop it: that tier is read as far as it goes here, and the
+    // files and the environment still answer.
+    let mut entries = file_entries(root);
+    entries.extend(nub_jsonc_entries(root).unwrap_or_default());
+    entries.extend(env_entries(root));
+    entries
         .into_iter()
         .rev()
         .find_map(|(key, value)| (key == "registry" || aliases.contains(&key)).then_some(value))
@@ -618,27 +631,29 @@ fn yaml_scalar(value: &serde_yaml::Value) -> Option<String> {
 /// rather than re-derived here, so the two cannot disagree about what a
 /// curated key means — `install.linker: "global"` is `nodeLinker` plus
 /// `enableGlobalVirtualStore` in exactly one place.
-fn nub_jsonc_entries(_root: &Path) -> Vec<(String, String)> {
+fn nub_jsonc_entries(_root: &Path) -> Result<Vec<(String, String)>> {
     // The config verbs dispatch through `lookup_verb` and RETURN before the
     // parser match that initializes the snapshot for every other route, so on
     // this path `effective_config` is unset unless it is asked for here.
     // Without it the whole tier reports "nub.jsonc supplies nothing" for every
     // project — silently, because an absent tier just reads as an unset key.
     //
-    // A failure reports the tier as empty rather than propagating: a malformed
-    // `nub.jsonc` means we cannot know what it supplies, and refusing every
-    // `config get` on the strength of an unparseable file is a worse answer
-    // than the file view the caller already has.
+    // A parse failure reports the tier as empty rather than propagating: a
+    // malformed `nub.jsonc` means we cannot know what it supplies, and refusing
+    // every `config get` on the strength of an unparseable file is a worse
+    // answer than the file view the caller already has. A value the file
+    // parses but the install refuses is the opposite case — exactly known, and
+    // the install's own error is the answer — so that one propagates.
     if crate::cli::initialize_config_snapshot(false, false).is_err() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let Some(config) = crate::project_config::effective_config() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    host_settings::supplied_settings(&config.values.install)
+    Ok(host_settings::supplied_settings(&config.values.install)?
         .into_iter()
         .filter_map(|(key, value)| Some((canonical_list_key(&key), render(value)?)))
-        .collect()
+        .collect())
 }
 
 /// A supplied value as `config get` prints it. A map or a nested structure has
@@ -664,10 +679,10 @@ pub(super) fn render(value: Value) -> Option<String> {
     }
 }
 
-fn entries_for(location: ListLocation) -> Vec<(String, String)> {
+fn entries_for(location: ListLocation) -> Result<Vec<(String, String)>> {
     match location {
         ListLocation::Merged => read_merged(),
-        ListLocation::User => read_user_entries(),
+        ListLocation::User => Ok(read_user_entries()),
         ListLocation::Project => read_project_entries(),
     }
 }
@@ -739,7 +754,7 @@ fn run_get(args: GetArgs) -> Result<()> {
         );
     }
     let aliases = resolve_aliases(&args.key);
-    let entries = entries_for(args.effective_location());
+    let entries = entries_for(args.effective_location())?;
     let found = entries
         .iter()
         .rev()
@@ -761,7 +776,7 @@ fn run_list(args: ListArgs) -> Result<()> {
         bail!("--all cannot be combined with --local or --global");
     }
     let mut seen: BTreeMap<String, String> = BTreeMap::new();
-    for (key, value) in entries_for(location) {
+    for (key, value) in entries_for(location)? {
         seen.insert(canonical_list_key(&key), value);
     }
 

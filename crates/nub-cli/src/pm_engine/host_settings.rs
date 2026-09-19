@@ -138,12 +138,17 @@ pub(crate) fn defaults(start_dir: &Path) -> Vec<(String, String)> {
 /// list a value nobody set under a name `config set` cannot write. Reading the
 /// two sources directly keeps the reporting surface to what a user actually
 /// put somewhere.
-pub(crate) fn supplied_settings(install: &InstallConfig) -> Map<String, Value> {
-    let mut out = curated(install).unwrap_or_default();
+///
+/// A curated value the install refuses is refused here too. Defaulting it
+/// away had `config get nodeLinker` answer `isolated` for a project whose
+/// every install stops on `install.linker: "pnp"`, and let `config set` write
+/// an `.npmrc` line for a setting the field already owns.
+pub(crate) fn supplied_settings(install: &InstallConfig) -> Result<Map<String, Value>> {
+    let mut out = curated(install)?;
     for (key, value) in install.settings.iter().flatten() {
         out.insert(key.clone(), value.clone());
     }
-    out
+    Ok(out)
 }
 
 /// The `npm_config_*` variables that name a setting, plus nub's own cache knob.

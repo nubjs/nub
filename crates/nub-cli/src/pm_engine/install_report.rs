@@ -211,8 +211,11 @@ impl SourceIndex {
         // The install's OWN lowering, not a second reading of `nub.jsonc`:
         // `install.linker: "global"` is `nodeLinker` plus
         // `enableGlobalVirtualStore` in exactly one place, and a copy here
-        // could disagree with the tree the install builds.
+        // could disagree with the tree the install builds. A value that
+        // lowering refuses stopped the install before any report, so an
+        // empty tier here hides nothing.
         let project_config = super::host_settings::supplied_settings(&install)
+            .unwrap_or_default()
             .into_iter()
             .filter_map(|(key, value)| Some((key, super::config_read::render(value)?)))
             .collect();

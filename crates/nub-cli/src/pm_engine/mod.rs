@@ -525,7 +525,7 @@ pub(crate) fn stub_error(typed: &str, args: &[String], pm_hint: &str) -> anyhow:
 /// install lowers them ([`host_settings::supplied_settings`]) rather than
 /// predicted a second time. Only a nub project reaches this: a pnpm project's
 /// `config set` is pnpm's own command.
-pub(crate) fn project_supplied_settings() -> Vec<String> {
+pub(crate) fn project_supplied_settings() -> Result<Vec<String>> {
     // The config verbs dispatch through `lookup_verb` and RETURN before the
     // parser match that initializes the snapshot for ordinary routes, so on this
     // path `effective_config` is unset unless it is asked for here. Without
@@ -533,19 +533,22 @@ pub(crate) fn project_supplied_settings() -> Vec<String> {
     // inert, and silently so, because failing to recognize a shadow just lets
     // the write through.
     //
-    // A failure reports "supplies nothing" rather than propagating: a
+    // A parse failure reports "supplies nothing" rather than propagating: a
     // malformed `nub.jsonc` means we cannot know what it supplies, and refusing
     // every `config set` on the strength of an unparseable file would be a
     // worse answer than the `.npmrc` write this project already gets today.
     // Returning here rather than falling through also keeps that promise when
     // some earlier path in the same process already populated the snapshot.
+    // A value the file parses but the install refuses does propagate: what it
+    // supplies is known exactly, and the write it would shadow is one the
+    // install never reads.
     if crate::cli::initialize_config_snapshot(false, false).is_err() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let Some(config) = crate::project_config::effective_config() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    let mut supplied: Vec<String> = host_settings::supplied_settings(&config.values.install)
+    let mut supplied: Vec<String> = host_settings::supplied_settings(&config.values.install)?
         .into_iter()
         .map(|(key, _)| key)
         .collect();
@@ -568,7 +571,7 @@ pub(crate) fn project_supplied_settings() -> Vec<String> {
     {
         supplied.push("verifyDepsBeforeRun".to_string());
     }
-    supplied
+    Ok(supplied)
 }
 
 /// Per-process, mtime-validated cache of parsed `package.json` files keyed by

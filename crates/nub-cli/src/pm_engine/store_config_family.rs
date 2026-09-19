@@ -625,7 +625,7 @@ fn dispatch_config(parsed: ConfigArgs) -> Result<i32> {
                     npmrc_first::SetRoute::Engine | npmrc_first::SetRoute::Refuse(_) => None,
                 };
                 if let Some(home) = blocked_home {
-                    let supplied = super::project_supplied_settings();
+                    let supplied = super::project_supplied_settings()?;
                     if let Some(field) = super::duplicate_home::shadowing_field(&set.key, &supplied)
                     {
                         return Err(super::duplicate_home::shadowed_error(&set.key, field, home));
