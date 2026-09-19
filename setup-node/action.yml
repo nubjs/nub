@@ -371,7 +371,8 @@ runs:
     #    _authToken bound to NODE_AUTH_TOKEN, optional always-auth), then point npm
     #    config at it via NPM_CONFIG_USERCONFIG. nub's PM reads this standard file.
     #    Like setup-node, an existing file keeps every line except the registry
-    #    line this call replaces (authutil.ts writeRegistryToFile).
+    #    line this call replaces (authutil.ts writeRegistryToFile) — and any
+    #    always-auth line, which the input below decides.
     - name: Configure registry auth
       if: inputs.registry-url != ''
       shell: bash
@@ -410,7 +411,7 @@ runs:
         auth_prefix="${url#*://}"
         keep=""
         if [ -f "$npmrc" ]; then
-          keep="$(grep -iv "^${scope:+${scope}:}registry" "$npmrc" || true)"
+          keep="$(grep -iv -e "^${scope:+${scope}:}registry" -e '^always-auth=' "$npmrc" || true)"
         fi
         {
           [ -n "$keep" ] && printf '%s\n' "$keep"
@@ -486,19 +487,22 @@ runs:
         fi
         # nvm-style aliases, as setup-node reads them: lts/*, lts/<codename>, node,
         # latest and current resolve through the dist index to a version nub pins.
+        # The index is newest-first and every entry carries its lts field, so
+        # curl, grep and awk pick the release: no Node is on PATH yet on a
+        # runner that ships none, which is what this action is there to fix.
         alias_spec="$(printf '%s' "$want" | tr '[:upper:]' '[:lower:]')"
         case "$alias_spec" in
           lts/*|node|latest|current)
-            want="$(node -e '
-              const spec = process.argv[1];
-              fetch("https://nodejs.org/dist/index.json").then(r => r.json()).then(idx => {
-                const pick = spec === "lts/*" ? idx.find(e => e.lts)
-                  : spec.startsWith("lts/") ? idx.find(e => typeof e.lts === "string" && e.lts.toLowerCase() === spec.slice(4))
-                  : idx[0];
-                if (!pick) process.exit(1);
-                process.stdout.write(pick.version.replace(/^v/, ""));
-              }).catch(() => process.exit(1));
-            ' "$alias_spec")" || { echo "::error::node-version '${alias_spec}' matches no release in the Node dist index."; exit 1; }
+            index="${NODEJS_ORG_MIRROR:-https://nodejs.org/dist}/index.json"
+            want="$(curl -fsSL --retry 3 "$index" \
+              | grep -oE '"version":"v[0-9]+\.[0-9]+\.[0-9]+"|"lts":("[A-Za-z]+"|false)' \
+              | awk -v spec="$alias_spec" '
+                  /^"version"/ { v = $0; sub(/^"version":"v/, "", v); sub(/"$/, "", v); next }
+                  { lts = ""
+                    if ($0 ~ /"lts":"/) { lts = tolower($0); sub(/^"lts":"/, "", lts); sub(/"$/, "", lts) }
+                    if (spec == "node" || spec == "latest" || spec == "current") { print v; exit }
+                    if (lts != "" && (spec == "lts/*" || spec == "lts/" lts)) { print v; exit } }')" || want=""
+            [ -n "$want" ] || { echo "::error::node-version '${alias_spec}' matches no release in the Node dist index at ${index}."; exit 1; }
             echo "${alias_spec} is Node ${want}" ;;
         esac
 

@@ -59,7 +59,7 @@ A workflow that omits `node-version` keeps running on the runner's Node when the
 | `working-directory` | checkout root | Where the pin files and lockfile live, for a project in a subdirectory. |
 | `registry-url` | — | Registry to configure auth for. |
 | `scope` | repo owner | Scope for a scoped registry (GitHub Packages). |
-| `always-auth` | `false` | Write `always-auth=true` into the `.npmrc`. |
+| `always-auth` | `false` | Write `always-auth=true` into the `.npmrc`; an existing `always-auth` line is replaced either way. |
 | `token` | `github.token` | GitHub API rate-limit relief when resolving the `nub-version` range. |
 | `nub-version` | `latest` | Version of nub to install: any range npm understands. |
 

@@ -446,6 +446,9 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           persist-credentials: false
+      - name: an existing user .npmrc with always-auth=true, and the input left at its default
+        shell: bash
+        run: printf 'always-auth=true\n' > "${RUNNER_TEMP}/.npmrc"
       - uses: ./setup-node
         with:
           # bare scope (no leading @, mixed case) against a path-bearing private
@@ -453,7 +456,7 @@ jobs:
           # lowercase whole) and full-path auth key.
           registry-url: "https://reg.example.com/npm/"
           scope: "My-Org"
-      - name: assert normalized scope + path-preserving auth key
+      - name: assert normalized scope + path-preserving auth key; a stale always-auth is gone
         shell: bash
         run: |
           set -euo pipefail
@@ -463,6 +466,8 @@ jobs:
           grep -q '@my-org:registry=https://reg.example.com/npm/' "$npmrc"
           # auth key keeps the full registry path, not just the host
           grep -q '//reg.example.com/npm/:_authToken=${NODE_AUTH_TOKEN}' "$npmrc"
+          # the default always-auth: false wins over the line the file started with
+          ! grep -q '^always-auth=' "$npmrc" || { echo "::error::a stale always-auth line survived"; exit 1; }
 
   range:
     if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
@@ -620,12 +625,22 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     permissions:
       contents: read
-    name: "node-version: lts/* resolves through the dist index (ubuntu-latest)"
+    name: "node-version: lts/* resolves through the dist index, with no node on PATH (ubuntu-latest)"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           persist-credentials: false
+      # A self-hosted runner can ship no Node at all; the alias must resolve
+      # before this action installs one.
+      - name: hide the runner's node
+        shell: bash
+        run: |
+          set -euo pipefail
+          p="$(command -v node)"
+          sudo mv "$p" "$p.hidden"
+          ! command -v node >/dev/null 2>&1 || { echo "::error::node is still on PATH at $(command -v node)"; exit 1; }
+          echo "hid $p"
       - uses: ./setup-node
         id: nub
         with:
