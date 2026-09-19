@@ -58,9 +58,11 @@ jobs:
         run: |
           set -euo pipefail
           nub --version
-          out="${{ steps.nub.outputs.nub-version }}"
+          out="${STEPS_NUB_OUTPUTS_NUB_VERSION}"
           echo "nub-version output: $out"
           [[ "$out" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]] || { echo "::error::bad nub-version output: $out"; exit 1; }
+        env:
+          STEPS_NUB_OUTPUTS_NUB_VERSION: ${{ steps.nub.outputs.nub-version }}
 
       - name: pinned nub-version installs exactly
         id: pinned
@@ -69,7 +71,9 @@ jobs:
           nub-version: 0.0.47
       - shell: bash
         run: |
-          [[ "${{ steps.pinned.outputs.nub-version }}" == "v0.0.47" ]] || { echo "::error::expected v0.0.47, got ${{ steps.pinned.outputs.nub-version }}"; exit 1; }
+          [[ "${STEPS_PINNED_OUTPUTS_NUB_VERSION}" == "v0.0.47" ]] || { echo "::error::expected v0.0.47, got ${STEPS_PINNED_OUTPUTS_NUB_VERSION}"; exit 1; }
+        env:
+          STEPS_PINNED_OUTPUTS_NUB_VERSION: ${{ steps.pinned.outputs.nub-version }}
 
   # Differential PATH parity: after setup-node with an explicit node-version, bare
   # node/npm/npx/corepack in a LATER step must resolve to that version — the
@@ -204,8 +208,10 @@ jobs:
         run: |
           set -euo pipefail
           nub node ls
-          echo "node-version output: ${{ steps.nub.outputs.node-version }}"
-          [[ "${{ steps.nub.outputs.node-version }}" == 20* ]] || { echo "::error::expected resolved pin 20.x"; exit 1; }
+          echo "node-version output: ${STEPS_NUB_OUTPUTS_NODE_VERSION}"
+          [[ "${STEPS_NUB_OUTPUTS_NODE_VERSION}" == 20* ]] || { echo "::error::expected resolved pin 20.x"; exit 1; }
+        env:
+          STEPS_NUB_OUTPUTS_NODE_VERSION: ${{ steps.nub.outputs.node-version }}
 
   eager-provision:
     if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
@@ -237,8 +243,10 @@ jobs:
           nub node ls | grep -E '(^|[^0-9])20\.' || { echo "::error::eager provision did not install the pinned Node 20.x"; exit 1; }
           nv="$(node -p 'process.versions.node')"
           [[ "$nv" == 20.* ]] || { echo "::error::bare node is $nv, expected the fronted pin 20.x"; exit 1; }
-          echo "node-version output: ${{ steps.nub.outputs.node-version }}"
-          [[ "${{ steps.nub.outputs.node-version }}" == 20* ]] || { echo "::error::expected resolved pin 20.x, got ${{ steps.nub.outputs.node-version }}"; exit 1; }
+          echo "node-version output: ${STEPS_NUB_OUTPUTS_NODE_VERSION}"
+          [[ "${STEPS_NUB_OUTPUTS_NODE_VERSION}" == 20* ]] || { echo "::error::expected resolved pin 20.x, got ${STEPS_NUB_OUTPUTS_NODE_VERSION}"; exit 1; }
+        env:
+          STEPS_NUB_OUTPUTS_NODE_VERSION: ${{ steps.nub.outputs.node-version }}
 
   no-pin:
     if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
@@ -268,10 +276,12 @@ jobs:
         run: |
           set -euo pipefail
           nv="$(node -p 'process.versions.node')"
-          out="${{ steps.nub.outputs.node-version }}"
+          out="${STEPS_NUB_OUTPUTS_NODE_VERSION}"
           echo "node on PATH: $(command -v node) ($nv) / node-version output: '$out'"
           [[ "$out" == "$nv" ]] || { echo "::error::node-version output '$out' is not the Node on PATH ($nv)"; exit 1; }
           [[ "$(command -v node)" != *"/nub/"* ]] || { echo "::error::a nub-provisioned Node was fronted with no pin: $(command -v node)"; exit 1; }
+        env:
+          STEPS_NUB_OUTPUTS_NODE_VERSION: ${{ steps.nub.outputs.node-version }}
 
   cache:
     if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
@@ -301,8 +311,10 @@ jobs:
       - shell: bash
         working-directory: smoke
         run: |
-          echo "cache-hit: ${{ steps.c1.outputs.cache-hit }}"
+          echo "cache-hit: ${STEPS_C1_OUTPUTS_CACHE_HIT}"
           time nub install
+        env:
+          STEPS_C1_OUTPUTS_CACHE_HIT: ${{ steps.c1.outputs.cache-hit }}
       # NOTE: a true warm-hit assertion needs a second run — within one job
       # actions/cache won't re-restore. The cache is saved at job end; a re-run
       # of this workflow exercises the warm path. Informational here.
@@ -335,13 +347,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ce="${{ steps.nub.outputs.caching-enabled }}"
-          ch="${{ steps.nub.outputs.cache-hit }}"
+          ce="${STEPS_NUB_OUTPUTS_CACHING_ENABLED}"
+          ch="${STEPS_NUB_OUTPUTS_CACHE_HIT}"
           echo "caching-enabled: '${ce}' / cache-hit: '${ch}'"
           # cache-hit is empty on a first-run full miss even when caching is active
           # (actions/cache semantics), so assert on caching-enabled instead.
           [ "$ce" = "true" ] || { echo "::error::expected caching auto-enabled (caching-enabled=true), got '${ce}'"; exit 1; }
           echo "caching auto-enabled by default — OK"
+        env:
+          STEPS_NUB_OUTPUTS_CACHING_ENABLED: ${{ steps.nub.outputs.caching-enabled }}
+          STEPS_NUB_OUTPUTS_CACHE_HIT: ${{ steps.nub.outputs.cache-hit }}
 
   cache-disable:
     if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
@@ -370,10 +385,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ce="${{ steps.nub.outputs.caching-enabled }}"
+          ce="${STEPS_NUB_OUTPUTS_CACHING_ENABLED}"
           echo "caching-enabled: '${ce}'"
           [ "$ce" = "false" ] || { echo "::error::expected caching disabled (caching-enabled=false), got '${ce}'"; exit 1; }
           echo "caching disabled by package-manager-cache: false — OK"
+        env:
+          STEPS_NUB_OUTPUTS_CACHING_ENABLED: ${{ steps.nub.outputs.caching-enabled }}
 
   auth-npmrc:
     if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
@@ -459,8 +476,10 @@ jobs:
       - shell: bash
         run: |
           set -euo pipefail
-          out="${{ steps.nub.outputs.nub-version }}"
+          out="${STEPS_NUB_OUTPUTS_NUB_VERSION}"
           [[ "$out" =~ ^v0\.8\.[0-9]+ ]] || { echo "::error::expected a v0.8.x for ^0.8.0, got $out"; exit 1; }
+        env:
+          STEPS_NUB_OUTPUTS_NUB_VERSION: ${{ steps.nub.outputs.nub-version }}
 
   shim-default:
     if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
@@ -549,12 +568,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "node before: ${{ steps.before.outputs.path }} / after: $(command -v node)"
-          [[ "$(command -v node)" == "${{ steps.before.outputs.path }}" ]] || { echo "::error::node moved on PATH although the runner's satisfied the pin"; exit 1; }
-          [[ "${{ steps.nub.outputs.node-version }}" == "${{ steps.before.outputs.version }}" ]] || { echo "::error::node-version output '${{ steps.nub.outputs.node-version }}' is not the runner's ${{ steps.before.outputs.version }}"; exit 1; }
+          echo "node before: ${STEPS_BEFORE_OUTPUTS_PATH} / after: $(command -v node)"
+          [[ "$(command -v node)" == "${STEPS_BEFORE_OUTPUTS_PATH}" ]] || { echo "::error::node moved on PATH although the runner's satisfied the pin"; exit 1; }
+          [[ "${STEPS_NUB_OUTPUTS_NODE_VERSION}" == "${STEPS_BEFORE_OUTPUTS_VERSION}" ]] || { echo "::error::node-version output '${STEPS_NUB_OUTPUTS_NODE_VERSION}' is not the runner's ${STEPS_BEFORE_OUTPUTS_VERSION}"; exit 1; }
           nub node ls
           # Every version nub lists is the runner's own: nothing was downloaded.
-          if nub node ls | grep -v "${{ steps.before.outputs.version }}" | grep -qE '[0-9]+\.[0-9]+\.[0-9]+'; then echo "::error::nub node ls lists a downloaded Node"; exit 1; fi
+          if nub node ls | grep -v "${STEPS_BEFORE_OUTPUTS_VERSION}" | grep -qE '[0-9]+\.[0-9]+\.[0-9]+'; then echo "::error::nub node ls lists a downloaded Node"; exit 1; fi
+        env:
+          STEPS_BEFORE_OUTPUTS_PATH: ${{ steps.before.outputs.path }}
+          STEPS_NUB_OUTPUTS_NODE_VERSION: ${{ steps.nub.outputs.node-version }}
+          STEPS_BEFORE_OUTPUTS_VERSION: ${{ steps.before.outputs.version }}
 
   multi-dep-path:
     if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
@@ -578,8 +601,10 @@ jobs:
             run.txt
       - run: |
           set -euo pipefail
-          [ "${{ steps.setup.outputs.caching-enabled }}" = "true" ] || { echo "::error::caching-enabled is '${{ steps.setup.outputs.caching-enabled }}'"; exit 1; }
+          [ "${STEPS_SETUP_OUTPUTS_CACHING_ENABLED}" = "true" ] || { echo "::error::caching-enabled is '${STEPS_SETUP_OUTPUTS_CACHING_ENABLED}'"; exit 1; }
           echo "OK: a two-line cache-dependency-path reached the cache step"
+        env:
+          STEPS_SETUP_OUTPUTS_CACHING_ENABLED: ${{ steps.setup.outputs.caching-enabled }}
 
   additive:
     if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
@@ -764,8 +789,10 @@ jobs:
             tests/action-smoke/install/fixture/run.txt
       - run: |
           set -euo pipefail
-          [ "${{ steps.install.outputs.cache-hit }}" != "true" ] || { echo "::error::cache-hit is true on a fresh key"; exit 1; }
+          [ "${STEPS_INSTALL_OUTPUTS_CACHE_HIT}" != "true" ] || { echo "::error::cache-hit is true on a fresh key"; exit 1; }
           echo "OK: seeded"
+        env:
+          STEPS_INSTALL_OUTPUTS_CACHE_HIT: ${{ steps.install.outputs.cache-hit }}
 
   install-cache-hit:
     if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
@@ -789,6 +816,8 @@ jobs:
             tests/action-smoke/install/fixture/run.txt
       - run: |
           set -euo pipefail
-          [ "${{ steps.install.outputs.cache-hit }}" = "true" ] || { echo "::error::cache-hit is '${{ steps.install.outputs.cache-hit }}', expected true"; exit 1; }
+          [ "${STEPS_INSTALL_OUTPUTS_CACHE_HIT}" = "true" ] || { echo "::error::cache-hit is '${STEPS_INSTALL_OUTPUTS_CACHE_HIT}', expected true"; exit 1; }
           [ -f tests/action-smoke/install/fixture/node_modules/.modules.yaml ]
           echo "OK: exact hit, offline install succeeded"
+        env:
+          STEPS_INSTALL_OUTPUTS_CACHE_HIT: ${{ steps.install.outputs.cache-hit }}
