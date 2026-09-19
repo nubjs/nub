@@ -28,19 +28,9 @@ if [ "$NODE_PIN" != "$(node -p process.versions.node)" ]; then
   exit 1
 fi
 printf '%s\n' "$NODE_PIN" > .node-version
-if [ ! -d node_modules ]; then
-  npm init -y >/dev/null 2>&1
-  # One tree, many entries: each fixture imports only what it needs, so detection
-  # still sees exactly the packages that program reaches.
-  npm i --no-audit --no-fund --silent \
-    express zod chalk date-fns better-sqlite3 bcrypt sharp pino keyv @parcel/watcher \
-    esbuild pdfkit
-fi
-# The node_modules tree is deliberately reused between runs — reinstalling a
-# dozen native packages every time would make this unusable — but the FIXTURES
-# must not accumulate with it. A renamed or deleted one otherwise lives on in
-# the work dir and keeps being run, which reads as a failure in the tree you
-# are actually testing.
+cp "$HERE/package.json" "$HERE/package-lock.json" "$WORK/"
+npm ci --userconfig "$HERE/../../.npmrc" --no-audit --no-fund --silent
+# A deleted or renamed fixture must not survive a reused work directory.
 rm -f "$WORK"/a-*.mjs "$WORK"/fork-child.mjs
 cp "$HERE"/fixtures/*.mjs "$WORK"/
 

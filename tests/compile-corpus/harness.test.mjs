@@ -15,6 +15,10 @@ for (const scenario of ["matching", "control-failure", "wrong-prefix", "artifact
       mkdirSync(join(root, "fixtures"));
       mkdirSync(join(root, "work", "node_modules"), { recursive: true });
       copyFileSync(join(here, "run.sh"), join(root, "run.sh"));
+      for (const file of ["package.json", "package-lock.json"]) copyFileSync(join(here, file), join(root, file));
+      mkdirSync(join(root, "bin"));
+      writeFileSync(join(root, "bin", "npm"), "#!/usr/bin/env bash\nset -eu\ntest \"$1\" = ci\nprintf '%s\\n' \"$@\" > install-args\nmkdir -p node_modules\n");
+      chmodSync(join(root, "bin", "npm"), 0o755);
       writeFileSync(join(root, "fixtures", "a-test.mjs"), `console.log("prefix"); console.log("ok:test"); process.exit(${scenario === "control-failure" ? 7 : 0});\n`);
       const compiler = join(root, "compiler");
       writeFileSync(compiler, `#!/usr/bin/env bash
@@ -39,11 +43,13 @@ chmod +x "$out"
       chmodSync(compiler, 0o755);
       const result = spawnSync("bash", [join(root, "run.sh"), join(root, "work")], {
         encoding: "utf8", timeout: 20_000,
-        env: { ...process.env, NODE_OPTIONS: "", NODE_PATH: "", NODE_PIN: process.versions.node, NUB: compiler,
+        env: { ...process.env, PATH: `${join(root, "bin")}:${process.env.PATH}`, NODE_OPTIONS: "", NODE_PATH: "", NODE_PIN: process.versions.node, NUB: compiler,
           CORPUS_WORK: join(root, "work"), CORPUS_SCENARIO: scenario },
       });
       assert.ifError(result.error);
       assert.equal(result.status, scenario === "matching" ? 0 : 1, `${result.stdout}\n${result.stderr}`);
+      assert.match(readFileSync(join(root, "work", "install-args"), "utf8"), /^ci\n--userconfig\n/);
+      assert.equal(readFileSync(join(root, "work", "package-lock.json"), "utf8"), readFileSync(join(here, "package-lock.json"), "utf8"));
       assert.ok(existsSync(join(root, "work", "a-test.mjs")), "source restored on failure");
       assert.ok(existsSync(join(root, "work", "node_modules")), "dependencies restored on failure");
       if (scenario === "control-failure") assert.ok(!existsSync(join(root, "work", "bin-a-test")), "failed controls must not reach compilation");

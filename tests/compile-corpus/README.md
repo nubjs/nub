@@ -12,6 +12,18 @@ Needs `__NUB_LAUNCHER_TEMPLATE` pointing at a built release launcher, and Node >
 The embedded Node version matches the Node used to install native addons and run the control.
 An explicit `NODE_PIN` must match that version.
 
+The corpus uses its committed manifest and lockfile with `npm ci`. Installs inherit the
+repository's npm age policy even when the work directory is outside the checkout.
+Update the graph deliberately with npm >= 11.17, which supports that policy:
+
+```sh
+cd tests/compile-corpus
+npm install --package-lock-only --ignore-scripts --userconfig ../../.npmrc
+```
+
+Review and commit both files after changing a dependency. CI never resolves unversioned
+package names or reuses an installation from a different locked graph.
+
 ## What it is checking
 
 `nub compile` bundles everything it can and ejects only what it cannot — a package that
@@ -110,6 +122,6 @@ with `Cannot find module`.
 
 ## Adding a fixture
 
-Drop `a-<name>.mjs` in `fixtures/`, add the package to the `npm i` line in `run.sh`, and
+Drop `a-<name>.mjs` in `fixtures/`, add a pinned dependency to the manifest and lockfile, and
 print a single deterministic `ok:<something>` line. Avoid anything that varies between runs
 or between machines — the control comparison is exact.
