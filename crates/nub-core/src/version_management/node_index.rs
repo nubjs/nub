@@ -106,7 +106,12 @@ fn fetch_index(mirror_base: &str) -> Result<Vec<IndexEntry>> {
 /// picks among what is installed, and never costs a network round trip on a plain
 /// `nub run`.
 pub(crate) fn load_cached_index(cache_root: &Path, mirror_base: &str) -> Option<Vec<IndexEntry>> {
-    let body = std::fs::read_to_string(cache_path(cache_root, mirror_base)).ok()?;
+    // Up to 0.9.3 the `nub node install` command group threaded the `node/` store
+    // dir as the root, so its index sits one level down on an upgraded machine;
+    // read it there until a fetch writes the root copy.
+    let body = std::fs::read_to_string(cache_path(cache_root, mirror_base))
+        .or_else(|_| std::fs::read_to_string(cache_path(&cache_root.join("node"), mirror_base)))
+        .ok()?;
     parse_index(&body).ok()
 }
 
