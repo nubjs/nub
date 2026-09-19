@@ -213,6 +213,7 @@ pub fn discover_node(cwd: &Path) -> Result<ResolvedNode, DiscoveryError> {
             shell_path_node(None)
         }
         Some((pin_str, parsed_pin, pin_source)) => {
+            let parsed_pin = concretize_alias(parsed_pin, &pin_str);
             // Try shell PATH first (covers fnm/Volta/mise auto-switch).
             if let Ok(node) = shell_path_node(Some(pin_source.clone())) {
                 if node.version.satisfies(&parsed_pin) {
@@ -279,7 +280,8 @@ pub fn discover_node_cached(cwd: &Path) -> Option<ResolvedNode> {
 
     match chain.pin {
         None => shell_path_node_cached(None),
-        Some((_, parsed_pin, pin_source)) => {
+        Some((pin_str, parsed_pin, pin_source)) => {
+            let parsed_pin = concretize_alias(parsed_pin, &pin_str);
             // PATH node, version from cache only — and only if it satisfies the pin.
             if let Some(node) = shell_path_node_cached(Some(pin_source.clone())) {
                 if node.version.satisfies(&parsed_pin) {
@@ -1920,6 +1922,38 @@ fn store_node_binary(version_dir: &Path) -> Option<Utf8PathBuf> {
     .and_then(|p| Utf8PathBuf::try_from(p).ok())
 }
 
+/// An alias pin (`lts/*`, `lts/<codename>`, `node`, `latest`) names no concrete
+/// version, so nothing on disk satisfies it until it is resolved against the dist
+/// index. The offline discovery paths resolve it against the index the last
+/// provisioning run cached, whatever its age: `nub node install` fetches a fresh one
+/// and installs the pick, so the `which` that follows finds that version on disk,
+/// and a plain `nub run` never pays a network round trip. With nothing cached the
+/// alias stays as it is and reads as not found, which is what provisioning acts on.
+fn concretize_alias(pin: VersionPin, raw: &str) -> VersionPin {
+    let Some(cache_root) = cache_dir() else {
+        return pin;
+    };
+    let Some(host) = crate::version_management::HostTarget::detect() else {
+        return pin;
+    };
+    let mirror = crate::version_management::resolve_mirror_base(&host);
+    concretize_alias_in(pin, raw, &cache_root, &mirror)
+}
+
+/// [`concretize_alias`] against an explicit cache root and mirror (the testable body).
+fn concretize_alias_in(pin: VersionPin, raw: &str, cache_root: &Path, mirror: &str) -> VersionPin {
+    if !matches!(pin, VersionPin::Alias(_)) {
+        return pin;
+    }
+    use crate::version_management::node_index;
+    match node_index::load_cached_index(cache_root, mirror)
+        .and_then(|index| node_index::resolve_spec(raw, &index))
+    {
+        Some(version) => VersionPin::Exact(version),
+        None => pin,
+    }
+}
+
 /// Look up a Node satisfying `pin` in nub's own download store
 /// (`~/.cache/nub/node/<version>/`, where the directory name IS the concrete
 /// version — `internal/runtime/node-version-management.md` §"State 1: Cache hit").
@@ -1972,6 +2006,51 @@ fn nvm_dir() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn alias_pins_resolve_against_the_cached_index_only() {
+        use crate::version_management::node_index::cache_path;
+        let root = std::env::temp_dir().join(format!("nub-alias-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let mirror = "https://nodejs.org/dist";
+        let alias = |s: &str| VersionPin::Alias(s.to_string());
+
+        // Nothing cached: the alias stays an alias, so discovery reports the pin as
+        // not found and provisioning (which fetches the index) takes over.
+        assert_eq!(
+            concretize_alias_in(alias("lts/*"), "lts/*", &root, mirror),
+            alias("lts/*")
+        );
+
+        fs::write(
+            cache_path(&root, mirror),
+            r#"[{"version":"v23.5.0","lts":false},{"version":"v22.13.0","lts":"Jod"},{"version":"v20.18.1","lts":"Iron"}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            concretize_alias_in(alias("lts/*"), "lts/*", &root, mirror),
+            VersionPin::Exact(NodeVersion::new(22, 13, 0))
+        );
+        assert_eq!(
+            concretize_alias_in(alias("lts/iron"), "lts/iron", &root, mirror),
+            VersionPin::Exact(NodeVersion::new(20, 18, 1))
+        );
+        assert_eq!(
+            concretize_alias_in(alias("node"), "node", &root, mirror),
+            VersionPin::Exact(NodeVersion::new(23, 5, 0))
+        );
+        // A concrete pin is untouched, and an alias the index cannot answer stays.
+        assert_eq!(
+            concretize_alias_in(VersionPin::Major(20), "20", &root, mirror),
+            VersionPin::Major(20)
+        );
+        assert_eq!(
+            concretize_alias_in(alias("lts/argon"), "lts/argon", &root, mirror),
+            alias("lts/argon")
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
     use super::*;
 
     #[test]
