@@ -23,7 +23,7 @@ A pnpm workspace fits this. In a pnpm project, `nub install` installs exactly as
 
 ```bash
 pnpm install          # before
-nub install           # after — same pnpm-lock.yaml, same node_modules layout
+nub install           # after — same pnpm-lock.yaml, same layout
 ```
 
 A Nub project, with `nub.lock` and no pnpm `packageManager` field, does not work with Turborepo, because Turborepo cannot resolve its workspaces:

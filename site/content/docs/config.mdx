@@ -535,7 +535,7 @@ The install block takes four fields: `linker` and `publicHoist` for `node_module
 
 The block applies when Nub is the project's package manager. A project that already belongs to pnpm takes its install settings from pnpm's own configuration, so an `install` block there is a contradiction rather than a setting to skip, and Nub refuses the command instead of picking one of the two:
 
-```text
+```text wide
 Error: /path/to/nub.jsonc sets an `install` block, but this project already belongs to pnpm.
 A pnpm project takes its install settings from pnpm's own configuration, so the block would be ignored. Move those settings into pnpm-workspace.yaml, or remove pnpm's files to make this a nub project.
 ```
@@ -709,13 +709,13 @@ Read the [full docs](https://pnpm.io/settings) on pnpm.io.
 
 A key that `pnpm-workspace.yaml` does not accept is an error:
 
-```text
+```text wide
 Error: install.settings.savePrefx is not a setting pnpm-workspace.yaml accepts
 ```
 
 The four fields above also have a pnpm spelling, such as `nodeLinker` for `linker`. Setting one both ways is an error:
 
-```text
+```text wide
 Error: `install.settings.nodeLinker` in /app/nub.jsonc: sets the same thing as
 `install.linker`; keep one of the two
 ```

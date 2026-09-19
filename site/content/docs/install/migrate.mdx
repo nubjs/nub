@@ -25,7 +25,7 @@ The versions the old lockfile pins carry across as preferences within your range
 
 Bun's binary `bun.lockb` is not read. Write a text `bun.lock` with Bun first:
 
-```console
+```console wide
 $ nub pm migrate
 Error: bun.lockb is bun's binary lockfile and nub does not read it — run
 `bun install --save-text-lockfile` to write a bun.lock first, then rerun the
@@ -46,7 +46,7 @@ read — run `nub pm migrate` to carry the versions it pins into nub's own.
 
 A frozen install has no lockfile to install from until `nub.lock` exists, so `nub ci` and `nub install --frozen-lockfile` fail:
 
-```console
+```console wide
 $ nub ci
   ╰─▶ Headless installation requires a nub.lock file, but none was found. Run
       `nub install` without --frozen-lockfile to create one.
