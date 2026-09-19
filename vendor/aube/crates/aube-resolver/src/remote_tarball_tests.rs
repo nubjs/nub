@@ -52,6 +52,7 @@ async fn fixture() -> Fixture {
                 "optionalDependencies": {
                     "native-any": format!("{base}/native-any.tgz"),
                     "native-elsewhere": format!("{base}/native-elsewhere.tgz"),
+                    "opt-registry": "^1.0.0",
                 },
                 "peerDependencies": { "peer-a": "^1.0.0" },
                 "peerDependenciesMeta": { "peer-opt": { "optional": true } },
@@ -76,6 +77,10 @@ async fn fixture() -> Fixture {
             }),
             32 << 20,
         ),
+    );
+    routes.insert(
+        "/opt-registry".to_string(),
+        serde_json::to_vec(&make_packument("opt-registry", &["1.0.0"], "1.0.0")).unwrap(),
     );
     routes.insert(
         "/peer-a".to_string(),
@@ -160,6 +165,22 @@ async fn url_tarball_optionals_and_peers_resolve_like_registry_ones() {
         parent.optional_dependencies
     );
     assert!(package(&graph, "native-any").is_some());
+    assert_eq!(
+        parent
+            .optional_dependencies
+            .get("opt-registry")
+            .map(String::as_str),
+        Some("1.0.0"),
+        "a registry optional of a URL package resolves to a pin"
+    );
+    assert_eq!(
+        parent
+            .declared_dependencies
+            .get("opt-registry")
+            .map(String::as_str),
+        Some("^1.0.0"),
+        "the manifest's declared range survives for the npm / bun / yarn writers"
+    );
     assert!(
         package(&graph, "native-elsewhere").is_none(),
         "an optional for another OS is dropped when the lockfile is host-only"
