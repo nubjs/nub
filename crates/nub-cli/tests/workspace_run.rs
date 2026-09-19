@@ -203,6 +203,29 @@ fn a_pnpm_project_runs_the_projects_pnpm_runs() {
     );
     assert!(stderr.contains("Scope: all 3 projects"), "{stderr}");
 
+    // pnpm reads `package.yaml` as a manifest, so a member written that way is
+    // one of the projects it walks. It used to be dropped from the run with no
+    // error, because the member list was rebuilt by re-reading `package.json`.
+    let (yaml_member, _) = ran(
+        "pnpm-package-yaml-member",
+        &[
+            (
+                "pnpm-workspace.yaml",
+                "packages:\n  - packages/*\nverifyDepsBeforeRun: false\n",
+            ),
+            (
+                "packages/b/package.yaml",
+                "name: probe-b\nversion: 1.0.0\nscripts:\n  x: echo RAN_b\n",
+            ),
+        ],
+        &[("packages/a", "a")],
+    );
+    assert_eq!(
+        yaml_member,
+        ["a", "b"],
+        "a `package.yaml` member is one of the projects pnpm walks"
+    );
+
     let (root_only, _) = ran(
         "pnpm-no-packages-key",
         &[("pnpm-workspace.yaml", "verifyDepsBeforeRun: false\n")],

@@ -48,20 +48,23 @@ pub(crate) fn find(cwd: &Path, project_root: &Path) -> Result<Option<RecursivePr
             patterns: patterns.clone(),
         },
     )?;
+    // The manifest is the engine's own parse, never a second read by the JSON
+    // name: the walk accepts `package.yaml` too, and re-reading `package.json`
+    // dropped such a member from the run with no error at all.
     let projects = found
         .into_iter()
-        .filter_map(|project| {
-            let manifest = super::cached_manifest(&project.root_dir.join("package.json"))?;
+        .map(|project| {
+            let manifest = project.manifest.value().clone();
             let name = manifest
                 .get("name")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
-            Some(WorkspacePackage {
+            WorkspacePackage {
                 name,
                 dir: project.root_dir,
-                manifest: (*manifest).clone(),
-            })
+                manifest,
+            }
         })
         .collect();
     Ok(Some(RecursiveProjects {
