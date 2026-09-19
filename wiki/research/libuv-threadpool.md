@@ -57,13 +57,15 @@ Thread stacks are NOT the mechanism, and an OOM claim resting on them is wrong. 
 
 `available_parallelism` takes the minimum of the affinity mask and the cgroup CPU quota, so a quota'd container is already sized correctly. A memory limit constrains neither, so a pod with `limits.memory` and no `limits.cpu` — a common shape, because a CPU limit throttles — gets a pool sized to every core on the host. No clamp is applied today: the candidate rules all need a megabytes-per-thread budget or an entitlement estimate, and the per-task working set above spans 4x between two inputs to one library, so no constant here is defensible yet. The escape is an explicit `UV_THREADPOOL_SIZE`, which every launcher uses as is.
 
+Two runtimes have already ruled on the entitlement estimate. The JDK derived its processor count from `cpu.shares` and removed that in JDK 19 ([JDK-8281181](https://bugs.openjdk.org/browse/JDK-8281181)): a share is a ratio against sibling groups that come and go, so a value read at start-up cannot say how much CPU the process will get, and the default of 1024 was read as one CPU on hosts that limited nothing. Go 1.25 made `GOMAXPROCS` container-aware from the CPU quota alone and left weight out for the same reason ([container-aware GOMAXPROCS](https://go.dev/blog/container-aware-gomaxprocs)). The memory-limit rule fails on reach rather than principle. Nearly every Kubernetes pod carries a memory limit, so a pool capped whenever one exists is the stand-down above under another name, and it gives up the throughput on every node that is not saturated. That leaves a fixed cap with no measurement behind it, or the explicit variable.
+
 ## Sources
 
 The upstream proposal and its closing comment, the scheduler and libuv references, and the operator-facing guidance from the same maintainer, which recommends raising the pool for a deployment the operator sizes themselves.
 
 - [nodejs/node#61533](https://github.com/nodejs/node/pull/61533), under [nodejs/performance#193](https://github.com/nodejs/performance/issues/193); [nodejs/node#57911](https://github.com/nodejs/node/issues/57911) for the Windows stack commit
 - [sched(7)](https://man7.org/linux/man-pages/man7/sched.7.html), "The nice value and group scheduling"
-- [libuv `threadpool.c`](https://github.com/libuv/libuv/blob/v1.x/src/threadpool.c), `init_threads`
+- [libuv `threadpool.c`](https://github.com/libuv/libuv/blob/v1.52.1/src/threadpool.c), `init_threads`
 - [sharp performance docs](https://github.com/lovell/sharp/blob/main/docs/src/content/docs/performance.md)
 - [mcollina/skills, libuv-thread-pool rule](https://github.com/mcollina/skills/blob/main/skills/nodejs-core/rules/libuv-thread-pool.md)
 
@@ -71,5 +73,6 @@ The upstream proposal and its closing comment, the scheduler and libuv reference
 
 One dated bullet per revision, with a `REVERSAL:` marker where a later finding overturned an earlier one.
 
+- 2026-09-19 — Prior art on the entitlement estimate: the JDK removed `cpu.shares` sizing in JDK 19 and Go 1.25 sizes from the quota alone, so that candidate is closed; the memory-limit candidate is rejected on reach.
 - 2026-09-15 — REVERSAL: an earlier draft of this page concluded that because `nice` does not cross a cgroup boundary, the pool must stand down to Node's four in a non-root cgroup with no quota. Measuring the neighbour rather than the nice disproved it — cgroup weight already bounds the share regardless of thread count, so that stand-down protected nothing and would have disabled the sizing across most Linux server deployments. The real cost is memory, and it is now the only open item.
 - 2026-09-15 — First version: the cross-cgroup scheduling probes, the contended and uncontended memory measurements, and the premise check against a live cgroup v1 hierarchy. The 2026-09-08 benchmarks behind nubjs/nub#919 are summarised, not re-run.

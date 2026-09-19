@@ -30,3 +30,5 @@ A process your app spawns, including a `cluster` worker, starts with Node's defa
 ## Opting out
 
 A `UV_THREADPOOL_SIZE` of your own wins. [`--node`](/docs/runtime#--node) and [`NODE_COMPAT`](/docs/runtime#node_compat) leave the pool at Node's default.
+
+The pool size is also how many tasks run at once, so a memory-heavy task such as resizing a large image holds more in flight on a bigger pool. Set the variable yourself when memory is the limit rather than CPU.
