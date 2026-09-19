@@ -10,6 +10,8 @@ Measurements of the augmentations Nub applies to a running Node process, each ag
 | `pool-priority.sh` | Whether demoting the pool threads beyond Node's four to a low priority (Linux `nice` through `os.setPriority(tid)`) keeps a bigger pool from taking CPU that other processes on the box are using: a bcrypt route with pool 4, pool 16, and pool 16 with the extra twelve at nice 10 or 19, on an idle box and beside twelve busy-loop processes, reporting the server's and the co-tenants' throughput. |
 | `pool-priority-nub.sh` | The same measurement with `nub` itself against plain `node` (needs a binary built from a tree with the threadpool augmentation, `--source <worktree>`): the server's req/s and the co-tenants' throughput, idle and busy. |
 
+Both priority scripts launch the co-tenants and the server from one shell, so they share a cgroup — the topology where a `nice` value governs how CPU is split, and the only one these two measure. Across a cgroup boundary (a container or a systemd service) nice has no effect at all and the group's CPU weight bounds the pool instead, so neither script says anything about that case. Do not read their co-tenant numbers as a result about neighbouring containers.
+
 Both run on the latest Node by default (`NODE_VERSION=v22.x` overrides it). An augmentation that applies to every Node is measured on the latest major, so the figure is about Nub and not about an old Node. A version-gated one, like the context-frame flag, is measured on the line it applies to and the figure names that line; the latest-Node run is then the control that shows the two conditions equal where the gate is closed.
 
 Both run on a Linux box at the repo root with `NUB_BIN` set, which is what `remote-build --job adhoc` provides:

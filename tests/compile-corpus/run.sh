@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Compile a corpus of real npm packages, then run each artifact with node_modules
-# DELETED and compare against the same program on plain Node.
+# Compile real npm packages, then run cold and warm artifacts with their source
+# and node_modules hidden, comparing complete stdout against successful Node runs.
 #
 # The comparison is the point. A compiled binary that prints nothing, or crashes
 # instantly, looks indistinguishable from a fast one unless its output is checked
@@ -8,38 +8,49 @@
 # must reproduce that byte for byte.
 #
 # Usage: NUB=/path/to/nub tests/compile-corpus/run.sh [workdir]
-set -uo pipefail
+set -euo pipefail
 
 NUB="${NUB:?set NUB to the nub binary under test}"
 WORK="${1:-${TMPDIR:-/tmp}/nub-compile-corpus}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 mkdir -p "$WORK" && cd "$WORK"
+WORK="$PWD"
+if [ -e .nm-hidden ] || [ -e .source-hidden ]; then
+  echo "restore .nm-hidden/.source-hidden from an interrupted run before retrying" >&2
+  exit 1
+fi
 # compile refuses to guess a Node version, by design — a compiled binary's runtime
 # must be intentional and reproducible. Pin it here so the corpus is too.
-: "${NODE_PIN:=26.5.0}"
-printf '%s\n' "$NODE_PIN" > .node-version
-if [ ! -d node_modules ]; then
-  npm init -y >/dev/null 2>&1
-  # One tree, many entries: each fixture imports only what it needs, so detection
-  # still sees exactly the packages that program reaches.
-  npm i --no-audit --no-fund --silent \
-    express zod chalk date-fns better-sqlite3 bcrypt sharp pino keyv @parcel/watcher \
-    esbuild pdfkit
+: "${NODE_PIN:=$(node -p process.versions.node)}"
+if [ "$NODE_PIN" != "$(node -p process.versions.node)" ]; then
+  echo "NODE_PIN must match the Node running the control and installing native addons" >&2
+  exit 1
 fi
-# The node_modules tree is deliberately reused between runs — reinstalling a
-# dozen native packages every time would make this unusable — but the FIXTURES
-# must not accumulate with it. A renamed or deleted one otherwise lives on in
-# the work dir and keeps being run, which reads as a failure in the tree you
-# are actually testing.
+printf '%s\n' "$NODE_PIN" > .node-version
+cp "$HERE/package.json" "$HERE/package-lock.json" "$WORK/"
+npm ci --userconfig "$HERE/../../.npmrc" --no-audit --no-fund --silent
+# A deleted or renamed fixture must not survive a reused work directory.
 rm -f "$WORK"/a-*.mjs "$WORK"/fork-child.mjs
 cp "$HERE"/fixtures/*.mjs "$WORK"/
+
+restore_source() {
+  if [ -d "$WORK/.source-hidden" ]; then
+    mv "$WORK/.source-hidden/"*.mjs "$WORK/"
+    rmdir "$WORK/.source-hidden"
+  fi
+  if [ -d "$WORK/.nm-hidden" ]; then mv "$WORK/.nm-hidden" "$WORK/node_modules"; fi
+}
+trap restore_source EXIT
 
 pass=0; fail=0
 printf '%-16s %-6s %-24s %s\n' FIXTURE RESULT OUTPUT EJECTED
 for f in a-*.mjs; do
   n="${f%.mjs}"
-  control="$(node "$f" 2>&1 | tail -1)"
+  if ! env -u NODE_OPTIONS -u NODE_PATH node "$f" > "$WORK/control-$n.stdout" 2> "$WORK/control-$n.stderr"; then
+    printf '%-16s %-6s %s\n' "$n" FAIL "Node control failed — see control-$n.stderr"
+    fail=$((fail+1)); continue
+  fi
   if ! "$NUB" compile "$WORK/$f" --out "$WORK/bin-$n" > "$WORK/log-$n" 2>&1; then
     printf '%-16s %-6s %s\n' "$n" FAIL "compile failed — see log-$n"; fail=$((fail+1)); continue
   fi
@@ -57,20 +68,27 @@ for f in a-*.mjs; do
   ' "$WORK/log-$n" 2>/dev/null | paste -sd, -)
 
   mv node_modules .nm-hidden
+  mkdir .source-hidden
+  mv ./*.mjs .source-hidden/
   rm -rf "$WORK/c-$n"
-  # Status on its own line, never through the pipe: `$(cmd | tail -1)` reports
-  # TAIL's status, so the rc gate below silently accepted anything — an
-  # artifact that printed the right last line and then died passed for the
-  # same reason a working one did.
-  raw="$(cd / && XDG_CACHE_HOME="$WORK/c-$n" "$WORK/bin-$n" 2>/dev/null)"
-  rc=$?
-  out="$(printf '%s' "$raw" | tail -1)"
-  mv .nm-hidden node_modules
+  good=1
+  for state in cold warm; do
+    rc=0
+    (cd / && env -u NODE_OPTIONS -u NODE_PATH XDG_CACHE_HOME="$WORK/c-$n" "$WORK/bin-$n") \
+      > "$WORK/$state-$n.stdout" 2> "$WORK/$state-$n.stderr" || rc=$?
+    if [ "$rc" != 0 ] || ! cmp -s "$WORK/control-$n.stdout" "$WORK/$state-$n.stdout"; then
+      printf '%-16s %-6s %s\n' "$n" FAIL "$state rc=$rc — see $state-$n.stdout/.stderr and control-$n.stdout"
+      good=0
+      break
+    fi
+  done
+  restore_source
 
-  if [ "$rc" = 0 ] && [ "$out" = "$control" ]; then
+  out="$(tail -1 "$WORK/control-$n.stdout")"
+  if [ "$good" = 1 ]; then
     printf '%-16s %-6s %-24s %s\n' "$n" PASS "$out" "${ejected:--}"; pass=$((pass+1))
   else
-    printf '%-16s %-6s %-24s %s\n' "$n" FAIL "$out rc=$rc (want: $control rc=0)" "${ejected:--}"; fail=$((fail+1))
+    fail=$((fail+1))
   fi
 done
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

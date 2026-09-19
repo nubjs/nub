@@ -184,11 +184,8 @@ jobs:
       # CommonJS closure used to be read as ESM and throw on its first require,
       # after a clean build — guarded nothing on any push.
       #
-      # Linux only, and only because it is cheap: the whole harness is ~80s and
-      # builds its fixtures by hand rather than installing a package corpus. The
-      # sibling corpus (run.sh) compiles 14 real packages and is deliberately
-      # left out; it is minutes per platform and mostly re-verifies what the
-      # per-platform gates already cover.
+      # The synthetic layouts and real-package corpus run on Linux. The native
+      # islands and augmentation gates below cover the host matrix separately.
       - name: Node_modules layout shapes
         if: runner.os == 'Linux'
         shell: bash
@@ -199,6 +196,15 @@ jobs:
           NUB="$nub" \
           __NUB_LAUNCHER_TEMPLATE="$GITHUB_WORKSPACE/crates/nub-launcher/target/release/nub-launcher" \
             tests/compile-corpus/layouts.sh
+      - name: Real package behavior, cold and warm
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test tests/compile-corpus/harness.test.mjs
+          NUB="$GITHUB_WORKSPACE/target/release/nub" \
+          __NUB_LAUNCHER_TEMPLATE="$GITHUB_WORKSPACE/crates/nub-launcher/target/release/nub-launcher" \
+            tests/compile-corpus/run.sh "$RUNNER_TEMP/compile-corpus"
       # The erasability acceptance test: every fixture runs as `nub <file>` and as
       # the compiled artifact, and the two must agree. It is the only gate that
       # would catch an augmentation the runtime makes and the compiler does not —
@@ -283,12 +289,18 @@ jobs:
           version="$(node --version)"
           NUB="$nub" __NUB_LAUNCHER_TEMPLATE="$launcher" \
             tests/compile-hide-console/run.sh "${version#v}"
-      - name: Upload native-island failure logs
+      - name: Upload compile failure logs
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: compile-native-${{ matrix.platform }}-logs
-          path: ${{ runner.temp }}/compile-native-islands-logs
+          path: |
+            ${{ runner.temp }}/compile-native-islands-logs
+            ${{ runner.temp }}/compile-corpus/*.stdout
+            ${{ runner.temp }}/compile-corpus/*.stderr
+            ${{ runner.temp }}/compile-corpus/log-*
+            ${{ runner.temp }}/compile-corpus/package.json
+            ${{ runner.temp }}/compile-corpus/package-lock.json
           if-no-files-found: ignore
           retention-days: 7
 

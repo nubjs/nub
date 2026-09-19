@@ -83,7 +83,7 @@ pub async fn run(
             LifecycleHook::PreInstall,
         )
         .await
-        .map_err(|e| miette!("{}", e))?;
+        .into_diagnostic()?;
     }
 
     if let Some(graph) = graph {
@@ -262,7 +262,7 @@ pub async fn run(
         ] {
             aube_scripts::run_root_hook(&cwd, &modules_dir_name, &manifest, hook)
                 .await
-                .map_err(|e| miette!("{}", e))?;
+                .into_diagnostic()?;
         }
     }
 

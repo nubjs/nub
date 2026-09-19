@@ -1890,6 +1890,12 @@ fn augmentation_to_lifecycle_overlay(
             OsString::from(runtime_json),
         ));
     }
+    // The script's `node` re-enters nub and re-derives its options; this is what
+    // keeps it on the tolerant tsconfig gate the PM verb itself used.
+    overlay.push((
+        OsString::from(crate::cli::LIFECYCLE_ENV),
+        OsString::from("1"),
+    ));
     // localStorage-neutralize signal for dependency build scripts' node children
     // (webstorage flag-needed band, no user --localstorage-file); preload reads + deletes.
     aug.apply_localstorage_env(|k, v| {
