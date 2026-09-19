@@ -14,10 +14,9 @@
 // `(request, info)`. A second argument stays additive for whenever WinterTC's
 // http-server proposal settles what belongs in one. Nothing else on the default
 // export is read: the listener's address comes from `PORT` and `HOST` alone (see
-// `listenOptions`). Pure node:http plus
-// WHATWG Request/Response: no N-API, no Rust listener, and the same adapter shape
-// `srvx` and `@hono/node-server` use on plain Node, which is the escape hatch this
-// feature is reversible through.
+// `listenOptions`). Pure node:http plus WHATWG Request/Response: no N-API, no Rust
+// listener, and the same adapter shape `srvx` and `@hono/node-server` use on plain
+// Node, which is the escape hatch this feature is reversible through.
 "use strict";
 
 const http = require("node:http");
