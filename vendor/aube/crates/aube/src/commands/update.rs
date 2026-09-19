@@ -618,21 +618,7 @@ async fn run_inner(
                         eprintln!("No packages selected.");
                         return Ok(None);
                     }
-                    manifest_keys_to_update.retain(|key| {
-                        sel.in_range.contains(key)
-                            || sel.to_latest.contains(key)
-                            || sel.to_version.contains_key(key)
-                    });
-                    // A "latest" pick is exactly `<pkg>@latest`, and a range
-                    // pick on an exact pin is exactly `<pkg>@<version>`: route
-                    // both through the same per-key explicit-spec machinery so
-                    // the resolver and both rewrite loops treat them identically.
-                    for key in &sel.to_latest {
-                        explicit_specs.insert(key.clone(), "latest".to_string());
-                    }
-                    for (key, version) in &sel.to_version {
-                        explicit_specs.insert(key.clone(), version.clone());
-                    }
+                    apply_rich_selection(&sel, &mut manifest_keys_to_update, &mut explicit_specs);
                 }
             }
         } else {
@@ -1627,6 +1613,30 @@ async fn fetch_packuments(
     Ok(packuments)
 }
 
+/// Fold a confirmed picker selection into the update's working sets: only
+/// picked keys stay in scope, and every pick that names a target becomes the
+/// per-key explicit spec the CLI form would have produced — a "latest" pick
+/// is exactly `<pkg>@latest`, a range pick on an exact pin is exactly
+/// `<pkg>@<version>` — so the resolver and both rewrite loops treat a pick
+/// and its typed equivalent identically. In-range picks carry no spec.
+fn apply_rich_selection(
+    sel: &update_picker::PickerSelection,
+    manifest_keys_to_update: &mut Vec<String>,
+    explicit_specs: &mut BTreeMap<String, String>,
+) {
+    manifest_keys_to_update.retain(|key| {
+        sel.in_range.contains(key)
+            || sel.to_latest.contains(key)
+            || sel.to_version.contains_key(key)
+    });
+    for key in &sel.to_latest {
+        explicit_specs.insert(key.clone(), "latest".to_string());
+    }
+    for (key, version) in &sel.to_version {
+        explicit_specs.insert(key.clone(), version.clone());
+    }
+}
+
 /// Outcome of the rich tri-state picker (`Embedder::rich_update_picker`).
 enum RichPick {
     /// Ctrl-C / Esc — the caller maps this to exit code 130.
@@ -2618,6 +2628,30 @@ mod tests {
         assert_eq!(
             picker_range_basis("npm:chalk@4.1.0", false),
             ("4.1.0".to_string(), false)
+        );
+    }
+
+    #[test]
+    fn rich_selection_becomes_the_equivalent_explicit_specs() {
+        let sel = update_picker::PickerSelection {
+            in_range: BTreeSet::from(["semver".to_string()]),
+            to_latest: BTreeSet::from(["chalk".to_string()]),
+            to_version: BTreeMap::from([("ms".to_string(), "2.1.3".to_string())]),
+        };
+        let mut keys: Vec<String> = ["chalk", "kept", "ms", "semver"].map(String::from).to_vec();
+        let mut explicit = BTreeMap::new();
+
+        apply_rich_selection(&sel, &mut keys, &mut explicit);
+
+        // The unpicked row leaves scope; the in-range pick stays bare, so the
+        // resolver re-resolves its manifest range.
+        assert_eq!(keys, vec!["chalk", "ms", "semver"]);
+        assert_eq!(
+            explicit,
+            BTreeMap::from([
+                ("chalk".to_string(), "latest".to_string()),
+                ("ms".to_string(), "2.1.3".to_string()),
+            ])
         );
     }
 
