@@ -410,6 +410,33 @@ fn package_reached_first_through_an_optional_branch_is_still_required() {
 }
 
 #[test]
+fn fatal_install_reports_the_required_failure_not_an_absorbed_optional_one() {
+    // `opt` (planned second) and `deep` (planned third) are both corrupt. The optional
+    // edge absorbs `opt`; `deep` is what makes the install fatal, so it is what is reported.
+    let reg = FakeRegistry::publish(&[
+        Pkg {
+            deps: &[("req", "*")],
+            optional: &[("opt", "*")],
+            ..pkg("root", "1.0.0")
+        },
+        Pkg {
+            deps: &[("deep", "*")],
+            ..pkg("req", "1.0.0")
+        },
+        pkg("opt", "1.0.0"),
+        pkg("deep", "1.0.0"),
+    ]);
+    reg.corrupt_tarball("opt", "1.0.0");
+    reg.corrupt_tarball("deep", "1.0.0");
+    let dir = tempdir();
+    let err = microbe(&reg).install("root", dir.path()).unwrap_err();
+    assert!(
+        matches!(&err, Error::Integrity { name, .. } if name == "deep"),
+        "{err}"
+    );
+}
+
+#[test]
 fn integrity_mismatch_fails_the_install() {
     let reg = FakeRegistry::publish(&[pkg("root", "1.0.0")]);
     reg.corrupt_tarball("root", "1.0.0");

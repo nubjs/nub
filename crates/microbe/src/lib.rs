@@ -465,40 +465,15 @@ fn settle(packages: &[Planned], failures: Vec<(usize, Error)>) -> Result<Settled
 
 /// Decide what survives. Each seed names a package that cannot be installed. A dropped
 /// package drops every dependent that reaches it over a NON-optional edge, transitively; an
-/// optional edge absorbs the failure. If that climb reaches a package the root requires —
-/// reachable over non-optional edges alone — the install fails with the first seed's error.
-/// Whatever is then unreachable from the root through surviving packages is not live, which
-/// is what removes a dropped branch's own dependencies along with it.
+/// optional edge absorbs the failure. If a seed's climb reaches a package the root requires —
+/// reachable over non-optional edges alone — the install fails with THAT seed's error: an
+/// earlier failure that an optional edge absorbed is not what made the install fatal, so it
+/// is never the one reported. Whatever is then unreachable from the root through surviving
+/// packages is not live, which is what removes a dropped branch's own dependencies with it.
 fn settle_seeded(
     packages: &[Planned],
     seeds: impl Iterator<Item = (usize, Option<Error>)>,
 ) -> Result<Settled, Error> {
-    let mut dropped = vec![false; packages.len()];
-    let mut dropped_seeds = Vec::new();
-    let mut first_error = None;
-    for (i, e) in seeds {
-        dropped[i] = true;
-        dropped_seeds.push(i);
-        if first_error.is_none() {
-            first_error = e;
-        }
-    }
-    loop {
-        let mut changed = false;
-        for (i, p) in packages.iter().enumerate() {
-            if !dropped[i]
-                && p.children
-                    .iter()
-                    .any(|&(c, optional)| !optional && dropped[c])
-            {
-                dropped[i] = true;
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
     let reach = |follow_optional: bool, skip: &[bool]| {
         let mut seen = vec![false; packages.len()];
         let mut stack = vec![0];
@@ -515,11 +490,33 @@ fn settle_seeded(
         }
         seen
     };
-    let none = vec![false; packages.len()];
-    let required = reach(false, &none);
-    if (0..packages.len()).any(|i| required[i] && dropped[i]) {
-        return Err(first_error
-            .unwrap_or_else(|| Error::Transport("a required package failed to install".into())));
+    let required = reach(false, &vec![false; packages.len()]);
+    let mut hard_dependents = vec![Vec::new(); packages.len()];
+    for (i, p) in packages.iter().enumerate() {
+        for &(c, optional) in &p.children {
+            if !optional {
+                hard_dependents[c].push(i);
+            }
+        }
+    }
+    // Climb seed by seed, in order. Sharing `dropped` across climbs is sound: a node an
+    // earlier, absorbed climb already visited has nothing required above it.
+    let mut dropped = vec![false; packages.len()];
+    let mut dropped_seeds = Vec::new();
+    for (seed, error) in seeds {
+        dropped_seeds.push(seed);
+        let mut stack = vec![seed];
+        while let Some(i) = stack.pop() {
+            if std::mem::replace(&mut dropped[i], true) {
+                continue;
+            }
+            if required[i] {
+                return Err(error.unwrap_or_else(|| {
+                    Error::Transport("a required package failed to install".into())
+                }));
+            }
+            stack.extend(&hard_dependents[i]);
+        }
     }
     Ok(Settled {
         live: reach(true, &dropped),
