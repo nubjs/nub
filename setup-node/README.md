@@ -11,10 +11,10 @@
 
 Two defaults differ from `actions/setup-node`:
 
-- **With no `node-version` input, the project's own pin wins.** Nub reads it: `package.json#devEngines.runtime`, `.node-version`, `.nvmrc`, `.tool-versions`, then `package.json#engines.node`. The runner's Node stays when it satisfies the pin, and when there is no pin. A pin the runner's Node does not satisfy is downloaded and put first on PATH for the rest of the job, with a notice in the job log naming the pin file. `actions/setup-node` leaves the runner's Node in place unless given a version; `provision-node: false` restores that.
+- **With no `node-version` input, the project's own pin wins.** Nub reads it: `package.json#devEngines.runtime`, `.node-version`, `.nvmrc`, `.tool-versions`, then `package.json#engines.node`. The runner's Node stays when it satisfies the pin, and when there is no pin. A pin the runner's Node does not satisfy is downloaded and put first on PATH for the rest of the job, with a notice in the job log naming the pin file; a pin that cannot be provisioned fails the action. `actions/setup-node` leaves the runner's Node in place unless given a version; `provision-node: false` restores that.
 - **The package manager the project pins is the one that runs.** `npm`, `npx`, `pnpm`, `pnpx`, `yarn` and `yarnpkg` in later steps resolve to Nub's shims. In a project with `packageManager` or `devEngines.packageManager`, they run that version, provisioned on demand, which is the job of `corepack enable` and `pnpm/action-setup`. In an unpinned project they fall through to the runner's own tool. The shims never route a command into Nub's own installer: `npm ci` runs npm. `shim: false` leaves the runner's tools alone.
 
-Everything else matches. An explicit `node-version` or `node-version-file` is provisioned and fronted on PATH for the rest of the job, so bare `node`, `npm` and `npx` are that version. `cache: npm` (any value, or none) caches Nub's store, keyed on the lockfile. `registry-url` and `scope` write the `.npmrc`. The `tsc` and `eslint` problem matchers are registered. `check-latest`, `architecture`, `mirror` and `mirror-token` are accepted and ignored.
+Everything else matches. An explicit `node-version` or `node-version-file` is provisioned and fronted on PATH for the rest of the job, so bare `node`, `npm` and `npx` are that version. `cache: npm` (any value, or none) caches Nub's store, keyed on the lockfile. `registry-url` and `scope` write the `.npmrc`, keeping the other lines of an existing one. The `tsc` and `eslint` problem matchers are registered. `check-latest`, `architecture`, `mirror` and `mirror-token` are accepted and ignored.
 
 `nub` is on PATH afterwards. `nub install` installs the lockfile the project already has (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`) from the cached store; `nub run <script>` and `nub <file.ts>` run on the resolved Node.
 
@@ -48,7 +48,7 @@ A workflow that omits `node-version` keeps running on the runner's Node when the
 
 | Input | Default | Behavior |
 |---|---|---|
-| `node-version` | the project's pin | Provision this Node and front it on PATH for the rest of the job. Any range npm understands (`20`, `22.14.0`, `^20.10`). |
+| `node-version` | the project's pin | Provision this Node and front it on PATH for the rest of the job. Any range npm understands (`20`, `22.14.0`, `^20.10`) or an nvm alias (`lts/*`, `lts/iron`, `node`). |
 | `node-version-file` | — | Read the version from this file (`.node-version`, `.nvmrc`, `package.json`) and treat it as `node-version`. The file must exist. |
 | `provision-node` | `true` | `false` leaves Node alone: nothing installed, nothing fronted, `node-version` output empty. For a job where `actions/setup-node` already ran. |
 | `shim` | `true` | `false` leaves `npm`/`pnpm`/`yarn` as the runner ships them. |
@@ -69,7 +69,7 @@ Accepted and ignored: `check-latest`, `architecture`, `mirror`, `mirror-token`.
 
 | Output | Description |
 |---|---|
-| `node-version` | The Node version on PATH after the action (`node --version` without the `v`), as setup-node reports it. Empty with `provision-node: false`. |
+| `node-version` | The Node version on PATH after the action, as `node --version` prints it (`v20.19.0`) and as setup-node reports it. Empty with `provision-node: false`. |
 | `nub-version` | The installed nub version (`v<semver>`). |
 | `cache-hit` | `true` on an exact cache key hit, `false` on a restore-keys partial hit, empty on a miss, as `actions/cache` reports it. |
 | `caching-enabled` | Whether caching is active for this run (`true`/`false`). |

@@ -12,7 +12,7 @@ inputs:
     required: false
     default: "latest"
   node-version:
-    description: "Provision this Node version and front its bin dir on PATH for the rest of the job, as actions/setup-node does. Default: the project's own pin (package.json#devEngines.runtime, .node-version, .nvmrc, .tool-versions, package.json#engines.node); the runner's Node stays when it satisfies the pin or the project has none. nub itself still runs the project's pin at its own invocation; the action warns if the two differ."
+    description: "Provision this Node version and front its bin dir on PATH for the rest of the job, as actions/setup-node does. Any range npm understands, or an nvm alias (lts/*, lts/<codename>, node). Default: the project's own pin (package.json#devEngines.runtime, .node-version, .nvmrc, .tool-versions, package.json#engines.node); the runner's Node stays when it satisfies the pin or the project has none. nub itself still runs the project's pin at its own invocation; the action warns if the two differ."
     required: false
   node-version-file:
     description: "Read a Node version from this file (.node-version, .nvmrc, package.json), provision it, and front it on PATH. An explicit alternative to node-version; the file must exist."
@@ -75,7 +75,7 @@ outputs:
     description: "The installed nub version (nub --version, a bare v<semver>)."
     value: ${{ steps.install.outputs.nub-version || steps.install-win.outputs.nub-version }}
   node-version:
-    description: "The Node version on PATH after this action (node --version without the v), as actions/setup-node reports it. Empty with provision-node: false."
+    description: "The Node version on PATH after this action, as node --version prints it (v20.19.0) and as actions/setup-node reports it. Empty with provision-node: false."
     value: ${{ steps.provision.outputs.node-version }}
   cache-hit:
     description: "Whether an exact nub-store cache match was restored. 'true' on an exact key hit, 'false' on a restore-keys partial hit, empty on a full miss (e.g. the first run) — mirrors actions/cache. Use caching-enabled to tell whether caching is active."
@@ -370,9 +370,8 @@ runs:
     #    equivalent to the setup-node authutil contract (registry, <scope>:registry,
     #    _authToken bound to NODE_AUTH_TOKEN, optional always-auth), then point npm
     #    config at it via NPM_CONFIG_USERCONFIG. nub's PM reads this standard file.
-    #    (Not byte-identical: setup-node merges into an existing user .npmrc and
-    #    orders _authToken before registry; this writes a fresh file. npm parses
-    #    both identically.)
+    #    Like setup-node, an existing file keeps every line except the registry
+    #    line this call replaces (authutil.ts writeRegistryToFile).
     - name: Configure registry auth
       if: inputs.registry-url != ''
       shell: bash
@@ -409,7 +408,12 @@ runs:
         # path (authutil.ts:43-44: registryUrl.replace(/(^\w+:|^)/, '')), so a
         # path-bearing private registry keeps its path in the //host/path/ key.
         auth_prefix="${url#*://}"
+        keep=""
+        if [ -f "$npmrc" ]; then
+          keep="$(grep -iv "^${scope:+${scope}:}registry" "$npmrc" || true)"
+        fi
         {
+          [ -n "$keep" ] && printf '%s\n' "$keep"
           if [ -n "$scope" ]; then
             echo "${scope}:registry=${url}"
           else
@@ -480,6 +484,23 @@ runs:
             *)      want="$(head -n1 "$NODE_VERSION_FILE" | tr -d 'v[:space:]')" ;;
           esac
         fi
+        # nvm-style aliases, as setup-node reads them: lts/*, lts/<codename>, node,
+        # latest and current resolve through the dist index to a version nub pins.
+        alias_spec="$(printf '%s' "$want" | tr '[:upper:]' '[:lower:]')"
+        case "$alias_spec" in
+          lts/*|node|latest|current)
+            want="$(node -e '
+              const spec = process.argv[1];
+              fetch("https://nodejs.org/dist/index.json").then(r => r.json()).then(idx => {
+                const pick = spec === "lts/*" ? idx.find(e => e.lts)
+                  : spec.startsWith("lts/") ? idx.find(e => typeof e.lts === "string" && e.lts.toLowerCase() === spec.slice(4))
+                  : idx[0];
+                if (!pick) process.exit(1);
+                process.stdout.write(pick.version.replace(/^v/, ""));
+              }).catch(() => process.exit(1));
+            ' "$alias_spec")" || { echo "::error::node-version '${alias_spec}' matches no release in the Node dist index."; exit 1; }
+            echo "${alias_spec} is Node ${want}" ;;
+        esac
 
         # `nub node which` prints the Node the pin resolves to on stdout and the
         # reason on stderr, exits non-zero when nothing on disk satisfies the
@@ -506,7 +527,7 @@ runs:
             nub node install "$want" || { echo "::error::nub node install ${want} failed"; exit 1; }
           else
             echo "Installing the project's pinned Node"
-            nub node install || echo "::warning::The project's Node pin could not be provisioned; the runner's Node ${runner_ver:-(none)} stays on PATH."
+            nub node install || { echo "::error::The project's Node pin could not be provisioned. Set provision-node: false to run on the runner's Node ${runner_ver:-(none)} instead."; exit 1; }
           fi
           resolve
         fi
@@ -524,7 +545,8 @@ runs:
             echo "No Node pin in this project; the runner's Node ${runner_ver} stays on PATH." ;;
           *)
             if [ -z "$resolved_ver" ]; then
-              echo "No Node resolved; the runner's Node ${runner_ver:-(none)} stays on PATH."
+              echo "::error::No Node satisfies this project's pin after provisioning: ${reason}"
+              exit 1
             elif [ "$resolved_ver" = "$runner_ver" ]; then
               echo "The runner's Node ${runner_ver} satisfies the pin (${src}); nothing installed or fronted."
             else
@@ -553,7 +575,7 @@ runs:
             echo "::warning::node-version (${want}) put Node ${on_path} on PATH, but the project pins ${proj_ver}; nub runs the project's pin when invoked."
           fi
         fi
-        echo "node-version=${on_path}" >> "$GITHUB_OUTPUT"
+        echo "node-version=${on_path:+v$on_path}" >> "$GITHUB_OUTPUT"
 
     # 7. Package-manager shims (on by default). `nub pm shim` hardlinks npm/npx/pnpm/
     #    pnpx/yarn/yarnpkg entries at the nub binary; each runs the package manager

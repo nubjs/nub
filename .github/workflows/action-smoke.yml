@@ -63,6 +63,8 @@ jobs:
           out="${STEPS_NUB_OUTPUTS_NUB_VERSION}"
           echo "nub-version output: $out"
           [[ "$out" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]] || { echo "::error::bad nub-version output: $out"; exit 1; }
+          # The archive ships bin/nub alone; the installer adds the two aliases.
+          for alias in nubx nubr; do command -v "$alias" >/dev/null 2>&1 || { echo "::error::$alias is not on PATH after the archive install"; exit 1; }; done
         env:
           STEPS_NUB_OUTPUTS_NUB_VERSION: ${{ steps.nub.outputs.nub-version }}
 
@@ -211,7 +213,7 @@ jobs:
           set -euo pipefail
           nub node ls
           echo "node-version output: ${STEPS_NUB_OUTPUTS_NODE_VERSION}"
-          [[ "${STEPS_NUB_OUTPUTS_NODE_VERSION}" == 20* ]] || { echo "::error::expected resolved pin 20.x"; exit 1; }
+          [[ "${STEPS_NUB_OUTPUTS_NODE_VERSION}" == v20* ]] || { echo "::error::expected resolved pin v20.x"; exit 1; }
         env:
           STEPS_NUB_OUTPUTS_NODE_VERSION: ${{ steps.nub.outputs.node-version }}
 
@@ -246,7 +248,7 @@ jobs:
           nv="$(node -p 'process.versions.node')"
           [[ "$nv" == 20.* ]] || { echo "::error::bare node is $nv, expected the fronted pin 20.x"; exit 1; }
           echo "node-version output: ${STEPS_NUB_OUTPUTS_NODE_VERSION}"
-          [[ "${STEPS_NUB_OUTPUTS_NODE_VERSION}" == 20* ]] || { echo "::error::expected resolved pin 20.x, got ${STEPS_NUB_OUTPUTS_NODE_VERSION}"; exit 1; }
+          [[ "${STEPS_NUB_OUTPUTS_NODE_VERSION}" == v20* ]] || { echo "::error::expected resolved pin v20.x, got ${STEPS_NUB_OUTPUTS_NODE_VERSION}"; exit 1; }
         env:
           STEPS_NUB_OUTPUTS_NODE_VERSION: ${{ steps.nub.outputs.node-version }}
 
@@ -280,7 +282,7 @@ jobs:
           nv="$(node -p 'process.versions.node')"
           out="${STEPS_NUB_OUTPUTS_NODE_VERSION}"
           echo "node on PATH: $(command -v node) ($nv) / node-version output: '$out'"
-          [[ "$out" == "$nv" ]] || { echo "::error::node-version output '$out' is not the Node on PATH ($nv)"; exit 1; }
+          [[ "$out" == "v$nv" ]] || { echo "::error::node-version output '$out' is not the Node on PATH (v$nv)"; exit 1; }
           [[ "$(command -v node)" != *"/nub/"* ]] || { echo "::error::a nub-provisioned Node was fronted with no pin: $(command -v node)"; exit 1; }
         env:
           STEPS_NUB_OUTPUTS_NODE_VERSION: ${{ steps.nub.outputs.node-version }}
@@ -398,7 +400,7 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     permissions:
       contents: read
-    name: registry .npmrc shape (${{ matrix.os }})
+    name: registry .npmrc shape, existing lines kept (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -408,6 +410,9 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           persist-credentials: false
+      - name: an existing user .npmrc with unrelated settings
+        shell: bash
+        run: printf '@other:registry=https://other.example.com/\nfund=false\n' > "${RUNNER_TEMP}/.npmrc"
       - uses: ./setup-node
         with:
           registry-url: "https://npm.pkg.github.com"
@@ -424,6 +429,8 @@ jobs:
           grep -q '@nubjs:registry=https://npm.pkg.github.com/' "$npmrc"
           grep -q '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}' "$npmrc"
           grep -q 'always-auth=true' "$npmrc"
+          grep -q '^@other:registry=https://other.example.com/' "$npmrc"
+          grep -q '^fund=false' "$npmrc"
 
   auth-npmrc-bare-scope:
     if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
@@ -504,6 +511,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # An unpinned project. This checkout is the Nub repository, whose
+          # package.json pins nub as the package manager, so the shim would
+          # refuse npm here rather than fall through.
+          d="$RUNNER_TEMP/unpinned" && mkdir -p "$d" && cd "$d"
+          printf '{ "name": "unpinned", "private": true }\n' > package.json
           npm_path="$(command -v npm)"
           echo "npm: $npm_path / node: $(command -v node) $(node --version)"
           [[ "$npm_path" == *shims* ]] || { echo "::error::npm is not the nub shim: $npm_path"; exit 1; }
@@ -566,13 +578,15 @@ jobs:
           echo "version=$(node -p 'process.versions.node')" >> "$GITHUB_OUTPUT"
       - uses: ./setup-node
         id: nub
+        with:
+          cache: false   # a restored cache would carry a Node another job downloaded
       - name: nothing fronted, nothing downloaded, node-version output is the runner's
         shell: bash
         run: |
           set -euo pipefail
           echo "node before: ${STEPS_BEFORE_OUTPUTS_PATH} / after: $(command -v node)"
           [[ "$(command -v node)" == "${STEPS_BEFORE_OUTPUTS_PATH}" ]] || { echo "::error::node moved on PATH although the runner's satisfied the pin"; exit 1; }
-          [[ "${STEPS_NUB_OUTPUTS_NODE_VERSION}" == "${STEPS_BEFORE_OUTPUTS_VERSION}" ]] || { echo "::error::node-version output '${STEPS_NUB_OUTPUTS_NODE_VERSION}' is not the runner's ${STEPS_BEFORE_OUTPUTS_VERSION}"; exit 1; }
+          [[ "${STEPS_NUB_OUTPUTS_NODE_VERSION}" == "v${STEPS_BEFORE_OUTPUTS_VERSION}" ]] || { echo "::error::node-version output '${STEPS_NUB_OUTPUTS_NODE_VERSION}' is not the runner's v${STEPS_BEFORE_OUTPUTS_VERSION}"; exit 1; }
           nub node ls
           # Every version nub lists is the runner's own: nothing was downloaded.
           if nub node ls | grep -v "${STEPS_BEFORE_OUTPUTS_VERSION}" | grep -qE '[0-9]+\.[0-9]+\.[0-9]+'; then echo "::error::nub node ls lists a downloaded Node"; exit 1; fi
@@ -580,6 +594,54 @@ jobs:
           STEPS_BEFORE_OUTPUTS_PATH: ${{ steps.before.outputs.path }}
           STEPS_NUB_OUTPUTS_NODE_VERSION: ${{ steps.nub.outputs.node-version }}
           STEPS_BEFORE_OUTPUTS_VERSION: ${{ steps.before.outputs.version }}
+
+  pin-unprovisionable:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: a project pin no release satisfies fails the action (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - run: echo "99.99.99" > .nvmrc
+      - uses: ./setup-node
+        id: nub
+        continue-on-error: true
+      - name: the action failed rather than running later steps on the runner's Node
+        shell: bash
+        run: |
+          [ "${STEPS_NUB_OUTCOME}" = "failure" ] || { echo "::error::outcome '${STEPS_NUB_OUTCOME}' on a pin nothing can provision; later steps would run on the wrong Node"; exit 1; }
+        env:
+          STEPS_NUB_OUTCOME: ${{ steps.nub.outcome }}
+
+  alias:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: "node-version: lts/* resolves through the dist index (ubuntu-latest)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: ./setup-node
+        id: nub
+        with:
+          node-version: lts/*
+      - name: the current LTS is on PATH and is the output
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="${STEPS_NUB_OUTPUTS_NODE_VERSION}"
+          echo "node --version: $(node --version) / output: $out"
+          [[ "$out" =~ ^v([0-9]+)\. ]] || { echo "::error::bad node-version output: $out"; exit 1; }
+          major="${BASH_REMATCH[1]}"
+          (( major >= 20 && major % 2 == 0 )) || { echo "::error::$out is not an LTS line"; exit 1; }
+          [[ "$(node --version)" == "$out" ]] || { echo "::error::node on PATH is $(node --version), output says $out"; exit 1; }
+        env:
+          STEPS_NUB_OUTPUTS_NODE_VERSION: ${{ steps.nub.outputs.node-version }}
 
   multi-dep-path:
     if: github.event_name != 'pull_request' || github.event.label.name == 'ci'

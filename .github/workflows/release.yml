@@ -2250,6 +2250,11 @@ jobs:
         run: |
           set -euo pipefail
           version="${TAG#v}"
+          # A prerelease-shaped tag (v0.9.2-canary.…) passes the trigger and the
+          # verify gate too; the floating tag follows stable releases only.
+          case "$version" in
+            *-*) echo "$TAG is a prerelease; v${version%%.*} stays on the last stable release."; exit 0 ;;
+          esac
           floating="v${version%%.*}"
           # Peel an annotated tag down to its commit, as the release jobs do.
           record="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$TAG" --jq '[.object.type, .object.sha] | @tsv')"
