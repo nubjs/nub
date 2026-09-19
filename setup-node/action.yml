@@ -497,11 +497,14 @@ runs:
             want="$(curl -fsSL --retry 3 "$index" \
               | grep -oE '"version":"v[0-9]+\.[0-9]+\.[0-9]+"|"lts":("[A-Za-z]+"|false)' \
               | awk -v spec="$alias_spec" '
+                  # No early exit: under pipefail a closed pipe would fail grep and erase the match.
                   /^"version"/ { v = $0; sub(/^"version":"v/, "", v); sub(/"$/, "", v); next }
-                  { lts = ""
+                  found == "" {
+                    lts = ""
                     if ($0 ~ /"lts":"/) { lts = tolower($0); sub(/^"lts":"/, "", lts); sub(/"$/, "", lts) }
-                    if (spec == "node" || spec == "latest" || spec == "current") { print v; exit }
-                    if (lts != "" && (spec == "lts/*" || spec == "lts/" lts)) { print v; exit } }')" || want=""
+                    if (spec == "node" || spec == "latest" || spec == "current") found = v
+                    else if (lts != "" && (spec == "lts/*" || spec == "lts/" lts)) found = v }
+                  END { if (found != "") print found }')" || want=""
             [ -n "$want" ] || { echo "::error::node-version '${alias_spec}' matches no release in the Node dist index at ${index}."; exit 1; }
             echo "${alias_spec} is Node ${want}" ;;
         esac
