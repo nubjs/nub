@@ -70,11 +70,11 @@ A pool sized to the host takes every core it can see. On a box shared with other
 
 ## The mitigations
 
-The size is the one Node's team proposed. Three things around it answer the objections.
+The size is the one Node's team proposed. Three things around it answer the objections, and the kernel supplies a fourth.
 
 ### Extra threads run at a lower priority
 
-On Linux, the threads beyond Node's four run at [nice](https://man7.org/linux/man-pages/man7/sched.7.html) 10. Node's four keep their normal priority. A nice 10 thread has about a tenth of the scheduler weight of a normal one. On an idle box it runs at full speed. Under contention it yields most of the CPU to the other work on the machine. Chromium [uses the same level](https://chromium.googlesource.com/chromium/src/+/main/base/threading/platform_thread_linux.cc) for its background threads.
+On Linux, the threads beyond Node's four run at [nice](https://man7.org/linux/man-pages/man7/sched.7.html) 10. Node's four keep their normal priority. A nice 10 thread has about a tenth of the scheduler weight of a normal one. On an idle box it runs at full speed. Under contention it yields most of the CPU to the other threads in its own cgroup, which includes the app's event loop. Chromium [uses the same level](https://chromium.googlesource.com/chromium/src/+/main/base/threading/platform_thread_linux.cc) for its background threads.
 
 <Figure
   src="/blog/threadpool-busy-host-light.svg"
@@ -83,7 +83,20 @@ On Linux, the threads beyond Node's four run at [nice](https://man7.org/linux/ma
   caption={<>The bcrypt route beside twelve processes spinning at normal priority, same box and load as above, two rounds; the neighbours' throughput is their loop rate while the server is under load (<a href="https://github.com/nubjs/nub/blob/main/tests/bench/runtime/pool-priority-nub.sh">benchmark</a>).</>}
 />
 
-The same twelve processes beside a sixteen-thread pool at normal priority lose 7.5% of their throughput. At nice 10 they lose about 1%, and the idle number is unchanged.
+The same twelve processes beside a sixteen-thread pool at normal priority lose 7.5% of their throughput. At nice 10 they lose about 1%, and the idle number is unchanged. Those processes share a cgroup with the server, which is the case the demotion governs.
+
+### Another container is bounded by its cgroup, not by the priority
+
+A nice value has no effect across a cgroup boundary: the kernel divides CPU between cgroups by weight and never reads nice when it does. Every container and every systemd service is its own cgroup, so the demotion above is not what protects them. Their weight is, and it bounds a group's share however many threads that group runs. On a 4-CPU box, one cgroup fixed at four threads while another varies:
+
+| Other cgroup's threads | The fixed cgroup's throughput |
+| --- | --- |
+| 4 | 195 Mloop/s |
+| 16 | 192 Mloop/s |
+| 64 | 191 Mloop/s |
+| 16, both in one cgroup | 58 Mloop/s |
+
+Sixteen times the threads costs a neighbouring cgroup about 2%. The same threads inside one cgroup cost 70%, which is the case the nice level handles. The two cover different halves of the problem.
 
 ### Children keep Node's default
 

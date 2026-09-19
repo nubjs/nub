@@ -14,12 +14,14 @@ import data from '@/data/package-extensions.json';
 // blog post that needs a running API to render its own evidence is worse.
 
 /**
- * `[target, "<class><field>", range?]`: two single characters, then the
- * selector's version range when the rule is narrower than the whole package.
- * See the JSON legend.
+ * `[target, "<class><field>", range?, outgrown?]`: two single characters, then
+ * the selector's version range when the rule is narrower than the whole
+ * package, then a flag set when the package's current release no longer falls
+ * in that range. The 4th element implies the 3rd — staleness only exists for a
+ * ranged rule. See the JSON legend.
  */
-type Edge = [target: string, code: string, range?: string];
-type Row = { n: string; d: number | null; t: Edge[]; y?: number };
+type Edge = [target: string, code: string, range?: string, outgrown?: number];
+type Row = { n: string; d: number | null; t: Edge[]; y?: number; l?: string };
 
 const PAGE_SIZE = 25;
 
@@ -40,9 +42,37 @@ const RANK = new Map(ROWS.map((row, index) => [row.n, index + 1]));
 // `redux-thunk` does not — 2.4.0 declared the peer, which is why Yarn bounded
 // the rule. Naming the bare package here is how the table came to accuse a
 // current release of a phantom that only its old versions had.
-function describe(pkg: string, target: string, code: string, range?: string) {
-  const P = <Name>{range ? `${pkg}@${range}` : pkg}</Name>;
+function describe(
+  pkg: string,
+  target: string,
+  code: string,
+  range?: string,
+  outgrown?: boolean,
+  latest?: string,
+) {
+  // The class sentence names the package WITH its range, which is what stops a
+  // ranged rule reading as an accusation against the current release — except
+  // when the fixed-since sentence above has already said so, where repeating it
+  // only lengthens the popover and gives the long token a second chance to land
+  // on a bad line break.
+  // Guarded on `latest` too, not just `outgrown`: the fixed-since sentence is
+  // what renders the range in this branch, and it needs both. Dropping the
+  // range here without it would leave the range shown nowhere at all.
+  const P = <Name>{range && !(outgrown && latest) ? `${pkg}@${range}` : pkg}</Name>;
   const T = <Name>{target}</Name>;
+  // A rule the package has since outgrown leads with that, because it is the
+  // first thing a maintainer reading their own package needs to know and the
+  // one thing the class sentence cannot say. The rule is not withdrawn — an
+  // install resolving a version inside the range still needs it — so the
+  // sentence says fixed-since, never wrong.
+  const fixed =
+    outgrown && latest ? (
+      <>
+        <strong className="font-medium">Fixed since.</strong> This rule covers only{' '}
+        <Name>{`${pkg}@${range}`}</Name>; the current release is <Name>{latest}</Name> and does not
+        match it. It still applies to an install that resolves a version in the range.{' '}
+      </>
+    ) : null;
   // A carried rule whose peer the package ALREADY declares is not a phantom at
   // all — Yarn only relaxes it to optional — so it gets its own sentence rather
   // than the class sentence, which would claim an undeclared import that is
@@ -50,6 +80,7 @@ function describe(pkg: string, target: string, code: string, range?: string) {
   if (code[1] === 'o') {
     return (
       <>
+        {fixed}
         {P} already declares {T} as a peer dependency. The rule, carried from{' '}
         <Name>@yarnpkg/extensions</Name>, only marks that peer optional so an install without it
         succeeds.
@@ -57,23 +88,31 @@ function describe(pkg: string, target: string, code: string, range?: string) {
     );
   }
   const how: Record<string, ReactNode> = {
+    // "references" rather than "imports" throughout: the scan counts
+    // `require.resolve('x')` as an edge, and correctly — it throws
+    // MODULE_NOT_FOUND on a miss exactly as `require` does — but it loads
+    // nothing, so a maintainer reading "imports" about their own
+    // `require.resolve` concludes the analysis is wrong. The ref kind is known
+    // at extraction and dropped before the published dataset, so the copy
+    // cannot yet say "resolves" only where that is the case; a verb true of
+    // both is the honest interim.
     r: (
       <>
-        {P} imports {T} from its main entry graph without declaring it. The import is not guarded,
-        so under a strict layout it fails as soon as that code runs.
+        {P} references {T} from its main entry graph without declaring it. The reference is not
+        guarded, so under a strict layout it fails as soon as that code runs.
       </>
     ),
     a: (
       <>
-        {P} imports {T} from one of its <Name>exports</Name> subpaths, the adapter a consumer opts
-        into, and never declares it. The consumer normally has {T} installed, but a strict linker
-        cannot connect the two until the peer is declared.
+        {P} references {T} from one of its <Name>exports</Name> subpaths, the adapter a consumer
+        opts into, and never declares it. The consumer normally has {T} installed, but a strict
+        linker cannot connect the two until the peer is declared.
       </>
     ),
     g: (
       <>
-        {P} imports {T} inside a try/catch without declaring it. When the package is missing the
-        import throws and the optional feature turns off.
+        {P} references {T} inside a try/catch without declaring it. When the package is missing the
+        reference throws and the optional feature turns off.
       </>
     ),
     t: (
@@ -85,8 +124,8 @@ function describe(pkg: string, target: string, code: string, range?: string) {
     ),
     '-': (
       <>
-        {P} imports {T} without declaring it, according to <Name>@yarnpkg/extensions</Name>. This
-        rule is carried from there, and Nub’s scan did not classify the import.
+        {P} references {T} without declaring it, according to <Name>@yarnpkg/extensions</Name>. This
+        rule is carried from there, and Nub’s scan did not classify the reference.
       </>
     ),
   };
@@ -101,6 +140,7 @@ function describe(pkg: string, target: string, code: string, range?: string) {
   };
   return (
     <>
+      {fixed}
       {how[code[0]] ?? how['-']} {ships[code[1]] ?? ships.p}
     </>
   );
@@ -108,9 +148,24 @@ function describe(pkg: string, target: string, code: string, range?: string) {
 
 // The prose's inline-code pill, restated: the popover is portalled outside the
 // blog's prose scope, so a bare `code` here would pick up none of it.
+//
+// A hyphen is a line-break opportunity in normal CSS wrapping, with no property
+// that removes it — `word-break` and `overflow-wrap` only ever add break points.
+// So `redux-thunk@<=2.3.0` split after `redux-` and read as two packages. Short
+// tokens are therefore held on one line and pushed down whole; long ones keep
+// wrapping, because they have to. The threshold is the widest token that fits
+// the popover's 22rem content box at this size (~7.2px per mono character,
+// ~328px of usable width), and the database's longest entry is 51 characters,
+// so the fallback is load-bearing rather than theoretical. A word-joiner around
+// the hyphen would beat both, but it travels with a copied package name.
+const FITS_ONE_LINE = 40;
 function Name({ children }: { children: string }) {
   return (
-    <code className="rounded-[5px] border border-fd-border/60 bg-fd-muted px-1 py-0.5 font-mono text-[12px] text-fd-foreground">
+    <code
+      className={`rounded-[5px] border border-fd-border/60 bg-fd-muted px-1 py-0.5 font-mono text-[12px] text-fd-foreground ${
+        children.length <= FITS_ONE_LINE ? 'whitespace-nowrap' : 'break-words'
+      }`}
+    >
       {children}
     </code>
   );
@@ -129,6 +184,18 @@ const NUMBER = new Intl.NumberFormat('en-US');
 // How many rules came from Yarn's database. Counted from the data rather than
 // written down, so it keeps agreeing with the rows after a database refresh.
 const FROM_YARN = ROWS.filter((row) => row.y).length;
+
+// The default view drops every rule whose range the package's current release
+// has moved past, and with it any row left with nothing to show. `debug` is the
+// case that forced this: it ranks first in the whole table on downloads, and
+// its one rule is scoped to `<4.2.0` against a current 4.4.3 — so the most
+// prominent row in the figure read as an accusation about a phantom that was
+// fixed years ago. The rules are not wrong and are not removed; a lockfile
+// pinning an old version still needs them, which is what the toggle is for.
+const CURRENT = ROWS.map((row) => ({ ...row, t: row.t.filter((edge) => !edge[3]) })).filter(
+  (row) => row.t.length > 0,
+);
+const OUTGROWN_ROWS = ROWS.length - CURRENT.length;
 
 // Weekly downloads are context, not a figure anyone reads digit by digit, so the
 // column shows a rounded magnitude and hands the exact count to the title. The
@@ -154,11 +221,15 @@ function Phantom({
   target,
   code,
   range,
+  outgrown,
+  latest,
 }: {
   pkg: string;
   target: string;
   code: string;
   range?: string;
+  outgrown?: boolean;
+  latest?: string;
 }) {
   const [open, setOpen] = useState(false);
   // Radix toggles on click, which on a mouse would CLOSE a popover that hover
@@ -172,7 +243,16 @@ function Phantom({
         // The prose's inline-code pill, so a name reads as the same kind of thing
         // as the package names in the paragraphs above. The open state darkens
         // it, which is the one visual tie between a name and its popover.
-        className="cursor-help whitespace-normal break-words rounded-[5px] border border-fd-border/60 bg-fd-muted px-1.5 py-0.5 text-left font-mono text-[13px] text-fd-foreground transition-colors data-[state=open]:bg-fd-accent"
+        // An outgrown rule is dimmed and dashed rather than struck through:
+        // struck text reads as "retracted", and the rule is still live for any
+        // install that resolves a version inside its range. Dimmed says
+        // "historical" without saying "withdrawn", and the popover carries the
+        // actual fact.
+        className={`cursor-help whitespace-normal break-words rounded-[5px] px-1.5 py-0.5 text-left font-mono text-[13px] transition-colors data-[state=open]:bg-fd-accent ${
+          outgrown
+            ? 'border border-dashed border-fd-border/60 bg-transparent text-fd-muted-foreground'
+            : 'border border-fd-border/60 bg-fd-muted text-fd-foreground'
+        }`}
         onPointerEnter={(event) => {
           if (event.pointerType !== 'mouse') return;
           hovered.current = true;
@@ -191,7 +271,13 @@ function Phantom({
       <PopoverContent
         side="top"
         align="start"
-        className="max-w-[22rem] p-3 text-[13px] leading-relaxed"
+        // `!bg-fd-popover` overrides fumadocs' own `bg-fd-popover/60`. That 60%
+        // alpha plus a backdrop blur is built for floating over busy content;
+        // over this page it composited the popover to within ~3 of 255 of the
+        // page background, so the panel had no edge but its border and read as
+        // text printed on the page. At full opacity the token does what it was
+        // picked for — one step up from the background, no more.
+        className="max-w-[22rem] !bg-fd-popover p-3 text-[13px] leading-relaxed"
         // Neither auto-focus: focus moving INTO the content would fire the
         // trigger's pointer-leave and close it, and focus returning to the
         // trigger on close paints a focus ring on every name the pointer has
@@ -199,26 +285,33 @@ function Phantom({
         onOpenAutoFocus={(event) => event.preventDefault()}
         onCloseAutoFocus={(event) => event.preventDefault()}
       >
-        {describe(pkg, target, code, range)}
+        {describe(pkg, target, code, range, outgrown, latest)}
       </PopoverContent>
     </Popover>
   );
 }
 
-function Edges({ pkg, edges }: { pkg: string; edges: Edge[] }) {
+function Edges({ pkg, edges, latest }: { pkg: string; edges: Edge[]; latest?: string }) {
   return (
     // The important modifier is load-bearing, not a shortcut: the blog's prose
     // typography styles bare `ul`/`li` from an unlayered sheet, which outranks
     // any Tailwind utility whatever its specificity. Left alone it put 17.5px of
     // margin above and below every cell's list and drove a one-line row to 89px.
     <ul className="!m-0 flex list-none flex-wrap gap-x-1.5 gap-y-1.5 !p-0">
-      {edges.map(([target, code, range]) => (
+      {edges.map(([target, code, range, outgrown]) => (
         // `min-w-0` defeats the flexbox automatic minimum size. Without it a
         // flex item refuses to shrink below its content's min-content width, so
         // on a phone a long scoped name ran past the cell's right edge instead
         // of wrapping inside it.
         <li key={target} className="!m-0 min-w-0 !p-0">
-          <Phantom pkg={pkg} target={target} code={code} range={range} />
+          <Phantom
+            pkg={pkg}
+            target={target}
+            code={code}
+            range={range}
+            outgrown={Boolean(outgrown)}
+            latest={latest}
+          />
         </li>
       ))}
     </ul>
@@ -227,6 +320,7 @@ function Edges({ pkg, edges }: { pkg: string; edges: Edge[] }) {
 
 export function ExtensionsTable() {
   const [filter, setFilter] = useState('');
+  const [historical, setHistorical] = useState(false);
   const [page, setPage] = useState(1);
   const pane = useRef<HTMLDivElement>(null);
 
@@ -238,10 +332,10 @@ export function ExtensionsTable() {
   }
 
   const query = filter.trim().toLowerCase();
-  const matches = useMemo(
-    () => (query ? ROWS.filter((row) => row.n.toLowerCase().includes(query)) : ROWS),
-    [query],
-  );
+  const matches = useMemo(() => {
+    const base = historical ? ROWS : CURRENT;
+    return query ? base.filter((row) => row.n.toLowerCase().includes(query)) : base;
+  }, [query, historical]);
   const pages = Math.max(1, Math.ceil(matches.length / PAGE_SIZE));
   // Clamped rather than reset: a filter change already sends `page` back to 1,
   // and clamping keeps the render honest if anything else ever shrinks the list.
@@ -268,10 +362,37 @@ export function ExtensionsTable() {
           }}
           className="min-w-0 flex-1 rounded-md border border-fd-border bg-transparent px-2.5 py-1 text-sm placeholder:text-fd-muted-foreground focus:outline-none focus:ring-1 focus:ring-fd-ring"
         />
+        {/* `N of 791` whenever anything is filtered out, by either control, so
+            the number under a paragraph that states 791 always explains itself
+            rather than looking like a different dataset. */}
         <span className="whitespace-nowrap text-fd-muted-foreground">
-          {NUMBER.format(matches.length)} {matches.length === 1 ? 'package' : 'packages'}
+          {matches.length === ROWS.length
+            ? `${NUMBER.format(matches.length)} packages`
+            : `${NUMBER.format(matches.length)} of ${NUMBER.format(ROWS.length)} packages`}
         </span>
       </div>
+
+      {/* Its own line under the filter rather than beside it: the label is the
+          long piece of text in the header, and wrapped into the flex row it
+          pushed the count off the end on a phone. */}
+      <label
+        // The count rides in the tooltip rather than the label. Spelled out it
+        // was the longest string in the header and wrapped to two lines on a
+        // phone, and the readout beside the filter already says 696 of 791.
+        title={`${NUMBER.format(OUTGROWN_ROWS)} packages are covered only by rules their current release has moved past`}
+        className="mb-3 flex w-fit cursor-pointer items-center gap-2 text-sm text-fd-muted-foreground"
+      >
+        <input
+          type="checkbox"
+          checked={historical}
+          onChange={(event) => {
+            setHistorical(event.target.checked);
+            goTo(1);
+          }}
+          className="shrink-0 accent-fd-primary"
+        />
+        <span>Include non-latest versions</span>
+      </label>
 
       {/* `relative` on the scroll container, as on the tool matrix: the sr-only
           label text is absolutely positioned, and an absolute box is clipped
@@ -311,8 +432,14 @@ export function ExtensionsTable() {
           </colgroup>
           <thead>
             <tr className="border-b border-fd-border bg-fd-muted/40">
+              {/* Rank is absolute, so the default view reads 2, 4, 6, 7 — the
+                  gaps are the hidden rows. That is the intended meaning (where
+                  a package sits in the ecosystem, not in this page), but
+                  unexplained it reads as a numbering bug, so the header says
+                  what the number is. */}
               <th
                 scope="col"
+                title="Position in the full download ranking, so it stays put when rows are filtered"
                 className="px-2 py-2.5 text-right font-medium text-fd-muted-foreground sm:px-3"
               >
                 #
@@ -365,7 +492,7 @@ export function ExtensionsTable() {
                   )}
                 </td>
                 <td className="px-2 py-2.5 align-top sm:px-3">
-                  <Edges pkg={row.n} edges={row.t} />
+                  <Edges pkg={row.n} edges={row.t} latest={row.l} />
                 </td>
               </tr>
             ))}
