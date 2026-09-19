@@ -1,14 +1,16 @@
 ---
 title: "Introducing `nub compile` — single-file executables for Node.js"
 hnTitle: "Introducing `nub compile` — single-file executables for Node.js"
-description: Single-file self-extracting executables for Node.js with support for all major operating systems, Node addons, and cross-compilation to every target from any machine.
+description: Single-file executables on stock Node.js, with native-addon packaging and cross-compilation.
 author: Colin
-# Re-capture every transcript and both recordings under `public/ansi/` with the
-# release binary — each intro line still reads `nub 0.8.3`.
 date: 2026-09-19
 ---
 
-Nub 0.10 adds `nub compile`, which bundles a TypeScript or JavaScript entrypoint into a single-file executable.
+Nub bundles a TypeScript or JavaScript entrypoint into a single-file executable with `nub compile`.
+
+<Callout title="Recorded examples">
+The terminal examples below were recorded before automatic SEA selection and the latest cache-reuse changes. They retain their original output, including the Nub 0.8.3 version labels; current builds can choose a different executable shape and size.
+</Callout>
 
 <AnsiPlayer
   src="/ansi/compile-cli.json"
@@ -23,7 +25,7 @@ The executable is standalone and does not require Node to be installed on the ta
 nub compile cli.ts --target 24.20.0 --platform linux-x64
 ```
 
-Native addons, WebAssembly, and static assets need no configuration, because the executable extracts what it needs to disk.
+Nub packages discoverable native addons, WebAssembly, and static assets with the application. Files loaded through computed paths may need `--include` or `--unbundled`.
 
 ## Some history
 
@@ -35,7 +37,7 @@ These executables all work the same way: the code is bundled and stapled onto a 
 2. **Linux** — an ELF note section. No signing involved.
 3. **Windows** — a PE resource, the same mechanism that stores an executable's icon.
 
-Node's equivalent, [Single Executable Applications](https://nodejs.org/api/single-executable-applications.html) (SEA) landed as experimental in v18.16 in 2023. It's currently marked as **Stability 1.1** ("Active development") today. Despite some ergonomic improvements in Node 25, development has largely stalled due to the complexity of implementing a virtual filesystem and contributor bandwidth.
+Node's [Single Executable Applications](https://nodejs.org/api/single-executable-applications.html) (SEA) landed as experimental in v18.16 in 2023. Node 25.5 added the `--build-sea` command. Nub uses SEA automatically when the target Node version and bundled program support it.
 
 <Figure
   src="/blog/sea-status-comment.png"
@@ -46,11 +48,12 @@ Node's equivalent, [Single Executable Applications](https://nodejs.org/api/singl
 
 ## Design
 
-Nub implements the same idea on stock Node: nothing is patched, and a small Rust launcher drives it. The file holds three things:
+Nub uses stock Node, with no patches. It chooses between two embedded-runtime shapes:
 
-1. **The launcher** — under a megabyte of Rust.
-2. **A stock Node** from nodejs.org, stripped and compressed.
-3. **The payload** — your application, bundled, plus anything it needs on disk.
+1. **Node SEA** — Node and a sealed JavaScript bundle run directly from the executable, including statically bundled workers.
+2. **A Rust launcher** — compressed Node and application files are extracted to a cache. This handles native packages, included files, and programs that need a separate Node process.
+
+The build reports its choice. The `--smol` variant omits Node and uses the launcher to find or provision it instead.
 
 ### Bundling
 
@@ -108,7 +111,7 @@ $ tree -L 2
 
 The `sharp` package can't be bundled. It ships in its installed layout, along with the packages it requires at run time. The addon under `@img` is an ordinary file, and `dlopen` loads it the same way it does under plain `node`.
 
-On every start, the launcher decodes the payload, verifies the extracted tree, and execs Node, so no wrapper process stays behind. The embedded Node extracts once per version, shared by every binary built against it.
+The launcher verifies files when it publishes a new extraction. Subsequent runs check the completion marker and launch files rather than walking and hashing the whole tree again. Matching launcher-built executables share one extracted Node; on Unix the launcher replaces itself with Node rather than leaving a wrapper process behind.
 
 ### Assets
 
@@ -216,28 +219,28 @@ An ejected package ships verbatim, but its dependencies do not inherit that. Nub
 | entities, reached only through parse5 | 86 | 0, inlined into parse5's chunk |
 | the whole tree | 1,513 | 537 |
 
-The count matters at startup. The launcher byte-checks the whole extracted tree before every run, at roughly 20 µs a file, so a file that never ships is a file that is never checked.
+Fewer packaged files reduce executable size and first-run extraction work. Warm cache checks are independent of the number of extracted application files.
 
 ## Performance
 
 ### Executable size
 
-The default shape embeds a full Node, and the file is still a fifth the size of the `node` binary inside it. Three things make the difference:
+Executable size depends on the chosen shape. A SEA carries Node directly; a launcher compresses its embedded Node. Three things reduce the launcher artifact's size:
 
 - The embedded Node is stripped of its symbols.
 - It is compressed, and decompressed once on first run.
 - The app is bundled, tree-shaken, and minified before it goes in.
 
-A stock `node` binary is 145 MB on darwin-arm64. Stripped and recompressed, it fits with your app in a 29 MB file:
+The following charts preserve measurements of the earlier launcher-based build, before automatic SEA selection. They are not measurements of the current default hello-world artifact, which can use SEA instead.
 
 <Bench
-  label="hello world · compiled executable · size on disk"
+  label="historical hello world · launcher size on disk"
   accent="acid"
   unit="MB"
   max={143.6}
-  caption="The same hello world under each tool, macOS arm64, Node 26.7.0. nub 0.10; @yao-pkg/pkg 6.22.0 on its patched Node 26.5.1; Node SEA via node --build-sea."
+  caption="Historical launcher build, macOS arm64, Node 26.7.0. @yao-pkg/pkg 6.22.0 used patched Node 26.5.1; Node SEA used node --build-sea."
   rows={[
-    { cmd: 'nub compile', ms: 29.3, us: true },
+    { cmd: 'nub launcher', ms: 29.3, us: true },
     { cmd: 'pkg', ms: 77.2, label: '2.6× larger' },
     { cmd: 'node --build-sea', ms: 143.6, label: '4.9× larger' },
   ]}
@@ -247,33 +250,33 @@ A Node SEA executable is a copy of the whole `node` binary, uncompressed. Stripp
 
 ### Startup
 
-Time to first output, measured warm — after the one-time extraction on first run:
+These warm-start measurements also predate the removal of recurring full-tree validation and the build-time bytecode optimization. They describe the earlier launcher build, not current startup performance:
 
 <Bench
-  label="hello world · warm start"
+  label="historical hello world · warm start"
   accent="acid"
   unit="ms"
   max={51.0}
-  caption="hyperfine, macOS arm64, median of 150 interleaved runs. nub 0.10, node and Node SEA 26.7.0, @yao-pkg/pkg 6.22.0 on its patched Node 26.5.1."
+  caption="Historical launcher build: hyperfine, macOS arm64, median of 150 interleaved runs. Node and Node SEA 26.7.0; @yao-pkg/pkg 6.22.0 on patched Node 26.5.1."
   rows={[
     { cmd: 'node hello.js', ms: 37.6 },
     { cmd: 'node --build-sea', ms: 38.1 },
     { cmd: 'pkg', ms: 45.0 },
-    { cmd: 'nub compile', ms: 51.0, us: true },
+    { cmd: 'nub launcher', ms: 51.0, us: true },
   ]}
 />
 
-A compiled binary starts a little slower than plain `node` on the same machine. The reason is structural: the artifact runs stock Node, then Nub's bootstrap, then the preload that installs the runtime augmentations, before it reaches the app. Node's own startup is the floor, and everything Nub adds sits on top of it.
+Current launcher builds reuse completed extractions without full-tree validation. Large eligible host-targeted bundles also carry build-time V8 code-cache data, reducing repeated compilation without executing application code during the build. A SEA avoids extraction entirely for the programs it supports.
 
 <Callout title="Locked-down deploys">
 Warm the cache when the image is built:
 
 ```dockerfile
 ENV XDG_CACHE_HOME=/opt/cache
-RUN ./app --version || true   # the exit code is irrelevant; the extraction is the point
+RUN ./app --version   # use an application command that exits successfully
 ```
 
-After that the binary writes nothing at run time, so a `readOnlyRootFilesystem` pod is fine. Where the home directory isn't writable, as on Lambda, the launcher falls back to the temp directory, so no warm-up step is needed.
+A completed extraction can be read-only. The application may still need writable storage of its own. For a cold cache, the launcher tries writable cache locations and then a private temporary directory; startup fails if none can hold the required files.
 </Callout>
 
 ## Cross-compilation
@@ -331,27 +334,27 @@ $ nub compile index.ts --platform linux-x64
 \e[2m  container is the usual way — or drop --platform to build for this machine.\e[22m
 ```
 
-Builds are reproducible. Two compiles of an unchanged tree produce a byte-identical executable, so anyone who checks out the tag can verify the checksum in your release notes.
+Pin the Node version, dependencies, and build options when producing release artifacts.
 
 ## The `--smol` flag
 
 The `--smol` flag can be used to dramatically reduce the resulting executable size. It works by omitting the Node runtime in favor of a launcher that installs the target version of Node when the executable is first run.
 
 <Bench
-  label="hello world · compiled executable · size on disk"
+  label="historical hello world · launcher size on disk"
   accent="acid"
   unit="MB"
   max={143.6}
-  caption="The earlier chart, with the runtime-free shape added. macOS arm64, Node 26.7.0; nub 0.10, @yao-pkg/pkg 6.22.0, Node SEA."
+  caption="The historical launcher measurements above, with --smol added. macOS arm64, Node 26.7.0; @yao-pkg/pkg 6.22.0 and Node SEA."
   rows={[
     { cmd: 'nub compile --smol', ms: 0.92, us: true },
-    { cmd: 'nub compile', ms: 29.3, label: '32× larger' },
+    { cmd: 'nub launcher', ms: 29.3, label: '32× larger' },
     { cmd: 'pkg', ms: 77.2, label: '84× larger' },
     { cmd: 'node --build-sea', ms: 143.6, label: '156× larger' },
   ]}
 />
 
-The file is 0.92 MB on disk, 489 KB gzipped. Warm start is 47 ms, within a few milliseconds of the default shape in the startup chart.
+That earlier `--smol` fixture was 0.92 MB on disk and 489 KB gzipped. Size varies with the application, target, and launcher version.
 
 At startup the executable looks for a Node that satisfies the target: Nub's own Node store, then version-manager installs, then `PATH`. When the machine has none, it provisions one from nodejs.org into Nub's cache, where every other `--smol` executable on the machine finds it. A range lets the binary use any qualifying Node already on the machine instead of downloading one:
 
@@ -431,7 +434,7 @@ Node apps were being packaged into executables long before Node SEA existed. The
 | [Bun](https://bun.sh/docs/bundler/executables) | not Node | Active | A copy of the `bun` binary with the bundle appended. Each embedded `.node` file is [copied to disk](https://bun.com/blog/bun-v1.2.13) before it loads. |
 | [Deno](https://docs.deno.com/runtime/reference/cli/compile/) | not Node | Active | A copy of the `deno` binary with the module graph appended. An opt-in `--self-extracting` mode unpacks to disk for native addons. |
 
-Capability by capability, against the ones still maintained:
+The following survey records the tested tool versions, rather than a claim about every later release:
 
 <ToolMatrix
   tools={['nub', 'Node SEA', 'pkg', 'Bun', 'Deno']}
@@ -443,7 +446,7 @@ Capability by capability, against the ones still maintained:
     'Bun': 'https://bun.sh/docs/bundler/executables',
     'Deno': 'https://docs.deno.com/runtime/reference/cli/compile/',
   }}
-  caption="nub 0.10 · Node SEA on 26.7.0 · @yao-pkg/pkg 6.22.0 · Bun 1.3.14 · Deno 2.8.1, measured on macOS arm64. Hover an amber mark for the caveat."
+  caption="Historical capability survey: the launcher-based Nub build, Node SEA on 26.7.0, @yao-pkg/pkg 6.22.0, Bun 1.3.14, and Deno 2.8.1 on macOS arm64. Hover an amber mark for the caveat."
   rows={[
     { feature: 'Single file, no runtime on the target machine', cells: ['yes', 'yes', 'yes', 'yes', 'yes'] },
     { feature: 'Embeds data files and assets', cells: ['yes', 'yes', 'yes', 'yes', 'yes'] },
@@ -453,7 +456,7 @@ Capability by capability, against the ones still maintained:
     { feature: 'Native addons inside the one file', cells: ['yes', { s: 'partial', note: 'The .node file can be bundled as an asset, but your own code has to write it to a temp path and call process.dlopen on it. The sharp fixture took a 55-line build plugin and runtime shim.' }, 'yes', 'yes', 'yes'] },
     { feature: 'Workers bundled with no manual entrypoint', cells: ['yes', 'no', 'no', { s: 'partial', note: 'Workers run, but the worker file has to be listed as a build entrypoint. Bun’s docs say it may detect statically-known paths automatically later.' }, { s: 'partial', note: 'Workers run, but a worker main module has to be named with --include so it is embedded.' }] },
     { feature: 'Reads nothing from the run directory', cells: ['yes', 'yes', 'yes', { s: 'partial', note: 'A compiled Bun binary autoloads .env and bunfig.toml from the directory it is run in. Measured: a .env beside the binary changed its output. Bun’s docs say this may become opt-in later.' }, 'yes'] },
-    { feature: 'Cross-compile from one host', cells: ['yes', 'no', 'yes', 'yes', 'yes'] },
+    { feature: 'Cross-compile from one host', cells: ['yes', { s: 'partial', note: 'Requires the target Node binary and disabling code cache and snapshots for cross-platform generation.' }, 'yes', 'yes', 'yes'] },
     { feature: 'musl / Alpine target', cells: ['yes', 'no', 'yes', 'yes', 'no'] },
     { feature: 'Windows arm64 target', cells: ['yes', { s: 'partial', note: "Node ships an arm64 Windows build, but SEA's tested-platform list names Windows with no architecture, and macOS x64 is explicitly excluded." }, { s: 'partial', note: 'arm64 is among the target architectures, but not among the platform builds the project publishes prebuilt Nodes for.' }, 'yes', 'no'] },
     { feature: 'macOS binary signed automatically', cells: ['yes', 'no', 'yes', 'no', 'yes'] },
@@ -472,7 +475,7 @@ The caxa project made the same extraction choice in 2021. Its author's successor
 
 [OpenCode](https://github.com/anomalyco/opencode) is a coding agent with a terminal UI, and upstream ships it as a Bun executable. [NopenCode](https://github.com/nubjs/nopencode/tree/nub-compile), our fork, builds the same app with `nub compile`, on stock Node.
 
-It is the hardest shape a packager meets. The TUI is Solid on top of OpenTUI, which loads a native library, tree-sitter grammars, and a parser worker through paths it computes at run time. Bun's executable serves all of that from an in-memory filesystem. Nub extracts it to disk instead, and because two of those packages ship in their installed layout, the extracted tree comes to over five thousand files. The build script, [`build-nub.mjs`](https://github.com/nubjs/nopencode/blob/nub-compile/packages/opencode/script/build-nub.mjs), maps each `Bun.build` option onto a flag. In outline:
+The TUI is Solid on top of OpenTUI, which loads native code, tree-sitter grammars, and a parser worker through paths it computes at run time. The initial port used Nub's launcher and extracted its packaged files to disk. Its build script, [`build-nub.mjs`](https://github.com/nubjs/nopencode/blob/nub-compile/packages/opencode/script/build-nub.mjs), mapped the `Bun.build` options onto flags. This was the initial build outline:
 
 ```bash
 nub compile src/index.ts --target 26 \
@@ -486,19 +489,19 @@ nub compile src/index.ts --target 26 \
   --define-file OPENCODE_MODELS_DEV=models.json
 ```
 
-The diff against upstream is 26 files, and most of it is build scripts and notes. What the app itself needed:
+The initial diff against upstream was 26 files, mostly build scripts and notes. That version of the port also needed these application changes:
 
 - **A `Bun` global, polyfilled for simplicity.** The shipped graph calls five of its members, `stringWidth`, `file`, `write`, `stdin`, and `hash`, and each maps onto a Node builtin.
 - **Node's own modules where it used Bun's.** The Zed integration moved from `bun:sqlite` to `node:sqlite`, and the Windows console guard moved from `bun:ffi` to `node:ffi`.
 - **No top-level `await`.** Bundled async modules in an import cycle await each other, and the program hangs before `main` with no error. Thirty-eight awaited dynamic imports became static imports, seven awaited `mkdir` calls became `mkdirSync`, and two awaits inside OpenTUI now resolve lazily.
 - **A staged asset root.** OpenTUI's thirteen run-time-resolved files go into one directory, embedded with `--include`, and an environment variable points OpenTUI at it before it loads.
 
-Everything else OpenCode already had. Its OpenTUI packages and its sqlite, pty, and `fff` bindings all ship a `node` export condition, and selecting it is the whole fix for them.
+The port also selected the Node-compatible exports already provided by its native dependencies.
 
-The result runs on darwin-arm64, linux-x64, linux-arm64, linux-arm64-musl, and win32-x64, all cross-compiled from one Mac, TUI included. Nine command surfaces, from `--version` to `providers list`, print byte for byte what the Bun build prints. In the port's measurements the default build is 45 MB on disk, and `--smol` is 18 MB and provisions its own Node on a machine that has none. Bun starts it faster, because Bun is the runtime and Nub's launcher is not. [The port notes](https://github.com/nubjs/nopencode/blob/nub-compile/NUB-PORT.md) carry the measurements and everything the port ran into.
+The initial port exercised the TUI and command surfaces across multiple platforms. Its artifact sizes and startup measurements predate subsequent compiler optimizations, so they are not current performance comparisons. [The port notes](https://github.com/nubjs/nopencode/blob/nub-compile/NUB-PORT.md) record that earlier work; test the compiled application on each deployment target before shipping it.
 
 ## Get started
 
 <GetStarted />
 
-Nub 0.10 ships `nub compile`, and [the compile docs](/docs/compile) cover every flag.
+The [compile docs](/docs/compile) cover every flag and the current SEA and launcher behavior.
