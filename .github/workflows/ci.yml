@@ -428,9 +428,11 @@ jobs:
       # runtime for the offline --smol gate below.
       # A released nub materializes node_modules from nub.lock; the nub under
       # test is built in the next step and cannot install its own inputs.
-      - uses: ./setup
+      - uses: ./actions/setup-node
         with:
           cache: 'true'
+          provision-node: 'false'
+          shim: 'false'
       - name: Install and stage runtime dependencies for embedded compile
         shell: bash
         run: |
@@ -1215,9 +1217,11 @@ jobs:
       # + seccomp) and macOS only (aube-scripts/src/lib.rs has no Windows arm),
       # so on the windows-latest cell the mitigation is the pinned lockfile
       # alone. The shims stay for the pnpm/npm surfaces the tests drive.
-      - uses: ./setup
+      - uses: ./actions/setup-node
         with:
           cache: 'true'
+          provision-node: 'false'
+          shim: 'false'
       - run: nub install --frozen-lockfile --node-linker hoisted
       # An installer that exits 0 on a half-built tree (package dirs present,
       # package.json missing) surfaces six minutes later as unresolvable helper

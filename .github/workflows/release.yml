@@ -30,7 +30,12 @@ name: Release
 # publish path.
 on:
   push:
-    tags: ["v*"]
+    # Only v<x>.<y>.<z>… tags (a stable v0.9.3 or a canary v0.9.2-canary.…):
+    # the floating v<major> tag that the GitHub Actions under actions/ are
+    # consumed through (`nubjs/nub/actions/<name>@v0`) sits in the same
+    # namespace and must not start a release. `+` and `[0-9]` are filter-pattern
+    # syntax, so `v0`, `v1`, `v10` and `v0.9` do not match.
+    tags: ["v[0-9]+.[0-9]+.[0-9]*"]
   schedule:
     # The nightly canary. Off the hour because GitHub delays :00 crons hardest
     # under load, and clear of the repo's other nightlies (00:15 through 08:00
@@ -2220,6 +2225,46 @@ jobs:
           [ "$LATEST" = "$TAG" ] \
             || { echo "::error::releases/latest is $LATEST, not $TAG — the upgrade channel is serving the wrong release"; exit 1; }
           echo "✓ releases/latest serves $TAG"
+
+  actions-tag:
+    name: Move the floating actions tag
+    # The GitHub Actions under actions/ are consumed as
+    # `nubjs/nub/actions/<name>@v0`, and that tag follows each stable release:
+    # a consumer on the floating major gets the action as of the latest Nub
+    # release, never a canary. Same major only — a 1.0.0 release moves `v1` and
+    # leaves `v0` on the last 0.x. It moves with whichever stable release
+    # promotes last, like the Latest marker above. The ref is written through
+    # the API with the job token, which starts no workflow, and the
+    # `push: tags` filter matches only v<x>.<y>.<z> tags, so a bare `v0` never
+    # reaches the verify gate.
+    if: ${{ needs.verify.outputs.publish_tag != '' }}
+    needs: [verify, github-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Point v<major> at the release commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify.outputs.publish_tag }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          floating="v${version%%.*}"
+          # Peel an annotated tag down to its commit, as the release jobs do.
+          record="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$TAG" --jq '[.object.type, .object.sha] | @tsv')"
+          IFS=$'\t' read -r type sha <<<"$record"
+          while [ "$type" = "tag" ]; do
+            record="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/$sha" --jq '[.object.type, .object.sha] | @tsv')"
+            IFS=$'\t' read -r type sha <<<"$record"
+          done
+          # `git/ref/tags/v0` answers only for that exact ref; a 404 means create.
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$floating" --jq .ref >/dev/null 2>&1; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/$floating" -f sha="$sha" -F force=true --jq .ref
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/$floating" -f sha="$sha" --jq .ref
+          fi
+          echo "✓ $floating -> $sha ($TAG)"
 
   canary-immutable-release:
     name: Create immutable canary release

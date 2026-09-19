@@ -36,7 +36,7 @@ A Nub release is tag-triggered and fully automated. Pushing a `v*` tag fires `.g
 ```bash
 git -C "$(git rev-parse --show-toplevel)" switch main && git pull --ff-only
 git fetch --tags
-PREV=$(git describe --tags --abbrev=0)        # e.g. v0.1.2 — the latest release tag
+PREV=$(git describe --tags --abbrev=0 --exclude 'v[0-9]')   # e.g. v0.1.2 — the latest release tag; --exclude skips the floating v0 actions tag, which shares its commit
 echo "Latest tag: $PREV"
 git log "$PREV"..HEAD --oneline               # the full changeset since the last release
 ```
@@ -84,6 +84,8 @@ git show --stat HEAD      # SANITY: 27 files, all version bumps, nothing else: 1
 git push origin main
 git tag v<ver>
 git push origin v<ver>    # the single tag: THIS is what triggers the publish
+# release.yml itself moves the floating v<major> tag (v0) that `uses: nubjs/nub/actions/<name>@v0`
+# resolves through, after the promote step. Never push v0 by hand.
 ```
 
 Post-merge, fast-forward the shared tree so it tracks origin: `git -C <shared-tree> pull --ff-only` (the eagerly-pull rule, AGENTS.md "Default to a PR flow" — the shared checkout otherwise drifts behind as PRs land).

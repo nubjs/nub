@@ -1,0 +1,73 @@
+name: "nub install"
+description: "Install the project's dependencies from its lockfile, whichever package manager wrote it: the npm ci, pnpm install, yarn install or bun install step, on nub, with the store cached across runs."
+author: "nubjs"
+branding:
+  icon: "package"
+  color: "purple"
+
+inputs:
+  working-directory:
+    description: "Directory holding the package.json and lockfile to install. Default: the checkout root."
+    default: "."
+  frozen-lockfile:
+    description: "Install exactly what the lockfile says and fail if it is out of date with package.json (npm ci, pnpm install --frozen-lockfile). Set false to let the install update the lockfile, as npm install does."
+    default: "true"
+  args:
+    description: "Extra flags for nub install, for example --prod or --ignore-scripts."
+    default: ""
+  shim:
+    description: "Put nub's package-manager shims first on PATH, so npm, pnpm and yarn in later steps run the version the project pins in packageManager or devEngines, provisioned on demand. Replaces pnpm/action-setup or corepack enable for a pinned project. Default: false."
+    default: "false"
+  nub-version:
+    description: "Version of nub to install: any semver range npm understands (0.9.0, ^0.9, latest)."
+    default: "latest"
+  cache:
+    description: "Cache nub's store across runs, keyed on the lockfile. Set false to disable."
+    default: "true"
+  cache-dependency-path:
+    description: "Lockfile path(s) whose hash keys the cache. Globs and newline-delimited lists. Default: the lockfile in working-directory."
+    default: ""
+  cache-key-prefix:
+    description: "Prefix for the cache key, to scope or bust caches independently of the lockfile."
+    default: ""
+  token:
+    description: "GitHub token for rate-limit relief when resolving nub's version. Defaults to github.token on github.com."
+    default: ${{ github.server_url == 'https://github.com' && github.token || '' }}
+
+outputs:
+  nub-version:
+    description: "The installed nub version (nub --version, a bare v<semver>)."
+    value: ${{ steps.nub.outputs.nub-version }}
+  cache-hit:
+    description: "Whether an exact store-cache match was restored: 'true' on an exact key hit, 'false' on a partial hit, empty on a miss."
+    value: ${{ steps.nub.outputs.cache-hit }}
+
+runs:
+  using: "composite"
+  steps:
+    # nub on PATH and its store cached; Node is left alone (provision-node:
+    # false), so whatever setup-node put on PATH stays there.
+    - uses: nubjs/setup-nub@c7b970ec04655a2f0a111cd436cc182a3b660e7a # v0.6.0
+      id: nub
+      with:
+        nub-version: ${{ inputs.nub-version }}
+        provision-node: false
+        cache: ${{ inputs.cache }}
+        cache-dependency-path: ${{ inputs.cache-dependency-path }}
+        cache-key-prefix: ${{ inputs.cache-key-prefix }}
+        working-directory: ${{ inputs.working-directory }}
+        shim: ${{ inputs.shim }}
+        token: ${{ inputs.token }}
+
+    - name: nub install
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        FROZEN: ${{ inputs.frozen-lockfile }}
+        ARGS: ${{ inputs.args }}
+      run: |
+        set -euo pipefail
+        flag=--frozen-lockfile
+        [ "$FROZEN" = "false" ] && flag=--no-frozen-lockfile
+        # shellcheck disable=SC2086
+        nub install "$flag" $ARGS

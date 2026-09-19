@@ -1,0 +1,794 @@
+name: Action smoke
+
+# The GitHub Actions under actions/ (setup-node, install) exercised on real
+# runners: install + PATH, Node pin resolution, shims, caching, registry auth,
+# and the install action against the fixtures under tests/action-smoke/. A
+# consumer references them as `nubjs/nub/actions/<name>@v0`; a job here
+# references the same files as `./actions/<name>`.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "actions/**"
+      - "tests/action-smoke/**"
+      - ".github/workflows/action-smoke.yml"
+  pull_request:
+    # PR CI is opt-in — request a run with `gh pr edit <n> --add-label ci`. Rationale: ci.yml.
+    types: [labeled]
+    branches: [main]
+    paths:
+      - "actions/**"
+      - "tests/action-smoke/**"
+      - ".github/workflows/action-smoke.yml"
+  schedule:
+    # Weekly: the runner images and the npm-published nub move under the action.
+    - cron: "50 10 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: install + PATH (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: setup-node (latest)
+        id: nub
+        uses: ./actions/setup-node
+        with:
+          nub-version: latest
+
+      - name: nub is on PATH and output is a bare v<semver>
+        shell: bash
+        run: |
+          set -euo pipefail
+          nub --version
+          out="${{ steps.nub.outputs.nub-version }}"
+          echo "nub-version output: $out"
+          [[ "$out" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]] || { echo "::error::bad nub-version output: $out"; exit 1; }
+
+      - name: pinned nub-version installs exactly
+        id: pinned
+        uses: ./actions/setup-node
+        with:
+          nub-version: 0.0.47
+      - shell: bash
+        run: |
+          [[ "${{ steps.pinned.outputs.nub-version }}" == "v0.0.47" ]] || { echo "::error::expected v0.0.47, got ${{ steps.pinned.outputs.nub-version }}"; exit 1; }
+
+  # Differential PATH parity: after setup-node with an explicit node-version, bare
+  # node/npm/npx/corepack in a LATER step must resolve to that version — the
+  # headline drop-in promise. We assert the MAJOR (setup-node and nub may resolve
+  # a different patch of 20.x, so byte-equality would flake) and confirm the
+  # global PATH was actually re-pointed (not the runner's preinstalled default).
+  # A setup-node control job runs the identical assertions as a sanity reference.
+  path-parity:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: bare node/npm/npx == specified version (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: ./actions/setup-node
+        with:
+          node-version: "20"
+          shim: false   # the strict contract: npm IS the fronted Node's own; shim-default covers the shims
+      - name: bare executables resolve to the specified Node 20.x
+        shell: bash
+        run: |
+          set -euo pipefail
+          node_path="$(command -v node)"
+          npm_path="$(command -v npm)"
+          echo "node: $node_path / npm: $npm_path"
+          nv="$(node -p 'process.versions.node')"
+          echo "node -v: $nv / npm -v: $(npm -v) / npx -v: $(npx -v)"
+          # 1. bare node is the specified MAJOR (patch may differ from setup-node's).
+          [[ "$nv" == 20.* ]] || { echo "::error::bare node is $nv, expected 20.x"; exit 1; }
+          # 2. node AND npm must resolve INSIDE the SAME fronted dir — proves the
+          #    PATH front (not a coincidental runner default that also happens to be 20).
+          node_dir="$(dirname "$node_path")"
+          npm_dir="$(dirname "$npm_path")"
+          [[ "$node_dir" == "$npm_dir" ]] || { echo "::error::node ($node_dir) and npm ($npm_dir) resolve to different dirs"; exit 1; }
+          # 3. npm itself runs ON the fronted Node (npm reports its own Node).
+          npm_node="$(npm version --json | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).node')"
+          [[ "$npm_node" == 20.* ]] || { echo "::error::npm runs on Node $npm_node, expected 20.x"; exit 1; }
+          # 4. npm i -g global-bin parity: a globally-installed CLI lands on PATH
+          #    (the fronted Node's global prefix bin == the fronted dir for a
+          #    self-contained tarball).
+          npm i -g cowsay@1.6.0 >/dev/null 2>&1
+          command -v cowsay >/dev/null 2>&1 || { echo "::error::npm i -g did not put cowsay on PATH (global prefix bin not fronted)"; exit 1; }
+          # 5. corepack is bundled but may be disabled on newer Node; presence-only, not a hard gate.
+          if command -v corepack >/dev/null 2>&1; then echo "corepack: $(corepack --version 2>/dev/null || echo '(disabled)')"; fi
+          echo "PATH parity OK"
+
+  path-parity-control:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: setup-node control — bare node == 20.x (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "20"
+      - name: reference assertions (identical to the setup-node job)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "which node: $(command -v node)"
+          nv="$(node -p 'process.versions.node')"
+          echo "node: $nv / npm: $(npm -v) / npx: $(npx -v)"
+          [[ "$nv" == 20.* ]] || { echo "::error::control: bare node is $nv, expected 20.x"; exit 1; }
+          echo "setup-node control OK"
+
+  bare-run:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: nub provisions Node + installs unaided (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: ./actions/setup-node
+      - name: tiny fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p smoke && cd smoke
+          echo "20" > .node-version
+          echo '{"name":"smoke","private":true,"dependencies":{"left-pad":"1.3.0"}}' > package.json
+          echo "console.log('ok')" > main.ts
+          nub install
+          nub main.ts
+
+  pre-provision:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: node-version pre-provision + output (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - name: fixture pinned to 20
+        shell: bash
+        # The action's Pre-provision step resolves the project pin (nub node which)
+        # at the checkout root, where a consumer's pin lives — so the fixture pin
+        # must sit there too, not under a subdir.
+        run: echo "20" > .node-version
+      - uses: ./actions/setup-node
+        id: nub
+        with:
+          node-version: "20"
+      - shell: bash
+        run: |
+          set -euo pipefail
+          nub node ls
+          echo "node-version output: ${{ steps.nub.outputs.node-version }}"
+          [[ "${{ steps.nub.outputs.node-version }}" == 20* ]] || { echo "::error::expected resolved pin 20.x"; exit 1; }
+
+  eager-provision:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: eager provision (no input) installs the project pin (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - name: fixture pinned to 20 (no setup-node input)
+        shell: bash
+        # The eager-provision step resolves the project's own pin off disk at the
+        # checkout root with NO node-version input — so the pin must live there.
+        run: echo "20" > .node-version
+      - uses: ./actions/setup-node
+        id: nub
+      - name: pinned Node is provisioned + emitted as output
+        shell: bash
+        run: |
+          set -euo pipefail
+          nub node ls
+          # Eager provision (no input) must have installed the project's pinned 20.x.
+          nub node ls | grep -E '(^|[^0-9])20\.' || { echo "::error::eager provision did not install the pinned Node 20.x"; exit 1; }
+          nv="$(node -p 'process.versions.node')"
+          [[ "$nv" == 20.* ]] || { echo "::error::bare node is $nv, expected the fronted pin 20.x"; exit 1; }
+          echo "node-version output: ${{ steps.nub.outputs.node-version }}"
+          [[ "${{ steps.nub.outputs.node-version }}" == 20* ]] || { echo "::error::expected resolved pin 20.x, got ${{ steps.nub.outputs.node-version }}"; exit 1; }
+
+  no-pin:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: no project pin does not fail the action (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - name: fixture with NO Node pin
+        shell: bash
+        # A package.json at the checkout root with no engines/devEngines and no
+        # .node-version/.nvmrc: nothing is installed, the runner's Node stays,
+        # and the output reports it (as actions/setup-node does with no input).
+        run: echo '{"name":"nopin","private":true}' > package.json
+      - uses: ./actions/setup-node
+        id: nub
+        # If the provision step errored on the no-pin case the job would fail here.
+      - name: the runner's Node stays and is the node-version output
+        shell: bash
+        run: |
+          set -euo pipefail
+          nv="$(node -p 'process.versions.node')"
+          out="${{ steps.nub.outputs.node-version }}"
+          echo "node on PATH: $(command -v node) ($nv) / node-version output: '$out'"
+          [[ "$out" == "$nv" ]] || { echo "::error::node-version output '$out' is not the Node on PATH ($nv)"; exit 1; }
+          [[ "$(command -v node)" != *"/nub/"* ]] || { echo "::error::a nub-provisioned Node was fronted with no pin: $(command -v node)"; exit 1; }
+
+  cache:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: cache round-trip (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - name: fixture
+        shell: bash
+        run: |
+          mkdir -p smoke && cd smoke
+          echo '{"name":"c","private":true,"dependencies":{"left-pad":"1.3.0"}}' > package.json
+      - name: setup-node with cache
+        id: c1
+        uses: ./actions/setup-node
+        with:
+          cache: "true"
+          cache-dependency-path: smoke/package.json
+      - shell: bash
+        working-directory: smoke
+        run: |
+          echo "cache-hit: ${{ steps.c1.outputs.cache-hit }}"
+          time nub install
+      # NOTE: a true warm-hit assertion needs a second run — within one job
+      # actions/cache won't re-restore. The cache is saved at job end; a re-run
+      # of this workflow exercises the warm path. Informational here.
+
+  cache-default-on:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: caching auto-enables by default on a lockfile project (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - name: lockfile fixture (no cache input)
+        shell: bash
+        # A lockfile at the checkout root with NO cache input must auto-enable
+        # caching, mirroring setup-node's default-on behavior.
+        run: |
+          echo '{"name":"d","private":true}' > package.json
+          echo '{}' > package-lock.json
+      - uses: ./actions/setup-node
+        id: nub
+        # deliberately no `cache:` / `package-manager-cache:` input
+      - name: caching is active (caching-enabled output is true)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ce="${{ steps.nub.outputs.caching-enabled }}"
+          ch="${{ steps.nub.outputs.cache-hit }}"
+          echo "caching-enabled: '${ce}' / cache-hit: '${ch}'"
+          # cache-hit is empty on a first-run full miss even when caching is active
+          # (actions/cache semantics), so assert on caching-enabled instead.
+          [ "$ce" = "true" ] || { echo "::error::expected caching auto-enabled (caching-enabled=true), got '${ce}'"; exit 1; }
+          echo "caching auto-enabled by default — OK"
+
+  cache-disable:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: package-manager-cache=false disables caching (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - name: lockfile fixture (would auto-enable)
+        shell: bash
+        run: |
+          echo '{"name":"d","private":true}' > package.json
+          echo '{}' > package-lock.json
+      - uses: ./actions/setup-node
+        id: nub
+        with:
+          package-manager-cache: "false"
+      - name: caching is inactive (caching-enabled output is false)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ce="${{ steps.nub.outputs.caching-enabled }}"
+          echo "caching-enabled: '${ce}'"
+          [ "$ce" = "false" ] || { echo "::error::expected caching disabled (caching-enabled=false), got '${ce}'"; exit 1; }
+          echo "caching disabled by package-manager-cache: false — OK"
+
+  auth-npmrc:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: registry .npmrc shape (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: ./actions/setup-node
+        with:
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@nubjs"
+          always-auth: "true"
+      - name: assert .npmrc contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          npmrc="${RUNNER_TEMP}/.npmrc"
+          echo "NPM_CONFIG_USERCONFIG=${NPM_CONFIG_USERCONFIG:-<unset>}"
+          [ "${NPM_CONFIG_USERCONFIG:-}" = "$npmrc" ] || { echo "::error::NPM_CONFIG_USERCONFIG not exported to $npmrc"; exit 1; }
+          cat "$npmrc"
+          grep -q '@nubjs:registry=https://npm.pkg.github.com/' "$npmrc"
+          grep -q '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}' "$npmrc"
+          grep -q 'always-auth=true' "$npmrc"
+
+  auth-npmrc-bare-scope:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: bare scope + path registry .npmrc shape (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: ./actions/setup-node
+        with:
+          # bare scope (no leading @, mixed case) against a path-bearing private
+          # registry — exercises authutil's scope normalization (prepend @,
+          # lowercase whole) and full-path auth key.
+          registry-url: "https://reg.example.com/npm/"
+          scope: "My-Org"
+      - name: assert normalized scope + path-preserving auth key
+        shell: bash
+        run: |
+          set -euo pipefail
+          npmrc="${RUNNER_TEMP}/.npmrc"
+          cat "$npmrc"
+          # bare "My-Org" -> "@my-org" (prepend @, lowercase whole)
+          grep -q '@my-org:registry=https://reg.example.com/npm/' "$npmrc"
+          # auth key keeps the full registry path, not just the host
+          grep -q '//reg.example.com/npm/:_authToken=${NODE_AUTH_TOKEN}' "$npmrc"
+
+  range:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: nub-version semver range resolves to its highest release (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: ./actions/setup-node
+        id: nub
+        with:
+          nub-version: "^0.8.0"
+      - shell: bash
+        run: |
+          set -euo pipefail
+          out="${{ steps.nub.outputs.nub-version }}"
+          [[ "$out" =~ ^v0\.8\.[0-9]+ ]] || { echo "::error::expected a v0.8.x for ^0.8.0, got $out"; exit 1; }
+
+  shim-default:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: shims by default — pinned pnpm runs, npm falls through to the fronted Node (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: ./actions/setup-node
+        with:
+          node-version: "20"
+      - name: npm resolves to the shim dir and runs the fronted Node 20's own npm
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm_path="$(command -v npm)"
+          echo "npm: $npm_path / node: $(command -v node) $(node --version)"
+          [[ "$npm_path" == *shims* ]] || { echo "::error::npm is not the nub shim: $npm_path"; exit 1; }
+          # An unpinned checkout falls through to the first npm after the shim
+          # dir on PATH, which is the fronted Node 20's, not the runner's.
+          npm_node="$(npm version --json | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).node')"
+          [[ "$npm_node" == 20.* ]] || { echo "::error::npm through the shim runs on Node $npm_node, expected the fronted 20.x"; exit 1; }
+      - name: a project pinning pnpm@10.15.1 runs that pnpm through the shim
+        shell: bash
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/pinned" && mkdir -p "$d" && cd "$d"
+          printf '{ "name": "pinned", "private": true, "packageManager": "pnpm@10.15.1" }\n' > package.json
+          v="$(pnpm --version)"
+          echo "pnpm --version: $v"
+          [[ "$v" == "10.15.1" ]] || { echo "::error::expected the pinned pnpm 10.15.1, got $v"; exit 1; }
+
+  shim-off:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: shim false leaves the runner's package managers alone
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: ./actions/setup-node
+        with:
+          shim: false
+      - shell: bash
+        run: |
+          set -euo pipefail
+          echo "npm: $(command -v npm)"
+          [[ "$(command -v npm)" != *shims* ]] || { echo "::error::npm resolves to nub's shims with shim: false"; exit 1; }
+          if command -v pnpm >/dev/null 2>&1; then echo "::error::pnpm on PATH with shim: false, on a runner that ships none"; exit 1; fi
+
+  runner-node-kept:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: the runner's Node satisfies the pin — kept, nothing fetched (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - name: pin the runner's own Node major
+        id: before
+        shell: bash
+        run: |
+          set -euo pipefail
+          node -p 'process.versions.node.split(".")[0]' > .nvmrc
+          echo "pin: $(cat .nvmrc) / node: $(command -v node) $(node --version)"
+          echo "path=$(command -v node)" >> "$GITHUB_OUTPUT"
+          echo "version=$(node -p 'process.versions.node')" >> "$GITHUB_OUTPUT"
+      - uses: ./actions/setup-node
+        id: nub
+      - name: nothing fronted, nothing downloaded, node-version output is the runner's
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "node before: ${{ steps.before.outputs.path }} / after: $(command -v node)"
+          [[ "$(command -v node)" == "${{ steps.before.outputs.path }}" ]] || { echo "::error::node moved on PATH although the runner's satisfied the pin"; exit 1; }
+          [[ "${{ steps.nub.outputs.node-version }}" == "${{ steps.before.outputs.version }}" ]] || { echo "::error::node-version output '${{ steps.nub.outputs.node-version }}' is not the runner's ${{ steps.before.outputs.version }}"; exit 1; }
+          nub node ls
+          # Every version nub lists is the runner's own: nothing was downloaded.
+          if nub node ls | grep -v "${{ steps.before.outputs.version }}" | grep -qE '[0-9]+\.[0-9]+\.[0-9]+'; then echo "::error::nub node ls lists a downloaded Node"; exit 1; fi
+
+  multi-dep-path:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: newline-delimited cache-dependency-path keys the cache (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - run: |
+          printf '{ "name": "multi", "version": "1.0.0" }\n' > package.json
+          echo "${{ github.run_id }}" > run.txt
+      - uses: ./actions/setup-node
+        id: setup
+        with:
+          cache: true
+          cache-dependency-path: |
+            package.json
+            run.txt
+      - run: |
+          set -euo pipefail
+          [ "${{ steps.setup.outputs.caching-enabled }}" = "true" ] || { echo "::error::caching-enabled is '${{ steps.setup.outputs.caching-enabled }}'"; exit 1; }
+          echo "OK: a two-line cache-dependency-path reached the cache step"
+
+  additive:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: beside setup-node — nub install from package-lock.json (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "20"
+      # A pin that disagrees with setup-node: with provision-node left on, the
+      # action would front Node 22 over setup-node's 20 and the check below fails.
+      - run: echo 22 > .nvmrc
+        shell: bash
+      - uses: ./actions/setup-node
+        with:
+          provision-node: false
+      - name: nub installs the npm lockfile; bare node and npm stay 20.x for later steps
+        shell: bash
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/additive" && mkdir -p "$d/local-dep" && cd "$d"
+          cat > package.json <<'PKG'
+          { "name": "additive", "version": "1.0.0", "dependencies": { "local-dep": "file:local-dep" },
+            "scripts": { "hello": "node -e \"console.log(42)\"" } }
+          PKG
+          printf '{ "name": "local-dep", "version": "1.0.0" }\n' > local-dep/package.json
+          cat > package-lock.json <<'LOCK'
+          {
+            "name": "additive", "version": "1.0.0", "lockfileVersion": 3, "requires": true,
+            "packages": {
+              "": { "name": "additive", "version": "1.0.0", "dependencies": { "local-dep": "file:local-dep" } },
+              "local-dep": { "version": "1.0.0" },
+              "node_modules/local-dep": { "resolved": "local-dep", "link": true }
+            }
+          }
+          LOCK
+          nub install --frozen-lockfile
+          [ -f node_modules/.nub-engine ] || { echo "::error::nub install did not run on Nub's engine"; exit 1; }
+          [ -e node_modules/local-dep ] || { echo "::error::the file: dependency is not linked"; exit 1; }
+          nv="$(node -p 'process.versions.node')"
+          [[ "$nv" == 20.* ]] || { echo "::error::bare node is $nv, expected 20.x"; exit 1; }
+          out="$(npm run --silent hello)"
+          [[ "$out" == "42" ]] || { echo "::error::npm run hello printed '$out', expected 42"; exit 1; }
+          echo "additive OK: nub installed package-lock.json, node $nv, npm run works"
+
+  # ---- nubjs/action/install ----
+  # The outreach shape: setup-node untouched, cache: npm left in place, the
+  # npm ci line replaced by this action. setup-node's cache is forced to a
+  # miss so its post step meets an npm cache directory nub never wrote.
+  install-dropin:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: after setup-node with cache npm, in place of npm ci (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - run: echo "${{ github.run_id }}-${{ github.run_attempt }}" > tests/action-smoke/install/fixture/run.txt
+        shell: bash
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: tests/action-smoke/install/fixture/run.txt
+      - uses: ./actions/install
+        id: install
+        with:
+          working-directory: tests/action-smoke/install/fixture
+      - name: the lockfile is installed on nub's engine; bare node and npm are setup-node's
+        shell: bash
+        working-directory: tests/action-smoke/install/fixture
+        env:
+          OUT_NUB: ${{ steps.install.outputs.nub-version }}
+        run: |
+          set -euo pipefail
+          [[ "$OUT_NUB" == v* ]] || { echo "::error::nub-version output is '$OUT_NUB'"; exit 1; }
+          # nub's engine writes .modules.yaml; npm never does.
+          [ -f node_modules/.modules.yaml ] || { echo "::error::the install did not run on nub's engine"; exit 1; }
+          [ -e node_modules/local-dep ] || { echo "::error::the file: dependency is not linked"; exit 1; }
+          node -e "require('is-number')" || { echo "::error::is-number did not install"; exit 1; }
+          nv="$(node -p 'process.versions.node')"
+          [[ "$nv" == 20.* ]] || { echo "::error::bare node is $nv, expected setup-node's 20.x"; exit 1; }
+          out="$(npm run --silent hello)"
+          [[ "$out" == "42" ]] || { echo "::error::npm run hello printed '$out', expected 42"; exit 1; }
+          echo "OK: $OUT_NUB installed the lockfile, node $nv, npm run works"
+
+  install-not-frozen:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: frozen-lockfile false installs without a lockfile (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - run: rm tests/action-smoke/install/fixture/package-lock.json
+      - uses: ./actions/install
+        with:
+          working-directory: tests/action-smoke/install/fixture
+          frozen-lockfile: false
+          cache: false
+      - run: |
+          set -euo pipefail
+          cd tests/action-smoke/install/fixture
+          node -e "require('is-number')" || { echo "::error::is-number did not install"; exit 1; }
+          echo "OK"
+
+  # A pnpm lockfile, and the pinned pnpm provisioned for later steps by the
+  # shim: no pnpm/action-setup, no corepack.
+  install-pnpm:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: pnpm-lock.yaml, then the pinned pnpm through the shim (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "20"
+      - uses: ./actions/install
+        with:
+          working-directory: tests/action-smoke/install/fixture-pnpm
+          shim: true
+      - shell: bash
+        working-directory: tests/action-smoke/install/fixture-pnpm
+        run: |
+          set -euo pipefail
+          [ -f node_modules/.modules.yaml ] || { echo "::error::the install did not run on nub's engine"; exit 1; }
+          node -e "require('is-number')" || { echo "::error::is-number did not install"; exit 1; }
+          p="$(command -v pnpm)"
+          [[ "$p" == *nub*shims* ]] || { echo "::error::pnpm resolves to '$p', not nub's shim"; exit 1; }
+          v="$(pnpm --version)"
+          [[ "$v" == "10.15.1" ]] || { echo "::error::pnpm --version is $v, expected the pinned 10.15.1"; exit 1; }
+          out="$(pnpm run --silent hello)"
+          [[ "$out" == "42" ]] || { echo "::error::pnpm run hello printed '$out', expected 42"; exit 1; }
+          nv="$(node -p 'process.versions.node')"
+          [[ "$nv" == 20.* ]] || { echo "::error::bare node is $nv, expected setup-node's 20.x"; exit 1; }
+          echo "OK: pnpm-lock.yaml installed, pnpm $v via $p, node $nv"
+
+  # The store cache round-trips. A per-run file in the key makes the seed a
+  # miss and the second job an exact hit, whose install then runs offline.
+  install-cache-seed:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: cache seed, a miss (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - run: echo "${{ github.run_id }}-${{ github.run_attempt }}" > tests/action-smoke/install/fixture/run.txt
+      - uses: ./actions/install
+        id: install
+        with:
+          working-directory: tests/action-smoke/install/fixture
+          cache-dependency-path: |
+            tests/action-smoke/install/fixture/package-lock.json
+            tests/action-smoke/install/fixture/run.txt
+      - run: |
+          set -euo pipefail
+          [ "${{ steps.install.outputs.cache-hit }}" != "true" ] || { echo "::error::cache-hit is true on a fresh key"; exit 1; }
+          echo "OK: seeded"
+
+  install-cache-hit:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: cache hit, then an offline install from the restored store (ubuntu-latest)
+    needs: install-cache-seed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - run: echo "${{ github.run_id }}-${{ github.run_attempt }}" > tests/action-smoke/install/fixture/run.txt
+      - uses: ./actions/install
+        id: install
+        with:
+          working-directory: tests/action-smoke/install/fixture
+          args: --offline
+          cache-dependency-path: |
+            tests/action-smoke/install/fixture/package-lock.json
+            tests/action-smoke/install/fixture/run.txt
+      - run: |
+          set -euo pipefail
+          [ "${{ steps.install.outputs.cache-hit }}" = "true" ] || { echo "::error::cache-hit is '${{ steps.install.outputs.cache-hit }}', expected true"; exit 1; }
+          [ -f tests/action-smoke/install/fixture/node_modules/.modules.yaml ]
+          echo "OK: exact hit, offline install succeeded"
