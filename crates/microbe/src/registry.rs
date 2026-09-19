@@ -29,7 +29,30 @@ pub struct Manifest {
     pub cpu: Vec<String>,
     #[serde(rename = "hasInstallScript", default)]
     pub has_install_script: bool,
+    /// Names shipped inside this package's own tarball, so never fetched separately.
+    #[serde(rename = "bundleDependencies", alias = "bundledDependencies", default)]
+    pub bundle_dependencies: Bundled,
     pub dist: Dist,
+}
+
+/// `bundleDependencies` is a list of names, or `true` meaning every dependency.
+#[derive(Deserialize, Clone, Default)]
+#[serde(untagged)]
+pub enum Bundled {
+    #[default]
+    None,
+    All(bool),
+    Names(Vec<String>),
+}
+
+impl Bundled {
+    pub fn contains(&self, name: &str) -> bool {
+        match self {
+            Bundled::None => false,
+            Bundled::All(all) => *all,
+            Bundled::Names(names) => names.iter().any(|n| n == name),
+        }
+    }
 }
 
 #[derive(Deserialize, Clone)]

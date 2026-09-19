@@ -12,11 +12,15 @@
 //! 4. `wget` (busybox on Alpine).
 //!
 //! An embedder with its own HTTP client skips all of this by implementing [`Transport`].
+//! Every transport here is safe to call from many threads at once; the installer does.
 
 use crate::error::Error;
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 
 pub trait Transport: Send + Sync {
     /// Fetch `url` with the given `Accept` header. A non-2xx status is an error.
@@ -69,41 +73,36 @@ fn check_status(url: &str, status: u16) -> Result<(), Error> {
 }
 
 // ---------------------------------------------------------------------------------------
-// node: one child, many requests. Line-oriented protocol on its stdio — a request is
-// `<accept>\t<url>\n`; a reply is `<status> <length>\n` followed by exactly `length` body
-// bytes. Requests are serialised through the mutex, which is fine: installs are latency-
-// bound on the registry, not on local pipe throughput.
+// node: one child, many requests in flight. A request line is `<id>\t<accept>\t<url>\n`; a
+// reply is `<id> <status> <length>\n` followed by exactly `length` body bytes, written by the
+// child in a single write so replies never interleave. The child starts every fetch as it
+// arrives, so replies come back in completion order and a reader thread routes each to its
+// waiting caller. Node's undici pool then gives connection reuse for free.
 
 const NODE_SCRIPT: &str = r#"
 if (typeof fetch !== 'function') { process.stdout.write('NOFETCH\n'); process.exit(0); }
 process.stdout.write('READY\n');
 const rl = require('readline').createInterface({ input: process.stdin });
-const queue = []; let busy = false;
-async function pump() {
-  if (busy) return; busy = true;
-  while (queue.length) {
-    const line = queue.shift(); const i = line.indexOf('\t');
-    const accept = line.slice(0, i), url = line.slice(i + 1);
-    try {
-      const r = await fetch(url, { headers: { accept } });
-      const b = Buffer.from(await r.arrayBuffer());
-      process.stdout.write(r.status + ' ' + b.length + '\n'); process.stdout.write(b);
-    } catch (e) { process.stdout.write('0 0\n'); }
-  }
-  busy = false;
-}
-rl.on('line', l => { queue.push(l); pump(); });
+rl.on('line', async (line) => {
+  const [id, accept, url] = line.split('\t');
+  let status = 0, body = Buffer.alloc(0);
+  try {
+    const r = await fetch(url, { headers: { accept } });
+    status = r.status; body = Buffer.from(await r.arrayBuffer());
+  } catch (e) {}
+  process.stdout.write(Buffer.concat([Buffer.from(id + ' ' + status + ' ' + body.length + '\n'), body]));
+});
 rl.on('close', () => process.exit(0));
 "#;
 
-pub struct NodeFetch {
-    inner: Mutex<NodeChild>,
-}
+type Reply = Result<(u16, Vec<u8>), Error>;
+type Pending = Arc<Mutex<HashMap<u64, Sender<Reply>>>>;
 
-struct NodeChild {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+pub struct NodeFetch {
+    child: Mutex<Child>,
+    stdin: Mutex<ChildStdin>,
+    pending: Pending,
+    next_id: AtomicU64,
 }
 
 impl NodeFetch {
@@ -125,35 +124,65 @@ impl NodeFetch {
             let _ = child.wait();
             return None;
         }
+        let pending: Pending = Arc::default();
+        let routes = Arc::clone(&pending);
+        std::thread::spawn(move || Self::route(stdout, routes));
         Some(NodeFetch {
-            inner: Mutex::new(NodeChild {
-                child,
-                stdin,
-                stdout,
-            }),
+            child: Mutex::new(child),
+            stdin: Mutex::new(stdin),
+            pending,
+            next_id: AtomicU64::new(1),
         })
+    }
+
+    /// Reader thread: deliver each reply to its caller. On EOF every waiter gets an error,
+    /// which is how a crashed child surfaces instead of hanging its callers.
+    fn route(mut stdout: BufReader<ChildStdout>, pending: Pending) {
+        loop {
+            let mut header = String::new();
+            if matches!(stdout.read_line(&mut header), Ok(0) | Err(_)) {
+                break;
+            }
+            let mut parts = header.split_whitespace();
+            let parsed = (
+                parts.next().and_then(|s| s.parse::<u64>().ok()),
+                parts.next().and_then(|s| s.parse::<u16>().ok()),
+                parts.next().and_then(|s| s.parse::<usize>().ok()),
+            );
+            let (Some(id), Some(status), Some(len)) = parsed else {
+                break;
+            };
+            let mut body = vec![0; len];
+            if stdout.read_exact(&mut body).is_err() {
+                break;
+            }
+            let waiter = pending.lock().ok().and_then(|mut p| p.remove(&id));
+            if let Some(tx) = waiter {
+                let _ = tx.send(Ok((status, body)));
+            }
+        }
+        if let Ok(mut p) = pending.lock() {
+            for (_, tx) in p.drain() {
+                let _ = tx.send(Err(Error::Transport("node transport exited".into())));
+            }
+        }
     }
 }
 
 impl Transport for NodeFetch {
     fn get(&self, url: &str, accept: &str) -> Result<Vec<u8>, Error> {
-        let mut n = self
-            .inner
-            .lock()
-            .map_err(|_| Error::Transport("node transport poisoned".into()))?;
-        let io = |e: std::io::Error| Error::Transport(format!("node: {e}"));
-        writeln!(n.stdin, "{accept}\t{url}").map_err(io)?;
-        let mut header = String::new();
-        n.stdout.read_line(&mut header).map_err(io)?;
-        let mut parts = header.split_whitespace();
-        let (Some(status), Some(len)) = (
-            parts.next().and_then(|s| s.parse::<u16>().ok()),
-            parts.next().and_then(|s| s.parse::<usize>().ok()),
-        ) else {
-            return Err(Error::Transport(format!("node: bad reply {header:?}")));
-        };
-        let mut body = vec![0; len];
-        n.stdout.read_exact(&mut body).map_err(io)?;
+        let poisoned = || Error::Transport("node transport poisoned".into());
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.pending.lock().map_err(|_| poisoned())?.insert(id, tx);
+        {
+            let mut stdin = self.stdin.lock().map_err(|_| poisoned())?;
+            writeln!(stdin, "{id}\t{accept}\t{url}")
+                .map_err(|e| Error::Transport(format!("node: {e}")))?;
+        }
+        let (status, body) = rx
+            .recv()
+            .map_err(|_| Error::Transport("node transport exited".into()))??;
         if status == 0 {
             return Err(Error::Transport(format!("node: fetch failed for {url}")));
         }
@@ -162,10 +191,12 @@ impl Transport for NodeFetch {
     }
 }
 
-impl Drop for NodeChild {
+impl Drop for NodeFetch {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Ok(mut child) = self.child.lock() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
@@ -228,7 +259,7 @@ impl Transport for Wget {
 }
 
 // ---------------------------------------------------------------------------------------
-// In-binary TLS (opt-in).
+// In-binary TLS (opt-in). ureq's Agent pools connections and is safe to share across threads.
 
 #[cfg(feature = "tls")]
 mod builtin {
@@ -286,6 +317,24 @@ mod tests {
     #[test]
     fn missing_programs_are_reported_absent_not_as_errors() {
         assert!(!available("microbe-definitely-not-a-program"));
+    }
+
+    #[test]
+    fn node_transport_multiplexes_concurrent_requests() {
+        let Some(t) = NodeFetch::spawn() else { return };
+        // Eight failures racing through one child: every caller must get ITS reply back,
+        // whatever order the child finishes in, and none may hang.
+        std::thread::scope(|s| {
+            for i in 0..8 {
+                let t = &t;
+                s.spawn(move || {
+                    let err = t
+                        .get(&format!("https://registry.invalid/{i}"), "*/*")
+                        .unwrap_err();
+                    assert!(matches!(err, Error::Transport(_)), "{err}");
+                });
+            }
+        });
     }
 
     #[test]

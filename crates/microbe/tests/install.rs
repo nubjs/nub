@@ -14,6 +14,8 @@ struct Pkg {
     version: &'static str,
     deps: &'static [(&'static str, &'static str)],
     optional: &'static [(&'static str, &'static str)],
+    /// Mirror `optional` into `dependencies` too, as `npm publish` does on the registry.
+    mirror_optional: bool,
     bin: Option<&'static str>,
     os: &'static [&'static str],
     install_script: bool,
@@ -25,6 +27,7 @@ const fn pkg(name: &'static str, version: &'static str) -> Pkg {
         version,
         deps: &[],
         optional: &[],
+        mirror_optional: false,
         bin: None,
         os: &[],
         install_script: false,
@@ -51,7 +54,8 @@ impl FakeRegistry {
             urls.insert(tarball_url.clone(), tgz);
             let mut manifest = serde_json::json!({
                 "name": p.name, "version": p.version,
-                "dependencies": map(p.deps), "optionalDependencies": map(p.optional),
+                "dependencies": map(&[p.deps, if p.mirror_optional { p.optional } else { &[] }].concat()),
+                "optionalDependencies": map(p.optional),
                 "os": p.os, "hasInstallScript": p.install_script,
                 "dist": { "tarball": tarball_url, "integrity": integrity },
             });
@@ -288,6 +292,36 @@ fn optional_dependencies_skip_other_platforms_and_tolerate_failure() {
         "an unpublished optional dependency does not fail the install"
     );
     assert_eq!(installed.packages, 2);
+}
+
+#[test]
+fn optional_dependency_mirrored_into_dependencies_stays_optional() {
+    // The registry lists every optionalDependencies entry under dependencies as well. A
+    // platform package for another OS must still be skipped, and a missing one tolerated.
+    let other_os: &[&str] = if cfg!(target_os = "macos") {
+        &["linux"]
+    } else {
+        &["darwin"]
+    };
+    let reg = FakeRegistry::publish(&[
+        Pkg {
+            optional: &[("native-elsewhere", "1.0.0"), ("missing", "1.0.0")],
+            mirror_optional: true,
+            ..pkg("root", "1.0.0")
+        },
+        Pkg {
+            os: other_os,
+            ..pkg("native-elsewhere", "1.0.0")
+        },
+    ]);
+    let dir = tempdir();
+    let installed = microbe(&reg).install("root", dir.path()).unwrap();
+    let nm = dir.path().canonicalize().unwrap().join("node_modules");
+    assert!(
+        !nm.join("native-elsewhere").exists(),
+        "mirrored optional dependency was installed for the wrong os"
+    );
+    assert_eq!(installed.packages, 1);
 }
 
 #[test]

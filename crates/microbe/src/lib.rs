@@ -6,10 +6,12 @@
 //! # Ok::<(), microbe::Error>(())
 //! ```
 //!
-//! What it does: abbreviated packument fetch, semver selection, tarball download with
-//! integrity verification, extraction, and recursion over `dependencies` and platform-
-//! matching `optionalDependencies`. Packages land flat under `<dir>/node_modules/`, and a
-//! version conflict nests the loser under its dependent, exactly as Node's resolver expects.
+//! Two phases. **Plan**: a breadth-first walk over `dependencies` and platform-matching
+//! `optionalDependencies`, fetching each level's packuments in parallel and deciding every
+//! package's directory deterministically — flat under `<dir>/node_modules/`, with a version
+//! conflict nested under its dependent, exactly as Node's resolver expects. **Materialize**:
+//! every planned tarball downloaded, verified and extracted in parallel. The split is what
+//! makes the install latency-bound on the slowest single fetch rather than on their sum.
 //!
 //! What it deliberately does not do: run lifecycle scripts (reported instead, see
 //! [`Installed::skipped_install_scripts`]), honour `peerDependencies`, write a lockfile, keep
@@ -25,16 +27,20 @@ pub use error::Error;
 pub use transport::Transport;
 
 use registry::{Manifest, Packument};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub const DEFAULT_REGISTRY: &str = "https://registry.npmjs.org";
 const ABBREVIATED: &str = "application/vnd.npm.install-v1+json";
+/// Matches npm's and pnpm's default network concurrency.
+const DEFAULT_CONCURRENCY: usize = 16;
 
 pub struct Microbe {
     transport: Box<dyn Transport>,
     registry: String,
+    concurrency: usize,
     packuments: Mutex<HashMap<String, Packument>>,
 }
 
@@ -67,6 +73,7 @@ impl Microbe {
         Microbe {
             transport,
             registry: DEFAULT_REGISTRY.to_string(),
+            concurrency: DEFAULT_CONCURRENCY,
             packuments: Mutex::new(HashMap::new()),
         }
     }
@@ -76,82 +83,208 @@ impl Microbe {
         self
     }
 
+    /// Simultaneous registry requests, for both packuments and tarballs.
+    pub fn concurrency(mut self, n: usize) -> Self {
+        self.concurrency = n.max(1);
+        self
+    }
+
     /// `spec` is `name`, `name@tag`, `name@version` or `name@range` (`@scope/name@^1` works).
     /// `dir` is created if needed; packages go under `dir/node_modules/`.
     pub fn install(&self, spec: &str, dir: &Path) -> Result<Installed, Error> {
         let (name, range) = split_spec(spec);
         std::fs::create_dir_all(dir)?;
         let root = dir.canonicalize()?;
-        let mut state = State::default();
-        let (version, manifest, pkg_dir) = self.place(&root, &root, name, range, &mut state)?;
+        let plan = self.plan(&root, name, range)?;
+        let extracted = self.materialize(&plan)?;
+        let head = &plan.packages[0];
         let mut bins = BTreeMap::new();
-        for (cmd, rel) in manifest.bin.entries(name) {
-            let path = pkg_dir.join(rel);
+        for (cmd, rel) in head.manifest.bin.entries(name) {
+            let path = head.dir.join(rel);
             make_executable(&path)?;
             bins.insert(cmd, path);
         }
         Ok(Installed {
             name: name.to_string(),
-            version,
-            dir: pkg_dir,
+            version: head.version.clone(),
+            dir: head.dir.clone(),
             bins,
-            packages: state.packages,
-            skipped_install_scripts: state.skipped_install_scripts,
+            packages: extracted,
+            skipped_install_scripts: plan
+                .packages
+                .iter()
+                .filter(|p| p.manifest.has_install_script)
+                .map(|p| format!("{}@{}", p.name, p.version))
+                .collect(),
         })
     }
 
-    /// Install `name@range` for a dependent living at `parent`, then its own dependencies.
-    /// Returns the version, manifest, and directory used — whether newly extracted or an
-    /// already-present package that satisfies the range.
-    fn place(
-        &self,
-        root: &Path,
-        parent: &Path,
-        name: &str,
-        range: &str,
-        state: &mut State,
-    ) -> Result<(String, Manifest, PathBuf), Error> {
-        if let Some((version, dir)) = find_satisfying(root, parent, name, range)? {
-            let manifest = self.manifest_for(name, &version)?;
-            return Ok((version, manifest, dir));
+    /// Phase one. Breadth-first so that placement is deterministic: whichever version of a
+    /// name is reached first from the root takes the flat slot, and later conflicting
+    /// versions nest under their dependents. Each level's packuments are fetched together
+    /// before any of that level is placed.
+    fn plan(&self, root: &Path, name: &str, range: &str) -> Result<Plan, Error> {
+        let mut plan = Plan::default();
+        let mut level: VecDeque<Want> = VecDeque::from([Want {
+            parent: root.to_path_buf(),
+            name: name.to_string(),
+            range: range.to_string(),
+            optional: false,
+        }]);
+        while !level.is_empty() {
+            self.prefetch(level.iter().map(|w| w.name.as_str()));
+            let mut next = VecDeque::new();
+            for want in level.drain(..) {
+                if let Some(planned) = self.place(root, &mut plan, &want)? {
+                    next.extend(planned.wants());
+                }
+            }
+            level = next;
         }
-        let (version, manifest) = self.with_packument(name, |p| {
+        if plan.packages.is_empty() {
+            // The root was already present at a satisfying version; plan it anyway so the
+            // caller gets its manifest and bins.
+            let (version, dir) = plan
+                .satisfied(root, root, name, range)?
+                .expect("root either planned or found");
+            let manifest = self.manifest_for(name, &version)?;
+            plan.packages
+                .push(Planned::existing(name, version, dir, manifest));
+        }
+        Ok(plan)
+    }
+
+    /// Decide where one wanted package goes, or that nothing needs doing. Returns the new
+    /// entry when a fetch is needed so the caller can enqueue its dependencies.
+    fn place(&self, root: &Path, plan: &mut Plan, want: &Want) -> Result<Option<Planned>, Error> {
+        let Want {
+            parent,
+            name,
+            range,
+            optional,
+        } = want;
+        if plan.satisfied(root, parent, name, range)?.is_some() {
+            return Ok(None);
+        }
+        let picked = self.with_packument(name, |p| {
             registry::pick(p, name, range).map(|(v, m)| (v.to_string(), m.clone()))
-        })??;
+        });
+        let (version, manifest) = match picked {
+            Ok(Ok(vm)) => vm,
+            // An optional dependency may be unpublished, or fail to resolve; npm proceeds.
+            Err(_) | Ok(Err(_)) if *optional => return Ok(None),
+            Err(e) | Ok(Err(e)) => return Err(e),
+        };
+        if *optional && !registry::platform_allowed(&manifest) {
+            return Ok(None);
+        }
         let flat = root.join("node_modules").join(name);
-        let dir = if flat.exists() {
+        let dir = if plan.placed.contains_key(&flat) || installed_version(&flat)?.is_some() {
             parent.join("node_modules").join(name)
         } else {
             flat
         };
-        let tgz = self
-            .transport
-            .get(&manifest.dist.tarball, "application/octet-stream")?;
-        extract::verify(&tgz, &manifest.dist, name, &version)?;
-        extract::extract(&tgz, &dir)?;
-        state.packages += 1;
-        if manifest.has_install_script {
-            state
-                .skipped_install_scripts
-                .push(format!("{name}@{version}"));
-        }
-        for (dep, dep_range) in &manifest.dependencies {
-            self.place(root, &dir, dep, dep_range, state)?;
-        }
-        for (dep, dep_range) in &manifest.optional_dependencies {
-            // An optional dependency may legitimately be absent for this platform, or fail
-            // to install; npm proceeds without it either way.
-            if let Ok(true) = self.optional_allowed(dep, dep_range) {
-                let _ = self.place(root, &dir, dep, dep_range, state);
-            }
-        }
-        Ok((version, manifest, dir))
+        plan.placed.insert(dir.clone(), version.clone());
+        let planned = Planned {
+            name: name.clone(),
+            version,
+            dir,
+            manifest,
+            optional: *optional,
+            fetch: true,
+        };
+        plan.packages.push(planned.clone());
+        Ok(Some(planned))
     }
 
-    fn optional_allowed(&self, name: &str, range: &str) -> Result<bool, Error> {
-        self.with_packument(name, |p| {
-            registry::pick(p, name, range).map(|(_, m)| registry::platform_allowed(m))
-        })?
+    /// Phase two: every planned tarball, `concurrency` at a time. A failed optional package
+    /// is dropped and its directory removed; any other failure aborts the install.
+    fn materialize(&self, plan: &Plan) -> Result<usize, Error> {
+        let todo: Vec<&Planned> = plan.packages.iter().filter(|p| p.fetch).collect();
+        let next = AtomicUsize::new(0);
+        let extracted = AtomicUsize::new(0);
+        let failures: Mutex<Vec<Error>> = Mutex::new(Vec::new());
+        std::thread::scope(|s| {
+            for _ in 0..self.concurrency.min(todo.len()) {
+                s.spawn(|| {
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(p) = todo.get(i) else { break };
+                        match self.fetch_one(p) {
+                            Ok(()) => {
+                                extracted.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(_) if p.optional => {
+                                let _ = std::fs::remove_dir_all(&p.dir);
+                            }
+                            Err(e) => {
+                                if let Ok(mut f) = failures.lock() {
+                                    f.push(e);
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        let mut failures = failures.into_inner().unwrap_or_default();
+        if !failures.is_empty() {
+            return Err(failures.remove(0));
+        }
+        Ok(extracted.into_inner())
+    }
+
+    fn fetch_one(&self, p: &Planned) -> Result<(), Error> {
+        let tgz = self
+            .transport
+            .get(&p.manifest.dist.tarball, "application/octet-stream")?;
+        extract::verify(&tgz, &p.manifest.dist, &p.name, &p.version)?;
+        extract::extract(&tgz, &p.dir)
+    }
+
+    /// Fetch every packument in `names` that is not cached yet, `concurrency` at a time.
+    /// Failures are not cached: the later serial lookup refetches and reports them.
+    fn prefetch<'a>(&self, names: impl Iterator<Item = &'a str>) {
+        let missing: Vec<&str> = {
+            let Ok(cache) = self.packuments.lock() else {
+                return;
+            };
+            let mut seen = std::collections::HashSet::new();
+            names
+                .filter(|n| !cache.contains_key(*n) && seen.insert(*n))
+                .collect()
+        };
+        if missing.len() < 2 {
+            return;
+        }
+        let next = AtomicUsize::new(0);
+        let fetched: Mutex<Vec<(String, Packument)>> = Mutex::new(Vec::new());
+        std::thread::scope(|s| {
+            for _ in 0..self.concurrency.min(missing.len()) {
+                s.spawn(|| {
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(name) = missing.get(i) else { break };
+                        if let Ok(p) = self.fetch_packument(name)
+                            && let Ok(mut f) = fetched.lock()
+                        {
+                            f.push((name.to_string(), p));
+                        }
+                    }
+                });
+            }
+        });
+        if let Ok(mut cache) = self.packuments.lock() {
+            for (name, p) in fetched.into_inner().unwrap_or_default() {
+                cache.entry(name).or_insert(p);
+            }
+        }
+    }
+
+    fn fetch_packument(&self, name: &str) -> Result<Packument, Error> {
+        let url = format!("{}/{}", self.registry, name.replace('/', "%2f"));
+        let body = self.transport.get(&url, ABBREVIATED)?;
+        registry::parse(name, &body)
     }
 
     fn manifest_for(&self, name: &str, version: &str) -> Result<Manifest, Error> {
@@ -174,43 +307,108 @@ impl Microbe {
             .lock()
             .map_err(|_| Error::Transport("packument cache poisoned".into()))?;
         if !cache.contains_key(name) {
-            let url = format!("{}/{}", self.registry, name.replace('/', "%2f"));
-            let body = self.transport.get(&url, ABBREVIATED)?;
-            cache.insert(name.to_string(), registry::parse(name, &body)?);
+            let p = self.fetch_packument(name)?;
+            cache.insert(name.to_string(), p);
         }
         Ok(f(&cache[name]))
     }
 }
 
-#[derive(Default)]
-struct State {
-    packages: usize,
-    skipped_install_scripts: Vec<String>,
+/// One dependency edge waiting to be placed.
+struct Want {
+    parent: PathBuf,
+    name: String,
+    range: String,
+    optional: bool,
 }
 
-/// Walk from the dependent's directory up to the install root looking for an installed
-/// `name` that satisfies `range` — Node's own resolution order, so whatever is found here is
-/// what `require` will find too.
-fn find_satisfying(
-    root: &Path,
-    parent: &Path,
-    name: &str,
-    range: &str,
-) -> Result<Option<(String, PathBuf)>, Error> {
-    let mut dir = Some(parent);
-    while let Some(d) = dir {
-        let candidate = d.join("node_modules").join(name);
-        if let Some(version) = installed_version(&candidate)?
-            && registry::satisfies(&version, range)
-        {
-            return Ok(Some((version, candidate)));
+#[derive(Clone)]
+struct Planned {
+    name: String,
+    version: String,
+    dir: PathBuf,
+    manifest: Manifest,
+    optional: bool,
+    /// False for a package already on disk at a satisfying version.
+    fetch: bool,
+}
+
+impl Planned {
+    fn existing(name: &str, version: String, dir: PathBuf, manifest: Manifest) -> Self {
+        Planned {
+            name: name.to_string(),
+            version,
+            dir,
+            manifest,
+            optional: false,
+            fetch: false,
         }
-        if d == root {
-            break;
-        }
-        dir = d.parent();
     }
-    Ok(None)
+
+    /// The edges this package adds to the next level. A name listed under
+    /// `optionalDependencies` is optional even when it also appears under `dependencies`,
+    /// because `npm publish` mirrors it there; a bundled name ships inside the tarball.
+    fn wants(&self) -> Vec<Want> {
+        let m = &self.manifest;
+        let bundled = |n: &str| m.bundle_dependencies.contains(n);
+        let want = |n: &String, r: &String, optional: bool| Want {
+            parent: self.dir.clone(),
+            name: n.clone(),
+            range: r.clone(),
+            optional,
+        };
+        m.dependencies
+            .iter()
+            .filter(|(n, _)| !m.optional_dependencies.contains_key(*n) && !bundled(n))
+            .map(|(n, r)| want(n, r, false))
+            .chain(
+                m.optional_dependencies
+                    .iter()
+                    .filter(|(n, _)| !bundled(n))
+                    .map(|(n, r)| want(n, r, true)),
+            )
+            .collect()
+    }
+}
+
+#[derive(Default)]
+struct Plan {
+    /// In placement order; the first entry is the requested package.
+    packages: Vec<Planned>,
+    /// Directory → version, for every package this plan will produce.
+    placed: HashMap<PathBuf, String>,
+}
+
+impl Plan {
+    /// Walk from the dependent's directory up to the install root looking for `name` at a
+    /// version satisfying `range`, in the plan first and then on disk — Node's own resolution
+    /// order, so whatever is found here is what `require` will find too.
+    fn satisfied(
+        &self,
+        root: &Path,
+        parent: &Path,
+        name: &str,
+        range: &str,
+    ) -> Result<Option<(String, PathBuf)>, Error> {
+        let mut dir = Some(parent);
+        while let Some(d) = dir {
+            let candidate = d.join("node_modules").join(name);
+            let version = match self.placed.get(&candidate) {
+                Some(v) => Some(v.clone()),
+                None => installed_version(&candidate)?,
+            };
+            if let Some(v) = version
+                && registry::satisfies(&v, range)
+            {
+                return Ok(Some((v, candidate)));
+            }
+            if d == root {
+                break;
+            }
+            dir = d.parent();
+        }
+        Ok(None)
+    }
 }
 
 fn installed_version(pkg_dir: &Path) -> Result<Option<String>, Error> {
