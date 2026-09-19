@@ -4393,6 +4393,63 @@ snapshots:
 }
 
 #[test]
+fn parse_keeps_scoped_url_tarball_dep_of_a_url_tarball_package() {
+    // `next` from a preview-build URL depends on `@next/env` from a
+    // sibling URL. The `@` of the scope inside the dep value is not an
+    // npm-alias separator; reading it as one invented the alias
+    // `@next/env@next/env` and failed the install with "npm-alias
+    // references missing package".
+    let base = "https://vercel-packages.vercel.app/next/commits/7b58e58";
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &path,
+        format!(
+            r#"
+lockfileVersion: '9.0'
+
+importers:
+  .:
+    dependencies:
+      next:
+        specifier: {base}/next
+        version: {base}/next
+
+packages:
+  '@next/env@{base}/@next/env':
+    resolution: {{integrity: sha512-env, tarball: {base}/@next/env}}
+    version: 16.4.0-preview
+  next@{base}/next:
+    resolution: {{integrity: sha512-next, tarball: {base}/next}}
+    version: 16.4.0-preview
+
+snapshots:
+  '@next/env@{base}/@next/env': {{}}
+  next@{base}/next:
+    dependencies:
+      '@next/env': {base}/@next/env
+"#
+        ),
+    )
+    .unwrap();
+
+    let graph = parse(&path).unwrap();
+    let next = graph
+        .packages
+        .values()
+        .find(|p| p.name == "next")
+        .expect("next entry");
+    let env_value = next.dependencies.get("@next/env").expect("@next/env edge");
+    let env_key = format!("@next/env@{env_value}");
+    let env = graph
+        .packages
+        .get(&env_key)
+        .unwrap_or_else(|| panic!("edge {env_key} resolves to a package"));
+    assert_eq!(env.name, "@next/env");
+    assert_eq!(env.alias_of, None);
+}
+
+#[test]
 fn git_resolution_integrity_roundtrips() {
     let sha = "abcdef0123456789abcdef0123456789abcdef01";
     let integrity = "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==";

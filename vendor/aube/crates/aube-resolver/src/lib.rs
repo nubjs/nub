@@ -385,3 +385,6 @@ impl ResolveTask {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod remote_tarball_tests;
