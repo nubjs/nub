@@ -28,6 +28,35 @@ fn validate_tarball_url(client: &RegistryClient, url: &str) -> Result<(), Error>
 }
 
 impl RegistryClient {
+    /// Read at most `max_bytes` from the start of a tarball body, then
+    /// drop the connection. npm-packed tarballs put `package.json`
+    /// first, so the prefix is enough to read a manifest without
+    /// downloading the payload — the resolver uses it to platform-check
+    /// URL-tarball optional deps (a `@next/swc-*` binary is ~30 MiB,
+    /// its manifest a few hundred bytes). Single attempt, no retries:
+    /// callers treat any error as "fetch it in full instead".
+    pub async fn fetch_tarball_prefix(
+        &self,
+        url: &str,
+        max_bytes: usize,
+    ) -> Result<bytes::Bytes, Error> {
+        validate_tarball_url(self, url)?;
+        let mut resp = self
+            .authed_tarball_get(url, url)
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
+            .send()
+            .await?
+            .error_for_status()?;
+        let mut buf = bytes::BytesMut::with_capacity(max_bytes.min(64 * 1024));
+        while buf.len() < max_bytes
+            && let Some(chunk) = resp.chunk().await?
+        {
+            let take = chunk.len().min(max_bytes - buf.len());
+            buf.extend_from_slice(&chunk[..take]);
+        }
+        Ok(buf.freeze())
+    }
+
     /// Download a tarball and return the bytes.
     ///
     /// Emits a `fetchMinSpeedKiBps` warning when the end-to-end average

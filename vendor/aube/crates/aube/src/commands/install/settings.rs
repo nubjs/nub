@@ -1257,9 +1257,15 @@ pub(crate) fn configure_resolver(
         )
     );
     let supported_architectures = if writes_cross_platform_lock {
+        // The lists ride along for the one resolve-time decision that
+        // still needs the real target: whether to download an optional
+        // URL-tarball dep, which (unlike a registry package) has no
+        // packument to read its platform from.
         aube_resolver::SupportedArchitectures {
+            os: sup_os,
+            cpu: sup_cpu,
+            libc: sup_libc,
             accept_all: true,
-            ..Default::default()
         }
     } else {
         aube_resolver::SupportedArchitectures {
