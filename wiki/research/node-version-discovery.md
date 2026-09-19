@@ -264,7 +264,6 @@ What this document settles: the pin-file priority order, the ordering of the dis
 - **Compat mode still discovers.** Discovery is CLI, not runtime.
 
 ## Changelog
-- 2026-09-19 — Alias pins resolve against the cached release index on the offline discovery path; the codename table this section described was never the shipped mechanism.
 
 Every revision to this document, with the date and what changed.
 
@@ -274,3 +273,4 @@ Every revision to this document, with the date and what changed.
 - 2026-09-02 — Recorded that an explicit binary resolving to Nub's own `node` shim is refused rather than resolved, which previously recursed without terminating.
 - 2026-09-02 — Recorded the scope of a failing `nodeExecutable` command: it refuses a run, while the version-store verbs continue.
 - 2026-09-01 — Recorded the explicit-binary layer above the pin chain: `NODE_EXECUTABLE`, and the `nub.jsonc` `nodeExecutable` field with its `$(command)` form, lazy resolution, two anchors, and disagreement reporting. The note that Volta and mise participate only through `PATH` was true when written and is now superseded — a command can delegate to either.
+- 2026-09-19 — Alias pins resolve against the cached release index on the offline discovery path; the codename table this section described was never the shipped mechanism.
