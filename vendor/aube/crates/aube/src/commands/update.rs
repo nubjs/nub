@@ -597,6 +597,7 @@ async fn run_inner(
                 existing.as_ref(),
                 &existing_importers,
                 &cwd,
+                no_save,
             )
             .await?
             {
@@ -1649,6 +1650,7 @@ async fn pick_update_rich(
     existing: Option<&aube_lockfile::LockfileGraph>,
     existing_importers: &[&str],
     cwd: &std::path::Path,
+    no_save: bool,
 ) -> miette::Result<RichPick> {
     if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
         return Err(miette!(
@@ -1699,14 +1701,19 @@ async fn pick_update_rich(
         // `current`, and an `npm:` alias is reduced to its range half so the
         // ungated `wanted_version` fallback can parse it. An explicit CLI spec
         // is never widened: the user typed that range.
+        //
+        // `--no-save` keeps the literal manifest range authoritative for the
+        // resolver (explicit targets never reach `resolver_manifest`), so a
+        // cell may only show what that range reaches: no widening, no CLI
+        // spec, and no `latest` cell below. Anything else would display a
+        // version the run then declines to install.
+        let manifest_spec = specifiers
+            .get(key.as_str())
+            .map(String::as_str)
+            .unwrap_or("");
         let (basis, pinned) = match explicit_specs.get(key.as_str()) {
-            Some(explicit) => (alias_range(explicit).to_string(), false),
-            None => picker_range_basis(
-                specifiers
-                    .get(key.as_str())
-                    .map(String::as_str)
-                    .unwrap_or(""),
-            ),
+            Some(explicit) if !no_save => (alias_range(explicit).to_string(), false),
+            _ => picker_range_basis(manifest_spec, !no_save),
         };
         let spec = basis.as_str();
         // The in-range cell is gated for the same reason the `latest` cell is,
@@ -1745,14 +1752,10 @@ async fn pick_update_rich(
         // non-interactive guard above.
         let gated_latest =
             super::outdated::latest_pick(packument, &real_name, gate.as_ref(), &current);
-        let registry_latest = gated_latest.as_deref();
+        let registry_latest = gated_latest.as_deref().filter(|_| !no_save);
         // The displayed spec is always the MANIFEST's (the dim annotation
         // answers "what does package.json say today"), even when an
         // explicit CLI spec drives the targets.
-        let manifest_spec = specifiers
-            .get(key.as_str())
-            .map(String::as_str)
-            .unwrap_or("");
         if let Some(row) = update_picker::build_row(
             key,
             dep_bucket(manifest, key),
@@ -2579,9 +2582,12 @@ fn alias_range(spec: &str) -> &str {
 /// yarn's `upgrade-interactive` applies. The manifest keeps the pin: the
 /// pick is applied as `<pkg>@<version>` and `rewrite_specifier` carries the
 /// original's empty prefix onto the new version.
-fn picker_range_basis(spec: &str) -> (String, bool) {
+///
+/// `widen == false` (`--no-save`) returns the literal range: that run can
+/// apply nothing the manifest spec doesn't already reach.
+fn picker_range_basis(spec: &str, widen: bool) -> (String, bool) {
     match exact_pin_version(spec) {
-        Some(pin) if node_semver::Version::parse(pin).is_ok() => (format!("^{pin}"), true),
+        Some(pin) if widen && node_semver::Version::parse(pin).is_ok() => (format!("^{pin}"), true),
         _ => (alias_range(spec).to_string(), false),
     }
 }
@@ -2592,24 +2598,26 @@ mod tests {
 
     #[test]
     fn picker_range_basis_widens_pins_and_strips_aliases() {
-        assert_eq!(picker_range_basis("4.1.0"), ("^4.1.0".to_string(), true));
-        assert_eq!(picker_range_basis("=4.1.0"), ("^4.1.0".to_string(), true));
-        assert_eq!(
-            picker_range_basis("npm:chalk@4.1.0"),
-            ("^4.1.0".to_string(), true)
-        );
+        let basis = |spec| picker_range_basis(spec, true);
+        assert_eq!(basis("4.1.0"), ("^4.1.0".to_string(), true));
+        assert_eq!(basis("=4.1.0"), ("^4.1.0".to_string(), true));
+        assert_eq!(basis("npm:chalk@4.1.0"), ("^4.1.0".to_string(), true));
         // Ranges, tags and aliases-of-ranges pass through un-widened; the
         // alias contributes only its range half.
-        assert_eq!(picker_range_basis("^4.1.0"), ("^4.1.0".to_string(), false));
-        assert_eq!(picker_range_basis("~4.1.0"), ("~4.1.0".to_string(), false));
-        assert_eq!(picker_range_basis("beta"), ("beta".to_string(), false));
+        assert_eq!(basis("^4.1.0"), ("^4.1.0".to_string(), false));
+        assert_eq!(basis("~4.1.0"), ("~4.1.0".to_string(), false));
+        assert_eq!(basis("beta"), ("beta".to_string(), false));
+        assert_eq!(basis("npm:chalk@^4.1.0"), ("^4.1.0".to_string(), false));
+        assert_eq!(basis("workspace:*"), ("workspace:*".to_string(), false));
+        // `--no-save` can install nothing the literal pin doesn't reach, so
+        // the pin is left un-widened and the row is not marked pinned.
         assert_eq!(
-            picker_range_basis("npm:chalk@^4.1.0"),
-            ("^4.1.0".to_string(), false)
+            picker_range_basis("4.1.0", false),
+            ("4.1.0".to_string(), false)
         );
         assert_eq!(
-            picker_range_basis("workspace:*"),
-            ("workspace:*".to_string(), false)
+            picker_range_basis("npm:chalk@4.1.0", false),
+            ("4.1.0".to_string(), false)
         );
     }
 
