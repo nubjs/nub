@@ -1,13 +1,16 @@
 # Compile corpus
 
-Compiles a set of real npm packages and runs each artifact **with `node_modules` deleted**,
-comparing its output against the same program on plain Node.
+Compiles real npm packages and runs each artifact cold and warm, with its source and
+`node_modules` hidden. Every run must exit successfully and match the complete stdout
+of a successful plain-Node control.
 
 ```sh
 NUB=$(scripts/rust-build.sh --print-target)/fast/nub tests/compile-corpus/run.sh
 ```
 
 Needs `__NUB_LAUNCHER_TEMPLATE` pointing at a built release launcher, and Node >= 24.
+The embedded Node version matches the Node used to install native addons and run the control.
+An explicit `NODE_PIN` must match that version.
 
 ## What it is checking
 
@@ -26,12 +29,14 @@ The corpus covers pure JavaScript, classic node-gyp packages, a napi-rs wrapper 
 lives in a sidecar package, a package that requires a computed path into a sibling, and one whose
 native payload is an executable it spawns rather than an addon it loads — that last one is the
 only fixture whose correctness depends on a file's executable bit surviving the payload.
+The SQLite fixture commits and rolls back transactions, then reopens an on-disk database.
+The Express fixture serves and answers a real HTTP request rather than only importing the package.
 
 ## Reading the output
 
 ```
 FIXTURE          RESULT OUTPUT                   EJECTED
-a-express        PASS   ok:function              -
+a-express        PASS   ok:http-42               -
 a-sharp          PASS   ok:true                  @img,detect-libc,semver,sharp
 ```
 
@@ -45,6 +50,16 @@ A binary that crashes on startup exits fast and prints nothing, which is indisti
 from a fast, correct one unless you compare against a known-good result. So each fixture's
 output on plain Node is captured as the control and the artifact must reproduce it exactly.
 Checking only the exit code would pass a binary that silently printed the wrong answer.
+The table displays the final output line, but the comparison includes every stdout byte.
+Per-run stdout and stderr are retained in the work directory. The harness restores source
+and dependencies on failure.
+
+The dependency-free harness tests reject failed controls, changed output before a matching
+last line, nonzero artifact exits, and failures that occur only on warm reuse:
+
+```sh
+node --test tests/compile-corpus/harness.test.mjs
+```
 
 ## Two harnesses
 
