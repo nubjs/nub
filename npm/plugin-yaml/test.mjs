@@ -11,17 +11,92 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { emit, PARSE_ERROR_CODE } from "./emit.mjs";
+import { emit, PARSE_ERROR_CODE, toModule } from "./emit.mjs";
 import vite from "./vite.mjs";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 const sample = "host: localhost\nport: 5432\ntags: [api, \"db\"]\n";
+// Values JSON.stringify would not round-trip: non-finite numbers, negative zero,
+// and a mapping key that an object literal would treat as the prototype.
+const edges = "nan: .nan\ninf: .inf\nneg: -.inf\nzero: -0.0\n__proto__: { x: 1 }\n";
+const evaluate = async (source) => (await import(`data:text/javascript,${encodeURIComponent(source)}`)).default;
+const assertEdges = (value) => {
+  assert.ok(Number.isNaN(value.nan));
+  assert.equal(value.inf, Infinity);
+  assert.equal(value.neg, -Infinity);
+  assert.ok(Object.is(value.zero, -0));
+  assert.ok(Object.hasOwn(value, "__proto__"), "__proto__ is an own property, not the prototype");
+  assert.deepEqual(value.__proto__, { x: 1 });
+};
 
 test("emit produces an object literal whose evaluation equals the parsed document", async () => {
   const { text, diagnostics } = emit(sample);
   assert.equal(diagnostics.length, 0);
-  const value = (await import(`data:text/javascript,${encodeURIComponent(text)}`)).default;
-  assert.deepEqual(value, { host: "localhost", port: 5432, tags: ["api", "db"] });
+  assert.deepEqual(await evaluate(text), { host: "localhost", port: 5432, tags: ["api", "db"] });
+});
+
+test("the module keeps values JSON cannot: NaN, ±Infinity, -0, and an own __proto__ key", async () => {
+  assertEdges(await evaluate(toModule(edges)));
+  assertEdges(await evaluate(vite().transform(edges, "/p/edges.yaml").code));
+  const dir = mkdtempSync(join(tmpdir(), "plugin-yaml-"));
+  writeFileSync(join(dir, "edges.yaml"), edges);
+  writeFileSync(
+    join(dir, "app.mjs"),
+    'import v from "./edges.yaml"; console.log(JSON.stringify([Number.isNaN(v.nan), v.inf === Infinity, v.neg === -Infinity, Object.is(v.zero, -0), Object.hasOwn(v, "__proto__") && v.__proto__.x]));',
+  );
+  const run = spawnSync(process.execPath, ["--import", join(here, "register.mjs"), "app.mjs"], { cwd: dir, encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.stdout.trim(), "[true,true,true,true,1]");
+});
+
+test("toModule throws on a malformed document, as parse() does", () => {
+  assert.throws(() => toModule("host: [unclosed\n"), SyntaxError);
+});
+
+test("the mapper process completes the content-mapper handshake and transforms a file", async () => {
+  const { spawn } = await import("node:child_process");
+  const child = spawn(process.execPath, [join(here, "mapper.mjs")], { stdio: ["pipe", "pipe", "inherit"] });
+  let buffer = Buffer.alloc(0);
+  const pending = new Map();
+  child.stdout.on("data", (chunk) => {
+    buffer = Buffer.concat([buffer, chunk]);
+    for (;;) {
+      const headerEnd = buffer.indexOf("\r\n\r\n");
+      if (headerEnd === -1) return;
+      const length = Number(/Content-Length:\s*(\d+)/i.exec(buffer.subarray(0, headerEnd).toString())[1]);
+      if (buffer.length < headerEnd + 4 + length) return;
+      const message = JSON.parse(buffer.subarray(headerEnd + 4, headerEnd + 4 + length).toString("utf8"));
+      buffer = buffer.subarray(headerEnd + 4 + length);
+      pending.get(message.id)(message);
+      pending.delete(message.id);
+    }
+  });
+  let nextId = 0;
+  const request = (method, params) =>
+    new Promise((resolve) => {
+      const id = `t${++nextId}`;
+      pending.set(id, resolve);
+      const body = Buffer.from(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+      child.stdin.write(`Content-Length: ${body.length}\r\n\r\n`);
+      child.stdin.write(body);
+    });
+  try {
+    const init = await request("initialize", { protocolVersion: 1, positionEncodings: ["utf-8", "utf-16"] });
+    assert.deepEqual(init.result, { protocolVersion: 1, positionEncoding: "utf-16", diagnosticSource: "yaml" });
+    const open = await request("openProject", { configFileName: "/p/tsconfig.json", projectHandle: "h0", compilerOptions: {} });
+    assert.deepEqual(open.result, {});
+    const transform = await request("transform", { fileName: "/p/config.yaml", content: sample, projectHandle: "h0" });
+    assert.equal(transform.result.extension, ".ts");
+    assert.equal(transform.result.text, emit(sample).text);
+    assert.equal(transform.result.mappings.length, 7);
+    assert.deepEqual(transform.result.diagnostics, []);
+    const close = await request("closeProject", { projectHandle: "h0" });
+    assert.equal(close.result, null);
+    const unknown = await request("nope", {});
+    assert.equal(unknown.error.code, -32601);
+  } finally {
+    child.stdin.end();
+  }
 });
 
 test("every key and scalar carries a span back to its YAML token", () => {
@@ -58,9 +133,10 @@ test("node --import <pkg>/register makes a YAML import evaluate to the parsed do
   assert.equal(run.stdout.trim(), '{"host":"localhost","port":5432,"tags":["api","db"]}');
 });
 
-test("the Vite transform emits the same module and ignores other files", () => {
+test("the Vite transform emits the same module and ignores other files", async () => {
   const plugin = vite();
   assert.equal(plugin.transform("x", "/p/app.ts"), null);
   const out = plugin.transform(sample, "/p/config.yaml?import");
-  assert.equal(out.code, 'export default {"host":"localhost","port":5432,"tags":["api","db"]};');
+  assert.equal(out.code, toModule(sample));
+  assert.deepEqual(await evaluate(out.code), { host: "localhost", port: 5432, tags: ["api", "db"] });
 });

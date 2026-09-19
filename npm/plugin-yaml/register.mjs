@@ -5,15 +5,13 @@
 import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { fileURLToPath } from "node:url";
-import { parse } from "yaml";
+import { toModule } from "./emit.mjs";
 
 const YAML = /\.ya?ml$/;
 
 registerHooks({
   load(url, context, nextLoad) {
     if (!url.startsWith("file:") || !YAML.test(new URL(url).pathname)) return nextLoad(url, context);
-    const value = parse(readFileSync(fileURLToPath(url), "utf8"));
-    const source = value === undefined ? "export default undefined;" : `export default ${JSON.stringify(value)};`;
-    return { format: "module", source, shortCircuit: true };
+    return { format: "module", source: toModule(readFileSync(fileURLToPath(url), "utf8")), shortCircuit: true };
   },
 });

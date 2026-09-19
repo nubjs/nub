@@ -10,7 +10,9 @@ import { emit } from "./emit.mjs";
 const projects = new Map();
 
 const handlers = {
-  initialize: () => ({ positionEncoding: "utf-16", diagnosticSource: "yaml" }),
+  // protocolVersion is checked by the host (expects 1); a build without the check
+  // ignores the extra field.
+  initialize: () => ({ protocolVersion: 1, positionEncoding: "utf-16", diagnosticSource: "yaml" }),
   openProject: ({ projectHandle, options }) => {
     projects.set(projectHandle, options ?? {});
     return {};

@@ -67,7 +67,9 @@ export function emit(content) {
         if (!isPair(pair)) continue;
         push(pad);
         const key = isScalar(pair.key) ? String(pair.key.value ?? "null") : JSON.stringify(pair.key?.toJSON?.() ?? pair.key);
-        map(pair.key, JSON.stringify(key));
+        // A quoted `"__proto__":` in an object literal sets the prototype; the
+        // computed form defines an own property, which is what `parse()` returns.
+        map(pair.key, key === "__proto__" ? '["__proto__"]' : JSON.stringify(key));
         push(": ");
         if (pair.value == null) push("null");
         else visit(pair.value, indent + 1);
@@ -93,4 +95,18 @@ export function emit(content) {
     return { messageText: error.message, start, length, code: PARSE_ERROR_CODE };
   });
   return { text: out.join(""), mappings, diagnostics };
+}
+
+/**
+ * The module source the runtime hook and the bundler plugin evaluate. The same
+ * emitter as the mapper, so `import x from "./x.yaml"` yields one value on every
+ * path — `JSON.stringify` would turn `.nan`/`.inf` into `null` and `-0.0` into `0`.
+ * Throws on a malformed document, as `parse()` does.
+ * @param {string} content
+ * @returns {string}
+ */
+export function toModule(content) {
+  const { text, diagnostics } = emit(content);
+  if (diagnostics.length > 0) throw new SyntaxError(diagnostics[0].messageText);
+  return text;
 }
