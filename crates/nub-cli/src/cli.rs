@@ -4243,7 +4243,12 @@ pub(crate) fn runtime_node_options(
     runtime: &mut crate::project_config::RuntimeConfig,
     node: &nub_core::node::discovery::ResolvedNode,
 ) -> Result<Vec<String>> {
-    runtime_node_options_with(runtime, node, FoldInherited::Yes, TsconfigGate::Required)
+    runtime_node_options_with(
+        runtime,
+        node,
+        FoldInherited::Yes,
+        TsconfigGate::for_program(),
+    )
 }
 
 /// The options a PM verb hands its lifecycle scripts. Same set as a run, except a
@@ -4257,18 +4262,39 @@ pub(crate) fn lifecycle_node_options(
     runtime_node_options_with(runtime, node, FoldInherited::Yes, TsconfigGate::BestEffort)
 }
 
+/// Set on every process under a PM verb's lifecycle scripts (the overlay in
+/// `pm_engine::augmentation_to_lifecycle_overlay`). A script's `node` is nub's
+/// PATH shim and a `nub` inside it is a fresh invocation, so each re-derives its
+/// own options; the marker is how they keep the tolerant gate their parent chose.
+/// Without it the script that GENERATES the config's `extends` target — sveltekit's
+/// `prepare: svelte-kit sync` writing `./.svelte-kit/tsconfig.json` — died on the
+/// missing target before it could write it, and the install with it (#804).
+pub(crate) const LIFECYCLE_ENV: &str = "__NUB_LIFECYCLE";
+
 /// What an unreadable tsconfig does to the run whose options are being built.
 ///
 /// `Required` is every path that executes the user's program (#731: running under
 /// options the author never wrote is the silent wrong answer). `BestEffort` is the
-/// lifecycle-script path of the PM verbs, where the config's `extends` target is
-/// routinely a package the verb is about to install: the run proceeds without the
-/// config-derived conditions and without a report — nothing is guessed at, and the
-/// child that re-enters nub to run a TypeScript file still applies the gate itself.
+/// lifecycle-script subtree of the PM verbs, where the config's `extends` target is
+/// routinely a package the verb is about to install or a file a script is about to
+/// generate: the run proceeds without the config-derived conditions and without a
+/// report — nothing is guessed at.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum TsconfigGate {
     Required,
     BestEffort,
+}
+
+impl TsconfigGate {
+    /// The gate for a path that executes a program: `Required`, unless this
+    /// process is itself inside a lifecycle subtree ([`LIFECYCLE_ENV`]).
+    fn for_program() -> Self {
+        if env::var_os(LIFECYCLE_ENV).is_some() {
+            Self::BestEffort
+        } else {
+            Self::Required
+        }
+    }
 }
 
 /// Whether inherited `NODE_OPTIONS` preloads may be folded into nub's chainer.
@@ -4778,7 +4804,9 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
         // config the addon will actually transform against, so it gets the same
         // refusal. Without this, the identical project fails from inside `sub/` and
         // merely warned from above it.
-        if let Some(entry_dir) = entry_file_dir(args, cwd) {
+        if let Some(entry_dir) = entry_file_dir(args, cwd)
+            && TsconfigGate::for_program() == TsconfigGate::Required
+        {
             ensure_tsconfig_parses(&entry_dir.to_string_lossy(), runtime.tsconfig.as_deref())?;
         }
         let v8_flags = runtime_v8_flags(&runtime)?;
@@ -7065,7 +7093,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         &mut runtime,
         &node,
         FoldInherited::No,
-        TsconfigGate::Required,
+        TsconfigGate::for_program(),
     )?;
     let runtime_v8_flags = runtime_v8_flags(&runtime)?;
     let runtime_json = runtime_config_json(&runtime)?;

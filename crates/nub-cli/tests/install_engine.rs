@@ -2183,3 +2183,46 @@ fn install_tolerates_a_tsconfig_whose_extends_target_is_not_installed_yet() {
         "the install must not report the tsconfig it does not need: {err}"
     );
 }
+
+/// The lifecycle script is what makes the `extends` target exist — sveltekit's
+/// `prepare: svelte-kit sync` writes the `./.svelte-kit/tsconfig.json` its config
+/// extends. The script's `node` is nub's PATH shim, which re-derives its own
+/// options, so the tolerant gate has to reach it or the script dies on the
+/// missing target before it can write it (#804). The script is TypeScript so the
+/// addon in that child reads the same config, and stays as quiet as the verb.
+#[test]
+fn a_lifecycle_script_can_generate_the_tsconfig_extends_target() {
+    let dir = pm_tmpdir("tsconfig-extends-generated");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"extends-generated","version":"1.0.0","scripts":{"prepare":"node prepare.ts"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("prepare.ts"),
+        r#"import fs from "node:fs";
+const target: string = ".svelte-kit/tsconfig.json";
+fs.mkdirSync(".svelte-kit", { recursive: true });
+fs.writeFileSync(target, JSON.stringify({ compilerOptions: { strict: true } }));"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("tsconfig.json"),
+        r#"{"extends":"./.svelte-kit/tsconfig.json"}"#,
+    )
+    .unwrap();
+
+    let (out, err, code) = run_install(&dir, &["install"]);
+    assert_eq!(
+        code, 0,
+        "prepare must run past the missing target: {out}\n{err}"
+    );
+    assert!(
+        dir.join(".svelte-kit/tsconfig.json").is_file(),
+        "prepare should have generated the extends target: {out}\n{err}"
+    );
+    assert!(
+        !err.contains("tsconfig"),
+        "the install must not report the tsconfig the script generates: {err}"
+    );
+}
