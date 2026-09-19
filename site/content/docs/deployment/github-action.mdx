@@ -62,20 +62,20 @@ The action also runs after `actions/setup-node` in a workflow that keeps it. The
 
 ## setup-node, with Nub installed
 
-[`nubjs/nub/actions/setup-node`](https://github.com/nubjs/nub/tree/main/actions/setup-node) takes the inputs and outputs of `actions/setup-node` and installs `nub` beside it:
+[`nubjs/nub/setup-node`](https://github.com/nubjs/nub/tree/main/setup-node) takes the inputs and outputs of `actions/setup-node` and installs `nub` beside it:
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: nubjs/nub/actions/setup-node@v0
+- uses: nubjs/nub/setup-node@v0
 - run: npm ci
 - run: npm test
 ```
 
-Two defaults differ from the action above. With no `node-version` input, the runner's Node stays when the project's pin allows it or when there is no pin; only a pin that excludes the runner's Node is downloaded and put first on PATH, with a notice in the job log. And the package-manager shims are on by default: `npm`, `pnpm` and `yarn` in later steps run the version the project pins in `packageManager` or `devEngines`, provisioned on demand. `provision-node: false` and `shim: false` turn each off. The inputs are listed in [its README](https://github.com/nubjs/nub/tree/main/actions/setup-node#inputs).
+Two defaults differ from the action above. With no `node-version` input, the runner's Node stays when the project's pin allows it or when there is no pin; only a pin that excludes the runner's Node is downloaded and put first on PATH, with a notice in the job log. And the package-manager shims are on by default: `npm`, `pnpm` and `yarn` in later steps run the version the project pins in `packageManager` or `devEngines`, provisioned on demand. `provision-node: false` and `shim: false` turn each off. The inputs are listed in [its README](https://github.com/nubjs/nub/tree/main/setup-node#inputs).
 
 ## The install step only
 
-[`nubjs/nub/actions/install`](https://github.com/nubjs/nub/tree/main/actions/install) replaces the line that runs `npm ci`, `pnpm install --frozen-lockfile`, `yarn install --immutable` or `bun install --frozen-lockfile`, and changes nothing else:
+[`nubjs/nub/install`](https://github.com/nubjs/nub/tree/main/install) replaces the line that runs `npm ci`, `pnpm install --frozen-lockfile`, `yarn install --immutable` or `bun install --frozen-lockfile`, and changes nothing else:
 
 ```diff
   - uses: actions/setup-node@v4
@@ -83,11 +83,11 @@ Two defaults differ from the action above. With no `node-version` input, the run
       node-version: 22
       cache: npm
 - - run: npm ci
-+ - uses: nubjs/nub/actions/install@v0
++ - uses: nubjs/nub/install@v0
   - run: npm test
 ```
 
-Nub reads the lockfile unchanged, installs it into `node_modules`, and caches its store across runs, keyed on the lockfile. Node and the package managers on PATH are left alone. `working-directory` points the install at a subdirectory, `frozen-lockfile: false` lets it update the lockfile as `npm install` does, and `shim: true` adds the package-manager shims for later steps. The inputs are listed in [its README](https://github.com/nubjs/nub/tree/main/actions/install#inputs).
+Nub reads the lockfile unchanged, installs it into `node_modules`, and caches its store across runs, keyed on the lockfile. Node and the package managers on PATH are left alone. `working-directory` points the install at a subdirectory, `frozen-lockfile: false` lets it update the lockfile as `npm install` does, and `shim: true` adds the package-manager shims for later steps. The inputs are listed in [its README](https://github.com/nubjs/nub/tree/main/install#inputs).
 
 ## Inputs
 

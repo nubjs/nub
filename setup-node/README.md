@@ -4,7 +4,7 @@
 
 ```yaml
 - uses: actions/checkout@v4     # first: the action reads the project's pin files
-- uses: nubjs/nub/actions/setup-node@v0
+- uses: nubjs/nub/setup-node@v0
 - run: npm ci
 - run: npm test
 ```
@@ -28,7 +28,7 @@ Everything else matches. An explicit `node-version` or `node-version-file` is pr
     cache: npm
 
 # after
-- uses: nubjs/nub/actions/setup-node@v0
+- uses: nubjs/nub/setup-node@v0
   with:
     node-version: 20      # provisioned and fronted, as before
     cache: npm            # accepted; Nub's store is cached instead of npm's
@@ -77,7 +77,7 @@ Accepted and ignored: `check-latest`, `architecture`, `mirror`, `mirror-token`.
 ## Registry auth
 
 ```yaml
-- uses: nubjs/nub/actions/setup-node@v0
+- uses: nubjs/nub/setup-node@v0
   with:
     registry-url: https://npm.pkg.github.com
     scope: "@my-org"
@@ -90,6 +90,6 @@ The `.npmrc` is written to `$RUNNER_TEMP/.npmrc` and pointed at through `NPM_CON
 
 ## Versioning
 
-- `nubjs/nub/actions/setup-node@v0`: floating, moves to each stable Nub `v0.x` release. A `v0.x` release can carry a breaking change to the action.
-- `nubjs/nub/actions/setup-node@v0.x.y`: the action as of that Nub release, never moves.
-- `nubjs/nub/actions/setup-node@<commit>`: a commit on `main`, never moves.
+- `nubjs/nub/setup-node@v0`: floating, moves to each stable Nub `v0.x` release. A `v0.x` release can carry a breaking change to the action.
+- `nubjs/nub/setup-node@v0.x.y`: the action as of that Nub release, never moves.
+- `nubjs/nub/setup-node@<commit>`: a commit on `main`, never moves.

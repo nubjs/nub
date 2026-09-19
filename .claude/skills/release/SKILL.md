@@ -84,7 +84,7 @@ git show --stat HEAD      # SANITY: 27 files, all version bumps, nothing else: 1
 git push origin main
 git tag v<ver>
 git push origin v<ver>    # the single tag: THIS is what triggers the publish
-# release.yml itself moves the floating v<major> tag (v0) that `uses: nubjs/nub/actions/<name>@v0`
+# release.yml itself moves the floating v<major> tag (v0) that `uses: nubjs/nub/<name>@v0`
 # resolves through, after the promote step. Never push v0 by hand.
 ```
 

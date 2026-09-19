@@ -91,7 +91,7 @@ jobs:
       # application install below MUST use the just-built Nub candidate — this
       # released nub exists only to materialize node_modules from nub.lock.
       # `hoisted` because the staging below `cp -R`s real directories out of it.
-      - uses: ./actions/setup-node
+      - uses: ./setup-node
         with:
           cache: 'true'
           provision-node: 'false'
@@ -317,7 +317,7 @@ jobs:
           # container below derives its own `--target`. Same major as
           # `native-host` so the matrix reads as one Node line.
           node-version: '24'
-      - uses: ./actions/setup-node
+      - uses: ./setup-node
         with:
           cache: 'true'
           provision-node: 'false'

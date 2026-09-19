@@ -428,7 +428,7 @@ jobs:
       # runtime for the offline --smol gate below.
       # A released nub materializes node_modules from nub.lock; the nub under
       # test is built in the next step and cannot install its own inputs.
-      - uses: ./actions/setup-node
+      - uses: ./setup-node
         with:
           cache: 'true'
           provision-node: 'false'
@@ -1217,7 +1217,7 @@ jobs:
       # + seccomp) and macOS only (aube-scripts/src/lib.rs has no Windows arm),
       # so on the windows-latest cell the mitigation is the pinned lockfile
       # alone. The shims stay for the pnpm/npm surfaces the tests drive.
-      - uses: ./actions/setup-node
+      - uses: ./setup-node
         with:
           cache: 'true'
           provision-node: 'false'

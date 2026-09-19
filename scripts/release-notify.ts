@@ -194,7 +194,7 @@ function main() {
   if (!prevTag) {
     try {
       // `--exclude 'v[0-9]'` skips the floating `v<major>` tag that release.yml
-      // moves to each stable release (`uses: nubjs/nub/actions/<name>@v0`
+      // moves to each stable release (`uses: nubjs/nub/<name>@v0`
       // resolves through it): it shares a commit with the latest release and
       // wins git's tie-break, so without the exclusion the "previous tag" is v0.
       prevTag = git(["describe", "--tags", "--abbrev=0", "--exclude", "v[0-9]", `${newTag}^`]);

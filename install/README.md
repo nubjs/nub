@@ -8,7 +8,7 @@ Install the project's dependencies from its lockfile, whichever package manager 
   with:
     node-version: 22
     cache: npm
-- uses: nubjs/nub/actions/install@v0     # was: - run: npm ci
+- uses: nubjs/nub/install@v0     # was: - run: npm ci
 - run: npm test
 ```
 
@@ -25,7 +25,7 @@ The same line installs a `pnpm-lock.yaml`, `yarn.lock` or `bun.lock`. With `shim
 - uses: actions/setup-node@v4
   with:
     node-version: 22
-- uses: nubjs/nub/actions/install@v0     # was: pnpm/action-setup, then - run: pnpm install --frozen-lockfile
+- uses: nubjs/nub/install@v0     # was: pnpm/action-setup, then - run: pnpm install --frozen-lockfile
   with:
     shim: true
 - run: pnpm test              # the pinned pnpm, provisioned by the shim
@@ -67,7 +67,7 @@ Swap the `uses:` line. `working-directory` and `cache-key-prefix` keep their mea
 
 ## Versioning
 
-- `nubjs/nub/actions/install@v0`: floating, moves to each stable Nub `v0.x` release. A `v0.x` release can carry a breaking change to the action.
-- `nubjs/nub/actions/install@v0.x.y`: the action as of that Nub release, never moves.
-- `nubjs/nub/actions/install@<commit>`: a commit on `main`, never moves.
+- `nubjs/nub/install@v0`: floating, moves to each stable Nub `v0.x` release. A `v0.x` release can carry a breaking change to the action.
+- `nubjs/nub/install@v0.x.y`: the action as of that Nub release, never moves.
+- `nubjs/nub/install@<commit>`: a commit on `main`, never moves.
 

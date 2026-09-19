@@ -49,7 +49,7 @@ jobs:
       # job builds its own nub only further down, after the deps are needed.
       # `hoisted` because the runtime staging and nub-core's build script copy
       # real directories out of node_modules and reject a symlinked store.
-      - uses: ./actions/setup-node
+      - uses: ./setup-node
         with:
           cache: 'true'
           provision-node: 'false'

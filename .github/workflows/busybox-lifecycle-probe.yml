@@ -67,7 +67,7 @@ jobs:
       # root is nub-identity (nub.lock), so a released nub installs it;
       # `hoisted` because nub-core's build script copies real directories out
       # of node_modules and rejects a symlinked store.
-      - uses: ./actions/setup-node
+      - uses: ./setup-node
         with:
           cache: 'true'
           provision-node: 'false'
