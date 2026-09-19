@@ -2227,6 +2227,13 @@ impl<'a> ResolveDriver<'a> {
         target_optional_deps.retain(|name, _| {
             !bundled.contains(name) && !self.resolver.ignored_optional_dependencies.contains(name)
         });
+        // The ranges the manifest declared, which the npm / bun / yarn
+        // writers emit on a child entry instead of the resolved pin.
+        let declared: BTreeMap<String, String> = target_deps
+            .iter()
+            .chain(target_optional_deps.iter())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         // Meta-only peers resolve like `"*"`, matching the registry path.
         let mut peer_deps = peer_dependencies;
         for name in peer_dependencies_meta.keys() {
@@ -2305,6 +2312,7 @@ impl<'a> ResolveDriver<'a> {
                         v.sort();
                         v
                     },
+                    declared_dependencies: declared,
                     ..Default::default()
                 },
             );
