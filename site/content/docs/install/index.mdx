@@ -396,7 +396,7 @@ nub update -P              # production only
 nub update --lockfile-only # refresh the lockfile, leave node_modules alone
 ```
 
-The interactive picker shows one row per outdated dependency, grouped by dependency type. Space (or `←`/`→`) cycles a row between keeping the current version, the newest version inside the manifest range, and the registry's `latest` — so one invocation covers both in-range refreshes and range-crossing bumps, per package. Nothing is selected by default: press enter and only the rows you flipped are updated. Version targets are colored by semver impact, and a `latest` that would downgrade a prerelease pin is never offered.
+The interactive picker shows one row per outdated dependency, grouped by dependency type. Space (or `←`/`→`) cycles a row between keeping the current version, the newest version inside the manifest range, and the registry's `latest` — so one invocation covers both in-range refreshes and range-crossing bumps, per package. Nothing is selected by default: press enter and only the rows you flipped are updated. Version targets are colored by semver impact, and a `latest` that would downgrade a prerelease pin is never offered. An exact pin (`"chalk": "4.1.0"`) gets its in-range column as if the spec were `^4.1.0`, and whichever version you pick is written back as an exact pin — the `^`/`~`/exact style of every spec survives the bump.
 
 ```text wide
 Choose dependency updates
