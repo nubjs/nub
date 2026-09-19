@@ -66,7 +66,9 @@ export function emit(content) {
       for (const pair of node.items) {
         if (!isPair(pair)) continue;
         push(pad);
-        const key = isScalar(pair.key) ? String(pair.key.value ?? "null") : JSON.stringify(pair.key?.toJSON?.() ?? pair.key);
+        // Same coercion `parse()` applies to a plain-object target: a scalar key is
+        // its string form, a collection key is its YAML flow text ("[ a, b ]").
+        const key = isScalar(pair.key) ? String(pair.key.value ?? "null") : String(pair.key);
         // A quoted `"__proto__":` in an object literal sets the prototype; the
         // computed form defines an own property, which is what `parse()` returns.
         map(pair.key, key === "__proto__" ? '["__proto__"]' : JSON.stringify(key));

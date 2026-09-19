@@ -49,6 +49,14 @@ test("the module keeps values JSON cannot: NaN, ±Infinity, -0, and an own __pro
   assert.equal(run.stdout.trim(), "[true,true,true,true,1]");
 });
 
+test("mapping keys are coerced the way parse() coerces them, collection keys included", async () => {
+  const { parse } = await import("yaml");
+  const keys = "? [a, b]\n: seq\n? { k: 1 }\n: map\n1: number\ntrue: boolean\n~: nothing\n";
+  const expected = parse(keys, { logLevel: "silent" });
+  assert.deepEqual(await evaluate(toModule(keys)), expected);
+  assert.deepEqual(Object.keys(expected), ["1", "[ a, b ]", "{ k: 1 }", "true", "null"]);
+});
+
 test("toModule throws on a malformed document, as parse() does", () => {
   assert.throws(() => toModule("host: [unclosed\n"), SyntaxError);
 });
