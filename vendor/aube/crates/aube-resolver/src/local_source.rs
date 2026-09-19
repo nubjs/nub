@@ -87,15 +87,31 @@ pub fn resolve_exec_script_path(
 /// identity in whatever error type it prefers — used by both the
 /// `file:` tarball path (`read_local_manifest`) and the remote
 /// tarball resolver (`resolve_remote_tarball`).
-/// Hard upper bound on the bytes read from the gzipped tarball stream
-/// while looking for `package.json`. A 64 MiB ceiling is far above any
-/// real npm package and keeps a hostile gzip bomb from amplifying into
-/// arbitrary RAM. Mirrors `aube-store::MAX_TARBALL_DECOMPRESSED_BYTES`
-/// in spirit — the resolver path was missed in the original cap pass.
-const MAX_RESOLVE_TARBALL_DECOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
+/// Hard upper bound on the DECOMPRESSED bytes read from the gzipped
+/// tarball stream while looking for `package.json`. Every entry that
+/// precedes the manifest is skipped through this reader, so the cap
+/// has to cover the whole unpacked size of a real package, not just
+/// the manifest: `next`'s tarball unpacks to ~186 MiB and its
+/// `package/package.json` sits after 80 MiB of other entries, which
+/// an earlier 64 MiB ceiling rejected as `unexpected EOF during skip`
+/// (a remote-tarball `next` dependency failed to resolve while the
+/// same tarball installed fine from the registry). Mirrors
+/// `aube-store::MAX_TARBALL_DECOMPRESSED_BYTES` (1 GiB) exactly, so a
+/// tarball the store would extract is one the resolver can read.
+const MAX_RESOLVE_TARBALL_DECOMPRESSED_BYTES: u64 = 1 << 30;
 const MAX_RESOLVE_PACKAGE_JSON_BYTES: u64 = 8 * 1024 * 1024;
 
 fn read_tarball_package_json(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    read_tarball_package_json_capped(bytes, MAX_RESOLVE_TARBALL_DECOMPRESSED_BYTES)
+}
+
+/// `read_tarball_package_json` with the decompressed-byte cap as a
+/// parameter, so the bomb tests can exercise the ceiling without
+/// building a gibibyte of tar in memory.
+fn read_tarball_package_json_capped(
+    bytes: &[u8],
+    max_decompressed: u64,
+) -> Result<Vec<u8>, String> {
     use std::io::Read;
     // Cap on the DECOMPRESSED output of the gzip stream so a hostile
     // tarball with large dummy entries before `package.json` cannot
@@ -103,7 +119,7 @@ fn read_tarball_package_json(bytes: &[u8]) -> Result<Vec<u8>, String> {
     // `bytes.take` would only bound the compressed read, which the
     // decoder is free to expand without ceiling.
     let gz = flate2::read::GzDecoder::new(bytes);
-    let capped = gz.take(MAX_RESOLVE_TARBALL_DECOMPRESSED_BYTES);
+    let capped = gz.take(max_decompressed);
     let mut archive = tar::Archive::new(capped);
     for entry in archive.entries().map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -845,6 +861,11 @@ mod cve_audit_tarball_bomb {
         gz
     }
 
+    // The ceiling is exercised through the cap parameter at 64 MiB: the
+    // production constant is 1 GiB, and materializing a tarball past it
+    // in memory is what these tests exist to avoid.
+    const TEST_CAP: u64 = 64 * 1024 * 1024;
+
     #[test]
     fn read_tarball_package_json_rejects_decompression_bomb() {
         let bomb = build_zero_tarball(200 * 1024 * 1024);
@@ -853,7 +874,7 @@ mod cve_audit_tarball_bomb {
             "compressed bomb too large to call this an amplification: {}",
             bomb.len()
         );
-        let result = read_tarball_package_json(&bomb);
+        let result = read_tarball_package_json_capped(&bomb, TEST_CAP);
         assert!(
             result.is_err(),
             "200 MiB decompressed payload must be rejected by the cap, got {:?}",
@@ -869,10 +890,31 @@ mod cve_audit_tarball_bomb {
             "compressed multi-entry bomb too large: {}",
             bomb.len()
         );
-        let result = read_tarball_package_json(&bomb);
+        let result = read_tarball_package_json_capped(&bomb, TEST_CAP);
         assert!(
             result.is_err(),
             "decompressed dummy entry preceding package.json must hit the output cap"
+        );
+    }
+
+    /// `next`'s registry tarball puts `package/package.json` after 80 MiB
+    /// of other entries (186 MiB unpacked in total). The production cap
+    /// must read past that, and the skip-through must keep counting
+    /// against it, so the same shape is rejected the moment it exceeds
+    /// the ceiling.
+    #[test]
+    fn production_cap_reads_past_next_sized_entries_before_package_json() {
+        let next_shaped = build_dummy_then_package_json(80 * 1024 * 1024);
+        let manifest = read_tarball_package_json(&next_shaped)
+            .expect("80 MiB of entries before package.json is a real package, not a bomb");
+        assert_eq!(manifest, b"{\"name\":\"x\",\"version\":\"0.0.1\"}");
+        assert!(
+            read_tarball_package_json_capped(&next_shaped, TEST_CAP).is_err(),
+            "the same tarball must fail under a cap smaller than its skipped prefix"
+        );
+        assert!(
+            MAX_RESOLVE_TARBALL_DECOMPRESSED_BYTES >= 1 << 30,
+            "resolver cap must not drop below aube-store's 1 GiB extraction cap"
         );
     }
 }
