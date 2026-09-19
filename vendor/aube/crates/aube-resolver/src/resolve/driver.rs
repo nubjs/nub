@@ -20,8 +20,9 @@ use super::fetch::{FetchKey, FetchScheduler, TrustHistory};
 use super::seed::seed_direct_deps;
 use super::vulnerable::{is_vulnerable, prefer_non_vulnerable_pick};
 use crate::local_source::{
-    dep_path_for, is_non_registry_specifier, read_local_manifest, rebase_local,
-    resolve_exec_manifest, resolve_git_source, resolve_remote_tarball, should_block_exotic_subdep,
+    LocalManifest, dep_path_for, is_non_registry_specifier, probe_remote_tarball_manifest,
+    read_local_manifest, rebase_local, resolve_exec_manifest, resolve_git_source,
+    resolve_remote_tarball, should_block_exotic_subdep,
 };
 use crate::locked_index::LockedIndex;
 use crate::package_ext::{
@@ -1940,101 +1941,25 @@ impl<'a> ResolveDriver<'a> {
             ));
         }
 
-        // Peer dependencies: enqueue only required peers that
-        // are truly missing from the importer/root scope. The
-        // post-pass below (`apply_peer_contexts`) computes
-        // which version each consumer sees, via ancestor
-        // scope, and assigns peer-suffixed dep_paths.
-        //
-        // pnpm's `auto-install-peers=true` fills in missing
-        // required peers, but it does not install optional peer
-        // alternatives that the user did not ask for, and it
-        // does not install a second compatible peer when the
-        // importer already declares that peer name at an
-        // incompatible version. In the latter case pnpm keeps
-        // the user's direct dependency and reports an unmet
-        // peer warning.
-        //
-        // When `auto-install-peers=false`, we skip enqueueing
-        // peers entirely. Users are on the hook for adding
-        // them to `package.json` themselves. Unmet peers still
-        // surface as warnings via `detect_unmet_peers` after
-        // resolve — in fact more so, since nothing gets
-        // auto-installed.
-        //
-        // Skip peers that are already declared as regular or
-        // optional deps of the same package — those already have a
-        // task queued via the loops above, and duplicating would
-        // just burn a queue slot.
-        if self.resolver.auto_install_peers {
-            for (dep_name, dep_range) in &version_meta.peer_dependencies {
-                let peer_optional = version_meta
+        // Peer dependencies: park the required peers nothing in scope
+        // provides; see `park_auto_install_peers`.
+        self.park_auto_install_peers(
+            &task,
+            &version_meta.peer_dependencies,
+            |name| {
+                version_meta
                     .peer_dependencies_meta
-                    .get(dep_name)
-                    .map(|m| m.optional)
-                    .unwrap_or(false);
-                // Optional peers are opt-in integrations, not
-                // auto-install candidates. Users who need one must
-                // declare it in their own manifest so the normal dep
-                // loops above resolve it explicitly.
-                if peer_optional {
-                    continue;
-                }
-                let importer_declares_peer = self
-                    .importer_declared_dep_names
-                    .get(&task.importer)
-                    .is_some_and(|names| names.contains(dep_name));
-                let root_declares_peer = self.resolver.resolve_peers_from_workspace_root
-                    && task.importer != "."
-                    && self
-                        .importer_declared_dep_names
-                        .get(".")
-                        .is_some_and(|names| names.contains(dep_name));
-                let peer_dep_is_ancestor = task.ancestors.iter().any(|(name, _)| name == dep_name);
-                if importer_declares_peer || root_declares_peer || peer_dep_is_ancestor {
-                    continue;
-                }
-                if version_meta.dependencies.contains_key(dep_name)
-                    || version_meta.optional_dependencies.contains_key(dep_name)
-                    || bundled_names.contains(dep_name)
-                {
-                    continue;
-                }
-                if self.resolver.dependency_policy.block_exotic_subdeps
-                    && is_non_registry_specifier(dep_range)
-                {
-                    tracing::warn!(
-                        code = aube_codes::warnings::WARN_AUBE_EXOTIC_SUBDEP_SKIPPED,
-                        "skipping peer dependency {dep_name} of {} — \
-                                 exotic specifier \"{dep_range}\" blocked \
-                                 by blockExoticSubdeps",
-                        task.name
-                    );
-                    continue;
-                }
-                if !self.existing_names.contains(dep_name.as_str())
-                    && self.resolver.is_prefetchable(
-                        dep_name.as_str(),
-                        dep_range.as_str(),
-                        self.workspace_packages,
-                    )
-                {
-                    self.ensure_fetch(dep_name);
-                }
-                // Park, don't enqueue: bound only after the main tree drains
-                // (see `deferred_auto_peers` / the drain in `bfs_loop`), so the
-                // peer reuses an already-resolved version instead of racing the
-                // hard deps and pulling in a registry-highest major.
-                self.deferred_auto_peers.push(ResolveTask::transitive(
-                    dep_name.clone(),
-                    dep_range.clone(),
-                    DepType::Production,
-                    dep_path.clone(),
-                    task.importer.clone(),
-                    child_ancestors.clone(),
-                ));
-            }
-        }
+                    .get(name)
+                    .is_some_and(|m| m.optional)
+            },
+            |name| {
+                version_meta.dependencies.contains_key(name)
+                    || version_meta.optional_dependencies.contains_key(name)
+                    || bundled_names.contains(name)
+            },
+            &dep_path,
+            &child_ancestors,
+        );
 
         // Root task just completed its full version-pick
         // path. Decrement the pending-directs counter so
@@ -2149,11 +2074,39 @@ impl<'a> ResolveDriver<'a> {
                 ),
             ));
         }
-        let (mut local, real_version, mut target_deps, integrity) = if let LocalSource::Git(ref g) =
-            raw_local
-        {
+        // An optional URL tarball whose manifest says it cannot run on
+        // this host is never downloaded: read `package.json` from the head
+        // of the body first. `next`'s eight `@next/swc-*` platform
+        // binaries are ~30 MiB each, and only the host's is used.
+        let probed_mismatch = match &raw_local {
+            LocalSource::RemoteTarball(t) if task.dep_type == DepType::Optional => {
+                match probe_remote_tarball_manifest(&t.url, self.resolver.client.as_ref()).await {
+                    Some(m) if !self.host_supports(&m) => Some(m),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let (mut local, manifest, integrity) = if let Some(m) = probed_mismatch {
+            let LocalSource::RemoteTarball(t) = &raw_local else {
+                unreachable!("probe only runs for remote tarballs")
+            };
+            // A portable lockfile records every platform variant, like the
+            // registry path does; the host skips it at link time. Without
+            // the download there is no integrity to pin, so the platform
+            // that does install it fetches it unverified.
+            (
+                LocalSource::RemoteTarball(aube_lockfile::RemoteTarballSource {
+                    url: t.url.clone(),
+                    integrity: String::new(),
+                    git_hosted: t.git_hosted,
+                }),
+                m,
+                None,
+            )
+        } else if let LocalSource::Git(ref g) = raw_local {
             let shallow = aube_store::git_host_in_list(&g.url, &self.resolver.git_shallow_hosts);
-            let (resolved_local, version, deps, integrity) =
+            let (resolved_local, manifest, integrity) =
                 resolve_git_source(&task.name, g, shallow, Some(self.resolver.client.as_ref()))
                     .await
                     .map_err(|e| {
@@ -2163,12 +2116,15 @@ impl<'a> ResolveDriver<'a> {
                         )
                     })?;
             let integrity = integrity.or_else(|| {
-                self.locked_index
-                    .find_local_source_integrity(&task.name, &version, &resolved_local)
+                self.locked_index.find_local_source_integrity(
+                    &task.name,
+                    &manifest.version,
+                    &resolved_local,
+                )
             });
-            (resolved_local, version, deps, integrity)
+            (resolved_local, manifest, integrity)
         } else if let LocalSource::RemoteTarball(ref t) = raw_local {
-            let (resolved_local, version, deps) =
+            let (resolved_local, manifest) =
                 resolve_remote_tarball(&task.name, t, self.resolver.client.as_ref())
                     .await
                     .map_err(|e| {
@@ -2183,13 +2139,13 @@ impl<'a> ResolveDriver<'a> {
                 }
                 _ => None,
             };
-            (resolved_local, version, deps, integrity)
+            (resolved_local, manifest, integrity)
         } else {
             // Rewrite the path to be relative to the project root so
             // every downstream consumer can resolve it with a single
             // `project_root.join(rel)`.
             let local = rebase_local(&raw_local, &importer_root, &self.resolver.project_root);
-            let (version, deps) = if matches!(local, LocalSource::Exec(_)) {
+            let manifest = if matches!(local, LocalSource::Exec(_)) {
                 if self.resolver.ignore_scripts {
                     return Err(Error::Registry(
                         task.name.clone(),
@@ -2201,12 +2157,55 @@ impl<'a> ResolveDriver<'a> {
                 }
                 resolve_exec_manifest(&task.name, &local, &self.resolver.project_root).await?
             } else {
-                let (_target_name, version, deps) = read_local_manifest(&raw_local, &importer_root)
-                    .unwrap_or_else(|_| (task.name.clone(), "0.0.0".to_string(), BTreeMap::new()));
-                (version, deps)
+                read_local_manifest(&raw_local, &importer_root).unwrap_or_else(|_| LocalManifest {
+                    version: "0.0.0".to_string(),
+                    ..Default::default()
+                })
             };
-            (local, version, deps, None)
+            (local, manifest, None)
         };
+        let LocalManifest {
+            version: real_version,
+            dependencies: mut target_deps,
+            optional_dependencies: mut target_optional_deps,
+            peer_dependencies,
+            peer_dependencies_meta,
+            bundled_dependencies,
+            os,
+            cpu,
+            libc,
+        } = manifest;
+        // Same platform rule as a registry package: an optional that
+        // cannot run here is dropped (a portable lockfile's accept-all
+        // set keeps it for the platforms that can), a required one is
+        // installed with a warning.
+        if !is_supported(&os, &cpu, &libc, &self.resolver.supported_architectures) {
+            if task.dep_type == DepType::Optional {
+                tracing::debug!(
+                    "skipping optional dep {}@{}: unsupported platform (os={os:?} cpu={cpu:?} libc={libc:?})",
+                    task.name,
+                    task.range,
+                );
+                if task.is_root
+                    && let Some(spec) = task.original_specifier.as_ref()
+                {
+                    self.skipped_optional_dependencies
+                        .entry(task.importer.clone())
+                        .or_default()
+                        .insert(task.name.clone(), spec.clone());
+                }
+                if task.is_root {
+                    self.note_root_done();
+                }
+                return Ok(());
+            }
+            tracing::warn!(
+                code = aube_codes::warnings::WARN_AUBE_UNSUPPORTED_PLATFORM_INSTALL,
+                "required dep {}@{} declares unsupported platform (os={os:?} cpu={cpu:?} libc={libc:?}); installing anyway",
+                task.name,
+                task.range,
+            );
+        }
         attach_integrity_to_git_source(&mut local, integrity.as_deref());
         // Apply `packageExtensions` to non-registry packages too. The
         // registry path applies them to the picked VersionMetadata; git /
@@ -2221,6 +2220,20 @@ impl<'a> ResolveDriver<'a> {
             &mut target_deps,
             &self.resolver.dependency_policy.package_extensions,
         );
+        // A name in both maps is an optional dep (npm semantics).
+        target_deps.retain(|name, _| !target_optional_deps.contains_key(name));
+        let bundled: FxHashSet<String> = bundled_dependencies.iter().cloned().collect();
+        target_deps.retain(|name, _| !bundled.contains(name));
+        target_optional_deps.retain(|name, _| {
+            !bundled.contains(name) && !self.resolver.ignored_optional_dependencies.contains(name)
+        });
+        // Meta-only peers resolve like `"*"`, matching the registry path.
+        let mut peer_deps = peer_dependencies;
+        for name in peer_dependencies_meta.keys() {
+            peer_deps
+                .entry(name.clone())
+                .or_insert_with(|| "*".to_string());
+        }
         let dep_path = local.dep_path(&task.name);
         let linked_name = task.name.clone();
 
@@ -2270,6 +2283,10 @@ impl<'a> ResolveDriver<'a> {
         }
 
         if self.visited.insert(std::sync::Arc::from(dep_path.as_str())) {
+            let peer_meta = peer_dependencies_meta.clone();
+            let os: aube_lockfile::PlatformList = os.into_iter().collect();
+            let cpu: aube_lockfile::PlatformList = cpu.into_iter().collect();
+            let libc: aube_lockfile::PlatformList = libc.into_iter().collect();
             self.resolved.insert(
                 dep_path.clone(),
                 LockedPackage {
@@ -2278,6 +2295,16 @@ impl<'a> ResolveDriver<'a> {
                     integrity: integrity.clone(),
                     dep_path: dep_path.clone(),
                     local_source: Some(local.clone()),
+                    peer_dependencies: peer_deps.clone(),
+                    peer_dependencies_meta,
+                    os: os.clone(),
+                    cpu: cpu.clone(),
+                    libc: libc.clone(),
+                    bundled_dependencies: {
+                        let mut v = bundled_dependencies;
+                        v.sort();
+                        v
+                    },
                     ..Default::default()
                 },
             );
@@ -2299,14 +2326,9 @@ impl<'a> ResolveDriver<'a> {
                         // rewrite.
                         alias_of: None,
                         local_source: Some(local.clone()),
-                        // Local `file:`/`link:` packages never carry
-                        // npm-style platform constraints — they're
-                        // whatever the user points at, so the fetch
-                        // coordinator treats them as unconstrained
-                        // (always fetch).
-                        os: aube_lockfile::PlatformList::new(),
-                        cpu: aube_lockfile::PlatformList::new(),
-                        libc: aube_lockfile::PlatformList::new(),
+                        os,
+                        cpu,
+                        libc,
                         deprecated: None,
                         unpacked_size: None,
                         pending,
@@ -2320,6 +2342,20 @@ impl<'a> ResolveDriver<'a> {
                 let mut child_ancestors = task.ancestors.to_vec();
                 child_ancestors.push((linked_name.clone(), real_version.clone()));
                 let child_ancestors: Arc<[(String, String)]> = child_ancestors.into();
+                // An exotic optional child `should_block_exotic_subdep`
+                // would refuse is skipped with a warning instead of failing
+                // the install, as it is under a registry parent. Required
+                // children still reach the guard in their own task.
+                let children_guarded = self.resolver.dependency_policy.block_exotic_subdeps
+                    && !matches!(
+                        local,
+                        LocalSource::Directory(_) | LocalSource::Portal(_) | LocalSource::Exec(_)
+                    );
+                let own_deps: BTreeSet<String> = target_deps
+                    .keys()
+                    .chain(target_optional_deps.keys())
+                    .cloned()
+                    .collect();
                 for (child_name, child_range) in target_deps {
                     self.queue.push_back(ResolveTask::transitive(
                         child_name,
@@ -2330,12 +2366,144 @@ impl<'a> ResolveDriver<'a> {
                         child_ancestors.clone(),
                     ));
                 }
+                for (child_name, child_range) in target_optional_deps {
+                    if children_guarded && is_non_registry_specifier(&child_range) {
+                        tracing::warn!(
+                            code = aube_codes::warnings::WARN_AUBE_EXOTIC_SUBDEP_SKIPPED,
+                            "skipping optional dependency {child_name} of {} — \
+                                     exotic specifier \"{child_range}\" blocked by blockExoticSubdeps",
+                            task.name
+                        );
+                        continue;
+                    }
+                    self.queue.push_back(ResolveTask::transitive(
+                        child_name,
+                        child_range,
+                        DepType::Optional,
+                        dep_path.clone(),
+                        task.importer.clone(),
+                        child_ancestors.clone(),
+                    ));
+                }
+                self.park_auto_install_peers(
+                    &task,
+                    &peer_deps,
+                    |name| peer_meta.get(name).is_some_and(|m| m.optional),
+                    |name| own_deps.contains(name) || bundled.contains(name),
+                    &dep_path,
+                    &child_ancestors,
+                );
             }
         }
         if task.is_root {
             self.note_root_done();
         }
         Ok(())
+    }
+
+    /// Whether the host this install runs on — or the configured
+    /// `supportedArchitectures` — can use a package with this manifest,
+    /// ignoring the accept-all widening a portable lockfile applies.
+    fn host_supports(&self, manifest: &LocalManifest) -> bool {
+        let arch = &self.resolver.supported_architectures;
+        is_supported(
+            &manifest.os,
+            &manifest.cpu,
+            &manifest.libc,
+            &crate::SupportedArchitectures {
+                os: arch.os.clone(),
+                cpu: arch.cpu.clone(),
+                libc: arch.libc.clone(),
+                accept_all: false,
+            },
+        )
+    }
+
+    /// Park the required peers of a just-resolved package that nothing
+    /// in scope provides, to be bound after the main tree drains.
+    ///
+    /// pnpm's `auto-install-peers=true` fills in missing required peers,
+    /// but it does not install optional peer alternatives the user did
+    /// not ask for, and it does not install a second compatible peer when
+    /// the importer already declares that peer name at an incompatible
+    /// version — pnpm keeps the direct dependency and reports an unmet
+    /// peer. With `auto-install-peers=false` nothing is parked; unmet
+    /// peers still surface through `detect_unmet_peers`. The post-pass
+    /// (`apply_peer_contexts`) decides which version each consumer sees
+    /// and assigns the peer-suffixed dep_paths.
+    ///
+    /// Peers the package also declares as a regular or optional dep (or
+    /// bundles) are skipped: those already have a task of their own.
+    fn park_auto_install_peers(
+        &mut self,
+        task: &ResolveTask,
+        peers: &BTreeMap<String, String>,
+        is_optional_peer: impl Fn(&str) -> bool,
+        is_own_dep: impl Fn(&str) -> bool,
+        dep_path: &str,
+        child_ancestors: &Arc<[(String, String)]>,
+    ) {
+        if !self.resolver.auto_install_peers {
+            return;
+        }
+        for (dep_name, dep_range) in peers {
+            // Optional peers are opt-in integrations, not auto-install
+            // candidates. Users who need one must declare it in their
+            // own manifest so the normal dep loops resolve it explicitly.
+            if is_optional_peer(dep_name) {
+                continue;
+            }
+            let importer_declares_peer = self
+                .importer_declared_dep_names
+                .get(&task.importer)
+                .is_some_and(|names| names.contains(dep_name));
+            let root_declares_peer = self.resolver.resolve_peers_from_workspace_root
+                && task.importer != "."
+                && self
+                    .importer_declared_dep_names
+                    .get(".")
+                    .is_some_and(|names| names.contains(dep_name));
+            let peer_dep_is_ancestor = task.ancestors.iter().any(|(name, _)| name == dep_name);
+            if importer_declares_peer || root_declares_peer || peer_dep_is_ancestor {
+                continue;
+            }
+            if is_own_dep(dep_name) {
+                continue;
+            }
+            if self.resolver.dependency_policy.block_exotic_subdeps
+                && is_non_registry_specifier(dep_range)
+            {
+                tracing::warn!(
+                    code = aube_codes::warnings::WARN_AUBE_EXOTIC_SUBDEP_SKIPPED,
+                    "skipping peer dependency {dep_name} of {} — \
+                             exotic specifier \"{dep_range}\" blocked \
+                             by blockExoticSubdeps",
+                    task.name
+                );
+                continue;
+            }
+            if !self.existing_names.contains(dep_name.as_str())
+                && self.resolver.is_prefetchable(
+                    dep_name.as_str(),
+                    dep_range.as_str(),
+                    self.workspace_packages,
+                )
+            {
+                self.ensure_fetch(dep_name);
+            }
+            // Park, don't enqueue: bound only after the main tree drains
+            // (see `deferred_auto_peers` / the drain in `bfs_loop`), so the
+            // peer reuses an already-resolved version instead of racing the
+            // hard deps and pulling in a registry-highest major.
+            self.deferred_auto_peers.push(ResolveTask::transitive(
+                dep_name.clone(),
+                dep_range.clone(),
+                DepType::Production,
+                dep_path.to_string(),
+                task.importer.clone(),
+                child_ancestors.clone(),
+            ));
+        }
     }
 
     /// Apply catalog, override, and `npm:`/`jsr:` alias rewrites
