@@ -1,6 +1,7 @@
 {
   "name": "@nubjs/plugin-yaml",
   "version": "0.0.0",
+  "private": true,
   "description": "Import YAML files as typed modules: a Node loader hook, a TypeScript content mapper, and a Vite/Rollup plugin in one package",
   "license": "MIT",
   "repository": "https://github.com/nubjs/nub",

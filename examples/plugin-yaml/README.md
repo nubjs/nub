@@ -2,7 +2,7 @@
 
 Import YAML files as modules, with types.
 
-> Prototype. Not published to npm and not part of the release workflow; it lives in the repo to exercise the plugin shape. The specifiers below work from a `file:` install of this directory.
+> An example, not a published package. It shows the shape a Nub plugin takes; the specifiers below work from a `file:` install of this directory.
 
 ```ts
 import config from "./config.yaml";
