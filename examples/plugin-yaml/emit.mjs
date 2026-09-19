@@ -7,7 +7,13 @@
 // go-to-definition land in the YAML file. Positions are UTF-16 code units — the
 // `yaml` package's offsets are JS string indices, which is what TypeScript's
 // "utf-16" position encoding means.
-import { isAlias, isMap, isPair, isScalar, isSeq, parseDocument } from "yaml";
+import { isAlias, isMap, isPair, isScalar, isSeq, parseDocument, stringify } from "yaml";
+
+const flowText = (node) => {
+  const clone = node.clone();
+  clone.flow = true;
+  return stringify(clone).trimEnd();
+};
 
 /** SpanMapKind from the protocol: Verbatim = same text, Atom = corresponding token. */
 const VERBATIM = 0;
@@ -67,8 +73,9 @@ export function emit(content) {
         if (!isPair(pair)) continue;
         push(pad);
         // Same coercion `parse()` applies to a plain-object target: a scalar key is
-        // its string form, a collection key is its YAML flow text ("[ a, b ]").
-        const key = isScalar(pair.key) ? String(pair.key.value ?? "null") : String(pair.key);
+        // its string form (null → ""), a collection key is its YAML flow text
+        // ("[ a, b ]"). A node's bare toString() is JSON, so stringify a flow clone.
+        const key = isScalar(pair.key) ? String(pair.key.value ?? "") : flowText(pair.key);
         // A quoted `"__proto__":` in an object literal sets the prototype; the
         // computed form defines an own property, which is what `parse()` returns.
         map(pair.key, key === "__proto__" ? '["__proto__"]' : JSON.stringify(key));
