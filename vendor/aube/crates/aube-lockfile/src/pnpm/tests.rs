@@ -4440,11 +4440,15 @@ snapshots:
         .find(|p| p.name == "next")
         .expect("next entry");
     let env_value = next.dependencies.get("@next/env").expect("@next/env edge");
-    let env_key = format!("@next/env@{env_value}");
-    let env = graph
-        .packages
-        .get(&env_key)
-        .unwrap_or_else(|| panic!("edge {env_key} resolves to a package"));
+    assert_eq!(env_value, &format!("{base}/@next/env"));
+    // The linker maps a URL edge to the hashed package key this way.
+    let env_key = crate::shared_local_dep_path("@next/env", env_value).unwrap();
+    let env = graph.packages.get(&env_key).unwrap_or_else(|| {
+        panic!(
+            "edge {env_key} resolves to a package; keys: {:?}",
+            graph.packages.keys().collect::<Vec<_>>()
+        )
+    });
     assert_eq!(env.name, "@next/env");
     assert_eq!(env.alias_of, None);
 }
