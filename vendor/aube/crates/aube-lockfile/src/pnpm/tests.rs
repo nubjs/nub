@@ -4393,6 +4393,64 @@ snapshots:
 }
 
 #[test]
+fn parse_restores_platform_and_peers_of_a_direct_url_tarball_dep() {
+    // A direct local dep is synthesized in the importer loop and skipped by
+    // the main package loop, so anything the writer put on its `packages:`
+    // entry is restored there or lost. Losing `os`/`cpu` leaves a native
+    // optional for another platform in the graph that `filter_graph` can no
+    // longer drop, so a frozen install would fetch and link it.
+    let url = "https://example.invalid/builds/abc/native-darwin-arm64";
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &path,
+        format!(
+            r#"
+lockfileVersion: '9.0'
+
+importers:
+  .:
+    optionalDependencies:
+      native:
+        specifier: {url}
+        version: {url}
+
+packages:
+  native@{url}:
+    resolution: {{integrity: sha512-fake, tarball: {url}}}
+    version: 1.2.3
+    cpu: [arm64]
+    os: [darwin]
+    peerDependencies:
+      host-app: ^2.0.0
+    peerDependenciesMeta:
+      host-app:
+        optional: true
+
+snapshots:
+  native@{url}: {{}}
+"#
+        ),
+    )
+    .unwrap();
+
+    let graph = parse(&path).unwrap();
+    let native = graph
+        .packages
+        .values()
+        .find(|p| p.name == "native")
+        .expect("native entry");
+    assert_eq!(native.version, "1.2.3");
+    assert_eq!(native.os.iter().collect::<Vec<_>>(), ["darwin"]);
+    assert_eq!(native.cpu.iter().collect::<Vec<_>>(), ["arm64"]);
+    assert_eq!(
+        native.peer_dependencies.get("host-app").map(String::as_str),
+        Some("^2.0.0")
+    );
+    assert!(native.peer_dependencies_meta["host-app"].optional);
+}
+
+#[test]
 fn parse_keeps_scoped_url_tarball_dep_of_a_url_tarball_package() {
     // `next` from a preview-build URL depends on `@next/env` from a
     // sibling URL. The `@` of the scope inside the dep value is not an

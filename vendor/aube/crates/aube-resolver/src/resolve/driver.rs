@@ -2074,37 +2074,40 @@ impl<'a> ResolveDriver<'a> {
                 ),
             ));
         }
-        // An optional URL tarball whose manifest says it cannot run on
-        // this host is never downloaded: read `package.json` from the head
-        // of the body first. `next`'s eight `@next/swc-*` platform
-        // binaries are ~30 MiB each, and only the host's is used.
-        let probed_mismatch = match &raw_local {
-            LocalSource::RemoteTarball(t) if task.dep_type == DepType::Optional => {
-                match probe_remote_tarball_manifest(&t.url, self.resolver.client.as_ref()).await {
-                    Some(m) if !self.host_supports(&m) => Some(m),
-                    _ => None,
+        // An optional URL tarball whose manifest says it cannot run on this
+        // host is dropped without downloading it: `package.json` comes from
+        // the head of the body, which npm packs first. `next`'s eight
+        // `@next/swc-*` binaries are ~30 MiB each and only the host's is
+        // used. Unlike a registry optional, this one is dropped even when a
+        // portable lockfile would otherwise record every variant — the
+        // entry would carry no integrity, which the strict reader (every
+        // default `parse_lockfile` caller) refuses. Another platform
+        // re-resolves the URL and picks up its own variant.
+        if let LocalSource::RemoteTarball(t) = &raw_local
+            && task.dep_type == DepType::Optional
+            && let Some(probed) =
+                probe_remote_tarball_manifest(&t.url, self.resolver.client.as_ref()).await
+            && !self.host_supports(&probed)
+        {
+            tracing::debug!(
+                "skipping optional dep {}: unsupported platform (os={:?} cpu={:?} libc={:?})",
+                task.name,
+                probed.os,
+                probed.cpu,
+                probed.libc,
+            );
+            if task.is_root {
+                if let Some(spec) = task.original_specifier.as_ref() {
+                    self.skipped_optional_dependencies
+                        .entry(task.importer.clone())
+                        .or_default()
+                        .insert(task.name.clone(), spec.clone());
                 }
+                self.note_root_done();
             }
-            _ => None,
-        };
-        let (mut local, manifest, integrity) = if let Some(m) = probed_mismatch {
-            let LocalSource::RemoteTarball(t) = &raw_local else {
-                unreachable!("probe only runs for remote tarballs")
-            };
-            // A portable lockfile records every platform variant, like the
-            // registry path does; the host skips it at link time. Without
-            // the download there is no integrity to pin, so the platform
-            // that does install it fetches it unverified.
-            (
-                LocalSource::RemoteTarball(aube_lockfile::RemoteTarballSource {
-                    url: t.url.clone(),
-                    integrity: String::new(),
-                    git_hosted: t.git_hosted,
-                }),
-                m,
-                None,
-            )
-        } else if let LocalSource::Git(ref g) = raw_local {
+            return Ok(());
+        }
+        let (mut local, manifest, integrity) = if let LocalSource::Git(ref g) = raw_local {
             let shallow = aube_store::git_host_in_list(&g.url, &self.resolver.git_shallow_hosts);
             let (resolved_local, manifest, integrity) =
                 resolve_git_source(&task.name, g, shallow, Some(self.resolver.client.as_ref()))
