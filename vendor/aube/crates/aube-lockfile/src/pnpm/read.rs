@@ -597,9 +597,9 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
             // survives `filter_graph` on this host; peers decide what the
             // linker places beside it.
             if let Some(pkg_info) = pkg_info {
-                local_pkg.os = pkg_info.os.clone();
-                local_pkg.cpu = pkg_info.cpu.clone();
-                local_pkg.libc = pkg_info.libc.clone();
+                local_pkg.os = pkg_info.os.iter().cloned().collect();
+                local_pkg.cpu = pkg_info.cpu.iter().cloned().collect();
+                local_pkg.libc = pkg_info.libc.iter().cloned().collect();
                 local_pkg.engines = pkg_info.engines.clone();
                 local_pkg.peer_dependencies =
                     pkg_info.peer_dependencies.clone().unwrap_or_default();
