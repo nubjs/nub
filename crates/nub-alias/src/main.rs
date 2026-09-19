@@ -50,11 +50,12 @@ fn run(nub: &PathBuf, verb: &str, args: &[OsString]) -> ExitCode {
 fn run(nub: &PathBuf, verb: &str, args: &[OsString]) -> ExitCode {
     // Ctrl+C reaches every process on the console. nub handles it and exits with
     // its own status; the stub only has to stay alive long enough to report that
-    // status, so it stops reacting to the signal itself.
-    // SAFETY: a null handler with `add = TRUE` only toggles this process's own
-    // Ctrl+C handling; there is no memory involved.
+    // status, so it swallows the event itself. A handler ROUTINE, not the null
+    // handler: `SetConsoleCtrlHandler(NULL, TRUE)` sets an ignore-Ctrl+C attribute
+    // that child processes inherit, which would take the signal away from nub.exe.
+    // SAFETY: registering a plain function pointer; no memory is shared with it.
     unsafe {
-        SetConsoleCtrlHandler(None, 1);
+        SetConsoleCtrlHandler(Some(swallow_ctrl_event), 1);
     }
     match Command::new(nub)
         .args(args)
@@ -67,6 +68,13 @@ fn run(nub: &PathBuf, verb: &str, args: &[OsString]) -> ExitCode {
         },
         Err(e) => fatal(format!("{verb}: failed to run {}: {e}", nub.display())),
     }
+}
+
+/// Consume Ctrl+C (0) and Ctrl+Break (1) so the stub outlives nub's handling of
+/// them; a close, logoff or shutdown event keeps its default handling.
+#[cfg(windows)]
+unsafe extern "system" fn swallow_ctrl_event(ctrl_type: u32) -> i32 {
+    i32::from(ctrl_type <= 1)
 }
 
 #[cfg(windows)]
