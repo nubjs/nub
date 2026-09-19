@@ -489,7 +489,7 @@ pub const ALL: &[CodeMeta] = &[
     CodeMeta {
         name: ERR_AUBE_SCRIPT_NON_ZERO_EXIT,
         category: category::SCRIPTS,
-        description: "A lifecycle script (`preinstall` / `install` / `postinstall` / a `package.json` script) exited non-zero.",
+        description: "A lifecycle script (`preinstall` / `install` / `postinstall` / a `package.json` script) exited non-zero. The process exits with the script's own exit code, as `run`, npm and pnpm do; 50 is only the fallback for a report that lost the script's status.",
         exit_code: Some(50),
     },
     CodeMeta {

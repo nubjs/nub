@@ -1255,6 +1255,57 @@ fn approved_build_that_never_calls_node_gyp_installs_with_no_registry() {
     );
 }
 
+/// nubjs/nub#670: several failed dependency builds are ALL reported, in build
+/// order, and the install exits with the first failing script's own exit code
+/// — the contract npm, pnpm and `nub run` already keep. Pinned through the
+/// real binary because the exit code is resolved in nub's presentation layer,
+/// which the engine's own e2e suite never exercises.
+#[test]
+fn failed_dependency_builds_are_all_reported_and_exit_with_the_first_scripts_code() {
+    let dir = pm_tmpdir("many-failed-builds");
+    for (name, code) in [("failing-a", 3), ("failing-b", 4), ("failing-c", 7)] {
+        let dep = dir.join(name);
+        std::fs::create_dir_all(&dep).unwrap();
+        // `exit N` is spelled the same for sh and cmd.exe.
+        std::fs::write(
+            dep.join("package.json"),
+            format!(
+                r#"{{"name":"{name}","version":"1.0.0","scripts":{{"postinstall":"exit {code}"}}}}"#
+            ),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"app","version":"1.0.0","private":true,"dependencies":{"failing-a":"file:./failing-a","failing-b":"file:./failing-b","failing-c":"file:./failing-c"},"allowScripts":{"failing-a@file:./failing-a":true,"failing-b@file:./failing-b":true,"failing-c@file:./failing-c":true}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(".npmrc"),
+        "registry=http://127.0.0.1:1/\nfetch-retries=0\n",
+    )
+    .unwrap();
+
+    let (_, stderr, code) = run_install(&dir, &["install"]);
+    assert_eq!(
+        code, 3,
+        "the first failing script's exit code (3) must be the install's, not a generic 1 or the table's 50: {stderr}"
+    );
+    for expected in [
+        "3 dependency builds failed",
+        "failing-a@1.0.0",
+        "exited with code 4",
+        "failing-b@1.0.0",
+        "exited with code 7",
+        "failing-c@1.0.0",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "every failed build must be named with its code; missing {expected:?}: {stderr}"
+        );
+    }
+}
+
 /// `jailBuilds` is the one case the lazy shim cannot serve on its own: the jail
 /// clears the environment and substitutes a temporary HOME, so a shim re-entry
 /// resolves the tool dir under *that* home, finds nothing, and cannot refetch

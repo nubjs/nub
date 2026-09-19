@@ -44,7 +44,10 @@ pub(super) async fn run_importer_lifecycle(
         &tool_dirs,
     )
     .await
-    .map_err(|e| miette!("{label} {script_name} script failed: {e}"))?;
+    // `wrap_err`, never `miette!("{e}")`: the typed `aube_scripts::Error`
+    // has to stay reachable for `exit_code_for_report` to hand the script's
+    // own exit code to the process.
+    .wrap_err_with(|| format!("{label} {script_name} script failed"))?;
     Ok(())
 }
 
@@ -266,7 +269,7 @@ pub(super) async fn run_root_lifecycle_script(
     tracing::debug!("Running {script_name} script...");
     aube_scripts::run_root_script_by_name(project_dir, modules_dir_name, manifest, script_name)
         .await
-        .map_err(|e| miette!("root {script_name} script failed: {e}"))?;
+        .wrap_err_with(|| format!("root {script_name} script failed"))?;
     Ok(())
 }
 
@@ -974,9 +977,9 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     });
 
     // Pass 2 (dependency-ordered, parallel within each phase): all jobs are
-    // registered up front so the existing first-error cancellation stays
-    // intact, but a job does not start until every EARLIER phase has fully
-    // drained, which is what puts a dependency's build ahead of its consumer's.
+    // registered up front, but a job does not start until every EARLIER phase
+    // has fully drained, which is what puts a dependency's build ahead of its
+    // consumer's.
     // Jobs within one phase stay bounded by `child_concurrency`, and inside one
     // job the three hooks (preinstall → install → postinstall) still run
     // sequentially — pnpm's execution model is "at most N packages building in
@@ -984,14 +987,13 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     // `buildSequence` chunks the build subgraph and `runGroups` runs one chunk
     // at a time under `childConcurrency`.
     //
-    // Cancellation on first failure uses `JoinSet`, which aborts every
-    // outstanding task when it's dropped. A plain `Vec<JoinHandle>`
-    // would NOT be safe here — dropping a `tokio::spawn` handle lets
-    // the task keep running detached, so a failing script would
-    // silently leave N siblings still executing `postinstall` against
-    // the user's machine after the install returned an error.
-    // `join_next` also surfaces whichever task fails first rather than
-    // waiting for the longest-running one to finish.
+    // The jobs live in a `JoinSet`, which aborts every outstanding task when
+    // it's dropped — the drain loop below normally runs it dry, but a task
+    // panic (`?` on the `JoinError`) or a cancelled caller still drops it. A
+    // plain `Vec<JoinHandle>` would NOT be safe there — dropping a
+    // `tokio::spawn` handle lets the task keep running detached, so a
+    // failing install would silently leave N siblings still executing
+    // `postinstall` against the user's machine after it returned.
     let concurrency = child_concurrency.max(1);
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
     let (phase_tx, phase_rx) = tokio::sync::watch::channel(0usize);
@@ -1028,12 +1030,26 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     let should_save_side_effects_cache = side_effects_cache.should_save();
     let overwrite_side_effects_cache = side_effects_cache.overwrite_existing();
     let jail_policy = std::sync::Arc::new((*jail_policy).clone());
-    // `(optional, spec, outcome)` rather than a bare result: the drain loop has
-    // to know whether the package that failed was optional-only, and an error
-    // surfacing from `join_next` carries no identity of its own.
-    let mut set: tokio::task::JoinSet<(bool, String, miette::Result<DepLifecycleOutcome>)> =
+    // A required build's failure stops every LATER phase from starting, and
+    // nothing else: the jobs already past the gate in the failing job's own
+    // phase run to completion, so every failure among them is collected and
+    // reported together rather than whichever one `join_next` drained first
+    // (nubjs/nub#670). That is also pnpm's shape — `runGroups` finishes the
+    // current group and never begins the next — and it is deterministic,
+    // where "abort the siblings still in flight" reports a timing-dependent
+    // subset. The failing task records its phase BEFORE its `PhaseGuard`
+    // drops, since the guard's drop is what opens the next gate; a task
+    // that passes the gate afterwards sees the flag and returns without
+    // building. `usize::MAX` is "no failure yet".
+    let abort_after_phase = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+    let not_started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // `(index, optional, spec, outcome)` rather than a bare result: the drain
+    // loop has to know whether the package that failed was optional-only and
+    // where it sat in build order, and an error surfacing from `join_next`
+    // carries no identity of its own.
+    let mut set: tokio::task::JoinSet<(usize, bool, String, miette::Result<DepLifecycleOutcome>)> =
         tokio::task::JoinSet::new();
-    for job in jobs {
+    for (job_index, job) in jobs.into_iter().enumerate() {
         let sem = semaphore.clone();
         let project_dir = project_dir.clone();
         let modules_dir_name = modules_dir_name.clone();
@@ -1044,6 +1060,8 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         let phase_tx = phase_tx.clone();
         let mut phase_rx = phase_rx.clone();
         let phase_remaining = phase_remaining.clone();
+        let abort_after_phase = abort_after_phase.clone();
+        let not_started = not_started.clone();
         let task = crate::dep_chain::scope_current(async move {
             // The task owns a `phase_tx` clone until the guard below takes it,
             // so `changed()` can never see every sender dropped and the error
@@ -1058,177 +1076,194 @@ pub(crate) async fn run_dep_lifecycle_scripts(
                 tx: phase_tx,
                 phase: job.phase,
             };
-            let _permit = sem.acquire().await.unwrap();
-            if should_restore_side_effects_cache && let Some(cache_entry) = job.cache_entry.clone()
-            {
-                let package_dir = job.package_dir.clone();
-                let restore_result = tokio::task::spawn_blocking(move || {
-                    cache_entry.restore_if_available(&package_dir)
-                })
-                .await
-                .map_err(|e| {
-                    miette!(
-                        "side-effects-cache restore task panicked for {}@{}: {e}",
-                        job.name,
-                        job.version
-                    )
-                })?;
-                match restore_result? {
-                    SideEffectsCacheRestore::Restored => {
-                        return Ok(DepLifecycleOutcome {
-                            package_contents_changed: true,
-                            ..Default::default()
-                        });
+            if job.phase > abort_after_phase.load(std::sync::atomic::Ordering::Acquire) {
+                not_started.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                return Ok(DepLifecycleOutcome::default());
+            }
+            let result: miette::Result<DepLifecycleOutcome> = async {
+                let _permit = sem.acquire().await.unwrap();
+                if should_restore_side_effects_cache
+                    && let Some(cache_entry) = job.cache_entry.clone()
+                {
+                    let package_dir = job.package_dir.clone();
+                    let restore_result = tokio::task::spawn_blocking(move || {
+                        cache_entry.restore_if_available(&package_dir)
+                    })
+                    .await
+                    .map_err(|e| {
+                        miette!(
+                            "side-effects-cache restore task panicked for {}@{}: {e}",
+                            job.name,
+                            job.version
+                        )
+                    })?;
+                    match restore_result? {
+                        SideEffectsCacheRestore::Restored => {
+                            return Ok(DepLifecycleOutcome {
+                                package_contents_changed: true,
+                                ..Default::default()
+                            });
+                        }
+                        SideEffectsCacheRestore::AlreadyApplied => {
+                            return Ok(DepLifecycleOutcome::default());
+                        }
+                        SideEffectsCacheRestore::Miss => {}
                     }
-                    SideEffectsCacheRestore::AlreadyApplied => {
-                        return Ok(DepLifecycleOutcome::default());
-                    }
-                    SideEffectsCacheRestore::Miss => {}
                 }
-            }
-            // Before the lifecycle script runs in-place inside the
-            // materialized package directory, break any hardlinks that
-            // still share an inode with the content-addressed store. On a
-            // hardlink filesystem (ext4, most Linux/CI) the linker
-            // hard-links store blobs into the package dir, so an in-place
-            // build write (node-gyp emitting `build/Release/*.node`, a
-            // postinstall rewriting its own files) would otherwise write
-            // *through* the shared inode and corrupt the machine-wide
-            // store — poisoning every project that shares that content
-            // hash. On reflink/copy filesystems (APFS, btrfs/xfs) the
-            // materialized files already have private inodes (nlink == 1),
-            // so this is a no-op and the default path is unchanged.
-            // (The side-effects-cache restore branch above returns early;
-            // its `copy_dir` removes and recreates the package dir, so a
-            // restored package never reaches a live store link here.)
-            #[cfg(unix)]
-            {
-                let package_dir = job.package_dir.clone();
-                let name = job.name.clone();
-                let version = job.version.clone();
-                tokio::task::spawn_blocking(move || {
-                    aube_scripts::break_cas_hardlinks(&package_dir)
-                })
-                .await
-                .map_err(|e| miette!("store-unshare task panicked for {name}@{version}: {e}"))?
-                .map_err(|e| {
-                    miette!(
-                        "failed to break store hardlinks for {name}@{version} before build: {e}"
-                    )
-                })?;
-            }
-            let tool_dirs: Vec<&std::path::Path> = node_gyp_bin_dir
-                .as_ref()
-                .as_deref()
-                .map(|p| vec![p])
-                .unwrap_or_default();
-            let jail = jail_policy.jail_for(
-                &job.registry_name,
-                &job.version,
-                job.source_key.as_deref(),
-                job.git_repository_key.as_deref(),
-                &job.package_dir,
-                &project_dir,
-            );
-            let _jail_home_cleanup = jail.as_ref().map(aube_scripts::ScriptJailHomeCleanup::new);
-            let mut ran_here = 0usize;
-            for hook in aube_scripts::DEP_LIFECYCLE_HOOKS {
-                let did_run = aube_scripts::run_dep_hook(
+                // Before the lifecycle script runs in-place inside the
+                // materialized package directory, break any hardlinks that
+                // still share an inode with the content-addressed store. On a
+                // hardlink filesystem (ext4, most Linux/CI) the linker
+                // hard-links store blobs into the package dir, so an in-place
+                // build write (node-gyp emitting `build/Release/*.node`, a
+                // postinstall rewriting its own files) would otherwise write
+                // *through* the shared inode and corrupt the machine-wide
+                // store — poisoning every project that shares that content
+                // hash. On reflink/copy filesystems (APFS, btrfs/xfs) the
+                // materialized files already have private inodes (nlink == 1),
+                // so this is a no-op and the default path is unchanged.
+                // (The side-effects-cache restore branch above returns early;
+                // its `copy_dir` removes and recreates the package dir, so a
+                // restored package never reaches a live store link here.)
+                #[cfg(unix)]
+                {
+                    let package_dir = job.package_dir.clone();
+                    let name = job.name.clone();
+                    let version = job.version.clone();
+                    tokio::task::spawn_blocking(move || {
+                        aube_scripts::break_cas_hardlinks(&package_dir)
+                    })
+                    .await
+                    .map_err(|e| miette!("store-unshare task panicked for {name}@{version}: {e}"))?
+                    .map_err(|e| {
+                        miette!(
+                            "failed to break store hardlinks for {name}@{version} before build: {e}"
+                        )
+                    })?;
+                }
+                let tool_dirs: Vec<&std::path::Path> = node_gyp_bin_dir
+                    .as_ref()
+                    .as_deref()
+                    .map(|p| vec![p])
+                    .unwrap_or_default();
+                let jail = jail_policy.jail_for(
+                    &job.registry_name,
+                    &job.version,
+                    job.source_key.as_deref(),
+                    job.git_repository_key.as_deref(),
                     &job.package_dir,
                     &project_dir,
-                    &modules_dir_name,
-                    &job.manifest,
-                    hook,
-                    &tool_dirs,
-                    jail.as_ref(),
-                )
-                .await
-                .map_err(|e| {
-                    miette!(
-                        "lifecycle script {} failed for {}@{}: {}",
-                        hook.script_name(),
-                        job.name,
-                        job.version,
-                        e
+                );
+                let _jail_home_cleanup =
+                    jail.as_ref().map(aube_scripts::ScriptJailHomeCleanup::new);
+                let mut ran_here = 0usize;
+                for hook in aube_scripts::DEP_LIFECYCLE_HOOKS {
+                    let did_run = aube_scripts::run_dep_hook(
+                        &job.package_dir,
+                        &project_dir,
+                        &modules_dir_name,
+                        &job.manifest,
+                        hook,
+                        &tool_dirs,
+                        jail.as_ref(),
                     )
-                })?;
-                if did_run {
-                    tracing::debug!(
-                        "ran {} for {}@{}",
-                        hook.script_name(),
-                        job.name,
-                        job.version
-                    );
-                    ran_here += 1;
+                    .await
+                    // `wrap_err`, never `miette!("{e}")`: the typed
+                    // `aube_scripts::Error` has to stay reachable for
+                    // `exit_code_for_report` to hand the script's own exit code
+                    // to the process.
+                    .wrap_err_with(|| {
+                        format!(
+                            "lifecycle script {} failed for {}@{}",
+                            hook.script_name(),
+                            job.name,
+                            job.version
+                        )
+                    })?;
+                    if did_run {
+                        tracing::debug!(
+                            "ran {} for {}@{}",
+                            hook.script_name(),
+                            job.name,
+                            job.version
+                        );
+                        ran_here += 1;
+                    }
                 }
-            }
-            if ran_here > 0 {
-                // A dep build writes its output in place — `node-gyp` emits
-                // `build/Release/*.node` right here — and those inodes are
-                // created by child processes that inherited this one's
-                // quarantine flags. A locally built addon is ad-hoc signed at
-                // best, so Gatekeeper refuses to load it, and without this the
-                // install that *built* the addon ships it unusable while only a
-                // later cache restore heals it.
-                //
-                // This does NOT make the cache entry saved below clean: `save`
-                // copies with `CopyMode::Copy`, so `fs::copy` mints inodes the
-                // kernel stamps again regardless of the now-clean source (route
-                // 2 in `aube-linker`'s module doc). The restore-side strip is
-                // what covers that, and remains load-bearing.
-                //
-                // Off the async worker like every other filesystem step here: a
-                // node-gyp `build/` tree can hold thousands of files, and this
-                // walks all of them. Best-effort, so a join error is ignored
-                // rather than failing an otherwise-complete build.
-                let package_dir = job.package_dir.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    aube_linker::strip_quarantine_from_tree(&package_dir)
-                })
-                .await;
-            }
-            if should_save_side_effects_cache
-                && ran_here > 0
-                && let Some(cache_entry) = job.cache_entry.clone()
-            {
-                let package_dir = job.package_dir.clone();
-                let save_result = tokio::task::spawn_blocking(move || {
-                    cache_entry.save(&package_dir, overwrite_side_effects_cache)
-                })
-                .await
-                .map_err(|e| {
-                    miette!(
-                        "side-effects-cache save task panicked for {}@{}: {e}",
-                        job.name,
-                        job.version
-                    )
-                })
-                .and_then(|r| r);
-                if let Err(e) = save_result {
-                    tracing::debug!(
-                        "side-effects-cache: ignoring cache save error for {}@{}: {e}",
-                        job.name,
-                        job.version
-                    );
+                if ran_here > 0 {
+                    // A dep build writes its output in place — `node-gyp` emits
+                    // `build/Release/*.node` right here — and those inodes are
+                    // created by child processes that inherited this one's
+                    // quarantine flags. A locally built addon is ad-hoc signed at
+                    // best, so Gatekeeper refuses to load it, and without this the
+                    // install that *built* the addon ships it unusable while only a
+                    // later cache restore heals it.
+                    //
+                    // This does NOT make the cache entry saved below clean: `save`
+                    // copies with `CopyMode::Copy`, so `fs::copy` mints inodes the
+                    // kernel stamps again regardless of the now-clean source (route
+                    // 2 in `aube-linker`'s module doc). The restore-side strip is
+                    // what covers that, and remains load-bearing.
+                    //
+                    // Off the async worker like every other filesystem step here: a
+                    // node-gyp `build/` tree can hold thousands of files, and this
+                    // walks all of them. Best-effort, so a join error is ignored
+                    // rather than failing an otherwise-complete build.
+                    let package_dir = job.package_dir.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        aube_linker::strip_quarantine_from_tree(&package_dir)
+                    })
+                    .await;
                 }
+                if should_save_side_effects_cache
+                    && ran_here > 0
+                    && let Some(cache_entry) = job.cache_entry.clone()
+                {
+                    let package_dir = job.package_dir.clone();
+                    let save_result = tokio::task::spawn_blocking(move || {
+                        cache_entry.save(&package_dir, overwrite_side_effects_cache)
+                    })
+                    .await
+                    .map_err(|e| {
+                        miette!(
+                            "side-effects-cache save task panicked for {}@{}: {e}",
+                            job.name,
+                            job.version
+                        )
+                    })
+                    .and_then(|r| r);
+                    if let Err(e) = save_result {
+                        tracing::debug!(
+                            "side-effects-cache: ignoring cache save error for {}@{}: {e}",
+                            job.name,
+                            job.version
+                        );
+                    }
+                }
+                Ok(DepLifecycleOutcome {
+                    ran: ran_here,
+                    package_contents_changed: ran_here > 0,
+                    ..Default::default()
+                })
             }
-            Ok(DepLifecycleOutcome {
-                ran: ran_here,
-                package_contents_changed: ran_here > 0,
-                ..Default::default()
-            })
+            .await;
+            if result.is_err() && !job_optional {
+                abort_after_phase.fetch_min(job.phase, std::sync::atomic::Ordering::AcqRel);
+            }
+            result
         });
         let task = crate::runtime::scope_current(task);
         let task = aube_scripts::scope_current(task);
-        set.spawn(async move { (job_optional, job_spec, task.await) });
+        set.spawn(async move { (job_index, job_optional, job_spec, task.await) });
     }
 
     let mut ran = 0usize;
     let mut package_contents_changed = false;
+    let mut failures: Vec<(usize, miette::Report)> = Vec::new();
     while let Some(res) = set.join_next().await {
         // A `JoinError` here is a task-level panic — an aube bug, not a package
         // whose build failed — so it stays fatal even for an optional package.
-        let (optional, spec, job_outcome) = res.into_diagnostic()?;
+        let (job_index, optional, spec, job_outcome) = res.into_diagnostic()?;
         match job_outcome {
             Ok(job_outcome) => {
                 ran += job_outcome.ran;
@@ -1257,13 +1292,31 @@ pub(crate) async fn run_dep_lifecycle_scripts(
             Err(error) if optional => {
                 tracing::warn!(
                     code = aube_codes::warnings::WARN_AUBE_OPTIONAL_BUILD_FAILED,
-                    "{spec} is an optional dependency and failed to build; continuing without it: {error}"
+                    "{spec} is an optional dependency and failed to build; continuing without it: {error:#}"
                 );
             }
-            // A required package's failure returns immediately, as before:
-            // `set` is dropped and the not-yet-started jobs never run.
-            Err(error) => return Err(error),
+            // A required package's failure is collected, not returned: the
+            // task already stopped later phases from starting (see
+            // `abort_after_phase`), and returning here would drop `set` and
+            // with it every other failure of the same phase.
+            Err(error) => failures.push((job_index, error)),
         }
+    }
+    if !failures.is_empty() {
+        // Build order, not drain order, so the same fixture reports the same
+        // list and the same exit code every run.
+        failures.sort_by_key(|(index, _)| *index);
+        let mut failures: Vec<miette::Report> =
+            failures.into_iter().map(|(_, error)| error).collect();
+        return Err(if failures.len() == 1 {
+            failures.remove(0)
+        } else {
+            aube_scripts::BuildFailures::new(
+                failures,
+                not_started.load(std::sync::atomic::Ordering::Acquire),
+            )
+            .into()
+        });
     }
     Ok(DepLifecycleOutcome {
         ran,
