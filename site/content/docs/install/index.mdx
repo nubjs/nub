@@ -14,6 +14,10 @@ nub dedupe                # collapse duplicate versions
 
 The lockfile is `nub.lock`. Every field Nub reads to build the graph is one pnpm, npm, Yarn, or Bun already reads — Nub adds no config field of its own. Running Nub inside a repo that already belongs to one of those tools works too: see [lockfile compatibility](#lockfile-compatibility).
 
+## Network
+
+On macOS, Nub uses the system DNS resolver for registry requests and downloads, including `nubx`. VPN and split-DNS settings apply without an extra Nub setting.
+
 ## Layout
 
 Layout is how the packages you install are arranged inside `node_modules`. Set it in `.npmrc`:
