@@ -4,9 +4,13 @@
   "private": true,
   "dependencies": {
     "is-number": "7.0.0",
-    "local-dep": "file:local-dep"
+    "local-dep": "file:local-dep",
+    "debug": "4.3.4"
   },
   "scripts": {
     "hello": "node -e \"console.log(42)\""
+  },
+  "devDependencies": {
+    "is-odd": "3.0.1"
   }
 }

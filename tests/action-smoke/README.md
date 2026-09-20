@@ -1,8 +1,8 @@
 # action-smoke
 
-Fixtures for `.github/workflows/action-smoke.yml`, which exercises the GitHub Actions [`setup-node/`](../../setup-node) and [`install/`](../../install) on real runners. The workflow runs on a push to `main` that touches either action, this directory, or itself; on a pull request once the `ci` label asks for a run; and weekly.
+Fixtures for `.github/workflows/action-smoke.yml`, which exercises the GitHub Actions [`setup-node/`](../../setup-node), [`install/`](../../install) and [`npm-ci/`](../../npm-ci) on real runners. The workflow runs on a push to `main` that touches either action, this directory, or itself; on a pull request once the `ci` label asks for a run; and weekly.
 
-- `install/fixture/` — an npm project (`package-lock.json`) with one registry dependency and one `file:` dependency, installed by `install` in the drop-in, not-frozen and cache jobs. The jobs write a per-run `run.txt` into it to force a cache miss where one is needed.
+- `install/fixture/` — an npm project (`package-lock.json`) with two registry dependencies (one of them, `debug`, with a transitive `ms` that the hoisted layout places at the root), a `file:` dependency and a devDependency, installed by `install` in the drop-in, not-frozen and cache jobs and by `npm-ci` in its drop-in, `--omit=dev` and refusal jobs. The jobs write a per-run `run.txt` into it to force a cache miss where one is needed.
 - `install/fixture-pnpm/` — the same project pinned to `pnpm@10.15.1` in `packageManager`, with a `pnpm-lock.yaml`, for the job that installs through the shims.
 
 Both lockfiles make the fixture its own project root; the repository's `nub.lock` above them is not read.

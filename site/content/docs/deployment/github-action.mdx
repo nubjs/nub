@@ -89,6 +89,26 @@ Two defaults differ from the action above. With no `node-version` input, the run
 
 Nub reads the lockfile unchanged, installs it into `node_modules`, and caches its store across runs, keyed on the lockfile. Node and the package managers on PATH are left alone. `working-directory` points the install at a subdirectory, `frozen-lockfile: false` lets it update the lockfile as `npm install` does, and `shim: true` adds the package-manager shims for later steps. The inputs are listed in [its README](https://github.com/nubjs/nub/tree/main/install#inputs).
 
+## npm ci, on Nub
+
+[`nubjs/nub/npm-ci`](https://github.com/nubjs/nub/tree/main/npm-ci) is the `npm ci` step for a project with a `package-lock.json`. It installs exactly what the lockfile records, under `npm ci`'s own contract, and leaves the lockfile as it found it:
+
+```diff
+  - uses: actions/setup-node@v4
+    with:
+      node-version: 22
+      cache: npm
+- - run: npm ci
++ - uses: nubjs/nub/npm-ci@v0
++   with:
++     lockfile: package-lock.json
+  - run: npm test
+```
+
+Every package is installed at the version and from the `resolved` URL the lockfile records and checked against its `integrity` hash; nothing is resolved against the registry. `node_modules` is removed first, the tree is hoisted as npm lays it out, every lifecycle script runs as it does under npm, and the install fails when the lockfile and `package.json` disagree. The action hashes the lockfile before and after the install and fails if a byte changed; the hash is its `lockfile-sha256` output. `args` takes `npm ci`'s own flags (`--omit=dev`, `--ignore-scripts`); a flag the engine does not honor fails the action rather than running npm.
+
+[`install`](#the-install-step-only) takes any lockfile and applies Nub's own layout and [build-script posture](/docs/install#lifecycle-scripts). `npm-ci` applies npm's, so a workflow that ran `npm ci` behaves as it did. The inputs are listed in [its README](https://github.com/nubjs/nub/tree/main/npm-ci#inputs).
+
 ## Inputs
 
 | Input | Default | Description |

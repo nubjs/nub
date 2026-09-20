@@ -1,6 +1,6 @@
 name: Action smoke
 
-# The GitHub Actions in setup-node/ and install/ exercised on real
+# The GitHub Actions in setup-node/, install/ and npm-ci/ exercised on real
 # runners: install + PATH, Node pin resolution, shims, caching, registry auth,
 # and the install action against the fixtures under tests/action-smoke/. A
 # consumer references them as `nubjs/nub/<name>@v0`; a job here references
@@ -11,6 +11,7 @@ on:
     paths:
       - "setup-node/**"
       - "install/**"
+      - "npm-ci/**"
       - "tests/action-smoke/**"
       - ".github/workflows/action-smoke.yml"
   pull_request:
@@ -20,6 +21,7 @@ on:
     paths:
       - "setup-node/**"
       - "install/**"
+      - "npm-ci/**"
       - "tests/action-smoke/**"
       - ".github/workflows/action-smoke.yml"
   schedule:
@@ -784,6 +786,146 @@ jobs:
           out="$(npm run --silent hello)"
           [[ "$out" == "42" ]] || { echo "::error::npm run hello printed '$out', expected 42"; exit 1; }
           echo "OK: $OUT_NUB installed the lockfile, node $nv, npm run works"
+
+  # ---- npm-ci ----
+  # The npm ci step on Nub's engine: the same drop-in shape as install-dropin,
+  # plus the guarantees the action states — npm's hoisted layout, the lockfile
+  # untouched, npm's flags, and a loud failure for every input it refuses.
+  npm-ci-dropin:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: "npm-ci: after setup-node, in place of npm ci (${{ matrix.os }})"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - run: echo "${{ github.run_id }}-${{ github.run_attempt }}" > tests/action-smoke/install/fixture/run.txt
+        shell: bash
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: tests/action-smoke/install/fixture/run.txt
+      - uses: ./npm-ci
+        id: ci
+        with:
+          working-directory: tests/action-smoke/install/fixture
+          lockfile: package-lock.json
+      - name: the lockfile is installed on Nub's engine, hoisted, and unchanged
+        shell: bash
+        working-directory: tests/action-smoke/install/fixture
+        env:
+          OUT_NUB: ${{ steps.ci.outputs.nub-version }}
+          OUT_SHA: ${{ steps.ci.outputs.lockfile-sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$OUT_NUB" == v* ]] || { echo "::error::nub-version output is '$OUT_NUB'"; exit 1; }
+          [ -f node_modules/.nub-engine ] || { echo "::error::the install did not run on Nub's engine"; exit 1; }
+          # debug's dependency ms sits at the root: npm's hoisted layout, not the isolated one.
+          [ -f node_modules/ms/package.json ] || { echo "::error::ms is not hoisted to the root"; exit 1; }
+          node -e "require('is-number'); require('is-odd')" || { echo "::error::a dependency did not install"; exit 1; }
+          [ -e node_modules/local-dep ] || { echo "::error::the file: dependency is not linked"; exit 1; }
+          sha="$( { command -v sha256sum >/dev/null 2>&1 && sha256sum package-lock.json; } || shasum -a 256 package-lock.json)"
+          [ "${sha:0:64}" = "$OUT_SHA" ] || { echo "::error::lockfile-sha256 output ${OUT_SHA} differs from the file's ${sha:0:64}"; exit 1; }
+          git diff --quiet -- package-lock.json || { echo "::error::package-lock.json changed"; exit 1; }
+          nv="$(node -p 'process.versions.node')"
+          [[ "$nv" == 20.* ]] || { echo "::error::bare node is $nv, expected setup-node's 20.x"; exit 1; }
+          out="$(npm run --silent hello)"
+          [[ "$out" == "42" ]] || { echo "::error::npm run hello printed '$out', expected 42"; exit 1; }
+          echo "OK: $OUT_NUB installed the lockfile ($OUT_SHA), hoisted, node $nv"
+
+  npm-ci-omit-dev:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: "npm-ci: args --omit=dev leaves devDependencies out (ubuntu-latest)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: ./npm-ci
+        with:
+          working-directory: tests/action-smoke/install/fixture
+          args: --omit=dev
+          cache: false
+      - shell: bash
+        working-directory: tests/action-smoke/install/fixture
+        run: |
+          set -euo pipefail
+          [ -f node_modules/.nub-engine ] || { echo "::error::the install did not run on Nub's engine"; exit 1; }
+          node -e "require('is-number')" || { echo "::error::is-number did not install"; exit 1; }
+          [ ! -e node_modules/is-odd ] || { echo "::error::the devDependency is-odd was installed under --omit=dev"; exit 1; }
+          echo "OK"
+
+  # Every refusal is a loud failure: no lockfile, a lockfileVersion 1 file, a
+  # package.json out of step with the lockfile, and an npm flag the engine does
+  # not honor (which must never quietly run npm instead).
+  npm-ci-refusals:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: "npm-ci: refuses a missing, legacy or stale lockfile and an unknown flag (ubuntu-latest)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - name: fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/nolock" "$RUNNER_TEMP/v1" "$RUNNER_TEMP/stale"
+          printf '{ "name": "nolock", "private": true }\n' > "$RUNNER_TEMP/nolock/package.json"
+          printf '{ "name": "v1", "private": true, "dependencies": { "is-number": "7.0.0" } }\n' > "$RUNNER_TEMP/v1/package.json"
+          printf '{ "name": "v1", "lockfileVersion": 1, "requires": true, "dependencies": { "is-number": { "version": "7.0.0" } } }\n' > "$RUNNER_TEMP/v1/package-lock.json"
+          cp -r tests/action-smoke/install/fixture/. "$RUNNER_TEMP/stale/"
+          node -e 'const fs=require("fs");const f=process.argv[1];const p=JSON.parse(fs.readFileSync(f,"utf8"));p.dependencies["is-number"]="6.0.0";fs.writeFileSync(f,JSON.stringify(p,null,2))' "$RUNNER_TEMP/stale/package.json"
+      - uses: ./npm-ci
+        id: nolock
+        continue-on-error: true
+        with:
+          working-directory: ${{ runner.temp }}/nolock
+          cache: false
+      - uses: ./npm-ci
+        id: v1
+        continue-on-error: true
+        with:
+          working-directory: ${{ runner.temp }}/v1
+          cache: false
+      - uses: ./npm-ci
+        id: stale
+        continue-on-error: true
+        with:
+          working-directory: ${{ runner.temp }}/stale
+          cache: false
+      - uses: ./npm-ci
+        id: flag
+        continue-on-error: true
+        with:
+          working-directory: tests/action-smoke/install/fixture
+          args: --legacy-peer-deps
+          cache: false
+      - shell: bash
+        env:
+          NOLOCK: ${{ steps.nolock.outcome }}
+          V1: ${{ steps.v1.outcome }}
+          STALE: ${{ steps.stale.outcome }}
+          FLAG: ${{ steps.flag.outcome }}
+        run: |
+          set -euo pipefail
+          echo "nolock=$NOLOCK v1=$V1 stale=$STALE flag=$FLAG"
+          [ "$NOLOCK" = failure ] || { echo "::error::a missing lockfile did not fail the action"; exit 1; }
+          [ "$V1" = failure ] || { echo "::error::a lockfileVersion 1 file did not fail the action"; exit 1; }
+          [ "$STALE" = failure ] || { echo "::error::a package.json out of step with the lockfile did not fail the action"; exit 1; }
+          [ "$FLAG" = failure ] || { echo "::error::an npm flag the engine does not honor did not fail the action"; exit 1; }
+          echo "OK: every refusal failed loudly"
 
   install-not-frozen:
     if: github.event_name != 'pull_request' || github.event.label.name == 'ci'

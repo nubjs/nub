@@ -465,7 +465,7 @@ git push origin v0.0.6         # ONE tag, never `--tags`: this clone holds ~155 
 
 Other Makefile targets: `make npm-build` (build + package for the current platform), `make npm-publish` (manual publish — prefer CI), `make npm-publish-dry`.
 
-The GitHub Actions `setup-node/` and `install/` ship at the repository root and are consumed as `nubjs/nub/<name>@v0`. The release workflow moves that floating `v<major>` tag to each promoted stable release; its `push: tags` filter matches only `v<x>.<y>.<z>` tags, so `v0` itself never starts a release, and `git describe --tags` needs `--exclude 'v[0-9]'` to see past it (`scripts/release-notify.ts` does). Their smoke is `.github/workflows/action-smoke.yml`, path-filtered to the two action directories and `tests/action-smoke/**`.
+The GitHub Actions `setup-node/`, `install/` and `npm-ci/` ship at the repository root and are consumed as `nubjs/nub/<name>@v0`. The release workflow moves that floating `v<major>` tag to each promoted stable release; its `push: tags` filter matches only `v<x>.<y>.<z>` tags, so `v0` itself never starts a release, and `git describe --tags` needs `--exclude 'v[0-9]'` to see past it (`scripts/release-notify.ts` does). Their smoke is `.github/workflows/action-smoke.yml`, path-filtered to the two action directories and `tests/action-smoke/**`.
 
 **CI release workflow** (`.github/workflows/release.yml`) triggers on `v*` tags and builds darwin-arm64, darwin-x64, linux-x64, linux-x64-musl, linux-arm64, linux-arm64-musl, win32-x64, win32-arm64. Publishes via npm OIDC trusted publishing (no secrets), then creates the GitHub Release with binary artifacts.
 
