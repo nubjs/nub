@@ -102,6 +102,11 @@ for entry in "${entries[@]}"; do
     mkdir -p "$XDG_DATA_HOME/nub/shims" && : > "$XDG_DATA_HOME/nub/shims/.route-installs"
     ( cd "$dir" && env -u npm_config_user_agent -u npm_execpath npm_config_node_linker=hoisted __NUB_ARGV0=npm "${TIMEOUT[@]}" "$NUB" ci ) > "$nub_log" 2>&1; rc=$?
     [ "$rc" -ne 0 ] || [ -f "$dir/node_modules/.modules.yaml" ] || { echo "  the routed npm ci did not run on Nub's engine" >> "$nub_log"; rc=1; }
+    # npm runs lifecycle scripts with the node on PATH and downloads nothing; a project
+    # pinned to a Node this runner lacks must not make the routed install provision one.
+    if [ "$rc" -eq 0 ] && grep -qE 'Installing from nodejs\.org|Using Node\.js .* \(resolved from' "$nub_log"; then
+      echo "  the routed npm ci provisioned or switched Node for a lifecycle script" >> "$nub_log"; rc=1
+    fi
   else
     ( cd "$dir" && "${TIMEOUT[@]}" "$NUB" install --frozen-lockfile ) > "$nub_log" 2>&1; rc=$?
   fi
