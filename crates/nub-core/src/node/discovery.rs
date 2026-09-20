@@ -918,6 +918,26 @@ pub fn discover_shell_node() -> Result<ResolvedNode, DiscoveryError> {
     shell_path_node(None)
 }
 
+/// Whether a bare `node` on PATH is Nub's own shim — the persistent one
+/// (`nub node shim`) or a per-invocation hijack dir — which resolves the
+/// project's pin on every call. [`discover_shell_node`] steps over those dirs to
+/// find the real binary, so a caller describing what a script's `node` will run
+/// under has to ask this first: with the shim in front, PATH semantics are the
+/// pin. A dependency's `node_modules/.bin/node` is skipped as in every probe.
+pub fn shell_node_is_nub_shim() -> bool {
+    for dir in env::split_paths(&env::var_os("PATH").unwrap_or_default()) {
+        if is_package_bin_dir(&dir) {
+            continue;
+        }
+        let has_node =
+            dir.join("node").is_file() || (cfg!(windows) && dir.join("node.exe").is_file());
+        if has_node {
+            return is_nub_shim_dir(&dir);
+        }
+    }
+    false
+}
+
 /// Resolve `node` from the shell PATH and detect its version.
 /// `pin_source` is threaded through so the resulting `ResolvedNode`
 /// carries the pin filename when one was found by the walk-up.

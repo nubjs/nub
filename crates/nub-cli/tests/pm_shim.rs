@@ -1402,3 +1402,74 @@ fn routed_npm_ci_runs_scripts_under_the_path_node_and_provisions_nothing() {
         "the engine stamp names the Node the scripts ran under, got {stamp:?}"
     );
 }
+
+/// With Nub's persistent `node` shim first on PATH (`nub node shim`), a
+/// script's bare `node` resolves the project's pin, so a routed `npm ci`
+/// records the Node the shim resolves — its version in the engine stamp, its
+/// path in `npm_node_execpath` — never the real binary the shim hides.
+#[test]
+fn routed_npm_ci_under_the_persistent_node_shim_records_what_the_shim_resolves() {
+    let work = tmp("route-node-shim");
+    let home = work.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let shims = shims_with_routing(&home, true);
+    // The persistent shim: nub wearing Node's name in the dir `nub node shim`
+    // installs to on a fresh unix home.
+    let node_shim = home.join(".local/share/nub/node-shim");
+    std::fs::create_dir_all(&node_shim).unwrap();
+    shim_link(&node_shim, "node");
+    let proj = npm_pinned_project(&work);
+    std::fs::write(
+        proj.join("package.json"),
+        r#"{ "name": "pinned", "version": "1.0.0", "dependencies": { "local-dep": "file:local-dep" },
+  "scripts": { "postinstall": "node -e \"require('fs').writeFileSync('postinstall-node.txt', process.env.npm_node_execpath || '')\"" } }"#,
+    )
+    .unwrap();
+    let cache = work.join("cache");
+    std::fs::create_dir_all(cache.join("nub")).unwrap();
+    std::fs::write(cache.join("nub/.npmrc"), "registry=http://127.0.0.1:1/\n").unwrap();
+    let env_base: Vec<(&str, &str)> = vec![
+        ("HOME", home.to_str().unwrap()),
+        ("XDG_CACHE_HOME", cache.to_str().unwrap()),
+        ("NODEJS_ORG_MIRROR", "http://127.0.0.1:1/"),
+    ];
+    // The pin is satisfied from nub's own store by a Node that is really the
+    // shell's binary: a store entry's version is its directory name.
+    let (execpath, stderr, code) = run(
+        Path::new("node"),
+        &["-p", "process.execPath"],
+        &proj,
+        &env_base,
+    );
+    assert_eq!(
+        code, 0,
+        "a node on PATH is the precondition; stderr:\n{stderr}"
+    );
+    let store_bin = cache.join("nub/node/19.9.9/bin");
+    std::fs::create_dir_all(&store_bin).unwrap();
+    std::os::unix::fs::symlink(execpath.trim(), store_bin.join("node")).unwrap();
+
+    let path = format!(
+        "{}:{}:{}",
+        node_shim.display(),
+        shims.display(),
+        std::env::var("PATH").unwrap()
+    );
+    let mut env = env_base.clone();
+    env.push(("PATH", path.as_str()));
+    let (_, stderr, code) = run(&shims.join("npm"), &["ci"], &proj, &env);
+    assert_eq!(
+        code, 0,
+        "the routed npm ci must succeed with the pin in the store; stderr:\n{stderr}"
+    );
+    let execpath_seen = std::fs::read_to_string(proj.join("postinstall-node.txt")).unwrap();
+    assert!(
+        execpath_seen.trim().ends_with("node/19.9.9/bin/node"),
+        "npm_node_execpath names the store Node the shim resolves, got {execpath_seen:?}; stderr:\n{stderr}"
+    );
+    let stamp = std::fs::read_to_string(proj.join("node_modules/.nub-engine")).unwrap();
+    assert!(
+        stamp.trim().ends_with("node19"),
+        "the engine stamp names the pin the shim resolves, got {stamp:?}"
+    );
+}

@@ -1960,7 +1960,7 @@ fn lifecycle_node_anchor(cwd: &Path) -> PathBuf {
 /// engine either way. Called once per command from [`engine_session`].
 fn apply_lifecycle_augmentation(cwd: &Path) -> Result<()> {
     if LIFECYCLE_NODE_FROM_PATH.load(std::sync::atomic::Ordering::Relaxed) {
-        return apply_lifecycle_path_node();
+        return apply_lifecycle_path_node(cwd);
     }
     let anchor = lifecycle_node_anchor(cwd);
     // The project's Node — pin-aware (`.nvmrc`/`.node-version`/`engines`), NOT
@@ -2055,8 +2055,20 @@ fn apply_lifecycle_augmentation(cwd: &Path) -> Result<()> {
 /// artifacts, and stamps the tree, on the Node that actually ran the scripts;
 /// `npm_node_execpath` names it as npm does. With no `node` on PATH at all the
 /// engine probes for itself, exactly as when pin discovery fails above.
-fn apply_lifecycle_path_node() -> Result<()> {
-    let Ok(node) = nub_core::node::discovery::discover_shell_node() else {
+///
+/// When the shell's `node` is Nub's own persistent shim (`nub node shim`), PATH
+/// semantics are the project's pin — every `node` a script runs resolves it, as
+/// it does under npm on that machine — so what is recorded is what the shim
+/// resolves, never the real binary the shim hides. An unsatisfied pin then
+/// records nothing, and the engine's own probe through the shim is the truth.
+fn apply_lifecycle_path_node(cwd: &Path) -> Result<()> {
+    use nub_core::node::discovery;
+    let node = if discovery::shell_node_is_nub_shim() {
+        discovery::discover_node(&lifecycle_node_anchor(cwd))
+    } else {
+        discovery::discover_shell_node()
+    };
+    let Ok(node) = node else {
         return Ok(());
     };
     let version = node.version.to_string();
