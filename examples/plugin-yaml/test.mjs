@@ -89,8 +89,8 @@ test("the mapper process completes the content-mapper handshake and transforms a
       child.stdin.write(body);
     });
   try {
-    const init = await request("initialize", { protocolVersion: 1, positionEncodings: ["utf-8", "utf-16"] });
-    assert.deepEqual(init.result, { protocolVersion: 1, positionEncoding: "utf-16", diagnosticSource: "yaml" });
+    const init = await request("initialize", { positionEncodings: ["utf-8", "utf-16"] });
+    assert.deepEqual(init.result, { positionEncoding: "utf-16", diagnosticSource: "yaml" });
     const open = await request("openProject", { configFileName: "/p/tsconfig.json", projectHandle: "h0", compilerOptions: {} });
     assert.deepEqual(open.result, {});
     const transform = await request("transform", { fileName: "/p/config.yaml", content: sample, projectHandle: "h0" });

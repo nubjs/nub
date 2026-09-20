@@ -10,9 +10,9 @@ import { emit } from "./emit.mjs";
 const projects = new Map();
 
 const handlers = {
-  // protocolVersion is checked by the host (expects 1); a build without the check
-  // ignores the extra field.
-  initialize: () => ({ protocolVersion: 1, positionEncoding: "utf-16", diagnosticSource: "yaml" }),
+  // No protocol version: microsoft/TypeScript#63936 dropped the field from both sides of
+  // initialize in favour of capabilities.
+  initialize: () => ({ positionEncoding: "utf-16", diagnosticSource: "yaml" }),
   openProject: ({ projectHandle, options }) => {
     projects.set(projectHandle, options ?? {});
     return {};
