@@ -7,7 +7,7 @@ branding:
 
 inputs:
   lockfile:
-    description: "The npm lockfile to install from, relative to working-directory: package-lock.json or npm-shrinkwrap.json. Nothing else is consulted. The action fails when the file is missing, when it is a lockfileVersion 1 file, and when the install would change it."
+    description: "The npm lockfile in working-directory to install from: package-lock.json or npm-shrinkwrap.json. When both exist, npm ci and Nub install from npm-shrinkwrap.json, so name that one. The action fails when the file is missing and when the install would change it."
     default: "package-lock.json"
   working-directory:
     description: "Directory holding package.json and the lockfile. Default: the checkout root."
@@ -68,13 +68,18 @@ runs:
         npm_config_node_linker: hoisted
       run: |
         set -euo pipefail
+        # The engine finds the lockfile in this directory itself and, as npm ci
+        # does, takes npm-shrinkwrap.json over package-lock.json when both exist.
+        # The input has to name that same file, or the hash below would cover a
+        # file the engine never read.
         case "$LOCKFILE" in
-          package-lock.json|npm-shrinkwrap.json|*/package-lock.json|*/npm-shrinkwrap.json) ;;
-          *) echo "::error::lockfile must name a package-lock.json or npm-shrinkwrap.json, got '${LOCKFILE}'."; exit 1 ;;
+          package-lock.json|npm-shrinkwrap.json) ;;
+          */*|*\\*) echo "::error::lockfile is a file name inside working-directory, not a path; point working-directory at the project that holds '${LOCKFILE}'."; exit 1 ;;
+          *) echo "::error::lockfile must be package-lock.json or npm-shrinkwrap.json, got '${LOCKFILE}'."; exit 1 ;;
         esac
         [ -f "$LOCKFILE" ] || { echo "::error::${LOCKFILE} not found in $(pwd). npm ci installs from a lockfile only: commit one, or use nubjs/nub/install for a project without one."; exit 1; }
-        if grep -qE '"lockfileVersion":[[:space:]]*1[^0-9]' "$LOCKFILE"; then
-          echo "::error::${LOCKFILE} is lockfileVersion 1 (npm 6), which records no dependency edges. Re-lock with npm 7 or later."; exit 1
+        if [ "$LOCKFILE" = package-lock.json ] && [ -f npm-shrinkwrap.json ]; then
+          echo "::error::npm-shrinkwrap.json is present, and npm ci and Nub install from it rather than package-lock.json; set lockfile: npm-shrinkwrap.json."; exit 1
         fi
         sha() { { command -v sha256sum >/dev/null 2>&1 && sha256sum "$1"; } || shasum -a 256 "$1"; }
         before="$(sha "$LOCKFILE" | cut -c1-64)"
@@ -84,13 +89,21 @@ runs:
         # process and lets every lifecycle script run as npm does. The route is
         # switched on by the marker `nub pm shim --route-installs` writes; only
         # the marker is written here, so no shim and no PATH edit reaches the
-        # runner. __NUB_ARGV0 is how Nub's own launcher names the verb. This
-        # step is the job's top level, so npm's nesting markers are cleared.
+        # runner, and a marker created here is removed when this step ends,
+        # success or failure, while one the runner's user set stays. __NUB_ARGV0
+        # is how Nub's own launcher names the verb. This step is the job's top
+        # level, so npm's nesting markers are cleared.
         case "${RUNNER_OS:-}" in
           Windows) shims="$(cygpath -u "${LOCALAPPDATA}")/nub/shims" ;;
           *)       shims="${XDG_DATA_HOME:-$HOME/.local/share}/nub/shims" ;;
         esac
-        mkdir -p "$shims" && : > "$shims/.route-installs"
+        marker="$shims/.route-installs"
+        created_marker=0
+        if [ ! -f "$marker" ]; then
+          mkdir -p "$shims" && : > "$marker" && created_marker=1
+        fi
+        cleanup() { if [ "$created_marker" = 1 ]; then rm -f "$marker"; fi; }
+        trap cleanup EXIT
         # shellcheck disable=SC2086
         env -u npm_config_user_agent -u npm_execpath __NUB_ARGV0=npm nub ci $ARGS
         [ -f node_modules/.nub-engine ] || { echo "::error::the install did not run on Nub's engine: an npm flag in args that the engine does not honor?"; exit 1; }

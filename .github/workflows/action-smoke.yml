@@ -838,18 +838,29 @@ jobs:
           [[ "$nv" == 20.* ]] || { echo "::error::bare node is $nv, expected setup-node's 20.x"; exit 1; }
           out="$(npm run --silent hello)"
           [[ "$out" == "42" ]] || { echo "::error::npm run hello printed '$out', expected 42"; exit 1; }
+          # the routing marker the action created for its own step is gone
+          case "$RUNNER_OS" in
+            Windows) shims="$(cygpath -u "$LOCALAPPDATA")/nub/shims" ;;
+            *)       shims="${XDG_DATA_HOME:-$HOME/.local/share}/nub/shims" ;;
+          esac
+          [ ! -f "$shims/.route-installs" ] || { echo "::error::the route-installs marker survived the action"; exit 1; }
           echo "OK: $OUT_NUB installed the lockfile ($OUT_SHA), hoisted, node $nv"
 
   npm-ci-omit-dev:
     if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     permissions:
       contents: read
-    name: "npm-ci: args --omit=dev leaves devDependencies out (ubuntu-latest)"
+    name: "npm-ci: args --omit=dev leaves devDependencies out; a user's routing marker stays (ubuntu-latest)"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           persist-credentials: false
+      - name: the runner's user already routes installs
+        shell: bash
+        run: |
+          mkdir -p ~/.local/share/nub/shims
+          touch ~/.local/share/nub/shims/.route-installs
       - uses: ./npm-ci
         with:
           working-directory: tests/action-smoke/install/fixture
@@ -862,16 +873,57 @@ jobs:
           [ -f node_modules/.nub-engine ] || { echo "::error::the install did not run on Nub's engine"; exit 1; }
           node -e "require('is-number')" || { echo "::error::is-number did not install"; exit 1; }
           [ ! -e node_modules/is-odd ] || { echo "::error::the devDependency is-odd was installed under --omit=dev"; exit 1; }
+          [ -f ~/.local/share/nub/shims/.route-installs ] || { echo "::error::the action removed a routing marker it did not create"; exit 1; }
           echo "OK"
 
-  # Every refusal is a loud failure: no lockfile, a lockfileVersion 1 file, a
-  # package.json out of step with the lockfile, and an npm flag the engine does
-  # not honor (which must never quietly run npm instead).
+  # npm 6 wrote lockfileVersion 1; the engine lifts its nested graph, so the
+  # action installs it like any other.
+  npm-ci-v1:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: "npm-ci: a lockfileVersion 1 lockfile installs (ubuntu-latest)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - name: a v1 lockfile built from the fixture's is-number entry
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/v1" && cd "$RUNNER_TEMP/v1"
+          printf '{ "name": "v1", "version": "1.0.0", "private": true, "dependencies": { "is-number": "7.0.0" } }\n' > package.json
+          node -e '
+            const fs = require("fs");
+            const e = JSON.parse(fs.readFileSync(process.argv[1], "utf8")).packages["node_modules/is-number"];
+            const lock = { name: "v1", version: "1.0.0", lockfileVersion: 1, requires: true,
+              dependencies: { "is-number": { version: e.version, resolved: e.resolved, integrity: e.integrity } } };
+            fs.writeFileSync("package-lock.json", JSON.stringify(lock, null, 2) + "\n");
+          ' "$GITHUB_WORKSPACE/tests/action-smoke/install/fixture/package-lock.json"
+          cat package-lock.json
+      - uses: ./npm-ci
+        with:
+          working-directory: ${{ runner.temp }}/v1
+          cache: false
+      - shell: bash
+        working-directory: ${{ runner.temp }}/v1
+        run: |
+          set -euo pipefail
+          [ -f node_modules/.nub-engine ] || { echo "::error::the install did not run on Nub's engine"; exit 1; }
+          v="$(node -p "require('./node_modules/is-number/package.json').version")"
+          [ "$v" = "7.0.0" ] || { echo "::error::is-number is $v, expected 7.0.0 from the v1 lockfile"; exit 1; }
+          echo "OK: v1 lockfile installed is-number $v"
+
+  # Every refusal is a loud failure: no lockfile, a lockfile named by path, a
+  # package-lock.json beside the npm-shrinkwrap.json npm and the engine would
+  # install instead, a package.json out of step with the lockfile, and an npm
+  # flag the engine does not honor (which must never quietly run npm instead).
   npm-ci-refusals:
     if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     permissions:
       contents: read
-    name: "npm-ci: refuses a missing, legacy or stale lockfile and an unknown flag (ubuntu-latest)"
+    name: "npm-ci: refuses a missing, misnamed or stale lockfile and an unknown flag (ubuntu-latest)"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
@@ -881,10 +933,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/nolock" "$RUNNER_TEMP/v1" "$RUNNER_TEMP/stale"
+          mkdir -p "$RUNNER_TEMP/nolock" "$RUNNER_TEMP/both" "$RUNNER_TEMP/stale"
           printf '{ "name": "nolock", "private": true }\n' > "$RUNNER_TEMP/nolock/package.json"
-          printf '{ "name": "v1", "private": true, "dependencies": { "is-number": "7.0.0" } }\n' > "$RUNNER_TEMP/v1/package.json"
-          printf '{ "name": "v1", "lockfileVersion": 1, "requires": true, "dependencies": { "is-number": { "version": "7.0.0" } } }\n' > "$RUNNER_TEMP/v1/package-lock.json"
+          cp -r tests/action-smoke/install/fixture/. "$RUNNER_TEMP/both/"
+          cp "$RUNNER_TEMP/both/package-lock.json" "$RUNNER_TEMP/both/npm-shrinkwrap.json"
           cp -r tests/action-smoke/install/fixture/. "$RUNNER_TEMP/stale/"
           node -e 'const fs=require("fs");const f=process.argv[1];const p=JSON.parse(fs.readFileSync(f,"utf8"));p.dependencies["is-number"]="6.0.0";fs.writeFileSync(f,JSON.stringify(p,null,2))' "$RUNNER_TEMP/stale/package.json"
       - uses: ./npm-ci
@@ -894,10 +946,18 @@ jobs:
           working-directory: ${{ runner.temp }}/nolock
           cache: false
       - uses: ./npm-ci
-        id: v1
+        id: nested
         continue-on-error: true
         with:
-          working-directory: ${{ runner.temp }}/v1
+          working-directory: tests/action-smoke
+          lockfile: install/fixture/package-lock.json
+          cache: false
+      - uses: ./npm-ci
+        id: both
+        continue-on-error: true
+        with:
+          working-directory: ${{ runner.temp }}/both
+          lockfile: package-lock.json
           cache: false
       - uses: ./npm-ci
         id: stale
@@ -915,14 +975,16 @@ jobs:
       - shell: bash
         env:
           NOLOCK: ${{ steps.nolock.outcome }}
-          V1: ${{ steps.v1.outcome }}
+          NESTED: ${{ steps.nested.outcome }}
+          BOTH: ${{ steps.both.outcome }}
           STALE: ${{ steps.stale.outcome }}
           FLAG: ${{ steps.flag.outcome }}
         run: |
           set -euo pipefail
-          echo "nolock=$NOLOCK v1=$V1 stale=$STALE flag=$FLAG"
+          echo "nolock=$NOLOCK nested=$NESTED both=$BOTH stale=$STALE flag=$FLAG"
           [ "$NOLOCK" = failure ] || { echo "::error::a missing lockfile did not fail the action"; exit 1; }
-          [ "$V1" = failure ] || { echo "::error::a lockfileVersion 1 file did not fail the action"; exit 1; }
+          [ "$NESTED" = failure ] || { echo "::error::a lockfile named by path did not fail the action"; exit 1; }
+          [ "$BOTH" = failure ] || { echo "::error::package-lock.json beside an npm-shrinkwrap.json did not fail the action"; exit 1; }
           [ "$STALE" = failure ] || { echo "::error::a package.json out of step with the lockfile did not fail the action"; exit 1; }
           [ "$FLAG" = failure ] || { echo "::error::an npm flag the engine does not honor did not fail the action"; exit 1; }
           echo "OK: every refusal failed loudly"

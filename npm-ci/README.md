@@ -25,7 +25,7 @@ What it does:
 
 | Input | Default | Meaning |
 | --- | --- | --- |
-| `lockfile` | `package-lock.json` | The npm lockfile to install from, relative to `working-directory`; `npm-shrinkwrap.json` is accepted. Missing, `lockfileVersion: 1`, or changed by the install: the action fails. |
+| `lockfile` | `package-lock.json` | The npm lockfile in `working-directory` to install from: `package-lock.json` or `npm-shrinkwrap.json`. When both exist, `npm ci` and Nub install from `npm-shrinkwrap.json`, so name that one. Missing, or changed by the install: the action fails. |
 | `working-directory` | `.` | Where `package.json` and the lockfile live. |
 | `args` | | Flags for `npm ci`, as npm spells them: `--omit=dev`, `--include=optional`, `--no-optional`, `--ignore-scripts`, `--loglevel <level>`. A flag the engine does not honor fails the action. |
 | `cache` | `true` | Cache Nub's store across runs, keyed on the lockfile. |
