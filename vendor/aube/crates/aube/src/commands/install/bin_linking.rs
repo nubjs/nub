@@ -24,6 +24,10 @@ pub(crate) enum ManagedBinEntry {
 pub(crate) struct ManagedBinLinks {
     entries: BTreeMap<PathBuf, BTreeMap<String, BTreeMap<PathBuf, ManagedBinEntry>>>,
     seen: BTreeMap<PathBuf, BTreeSet<String>>,
+    /// Every name a pass of this install claimed in each `.bin` dir, whether
+    /// it wrote the shim or left a preserved one in place. The importer
+    /// self-bin passes read it: a dependency's bin keeps its name.
+    taken: BTreeMap<PathBuf, BTreeSet<String>>,
     capture: bool,
 }
 
@@ -33,6 +37,12 @@ impl ManagedBinLinks {
             capture: true,
             ..Default::default()
         }
+    }
+
+    fn is_taken(&self, bin_dir: &Path, name: &str) -> bool {
+        self.taken
+            .get(bin_dir)
+            .is_some_and(|names| names.contains(name))
     }
 }
 pub(crate) type PreservedBinLinks = BTreeMap<PathBuf, BTreeSet<String>>;
@@ -694,7 +704,9 @@ pub(super) fn link_all_bins(input: LinkAllBinsInput<'_>) -> miette::Result<Manag
     // later pass overwrites a same-named shim (`create_bin_shim` unlinks
     // before it writes). That makes the order below the whole conflict
     // resolution for the hoisted layout:
-    //   hoisted placements < direct deps < self-bin.
+    //   hoisted placements < direct deps.
+    // The importer's own bins come last and never overwrite: they fill only
+    // the names no dependency claimed (`link_importer_own_bins`).
     // `link_dep_bins` is deliberately NOT part of this sequence — it is
     // isolated-only, and its per-dep targets are disjoint from every `.bin`
     // written here, so it stays at the end.
@@ -725,15 +737,20 @@ pub(super) fn link_all_bins(input: LinkAllBinsInput<'_>) -> miette::Result<Manag
         preserved,
     )?;
 
-    // Root self-bins override dependency bins with the same name. Force a
-    // wrapper because generated output may not exist yet or be executable.
+    // The root's own bins, under the names no dependency took. A dependency
+    // wins a same-named entry: a package that builds itself with its own
+    // released version (rollup's `prepare` runs the devDependency `rollup`)
+    // must not be handed its own unbuilt `dist/bin` instead — npm and pnpm
+    // link no importer's own bins at all, so the dependency is what `.bin`
+    // means to a script there. Force a wrapper because generated output may
+    // not exist yet or be executable.
     if let Some(bin) = manifest.extra.get("bin") {
         let root_bin_dir = project_dir.join(modules_dir_name).join(".bin");
         let self_shim_opts = aube_linker::BinShimOptions {
             prefer_symlinked_executables: Some(false),
             ..shim_opts
         };
-        link_bin_entries(
+        link_importer_own_bins(
             &root_bin_dir,
             project_dir,
             manifest.name.as_deref(),
@@ -797,7 +814,7 @@ pub(super) fn link_all_bins(input: LinkAllBinsInput<'_>) -> miette::Result<Manag
                     prefer_symlinked_executables: Some(false),
                     ..shim_opts
                 };
-                link_bin_entries(
+                link_importer_own_bins(
                     &bin_dir,
                     &pkg_dir,
                     member_manifest.name.as_deref(),
@@ -1014,23 +1031,53 @@ pub(super) fn link_bin_entries(
     managed: &mut ManagedBinLinks,
     preserved: Option<&PreservedBinLinks>,
 ) -> miette::Result<()> {
+    for (bin_name, target) in bin_entries(pkg_dir, pkg_name, bin) {
+        create_bin_link(bin_dir, &bin_name, &target, shim_opts, managed, preserved)?;
+    }
+    Ok(())
+}
+
+/// [`link_bin_entries`] for an importer's OWN `bin` field (the root, or a
+/// workspace member into its own `.bin`): every name a dependency already
+/// claimed in `bin_dir` during this install is skipped, so the importer's
+/// entry — usually a build output that does not exist yet — never shadows
+/// the tool its scripts mean to run.
+fn link_importer_own_bins(
+    bin_dir: &std::path::Path,
+    pkg_dir: &std::path::Path,
+    pkg_name: Option<&str>,
+    bin: &serde_json::Value,
+    shim_opts: aube_linker::BinShimOptions,
+    managed: &mut ManagedBinLinks,
+    preserved: Option<&PreservedBinLinks>,
+) -> miette::Result<()> {
+    for (bin_name, target) in bin_entries(pkg_dir, pkg_name, bin) {
+        if managed.is_taken(bin_dir, &bin_name) {
+            continue;
+        }
+        create_bin_link(bin_dir, &bin_name, &target, shim_opts, managed, preserved)?;
+    }
+    Ok(())
+}
+
+/// The `(shim name, target path)` pairs a package.json `bin` field declares,
+/// with invalid names and targets dropped as [`link_bin_entries`] documents.
+fn bin_entries(
+    pkg_dir: &std::path::Path,
+    pkg_name: Option<&str>,
+    bin: &serde_json::Value,
+) -> Vec<(String, std::path::PathBuf)> {
+    let mut entries = Vec::new();
     match bin {
         serde_json::Value::String(bin_path) => {
             let Some(name) = pkg_name else {
-                return Ok(());
+                return entries;
             };
             let bin_name = name.split('/').next_back().unwrap_or(name);
             if aube_linker::validate_bin_name(bin_name).is_ok()
                 && aube_linker::validate_bin_target(bin_path).is_ok()
             {
-                create_bin_link(
-                    bin_dir,
-                    bin_name,
-                    &pkg_dir.join(bin_path),
-                    shim_opts,
-                    managed,
-                    preserved,
-                )?;
+                entries.push((bin_name.to_string(), pkg_dir.join(bin_path)));
             }
         }
         serde_json::Value::Object(bins) => {
@@ -1039,20 +1086,13 @@ pub(super) fn link_bin_entries(
                     && aube_linker::validate_bin_name(bin_name).is_ok()
                     && aube_linker::validate_bin_target(path_str).is_ok()
                 {
-                    create_bin_link(
-                        bin_dir,
-                        bin_name,
-                        &pkg_dir.join(path_str),
-                        shim_opts,
-                        managed,
-                        preserved,
-                    )?;
+                    entries.push((bin_name.clone(), pkg_dir.join(path_str)));
                 }
             }
         }
         _ => {}
     }
-    Ok(())
+    entries
 }
 
 /// Fallback bin-linking for a package that declares no top-level
@@ -1194,6 +1234,11 @@ fn create_bin_link(
     managed: &mut ManagedBinLinks,
     preserved: Option<&PreservedBinLinks>,
 ) -> miette::Result<()> {
+    managed
+        .taken
+        .entry(bin_dir.to_path_buf())
+        .or_default()
+        .insert(name.to_string());
     if let Some(preserved) = preserved {
         managed
             .seen

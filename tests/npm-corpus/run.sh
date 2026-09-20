@@ -101,7 +101,7 @@ for entry in "${entries[@]}"; do
     # action writes) with npm's contract — hoisted layout, every lifecycle script.
     mkdir -p "$XDG_DATA_HOME/nub/shims" && : > "$XDG_DATA_HOME/nub/shims/.route-installs"
     ( cd "$dir" && env -u npm_config_user_agent -u npm_execpath npm_config_node_linker=hoisted __NUB_ARGV0=npm "${TIMEOUT[@]}" "$NUB" ci ) > "$nub_log" 2>&1; rc=$?
-    [ "$rc" -ne 0 ] || [ -f "$dir/node_modules/.nub-engine" ] || { echo "  the routed npm ci did not run on Nub's engine" >> "$nub_log"; rc=1; }
+    [ "$rc" -ne 0 ] || [ -f "$dir/node_modules/.modules.yaml" ] || { echo "  the routed npm ci did not run on Nub's engine" >> "$nub_log"; rc=1; }
   else
     ( cd "$dir" && "${TIMEOUT[@]}" "$NUB" install --frozen-lockfile ) > "$nub_log" 2>&1; rc=$?
   fi

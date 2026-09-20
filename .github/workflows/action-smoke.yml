@@ -826,7 +826,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$OUT_NUB" == v* ]] || { echo "::error::nub-version output is '$OUT_NUB'"; exit 1; }
-          [ -f node_modules/.nub-engine ] || { echo "::error::the install did not run on Nub's engine"; exit 1; }
+          [ -f node_modules/.modules.yaml ] || { echo "::error::the install did not run on Nub's engine"; exit 1; }
           # debug's dependency ms sits at the root: npm's hoisted layout, not the isolated one.
           [ -f node_modules/ms/package.json ] || { echo "::error::ms is not hoisted to the root"; exit 1; }
           node -e "require('is-number'); require('is-odd')" || { echo "::error::a dependency did not install"; exit 1; }
@@ -870,11 +870,55 @@ jobs:
         working-directory: tests/action-smoke/install/fixture
         run: |
           set -euo pipefail
-          [ -f node_modules/.nub-engine ] || { echo "::error::the install did not run on Nub's engine"; exit 1; }
+          [ -f node_modules/.modules.yaml ] || { echo "::error::the install did not run on Nub's engine"; exit 1; }
           node -e "require('is-number')" || { echo "::error::is-number did not install"; exit 1; }
           [ ! -e node_modules/is-odd ] || { echo "::error::the devDependency is-odd was installed under --omit=dev"; exit 1; }
           [ -f ~/.local/share/nub/shims/.route-installs ] || { echo "::error::the action removed a routing marker it did not create"; exit 1; }
           echo "OK"
+
+  # A project pinned to a Node the runner lacks: npm ci runs the scripts with
+  # the runner's node and downloads nothing, and so does the action.
+  npm-ci-pinned-node:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    permissions:
+      contents: read
+    name: "npm-ci: a .nvmrc the runner cannot satisfy changes nothing; scripts run under the job's node (ubuntu-latest)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "22"
+      - name: the fixture, pinned to a Node that is not on this runner, with a postinstall that records its Node
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -R tests/action-smoke/install/fixture "$RUNNER_TEMP/pinned"
+          cd "$RUNNER_TEMP/pinned"
+          echo "v20.0.0" > .nvmrc
+          node - <<'JS'
+          const fs = require("fs");
+          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          pkg.scripts = { ...pkg.scripts, postinstall: "node -e \"require('fs').writeFileSync('postinstall-node.txt', process.version)\"" };
+          fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+          JS
+      - uses: ./npm-ci
+        with:
+          working-directory: ${{ runner.temp }}/pinned
+          cache: false
+      - shell: bash
+        working-directory: ${{ runner.temp }}/pinned
+        run: |
+          set -euo pipefail
+          [ -f node_modules/.modules.yaml ] || { echo "::error::the install did not run on Nub's engine"; exit 1; }
+          want="$(node --version)"
+          case "$want" in v22.*) ;; *) echo "::error::setup-node put ${want} on PATH, expected a 22"; exit 1 ;; esac
+          got="$(cat postinstall-node.txt)"
+          [ "$got" = "$want" ] || { echo "::error::the postinstall ran under Node ${got}, not the runner's ${want}"; exit 1; }
+          [ ! -d ~/.cache/nub/node ] || { echo "::error::the action provisioned a Node: $(ls ~/.cache/nub/node)"; exit 1; }
+          echo "OK: the scripts ran under ${want}; nothing was provisioned"
 
   # npm 6 wrote lockfileVersion 1; the engine lifts its nested graph, so the
   # action installs it like any other.
@@ -910,7 +954,7 @@ jobs:
         working-directory: ${{ runner.temp }}/v1
         run: |
           set -euo pipefail
-          [ -f node_modules/.nub-engine ] || { echo "::error::the install did not run on Nub's engine"; exit 1; }
+          [ -f node_modules/.modules.yaml ] || { echo "::error::the install did not run on Nub's engine"; exit 1; }
           v="$(node -p "require('./node_modules/is-number/package.json').version")"
           [ "$v" = "7.0.0" ] || { echo "::error::is-number is $v, expected 7.0.0 from the v1 lockfile"; exit 1; }
           echo "OK: v1 lockfile installed is-number $v"

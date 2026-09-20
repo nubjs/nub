@@ -11283,6 +11283,10 @@ fn run_shim_engine_install(
     if route.prod {
         crate::pm_engine::set_lifecycle_env(vec![("NODE_ENV".into(), "production".into())]);
     }
+    // npm runs the scripts with the `node` on PATH, whatever the project pins;
+    // so does its install on the engine. A pin the machine lacks would
+    // otherwise provision a Node mid-install and compile addons against it.
+    crate::pm_engine::set_lifecycle_node_from_path();
     let (from, to) = match route.verb {
         NpmInstallVerb::Ci => ("npm ci", "nub ci"),
         NpmInstallVerb::Install => ("npm install", "nub install"),

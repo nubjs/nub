@@ -725,3 +725,71 @@ fn run_reports_a_missing_command_like_a_shell() {
         assert.failure();
     }
 }
+
+/// What a `.bin/<name>` shim resolves to: the link target when it is a
+/// symlink, else the wrapper's text (which names its target).
+fn bin_shim_target(shim: &std::path::Path) -> String {
+    match fs::read_link(shim) {
+        Ok(target) => target.to_string_lossy().into_owned(),
+        Err(_) => fs::read_to_string(shim).unwrap(),
+    }
+}
+
+/// An importer's own `bin` never takes a name a dependency claimed. A
+/// package that builds itself with its own released version (rollup's
+/// `prepare` runs the devDependency `rollup`) was handed its own unbuilt
+/// `dist/bin` instead, and the build died on the missing file. The
+/// dependency's shim wins in both layouts; an own bin under a free name is
+/// still linked.
+#[test]
+fn an_importers_own_bin_never_shadows_a_dependencys_bin() {
+    let _guard = e2e_lock();
+    for linker_args in [&[][..], &["--node-linker=hoisted"][..]] {
+        let sbx = Sandbox::new();
+        sbx.write_file(
+            "vendor/tool/package.json",
+            r#"{ "name": "tool", "version": "1.0.0", "bin": { "tool": "cli.js" } }"#,
+        );
+        sbx.write_file(
+            "vendor/tool/cli.js",
+            "#!/usr/bin/env node\nconsole.log('dep')\n",
+        );
+        sbx.write_manifest(
+            r#"{
+                "name": "tool",
+                "version": "0.0.0",
+                "bin": { "tool": "dist/tool.js", "tool-dev": "dev.js" },
+                "devDependencies": { "tool": "file:./vendor/tool" }
+            }"#,
+        );
+        sbx.cmd()
+            .arg("install")
+            .args(linker_args)
+            .assert()
+            .success();
+
+        let bin_dir = sbx.project.join("node_modules/.bin");
+        let shims: Vec<_> = ["tool", "tool.cmd"]
+            .iter()
+            .map(|name| bin_dir.join(name))
+            .filter(|path| path.symlink_metadata().is_ok())
+            .collect();
+        assert!(
+            !shims.is_empty(),
+            "the dependency's bin is linked ({linker_args:?})"
+        );
+        for shim in shims {
+            let target = bin_shim_target(&shim);
+            assert!(
+                target.contains("cli.js") && !target.contains("dist/tool.js"),
+                "{} runs the dependency, not the importer's own unbuilt bin ({linker_args:?}):\n{target}",
+                shim.display()
+            );
+        }
+        assert!(
+            bin_dir.join("tool-dev").symlink_metadata().is_ok()
+                || bin_dir.join("tool-dev.cmd").symlink_metadata().is_ok(),
+            "an own bin under a free name is still linked ({linker_args:?})"
+        );
+    }
+}

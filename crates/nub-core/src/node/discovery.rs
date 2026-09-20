@@ -910,6 +910,14 @@ pub fn engines_disagreement_warning(cwd: &Path, node: &ResolvedNode) -> Option<S
     }
 }
 
+/// The `node` on PATH with every pin ignored: the Node npm runs a project's
+/// scripts with. For the npm-routed install, whose contract is npm's, so a
+/// `.nvmrc` naming a Node the machine lacks is neither provisioned nor waited
+/// on. Skips nub's own shim directories like every PATH probe here.
+pub fn discover_shell_node() -> Result<ResolvedNode, DiscoveryError> {
+    shell_path_node(None)
+}
+
 /// Resolve `node` from the shell PATH and detect its version.
 /// `pin_source` is threaded through so the resulting `ResolvedNode`
 /// carries the pin filename when one was found by the walk-up.

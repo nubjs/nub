@@ -117,6 +117,19 @@ pub fn set_lifecycle_env(pairs: Vec<(String, String)>) {
     );
 }
 
+/// Lifecycle scripts run under the Node on PATH — no pin lookup, no
+/// provisioning, no augmentation — which is npm's contract for them. Set by the
+/// npm-routing shim before the engine session opens: the user typed `npm ci` /
+/// `npm install` (or the npm-ci GitHub Action did), so a project's `.nvmrc`
+/// pointing at a Node the machine lacks must neither download one nor build
+/// native addons against a different Node than the one the job's `node` is.
+static LIFECYCLE_NODE_FROM_PATH: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_lifecycle_node_from_path() {
+    LIFECYCLE_NODE_FROM_PATH.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// The four engine verb families. One module per family; each family module
 /// owns the wiring (args parsing, options construction, output routing) for
 /// its verbs.
@@ -1946,6 +1959,9 @@ fn lifecycle_node_anchor(cwd: &Path) -> PathBuf {
 /// re-entrant / broken install); the resolved Node *version* is published to the
 /// engine either way. Called once per command from [`engine_session`].
 fn apply_lifecycle_augmentation(cwd: &Path) -> Result<()> {
+    if LIFECYCLE_NODE_FROM_PATH.load(std::sync::atomic::Ordering::Relaxed) {
+        return apply_lifecycle_path_node();
+    }
     let anchor = lifecycle_node_anchor(cwd);
     // The project's Node — pin-aware (`.nvmrc`/`.node-version`/`engines`), NOT
     // the ambient PATH node. This resolved version drives flag injection and its
@@ -2028,6 +2044,27 @@ fn apply_lifecycle_augmentation(cwd: &Path) -> Result<()> {
         c.path_prepends = path_prepends;
         c.runtime_node_dir = runtime_node_dir;
         c.runtime_node_bin = runtime_node_bin;
+    });
+    Ok(())
+}
+
+/// The npm-routed install's lifecycle Node ([`set_lifecycle_node_from_path`]):
+/// the `node` on PATH, as npm hands it to scripts. No shim dir goes on PATH, so
+/// a script's `node` is the same binary the shell's `node` is, and nothing is
+/// provisioned. The version is still published so the engine keys its build
+/// artifacts, and stamps the tree, on the Node that actually ran the scripts;
+/// `npm_node_execpath` names it as npm does. With no `node` on PATH at all the
+/// engine probes for itself, exactly as when pin discovery fails above.
+fn apply_lifecycle_path_node() -> Result<()> {
+    let Ok(node) = nub_core::node::discovery::discover_shell_node() else {
+        return Ok(());
+    };
+    let version = node.version.to_string();
+    let execpath = std::ffi::OsString::from(node.path.as_str());
+    aube_util::update_engine_context(move |c| {
+        c.runtime_node_version = Some(version);
+        c.env_overlay
+            .push((std::ffi::OsString::from("npm_node_execpath"), execpath));
     });
     Ok(())
 }

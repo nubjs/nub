@@ -18,6 +18,7 @@ What it does:
 
 - Installs exactly what `package-lock.json` records: every package at the version and from the `resolved` URL in the lockfile, checked against its `integrity` hash. Nothing is resolved against the registry.
 - Keeps `npm ci`'s contract: `node_modules` is removed first, every lifecycle script runs as it does under npm, and the install fails when `package-lock.json` and `package.json` disagree (`ERR_NUB_OUTDATED_LOCKFILE`).
+- Runs the lifecycle scripts under the job's `node`, the one `setup-node` put on PATH. A `.nvmrc` or `engines` pin in the project is not consulted and no Node is downloaded, as under `npm ci`.
 - Never writes the lockfile. The action hashes it before and after the install and fails if a byte changed.
 - Leaves everything else alone: `setup-node`, `node`, `npm test`, `npm run` keep running exactly as before. Nub is the install step and nothing more.
 

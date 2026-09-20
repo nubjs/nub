@@ -106,7 +106,8 @@ runs:
         trap cleanup EXIT
         # shellcheck disable=SC2086
         env -u npm_config_user_agent -u npm_execpath __NUB_ARGV0=npm nub ci $ARGS
-        [ -f node_modules/.nub-engine ] || { echo "::error::the install did not run on Nub's engine: an npm flag in args that the engine does not honor?"; exit 1; }
+        # The engine's layout record; npm writes node_modules/.package-lock.json instead.
+        [ -f node_modules/.modules.yaml ] || { echo "::error::the install did not run on Nub's engine: an npm flag in args that the engine does not honor?"; exit 1; }
 
         after="$(sha "$LOCKFILE" | cut -c1-64)"
         [ "$before" = "$after" ] || { echo "::error::${LOCKFILE} changed during the install (sha256 ${before} -> ${after}). The lockfile is the input and is never written."; exit 1; }
