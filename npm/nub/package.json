@@ -1,6 +1,6 @@
 {
   "name": "@nubjs/nub",
-  "version": "0.9.4",
+  "version": "0.9.3",
   "description": "TypeScript-first developer supertool — a fast script runner and TS runtime powered by Node.js",
   "license": "MIT",
   "repository": "https://github.com/nubjs/nub",
@@ -27,7 +27,7 @@
     "nubr": "bin/nubr"
   },
   "scripts": {
-    "preinstall": "node postinstall.js"
+    "postinstall": "node postinstall.js"
   },
   "files": [
     "bin",
