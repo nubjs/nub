@@ -22,22 +22,12 @@
     },
     "prefix": {
       "oneOf": [
-        {
-          "type": "string",
-          "pattern": "^[^\\\\]*[^\\\\\\s][^\\\\]*$"
-        },
+        { "type": "string", "pattern": "^[^\\\\]*[^\\\\\\s][^\\\\]*$" },
         {
           "type": "array",
           "minItems": 1,
-          "prefixItems": [
-            {
-              "type": "string",
-              "minLength": 1
-            }
-          ],
-          "items": {
-            "type": "string"
-          }
+          "prefixItems": [{ "type": "string", "minLength": 1 }],
+          "items": { "type": "string" }
         }
       ],
       "description": "A command put in front of every file run, script, and watch — a string split like a shell, or an array of arguments taken as written. A backslash is a shell escape, so a Windows path goes in the array form."
