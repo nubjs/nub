@@ -9,9 +9,9 @@ name: Release
 #   - CANARY (nightly schedule): bun-style rolling prerelease, built ONCE A DAY
 #     from the head of main rather than on every push. The nightly builds the
 #     full 8-platform matrix with an uncommitted `<base>-canary.<yyyymmdd>.<run#>`
-#     version stamp, publishes all packages to npm under the `canary` dist-tag
-#     after its immutable versioned assets are complete, then recreates the
-#     rolling `canary` GitHub prerelease at the built commit. A nightly whose
+#     version stamp, publishes its immutable versioned assets, then recreates
+#     the rolling `canary` GitHub prerelease at the built commit. Canaries do
+#     not go to npm: the @nubjs trusted publishers are stage-only (2026-09-22). A nightly whose
 #     only new commits are inert is skipped, as is one where main has not moved
 #     at all (the `verify` job's canary gate); the test/conformance gates are
 #     skipped too — ci.yml runs them on the same commit, and the canary contract
@@ -119,8 +119,8 @@ jobs:
       # runs against whatever branch or tag the operator selected in the UI, and
       # every canary job downstream trusts `is_canary` and targets GITHUB_SHA —
       # so without this, a canary dispatch from a feature branch would build that
-      # branch, publish it to the `canary` dist-tag, and repoint the rolling
-      # release at it while the notes claim it is main. The schedule event cannot
+      # branch and repoint the rolling release at it while the notes claim it
+      # is main. The schedule event cannot
       # reach this state (GitHub runs it on the default branch), so the guard
       # costs nothing there.
       - id: channel
@@ -1693,8 +1693,27 @@ jobs:
     # assets first. That prevents npm from exposing a package whose cross-target
     # compile launcher or installer archive is still absent. This job remains
     # idempotent so a rerun can skip packages already on the registry.
-    # Canary runs never reach this job; canary-publish-npm owns them.
+    # Canary runs never reach this job: canaries ship only as the rolling GitHub
+    # release since 2026-09-22 (stage-only trusted publishing has no unattended
+    # publish path, and a nightly cannot wait for a 2FA approval).
+    #
+    # STAGED PUBLISHING (2026-09-22). Every publish here is `npm stage publish`:
+    # the trusted publisher on each @nubjs package is stage-only, so this job can
+    # put a version in npm's staged queue and nothing else. A staged version is
+    # not installable until a maintainer approves it with 2FA (`pnpm stage
+    # approve`, or the Staged Packages tab on npmjs.com) — a proof of presence
+    # that no OIDC token and no GitHub credential can supply. The final step polls
+    # the registry until every version answers a read, which only happens after
+    # that approval, so everything downstream (the GitHub Release promotion, the
+    # tap, winget, docker, the install smokes) waits on the human. On 2026-09-21 a
+    # stolen push credential cut v0.9.4 and this job published 18 packages before
+    # npm's scanner held the loader-carrying root package; under staging that
+    # push would have filled a queue and shipped nothing.
+    # A GitHub job can wait six hours at most. If the approval comes later, re-run
+    # this job: every package is skipped as already published, the wait passes at
+    # once, and the downstream jobs run.
     if: ${{ needs.verify.outputs.publish_version != '' }}
+    timeout-minutes: 360
     # Gate on the test, conformance, glibc-floor, AND pre-publish smoke jobs: a
     # broken test, a lockfile-compat regression, a glibc-floor regression, or a
     # build that can't run / reports the wrong version must block publish — not
@@ -1717,6 +1736,15 @@ jobs:
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
+      - name: Install an npm CLI that can stage
+        # `npm stage publish` needs npm 11.15; the npm bundled with Node 24 lags it.
+        run: | # zizmor: ignore[adhoc-packages] the npm CLI itself, pinned to the major that carries `npm stage`
+          npm install -g npm@11
+          v="$(npm --version)"
+          # `sort -V | head -1` yields the smaller of the two; it must be the floor.
+          [ "$(printf '%s\n11.15.0\n' "$v" | sort -V | head -1)" = "11.15.0" ] \
+            || { echo "::error::npm $v cannot stage (need >= 11.15)"; exit 1; }
+          echo "npm $v"
 
       - name: Download all platform artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
@@ -1768,13 +1796,7 @@ jobs:
               p.version = process.env.VERSION;
               fs.writeFileSync('$PKG/package.json', JSON.stringify(p, null, 2));
             "
-            NAME="@nubjs/runner-$platform"
-            if [ "$(npm view "$NAME@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
-              echo "✓ $NAME@$VERSION already published — skipping"
-              continue
-            fi
-            echo "→ $NAME@$VERSION"
-            (cd "$PKG" && npm publish --access public)
+            bash .github/scripts/npm-stage-publish.sh "$PKG"
           done
           node scripts/build-runner-npm.mjs --addon /nonexistent
           node -e "
@@ -1786,13 +1808,7 @@ jobs:
             }
             fs.writeFileSync('npm/runner/package.json', JSON.stringify(p, null, 2) + '\n');
           "
-          NAME="$(node -p "require('./npm/runner/package.json').name")"
-          if [ "$(npm view "$NAME@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
-            echo "✓ $NAME@$VERSION already published — skipping"
-          else
-            echo "→ $NAME@$VERSION"
-            (cd npm/runner && npm publish --access public)
-          fi
+          bash .github/scripts/npm-stage-publish.sh npm/runner
 
       - name: Prepare and publish platform packages (idempotent)
         run: |
@@ -1817,13 +1833,7 @@ jobs:
               p.version = process.env.VERSION;
               fs.writeFileSync('$PKG/package.json', JSON.stringify(p, null, 2));
             "
-            NAME="@nubjs/nub-$platform"
-            if [ "$(npm view "$NAME@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
-              echo "✓ $NAME@$VERSION already published — skipping"
-              continue
-            fi
-            echo "→ $NAME@$VERSION"
-            (cd "$PKG" && npm publish --access public)
+            bash .github/scripts/npm-stage-publish.sh "$PKG"
           done
 
       - name: Prepare and publish root package (idempotent)
@@ -1838,12 +1848,7 @@ jobs:
             }
             fs.writeFileSync('npm/nub/package.json', JSON.stringify(p, null, 2));
           "
-          if [ "$(npm view "@nubjs/nub@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
-            echo "✓ @nubjs/nub@$VERSION already published — skipping"
-          else
-            echo "→ @nubjs/nub@$VERSION"
-            (cd npm/nub && npm publish --access public)
-          fi
+          bash .github/scripts/npm-stage-publish.sh npm/nub
 
       - name: Prepare and publish types package (idempotent)
         run: |
@@ -1858,47 +1863,57 @@ jobs:
             p.version = process.env.VERSION;
             fs.writeFileSync('npm/nub-types/package.json', JSON.stringify(p, null, 2) + '\n');
           "
-          if [ "$(npm view "@nubjs/types@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
-            echo "✓ @nubjs/types@$VERSION already published — skipping"
-          else
-            echo "→ @nubjs/types@$VERSION"
-            (cd npm/nub-types && npm publish --access public)
-          fi
+          bash .github/scripts/npm-stage-publish.sh npm/nub-types
 
-      - name: Wait until every published package answers a read
-        # `npm publish` returns before the registry SERVES the package, and the lag is
-        # per-package: on v0.9.0 the root package was readable at 19:21:29 while
-        # @nubjs/nub-linux-x64-musl only landed at 19:22:52. Five jobs start the moment
-        # this one reports success, and npm SKIPS AN UNRESOLVABLE optionalDependency
-        # SILENTLY — so the alpine image built inside that window, installed one package,
-        # and died at `nub --version` with the musl binary simply absent. Re-running it
-        # unchanged went green, which is the whole tell: nothing was wrong with the
-        # artifacts, only with when they became readable. No publish error surfaces this,
-        # so hold the job open until each package actually answers.
+      - name: Wait for the maintainer's approval and for every package to answer a read
+        # This is the human gate. The 19 versions above sit in npm's staged queue until a
+        # maintainer approves them with 2FA; only then does the registry serve them, and
+        # only then does this step end. Everything downstream — the GitHub Release
+        # promotion, the tap, winget, docker, the install smokes — starts after it.
+        #
+        # The loop also covers the propagation lag it was first written for: `npm
+        # publish` returns before the registry SERVES the package, and the lag is
+        # per-package (on v0.9.0 the root package was readable at 19:21:29 while
+        # @nubjs/nub-linux-x64-musl only landed at 19:22:52). npm SKIPS AN UNRESOLVABLE
+        # optionalDependency SILENTLY, so an image built inside that window installed one
+        # package and died at `nub --version` with the musl binary absent. So every
+        # package, not just the root, must answer before this job reports success.
         run: |
           PKGS="@nubjs/nub @nubjs/types"
           for p in darwin-arm64 darwin-x64 linux-x64 linux-x64-musl linux-arm64 linux-arm64-musl win32-x64 win32-arm64; do
-            PKGS="$PKGS @nubjs/nub-$p"
+            PKGS="$PKGS @nubjs/nub-$p @nubjs/runner-$p"
           done
+          PKGS="$PKGS $(node -p "require('./npm/runner/package.json').name")"
+          {
+            echo "## Staged: waiting for approval"
+            echo
+            echo "Version \`$VERSION\` is staged on npm for every package below and is not installable until a maintainer approves it with 2FA. Approve the batch with \`pnpm stage approve\` (pnpm 12+, one one-time password for the batch), or per package in the Staged Packages tab on npmjs.com. Inspect a tarball first with \`npm stage view <id>\` / \`npm stage download <id>\`. This job waits up to six hours; after that, re-run it and it continues from the approval."
+            echo
+            for pkg in $PKGS; do echo "- \`$pkg@$VERSION\`"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+          # 350 minutes of polling under the job's 360-minute cap, one read per package per minute.
+          deadline=$(( $(date +%s) + 350 * 60 ))
           for pkg in $PKGS; do
-            for attempt in $(seq 1 30); do
-              if [ "$(npm view "$pkg@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
-                echo "✓ $pkg@$VERSION readable"
-                break
-              fi
-              if [ "$attempt" -eq 30 ]; then
-                echo "::error::$pkg@$VERSION still unreadable after 5 minutes. Downstream image builds would install a silently incomplete tree."
+            until [ "$(npm view "$pkg@$VERSION" version 2>/dev/null)" = "$VERSION" ]; do
+              if [ "$(date +%s)" -ge "$deadline" ]; then
+                echo "::error::$pkg@$VERSION is still not served after 350 minutes — approve the staged versions and re-run this job; it resumes from the approval."
                 exit 1
               fi
-              sleep 10
+              echo "… $pkg@$VERSION not served yet (staged, awaiting approval) — $(date -u +%H:%M:%SZ)"
+              sleep 60
             done
+            echo "✓ $pkg@$VERSION readable"
           done
 
   stable-immutable-release:
     name: Stage immutable stable release (+ verify assets)
-    # Publish the exact versioned release and verify its complete 32-asset set
-    # BEFORE npm publication. It starts as a prerelease so installer and compile
-    # URLs are live while the ordinary release presentation remains post-npm.
+    # Create the exact versioned release and verify its complete 32-asset set
+    # BEFORE npm staging. It is a DRAFT until github-release promotes it: drafts
+    # are invisible and notify nobody, so nothing public exists for a version the
+    # maintainer has not approved on npm. (It used to start as a visible
+    # prerelease so installer and compile URLs were live early; the unauthorized
+    # v0.9.4 showed what that costs — a public release, with binaries, for a
+    # version nobody sanctioned.)
     # A rerun compares every existing asset byte-for-byte, uploads only missing
     # assets, and fails if this commit would change a versioned release.
     # A validated stable tag only — canary runs update the rolling `canary`
@@ -2041,7 +2056,11 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "✓ release $TAG already exists; preserving its presentation state"
           else
-            gh release create "$TAG" --verify-tag --prerelease --title "Nub $VERSION" --generate-notes
+            # A DRAFT: invisible and silent until github-release promotes it after the
+            # maintainer approves the staged npm versions. A visible prerelease here would
+            # notify every watcher of a version that may never ship — and did, on the
+            # unauthorized v0.9.4.
+            gh release create "$TAG" --verify-tag --draft --prerelease --title "Nub $VERSION" --generate-notes
           fi
 
       - name: Reconcile immutable stable assets
@@ -2191,9 +2210,11 @@ jobs:
 
   github-release:
     name: Publish stable GitHub Release
-    # npm can publish only after the immutable prerelease above is asset-complete.
-    # Once npm succeeds, promote that same versioned release without rebuilding or
-    # retargeting it. Asset repair remains owned by stable-immutable-release.
+    # npm can stage only after the immutable draft above is asset-complete, and
+    # publish-npm ends only once the maintainer has approved the staged versions
+    # and the registry serves them. Then promote that same draft — publish it,
+    # drop the prerelease flag, claim Latest — without rebuilding or retargeting
+    # it. Asset repair remains owned by stable-immutable-release.
     if: ${{ needs.verify.outputs.publish_tag != '' }}
     needs: [verify, publish-npm, stable-immutable-release]
     runs-on: ubuntu-latest
@@ -2201,16 +2222,23 @@ jobs:
       contents: write
     steps:
       - name: Promote immutable release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2 # zizmor: ignore[superfluous-actions] updates the existing asset-complete release without retargeting it
-        with:
-          tag_name: ${{ needs.verify.outputs.publish_tag }}
-          generate_release_notes: true
-          prerelease: false
-          # Promotion is an UPDATE, and an update that omits make_latest leaves the
-          # repo's "Latest" pointer untouched — v0.7.5 stayed latest through three
-          # stable 0.8.x promotions, so `releases/latest` (nub upgrade + both
-          # installers) kept serving 0.7.5. Claim it explicitly.
-          make_latest: "true"
+        # `gh release edit` resolves a DRAFT by its pending tag (the REST tag endpoint
+        # cannot), so this is the one step that publishes it — which is what makes the
+        # assets public and notifies watchers — and it runs only after publish-npm saw
+        # the maintainer-approved versions served by the registry. The previous
+        # softprops/action-gh-release step could not do this: on an existing release it
+        # carries the release's own draft flag forward, so a draft stayed a draft.
+        # Promotion is an UPDATE, and an update that omits the Latest claim leaves the
+        # repo's "Latest" pointer untouched — v0.7.5 stayed latest through three
+        # stable 0.8.x promotions, so `releases/latest` (nub upgrade + both
+        # installers) kept serving 0.7.5. Claim it explicitly.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify.outputs.publish_tag }}
+        run: |
+          set -euo pipefail
+          gh release edit "$TAG" --draft=false --prerelease=false --latest
+          gh release view "$TAG" --json isDraft,isPrerelease --jq 'if .isDraft or .isPrerelease then error("release \(env.TAG) is still draft/prerelease") else "✓ \(env.TAG) published as a stable release" end'
       - name: Assert the upgrade channel serves this release
         # `nub upgrade`, install.sh, and install.ps1 all resolve the version from
         # `releases/latest`, so a promotion that does not move the Latest pointer
@@ -2518,187 +2546,18 @@ jobs:
             || { echo "::error::immutable canary launcher cache bytes differ from the reconciled release asset"; exit 1; }
           echo "✓ copied packaged CLI fetched the immutable win32-x64 template (no sibling fallback)"
 
-  canary-publish-npm:
-    name: Publish canary to npm
-    # Canary runs only — npm advances only after the immutable release
-    # matching this package version is complete, so cross-target compile fetches
-    # cannot observe a published package whose versioned launcher assets are absent.
-    # Mirrors publish-npm above (keep the two in sync) with three differences:
-    # the version is the uncommitted canary stamp from verify, every publish
-    # carries `--tag canary` so `latest` never moves, and the gates are build +
-    # glibc-floor + pre-publish smoke — not test/conformance, which canary runs
-    # skip (see the `test` job comment). Deliberately its OWN job rather than a
-    # conditional branch of publish-npm: threading canary through the tag job
-    # would loosen its needs/if gating, and the tag path must stay untouched.
-    # Publish ORDER is the safety property shared with publish-npm: all 8
-    # platform packages first, the root package LAST — so `@nubjs/nub@canary`
-    # only ever resolves to a version whose exact-pinned platform deps all
-    # published.
-    if: needs.verify.outputs.is_canary == 'true'
-    needs: [verify, canary-immutable-release]
-    runs-on: ubuntu-latest
-    permissions:
-      # Same grant as publish-npm (the job this mirrors): checkout reads; npm
-      # publish authenticates via OIDC trusted publishing, which mints its
-      # token from the job's OIDC identity (id-token: write). The workflow
-      # baseline is `permissions: {}`, so omitting this block deny-alls the
-      # job — the maiden canary run failed exactly here (npm PUT E404 from the
-      # unauthenticated fallback).
-      contents: read
-      id-token: write
-    env:
-      VERSION: ${{ needs.verify.outputs.canary_version }}
-    steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
-        with:
-          persist-credentials: false
-      # ACCEPTED TRADEOFF (maintainer, 2026-07-24): zizmor's cache-poisoning
-      # audit flags publishing from a main-push-triggered workflow whose build
-      # jobs restore rust/pnpm caches — a poisoned Actions cache could in
-      # theory reach published canary bits. Accepted: the tag-path stable
-      # releases build from these same caches, and cold-building 8 platforms
-      # per push is not worth the surface reduction (bun/deno ship canaries
-      # the same way). setup-node is v5-pinned by SHA like every other action.
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # zizmor: ignore[cache-poisoning]
-        with:
-          node-version: "24"
-          registry-url: "https://registry.npmjs.org"
-
-      - name: Download all platform artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
-        with:
-          path: artifacts
-
-      - name: Preflight — runner packages must exist and be trusted on npm
-        run: |
-          # Mirrors publish-npm's preflight (keep the two in sync): the runner
-          # packages must have been first-published + trusted once
-          # (scripts/npm-first-publish-runner.sh; npm OIDC cannot create a
-          # package, npm/cli#8544). Fails BEFORE anything publishes.
-          missing=0
-          ROOT="$(node -p "require('./npm/runner/package.json').name")"
-          for name in "$ROOT" @nubjs/runner-darwin-arm64 @nubjs/runner-darwin-x64 @nubjs/runner-linux-x64 @nubjs/runner-linux-x64-musl @nubjs/runner-linux-arm64 @nubjs/runner-linux-arm64-musl @nubjs/runner-win32-x64 @nubjs/runner-win32-arm64; do
-            if ! npm view "$name" versions >/dev/null 2>&1; then
-              echo "::error::$name does not exist on npm — run scripts/npm-first-publish-runner.sh once (see its header)"
-              missing=1
-            fi
-          done
-          exit $missing
-
-      - name: Prepare and publish runner packages (idempotent)
-        run: |
-          # Mirrors publish-npm's runner step (keep the two in sync): the runner
-          # family publishes FIRST so a failure lands before @nubjs/nub's
-          # irreversible publishes below; within the family, platform addon
-          # packages first, root last, every publish tagged canary.
-          for platform in darwin-arm64 darwin-x64 linux-x64 linux-x64-musl linux-arm64 linux-arm64-musl win32-x64 win32-arm64; do
-            PKG="artifacts/runner-$platform"
-            if [ ! -d "$PKG" ]; then
-              echo "⚠️  Skipping runner-$platform (not built)"
-              continue
-            fi
-            cp "npm/runner-$platform/package.json" "$PKG/package.json"
-            node -e "
-              const fs = require('fs');
-              const p = JSON.parse(fs.readFileSync('$PKG/package.json', 'utf8'));
-              p.version = process.env.VERSION;
-              fs.writeFileSync('$PKG/package.json', JSON.stringify(p, null, 2));
-            "
-            NAME="@nubjs/runner-$platform"
-            if [ "$(npm view "$NAME@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
-              echo "✓ $NAME@$VERSION already published — skipping"
-              continue
-            fi
-            echo "→ $NAME@$VERSION (canary)"
-            (cd "$PKG" && npm publish --access public --tag canary)
-          done
-          node scripts/build-runner-npm.mjs --addon /nonexistent
-          node -e "
-            const fs = require('fs');
-            const p = JSON.parse(fs.readFileSync('npm/runner/package.json', 'utf8'));
-            p.version = process.env.VERSION;
-            for (const k of Object.keys(p.optionalDependencies || {})) {
-              p.optionalDependencies[k] = process.env.VERSION;
-            }
-            fs.writeFileSync('npm/runner/package.json', JSON.stringify(p, null, 2) + '\n');
-          "
-          NAME="$(node -p "require('./npm/runner/package.json').name")"
-          if [ "$(npm view "$NAME@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
-            echo "✓ $NAME@$VERSION already published — skipping"
-          else
-            echo "→ $NAME@$VERSION (canary)"
-            (cd npm/runner && npm publish --access public --tag canary)
-          fi
-
-      - name: Prepare and publish platform packages (idempotent)
-        run: |
-          # Same idempotent loop as publish-npm: a re-run skips already-published
-          # versions instead of aborting on npm's E403.
-          for platform in darwin-arm64 darwin-x64 linux-x64 linux-x64-musl linux-arm64 linux-arm64-musl win32-x64 win32-arm64; do
-            PKG="artifacts/nub-$platform"
-            if [ ! -d "$PKG" ]; then
-              echo "⚠️  Skipping $platform (not built)"
-              continue
-            fi
-            cp "npm/nub-$platform/package.json" "$PKG/package.json"
-            node -e "
-              const fs = require('fs');
-              const p = JSON.parse(fs.readFileSync('$PKG/package.json', 'utf8'));
-              p.version = process.env.VERSION;
-              fs.writeFileSync('$PKG/package.json', JSON.stringify(p, null, 2));
-            "
-            NAME="@nubjs/nub-$platform"
-            if [ "$(npm view "$NAME@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
-              echo "✓ $NAME@$VERSION already published — skipping"
-              continue
-            fi
-            echo "→ $NAME@$VERSION (canary)"
-            (cd "$PKG" && npm publish --access public --tag canary)
-          done
-
-      - name: Prepare and publish root package (idempotent)
-        run: |
-          node -e "
-            const fs = require('fs');
-            const p = JSON.parse(fs.readFileSync('npm/nub/package.json', 'utf8'));
-            p.version = process.env.VERSION;
-            for (const k of Object.keys(p.optionalDependencies || {})) {
-              p.optionalDependencies[k] = process.env.VERSION;
-            }
-            fs.writeFileSync('npm/nub/package.json', JSON.stringify(p, null, 2));
-          "
-          if [ "$(npm view "@nubjs/nub@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
-            echo "✓ @nubjs/nub@$VERSION already published — skipping"
-          else
-            echo "→ @nubjs/nub@$VERSION (canary)"
-            (cd npm/nub && npm publish --access public --tag canary)
-          fi
-
-      - name: Prepare and publish types package (idempotent)
-        run: |
-          # @nubjs/types tracks the binary version in lockstep on the canary
-          # channel too, so a canary install can pull matching declarations.
-          node -e "
-            const fs = require('fs');
-            const p = JSON.parse(fs.readFileSync('npm/nub-types/package.json', 'utf8'));
-            p.version = process.env.VERSION;
-            fs.writeFileSync('npm/nub-types/package.json', JSON.stringify(p, null, 2) + '\n');
-          "
-          if [ "$(npm view "@nubjs/types@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
-            echo "✓ @nubjs/types@$VERSION already published — skipping"
-          else
-            echo "→ @nubjs/types@$VERSION (canary)"
-            (cd npm/nub-types && npm publish --access public --tag canary)
-          fi
 
 
   canary-release:
     name: Update rolling canary release
-    # The rolling `canary` prerelease remains installer/self-upgrade-facing and
-    # is updated only after npm succeeds. It carries the same 32 assets as the
-    # immutable versioned release but is never used by `nub compile` lookup.
+    # The rolling `canary` prerelease is the ONLY canary channel: installer and
+    # self-upgrade facing, updated once the immutable versioned release is
+    # complete. It carries the same 32 assets as that release but is never used
+    # by `nub compile` lookup. Canaries no longer publish to npm (2026-09-22):
+    # the @nubjs trusted publishers are stage-only, and a nightly has no human
+    # to approve a staged version.
     if: needs.verify.outputs.is_canary == 'true'
-    needs: [verify, canary-publish-npm]
+    needs: [verify, canary-immutable-release]
     runs-on: ubuntu-24.04
     permissions:
       # Deletes + recreates the rolling release and the canary tag ref with
@@ -2772,7 +2631,7 @@ jobs:
             echo
             echo "- Version: \`$VERSION\`"
             echo "- Commit: $GITHUB_SHA"
-            echo "- Install: \`npm install -g @nubjs/nub@canary\`"
+            echo "- Install: \`curl -fsSL https://nubjs.com/install.sh | bash -s canary\` (or \`nub upgrade --canary\`)"
             echo
             echo "Prerelease channel — the assets below track the head of main as of the last nightly build."
           } > canary-notes.md

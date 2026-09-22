@@ -460,7 +460,10 @@ git tag v0.0.6
 git push origin v0.0.6         # ONE tag, never `--tags`: this clone holds ~155 local tags against
                                # ~84 on the remote (v1.x leftovers from the Node fork), and the
                                # rejected extras take `main` down with them so nothing publishes.
-                               # CI then builds 8 platforms, publishes to npm, creates the release.
+                               # CI then builds 8 platforms, STAGES the 19 npm packages, and
+                               # waits for the maintainer's 2FA approval (`pnpm stage approve`)
+                               # before publishing the GitHub Release — the `release` skill's
+                               # Step 3b. A tag alone ships nothing.
 ```
 
 Other Makefile targets: `make npm-build` (build + package for the current platform), `make npm-publish` (manual publish — prefer CI), `make npm-publish-dry`.
