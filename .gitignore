@@ -118,6 +118,7 @@ npm/nub-*/*.tgz
 # addon comes from the platform build — only package.json + README are source.
 npm/runner/*.mjs
 npm/runner/*.cjs
+npm/runner/util/*.cjs
 npm/runner/LICENSE
 npm/runner/*.tgz
 npm/runner-*/nub-native.node

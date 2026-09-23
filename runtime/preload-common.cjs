@@ -646,11 +646,14 @@ function restoreSchemeOnlyBuiltinURL(result) {
 function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsyncLoaderFlagPresent()) {
   installUserHookDetector();
   installUserAsyncLoaderDetector();
+  const { resolveUtilRateFacade } = require("./util/rate.cjs");
 
   function resolve(specifier, context, nextResolve) {
     // The fetch-handler pass tells the entry's own load from a preload's import of
     // the same file by Node resolving it first as the main, with no parent.
     noteEntryResolve(specifier, context);
+    const utilFacade = resolveUtilRateFacade(specifier, context, !!process.versions.nub);
+    if (utilFacade) return utilFacade;
     const r = core.resolveSpec(specifier, context.parentURL);
     if (r) return r;
     // Yarn PnP (ESM): PnP doesn't patch the ESM loader, so `import` of a PnP dep must
