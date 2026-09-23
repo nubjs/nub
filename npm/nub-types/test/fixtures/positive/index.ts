@@ -21,7 +21,17 @@ const pendingThrottled: Promise<string> | null = throttled.pending;
 const canInvoke: boolean = throttled.hasImmediateCapacity();
 const aliasDebouncedResult: Promise<number> = aliasDebounce((value: number) => value, 1)(1);
 const aliasThrottledResult: Promise<number> = aliasThrottle((value: number) => value, 1, 1)(1);
-void [debouncedResult, throttledResult, pendingDebounced, pendingThrottled, canInvoke, aliasDebouncedResult, aliasThrottledResult];
+const debouncedWithThis = debounce(function (value: string) {
+  const pendingCount: number = this.pendingCount;
+  return value.length + pendingCount;
+}, 1);
+const throttledWithThis = throttle(function (value: number) {
+  const activeCount: number = this.activeCount;
+  return value + activeCount;
+}, 1, 1);
+const debouncedWithThisResult: Promise<number> = debouncedWithThis("draft");
+const throttledWithThisResult: Promise<number> = throttledWithThis(1);
+void [debouncedResult, throttledResult, pendingDebounced, pendingThrottled, canInvoke, aliasDebouncedResult, aliasThrottledResult, debouncedWithThisResult, throttledWithThisResult];
 
 // Browser-shape Worker global + its methods/handlers.
 const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
