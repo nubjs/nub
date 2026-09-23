@@ -9,6 +9,19 @@ import tomlCfg from "./config.toml";
 // The default-export handler type, which is module-scoped rather than global so it
 // cannot merge with Cloudflare's same-named global.
 import type { ExportedHandler, FetchHandler } from "@nubjs/types";
+import { debounce, throttle } from "node:util";
+import { debounce as aliasDebounce, throttle as aliasThrottle } from "util";
+
+const debounced = debounce((value: string) => value.length, 10, { leading: true });
+const throttled = throttle((value: number) => Promise.resolve(value.toString()), 2, 100, { overflow: "drop" });
+const debouncedResult: Promise<number> = debounced("draft");
+const throttledResult: Promise<string> = throttled(2);
+const pendingDebounced: Promise<number> | null = debounced.pending;
+const pendingThrottled: Promise<string> | null = throttled.pending;
+const canInvoke: boolean = throttled.hasImmediateCapacity();
+const aliasDebouncedResult: Promise<number> = aliasDebounce((value: number) => value, 1)(1);
+const aliasThrottledResult: Promise<number> = aliasThrottle((value: number) => value, 1, 1)(1);
+void [debouncedResult, throttledResult, pendingDebounced, pendingThrottled, canInvoke, aliasDebouncedResult, aliasThrottledResult];
 
 // Browser-shape Worker global + its methods/handlers.
 const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });

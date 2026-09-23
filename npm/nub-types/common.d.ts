@@ -63,6 +63,46 @@ declare module "*.txt" {
 // In no Node version, in no @types/node. Nub installs it on every supported version.
 declare function reportError(error: unknown): void;
 
+// ── node:util rate helpers (runtime/util/rate.cjs) ──
+declare module "node:util" {
+  export interface NubDebouncedFunction<Args extends unknown[], Result> {
+    (...args: Args): Promise<Awaited<Result>>;
+    cancel(reason?: unknown): void;
+    flush(): void;
+    ref(): NubDebouncedFunction<Args, Result>;
+    unref(): NubDebouncedFunction<Args, Result>;
+    readonly pending: Promise<Awaited<Result>> | null;
+    readonly pendingCount: number;
+  }
+  export interface NubThrottledFunction<Args extends unknown[], Result> {
+    (...args: Args): Promise<Awaited<Result>>;
+    cancel(reason?: unknown): void;
+    hasImmediateCapacity(): boolean;
+    ref(): NubThrottledFunction<Args, Result>;
+    unref(): NubThrottledFunction<Args, Result>;
+    readonly pending: Promise<Awaited<Result>> | null;
+    readonly pendingCount: number;
+    readonly activeCount: number;
+  }
+  export function debounce<Args extends unknown[], Result>(
+    fn: (...args: Args) => Result,
+    wait: number,
+    options?: { signal?: AbortSignal; leading?: boolean; rejectOnCancel?: boolean },
+  ): NubDebouncedFunction<Args, Result>;
+  export function throttle<Args extends unknown[], Result>(
+    fn: (...args: Args) => Result,
+    limit: number,
+    interval: number,
+    options?: {
+      concurrency?: number;
+      maxPending?: number;
+      overflow?: "queue" | "drop";
+      signal?: AbortSignal;
+      strict?: boolean;
+    },
+  ): NubThrottledFunction<Args, Result>;
+}
+
 // ── lib.dom step-aside helpers (idiom from bun-types: packages/bun-types/bun.d.ts) ──
 // These two ambient *type* aliases let us declare DOM-overlapping globals (today
 // just `Worker`) WITHOUT colliding (TS2403/TS2430) when the consumer ALSO has them

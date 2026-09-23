@@ -1,5 +1,22 @@
 "use strict";
 
+const { addAbortListener } = require("node:events");
+const ArrayIsArray = Array.isArray;
+const ArrayPrototypeIncludes = Array.prototype.includes;
+const ArrayPrototypeJoin = Array.prototype.join;
+const ArrayPrototypePushMethod = Array.prototype.push;
+const ArrayPrototypeSliceMethod = Array.prototype.slice;
+const MathFloor = Math.floor;
+const NumberIsInteger = Number.isInteger;
+const NumberMaxSafeInteger = Number.MAX_SAFE_INTEGER;
+const RangeErrorConstructor = RangeError;
+const TypeErrorConstructor = TypeError;
+const PromiseConstructor = Promise;
+const PromisePrototypeThenMethod = Promise.prototype.then;
+const PromiseRejectMethod = Promise.reject;
+const PromiseResolveMethod = Promise.resolve;
+const ReflectApply = Reflect.apply;
+const PerformanceNow = performance.now.bind(performance);
 const TIMEOUT_MAX = 2_147_483_647;
 const kEmptyObject = Object.freeze({});
 
@@ -19,7 +36,7 @@ class ERR_THROTTLED extends Error {
 }
 
 function validateFunction(value, name) {
-  if (typeof value !== "function") throw argumentError(TypeError, "ERR_INVALID_ARG_TYPE", `${name} must be a function`);
+  if (typeof value !== "function") throw argumentError(TypeErrorConstructor, "ERR_INVALID_ARG_TYPE", `${name} must be a function`);
 }
 
 function argumentError(Type, code, message) {
@@ -28,65 +45,60 @@ function argumentError(Type, code, message) {
   return error;
 }
 
-function validateInteger(value, name, minimum, maximum = Number.MAX_SAFE_INTEGER) {
+function validateInteger(value, name, minimum, maximum = NumberMaxSafeInteger) {
   if (typeof value !== "number") {
-    throw argumentError(TypeError, "ERR_INVALID_ARG_TYPE", `${name} must be a number`);
+    throw argumentError(TypeErrorConstructor, "ERR_INVALID_ARG_TYPE", `${name} must be a number`);
   }
-  if (!Number.isInteger(value) || value < minimum || value > maximum) {
-    throw argumentError(RangeError, "ERR_OUT_OF_RANGE", `${name} must be an integer between ${minimum} and ${maximum}`);
+  if (!NumberIsInteger(value) || value < minimum || value > maximum) {
+    throw argumentError(RangeErrorConstructor, "ERR_OUT_OF_RANGE", `${name} must be an integer between ${minimum} and ${maximum}`);
   }
 }
 
 function validateObject(value, name) {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw argumentError(TypeError, "ERR_INVALID_ARG_TYPE", `${name} must be an object`);
+  if (value === null || typeof value !== "object" || ArrayIsArray(value)) {
+    throw argumentError(TypeErrorConstructor, "ERR_INVALID_ARG_TYPE", `${name} must be an object`);
   }
 }
 
 function validateBoolean(value, name) {
-  if (typeof value !== "boolean") throw argumentError(TypeError, "ERR_INVALID_ARG_TYPE", `${name} must be a boolean`);
+  if (typeof value !== "boolean") throw argumentError(TypeErrorConstructor, "ERR_INVALID_ARG_TYPE", `${name} must be a boolean`);
 }
 
 function validateAbortSignal(value, name) {
   if (value !== undefined &&
       (value === null || typeof value !== "object" ||
        typeof value.aborted !== "boolean" || typeof value.addEventListener !== "function")) {
-    throw argumentError(TypeError, "ERR_INVALID_ARG_TYPE", `${name} must be an AbortSignal`);
+    throw argumentError(TypeErrorConstructor, "ERR_INVALID_ARG_TYPE", `${name} must be an AbortSignal`);
   }
 }
 
 function validateOneOf(value, name, choices) {
-  if (!choices.includes(value)) {
-    throw argumentError(TypeError, "ERR_INVALID_ARG_VALUE", `${name} must be one of ${choices.join(", ")}`);
+  if (!ReflectApply(ArrayPrototypeIncludes, choices, [value])) {
+    throw argumentError(TypeErrorConstructor, "ERR_INVALID_ARG_VALUE", `${name} must be one of ${ReflectApply(ArrayPrototypeJoin, choices, [", "])}`);
   }
 }
 
-function addAbortListener(signal, listener) {
-  signal.addEventListener("abort", listener, { once: true });
-}
-
 function markPromiseAsHandled(promise) {
-  promise.then(undefined, () => {});
+  PromisePrototypeThen(promise, undefined, () => {});
 }
 
 function PromiseWithResolvers() {
   let resolve;
   let reject;
-  const promise = new Promise((resolvePromise, rejectPromise) => {
+  const promise = new PromiseConstructor((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
     reject = rejectPromise;
   });
   return { promise, resolve, reject };
 }
 
-const ArrayPrototypePush = (array, value) => Array.prototype.push.call(array, value);
-const ArrayPrototypeSlice = (array, start) => Array.prototype.slice.call(array, start);
+const ArrayPrototypePush = (array, value) => ReflectApply(ArrayPrototypePushMethod, array, [value]);
+const ArrayPrototypeSlice = (array, start) => ReflectApply(ArrayPrototypeSliceMethod, array, [start]);
 const ObjectDefineProperties = Object.defineProperties;
-const PromisePrototypeThen = (promise, resolve, reject) => Promise.prototype.then.call(promise, resolve, reject);
-const PromiseReject = (reason) => Promise.reject(reason);
-const PromiseResolve = (value) => Promise.resolve(value);
-const ReflectApply = Reflect.apply;
-const timersBinding = { getLibuvNow: () => Math.floor(performance.now()) };
+const PromisePrototypeThen = (promise, resolve, reject) => ReflectApply(PromisePrototypeThenMethod, promise, [resolve, reject]);
+const PromiseReject = (reason) => ReflectApply(PromiseRejectMethod, PromiseConstructor, [reason]);
+const PromiseResolve = (value) => ReflectApply(PromiseResolveMethod, PromiseConstructor, [value]);
+const timersBinding = { getLibuvNow: () => MathFloor(PerformanceNow()) };
 
 module.exports = {
   AbortError,

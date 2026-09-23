@@ -150,3 +150,47 @@ test("Node argument error codes are preserved", () => {
   assert.throws(() => util.throttle(() => {}, 0, 1), { code: "ERR_OUT_OF_RANGE" });
   assert.throws(() => util.throttle(() => {}, 1, 1, { overflow: "other" }), { code: "ERR_INVALID_ARG_VALUE" });
 });
+
+test("abort cannot be suppressed by an earlier signal listener", async () => {
+  for (const create of [
+    (signal) => util.debounce(() => 1, 1000, { signal }),
+    (signal) => util.throttle(() => 1, 1, 1000, { signal }),
+  ]) {
+    const controller = new AbortController();
+    controller.signal.addEventListener("abort", (event) => event.stopImmediatePropagation());
+    const fn = create(controller.signal);
+    const first = fn();
+    if (fn.activeCount !== undefined) await first;
+    const pending = fn.activeCount !== undefined ? fn() : first;
+    controller.abort("stopped");
+    await assert.rejects(
+      Promise.race([pending, wait(100).then(() => { throw new Error("abort did not settle the call"); })]),
+      { code: "ABORT_ERR" },
+    );
+  }
+});
+
+test("shim operations retain captured intrinsics after global mutation", () => {
+  const rate = fileURLToPath(new URL("../runtime/util/rate.cjs", import.meta.url));
+  const source = `
+    const util = require("node:util");
+    require(${JSON.stringify(rate)}).installUtilRateShims();
+    const NativeThen = Promise.prototype.then;
+    Array.prototype.push = () => { throw new Error("mutated push"); };
+    Array.prototype.slice = () => { throw new Error("mutated slice"); };
+    Promise.resolve = () => { throw new Error("mutated resolve"); };
+    Promise.reject = () => { throw new Error("mutated reject"); };
+    Number.isInteger = () => false;
+    globalThis.Promise = class {};
+    globalThis.performance = { now: () => { throw new Error("mutated clock"); } };
+    const debounced = util.debounce(value => value, 1);
+    const throttled = util.throttle(value => value, 1, 1);
+    const values = [];
+    const onError = error => { process.stderr.write(String(error)); process.exitCode = 1; };
+    NativeThen.call(debounced(1), value => { values[0] = value; if (values.length === 2) process.stdout.write(values.join(",")); }, onError);
+    NativeThen.call(throttled(2), value => { values[1] = value; if (values[0] !== undefined) process.stdout.write(values.join(",")); }, onError);
+  `;
+  const result = spawnSync(process.execPath, ["-e", source], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "1,2");
+});
