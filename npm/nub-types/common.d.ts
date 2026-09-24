@@ -85,6 +85,7 @@ declare module "node:util" {
     readonly activeCount: number;
   }
   export interface NubDebounceCallbackContext {
+    (...args: unknown[]): Promise<unknown>;
     cancel(reason?: unknown): void;
     flush(): void;
     ref(): NubDebounceCallbackContext;
@@ -93,6 +94,7 @@ declare module "node:util" {
     readonly pendingCount: number;
   }
   export interface NubThrottleCallbackContext {
+    (...args: unknown[]): Promise<unknown>;
     cancel(reason?: unknown): void;
     hasImmediateCapacity(): boolean;
     ref(): NubThrottleCallbackContext;
