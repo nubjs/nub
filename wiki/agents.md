@@ -33,7 +33,7 @@ An index of the rules a doing-agent must not miss. Each links to its authoritati
 - **Builds, gates and test runs go REMOTE by default** — a CI-run test or a `remote-build` VM job, never the dev Mac, except for the warm incremental loop and macOS-native checks. ([Builds and tests go REMOTE by default](#builds-and-tests-go-remote-by-default--the-local-box-is-the-exception))
 - **PR CI is OPT-IN.** Opening a pull request and pushing to it start nothing; a run is requested with `gh pr edit <n> --add-label ci`. A pull request with no checks is unverified, never green. ([PR CI is opt-in](#pr-ci-is-opt-in--ask-for-a-run-with-the-ci-label))
 - No agent co-author trailers in commits; the commit-msg hook strips them.
-- **Never cut a release without the maintainer's explicit, in-the-moment instruction.** Publishing to npm is irreversible, and the tag push is what triggers it. Same shape as the never-upstream rule. ([Releasing](#releasing) — and invoke the `release` skill, which carries the runbook and this gate.)
+- **Never cut a release without the maintainer's explicit, in-the-moment instruction.** Publishing to npm is irreversible, and a publishing dispatch of `release.yml` is what starts it. Same shape as the never-upstream rule. ([Releasing](#releasing) — and invoke the `release` skill, which carries the runbook and this gate.)
 
 ## Builds and tests go REMOTE by default — the local box is the exception
 
@@ -442,7 +442,7 @@ Before loading a large markdown file in full, run `node scripts/md-toc/index.mjs
 
 Nub publishes to npm as `@nubjs/nub` plus 8 platform-specific binary packages, fully automated via GitHub Actions.
 
-**The `v*` tag push IS the publish — it is irreversible and requires the maintainer's explicit, in-the-moment
+**A publishing dispatch IS the publish — it is irreversible and requires the maintainer's explicit, in-the-moment
 say-so. Invoke the `release` skill rather than running the recipe below from memory**; it carries that gate,
 the version-pick rules, and the mandatory post-release issue/PR comments.
 
@@ -456,20 +456,18 @@ git commit -m "v0.0.6" -- <the 27 version files>   # path-scoped: the shared tre
                                # stamped crate's version and is consumed under `--locked`, so
                                # omitting one tags a stale tree (v0.9.1 missed nub-phantom's).
 git push origin main
-git tag v0.0.6
-git push origin v0.0.6         # ONE tag, never `--tags`: this clone holds ~155 local tags against
-                               # ~84 on the remote (v1.x leftovers from the Node fork), and the
-                               # rejected extras take `main` down with them so nothing publishes.
-                               # CI then builds 8 platforms, STAGES the 19 npm packages, and
-                               # waits for the maintainer's 2FA approval (`pnpm stage approve`)
-                               # before publishing the GitHub Release — the `release` skill's
-                               # Step 3b. A tag alone ships nothing.
+# THIS starts the release; nothing else does. The run reads 0.0.6 from npm/nub/package.json at
+# the dispatched commit, builds 8 platforms, creates the v0.0.6 tag itself once every gate
+# passes, STAGES the 19 npm packages, and waits for the maintainer's 2FA approval
+# (`pnpm stage approve`) before publishing the GitHub Release — the `release` skill's Step 3b.
+# release.yml has no tag trigger, so pushing a v* tag by hand starts nothing.
+gh workflow run release.yml -R nubjs/nub -f publish=true
 ```
 
 Other Makefile targets: `make npm-build` (build + package for the current platform), `make npm-publish` (manual publish — prefer CI), `make npm-publish-dry`.
 
-The GitHub Actions `setup-node/`, `install/` and `npm-ci/` ship at the repository root and are consumed as `nubjs/nub/<name>@v0`. The release workflow moves that floating `v<major>` tag to each promoted stable release; its `push: tags` filter matches only `v<x>.<y>.<z>` tags, so `v0` itself never starts a release, and `git describe --tags` needs `--exclude 'v[0-9]'` to see past it (`scripts/release-notify.ts` does). Their smoke is `.github/workflows/action-smoke.yml`, path-filtered to the two action directories and `tests/action-smoke/**`.
+The GitHub Actions `setup-node/`, `install/` and `npm-ci/` ship at the repository root and are consumed as `nubjs/nub/<name>@v0`. The release workflow moves that floating `v<major>` tag to each promoted stable release; the workflow has no tag trigger at all, so writing `v0` starts nothing, and `git describe --tags` needs `--exclude 'v[0-9]'` to see past it (`scripts/release-notify.ts` does). Their smoke is `.github/workflows/action-smoke.yml`, path-filtered to the two action directories and `tests/action-smoke/**`.
 
-**CI release workflow** (`.github/workflows/release.yml`) triggers on `v*` tags and builds darwin-arm64, darwin-x64, linux-x64, linux-x64-musl, linux-arm64, linux-arm64-musl, win32-x64, win32-arm64. Publishes via npm OIDC trusted publishing (no secrets), then creates the GitHub Release with binary artifacts.
+**CI release workflow** (`.github/workflows/release.yml`) runs on a `workflow_dispatch` with `publish=true` from `main`, and builds darwin-arm64, darwin-x64, linux-x64, linux-x64-musl, linux-arm64, linux-arm64-musl, win32-x64, win32-arm64. The `verify` job derives the version from `npm/nub/package.json` at the dispatched commit and the release creates the `v<version>` tag itself. Stages via npm OIDC trusted publishing (no secrets), then promotes the GitHub Release with binary artifacts once the maintainer approves the staged versions. Re-running a release whose tag already exists is supported: dispatch with `publish=true` and select that tag.
 
 **Version regime:** stay in `0.0.x` until public launch; bump to `0.1.0` only when the whitepaper, benchmarks, and install experience are polished.

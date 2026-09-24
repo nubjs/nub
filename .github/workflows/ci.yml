@@ -1650,7 +1650,8 @@ jobs:
       - run: node scripts/check-oxc-lockstep.mjs
 
   # `make version-check` also runs in release.yml's verify job, but that fires on
-  # `v*` tags and on pushes to main — i.e. always AFTER the offending merge. #735
+  # a release dispatch and on the nightly canary — i.e. always AFTER the offending
+  # merge. #735
   # edited site/public/schema/latest.json without refreshing its pinned snapshot,
   # merged green, and surfaced only on main, where it blocked every release until
   # #751. This job is what makes that fail on its own pull request instead. Same

@@ -3,9 +3,12 @@ name: Release
 # Two publish paths share this file (npm OIDC trusted publishing binds ONE
 # workflow filename per package, so the canary publish cannot live in its own
 # workflow):
-#   - TAG (v*): stage + verify the immutable versioned assets, publish npm
-#     `latest`, promote the GitHub Release, then docker/homebrew/winget and
-#     post-publish install smokes.
+#   - STABLE (`workflow_dispatch` with publish=true, from main): stage + verify
+#     the immutable versioned assets, stage the npm `latest` versions, promote
+#     the GitHub Release, then docker/homebrew/winget and post-publish install
+#     smokes. The run reads its version from the dispatched commit's
+#     npm/nub/package.json and creates the `v<version>` tag itself; there is no
+#     tag trigger, so pushing a tag starts nothing.
 #   - CANARY (nightly schedule): bun-style rolling prerelease, built ONCE A DAY
 #     from the head of main rather than on every push. The nightly builds the
 #     full 8-platform matrix with an uncommitted `<base>-canary.<yyyymmdd>.<run#>`
@@ -29,13 +32,11 @@ name: Release
 # gate on verify's `is_canary` output. A canary run must never reach the stable
 # publish path.
 on:
-  push:
-    # Only v<x>.<y>.<z>… tags (a stable v0.9.3 or a canary v0.9.2-canary.…):
-    # the floating v<major> tag that the GitHub Actions in setup-node/ and
-    # install/ are consumed through (`nubjs/nub/<name>@v0`) sits in the same
-    # namespace and must not start a release. `+` and `[0-9]` are filter-pattern
-    # syntax, so `v0`, `v1`, `v10` and `v0.9` do not match.
-    tags: ["v[0-9]+.[0-9]+.[0-9]*"]
+  # No `push: tags` trigger. A stable release is started by a
+  # `workflow_dispatch` with publish=true and nothing else (2026-09-23): the
+  # run derives `v<version>` from the dispatched commit's npm/nub/package.json
+  # and creates that tag itself, so the tag is an OUTPUT of a release rather
+  # than its trigger. Pushing a v* tag by hand starts no workflow at all.
   schedule:
     # The nightly canary. Off the hour because GitHub delays :00 crons hardest
     # under load, and clear of the repo's other nightlies (00:15 through 08:00
@@ -44,7 +45,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: "Publish the selected v<semver> tag across release channels. Default off = build + assemble only (for CI debugging)."
+        description: "Release the dispatched commit across every channel. Run from main after the version-bump commit is pushed; the version comes from npm/nub/package.json and the run creates the v<version> tag. Re-running a failed release may instead select its existing v<semver> tag. Default off = build + assemble only (for CI debugging)."
         type: boolean
         default: false
       canary:
@@ -52,7 +53,7 @@ on:
         type: boolean
         default: false
       linux_only:
-        description: "Build only the Linux targets — cheap iteration that skips the 10×-billed macOS and 2× Windows runners. Ignored on tag pushes and on publishing or canary dispatches, which always build the full matrix."
+        description: "Build only the Linux targets — cheap iteration that skips the 10×-billed macOS and 2× Windows runners. Ignored on publishing and canary dispatches, which always build the full matrix."
         type: boolean
         default: false
 
@@ -66,7 +67,7 @@ permissions: {}
 # (cancelling mid-`npm publish` could strand a half-published canary version).
 # One run a day rarely contends, but the group is what stops a manual dispatch
 # from interleaving with the schedule inside canary-release's delete-then-
-# recreate of the rolling tag. Tag/stable-dispatch runs get per-run groups:
+# recreate of the rolling tag. Stable-dispatch runs get per-run groups:
 # never queued against each other, never cancelled.
 concurrency:
   group: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.canary)) && 'canary' || format('release-{0}', github.run_id) }}
@@ -96,7 +97,7 @@ jobs:
       # no workflow-level alias for a job `if:`, and six jobs need the same
       # predicate. Every canary-gated job already `needs: verify`.
       is_canary: ${{ steps.channel.outputs.is_canary }}
-      # Canary plumbing (empty on tag/stable-dispatch runs): whether the nightly
+      # Canary plumbing (empty on stable-dispatch runs): whether the nightly
       # found anything worth building, and the prerelease version it publishes as.
       canary: ${{ steps.canary.outputs.canary }}
       canary_version: ${{ steps.canary.outputs.canary_version }}
@@ -144,25 +145,44 @@ jobs:
       - name: Check internal version consistency
         run: make version-check
       # The binary is built from the committed Cargo.toml and the committed
-      # preload.mjs is shipped as-is, so a stable publication must use a SemVer
-      # tag that matches the checked-out workspace. A publishing dispatch may
-      # select a tag, while a non-publishing dispatch remains a build-only run.
+      # preload.mjs is shipped as-is, so a stable publication ships the version
+      # the dispatched commit carries, under a SemVer `v<version>` tag.
+      #
+      # THE TAG IS AN OUTPUT OF THE RELEASE, NOT ITS TRIGGER (2026-09-23). A
+      # publishing dispatch normally selects `main`: the version is read from
+      # the dispatched commit's npm/nub/package.json, the tag name is derived
+      # from it, and stable-immutable-release creates that tag at GITHUB_SHA
+      # once every build and gate has passed — so a release that dies in the
+      # build leaves no tag behind. Selecting an existing `v*` tag is the
+      # re-run path for a release whose tag was already created and whose
+      # staged npm versions are waiting on the maintainer's approval; the
+      # ancestor-of-origin/main guard in stable-immutable-release applies
+      # either way. Any other ref is refused here, loudly, rather than by a
+      # silent job-level `if:` that would look like a green build-only run.
       - id: publish_tag
-        name: Validate stable publish tag
-        if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
+        name: Resolve and validate the stable publish tag
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
         env:
           PUBLISH_REF: ${{ github.ref }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           case "$PUBLISH_REF" in
-            refs/tags/v*) ;;
+            refs/heads/main)
+              TAG_VERSION="$(node -e "console.log(require('./npm/nub/package.json').version)")"
+              TAG="v$TAG_VERSION"
+              echo "releasing the dispatched commit ${GITHUB_SHA} as $TAG"
+              ;;
+            refs/tags/v*)
+              TAG="${PUBLISH_REF#refs/tags/}"
+              TAG_VERSION="${TAG#v}"
+              echo "re-running the release of the existing tag $TAG"
+              ;;
             *)
-              echo "::error::Stable publication requires selecting a v<semver> tag; got '$PUBLISH_REF'."
+              echo "::error::A publishing dispatch must select main or an existing v<semver> tag; got '$PUBLISH_REF'. Push the version-bump commit to main, then dispatch this workflow from main."
               exit 1
               ;;
           esac
-          TAG="${PUBLISH_REF#refs/tags/}"
-          TAG_VERSION="${TAG#v}"
           node - "$TAG_VERSION" <<'NODE'
           const version = process.argv[2];
           const prereleaseIdentifier = '(?:0|[1-9]\\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)';
@@ -174,15 +194,36 @@ jobs:
           NODE
           COMMITTED=$(node -e "console.log(require('./npm/nub/package.json').version)")
           if [ "$TAG_VERSION" != "$COMMITTED" ]; then
-            echo "::error::Tag v$TAG_VERSION does not match committed version $COMMITTED. Run 'make version V=$TAG_VERSION', commit, then re-tag."
+            echo "::error::Tag v$TAG_VERSION does not match committed version $COMMITTED. Run 'make version V=$TAG_VERSION', commit it to main, then dispatch this workflow from main."
             exit 1
+          fi
+          # Pre-flight the tag state here so a wrong one costs a minute rather
+          # than a full 8-platform build: stable-immutable-release creates the
+          # tag and re-checks it, but only after every gate has run. An
+          # already-existing tag at this commit is the sanctioned re-run; one
+          # pointing anywhere else means this version was already cut from a
+          # different tree and the operator needs a new version number.
+          # Annotated tags are peeled the same way the release jobs peel them.
+          if RECORD="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$TAG" --jq '[.object.type, .object.sha] | @tsv' 2>/dev/null)"; then
+            IFS=$'\t' read -r TYPE SHA <<<"$RECORD"
+            while [ "$TYPE" = "tag" ]; do
+              RECORD="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/$SHA" --jq '[.object.type, .object.sha] | @tsv')"
+              IFS=$'\t' read -r TYPE SHA <<<"$RECORD"
+            done
+            if [ "$TYPE" != "commit" ] || [ "$SHA" != "$GITHUB_SHA" ]; then
+              echo "::error::Tag $TAG already exists and resolves to $TYPE $SHA, but this run is at commit $GITHUB_SHA. Release a new version instead of moving a published tag."
+              exit 1
+            fi
+            echo "✓ $TAG already exists at $GITHUB_SHA — re-running its release"
+          else
+            echo "✓ $TAG does not exist yet; the release will create it at $GITHUB_SHA"
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
           echo "✓ Stable publication tag $TAG matches committed version"
       # Build matrix as data, so a non-publishing debug dispatch with
-      # linux_only=true can drop the 10×-billed macOS + 2× Windows targets. Tag
-      # pushes and publishing dispatches always get the full 8-platform matrix —
+      # linux_only=true can drop the 10×-billed macOS + 2× Windows targets.
+      # Publishing dispatches always get the full 8-platform matrix —
       # and so does a canary dispatch, which publishes all eight platform
       # packages and would otherwise ship a partial set under the canary tag.
       - id: matrix
@@ -1112,7 +1153,7 @@ jobs:
     # then compiles + executes both supported artifact shapes. The default shape
     # runs cold and warm from an isolated runtime cache with no host Node on PATH.
     name: Pre-publish smoke gate (${{ matrix.platform }})
-    if: ${{ github.event_name == 'push' || inputs.publish || needs.verify.outputs.is_canary == 'true' }}
+    if: ${{ inputs.publish || needs.verify.outputs.is_canary == 'true' }}
     # verify supplies the expected canary version on canary runs.
     needs: [verify, build]
     # actions:read is for the container legs' REST artifact download below —
@@ -2010,6 +2051,28 @@ jobs:
           done
           ls -la release-archives
 
+      - name: Create the release tag when absent
+        # The release CREATES its own tag, here, at the commit it just built and
+        # gated — there is no tag trigger and no tag is pushed by hand. This is
+        # the first job on the stable path holding contents:write, and it runs
+        # only after build/test/conformance/glibc-floor/pre-publish-gate, so a
+        # release that dies earlier leaves no tag behind to clean up. verify has
+        # already refused an existing tag that points anywhere but this commit,
+        # and the next step re-proves that against what the API actually holds.
+        # A ref written with the job token starts no workflow.
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            echo "✓ tag $TAG already exists"
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" --jq .ref
+            echo "✓ created $TAG at $GITHUB_SHA"
+          fi
+
       - name: Validate immutable stable tag
         shell: bash
         env:
@@ -2262,9 +2325,8 @@ jobs:
     # release, never a canary. Same major only — a 1.0.0 release moves `v1` and
     # leaves `v0` on the last 0.x. It moves with whichever stable release
     # promotes last, like the Latest marker above. The ref is written through
-    # the API with the job token, which starts no workflow, and the
-    # `push: tags` filter matches only v<x>.<y>.<z> tags, so a bare `v0` never
-    # reaches the verify gate.
+    # the API with the job token; no tag trigger exists, so writing it starts
+    # no workflow.
     if: ${{ needs.verify.outputs.publish_tag != '' }}
     needs: [verify, github-release]
     runs-on: ubuntu-latest
