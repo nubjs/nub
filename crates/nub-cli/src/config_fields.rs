@@ -227,6 +227,35 @@ pub(crate) fn field(key: &str) -> Option<&'static Field> {
     FIELDS.iter().find(|f| f.address == key)
 }
 
+/// The refusal for a dotted key whose first segment is one of `nub.jsonc`'s
+/// sections (`install.`, `dlx.`, `runtime.`, or the legacy `exec.`) but
+/// which addresses no field, `None` for every other key.
+///
+/// The exact-match rule above sends a typo to `.npmrc`, which is the right
+/// place for a key nub does not own. A key under a nub section is different:
+/// nothing reads `dlx.*` from `.npmrc`, and npm warns on every run that the
+/// key is unknown (and will reject it in its next major) — so the write can
+/// only ever be a mistake, and it is refused where it is typed with the
+/// section's real addresses as the pointer.
+pub(crate) fn section_near_miss(key: &str) -> Option<String> {
+    let (section, _) = key.split_once('.')?;
+    let mut addresses: Vec<&str> = FIELDS
+        .iter()
+        .filter(|f| f.address.split_once('.').is_some_and(|(s, _)| s == section))
+        .map(|f| f.address)
+        .collect();
+    if section == "exec" {
+        addresses.push("exec.implicitDlx");
+    }
+    if addresses.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "`{key}` is not a nub setting (`{section}.*` lives in nub.jsonc, not .npmrc)\n\x20\x20fields under `{section}`: {}",
+        addresses.join(", ")
+    ))
+}
+
 impl Field {
     fn segments(&self) -> Vec<&'static str> {
         self.path.split('.').collect()

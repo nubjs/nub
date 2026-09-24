@@ -258,6 +258,53 @@ fn config_set_refuses_a_setting_nub_does_not_consume() {
     assert!(stderr.contains("verify"), "{stderr}");
 }
 
+/// A typo under one of nub.jsonc's own sections is refused, in both scopes,
+/// and writes nothing.
+///
+/// The exact-match field lookup deliberately lets an unknown key fall through
+/// to `.npmrc`. `dlx.implicit` went down that path and landed in `~/.npmrc`,
+/// where npm warned on every run that the key is unknown. A key under a nub
+/// section can never be a legitimate `.npmrc` key, so it stops here with the
+/// section's real addresses as the pointer.
+#[test]
+fn config_set_refuses_a_typo_under_a_nub_section() {
+    for (key, pointer) in [
+        ("dlx.implicit", "dlx.consent"),
+        ("exec.implicit", "exec.implicitDlx"),
+        ("install.hoist", "install.publicHoist"),
+    ] {
+        for scope in [&[][..], &["--global"][..]] {
+            let mut argv = vec!["set", key, "false"];
+            argv.extend_from_slice(scope);
+            let (stdout, stderr, code, project) = config(&argv);
+            assert_ne!(
+                code, 0,
+                "`config set {key} {scope:?}` must fail: {stdout}{stderr}"
+            );
+            assert!(
+                stderr.contains(pointer),
+                "the refusal for {key} must name {pointer}: {stderr}"
+            );
+            assert!(
+                !project.join(".npmrc").exists(),
+                "`config set {key} {scope:?}` wrote a project .npmrc"
+            );
+            let home = project.parent().unwrap().join("home").join(".npmrc");
+            assert!(
+                !home.exists(),
+                "`config set {key} {scope:?}` wrote a user .npmrc"
+            );
+        }
+    }
+    // A dotted key outside nub's sections keeps its free-form `.npmrc` route.
+    let (_, stderr, code, project) = config(&["set", "custom.flag", "1"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        project.join(".npmrc").exists(),
+        "the free-form route must still write"
+    );
+}
+
 /// A setting nub does not consume is absent from `config list --all` too.
 ///
 /// The write guard and the listing are separate code paths off one declaration,
