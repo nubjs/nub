@@ -39,7 +39,8 @@
     "lat": "npx --yes lat.md@0.12.2",
     "lat:index": "npx --yes lat.md@0.12.2 reindex --local --yes",
     "lat:check": "npx --yes lat.md@0.12.2 check",
-    "test:scripts": "node --test 'scripts/**/*.test.m[jt]s' 'tests/cross-runtime/*.test.mjs'"
+    "test:scripts": "node --test 'scripts/**/*.test.m[jt]s' 'tests/cross-runtime/*.test.mjs'",
+    "test:util-rate": "node --test scripts/util-rate.test.mjs"
   },
   "untracked": {
     "whitelist": [

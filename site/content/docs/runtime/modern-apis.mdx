@@ -6,7 +6,7 @@ description: Reference for the JavaScript, web-platform, and Node.js APIs that N
 Nub fills the gaps between supported Node versions, so the same modern APIs are there whichever Node your project pins. Each entry below says what Nub adds, how it is delivered, and when Node's own implementation takes over.
 
 <TypesSetup>
-Nub's types package declares the keyed Promise combinators, `Temporal`, the browser-style `Worker` global, and `reportError`. Standard APIs use TypeScript's bundled libraries and `@types/node`.
+Nub's types package declares the keyed Promise combinators, `Temporal`, the browser-style `Worker` global, `reportError`, and `node:util` rate helpers. Standard APIs use TypeScript's bundled libraries and `@types/node`.
 </TypesSetup>
 
 ## How augmentation works
@@ -554,6 +554,22 @@ channel.port1.onmessage = (event) => {
 ```
 
 ## Node.js APIs and loading behavior
+
+### `util.debounce()` and `util.throttle()`
+
+[`util.debounce()`](https://nodejs.org/api/util.html) delays a call until activity stops. `util.throttle()` limits calls within an interval and queues excess calls. Both return promises and expose cancellation, pending-call state, and timer controls.
+
+<Callout title="Delivery">
+Nub backfills both methods on Node 18.19 through 26.9, including named `node:util` imports and compiled artifacts. Node 26.10+ supplies the native implementations.
+</Callout>
+
+```ts
+import { debounce, throttle } from "node:util";
+
+const save = debounce((value: string) => value, 100);
+const send = throttle((value: string) => value, 2, 1000);
+await Promise.all([save("draft"), send("event")]);
+```
 
 These entries expose parsers, modules, and flags already present in particular Node releases. Nub does not polyfill a missing native subsystem.
 
