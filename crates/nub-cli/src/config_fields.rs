@@ -3,8 +3,10 @@
 //! `nub config` is the engine's `.npmrc` verb. A key naming a real `nub.jsonc`
 //! field is intercepted in [`crate::pm_engine::store_config_family`] and handled
 //! here; every other key keeps its existing `.npmrc` / `pnpm-workspace.yaml`
-//! routing untouched. The interception is driven by [`FIELDS`], so a key nub
-//! does not own can never be captured away from the engine.
+//! routing untouched, except a dotted key under one of nub's own address
+//! prefixes (`install.`, `dlx.`, `runtime.`, legacy `exec.`) that names no
+//! field, which [`section_near_miss`] refuses. Both are driven by [`FIELDS`],
+//! so a key nub does not own can never be captured away from the engine.
 //!
 //! Four decisions this module encodes:
 //!
@@ -220,23 +222,26 @@ const FIELDS: &[Field] = &[
     },
 ];
 
-/// The field `key` addresses, if any. Matching is exact: a near-miss must fall
-/// through to the engine rather than be silently corrected, so a typo lands in
-/// `.npmrc` where the user can see it instead of in a file nub validates.
+/// The field `key` addresses, if any. Matching is exact: a near-miss is never
+/// silently corrected. Outside nub's address prefixes it falls through to the
+/// engine and lands in `.npmrc` where the user can see it; under one of them
+/// [`section_near_miss`] refuses it instead.
 pub(crate) fn field(key: &str) -> Option<&'static Field> {
     FIELDS.iter().find(|f| f.address == key)
 }
 
-/// The refusal for a dotted key whose first segment is one of `nub.jsonc`'s
-/// sections (`install.`, `dlx.`, `runtime.`, or the legacy `exec.`) but
-/// which addresses no field, `None` for every other key.
+/// The refusal for a dotted key whose first segment is one of nub's own config
+/// ADDRESS prefixes (`install.`, `dlx.`, `runtime.`, or the legacy `exec.`) but
+/// which addresses no field, `None` for every other key. A prefix is a CLI
+/// address, not necessarily a file section: `runtime.nodeOptions` writes the
+/// root-level `nodeOptions`.
 ///
 /// The exact-match rule above sends a typo to `.npmrc`, which is the right
-/// place for a key nub does not own. A key under a nub section is different:
+/// place for a key nub does not own. A key under a nub prefix is different:
 /// nothing reads `dlx.*` from `.npmrc`, and npm warns on every run that the
 /// key is unknown (and will reject it in its next major) — so the write can
 /// only ever be a mistake, and it is refused where it is typed with the
-/// section's real addresses as the pointer.
+/// prefix's real addresses as the pointer.
 pub(crate) fn section_near_miss(key: &str) -> Option<String> {
     let (section, _) = key.split_once('.')?;
     let mut addresses: Vec<&str> = FIELDS
@@ -251,7 +256,7 @@ pub(crate) fn section_near_miss(key: &str) -> Option<String> {
         return None;
     }
     Some(format!(
-        "`{key}` is not a nub setting (`{section}.*` lives in nub.jsonc, not .npmrc)\n\x20\x20fields under `{section}`: {}",
+        "`{key}` is not a nub setting (`{section}.*` is a nub config address, not an .npmrc key)\n\x20\x20settings under `{section}`: {}",
         addresses.join(", ")
     ))
 }
