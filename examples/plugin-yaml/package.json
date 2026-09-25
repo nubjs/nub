@@ -1,0 +1,37 @@
+{
+  "name": "@nubjs/plugin-yaml",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Import YAML files as typed modules: a Node loader hook, a TypeScript content mapper, and a Vite/Rollup plugin in one package",
+  "license": "MIT",
+  "repository": "https://github.com/nubjs/nub",
+  "homepage": "https://nubjs.com",
+  "type": "module",
+  "engines": {
+    "node": ">=22.15.0"
+  },
+  "exports": {
+    "./register": {
+      "types": "./register.d.ts",
+      "default": "./register.mjs"
+    },
+    "./vite": "./vite.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "register.mjs",
+    "register.d.ts",
+    "vite.mjs",
+    "mapper.mjs",
+    "emit.mjs"
+  ],
+  "typescript": {
+    "contentMapper": {
+      "exec": ["node", "mapper.mjs"],
+      "compilerOptions": []
+    }
+  },
+  "dependencies": {
+    "yaml": "^2.8.0"
+  }
+}

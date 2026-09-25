@@ -117,6 +117,8 @@ jobs:
               - 'package.json'
               # skip.test.mjs, the cross-runtime harness's skip classifier
               - 'tests/cross-runtime/**'
+              # the YAML plugin prototype's own node --test suite runs in the same job
+              - 'examples/plugin-yaml/**'
               # ci-optin.test.mjs asserts the opt-in guard over every workflow FILE, so a
               # workflow-only change has to reach `test:scripts`. Without this the one edit
               # the lint exists to catch — a new job added without the `ci` label guard —
@@ -1566,6 +1568,14 @@ jobs:
           pnpm run soak
           pnpm run tools:check
           pnpm run test:scripts
+      # The plugin prototype has its own dependency (`yaml`) and no lockfile; the
+      # suite covers the emitter, the loader hook, the Vite transform and the
+      # content-mapper handshake, so protocol drift fails here rather than on a
+      # user's tsc.
+      - name: plugin-yaml tests
+        run: |
+          npm install --no-package-lock --no-audit --no-fund --prefix examples/plugin-yaml
+          node --test examples/plugin-yaml/test.mjs
       # The checker slugifies headings with github-slugger (a transitive site
       # dep) to match the rendered anchors exactly; install the site workspace
       # so it resolves. --frozen-lockfile keeps it deterministic.
