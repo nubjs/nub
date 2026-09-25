@@ -3,12 +3,15 @@ name: Release
 # Two publish paths share this file (npm OIDC trusted publishing binds ONE
 # workflow filename per package, so the canary publish cannot live in its own
 # workflow):
-#   - STABLE (`workflow_dispatch` with publish=true, from main): stage + verify
-#     the immutable versioned assets, stage the npm `latest` versions, promote
-#     the GitHub Release, then docker/homebrew/winget and post-publish install
-#     smokes. The run reads its version from the dispatched commit's
-#     npm/nub/package.json and creates the `v<version>` tag itself; there is no
-#     tag trigger, so pushing a tag starts nothing.
+#   - STABLE (`workflow_dispatch` with publish=true and notes, from main): create
+#     the `v<version>` tag at the dispatched commit, stage + verify the immutable
+#     versioned assets as a draft release carrying the notes, stage the npm
+#     `latest` versions, then HOLD on the `release-approval` environment until
+#     the maintainer approves the staged versions (`stager approve` approves on
+#     npm and resumes the run), promote the GitHub Release, then docker/homebrew/
+#     winget and post-publish install smokes. The run reads its version from the
+#     dispatched commit's npm/nub/package.json; there is no tag trigger, so
+#     pushing a tag starts nothing.
 #   - CANARY (nightly schedule): bun-style rolling prerelease, built ONCE A DAY
 #     from the head of main rather than on every push. The nightly builds the
 #     full 8-platform matrix with an uncommitted `<base>-canary.<yyyymmdd>.<run#>`
@@ -56,6 +59,10 @@ on:
         description: "Build only the Linux targets — cheap iteration that skips the 10×-billed macOS and 2× Windows runners. Ignored on publishing and canary dispatches, which always build the full matrix."
         type: boolean
         default: false
+      notes:
+        description: "Release notes in Markdown, REQUIRED on a publishing dispatch: they become the body of the GitHub Release. Pass a file with -f notes=\"$(cat notes.md)\". Ignored on canary and build-only dispatches."
+        type: string
+        default: ""
 
 # Default-deny at the workflow level; each job requests exactly the scopes its
 # steps use (id-token:write only in npm publication jobs; contents:write only in
@@ -89,7 +96,9 @@ jobs:
     name: Verify version consistency
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      # Creates the release tag on a publishing dispatch (see "Create the release
+      # tag"); everything else here only reads.
+      contents: write
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       # Whether this run is a canary run AT ALL (the nightly schedule, or a
@@ -151,14 +160,13 @@ jobs:
       # THE TAG IS AN OUTPUT OF THE RELEASE, NOT ITS TRIGGER (2026-09-23). A
       # publishing dispatch normally selects `main`: the version is read from
       # the dispatched commit's npm/nub/package.json, the tag name is derived
-      # from it, and stable-immutable-release creates that tag at GITHUB_SHA
-      # once every build and gate has passed — so a release that dies in the
-      # build leaves no tag behind. Selecting an existing `v*` tag is the
-      # re-run path for a release whose tag was already created and whose
-      # staged npm versions are waiting on the maintainer's approval; the
-      # ancestor-of-origin/main guard in stable-immutable-release applies
-      # either way. Any other ref is refused here, loudly, rather than by a
-      # silent job-level `if:` that would look like a green build-only run.
+      # from it, and the step after this one creates that tag at GITHUB_SHA.
+      # Selecting an existing `v*` tag is the re-run path for a release whose
+      # tag was already created and whose staged npm versions are waiting on
+      # the maintainer's approval; the ancestor-of-origin/main guard in
+      # stable-immutable-release applies either way. Any other ref is refused
+      # here, loudly, rather than by a silent job-level `if:` that would look
+      # like a green build-only run.
       - id: publish_tag
         name: Resolve and validate the stable publish tag
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
@@ -221,6 +229,38 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
           echo "✓ Stable publication tag $TAG matches committed version"
+      - name: Refuse a publishing dispatch without release notes
+        if: ${{ steps.publish_tag.outputs.tag != '' }}
+        env:
+          NOTES: ${{ inputs.notes }}
+        run: |
+          [ -n "$(printf '%s' "$NOTES" | tr -d '[:space:]')" ] \
+            || { echo "::error::the notes input is empty. A publishing dispatch carries the release notes: gh workflow run release.yml -R $GITHUB_REPOSITORY -f publish=true -f notes=\"\$(cat notes.md)\""; exit 1; }
+          echo "✓ release notes supplied ($(printf '%s' "$NOTES" | wc -c | tr -d ' ') bytes)"
+      - name: Create the release tag
+        # AT DISPATCH TIME, while this commit is still the tip of main. The job
+        # token may create or move a ref only when the commit's .github/workflows
+        # match the default branch's current tip: once a workflow-touching commit
+        # lands on main behind a running release, every ref write from the run
+        # answers 403 (v0.9.5's second run died that way, an hour into the build).
+        # The cost is a tag left behind by a release that dies in the build; the
+        # re-run path (dispatch the existing tag) and the `Release tags` ruleset
+        # (disable it to delete the tag) cover that. A ref written with the job
+        # token starts no workflow.
+        if: ${{ steps.publish_tag.outputs.tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.publish_tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            echo "✓ tag $TAG already exists (validated above)"
+          elif gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" --jq .ref; then
+            echo "✓ created $TAG at $GITHUB_SHA"
+          else
+            echo "::error::could not create $TAG at $GITHUB_SHA with the job token (main has moved past this commit with a workflow change?). Create it by hand — gh api -X POST repos/${GITHUB_REPOSITORY}/git/refs -f ref=refs/tags/$TAG -f sha=$GITHUB_SHA — then dispatch again selecting the tag."
+            exit 1
+          fi
       # Build matrix as data, so a non-publishing debug dispatch with
       # linux_only=true can drop the 10×-billed macOS + 2× Windows targets.
       # Publishing dispatches always get the full 8-platform matrix —
@@ -1763,20 +1803,16 @@ jobs:
     # STAGED PUBLISHING (2026-09-22). Every publish here is `npm stage publish`:
     # the trusted publisher on each @nubjs package is stage-only, so this job can
     # put a version in npm's staged queue and nothing else. A staged version is
-    # not installable until a maintainer approves it with 2FA (`pnpm stage
-    # approve`, or the Staged Packages tab on npmjs.com) — a proof of presence
-    # that no OIDC token and no GitHub credential can supply. The final step polls
-    # the registry until every version answers a read, which only happens after
-    # that approval, so everything downstream (the GitHub Release promotion, the
-    # tap, winget, docker, the install smokes) waits on the human. On 2026-09-21 a
-    # stolen push credential cut v0.9.4 and this job published 18 packages before
-    # npm's scanner held the loader-carrying root package; under staging that
-    # push would have filled a queue and shipped nothing.
-    # A GitHub job can wait six hours at most. If the approval comes later, re-run
-    # this job: every package is skipped as already published, the wait passes at
-    # once, and the downstream jobs run.
+    # not installable until a maintainer approves it with 2FA (`stager approve`,
+    # or the Staged Packages tab on npmjs.com) — a proof of presence that no OIDC
+    # token and no GitHub credential can supply. This job ends once the 19
+    # versions are queued; the `await-approval` job below then holds the run,
+    # and everything downstream (the GitHub Release promotion, the tap, winget,
+    # docker, the install smokes) starts after the maintainer approves. On
+    # 2026-09-21 a stolen push credential cut v0.9.4 and this job published 18
+    # packages before npm's scanner held the loader-carrying root package; under
+    # staging that push would have filled a queue and shipped nothing.
     if: ${{ needs.verify.outputs.publish_version != '' }}
-    timeout-minutes: 360
     # Gate on the test, conformance, glibc-floor, AND pre-publish smoke jobs: a
     # broken test, a lockfile-compat regression, a glibc-floor regression, or a
     # build that can't run / reports the wrong version must block publish — not
@@ -1928,19 +1964,9 @@ jobs:
           "
           bash .github/scripts/npm-stage-publish.sh npm/nub-types
 
-      - name: Wait for the maintainer's approval and for every package to answer a read
-        # This is the human gate. The 19 versions above sit in npm's staged queue until a
-        # maintainer approves them with 2FA; only then does the registry serve them, and
-        # only then does this step end. Everything downstream — the GitHub Release
-        # promotion, the tap, winget, docker, the install smokes — starts after it.
-        #
-        # The loop also covers the propagation lag it was first written for: `npm
-        # publish` returns before the registry SERVES the package, and the lag is
-        # per-package (on v0.9.0 the root package was readable at 19:21:29 while
-        # @nubjs/nub-linux-x64-musl only landed at 19:22:52). npm SKIPS AN UNRESOLVABLE
-        # optionalDependency SILENTLY, so an image built inside that window installed one
-        # package and died at `nub --version` with the musl binary absent. So every
-        # package, not just the root, must answer before this job reports success.
+      - name: Say how to approve
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           PKGS="@nubjs/nub @nubjs/types"
           for p in darwin-arm64 darwin-x64 linux-x64 linux-x64-musl linux-arm64 linux-arm64-musl win32-x64 win32-arm64; do
@@ -1948,25 +1974,36 @@ jobs:
           done
           PKGS="$PKGS $(node -p "require('./npm/runner/package.json').name")"
           {
-            echo "## Staged: waiting for approval"
+            echo "## Staged on npm — waiting for approval"
             echo
-            echo "Version \`$VERSION\` is staged on npm for every package below and is not installable until a maintainer approves it with 2FA. Approve the batch with \`pnpm stage approve\` (pnpm 12+, one one-time password for the batch), or per package in the Staged Packages tab on npmjs.com. Inspect a tarball first with \`npm stage view <id>\` / \`npm stage download <id>\`. This job waits up to six hours; after that, re-run it and it continues from the approval."
+            echo "Version \`$VERSION\` of every package below is in npm's staged queue and is not installable until a maintainer approves it with 2FA. This run is now held on the \`release-approval\` environment; it resumes when that deployment is approved, and then promotes the GitHub Release, moves the actions tag and runs the install smokes."
+            echo
+            echo '```'
+            echo "stager approve '@nubjs/*@$VERSION'     # approve in the browser (one click), then resume this run"
+            echo "stager reject '@nubjs/*@$VERSION'      # drop the staged versions and fail this run"
+            echo "stager await '@nubjs/*@$VERSION'       # block, with no timeout, until npm serves every version"
+            echo '```'
+            echo
+            echo "Without stager: approve each version on npmjs.com (Staged Packages) or with \`npm stage approve <id>\`, then approve the pending deployment on $RUN_URL. Inspect a tarball first with \`npm stage view <id>\` / \`npm stage download <id>\`."
             echo
             for pkg in $PKGS; do echo "- \`$pkg@$VERSION\`"; done
           } >> "$GITHUB_STEP_SUMMARY"
-          # 350 minutes of polling under the job's 360-minute cap, one read per package per minute.
-          deadline=$(( $(date +%s) + 350 * 60 ))
-          for pkg in $PKGS; do
-            until [ "$(npm view "$pkg@$VERSION" version 2>/dev/null)" = "$VERSION" ]; do
-              if [ "$(date +%s)" -ge "$deadline" ]; then
-                echo "::error::$pkg@$VERSION is still not served after 350 minutes — approve the staged versions and re-run this job; it resumes from the approval."
-                exit 1
-              fi
-              echo "… $pkg@$VERSION not served yet (staged, awaiting approval) — $(date -u +%H:%M:%SZ)"
-              sleep 60
-            done
-            echo "✓ $pkg@$VERSION readable"
-          done
+
+  await-approval:
+    name: Wait for the npm approval
+    # Held by the environment's required reviewer, not by a runner: GitHub keeps
+    # the run in the waiting state, with no runner and no six-hour cap (the
+    # limit is 30 days), until the maintainer approves the deployment — which
+    # `stager approve` does right after the npm approval (and `stager reject`
+    # rejects, failing the run). The npm approval is the gate; this approval is
+    # only the resume signal, and github-release checks the registry before it
+    # publishes anything.
+    if: ${{ needs.verify.outputs.publish_tag != '' }}
+    needs: [verify, publish-npm]
+    runs-on: ubuntu-latest
+    environment: release-approval
+    steps:
+      - run: echo "resuming — the staged ${{ needs.verify.outputs.publish_version }} versions were approved"
 
   stable-immutable-release:
     name: Stage immutable stable release (+ verify assets)
@@ -2101,29 +2138,10 @@ jobs:
           done
           ls -la release-archives
 
-      - name: Create the release tag when absent
-        # The release CREATES its own tag, here, at the commit it just built and
-        # gated — there is no tag trigger and no tag is pushed by hand. This is
-        # the first job on the stable path holding contents:write, and it runs
-        # only after build/test/conformance/glibc-floor/pre-publish-gate, so a
-        # release that dies earlier leaves no tag behind to clean up. verify has
-        # already refused an existing tag that points anywhere but this commit,
-        # and the next step re-proves that against what the API actually holds.
-        # A ref written with the job token starts no workflow.
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$TAG" >/dev/null 2>&1; then
-            echo "✓ tag $TAG already exists"
-          else
-            gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
-              -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" --jq .ref
-            echo "✓ created $TAG at $GITHUB_SHA"
-          fi
-
       - name: Validate immutable stable tag
+        # verify created the tag at dispatch time and refused one pointing
+        # anywhere but this commit; this re-proves it against what the API holds
+        # now that the build is done.
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -2161,19 +2179,25 @@ jobs:
           echo "✓ stable tag $TAG resolves to this run's commit and is reachable from origin/main"
 
       - name: Create immutable stable prerelease when absent
+        # The body is the `notes` input, so the notes ride the run and the
+        # promotion publishes them as they are; a re-run with corrected notes
+        # rewrites the body of the existing draft.
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          NOTES: ${{ inputs.notes }}
         run: |
           set -euo pipefail
+          printf '%s\n' "$NOTES" > "$RUNNER_TEMP/release-notes.md"
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "✓ release $TAG already exists; preserving its presentation state"
+            gh release edit "$TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
+            echo "✓ release $TAG already exists; notes rewritten from this dispatch, presentation state preserved"
           else
             # A DRAFT: invisible and silent until github-release promotes it after the
             # maintainer approves the staged npm versions. A visible prerelease here would
             # notify every watcher of a version that may never ship — and did, on the
             # unauthorized v0.9.4.
-            gh release create "$TAG" --verify-tag --draft --prerelease --title "Nub $VERSION" --generate-notes
+            gh release create "$TAG" --verify-tag --draft --prerelease --title "Nub $VERSION" --notes-file "$RUNNER_TEMP/release-notes.md"
           fi
 
       - name: Reconcile immutable stable assets
@@ -2286,16 +2310,45 @@ jobs:
   github-release:
     name: Publish stable GitHub Release
     # npm can stage only after the immutable draft above is asset-complete, and
-    # publish-npm ends only once the maintainer has approved the staged versions
-    # and the registry serves them. Then promote that same draft — publish it,
-    # drop the prerelease flag, claim Latest — without rebuilding or retargeting
-    # it. Asset repair remains owned by stable-immutable-release.
+    # await-approval releases this job once the maintainer has approved. The
+    # first step proves the registry serves every version, then promote that
+    # same draft — publish it, drop the prerelease flag, claim Latest — without
+    # rebuilding or retargeting it. Asset repair remains owned by
+    # stable-immutable-release.
     if: ${{ needs.verify.outputs.publish_tag != '' }}
-    needs: [verify, publish-npm, stable-immutable-release]
+    needs: [verify, await-approval, stable-immutable-release]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - name: Confirm npm serves every version
+        # The approval already happened; this loop covers propagation lag, which is
+        # per-package (on v0.9.0 the root package was readable at 19:21:29 while
+        # @nubjs/nub-linux-x64-musl only landed at 19:22:52). npm SKIPS AN
+        # UNRESOLVABLE optionalDependency SILENTLY, so an image built inside that
+        # window installed one package and died at `nub --version` with the musl
+        # binary absent: every package, not just the root, answers before anything
+        # downstream runs. A deployment approved before the npm approval ends here.
+        env:
+          VERSION: ${{ needs.verify.outputs.publish_version }}
+        run: |
+          set -euo pipefail
+          PKGS="@nubjs/nub @nubjs/types @nubjs/runner"
+          for p in darwin-arm64 darwin-x64 linux-x64 linux-x64-musl linux-arm64 linux-arm64-musl win32-x64 win32-arm64; do
+            PKGS="$PKGS @nubjs/nub-$p @nubjs/runner-$p"
+          done
+          deadline=$(( $(date +%s) + 20 * 60 ))
+          for pkg in $PKGS; do
+            until [ "$(npm view "$pkg@$VERSION" version 2>/dev/null)" = "$VERSION" ]; do
+              if [ "$(date +%s)" -ge "$deadline" ]; then
+                echo "::error::$pkg@$VERSION is not served by npm — the deployment was approved but this staged version was not. Approve it (stager approve '@nubjs/*@$VERSION'), then re-run this job."
+                exit 1
+              fi
+              echo "… $pkg@$VERSION not served yet — $(date -u +%H:%M:%SZ)"
+              sleep 30
+            done
+            echo "✓ $pkg@$VERSION readable"
+          done
       - name: Promote immutable release
         # `gh release edit` resolves a DRAFT by its pending tag (the REST tag endpoint
         # cannot), so this is the one step that publishes it — which is what makes the
@@ -2411,10 +2464,28 @@ jobs:
             IFS=$'\t' read -r type sha <<<"$record"
           done
           # `git/ref/tags/v0` answers only for that exact ref; a 404 means create.
+          # The job token may not write a ref once main has moved past this commit
+          # with a workflow change (GitHub answers 403); the release is complete
+          # either way, so the fallback is one command from a maintainer's token.
+          manual="gh api -X PATCH repos/${GITHUB_REPOSITORY}/git/refs/tags/$floating -f sha=$sha -F force=true"
           if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$floating" --jq .ref >/dev/null 2>&1; then
-            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/$floating" -f sha="$sha" -F force=true --jq .ref
+            ok=0; gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/$floating" -f sha="$sha" -F force=true --jq .ref || ok=$?
           else
-            gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/$floating" -f sha="$sha" --jq .ref
+            manual="gh api -X POST repos/${GITHUB_REPOSITORY}/git/refs -f ref=refs/tags/$floating -f sha=$sha"
+            ok=0; gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/$floating" -f sha="$sha" --jq .ref || ok=$?
+          fi
+          if [ "$ok" -ne 0 ]; then
+            {
+              echo "## The floating \`$floating\` tag was NOT moved"
+              echo
+              echo "The job token could not write the ref (usually: main moved past this commit with a workflow change, so GitHub answers 403). $TAG itself is fully released. Move the tag from a maintainer's own token:"
+              echo
+              echo '```sh'
+              echo "$manual"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::could not point $floating at $sha with the job token; run from a maintainer's token: $manual"
+            exit 1
           fi
           echo "✓ $floating -> $sha ($TAG)"
 
@@ -2877,7 +2948,7 @@ jobs:
     # image installs at build time. The validated stable-tag path only includes
     # publishing dispatches; a build-only dispatch or a canary run cannot
     # push an image.
-    needs: [verify, publish-npm]
+    needs: [verify, github-release]
     if: needs.verify.outputs.publish_tag != ''
     # The called workflow inherits the calling job's token scope; the GHCR push needs
     # packages:write (release.yml's top-level token has only id-token+contents).
@@ -2893,7 +2964,7 @@ jobs:
 
   test-install:
     name: Test install (${{ matrix.os }})
-    needs: [verify, publish-npm]
+    needs: [verify, github-release]
     permissions:
       contents: read
     env:
@@ -2952,7 +3023,7 @@ jobs:
     # broken `-musl` platform-package selection / a glibc-only addon link in CI.
     # node:22-alpine also exercises a floor-ish Node on musl in one shot.
     name: Test install (linux-musl)
-    needs: [verify, publish-npm]
+    needs: [verify, github-release]
     runs-on: ubuntu-latest
     permissions:
       contents: read

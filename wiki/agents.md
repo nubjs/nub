@@ -457,17 +457,19 @@ git commit -m "v0.0.6" -- <the 27 version files>   # path-scoped: the shared tre
                                # omitting one tags a stale tree (v0.9.1 missed nub-phantom's).
 git push origin main
 # THIS starts the release; nothing else does. The run reads 0.0.6 from npm/nub/package.json at
-# the dispatched commit, builds 8 platforms, creates the v0.0.6 tag itself once every gate
-# passes, STAGES the 19 npm packages, and waits for the maintainer's 2FA approval
-# (`pnpm stage approve`) before publishing the GitHub Release — the `release` skill's Step 3b.
-# release.yml has no tag trigger, so pushing a v* tag by hand starts nothing.
-gh workflow run release.yml -R nubjs/nub -f publish=true
+# the dispatched commit, creates the v0.0.6 tag there at once, builds 8 platforms, STAGES the
+# 19 npm packages, then HOLDS on the `release-approval` environment (no runner, up to 30 days)
+# until the maintainer approves them with 2FA — `stager approve '@nubjs/*@0.0.6'` approves and
+# resumes the run — and only then publishes the GitHub Release, whose body is the `notes`
+# input (required). The `release` skill's Step 3b. release.yml has no tag trigger, so
+# pushing a v* tag by hand starts nothing.
+gh workflow run release.yml -R nubjs/nub -f publish=true -f notes="$(cat notes.md)"
 ```
 
 Other Makefile targets: `make npm-build` (build + package for the current platform), `make npm-publish` (manual publish — prefer CI), `make npm-publish-dry`.
 
 The GitHub Actions `setup-node/`, `install/` and `npm-ci/` ship at the repository root and are consumed as `nubjs/nub/<name>@v0`. The release workflow moves that floating `v<major>` tag to each promoted stable release; the workflow has no tag trigger at all, so writing `v0` starts nothing, and `git describe --tags` needs `--exclude 'v[0-9]'` to see past it (`scripts/release-notify.ts` does). Their smoke is `.github/workflows/action-smoke.yml`, path-filtered to the two action directories and `tests/action-smoke/**`.
 
-**CI release workflow** (`.github/workflows/release.yml`) runs on a `workflow_dispatch` with `publish=true` from `main`, and builds darwin-arm64, darwin-x64, linux-x64, linux-x64-musl, linux-arm64, linux-arm64-musl, win32-x64, win32-arm64. The `verify` job derives the version from `npm/nub/package.json` at the dispatched commit and the release creates the `v<version>` tag itself. Stages via npm OIDC trusted publishing (no secrets), then promotes the GitHub Release with binary artifacts once the maintainer approves the staged versions. Re-running a release whose tag already exists is supported: dispatch with `publish=true` and select that tag.
+**CI release workflow** (`.github/workflows/release.yml`) runs on a `workflow_dispatch` with `publish=true` from `main`, and builds darwin-arm64, darwin-x64, linux-x64, linux-x64-musl, linux-arm64, linux-arm64-musl, win32-x64, win32-arm64. The `verify` job derives the version from `npm/nub/package.json` at the dispatched commit, requires the `notes` input, and creates the `v<version>` tag at dispatch time (the job token can write a ref only while the commit's workflows match the default branch tip, so the tag is written before `main` can move). Stages via npm OIDC trusted publishing (no secrets), holds the run on the `release-approval` environment, then promotes the GitHub Release with binary artifacts once the maintainer approves the staged versions and resumes the run. Re-running a release whose tag already exists is supported: dispatch with `publish=true` and the notes, and select that tag.
 
 **Version regime:** stay in `0.0.x` until public launch; bump to `0.1.0` only when the whitepaper, benchmarks, and install experience are polished.
