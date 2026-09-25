@@ -550,10 +550,12 @@ fn project_scalar_home(pnpm_incumbent: bool) -> config_model::ScalarHome {
 /// nub's OWN settings live in `nub.jsonc`, NOT `.npmrc` (which npm will soon
 /// ERROR on for unrecognized keys) — so a key naming a `nub.jsonc` field is
 /// intercepted BEFORE the engine's `.npmrc`/pnpm-yaml routing. Two tables claim
-/// keys here, both exact-match so a key nub does not own falls through
-/// unchanged: [`crate::config_fields::FIELDS`], the nub CLI address table; and
-/// the legacy `exec.implicitDlx` spelling below, which predates that schema and
-/// keeps its own storage location and its `prompt` default on an unset read.
+/// keys here, both exact-match: [`crate::config_fields::FIELDS`], the nub CLI
+/// address table; and the legacy `exec.implicitDlx` spelling below, which
+/// predates that schema and keeps its own storage location and its `prompt`
+/// default on an unset read. A key nub does not own falls through unchanged,
+/// unless it sits under one of nub's own address prefixes, where it can only be
+/// a typo for one of ours and is refused (see [`refuse_section_near_miss`]).
 ///
 /// The kebab spelling `exec.implicit-dlx` is accepted as a read/route ALIAS
 /// (stale muscle memory from the pre-migration TOML key) but always writes the
@@ -607,8 +609,20 @@ fn try_nub_config(parsed: &ConfigArgs, global: bool) -> Option<i32> {
                 }
             }
         }
+        // A key under a nub address prefix that names no field (`dlx.implicit`) is a
+        // typo for one of ours, never a legitimate `.npmrc` key: refuse it
+        // rather than let the engine write it verbatim for npm to warn about.
+        Some(ConfigCommand::Set(set)) => refuse_section_near_miss(&set.key),
+        Some(ConfigCommand::Get(get)) => refuse_section_near_miss(&get.key),
+        Some(ConfigCommand::Delete(del)) => refuse_section_near_miss(&del.key),
         _ => None,
     }
+}
+
+fn refuse_section_near_miss(key: &str) -> Option<i32> {
+    let message = crate::config_fields::section_near_miss(key)?;
+    eprintln!("nub: {message}");
+    Some(1)
 }
 
 /// Route a `nub.jsonc` field to [`crate::config_fields`], or `None` when the key

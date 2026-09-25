@@ -28,7 +28,8 @@
 //! The `nub config get/set …` surface is NOT a separate parser verb (the `config`
 //! verb already exists as the engine's `.npmrc` config): a key naming a nub
 //! setting is intercepted in `pm_engine::store_config_family` and routed here or
-//! to [`crate::config_fields`], while every other key stays on the `.npmrc` path.
+//! to [`crate::config_fields`], while every other key stays on the `.npmrc` path
+//! — except a typo under one of nub's own address prefixes, which is refused.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};

@@ -815,7 +815,7 @@ nub config get preload --json       # ["./setup.ts","tsx/esm"]
 
 A key that is not a field of this file reads and writes `.npmrc`, so the value stays visible to npm, Yarn, and pnpm. Nub picks whichever file will read the key back, so under a pnpm 11 project the settings pnpm moved out of `.npmrc` are written to `pnpm-workspace.yaml` instead. Registry and auth keys stay in `.npmrc` on every project.
 
-Nub refuses a key it would never read back rather than writing a line nothing consults, and names the surface that works instead. Two kinds are refused: a setting only the underlying engine's own CLI acts on, and a setting `.npmrc` has no spelling for.
+Nub refuses a key it would never read back rather than writing a line nothing consults, and names the surface that works instead. Three kinds are refused: a setting only the underlying engine's own CLI acts on, a setting `.npmrc` has no spelling for, and a key under one of Nub's own config address prefixes (`install.`, `dlx.`, `runtime.`) that names no field, such as `dlx.implicit`. That last one is a typo for a field of this file; written to `.npmrc` it would only make npm warn about an unknown key on every run.
 
 ```text
 $ nub config set updateNotifier false
