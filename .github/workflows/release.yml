@@ -2349,6 +2349,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      # No checkout in this job, and `gh release` resolves the repository from the
+      # working tree when nothing names it: v0.9.5 died here with "not a git
+      # repository" the first time the promote step ever ran.
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: Confirm npm serves every version
         # The approval already happened; this loop covers propagation lag, which is
