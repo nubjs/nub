@@ -255,7 +255,17 @@ jobs:
           set -euo pipefail
           if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$TAG" >/dev/null 2>&1; then
             echo "✓ tag $TAG already exists (validated above)"
-          elif gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" --jq .ref; then
+            exit 0
+          fi
+          # No tag, yet npm already serves the version: it was published from some other
+          # commit (npm records it as gitHead), and this dispatch may not claim it.
+          VERSION="${TAG#v}"
+          if [ "$(npm view "@nubjs/nub@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
+            built="$(npm view "@nubjs/nub@$VERSION" gitHead 2>/dev/null || true)"
+            [ "$built" = "$GITHUB_SHA" ] \
+              || { echo "::error::@nubjs/nub@$VERSION is already published from commit ${built:-<unknown>}, not from this run's $GITHUB_SHA, and no $TAG exists. Create the tag at the commit that built it — gh api -X POST repos/${GITHUB_REPOSITORY}/git/refs -f ref=refs/tags/$TAG -f sha=${built:-<sha>} — then dispatch selecting that tag."; exit 1; }
+          fi
+          if gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" --jq .ref; then
             echo "✓ created $TAG at $GITHUB_SHA"
           else
             echo "::error::could not create $TAG at $GITHUB_SHA with the job token (main has moved past this commit with a workflow change?). Create it by hand — gh api -X POST repos/${GITHUB_REPOSITORY}/git/refs -f ref=refs/tags/$TAG -f sha=$GITHUB_SHA — then dispatch again selecting the tag."
