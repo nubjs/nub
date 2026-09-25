@@ -6,21 +6,22 @@ description: >-
   CI-green. Encodes the full runbook: pick the version (patch bump in the
   0.0.x/0.1.x pre-release regime), audit `@nubjs/types`, run `make version`
   + `make version-check`,
-  commit + push to `main`, then dispatch release.yml with publish=true (that
-  dispatch starts the 8-platform build → glibc and pre-publish native gates →
-  immutable 32-asset DRAFT release → npm OIDC STAGE → the maintainer's 2FA
-  approval → stable GitHub Release, and the workflow creates the `v<ver>` tag
-  itself), then draft comprehensive FACTUAL + NEUTRAL release
-  notes from the full changeset and comment the version + release link on every
-  closed issue + merged PR the release ships (mandatory maintainer hygiene). Do
-  NOT cut until all fixes are green.
+  commit + push to `main`, write the FACTUAL + NEUTRAL release notes from the
+  full changeset, then dispatch release.yml with publish=true and the notes as
+  its input (that dispatch creates the `v<ver>` tag, runs the 8-platform build →
+  glibc and pre-publish native gates → immutable 32-asset DRAFT release carrying
+  the notes → npm OIDC STAGE → a held run until the maintainer approves with
+  2FA → stable GitHub Release), `stager await` the approval with no timeout,
+  then comment the version + release link on every closed issue + merged PR the
+  release ships (mandatory maintainer hygiene). Do NOT cut until all fixes are
+  green.
 metadata:
   internal: true
 ---
 
 # Cutting a Nub release
 
-A Nub release is dispatch-started and automated up to one human gate. A `workflow_dispatch` of `.github/workflows/release.yml` from `main` with `publish=true` reads the version from `npm/nub/package.json` at the dispatched commit, builds 8 platforms, gates them (test, lockfile conformance, glibc-floor, pre-publish smoke), creates the `v<ver>` tag at the dispatched commit once every gate has passed, creates an immutable DRAFT release with 32 assets, STAGES 19 npm packages via OIDC trusted publishing (stage-only: CI cannot publish), waits for the maintainer to approve them with 2FA (Step 3b), and then presents the stable GitHub Release — claiming the repository's **Latest** marker (`make_latest: "true"` on the promote step) and then asserting `releases/latest` actually serves the new tag. That marker IS the upgrade channel: `nub upgrade`, `install.sh`, and `install.ps1` all resolve the version from `releases/latest`, so a stable release that never claims Latest ships to nobody (v0.8.0–v0.8.2 sat unserved behind v0.7.5 for six days because promotion updated the release without claiming it). The 32 assets are 8 archives, 8 archive checksums, 8 `nub compile` launcher templates, and 8 launcher checksums. The human work: confirm green, reconcile the runtime with `@nubjs/types`, bump the version, dispatch the workflow, approve the staged versions, write good notes, close the loop on issues/PRs.
+A Nub release is dispatch-started and automated up to one human gate. A `workflow_dispatch` of `.github/workflows/release.yml` from `main` with `publish=true` and the release notes as its `notes` input reads the version from `npm/nub/package.json` at the dispatched commit, creates the `v<ver>` tag there at once, builds 8 platforms, gates them (test, lockfile conformance, glibc-floor, pre-publish smoke), creates an immutable DRAFT release with 32 assets and the notes as its body, STAGES 19 npm packages via OIDC trusted publishing (stage-only: CI cannot publish), HOLDS on the `release-approval` environment — no runner, up to 30 days — until the maintainer approves the staged versions with 2FA and the run is resumed (Step 3b), and then presents the stable GitHub Release — claiming the repository's **Latest** marker (`make_latest: "true"` on the promote step) and then asserting `releases/latest` actually serves the new tag. That marker IS the upgrade channel: `nub upgrade`, `install.sh`, and `install.ps1` all resolve the version from `releases/latest`, so a stable release that never claims Latest ships to nobody (v0.8.0–v0.8.2 sat unserved behind v0.7.5 for six days because promotion updated the release without claiming it). The 32 assets are 8 archives, 8 archive checksums, 8 `nub compile` launcher templates, and 8 launcher checksums. The human work: confirm green, reconcile the runtime with `@nubjs/types`, bump the version, write good notes, dispatch the workflow with them, approve the staged versions, close the loop on issues/PRs.
 
 **Guardrails (read first, non-negotiable):**
 
@@ -28,7 +29,8 @@ A Nub release is dispatch-started and automated up to one human gate. A `workflo
 - **Do not cut until every targeted fix is landed on `main` AND CI-green.** A prerequisite, not authorization.
 - **Do not version until the type-declaration audit is complete.** Invoke the `type-declarations` skill for every release. Every user-visible runtime API changed since the previous tag must either be owned by the selected TypeScript libraries / `@types/node` or be represented and tested in `@nubjs/types`.
 - **Pre-release version regime: stay in `0.0.x` / `0.1.x`.** A normal release is a patch bump. Bump the minor only on explicit instruction. Never invent a version; derive it from the latest tag.
-- **The version-bump commit MUST be on `main` before you dispatch** — `verify` reads `npm/nub/package.json` at the dispatched commit and names the tag from it. So: `make version` → commit → push `main` → dispatch, in that order. Never push a `v*` tag by hand; the workflow has no tag trigger and creates its own tag.
+- **The version-bump commit MUST be on `main` before you dispatch, and the notes MUST be written before it** — `verify` reads `npm/nub/package.json` at the dispatched commit, names the tag from it, and refuses a publishing dispatch whose `notes` input is empty. So: `make version` → commit → push `main` → write `notes.md` (Step 4's shape) → dispatch with the notes, in that order. Never push a `v*` tag by hand; the workflow has no tag trigger and creates its own tag at dispatch time.
+- **Land nothing that touches `.github/workflows/` on `main` while a release run is in flight.** The job token may write a ref only while the run's commit matches the default branch's workflows; once a workflow change lands behind a running release, the `v0` move answers 403 (v0.9.5's second run died that way). The job says so and prints the one-command fallback.
 - **Release notes are FACTUAL and NEUTRAL — the repo is PUBLIC.** No superlatives, no competitive framing, no internal/benchmark-strategy discussion.
 
 ---
@@ -85,36 +87,40 @@ git show --stat HEAD      # SANITY: 27 files, all version bumps, nothing else: 1
 # `main` does not land either.
 git push origin main
 
-# THIS is what starts the publish. No tag is pushed by hand: release.yml has no tag
-# trigger, verify names the tag from npm/nub/package.json at the dispatched commit, and
-# stable-immutable-release creates v<ver> there once every gate has passed.
-gh workflow run release.yml -R nubjs/nub -f publish=true
+# Write the release notes FIRST (Step 4 has their shape) — they are an input of the dispatch,
+# and verify refuses a publishing dispatch without them. Then THIS is what starts the publish.
+# No tag is pushed by hand: release.yml has no tag trigger; verify names the tag from
+# npm/nub/package.json at the dispatched commit and creates v<ver> there at dispatch time.
+gh workflow run release.yml -R nubjs/nub -f publish=true -f notes="$(cat notes.md)"
 gh run list -R nubjs/nub --workflow release.yml --limit 1   # the run id, to watch
 # release.yml itself moves the floating v<major> tag (v0) that `uses: nubjs/nub/<name>@v0`
 # resolves through, after the promote step. Never push v0 by hand.
 ```
 
-Re-running a release that died after its tag was created — most often one whose staged npm versions went unapproved past the six-hour wait — re-dispatches with `publish=true` and selects the existing `v<ver>` tag as the ref. Every other ref is refused by `verify`, and a tag that points at any commit but the dispatched one is refused there too: release a new version rather than moving a published tag.
+Re-running a release that died after its tag was created — a failed build, a run whose held approval expired after 30 days — re-dispatches with `publish=true` and the same notes, selecting the existing `v<ver>` tag as the ref. Every other ref is refused by `verify`, and a tag that points at any commit but the dispatched one is refused there too: release a new version rather than moving a published tag (or, for a version nothing published, disable the `Release tags` ruleset, delete the draft release with `gh release delete v<ver> --cleanup-tag`, re-enable it, and dispatch from the fixed `main`).
 
 Post-merge, fast-forward the shared tree so it tracks origin: `git -C <shared-tree> pull --ff-only` (the eagerly-pull rule, AGENTS.md "Default to a PR flow" — the shared checkout otherwise drifts behind as PRs land).
 
-The workflow runs, in order: `verify` (version consistency + tag resolution), `primer`, `test` + `conformance` + `glibc-floor-guard` + `pre-publish-gate`, `build` (8 platforms), `stable-immutable-release` (creates the tag, then 32 assets on a DRAFT release), `publish-npm` (19 packages STAGED, then a wait for the maintainer's approval), `github-release` (publishes the draft as the stable release), then the post-publish fan-out — `test-install` / `test-install-musl`, `docker`, `bump-homebrew-tap`, `submit-winget`.
+The workflow runs, in order: `verify` (version consistency, notes present, creates the tag), `primer`, `test` + `conformance` + `glibc-floor-guard` + `pre-publish-gate`, `build` (8 platforms), `stable-immutable-release` (32 assets on a DRAFT release whose body is the notes), `publish-npm` (19 packages STAGED), `await-approval` (the run is HELD on the `release-approval` environment until the maintainer approves), `github-release` (confirms npm serves every version, publishes the draft as the stable release), then the post-publish fan-out — `actions-tag`, `test-install` / `test-install-musl`, `docker`, `bump-homebrew-tap`, `submit-winget`.
 
 ### Step 3b — Approve the staged versions (the human gate; maintainer only)
 
-`publish-npm` does not publish. It runs `npm stage publish` for every package, because the trusted publisher on each `@nubjs` package is stage-only, and then polls the registry until every version is served. Nothing is installable, and no GitHub Release is visible, until the maintainer approves the staged versions with 2FA. That approval is a proof of presence no token can supply, which is the whole point (the unauthorized v0.9.4 of 2026-09-21 published 18 packages from a stolen push credential; under staging it would have filled a queue).
+`publish-npm` does not publish. It runs `npm stage publish` for every package, because the trusted publisher on each `@nubjs` package is stage-only, and then ends. The run moves to `await-approval`, a job on the `release-approval` environment whose required reviewer is the maintainer: GitHub holds the run there with no runner, for up to 30 days. Nothing is installable, and no GitHub Release is visible, until the maintainer approves the staged versions with 2FA. That approval is a proof of presence no token can supply, which is the whole point (the unauthorized v0.9.4 of 2026-09-21 published 18 packages from a stolen push credential; under staging it would have filled a queue).
 
-The maintainer, on a logged-in machine, once the job summary lists the staged packages:
+The approval goes through `stager` (`~/Documents/projects/stager`, on PATH). An agent RUNS it; the maintainer supplies the one click on the npm page it prints:
 
 ```bash
-npm stage list @nubjs/nub               # the stage ids; repeat for any package to inspect
-npm stage view <stage-id>               # metadata; `npm stage download <stage-id>` for the tarball
-pnpm stage approve                      # pnpm 12+: interactive picker, one one-time password for the whole batch
+stager approve '@nubjs/*@<ver>'     # prints an npmjs.com URL; the maintainer approves there (tick "skip 2FA for
+                                    # 5 minutes" so the other 18 pass without another URL); then stager approves
+                                    # the run's pending deployment, which resumes it
+stager await '@nubjs/*@<ver>'       # blocks, with no timeout, until npm serves every version — park on this
+stager reject '@nubjs/*@<ver>'      # drops the staged versions and fails the held run
+stager                              # the interactive picker: every staged version, commit, run, Drydock diff
 ```
 
-`npm stage approve <stage-id>` takes one id per call, so the 19-package batch goes through `pnpm stage approve`. An agent never approves: the approval IS the gate, and every `npm stage` subcommand except `publish` refuses an OIDC token anyway. The job waits up to six hours; if the approval comes later, re-run the failed `publish-npm` job — every package is skipped as already published, the wait passes at once, and the downstream jobs run.
+`stager` approves every staged version of a package oldest-first, so two versions staged at once end with `latest` on the higher one. A version still `validating` (npm's malware review, up to an hour) is approved once the review finishes; stager waits for it. Without stager: `npm stage approve <id>` per package (or the Staged Packages tab on npmjs.com), then approve the pending deployment on the run's page. A deployment approved before the npm approval fails `github-release` at its registry check; re-run that job after approving.
 
-**Watch CI through the `ci-watch` skill until it returns a terminal verdict.** Keep the selected monitor in a tracked persistent process or an owned live agent; never detach `gh run watch` and infer completion from a log. The release is not done until `stable-immutable-release`, `publish-npm`, and `github-release` are green.
+**Park on `stager await` (a background shell) rather than on the run.** It returns when the versions are live; the run's remaining jobs then take a few minutes. The release is not done until `stable-immutable-release`, `publish-npm`, `github-release` and `actions-tag` are green.
 
 ### The other distribution channels ride the same run — no manual step, but they are not free
 
@@ -127,7 +133,7 @@ npm is not the only thing a release publishes. Two jobs push OUTSIDE this repo, 
 
 ## Step 4 — Comprehensive release notes (Opus)
 
-CI's `stable-immutable-release` job creates the prerelease with `generate_release_notes: true`, and `github-release` promotes it after npm succeeds. **Replace the generated body** with hand-written, scannable, factual notes; do not leave the release on the raw auto-list. Drive this on Opus.
+The notes are the `notes` input of the dispatch (Step 3): `stable-immutable-release` creates the draft with them as its body and `github-release` promotes it unchanged, so they are written BEFORE the dispatch, into `notes.md`. Hand-written, scannable, factual; never a raw auto-list. Drive this on Opus.
 
 Build the notes from the **full** `git log "$PREV"..HEAD` changeset (Step 1), not just the headline fixes — every user-affecting change ships.
 
@@ -177,21 +183,20 @@ Build the notes from the **full** `git log "$PREV"..HEAD` changeset (Step 1), no
 **Full Changelog**: https://github.com/nubjs/nub/compare/<PREV>...v<ver>
 ```
 
-Generate the bottom `## What's Changed` breakdown mechanically so every merged PR is listed:
+Generate the bottom `## What's Changed` breakdown mechanically so every merged PR is listed (the tag does not exist yet, so name the commit):
 
 ```bash
 # PR-level list + New Contributors + Full Changelog compare link — append verbatim below the curated narrative
 gh api repos/nubjs/nub/releases/generate-notes \
-  -f tag_name=v<ver> -f previous_tag_name=$PREV --jq '.body'
+  -f tag_name=v<ver> -f target_commitish=main -f previous_tag_name=$PREV --jq '.body'
 ```
 
-Append that block under a `---` separator below the curated sections, then `gh release edit`. The curated narrative stays on top; this exhaustive PR list goes underneath.
+Append that block under a `---` separator below the curated sections, save `notes.md`, and dispatch with it. The curated narrative stays on top; this exhaustive PR list goes underneath.
 
-Update the release body:
+To correct the notes after the dispatch (a re-dispatch of the same tag rewrites the draft's body from its own `notes` input; after the promotion, edit in place):
 
 ```bash
-# Edit a notes file, then:
-gh release edit v<ver> --notes-file <path-to-notes.md>
+gh release edit v<ver> --notes-file notes.md
 gh release view v<ver> --repo nubjs/nub --json body -q .body   # verify it rendered
 ```
 
@@ -318,8 +323,9 @@ A complete release has the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub-
 | Changeset | `git log $(git describe --tags --abbrev=0)..HEAD --oneline` |
 | Types | Invoke `type-declarations`; reconcile every runtime API in the changeset before versioning |
 | Bump | `make version V=<ver>` → `make version-check` |
-| Cut | `git commit -m "v<ver>" -- <version files>` → `git push origin main` (never `--tags`) → `gh workflow run release.yml -R nubjs/nub -f publish=true` |
-| Notes | `gh release edit v<ver> --notes-file notes.md` |
+| Notes | write `notes.md` (curated sections + generated `## What's Changed`) BEFORE the dispatch |
+| Cut | `git commit -m "v<ver>" -- <version files>` → `git push origin main` (never `--tags`) → `gh workflow run release.yml -R nubjs/nub -f publish=true -f notes="$(cat notes.md)"` |
+| Approve | `stager approve '@nubjs/*@<ver>'` (maintainer clicks the npm URL) → `stager await '@nubjs/*@<ver>'` |
 | Blog | `site/content/blog/nub-<x>-<y>-<z>.mdx` — back-dated to `publishedAt` (direct to `main`) |
 | Tap | automatic via `bump-homebrew-tap`; verify with `gh api repos/nubjs/homebrew-tap/contents/Formula/nub.rb --jq .content \| base64 -d \| head -5` |
 | Loop | `gh issue comment <n> --body "Fixed in v<ver>: <release URL>"` (every closed issue + merged PR) |
