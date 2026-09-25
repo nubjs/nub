@@ -58,8 +58,9 @@ on:
         default: false
 
 # Default-deny at the workflow level; each job requests exactly the scopes its
-# steps use (id-token:write only in npm publication jobs; contents:write only in
-# immutable/presentation release jobs that create, upload, or promote releases).
+# steps use (id-token:write only in npm publication jobs and the packslip
+# signing job; contents:write only in immutable/presentation release jobs that
+# create, upload, or promote releases).
 permissions: {}
 
 # Canary runs coalesce WITHOUT cancellation: the scheduled nightly and any manual
@@ -1754,7 +1755,9 @@ jobs:
     #
     # The immutable versioned release job below must publish and verify all 32
     # assets first. That prevents npm from exposing a package whose cross-target
-    # compile launcher or installer archive is still absent. This job remains
+    # compile launcher or installer archive is still absent. The packslip job
+    # must also have signed that release, so a packslip that cannot be written
+    # stops the release before anything irreversible. This job remains
     # idempotent so a rerun can skip packages already on the registry.
     # Canary runs never reach this job: canaries ship only as the rolling GitHub
     # release since 2026-09-22 (stage-only trusted publishing has no unattended
@@ -1782,7 +1785,7 @@ jobs:
     # build that can't run / reports the wrong version must block publish — not
     # just a failed compile. (conformance = the 0.0.35/0.0.36 gap; glibc-floor =
     # the 0.0.44 gap; pre-publish-gate = a build that links but doesn't run.)
-    needs: [verify, build, test, conformance, glibc-floor-guard, pre-publish-gate, stable-immutable-release]
+    needs: [verify, build, test, conformance, glibc-floor-guard, pre-publish-gate, stable-immutable-release, packslip]
     runs-on: ubuntu-latest
     permissions:
       # checkout reads; npm publish authenticates via OIDC trusted publishing,
@@ -2282,6 +2285,72 @@ jobs:
             exit 1
           fi
           echo "✓ all ${#EXPECTED[@]} release assets present on $TAG"
+
+  packslip:
+    name: Sign the release packslip
+    # The packslip (https://packslip.dev) is the release's signed inventory:
+    # every archive's digest and platform, the nub/nubx/nubr executables inside
+    # it, a link to its build provenance, and skills/nub at the release commit
+    # as the version's agent skill. An installer such as mise verifies a
+    # download against this workflow's identity rather than a key the project
+    # would have to hold, and learns from the document which archive fits the
+    # host and which commands it provides.
+    #
+    # It signs the DRAFT once stable-immutable-release has proven the archives
+    # complete and byte-identical, so the packslip goes public with the release
+    # rather than after it. publish-npm needs this job: a packslip that cannot
+    # be signed stops the release before anything irreversible.
+    #
+    # The launcher templates stay out: nothing installs a command from them.
+    #
+    # A signature is not reproducible (each signing gets a fresh certificate and
+    # log entry), so this is the one asset a rerun cannot byte-compare. The
+    # archives it describes are, so a packslip already on the release is still
+    # accurate; a rerun keeps it and signs nothing.
+    if: ${{ needs.verify.outputs.publish_tag != '' }}
+    needs: [verify, stable-immutable-release]
+    runs-on: ubuntu-latest
+    permissions:
+      # Downloads the draft's archives and uploads the packslip to it.
+      contents: write
+      # The keyless signing identity, and the provenance attestation's.
+      id-token: write
+      # Records each archive's build-provenance attestation.
+      attestations: write
+    env:
+      TAG: ${{ needs.verify.outputs.publish_tag }}
+    steps:
+      - name: Keep an existing packslip
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -qxF packslip.sigstore.json; then
+            echo "✓ $TAG already carries packslip.sigstore.json; keeping it"
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Create, sign, and verify the packslip
+        id: packslip
+        if: steps.existing.outputs.present != 'true'
+        uses: jdx/packslip@4920350c39c234c7a969f9775040bd02829f1923 # v1.3.0
+        with:
+          tag: ${{ needs.verify.outputs.publish_tag }}
+          download: nub-*.tar.gz nub-*.zip
+          bin: nub nubx nubr
+          resources: |
+            skill/nub=repo:skills/nub
+          # Uploaded below without --clobber, so a packslip another run put
+          # there first is never replaced.
+          upload: "false"
+      - name: Upload the packslip
+        if: steps.existing.outputs.present != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE: ${{ steps.packslip.outputs.bundle }}
+        run: gh release upload "$TAG" "$BUNDLE" --repo "$GITHUB_REPOSITORY"
 
   github-release:
     name: Publish stable GitHub Release
