@@ -74,10 +74,17 @@ permissions: {}
 # (cancelling mid-`npm publish` could strand a half-published canary version).
 # One run a day rarely contends, but the group is what stops a manual dispatch
 # from interleaving with the schedule inside canary-release's delete-then-
-# recreate of the rolling tag. Stable-dispatch runs get per-run groups:
-# never queued against each other, never cancelled.
+# recreate of the rolling tag. Stable publishing dispatches share ONE group too,
+# held across the approval wait: a second version dispatched while the first is
+# still waiting on its approval queues behind it instead of holding alongside
+# it, because every mutable channel (releases/latest, the v0 actions tag,
+# Docker latest, the tap, npm latest) is written by whichever run resumes
+# LAST, and an older version approved late would roll them all backwards.
+# (GitHub keeps one pending run per group: a third dispatch replaces the
+# second in the queue, which is fine — it is re-dispatchable.) Build-only
+# debug dispatches get per-run groups: never queued, never cancelled.
 concurrency:
-  group: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.canary)) && 'canary' || format('release-{0}', github.run_id) }}
+  group: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.canary)) && 'canary' || (github.event_name == 'workflow_dispatch' && inputs.publish && 'release-stable') || format('release-{0}', github.run_id) }}
   cancel-in-progress: false
 
 env:
