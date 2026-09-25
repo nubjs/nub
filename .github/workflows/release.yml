@@ -266,12 +266,14 @@ jobs:
           fi
           # No tag, yet npm already serves the version: it was published from some other
           # commit (npm records it as gitHead), and this dispatch may not claim it. The
-          # lookup fails CLOSED: only npm's own answer that the version is absent (exit 0
-          # with no value; the package exists) lets the tag be created — a registry, DNS
-          # or 5xx failure stops the run rather than reading as "absent".
+          # lookup fails CLOSED: only npm's own answer that the version is absent (an
+          # E404, or exit 0 with no value on older npm) lets the tag be created — a
+          # registry, DNS or 5xx failure stops the run rather than reading as "absent".
           VERSION="${TAG#v}"
           served="$(npm view "@nubjs/nub@$VERSION" version 2>"$RUNNER_TEMP/npm-view.err")" && rc=0 || rc=$?
-          if [ "$rc" -ne 0 ]; then
+          if [ "$rc" -ne 0 ] && grep -q "E404" "$RUNNER_TEMP/npm-view.err"; then
+            served=""
+          elif [ "$rc" -ne 0 ]; then
             cat "$RUNNER_TEMP/npm-view.err"
             echo "::error::could not ask npm whether @nubjs/nub@$VERSION is published (npm view exited $rc); not creating $TAG on an unknown registry state"
             exit 1
