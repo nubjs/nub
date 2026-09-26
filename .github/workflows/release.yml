@@ -2383,6 +2383,25 @@ jobs:
             done
             echo "✓ $pkg@$VERSION readable"
           done
+      - name: Install the published root package and run it
+        # Readable is not working: the root package's postinstall has to pick the platform
+        # package and copy the binary, and a version the registry lists can still fail that.
+        # Install it the way a user would, into an empty project, and run the binary before
+        # the draft is promoted. The full matrix in test-install runs after promotion; this is
+        # the one that can still abort the release.
+        env:
+          TAG: ${{ needs.verify.outputs.publish_tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          dir="$RUNNER_TEMP/install-smoke"
+          rm -rf "$dir" && mkdir -p "$dir" && cd "$dir"
+          npm init -y >/dev/null
+          npm install "@nubjs/nub@$VERSION" --no-audit --no-fund
+          # `nub --version` prints `v<semver>` on stdout and a provenance line on stderr.
+          reported="$(./node_modules/.bin/nub --version 2>/dev/null | head -1 | tr -d '[:space:]')"
+          [ "${reported#v}" = "$VERSION" ] || { echo "::error::the installed nub reports '$reported', expected v$VERSION; not promoting"; exit 1; }
+          echo "✓ @nubjs/nub@$VERSION installs and reports $reported"
       - name: Promote immutable release
         # `gh release edit` resolves a DRAFT by its pending tag (the REST tag endpoint
         # cannot), so this is the one step that publishes it — which is what makes the
