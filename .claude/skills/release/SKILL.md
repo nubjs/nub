@@ -8,7 +8,7 @@ description: >-
   + `make version-check`,
   commit + push to `main`, then dispatch release.yml with publish=true (that
   dispatch starts the 8-platform build → glibc and pre-publish native gates →
-  immutable 32-asset DRAFT release → npm OIDC STAGE → the maintainer's 2FA
+  immutable 32-asset DRAFT release → signed packslip → npm OIDC STAGE → the maintainer's 2FA
   approval → stable GitHub Release, and the workflow creates the `v<ver>` tag
   itself), then draft comprehensive FACTUAL + NEUTRAL release
   notes from the full changeset and comment the version + release link on every
@@ -20,7 +20,7 @@ metadata:
 
 # Cutting a Nub release
 
-A Nub release is dispatch-started and automated up to one human gate. A `workflow_dispatch` of `.github/workflows/release.yml` from `main` with `publish=true` reads the version from `npm/nub/package.json` at the dispatched commit, builds 8 platforms, gates them (test, lockfile conformance, glibc-floor, pre-publish smoke), creates the `v<ver>` tag at the dispatched commit once every gate has passed, creates an immutable DRAFT release with 32 assets, STAGES 19 npm packages via OIDC trusted publishing (stage-only: CI cannot publish), waits for the maintainer to approve them with 2FA (Step 3b), and then presents the stable GitHub Release — claiming the repository's **Latest** marker (`make_latest: "true"` on the promote step) and then asserting `releases/latest` actually serves the new tag. That marker IS the upgrade channel: `nub upgrade`, `install.sh`, and `install.ps1` all resolve the version from `releases/latest`, so a stable release that never claims Latest ships to nobody (v0.8.0–v0.8.2 sat unserved behind v0.7.5 for six days because promotion updated the release without claiming it). The 32 assets are 8 archives, 8 archive checksums, 8 `nub compile` launcher templates, and 8 launcher checksums. The human work: confirm green, reconcile the runtime with `@nubjs/types`, bump the version, dispatch the workflow, approve the staged versions, write good notes, close the loop on issues/PRs.
+A Nub release is dispatch-started and automated up to one human gate. A `workflow_dispatch` of `.github/workflows/release.yml` from `main` with `publish=true` reads the version from `npm/nub/package.json` at the dispatched commit, builds 8 platforms, gates them (test, lockfile conformance, glibc-floor, pre-publish smoke), creates the `v<ver>` tag at the dispatched commit once every gate has passed, creates an immutable DRAFT release with 32 assets, signs a packslip for it, STAGES 19 npm packages via OIDC trusted publishing (stage-only: CI cannot publish), waits for the maintainer to approve them with 2FA (Step 3b), and then presents the stable GitHub Release — claiming the repository's **Latest** marker (`make_latest: "true"` on the promote step) and then asserting `releases/latest` actually serves the new tag. That marker IS the upgrade channel: `nub upgrade`, `install.sh`, and `install.ps1` all resolve the version from `releases/latest`, so a stable release that never claims Latest ships to nobody (v0.8.0–v0.8.2 sat unserved behind v0.7.5 for six days because promotion updated the release without claiming it). The 32 assets are 8 archives, 8 archive checksums, 8 `nub compile` launcher templates, and 8 launcher checksums; the `packslip` job then adds `packslip.sigstore.json`, the signed manifest of the 8 archives. The human work: confirm green, reconcile the runtime with `@nubjs/types`, bump the version, dispatch the workflow, approve the staged versions, write good notes, close the loop on issues/PRs.
 
 **Guardrails (read first, non-negotiable):**
 
@@ -98,7 +98,7 @@ Re-running a release that died after its tag was created — most often one whos
 
 Post-merge, fast-forward the shared tree so it tracks origin: `git -C <shared-tree> pull --ff-only` (the eagerly-pull rule, AGENTS.md "Default to a PR flow" — the shared checkout otherwise drifts behind as PRs land).
 
-The workflow runs, in order: `verify` (version consistency + tag resolution), `primer`, `test` + `conformance` + `glibc-floor-guard` + `pre-publish-gate`, `build` (8 platforms), `stable-immutable-release` (creates the tag, then 32 assets on a DRAFT release), `publish-npm` (19 packages STAGED, then a wait for the maintainer's approval), `github-release` (publishes the draft as the stable release), then the post-publish fan-out — `test-install` / `test-install-musl`, `docker`, `bump-homebrew-tap`, `submit-winget`.
+The workflow runs, in order: `verify` (version consistency + tag resolution), `primer`, `test` + `conformance` + `glibc-floor-guard` + `pre-publish-gate`, `build` (8 platforms), `stable-immutable-release` (creates the tag, then 32 assets on a DRAFT release), `packslip` (signs `packslip.sigstore.json` onto the draft), `publish-npm` (19 packages STAGED, then a wait for the maintainer's approval), `github-release` (publishes the draft as the stable release), then the post-publish fan-out — `test-install` / `test-install-musl`, `docker`, `bump-homebrew-tap`, `submit-winget`.
 
 ### Step 3b — Approve the staged versions (the human gate; maintainer only)
 
@@ -253,7 +253,7 @@ gh api repos/nubjs/nub/releases/latest --jq .tag_name   # MUST print v<ver> — 
 npm view @nubjs/nub@<ver> version            # the root package is on the registry
 npm view @nubjs/nub@<ver> dist.tarball        # sanity: published artifact exists
 gh release view v<ver> --json assets --jq '.assets[].name' | sort
-# expect these exact 32 assets:
+# expect these exact 33 assets:
 # nub-darwin-arm64.tar.gz
 # nub-darwin-arm64.tar.gz.sha256
 # nub-darwin-x64.tar.gz
@@ -286,13 +286,14 @@ gh release view v<ver> --json assets --jq '.assets[].name' | sort
 # nub-launcher-win32-arm64.exe.sha256
 # nub-launcher-win32-x64.exe
 # nub-launcher-win32-x64.exe.sha256
+# packslip.sigstore.json
 ```
 
-A complete release has: the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub-<platform>` ×8, `@nubjs/types`), the stable GitHub Release present and marked **Latest**, and all 32 assets attached. CI's `stable-immutable-release` job asserts the 32 assets before npm can publish, `github-release` promotes that same release after npm succeeds, and `test-install` smokes the published package. This step confirms that the workflow reached green.
+A complete release has: the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub-<platform>` ×8, `@nubjs/types`), the stable GitHub Release present and marked **Latest**, and all 33 assets attached. CI's `stable-immutable-release` job asserts the 32 build assets and the `packslip` job signs the 33rd before npm can publish, `github-release` promotes that same release after npm succeeds, and `test-install` smokes the published package. This step confirms that the workflow reached green.
 
 The 8 `nub-launcher-*` assets are what `nub compile --platform <foreign>` fetches to cross-compile, so a release missing one silently disables cross-compiling to that platform for everyone on that version.
 
-**If CI failed partway:** Re-run the failed job from the Actions UI. The `stable-immutable-release` job rebuilds the deterministic archives and re-uploads missing assets before npm starts; `publish-npm` skips packages already published or already staged during a partial attempt, and a `publish-npm` that timed out waiting for approval resumes from the approval on re-run; `github-release` only promotes the asset-complete prerelease. Do not re-cut a version for a failed upload or partial npm publish.
+**If CI failed partway:** Re-run the failed job from the Actions UI. The `stable-immutable-release` job rebuilds the deterministic archives and re-uploads missing assets before npm starts; `packslip` keeps a packslip already on the release and signs one only when it is absent; `publish-npm` skips packages already published or already staged during a partial attempt, and a `publish-npm` that timed out waiting for approval resumes from the approval on re-run; `github-release` only promotes the asset-complete prerelease. Do not re-cut a version for a failed upload or partial npm publish.
 
 Then confirm the Homebrew channel actually moved — the tap lives in another repo, so a green release run here is not evidence that it did:
 
@@ -305,7 +306,7 @@ brew update && brew install nubjs/tap/nub && nub --version && nubx --help | head
 docker run --rm homebrew/brew brew install nubjs/tap/nub
 ```
 
-A complete release has the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub-<platform>` ×8, `@nubjs/types`), the GitHub Release present and marked **Latest**, all 32 assets attached, and the tap formula bumped to `<ver>` and installable.
+A complete release has the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub-<platform>` ×8, `@nubjs/types`), the GitHub Release present and marked **Latest**, all 33 assets attached, and the tap formula bumped to `<ver>` and installable.
 
 **If CI failed partway:** `publish-npm` and `github-release` are split + idempotent on purpose — re-run the failed job from the Actions UI (npm publish skips already-published packages; the release job re-uploads only missing assets). Never re-cut a version for a flaky asset upload. `bump-homebrew-tap` is re-runnable too, and failing it is the safe outcome: the tap keeps serving the previous version rather than a broken formula, so fix the generator on `main` and re-run the job — never hand-edit the tap as the fix, since the next release regenerates it.
 
