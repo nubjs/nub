@@ -72,14 +72,17 @@ impl PackageReport {
     /// What a NAIVE detector would flag: every undeclared reference, NOT excluding
     /// optional peers or soft loads. Lets the report quantify the over-count the
     /// real classifier avoids. (Builtins/self/declared are excluded even naively;
-    /// the over-count is optional-peers + soft-phantoms counted as phantoms.)
+    /// the over-count includes optional peers, soft loads, and type-only imports.)
     pub fn naive_phantom_count(&self) -> usize {
         self.findings
             .iter()
             .filter(|f| {
                 matches!(
                     f.verdict,
-                    Verdict::HardPhantom | Verdict::SoftPhantom | Verdict::DeclaredOptionalPeer
+                    Verdict::HardPhantom
+                        | Verdict::SoftPhantom
+                        | Verdict::DeclaredOptionalPeer
+                        | Verdict::TypeOnly
                 )
             })
             .count()
