@@ -41,7 +41,7 @@ LEAVES = [
 # `runtime` rides along for the same reason it joined rust-build.sh: a dev
 # binary resolves runtime/*.cjs from the tree that compiled nub-core, so the
 # hash covers it and a runtime-divergent worktree isolates.
-CRATE_PATHS = ["vendor/aube", "crates", "runtime"]
+CRATE_PATHS = ["vendor/aube", "vendor/libsui", "crates", "runtime"]
 BUCKET_RE = re.compile(r"^shared-target-([0-9a-f]+)$")
 
 

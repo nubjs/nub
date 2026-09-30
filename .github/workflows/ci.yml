@@ -307,6 +307,10 @@ jobs:
       # fast` for the same reason nub-phantom does: its workspace defines no such
       # profile, only `[profile.release]`.
       - run: cd crates/nub-launcher && cargo clippy --locked --all-targets -- -D warnings && cargo build --locked && cargo test --locked
+      # nub-alias (the bin/nubx.exe + bin/nubr.exe stub in the Windows release zip)
+      # is its own workspace for the same reason; std-only, so this is quick. Its
+      # Windows body is exercised by the windows-embed-roundtrip smoke below.
+      - run: cd crates/nub-alias && cargo clippy --locked --all-targets -- -D warnings && cargo build --locked
       # Static brand-boundary gate: no AUBE_*-branded env-var READS in nub crate
       # source (the embedded engine's brand is never nub's config surface). Cheap
       # grep, no build — runs alongside clippy on the same run_rust gate.
@@ -430,9 +434,11 @@ jobs:
       # runtime for the offline --smol gate below.
       # A released nub materializes node_modules from nub.lock; the nub under
       # test is built in the next step and cannot install its own inputs.
-      - uses: ./setup
+      - uses: ./setup-node
         with:
           cache: 'true'
+          provision-node: 'false'
+          shim: 'false'
       - name: Install and stage runtime dependencies for embedded compile
         shell: bash
         run: |
@@ -486,6 +492,11 @@ jobs:
       - name: Build release nub-launcher template
         shell: bash
         run: (cd crates/nub-launcher && cargo build --locked --release)
+      # The alias stub the release zip ships as bin/nubx.exe and bin/nubr.exe. Its
+      # own workspace with its own static-CRT config, like the launcher.
+      - name: Build release nub-alias stub
+        shell: bash
+        run: (cd crates/nub-alias && cargo build --locked --release)
       # GATE: neither shipped Windows binary may depend on the VC++ redistributable.
       #
       # This runner already HAS the redistributable, so every functional test above
@@ -505,10 +516,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for f in target/release/nub.exe crates/nub-launcher/target/release/nub-launcher.exe; do
+          for f in target/release/nub.exe crates/nub-launcher/target/release/nub-launcher.exe crates/nub-alias/target/release/nub-alias.exe; do
             test -f "$f" || { echo "::error::$f not found — this gate must not be skipped silently"; exit 1; }
             node scripts/pe-imports.mjs --check "$f" > /dev/null
           done
+      # The alias stub as the release zip lays it out: bin/nubx.exe and bin/nubr.exe
+      # beside nub.exe, each running nub with its own file stem as the verb. The
+      # two outputs are distinct from plain `nub`'s — `nubx --help` is the exec
+      # grammar and `nubr --version` the bare version (nub's carries a `v`) — so
+      # each proves the verb arrived, not merely that nub ran.
+      - name: Smoke the nub-alias stub as nubx.exe and nubr.exe
+        shell: bash
+        run: |
+          set -euo pipefail
+          d="$(mktemp -d)"
+          cp target/release/nub.exe "$d/nub.exe"
+          cp crates/nub-alias/target/release/nub-alias.exe "$d/nubx.exe"
+          cp crates/nub-alias/target/release/nub-alias.exe "$d/nubr.exe"
+          "$d/nubx.exe" --help | grep -q 'node_modules/.bin' \
+            || { echo "::error::nubx.exe did not dispatch to the nubx grammar"; exit 1; }
+          want="$(node -p 'require("./npm/nub/package.json").version')"
+          got="$("$d/nubr.exe" --version)"
+          test "$got" = "$want" \
+            || { echo "::error::nubr.exe --version printed '$got', expected '$want'"; exit 1; }
+          echo "✓ nubx.exe and nubr.exe dispatch through the stub"
       # The WHOLE point of a Windows runner is the on-access AV heuristic (process
       # writes a DLL then dlopen's it). GitHub-hosted runners ship with real-time
       # protection OFF, so try to turn it ON before the round-trip so the scan is
@@ -1217,9 +1248,11 @@ jobs:
       # + seccomp) and macOS only (aube-scripts/src/lib.rs has no Windows arm),
       # so on the windows-latest cell the mitigation is the pinned lockfile
       # alone. The shims stay for the pnpm/npm surfaces the tests drive.
-      - uses: ./setup
+      - uses: ./setup-node
         with:
           cache: 'true'
+          provision-node: 'false'
+          shim: 'false'
       - run: nub install --frozen-lockfile --node-linker hoisted
       # An installer that exits 0 on a half-built tree (package dirs present,
       # package.json missing) surfaces six minutes later as unresolvable helper
@@ -1648,7 +1681,8 @@ jobs:
       - run: node scripts/check-oxc-lockstep.mjs
 
   # `make version-check` also runs in release.yml's verify job, but that fires on
-  # `v*` tags and on pushes to main — i.e. always AFTER the offending merge. #735
+  # a release dispatch and on the nightly canary — i.e. always AFTER the offending
+  # merge. #735
   # edited site/public/schema/latest.json without refreshing its pinned snapshot,
   # merged green, and surfaced only on main, where it blocked every release until
   # #751. This job is what makes that fail on its own pull request instead. Same

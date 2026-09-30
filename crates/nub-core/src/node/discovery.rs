@@ -213,6 +213,7 @@ pub fn discover_node(cwd: &Path) -> Result<ResolvedNode, DiscoveryError> {
             shell_path_node(None)
         }
         Some((pin_str, parsed_pin, pin_source)) => {
+            let parsed_pin = concretize_alias(parsed_pin, &pin_str);
             // Try shell PATH first (covers fnm/Volta/mise auto-switch).
             if let Ok(node) = shell_path_node(Some(pin_source.clone())) {
                 if node.version.satisfies(&parsed_pin) {
@@ -279,7 +280,8 @@ pub fn discover_node_cached(cwd: &Path) -> Option<ResolvedNode> {
 
     match chain.pin {
         None => shell_path_node_cached(None),
-        Some((_, parsed_pin, pin_source)) => {
+        Some((pin_str, parsed_pin, pin_source)) => {
+            let parsed_pin = concretize_alias(parsed_pin, &pin_str);
             // PATH node, version from cache only — and only if it satisfies the pin.
             if let Some(node) = shell_path_node_cached(Some(pin_source.clone())) {
                 if node.version.satisfies(&parsed_pin) {
@@ -906,6 +908,34 @@ pub fn engines_disagreement_warning(cwd: &Path, node: &ResolvedNode) -> Option<S
     } else {
         Some(warnings.join("\n"))
     }
+}
+
+/// The `node` on PATH with every pin ignored: the Node npm runs a project's
+/// scripts with. For the npm-routed install, whose contract is npm's, so a
+/// `.nvmrc` naming a Node the machine lacks is neither provisioned nor waited
+/// on. Skips nub's own shim directories like every PATH probe here.
+pub fn discover_shell_node() -> Result<ResolvedNode, DiscoveryError> {
+    shell_path_node(None)
+}
+
+/// Whether a bare `node` on PATH is Nub's own shim — the persistent one
+/// (`nub node shim`) or a per-invocation hijack dir — which resolves the
+/// project's pin on every call. [`discover_shell_node`] steps over those dirs to
+/// find the real binary, so a caller describing what a script's `node` will run
+/// under has to ask this first: with the shim in front, PATH semantics are the
+/// pin. A dependency's `node_modules/.bin/node` is skipped as in every probe.
+pub fn shell_node_is_nub_shim() -> bool {
+    for dir in env::split_paths(&env::var_os("PATH").unwrap_or_default()) {
+        if is_package_bin_dir(&dir) {
+            continue;
+        }
+        let has_node =
+            dir.join("node").is_file() || (cfg!(windows) && dir.join("node.exe").is_file());
+        if has_node {
+            return is_nub_shim_dir(&dir);
+        }
+    }
+    false
 }
 
 /// Resolve `node` from the shell PATH and detect its version.
@@ -1920,6 +1950,44 @@ fn store_node_binary(version_dir: &Path) -> Option<Utf8PathBuf> {
     .and_then(|p| Utf8PathBuf::try_from(p).ok())
 }
 
+/// An alias pin (`lts/*`, `lts/<codename>`, `node`, `latest`) names no concrete
+/// version, so nothing on disk satisfies it until it is resolved against the dist
+/// index. The offline discovery paths resolve it against the index the last
+/// provisioning run cached, whatever its age, and never pay a network round trip.
+/// It resolves to a release LINE, not to one release — nvm's reading, where
+/// `lts/*` is the newest LTS line and `nvm use` takes the newest installed
+/// version in it — so a refreshed index that lists a point release nobody
+/// installed does not invalidate the version on disk. When the index moves the
+/// alias to a new line (`lts/*` after an LTS promotion) the installed one no
+/// longer satisfies it and provisioning installs the new line, as nvm would.
+/// With nothing cached the alias stays as it is and reads as not found, which is
+/// what provisioning acts on.
+fn concretize_alias(pin: VersionPin, raw: &str) -> VersionPin {
+    let Some(cache_root) = cache_dir() else {
+        return pin;
+    };
+    let Some(host) = crate::version_management::HostTarget::detect() else {
+        return pin;
+    };
+    let mirror = crate::version_management::resolve_mirror_base(&host);
+    concretize_alias_in(pin, raw, &cache_root, &mirror)
+}
+
+/// [`concretize_alias`] against an explicit cache root and mirror (the testable body).
+fn concretize_alias_in(pin: VersionPin, raw: &str, cache_root: &Path, mirror: &str) -> VersionPin {
+    if !matches!(pin, VersionPin::Alias(_)) {
+        return pin;
+    }
+    use crate::version_management::node_index;
+    match node_index::load_cached_index(cache_root, mirror)
+        .and_then(|index| node_index::resolve_spec(raw, &index))
+        .and_then(|newest| u32::try_from(newest.0.major).ok())
+    {
+        Some(major) => VersionPin::Major(major),
+        None => pin,
+    }
+}
+
 /// Look up a Node satisfying `pin` in nub's own download store
 /// (`~/.cache/nub/node/<version>/`, where the directory name IS the concrete
 /// version — `internal/runtime/node-version-management.md` §"State 1: Cache hit").
@@ -1972,6 +2040,69 @@ fn nvm_dir() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn alias_pins_name_a_release_line_from_the_cached_index() {
+        use crate::version_management::node_index::cache_path;
+        let root = std::env::temp_dir().join(format!("nub-alias-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let mirror = "https://nodejs.org/dist";
+        let alias = |s: &str| VersionPin::Alias(s.to_string());
+
+        // Nothing cached: the alias stays an alias, so discovery reports the pin as
+        // not found and provisioning (which fetches the index) takes over.
+        assert_eq!(
+            concretize_alias_in(alias("lts/*"), "lts/*", &root, mirror),
+            alias("lts/*")
+        );
+
+        fs::write(
+            cache_path(&root, mirror),
+            r#"[{"version":"v23.5.0","lts":false},{"version":"v22.13.0","lts":"Jod"},{"version":"v20.18.1","lts":"Iron"}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            concretize_alias_in(alias("lts/*"), "lts/*", &root, mirror),
+            VersionPin::Major(22)
+        );
+        assert_eq!(
+            concretize_alias_in(alias("lts/iron"), "lts/iron", &root, mirror),
+            VersionPin::Major(20)
+        );
+        assert_eq!(
+            concretize_alias_in(alias("node"), "node", &root, mirror),
+            VersionPin::Major(23)
+        );
+        // The index lists 22.13.0; an installed 22.12.0 still satisfies `lts/*`,
+        // so a refreshed index never invalidates the version on disk.
+        let store = root.join("node");
+        fs::create_dir_all(store.join("22.12.0").join("bin")).unwrap();
+        fs::write(store.join("22.12.0").join("bin").join("node"), b"").unwrap();
+        let lts = concretize_alias_in(alias("lts/*"), "lts/*", &root, mirror);
+        assert_eq!(
+            nub_store_node_in(&store, &lts).map(|n| n.version),
+            Some(NodeVersion::new(22, 12, 0))
+        );
+        // Up to 0.9.3 `nub node install` cached the index under the store dir;
+        // an upgraded nub still reads that copy offline.
+        fs::rename(cache_path(&root, mirror), cache_path(&store, mirror)).unwrap();
+        assert_eq!(
+            concretize_alias_in(alias("lts/*"), "lts/*", &root, mirror),
+            VersionPin::Major(22)
+        );
+        fs::rename(cache_path(&store, mirror), cache_path(&root, mirror)).unwrap();
+        // A concrete pin is untouched, and an alias the index cannot answer stays.
+        assert_eq!(
+            concretize_alias_in(VersionPin::Major(20), "20", &root, mirror),
+            VersionPin::Major(20)
+        );
+        assert_eq!(
+            concretize_alias_in(alias("lts/argon"), "lts/argon", &root, mirror),
+            alias("lts/argon")
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
     use super::*;
 
     #[test]

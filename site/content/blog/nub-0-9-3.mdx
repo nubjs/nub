@@ -1,0 +1,39 @@
+---
+title: "Nub 0.9.3"
+description: Puts the nubr command on the nub binary, so every install channel that ships nub and nubx ships the unified runner too.
+author: The Nub Team
+date: 2026-09-19
+---
+
+Nub 0.9.3 makes `nubr` a third name on the `nub` binary. The unified runner arrived in 0.9.2 as the bin of `@nubjs/runner` on npm; it now comes with every `nub` install as well, from the one-line installer to Homebrew, winget and Nix.
+
+## nubr from the installer
+
+Invoked as `nubr`, the binary runs the same `nubr.mjs` the npm package ships, on the project's Node. When no Node is installed, the binary provisions one, so the installer is the way to get the runner with neither npm nor Node on the machine.
+
+```sh
+curl -fsSL https://nubjs.com/install.sh | bash   # macOS / Linux
+irm https://nubjs.com/install.ps1 | iex           # Windows (PowerShell)
+
+nubr app.ts        # a file
+nubr build         # a package.json script
+nubr vitest run    # an installed node_modules/.bin entry
+```
+
+The alias is created wherever `nubx` already was: the installers, `nub upgrade`, the Homebrew tap formula, the `@nubjs/nub` npm package, the Nix flake, and the winget manifest. Both installs run the same file, so a project behaves the same under either.
+
+## winget
+
+Nub has been on winget as `Nub.Nub` since 0.1.0, bumped by community automation on each release. The README now lists `winget install Nub.Nub` with the other channels.
+
+## Bug fixes
+
+| PR | What changed |
+| --- | --- |
+| [#941](https://github.com/nubjs/nub/pull/941) | The string form of `prefix` refuses a backslash. It is split like a POSIX shell, so a Windows path lost its separators; the error names the array form, which takes each argument as written. |
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.9.3) list every change in this release.
+
+## Get started
+
+<GetStarted />

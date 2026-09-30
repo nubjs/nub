@@ -2536,7 +2536,7 @@ impl CompilePreamble {
 
     fn root_source(&self, id: &str) -> Option<String> {
         let source = self.roots.lock().ok()?.get(id)?.clone();
-        Some(compile_root_source(&source))
+        Some(compile_root_source(&source, id == COMPILE_ROOT_ID))
     }
 
     fn has_root(&self, id: &str) -> bool {
@@ -2551,10 +2551,6 @@ impl CompilePreamble {
     }
 }
 
-/// The only code generated for a root.  Both imports are static and
-/// side-effectful: prelude first, program second.  JSON quoting keeps Windows
-/// separators and every filename character out of JavaScript grammar concerns;
-/// Rolldown resolves the absolute id only while building and never emits it.
 /// Drop a Windows verbatim (`\\?\`) prefix. Pure over `windows` so both branches
 /// test on any host.
 pub fn strip_verbatim_prefix(path: PathBuf, windows: bool) -> PathBuf {
@@ -2586,11 +2582,30 @@ fn canonicalize_for_bundler(path: &Path) -> PathBuf {
     strip_verbatim_prefix(canonical, cfg!(windows))
 }
 
-fn compile_root_source(source: &Path) -> String {
+/// The only code generated for a root.  Both imports are static and
+/// side-effectful: prelude first, program second.  JSON quoting keeps Windows
+/// separators and every filename character out of JavaScript grammar concerns;
+/// Rolldown resolves the absolute id only while building and never emits it.
+///
+/// The PROGRAM root also hands the entry's namespace to the prelude once the entry
+/// has evaluated — top-level await included, which a namespace import waits for —
+/// so a default-exported `fetch` handler is served exactly as `nub <file>` serves
+/// it (`serveCompiledEntry`, compile-preamble.mjs). A worker root never does:
+/// under `nub <file>` a Worker copies its environment after the serve marker is
+/// gone, and an artifact keeps that. A CommonJS root needs nothing further, since
+/// Rolldown's interop hands `module.exports` over as `default`, the shape the
+/// handler check already unwraps.
+fn compile_root_source(source: &Path, program: bool) -> String {
     let prelude = serde_json::to_string(COMPILE_PREAMBLE_ID).expect("a virtual id serializes");
     let source =
         serde_json::to_string(&source.to_string_lossy()).expect("a source path serializes");
-    format!("import {prelude};\nimport {source};\n")
+    if program {
+        format!(
+            "import {{ serveCompiledEntry }} from {prelude};\nimport * as entry from {source};\nserveCompiledEntry(entry);\n"
+        )
+    } else {
+        format!("import {prelude};\nimport {source};\n")
+    }
 }
 
 /// Locate exactly the public runtime whose dependencies compiled artifacts need.
@@ -7904,14 +7919,25 @@ mod tests {
     #[test]
     fn compile_root_statically_imports_the_prelude_before_the_program() {
         let source = Path::new("/tmp/compile prelude/main.cjs");
-        let wrapper = compile_root_source(source);
         let prelude = serde_json::to_string(COMPILE_PREAMBLE_ID).unwrap();
         let program = serde_json::to_string(&source.to_string_lossy()).unwrap();
-        assert_eq!(wrapper, format!("import {prelude};\nimport {program};\n"));
-        assert!(
-            wrapper.find(&prelude).unwrap() < wrapper.find(&program).unwrap(),
-            "the side-effect prelude must be evaluated before authored code: {wrapper}"
+        let worker = compile_root_source(source, false);
+        assert_eq!(worker, format!("import {prelude};\nimport {program};\n"));
+        // The program root hands the evaluated entry to the prelude; a worker root
+        // never serves, so it stays the two bare imports.
+        let wrapper = compile_root_source(source, true);
+        assert_eq!(
+            wrapper,
+            format!(
+                "import {{ serveCompiledEntry }} from {prelude};\nimport * as entry from {program};\nserveCompiledEntry(entry);\n"
+            )
         );
+        for wrapper in [&worker, &wrapper] {
+            assert!(
+                wrapper.find(&prelude).unwrap() < wrapper.find(&program).unwrap(),
+                "the side-effect prelude must be evaluated before authored code: {wrapper}"
+            );
+        }
     }
 
     #[test]
@@ -9169,12 +9195,12 @@ mod tests {
         let roots = CompilePreamble::from_source(program, PathBuf::new(), String::new());
         let worker_id = roots.worker_root(worker).unwrap();
         assert_ne!(worker_id, COMPILE_ROOT_ID);
-        let program_wrapper = compile_root_source(program);
+        let program_wrapper = compile_root_source(program, true);
         assert_eq!(
             roots.root_source(COMPILE_ROOT_ID).as_deref(),
             Some(program_wrapper.as_str())
         );
-        let worker_wrapper = compile_root_source(worker);
+        let worker_wrapper = compile_root_source(worker, false);
         assert_eq!(
             roots.root_source(&worker_id).as_deref(),
             Some(worker_wrapper.as_str())
@@ -9734,7 +9760,7 @@ console.log('ESM_ENTRY_MARK', path.sep);
     #[test]
     fn dynamic_global_access_still_has_an_unconditional_prelude_import() {
         let source = Path::new("/tmp/nub-prelude/dynamic-global.ts");
-        let wrapper = compile_root_source(source);
+        let wrapper = compile_root_source(source, true);
         assert!(
             wrapper.starts_with("import "),
             "the wrapper must not depend on a statically named global that the prelude creates: {wrapper}"

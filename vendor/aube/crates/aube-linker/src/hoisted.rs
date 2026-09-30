@@ -26,6 +26,15 @@
 //!    under the same name, so the conflict forces the new entry to
 //!    live below the blocker (typically inside the requester's own
 //!    `node_modules/`).
+//! 5. A placement must also not step BETWEEN an already-resolved
+//!    consumer and the copy it resolves to, which the `children` check
+//!    alone cannot see: when a package is deduped onto an ancestor, no
+//!    entry is written at the nodes in between, so a later placement of
+//!    a rival version there would silently shadow it. Every node on the
+//!    path from a requester up to its provider therefore records
+//!    `resolved_above[name] = dep_path`, and that record blocks a
+//!    different version from landing on the node (yarn's hoister calls
+//!    the same set `usedDependencies`).
 //!
 //! The planner operates purely on dep_path strings — the same keys
 //! aube-lockfile uses — so peer-context dep_paths like
@@ -162,6 +171,14 @@ struct TreeNode {
     parent: Option<usize>,
     children: BTreeMap<String, usize>,
     dep_path: Option<String>,
+    /// Names this node — or something below it — resolves through an
+    /// ANCESTOR's `node_modules/`, mapped to the `dep_path` they land on.
+    /// Node's resolver walks up from the consumer, so a different version
+    /// of such a name placed here would intercept that walk; `place`
+    /// treats an entry as a hard blocker exactly like an occupied
+    /// `children` slot. Nothing is recorded when the provider is the node
+    /// itself: `children` already blocks that case.
+    resolved_above: BTreeMap<String, String>,
 }
 
 /// Arena-backed placement tree.
@@ -192,6 +209,7 @@ impl PlacementPlan {
             parent: None,
             children: BTreeMap::new(),
             dep_path: None,
+            resolved_above: BTreeMap::new(),
         };
         Self {
             nodes: vec![root],
@@ -217,6 +235,7 @@ impl PlacementPlan {
             parent,
             children: BTreeMap::new(),
             dep_path: None,
+            resolved_above: BTreeMap::new(),
         });
         self.importer_nodes.push(idx);
         idx
@@ -249,6 +268,7 @@ impl PlacementPlan {
         loop {
             if let Some(&existing) = self.nodes[cursor].children.get(name) {
                 if self.nodes[existing].dep_path.as_deref() == Some(dep_path) {
+                    self.reserve_resolution_path(requester, cursor, name, dep_path);
                     return Ok(PlaceOutcome {
                         node_idx: existing,
                         created: false,
@@ -270,8 +290,17 @@ impl PlacementPlan {
         let mut cursor = requester;
         let mut candidate = requester;
         loop {
-            if self.nodes[cursor].children.contains_key(name) {
-                // Conflict: must stay at or below `candidate`.
+            if self.nodes[cursor].children.contains_key(name)
+                || self.nodes[cursor]
+                    .resolved_above
+                    .get(name)
+                    .is_some_and(|resolved| resolved != dep_path)
+            {
+                // Conflict: must stay at or below `candidate`. The
+                // `resolved_above` half covers the dedupe case that leaves no
+                // `children` entry behind — a consumer at or below `cursor`
+                // already resolves `name` past it to a shallower copy, so
+                // seating a rival version here would shadow that copy.
                 break;
             }
             candidate = cursor;
@@ -283,6 +312,7 @@ impl PlacementPlan {
                 None => break,
             }
         }
+        self.reserve_resolution_path(requester, candidate, name, dep_path);
 
         let parent_nm = self.nodes[candidate].nm_dir.clone();
         // Never displace an existing occupant of `candidate`'s slot: the
@@ -306,6 +336,7 @@ impl PlacementPlan {
             parent: Some(candidate),
             children: BTreeMap::new(),
             dep_path: Some(dep_path.to_string()),
+            resolved_above: BTreeMap::new(),
         });
         self.nodes[candidate]
             .children
@@ -314,6 +345,31 @@ impl PlacementPlan {
             node_idx: new_idx,
             created: true,
         })
+    }
+
+    /// Record, on every node from `requester` up to but excluding
+    /// `provider`, that `name` resolves past it to `dep_path`. Those nodes
+    /// hold no `children` entry for `name`, so this is the only trace of the
+    /// resolution and the only thing that stops a later `place` from seating
+    /// a rival version in the middle of the walk. No-op when the provider is
+    /// the requester itself.
+    fn reserve_resolution_path(
+        &mut self,
+        requester: usize,
+        provider: usize,
+        name: &str,
+        dep_path: &str,
+    ) {
+        let mut cursor = requester;
+        while cursor != provider {
+            self.nodes[cursor]
+                .resolved_above
+                .insert(name.to_string(), dep_path.to_string());
+            match self.nodes[cursor].parent {
+                Some(p) => cursor = p,
+                None => break,
+            }
+        }
     }
 
     /// Pre-claim the root `node_modules/` slot for `name` with `dep_path`,
@@ -334,6 +390,7 @@ impl PlacementPlan {
             parent: Some(self.root_idx),
             children: BTreeMap::new(),
             dep_path: Some(dep_path.to_string()),
+            resolved_above: BTreeMap::new(),
         });
         self.nodes[self.root_idx]
             .children
@@ -1503,6 +1560,60 @@ mod tests {
         assert_eq!(
             nested_v2, expected_v2,
             "foo@2.0.0 must nest under every consumer, never at root"
+        );
+    }
+
+    #[test]
+    fn hoisting_never_shadows_a_dependency_the_parent_resolves_above() {
+        // `send` depends on ms@2.1.3 and on debug@2.6.9, which itself depends
+        // on ms@2.0.0. The importer declares ms@2.1.3 and debug@4.3.4, so both
+        // win root: debug@2.6.9 nests under `send`, and `send`'s own ms edge
+        // DEDUPES onto root, leaving no entry under `send`. debug's ms@2.0.0
+        // must not take that empty slot — Node resolves `require('ms')` from
+        // inside `send` through `send/node_modules` first, so a 2.0.0 there
+        // silently downgrades what `send` itself loads. Observed on the
+        // 1,168-package npm fixture under `node-linker=hoisted`.
+        let nm = PathBuf::from("/project/node_modules");
+        let mut graph = LockfileGraph::default();
+        graph.packages.insert(
+            "send@0.18.0".into(),
+            pkg("send", "0.18.0", &[("ms", "2.1.3"), ("debug", "2.6.9")]),
+        );
+        graph.packages.insert(
+            "debug@2.6.9".into(),
+            pkg("debug", "2.6.9", &[("ms", "2.0.0")]),
+        );
+        graph
+            .packages
+            .insert("debug@4.3.4".into(), pkg("debug", "4.3.4", &[]));
+        graph
+            .packages
+            .insert("ms@2.1.3".into(), pkg("ms", "2.1.3", &[]));
+        graph
+            .packages
+            .insert("ms@2.0.0".into(), pkg("ms", "2.0.0", &[]));
+        let root_deps = vec![
+            dep("send", "send@0.18.0"),
+            dep("ms", "ms@2.1.3"),
+            dep("debug", "debug@4.3.4"),
+        ];
+
+        let plan = plan_importer(&nm, &root_deps, &graph, HoistingLimits::None).unwrap();
+
+        assert_eq!(package_dir(&plan, "ms@2.1.3"), nm.join("ms"));
+        assert_eq!(
+            package_dir(&plan, "ms@2.0.0"),
+            nm.join("send/node_modules/debug/node_modules/ms"),
+            "debug's ms must nest under debug, not in send's node_modules"
+        );
+        let send_idx = plan
+            .nodes
+            .iter()
+            .position(|n| n.dep_path.as_deref() == Some("send@0.18.0"))
+            .expect("send was not placed");
+        assert!(
+            !plan.nodes[send_idx].children.contains_key("ms"),
+            "send/node_modules/ms would shadow the ms@2.1.3 send resolves from root"
         );
     }
 

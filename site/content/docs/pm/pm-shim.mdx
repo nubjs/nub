@@ -64,7 +64,7 @@ npm ci → nub ci (via nub shim)
 
 The rest of npm is untouched. Everything else runs the real npm with the argv as typed: `npm test`, `npm run`, `npx`, `npm publish`, a global install, an install that names a package, and an install with a flag Nub does not translate (`--legacy-peer-deps`, `--workspace`, `--prefix`, `--no-package-lock`). So does an `npm install` a lifecycle script spawns under a running install. Translated flags: `--ignore-scripts`, `--omit=dev` (also `--production` and `NODE_ENV=production`), `--omit=optional`, and `--include`, which wins over `--omit` in either order as it does for npm; `--no-audit`, `--no-fund`, `--prefer-offline`, and the log-level and progress flags are accepted and ignored.
 
-A routed install runs every lifecycle script, as npm does, and hands them `NODE_ENV=production` exactly when dev dependencies are omitted. An `ignore-scripts=true` in the project or user `.npmrc`, or `npm_config_ignore_scripts` in the environment, is honored, and `--ignore-scripts=false` on the command line outranks it. The default trust list still applies to `nub install` typed directly.
+A routed install runs every lifecycle script, as npm does, under the `node` on PATH: the install itself consults no Node pin and provisions nothing. It hands the scripts `NODE_ENV=production` exactly when dev dependencies are omitted. An `ignore-scripts=true` in the project or user `.npmrc`, or `npm_config_ignore_scripts` in the environment, is honored, and `--ignore-scripts=false` on the command line outranks it. The default trust list still applies to `nub install` typed directly.
 
 `nub pm shim --no-route-installs` turns the routing off and keeps the shims; `nub pm unshim` removes both.
 

@@ -190,12 +190,9 @@ Key decisions:
 
 For `.nvmrc` containing `lts/*` or `node`:
 
-- `lts/*` → highest installed Node whose major is a current LTS (lookup table updated with each Node major release).
-- `node` → highest installed Node, period.
-- `lts/<codename>` → mapping table (`iron` → 20, `jod` → 22, `<future>` → …).
+- `lts/*`, `lts/<codename>`, `node` and `latest` → resolved against the nodejs.org release index (`index.json`, which carries each release's LTS codename), the same lookup `nub node install` uses. Provisioning fetches the index and caches it at the cache root; the discovery path that never touches the network resolves an alias against that cached copy, whatever its age, and treats an alias with no cached index as an unprovisioned pin. No codename table lives in the source, so a new LTS line needs no release of Nub.
 - `system` → first `node` on PATH outside any known manager root.
-
-The LTS-name → major-version table lives in Nub's source; bumping it is a one-line change per Node major. For an unrecognized alias, shell out to nvm/fnm/asdf/mise (`<manager> which`) only as a last resort, and only if that manager provided the pin file. Tolerable cost: ~30–150 ms on the cold path, cached.
+ For an unrecognized alias, shell out to nvm/fnm/asdf/mise (`<manager> which`) only as a last resort, and only if that manager provided the pin file. Tolerable cost: ~30–150 ms on the cold path, cached.
 
 ## 6. Caching
 
@@ -276,3 +273,4 @@ Every revision to this document, with the date and what changed.
 - 2026-09-02 — Recorded that an explicit binary resolving to Nub's own `node` shim is refused rather than resolved, which previously recursed without terminating.
 - 2026-09-02 — Recorded the scope of a failing `nodeExecutable` command: it refuses a run, while the version-store verbs continue.
 - 2026-09-01 — Recorded the explicit-binary layer above the pin chain: `NODE_EXECUTABLE`, and the `nub.jsonc` `nodeExecutable` field with its `$(command)` form, lazy resolution, two anchors, and disagreement reporting. The note that Volta and mise participate only through `PATH` was true when written and is now superseded — a command can delegate to either.
+- 2026-09-19 — Alias pins resolve against the cached release index on the offline discovery path; the codename table this section described was never the shipped mechanism.

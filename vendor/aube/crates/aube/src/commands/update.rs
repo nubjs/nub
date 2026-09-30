@@ -597,6 +597,7 @@ async fn run_inner(
                 existing.as_ref(),
                 &existing_importers,
                 &cwd,
+                no_save,
             )
             .await?
             {
@@ -617,14 +618,7 @@ async fn run_inner(
                         eprintln!("No packages selected.");
                         return Ok(None);
                     }
-                    manifest_keys_to_update
-                        .retain(|key| sel.in_range.contains(key) || sel.to_latest.contains(key));
-                    // A "latest" pick is exactly `<pkg>@latest`: route it
-                    // through the same per-key explicit-spec machinery so the
-                    // resolver and both rewrite loops treat it identically.
-                    for key in &sel.to_latest {
-                        explicit_specs.insert(key.clone(), "latest".to_string());
-                    }
+                    apply_rich_selection(&sel, &mut manifest_keys_to_update, &mut explicit_specs);
                 }
             }
         } else {
@@ -695,7 +689,10 @@ async fn run_inner(
     // tracks the resolved in-range version in `package.json`. Limited to
     // `^X.Y.Z` / `~X.Y.Z` specs at the rewrite site below; other shapes
     // (`>=`, `1.x`, exact, dist-tags, git, workspace:) are preserved.
-    let cosmetic_rewrite_eligible = !effective_latest && rewrites_specifier_setting && !no_save;
+    // Decided per key, not per run: a bare key keeps its floor-bump beside
+    // an explicit `<pkg>@latest` (or a picker's latest / pinned-range pick)
+    // in the same invocation, exactly as it would have alone.
+    let cosmetic_rewrite_eligible = !latest && rewrites_specifier_setting && !no_save;
 
     let real_names_to_update: std::collections::HashSet<String> = manifest_keys_to_update
         .iter()
@@ -1088,7 +1085,8 @@ async fn run_inner(
     } else if effective_latest || cosmetic_rewrite_eligible {
         let mut wrote_any = false;
         for key in &manifest_keys_to_update {
-            if effective_latest && !should_rewrite_key(key) {
+            let explicit = should_rewrite_key(key);
+            if !explicit && !cosmetic_rewrite_eligible {
                 continue;
             }
             let real_name = resolve_real_name(key);
@@ -1113,7 +1111,7 @@ async fn run_inner(
             // `range_prefix` defaults to `"^"` for unknown shapes so it
             // can't be the discriminator here. Caret/tilde under an
             // `npm:` alias lives on the post-`@` portion.
-            if !effective_latest {
+            if !explicit {
                 let range_slice = original
                     .strip_prefix("npm:")
                     .and_then(|rest| rest.rsplit_once('@').map(|(_, r)| r))
@@ -1615,6 +1613,30 @@ async fn fetch_packuments(
     Ok(packuments)
 }
 
+/// Fold a confirmed picker selection into the update's working sets: only
+/// picked keys stay in scope, and every pick that names a target becomes the
+/// per-key explicit spec the CLI form would have produced — a "latest" pick
+/// is exactly `<pkg>@latest`, a range pick on an exact pin is exactly
+/// `<pkg>@<version>` — so the resolver and both rewrite loops treat a pick
+/// and its typed equivalent identically. In-range picks carry no spec.
+fn apply_rich_selection(
+    sel: &update_picker::PickerSelection,
+    manifest_keys_to_update: &mut Vec<String>,
+    explicit_specs: &mut BTreeMap<String, String>,
+) {
+    manifest_keys_to_update.retain(|key| {
+        sel.in_range.contains(key)
+            || sel.to_latest.contains(key)
+            || sel.to_version.contains_key(key)
+    });
+    for key in &sel.to_latest {
+        explicit_specs.insert(key.clone(), "latest".to_string());
+    }
+    for (key, version) in &sel.to_version {
+        explicit_specs.insert(key.clone(), version.clone());
+    }
+}
+
 /// Outcome of the rich tri-state picker (`Embedder::rich_update_picker`).
 enum RichPick {
     /// Ctrl-C / Esc — the caller maps this to exit code 130.
@@ -1638,6 +1660,7 @@ async fn pick_update_rich(
     existing: Option<&aube_lockfile::LockfileGraph>,
     existing_importers: &[&str],
     cwd: &std::path::Path,
+    no_save: bool,
 ) -> miette::Result<RichPick> {
     if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
         return Err(miette!(
@@ -1681,11 +1704,28 @@ async fn pick_update_rich(
         // through the packument's dist-tags — without this, a tag-spec key
         // would render no in-range cell and the tag could never apply from
         // the picker.
-        let spec = explicit_specs
+        //
+        // The manifest spec is normalized first: an exact pin is widened to
+        // `^<pin>` — the yarn `upgrade-interactive` rule — so a fully-pinned
+        // project gets a compatible-bump cell rather than a dead duplicate of
+        // `current`, and an `npm:` alias is reduced to its range half so the
+        // ungated `wanted_version` fallback can parse it. An explicit CLI spec
+        // is never widened: the user typed that range.
+        //
+        // `--no-save` keeps the literal manifest range authoritative for the
+        // resolver (explicit targets never reach `resolver_manifest`), so a
+        // cell may only show what that range reaches: no widening, no CLI
+        // spec, and no `latest` cell below. Anything else would display a
+        // version the run then declines to install.
+        let manifest_spec = specifiers
             .get(key.as_str())
-            .or_else(|| specifiers.get(key.as_str()))
             .map(String::as_str)
             .unwrap_or("");
+        let (basis, pinned) = match explicit_specs.get(key.as_str()) {
+            Some(explicit) if !no_save => (alias_range(explicit).to_string(), false),
+            _ => picker_range_basis(manifest_spec, !no_save),
+        };
+        let spec = basis.as_str();
         // The in-range cell is gated for the same reason the `latest` cell is,
         // and skipping it leaves a bypass rather than a cosmetic gap: when the
         // gated `latest` is filtered out, `build_row` falls back to THIS value
@@ -1722,14 +1762,10 @@ async fn pick_update_rich(
         // non-interactive guard above.
         let gated_latest =
             super::outdated::latest_pick(packument, &real_name, gate.as_ref(), &current);
-        let registry_latest = gated_latest.as_deref();
+        let registry_latest = gated_latest.as_deref().filter(|_| !no_save);
         // The displayed spec is always the MANIFEST's (the dim annotation
         // answers "what does package.json say today"), even when an
         // explicit CLI spec drives the targets.
-        let manifest_spec = specifiers
-            .get(key.as_str())
-            .map(String::as_str)
-            .unwrap_or("");
         if let Some(row) = update_picker::build_row(
             key,
             dep_bucket(manifest, key),
@@ -1737,6 +1773,7 @@ async fn pick_update_rich(
             &current,
             wanted.as_deref(),
             registry_latest,
+            pinned,
         ) {
             rows.push(row);
         }
@@ -2537,9 +2574,86 @@ fn exact_pin_version(spec: &str) -> Option<&str> {
     looks_like_exact_version(trimmed).then_some(trimmed)
 }
 
+/// The range half of a specifier: `npm:<real>@<range>` yields `<range>`,
+/// anything else is returned as-is. The resolver's gated pick strips an
+/// alias itself; the ungated `wanted_version` fallback (release-age window
+/// off) parses a bare range and would see the alias as unparseable.
+fn alias_range(spec: &str) -> &str {
+    spec.strip_prefix("npm:")
+        .and_then(|rest| rest.rsplit_once('@').map(|(_, range)| range))
+        .unwrap_or(spec)
+}
+
+/// The range the interactive picker resolves a manifest spec's "latest in
+/// range" cell against, plus whether it was widened from an exact pin.
+///
+/// A pin's literal range reaches only itself, so `"4.1.0"` (or `=4.1.0`,
+/// or `npm:chalk@4.1.0`) is resolved as `^4.1.0` instead — the same rule
+/// yarn's `upgrade-interactive` applies. The manifest keeps the pin: the
+/// pick is applied as `<pkg>@<version>` and `rewrite_specifier` carries the
+/// original's empty prefix onto the new version.
+///
+/// `widen == false` (`--no-save`) returns the literal range: that run can
+/// apply nothing the manifest spec doesn't already reach.
+fn picker_range_basis(spec: &str, widen: bool) -> (String, bool) {
+    match exact_pin_version(spec) {
+        Some(pin) if widen && node_semver::Version::parse(pin).is_ok() => (format!("^{pin}"), true),
+        _ => (alias_range(spec).to_string(), false),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn picker_range_basis_widens_pins_and_strips_aliases() {
+        let basis = |spec| picker_range_basis(spec, true);
+        assert_eq!(basis("4.1.0"), ("^4.1.0".to_string(), true));
+        assert_eq!(basis("=4.1.0"), ("^4.1.0".to_string(), true));
+        assert_eq!(basis("npm:chalk@4.1.0"), ("^4.1.0".to_string(), true));
+        // Ranges, tags and aliases-of-ranges pass through un-widened; the
+        // alias contributes only its range half.
+        assert_eq!(basis("^4.1.0"), ("^4.1.0".to_string(), false));
+        assert_eq!(basis("~4.1.0"), ("~4.1.0".to_string(), false));
+        assert_eq!(basis("beta"), ("beta".to_string(), false));
+        assert_eq!(basis("npm:chalk@^4.1.0"), ("^4.1.0".to_string(), false));
+        assert_eq!(basis("workspace:*"), ("workspace:*".to_string(), false));
+        // `--no-save` can install nothing the literal pin doesn't reach, so
+        // the pin is left un-widened and the row is not marked pinned.
+        assert_eq!(
+            picker_range_basis("4.1.0", false),
+            ("4.1.0".to_string(), false)
+        );
+        assert_eq!(
+            picker_range_basis("npm:chalk@4.1.0", false),
+            ("4.1.0".to_string(), false)
+        );
+    }
+
+    #[test]
+    fn rich_selection_becomes_the_equivalent_explicit_specs() {
+        let sel = update_picker::PickerSelection {
+            in_range: BTreeSet::from(["semver".to_string()]),
+            to_latest: BTreeSet::from(["chalk".to_string()]),
+            to_version: BTreeMap::from([("ms".to_string(), "2.1.3".to_string())]),
+        };
+        let mut keys: Vec<String> = ["chalk", "kept", "ms", "semver"].map(String::from).to_vec();
+        let mut explicit = BTreeMap::new();
+
+        apply_rich_selection(&sel, &mut keys, &mut explicit);
+
+        // The unpicked row leaves scope; the in-range pick stays bare, so the
+        // resolver re-resolves its manifest range.
+        assert_eq!(keys, vec!["chalk", "ms", "semver"]);
+        assert_eq!(
+            explicit,
+            BTreeMap::from([
+                ("chalk".to_string(), "latest".to_string()),
+                ("ms".to_string(), "2.1.3".to_string()),
+            ])
+        );
+    }
 
     #[test]
     fn recursive_catalog_choice_is_reused_without_reprompting() {

@@ -21,6 +21,7 @@ on:
       - "crates/nub-cli/src/pm_engine/**"
       - "crates/nub-cli/src/cli.rs"
       - "tests/npm-corpus/**"
+      - "npm-ci/**"
       - ".github/workflows/npm-corpus.yml"
   pull_request:
     # PR CI is opt-in — request a run with `gh pr edit <n> --add-label ci`. Rationale: ci.yml.
@@ -31,6 +32,7 @@ on:
       - "crates/nub-cli/src/pm_engine/**"
       - "crates/nub-cli/src/cli.rs"
       - "tests/npm-corpus/**"
+      - "npm-ci/**"
       - ".github/workflows/npm-corpus.yml"
   schedule:
     # Nightly at 09:00 UTC, offset from the lockfile-roundtrip (07:00) and pnpm-conformance
@@ -47,6 +49,10 @@ on:
         default: "on-failure"
         type: choice
         options: [on-failure, always, never]
+      modes:
+        description: "Install modes to run: install (nub install --frozen-lockfile), npm-ci (the npm-ci action's command), or both"
+        default: "install,npm-ci"
+        type: string
 
 permissions: {}
 
@@ -77,12 +83,13 @@ jobs:
         env:
           # `inputs` is defined only for workflow_dispatch; `github.event.inputs` is empty elsewhere.
           REPOS: ${{ github.event.inputs.repos || '' }}
+          MODES: ${{ github.event.inputs.modes || 'install,npm-ci' }}
         shell: bash
         run: |
           set -euo pipefail
           matrix="$(node tests/npm-corpus/matrix.mjs "$REPOS")"
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-          echo "$matrix" | node -e 'const m = JSON.parse(require("fs").readFileSync(0, "utf8")); console.log(`${m.include.length} project(s):`, m.include.map((e) => `${e.repo}@node${e.node}`).join(" "))'
+          echo "$matrix" | node -e 'const m = JSON.parse(require("fs").readFileSync(0, "utf8")); console.log(`${m.include.length} project(s):`, m.include.map((e) => `${e.repo}@node${e.node}/${e.mode}`).join(" "))'
 
   build:
     name: Build nub (once)
@@ -126,7 +133,7 @@ jobs:
           retention-days: 1
 
   corpus:
-    name: ${{ matrix.repo }} (node ${{ matrix.node }})
+    name: ${{ matrix.repo }} (node ${{ matrix.node }}, ${{ matrix.mode }})
     needs: [plan, build]
     if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     runs-on: ubuntu-latest
@@ -151,6 +158,7 @@ jobs:
       - name: Frozen-install under nub and check the tree
         env:
           REPO: ${{ matrix.repo }}
+          MODE: ${{ matrix.mode }}
           # The nightly times `npm ci` on every project; other runs only classify a red.
           CONTROL: ${{ github.event_name == 'schedule' && 'always' || (github.event.inputs.control || 'on-failure') }}
         shell: bash

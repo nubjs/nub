@@ -1,0 +1,19 @@
+{
+  "name": "nub-compile-corpus",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@parcel/watcher": "2.6.0",
+    "bcrypt": "6.0.0",
+    "better-sqlite3": "13.0.3",
+    "chalk": "6.0.0",
+    "date-fns": "4.4.0",
+    "esbuild": "0.28.2",
+    "express": "5.2.1",
+    "keyv": "5.6.0",
+    "pdfkit": "0.20.2",
+    "pino": "10.3.1",
+    "sharp": "0.35.4",
+    "zod": "4.6.2"
+  }
+}

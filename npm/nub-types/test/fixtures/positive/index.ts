@@ -6,6 +6,10 @@
 import yamlCfg from "./config.yaml";
 import tomlCfg from "./config.toml";
 
+// The default-export handler type, which is module-scoped rather than global so it
+// cannot merge with Cloudflare's same-named global.
+import type { ExportedHandler, FetchHandler } from "@nubjs/types";
+
 // Browser-shape Worker global + its methods/handlers.
 const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
 worker.postMessage({ yaml: yamlCfg, toml: tomlCfg });
@@ -131,3 +135,26 @@ if (import.meta.hot) {
   import.meta.hot.accept((mod) => console.log(mod));
   import.meta.hot.dispose((data) => console.log(data));
 }
+
+// Default-export `fetch` handler. `request` is deliberately UNANNOTATED: if the
+// ambient `declare module "@nubjs/types"` stopped resolving, the parameter would
+// become an implicit `any` and fail here under `strict` rather than pass silently.
+const served = {
+  fetch(request) {
+    return new Response(request.url);
+  },
+} satisfies ExportedHandler;
+const standalone: FetchHandler = async (request) => new Response(request.method);
+void [served, standalone];
+
+// `fetch` is REQUIRED — an empty object is not a handler. Annotating the conditional
+// is what pins it: making `fetch` optional flips this to `true` and fails the fixture.
+type FetchOptional = {} extends ExportedHandler ? true : false;
+const fetchIsRequired: false = null as unknown as FetchOptional;
+// ONE argument, which is what holds the Workers/Bun/Deno second argument out until
+// WinterTC settles it: a two-parameter handler must not be assignable.
+type SecondArgument = { fetch: (r: Request, env: unknown) => Response } extends ExportedHandler
+  ? true
+  : false;
+const oneArgumentOnly: false = null as unknown as SecondArgument;
+void [fetchIsRequired, oneArgumentOnly];

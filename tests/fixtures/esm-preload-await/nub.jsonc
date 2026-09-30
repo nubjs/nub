@@ -1,0 +1,5 @@
+{
+  // An ESM preload whose top-level `await` crosses an event-loop turn: the entry
+  // must not start until it has settled, on either tier.
+  "preload": ["./pre.mjs"]
+}

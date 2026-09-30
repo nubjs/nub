@@ -191,7 +191,7 @@ pub(crate) async fn run_root_lifecycle_script(
     tracing::debug!("lifecycle: {script_name}");
     aube_scripts::run_root_script_by_name(project_root, &modules_dir_name, manifest, script_name)
         .await
-        .map_err(|e| miette!("root `{script_name}` script failed: {e}"))?;
+        .wrap_err_with(|| format!("root `{script_name}` script failed"))?;
     Ok(())
 }
 

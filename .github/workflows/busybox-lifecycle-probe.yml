@@ -67,9 +67,11 @@ jobs:
       # root is nub-identity (nub.lock), so a released nub installs it;
       # `hoisted` because nub-core's build script copies real directories out
       # of node_modules and rejects a symlinked store.
-      - uses: ./setup
+      - uses: ./setup-node
         with:
           cache: 'true'
+          provision-node: 'false'
+          shim: 'false'
       - run: nub install --frozen-lockfile --node-linker hoisted
       - name: Build nub-native addon
         shell: bash

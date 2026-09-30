@@ -1,0 +1,20 @@
+# Link the MSVC C runtime STATICALLY into the alias stub, on Windows targets only.
+#
+# The stub ships in the release zip and runs on whatever machine unpacks it. Rust's
+# MSVC targets link the CRT dynamically by default, which imports VCRUNTIME140.dll;
+# on a clean Windows Server or a fresh install that DLL is absent and the process
+# dies at 0xC0000135 before any code runs, with nothing on stderr. nub.exe and
+# nub-launcher.exe already carry the static CRT for the same reason (release.yml,
+# crates/nub-launcher/.cargo/config.toml); an alias that cannot start beside a
+# binary that can would be a worse experience than no alias at all.
+#
+# This crate is its own workspace with no cdylib beneath it, so pinning the flag
+# here is safe. It must NOT move to the repo root: cargo concatenates rustflags
+# down the directory tree and `+crt-static` is sticky, so a root config would
+# reach crates/nub-native — a cdylib loaded into the user's node.exe, which has to
+# keep the dynamic CRT.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

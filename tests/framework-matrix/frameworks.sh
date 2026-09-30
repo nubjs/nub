@@ -23,6 +23,8 @@
 #   GVS=      auto   → default install (respects nub's triggers; GVS engages)
 #             exclude→ a realpath-locality-excluded framework (next/react-native):
 #                      the trigger flips it PROJECT-LOCAL by design — never force GVS on
+#             require→ GVS is forced ON for this fixture (its config makes the
+#                      framework store-aware), and the verdict demands the store layout
 set -u
 
 # ── pinned scaffolder versions (override via env for a different major) ────────
@@ -35,9 +37,13 @@ ASTRO_CREATE="${ASTRO_CREATE:-astro@latest}"     # → npm create astro@latest (
 SVELTE_CREATE="${SVELTE_CREATE:-sv@latest}"       # → npx sv create           (the SvelteKit CLI)
 NUXT_CREATE="${NUXT_CREATE:-nuxi@latest}"         # → npx nuxi init
 NEXT_CREATE="${NEXT_CREATE:-create-next-app@latest}" # → npx create-next-app
+# The Next.js release the `next-gvs` arm pins (the generator's own pick lacks
+# `experimental.turbopackAdditionalRoots`, which shipped in 16.4.0-canary.37).
+# Bump to the first stable that carries it once 16.4.0 is out.
+NEXT_GVS_VERSION="${NEXT_GVS_VERSION:-16.4.0-canary.37}"
 
 # The framework names this manifest knows. Keep in sync with the case block below.
-FRAMEWORKS=(vite-react vite-vue vite-svelte astro sveltekit nuxt next)
+FRAMEWORKS=(vite-react vite-vue vite-svelte astro sveltekit nuxt next next-gvs)
 
 _list() { printf '%s\n' "${FRAMEWORKS[@]}"; }
 
@@ -116,6 +122,54 @@ scaffold() {
       echo "PREVIEW=npx next start --port \$PPORT"
       echo "PROBE=next"
       echo "GVS=exclude" ;;
+
+    # Next on the SHARED store: the same create-next-app scaffold (Turbopack on,
+    # the 16.x default), pinned to a Next that has
+    # `experimental.turbopackAdditionalRoots`, with nub's store configured as
+    # the root. GVS=require forces the store on past nub's Next trigger and
+    # demands the store layout in the verdict — this arm is what proves the
+    # trigger can be dropped once Vercel ships the option. The root is computed
+    # at `next` runtime from the same env the run uses (`--isolate-store`
+    # relocates the store through XDG_CACHE_HOME after scaffolding), mirroring
+    # nub's own cache-dir resolution. The release-age floor is lifted for the
+    # fixture because a canary is younger than nub's 24-hour default.
+    next-gvs)
+      npx --yes "$NEXT_CREATE" "$base" --ts --no-eslint --no-tailwind --no-src-dir --app --turbopack --import-alias '@/*' --use-npm --skip-install >/dev/null 2>&1 || return 1
+      node -e '
+        const fs = require("fs");
+        const p = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+        p.dependencies.next = process.argv[1];
+        fs.writeFileSync(process.argv[2], JSON.stringify(p, null, 2) + "\n");
+      ' "$NEXT_GVS_VERSION" "$base/package.json" || return 1
+      printf 'minimumReleaseAge=0\n' > "$base/.npmrc"
+      cat > "$base/next.config.ts" <<'CFG'
+import os from "node:os";
+import path from "node:path";
+import type { NextConfig } from "next";
+
+// nub's shared store, resolved the way nub resolves its cache dir.
+const cacheDir =
+  process.env.NUB_CACHE_DIR ??
+  (process.env.XDG_CACHE_HOME
+    ? path.join(process.env.XDG_CACHE_HOME, "nub")
+    : process.platform === "win32" && process.env.LOCALAPPDATA
+      ? path.join(process.env.LOCALAPPDATA, "nub")
+      : path.join(os.homedir(), ".cache", "nub"));
+const nubStore = path.join(cacheDir, "pm", "store");
+
+const nextConfig: NextConfig = {
+  experimental: {
+    turbopackAdditionalRoots: { nubStore: { path: nubStore } },
+  },
+};
+
+export default nextConfig;
+CFG
+      echo "DEV=npx next dev --port \$PORT"
+      echo "BUILD=npx next build"
+      echo "PREVIEW=npx next start --port \$PPORT"
+      echo "PROBE=react"
+      echo "GVS=require" ;;
 
     *) echo "UNKNOWN_FRAMEWORK: $name" >&2; return 2 ;;
   esac

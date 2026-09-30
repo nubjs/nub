@@ -152,6 +152,10 @@ verify:
 	}
 	NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" fmt --check
 	(cd crates/nub-native && NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" fmt --check)
+	@# Cheap and early: every tracked lock must satisfy its manifest. The build
+	@# steps below all omit `--locked` and re-resolve silently, so without this a
+	@# stale lock first surfaces in CI ~20 minutes after the push.
+	scripts/check-lockfiles.sh
 	@# PROFILE=fast, matching both the dev loop and CI's check/clippy jobs, so the
 	@# gates reuse the artifacts iteration already built instead of driving a
 	@# second full dependency compile under `dev` (~26 GB of duplicated

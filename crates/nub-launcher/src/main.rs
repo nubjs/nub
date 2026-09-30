@@ -687,6 +687,20 @@ fn compile_cache_dir(base: &Path, manifest: &Manifest) -> PathBuf {
 }
 
 fn configure_compiled_process_identity(cmd: &mut Command, launcher_path: &Path) {
+    // A top-level launch may serve a default-exported `fetch` handler, as
+    // `nub <file>` would (`serveCompiledEntry`, compile-preamble.mjs). A re-exec of
+    // this executable by its own program — `fork`, `cluster`, `spawn(process.execPath)`
+    // — arrives with the identity variable below already naming THIS launcher, and
+    // is not marked: under `nub <file>` such a child is plain `node` with the marker
+    // already consumed, and never serves. The inherited marker is dropped rather
+    // than passed on for the same reason the mode channel is, below.
+    let relaunched = std::env::var_os(COMPILED_EXEC_PATH_ENV)
+        .is_some_and(|inherited| Path::new(&inherited) == launcher_path);
+    if relaunched {
+        cmd.env_remove(flags::COMPILED_SERVE_ENTRY_ENV);
+    } else {
+        cmd.env(flags::COMPILED_SERVE_ENTRY_ENV, "1");
+    }
     // `Command::env` replaces an inherited value of the same name. Keep the
     // value in child environments: Node workers, fork(), and re-exec inherit it
     // until the preamble establishes their public process identity.

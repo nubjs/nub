@@ -745,10 +745,16 @@ pub fn cli_main_with_defaults(
     }
 }
 
-/// Resolve a diagnostic's exit code by walking its `code()` chain.
-/// Falls back to `EXIT_GENERIC` (1) when no `code` is set or the
-/// reported code has no entry in `aube_codes::exit::EXIT_TABLE`.
-fn report_exit_code(report: &miette::Report) -> i32 {
+/// Resolve a diagnostic's exit code. A failed lifecycle script exits with
+/// the script's own code (`aube_scripts::exit_code_for_report`), the way
+/// `run`, npm and pnpm do; everything else looks its `code()` up in
+/// `aube_codes::exit::EXIT_TABLE` and falls back to `EXIT_GENERIC` (1) when
+/// no `code` is set or the code has no entry. Public so an embedder that
+/// renders reports itself resolves exit codes the same way `cli_main` does.
+pub fn report_exit_code(report: &miette::Report) -> i32 {
+    if let Some(code) = aube_scripts::exit_code_for_report(report) {
+        return code;
+    }
     if let Some(code) = report.code() {
         let code = code.to_string();
         if let Some(exit) = aube_codes::exit::exit_code_for(&code) {

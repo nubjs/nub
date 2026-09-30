@@ -33,7 +33,7 @@ An index of the rules a doing-agent must not miss. Each links to its authoritati
 - **Builds, gates and test runs go REMOTE by default** — a CI-run test or a `remote-build` VM job, never the dev Mac, except for the warm incremental loop and macOS-native checks. ([Builds and tests go REMOTE by default](#builds-and-tests-go-remote-by-default--the-local-box-is-the-exception))
 - **PR CI is OPT-IN.** Opening a pull request and pushing to it start nothing; a run is requested with `gh pr edit <n> --add-label ci`. A pull request with no checks is unverified, never green. ([PR CI is opt-in](#pr-ci-is-opt-in--ask-for-a-run-with-the-ci-label))
 - No agent co-author trailers in commits; the commit-msg hook strips them.
-- **Never cut a release without the maintainer's explicit, in-the-moment instruction.** Publishing to npm is irreversible, and the tag push is what triggers it. Same shape as the never-upstream rule. ([Releasing](#releasing) — and invoke the `release` skill, which carries the runbook and this gate.)
+- **Never cut a release without the maintainer's explicit, in-the-moment instruction.** Publishing to npm is irreversible, and a publishing dispatch of `release.yml` is what starts it. Same shape as the never-upstream rule. ([Releasing](#releasing) — and invoke the `release` skill, which carries the runbook and this gate.)
 
 ## Builds and tests go REMOTE by default — the local box is the exception
 
@@ -358,18 +358,12 @@ Feature-specific harnesses live under `tests/<feature>/` — e.g. `tests/pnp/` b
 
       **Its own workspace means its own `Cargo.lock`, and the `--locked` gates are the only thing that will tell you it is stale.** `crates/nub-native/Cargo.lock` is tracked and separate, so giving the addon a new dependency — a path dep into the main workspace included — leaves it stale until you regenerate it. Nothing local tells you: the root `cargo check`/`clippy` steps and `remote-build`'s jobs all omit `--locked` and silently re-resolve, so the first thing that fails is a `--locked` step in CI, ~20 minutes after you push. Those gates live in `ci.yml`, `release.yml`, `compile-native.yml` and `win-arm64-probe.yml` — `grep -rn -- '--locked' .github/workflows/` is the current list. A VERSION bump moves these locks too — `scripts/set-version.mjs` stamps them, and the release commit must carry them.
 
-      **There are FIVE tracked lockfiles, and enumerating them from the `--locked` gates undercounts.** `git ls-files '*/Cargo.lock' 'Cargo.lock'` is the honest list: the root, `crates/nub-native`, `crates/nub-launcher`, `crates/nub-phantom` and `vendor/aube`. `crates/nub-phantom` is the one that gets missed, because until 2026-09-02 NO gate passed `--locked` for it — its only CI step re-resolved silently, so its lock could describe a dependency graph that no longer existed and every check stayed green. Corrected that day, after a `flate2` backend swap left it naming a crate the manifest no longer selected and `cargo metadata --locked` exited 101 with nothing in CI to say so. Check the list, not the gates; a workspace with no gate is exactly the one that rots.
+      **There are SIX tracked lockfiles, and enumerating them from the `--locked` gates undercounts.** `git ls-files '*/Cargo.lock' 'Cargo.lock'` is the honest list: the root, `crates/nub-native`, `crates/nub-launcher`, `crates/nub-alias`, `crates/nub-phantom` and `vendor/aube`. `crates/nub-phantom` is the one that gets missed, because until 2026-09-02 NO gate passed `--locked` for it — its only CI step re-resolved silently, so its lock could describe a dependency graph that no longer existed and every check stayed green. Corrected that day, after a `flate2` backend swap left it naming a crate the manifest no longer selected and `cargo metadata --locked` exited 101 with nothing in CI to say so. Check the list, not the gates; a workspace with no gate is exactly the one that rots.
 
-      Refresh every out-of-workspace lock without compiling, then confirm each is satisfiable, before pushing any dependency change (verified 2026-08-07 after paying for exactly this round-trip):
-      ```sh
-      for d in . crates/nub-native crates/nub-launcher crates/nub-phantom vendor/aube; do
-        (cd "$d" && cargo metadata --offline >/dev/null)               # regenerate
-      done
-      for d in . crates/nub-native crates/nub-launcher crates/nub-phantom vendor/aube; do
-        (cd "$d" && cargo metadata --locked --offline >/dev/null) || echo "STALE: $d"
-      done                                                             # each must exit 0
-      ```
+      **Run `scripts/check-lockfiles.sh`** (`--fix` re-resolves the stale ones without compiling). It derives the list from `git ls-files`, so it cannot drift as workspaces come and go, takes ~1.4s warm, and is wired into `make verify` and `.githooks/pre-push` (bypass `NUB_SKIP_LOCKFILE_CHECK=1`) so a stale lock stops costing a ~20-minute CI round trip.
       A dev-dependency counts: adding one to a crate the root workspace owns moves the ROOT lock too, and it moves it again later than you expect — after whatever build last regenerated it.
+
+      **Do not hand-roll this with `cargo metadata --locked --offline`, which is what this file used to tell you to do.** That conflates two different failures and the misleading one is the common one: a stale lock says `cannot update the lock file ... because --locked was passed`, while a cold crate cache says `attempting to make an HTTP request, but --offline was specified`. Both exit 101, so a bare `|| echo STALE` reports the second as the first. A fresh checkout, a fresh container or a CI runner has no populated cache, so the old snippet called ALL FIVE locks stale on a tree where every one was clean (measured 2026-09-15), and the reflex fix writes real churn into a commit. The script keeps a third verdict for it — `unverified`, which exits 0 and claims nothing — and only reports staleness on cargo's own words for it.
 
       **`vendor/aube` is the same story, and its failure mode is quieter.** It is a path DEPENDENCY, not a workspace member, so `cargo test -p aube-scripts` from the repo root refuses outright — `package 'aube-scripts' cannot be tested because it requires dev-dependencies and is not a member of the workspace`. Run aube's tests from inside it, with its own target dir: `cd vendor/aube && CARGO_TARGET_DIR=<somewhere-else> cargo test -p <crate>`. The ROOT invocation genuinely refuses — `--all-targets` from the root never builds a path dependency's test targets, verified 2026-08-04 by adding a test there and watching it decline. **A test you add under `vendor/aube/` is still gated, just not from the root**: `.github/workflows/aube-parity.yml` runs `cargo test --workspace` with `working-directory: vendor/aube` on ubuntu AND windows for any pull request touching `vendor/aube/**`. Corrected 2026-08-19 — both legs ran and passed on #743, which added 16 tests under `vendor/aube/`. So write the test beside the code it guards; put it nub-side only when it needs the `nub` binary.
   3. **The heavy gates run remotely BY DEFAULT** ([Builds and tests go REMOTE by default](#builds-and-tests-go-remote-by-default--the-local-box-is-the-exception) is the governing rule; this step is its mechanics). `cargo clippy --all-targets --all-features` and a full `cargo test` are what saturate the dev host when many worktrees build at once — the bottleneck is disk churn across many multi-GB target dirs on one APFS volume, and every remote builder brings its own disk. Run them on an ephemeral GCE spot VM: `nub scripts/remote-build.ts --job clippy --detach`, then `nub scripts/remote-build.ts --attach <vm-name>` to collect (the `remote-build` skill). Byte-identical CI invocation, a few cents each; running these locally is the exception and needs a reason (for example, the box is otherwise idle). **Use `--detach`/`--attach`, never the plain foreground form** — a foreground run is SIGKILLed at the agent harness's timeout, which no handler can catch, so cleanup is skipped and the builder leaks until its server-side TTL; `--attach` exits 75 meaning "still running, call again". The `--profile fast` inner loop stays local.
@@ -421,7 +415,7 @@ Conventions specific to the docs site, on top of the shared guide above.
 
 - **Register:** zod.dev — to the point, code-first, no marketing fluff inside docs pages.
 - **Page slugs are command-aligned:** `/docs/run`, `/docs/pm`; the command-less file runner is `/docs/files`.
-- **A page for an unreleased feature lands on `main` with `unpublished: true` in its frontmatter** (docs, guides, and blog posts alike). A production build then has no route, nav entry, sitemap line, search hit, or `llms.txt` link for it, while `next dev` still serves it for review; `SITE_SHOW_UNPUBLISHED=1` shows it in a production build. The gate is `published()` in `site/src/lib/source.ts`, applied to every loader, so a new consumer cannot forget it. Delete the key in the release commit.
+- **A page for an unreleased feature lands on `main` with `unpublished: true` in its frontmatter** (docs, guides, and blog posts alike). A production build then has no route, nav entry, sitemap line, search hit, or `llms.txt` link for it, while `next dev` still serves it for review; `SITE_SHOW_UNPUBLISHED=1` shows it in a production build. The gate is `published()` in `site/src/lib/source.ts`, applied to every loader, so a new consumer cannot forget it. Delete the key in the release commit that launches the feature. A feature the maintainer is holding back keeps the key, and the `release` skill leaves it out of the notes and the blog post.
 - **Features relying on nub's own ambient TS declarations get a `<Callout>` at the top:** install `@nubjs/types` as a devDep alongside `@types/node`, and use `@types/node` 26. Only for pages whose types actually come from `@nubjs/types`/`nub-env.d.ts` (data-format imports, `Worker`, `import.meta.hot`) — word it to match what the feature needs.
 - **The `--node` escape hatch is introduced once, on its own surface** (the runtime overview's `--node` section, the node-command page) or as a documented flag of the command a page is about (`nub run --node`, `nubx --node`) — never as a tangential aside tacked onto a PnP / TypeScript / web-storage behavior section.
 - **Know the rendered HTML/CSS before hand-rolling a code block in a React/MDX component.** The site's global CSS styles a bare `<code>` as INLINE code, so a `<code>` inside a custom `<pre>` renders the whole block as an inline-code pill. A hand-built code block is a `<pre>` containing the text directly: `<pre>{`line1\nline2`}</pre>`. (A real MDX code fence is styled correctly by fumadocs — prefer it.) Never put `select-none` or per-span styling on parts of a code block; it makes them unselectable.
@@ -448,7 +442,7 @@ Before loading a large markdown file in full, run `node scripts/md-toc/index.mjs
 
 Nub publishes to npm as `@nubjs/nub` plus 8 platform-specific binary packages, fully automated via GitHub Actions.
 
-**The `v*` tag push IS the publish — it is irreversible and requires the maintainer's explicit, in-the-moment
+**A publishing dispatch IS the publish — it is irreversible and requires the maintainer's explicit, in-the-moment
 say-so. Invoke the `release` skill rather than running the recipe below from memory**; it carries that gate,
 the version-pick rules, and the mandatory post-release issue/PR comments.
 
@@ -462,15 +456,18 @@ git commit -m "v0.0.6" -- <the 27 version files>   # path-scoped: the shared tre
                                # stamped crate's version and is consumed under `--locked`, so
                                # omitting one tags a stale tree (v0.9.1 missed nub-phantom's).
 git push origin main
-git tag v0.0.6
-git push origin v0.0.6         # ONE tag, never `--tags`: this clone holds ~155 local tags against
-                               # ~84 on the remote (v1.x leftovers from the Node fork), and the
-                               # rejected extras take `main` down with them so nothing publishes.
-                               # CI then builds 8 platforms, publishes to npm, creates the release.
+# THIS starts the release; nothing else does. The run reads 0.0.6 from npm/nub/package.json at
+# the dispatched commit, builds 8 platforms, creates the v0.0.6 tag itself once every gate
+# passes, STAGES the 19 npm packages, and waits for the maintainer's 2FA approval
+# (`pnpm stage approve`) before publishing the GitHub Release — the `release` skill's Step 3b.
+# release.yml has no tag trigger, so pushing a v* tag by hand starts nothing.
+gh workflow run release.yml -R nubjs/nub -f publish=true
 ```
 
 Other Makefile targets: `make npm-build` (build + package for the current platform), `make npm-publish` (manual publish — prefer CI), `make npm-publish-dry`.
 
-**CI release workflow** (`.github/workflows/release.yml`) triggers on `v*` tags and builds darwin-arm64, darwin-x64, linux-x64, linux-x64-musl, linux-arm64, linux-arm64-musl, win32-x64, win32-arm64. Publishes via npm OIDC trusted publishing (no secrets), then creates the GitHub Release with binary artifacts.
+The GitHub Actions `setup-node/`, `install/` and `npm-ci/` ship at the repository root and are consumed as `nubjs/nub/<name>@v0`. The release workflow moves that floating `v<major>` tag to each promoted stable release; the workflow has no tag trigger at all, so writing `v0` starts nothing, and `git describe --tags` needs `--exclude 'v[0-9]'` to see past it (`scripts/release-notify.ts` does). Their smoke is `.github/workflows/action-smoke.yml`, path-filtered to the two action directories and `tests/action-smoke/**`.
+
+**CI release workflow** (`.github/workflows/release.yml`) runs on a `workflow_dispatch` with `publish=true` from `main`, and builds darwin-arm64, darwin-x64, linux-x64, linux-x64-musl, linux-arm64, linux-arm64-musl, win32-x64, win32-arm64. The `verify` job derives the version from `npm/nub/package.json` at the dispatched commit and the release creates the `v<version>` tag itself. Stages via npm OIDC trusted publishing (no secrets), then promotes the GitHub Release with binary artifacts once the maintainer approves the staged versions. Re-running a release whose tag already exists is supported: dispatch with `publish=true` and select that tag.
 
 **Version regime:** stay in `0.0.x` until public launch; bump to `0.1.0` only when the whitepaper, benchmarks, and install experience are polished.

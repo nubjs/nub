@@ -542,7 +542,7 @@ fn a_failing_required_dependency_build_still_fails_the_install() {
         r#"{
             "name": "required-dep",
             "version": "1.0.0",
-            "scripts": { "postinstall": "exit 1" }
+            "scripts": { "postinstall": "exit 3" }
         }"#,
     );
     sbx.write_manifest(
@@ -553,11 +553,79 @@ fn a_failing_required_dependency_build_still_fails_the_install() {
         }"#,
     );
 
+    // `.code(3)`, not `.failure()`: the script's own exit code is the
+    // install's, as under npm, pnpm and `run` — neither the generic 1 nor
+    // the exit table's 50 (nubjs/nub#670).
     sbx.cmd()
         .args(["install", "--dangerously-allow-all-builds"])
         .assert()
-        .failure()
+        .code(3)
         .stderr(predicates::str::contains("required-dep"));
+}
+
+#[test]
+fn every_failed_required_build_is_reported_and_the_first_sets_the_exit_code() {
+    // Three required builds fail in the same phase with distinct codes. All
+    // three must be named — not whichever the scheduler drained first — and
+    // the exit code is the FIRST failure's in build order, so the same
+    // fixture answers the same way every run (nubjs/nub#670).
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    for (name, code) in [("failing-a", 3), ("failing-b", 4), ("failing-c", 7)] {
+        sbx.write_file(
+            &format!("{name}/package.json"),
+            &format!(
+                r#"{{
+                    "name": "{name}",
+                    "version": "1.0.0",
+                    "scripts": {{ "postinstall": "exit {code}" }}
+                }}"#
+            ),
+        );
+    }
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-many-failed-builds",
+            "version": "0.0.0",
+            "dependencies": {
+                "failing-a": "file:./failing-a",
+                "failing-b": "file:./failing-b",
+                "failing-c": "file:./failing-c"
+            }
+        }"#,
+    );
+
+    sbx.cmd()
+        .args(["install", "--dangerously-allow-all-builds"])
+        .assert()
+        .code(3)
+        .stderr(predicates::str::contains("3 dependency builds failed"))
+        .stderr(predicates::str::contains("failing-a@1.0.0"))
+        .stderr(predicates::str::contains("exited with code 4"))
+        .stderr(predicates::str::contains("failing-b@1.0.0"))
+        .stderr(predicates::str::contains("exited with code 7"))
+        .stderr(predicates::str::contains("failing-c@1.0.0"));
+}
+
+#[test]
+fn a_failing_root_postinstall_exits_with_the_scripts_code() {
+    // The root hook takes a different wrapper from a dependency build and
+    // used to flatten the script error to a string the same way.
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-root-postinstall",
+            "version": "0.0.0",
+            "scripts": { "postinstall": "exit 3" }
+        }"#,
+    );
+
+    sbx.cmd()
+        .args(["install"])
+        .assert()
+        .code(3)
+        .stderr(predicates::str::contains("root postinstall script failed"));
 }
 
 #[test]
@@ -655,5 +723,73 @@ fn run_reports_a_missing_command_like_a_shell() {
         assert.code(127);
     } else {
         assert.failure();
+    }
+}
+
+/// What a `.bin/<name>` shim resolves to: the link target when it is a
+/// symlink, else the wrapper's text (which names its target).
+fn bin_shim_target(shim: &std::path::Path) -> String {
+    match fs::read_link(shim) {
+        Ok(target) => target.to_string_lossy().into_owned(),
+        Err(_) => fs::read_to_string(shim).unwrap(),
+    }
+}
+
+/// An importer's own `bin` never takes a name a dependency claimed. A
+/// package that builds itself with its own released version (rollup's
+/// `prepare` runs the devDependency `rollup`) was handed its own unbuilt
+/// `dist/bin` instead, and the build died on the missing file. The
+/// dependency's shim wins in both layouts; an own bin under a free name is
+/// still linked.
+#[test]
+fn an_importers_own_bin_never_shadows_a_dependencys_bin() {
+    let _guard = e2e_lock();
+    for linker_args in [&[][..], &["--node-linker=hoisted"][..]] {
+        let sbx = Sandbox::new();
+        sbx.write_file(
+            "vendor/tool/package.json",
+            r#"{ "name": "tool", "version": "1.0.0", "bin": { "tool": "cli.js" } }"#,
+        );
+        sbx.write_file(
+            "vendor/tool/cli.js",
+            "#!/usr/bin/env node\nconsole.log('dep')\n",
+        );
+        sbx.write_manifest(
+            r#"{
+                "name": "tool",
+                "version": "0.0.0",
+                "bin": { "tool": "dist/tool.js", "tool-dev": "dev.js" },
+                "devDependencies": { "tool": "file:./vendor/tool" }
+            }"#,
+        );
+        sbx.cmd()
+            .arg("install")
+            .args(linker_args)
+            .assert()
+            .success();
+
+        let bin_dir = sbx.project.join("node_modules/.bin");
+        let shims: Vec<_> = ["tool", "tool.cmd"]
+            .iter()
+            .map(|name| bin_dir.join(name))
+            .filter(|path| path.symlink_metadata().is_ok())
+            .collect();
+        assert!(
+            !shims.is_empty(),
+            "the dependency's bin is linked ({linker_args:?})"
+        );
+        for shim in shims {
+            let target = bin_shim_target(&shim);
+            assert!(
+                target.contains("cli.js") && !target.contains("dist/tool.js"),
+                "{} runs the dependency, not the importer's own unbuilt bin ({linker_args:?}):\n{target}",
+                shim.display()
+            );
+        }
+        assert!(
+            bin_dir.join("tool-dev").symlink_metadata().is_ok()
+                || bin_dir.join("tool-dev.cmd").symlink_metadata().is_ok(),
+            "an own bin under a free name is still linked ({linker_args:?})"
+        );
     }
 }

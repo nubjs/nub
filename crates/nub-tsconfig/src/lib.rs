@@ -197,7 +197,8 @@ pub fn diagnostics(dir: &str, explicit: Option<&str>) -> Vec<String> {
 /// until the install has run, and the user would read a warning about their own
 /// devDependency on every CI run. The result is memoized like every other load,
 /// so a later loud call in the same process for the same directory stays quiet
-/// too — the PM process never reaches one.
+/// too, and the path lands in [`reported_config_paths`] so a lifecycle child
+/// handed [`REPORTED_ENV`] stays quiet as well.
 pub fn probe_diagnostics(dir: &str, explicit: Option<&str>) -> Vec<String> {
     load_for_dir_with(dir, explicit, Report::No)
         .diagnostics
@@ -211,8 +212,11 @@ enum Report {
     No,
 }
 
-/// Config paths this process has already written a warning for. The CLI hands
-/// these to the child through [`REPORTED_ENV`] so the addon does not repeat them.
+/// Config paths this process has already settled the warning for — written it,
+/// or deliberately withheld it on a [`probe_diagnostics`] load. The CLI hands
+/// these to the child through [`REPORTED_ENV`] so the addon does not repeat them:
+/// a lifecycle script's TypeScript child would otherwise announce the very
+/// `extends` target the script is about to generate.
 pub fn reported_config_paths() -> Vec<String> {
     reported().lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
@@ -234,12 +238,14 @@ fn reported() -> &'static Mutex<Vec<String>> {
     REPORTED.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// Write each diagnostic to stderr once per process, then remember the path.
+/// Settle the diagnostics for a config path once per process: write them to
+/// stderr under `Report::Yes`, withhold them under `Report::No`, and remember the
+/// path either way so neither this process nor a child says them again.
 ///
 /// Deduped on the config path, because `build_loaded` runs once per importer
 /// DIRECTORY and a project resolves the same tsconfig from many of them. Each
 /// message already names the file it belongs to, so nothing is prefixed here.
-fn report_diagnostics(config_path: &str, diags: &[String]) {
+fn report_diagnostics(config_path: &str, diags: &[String], report: Report) {
     if diags.is_empty() {
         return;
     }
@@ -253,8 +259,10 @@ fn report_diagnostics(config_path: &str, diags: &[String]) {
     }
     seen.push(path);
     drop(seen);
-    for diag in diags {
-        eprintln!("Nub: {diag}");
+    if report == Report::Yes {
+        for diag in diags {
+            eprintln!("Nub: {diag}");
+        }
     }
 }
 
@@ -304,9 +312,7 @@ fn build_loaded(dir: &str, explicit: Option<&str>, report: Report) -> Loaded {
             // the CLI can refuse the run; a silent fallback to defaults here is
             // indistinguishable from having no tsconfig at all (#731).
             diagnostics.push(e);
-            if report == Report::Yes {
-                report_diagnostics(&config_path, &diagnostics);
-            }
+            report_diagnostics(&config_path, &diagnostics, report);
             return Loaded {
                 path: Some(slash(&config_path)),
                 compiler_options: None,
@@ -317,9 +323,7 @@ fn build_loaded(dir: &str, explicit: Option<&str>, report: Report) -> Loaded {
             };
         }
     };
-    if report == Report::Yes {
-        report_diagnostics(&config_path, &diagnostics);
-    }
+    report_diagnostics(&config_path, &diagnostics, report);
 
     let co = parsed
         .get("compilerOptions")
@@ -917,38 +921,71 @@ fn resolve_from_package_json(pkg_json_path: &str, subpath: &str, direct: bool) -
     )
 }
 
-/// Minimal subset of `resolve-pkg-maps`'s `resolveExports` covering the shapes a
-/// `@tsconfig/*` package uses: a `"."`/subpath key whose value is a string or a
-/// conditions object. Returns the first matching string target, or `None` when no
-/// condition matched (get-tsconfig treats that as the `false` short-circuit).
+/// Subset of `resolve-pkg-maps`'s `resolveExports` covering the shapes a tsconfig
+/// package uses: a `"."`/subpath key — exact or a single-`*` pattern — whose value
+/// is a string, an array, or a conditions object. Returns the first matching
+/// string target, or `None` when the subpath is not exported or no condition
+/// matched (get-tsconfig treats that as the `false` short-circuit).
+///
+/// Patterns are not a nicety: astro publishes `./tsconfigs/*: ./tsconfigs/*.json`,
+/// so `extends: "astro/tsconfigs/strict"` has no exact key to hit, and `tsc`
+/// resolves it through the pattern (#804).
 fn resolve_exports(exports: &Value, subpath: &str, conditions: &[&str]) -> Option<String> {
-    let key = if subpath.is_empty() {
+    let request = if subpath.is_empty() {
         ".".to_string()
     } else {
         format!("./{subpath}")
     };
-    // exports may be a bare string (only valid for the "." subpath), a conditions
-    // object, or a subpath map.
-    match exports {
-        Value::String(s) => {
-            if subpath.is_empty() {
-                Some(s.clone())
-            } else {
-                None
-            }
+    // A bare string, array or conditions object is sugar for `{ ".": <that> }`,
+    // so it answers the root request only.
+    let (target, star) = match exports {
+        Value::Object(map) if map.keys().any(|k| k.starts_with('.')) => {
+            find_matching_path(map, &request)?
         }
-        Value::Object(map) => {
-            // Subpath map (keys starting with ".") vs a bare conditions object.
-            let is_subpath_map = map.keys().any(|k| k.starts_with('.'));
-            if is_subpath_map {
-                let target = map.get(&key)?;
-                resolve_conditional(target, conditions)
-            } else {
-                resolve_conditional(exports, conditions)
-            }
+        _ if subpath.is_empty() => (exports, None),
+        _ => return None,
+    };
+    let resolved = resolve_conditional(target, conditions)?;
+    Some(match star {
+        Some(star) => resolved.replace('*', star),
+        None => resolved,
+    })
+}
+
+/// resolve-pkg-maps' `findMatchingPath` (Node's `PATTERN_KEY_COMPARE`): an exact
+/// key wins outright; otherwise the single-`*` pattern with the longest prefix,
+/// ties broken by the longer key. Yields the matched value and the text the `*`
+/// stood for, which the target substitutes back in.
+fn find_matching_path<'a>(
+    map: &'a serde_json::Map<String, Value>,
+    request: &'a str,
+) -> Option<(&'a Value, Option<&'a str>)> {
+    if !request.contains('*') {
+        if let Some(value) = map.get(request) {
+            return Some((value, None));
         }
-        _ => None,
     }
+    // Specificity is (prefix length, key length), compared lexicographically.
+    let mut best: Option<((usize, usize), &Value, &str)> = None;
+    for (key, value) in map {
+        let Some((prefix, suffix)) = key.split_once('*') else {
+            continue;
+        };
+        let Some(star) = request
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix(suffix))
+        else {
+            continue;
+        };
+        if suffix.contains('*') || star.is_empty() {
+            continue;
+        }
+        let specificity = (prefix.len(), key.len());
+        if best.is_none_or(|(current, _, _)| specificity > current) {
+            best = Some((specificity, value, star));
+        }
+    }
+    best.map(|(_, value, star)| (value, Some(star)))
 }
 
 /// Resolve a conditions object / string / array target against the condition set.
@@ -1391,7 +1428,9 @@ mod tests {
     fn project(files: &[(&str, &str)]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         for (name, body) in files {
-            std::fs::write(dir.path().join(name), body).unwrap();
+            let path = dir.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
         }
         dir
     }
@@ -1563,6 +1602,67 @@ mod tests {
         assert!(
             reported.len() == 1 && reported[0].contains("tsconfig.json"),
             "expected one diagnostic naming the unparseable config; got {reported:?}",
+        );
+    }
+
+    /// #804: astro publishes its tsconfigs behind a `*` pattern pair, so the
+    /// request `astro/tsconfigs/strict` has no exact `exports` key and only the
+    /// pattern reaches `strict.json`. `tsc` resolves it; an exact-key lookup does
+    /// not, and the miss short-circuits the plain on-disk probe that would have.
+    #[test]
+    fn a_package_extends_resolves_through_an_exports_subpath_pattern() {
+        let dir = project(&[
+            (
+                "node_modules/astro/package.json",
+                r#"{ "exports": { ".": "./index.js",
+                                  "./tsconfigs/*.json": "./tsconfigs/*",
+                                  "./tsconfigs/*": "./tsconfigs/*.json" } }"#,
+            ),
+            (
+                "node_modules/astro/tsconfigs/base.json",
+                r#"{ "compilerOptions": { "customConditions": ["from-astro"] } }"#,
+            ),
+            (
+                "node_modules/astro/tsconfigs/strict.json",
+                r#"{ "extends": "./base.json", "compilerOptions": { "strict": true } }"#,
+            ),
+            (
+                "tsconfig.json",
+                r#"{ "extends": "astro/tsconfigs/strict" }"#,
+            ),
+        ]);
+        assert_eq!(read(&dir), vec!["from-astro"]);
+        assert!(
+            diags(&dir).is_empty(),
+            "unexpected diagnostics: {:?}",
+            diags(&dir)
+        );
+    }
+
+    /// The other side of the same rule, and the reason the short-circuit stays: a
+    /// package that declares `exports` closes every subpath it does not list. The
+    /// file is on disk, and `tsc` still reports TS6053 rather than probing for it.
+    #[test]
+    fn a_package_extends_outside_its_exports_does_not_fall_back_to_the_disk() {
+        let dir = project(&[
+            (
+                "node_modules/astro/package.json",
+                r#"{ "exports": { "./tsconfigs/other": "./tsconfigs/strict.json" } }"#,
+            ),
+            (
+                "node_modules/astro/tsconfigs/strict.json",
+                r#"{ "compilerOptions": { "customConditions": ["from-astro"] } }"#,
+            ),
+            (
+                "tsconfig.json",
+                r#"{ "extends": "astro/tsconfigs/strict" }"#,
+            ),
+        ]);
+        assert!(read(&dir).is_empty());
+        let reported = diags(&dir);
+        assert!(
+            reported.len() == 1 && reported[0].contains("astro/tsconfigs/strict"),
+            "expected one diagnostic naming the unexported target; got {reported:?}",
         );
     }
 

@@ -246,6 +246,8 @@ ok
 
 Two harnesses under `tests/compile-corpus/` do this continuously. One varies **which package** is compiled, across pure JavaScript, node-gyp, node-pre-gyp and napi-rs packages. The other varies **the shape of the tree** it sits in — a nested duplicate version, a scoped package, a symlinked workspace member, an isolated install, a peer dependency, and a package that reads a data file. The second axis is the one that finds path defects, because it inspects the payload rather than only running the artifact: a tree shape can produce a collision that no ordinary package would, and the binary still exits 0 printing the right answer.
 
+The package corpus requires a successful plain-Node control and compares complete stdout on both cold and warm launches, with source and dependencies hidden. Its SQLite fixture verifies rollback and persistence after reopen; its Express fixture sends an HTTP request to the compiled server.
+
 ### Platform coverage
 
 Nub publishes eight targets. Each is verified by building an artifact and running it, rather than inferred from a sibling that shares an operating system or an architecture.

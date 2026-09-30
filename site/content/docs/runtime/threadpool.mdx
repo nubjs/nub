@@ -19,7 +19,9 @@ Read the [full docs](https://docs.libuv.org/en/v1.x/threadpool.html) for the thr
 
 ## Priority
 
-On Linux the threads beyond the first four run at [nice](https://man7.org/linux/man-pages/man7/sched.7.html) 10, about a tenth of the scheduler weight of a normal thread. On an idle box they run at full speed. Under contention they yield most of the CPU to the other work on the machine.
+On Linux the threads beyond the first four run at [nice](https://man7.org/linux/man-pages/man7/sched.7.html) 10, about a tenth of the scheduler weight of a normal thread. On an idle box they run at full speed. Under contention they yield most of the CPU to the other threads in the same cgroup, which includes your own event loop.
+
+A nice value ranks a thread only against the tasks in its own cgroup. What keeps the pool from taking CPU from a neighbouring container or service is that cgroup's own CPU share, which the kernel fixes by weight however many threads the group runs. So a larger pool does not take CPU from another container, and inside one cgroup the demotion is what keeps it off everything else there.
 
 ## Child processes
 
@@ -28,3 +30,5 @@ A process your app spawns, including a `cluster` worker, starts with Node's defa
 ## Opting out
 
 A `UV_THREADPOOL_SIZE` of your own wins. [`--node`](/docs/runtime#--node) and [`NODE_COMPAT`](/docs/runtime#node_compat) leave the pool at Node's default.
+
+The pool size is also how many tasks run at once, so a memory-heavy task such as resizing a large image holds more in flight on a bigger pool. Set the variable yourself when memory is the limit rather than CPU.

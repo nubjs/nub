@@ -52,6 +52,11 @@ const { installSyncPolyfills } = __require("./polyfills.cjs");
 // Tier-independent — same call in the fast entry (preload.cjs).
 common.installVersionMarker();
 common.installThreadpoolPolicy();
+// Consume the launcher's fetch-handler marker BEFORE any user code — the configured
+// preload chain below included — and note which entry it names, so the loader
+// worker registered below can announce that entry's load. Arming the pass itself
+// waits for the end of this file (`installServeEntry`).
+common.claimServeEntry();
 
 // ── Tier detection ──────────────────────────────────────────────────
 // This `.mjs` preload should only ever be `--import`ed for the compat tier (the
@@ -98,7 +103,11 @@ if (__isFastTier) {
   // On the compat tier proper (18.19–22.14, and 23.0–23.4) registerHooks doesn't
   // exist, so the loader-worker is the only hook surface; the user has no action
   // to take.
-  common.registerLoaderWorker("./preload-async-hooks.mjs", import.meta.url);
+  common.registerLoaderWorker(
+    "./preload-async-hooks.mjs",
+    import.meta.url,
+    common.loaderWorkerOptions(),
+  );
   // (The main-thread require() shim's module-format + decorator detection is a
   // synchronous native addon call now — no parser warm-up; the old
   // `await core.ensureParser()` for the ESM-only oxc-parser is gone.)
@@ -181,3 +190,16 @@ if (core.sweepDue()) {
 // A no-op unless the spawn path put the chainer on nub's own preload rather than its
 // own `--import`. See importUserPreloadChain.
 await common.importUserPreloadChain();
+
+// ── Default-export `fetch` handler ──────────────────────────────────
+// Arms the deferred pass that serves an entry whose default export is a `fetch`
+// handler. Tier-independent — the same call sits in preload.cjs.
+//
+// LAST, AFTER the awaited preload chain above, and that order is load-bearing. The
+// pass arms a `setImmediate`, and the chainer's own `await import()` per entry yields
+// to the event loop — so arming before it put the check phase BETWEEN two of the
+// user's preload entries, where the pass imported the entry and ran it ahead of them.
+// Arming here means every preload nub carries has already run. (A preload on its own
+// `--import` token can still follow; `claimServeEntry` detected that case up front,
+// and the pass then waits for the loader worker to announce the entry's load.)
+common.installServeEntry();
