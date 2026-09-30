@@ -1,9 +1,9 @@
 ---
 title: Nub vs Vite+
-description: How Nub and Vite Plus overlap and where their goals diverge — Nub is a full package manager and a better runtime on stock Node; Vite Plus is an integrated frontend toolchain.
+description: Where Nub and Vite Plus overlap and where they differ. Nub is a package manager and runtime layer on stock Node; Vite Plus is an integrated frontend toolchain.
 ---
 
-Nub and Vite+ overlap on the everyday Node workflow — both run your `package.json` scripts, both run package binaries, and both provision the right Node version for a project on the fly — but their goals are ultimately very different. Nub is a better developer experience on top of stock `node`; [Vite+](https://viteplus.dev) is the integrated frontend toolchain from the Vite team.
+Nub and [Vite+](https://viteplus.dev) overlap on the everyday Node workflow: both run `package.json` scripts and package binaries, and both provision a project's Node version. Beyond that they differ. Nub is a runtime and package manager on stock `node`; Vite+ is the Vite team's integrated frontend toolchain.
 
 | Functionality | Nub | Vite+ |
 | --- | :-: | :-: |
@@ -22,14 +22,14 @@ Nub and Vite+ overlap on the everyday Node workflow — both run your `package.j
 
 ## Running files
 
-Both tools run a file, and both fetch the project's Node version on demand — the difference is what happens to the file in between.
+Both tools run a file on the project's Node version. The difference is what happens to the file.
 
 ```bash
 nub app.ts        # augmented, on stock Node
 vp node app.ts    # plain Node
 ```
 
-Running a file with Nub augments it — the batteries-included feel of a runtime like Bun, still on the stock `node` binary:
+Nub augments the file it runs, on the stock `node` binary:
 
 - **TypeScript** — the full syntax surface: enums, decorators, parameter properties, `import =`, and extensionless imports
 - **JSX** — `.jsx` and `.tsx` run directly, with the runtime resolved from your `tsconfig`
@@ -38,14 +38,16 @@ Running a file with Nub augments it — the batteries-included feel of a runtime
 - **Data imports** — YAML, TOML, JSON5, JSONC, and text files load like JSON
 - **Polyfilled APIs** — `Worker`, web storage, `Temporal`, `URLPattern`, and other newer globals
 
-Vite+ runs files through `vp node`, but that path is unaugmented: it defers to Node's own native type-stripping, with no `tsconfig`-aware resolution and none of those loaders or polyfills.
+Running a file with `vp node` is unaugmented. It relies on Node's own type stripping, with no `tsconfig`-aware resolution and none of those loaders or polyfills.
 
-This is transpilation, not type-checking — Nub runs the TypeScript above but never type-checks it. For that, bring your own type checker.
+Nub transpiles TypeScript but does not type check it; bring your own type checker.
 
 ## Package management
 
-Nub is a full package manager, powered by the embedded [aube](https://github.com/jdx/aube) engine — it resolves the dependency graph, links `node_modules`, and round-trips whatever lockfile your project already uses. Vite+ is a [passthrough](https://viteplus.dev/guide/env) to an existing package manager: in a pnpm project, `vp install` runs pnpm's install.
+Nub is a full package manager, powered by the embedded [aube](https://github.com/jdx/aube) engine. It resolves the dependency graph, links `node_modules`, and round-trips the lockfile your project already uses.
+
+Vite+ [passes through](https://viteplus.dev/guide/env) to an existing package manager: in a pnpm project, `vp install` runs pnpm's install.
 
 ## The frontend toolchain
 
-Vite+ is far broader in scope. It bundles the whole frontend toolchain — the dev server, bundler, formatter, linter, type checker, and test runner named in the table above — as one tested stack. Nub is deliberately unopinionated there, leaving those choices to whatever tools and frameworks you pull in as `devDependencies`.
+Vite+ is broader in scope. It ships the dev server, bundler, formatter, linter, type checker, and test runner from the table above as one tested stack. Nub leaves those to the tools and frameworks you install as `devDependencies`.
