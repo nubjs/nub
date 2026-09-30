@@ -4,7 +4,7 @@ description: A default-exported object with a fetch method is served over HTTP. 
 unpublished: true
 ---
 
-Export an object with a `fetch` method and Nub serves it:
+Export an object with a `fetch` method and Nub serves it.
 
 ```ts
 // server.ts
@@ -20,24 +20,11 @@ $ nub server.ts
 Listening on http://localhost:3000
 ```
 
-The handler takes a WHATWG [`Request`](https://developer.mozilla.org/en-US/docs/Web/API/Request) and returns a [`Response`](https://developer.mozilla.org/en-US/docs/Web/API/Response), or a promise for one. Nub binds a port, converts each inbound request, and writes the response back.
-
-## Portability
-
-Cloudflare Workers, Bun, Deno and Vercel all read this shape, so the file above runs unmodified on any of them:
-
-```sh
-nub server.ts          # Nub
-bun server.ts          # Bun
-deno serve server.ts   # Deno
-wrangler deploy        # Cloudflare Workers
-```
-
-Each of those runtimes passes a second argument of its own — bindings on Workers, the server on Bun, connection info on Deno. Nub passes one argument, so a handler that reads only the request is the portable form.
+The handler takes a WHATWG [`Request`](https://developer.mozilla.org/en-US/docs/Web/API/Request) and returns a [`Response`](https://developer.mozilla.org/en-US/docs/Web/API/Response), or a promise for one.
 
 ## What Nub serves
 
-The shape of the default export is the whole trigger. A file whose default export is an object with a callable `fetch` becomes a server; every other file runs and exits the way `node` runs it.
+A file whose default export is an object with a callable `fetch` becomes a server. Every other file runs and exits the way `node` runs it.
 
 ```ts
 export default { fetch() { … } };        // served
@@ -45,7 +32,7 @@ export default { name: "config" };       // ordinary script
 export function handler() { … }          // ordinary script
 ```
 
-CommonJS works through the same check, so a `.ts` file in a package without `"type": "module"` is served too:
+CommonJS goes through the same check, so a `.ts` file in a package without `"type": "module"` is served too.
 
 ```js
 // server.cjs
@@ -73,7 +60,7 @@ $ HOST=127.0.0.1 nub server.ts
 Listening on http://127.0.0.1:3000
 ```
 
-To keep a port with the project, set it in a script. Scripts run through a [POSIX shell](/docs/run#the-script-shell) on every platform, so the assignment works on Windows too:
+To keep a port with the project, set it in a script. Scripts run through a [POSIX shell](/docs/run#the-script-shell) on every platform, so the assignment works on Windows too.
 
 ```json
 { "scripts": { "start": "PORT=8080 nub server.ts" } }
@@ -98,11 +85,11 @@ export default {
 } satisfies ExportedHandler;
 ```
 
-The import is type-only and is removed when the file is compiled, so it still runs on every runtime listed under [Portability](#portability).
+The import is type-only and compiles away, so the file still runs on the runtimes under [Portability](#portability).
 
 ## Watch mode
 
-Running the file under [`nub watch`](/docs/watch) restarts the server on every edit:
+Running the file under [`nub watch`](/docs/watch) restarts the server on every edit.
 
 ```console
 $ nub watch server.ts
@@ -111,18 +98,27 @@ Listening on http://localhost:3000
 
 ## Compiled executables
 
-[`nub compile`](/docs/compile) carries the handler into the executable it builds, so the compiled server binds a port on launch the way the source file does:
+An executable built with [`nub compile`](/docs/compile) carries the handler and binds a port on launch, like the source file.
 
 ```console
 $ ./server
 Listening on http://localhost:3000
 ```
 
-## Plain Node
+## Portability
 
-Passing [`--node`](/docs/node) runs the file on stock Node, where a default-exported `fetch` means nothing and the process exits once the module has evaluated.
+Cloudflare Workers, Bun, Deno and Vercel all read this shape, so the same file runs unmodified on each.
 
-To serve the same file without Nub, install an adapter that reads the export and binds the listener. [`srvx`](https://www.npmjs.com/package/srvx) and [`@hono/node-server`](https://www.npmjs.com/package/@hono/node-server) both do, and neither asks you to change the handler.
+```sh
+nub server.ts          # Nub
+bun server.ts          # Bun
+deno serve server.ts   # Deno
+wrangler deploy        # Cloudflare Workers
+```
+
+Each of those runtimes passes a second argument of its own: bindings on Workers, the server on Bun, connection info on Deno. Nub passes only the request, so a handler that reads only the request is the portable form.
+
+Plain Node, including a run under [`--node`](/docs/runtime#--node), does not serve the export; the process exits once the module has evaluated. To serve the file there, use an adapter that reads the export and binds the listener, such as [`srvx`](https://www.npmjs.com/package/srvx) or [`@hono/node-server`](https://www.npmjs.com/package/@hono/node-server). Neither needs changes to the handler.
 
 ```sh
 npx srvx ./server.ts
