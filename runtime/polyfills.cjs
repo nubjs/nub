@@ -1317,7 +1317,13 @@ function installMathSumPrecise() {
 function installJsonParseOptions() {
   const nativeParse = JSON.parse;
   if (typeof JSON.parse === "function") {
-    const probe = nativeParse("{}", { freeze: true });
+    // A parser installed before this preload (Yarn PnP's `.pnp.cjs` loads first)
+    // may reject a non-callable second argument, so a throw reads as "no support"
+    // rather than aborting startup.
+    let probe;
+    try {
+      probe = nativeParse("{}", { freeze: true });
+    } catch {}
     if (typeof probe === "object" && probe !== null && Object.isFrozen(probe)
         && Object.getPrototypeOf(probe) === null) {
       return;
@@ -1345,19 +1351,22 @@ function installJsonParseOptions() {
       if ((!freezeOpt && !nullProto) || typeof result !== "object" || result === null) {
         return result;
       }
-      const stack = [result];
-      while (stack.length > 0) {
-        const node = stack.pop();
+      // Indexed with a null prototype so no Array.prototype method or indexed
+      // accessor that user code installs after the preload can reach the walk.
+      const stack = setPrototypeOf([result], null);
+      let top = 1;
+      while (top > 0) {
+        const node = stack[--top];
         if (isArray(node)) {
           for (let i = 0; i < node.length; i++) {
             const v = node[i];
-            if (typeof v === "object" && v !== null) stack.push(v);
+            if (typeof v === "object" && v !== null) stack[top++] = v;
           }
         } else {
           const ks = keys(node);
           for (let i = 0; i < ks.length; i++) {
             const v = node[ks[i]];
-            if (typeof v === "object" && v !== null) stack.push(v);
+            if (typeof v === "object" && v !== null) stack[top++] = v;
           }
           if (nullProto) setPrototypeOf(node, null);
         }

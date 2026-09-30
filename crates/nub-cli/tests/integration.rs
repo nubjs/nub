@@ -3087,7 +3087,14 @@ fn json_parse_options_follow_spec() {
         &script,
         r#"
 import { createRequire } from "node:module";
-const nativeParse = JSON.parse;
+// A parser installed by an earlier preload that rejects a non-callable second
+// argument: the install-time probe must not abort on it.
+const engineParse = JSON.parse;
+const nativeParse = function parse(text, reviver) {
+  if (reviver !== undefined && typeof reviver !== "function") throw new TypeError("reviver");
+  return engineParse(text, reviver);
+};
+JSON.parse = nativeParse;
 createRequire(import.meta.url)(process.argv[2]).installSyncPolyfills({});
 
 const failures = [];
@@ -3146,6 +3153,19 @@ check("a callable is a reviver and its option-named properties are ignored", () 
   const r = JSON.parse('{"a":1,"b":[2]}', reviver);
   return keys.join() === "a,0,b," && r.a === 2 && r.b[0] === 4 && !Object.isFrozen(r) &&
     proto(r) === Object.prototype;
+});
+check("the walk ignores Array.prototype changes made after the preload", () => {
+  const AP = Array.prototype;
+  const saved = { push: AP.push, pop: AP.pop };
+  AP.push = function () { return 0; };
+  AP.pop = function () { return undefined; };
+  Object.defineProperty(AP, "1", { set() {}, configurable: true });
+  try {
+    return deepFrozen(JSON.parse('{"x":{"y":[{}]}}', { freeze: true }));
+  } finally {
+    Object.assign(AP, saved);
+    delete AP[1];
+  }
 });
 check("deep nesting is walked without recursion", () => {
   const depth = 100000;
