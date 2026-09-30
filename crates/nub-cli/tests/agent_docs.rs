@@ -28,7 +28,7 @@ fn default_output_is_help_and_toc_without_page_content() {
     let (help, toc) = output.split_once("Table of contents:").unwrap();
     assert_eq!(format!("Table of contents:{toc}"), list);
     assert!(help.lines().count() <= 14, "help should remain concise");
-    assert!(!output.contains("all-in-one toolkit"));
+    assert!(!output.contains("## The toolkit"));
     assert!(!output.contains("```"));
 }
 
@@ -47,7 +47,7 @@ fn list_aliases_print_only_page_paths_and_titles() {
 #[test]
 fn explicit_pages_still_print_markdown_and_accept_link_targets() {
     let overview = stdout(&["--page", "/docs"]);
-    assert!(overview.contains("all-in-one toolkit"));
+    assert!(overview.contains("## The toolkit"));
     assert!(overview.contains("```bash"));
     for alias in ["/", "docs", "/docs#install"] {
         assert_eq!(overview, stdout(&["--page", alias]));
