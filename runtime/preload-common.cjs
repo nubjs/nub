@@ -1814,14 +1814,25 @@ const THREADPOOL_NODE_DEFAULT = 4;
 const THREADPOOL_EXTRA_NICE = 10;
 const THREADPOOL_WORKERS = Symbol.for("nub.threadpool.workers");
 
-// One pool submit, and nothing else: the addon's private-loop task, or `fs.access`
-// when the addon is missing. The addon is the sibling transform-core loads moments
-// later, through the same filename, so Node's module cache hands out one instance.
-function buildThreadpool() {
+// The addon that owns the submit, or null where it cannot be loaded. It is the
+// sibling transform-core loads moments later, through the same filename, so Node's
+// module cache hands out one instance. Loaded BEFORE the thread-id snapshot around
+// the submit: loading it starts threads of its own (a native runtime's pool), and a
+// snapshot that spans the load counts those among the pool's workers — measured on
+// an 8-core Linux box as every worker demoted, and its first four spared instead.
+function loadNativeAddon() {
   try {
     const addon = require(require("node:path").join(__dirname, "addons", "nub-native.node"));
-    if (typeof addon.warmThreadpool === "function" && addon.warmThreadpool()) return;
-  } catch {}
+    return typeof addon.warmThreadpool === "function" ? addon : null;
+  } catch {
+    return null;
+  }
+}
+
+// One pool submit, and nothing else: the addon's private-loop task, or `fs.access`
+// when the addon is missing.
+function buildThreadpool(addon) {
+  if (addon !== null && addon.warmThreadpool()) return;
   require("node:fs").access("/", () => {});
 }
 
@@ -1844,8 +1855,9 @@ function installThreadpoolPolicy() {
     const tids = () => fs.readdirSync("/proc/self/task").map(Number).filter(Boolean);
     let workers = linux ? process[THREADPOOL_WORKERS] : undefined;
     if (workers === undefined) {
+      const addon = loadNativeAddon();
       const before = linux ? new Set(tids()) : null;
-      buildThreadpool();
+      buildThreadpool(addon);
       const isWorker = (t) => {
         if (!before.has(t)) return true;
         try {
@@ -1927,11 +1939,25 @@ function claimServeEntry() {
 // the additivity guarantee this feature is supposed to preserve. So the pass runs on
 // three triggers, none of which can get there first:
 //
-//   1. A `setImmediate`, which reads a CommonJS entry straight off `process.mainModule`
-//      and imports NOTHING. `Module.runMain` is synchronous, so a CommonJS entry has
-//      finished by the check phase. It may only `import()` when no preload can still
-//      follow nub's own (`anotherPreloadMayFollow`), or when a hook has already seen
-//      Node start loading the entry.
+//   1. The first pass, which reads a CommonJS entry straight off `process.mainModule`
+//      and imports NOTHING. It may only `import()` when no preload can still follow
+//      nub's own (`anotherPreloadMayFollow`), or when a hook has already seen Node
+//      start loading the entry. WHEN it runs differs by tier, and the difference is
+//      what user code can see of it. A `--require` preload runs before Node calls
+//      `Module.runMain`, which loads a CommonJS entry synchronously, so the fast tier
+//      wraps that call once and runs the pass as it returns: a CommonJS entry is
+//      inspected in the same tick, with no timer, request or promise left for the
+//      program to observe — `async_hooks` sees no `before` it never saw an `init` for,
+//      `process.getActiveResourcesInfo()` is empty as under plain Node, and the loop
+//      does not turn an extra time (which ran an unref'd `setImmediate` plain Node
+//      never would; Node's own suite asserts on each). An ES module entry has only
+//      been started by then, so its pass is a microtask, which Node's own loader
+//      already leaves such an entry a dozen of. The compat tier's `--import` preload
+//      runs inside `runMain`, after it, so a `setImmediate` still carries its pass:
+//      a microtask queued there would run ahead of Node's own import of the entry.
+//      Neither is `.unref()`d or skippable: a synchronous script must still reach
+//      the pass, or a server whose module body does nothing asynchronous would exit
+//      before binding.
 //   2. The load hook seeing the entry (`noteEntryLoad`): Node imports the entry only
 //      after awaiting the last `--import`, so by then every preload has run and an
 //      `import()` can only join the job Node already made. This fires whatever the
@@ -1951,7 +1977,7 @@ function claimServeEntry() {
 // Declining to serve remains the right side to fail on where none of the three can
 // fire: reordering a user's preloads is a correctness break, and not binding a port
 // is not.
-function installServeEntry() {
+function installServeEntry(beforeMain) {
   const entry = serveEntry;
   if (entry === null) return;
   const report = (err) => {
@@ -1966,9 +1992,7 @@ function installServeEntry() {
     process.removeListener("beforeExit", late);
     return serveEntryIfHandler(entry, true).then(() => closeEntryChannel(entry)).catch(report);
   };
-  // Not `.unref()`d: a synchronous script must still reach this pass, or a server
-  // whose module body does nothing asynchronous would exit before binding.
-  setImmediate(() => {
+  const pass = () =>
     serveEntryIfHandler(entry, entry.loadSeen || !entry.mayFollow)
       .then((deferred) => {
         if (!deferred) {
@@ -1985,7 +2009,29 @@ function installServeEntry() {
         process.once("beforeExit", late);
       })
       .catch(report);
-  });
+  if (!beforeMain) {
+    setImmediate(pass);
+    return;
+  }
+  const runMain = module_.runMain;
+  if (typeof runMain !== "function") return;
+  // Node reads `Module.runMain` at the call, for exactly this kind of wrap. Restored
+  // as it runs: one entry, one pass. An entry that throws propagates out of the call
+  // as it would have, uninspected.
+  module_.runMain = function (...args) {
+    module_.runMain = runMain;
+    const result = runMain.apply(this, args);
+    let served;
+    try {
+      served = serveMainModuleIfHandler(entry);
+    } catch (err) {
+      report(err);
+      return result;
+    }
+    if (served) closeEntryChannel(entry);
+    else Promise.resolve().then(pass);
+    return result;
+  };
 }
 
 // The URLs a load hook may see the entry under, matched without query or fragment.
@@ -2038,8 +2084,12 @@ function fireEntryLoad(entry) {
   if (onLoad === null) return;
   entry.onLoad = null;
   // Out of the hook's own stack: the sync hook runs INSIDE Node's load of the entry,
-  // and an `import()` issued from there would re-enter the loader.
-  setImmediate(onLoad);
+  // and an `import()` issued from there would re-enter the loader. A microtask, not
+  // an immediate: Node has the entry's job by the time the stack unwinds, so the
+  // `import()` joins it, and this is only ever reached after the first pass declined
+  // to import — an entry on the ES-module loader's path, which Node's own loader
+  // already leaves promise reactions of its own behind on.
+  Promise.resolve().then(onLoad);
 }
 
 // For `registerLoaderWorker`, on the tiers whose hooks run in a loader worker: the
@@ -2181,12 +2231,7 @@ function anotherPreloadMayFollow() {
 // 20.19 and 22.14, which is what plain Node reports on each.
 async function serveEntryIfHandler(entry, mayImport) {
   if (entry.taken) return false;
-  const main = process.mainModule;
-  if (main && main.loaded && main.filename === entry.file) {
-    entry.taken = true;
-    serveIfHandler(main.exports);
-    return false;
-  }
+  if (serveMainModuleIfHandler(entry)) return false;
   if (!mayImport) return true;
   entry.taken = true;
   let ns;
@@ -2200,6 +2245,17 @@ async function serveEntryIfHandler(entry, mayImport) {
   }
   serveIfHandler(ns.default);
   return false;
+}
+
+// The synchronous half: a CommonJS entry Node has already run is inspected off
+// `process.mainModule`, with nothing imported and nothing deferred. True once the
+// entry has been taken this way.
+function serveMainModuleIfHandler(entry) {
+  const main = process.mainModule;
+  if (!(main && main.loaded && main.filename === entry.file)) return false;
+  entry.taken = true;
+  serveIfHandler(main.exports);
+  return true;
 }
 
 function serveIfHandler(exported) {

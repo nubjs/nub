@@ -284,8 +284,10 @@ if (core && core.sweepDue()) {
 // unless `claimServeEntry` above found this process marked as a top-level file
 // run. Placed after the tier branches so the shape check runs on either, and after
 // the eviction block for the same reason it is: nothing here may touch the
-// bootstrap module list.
-common.installServeEntry();
+// bootstrap module list. `true`: this `--require` preload runs before Node calls
+// `Module.runMain`, so the pass can ride that call (see the triggers above
+// `installServeEntry`); the `--import` entry cannot, and passes nothing.
+common.installServeEntry(true);
 
 // ── Lazy ESM-side-effect polyfills (R7) ─────────────────────────────
 // The two ESM side-effect polyfills — the browser-shape Worker global
