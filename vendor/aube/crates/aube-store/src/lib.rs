@@ -59,6 +59,49 @@ pub const INDEX_SUBDIR: &str = "index";
 /// single-`clonefile(2)` clone sources for the macOS whole-dir linker
 /// fast path. See [`Store::trees_dir`].
 pub const TREES_SUBDIR: &str = "trees";
+
+/// Separator between a tree key's coordinate and its content digest.
+/// `dep_path_to_filename` never emits `=` for a real dep path (npm names,
+/// semver versions and the hashed local/git/url forms cannot contain it),
+/// so the split in [`tree_key_coordinate`] is unambiguous.
+const TREE_KEY_CONTENT_SEPARATOR: char = '=';
+const TREE_KEY_CONTENT_HEX_LEN: usize = 32;
+
+/// Key of the extracted tree holding `index`, for the package whose
+/// virtual-store subdir name is `coordinate`.
+///
+/// The tree is cloned verbatim into every later materialization with the
+/// same key, so the key must determine the bytes. A coordinate alone does
+/// not: a `file:` tarball's dep path hashes its relative PATH, so two
+/// projects with `file:../p.tgz` — or one project whose tarball was
+/// rebuilt — share a coordinate while their contents differ, and keying by
+/// coordinate alone cloned the first tarball's files into every later
+/// install. The index content fingerprint is appended so a tree is only
+/// ever reused for byte-identical content. The coordinate stays as the
+/// prefix so `store prune` can match a tree to the live virtual-store
+/// entries that use it.
+pub fn tree_key(coordinate: &str, index: &PackageIndex) -> String {
+    let digest = index_content_fingerprint(index);
+    format!(
+        "{coordinate}{TREE_KEY_CONTENT_SEPARATOR}{}",
+        &digest[..TREE_KEY_CONTENT_HEX_LEN]
+    )
+}
+
+/// The coordinate part of a tree directory name — the inverse of
+/// [`tree_key`]. A name without a content digest (a tree written before
+/// trees were content-keyed) is returned unchanged.
+pub fn tree_key_coordinate(name: &str) -> &str {
+    match name.rsplit_once(TREE_KEY_CONTENT_SEPARATOR) {
+        Some((coordinate, digest))
+            if digest.len() == TREE_KEY_CONTENT_HEX_LEN
+                && digest.bytes().all(|b| b.is_ascii_hexdigit()) =>
+        {
+            coordinate
+        }
+        _ => name,
+    }
+}
 /// Registry of projects that have installed against the global virtual
 /// store, kept INSIDE it as `<virtual-store>/.projects/<hash>.json` records.
 /// A leading dot cannot collide with a store entry: entry names come from
@@ -543,7 +586,8 @@ impl Store {
     /// Root of the per-package *extracted-tree* tier, a sibling of the
     /// CAS `files/` dir at `<v1_dir>/trees/`. Each entry is a real,
     /// fully-materialized package directory (every file reflinked from
-    /// the CAS) keyed by the linker's virtual-store subdir name. It
+    /// the CAS) keyed by [`tree_key`] — the linker's virtual-store subdir
+    /// name plus a digest of the package's file content. It
     /// exists solely as a single-`clonefile(2)` clone *source* for the
     /// macOS whole-dir materialization fast path: the kernel clones the
     /// whole tree in one syscall instead of the linker reflinking each
@@ -556,9 +600,8 @@ impl Store {
         self.store_v1_dir().join(TREES_SUBDIR)
     }
 
-    /// On-disk path of the extracted tree for `tree_key` (the linker's
-    /// virtual-store subdir name — already filesystem-safe, with `/`
-    /// flattened to `+`, so it's a single path component). The tree
+    /// On-disk path of the extracted tree for `tree_key` (see
+    /// [`tree_key`] — a single filesystem-safe path component). The tree
     /// root *is* the package root: files sit at the same relative
     /// layout they'd have under `<entry>/node_modules/<name>/`.
     pub fn tree_path(&self, tree_key: &str) -> PathBuf {

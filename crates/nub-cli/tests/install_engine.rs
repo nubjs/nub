@@ -1519,6 +1519,60 @@ fn ci_dep_axis_flags_select_which_dependency_sets_link() {
     );
 }
 
+/// Two projects whose `file:` dependencies share a relative path — a tarball
+/// and a directory — but not their contents must each install their OWN
+/// files from one shared store. A local package's dep path hashes its
+/// relative path, so a store cache keyed by it handed the second project the
+/// first project's files with no error.
+///
+/// The store is shared across the two installs on purpose; offline, since
+/// both dependencies are written by the test.
+#[test]
+fn file_deps_at_the_same_relative_path_install_their_own_content() {
+    let root = pm_tmpdir("file-dep-content");
+    let store = pm_tmpdir("file-dep-content-store");
+    let cache = pm_tmpdir("file-dep-content-cache");
+    for project in ["a", "b"] {
+        let side = root.join(project);
+        for (name, dir) in [("tgz-dep", "tgz-src/package"), ("dir-dep", "dir-dep")] {
+            let pkg = side.join(dir);
+            std::fs::create_dir_all(&pkg).unwrap();
+            std::fs::write(
+                pkg.join("package.json"),
+                format!(r#"{{"name":"{name}","version":"1.0.0"}}"#),
+            )
+            .unwrap();
+            std::fs::write(pkg.join("index.js"), format!("module.exports='{project}'\n")).unwrap();
+        }
+        let status = Command::new("tar")
+            .args(["-czf", "../p.tgz", "package"])
+            .current_dir(side.join("tgz-src"))
+            .status()
+            .expect("failed to spawn tar");
+        assert!(status.success(), "tar must pack the fixture tarball");
+        let proj = side.join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("package.json"),
+            r#"{"name":"app","private":true,"dependencies":{"tgz-dep":"file:../p.tgz","dir-dep":"file:../dir-dep"}}"#,
+        )
+        .unwrap();
+
+        let (err, code) = run_install_in_store(&proj, &store, &cache, &["install"]);
+        assert_eq!(code, 0, "install in project {project} must succeed: {err}");
+        for dep in ["tgz-dep", "dir-dep"] {
+            let got =
+                std::fs::read_to_string(proj.join("node_modules").join(dep).join("index.js"))
+                    .unwrap();
+            assert_eq!(
+                got,
+                format!("module.exports='{project}'\n"),
+                "project {project} must get its own {dep} content"
+            );
+        }
+    }
+}
+
 /// `--os`/`--cpu` select which platform-specific optional deps get installed,
 /// overriding host detection for the run. The assertion is host-independent by
 /// construction: it names platforms explicitly and never mentions the host, so

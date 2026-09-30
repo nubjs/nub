@@ -961,8 +961,8 @@ fn plan_trees_prune(
             let name = entry.file_name().to_str().map(str::to_owned)?;
             // Dot-prefixed names are aube's own bookkeeping (this tier's
             // state file, a crashed build's `.tmp-tree-…`), never a package
-            // entry: a tree key comes from `dep_path_to_filename` and an npm
-            // name cannot start with a dot.
+            // entry: a tree key starts with a `dep_path_to_filename` name and
+            // an npm name cannot start with a dot.
             (!name.starts_with('.')).then_some((name, entry.path()))
         })
         .collect();
@@ -995,7 +995,9 @@ fn plan_trees_prune(
     let now = unix_now();
     let previous = read_grace_state(trees);
     for (name, path) in tier {
-        if reachable.contains(&name) {
+        // A tree is named by its coordinate plus a content digest; it is
+        // live when a virtual-store entry of that coordinate is.
+        if reachable.contains(aube_store::tree_key_coordinate(&name)) {
             // Reachable again — drop any record, so a project that comes back
             // restarts the clock rather than inheriting an old one.
             continue;
@@ -1874,22 +1876,30 @@ mod extracted_tree_prune_tests {
     /// A project-local install links into its own `.aube/`, never into the
     /// global store, so its trees are named by the UN-hashed dep path and
     /// appear nowhere in the link walk. Marking them from the record's
-    /// `aube_dir` is the only thing that keeps them.
+    /// `aube_dir` is the only thing that keeps them. Trees carry a content
+    /// digest after the coordinate, and every content variant of a live
+    /// coordinate is kept.
     #[test]
     fn a_project_local_install_keeps_its_unhashed_trees() {
         let tmp = tempfile::tempdir().unwrap();
         let (gvs, trees) = (tmp.path().join("gvs"), tmp.path().join("trees"));
-        tree(&trees, "local@1.0.0");
-        tree(&trees, "orphan@1.0.0");
+        let live_a = format!("local@1.0.0={}", "a".repeat(32));
+        let live_b = format!("local@1.0.0={}", "b".repeat(32));
+        let orphan = format!("orphan@1.0.0={}", "c".repeat(32));
+        for name in [&live_a, &live_b, &orphan] {
+            tree(&trees, name);
+        }
 
         let project = tmp.path().join("proj");
         let aube_dir = register(&gvs, &project);
         std::fs::create_dir_all(aube_dir.join("local@1.0.0/node_modules/local")).unwrap();
-        expire(&trees, "orphan@1.0.0");
+        for name in [&live_a, &live_b, &orphan] {
+            expire(&trees, name);
+        }
 
         sweep(&trees, &gvs, &live(&gvs));
 
-        assert_eq!(names(&trees), vec!["local@1.0.0"]);
+        assert_eq!(names(&trees), vec![live_a, live_b]);
     }
 
     /// The registry is the only reachability evidence there is, so a registry
