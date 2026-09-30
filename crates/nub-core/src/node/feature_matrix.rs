@@ -890,18 +890,21 @@ static FEATURES: &[Feature] = &[
         ],
         evidence: "Stage 4 (resizable ArrayBuffer / transfer); native on Node 21+",
     },
-    // Stage 3, in no Node. A micro-architectural hint, so a validate-and-return
-    // implementation is fully faithful — the spec lets an implementation do nothing.
+    // A micro-architectural hint, so a validate-and-return implementation is
+    // fully faithful — the spec lets an implementation do nothing.
     Feature {
         name: "Atomics.pause",
-        mitigations: &[(
-            band((18, 19, 0), None),
-            Mitigation::Polyfill {
-                runtime_file: "polyfills.cjs",
-                global: "Atomics.pause",
-            },
-        )],
-        evidence: "TC39 Stage 3 (proposal-atomics-microwait); absent on every Node through 26.5",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((24, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "Atomics.pause",
+                },
+            ),
+            (band((24, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "TC39 proposal-atomics-microwait; native on Node 24+ (typeof probe on 23.11.1 vs 24.0.0)",
     },
     // ── Promise.withResolvers ───────────────────────────────────────────────
     // TC39 Stage 4 / ES2024; native on Node 22+, absent on the 18.19–21.x compat
@@ -1037,20 +1040,23 @@ static FEATURES: &[Feature] = &[
         evidence: "TC39 Stage 4 (Explicit Resource Management); native on Node 24+",
     },
     // ── Temporal ────────────────────────────────────────────────────────────
-    // Not shipped by ANY Node version, so polyfilled across the whole floor — but
+    // Native on Node 26+, polyfilled below it — but
     // installed as a LAZY global by the preload entry (A37: the polyfill is ~18ms
     // to load, so it is deferred behind a getter), NOT eagerly in polyfills.cjs.
     // The feature-detect lives in preload-common.cjs (`installTemporalLazyGlobal`).
     Feature {
         name: "Temporal",
-        mitigations: &[(
-            band((18, 19, 0), None),
-            Mitigation::Polyfill {
-                runtime_file: "preload-common.cjs",
-                global: "globalThis.Temporal",
-            },
-        )],
-        evidence: "TC39 proposal; not in any Node through 26; lazy global (A37)",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((26, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "preload-common.cjs",
+                    global: "globalThis.Temporal",
+                },
+            ),
+            (band((26, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "TC39 Stage 4; native on Node 26+ (typeof probe on 25.9.0 vs 26.0.0); lazy global (A37)",
     },
     // ── Worker (browser-shape global) ───────────────────────────────────────
     // The browser-shape `Worker` global is not shipped by any Node version (Node
