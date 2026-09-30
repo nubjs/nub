@@ -150,10 +150,21 @@ async fn fixture() -> Fixture {
 }
 
 async fn resolve(fx: &Fixture, accept_all: bool) -> LockfileGraph {
-    let client = Arc::new(aube_registry::client::RegistryClient::new(&format!(
-        "{}/",
-        fx.base
-    )));
+    use aube_registry::config::{FetchPolicy, NpmConfig, normalize_registry_url_pub};
+    // No retries: the truncated tarball would otherwise sit through the
+    // client's backoff before its failure reaches the resolver.
+    let client = Arc::new(
+        aube_registry::client::RegistryClient::from_config_with_policy(
+            NpmConfig {
+                registry: normalize_registry_url_pub(&format!("{}/", fx.base)),
+                ..Default::default()
+            },
+            FetchPolicy {
+                retries: 0,
+                ..Default::default()
+            },
+        ),
+    );
     let mut resolver = Resolver::new(client)
         .with_supported_architectures(SupportedArchitectures {
             accept_all,
