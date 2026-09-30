@@ -1,14 +1,14 @@
 ---
 title: Decorators
-description: How Nub runs legacy TypeScript decorators and their emitted design-type metadata on stock Node — the form the NestJS, TypeORM, and Angular dependency-injection ecosystem is written against.
+description: How Nub runs legacy TypeScript decorators and their design-type metadata on stock Node, the form NestJS, TypeORM, and Angular are written against.
 ---
 
-Set the decorator mode to `legacy` in `nub.jsonc` and decorated classes run with no build step. This is the legacy decorator form the DI / ORM ecosystem (NestJS, TypeORM, Angular) is written against.
+Set the decorator mode to `legacy` in `nub.jsonc` and decorated classes run with no build step. This is the form the dependency-injection and ORM ecosystem (NestJS, TypeORM, Angular) is written against.
 
 ```jsonc title="nub.jsonc"
 {
   "decorators": "legacy",
-  "emitDecoratorMetadata": true
+  "emitDecoratorMetadata": true  // optional: design-type metadata
 }
 ```
 
@@ -23,7 +23,7 @@ class Account {
 }
 ```
 
-Nub also reads `compilerOptions.experimentalDecorators` and `compilerOptions.emitDecoratorMetadata` from the selected or nearest `tsconfig.json`. Top-level Nub fields override their TypeScript equivalents when both are present.
+Nub also reads `compilerOptions.experimentalDecorators` and `compilerOptions.emitDecoratorMetadata` from the selected or nearest `tsconfig.json`. A field set in `nub.jsonc` wins.
 
 <Callout>
 Read the [full docs](https://www.typescriptlang.org/docs/handbook/decorators.html) for decorators on typescriptlang.org.
@@ -31,8 +31,8 @@ Read the [full docs](https://www.typescriptlang.org/docs/handbook/decorators.htm
 
 ## Design-type metadata
 
-When `emitDecoratorMetadata` is also set, Nub emits the `Reflect.metadata(...)` calls that DI containers read for constructor-parameter type inference. The emitted code references `Reflect.metadata`, so install and import `reflect-metadata` yourself, as on plain TypeScript.
+With `emitDecoratorMetadata` on, Nub emits the `Reflect.metadata(...)` calls that DI containers read to infer constructor-parameter types. Install and import `reflect-metadata` yourself, as with plain TypeScript.
 
 ## Stage 3 decorators
 
-Stage 3 decorators (TypeScript 5's default when no legacy mode is selected) are not supported: that transform is an [upstream gap in oxc](https://github.com/oxc-project/oxc/issues/9170), so Nub rejects Stage-3-shaped decorator syntax with a diagnostic that names `decorators: "legacy"`.
+Stage 3 decorators, TypeScript 5's default, are not supported. The transform is an [open gap in oxc](https://github.com/oxc-project/oxc/issues/9170), so Nub rejects Stage 3 decorator syntax with a diagnostic that points to `decorators: "legacy"`.
