@@ -101,7 +101,7 @@ Re-running a release that died after its tag was created — a failed build, a r
 
 Post-merge, fast-forward the shared tree so it tracks origin: `git -C <shared-tree> pull --ff-only` (the eagerly-pull rule, AGENTS.md "Default to a PR flow" — the shared checkout otherwise drifts behind as PRs land).
 
-The workflow runs, in order: `verify` (version consistency, notes present, creates the tag), `primer`, `test` + `conformance` + `glibc-floor-guard` + `pre-publish-gate`, `build` (8 platforms), `stable-immutable-release` (32 assets on a DRAFT release whose body is the notes), `publish-npm` (19 packages STAGED), `await-approval` (the run is HELD on the `release-approval` environment until the maintainer approves), `github-release` (confirms npm serves every version, publishes the draft as the stable release), then the post-publish fan-out — `actions-tag`, `test-install` / `test-install-musl`, `docker`, `bump-homebrew-tap`, `submit-winget`.
+The workflow runs, in order: `verify` (version consistency, notes present, creates the tag), `primer`, `test` + `conformance` + `glibc-floor-guard` + `pre-publish-gate`, `build` (8 platforms), `stable-immutable-release` (32 assets on a DRAFT release whose body is the notes), `publish-npm` (19 packages STAGED), `await-approval` (the run is HELD on the `release-approval` environment until the maintainer approves), `npm-served` (confirms npm serves every version and the root package installs and runs), `github-release` (publishes the draft as the stable release), then the post-publish fan-out — `actions-tag`, `test-install` / `test-install-musl`, `docker`, `bump-homebrew-tap`, `submit-winget`.
 
 ### Step 3b — Approve the staged versions (the human gate; maintainer only)
 
@@ -115,10 +115,10 @@ stager approve '@nubjs/*@<ver>'     # prints an npmjs.com URL; the maintainer ap
                                     # the run's pending deployment, which resumes it
 stager await '@nubjs/*@<ver>'       # blocks, with no timeout, until npm serves every version — park on this
 stager reject '@nubjs/*@<ver>'      # drops the staged versions and fails the held run
-stager                              # the interactive picker: every staged version, commit, run, Drydock diff
+stager                              # the interactive picker: every staged version, with its commit and run
 ```
 
-`stager` approves every staged version of a package oldest-first, so two versions staged at once end with `latest` on the higher one. A version still `validating` (npm's malware review, up to an hour) is approved once the review finishes; stager waits for it. Without stager: `npm stage approve <id>` per package (or the Staged Packages tab on npmjs.com), then approve the pending deployment on the run's page. A deployment approved before the npm approval fails `github-release` at its registry check; re-run that job after approving.
+`stager` approves every staged version of a package oldest-first, so two versions staged at once end with `latest` on the higher one. A version still `validating` (npm's malware review, up to an hour) is approved once the review finishes; stager waits for it. Without stager: `npm stage approve <id>` per package (or the Staged Packages tab on npmjs.com), then approve the pending deployment on the run's page. A deployment approved before the npm approval fails `npm-served` at its registry check; re-run that job after approving.
 
 **Park on `stager await` (a background shell) rather than on the run.** It returns when the versions are live; the run's remaining jobs then take a few minutes. The release is not done until `stable-immutable-release`, `publish-npm`, `github-release` and `actions-tag` are green.
 
@@ -297,7 +297,7 @@ A complete release has: the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub
 
 The 8 `nub-launcher-*` assets are what `nub compile --platform <foreign>` fetches to cross-compile, so a release missing one silently disables cross-compiling to that platform for everyone on that version.
 
-**If CI failed partway:** Re-run the failed job from the Actions UI. The `stable-immutable-release` job rebuilds the deterministic archives and re-uploads missing assets before npm starts; `publish-npm` skips packages already published or already staged during a partial attempt, and a `publish-npm` that timed out waiting for approval resumes from the approval on re-run; `github-release` only promotes the asset-complete prerelease. Do not re-cut a version for a failed upload or partial npm publish.
+**If CI failed partway:** Re-run the failed job from the Actions UI. The `stable-immutable-release` job rebuilds the deterministic archives and re-uploads missing assets before npm starts; `publish-npm` skips packages already published or already staged during a partial attempt; a run whose approval hold expired (30 days) is re-dispatched selecting its tag (Step 3); `github-release` only promotes the asset-complete prerelease. Do not re-cut a version for a failed upload or partial npm publish.
 
 Then confirm the Homebrew channel actually moved — the tap lives in another repo, so a green release run here is not evidence that it did:
 

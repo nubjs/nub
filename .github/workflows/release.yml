@@ -213,8 +213,8 @@ jobs:
             exit 1
           fi
           # Pre-flight the tag state here so a wrong one costs a minute rather
-          # than a full 8-platform build: stable-immutable-release creates the
-          # tag and re-checks it, but only after every gate has run. An
+          # than a full 8-platform build: the next step creates the tag, and
+          # stable-immutable-release re-checks it after every gate has run. An
           # already-existing tag at this commit is the sanctioned re-run; one
           # pointing anywhere else means this version was already cut from a
           # different tree and the operator needs a new version number.
@@ -2025,14 +2025,16 @@ jobs:
     # limit is 30 days), until the maintainer approves the deployment — which
     # `stager approve` does right after the npm approval (and `stager reject`
     # rejects, failing the run). The npm approval is the gate; this approval is
-    # only the resume signal, and github-release checks the registry before it
-    # publishes anything.
+    # only the resume signal, and npm-served checks the registry before anything
+    # is published.
     if: ${{ needs.verify.outputs.publish_tag != '' }}
     needs: [verify, publish-npm]
     runs-on: ubuntu-latest
     environment: release-approval
     steps:
-      - run: echo "resuming — the staged ${{ needs.verify.outputs.publish_version }} versions were approved"
+      - env:
+          VERSION: ${{ needs.verify.outputs.publish_version }}
+        run: echo "resuming — the staged $VERSION versions were approved"
 
   stable-immutable-release:
     name: Stage immutable stable release (+ verify assets)
@@ -2336,24 +2338,20 @@ jobs:
           fi
           echo "✓ all ${#EXPECTED[@]} release assets present on $TAG"
 
-  github-release:
-    name: Publish stable GitHub Release
-    # npm can stage only after the immutable draft above is asset-complete, and
-    # await-approval releases this job once the maintainer has approved. The
-    # first step proves the registry serves every version, then promote that
-    # same draft — publish it, drop the prerelease flag, claim Latest — without
-    # rebuilding or retargeting it. Asset repair remains owned by
-    # stable-immutable-release.
+  npm-served:
+    name: Confirm npm serves the release
+    # After the approval and before anything is promoted: every version answers
+    # a read, and the root package installs and runs. Its own job with no token
+    # because the install runs the published package's postinstall, and a
+    # process a step leaves behind lives on through the later steps of its job,
+    # which in github-release hold a contents:write token. A deployment approved
+    # before the npm approval fails here, and github-release never starts.
     if: ${{ needs.verify.outputs.publish_tag != '' }}
-    needs: [verify, await-approval, stable-immutable-release]
+    needs: [verify, await-approval]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    permissions: {}
     env:
-      # No checkout in this job, and `gh release` resolves the repository from the
-      # working tree when nothing names it: v0.9.5 died here with "not a git
-      # repository" the first time the promote step ever ran.
-      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.verify.outputs.publish_version }}
     steps:
       - name: Confirm npm serves every version
         # The approval already happened; this loop covers propagation lag, which is
@@ -2362,9 +2360,7 @@ jobs:
         # UNRESOLVABLE optionalDependency SILENTLY, so an image built inside that
         # window installed one package and died at `nub --version` with the musl
         # binary absent: every package, not just the root, answers before anything
-        # downstream runs. A deployment approved before the npm approval ends here.
-        env:
-          VERSION: ${{ needs.verify.outputs.publish_version }}
+        # downstream runs.
         run: |
           set -euo pipefail
           PKGS="@nubjs/nub @nubjs/types @nubjs/runner"
@@ -2388,24 +2384,52 @@ jobs:
         # package and copy the binary, and a version the registry lists can still fail that.
         # Install it the way a user would, into an empty project, and run the binary before
         # the draft is promoted. The full matrix in test-install runs after promotion; this is
-        # the one that can still abort the release.
-        env:
-          TAG: ${{ needs.verify.outputs.publish_tag }}
-        run: |
+        # the one that can still abort the release. The install's metadata can lag the
+        # `npm view` read above (test-install's false reds on 0.0.36 and 0.0.38), so it
+        # retries for five minutes; a broken version fails every attempt.
+        run: | # zizmor: ignore[adhoc-packages] installs the version this run staged and the maintainer approved, to smoke it before promotion; no lockfile applies
           set -euo pipefail
-          VERSION="${TAG#v}"
           dir="$RUNNER_TEMP/install-smoke"
-          rm -rf "$dir" && mkdir -p "$dir" && cd "$dir"
-          npm init -y >/dev/null
-          npm install "@nubjs/nub@$VERSION" --no-audit --no-fund
-          # `nub --version` prints `v<semver>` on stdout and a provenance line on stderr.
-          reported="$(./node_modules/.bin/nub --version 2>/dev/null | head -1 | tr -d '[:space:]')"
-          [ "${reported#v}" = "$VERSION" ] || { echo "::error::the installed nub reports '$reported', expected v$VERSION; not promoting"; exit 1; }
-          echo "✓ @nubjs/nub@$VERSION installs and reports $reported"
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            rm -rf "$dir" && mkdir -p "$dir"
+            reported=""
+            if (cd "$dir" && npm init -y >/dev/null && npm install "@nubjs/nub@$VERSION" --prefer-online --no-audit --no-fund); then
+              # `nub --version` prints `v<semver>` on stdout and a provenance line on stderr.
+              reported="$("$dir/node_modules/.bin/nub" --version 2>/dev/null | head -1 | tr -d '[:space:]')" || reported=""
+              if [ "${reported#v}" = "$VERSION" ]; then
+                echo "✓ @nubjs/nub@$VERSION installs and reports $reported"
+                exit 0
+              fi
+            fi
+            echo "… attempt $attempt/10: the installed nub reports '${reported:-nothing}', expected v$VERSION"
+            [ "$attempt" -eq 10 ] || sleep 30
+          done
+          echo "::error::@nubjs/nub@$VERSION did not install and report v$VERSION in 10 attempts; not promoting"
+          exit 1
+
+  github-release:
+    name: Publish stable GitHub Release
+    # npm can stage only after the immutable draft above is asset-complete, and
+    # npm-served releases this job once the maintainer has approved and the
+    # registry serves a version that installs and runs. Then promote that same
+    # draft — publish it, drop the prerelease flag, claim Latest — without
+    # rebuilding or retargeting it. Asset repair remains owned by
+    # stable-immutable-release.
+    if: ${{ needs.verify.outputs.publish_tag != '' }}
+    needs: [verify, npm-served, stable-immutable-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      # No checkout in this job, and `gh release` resolves the repository from the
+      # working tree when nothing names it: v0.9.5 died here with "not a git
+      # repository" the first time the promote step ever ran.
+      GH_REPO: ${{ github.repository }}
+    steps:
       - name: Promote immutable release
         # `gh release edit` resolves a DRAFT by its pending tag (the REST tag endpoint
         # cannot), so this is the one step that publishes it — which is what makes the
-        # assets public and notifies watchers — and it runs only after publish-npm saw
+        # assets public and notifies watchers — and it runs only after npm-served saw
         # the maintainer-approved versions served by the registry. The previous
         # softprops/action-gh-release step could not do this: on an existing release it
         # carries the release's own draft flag forward, so a draft stayed a draft.
@@ -2997,8 +3021,8 @@ jobs:
     # raised event does NOT trigger another workflow — so that trigger never fired for
     # an automated release and the image froze at v0.2.0. Invoking docker.yml here via
     # `workflow_call` runs the build+push INSIDE this run (no cascade) and `needs:
-    # publish-npm` sequences it after `@nubjs/nub@<version>` is live on npm, which the
-    # image installs at build time. The validated stable-tag path only includes
+    # github-release` sequences it after npm-served saw `@nubjs/nub@<version>` live on
+    # npm, which the image installs at build time. The validated stable-tag path only includes
     # publishing dispatches; a build-only dispatch or a canary run cannot
     # push an image.
     needs: [verify, github-release]
