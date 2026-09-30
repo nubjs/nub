@@ -6,7 +6,7 @@ description: Reference for the JavaScript, web-platform, and Node.js APIs that N
 Nub fills the gaps between supported Node versions, so the same modern APIs are there whichever Node your project pins. Each entry below says what Nub adds, how it is delivered, and when Node's own implementation takes over.
 
 <TypesSetup>
-Nub's types package declares the keyed Promise combinators, `Temporal`, the browser-style `Worker` global, and `reportError`. Standard APIs use TypeScript's bundled libraries and `@types/node`.
+Nub's types package declares the proposal APIs that TypeScript's libraries do not include yet, plus `Temporal`, the browser-style `Worker` global, and `reportError`. Other standard APIs use TypeScript's bundled libraries and `@types/node`.
 </TypesSetup>
 
 ## How augmentation works
@@ -381,6 +381,27 @@ Feature-detected JavaScript polyfill on every supported Node version. No Node re
 ```ts
 const total = Math.sumPrecise([1, 1e100, 1, -1e100]);
 console.log(total); // 2
+```
+
+### `JSON.parse()`
+
+An options object as the second argument controls the objects that `JSON.parse()` creates. The `freeze` option deep-freezes every object and array in the result, and `preferNullPrototype` gives each object a `null` prototype.
+
+<Callout title="Delivery">
+Feature-detected JavaScript polyfill on every supported Node version. The [JSON.parse options proposal](https://github.com/tc39/proposal-json-parseimmutable) is at Stage 2.7, and no Node release ships it yet.
+</Callout>
+
+The `preferNullPrototype` option defaults to the value of `freeze`. Both options must be booleans; any other value throws a `TypeError`.
+
+```ts
+const config = JSON.parse(text, { freeze: true });
+Object.isFrozen(config.servers[0]); // true
+Object.getPrototypeOf(config); // null
+
+// frozen, objects keep Object.prototype
+JSON.parse(text, { freeze: true, preferNullPrototype: false });
+// mutable, objects have a null prototype
+JSON.parse(text, { preferNullPrototype: true });
 ```
 
 ### `Symbol.metadata`
