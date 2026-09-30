@@ -4,7 +4,7 @@
 //! strict-by-default agreement check, both ratified 2026-06-09).
 //!
 //! Five concerns live here:
-//!   1. the shim dir (`~/.nub/shims`) and its hardlink-to-nub entries,
+//!   1. the shim dir (`~/.local/share/nub/shims`) and its hardlink-to-nub entries,
 //!   2. the shell-profile PATH block (a Rust port of `install.sh`'s mechanism),
 //!   3. the which-style reachability report (Volta's `check_shim_reachable` idea),
 //!   4. the PURE decision core — invoked name × pin state × first verb →
