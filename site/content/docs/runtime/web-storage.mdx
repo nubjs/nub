@@ -3,7 +3,9 @@ title: Web Storage
 description: Session storage is in-memory, and persistent local storage turns on once you point it at a backing file. Both need Node 22.4 or newer.
 ---
 
-Node hides `sessionStorage` and `localStorage` behind `--experimental-webstorage` on the 22.4–24 band (native from 25); Nub injects that flag on exactly that band. Below Node 22.4 the flag does not exist and Web Storage is unavailable.
+Node 22.4 through 24 hide `sessionStorage` and `localStorage` behind `--experimental-webstorage`, and Nub injects the flag on those releases. From Node 25 they are on by default; below 22.4 they do not exist.
+
+A `--experimental-webstorage` or `--no-experimental-webstorage` you pass yourself wins, and Nub injects nothing.
 
 <Callout>
 Read the [full docs](https://developer.mozilla.org/en-US/docs/Web/API/Web_Storage_API) for Web Storage on developer.mozilla.org.
@@ -11,7 +13,7 @@ Read the [full docs](https://developer.mozilla.org/en-US/docs/Web/API/Web_Storag
 
 ## `sessionStorage`
 
-The `sessionStorage` global is in-memory and per-process: it is created fresh each run and discarded when the process exits.
+The `sessionStorage` global is in memory. Each run starts with an empty store, and it is discarded when the process exits.
 
 ```ts
 sessionStorage.setItem("step", "1");
@@ -24,7 +26,7 @@ sessionStorage.clear();
 
 ## `localStorage`
 
-The `localStorage` global persists across runs, so it needs a file on disk to write to. Pass `--localstorage-file <path>` and Nub forwards it to Node verbatim; until then `localStorage` is `undefined`, so `typeof localStorage === "undefined"` is a feature check.
+The `localStorage` global persists across runs in a file. Pass `--localstorage-file <path>`, directly or in `NODE_OPTIONS`, and Nub forwards it to Node. Without the flag, `localStorage` is `undefined`.
 
 ```ts
 localStorage.setItem("token", "abc123");
@@ -41,9 +43,3 @@ abc123
 $ nub --localstorage-file=./app.db read.ts
 abc123
 ```
-
-The `--localstorage-file` flag is also honored when set in `NODE_OPTIONS`.
-
-<Callout title="Explicit flags">
-If you pass `--experimental-webstorage` (or `--no-experimental-webstorage`) yourself, Nub respects it and injects nothing. The flag exists from Node 22.4.0, is required through 24.x, and is unflagged from 25.0.0 on.
-</Callout>
