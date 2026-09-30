@@ -995,7 +995,7 @@ mod cve_audit_tarball_bomb {
             read_tarball_package_json_capped(&next_shaped, TEST_CAP).is_err(),
             "the same tarball must fail under a cap smaller than its skipped prefix"
         );
-        assert!(
+        const _: () = assert!(
             MAX_RESOLVE_TARBALL_DECOMPRESSED_BYTES >= 1 << 30,
             "resolver cap must not drop below aube-store's 1 GiB extraction cap"
         );
