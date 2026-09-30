@@ -12,6 +12,15 @@ interface Math {
   sumPrecise(items: Iterable<number>): number;
 }
 
+interface JSONParseOptions {
+  freeze?: boolean;
+  preferNullPrototype?: boolean;
+}
+
+interface JSON {
+  parse(text: string, options?: JSONParseOptions): any;
+}
+
 interface RegExpConstructor {
   escape(string: string): string;
 }
