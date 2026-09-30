@@ -2807,7 +2807,10 @@ fn clonedir_materialize_matches_per_file_byte_for_byte() {
     // Confirm the tree tier was actually built and the clone path taken
     // (otherwise this test would silently degrade to comparing per-file
     // against per-file and prove nothing).
-    let tree = store.tree_path(&linker.virtual_store_subdir("pkg@1.2.3"));
+    let tree = store.tree_path(&aube_store::tree_key(
+        &linker.virtual_store_subdir("pkg@1.2.3"),
+        &index,
+    ));
     assert!(
         tree.exists(),
         "tree tier must have been built (clonedir path not exercised?)"
@@ -2844,6 +2847,67 @@ fn clonedir_materialize_matches_per_file_byte_for_byte() {
     );
     // Stats parity: the clone counts every index entry as linked.
     assert_eq!(stats.files_linked, index.len());
+}
+
+/// Two packages with the same dep path but different files — two projects
+/// each depending on their own `file:../p.tgz`, or one tarball rebuilt in
+/// place — must each materialize their OWN files. The whole-dir clone
+/// copies a shared store tree verbatim, so a tree keyed by dep path alone
+/// handed the second project the first tarball's bytes with no error.
+#[cfg(target_os = "macos")]
+#[test]
+fn clonedir_never_reuses_a_tree_across_different_content_at_one_dep_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::at(dir.path().join("store/files"));
+    let dep_path = "probe@file+3697c86abcf40c0a";
+    let pkg = LockedPackage {
+        name: "probe".to_string(),
+        version: "1.0.0".to_string(),
+        dep_path: dep_path.to_string(),
+        ..Default::default()
+    };
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Reflink, false);
+
+    for (project, body) in [("a", "AAA"), ("b", "BBB")] {
+        let mut index = PackageIndex::default();
+        index.insert(
+            "index.js".to_string(),
+            store
+                .import_bytes(format!("module.exports='{body}'\n").as_bytes(), false)
+                .unwrap(),
+        );
+        let aube_dir = dir.path().join(project).join("node_modules/.aube");
+        std::fs::create_dir_all(&aube_dir).unwrap();
+        let mut stats = LinkStats::default();
+        linker
+            .ensure_in_aube_dir(
+                &aube_dir,
+                dep_path,
+                &aube_lockfile::LockfileGraph::default(),
+                &pkg,
+                &index,
+                &mut stats,
+                None,
+            )
+            .expect("materialize");
+        assert!(
+            store
+                .tree_path(&aube_store::tree_key(
+                    &linker.virtual_store_subdir(dep_path),
+                    &index
+                ))
+                .exists(),
+            "the clonedir path must have run for project {project}"
+        );
+        let installed = aube_dir
+            .join(linker.aube_dir_entry_name(dep_path))
+            .join("node_modules/probe/index.js");
+        assert_eq!(
+            std::fs::read_to_string(&installed).unwrap(),
+            format!("module.exports='{body}'\n"),
+            "project {project} must get its own file content"
+        );
+    }
 }
 
 // nub#566 / nub#576: a POPULATED real directory sitting in a
