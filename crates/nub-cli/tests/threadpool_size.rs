@@ -44,6 +44,20 @@ fn run(extra_args: &[&str], env: &[(&str, &str)]) -> serde_json::Value {
         .expect("fixture must emit valid JSON")
 }
 
+/// Building the pool leaves nothing on Node's loop: no active resource when user
+/// code starts, as under plain Node. (A JS submit would leave an `FSReqCallback`
+/// whose callback fires after user code has installed its own `async_hooks`.)
+#[test]
+fn augmented_startup_leaves_no_active_resource() {
+    let v = run(&[], &[]);
+    assert_eq!(
+        v["active"].as_array().map(Vec::len),
+        Some(0),
+        "user code must start with no active resource, got {}",
+        v["active"]
+    );
+}
+
 /// Augmented run: the pool is at least libuv's default of 4 and never exceeds the
 /// parallelism Node itself reports (the two runtimes read a cgroup quota
 /// differently, so the exact value is not pinned).

@@ -38,6 +38,7 @@ compile_error!(
 mod cache;
 mod detect;
 mod resolve;
+mod threadpool;
 mod transform;
 mod tsconfig;
 
@@ -46,6 +47,7 @@ use napi_derive::napi;
 pub use cache::transform_cached;
 pub use detect::detect_module_info;
 pub use resolve::resolve_ts;
+pub use threadpool::warm_threadpool;
 pub use transform::transform;
 pub use tsconfig::load_tsconfig;
 

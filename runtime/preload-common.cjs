@@ -1787,15 +1787,25 @@ function installVersionMarker() {
 //     10). Measured on 16 vCPU beside twelve busy processes: the neighbours keep
 //     98.6% of their CPU instead of 92.5%, the server still gains 20% over four
 //     threads, and an idle box loses nothing. libuv creates every worker
-//     synchronously inside the first pool submit, so one `fs.access` call makes
-//     them all exist (`access` never takes the io_uring path that lets stat, read
-//     and open skip the pool); the new thread ids (or the `libuv-worker` name) name
-//     them, and `os.setPriority(tid)` targets one thread on Linux. The thread ids
-//     are exact only across the call that builds the pool: the fast tier's
-//     `--require` preload runs before any pool use and builds it here, but the
-//     compat tier's `--import` preload is itself read through the pool, so the
-//     launcher `--require`s threadpool-snapshot.cjs ahead of it to build the pool
-//     and record its threads there.
+//     synchronously inside the first pool submit, so one submit makes them all
+//     exist; the new thread ids (or the `libuv-worker` name) name them, and
+//     `os.setPriority(tid)` targets one thread on Linux. The thread ids are exact
+//     only across the call that builds the pool: the fast tier's `--require`
+//     preload runs before any pool use and builds it here, but the compat tier's
+//     `--import` preload is itself read through the pool, so the launcher
+//     `--require`s threadpool-snapshot.cjs ahead of it to build the pool and
+//     record its threads there.
+//
+// The submit is the addon's `warmThreadpool`: one no-op task on a private libuv
+// loop, run to completion inside the call, so nothing is left on Node's loop for
+// user code to see. A JS submit (`fs.access`) completes AFTER user code has
+// started: its callback is a `before` for an id `async_hooks` never saw born,
+// `process.getActiveResourcesInfo()` lists it, and the loop stays alive one turn
+// longer than plain Node's, which fires an unref'd `setImmediate`. Node's own
+// suite asserts on all three (49 files). `fs.access` remains the fallback when
+// the addon is absent, because it never takes libuv's io_uring path, which stat,
+// read and open do where io_uring is on (Node 20.3–20.11.0 by default, opt-in
+// since), building no pool at all.
 const THREADPOOL_ENV = "UV_THREADPOOL_SIZE";
 const THREADPOOL_MARK_ENV = "__NUB_AUGMENTED_UV_THREADPOOL_SIZE";
 const COMPAT_PRESENT_ENV = "__NUB_COMPAT_PRESENT";
@@ -1803,6 +1813,17 @@ const THREADPOOL_PRESENT_BIT = 1 << 5;
 const THREADPOOL_NODE_DEFAULT = 4;
 const THREADPOOL_EXTRA_NICE = 10;
 const THREADPOOL_WORKERS = Symbol.for("nub.threadpool.workers");
+
+// One pool submit, and nothing else: the addon's private-loop task, or `fs.access`
+// when the addon is missing. The addon is the sibling transform-core loads moments
+// later, through the same filename, so Node's module cache hands out one instance.
+function buildThreadpool() {
+  try {
+    const addon = require(require("node:path").join(__dirname, "addons", "nub-native.node"));
+    if (typeof addon.warmThreadpool === "function" && addon.warmThreadpool()) return;
+  } catch {}
+  require("node:fs").access("/", () => {});
+}
 
 function installThreadpoolPolicy() {
   const size = process.env[THREADPOOL_ENV];
@@ -1824,7 +1845,7 @@ function installThreadpoolPolicy() {
     let workers = linux ? process[THREADPOOL_WORKERS] : undefined;
     if (workers === undefined) {
       const before = linux ? new Set(tids()) : null;
-      fs.access("/", () => {});
+      buildThreadpool();
       const isWorker = (t) => {
         if (!before.has(t)) return true;
         try {

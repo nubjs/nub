@@ -166,6 +166,8 @@ nub-data-formats = { path = "../nub-data-formats" }
 # the nesting bound this crate's data-format parsers use, so the two readers cannot
 # drift apart. These are the third and fourth path deps into the MAIN workspace.
 nub-tsconfig = { path = "../nub-tsconfig" }
+# Host-symbol lookup for libuv (threadpool.rs); the version napi-sys already pins.
+libloading = "0.9"
 
 [build-dependencies]
 napi-build = "2"
