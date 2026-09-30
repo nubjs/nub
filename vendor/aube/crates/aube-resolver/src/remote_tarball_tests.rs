@@ -35,9 +35,10 @@ struct Fixture {
     server: tokio::task::JoinHandle<()>,
 }
 
-/// `parent` (a URL tarball) with two URL-tarball optionals — one any
+/// `parent` (a URL tarball) with three URL-tarball optionals — one any
 /// platform can use, one for an OS nothing runs, padded to 32 MiB so a
-/// full download is observable — plus a required peer and an optional
+/// full download is observable, and one for that OS whose connection
+/// drops after the manifest — plus a required peer and an optional
 /// meta-only peer. `peer-a` itself comes from the registry.
 async fn fixture() -> Fixture {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -52,6 +53,7 @@ async fn fixture() -> Fixture {
                 "optionalDependencies": {
                     "native-any": format!("{base}/native-any.tgz"),
                     "native-elsewhere": format!("{base}/native-elsewhere.tgz"),
+                    "native-broken": format!("{base}/native-broken.tgz"),
                     "opt-registry": "^1.0.0",
                 },
                 "peerDependencies": { "peer-a": "^1.0.0" },
@@ -76,6 +78,17 @@ async fn fixture() -> Fixture {
                 "os": ["plan9"],
             }),
             32 << 20,
+        ),
+    );
+    routes.insert(
+        "/native-broken.tgz".to_string(),
+        tgz(
+            serde_json::json!({
+                "name": "native-broken",
+                "version": "1.0.0",
+                "os": ["plan9"],
+            }),
+            1 << 20,
         ),
     );
     routes.insert(
@@ -112,12 +125,20 @@ async fn fixture() -> Fixture {
                 if socket.write_all(head.as_bytes()).await.is_err() {
                     return;
                 }
+                // Serves the manifest, then drops the connection mid-body.
+                let body = if path == "/native-broken.tgz" {
+                    &body[..64 * 1024]
+                } else {
+                    &body[..]
+                };
                 for chunk in body.chunks(64 * 1024) {
                     if socket.write_all(chunk).await.is_err() {
                         return;
                     }
                 }
-                done.lock().unwrap().push(path);
+                if body.len() == routes[&path].len() {
+                    done.lock().unwrap().push(path);
+                }
             });
         }
     });
@@ -226,6 +247,10 @@ async fn portable_lockfile_records_other_platform_url_optionals_with_integrity()
         "the recorded variant carries its integrity"
     );
     assert_eq!(elsewhere.os.as_slice(), ["plan9".to_string()]);
+    assert!(
+        package(&graph, "native-broken").is_none(),
+        "an optional whose download fails is skipped, not fatal"
+    );
     assert!(package(&graph, "native-any").unwrap().integrity.is_some());
     fx.server.abort();
 }

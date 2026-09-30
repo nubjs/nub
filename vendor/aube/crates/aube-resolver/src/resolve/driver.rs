@@ -2132,15 +2132,36 @@ impl<'a> ResolveDriver<'a> {
             });
             (resolved_local, manifest, integrity)
         } else if let LocalSource::RemoteTarball(ref t) = raw_local {
-            let (resolved_local, manifest) =
-                resolve_remote_tarball(&task.name, t, self.resolver.client.as_ref())
-                    .await
-                    .map_err(|e| {
-                        Error::Registry(
-                            task.name.clone(),
-                            format!("remote tarball {}: {e}", task.range),
-                        )
-                    })?;
+            // An optional that fails to download is skipped, as a registry
+            // optional whose fetch fails is. A portable lockfile downloads
+            // every platform's variant, so without this one unreachable
+            // tarball for another platform would fail the whole install.
+            let (resolved_local, manifest) = match resolve_remote_tarball(
+                &task.name,
+                t,
+                self.resolver.client.as_ref(),
+            )
+            .await
+            {
+                Ok(resolved) => resolved,
+                Err(e) if task.dep_type == DepType::Optional => {
+                    tracing::warn!(
+                        "skipping optional dependency {}: remote tarball {} could not be fetched: {e}",
+                        task.name,
+                        task.range,
+                    );
+                    if task.is_root {
+                        self.note_root_done();
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    return Err(Error::Registry(
+                        task.name.clone(),
+                        format!("remote tarball {}: {e}", task.range),
+                    ));
+                }
+            };
             let integrity = match &resolved_local {
                 LocalSource::RemoteTarball(tarball) if !tarball.integrity.is_empty() => {
                     Some(tarball.integrity.clone())
