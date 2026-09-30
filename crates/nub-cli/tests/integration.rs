@@ -3055,7 +3055,10 @@ console.log(JSON.stringify(failures));
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(stdout, "[]", "spec cases the polyfill failed (stderr: {stderr})");
+    assert_eq!(
+        stdout, "[]",
+        "spec cases the polyfill failed (stderr: {stderr})"
+    );
 }
 
 #[test]
