@@ -211,7 +211,7 @@ mod tests {
             .find(|(s, _, _)| *s == INDEX_SLUG)
             .expect("/docs index page baked");
         assert!(
-            index.2.contains("all-in-one toolkit"),
+            index.2.contains("## The toolkit"),
             "index body must be the real /docs page content"
         );
 

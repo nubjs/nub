@@ -58,7 +58,7 @@
 //! audited for exactness and must be corrected in place, never silently dropped.
 //! NOTE the site sync is MANUAL — nothing programmatic consumes this table for
 //! copy, so an edit to a row requires a matching pass over site/content (the
-//! Modern APIs tables) by hand.
+//! Modern APIs page) by hand.
 //!
 //! ## How to add a feature
 //!
