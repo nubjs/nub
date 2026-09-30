@@ -74,6 +74,11 @@ const joined: string = [1, 2, 3].values().join("-");
 void [firstChunk, firstWindow, partialWindow, hasTwo, hasTwoAfterSkip, joined];
 
 const precise: number = Math.sumPrecise([1e20, 0.1, -1e20]);
+JSON.parse("{}", { freeze: true, preferNullPrototype: false });
+// The runtime throws on a non-boolean option rather than coercing it; an
+// `options: object` signature would accept this.
+// @ts-expect-error `freeze` is a boolean.
+JSON.parse("{}", { freeze: 1 });
 const metadataKey: symbol = Symbol.metadata;
 Atomics.pause(1);
 void [precise, metadataKey];
