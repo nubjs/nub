@@ -16,11 +16,11 @@ type Line = { text: string; prompt?: boolean; dim?: boolean };
 
 const lines: Line[] = [
   { text: 'nub pm shim', prompt: true },
-  { text: 'nub pm shim: 6 entries in ~/.nub/shims (6 created)', dim: true },
-  { text: '  PATH: added ~/.nub/shims to PATH (~/.zshrc) — restart your shell', dim: true },
+  { text: 'nub pm shim: 6 entries in ~/.local/share/nub/shims (6 created)', dim: true },
+  { text: '  PATH: added ~/.local/share/nub/shims to PATH (~/.zshrc) — restart your shell', dim: true },
   { text: '' },
   { text: 'which pnpm', prompt: true },
-  { text: '~/.nub/shims/pnpm' },
+  { text: '~/.local/share/nub/shims/pnpm' },
   { text: '' },
   { text: 'pnpm --version', prompt: true },
   { text: 'pnpm@9.5.0 (via nub shim)', dim: true },
