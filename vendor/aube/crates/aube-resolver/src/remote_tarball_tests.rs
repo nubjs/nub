@@ -213,22 +213,19 @@ async fn url_tarball_optionals_and_peers_resolve_like_registry_ones() {
 }
 
 #[tokio::test]
-async fn other_platform_url_optional_is_dropped_even_for_a_portable_lockfile() {
-    // A registry optional for another platform still lands in a portable
-    // lockfile, because the packument carries its integrity. A URL tarball
-    // carries integrity only in the bytes, so recording one that was never
-    // downloaded would write an entry the strict reader refuses.
+async fn portable_lockfile_records_other_platform_url_optionals_with_integrity() {
+    // A URL tarball's integrity exists only in its bytes, so a lockfile
+    // meant for every platform downloads each variant once, as npm and
+    // pnpm do. An entry without integrity is refused by the strict reader.
     let fx = fixture().await;
     let graph = resolve(&fx, true).await;
 
-    assert!(package(&graph, "native-elsewhere").is_none());
-    assert!(package(&graph, "native-any").unwrap().integrity.is_some());
+    let elsewhere = package(&graph, "native-elsewhere").expect("other-OS variant recorded");
     assert!(
-        !fx.completed
-            .lock()
-            .unwrap()
-            .contains(&"/native-elsewhere.tgz".to_string()),
-        "the other-OS tarball was downloaded in full"
+        elsewhere.integrity.is_some(),
+        "the recorded variant carries its integrity"
     );
+    assert_eq!(elsewhere.os.as_slice(), ["plan9".to_string()]);
+    assert!(package(&graph, "native-any").unwrap().integrity.is_some());
     fx.server.abort();
 }

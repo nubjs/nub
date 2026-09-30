@@ -2074,20 +2074,25 @@ impl<'a> ResolveDriver<'a> {
                 ),
             ));
         }
-        // An optional URL tarball whose manifest says it cannot run on this
-        // host is dropped without downloading it: `package.json` comes from
-        // the head of the body, which npm packs first. `next`'s eight
-        // `@next/swc-*` binaries are ~30 MiB each and only the host's is
-        // used. Unlike a registry optional, this one is dropped even when a
-        // portable lockfile would otherwise record every variant — the
-        // entry would carry no integrity, which the strict reader (every
-        // default `parse_lockfile` caller) refuses. Another platform
-        // re-resolves the URL and picks up its own variant.
+        // For a host-only lockfile, an optional URL tarball whose manifest
+        // says it cannot run here is dropped without downloading it:
+        // `package.json` comes from the head of the body, which npm packs
+        // first, and `next`'s eight `@next/swc-*` binaries are ~30 MiB each.
+        // A portable lockfile skips the probe and downloads every variant,
+        // as npm and pnpm do: the integrity of a URL tarball exists only in
+        // its bytes, and an entry without one is refused by the strict
+        // reader and cannot be installed by a frozen install elsewhere.
         if let LocalSource::RemoteTarball(t) = &raw_local
             && task.dep_type == DepType::Optional
+            && !self.resolver.supported_architectures.accept_all
             && let Some(probed) =
                 probe_remote_tarball_manifest(&t.url, self.resolver.client.as_ref()).await
-            && !self.host_supports(&probed)
+            && !is_supported(
+                &probed.os,
+                &probed.cpu,
+                &probed.libc,
+                &self.resolver.supported_architectures,
+            )
         {
             tracing::debug!(
                 "skipping optional dep {}: unsupported platform (os={:?} cpu={:?} libc={:?})",
@@ -2410,24 +2415,6 @@ impl<'a> ResolveDriver<'a> {
             self.note_root_done();
         }
         Ok(())
-    }
-
-    /// Whether the host this install runs on — or the configured
-    /// `supportedArchitectures` — can use a package with this manifest,
-    /// ignoring the accept-all widening a portable lockfile applies.
-    fn host_supports(&self, manifest: &LocalManifest) -> bool {
-        let arch = &self.resolver.supported_architectures;
-        is_supported(
-            &manifest.os,
-            &manifest.cpu,
-            &manifest.libc,
-            &crate::SupportedArchitectures {
-                os: arch.os.clone(),
-                cpu: arch.cpu.clone(),
-                libc: arch.libc.clone(),
-                accept_all: false,
-            },
-        )
     }
 
     /// Park the required peers of a just-resolved package that nothing
