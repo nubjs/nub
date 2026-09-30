@@ -2148,7 +2148,7 @@ impl<'a> ResolveDriver<'a> {
                     tracing::warn!(
                         "skipping optional dependency {}: remote tarball {} could not be fetched: {e}",
                         task.name,
-                        task.range,
+                        aube_util::url::redact_url(&task.range),
                     );
                     if task.is_root {
                         self.note_root_done();
@@ -2158,7 +2158,10 @@ impl<'a> ResolveDriver<'a> {
                 Err(e) => {
                     return Err(Error::Registry(
                         task.name.clone(),
-                        format!("remote tarball {}: {e}", task.range),
+                        format!(
+                            "remote tarball {}: {e}",
+                            aube_util::url::redact_url(&task.range)
+                        ),
                     ));
                 }
             };
