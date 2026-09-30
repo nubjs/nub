@@ -3,7 +3,7 @@ title: AWS Lambda
 description: Run a Nub HTTP server from a Lambda container image by adding the AWS Lambda Web Adapter.
 ---
 
-AWS Lambda runs container images from ECR rather than GHCR. Add the [AWS Lambda Web Adapter](https://github.com/aws/aws-lambda-web-adapter) to the official Nub image so Lambda events reach the application's HTTP port.
+AWS Lambda runs container images from ECR. Add the [AWS Lambda Web Adapter](https://github.com/aws/aws-lambda-web-adapter) to the official Nub image so Lambda events reach the application's HTTP port.
 
 ## Dockerfile
 
@@ -21,32 +21,28 @@ EXPOSE 8080
 CMD ["nub", "run", "start"]
 ```
 
-Change `package-lock.json` to the project's lockfile. The application must listen on `0.0.0.0:8080` and return a response from its readiness path:
+Change `package-lock.json` to the lockfile the project already uses. The adapter activates only inside Lambda, so the same image runs as a plain HTTP server under local Docker.
+
+## HTTP endpoint
+
+The start script's server must listen on `0.0.0.0:8080` and answer on its readiness path:
 
 ```ts title="server.ts"
 import { createServer } from "node:http";
 
 const port = Number(process.env.PORT || 8080);
-createServer((request, response) => {
-  if (request.url !== "/alive") {
-    response.writeHead(404);
-    response.end();
-    return;
-  }
 
+createServer((request, response) => {
   response.writeHead(200, { "content-type": "application/json" });
-  response.end(JSON.stringify({
-    alive: true,
-    runtime: "nub-on-node",
-  }));
+  response.end(JSON.stringify({ alive: true, runtime: "nub-on-node" }));
 }).listen(port, "0.0.0.0");
 ```
 
-The adapter activates inside Lambda. The same image runs as a normal HTTP server under local Docker.
+## Deploy
 
-## Build and push
+### Build and push
 
-[Lambda accepts one architecture per function](https://docs.aws.amazon.com/lambda/latest/dg/images-create.html). Build `linux/amd64` on any host and disable provenance so ECR receives the image manifest Lambda expects:
+[Lambda accepts one architecture per function](https://docs.aws.amazon.com/lambda/latest/dg/images-create.html). Build `linux/amd64` and disable provenance, so ECR receives the image manifest Lambda expects:
 
 ```bash
 export AWS_REGION=us-east-1
@@ -72,15 +68,15 @@ docker buildx build \
 docker push "$ECR_IMAGE"
 ```
 
-Reuse `aws ecr describe-repositories` instead of `create-repository` when the repository already exists.
+Skip `create-repository` when the repository already exists.
 
 <Callout>
 Read the [full docs](https://docs.aws.amazon.com/AmazonECR/latest/userguide/docker-push-ecr-image.html) on docs.aws.amazon.com.
 </Callout>
 
-## Create the function
+### Create the function
 
-Create an execution role that Lambda can assume. This example attaches only Lambda's managed policy for writing logs; add application permissions separately:
+Create an execution role that Lambda can assume. This example attaches only Lambda's managed logging policy; add application permissions separately:
 
 ```bash
 export LAMBDA_FUNCTION=nub-lambda-app
@@ -108,11 +104,10 @@ aws iam attach-role-policy \
   --role-name "$LAMBDA_ROLE" \
   --policy-arn "arn:aws:iam::aws:policy/$BASIC_EXECUTION"
 
-# Give the new role time to propagate before Lambda assumes it.
-sleep 10
+sleep 10  # let the new role propagate before Lambda assumes it
 ```
 
-Create the function from the image in the same region, then wait for Lambda to finish optimizing it:
+Create the function from the image in the same region, then wait until it is active:
 
 ```bash
 aws lambda create-function \
@@ -131,7 +126,9 @@ aws lambda wait function-active-v2 \
   --region "$AWS_REGION"
 ```
 
-A [Function URL](https://docs.aws.amazon.com/lambda/latest/dg/urls-configuration.html) with auth type **NONE** is public. When using the CLI, add both URL permissions that AWS requires for new Function URLs:
+### Function URL
+
+A [Function URL](https://docs.aws.amazon.com/lambda/latest/dg/urls-configuration.html) with auth type **NONE** is public. From the CLI, a new Function URL needs both of these permissions:
 
 ```bash
 FUNCTION_URL=$(aws lambda create-function-url-config \
@@ -164,6 +161,6 @@ curl --fail "${FUNCTION_URL}alive"
 
 Update the AWS CLI if it does not recognize `--invoked-via-function-url`. Use `AWS_IAM` instead of `NONE` when callers should authenticate.
 
-## GitHub Actions
+## Prebuilt images
 
-The setup action can run tests before the image build. Deployment still needs AWS authentication, an ECR login, and a Lambda update through AWS's own actions or CLI.
+A GitHub Actions workflow can run tests with the setup action before building the image. Deploying from CI still needs AWS authentication, an ECR login, and a Lambda update through AWS's own actions or CLI.
