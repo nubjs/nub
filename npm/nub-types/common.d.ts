@@ -176,14 +176,16 @@ interface ImportMeta {
 // future standard lib adds them. The one property member (`Symbol.metadata`) is
 // byte-for-byte TypeScript's already-settled `lib.esnext.decorators` declaration.
 
-// Iterator chunking/includes/join. `IteratorObject` is in lib.es2015.iterable even
-// when the ES2025 Iterator constructor is not selected, so built-in iterators gain
-// these methods at the ES2024 target too. The versioned package entry point loads
-// TypeScript's own Iterator constructor and base-helper declarations.
+// Iterator chunking/includes/join (Stage 4, 2026-09). `IteratorObject` is in
+// lib.es2015.iterable even when the ES2025 Iterator constructor is not selected, so
+// built-in iterators gain these methods at the ES2024 target too. The versioned
+// package entry point loads TypeScript's own Iterator constructor and base-helper
+// declarations. The sizes and skip count are not coerced at runtime: a non-integral
+// number is a TypeError.
 interface IteratorObject<T, TReturn, TNext> {
   chunks(chunkSize: number): IteratorObject<T[], undefined, unknown>;
-  windows(windowSize: number): IteratorObject<T[], undefined, unknown>;
-  includes(searchElement: T): boolean;
+  windows(windowSize: number, undersized?: "only-full" | "allow-partial"): IteratorObject<T[], undefined, unknown>;
+  includes(searchElement: T, skippedElements?: number): boolean;
   join(separator?: string): string;
 }
 

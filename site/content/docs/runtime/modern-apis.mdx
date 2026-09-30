@@ -137,7 +137,7 @@ for (const row of Iterator.zipKeyed({ id: ids, name: names })) {
 
 ### `Iterator.prototype.chunks()`
 
-These helpers [batch an iterator](https://github.com/tc39/proposal-iterator-chunking), produce overlapping windows, search for a value, or join values into a string.
+These helpers [batch an iterator](https://github.com/tc39/proposal-iterator-chunking), produce overlapping windows, [search for a value](https://github.com/tc39/proposal-iterator-includes), or [join values into a string](https://github.com/tc39/proposal-iterator-join).
 
 <Callout title="Delivery">
 Feature-detected JavaScript polyfill on every supported Node version. No Node release ships these methods yet.
@@ -146,7 +146,11 @@ Feature-detected JavaScript polyfill on every supported Node version. No Node re
 ```ts
 const batches = Iterator.from(records).chunks(100).toArray();
 const movingTriples = Iterator.from(values).windows(3).toArray();
+// [[1, 2]], one short window
+Iterator.from([1, 2]).windows(3, "allow-partial").toArray();
 const hasDraft = Iterator.from(statuses).includes("draft");
+// skips the first value
+const draftLater = Iterator.from(statuses).includes("draft", 1);
 const label = Iterator.from(tags).join(", ");
 ```
 

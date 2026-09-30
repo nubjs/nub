@@ -66,10 +66,10 @@ There is nothing for Nub's feature matrix (`crates/nub-core/src/node/flags.rs` /
 
 ### (c) The floor and fast-tier boundary
 
-- **Node 18.19 (Nub's support floor) → V8 10.2 → NO Iterator Helpers.** Users on Node 18, 20, or 21 have neither the `Iterator` global nor any prototype helpers natively. A Nub polyfill path would have to cover these versions; Nub does not polyfill web/runtime APIs today, so this is an expected gap rather than a defect. A user-land polyfill such as `core-js` covers it.
+- **Node 18.19 (Nub's support floor) → V8 10.2 → NO Iterator Helpers.** Users on Node 18, 20, or 21 have neither the `Iterator` global nor any prototype helpers natively. Nub's preload polyfills the `Iterator` global and every helper on these versions, and test262's `built-ins/Iterator/prototype` suite is the conformance check for that polyfill.
 - **Node 22.15 (Nub's fast-tier classifier) → V8 12.4.254.21 → YES, on by default.** The fast-tier threshold already coincides with full native Iterator Helpers support.
 
-No action is required in Nub itself: Iterator Helpers are purely a V8 runtime feature, available on-by-default in every Node.js version Nub could plausibly see in the fast tier.
+No flag is required: Iterator Helpers are on by default in every Node.js version Nub could plausibly see in the fast tier, and the polyfill defers to them wherever they are native.
 
 ---
 
@@ -78,3 +78,4 @@ No action is required in Nub itself: Iterator Helpers are purely a V8 runtime fe
 Every revision to this document, with the date and what changed.
 
 - 2026-06-30 — Initial write-up.
+- 2026-09-30 — The floor section said Nub does not polyfill these helpers; it does, on Node 18–21, checked against test262.

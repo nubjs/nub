@@ -265,11 +265,27 @@ function installSyncPolyfills(preloaded) {
     };
   }
 
-  // Promise.try
+  // Promise.try (native on Node 24+). Generic on `this` like the other statics: the
+  // capability comes from NewPromiseCapability(this), so a subclass drives the result
+  // and a non-constructor `this` throws synchronously.
   if (typeof Promise.try !== "function") {
-    Promise.try = (fn, ...args) => {
-      return new Promise((resolve) => resolve(fn(...args)));
-    };
+    defBuiltin(Promise, "try", {
+      try(callbackfn, ...args) {
+        if (!(this !== null && (typeof this === "object" || typeof this === "function"))) {
+          throw new TypeError("Promise.try called on a non-object");
+        }
+        const { promise, resolve, reject } = newPromiseCapability(this, "try");
+        let value;
+        try {
+          value = callbackfn(...args);
+        } catch (e) {
+          reject(e);
+          return promise;
+        }
+        resolve(value);
+        return promise;
+      },
+    }.try);
   }
 
   // Float16Array (TC39 Stage 4, native on Node 24+; absent on our 22.x floor).
@@ -325,17 +341,17 @@ function installSyncPolyfills(preloaded) {
 // gains only the names it lacks.
 //
 // FIDELITY LIMIT (inherent, same class as the polyfilled Float16Array not being an
-// ArrayBuffer.isView): the helper objects here are generator objects, so their
-// prototype is not the spec's %IteratorHelperPrototype% and their
-// Symbol.toStringTag reads "Generator" rather than "Iterator Helper". Iteration,
-// laziness, argument validation and underlying-iterator closing all behave
-// correctly — only the internal identity differs, which no realistic consumer
-// inspects. Generators were chosen precisely because they get the hard part right:
-// an early `return()` propagates to the source iterator.
+// ArrayBuffer.isView): where the engine ships some helpers natively, a polyfilled
+// helper's result inherits from this file's own "Iterator Helper" prototype rather
+// than the engine's %IteratorHelperPrototype%, whose methods check internal slots a
+// userland object cannot carry. Iteration, laziness, argument validation and
+// underlying-iterator closing all follow the spec (test262 is the oracle) — only
+// that prototype identity differs, which no realistic consumer inspects.
 function installIteratorSurface() {
   // %IteratorPrototype% is reachable from any built-in iterator: array iterator →
   // %ArrayIteratorPrototype% → %IteratorPrototype%.
   const IteratorProto = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
+  const isObject = (v) => v !== null && (typeof v === "object" || typeof v === "function");
 
   if (typeof globalThis.Iterator !== "function") {
     // The Iterator constructor is abstract: calling it directly throws, and
@@ -351,7 +367,36 @@ function installIteratorSurface() {
       enumerable: false,
       configurable: false,
     });
-    defBuiltin(IteratorProto, "constructor", Iterator);
+    // `constructor` and Symbol.toStringTag are ACCESSORS in the spec, so that
+    // assigning either on an object inheriting from %IteratorPrototype% (a
+    // user's iterator class prototype) creates an own property there instead of
+    // failing or rewriting the shared one (SetterThatIgnoresPrototypeProperties).
+    const setIgnoringPrototype = (obj, key, v) => {
+      if (!isObject(obj)) throw new TypeError("setter called on a non-object");
+      if (obj === IteratorProto) throw new TypeError(`Cannot assign to Iterator.prototype[${String(key)}]`);
+      const ok = Object.getOwnPropertyDescriptor(obj, key) === undefined
+        ? Reflect.defineProperty(obj, key, { value: v, writable: true, enumerable: true, configurable: true })
+        : Reflect.set(obj, key, v, obj);
+      if (!ok) throw new TypeError(`Cannot assign to ${String(key)}`);
+    };
+    const accessors = {
+      get constructor() {
+        return Iterator;
+      },
+      set constructor(v) {
+        setIgnoringPrototype(this, "constructor", v);
+      },
+      get [Symbol.toStringTag]() {
+        return "Iterator";
+      },
+      set [Symbol.toStringTag](v) {
+        setIgnoringPrototype(this, Symbol.toStringTag, v);
+      },
+    };
+    for (const key of ["constructor", Symbol.toStringTag]) {
+      const { get, set } = Object.getOwnPropertyDescriptor(accessors, key);
+      Object.defineProperty(IteratorProto, key, { get, set, enumerable: false, configurable: true });
+    }
     Object.defineProperty(globalThis, "Iterator", {
       value: Iterator,
       writable: true,
@@ -361,46 +406,138 @@ function installIteratorSurface() {
   }
   const Iterator = globalThis.Iterator;
 
-  // GetIteratorDirect: helpers operate on the object's OWN `next`, without
-  // re-invoking Symbol.iterator — so a partially-consumed iterator keeps its place.
+  // %IteratorPrototype%[Symbol.dispose] (explicit resource management; native on
+  // Node 24+): lets `using` close any iterator through its `return()`.
+  if (typeof IteratorProto[Symbol.dispose] !== "function") {
+    const dispose = {
+      [Symbol.dispose]() {
+        const ret = this.return;
+        if (ret !== undefined && ret !== null) Reflect.apply(ret, this, []);
+      },
+    }[Symbol.dispose];
+    // Node 18-22 define Symbol.dispose themselves with the description
+    // "nodejs.dispose", which would otherwise name this "[nodejs.dispose]".
+    Object.defineProperty(dispose, "name", { value: "[Symbol.dispose]" });
+    defBuiltin(IteratorProto, Symbol.dispose, dispose);
+  }
+
   const iterOf = (obj) => {
-    if (obj === null || (typeof obj !== "object" && typeof obj !== "function")) {
-      throw new TypeError("not an object");
-    }
+    if (!isObject(obj)) throw new TypeError("not an object");
     return obj;
+  };
+  // GetIteratorDirect: helpers operate on the object's OWN `next`, read ONCE here
+  // and never again, without re-invoking Symbol.iterator — so a partially-consumed
+  // iterator keeps its place. Every method validates its arguments BEFORE this
+  // runs, and a validation failure closes the receiver (`closeOnError`).
+  const getIteratorDirect = (obj) => ({ iterator: obj, next: obj.next });
+  // IteratorClose for a NORMAL completion: a throw from reading or calling
+  // `return`, or a non-object result, propagates.
+  const closeIterator = (iterator) => {
+    const ret = iterator.return;
+    if (ret === undefined || ret === null) return;
+    if (!isObject(Reflect.apply(ret, iterator, []))) {
+      throw new TypeError("iterator.return() did not return an object");
+    }
+  };
+  // IteratorClose for a THROW completion: the original error always wins.
+  const closeOnError = (iterator, error) => {
+    try {
+      const ret = iterator.return;
+      if (ret !== undefined && ret !== null) Reflect.apply(ret, iterator, []);
+    } catch { /* masked by `error`, per IteratorClose */ }
+    throw error;
+  };
+  // Run a method's argument validation; on failure close the receiver, which has
+  // not had its `next` read yet.
+  const validate = (obj, check) => {
+    try {
+      return check();
+    } catch (e) {
+      closeOnError(obj, e);
+    }
   };
   // Drive an iterator record with for..of semantics while forwarding closure.
   // The `finally` is load-bearing: when a consumer abandons a helper early (a
   // `break`, a `return`, a throw), native helpers call the SOURCE iterator's
-  // `return()`, and without this the source would be left open — verified against
-  // native, which is how the omission was caught. It must fire ONLY on early exit,
-  // since native does not call `return()` on an already-exhausted iterator.
+  // `return()`, and without this the source would be left open. It must NOT fire
+  // once the source is exhausted or has itself thrown (a throwing `next`, a
+  // non-object result, a throwing `done`/`value` getter): IteratorStepValue marks
+  // the record done in all of those, so native never calls `return()` on them.
+  // A throw from `return()` propagates here; when the exit was itself a throw,
+  // for..of's own IteratorClose discards it in favor of the original error.
   function* drain(rec) {
-    let exhausted = false;
+    let open = true;
     try {
       while (true) {
-        const r = rec.next();
-        if (r.done) {
-          exhausted = true;
-          return;
+        let value;
+        try {
+          const r = Reflect.apply(rec.next, rec.iterator, []);
+          if (!isObject(r)) throw new TypeError("iterator result is not an object");
+          if (r.done) {
+            open = false;
+            return;
+          }
+          value = r.value;
+        } catch (e) {
+          open = false;
+          throw e;
         }
-        yield r.value;
+        yield value;
       }
     } finally {
-      if (!exhausted) {
-        const ret = rec.return;
-        if (typeof ret === "function") {
-          // A throw from `return()` must not mask the completion in flight.
-          try {
-            ret.call(rec);
-          } catch { /* swallow, matching IteratorClose's error handling here */ }
-        }
-      }
+      if (open) closeIterator(rec.iterator);
     }
   }
   const asIterable = (rec) => ({ [Symbol.iterator]: () => drain(rec) });
-  // ToIntegerOrInfinity plus the helpers' shared limit validation: NaN and negative
-  // are RangeErrors, which is where a naive `Number(x) | 0` diverges.
+
+  // %IteratorHelperPrototype% stand-in. The helper body is a generator (which gets
+  // laziness, re-entrancy errors and return-forwarding mid-iteration right), but a
+  // bare generator misses one case: `return()` BEFORE the first `next()` must
+  // still close the underlying iterator, and a never-started generator runs no
+  // `finally`. This wrapper closes it directly in that state.
+  const helperState = new WeakMap();
+  const stateOf = (h) => {
+    const s = helperState.get(h);
+    if (s === undefined) throw new TypeError("not an Iterator Helper");
+    return s;
+  };
+  const HelperProto = Object.create(IteratorProto);
+  defBuiltin(HelperProto, "next", {
+    next() {
+      const s = stateOf(this);
+      s.started = true;
+      return s.gen.next();
+    },
+  }.next);
+  defBuiltin(HelperProto, "return", {
+    return() {
+      const s = stateOf(this);
+      if (!s.started) {
+        s.started = true;
+        s.gen.return();
+        closeIterator(s.rec.iterator);
+        return { value: undefined, done: true };
+      }
+      return s.gen.return();
+    },
+  }.return);
+  Object.defineProperty(HelperProto, Symbol.toStringTag, {
+    value: "Iterator Helper",
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  const makeHelper = (rec, body) => {
+    const h = Object.create(HelperProto);
+    helperState.set(h, { gen: body(), rec, started: false });
+    return h;
+  };
+
+  // take/drop limit: ToNumber, NaN is a RangeError, then ToIntegerOrInfinity and
+  // negative is a RangeError — which is where a naive `Number(x) | 0` diverges.
+  // The later spec step rejecting a finite limit above 2^53-1 is deliberately
+  // absent: native V8 (Node 26.10) still accepts one, and the polyfill must agree
+  // with the helpers it stands in for.
   const toLimit = (v) => {
     const n = Number(v);
     if (Number.isNaN(n)) throw new RangeError("limit must not be NaN");
@@ -411,40 +548,51 @@ function installIteratorSurface() {
   const requireFn = (f, what) => {
     if (typeof f !== "function") throw new TypeError(`${what} is not a function`);
   };
+  // chunks/windows size: an integral Number with NO coercion, in 1..2^32-1.
+  const requireSize = (v, what) => {
+    if (!Number.isInteger(v)) throw new TypeError(`${what} must be an integral Number`);
+    if (v < 1 || v > 2 ** 32 - 1) throw new RangeError(`${what} must be between 1 and 2^32 - 1`);
+    return v;
+  };
 
   const protoHelpers = {
     map(mapper) {
-      const rec = iterOf(this);
-      requireFn(mapper, "mapper");
-      return (function* () {
+      const O = iterOf(this);
+      validate(O, () => requireFn(mapper, "mapper"));
+      const rec = getIteratorDirect(O);
+      return makeHelper(rec, function* () {
         let i = 0;
         for (const v of asIterable(rec)) yield mapper(v, i++);
-      })();
+      });
     },
     filter(predicate) {
-      const rec = iterOf(this);
-      requireFn(predicate, "predicate");
-      return (function* () {
+      const O = iterOf(this);
+      validate(O, () => requireFn(predicate, "predicate"));
+      const rec = getIteratorDirect(O);
+      return makeHelper(rec, function* () {
         let i = 0;
         for (const v of asIterable(rec)) if (predicate(v, i++)) yield v;
-      })();
+      });
     },
     take(limit) {
-      const rec = iterOf(this);
-      const n = toLimit(limit);
-      return (function* () {
-        if (n === 0) return;
+      const O = iterOf(this);
+      const n = validate(O, () => toLimit(limit));
+      const rec = getIteratorDirect(O);
+      return makeHelper(rec, function* () {
+        // A spent limit closes the source on the NEXT pull, never eagerly.
+        if (n === 0) return closeIterator(rec.iterator);
         let left = n;
         for (const v of asIterable(rec)) {
           yield v;
           if (--left === 0) return;
         }
-      })();
+      });
     },
     drop(limit) {
-      const rec = iterOf(this);
-      const n = toLimit(limit);
-      return (function* () {
+      const O = iterOf(this);
+      const n = validate(O, () => toLimit(limit));
+      const rec = getIteratorDirect(O);
+      return makeHelper(rec, function* () {
         let left = n;
         for (const v of asIterable(rec)) {
           if (left > 0) {
@@ -453,85 +601,93 @@ function installIteratorSurface() {
           }
           yield v;
         }
-      })();
+      });
     },
     flatMap(mapper) {
-      const rec = iterOf(this);
-      requireFn(mapper, "mapper");
-      return (function* () {
+      const O = iterOf(this);
+      validate(O, () => requireFn(mapper, "mapper"));
+      const rec = getIteratorDirect(O);
+      return makeHelper(rec, function* () {
         let i = 0;
         for (const v of asIterable(rec)) {
-          const inner = mapper(v, i++);
-          // The mapper must return something iterable; a bare value is a TypeError
-          // rather than being wrapped.
-          if (inner === null || inner === undefined || typeof inner[Symbol.iterator] !== "function") {
-            throw new TypeError("flatMap mapper did not return an iterable");
+          // GetIteratorFlattenable(reject-primitives): a primitive — a string
+          // included — is a TypeError, and an object with no Symbol.iterator is
+          // taken as an iterator itself.
+          const mapped = mapper(v, i++);
+          if (!isObject(mapped)) throw new TypeError("flatMap mapper did not return an object");
+          const method = mapped[Symbol.iterator];
+          let inner = mapped;
+          if (method !== undefined && method !== null) {
+            inner = Reflect.apply(method, mapped, []);
+            if (!isObject(inner)) throw new TypeError("Symbol.iterator did not return an object");
           }
-          yield* inner;
+          for (const x of asIterable(getIteratorDirect(inner))) yield x;
         }
-      })();
+      });
     },
     reduce(reducer) {
-      const rec = iterOf(this);
-      requireFn(reducer, "reducer");
+      const O = iterOf(this);
+      validate(O, () => requireFn(reducer, "reducer"));
+      const it = drain(getIteratorDirect(O));
       let acc;
       let i = 0;
       if (arguments.length > 1) {
         acc = arguments[1];
       } else {
-        const first = rec.next();
+        const first = it.next();
         if (first.done) {
           throw new TypeError("reduce of empty iterator with no initial value");
         }
         acc = first.value;
         i = 1;
       }
-      for (const v of asIterable(rec)) acc = reducer(acc, v, i++);
+      for (const v of it) acc = reducer(acc, v, i++);
       return acc;
     },
     toArray() {
-      const rec = iterOf(this);
+      const rec = getIteratorDirect(iterOf(this));
       const out = [];
       for (const v of asIterable(rec)) out.push(v);
       return out;
     },
     some(predicate) {
-      const rec = iterOf(this);
-      requireFn(predicate, "predicate");
+      const O = iterOf(this);
+      validate(O, () => requireFn(predicate, "predicate"));
       let i = 0;
-      for (const v of asIterable(rec)) if (predicate(v, i++)) return true;
+      for (const v of asIterable(getIteratorDirect(O))) if (predicate(v, i++)) return true;
       return false;
     },
     every(predicate) {
-      const rec = iterOf(this);
-      requireFn(predicate, "predicate");
+      const O = iterOf(this);
+      validate(O, () => requireFn(predicate, "predicate"));
       let i = 0;
-      for (const v of asIterable(rec)) if (!predicate(v, i++)) return false;
+      for (const v of asIterable(getIteratorDirect(O))) if (!predicate(v, i++)) return false;
       return true;
     },
     find(predicate) {
-      const rec = iterOf(this);
-      requireFn(predicate, "predicate");
+      const O = iterOf(this);
+      validate(O, () => requireFn(predicate, "predicate"));
       let i = 0;
-      for (const v of asIterable(rec)) if (predicate(v, i++)) return v;
+      for (const v of asIterable(getIteratorDirect(O))) if (predicate(v, i++)) return v;
       return undefined;
     },
     forEach(fn) {
-      const rec = iterOf(this);
-      requireFn(fn, "fn");
+      const O = iterOf(this);
+      validate(O, () => requireFn(fn, "fn"));
       let i = 0;
-      for (const v of asIterable(rec)) fn(v, i++);
+      for (const v of asIterable(getIteratorDirect(O))) fn(v, i++);
       return undefined;
     },
-    // ── Stage 3 additions, in no engine yet ──
+    // ── Stage 4 (2026-09), in no Node release yet ──
     // iterator-chunking: chunks() partitions into non-overlapping arrays of n and
-    // yields a SHORT final chunk; windows() slides by one and yields nothing at all
-    // when the source is shorter than n. Both reject n < 1, unlike take/drop.
+    // yields a SHORT final chunk; windows() slides by one and, by default, yields
+    // nothing when the source is shorter than n ("allow-partial" yields the short
+    // buffer instead). Unlike take/drop, the size is not coerced.
     chunks(chunkSize) {
-      const rec = iterOf(this);
-      const n = toLimit(chunkSize);
-      if (n < 1 || n === Infinity) throw new RangeError("chunkSize must be a positive integer");
-      return (function* () {
+      const O = iterOf(this);
+      const n = validate(O, () => requireSize(chunkSize, "chunkSize"));
+      const rec = getIteratorDirect(O);
+      return makeHelper(rec, function* () {
         let buf = [];
         for (const v of asIterable(rec)) {
           buf.push(v);
@@ -541,45 +697,72 @@ function installIteratorSurface() {
           }
         }
         if (buf.length > 0) yield buf;
-      })();
+      });
     },
     windows(windowSize) {
-      const rec = iterOf(this);
-      const n = toLimit(windowSize);
-      if (n < 1 || n === Infinity) throw new RangeError("windowSize must be a positive integer");
-      return (function* () {
+      const O = iterOf(this);
+      const undersized = arguments.length > 1 ? arguments[1] : undefined;
+      const n = validate(O, () => {
+        requireSize(windowSize, "windowSize");
+        if (undersized !== undefined && undersized !== "only-full" && undersized !== "allow-partial") {
+          throw new TypeError('undersized must be "only-full" or "allow-partial"');
+        }
+        return windowSize;
+      });
+      const rec = getIteratorDirect(O);
+      return makeHelper(rec, function* () {
         const buf = [];
         for (const v of asIterable(rec)) {
           buf.push(v);
           if (buf.length > n) buf.shift();
           if (buf.length === n) yield buf.slice();
         }
-      })();
+        if (undersized === "allow-partial" && buf.length > 0 && buf.length < n) yield buf;
+      });
     },
-    // iterator-includes: SameValueZero, so NaN is found and -0 matches +0.
+    // iterator-includes: SameValueZero, so NaN is found and -0 matches +0. The
+    // optional skip count is not coerced; +Infinity skips everything.
     includes(searchElement) {
-      const rec = iterOf(this);
-      for (const v of asIterable(rec)) {
-        if (v === searchElement || (Number.isNaN(v) && Number.isNaN(searchElement))) return true;
+      const O = iterOf(this);
+      const skippedElements = arguments.length > 1 ? arguments[1] : undefined;
+      const toSkip = validate(O, () => {
+        if (skippedElements === undefined) return 0;
+        if (
+          typeof skippedElements !== "number" ||
+          !(Number.isInteger(skippedElements) || skippedElements === Infinity || skippedElements === -Infinity)
+        ) {
+          throw new TypeError("skippedElements must be an integral Number or ±Infinity");
+        }
+        if (skippedElements < 0) throw new RangeError("skippedElements must not be negative");
+        if (skippedElements !== Infinity && skippedElements > Number.MAX_SAFE_INTEGER) {
+          throw new RangeError("skippedElements must not exceed 2^53 - 1");
+        }
+        return skippedElements;
+      });
+      let skipped = 0;
+      for (const v of asIterable(getIteratorDirect(O))) {
+        if (skipped < toSkip) skipped++;
+        else if (v === searchElement || (v !== v && searchElement !== searchElement)) return true;
       }
       return false;
     },
     // iterator-join: like Array.prototype.join — default separator ",", and
-    // null/undefined elements become the empty string.
+    // null/undefined elements become the empty string. ToString (a template
+    // literal), not String(), so a Symbol separator or element is a TypeError.
     join(separator) {
-      const rec = iterOf(this);
-      const sep = separator === undefined ? "," : String(separator);
+      const O = iterOf(this);
+      const sep = separator === undefined ? "," : validate(O, () => `${separator}`);
       let out = "";
       let first = true;
-      for (const v of asIterable(rec)) {
+      for (const v of asIterable(getIteratorDirect(O))) {
         if (!first) out += sep;
         first = false;
-        if (v !== null && v !== undefined) out += String(v);
+        if (v !== null && v !== undefined) out += `${v}`;
       }
       return out;
     },
   };
-  // `chunks` is written out literally as the matrix anchor for the Stage 3 additions
+  // `chunks` is written out literally as the matrix anchor for the Stage 4 additions
   // (chunks/windows/includes/join), which install even where the ES2025 helpers are
   // already native. Every name is still guarded individually.
   if (typeof Iterator.prototype.chunks !== "function") {
@@ -611,8 +794,9 @@ function installIteratorSurface() {
         if (IteratorProto.isPrototypeOf(O)) return O;
         rec = O;
       }
+      const direct = getIteratorDirect(rec);
       return (function* () {
-        yield* asIterable(rec);
+        yield* asIterable(direct);
       })();
     });
   }
@@ -1012,7 +1196,7 @@ function installMapGetOrInsert() {
   }
 }
 
-// ── Math.sumPrecise (TC39 Stage 3; in no Node — bun ships it, so bun is the
+// ── Math.sumPrecise (TC39 Stage 4; in no Node — bun ships it, so bun is the
 //    differential oracle used to verify this) ──
 // Returns the CORRECTLY ROUNDED sum, not a left-to-right accumulation, so naive
 // `reduce((a, b) => a + b)` is wrong: it loses low bits at every step. This is
@@ -1111,7 +1295,7 @@ function installMathSumPrecise() {
 }
 
 // ── Shipped-standard ECMAScript builtins missing below their Node line ──
-// Every one of these is Stage 4 (except Atomics.pause, Stage 3) and native on a
+// Every one of these is Stage 4 and native on a
 // NEWER Node than nub's 18.19 support floor, so each is a hole only the compat
 // tier sees. They all went unpolyfilled until 2026-07 for the same reason
 // Promise.withResolvers did: the 2026-05 candidates survey judged them "native on
@@ -1329,7 +1513,7 @@ function installFloorBuiltins() {
     });
   }
 
-  // ── Atomics.pause (TC39 Stage 3, proposal-atomics-microwait; in no Node) ──
+  // ── Atomics.pause (TC39 Stage 4, proposal-atomics-microwait; native on Node 24+) ──
   // A pure micro-architectural HINT with no observable effect beyond argument
   // validation, so returning undefined is a fully faithful implementation — the
   // spec permits an implementation to do nothing. Validation is the observable
@@ -1347,7 +1531,7 @@ function installFloorBuiltins() {
   }
 }
 
-// ── Uint8Array base64/hex (TC39 Stage 3; native Node 25+, absent below) ──
+// ── Uint8Array base64/hex (TC39 Stage 4; native Node 25+, absent below) ──
 // Spec-faithful port of the TC39 proposal-arraybuffer-base64 reference polyfill,
 // so the < 25 floor behaves byte-for-byte like native: toBase64/fromBase64 honor
 // the {alphabet, omitPadding} / {alphabet, lastChunkHandling} options,

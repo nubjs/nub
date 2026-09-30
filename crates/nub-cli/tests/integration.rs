@@ -2901,7 +2901,7 @@ const targets = [
   [Math, "sumPrecise"],
   [IP, "map"], [IP, "filter"], [IP, "take"], [IP, "drop"], [IP, "flatMap"], [IP, "reduce"],
   [IP, "toArray"], [IP, "some"], [IP, "every"], [IP, "find"], [IP, "forEach"],
-  [IP, "chunks"], [IP, "windows"], [IP, "includes"], [IP, "join"],
+  [IP, "chunks"], [IP, "windows"], [IP, "includes"], [IP, "join"], [IP, Symbol.dispose],
   [Uint8Array.prototype, "toBase64"], [Uint8Array.prototype, "toHex"], [Uint8Array, "fromBase64"],
   [globalThis, "DisposableStack"], [globalThis, "AsyncDisposableStack"],
   [globalThis, "SuppressedError"], [globalThis, "reportError"],
@@ -2954,6 +2954,108 @@ console.log(JSON.stringify({ checked: planted.length + 1, clobbered }));
         "expected >=50 surfaces checked, got {}",
         parsed["checked"]
     );
+}
+
+#[test]
+fn iterator_stage4_helpers_and_promise_try_follow_spec() {
+    // The final Stage 4 text of iterator chunking/includes/join, plus the generic
+    // `this` of Promise.try. No Node release ships the four iterator methods, and
+    // Promise.try is deleted first so its fallback runs on 24+ too; each case below
+    // is one the pre-Stage-4 polyfill got wrong. Full conformance is checked against
+    // test262 (built-ins/Iterator/prototype, built-ins/Promise/try); this pins the
+    // observable contract. Plain `node` against the runtime file, as the no-clobber
+    // test above, so the CI Node matrix covers both tiers.
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let polyfills = Path::new(&manifest).join("../../runtime/polyfills.cjs");
+
+    let work = unique_test_cache();
+    std::fs::create_dir_all(&work).unwrap();
+    let script = work.join("_iterator_stage4.mjs");
+    std::fs::write(
+        &script,
+        r#"
+import { createRequire } from "node:module";
+const IP = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
+for (const k of ["chunks", "windows", "includes", "join"]) delete IP[k];
+delete Promise.try;
+createRequire(import.meta.url)(process.argv[2]).installSyncPolyfills({});
+
+const failures = [];
+const check = (name, fn) => {
+  try {
+    if (fn() !== true) failures.push(name);
+  } catch (e) {
+    failures.push(`${name}: ${e}`);
+  }
+};
+const throws = (Err, fn) => {
+  try {
+    fn();
+  } catch (e) {
+    return e instanceof Err;
+  }
+  return false;
+};
+const it = () => [1, 2, 3].values();
+// A receiver whose `next` must never be read, counting `return()` calls.
+const closable = () => {
+  const o = { closed: 0, get next() { throw new Error("next was read"); }, return() { o.closed++; return {}; } };
+  return o;
+};
+
+check("windows undersized", () =>
+  JSON.stringify(it().windows(5, "allow-partial").toArray()) === "[[1,2,3]]" &&
+  it().windows(5).toArray().length === 0 &&
+  JSON.stringify(it().windows(2, "allow-partial").toArray()) === "[[1,2],[2,3]]" &&
+  throws(TypeError, () => it().windows(2, "bogus")));
+check("includes skippedElements", () =>
+  it().includes(1, 1) === false && it().includes(2, 1) === true && it().includes(3, Infinity) === false &&
+  throws(TypeError, () => it().includes(1, 1.5)) && throws(TypeError, () => it().includes(1, "1")) &&
+  throws(RangeError, () => it().includes(1, -1)) && throws(RangeError, () => it().includes(1, 2 ** 53)));
+check("sizes are not coerced", () =>
+  throws(TypeError, () => it().chunks(2.5)) && throws(TypeError, () => it().chunks("2")) &&
+  throws(RangeError, () => it().chunks(0)) && throws(RangeError, () => it().windows(2 ** 32)));
+check("a bad argument closes the receiver before reading next", () =>
+  [["chunks", [0]], ["windows", [1, "x"]], ["includes", [0, -1]], ["join", [Symbol()]]]
+    .map(([m, args]) => {
+      const o = closable();
+      try { IP[m].apply(o, args); } catch {}
+      return o.closed;
+    })
+    .join() === "1,1,1,1");
+check("join uses ToString and closes on failure", () => {
+  let closed = 0;
+  const src = { next: () => ({ done: false, value: Symbol() }), return() { closed++; return {}; } };
+  return throws(TypeError, () => it().join(Symbol())) && throws(TypeError, () => IP.join.call(src)) && closed === 1;
+});
+check("return() before next() closes the source once", () => {
+  let closed = 0;
+  const src = { next: () => ({ done: false, value: 1 }), return() { closed++; return {}; } };
+  const h = IP.chunks.call(src, 2);
+  h.return();
+  h.return();
+  return closed === 1;
+});
+class Sub extends Promise {}
+check("Promise.try constructs from this", () =>
+  Sub.try(() => 1) instanceof Sub && throws(TypeError, () => Promise.try.call(1, () => 1)));
+console.log(JSON.stringify(failures));
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(target_node_path())
+        .arg(&script)
+        .arg(&polyfills)
+        .current_dir(&work)
+        .output()
+        .expect("failed to spawn node");
+
+    let _ = std::fs::remove_dir_all(&work);
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stdout, "[]", "spec cases the polyfill failed (stderr: {stderr})");
 }
 
 #[test]
