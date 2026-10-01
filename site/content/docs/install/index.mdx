@@ -1,9 +1,9 @@
 ---
 title: Package manager
-description: Nub's install engine — the package.json fields and config keys that shape dependency resolution, plus lockfile compatibility with npm, pnpm, Bun, and Yarn.
+description: Nub's install engine — the commands, the package.json fields and settings that shape dependency resolution, install-time security checks, and compatibility with npm, pnpm, Bun, and Yarn projects.
 ---
 
-Nub has its own install engine: it resolves the dependency graph, writes the lockfile, and links `node_modules`. The CLI is pnpm-shaped, so the verbs and flags are the ones you already type.
+Nub has its own install engine: it resolves the dependency graph, writes the lockfile, and links `node_modules`. Its CLI follows pnpm's, so the verbs and flags are the ones you already type.
 
 ```bash
 nub install               # install what package.json declares
@@ -12,49 +12,238 @@ nub update --latest       # move ranges to the newest release
 nub dedupe                # collapse duplicate versions
 ```
 
-The lockfile is `nub.lock`. Every field Nub reads to build the graph is one pnpm, npm, Yarn, or Bun already reads — Nub adds no config field of its own. Running Nub inside a repo that already belongs to one of those tools works too: see [lockfile compatibility](#lockfile-compatibility).
+A project Nub owns gets a `nub.lock`. In a repo that already uses npm, pnpm, Yarn, or Bun, Nub installs with that tool's lockfile instead — see [lockfile compatibility](#lockfile-compatibility).
 
-## Layout
+## CLI
 
-Layout is how the packages you install are arranged inside `node_modules`. Set it in `.npmrc`:
+### `nub install`
 
-```ini title=".npmrc"
-node-linker=hoisted
-hoist-pattern=lodash
-public-hoist-pattern=@types/*
-shamefully-hoist=true
-hoist-workspace-packages=false
-hoisting-limits=workspaces
-modules-dir=vendor_modules
-virtual-store-dir=.store
+Resolves the graph and links `node_modules`:
+
+```bash
+nub install                      # alias: nub i
+nub install --frozen-lockfile    # fail if the lockfile is out of date
+nub install -P                   # --prod / --production
+nub install -D                   # dev only
+nub install --node-linker hoisted
+nub ci                           # clean install from the lockfile
+nub ci -P                        # clean install, no devDependencies
 ```
 
-<Callout>
-Read the [full docs](https://pnpm.io/settings/node-modules) on pnpm.io.
-</Callout>
+The accepted flags are pnpm's spellings:
 
-The `--node-linker` flag does the same for one command. The same two choices are `linker` and `publicHoist` in `nub.jsonc`:
-
-```jsonc title="nub.jsonc"
-{
-  // ...
-  "install": {
-    // "global-virtual-store" (the default), "isolated", or "hoisted"
-    "linker": "hoisted",
-    "publicHoist": ["@types/*"]  // lift a package to the project root
-  }
-}
+```bash
+--frozen-lockfile / --no-frozen-lockfile / --prefer-frozen-lockfile
+--prod, -P            # production install
+--dev, -D
+--ignore-scripts
+--pnpmfile <path>     # run this one instead of the project's
+--global-pnpmfile <path>
+--ignore-pnpmfile
+--no-optional
+--offline / --prefer-offline
+--lockfile-only
+--force
+--node-linker
+--registry
+--dir, -C             # pnpm's spelling, not npm's --prefix
+--reporter <name>     # default, append-only, silent
+--silent, -s          # alias for --reporter=silent
+--loglevel <level>    # debug, info, warn, error, silent
+--os <os>             # which platforms' optional deps to install
+--cpu <arch>
+--libc <libc>
 ```
 
-Both fields take an object form too — see [`install.linker`](/docs/config#installlinker) and [`install.publicHoist`](/docs/config#installpublichoist) for the strategies and their options. See [the flat opt-out](/docs/install/virtual-store#the-flat-opt-out) for choosing between the layouts.
+Packages like `esbuild` and `rollup` ship one prebuilt binary per platform as optional dependencies, and an install picks the one matching the current machine. Pass `--os`, `--cpu`, or `--libc` to pick a different one, for example when building a Linux container image on a Mac:
+
+```bash
+nub install --os linux --cpu x64        # Linux x64 binaries
+nub install --os linux                  # Linux binaries, host CPU
+nub install --os current,linux          # this machine and Linux
+nub install --os '*' --cpu '*'          # every platform variant
+```
+
+Each flag is repeatable and takes a comma-separated list. A flag overrides `supportedArchitectures` for the axis it names, for that run only.
+
+Three flags control output. Each works on every install-family command, before or after the verb:
+
+```bash
+nub install --silent                # -s: only fatal errors
+nub install --reporter=append-only  # no live progress, keeps the summary
+nub install --loglevel error        # hide warnings
+```
+
+In a workspace, `install` and `ci` take the same selector flags as [script running](/docs/run):
+
+```bash
+--filter <sel>, -F        # pnpm's selector grammar
+--recursive, -r           # every workspace package
+--filter-prod <sel>       # selector, production deps only
+--include-workspace-root  # add the root package to the recursive set
+--fail-if-no-match        # error if the filter selects zero packages
+```
+
+### `nub add`
+
+Resolves a package, links it, and writes the dependency into `package.json`:
+
+```bash
+nub add <pkg>                  # alias: a
+nub add -D <pkg>               # --save-dev
+nub add -E <pkg>               # --save-exact (pin, no ^)
+nub add -O <pkg>               # --save-optional
+nub add --save-peer <pkg>      # peer + dev dependencies (pnpm parity)
+nub add -g <pkg>               # global install
+nub add -w <pkg>               # write to the workspace root
+nub add --save-catalog <pkg>   # add into the workspace catalog
+nub add --allow-build=<pkg>    # pre-approve its build scripts
+nub add --no-save <pkg>        # link without persisting to package.json
+nub add <pkg>@<version>        # pin an exact version
+nub add <pkg>@<version> --lockfile-only  # refresh the lockfile only
+```
+
+### `nub remove`
+
+Drops a dependency from `package.json` and relinks `node_modules`:
+
+```bash
+nub remove <pkg>           # rm / uninstall / un / uni
+nub remove -D <pkg>        # remove only from devDependencies
+nub remove -g <pkg>        # remove a global package
+nub remove -w <pkg>        # remove from the workspace root
+```
+
+### `nub update`
+
+Re-resolves dependencies within their ranges. With `--latest`, it rewrites the `package.json` ranges to the newest versions:
+
+```bash
+nub update                 # up — refresh all deps within range
+nub update <pkg>           # update a single dependency
+nub update <pkg>@<version> # pin one dep, keeping its ^/~ operator
+nub update <pkg>@<tag>     # move one dep to a dist-tag, exact
+nub update -i              # --interactive: pick each package's target
+nub update -L              # --latest: move past the manifest range
+nub update -E -L           # pin the rewritten range to an exact version
+nub update -D              # devDependencies only
+nub update -P              # production only
+nub update --lockfile-only # refresh the lockfile, leave node_modules alone
+```
+
+The interactive picker shows one row per outdated dependency:
+
+```text wide
+Choose dependency updates
+                                         keep             latest in range   latest
+  dependencies
+❯   @effect/opentelemetry@^4.0.0-beta.1  ■ 4.0.0-beta.90  □ 4.0.0-beta.100  □ 4.0.0-beta.100
+    chalk@^4.1.0                         ■ 4.1.0          □ 4.1.2           □ 5.6.2
+    react@^17.0.0                        ■ 17.0.1         □ 17.0.2          □ 19.2.8
+  devDependencies
+    typescript@~5.3.0                    ■ 5.3.2          □ 5.3.3           □ 7.0.2
+↑/↓ move · space/←/→ cycle · a cycle all · / filter · enter apply · esc cancel
+```
+
+- Space, `←`, or `→` cycles a row between the current version, the newest version inside the range, and the registry's `latest`.
+- Nothing is selected by default. Enter updates only the rows you changed.
+- Targets are colored by semver impact.
+- Each spec keeps its style: a `^` range stays `^`, and an exact pin stays exact.
+
+### `nub dedupe`
+
+Collapses duplicate versions in the lockfile to fewer, shared resolutions:
+
+```bash
+nub dedupe          # rewrite the lockfile with deduped resolutions
+nub dedupe --check  # CI: exit non-zero if dedupe would change anything
+```
+
+### `nub import`
+
+Converts another package manager's lockfile to `pnpm-lock.yaml`, without installing:
+
+```bash
+nub import          # package-lock / yarn.lock / bun.lock → pnpm-lock
+nub import --force  # overwrite an existing pnpm-lock.yaml
+```
+
+### Other commands
+
+The rest of pnpm's verb set:
+
+```text
+why          outdated      list, ls
+patch        patch-commit  patch-remove
+approve-builds  prune      rebuild
+fetch        link, unlink  audit
+licenses     bin           root
+store        config        pkg
+publish      pack          dlx          create
+```
+
+The [package meta-manager](/docs/pm), `nub pm`, is a separate tool. It fetches and runs the exact pnpm, npm, or Yarn release a project pins, as corepack does.
+
+## Global installs
+
+Passing `-g` installs a package for your user rather than a project, and links its executables onto your `PATH`:
+
+```bash
+nub add -g cowsay          # or: nub install -g cowsay
+cowsay hello
+
+nub remove -g cowsay
+```
+
+| | Default | Purpose |
+| --- | --- | --- |
+| Executables | `~/.local/bin` | Shared with every tool that installs there, and already on `PATH` on most systems |
+| Packages | `$XDG_DATA_HOME/nub/global` | Nub's own, beside the content store |
+
+Nub picks the executable directory from, in order:
+
+- `XDG_BIN_HOME`
+- `$XDG_DATA_HOME/../bin`
+- `~/.local/bin`
+
+Point it elsewhere with a setting:
+
+```bash
+nub config set --global global-bin-dir ~/bin
+```
+
+Run `nub bin -g` to print the directory in use, and `nub root -g` for where the packages live.
+
+### PATH setup
+
+Most Linux distributions already put `~/.local/bin` on `PATH`; macOS does not. When the directory is missing from `PATH` after a global install, Nub adds it to your shell profile and says so:
+
+```console
+$ nub add -g cowsay
+Linked 2 bins into /Users/you/.local/bin
+  PATH: added /Users/you/.local/bin to /Users/you/.zshrc
+  Restart your shell, or source that file, to pick it up.
+```
+
+Nub writes the line once, under a `# nub global bin` marker, for bash, zsh, and fish. When it cannot write a profile, it prints the line to add by hand.
+
+### Name collisions
+
+The executable directory is shared, so a name may already be taken. Nub replaces an entry only when it created that entry itself; otherwise it keeps your file and says what it skipped:
+
+```console
+$ nub add -g cowsay
+warning: not linking cowsay — /Users/you/.local/bin/cowsay already
+exists and was not created by this tool; remove it to link cowsay
+```
 
 ## Resolution
 
-Resolution decides which version of which package ends up in the graph. Every field below lives in `package.json`, and every one is a field pnpm, npm, Yarn, or Bun already reads.
+Resolution decides which version of each package ends up in the graph. Every field below lives in `package.json`.
 
 ### `overrides`
 
-Force one version of a package everywhere in the graph, whoever asked for it. A selector is a bare name, a name carrying a range to match, a path scoping the pin to one parent, or `$name` to reuse your own dependency's range.
+Force one version of a package everywhere in the graph. A selector is a bare name, a name with a range to match, a path that scopes the pin to one parent, or `$name` to reuse your own dependency's range.
 
 ```json title="package.json"
 {
@@ -73,7 +262,7 @@ Read the [full docs](https://pnpm.io/settings/dependency-resolution#overrides) o
 
 ### `resolutions`
 
-The same pins in Yarn's spelling, taking the same selectors. Both fields are read, and `overrides` wins a conflict — so a repo that declares a pin in both for portability stays silent.
+The same pins in Yarn's spelling, with the same selectors. When both fields pin a package, `overrides` wins.
 
 ```json title="package.json"
 {
@@ -89,7 +278,7 @@ Read the [full docs](https://yarnpkg.com/configuration/manifest#resolutions) on 
 
 ### `packageExtensions`
 
-Patch a dependency's own manifest at resolve time, adding to its `dependencies`, `optionalDependencies`, `peerDependencies`, or `peerDependenciesMeta`. Use it when a published package declares a peer it doesn't need, or omits one it does. An extension only adds what is missing; it never overrides a range the package already declares.
+Patch a dependency's own manifest at resolve time, adding to its `dependencies`, `optionalDependencies`, `peerDependencies`, or `peerDependenciesMeta`. Use it when a published package declares a peer it doesn't need, or omits one it does. An extension only adds what is missing and never replaces a declared range.
 
 ```json title="package.json"
 {
@@ -107,18 +296,18 @@ Patch a dependency's own manifest at resolve time, adding to its `dependencies`,
 Read the [full docs](https://pnpm.io/settings/dependency-resolution#packageextensions) on pnpm.io.
 </Callout>
 
-Nub applies a bundled database of these repairs, so most undeclared dependencies resolve with no configuration. It covers what Nub's phantom detector finds across the 10,000 most-downloaded packages on npm, and carries every rule from Yarn's curated database.
+The top-level field applies in a Nub-owned project. A pnpm project uses `pnpm.packageExtensions`, and a Yarn project uses `packageExtensions` in `.yarnrc.yml`.
+
+Nub also applies a bundled database of these repairs, so most undeclared dependencies resolve with no configuration. It covers what Nub's phantom detector finds across the 10,000 most-downloaded packages on npm, plus every rule from Yarn's curated database. It ships separately as [@nubjs/extensions](https://www.npmjs.com/package/@nubjs/extensions) for other tools to read.
 
 ```ini title=".npmrc"
 # resolve every manifest exactly as published, repairing nothing
 ignore-compatibility-db=true
 ```
 
-The bundled database is larger than the one pnpm applies, so a dependency can resolve under Nub that pnpm leaves missing. It ships separately as [@nubjs/extensions](https://www.npmjs.com/package/@nubjs/extensions) for other tools to read.
-
 ### `patchedDependencies`
 
-Apply a patch file to a package's contents, keyed by name and version. Running `nub patch <pkg>` writes both the patch and this entry. A key matching no installed package fails the install, because the usual cause is a patch that silently stopped being applied.
+Apply a patch file to a package's contents, keyed by name and version. Running `nub patch <pkg>` writes both the patch and this entry. A key that matches no installed package fails the install.
 
 ```json title="package.json"
 {
@@ -143,12 +332,12 @@ Monorepo member globs. Members resolve to each other through a `workspace:` spec
 ```
 
 <Callout>
-Read the [full docs](https://docs.npmjs.com/cli/v11/configuring-npm/package-json#workspaces) on docs.npmjs.com. Pnpm keeps its member globs in `pnpm-workspace.yaml` rather than this field.
+Read the [full docs](https://docs.npmjs.com/cli/v11/configuring-npm/package-json#workspaces) on docs.npmjs.com.
 </Callout>
 
 ### `workspaces.catalog`
 
-Name a version once and let every member reference it, so a bump is a one-line edit. The default catalog is `catalog:`; named catalogs are `catalog:<name>`. A reference naming no defined entry is an error rather than a fallback, so a typo fails the install.
+Name a version once and let every member reference it. The default catalog is `catalog:`, and a named catalog is `catalog:<name>`. A reference to an undefined entry fails the install.
 
 ```json title="package.json"
 {
@@ -168,24 +357,27 @@ Name a version once and let every member reference it, so a bump is a one-line e
 ```
 
 <Callout>
-Read the [full docs](https://pnpm.io/catalogs) on pnpm.io. The `catalog:` syntax matches pnpm's; the definitions live here rather than in `pnpm-workspace.yaml`.
+Read the [full docs](https://pnpm.io/catalogs) on pnpm.io. The `catalog:` syntax matches pnpm's; the definitions live in `package.json` rather than `pnpm-workspace.yaml`.
 </Callout>
 
 ### `allowScripts`
 
-Which dependencies may run install scripts — see [lifecycle scripts](#lifecycle-scripts) for the deny-by-default rules around it. A registry dependency is keyed by name, anything else by its full specifier, and an explicit `false` beats any allow in the map.
+Which dependencies may run install scripts — see [lifecycle scripts](#lifecycle-scripts). The field applies in every project, whichever tool owns it.
 
-```json title="package.json"
+```jsonc title="package.json"
 {
   "allowScripts": {
-    "esbuild": true,
-    "sharp": false
+    "esbuild": true,  // a registry dep, by name
+    "sharp": false,   // a denial beats any allow
+
+    // anything else, by full specifier
+    "buildy@file:./buildy-1.0.0.tgz": true
   }
 }
 ```
 
 <Callout>
-npm 12 gates its own install scripts on this same field, so one map covers both tools. Read npm's [approve-scripts docs](https://docs.npmjs.com/cli/v12/commands/npm-approve-scripts).
+Version 12 of npm gates its own install scripts on this same field, so one map covers both tools. Read npm's [approve-scripts docs](https://docs.npmjs.com/cli/v12/commands/npm-approve-scripts).
 </Callout>
 
 ### `dependenciesMeta`
@@ -207,7 +399,7 @@ Read the [full docs](https://pnpm.io/package_json#dependenciesmeta) on pnpm.io.
 
 ### `peerDependenciesMeta`
 
-Mark one of your own peer dependencies optional, so a consumer that doesn't install it is not an error.
+Mark one of your own peer dependencies optional, so a consumer that doesn't install it gets no error.
 
 ```json title="package.json"
 {
@@ -255,9 +447,9 @@ The Node and package-manager versions the project requires. Nub provisions the N
 Read the [full docs](https://pnpm.io/package_json#engines) on pnpm.io.
 </Callout>
 
-### Config keys
+## Settings
 
-Registries, auth, peer-dependency behavior, and save behavior come from the `.npmrc` cascade, which Nub reads in every project no matter which tool owns it, along with `npm_config_*` in the environment. Setting names are pnpm's:
+Registries, auth, peer-dependency behavior, and save behavior come from `.npmrc` and `npm_config_*` environment variables, in every project. The setting names are pnpm's:
 
 | Key | Reference |
 |---|---|
@@ -277,232 +469,23 @@ Registries, auth, peer-dependency behavior, and save behavior come from the `.np
 | `engineStrict` | [pnpm.io](https://pnpm.io/settings/cli#enginestrict) |
 | `registries`, `namedRegistries` | [pnpm.io](https://pnpm.io/settings/dependency-resolution#registries) |
 
-Four further install fields live in `nub.jsonc`, Nub's own config file. Two set the [cooling window](#cooling-window) — `minimumReleaseAge` and `minimumReleaseAgeExclude` — and apply only when Nub owns the project. Two set [layout](#layout), `linker` and `publicHoist`, and apply under every incumbent. That is the entire block; see the [config reference](/docs/config#install) for each field's shape.
-## CLI
+Nub's own config file, `nub.jsonc`, adds four [install fields](/docs/config#install). The layout fields `linker` and `publicHoist` apply in every project. The cooling-window fields `minimumReleaseAge` and `minimumReleaseAgeExclude` apply only when Nub owns the project.
 
-The install engine is one CLI — pnpm's verbs and flags, driven by Nub.
+## Layout
 
-### `nub install`
+The default `node_modules` layout is isolated under every incumbent: direct dependencies sit at the top level, and everything else links from a virtual store. A project that relies on undeclared (phantom) dependencies can switch to npm's flat layout:
 
-Resolves the graph and links `node_modules`. The verb, aliases, and flags follow pnpm:
-
-```bash
-nub install                      # alias: nub i
-nub install --frozen-lockfile    # fail if the lockfile is out of date
-nub install -P                   # --prod / --production
-nub install -D                   # dev only
-nub install --node-linker hoisted
-nub ci                           # clean install from the lockfile
-nub ci -P                        # clean install, no devDependencies
+```ini title=".npmrc"
+node-linker=hoisted
 ```
 
-The accepted flags are pnpm's spellings:
+The `--node-linker hoisted` flag does the same for one command, and [`install.linker`](/docs/config#installlinker) sets it in `nub.jsonc`. When an undeclared package fails to resolve at runtime, Nub's error names it and points at this setting.
 
-```bash
---frozen-lockfile / --no-frozen-lockfile / --prefer-frozen-lockfile
---prod, -P            # production install
---dev, -D
---ignore-scripts
---pnpmfile <path>     # run this one instead of the project's
---global-pnpmfile <path>
---ignore-pnpmfile
---no-optional
---offline / --prefer-offline
---lockfile-only
---force
---node-linker
---registry
---dir, -C             # pnpm's spelling, not npm's --prefix
---reporter <name>     # default, append-only, silent
---silent, -s          # alias for --reporter=silent
---loglevel <level>    # debug, info, warn, error, silent
---os <os>             # which platforms' optional deps to install
---cpu <arch>
---libc <libc>
-```
-
-Packages like `esbuild` and `rollup` ship one prebuilt binary per platform as optional dependencies, and an install picks only the one matching the machine it runs on. Pass `--os`, `--cpu`, or `--libc` to pick a different one, for example when building a Linux container image from a Mac:
-
-```bash
-nub install --os linux --cpu x64
-```
-
-Each flag is repeatable, takes a comma-separated list, and accepts `current` for the running machine and `*` for every value. Naming one axis leaves the others alone:
-
-```bash
-nub install --os linux                  # Linux binaries, host CPU
-nub install --os current,linux          # this machine and Linux
-nub install --os '*' --cpu '*'          # every platform variant
-```
-
-These apply to one invocation and are never written to a config file. They also override `supportedArchitectures` from `.npmrc`, `pnpm-workspace.yaml`, or the `pnpm` object in `package.json` — Nub reads that setting for pnpm compatibility, and a flag replaces only the axis it names. A value that names no platform warns rather than silently installing nothing.
-
-To quiet the progress output, pass `--silent` (or `-s`, or `--reporter=silent`): nothing reaches stderr but a fatal error, matching `pnpm install --silent`. The `--reporter=append-only` form drops the live progress display while keeping the dependency summary, and `--loglevel error` hides warnings without touching the rest. These spellings apply to every install-family command, and work either after the command (`nub install --silent`) or before it (`nub --silent install`).
-
-In a workspace, `install` and `ci` accept the same selector flags as script running — install only the packages a filter matches:
-
-```bash
---filter <sel>, -F        # pnpm's selector grammar (see /docs/run)
---recursive, -r           # every workspace package
---filter-prod <sel>       # selector, production deps only
---include-workspace-root  # add the root package to the recursive set
---fail-if-no-match        # error if the filter selects zero packages
-```
-
-### `nub add`
-
-Resolves a package, links it, and writes the dependency into `package.json`:
-
-```bash
-nub add <pkg>                  # alias: a
-nub add -D <pkg>               # --save-dev
-nub add -E <pkg>               # --save-exact (pin, no ^)
-nub add -O <pkg>               # --save-optional
-nub add --save-peer <pkg>      # peer + dev dependencies (pnpm parity)
-nub add -g <pkg>               # global install
-nub add -w <pkg>               # write to the workspace root
-nub add --save-catalog <pkg>   # add into the workspace catalog
-nub add --allow-build=<pkg>    # pre-approve its build scripts
-nub add --no-save <pkg>        # link without persisting to package.json
-nub add <pkg>@<version>        # pin an exact version
-nub add <pkg>@<version> --lockfile-only  # refresh the lockfile only
-```
-
-### `nub remove`
-
-Drops a dependency from `package.json` and relinks `node_modules`:
-
-```bash
-nub remove <pkg>           # rm / uninstall / un / uni
-nub remove -D <pkg>        # remove only from devDependencies
-nub remove -g <pkg>        # remove a global package
-nub remove -w <pkg>        # remove from the workspace root
-```
-
-### `nub update`
-
-Re-resolves dependencies within their ranges; `--latest` rewrites the `package.json` ranges to the newest resolved versions:
-
-```bash
-nub update                 # up — refresh all deps within range
-nub update <pkg>           # update a single dependency
-nub update <pkg>@<version> # pin one dep, keeping its ^/~ operator
-nub update <pkg>@<tag>     # move one dep to a dist-tag, exact
-nub update -i              # --interactive: pick each package's target
-nub update -L              # --latest: move past the manifest range
-nub update -E -L           # pin the rewritten range to an exact version
-nub update -D              # devDependencies only
-nub update -P              # production only
-nub update --lockfile-only # refresh the lockfile, leave node_modules alone
-```
-
-The interactive picker shows one row per outdated dependency, grouped by dependency type. Space (or `←`/`→`) cycles a row between keeping the current version, the newest version inside the manifest range, and the registry's `latest` — so one invocation covers both in-range refreshes and range-crossing bumps, per package. Nothing is selected by default: press enter and only the rows you flipped are updated. Version targets are colored by semver impact, and a `latest` that would downgrade a prerelease pin is never offered. An exact pin (`"chalk": "4.1.0"`) gets its in-range column as if the spec were `^4.1.0`, and whichever version you pick is written back as an exact pin — the `^`/`~`/exact style of every spec survives the bump.
-
-```text wide
-Choose dependency updates
-                                         keep             latest in range   latest
-  dependencies
-❯   @effect/opentelemetry@^4.0.0-beta.1  ■ 4.0.0-beta.90  □ 4.0.0-beta.100  □ 4.0.0-beta.100
-    chalk@^4.1.0                         ■ 4.1.0          □ 4.1.2           □ 5.6.2
-    react@^17.0.0                        ■ 17.0.1         □ 17.0.2          □ 19.2.8
-  devDependencies
-    typescript@~5.3.0                    ■ 5.3.2          □ 5.3.3           □ 7.0.2
-↑/↓ move · space/←/→ cycle · a cycle all · / filter · enter apply · esc cancel
-```
-
-### `nub dedupe`
-
-Collapses duplicate versions in the lockfile to fewer, shared resolutions:
-
-```bash
-nub dedupe          # rewrite the lockfile with deduped resolutions
-nub dedupe --check  # CI: exit non-zero if dedupe would change anything
-```
-
-### `nub import`
-
-Converts another package manager's lockfile to Nub's `pnpm-lock.yaml`, without installing:
-
-```bash
-nub import          # package-lock / yarn.lock / bun.lock → pnpm-lock
-nub import --force  # overwrite an existing pnpm-lock.yaml
-```
-
-The full verb set:
-
-```text
-why          outdated      list, ls
-patch        patch-commit  patch-remove
-approve-builds  prune      rebuild
-fetch        link, unlink  audit
-licenses     bin           root
-store        config        pkg
-publish      pack          dlx          create
-```
-
-### `nub pm`
-
-The install engine is distinct from `nub pm`, the [package meta-manager](/docs/pm), which provisions and runs the exact pnpm/npm/yarn your project *pins* (corepack's job).
-
-- For "install dependencies," this engine.
-- For "fetch and run the project's pinned PM," `nub pm`.
-
-The two compose: `nub pm shim` routes bare `npm` / `pnpm` / `yarn` through the pin while you keep using whatever installer you prefer.
-
-## Global installs
-
-Passing `-g` installs a package for your user rather than a project, and links its executables somewhere your shell can find them:
-
-```bash
-nub add -g cowsay          # or: nub install -g cowsay
-cowsay hello
-
-nub remove -g cowsay
-```
-
-Two directories are involved:
-
-| | Default | Purpose |
-| --- | --- | --- |
-| Executables | `~/.local/bin` | Shared with every tool that installs there, and already on `PATH` on most systems |
-| Packages | `$XDG_DATA_HOME/nub/global` | Nub's own, beside the content store |
-
-Executables go to the conventional user-binary directory rather than one Nub owns, so a global install is runnable without configuring anything. Resolution order is `XDG_BIN_HOME`, then `$XDG_DATA_HOME/../bin`, then `~/.local/bin`, on every platform. Point it elsewhere with a setting:
-
-```bash
-nub config set --global global-bin-dir ~/bin
-```
-
-Run `nub bin -g` to print the directory in use, and `nub root -g` for where the packages themselves live.
-
-### When the directory is not on your PATH
-
-Most Linux distributions already expose `~/.local/bin`; macOS does not. When Nub finds the directory missing from `PATH` after a global install, it adds it to your shell profile and says so:
-
-```console
-$ nub add -g cowsay
-Linked 2 bins into /Users/you/.local/bin
-  PATH: added /Users/you/.local/bin to /Users/you/.zshrc
-  Restart your shell, or source that file, to pick it up.
-```
-
-The block is written once, under a `# nub global bin` marker, for bash, zsh and fish. Installing again does not add a second copy, and pointing the directory somewhere new rewrites that line rather than stacking another. When no profile can be written, Nub prints the line to add by hand.
-
-### Name collisions
-
-The executable directory is shared, so a package's executable name may already be taken. Nub links it only when it can show the existing entry is one of its own; otherwise it keeps your file and says what it skipped:
-
-```console
-$ nub add -g cowsay
-warning: not linking cowsay — /Users/you/.local/bin/cowsay already
-exists and was not created by this tool; remove it to link cowsay
-```
-
-The rest of the package's executables still link. Removing a global package likewise only unlinks entries it owns, so an executable that another install has since taken over is left alone.
+[Store and layout](/docs/install/virtual-store) covers the shared store, the hoisting settings, and where Nub keeps packages on disk.
 
 ## Lifecycle scripts
 
-Some dependencies run build steps on install — `preinstall`, `install`, and `postinstall` scripts declared in their own `package.json` (across pnpm, npm, and Bun). Nub denies them by default; you allow the packages that may build.
+Dependencies can declare `preinstall`, `install`, and `postinstall` scripts. Nub denies them by default, and you allow the packages that may build:
 
 ```bash
 nub approve-builds                # approve packages, then build them
@@ -511,25 +494,18 @@ nub rebuild                       # re-run already-approved scripts
 nub install --ignore-scripts      # skip dependency build scripts
 ```
 
-Approval takes effect immediately: `nub approve-builds` records the decision and runs the just-approved packages' build scripts in the same invocation, matching pnpm — no follow-up `nub install` or `nub rebuild` needed.
+Approving builds runs the approved packages' scripts in the same invocation, as pnpm does. No follow-up install is needed.
 
-The neutral `allowScripts` field grants permission, and it keys on the package name for a registry dependency or the full specifier for anything else:
+Permission comes from the [`allowScripts`](#allowscripts) field in any project. A project owned by another package manager can also use that tool's own field:
 
-```json title="package.json"
-{
-  "allowScripts": {
-    "esbuild": true,                        // a registry dep, by name
-    "buildy@file:./buildy-1.0.0.tgz": true, // anything else, in full
-    "sharp": false                          // a denial beats any allow
-  }
-}
-```
+- pnpm: `pnpm.onlyBuiltDependencies`, `pnpm.allowBuilds`
+- Bun: `trustedDependencies`
 
-That field applies in any project, whoever owns it, and npm 12 reads the same map for the same purpose — approve a package once and both tools honor it. A project owned by another package manager grants permission through its own field as well: pnpm projects use `pnpm.onlyBuiltDependencies` / `pnpm.allowBuilds`, and Bun projects use `trustedDependencies`. A package with build scripts that is not allowed is skipped, with `WARN_NUB_IGNORED_BUILD_SCRIPTS` naming it and `nub approve-builds` as the remedy.
+A package with build scripts that is not allowed is skipped. The `WARN_NUB_IGNORED_BUILD_SCRIPTS` warning names it and suggests `nub approve-builds`.
 
-### When a build fails
+### Build failures
 
-A failed build fails the install. The one exception is a package reachable only through `optionalDependencies`, which the project has declared it can work without: that failure is reported and the install continues, matching npm and pnpm.
+A failed build fails the install. The exception is a package reachable only through `optionalDependencies`: its failure is reported and the install continues, as in npm and pnpm.
 
 ```console
 # captured: nub 0.7.5, optfail@1.0.0 postinstall exits 3, allowScripts set
@@ -542,100 +518,21 @@ optionalDependencies:
 + optfail@1.0.0
 ```
 
-Optionality is a property of the edge, not the package. A package that anything reaches through a normal dependency is required, and its build failure still fails the install, even when something else depends on it optionally.
-
-The warning is emitted by the install that runs the build. A later install with nothing to do skips the package along with everything else, so it does not repeat. Run `nub rebuild <pkg>` to attempt the build again and see the failure.
-
-### Cooling window
-
-A registry-resolved version must be older than `minimumReleaseAge` — 24 hours by default — before Nub will install it.
-
-Asking for a package without naming a version resolves to the newest release that clears the window:
-
-```console
-$ nub add some-tool
-+ some-tool@2.3.0  latest 2.4.0   # 2.4.0 is still inside the window
-```
-
-The fallback stops at whatever the publisher currently tags `latest`; a version published and then untagged was withdrawn. When `latest` is a prerelease the command fails outright, since the stable release below it belongs to a line the publisher has moved off.
-
-Both version columns of `nub outdated` follow the same rule: they name what an install would select, so a version inside the window is never offered:
-
-```console
-$ nub outdated
-All dependencies up to date.
-```
-
-With every pending upgrade inside the window, the command exits 0.
-
-The fallback never walks back past what is installed: when the window is wider than a dependency's own age, `Latest` reports the installed version and the command exits 0.
-
-Two flags adjust the window for a single command:
-
-```console
-$ nub add some-tool
-ERR_NUB_NO_MATURE_MATCHING_VERSION       # ❌ every version is too new
-
-$ nub add some-tool --minimum-release-age=0                 # off, this run
-$ nub add some-tool --minimum-release-age=2h                # or shorten it
-$ nub add some-tool --minimum-release-age-exclude=some-tool # exempt one
-```
-
-The duration takes a unit — `s`, `m`, `h`, `d`, or `w` — and a bare number means minutes, matching pnpm. Both flags work on every command that installs, including the remote bin runner.
-
-The exclude flag *replaces* the configured `minimumReleaseAgeExclude` for that run rather than adding to it, matching pnpm — so name every package you still need:
-
-```console
-$ nub add some-tool --minimum-release-age-exclude='@internal/*' \
-    --minimum-release-age-exclude=some-tool
-```
-
-<Callout title="Enforcement">
-When nothing satisfying the range is old enough, the install fails. Setting `minimumReleaseAge` to `0s` turns the window off entirely.
-</Callout>
-
-Publish dates come from the registry's `time` metadata, and the outcome depends on what it supplies:
-
-| Registry metadata | Outcome |
-|---|---|
-| A publish date for the resolved version | Checked against the window |
-| Dates for other versions, none for this one | Blocked |
-| No per-version dates, document older than the window | Allowed — the document's own timestamp bounds every version in it |
-| No per-version dates, document newer than the window | Blocked |
-
-Registries that publish no dates at all — some private mirrors, older Verdaccio — fall under the last row. The refusal is its own error, `ERR_NUB_RELEASE_AGE_MISSING_TIME`, rather than the too-new one.
-
-This is the one case where `nub outdated` warns: staying silent would report no work to do on a project where every install refuses. The warning goes to stderr, leaving stdout as data:
-
-```console
-$ nub outdated
-warn: internal-pkg has no registry publish times, so minimumReleaseAge
-      cannot admit any version; `nub update` will fail for it
-All dependencies up to date.
-```
-
-Two remedies:
-
-```ini title=".npmrc"
-minimumReleaseAgeExclude=internal-pkg   # exempt one (comma-separated)
-minimumReleaseAge=0                     # turn the window off
-```
-
-Setting pnpm's `minimumReleaseAgeStrict=false` also gets past both, and Nub reads it for compatibility — but it makes an undateable version count as *clearing* the gate, so the window appears enforced but is not. Prefer `minimumReleaseAge=0`.
+A package that anything depends on through a normal dependency is required, even if another package depends on it optionally. The warning appears only on the install that ran the build. Run `nub rebuild <pkg>` to try the build again.
 
 ### Default-trust floor
 
-Beyond the packages you approve explicitly, a curated set of well-known packages may build without approval — but only when **all three** gates hold at once:
+A curated set of well-known packages, such as `esbuild`, may build without approval. All three gates must hold:
 
-| Gate | Requirement | On failure |
-|---|---|---|
-| **Registry provenance** | Resolved from a registry. Git, file, link, tarball, and npm-alias specifiers never qualify — an alias can't borrow a listed name's trust. | Not built |
-| **Advisory vetting** | An OSV `MAL-*` advisory check ran against this graph, *or* the graph was inherited from an already-checked lockfile (a frozen install, `nub ci`, a teammate's clone). | Not built |
-| **Cooling window** | The resolved version's publish time is older than `minimumReleaseAge` (default 24 hours). | Not built — fails closed on unknown publish time |
+| Gate | Requirement |
+|---|---|
+| **Registry provenance** | Resolved from a registry. Git, file, link, tarball, and npm-alias specifiers never qualify. |
+| **Advisory vetting** | The [advisory check](#advisory-gate) ran against this graph, or the graph came from an already-checked lockfile (a frozen install, `nub ci`, a teammate's clone). |
+| **Cooling window** | The version is older than the [cooling window](#cooling-window). An unknown publish time fails the gate. |
 
-Explicit decisions outrank the floor in both directions: a package you approve builds regardless of the gates, and an explicit denial still wins.
+Explicit decisions outrank the floor: a package you approve always builds, and an explicit denial always wins.
 
-A fresh resolve, or a lockfile Nub itself wrote (which carries the `time:` block), gives the floor everything it needs, so curated packages like `esbuild` build automatically:
+A fresh resolve, or a lockfile Nub wrote, carries the publish times the floor needs:
 
 ```console
 # captured: nub 0.0.44, pnpm, esbuild@0.21.5 — no allowScripts entry
@@ -645,7 +542,7 @@ dependencies:
 + esbuild@0.21.5
 ```
 
-When a gate fails, the floor does not apply: the same package is skipped and disclosed, with `nub approve-builds` as the remedy. Tighten the cooling window past every published version and even a curated package fails closed:
+When a gate fails, the package is skipped like any other unapproved build:
 
 ```console
 # captured: nub 0.0.44, esbuild — minimumReleaseAge set past every release
@@ -657,19 +554,87 @@ dependencies:
 + esbuild@0.21.5
 ```
 
-A foreign lockfile that carries no publish-time data — notably an incumbent `bun.lock` — takes the same fail-closed path: the cooling gate has nothing to read, so the package is skipped (see the [Bun page](/docs/install/bun#trusteddependencies)).
+A foreign lockfile with no publish times, such as `bun.lock`, fails the cooling gate the same way (see the [Bun page](/docs/install/bun#install-behavior)).
+
+## Supply-chain checks
+
+Three checks apply when Nub resolves a new version: a minimum age, a malware advisory lookup, and a comparison of publishing evidence.
+
+### Cooling window
+
+A registry version must be older than `minimumReleaseAge`, 24 hours by default, before Nub installs it. When nothing in the range is old enough, the install fails.
+
+Adding a package without naming a version resolves to the newest release that clears the window:
+
+```console
+$ nub add some-tool
++ some-tool@2.3.0  latest 2.4.0   # 2.4.0 is still inside the window
+```
+
+The `nub outdated` command follows the same rule, so it never offers a version inside the window.
+
+Two flags adjust the window for one command:
+
+```console
+$ nub add some-tool
+ERR_NUB_NO_MATURE_MATCHING_VERSION       # ❌ every version is too new
+
+$ nub add some-tool --minimum-release-age=0                 # off, this run
+$ nub add some-tool --minimum-release-age=2h                # or shorten it
+$ nub add some-tool --minimum-release-age-exclude=some-tool # exempt one
+```
+
+The duration takes a unit (`s`, `m`, `h`, `d`, or `w`), and a bare number means minutes, as in pnpm. Both flags work on every command that installs, including [`nubx`](/docs/nubx).
+
+The exclude flag replaces the configured `minimumReleaseAgeExclude` for that run, as in pnpm. Name every package you still need:
+
+```console
+$ nub add some-tool --minimum-release-age-exclude='@internal/*' \
+    --minimum-release-age-exclude=some-tool
+```
+
+Publish dates come from the registry's `time` metadata:
+
+| Registry metadata | Outcome |
+|---|---|
+| A publish date for the resolved version | Checked against the window |
+| Dates for other versions, none for this one | Blocked |
+| No per-version dates, document older than the window | Allowed |
+| No per-version dates, document newer than the window | Blocked |
+
+Some private mirrors and older Verdaccio releases publish no dates at all, so they fall under the last row. That refusal is `ERR_NUB_RELEASE_AGE_MISSING_TIME`, and `nub outdated` warns about it on stderr:
+
+```console
+$ nub outdated
+warn: internal-pkg has no registry publish times, so minimumReleaseAge
+      cannot admit any version; `nub update` will fail for it
+All dependencies up to date.
+```
+
+Exempt the package, or turn the window off:
+
+```ini title=".npmrc"
+minimumReleaseAgeExclude=internal-pkg   # exempt one (comma-separated)
+minimumReleaseAge=0                     # turn the window off
+```
+
+Nub also reads pnpm's `minimumReleaseAgeStrict=false`. That setting counts an undateable version as clearing the window, so the window looks enforced but is not. Prefer `minimumReleaseAge=0`.
 
 ### Advisory gate
 
-The OSV check queries `api.osv.dev` on a fresh resolve. A confirmed `MAL-*` hit is a **hard block** — the install aborts with `ERR_NUB_MALICIOUS_PACKAGE`, never a skip-and-warn. An osv.dev **outage** is treated differently: the check fails *open*, warning and proceeding, so an outage does not block an install. To fail closed on outages too, set `advisoryCheck=required`.
+On a fresh resolve, Nub checks the graph against OSV `MAL-*` advisories at `api.osv.dev`. A confirmed hit aborts the install with `ERR_NUB_MALICIOUS_PACKAGE`. When osv.dev is unreachable, the check warns and the install proceeds. To fail instead:
 
-Frozen reinstalls — `nub ci`, `--frozen-lockfile`, a teammate's clone — inherit the advisory vetting recorded when the lockfile was written and skip the per-install round-trip, but still enforce the cooling and provenance gates on every install.
+```ini title=".npmrc"
+advisoryCheck=required
+```
+
+A frozen reinstall (`nub ci`, `--frozen-lockfile`, a teammate's clone) reuses the vetting recorded when the lockfile was written. The cooling and provenance gates still apply on every install.
 
 ### Trust downgrades
 
-Nub also weighs trust *evidence* across a package's release history — OIDC provenance, a trusted publisher, a staged-publish approval. A resolved version that carries weaker evidence than an earlier-published version of the same package is refused, because a maintainer's pipeline that suddenly publishes without the attestation it used to carry is the shape of a token-theft supply-chain attack.
+Nub compares a version's trust evidence with earlier releases of the same package: OIDC provenance, a trusted publisher, a staged-publish approval. A version with weaker evidence than an earlier-published version is refused. A pipeline that suddenly publishes without its usual attestation is a common sign of a stolen token.
 
-Refusing a version is not the same as failing the install. Nub keeps looking through the versions the range admits and takes the best one that still carries its evidence, naming what it skipped and why:
+Nub then takes the best version in the range that still carries the evidence, and names what it skipped:
 
 ```console
 # captured: fast-glob → @nodelib/fs.walk → fastq; 1.20.2 hand-published
@@ -680,11 +645,9 @@ WARN skipped fastq@1.20.2 (trustPolicy=no-downgrade): earlier published
      code=WARN_NUB_TRUST_DOWNGRADE_SKIPPED
 ```
 
-The substitution stays inside the declared range and never crosses the refused version — down to an older release for an ordinary pick, and up to a newer one when `resolution-mode=time-based` resolves a direct dependency to its range floor. When nothing the range admits clears the check, the install stops with `ERR_NUB_TRUST_DOWNGRADE`.
+The substitute always satisfies the declared range. When no version in the range clears the check, the install stops with `ERR_NUB_TRUST_DOWNGRADE`. The check runs only when a version is newly resolved, so an install from an up-to-date lockfile trusts its recorded pins.
 
-A lockfile names one exact version rather than a range, so there is nothing to walk. The check runs when a version is newly resolved, and the lockfile is the trust boundary from there: an install that reuses an undrifted lockfile — `nub ci`, `--frozen-lockfile`, or a plain `nub install` — trusts the recorded pin without re-fetching its publishing evidence.
-
-The comparison is by publish date, so a legitimate maintenance release on an older major — shipped after a newer major adopted provenance — can trigger it. Nub exempts any version older than 14 days, so an aged, un-yanked backport resolves while a freshly published downgrade is still checked against the full history. Widen the window, clear a single package, or turn the check off in `.npmrc`:
+A maintenance release on an older major, published after a newer major adopted provenance, can trip the check. Versions older than 14 days are exempt. Adjust the check in `.npmrc`:
 
 ```ini title=".npmrc"
 trustPolicyIgnoreAfter=20160        # exemption, minutes (default 14d)
@@ -692,153 +655,15 @@ trustPolicyExclude=tailwind-merge   # exempt one package regardless of age
 trustPolicy=off                     # disable the check entirely
 ```
 
-## Store and disk layout
-
-Regardless of the incumbent, Nub installs through a global content-addressed store and links into an isolated virtual store — aube's scheme, under Nub's own directory names.
-
-### Global content store
-
-Package files are deduplicated by content hash in a global store at `$XDG_DATA_HOME/nub/store/v1/` (default `~/.local/share/nub/store/v1/`). Every install imports from it, so a given package version is on disk once and is shared across projects.
-
-```console
-$ nub store path
-/Users/you/.local/share/nub/store/v1
-```
-
-Files materialize into `node_modules` by reflink (APFS/btrfs), hardlink (ext4), or copy fallback — whichever the filesystem supports — so a populated tree costs little extra disk.
-
-### Relocating the store
-
-The store location is the `store-dir` setting. Set it persistently with `nub config set`, which writes the project's config home:
-
-```console
-$ nub config set store-dir /srv/nub-store
-set store-dir=/srv/nub-store (/home/you/app/.npmrc)
-$ nub store path
-/srv/nub-store/v1
-```
-
-For a single invocation — a CI runner, a test sandbox, any run that must not touch the machine's real store — set the environment form instead:
-
-```console
-$ npm_config_store_dir=/tmp/scratch-store nub install
-```
-
-Sources, highest first:
-
-- `npm_config_store_dir` (environment)
-- `storeDir` in `pnpm-workspace.yaml` (pnpm incumbent)
-- `store-dir` in the project `.npmrc`
-- `store-dir` in the user `~/.npmrc`
-- `$XDG_DATA_HOME/nub/store/` (default)
-
-Nub appends the `v1/` schema suffix to the configured directory; a leading `~` expands to the home directory and a relative path resolves against the project root. The packument caches and the shared virtual store live under `cache-dir` (`NUB_CACHE_DIR`) instead — move both when a run must stay entirely off the default locations, and point them at the same volume so the virtual store keeps hardlinking out of the CAS.
-
-### Cache directory
-
-Registry metadata and the shared virtual store live in a cache at `$XDG_CACHE_HOME/nub/pm/` (default `~/.cache/nub/pm/`), separate from the content store above. Point it somewhere else — a faster volume, a CI cache mount — with one line in `.npmrc`:
-
-```ini title=".npmrc"
-cache-dir=/mnt/fast/nub-cache
-```
-
-Two environment variables set the same thing, and both outrank the file:
-
-```bash
-# neutral — npm and pnpm read it too
-npm_config_cache_dir=/mnt/fast/nub-cache nub install
-# Nub's own spelling, which wins over the above
-NUB_CACHE_DIR=/mnt/fast/nub-cache nub install
-```
-
-Print the effective value:
-
-```console
-$ npm_config_cache_dir=/mnt/fast/nub-cache nub config get cache-dir
-/mnt/fast/nub-cache
-```
-
-Sharing a volume with `store-dir`, as the section above recommends, matters only while the shared virtual store is enabled: packages materialize into it by hardlink out of the content store, and a hardlink cannot cross filesystems, so a split degrades every install to a per-file copy — which Nub warns about. In CI the shared store is off by default, so the two can be on different volumes there.
-
-Some caches stay at the platform default whatever this is set to: the advisory database, the bootstrapped `node-gyp`, git clones, and the registry behind `nub link -g`.
-
-### Virtual store
-
-The default `node_modules` layout is **isolated**: direct dependencies sit at the top level, transitive packages link into a per-project virtual store, and phantom dependencies fail instead of resolving by accident. Nub's virtual store is `node_modules/.store/` (pnpm uses `node_modules/.pnpm/`) — same shape, not byte-shared, so alternating tools relinks the tree.
-
-Every incumbent defaults to **isolated** — npm, Yarn, and Bun included, alongside pnpm and Nub's own projects. A project that relies on phantom (undeclared) dependencies opts into the flat, npm-style layout with one line in `.npmrc`:
-
-```ini title=".npmrc"
-node-linker=hoisted
-```
-
-The `--node-linker hoisted` flag does the same for a single command. When an undeclared package fails to resolve at runtime, Nub's error names it and points at this opt-out. See [the virtual store](/docs/install/virtual-store) for the per-package-manager breakdown and the flat-versus-project-local choice.
-
-### Shared vs per-project store
-
-Outside CI, the isolated virtual store is shared across projects: a package version materializes once per machine and every project links to that copy. It is fast and uses little disk, but machine-local — the links reach outside the project, so a `node_modules` copied to another machine won't resolve.
-
-In CI, and under `nub ci`, each project gets its own self-contained virtual store instead — real directories and relative links, nothing shared. That tree survives a Docker `COPY --from` into a fresh image, where the shared store wouldn't exist. Force it for any install with one line in `.npmrc`:
-
-```ini title=".npmrc"
-enableGlobalVirtualStore=false
-```
-
-Some packages and tools break when a dependency's real path is outside the project. Nub detects those and ejects them, so the rest of the tree keeps sharing:
-
-| What breaks | Example | What Nub does |
-|---|---|---|
-| A package importing a backend it never declares | `@hookform/resolvers/zod` reaching your `zod` | Materializes the adapter into the project |
-| A package writing generated code beside itself | Prisma's postinstall running `prisma generate` | Materializes the package so `generate` stays project-local |
-| A bundler or asset server that resolves by real path | Next.js; Metro, in bare React Native and Expo before SDK 56; Remix 3 | Gives the project a self-contained store |
-| A dev server that gates real-path access by allow-list | Vite | Writes `node_modules/.modules.yaml`, which Vite reads — no `vite.config` change |
-
-Detection scans each package's published code rather than a curated list. Add a bundler of your own in `.npmrc`:
-
-```ini title=".npmrc"
-disableGlobalVirtualStoreForPackages=my-bundler   # comma-separated
-```
-
-### Offline installs
-
-Like pnpm, Nub relinks from the global store into `node_modules` when the store already holds every package — no re-download, no byte-for-byte copy. With the default shared virtual store the relink is one symlink per package rather than one link per file. The benchmark below measures the warm reinstall case on a large tree (1,168 packages, 81,398 files): `node_modules` is removed between runs, packages are already on disk, no network. It runs on Linux, where Bun and Nub's hoisted mode both link with per-file hardlinks, so the hoisted row is a same-layout, same-syscall comparison; the default row is the same install with the per-package relink.
-
-<Bench
-  label="warm reinstall · 1168 packages · Linux (ubuntu-latest)"
-  accent="pink"
-  max={12945}
-  caption="hyperfine, 25 runs / 6 warmup, near-idle ubuntu-latest runner · bun 1.3.14, pnpm 10.34.4, npm on Node 24."
-  rows={[
-    { cmd: 'nub install', ms: 346, us: true },
-    { cmd: 'nub install --node-linker hoisted', ms: 1461, ratio: 4.2 },
-    { cmd: 'bun install', ms: 1896, ratio: 5.5 },
-    { cmd: 'pnpm install', ms: 3453, ratio: 10 },
-    { cmd: 'npm ci', ms: 12945, ratio: 37.4 },
-  ]}
-  source="https://github.com/nubjs/nub/tree/main/tests/bench/install"
-/>
-
-<Callout title="Warm reinstall, not cold">
-These numbers are the warm-reinstall case — a populated store and an existing lockfile, with `node_modules` cleared — where the relinking path is the whole cost. A cold install (empty store, fetching from the registry) is a different workload, and Nub does not lead there.
-</Callout>
-
-```bash
-nub install            # offline when the store already holds every package
-nub install --offline  # force offline
-nub install --prefer-offline  # try the cache first
-```
-
-When Nub provisioned the project's Node, a dependency that compiles a native addon builds offline as well: Nub fills the `node-gyp` header cache from that Node instead of letting `node-gyp` download the headers from nodejs.org. On Windows the download stays, because the official Node zip carries no headers.
-
 ## Lockfile compatibility
 
-Run Nub in a repo that already uses npm, pnpm, Yarn, or Bun and it behaves *as that package manager* — no migration, no new files, and no `nub.lock` in a project it does not own. Nub infers the incumbent, then mirrors it: same lockfile format, same config files, same manifest fields. Inference walks one precedence chain:
+In a repo that already uses npm, pnpm, Yarn, or Bun, Nub installs as that package manager: same lockfile format, same config files, same manifest fields. It writes no `nub.lock` there. Nub identifies the incumbent from, in order:
 
-- **`packageManager`** — Corepack standard
-- **`devEngines.packageManager`** — object or array form
-- **lockfile on disk**
+- `packageManager`
+- `devEngines.packageManager`
+- Lockfile on disk
 
-In a workspace, the chain runs from any member: Nub walks up to the root, which carries the declaration and lockfile. Two lockfiles for different managers is a hard error unless a declaration names one of them.
+In a workspace, Nub reads these at the root, from any member.
 
 | Incumbent | Lockfile | Round-trip |
 |---|---|---|
@@ -848,7 +673,7 @@ In a workspace, the chain runs from any member: Nub walks up to the root, which 
 | **Bun** — [docs →](/docs/install/bun) | `bun.lock` | read + write |
 | **Nub** — [docs →](/docs/pm) | `nub.lock` (pnpm v9 bytes) | read + write |
 
-A no-churn guard leaves a graph-equal lockfile untouched. The `bun.lockb` binary format is rejected — convert to text `bun.lock` first.
+An install that leaves the graph unchanged leaves the lockfile untouched.
 
 <Callout title="Optional">
 The installer is optional. Keep running `npm`, `pnpm`, `yarn`, or `bun` as you do today, and use Nub for everything else — running files, scripts, and binaries.
@@ -856,7 +681,7 @@ The installer is optional. Keep running `npm`, `pnpm`, `yarn`, or `bun` as you d
 
 ### Config it reads
 
-Config reads are symmetric with the lockfile: under each incumbent Nub reads that tool's branded config and no other's. The neutral `.npmrc` cascade and `npm_config_*` are read under every incumbent. Hover a partial chip for the breakdown; each chip is grounded in the detailed table on that incumbent's page.
+Under each incumbent, Nub reads that tool's branded config and no other's. It reads `.npmrc` and `npm_config_*` under every incumbent. Hover a partial chip for the breakdown; each incumbent's page has the full table.
 
 <PmSupport
   rows={[
@@ -970,7 +795,7 @@ Config reads are symmetric with the lockfile: under each incumbent Nub reads tha
   ]}
 />
 
-Mirroring runs in both directions, so a field the incumbent would ignore Nub ignores too. A pin written in `overrides` in a pnpm project changes nothing, because pnpm itself reads `resolutions` and `pnpm.overrides` — Nub applies what pnpm would and says which field it skipped:
+A field the incumbent would ignore, Nub ignores too, and it says which field it skipped. In a pnpm project, a top-level `overrides` block changes nothing, because pnpm reads `resolutions` and `pnpm.overrides`:
 
 ```console
 # captured: nub 0.7.2, pnpm project with a top-level overrides block
@@ -981,28 +806,28 @@ dependencies:
 + is-odd@3.0.1
 ```
 
-Declaring the same pin in both fields is portable and stays silent, since the ignore changes nothing. Branded config from a *different* manager is never read: Nub in a pnpm project ignores Bun's `trustedDependencies`, and under its own identity it reads neither that nor `pnpm.overrides`, `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `pnpm_config_*`, `.yarnrc.yml`, or `bunfig.toml`. To keep pnpm hooks or pnpm-named workspace config active, stay pnpm-owned or run `nub pm use pnpm`.
+Declaring the same pin in both fields stays silent. A Nub-owned project reads no tool's branded config, including `pnpm.*` fields, `pnpm-workspace.yaml`, and `.pnpmfile.cjs`. To keep pnpm hooks or pnpm workspace config active, keep the project pnpm-owned or run `nub pm use pnpm`.
 
 ### Layout settings
 
-Nub does not mirror layout settings from an incumbent's branded config file. The rest of that file — registries, auth, resolution settings, overrides — is read normally.
+Nub does not read layout settings from an incumbent's branded config. It reads the rest of that config (registries, auth, resolution settings, overrides) as usual.
 
 | Package manager | Its own layout settings | Under Nub |
 |---|---|---|
 | **npm** | `install-strategy`, `global-style`, `legacy-bundling` | Not read |
 | **pnpm** | `nodeLinker`, `hoist`, `symlink`, and related keys in `pnpm-workspace.yaml` or global `config.yaml` | Not read |
-| **Yarn** | `nodeLinker`, `nmHoistingLimits`, `nmMode` | Not read. Plug'n'Play is refused outright, before any write — there is no `node_modules` tree for Nub to install into |
+| **Yarn** | `nodeLinker`, `nmHoistingLimits`, `nmMode` | Not read. Plug'n'Play is refused before any write, because Nub installs a `node_modules` tree |
 | **Bun** | `linker`, under `[install]` in `bunfig.toml` | Not read |
 
-Set layout with [`install.linker` and `install.publicHoist` in `nub.jsonc`](/docs/config#install), their neutral `.npmrc` spellings, or command-line flags. Those sources work under every incumbent. Nub reports a branded layout setting when it finds one so the ignored request is not silent.
+Set layout with [`install.linker` and `install.publicHoist` in `nub.jsonc`](/docs/config#install), their `.npmrc` spellings, or command-line flags. These work under every incumbent. Nub warns when it finds a branded layout setting.
 
 ### Switching to Nub
 
-Running `nub pm use nub` moves a project onto Nub's own surface: it aligns the manifest and lockfile, migrates pnpm workspace config into the neutral `package.json` fields, and writes `nub.lock`. A fresh `nub install` in a project with no declaration and no lockfile does the same thing implicitly.
+Running `nub pm use nub` moves a project onto Nub: it migrates pnpm workspace config into the neutral `package.json` fields, aligns the manifest, and writes `nub.lock`. A first `nub install` in a project with no declaration and no lockfile does the same.
 
-Either way Nub records itself with a non-locking range rather than an exact pin. Tools that read `devEngines` by name see the signal, and the caret is a floor rather than a pin.
+Either way, Nub records itself with a range rather than an exact pin:
 
-```json title="package.json"
+```jsonc title="package.json"
 {
   "devEngines": {
     "packageManager": {
@@ -1014,7 +839,7 @@ Either way Nub records itself with a non-locking range rather than an exact pin.
 }
 ```
 
-To freeze the project at an exact version instead — the corepack-visible hard pin — run `nub pm use nub@<version>`. Config a Nub-owned project no longer reads is called out rather than dropped:
+To pin an exact version that corepack can see, run `nub pm use nub@<version>`. Config that a Nub-owned project no longer reads produces a warning:
 
 ```console
 # captured: Nub-owned project (nub.lock) with a stray pnpm-workspace.yaml
@@ -1023,9 +848,9 @@ nub: pnpm-workspace.yaml is not read under nub identity — migrate it
      (`nub pm use nub`), delete it, or return to pnpm (`nub pm use pnpm`).
 ```
 
-### When signals disagree
+### Conflicting signals
 
-Nub stops rather than guess. Two lockfiles it cannot choose between:
+When the signals disagree, Nub stops rather than guess. Two lockfiles for different managers are an error unless a declaration names one of them:
 
 ```console
 $ nub install
@@ -1037,9 +862,9 @@ Error: ERR_NUB_LOCKFILE_AMBIGUOUS
         manager
 ```
 
-A hosted builder is the common way to reach this state: it runs its own install beside the lockfile you committed, leaving two. See [Cloudflare](/docs/deployment/cloudflare) for the build-level fix.
+A hosted builder that runs its own install beside your committed lockfile is a common cause. See [Cloudflare](/docs/deployment/cloudflare) for the build-level fix. In a Nub-owned project, `nub.lock` beside a foreign lockfile is the same error.
 
-A declaration whose lockfile is missing:
+A declaration whose lockfile is missing is also an error:
 
 ```console
 $ nub install   # packageManager: "pnpm@9.0.0"
@@ -1049,9 +874,3 @@ Error: ERR_NUB_LOCKFILE_DECLARATION_MISMATCH
   │ pnpm-lock.yaml is missing — found package-lock.json instead
   help: nub pm use <pm> to declare it, or remove the stale lockfile
 ```
-
-In a Nub-owned project, `nub.lock` beside a foreign lockfile is the same ambiguity error.
-
-<Callout title="Inference vs the pinned PM">
-This inference picks the *install engine's* incumbent — the format Nub reads and writes. It is separate from the version `nub pm` provisions: the meta-manager resolves a *pin* (`.yarnrc.yml` `yarnPath` → `packageManager` → `devEngines`) to fetch and run an exact PM binary. The two answer different questions: which format to install in, and which PM binary to run.
-</Callout>

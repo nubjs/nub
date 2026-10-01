@@ -1,60 +1,24 @@
 ---
 title: TypeScript
-description: How Nub runs every TypeScript feature on stock Node — non-erasable syntax, resource-management downleveling, and source maps — none of which plain Node does.
+description: How Nub runs every TypeScript feature on stock Node, including non-erasable syntax, resource-management downleveling, and source maps.
 ---
 
-Nub runs every TypeScript feature, not just the erasable subset Node's built-in type-stripping accepts. Files ending in `.ts`, `.tsx`, `.mts`, and `.cts` execute directly: Nub transpiles them with its oxc-based transpiler through a `module.registerHooks()` load hook, then hands the result to Node.
+Nub runs every TypeScript feature, not just the erasable subset Node's built-in type stripping accepts. Files ending in `.ts`, `.tsx`, `.mts`, and `.cts` run directly.
 
 ```bash
 nub index.ts
 nub server.tsx
 ```
 
-Transpilation happens before Node sees the code, so the transforms on this page work on every Node version Nub supports (18.19+).
+Nub transpiles each file before Node sees it, so these features work from the Node 18.19 floor up.
 
 <Callout title="Types are stripped, not checked">
-Nub does not type-check — types are stripped for execution. Keep `tsc --noEmit` in your editor and CI for type validation.
-</Callout>
-
-## Choosing a tsconfig
-
-Nub reads the nearest `tsconfig.json` for the [resolution](/docs/runtime/resolution) layer and transform defaults. Set JSX and decorator options directly in [nub.jsonc](/docs/config#jsx), or name a different TypeScript config when the runtime should not use the one your editor finds.
-
-```jsonc title="nub.jsonc"
-{
-  // ...
-  "tsconfig": "./tsconfig.runtime.json"  // read instead of ./tsconfig.json
-}
-```
-
-```jsonc title="tsconfig.runtime.json"
-{
-  "compilerOptions": {
-    "baseUrl": ".",
-    "paths": { "@/*": ["./src/*"] }
-  }
-}
-```
-
-A config Nub cannot read in full stops the run.
-
-```console
-$ nub main.ts
-Nub: /app/tsconfig.json: File './base.json' not found.
-Error: the project's tsconfig.json could not be read in full (see above).
-Fix the config, or use --node to run without Nub's TypeScript features,
-path aliases included.
-```
-
-Compat mode turns off every config-derived behavior, so `--node` gets past the error but loses what the config was setting up — path aliases and decorator flags included.
-
-<Callout>
-Read the [full docs](https://www.typescriptlang.org/tsconfig/) for `tsconfig.json` on typescriptlang.org.
+Nub does not type-check. Keep `tsc --noEmit` in your editor and CI for type validation.
 </Callout>
 
 ## Non-erasable syntax
 
-Syntax like `enum`, `namespace`, parameter properties, and `import =` requires transformation, not just type removal — Node's type-stripping rejects all of it. Nub's transpiler emits the runtime form as part of the normal pipeline.
+Syntax like `enum`, `namespace`, parameter properties, and `import =` needs a runtime form, not just type removal, and Node's type stripping rejects it. Nub emits the runtime form.
 
 ```ts
 enum Color { Red, Green, Blue }
@@ -70,24 +34,11 @@ class User {
 import fs = require("node:fs");
 ```
 
-JSX and decorators each have their own page: see [JSX](/docs/runtime/jsx) for the `.jsx` / `.tsx` runtime and tsconfig configuration, and [Decorators](/docs/runtime/decorators) for the legacy decorator mode and emitted design-type metadata.
-
-## Plain JavaScript
-
-Your project's plain JavaScript — `.js`, `.mjs`, and `.cjs` — goes through the same pipeline. Modern syntax that Nub's Node floor can't parse natively is lowered as it is in a `.ts` file, so identical source behaves the same whatever extension it carries: `using` / `await using`, a `v`-flag (unicode-sets) RegExp like `/\p{Letter}/v`, and decorators all run.
-
-```js title="app.js"
-using handle = openHandle();
-const letters = /\p{Letter}/v;
-```
-
-A file with nothing to lower is handed to Node untouched — byte for byte, no reformatting and no source-map footer. Files inside `node_modules` are never transpiled, on any tier.
-
-JSX in a `.js` file is out of scope — use `.jsx`. Nub parses `.js` as JavaScript, not JSX, so a `<` is a comparison, not an element.
+JSX and decorators have their own pages: [JSX](/docs/runtime/jsx) and [Decorators](/docs/runtime/decorators).
 
 ## Explicit resource management
 
-Explicit Resource Management — the `using` and `await using` declarations — runs on Nub's entire Node floor. Node 22's V8 cannot parse `using`, so Nub's transpiler lowers it to the helper-based form.
+The `using` and `await using` declarations run from Node 18.19 up. Node 22's V8 cannot parse `using`, so Nub lowers it to a helper-based form.
 
 ```ts
 class Handle {
@@ -108,15 +59,13 @@ disposed
 after scope
 ```
 
-The lowering targets `es2022` — the highest target that still rewrites `using` while leaving everything Node 22 already supports (top-level await, class fields, private methods) untouched. The disposal helper resolves through Nub's vendored runtime.
-
 <Callout>
 Read the [full docs](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/using) for `using` on developer.mozilla.org.
 </Callout>
 
 ## Source maps
 
-Nub generates an inline source map for every transpiled file and injects `--enable-source-maps`, so uncaught errors and `console.trace()` print frames that point at your original TypeScript source and line numbers — not the generated JS. Breakpoints set in `.ts` source land correctly under `nub --inspect`.
+Nub generates an inline source map for every transpiled file and injects `--enable-source-maps`. Stack traces point at your TypeScript source, and breakpoints set in `.ts` files land correctly under `nub --inspect`.
 
 ```console
 $ nub app.ts
@@ -131,4 +80,42 @@ Error: kaboom
 
 To turn it off, pass `--no-enable-source-maps`.
 
-Source maps are injected on every supported Node version except **26.0 through 26.7**, where a Node regression ([nodejs/node#63169](https://github.com/nodejs/node/issues/63169)) makes a no-message `assert(false)` throw a `TypeError` instead of an `AssertionError` when source maps are on. Nub withholds the flag across that band, so stack traces are not remapped there. Every other version gets source maps: 18.19 through 25.x, and 26.8 onward, where the upstream fix ships.
+On Node 26.0 through 26.7, Nub does not inject the flag, so stack traces are not remapped there. A Node regression on those releases ([nodejs/node#63169](https://github.com/nodejs/node/issues/63169)) makes a no-message `assert(false)` throw a `TypeError` when source maps are on; 26.8 fixes it.
+
+## Plain JavaScript
+
+Your project's `.js`, `.mjs`, and `.cjs` files go through the same pipeline. Modern syntax that older Node cannot parse is lowered as it is in a `.ts` file: `using` and `await using`, `v`-flag RegExps like `/\p{Letter}/v`, and decorators.
+
+```js title="app.js"
+using handle = openHandle();
+const letters = /\p{Letter}/v;
+```
+
+Files inside `node_modules` are never transpiled.
+
+## Choosing a tsconfig
+
+Nub reads the nearest `tsconfig.json` for [module resolution](/docs/runtime/resolution) and transform defaults. To have the runtime read a different file, name it in [nub.jsonc](/docs/config#tsconfig).
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "tsconfig": "./tsconfig.runtime.json"  // read instead of ./tsconfig.json
+}
+```
+
+JSX and decorator options can also be set in [nub.jsonc](/docs/config#jsx) directly.
+
+A tsconfig Nub cannot read in full stops the run.
+
+```console
+$ nub main.ts
+Nub: /app/tsconfig.json: File './base.json' not found.
+Error: the project's tsconfig.json could not be read in full (see above).
+Fix the config, or use --node to run without Nub's TypeScript features,
+path aliases included.
+```
+
+<Callout>
+Read the [full docs](https://www.typescriptlang.org/tsconfig/) for `tsconfig.json` on typescriptlang.org.
+</Callout>

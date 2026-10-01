@@ -1,11 +1,9 @@
 ---
 title: Varlock
-description: First-party Varlock support — a project carrying an env-spec schema turns off Nub's own environment loading and defers to Varlock, using whichever Varlock the project or your PATH provides.
+description: First-party Varlock support, where a project carrying an env-spec schema turns off Nub's own environment loading and defers to Varlock, using whichever Varlock the project or your PATH provides.
 ---
 
-Nub has first-party support for [Varlock](https://varlock.dev).
-
-Varlock is an environment loading and validation tool that lets you specify a declarative schema file for your environment: `.env.schema`. The schema determines which environment files get loaded, and validates individual variables.
+Nub has first-party support for [Varlock](https://varlock.dev), a tool that loads and validates the environment against a declarative schema file, `.env.schema`.
 
 ```env-spec title=".env.schema"
 # @defaultSensitive=false
@@ -20,23 +18,22 @@ APP_ENV=development
 
 # @required @sensitive @type=url
 DATABASE_URL=
-
-# @required @sensitive @type=string(startsWith=sk-)
-STRIPE_SECRET_KEY=
 ```
 
-When Nub detects `.env.schema`, it *disables its own [environment loading](/docs/runtime/env)* and hands the environment to Varlock for every file and script it runs.
+When Nub finds a `.env.schema`, it turns off its own [environment loading](/docs/runtime/env) and hands the environment to Varlock for every file and script it runs.
 
 ```sh
 nub index.ts
 nub run dev
 ```
 
-<Callout title="Monorepos">
-Nub looks for `.env.schema` at the package you're running, then walks up to the workspace root. The nearest one wins, so a package that ships its own schema keeps it. Nub hands that directory to Varlock.
-</Callout>
+Nub looks for the schema in the package you are running, then walks up to the workspace root. The nearest one wins, so a package with its own schema keeps it.
 
-Nub does not vendor Varlock — it uses the copy already on your machine, checking the local project first and falling back to `PATH`. Finding neither is an error:
+A project that depends on [dotenv-extended](https://www.npmjs.com/package/dotenv-extended), which uses the `.env.schema` name for its own format, keeps Nub's own environment loading.
+
+## Installing Varlock
+
+Nub uses the Varlock already on your machine, checking the project first and then `PATH`. A command that launches your code fails when it finds neither:
 
 ```console
 $ nub index.ts
@@ -44,37 +41,25 @@ Error: .env.schema needs varlock, which isn't installed.
 Run `nub add -D varlock`.
 ```
 
-Only the commands that launch your code are gated; `nub add -D varlock` resolves it.
-
 ## Overriding the hand-over
 
-A `.env.schema` file is a signal Nub infers ownership from; an explicit [`envFile`](/docs/config#envfile) setting wins, and Varlock stays out of the chain.
+An explicit [`envFile`](/docs/config#envfile) setting wins over the schema, and Varlock stays out of the chain.
 
 ```jsonc title="nub.jsonc"
 {
-  "envFile": [".env"]     // load this, not the schema
+  "envFile": [".env"]  // load this, not the schema; false loads nothing
 }
 ```
+
+The `--env-file` and `--no-env-file` flags do the same for a single run, and also clear the missing-Varlock error. Use them to run a schema project on a machine where Varlock will not install.
+
+The setting works at every scope, so `nub config set --global envFile false` reaches schema projects too. To keep Varlock in one project regardless, select it explicitly.
 
 ```jsonc title="nub.jsonc"
 {
-  "envFile": false        // load nothing at all
+  "envFile": "varlock"  // keep Varlock, whatever the global config says
 }
 ```
-
-The `--env-file` and `--no-env-file` flags do the same for a single run, and either one also clears the missing-Varlock error above — which is how to run a schema project on a machine where Varlock will not install.
-
-Precedence works at every scope, your global config included. A `.env.schema` decides the environment only when nothing else does, so a machine-wide `nub config set --global envFile false` reaches schema projects too.
-
-Setting `"envFile": "varlock"` selects Varlock explicitly. That is how one project keeps the hand-over when your global config turns environment files off.
-
-```jsonc title="nub.jsonc"
-{
-  "envFile": "varlock"    // keep Varlock, whatever the global config says
-}
-```
-
-The exception is [dotenv-extended](https://www.npmjs.com/package/dotenv-extended), which has used the `.env.schema` name for its own incompatible format since 2016 — a project declaring it as a dependency keeps Nub's own environment loading and never sees Varlock mentioned.
 
 <Callout>
 Read the [full docs](https://varlock.dev) for Varlock on varlock.dev.
