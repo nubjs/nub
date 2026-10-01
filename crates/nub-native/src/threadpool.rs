@@ -104,7 +104,7 @@ unsafe fn host_library() -> Option<libloading::Library> {
             .map(Into::into)
     }
     #[cfg(not(windows))]
-    unsafe {
+    {
         Some(libloading::os::unix::Library::this().into())
     }
 }
