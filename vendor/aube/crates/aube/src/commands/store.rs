@@ -942,8 +942,9 @@ const GRACE: std::time::Duration = std::time::Duration::from_secs(30 * 86_400);
 /// one it was cloned from. The linker refreshes a tree's mtime when it clones
 /// from it, so of a live coordinate's variants the most recently used one is
 /// always kept, as is any used within [`GRACE`]; the rest age out like an
-/// unmarked tree. A tree named before trees carried a digest is a variant
-/// the linker never reads again, so it ages out the same way.
+/// unmarked tree. A tree named before trees carried a digest is never read
+/// again, so it is never the protected variant: it survives only while its
+/// own mtime is inside the window, even as the sole tree of its coordinate.
 ///
 /// Every heuristic here fails toward over-marking, and the cost asymmetry is
 /// what justifies it: retaining a tree wastes disk on a cache, while dropping
@@ -1011,16 +1012,19 @@ fn plan_trees_prune(
     let mut newest: HashMap<String, u64> = HashMap::new();
     for (name, _, used) in &tier {
         let coordinate = aube_store::tree_key_coordinate(name);
-        if reachable.contains(coordinate) {
+        let digested = coordinate.len() != name.len();
+        if digested && reachable.contains(coordinate) {
             let slot = newest.entry(coordinate.to_string()).or_default();
             *slot = (*slot).max(*used);
         }
     }
     let previous = read_grace_state(trees);
     for (name, path, used) in tier {
-        let live = newest
-            .get(aube_store::tree_key_coordinate(&name))
-            .is_some_and(|&latest| used == latest || now.saturating_sub(used) < GRACE.as_secs());
+        let coordinate = aube_store::tree_key_coordinate(&name);
+        let digested = coordinate.len() != name.len();
+        let recent = now.saturating_sub(used) < GRACE.as_secs();
+        let newest_variant = digested && newest.get(coordinate) == Some(&used);
+        let live = reachable.contains(coordinate) && (recent || newest_variant);
         if live {
             // Reachable again — drop any record, so a project that comes back
             // restarts the clock rather than inheriting an old one.
@@ -1930,7 +1934,8 @@ mod extracted_tree_prune_tests {
     /// same coordinate, so keeping all of a live coordinate's variants grows
     /// the tier without bound. Only the most recently used one survives once
     /// the others go unused past the grace window. A tree named before trees
-    /// carried a digest is never read again and ages out the same way.
+    /// carried a digest is never read again and ages out the same way, even
+    /// when it is the only tree of its coordinate.
     #[test]
     fn superseded_content_variants_of_a_live_coordinate_age_out() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1938,11 +1943,12 @@ mod extracted_tree_prune_tests {
         let current = format!("local@1.0.0={}", "a".repeat(32));
         let superseded = format!("local@1.0.0={}", "b".repeat(32));
         let legacy = "local@1.0.0".to_string();
-        for name in [&current, &superseded, &legacy] {
+        let lone_legacy = "solo@1.0.0".to_string();
+        for name in [&current, &superseded, &legacy, &lone_legacy] {
             tree(&trees, name);
         }
         let unused = std::time::SystemTime::now() - GRACE - std::time::Duration::from_secs(86_400);
-        for name in [&superseded, &legacy] {
+        for name in [&superseded, &legacy, &lone_legacy] {
             std::fs::File::open(trees.join(name))
                 .and_then(|f| f.set_modified(unused))
                 .unwrap();
@@ -1951,7 +1957,8 @@ mod extracted_tree_prune_tests {
         let project = tmp.path().join("proj");
         let aube_dir = register(&gvs, &project);
         std::fs::create_dir_all(aube_dir.join("local@1.0.0/node_modules/local")).unwrap();
-        for name in [&current, &superseded, &legacy] {
+        std::fs::create_dir_all(aube_dir.join("solo@1.0.0/node_modules/solo")).unwrap();
+        for name in [&current, &superseded, &legacy, &lone_legacy] {
             expire(&trees, name);
         }
 
