@@ -1223,11 +1223,28 @@ impl Linker {
                 .store
                 .tree_path(&aube_store::tree_key(tree_coordinate, index));
             let tree_src = tree_src.as_path();
-            if !tree_src.exists() && self.build_tree(tree_src, dep_path, pkg, index).is_err() {
-                // Tree build failed (e.g. a CAS shard went missing) —
-                // fall back to the per-file path, which surfaces the
-                // same error with full attribution + index invalidation.
-                return Ok(false);
+            match std::fs::metadata(tree_src).and_then(|m| m.modified()) {
+                // A reused tree's mtime is its last-use stamp: `store prune`
+                // keeps the most recently used content variant of a live
+                // coordinate and ages out the rest. Refreshed at most daily
+                // so a warm install pays one stat per package, not a write.
+                Ok(modified) => {
+                    let now = std::time::SystemTime::now();
+                    if now
+                        .duration_since(modified)
+                        .is_ok_and(|age| age.as_secs() > 86_400)
+                    {
+                        let _ = std::fs::File::open(tree_src).and_then(|f| f.set_modified(now));
+                    }
+                }
+                Err(_) => {
+                    if self.build_tree(tree_src, dep_path, pkg, index).is_err() {
+                        // Tree build failed (e.g. a CAS shard went missing) —
+                        // fall back to the per-file path, which surfaces the
+                        // same error with full attribution + index invalidation.
+                        return Ok(false);
+                    }
+                }
             }
 
             // The destination must not pre-exist for clonefile. The
