@@ -927,14 +927,23 @@ const GRACE: std::time::Duration = std::time::Duration::from_secs(30 * 86_400);
 
 /// Plan the extracted-tree tier sweep.
 ///
-/// The tier is a clone-source cache, not content-addressed, and neither the
-/// CAS sweep nor the global-virtual-store plan can see it — a tree is keyed
-/// by the linker's virtual-store subdir name and nothing else names it. Two
+/// The tier is a clone-source cache, and neither the CAS sweep nor the
+/// global-virtual-store plan can see it — a tree is keyed by the linker's
+/// virtual-store subdir name (its coordinate) plus a content digest, and
+/// nothing else names it. Two
 /// name spaces reach it, because that key carries the graph-hash fold only
 /// when the install used the shared store: a global-virtual-store install's
 /// trees are named after the entries its project links reach, while a
 /// project-local install's trees carry the un-hashed `.aube/` entry names,
 /// which appear nowhere in the link walk. Both are marked, per project.
+///
+/// A marked coordinate can hold several content variants — every rebuild of a
+/// `file:` tarball adds one — and the virtual-store entry cannot say which
+/// one it was cloned from. The linker refreshes a tree's mtime when it clones
+/// from it, so of a live coordinate's variants the most recently used one is
+/// always kept, as is any used within [`GRACE`]; the rest age out like an
+/// unmarked tree. A tree named before trees carried a digest is a variant
+/// the linker never reads again, so it ages out the same way.
 ///
 /// Every heuristic here fails toward over-marking, and the cost asymmetry is
 /// what justifies it: retaining a tree wastes disk on a cache, while dropping
@@ -959,11 +968,17 @@ fn plan_trees_prune(
         .flatten()
         .filter_map(|entry| {
             let name = entry.file_name().to_str().map(str::to_owned)?;
+            let used = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs());
             // Dot-prefixed names are aube's own bookkeeping (this tier's
             // state file, a crashed build's `.tmp-tree-…`), never a package
             // entry: a tree key starts with a `dep_path_to_filename` name and
             // an npm name cannot start with a dot.
-            (!name.starts_with('.')).then_some((name, entry.path()))
+            (!name.starts_with('.')).then_some((name, entry.path(), used))
         })
         .collect();
     if live.is_empty() {
@@ -993,11 +1008,20 @@ fn plan_trees_prune(
     }
 
     let now = unix_now();
+    let mut newest: HashMap<String, u64> = HashMap::new();
+    for (name, _, used) in &tier {
+        let coordinate = aube_store::tree_key_coordinate(name);
+        if reachable.contains(coordinate) {
+            let slot = newest.entry(coordinate.to_string()).or_default();
+            *slot = (*slot).max(*used);
+        }
+    }
     let previous = read_grace_state(trees);
-    for (name, path) in tier {
-        // A tree is named by its coordinate plus a content digest; it is
-        // live when a virtual-store entry of that coordinate is.
-        if reachable.contains(aube_store::tree_key_coordinate(&name)) {
+    for (name, path, used) in tier {
+        let live = newest
+            .get(aube_store::tree_key_coordinate(&name))
+            .is_some_and(|&latest| used == latest || now.saturating_sub(used) < GRACE.as_secs());
+        if live {
             // Reachable again — drop any record, so a project that comes back
             // restarts the clock rather than inheriting an old one.
             continue;
@@ -1877,8 +1901,8 @@ mod extracted_tree_prune_tests {
     /// global store, so its trees are named by the UN-hashed dep path and
     /// appear nowhere in the link walk. Marking them from the record's
     /// `aube_dir` is the only thing that keeps them. Trees carry a content
-    /// digest after the coordinate, and every content variant of a live
-    /// coordinate is kept.
+    /// digest after the coordinate, and every recently used content variant
+    /// of a live coordinate is kept.
     #[test]
     fn a_project_local_install_keeps_its_unhashed_trees() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1900,6 +1924,40 @@ mod extracted_tree_prune_tests {
         sweep(&trees, &gvs, &live(&gvs));
 
         assert_eq!(names(&trees), vec![live_a, live_b]);
+    }
+
+    /// Every rebuild of a `file:` tarball adds a content variant under the
+    /// same coordinate, so keeping all of a live coordinate's variants grows
+    /// the tier without bound. Only the most recently used one survives once
+    /// the others go unused past the grace window. A tree named before trees
+    /// carried a digest is never read again and ages out the same way.
+    #[test]
+    fn superseded_content_variants_of_a_live_coordinate_age_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (gvs, trees) = (tmp.path().join("gvs"), tmp.path().join("trees"));
+        let current = format!("local@1.0.0={}", "a".repeat(32));
+        let superseded = format!("local@1.0.0={}", "b".repeat(32));
+        let legacy = "local@1.0.0".to_string();
+        for name in [&current, &superseded, &legacy] {
+            tree(&trees, name);
+        }
+        let unused = std::time::SystemTime::now() - GRACE - std::time::Duration::from_secs(86_400);
+        for name in [&superseded, &legacy] {
+            std::fs::File::open(trees.join(name))
+                .and_then(|f| f.set_modified(unused))
+                .unwrap();
+        }
+
+        let project = tmp.path().join("proj");
+        let aube_dir = register(&gvs, &project);
+        std::fs::create_dir_all(aube_dir.join("local@1.0.0/node_modules/local")).unwrap();
+        for name in [&current, &superseded, &legacy] {
+            expire(&trees, name);
+        }
+
+        sweep(&trees, &gvs, &live(&gvs));
+
+        assert_eq!(names(&trees), vec![current]);
     }
 
     /// The registry is the only reachability evidence there is, so a registry
