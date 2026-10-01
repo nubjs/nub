@@ -188,7 +188,7 @@ git show aube-upstream/main:crates/aube/Cargo.toml | sed -n '/\[features\]/,/^\[
 Live requirements in `crates/nub-cli/Cargo.toml`:
 
 - `aube` → `features = ["rustls", "publish"]`. `publish` gates `commands::publish`, which `pm_engine/publish_family.rs` calls directly; `rustls` is the crate's only TLS backend. Without both, nub-cli does not compile.
-- `aube-registry` → `features = ["hickory-dns"]`. Default-preserving, not new.
+- `aube-registry` → `features = ["hickory-dns"]` under `[target.'cfg(not(target_os = "macos"))'.dependencies]` only; the unconditional entry names no features. macOS uses the system resolver (#942: Hickory reads the global nameserver list without VPN interface scopes). `scripts/check-dns-features.sh` guards the per-target split in CI.
 - `hickory-dns` stays **off** the `aube` crate: reqwest's feature flips the default resolver for every client in the final binary.
 
 Also check the brand boundary on the incoming delta — new `AUBE_*` vars must read through `aube_util::env::embedder_env()`, and no new *unconditional* pnpm-named file read may appear:
