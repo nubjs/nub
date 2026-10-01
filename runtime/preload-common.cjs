@@ -2017,7 +2017,10 @@ function installServeEntry(beforeMain) {
   if (typeof runMain !== "function") return;
   // Node reads `Module.runMain` at the call, for exactly this kind of wrap. Restored
   // as it runs: one entry, one pass. An entry that throws propagates out of the call
-  // as it would have, uninspected.
+  // as it would have, uninspected. A later preload that REPLACES the property rather
+  // than wrapping it withdraws the pass with it, and the entry goes unserved: the
+  // declining side, by the rule above, and the only alternative would be a resource
+  // every ordinary run carried.
   module_.runMain = function (...args) {
     module_.runMain = runMain;
     const result = runMain.apply(this, args);
