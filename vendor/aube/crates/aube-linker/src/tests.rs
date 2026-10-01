@@ -2601,7 +2601,7 @@ fn validate_index_key_rejects_windows_drive() {
 /// Recursively compare two trees for byte-identical content, identical
 /// symlink targets, identical +x bits, and identical directory shape.
 /// Returns a human-readable mismatch description, or `None` on match.
-#[cfg(all(unix, test))]
+#[cfg(target_os = "macos")]
 fn diff_trees(a: &Path, b: &Path) -> Option<String> {
     use std::collections::BTreeSet;
     use std::os::unix::fs::PermissionsExt;
