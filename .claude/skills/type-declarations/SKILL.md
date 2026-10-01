@@ -89,7 +89,7 @@ Preserve the rest of the matrix:
 - `stepaside-dom` and `stepaside-stub` verify global-owner coexistence.
 - `negative-export` must fail only because YAML resolution and `reportError` disappear after `common.d.ts` is converted into a module.
 
-Run the fixture package through Nub against a freshly packed tarball. Do not rely on the checked-in `file:..` dependency for release verification: a package-manager content store may reuse an older local-package snapshot, which can hide or invent routing failures. The tarball workflow also proves the artifact users receive:
+Run the fixture package through Nub against a freshly packed tarball. The checked-in `file:..` dependency only proves the source tree; the tarball workflow proves the artifact users receive, including its `files` list. Use a `nub` newer than 0.9.5: on macOS, 0.9.5 and earlier reused the files of an earlier install for a `file:` dependency whose path had not changed, so every run of this workflow (same tarball name each time) silently tested a stale `@nubjs/types`.
 
 ```bash
 tmp=$(mktemp -d)
