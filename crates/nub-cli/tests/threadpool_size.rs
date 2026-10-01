@@ -44,18 +44,41 @@ fn run(extra_args: &[&str], env: &[(&str, &str)]) -> serde_json::Value {
         .expect("fixture must emit valid JSON")
 }
 
-/// Building the pool leaves nothing on Node's loop: no active resource when user
-/// code starts, as under plain Node. (A JS submit would leave an `FSReqCallback`
-/// whose callback fires after user code has installed its own `async_hooks`.)
+/// Building the pool leaves nothing on Node's loop: no request when user code
+/// starts, on any tier. (A JS submit would leave an `FSReqCallback` whose callback
+/// fires after user code has installed its own `async_hooks`.) On the fast tier
+/// nothing of nub's is there at all, as under plain Node; the compat tier's loader
+/// worker is Node's own `module.register` machinery, which leaves its pipes open
+/// and reads the `--import` preload after the pass that serves a fetch handler has
+/// had to arm an immediate (see `installServeEntry`), so that tier is held to the
+/// request alone.
 #[test]
 fn augmented_startup_leaves_no_active_resource() {
     let v = run(&[], &[]);
-    assert_eq!(
-        v["active"].as_array().map(Vec::len),
-        Some(0),
-        "user code must start with no active resource, got {}",
+    let active = v["active"].as_array().expect("active");
+    assert!(
+        !active.iter().any(|r| r.as_str() == Some("FSReqCallback")),
+        "building the pool must leave no request behind, got {}",
         v["active"]
     );
+    if host_node_on_fast_tier() {
+        assert!(
+            active.is_empty(),
+            "user code must start with no active resource, got {}",
+            v["active"]
+        );
+    }
+}
+
+/// Node 22.15+ with sync `module.registerHooks`; 23.0–23.4 sort above that floor
+/// without the API and stay on the compat tier.
+fn host_node_on_fast_tier() -> bool {
+    let out = Command::new("node").arg("--version").output().unwrap();
+    let v = String::from_utf8_lossy(&out.stdout);
+    let mut parts = v.trim().trim_start_matches('v').split('.');
+    let major: u32 = parts.next().unwrap().parse().unwrap();
+    let minor: u32 = parts.next().unwrap().parse().unwrap();
+    (major, minor) >= (22, 15) && !(major == 23 && minor < 5)
 }
 
 /// Augmented run: the pool is at least libuv's default of 4 and never exceeds the
