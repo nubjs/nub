@@ -1542,7 +1542,11 @@ fn file_deps_at_the_same_relative_path_install_their_own_content() {
                 format!(r#"{{"name":"{name}","version":"1.0.0"}}"#),
             )
             .unwrap();
-            std::fs::write(pkg.join("index.js"), format!("module.exports='{project}'\n")).unwrap();
+            std::fs::write(
+                pkg.join("index.js"),
+                format!("module.exports='{project}'\n"),
+            )
+            .unwrap();
         }
         let status = Command::new("tar")
             .args(["-czf", "../p.tgz", "package"])
@@ -1561,9 +1565,8 @@ fn file_deps_at_the_same_relative_path_install_their_own_content() {
         let (err, code) = run_install_in_store(&proj, &store, &cache, &["install"]);
         assert_eq!(code, 0, "install in project {project} must succeed: {err}");
         for dep in ["tgz-dep", "dir-dep"] {
-            let got =
-                std::fs::read_to_string(proj.join("node_modules").join(dep).join("index.js"))
-                    .unwrap();
+            let got = std::fs::read_to_string(proj.join("node_modules").join(dep).join("index.js"))
+                .unwrap();
             assert_eq!(
                 got,
                 format!("module.exports='{project}'\n"),
