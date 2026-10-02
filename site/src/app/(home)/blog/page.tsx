@@ -2,6 +2,7 @@ import Link from 'next/link';
 import type { Metadata } from 'next';
 import { blog } from '@/lib/source';
 import { renderInlineCode } from '@/lib/inline-code';
+import { formatDate } from '@/lib/blog-date';
 
 const blogOgImage = `/og?${new URLSearchParams({ title: 'Blog', eyebrow: 'Blog' }).toString()}`;
 
@@ -88,13 +89,4 @@ export default function BlogIndex() {
       </div>
     </div>
   );
-}
-
-function formatDate(date: string | Date | undefined): string {
-  if (!date) return '';
-  return new Date(date).toLocaleDateString('en-US', {
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-  });
 }
