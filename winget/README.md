@@ -17,7 +17,7 @@ Nub is installable on Windows with `winget install Nub.Nub`. This directory hold
 
 The zip carries one `bin\nub.exe`; `nubx` and `nubr` are that binary dispatched on argv[0]. winget creates one command alias per `NestedInstallerFiles` entry and refuses a repeated `RelativeFilePath`, comparing the literal string — so the published manifests have named the file in two spellings (`bin/nub.exe`, `./bin/nub.exe`) for `nub` + `nubx` since 0.1.0, and komac carries those entries forward on every bump.
 
-From 0.9.5 the zip also ships `bin\nubx.exe` and `bin\nubr.exe`, each a small stub (`crates/nub-alias`) that runs the sibling `nub.exe` with its verb. The fixture keeps the community's two entries as they are and points `nubr` at its own file, which is the shape submitted for 0.9.5; the validate workflow proves all three run.
+From 0.9.5 the zip also ships `bin\nubx.exe` and `bin\nubr.exe`, each a small stub (`crates/nub-alias`) that runs the sibling `nub.exe` with its verb. The fixture keeps the community's two entries as they are and points `nubr` at its own file, which is the shape submitted for 0.9.5 and 0.9.6; the validate workflow proves all three run.
 
 ## Confidence chain — why a broken manifest cannot reach users
 
@@ -34,8 +34,8 @@ From 0.9.5 the zip also ships `bin\nubx.exe` and `bin\nubr.exe`, each a small st
 ### Manual local test (a Windows machine)
 
 ```powershell
-winget validate --manifest .\winget\manifests\n\Nub\Nub\0.9.5
-winget install --manifest .\winget\manifests\n\Nub\Nub\0.9.5 `
+winget validate --manifest .\winget\manifests\n\Nub\Nub\0.9.6
+winget install --manifest .\winget\manifests\n\Nub\Nub\0.9.6 `
   --accept-package-agreements --accept-source-agreements
 nub --version
 nubx --version
@@ -47,7 +47,7 @@ nubr --version
 winget-pkgs ships `Tools/SandboxTest.ps1`, which spins up Windows Sandbox and runs the manifest through the same flow the validation bot uses. On a Windows host with Windows Sandbox enabled, from a `microsoft/winget-pkgs` checkout:
 
 ```powershell
-.\Tools\SandboxTest.ps1 <path-to>\winget\manifests\n\Nub\Nub\0.9.5
+.\Tools\SandboxTest.ps1 <path-to>\winget\manifests\n\Nub\Nub\0.9.6
 ```
 
 ### Published-package smoke
