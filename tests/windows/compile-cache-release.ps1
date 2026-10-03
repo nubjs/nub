@@ -159,7 +159,9 @@ function Invoke-CacheFallbackProbe {
 if (-not (Test-Path -LiteralPath $Nub -PathType Leaf)) { throw "nub.exe not found: $Nub" }
 if (-not (Test-Path -LiteralPath $Launcher -PathType Leaf)) { throw "nub-launcher.exe not found: $Launcher" }
 
-$root = Join-Path $env:RUNNER_TEMP ("nub-compile-cache-release-" + [Guid]::NewGuid().ToString('N'))
+# RUNNER_TEMP can live on a shared D:\ drive whose ancestor DACL the runtime
+# correctly rejects. Keep both the cache and its fallback below the user profile.
+$root = Join-Path $env:USERPROFILE ("nub-compile-cache-release-" + [Guid]::NewGuid().ToString('N'))
 $holder = $null
 try {
     New-Item -ItemType Directory -Force -Path $root | Out-Null

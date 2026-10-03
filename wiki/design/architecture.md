@@ -78,6 +78,8 @@ So Nub writes a private `node` into a temporary directory named with [[crates/nu
 
 The persistent shim installed by `nub node shim` is the opposite: it runs the resolved Node unaugmented. Version management is its job. A globally augmenting `node` would load environment files and inject globals into every Node process on the machine.
 
+For interactive Unix children, [[crates/nub-core/src/node/spawn.rs#foreground_child]] hands the terminal to the child's process group, then sends `SIGCONT`: a child that reads before the parent runs can already be stopped by `SIGTTIN`. The PTY regression test waits for that stop before handing over the terminal, and checks both the stopped negative control and a successful read. The guard restores the parent's foreground group when the child exits.
+
 ## Turning it off
 
 Both `--node` and a truthy `NODE_COMPAT` disable runtime augmentation — no hooks, no preload, no injected flags, no path shim. They compose, and `NODE_COMPAT` is stamped tree-wide so every descendant inherits it.
