@@ -417,6 +417,14 @@ fn foreground_child(child_pid: u32) -> Option<ForegroundGuard> {
     // directly, so suppress nub's redundant SIGINT forward (#26 exactly-once).
     ctrl_c::set_suppress_sigint_forward(true);
 
+    // A fast child can already be SIGTTIN-stopped before tcsetpgrp runs.
+    // Foreground ownership does not resume it; continue the whole job after
+    // the handoff so shell descendants can read the terminal too.
+    // SAFETY: child_pid identifies the child's own process group.
+    unsafe {
+        libc::kill(-(child_pid as libc::pid_t), libc::SIGCONT);
+    }
+
     Some(ForegroundGuard { nub_pgrp })
 }
 
@@ -4903,7 +4911,7 @@ mod tests {
         // stdout/stderr go to /dev/null so the worker's own captured output stays
         // clean; stdin is inherited (our pty slave) — that's the terminal under test.
         let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg("read x; exit 0");
+        cmd.arg("-c").arg("read x");
         cmd.stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
@@ -4914,16 +4922,41 @@ mod tests {
         };
         let child_pid = child.id();
 
+        // Force the child-first ordering: tcsetpgrp alone cannot resume a child
+        // that already stopped on SIGTTIN before the parent ran the handoff.
+        let stop_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let stopped = loop {
+            let mut status: libc::c_int = 0;
+            // SAFETY: observe our live child without blocking past the deadline.
+            let r = unsafe {
+                libc::waitpid(
+                    child_pid as libc::pid_t,
+                    &mut status,
+                    libc::WNOHANG | libc::WUNTRACED,
+                )
+            };
+            if r == child_pid as libc::pid_t {
+                break libc::WIFSTOPPED(status) && libc::WSTOPSIG(status) == libc::SIGTTIN;
+            }
+            if r < 0 || std::time::Instant::now() >= stop_deadline {
+                break false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        if !stopped {
+            let _ = child.kill();
+            let _ = child.wait();
+            // SAFETY: close the live PTY master after reaping the child.
+            unsafe { libc::close(master) };
+            return 2;
+        }
+
         // Apply the fix under test (or not).
         let _fg = if apply_fix {
             foreground_child(child_pid)
         } else {
             None
         };
-
-        // Let the grandchild reach its blocking terminal read; if it's going to
-        // SIGTTIN-stop (no fix), it will have stopped by now.
-        std::thread::sleep(std::time::Duration::from_millis(300));
 
         // The "keystroke": a newline to the PTY master. With the fix the child is
         // foreground and reads it → exits 0; without it the child is stopped.
@@ -4936,6 +4969,9 @@ mod tests {
         // Observe the child with WUNTRACED so a SIGTTIN STOP is reported, polling ~2s.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let verdict = loop {
+            if !apply_fix {
+                break 1; // the observed SIGTTIN stop is the negative control
+            }
             let mut status: libc::c_int = 0;
             // SAFETY: waitpid on our child, non-blocking + report-stops.
             let r = unsafe {
@@ -4950,7 +4986,7 @@ mod tests {
                     break 1; // stopped (SIGTTIN) → the hang
                 }
                 if libc::WIFEXITED(status) {
-                    break 0; // read the keystroke and exited cleanly
+                    break if libc::WEXITSTATUS(status) == 0 { 0 } else { 2 };
                 }
             }
             if std::time::Instant::now() >= deadline {
