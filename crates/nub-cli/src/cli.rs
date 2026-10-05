@@ -7079,7 +7079,11 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     if let Some(w) = nub_core::node::discovery::engines_disagreement_warning(&cwd, &node) {
         eprintln!("{w}");
     }
-    nub_core::node::discovery::check_min_version(&node)?;
+    // Only augmentation needs the hook API; the compat branch below runs plain
+    // `node --watch`, so it skips the gate exactly as the file runner does.
+    if !compat_mode {
+        nub_core::node::discovery::check_min_version(&node)?;
+    }
 
     // `nub watch` has no `--node` flag (the watch loop is nub's, so there's no
     // "vanilla watch" CLI escape — use `node --watch` in your shell for that).

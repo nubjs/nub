@@ -476,12 +476,15 @@ fn provision_unpinned_node() -> Result<ResolvedNode, DiscoveryError> {
 /// every version). Backs the unpinned store-first path. Sub-floor cached versions
 /// (e.g. a leftover `nub node pin 16` the user later unpinned) are filtered out so
 /// an unpinned run falls through to downloading `latest` instead of dead-ending on
-/// `Unsupported` — and because a supported version always outranks a sub-floor one,
-/// filtering the single highest is equivalent to picking the highest supported.
+/// `Unsupported`. The filter runs before selection: the 19.x / 20.0–20.5 gap sorts
+/// above a usable 18.19, so the highest cached version is not always a supported one.
 /// Parameterized over `store` for testability; `highest_store_node` is the wrapper.
 fn highest_store_node_in(store: &Path) -> Option<ResolvedNode> {
-    nub_store_node_in(store, &VersionPin::Range(vec![semver::VersionReq::STAR]))
-        .filter(|n| n.version.is_supported())
+    nub_store_node_where(
+        store,
+        &VersionPin::Range(vec![semver::VersionReq::STAR]),
+        NodeVersion::is_supported,
+    )
 }
 
 fn highest_store_node() -> Option<ResolvedNode> {
@@ -2015,6 +2018,17 @@ fn concretize_alias_in(pin: VersionPin, raw: &str, cache_root: &Path, mirror: &s
 /// satisfying the pin. Parameterized over `store` so it's testable without
 /// mutating the process env (XDG_CACHE_HOME); `nub_store_node` is the wrapper.
 fn nub_store_node_in(store: &Path, pin: &VersionPin) -> Option<ResolvedNode> {
+    nub_store_node_where(store, pin, |_| true)
+}
+
+/// [`nub_store_node_in`], keeping only versions `keep` accepts BEFORE the highest
+/// is chosen — a filter applied after selection would discard a usable lower
+/// version whenever the highest one is rejected.
+fn nub_store_node_where(
+    store: &Path,
+    pin: &VersionPin,
+    keep: impl Fn(&NodeVersion) -> bool,
+) -> Option<ResolvedNode> {
     let mut candidates: Vec<(NodeVersion, Utf8PathBuf)> = fs::read_dir(store)
         .ok()?
         .filter_map(|entry| {
@@ -2023,7 +2037,7 @@ fn nub_store_node_in(store: &Path, pin: &VersionPin) -> Option<ResolvedNode> {
             let bin = store_node_binary(&entry.path())?;
             Some((version, bin))
         })
-        .filter(|(v, _)| v.satisfies(pin))
+        .filter(|(v, _)| v.satisfies(pin) && keep(v))
         .collect();
 
     // Highest matching version wins (mirrors scan_nvm).
@@ -3051,6 +3065,18 @@ mod tests {
             "sub-floor-only store → None → caller downloads `latest`"
         );
         let _ = std::fs::remove_dir_all(&old);
+
+        // A gap version (no `module.register`) sorting above a usable one must
+        // not hide it: the supported 18.19 is picked, not None.
+        let gap = resolution_tmpdir("store-gap");
+        seed(&gap, &["18.19.0", "19.8.1", "20.5.1"]);
+        assert_eq!(
+            highest_store_node_in(&gap)
+                .expect("the supported 18.19 under the gap")
+                .version,
+            NodeVersion::new(18, 19, 0),
+        );
+        let _ = std::fs::remove_dir_all(&gap);
 
         let empty = resolution_tmpdir("store-empty");
         assert!(
