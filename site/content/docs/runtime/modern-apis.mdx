@@ -208,7 +208,7 @@ const rows = await Array.fromAsync(stream, (row) => normalize(row));
 
 ### `URL.parse()`
 
-The [`URL.parse()`](https://developer.mozilla.org/en-US/docs/Web/API/URL/parse_static) method returns `null` where the `URL` constructor would throw. Native on Node 20.19–20.x and 22.1+; Nub polyfills it elsewhere.
+The [`URL.parse()`](https://developer.mozilla.org/en-US/docs/Web/API/URL/parse_static) method returns `null` where the `URL` constructor would throw. Native on Node 20.18–20.x and 22.1+; Nub polyfills it elsewhere.
 
 ```ts
 const callback = URL.parse(value, "https://example.com");

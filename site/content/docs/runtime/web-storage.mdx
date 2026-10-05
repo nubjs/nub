@@ -26,7 +26,7 @@ sessionStorage.clear();
 
 ## `localStorage`
 
-The `localStorage` global persists across runs in a file. Pass `--localstorage-file <path>`, directly or in `NODE_OPTIONS`, and Nub forwards it to Node. Without the flag, `localStorage` is `undefined`.
+The `localStorage` global persists across runs in a file. Pass `--localstorage-file <path>`, directly or in `NODE_OPTIONS`, and Nub forwards it to Node. Without the flag, `localStorage` is `undefined`, except on Node 25, where it is an empty object with no storage methods.
 
 ```ts
 localStorage.setItem("token", "abc123");

@@ -301,7 +301,7 @@ Nub adds no APIs that your code imports or calls, so the code itself does not de
 
 ### Does Nub add anything to my `package.json` or `tsconfig.json`?
 
-Nothing Nub-specific. When you pin a package manager with `nub pm pin` or `nub pm use`, Nub writes the standard `packageManager` and `devEngines.packageManager` fields. Otherwise it reads the standard `package.json` fields the way Node, npm, pnpm, and yarn read them:
+Nub writes only the standard `packageManager` and `devEngines.packageManager` fields: when you run `nub pm use` or `nub pm pin`, and on the first `nub install` in a project with no lockfile. Otherwise it reads the standard `package.json` fields the way Node, npm, pnpm, and yarn read them:
 
 ```text
 scripts

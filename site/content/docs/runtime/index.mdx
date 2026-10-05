@@ -61,7 +61,7 @@ Nub supports Node 18.19 and later, and refuses to run on anything older. It deli
 | Tier | Node versions | Module hooks |
 | --- | --- | --- |
 | Fast | 22.15+ on 22.x, 23.5+ on 23.x, and every release from 24 on | Sync `module.registerHooks()`, in the main thread |
-| Compatibility | 18.19+ on 18.x, all of 20.x, 22.0–22.14, and 23.0–23.4 | Async `module.register()`, in a loader-worker thread |
+| Compatibility | 18.19+ on 18.x, all of 19.x–21.x, 22.0–22.14, and 23.0–23.4 | Async `module.register()`, in a loader-worker thread |
 
 The compatibility tier adds about 80 ms to cold start, plus about 90 µs per module, and does not change execution speed. A fast-tier Node is recommended.
 

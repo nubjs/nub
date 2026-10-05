@@ -628,20 +628,20 @@ static FEATURES: &[Feature] = &[
         evidence: "native on Node 24+",
     },
     // ── Promise.try ─────────────────────────────────────────────────────────
-    // Native on Node 24+; polyfilled on 22.x.
+    // Native on Node 23+; polyfilled below.
     Feature {
         name: "Promise.try",
         mitigations: &[
             (
-                band((18, 19, 0), Some((24, 0, 0))),
+                band((18, 19, 0), Some((23, 0, 0))),
                 Mitigation::Polyfill {
                     runtime_file: "polyfills.cjs",
                     global: "Promise.try",
                 },
             ),
-            (band((24, 0, 0), None), Mitigation::Native),
+            (band((23, 0, 0), None), Mitigation::Native),
         ],
-        evidence: "native on Node 24+",
+        evidence: "native on Node 23+ (typeof probe on 22.23.2 vs 23.0.0)",
     },
     // ── Stage 3+ library surfaces ───────────────────────────────────────────
     // union is the detect anchor for all SEVEN set methods (union/intersection/
@@ -789,20 +789,20 @@ static FEATURES: &[Feature] = &[
     // same stale-floor premise as Promise.withResolvers below; bands are measured,
     // not read off release notes.
     //
-    // URL.parse is the awkward one: Node backported it to 20.19 but the 21.x line
-    // never got it, so the row has a HOLE — native on 20.19-20.x, absent again
+    // URL.parse is the awkward one: Node backported it to 20.18 but the 21.x line
+    // never got it, so the row has a HOLE — native on 20.18-20.x, absent again
     // across all of 21.x, native from 22.1. Same shape as the eventsource 21.x hole.
     Feature {
         name: "URL.parse",
         mitigations: &[
             (
-                band((18, 19, 0), Some((20, 19, 0))),
+                band((18, 19, 0), Some((20, 18, 0))),
                 Mitigation::Polyfill {
                     runtime_file: "polyfills.cjs",
                     global: "URL.parse",
                 },
             ),
-            (band((20, 19, 0), Some((21, 0, 0))), Mitigation::Native),
+            (band((20, 18, 0), Some((21, 0, 0))), Mitigation::Native),
             (
                 band((21, 0, 0), Some((22, 1, 0))),
                 Mitigation::Polyfill {
@@ -812,7 +812,7 @@ static FEATURES: &[Feature] = &[
             ),
             (band((22, 1, 0), None), Mitigation::Native),
         ],
-        evidence: "Stage 4; native 22.1 and backported to 20.19; the 21.x line never got it",
+        evidence: "Stage 4; native 22.1 and backported to 20.18.0 (#52280); the 21.x line never got it",
     },
     // isWellFormed/toWellFormed ship together; isWellFormed is the detect anchor.
     Feature {
