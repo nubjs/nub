@@ -159,6 +159,26 @@ fn format_node_executable_failure(
 /// wording (per `internal/research/supported-node-versions.md` line 52)
 /// lives in one place; tests pin to the output of this function.
 fn format_unsupported(version: &NodeVersion, pin_source: Option<&str>) -> String {
+    // 19.x and 20.0–20.5 are above the floor, so the floor sentence would read
+    // as a contradiction; name the missing API and the nearest working release.
+    if version.in_register_gap() {
+        let (cause, action) = match pin_source {
+            Some(src) => (
+                format!(
+                    "This project pins Node {version} via {src}, which predates `module.register()`."
+                ),
+                "update the pin",
+            ),
+            None => (
+                format!("Node {version} predates `module.register()`."),
+                "upgrade Node",
+            ),
+        };
+        return format!(
+            "Nub requires Node 18.19+ on the 18.x line, or 20.6 or newer, for runtime augmentation. \
+             {cause} To run it: {action} to 20.6+, or run plain `node` directly for this project."
+        );
+    }
     match pin_source {
         Some(src) => format!(
             "Nub requires Node 18.19 or newer for runtime augmentation. \
@@ -3076,6 +3096,30 @@ mod tests {
                         To run it: update the pin to 18.19+ (Nub will run it in compatibility mode), \
                         or run plain `node` directly for this project.";
         assert_eq!(msg, expected);
+    }
+
+    #[test]
+    fn unsupported_error_names_the_register_gap_for_node_19() {
+        let pinned = DiscoveryError::Unsupported {
+            version: NodeVersion::new(19, 3, 0),
+            pin_source: Some(".nvmrc".to_string()),
+        };
+        assert_eq!(
+            format!("{pinned}"),
+            "Nub requires Node 18.19+ on the 18.x line, or 20.6 or newer, for runtime augmentation. \
+             This project pins Node 19.3.0 via .nvmrc, which predates `module.register()`. \
+             To run it: update the pin to 20.6+, or run plain `node` directly for this project."
+        );
+        let unpinned = DiscoveryError::Unsupported {
+            version: NodeVersion::new(20, 5, 1),
+            pin_source: None,
+        };
+        assert_eq!(
+            format!("{unpinned}"),
+            "Nub requires Node 18.19+ on the 18.x line, or 20.6 or newer, for runtime augmentation. \
+             Node 20.5.1 predates `module.register()`. \
+             To run it: upgrade Node to 20.6+, or run plain `node` directly for this project."
+        );
     }
 
     #[test]
