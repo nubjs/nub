@@ -133,6 +133,8 @@ The `hoist` option is valid only under `isolated`, and `eject` only under `globa
 
 ## Disk locations
 
+Nub keeps package files and download caches outside the project, in these directories.
+
 ### Content store
 
 Package files are deduplicated by content hash in a global store at `$XDG_DATA_HOME/nub/store/v1/` (default `~/.local/share/nub/store/v1/`). A given package version is on disk once, shared across projects.
@@ -263,6 +265,8 @@ nub install --node-linker hoisted
 ```
 
 ## How it works
+
+The shared layout rests on two mechanisms: store entries that link to each other, and a scan for imports a package never declared.
 
 ### One symlink per package
 

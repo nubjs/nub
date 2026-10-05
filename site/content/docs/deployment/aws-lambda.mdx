@@ -40,6 +40,8 @@ createServer((request, response) => {
 
 ## Deploy
 
+The deploy pushes the image to ECR, creates a function from it, and gives the function a public URL.
+
 ### Build and push
 
 [Lambda accepts one architecture per function](https://docs.aws.amazon.com/lambda/latest/dg/images-create.html). Build `linux/amd64` and disable provenance, so ECR receives the image manifest Lambda expects:

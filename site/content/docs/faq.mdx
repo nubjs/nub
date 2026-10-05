@@ -5,6 +5,8 @@ description: Short answers to common questions about Nub — what it is, how it 
 
 ## Basics
 
+The [introduction](/docs) shows Nub in use, and these answers cover what it is.
+
 ### What is Nub?
 
 Nub is a Rust CLI that runs your files, scripts, and CLIs, installs dependencies, and manages Node versions. It runs on stock Node and augments it through Node's public extension surfaces.
@@ -84,6 +86,8 @@ Homebrew, mise, the install script, the Docker image, the GitHub Action, upgrade
 
 ## Compatibility
 
+The [runtime overview](/docs/runtime#supported-versions-and-tiers) has the full table of Node versions and tiers.
+
 ### Will my existing Node code work on Nub?
 
 Yes. The process is stock Node, so every `node:` core module and every package behaves as it does on Node.
@@ -112,6 +116,8 @@ On Node older than 18.19, an augmented command fails with an error naming the fl
 Yes: macOS (arm64, x64), Linux (x64, arm64), and Windows (x64, arm64).
 
 ## Package management
+
+The [package manager](/docs/install) page covers the install commands, and the [package meta-manager](/docs/pm) page covers how Nub picks the tool a project pins.
 
 ### Does it replace my package manager?
 
@@ -144,6 +150,8 @@ Topological ordering, parallelism, and `--workspace-root` work as in pnpm. Nub s
 Yes. The `nubx` command runs a bin from `node_modules/.bin`, walking up the directory tree, and fetches an uninstalled tool from the registry. Unlike `npx`, the first registry fetch of a tool prompts, and CI fails closed unless you pass `-y`. See [registry fetches](/docs/nubx#registry-fetches).
 
 ## Running code
+
+Each answer links to the page that covers the feature in full.
 
 ### Does it replace `tsx` / `ts-node`?
 
@@ -207,6 +215,8 @@ It helps when a script expects plain Node, when you bisect a suspected Nub bug, 
 
 ## Comparisons
 
+Bun and Deno are separate runtimes, and `node --run` is Node's own script runner. Nub runs your code on stock Node.
+
 ### How is it different from Bun?
 
 Bun is a separate JavaScript runtime built on JavaScriptCore, with its own module loader, package manager, test runner, bundler, and `Bun.*` APIs. Code that uses those surfaces runs only on Bun:
@@ -254,6 +264,8 @@ The `nub run` command matches its speed in the [script-runner benchmark](https:/
 
 ## Under the hood
 
+The [runtime overview](/docs/runtime#how-it-works) has a shorter summary of the mechanism.
+
 ### How does it work?
 
 When you run `nub script.ts`, the Rust binary:
@@ -285,9 +297,11 @@ The [Node extension surfaces](#what-node-features-does-it-rely-on) Nub builds on
 
 ## Lock-in
 
+Nub adds no APIs that your code imports or calls, so the code itself does not depend on Nub.
+
 ### Does Nub add anything to my `package.json` or `tsconfig.json`?
 
-No. Nub reads the standard `package.json` fields the way Node, npm, pnpm, and yarn read them:
+Nothing Nub-specific. When you pin a package manager with `nub pm pin` or `nub pm use`, Nub writes the standard `packageManager` and `devEngines.packageManager` fields. Otherwise it reads the standard `package.json` fields the way Node, npm, pnpm, and yarn read them:
 
 ```text
 scripts
