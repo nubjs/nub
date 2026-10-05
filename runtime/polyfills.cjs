@@ -265,7 +265,7 @@ function installSyncPolyfills(preloaded) {
     };
   }
 
-  // Promise.try (native on Node 24+). Generic on `this` like the other statics: the
+  // Promise.try (native on Node 23+). Generic on `this` like the other statics: the
   // capability comes from NewPromiseCapability(this), so a subclass drives the result
   // and a non-constructor `this` throws synchronously.
   if (typeof Promise.try !== "function") {

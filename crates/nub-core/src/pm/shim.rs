@@ -12,8 +12,8 @@
 //!   5. the PATH fall-through scan that skips the shim dir (the recursion guard,
 //!      same shape as `node::discovery::which_node`'s `nub-node-shim-` skip).
 //!
-//! The shims live under `~/.nub` (the install surface `install.sh` owns), NOT
-//! under `$XDG_CACHE_HOME/nub`: a shim is an installation the user opted into,
+//! The shims live under the data dir (`~/.local/share/nub/shims`; see
+//! [`resolve_shim_dir`]), NOT under `$XDG_CACHE_HOME/nub`: a shim is an installation the user opted into,
 //! and wiping a cache must never silently remove entries their PATH points at.
 
 use std::borrow::Cow;
@@ -560,7 +560,7 @@ pub fn safe_redirect(pinned: Pm, args: &[String]) -> Option<String> {
 /// and the reachability-check set. `nub` itself is deliberately NOT shimmed:
 /// `install.sh` already puts `~/.nub/bin/nub` on PATH, and a `nub` argv0 is
 /// dispatched by [`Argv0`](../../../nub_cli/cli/enum.Argv0.html) regardless of
-/// the shim dir, so a `~/.nub/shims/nub` hardlink intercepts nothing.
+/// the shim dir, so a `nub` hardlink in the shim dir intercepts nothing.
 const PM_SHIM_NAMES: [&str; 6] = ["npm", "npx", "pnpm", "pnpx", "yarn", "yarnpkg"];
 
 /// Everything [`install_shims`] links — the six PM names. Kept as a named alias

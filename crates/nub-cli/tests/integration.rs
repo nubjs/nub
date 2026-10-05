@@ -2960,7 +2960,7 @@ console.log(JSON.stringify({ checked: planted.length + 1, clobbered }));
 fn iterator_stage4_helpers_and_promise_try_follow_spec() {
     // The final Stage 4 text of iterator chunking/includes/join, plus the generic
     // `this` of Promise.try. No Node release ships the four iterator methods, and
-    // Promise.try is deleted first so its fallback runs on 24+ too; each case below
+    // Promise.try is deleted first so its fallback runs on 23+ too; each case below
     // is one the pre-Stage-4 polyfill got wrong. Full conformance is checked against
     // test262 (built-ins/Iterator/prototype, built-ins/Promise/try); this pins the
     // observable contract. Plain `node` against the runtime file, as the no-clobber
