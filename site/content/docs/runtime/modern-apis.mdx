@@ -11,6 +11,8 @@ Nub's types package declares the keyed Promise combinators, `Temporal`, the brow
 
 ## JavaScript APIs
 
+These are ECMAScript globals and methods. Each entry gives the Node version that ships it and how Nub supplies it below that version.
+
 ### `Temporal`
 
 The [`Temporal`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Temporal) namespace provides immutable types for instants, calendar dates, durations, and time zones. Native on Node 26+; on older Node, Nub loads `@js-temporal/polyfill` the first time code reads `Temporal`.
@@ -317,6 +319,8 @@ while (Atomics.load(state, 0) === 0) {
 ```
 
 ## Web APIs
+
+These are browser-platform globals, such as `URLPattern`, `WebSocket`, and `localStorage`.
 
 ### `URLPattern`
 
