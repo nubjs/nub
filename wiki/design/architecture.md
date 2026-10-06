@@ -112,6 +112,12 @@ Four files load in precedence order, with the real process environment always wi
 
 Loading happens in the CLI before the spawn rather than in a preload. Cross-runtime load order, the expansion subset, and the security case for the ordering are in [[research/env-file-loading]].
 
+## HTTP DNS resolution
+
+On macOS every HTTP client in the binary resolves through the system resolver, so VPN interface scopes and split-DNS routing apply. Elsewhere the in-process Hickory resolver stays on for its per-client cache.
+
+The switch is a target-specific Cargo feature on the vendored registry crate. reqwest's `hickory-dns` feature sets the default resolver for every client through feature unification, so leaving it out of the macOS graph covers registry, tarball, and Node download requests at once. `scripts/check-dns-features.sh` guards the per-target split in CI.
+
 ## How the code is laid out
 
 Three Cargo workspaces, and the splits are structural rather than organizational.
