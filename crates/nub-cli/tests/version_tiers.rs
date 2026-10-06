@@ -1188,8 +1188,10 @@ fn a_foreign_hook_rewriting_the_entry_url_does_not_hold_the_process() {
 /// code, after which it is a plain argument. The detection pass imported it in each,
 /// and with no evaluation of Node's own to join, that import ran it: 0.9.5 and 0.9.6
 /// ran every `nub --test` file twice on the fast tier, and the compat tier executed a
-/// file `--check` only parses and an argument after `-e`. Node reads `--check=<value>`
-/// as a syntax check whatever the value, `--check=false` included. The plain run is
+/// file `--check` only parses and an argument after `-e`. The other cases are Node's
+/// own reading of its flags: `--check=<value>` is a syntax check whatever the value,
+/// `--no-print` still evaluates its code, and `--no_interactive` (Node reads `_` as
+/// `-`) takes back the `-i` that would make the file the program. The plain run is
 /// the control: it proves the body's line marks each evaluation.
 #[test]
 fn a_file_node_does_not_run_as_the_program_is_not_evaluated_on_both_tiers() {
@@ -1202,6 +1204,11 @@ fn a_file_node_does_not_run_as_the_program_is_not_evaluated_on_both_tiers() {
             (&["--check=true", "counts.test.mjs"][..], 0),
             (&["--check=false", "counts.test.mjs"][..], 0),
             (&["-e", "0", "counts.test.mjs"][..], 0),
+            (&["--no-print", "0", "counts.test.mjs"][..], 0),
+            (
+                &["-e", "0", "-i", "--no_interactive", "counts.test.mjs"][..],
+                0,
+            ),
         ] {
             let Some((stdout, stderr, code)) =
                 run_nub_args_against_node(want, "non-program-modes", args, Duration::from_secs(60))
@@ -1230,11 +1237,12 @@ fn a_file_node_does_not_run_as_the_program_is_not_evaluated_on_both_tiers() {
 /// the program. Under `--test` it runs as a test and exits: on the compat tier the
 /// runner never consumes the launch's marker, so the test child inherited it, matched
 /// the launch's argv and served the file, and the run never ended; 0.9.5's fast tier
-/// served it from the runner itself. A test mode the flags cancel (`--test --no-test`)
-/// or an eval that `-i` outranks leaves Node running the file as the program, so it
-/// is served; a check that read those flags by presence refused it. (`--no-check`
-/// never reaches Node: nub takes it as its own dependency-check opt-out.) The plain
-/// run is the control: it proves the export is served.
+/// served it from the runner itself. A mode the flags cancel (`--test --no-test`,
+/// `--check --no_check`) or an eval that `-i` outranks leaves Node running the file as
+/// the program, so it is served; a check that read those flags by presence refused it.
+/// (`--no-check` itself never reaches Node, because nub takes it as its own
+/// dependency-check opt-out; `--no_check` does, and Node reads it as `--no-check`.)
+/// The plain run is the control: it proves the export is served.
 #[test]
 fn a_handler_file_is_served_exactly_when_node_runs_it_as_the_program_on_both_tiers() {
     'tiers: for want in [(22, 13, 0), (26, 5, 0)] {
@@ -1242,6 +1250,7 @@ fn a_handler_file_is_served_exactly_when_node_runs_it_as_the_program_on_both_tie
         for args in [
             &["serves.test.mjs"][..],
             &["--test", "--no-test", "serves.test.mjs"][..],
+            &["--check", "--no_check", "serves.test.mjs"][..],
             &["-e", "0", "-i", "serves.test.mjs"][..],
         ] {
             let Some((listening, _)) = run_nub_args_until(
