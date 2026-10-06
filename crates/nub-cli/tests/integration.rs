@@ -2915,6 +2915,14 @@ for (const [holder, key] of targets) {
   Object.defineProperty(holder, key, { value: sentinel, writable: true, enumerable: false, configurable: true });
   planted.push([holder, key, sentinel]);
 }
+// JSON.parse exists everywhere, so its detect probes behavior: plant one that
+// already honors `{ freeze: true }`, as a native implementation would.
+const jsonParse = JSON.parse;
+const jsonSentinel = function nubSentinel(text) {
+  return Object.freeze(Object.setPrototypeOf(jsonParse(text), null));
+};
+Object.defineProperty(JSON, "parse", { value: jsonSentinel, writable: true, enumerable: false, configurable: true });
+planted.push([JSON, "parse", jsonSentinel]);
 // The one accessor in the set needs its own sentinel shape.
 Object.defineProperty(ArrayBuffer.prototype, "detached", {
   get: function nubSentinelGetter() { return "SENTINEL"; },
@@ -3062,6 +3070,132 @@ console.log(JSON.stringify(failures));
 }
 
 #[test]
+fn json_parse_options_follow_spec() {
+    // The Stage 2.7 spec text of JSON.parse options (proposal-json-parseimmutable).
+    // No engine ships it, so the first check pins that the polyfill, not native, is
+    // under test. test262 has no tests for the proposal yet; its existing JSON.parse
+    // suite passes identically with the wrapper installed. Plain `node` against the
+    // runtime file, as the no-clobber test above, so the CI Node matrix covers both
+    // tiers.
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let polyfills = Path::new(&manifest).join("../../runtime/polyfills.cjs");
+
+    let work = unique_test_cache();
+    std::fs::create_dir_all(&work).unwrap();
+    let script = work.join("_json_parse_options.mjs");
+    std::fs::write(
+        &script,
+        r#"
+import { createRequire } from "node:module";
+// A parser installed by an earlier preload that rejects a non-callable second
+// argument: the install-time probe must not abort on it.
+const engineParse = JSON.parse;
+const nativeParse = function parse(text, reviver) {
+  if (reviver !== undefined && typeof reviver !== "function") throw new TypeError("reviver");
+  return engineParse(text, reviver);
+};
+JSON.parse = nativeParse;
+createRequire(import.meta.url)(process.argv[2]).installSyncPolyfills({});
+
+const failures = [];
+const check = (name, fn) => {
+  try {
+    if (fn() !== true) failures.push(name);
+  } catch (e) {
+    failures.push(`${name}: ${e}`);
+  }
+};
+const throws = (Err, fn) => {
+  try {
+    fn();
+  } catch (e) {
+    return e instanceof Err;
+  }
+  return false;
+};
+const proto = Object.getPrototypeOf;
+const deepFrozen = (v) =>
+  typeof v !== "object" || v === null || (Object.isFrozen(v) && Object.values(v).every(deepFrozen));
+const text = '{"a":[1,{"b":{}}],"__proto__":{"c":1}}';
+
+check("the polyfill is installed with the builtin's shape", () =>
+  JSON.parse !== nativeParse && JSON.parse.length === 2 && JSON.parse.name === "parse" &&
+  throws(TypeError, () => new JSON.parse("1")));
+check("freeze deep-freezes and defaults preferNullPrototype to true", () => {
+  const r = JSON.parse(text, { freeze: true });
+  return deepFrozen(r) && proto(r) === null && proto(r.a[1].b) === null && proto(r.a) === Array.prototype &&
+    Object.hasOwn(r, "__proto__") && r.__proto__.c === 1;
+});
+check("preferNullPrototype is independent of freeze when given", () => {
+  const kept = JSON.parse(text, { freeze: true, preferNullPrototype: false });
+  const bare = JSON.parse(text, { preferNullPrototype: true });
+  return deepFrozen(kept) && proto(kept.a[1]) === Object.prototype &&
+    proto(bare.a[1]) === null && !Object.isFrozen(bare) && !Object.isFrozen(bare.a);
+});
+check("options are never coerced", () =>
+  [1, "true", null, new Boolean(true)].every((v) =>
+    throws(TypeError, () => JSON.parse("{}", { freeze: v })) &&
+    throws(TypeError, () => JSON.parse("{}", { preferNullPrototype: v }))));
+check("ToString(text), then freeze, then preferNullPrototype, then the parse", () => {
+  const order = [];
+  const src = { toString() { order.push("text"); return "{"; } };
+  const opts = {
+    get freeze() { order.push("freeze"); return true; },
+    get preferNullPrototype() { order.push("preferNullPrototype"); return true; },
+  };
+  return throws(SyntaxError, () => JSON.parse(src, opts)) &&
+    order.join() === "text,freeze,preferNullPrototype";
+});
+check("a callable is a reviver and its option-named properties are ignored", () => {
+  const keys = [];
+  const reviver = (k, v) => (keys.push(k), typeof v === "number" ? v * 2 : v);
+  reviver.freeze = "ignored";
+  const r = JSON.parse('{"a":1,"b":[2]}', reviver);
+  return keys.join() === "a,0,b," && r.a === 2 && r.b[0] === 4 && !Object.isFrozen(r) &&
+    proto(r) === Object.prototype;
+});
+check("the walk ignores Array.prototype changes made after the preload", () => {
+  const AP = Array.prototype;
+  const saved = { push: AP.push, pop: AP.pop };
+  AP.push = function () { return 0; };
+  AP.pop = function () { return undefined; };
+  Object.defineProperty(AP, "1", { set() {}, configurable: true });
+  try {
+    return deepFrozen(JSON.parse('{"x":{"y":[{}]}}', { freeze: true }));
+  } finally {
+    Object.assign(AP, saved);
+    delete AP[1];
+  }
+});
+check("deep nesting is walked without recursion", () => {
+  const depth = 100000;
+  let node = JSON.parse("[".repeat(depth) + "]".repeat(depth), { freeze: true });
+  while (node.length > 0 && Object.isFrozen(node)) node = node[0];
+  return node.length === 0 && Object.isFrozen(node);
+});
+console.log(JSON.stringify(failures));
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(target_node_path())
+        .arg(&script)
+        .arg(&polyfills)
+        .current_dir(&work)
+        .output()
+        .expect("failed to spawn node");
+
+    let _ = std::fs::remove_dir_all(&work);
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stdout, "[]",
+        "spec cases the polyfill failed (stderr: {stderr})"
+    );
+}
+
+#[test]
 fn esnext_library_polyfills() {
     // The Stage 3+ library families: new Set methods, Array.fromAsync, the Iterator
     // surface (helpers + from/concat/zip/zipKeyed + the Stage 3 chunks/windows/
@@ -3097,7 +3231,9 @@ const mapOk = m.getOrInsert("a", 1) === 1 && m.getOrInsert("a", 9) === 1 &&
 const sumOk = Math.sumPrecise([1e308, 1e308, -1e308, -1e308]) === 0 &&
   Math.sumPrecise([1, 1e100, 1, -1e100]) === 2;
 const symOk = typeof Symbol.metadata === "symbol";
-console.log(JSON.stringify({ setOk, fromAsyncOk, iterOk, mapOk, sumOk, symOk }));
+const parsed = JSON.parse('{"a":[{}]}', { freeze: true });
+const jsonOk = Object.isFrozen(parsed.a[0]) && Object.getPrototypeOf(parsed) === null;
+console.log(JSON.stringify({ setOk, fromAsyncOk, iterOk, mapOk, sumOk, symOk, jsonOk }));
 "#,
     )
     .unwrap();
@@ -3115,7 +3251,7 @@ console.log(JSON.stringify({ setOk, fromAsyncOk, iterOk, mapOk, sumOk, symOk }))
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
         stdout,
-        r#"{"setOk":true,"fromAsyncOk":true,"iterOk":true,"mapOk":true,"sumOk":true,"symOk":true}"#,
+        r#"{"setOk":true,"fromAsyncOk":true,"iterOk":true,"mapOk":true,"sumOk":true,"symOk":true,"jsonOk":true}"#,
         "stderr: {stderr}"
     );
 }
