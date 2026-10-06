@@ -1,0 +1,49 @@
+name: upm state performance probe
+on:
+  push:
+    branches: [perf-upm-state-probe]
+permissions:
+  contents: read
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: /tmp/upm-state-target
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c
+        with:
+          install: false
+      - name: Install cargo wrapper
+        working-directory: vendor/aube/
+        run: mise trust && mise install mr-boxington
+      - name: State and startup checks
+        working-directory: vendor/aube/
+        run: |
+          mise exec -- cargo test --locked --release -p aube --lib state::
+          mise exec -- cargo test --locked --release -p aube --lib commands::install::startup
+          mise exec -- cargo clippy --locked --release -p aube --lib --tests -- -D warnings
+      - name: Alternate paired samples
+        working-directory: vendor/aube/
+        run: |
+          mise exec -- cargo test --locked --release -p aube --lib bench_startup_state -- --ignored --nocapture | tee /tmp/state-results.log
+          git rev-parse HEAD > /tmp/source-commit.txt
+          rustc --version > /tmp/compiler.txt
+          lscpu > /tmp/cpu.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: state-results
+          path: |
+            /tmp/state-results.log
+            /tmp/source-commit.txt
+            /tmp/compiler.txt
+            /tmp/cpu.txt

@@ -44,6 +44,12 @@ You never hand-review the upstream diff.
 
 Work in a nub worktree off latest `origin/main` (see the `worktree` skill). Never touch the shared tree.
 
+**Mechanics are a script, not shell improvisation.** `scripts/aube-bump.ts` does the deterministic parts: `plan` (base/delta sanity), `venue [--reset]` (build the venue + merge + conflict table), `gate` (check/clippy verdicts), `land` (rsync + UPSTREAM marker + identical-tree check). Run its subcommands instead of retyping the shell. Guarded by `scripts/aube-bump.test.mjs`.
+
+**Never archive-overwrite the vendor tree.** `git archive | tar -x -C vendor/aube` throws away the fork delta and turns the bump into N hand-rebuilt features. The venue 3-way merge is the process; the delta survives unless both sides edited the same lines.
+
+**Never iterate the compiler loop in your own context.** After the venue's textual conflicts are resolved (partitioned subagents, below), dispatch ONE agent to own the whole gate — `check -> clippy -> test` iterated to green — with the doctrine and stop conditions in its prompt. The orchestrator reads the summary, not the errors. Iterating error-by-error in the orchestrator's context burned a full session's budget on one bump.
+
 ### 1. Read the base and fetch upstream
 
 ```sh
