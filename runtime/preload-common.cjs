@@ -2290,13 +2290,34 @@ function serveIfHandler(exported) {
 // program, carries no `--test` of its own, so a test file that default-exports a
 // handler was served there and the run never ended. Either way the marker is
 // consumed before this is asked, so nothing the claimant spawns inherits it.
-const NON_PROGRAM_MODE_FLAGS = new Set(["--test", "--check", "-c", "--eval", "-e", "--print", "-p", "-pe"]);
-
 function nodeRunsArgvAsProgram(launchFlags) {
   const own = Array.isArray(process.execArgv) ? process.execArgv : [];
-  return ![...own, ...launchFlags].some(
-    (flag) => NON_PROGRAM_MODE_FLAGS.has(flag) || flag.startsWith("--eval=") || flag.startsWith("--print="),
-  );
+  return modeRunsArgvAsProgram(own) && modeRunsArgvAsProgram(launchFlags);
+}
+
+// One flag list read the way Node's option parser reads it, not by which tokens are
+// present. `--check` and `--test` are booleans: any `=value` turns one ON, even
+// `--check=false`; `--no-check` and `--no-test` turn it off; the last spelling wins,
+// so `--test --no-test file` runs the file. An eval string cannot be negated (Node
+// refuses `--no-eval`, and `--no-print` only stops the printing), but `-i` outranks
+// it: `-e 0 -i file` runs the file as the program. Measured on 18.19 through 26.5.
+const EVAL_FLAGS = new Set(["--eval", "-e", "--print", "-p", "-pe"]);
+
+function modeRunsArgvAsProgram(flags) {
+  let evaluates = false;
+  let interactive = false;
+  let checks = false;
+  let tests = false;
+  for (const flag of flags) {
+    if (EVAL_FLAGS.has(flag) || flag.startsWith("--eval=") || flag.startsWith("--print=")) evaluates = true;
+    else if (flag === "-i" || flag === "--interactive" || flag.startsWith("--interactive=")) interactive = true;
+    else if (flag === "--no-interactive") interactive = false;
+    else if (flag === "-c" || flag === "--check" || flag.startsWith("--check=")) checks = true;
+    else if (flag === "--no-check") checks = false;
+    else if (flag === "--test" || flag.startsWith("--test=")) tests = true;
+    else if (flag === "--no-test") tests = false;
+  }
+  return !(evaluates && !interactive) && !checks && !tests;
 }
 
 // The entry as Node itself resolved it: `resolveMainPath` is `Module._findPath` over
