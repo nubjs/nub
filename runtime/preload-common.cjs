@@ -1893,10 +1893,11 @@ function installThreadpoolPolicy() {
 // whole containment: a `child_process` spawn or a Worker copies `process.env` after
 // it is gone, so a server entry that forks a worker pool does not hand every worker
 // its own listener — no `worker_threads` probe needed here to tell the realms apart.
+// A launched process that never runs nub's preload cannot delete it. A test runner on
+// the compat tier is one, and `nodeRunsArgvAsProgram` answers for its children.
 //
 // Its value is the launcher's argv as a JSON array, and that is what makes "the
-// application's preload" a process this code can identify: see
-// `markedEntryIsThisProcess`.
+// application's preload" a process this code can identify: see `markedLaunchFlags`.
 const SERVE_ENTRY_ENV = "__NUB_SERVE_ENTRY";
 
 // The entry this process was marked to serve, from `claimServeEntry` on: the file as
@@ -1909,13 +1910,16 @@ let serveEntry = null;
 
 // FIRST in each preload entry, before any user code — the configured preload chain
 // included: consume the marker, so nothing the user wrote ever sees it, and resolve
-// the entry, so the hooks know which URL announces it. Arming the pass itself waits
-// for `installServeEntry`, at the very end of the preload.
+// the entry, so the hooks know which URL announces it — unless Node is in a mode that
+// never runs it (`nodeRunsArgvAsProgram`). Arming the pass itself waits for
+// `installServeEntry`, at the very end of the preload.
 function claimServeEntry() {
   const marker = process.env[SERVE_ENTRY_ENV];
   if (marker === undefined) return;
-  if (!markedEntryIsThisProcess(marker)) return;
+  const launchFlags = markedLaunchFlags(marker);
+  if (launchFlags === null) return;
   delete process.env[SERVE_ENTRY_ENV];
+  if (!nodeRunsArgvAsProgram(launchFlags)) return;
   const file = mainEntryPath();
   if (!file) return;
   serveEntry = {
@@ -2151,17 +2155,20 @@ function closeEntryChannel(entry) {
 // could disagree on. The raw comparison covers `-` (stdin), which Node does not
 // expand. No `argv[1]` at all — `-e`, the REPL — is nothing to serve and nothing to
 // forward, so it counts as this process and the caller deletes the marker.
-function markedEntryIsThisProcess(marker) {
+//
+// A match hands back the launch's Node flags, the tokens ahead of the entry, for
+// `nodeRunsArgvAsProgram`; no match is null.
+function markedLaunchFlags(marker) {
   const main = process.argv[1];
-  if (typeof main !== "string") return true;
+  if (typeof main !== "string") return [];
   const tokens = markerTokens(marker);
-  if (tokens === null) return false;
+  if (tokens === null) return null;
   const rest = process.argv.slice(2);
   const at = tokens.length - rest.length - 1;
-  if (at < 0) return false;
+  if (at < 0) return null;
   const entry = tokens[at];
-  if (entry === "" || (entry !== main && pathResolve(entry) !== main)) return false;
-  return rest.every((arg, i) => arg === tokens[at + 1 + i]);
+  if (entry === "" || (entry !== main && pathResolve(entry) !== main)) return null;
+  return rest.every((arg, i) => arg === tokens[at + 1 + i]) ? tokens.slice(0, at) : null;
 }
 
 // The launcher's argv out of the marker, or null for a value nub did not write. A
@@ -2268,6 +2275,30 @@ function serveIfHandler(exported) {
   require("./fetch-serve.cjs").serve(handler);
 }
 
+// Node runs `argv[1]` as the program in its script mode only. Three other modes still
+// load the preloads with a file in `argv[1]`: the test runner, which runs it in a
+// child of its own (`--test`); a syntax check, which only parses it (`--check`); and
+// `-e`/`-p` code, after which it is a plain argument. The pass's `import()` joins the
+// evaluation Node already started, and in these modes there is none to join, so the
+// import WAS the evaluation: every `nub --test` file ran twice, a checked file
+// executed, and an argument ran as a script. Node refuses all of these flags in
+// NODE_OPTIONS, so they arrive on argv alone, read here twice over: this process's
+// own `execArgv`, and the LAUNCH's flags as the marker recorded them. The second is
+// for a test runner's children. On the compat tier the runner never consumes the
+// marker (measured on 22.13), so every child inherits it and the one whose file sits
+// at the entry's position matches it — and that child, running its file as the
+// program, carries no `--test` of its own, so a test file that default-exports a
+// handler was served there and the run never ended. Either way the marker is
+// consumed before this is asked, so nothing the claimant spawns inherits it.
+const NON_PROGRAM_MODE_FLAGS = new Set(["--test", "--check", "-c", "--eval", "-e", "--print", "-p", "-pe"]);
+
+function nodeRunsArgvAsProgram(launchFlags) {
+  const own = Array.isArray(process.execArgv) ? process.execArgv : [];
+  return ![...own, ...launchFlags].some(
+    (flag) => NON_PROGRAM_MODE_FLAGS.has(flag) || flag.startsWith("--eval=") || flag.startsWith("--print="),
+  );
+}
+
 // The entry as Node itself resolved it: `resolveMainPath` is `Module._findPath` over
 // the absolute `argv[1]` with `isMain` true, so deferring to the same call inherits
 // every main-specific behavior — extension and index probing, a directory's
@@ -2275,8 +2306,9 @@ function serveIfHandler(exported) {
 // second resolver that could name a different file than the one Node loaded.
 function mainEntryPath() {
   const main = process.argv[1];
-  // Absent for `--eval`/`--print` and the REPL; `-` is stdin, which has no module
-  // identity to inspect.
+  // Absent for the REPL and for `--eval`/`--print` with no arguments (with arguments
+  // it is the first of them, which `nodeRunsArgvAsProgram` has already declined);
+  // `-` is stdin, which has no module identity to inspect.
   if (typeof main !== "string" || main === "" || main === "-") return null;
   try {
     const found = module_._findPath(pathResolve(main), null, true);
