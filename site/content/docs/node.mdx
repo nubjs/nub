@@ -1,13 +1,9 @@
 ---
 title: Node manager
-description: Manage the Node versions Nub provisions — pin a version and it's fetched automatically, or drive the cache explicitly with the install, list, uninstall, and pin subcommands.
+description: Manage the Node versions Nub provisions. Pin a version and it is fetched automatically, or manage the cache explicitly with the install, list, uninstall, and pin subcommands.
 ---
 
-Nub runs your code on stock Node and provisions the pinned version. Pin a version, run a file, and the matching Node is downloaded and cached without a second command. The `nub node` subcommands cover the explicit steps: warming the cache before a run, listing what is installed, reclaiming disk, and recording a pin.
-
-## Automatic provisioning
-
-Add a `.node-version` or `.nvmrc` to your project (or an `engines.node` range in `package.json`) and run `nub`. If that Node is already on your machine it's used as-is; if not, Nub downloads the matching stock build from nodejs.org — SHA-256 verified and cached under `~/.cache/nub/node` — then runs your code. Nub provisions the pinned version itself rather than handing off to `nvm`, `fnm`, or `mise`; with nothing pinned anywhere up the tree, it uses whatever `node` is already on your `PATH`.
+Nub runs your code on stock Node and provisions the version your project pins. Pin a version, run a file, and the matching Node is downloaded and cached with no second command.
 
 ```console
 $ echo {{NODE_VERSION}} > .node-version
@@ -18,7 +14,13 @@ Installed in 8.0s
 # ...your script runs, on exactly the Node you pinned
 ```
 
-On a fresh machine with no Node at all, a plain `nub file.ts` runs. With no pin and no `node` on `PATH`, Nub provisions the latest release, reusing the newest version already in its cache before downloading. Without a pin each run uses the latest release; `nub node pin <version>` makes it reproducible.
+The `nub node` subcommands cover the explicit steps: warming the cache, listing and removing versions, and writing a pin.
+
+## Automatic provisioning
+
+A pin can be a `.node-version`, a `.nvmrc`, or an `engines.node` range in `package.json`. When that Node is already on your machine, Nub uses it. Otherwise Nub downloads the stock build from nodejs.org, verifies its SHA-256, and caches it under `~/.cache/nub/node`.
+
+With no pin, Nub uses the `node` on your `PATH`. On a machine with no Node at all, it provisions the latest release, reusing the newest cached version if there is one:
 
 ```console
 $ nub app.ts          # fresh machine: no pin, no Node on PATH
@@ -28,36 +30,28 @@ Installed in 5.1s
 # ...your script runs
 ```
 
-For the `~/.cache/nub` layout and the per-invocation shim, see [Running files → The Node version](/docs/runtime#node-version-resolution).
+Each unpinned run there uses the latest release; [`nub node pin`](#nub-node-pin) makes it reproducible.
 
 ## Version precedence
 
+Nub first picks a version from the nearest pin, and then finds a binary that satisfies it.
+
 ### Pin sources
 
-Nub walks up from your working directory to the nearest pin, highest precedence first:
+Nub walks up from your working directory to the nearest pin. Highest precedence first:
 
-1. **`NODE_EXECUTABLE`** — an absolute path to a Node binary (a hard override)
+1. **`NODE_EXECUTABLE`** — an absolute path to a Node binary
 2. **`nodeExecutable`** in `nub.jsonc` — a path, or a command that prints one
 3. **`package.json#/devEngines/runtime`** — the `node` entry
 4. **`.node-version`**
 5. **`.nvmrc`**
-6. **`.tool-versions`** — the asdf/mise file; its `nodejs` or `node` line
-7. **`package.json#/engines/node`** — a range or exact version
-8. **Nothing pinned anywhere up the tree** — whatever `node` is on your `PATH`, or the latest release when there's no `node` at all.
+6. **`.tool-versions`** — the asdf/mise file
+7. **`package.json#/engines/node`**
+8. **No pin** — the `node` on `PATH`, else the latest release
 
-This resolved Node version is auto-installed and cached for future runs.
+The first two name a binary and skip version resolution entirely; see [`nodeExecutable`](/docs/config#nodeexecutable). Both `package.json` fields are read from the workspace root when there is one, so a monorepo pins its Node once. Dependency build scripts use that root pin during an install, while `nub run` inside a member uses the member's own pin.
 
-```sh
-$ echo {{NODE_MAJOR}} > .node-version
-$ nub hello.ts
-Using Node.js {{NODE_VERSION}} (resolved from .node-version)
-Installed in 9.8s
-Hello world!
-```
-
-Within a single directory, `.node-version` wins over `.nvmrc` (it's the tool-agnostic standard). Discovery walks **up** the directory tree to the nearest pin and **skips** pin files inside an installed dependency (under `node_modules`) — a dependency's own CI pin never drives your project. The `package.json` fields (`devEngines.runtime`, `engines.node`) are read from the **workspace root** manifest when one exists above you, else the nearest `package.json` — a monorepo pins its Node once at the root.
-
-Both fields take the `engines.node` grammar, so either can express a range or an exact version:
+Both fields take the `engines.node` grammar, so either can hold a range or an exact version:
 
 ```json title="package.json"
 {
@@ -66,11 +60,7 @@ Both fields take the `engines.node` grammar, so either can express a range or an
 }
 ```
 
-The first pins exactly 22.15.0, patch included. The second resolves to the newest published release satisfying the range.
-
-Nub reads only the `node` entry's `version` under `devEngines.runtime`, and provisions that version regardless of `onFail`. That field governs entries declaring a *non*-Node runtime instead: Nub refuses by default, `onFail: "warn"` prints a notice and falls through, `onFail: "ignore"` falls through silently. Naming a binary outright skips resolution altogether — it bypasses the pin files, the cache, the `nvm` scan, and any download, though the version is still detected, so the floor check and tier dispatch still apply. The committed form is [`nodeExecutable`](/docs/config#nodeexecutable), which also takes a command so a project can defer to whatever tool already manages its toolchain; `NODE_EXECUTABLE` is the per-shell form and outranks it.
-
-Dependency build scripts follow the same root anchor during an install, so every member of a monorepo builds native dependencies under one Node rather than switching per member. Running a script with `nub run` inside a member still uses that member's own pin.
+An exact version pins the patch too, and a range resolves to the newest published release that satisfies it. The `onFail` policy does not apply to the `node` entry. A `devEngines.runtime` that names only another runtime, such as Bun, stops the run unless its `onFail` is `"warn"` or `"ignore"`.
 
 <Callout>
 Read the [full docs](https://docs.npmjs.com/cli/v11/configuring-npm/package-json#devengines) for the `devEngines` and `engines` fields on docs.npmjs.com.
@@ -78,34 +68,28 @@ Read the [full docs](https://docs.npmjs.com/cli/v11/configuring-npm/package-json
 
 ### Binary sources
 
-Once a version is pinned, Nub finds a binary for it in order:
+Once a version is pinned, Nub looks for a binary in this order:
 
-1. **`node` on `PATH`**, if its version satisfies the pin — so `fnm` / `Volta` / `mise` auto-switching is honored.
-2. **Nub's own download store** (`~/.cache/nub/node/<version>/`).
-3. **An `nvm`-installed version** (nvm scan).
-4. **Download the matching stock build from nodejs.org** — SHA-256 verified and cached — otherwise error.
-
-The `PATH` walk **skips** `node_modules/.bin`, mirroring how pin discovery skips pin files under `node_modules`. An entry there is a bin some package declared, so a dependency shipping its own `node` never becomes your project's runtime.
+1. **The `node` on `PATH`**, when its version satisfies the pin, so `fnm`, Volta, and `mise` auto-switching is honored
+2. **Nub's download store** (`~/.cache/nub/node/<version>/`)
+3. **An `nvm`-installed version**
+4. **A download from nodejs.org**, SHA-256 verified and cached
 
 ## `nub node install`
 
-Provision a version into the cache *now*, instead of on the next `nub <file>`. Use it to warm a CI cache in a setup step (the [GitHub Action](/docs/deployment/github-action) does this) or to fetch a Node before going offline.
+Provision a version into the cache now, instead of on the next run. Use it to warm a CI cache (the [GitHub Action](/docs/deployment/github-action) does this) or to fetch a Node before going offline.
 
 ```bash
 nub node install {{NODE_MAJOR}}          # newest {{NODE_MAJOR}}.x
-nub node install lts         # newest LTS line
+nub node install 22.13       # newest 22.13.x
 nub node install 20.11.0     # an exact version
+nub node install lts         # newest LTS line; also lts/<codename>
+nub node install latest      # newest release
 nub node install 20 22       # several at once
+nub node install             # the project's pin
 ```
 
-Aliases and ranges resolve the same way pins do — `lts`, `latest`, `lts/<codename>`, a bare major (`{{NODE_MAJOR}}`) or `major.minor` (`22.13`), or an exact version. With no argument, `nub node install` reads your project's pin and provisions that:
-
-```bash
-# installs whatever .node-version / .nvmrc / engines.node names
-nub node install
-```
-
-A version already in the cache is a no-op; a version already available on your `PATH` (a system install, `nvm`, `fnm`, …) is reported and **skipped** rather than re-downloaded.
+A version already in the cache is a no-op. A version already on your `PATH`, from a system install or another version manager, is skipped:
 
 ```console
 $ nub node install {{NODE_VERSION}}
@@ -114,7 +98,7 @@ Node {{NODE_VERSION}} is already available on PATH — skipped
 
 ## `nub node ls`
 
-List the versions in Nub's cache, newest first. The version your current directory resolves to is marked.
+List the versions in Nub's cache, newest first, with the one your current directory resolves to marked. Versions installed by `nvm`, `fnm`, or the system are not listed.
 
 ```console
 $ nub node ls
@@ -123,39 +107,33 @@ $ nub node ls
   20.11.0
 ```
 
-Only Nub's own download cache is shown — `ls` doesn't enumerate your `nvm` / `fnm` / system installs.
-
 ## `nub node uninstall`
 
-Reclaim disk by deleting a cached version. Nub guards against removing the version your current directory resolves to.
+Delete a version from Nub's cache. Nub refuses to remove the version your current directory resolves to.
 
 ```console
 $ nub node uninstall 20.11.0
 Removed Node 20.11.0 from the cache
 ```
 
-Like `ls`, this operates on Nub's cache only.
-
 ## `nub node pin`
 
-Write a `.node-version` for the project so every later `nub` in that tree uses it.
+Write a `.node-version` so every later `nub` in the project uses that version.
 
 ```console
 $ nub node pin {{NODE_MAJOR}}
 pinned Node {{NODE_MAJOR}} → /path/to/project/.node-version
 ```
 
-Placement and file choice:
+- **Location** — the project root (the nearest `package.json` directory), or the workspace root in a monorepo, wherever you run it from.
+- **Existing file** — a project with a `.nvmrc` and no `.node-version` gets its `.nvmrc` updated in place.
+- **Spec** — written verbatim, aliases like `lts` included, with no network access.
 
-- **It pins the project, not the subdirectory.** Run from anywhere inside the project and the file is written at the project root — the nearest `package.json` directory — not in your current subfolder.
-- **In a workspace, it pins the whole repo.** A Node version is a property of the repository, not one package, so in a monorepo the pin is written at the workspace root.
-- **It edits the pin file you already have.** If the project carries a `.nvmrc` but no `.node-version`, `pin` updates the `.nvmrc` in place.
-
-Whatever spec you give is written verbatim — including an alias like `lts` — and `pin` works offline. The `.node-version` file is the tool-agnostic convention (`nvm`, `fnm`, `volta`, `asdf` all read it), so the pin is portable to your other tools.
+Other version managers, including `nvm`, `fnm`, Volta, and `asdf`, read `.node-version` too.
 
 ## `nub node which`
 
-Print the Node that runs in the current directory. The binary path goes to stdout; a `» resolved from <source>` explainer goes to stderr, so a captured value is only the path.
+Print the Node that runs in the current directory. The path goes to stdout and the resolution source to stderr, so a captured value is only the path.
 
 ```console
 $ nub node which
@@ -163,11 +141,11 @@ $ nub node which
 » resolved from .node-version ({{NODE_VERSION}})
 ```
 
-With no pin the explainer reads `» resolved from node on PATH`. An alias pin (`lts/*`, `lts/<codename>`, `node`) resolves against the release index that the last `nub node install` fetched, so `which` and every run work offline once the version is in the cache. Bare `nub node` prints a status block instead — the version, path, and resolution source on separate lines.
+An alias pin such as `lts/*` resolves against the release index from the last `nub node install`, so `which` and every run work offline once the version is cached. Bare `nub node` prints a status block with the version, path, and resolution source.
 
 ## `nub node shim`
 
-Make `node` itself resolve through Nub, so a machine with no Node installed can run `node` at all. On a fresh machine, `brew install nub` (or the curl script) followed by `nub node shim` is enough for a bare `node file.js` to run.
+Make `node` itself resolve through Nub, so a machine with no Node installed can run `node file.js`. After installing Nub, one command sets it up:
 
 ```console
 $ nub node shim
@@ -178,9 +156,9 @@ node shim in /Users/you/.local/share/nub/node-shim (created)
   restart your shell, or run: source /Users/you/.zshrc
 ```
 
-The shimmed `node` resolves and provisions the version (the [precedence above](#version-precedence)) and adds nothing else: `node app.ts` type-strips as stock Node does, while `nub app.ts` transpiles it.
+The shimmed `node` resolves and provisions the version by the [precedence above](#version-precedence) and adds nothing else. So `node app.ts` type-strips as stock Node does, while `nub app.ts` transpiles it.
 
-It installs a `node` link in `$XDG_DATA_HOME/nub/node-shim` — `~/.local/share/nub/node-shim` when that variable is unset — and adds that directory to your PATH; because that comes first, a Node you install later (`brew install node`) is shadowed until you unshim. Re-run `nub node shim` after `nub upgrade` to re-link.
+The link lives in `$XDG_DATA_HOME/nub/node-shim`, or `~/.local/share/nub/node-shim` when that variable is unset. That directory goes first on your PATH, so a Node you install later is shadowed until you unshim. Re-run `nub node shim` after `nub upgrade`.
 
 ```console
 $ nub node unshim
@@ -190,13 +168,13 @@ removed /Users/you/.local/share/nub/node-shim
 
 ## Mirrors and proxies
 
-Node downloads use `HTTP(S)_PROXY` / `NO_PROXY` and the system trust store. To fetch Node from an internal mirror instead of nodejs.org, set the standard env var or the `.npmrc` key pnpm uses — Nub reads both from a project or user-level file:
+Node downloads use `HTTP(S)_PROXY`, `NO_PROXY`, and the system trust store. To fetch Node from an internal mirror, set the `NODEJS_ORG_MIRROR` environment variable or pnpm's `.npmrc` key, in a project or user file:
 
 ```ini title=".npmrc"
 node-mirror:release=https://artifactory.corp.example/node/
 ```
 
-The `NODEJS_ORG_MIRROR` env var (the nvm/n convention) takes precedence over the `.npmrc` key. A mirror is used for musl builds too — point it at one carrying the `unofficial-builds` layout on Alpine.
+The environment variable wins over the `.npmrc` key. On Alpine, point the mirror at one carrying the `unofficial-builds` layout for musl.
 
 ## Related
 

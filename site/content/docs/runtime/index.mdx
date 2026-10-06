@@ -1,9 +1,9 @@
 ---
 title: Runtime
-description: What Nub adds when it runs your code on stock Node — TypeScript and JSX with no build step, editor-style resolution, automatic .env loading, data-file imports, and modern globals — plus the plain-Node escape hatch that turns it all off.
+description: What Nub adds when it runs your code on stock Node, which Node version it runs, and how to turn the additions off.
 ---
 
-Run a TypeScript file directly — no tsconfig, no build step, no `ts-node`:
+Run a TypeScript file directly, with no tsconfig and no build step.
 
 ```sh
 nub index.ts
@@ -11,107 +11,38 @@ nub server.tsx
 nub script.js
 ```
 
-On top of stock Node, `nub <file>` adds a modern runtime:
+Nub runs the file on stock Node and adds the following.
 
-- 🦆 Full TypeScript — non-erasable syntax (`enum`, `namespace`, parameter properties), `emitDecoratorMetadata` decorators
-- ⚛️ JSX / TSX — the automatic runtime by default
-- 🧭 Editor-style resolution — extensionless imports, `.js → .ts` rewriting, `tsconfig.json#paths`
-- 🆕 Modern syntax like `using` — transpiler-downleveled on older Node
-- 🔐 Automatic `.env*` loading — Next.js / Vite parity, with `${VAR}` expansion
-- 🗂️ Data-file imports — `.yaml`, `.toml`, `.jsonc`, `.json5`, `.txt` as parsed default exports
-- 🌐 Modern globals backfilled per Node version — `Temporal`, `URLPattern`, `WebSocket`, `EventSource`, `node:sqlite`, and more
-- 🧵 Source maps in stack traces, automatically
-- ⚡ ~2.9× faster startup than `tsx`
+| Page | What it adds |
+| --- | --- |
+| [TypeScript](/docs/runtime/typescript) | Every TypeScript feature, including `enum` and `namespace`, with source maps |
+| [JSX](/docs/runtime/jsx) | `.jsx` and `.tsx` files, with the automatic runtime by default |
+| [Decorators](/docs/runtime/decorators) | Legacy decorators and emitted design-type metadata |
+| [Module resolution](/docs/runtime/resolution) | Path aliases, extensionless imports, and `.js` to `.ts` rewriting, as your editor resolves them |
+| [Environment files](/docs/runtime/env) | Automatic `.env*` loading with `${VAR}` expansion |
+| [Varlock](/docs/runtime/varlock) | Hands the environment to Varlock when the project has a `.env.schema` |
+| [Loaders](/docs/runtime/loaders) | YAML, TOML, JSONC, JSON5, and text files imported as values |
+| [Modern APIs](/docs/runtime/modern-apis) | Temporal, URLPattern, WebSocket, `node:sqlite`, and more, per Node version |
+| [Web Workers](/docs/runtime/workers) | The browser `Worker` global, with TypeScript entry points |
+| [Web Storage](/docs/runtime/web-storage) | `sessionStorage`, and `localStorage` backed by a file |
+| [Threadpool](/docs/runtime/threadpool) | A libuv threadpool sized to the available cores |
+| [Debugging](/docs/runtime/debugging) | A VS Code launch configuration that runs through Nub |
 
-Nub is a drop-in for `node`: same argv shape, same flag set, and every flag reaches Node verbatim. Pass `--node` (or set `NODE_COMPAT=1`) to turn every augmentation off and run on plain Node.
+## A drop-in for `node`
 
-<Callout title="Supported Node versions">
-Nub runs your code on stock Node: it resolves the Node your project pins and fetches it when missing.
-</Callout>
+Nub accepts the same arguments as `node`, and every flag reaches Node verbatim.
 
-## Supported versions and tiers
-
-The hard floor is **Node 18.19** — below it no loader-hook API can carry Nub's augmentations, so Nub refuses to run. Above the floor, augmentation is delivered through one of two tiers:
-
-- **Fast tier** — sync `module.registerHooks()`, run in-thread via a `--require` CJS preload. No loader-worker, lower startup overhead.
-- **Compatibility tier** — async `module.register()`, run in a loader-worker thread via an `--import` ESM preload. Same augmentations, more startup cost.
-
-Nub selects the tier from your Node version. The fast tier needs sync `module.registerHooks()`, which Node added in v23.5.0 and backported to v22.15.0 — and never backported to the 20.x line. The tier boundary differs per Node major:
-
-| Node line | Minimum Nub supports | Fast-tier floor | Tier | Recommended |
-|---|---|---|---|---|
-| 18.x | 18.19 | — | Compatibility (no `registerHooks`) | |
-| 20.x | all 20.x | — | Compatibility (`registerHooks` never backported to 20) | |
-| 22.x | all 22.x | 22.15 | Fast at 22.15+, compatibility on 22.0–22.14 | ✓ at 22.15+ |
-| 23.x | all 23.x | 23.5 | Fast at 23.5+, compatibility on 23.0–23.4 | ✓ at 23.5+ |
-| 24.x | all 24.x | 24.0 | Fast (whole line) | ✓ |
-| 25.x | all 25.x | 25.0 | Fast (whole line) | ✓ |
-| 26.x | all 26.x | 26.0 | Fast (whole line) | ✓ **default** |
-
-<Callout title="Why a fast-tier Node is recommended">
-The compatibility tier routes module loading through an async `module.register()` loader-worker: about **1.4× slower cold start** than the fast tier — a fixed **~80 ms** plus **~90 µs per module** — with no effect on execution speed. The fast tier (22.15+, sync `module.registerHooks()`) has none of it.
-</Callout>
-
-## Augmentations
-
-- **[TypeScript](/docs/runtime/typescript)** — every TypeScript feature runs directly, including non-erasable syntax (`enum`, `namespace`, parameter properties). Types are stripped, not checked.
-- **[JSX](/docs/runtime/jsx)** — `.jsx` and `.tsx` files run with the modern automatic runtime by default, configured through `tsconfig.json` or a per-file `@jsxImportSource` pragma.
-- **[Decorators](/docs/runtime/decorators)** — legacy decorators run with no build step, including emitted design-type metadata for the DI / ORM ecosystem.
-- **[Resolution](/docs/runtime/resolution)** — extensionless imports, `.js → .ts` rewriting, and `tsconfig.json` path aliases resolve at runtime, the way `tsc` and your editor resolve them.
-- **[Environment variables](/docs/runtime/env)** — `.env*` files load into the environment before Node starts, with `${VAR}` expansion. No `dotenv`, no `--env-file`.
-- **[Varlock](/docs/runtime/varlock)** — a project with an `@env-spec` schema hands its environment to Varlock instead, with no wrapper command and no import in your source.
-- **[Loaders](/docs/runtime/loaders)** — import `.yaml`, `.toml`, `.jsonc`, `.json5`, and `.txt` files directly as parsed values, with no npm parser.
-- **[Modern APIs](/docs/runtime/modern-apis)** — modern globals and built-ins (Temporal, URLPattern, WebSocket, EventSource, node:sqlite, and more) are present, polyfilled or unflagged per Node-version band.
-- **[Workers](/docs/runtime/workers)** — the browser-shape `Worker` global runs your `.ts` entry points, wrapping `node:worker_threads`.
-- **[Web Storage](/docs/runtime/web-storage)** — `localStorage` / `sessionStorage` behavior and the opt-in that backs persistent storage.
-- **[Threadpool](/docs/runtime/threadpool)** — libuv's threadpool is sized to the cores available to the process instead of Node's fixed four, with the extra threads at a lower priority on Linux.
-
-## Memory-constrained launches
-
-On Linux x64, direct Node launches use a 16 MiB V8 semi-space within the following cgroup memory budgets. This includes file runs and Node-backed `nub exec`/`nubx` binaries.
-
-| Node release | Memory budget, inclusive |
-|---|---|
-| 22.23.2 | 512 MiB–1 GiB |
-| 24.20.0 | 512 MiB |
-
-The ranges are benchmarked, not a universal larger-heap policy. Node 24.20.0 already chooses 16 MiB immediately above 512 MiB. Larger Node 22 budgets and Node 26 keep stock defaults because the larger nursery regressed production-mode SSR, despite improving some allocation-heavy fixtures. Budgets below 512 MiB are excluded because smaller-container pressure tests found additional OOM kills. Other releases and platforms also keep Node's defaults.
-
-Nub checks both the leaf cgroup limit that Node uses for sizing and tighter ancestor limits. A tighter ancestor cannot enable tuning for an oversized or unlimited leaf, and any effective budget below 512 MiB disables it. This changes the main heap only; Workers retain their own defaults and explicit `resourceLimits`.
-
-Nub skips this tuning when Node options or preloads are supplied through argv, `NODE_OPTIONS`, or project configuration, or when PnP, a command prefix, or an external environment loader owns startup. Unknown memory limits, watch mode, compiled executables, and inherited augmented processes keep their existing behavior. Application arguments after the entry path do not disable tuning.
-
-The larger nursery can reduce garbage collection for allocation-heavy workloads, but it is not a process memory cap. Workers, native allocations, and other processes can share the same container budget. Use [explicit V8 flags](/docs/config#v8flags) for an application-specific budget, or [compatibility mode](#compatibility-mode) for unchanged Node defaults.
-
-## Modern APIs
-
-Modern globals — TC39, web-platform, and newer Node built-ins — are available under Nub. Native implementations win; Nub fills a missing API or enables a version's experimental Node feature only where needed.
-
-```ts
-const now = Temporal.Now.plainDateTimeISO();
-const route = new URLPattern({ pathname: "/u/:id" });
-const { me, feed } = await Promise.allKeyed({
-  me: getMe(),
-  feed: getFeed(),
-});
+```bash
+nub --max-old-space-size=4096 build.ts  # node flags go before the file
+nub --inspect-brk server.ts
+nub --import ./instrument.js server.ts
+nub script.ts --port 3000 --verbose     # the rest is the script's argv
+echo 'console.log(1 + 1)' | nub -       # program from stdin, like node -
 ```
-
-See [Modern APIs](/docs/runtime/modern-apis) for the complete version-aware reference and examples.
 
 ## Node version resolution
 
-Like Corepack's shims, `nub` itself auto-installs Node versions as needed. When you run a file with `nub`, it infers the version of Node your project expects and provisions it — downloading and caching the matching stock build if it isn't already on your machine. The inference walks up from the working directory to the nearest pin, taking the first source that yields a version. Highest precedence first:
-
-- `NODE_EXECUTABLE` — an explicit path to a Node binary (a hard override)
-- `nodeExecutable` in `nub.jsonc` — a path, or a command that prints one
-- `package.json#/devEngines/runtime`
-- `.node-version`
-- `.nvmrc`
-- `.tool-versions` — the asdf/mise file; its `nodejs` or `node` line
-- `package.json#/engines/node` (a range)
-- the `node` on your `PATH`, when nothing is pinned
-
-This resolved Node version is auto-installed and cached for future runs.
+Nub runs your code on the Node version your project pins, such as a `.node-version` file or `engines.node`, and downloads it when it is missing. With nothing pinned, it uses the `node` on your `PATH`.
 
 ```sh
 $ echo {{NODE_MAJOR}} > .node-version
@@ -121,46 +52,22 @@ Installed in 9.8s
 Hello world!
 ```
 
-A few details of the walk:
+[Managing Node versions](/docs/node) lists every pin source in precedence order and covers the `nub node` subcommands.
 
-- Discovery walks **up** the directory tree to the nearest pin, and **skips** pin files inside an installed dependency (under `node_modules`) — a dependency's own CI pin never drives your project.
-- The `package.json` fields (`devEngines.runtime`, `engines.node`) are read from the **workspace root** manifest when one exists above you — a monorepo pins its Node once at the root.
-- Once a version is pinned, Nub finds a binary for it in order: the `node` on `PATH` (so `fnm` / `Volta` / `mise` auto-switching is honored) → Nub's own download store (`~/.cache/nub/node/<version>/`) → an `nvm`-installed version → download the matching stock build from nodejs.org, SHA-256 verified and cached.
+## Supported versions and tiers
 
-For pinning, pre-installing, and the `nub node` subcommands, see [Managing Node versions](/docs/node).
+Nub supports Node 18.19 and later, except Node 19 and 20.0–20.5, which lack the loader-hook API. It delivers the same augmentations through one of two tiers, chosen by the Node version:
 
-## A drop-in for `node`
+| Tier | Node versions | Module hooks |
+| --- | --- | --- |
+| Fast | 22.15+ on 22.x, 23.5+ on 23.x, and every release from 24 on | Sync `module.registerHooks()`, in the main thread |
+| Compatibility | 18.19+ on 18.x, 20.6+ on 20.x, all of 21.x, 22.0–22.14, and 23.0–23.4 | Async `module.register()`, in a loader-worker thread |
 
-Anything `node <args>` accepts, `nub <args>` accepts too — every flag reaches Node verbatim:
-
-```bash
-# diagnostics
---prof  --cpu-prof  --report-*
-# module resolution
---conditions  --preserve-symlinks
-# inspector
---inspect  --inspect-brk
-# warnings
---no-warnings  --trace-deprecation
-```
-
-Reading a program from stdin works the same way `node -` does.
-
-```bash
-nub --max-old-space-size=4096 build.ts
-nub --import ./instrument.js server.ts
-# everything after the file is your script's argv
-nub script.ts --port 3000 --verbose
-echo 'console.log(1 + 1)' | nub -
-```
-
-<Callout title="Debugging in VS Code">
-Point VS Code's debugger at the `nub` binary to run a program through Nub with breakpoints and stepping. See [Debugging](/docs/runtime/debugging).
-</Callout>
+The compatibility tier adds about 80 ms to cold start, plus about 90 µs per module, and does not change execution speed. A fast-tier Node is recommended.
 
 ## Project configuration
 
-Settings you want on every run go in a [nub.jsonc](/docs/config) at the project root rather than on the command line.
+Settings you want on every run go in a [nub.jsonc](/docs/config) at the project root.
 
 ```jsonc title="nub.jsonc"
 {
@@ -170,17 +77,19 @@ Settings you want on every run go in a [nub.jsonc](/docs/config) at the project 
 }
 ```
 
-A preload entry is either a path, resolved from the directory holding the file that supplied it, or a bare package specifier resolved the way an import in your project would be. V8 flags reach Node on its command line rather than through `NODE_OPTIONS`, so the full V8 set works — including the flags `NODE_OPTIONS` rejects, such as `--stack-size`.
+A preload path resolves from the directory holding the file that names it, and a bare specifier resolves like an import in your project. V8 flags go on Node's command line rather than into `NODE_OPTIONS`, so flags that `NODE_OPTIONS` rejects, such as `--stack-size`, work too.
 
 A command-line flag always wins over the file. See [nub.jsonc](/docs/config) for the full precedence order.
 
 ## Compatibility mode
 
-Compatibility mode turns every augmentation off — the load hook, preloads, unflagging, and `.env` loading — and runs your code on plain Node. It still runs the project's *pinned* Node; version provisioning stays on. (This is distinct from the compatibility *tier* in the [table above](#supported-versions-and-tiers), the startup path for Node lines without sync `registerHooks`, which only changes how augmentation is delivered.)
+Compatibility mode turns every augmentation off and runs your code on plain Node: no load hook, no preloads, no unflagging, and no `.env` loading. Nub still runs the project's pinned Node and downloads it when missing.
+
+Compatibility mode is separate from the compatibility [tier](#supported-versions-and-tiers), which only changes how augmentation is delivered.
 
 ### `--node`
 
-Pass `--node` to run a single invocation with zero augmentation. Your code runs on the project's *pinned* Node (from `.node-version` / `.nvmrc`, fetched if missing).
+Pass `--node` to run a single invocation with zero augmentation.
 
 ```bash
 nub --node script.js     # the project's pinned Node, vanilla
@@ -189,7 +98,7 @@ node script.js           # your shell's Node, unaugmented, unprovisioned
 
 ### `NODE_COMPAT`
 
-Setting a truthy `NODE_COMPAT` (`1`, `true`, or `yes`, case-insensitive) has the same effect as `--node` and is inherited by every descendant `node` / `nub` in the tree:
+A truthy `NODE_COMPAT` (`1`, `true`, or `yes`, case-insensitive) has the same effect as `--node`, and every descendant `node` or `nub` inherits it.
 
 ```bash
 export NODE_COMPAT=1     # every nub/node in this shell now runs vanilla
@@ -198,7 +107,7 @@ nub script.ts            # plain Node, still on the pinned version
 
 ### `nodeCompat`
 
-Setting `nodeCompat` in a [nub.jsonc](/docs/config#nodecompat) applies compatibility mode to every run in the project.
+Setting `nodeCompat` in a [nub.jsonc](/docs/config#nodecompat) applies compatibility mode to every run in the project. The other `nub.jsonc` runtime fields no longer apply.
 
 ```jsonc title="nub.jsonc"
 {
@@ -207,11 +116,20 @@ Setting `nodeCompat` in a [nub.jsonc](/docs/config#nodecompat) applies compatibi
 }
 ```
 
-None of the other `nub.jsonc` runtime fields apply once it is set.
+## Memory-constrained launches
+
+On Linux x64, Nub sets V8's semi-space to 16 MiB for two Node releases when the process runs under a cgroup memory limit in the range below. Every other release, platform, and budget keeps Node's defaults.
+
+| Node release | Memory budget, inclusive |
+|---|---|
+| 22.23.2 | 512 MiB–1 GiB |
+| 24.20.0 | 512 MiB |
+
+Passing Node options or preloads of your own turns the tuning off, and Workers keep their own defaults. Use [`v8Flags`](/docs/config#v8flags) for an application-specific budget.
 
 ## How it works
 
-Nub registers a `module.registerHooks()` load hook (an async `module.register()` loader-worker on the compatibility tier) for transpilation and resolution, and injects a small `--import` preload for the globals and `.env` loading. On the fast tier, transpilation runs through an embedded [oxc](https://oxc.rs) N-API addon.
+Nub reads the `.env*` files itself and passes their values to Node in the environment. A preload registers the module hooks that transpile and resolve your code, and installs the missing globals. The fast tier loads it with `--require`, the compatibility tier with `--import`. Transpilation runs in an embedded [oxc](https://oxc.rs) N-API addon.
 
 <Callout>
 Read the [full docs](https://nodejs.org/api/module.html#moduleregisterhooksoptions) for module customization hooks on nodejs.org.

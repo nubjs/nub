@@ -19,19 +19,49 @@ import prompt from "./prompt.txt";   // string
 
 ## Extensions
 
-Loaders are keyed on file extension:
+Nub picks the loader by file extension. Plain `.json` is not in the set, because Node imports JSON natively.
 
-- `.jsonc` — JSON with comments
-- `.json5` — the JSON5 superset
-- `.toml`
-- `.yaml` / `.yml`
-- `.txt` — loaded as a string, no parsing
+| Extension | Imports as |
+| --- | --- |
+| `.jsonc` | JSON with comments, parsed |
+| `.json5` | JSON5, parsed |
+| `.toml` | TOML, parsed |
+| `.yaml`, `.yml` | YAML, parsed |
+| `.txt` | a string, unparsed |
 
-The `.json` extension is not in this set: JSON modules are Node-native.
+## Default export
+
+A data module has a single default export, the parsed value, like Node's own JSON modules. There are no named exports, so destructure the default to pull out top-level keys.
+
+```yaml title="config.yaml"
+host: localhost
+port: 5432
+```
+
+```ts
+import config from "./config.yaml"; // { host: "localhost", port: 5432 }
+const { host, port } = config;      // "localhost", 5432
+```
+
+The object formats are typed `Record<string, unknown>`, so narrow or cast destructured keys where you use them. A file whose top-level value is an array or scalar imports as that value; cast it, since the type assumes an object.
+
+## Text imports
+
+Add the `with { type: "text" }` import attribute to read any file's raw contents as a string. The attribute wins over parsing, so a `.yaml` or `.json` file read this way is the raw text.
+
+```ts
+import readme from "./README.md" with { type: "text" };  // string
+import query from "./query.sql" with { type: "text" };   // string
+import raw from "./config.yaml" with { type: "text" };   // YAML, unparsed
+```
+
+<Callout>
+Read the [full docs](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/import/with) for import attributes on developer.mozilla.org.
+</Callout>
 
 ## Custom extensions
 
-Map an extension of your own onto one of Nub's loaders from a [nub.jsonc](/docs/config#loader).
+Map an extension of your own onto one of Nub's loaders in a [nub.jsonc](/docs/config#loader).
 
 ```jsonc title="nub.jsonc"
 {
@@ -50,35 +80,3 @@ text  jsonc  json5  toml  yaml  ts  tsx  jsx
 ```
 
 Any other value stops the command with an error.
-
-## Default export
-
-A data module exposes a single default export — the parsed value, like Node's own JSON modules. There are no named exports; destructure the default to pull out top-level keys.
-
-```yaml title="config.yaml"
-host: localhost
-port: 5432
-```
-
-```ts
-import config from "./config.yaml"; // { host: "localhost", port: 5432 }
-const { host, port } = config;      // "localhost", 5432
-```
-
-The object formats are typed `Record<string, unknown>`, so destructured keys are `unknown` — narrow or cast them at the use site. A data file whose top-level value is an array or scalar imports as that value via the default; cast it, since the wildcard type assumes an object.
-
-## Text imports
-
-Add the `with { type: "text" }` import attribute to read a file's raw contents as a string, whatever its extension.
-
-```ts
-import readme from "./README.md" with { type: "text" };  // string
-import query from "./query.sql" with { type: "text" };   // string
-import raw from "./config.yaml" with { type: "text" };   // YAML, unparsed
-```
-
-The attribute wins over parsing: a `.yaml` or `.json` file read this way is the raw text, not the parsed value. A text import is a single default export, like the data loaders — there are no named exports.
-
-<Callout>
-Read the [full docs](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/import/with) for import attributes on developer.mozilla.org.
-</Callout>

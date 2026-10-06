@@ -1,34 +1,39 @@
 ---
 title: Migrating from Bun to Nub
-description: A practical, code-first guide to moving a Bun project onto Node + Nub — runtime, scripts, env files, a complete map of every Bun-specific API to its Node or npm-ecosystem replacement, Dependabot, and the gotchas that actually bite.
+description: Move a Bun project onto Node and Nub, from running files and scripts to env files, with a map of every Bun-specific API to its Node or npm replacement.
 ---
 
-This guide walks through moving a project from the Bun runtime to stock Node driven by Nub. The shape of the move is: Nub runs your TypeScript directly on stock Node — the version your project pins, provisioned on demand — your package manager and lockfile stay where they are, and the `Bun.*` APIs your code calls get swapped for their Node or npm-ecosystem equivalents. Most of the work is the last part — Bun's batteries-included global APIs are the surface with no exact Node counterpart, so each one needs a deliberate replacement.
-
-Everything below is grounded in how Nub actually behaves today. Where Nub does not yet do something, this guide says so plainly rather than papering over it.
-
-## Runtime and TypeScript execution
-
-Bun runs `.ts` files directly. So does Nub — point it at an entry file and it transpiles TypeScript (and JSX, enums, namespaces, parameter properties, `emitDecoratorMetadata`) on stock Node, with no `tsconfig` build step and no separate loader to register.
+Nub runs your TypeScript directly on the Node your project pins, and your package manager and lockfile stay where they are. Most of a migration is replacing the `Bun.*` APIs your code calls, which have no direct Node counterpart.
 
 ```bash
 bun run src/index.ts          # before
 nub src/index.ts              # after
 ```
 
-There is no `nub run <file>` form for a bare file — `nub <file>` is the file runner, and `nub run <script>` is the package.json script runner. Keep the two straight: `nub run dev` runs the `"dev"` script, `nub src/server.ts` runs the file.
+## Running files
 
-If you ever need to compare against unaugmented Node — to rule out a transpile or runtime-augmentation difference — `nub --node <file>` runs the file on plain Node with Nub's augmentation switched off, while still using the Node version your project pins. A truthy `NODE_COMPAT` environment variable does the same thing tree-wide and persistently.
+Nub runs TypeScript and JSX on stock Node, including enums, namespaces, parameter properties, and `emitDecoratorMetadata`. There is no build step and no loader to register.
+
+The file runner is `nub <file>`, and `nub run <script>` runs a `package.json` script. There is no `nub run <file>` form:
+
+```bash
+nub src/server.ts             # runs the file
+nub run dev                   # runs the "dev" script
+```
 
 ## Choosing a Node version
 
-Bun bundles its own runtime, so a Bun project never picks a Node version. On Nub you do, because Nub runs *your* Node. Pin it the way the rest of the Node ecosystem does — an `.nvmrc`, a `packageManager`/`devEngines` entry, or `nub node pin` — and Nub provisions and uses that version. Pick a version your dependencies actually support; some packages reach for globals (`Float16Array`, web crypto surfaces, `structuredClone`) that only exist from a given Node major onward, and a too-old floor will fail at runtime rather than at install. When in doubt, pin a current LTS or the latest stable and set a realistic `engines.node` floor.
+Bun bundles its own runtime; Nub runs the Node your project pins and provisions it on demand. Pin it with `.node-version`, `.nvmrc`, `devEngines.runtime`, or `nub node pin`:
 
-Nub's runtime augmentation is tier-banded by Node version: the fast tier (Node 22.15+) uses synchronous module hooks, and the compat tier (18.19–22.14) uses the async loader-worker path. Both transpile TypeScript; the mechanism differs. Newer Node is the smoother path.
+```bash
+nub node pin {{NODE_MAJOR}}   # writes the pin
+```
+
+Pick a version your dependencies support. A package that needs a newer Node API fails at runtime on an older Node, not at install. A current LTS or the latest release is the safe choice; see [Managing Node versions](/docs/node).
 
 ## Package manager and lockfile
 
-Nub's package-manager surface mirrors pnpm's command grammar:
+Nub's package-manager commands follow pnpm's grammar:
 
 ```bash
 bun install                   # → nub install   (alias: nub i)
@@ -37,63 +42,41 @@ bun remove <pkg>              # → nub remove <pkg>
 bunx <pkg>                    # → nubx <pkg>     (fetch: nub dlx <pkg>)
 ```
 
-Nub is **lockfile-compatible** with what your project already uses — it round-trips npm, pnpm, and bun lockfiles and reads yarn's — so you do not have to convert your lockfile to adopt Nub. The CLI grammar is pnpm's, but lockfile support is not limited to pnpm's format. If you want Nub to own resolution as a Nub-identity project (consuming only neutral, cross-tool config), drop the bun-branded `bunfig.toml` and let Nub write a neutral `.npmrc`; if you keep an incumbent PM, Nub mirrors that PM faithfully.
-
-One real difference from Bun: Nub follows pnpm's dependency model, which does **not** auto-install peer dependencies. Packages that worked under Bun because Bun silently installed their peers will surface as missing — add the peers explicitly to your `package.json`. This is the single most common post-migration install surprise.
+Nub round-trips your existing `bun.lock`, so the lockfile needs no conversion. It also reads the `bunfig.toml` install settings that map onto Nub's; see [Bun projects](/docs/install/bun).
 
 ## Scripts: parallel and sequential
 
-Bun exposes `bun run --parallel` and `bun run --sequential` for fanning out multiple scripts. Nub's `nub run` mirrors pnpm's script grammar, which is **not** the same shape:
+Bun's `bun run --parallel` and `--sequential` take a list of script names. Nub follows pnpm's grammar instead, where `nub run a b` runs script `a` with `b` as its argument.
 
-- A single script name runs that script: `nub run build`.
-- A `/regex/` literal runs every script whose name matches, in `package.json` order: `nub run "/^build:/"`. By default the matched set runs concurrently (`--sequential` serializes it). This is pnpm's regex script selector, and it is the native multi-script form Nub supports today.
-- Space-separated `nub run a b` is **not** a multi-script form — exactly as in pnpm, that runs script `a` with `b` as an argument. Do not expect `nub run lint test` to run two scripts.
-
-There is no native `run-p` / `run-s` with an explicit list of named scripts (`nub run --parallel lint test typecheck`). If your Bun setup leaned on `--parallel <a> <b> <c>`, the portable replacement is [`npm-run-all2`](https://github.com/bcomnes/npm-run-all2), which provides `run-p` and `run-s` and runs cleanly under Nub:
-
-```jsonc
-// package.json
-{
-  "scripts": {
-    "check": "run-p lint typecheck test",   // parallel
-    "release": "run-s build publish"         // sequential
-  }
-}
-```
+To run several scripts, match their names with a `/regex/` selector. The matched scripts run concurrently:
 
 ```bash
-nub run check
+nub run "/^(lint|typecheck|test)$/"             # three named scripts
+nub run "/^check:/"                             # every check:* script
+nub run --workspace-concurrency 1 "/^build:/"   # one at a time
 ```
 
-If your script names share a prefix, the regex selector is the lighter option and needs no dependency: name them `check:lint`, `check:typecheck`, `check:test` and run `nub run "/^check:/"`.
+See [multiple scripts](/docs/run#multiple-scripts). The `run-p` and `run-s` commands from [`npm-run-all2`](https://github.com/bcomnes/npm-run-all2) also work under Nub.
 
 ## Environment files
 
-Bun auto-loads `.env`, `.env.local`, `.env.<mode>` and accepts an explicit `--env-file`. Nub auto-discovers and loads your `.env*` files for the file runner, `nub run`, and `nub watch`, and accepts an explicit `--env-file`:
+Nub loads your `.env*` files automatically for file runs, `nub run`, and `nub watch`. Like Bun, it accepts `--env-file`, and an explicit file turns off automatic discovery for that run:
 
 ```bash
 bun --env-file=.env.production src/index.ts
 nub --env-file=.env.production src/index.ts
 ```
 
-Behavior to know:
+One difference: Nub expands `${VAR}` references only in the automatic `.env*` files. A file named with `--env-file` loads verbatim, as on Node, while Bun expands it. To keep expansion, load the file another way:
 
-- Passing any `--env-file` flag **suppresses** Nub's automatic `.env*` discovery — only the file(s) you name load, matching the "explicit means explicit" contract. This mirrors how an explicit file opts out of the auto cascade.
-- Nub expands `${VAR}` cross-references in the automatic `.env*` files. Files named with `--env-file` arrive verbatim, matching Node. Bun expands explicit files too, so a value that leaned on expansion in a `--env-file` file needs the real value under Nub. There is no exact equivalent of one explicit file that also expands; the two nearest options each differ in one way. Naming the file in [`nub.jsonc` `envFile`](/docs/config#envfile) keeps it explicit and expanding, but a source list loads on every run and every listed path must exist. Selecting a mode with `APP_ENV=production nub src/index.ts` is per-invocation and expanding, but loads the full cascade — `.env.production.local`, `.env.local`, `.env.production`, `.env`, in that precedence — so a `.env.local` value outranks the production file for any overlapping key.
-- The shell environment still wins over file values (a var already set in the environment is not overwritten).
+- **[`envFile` in `nub.jsonc`](/docs/config#envfile)** — explicit and expanded, but loads on every run, and every listed file must exist.
+- **A mode** — `APP_ENV=production nub src/index.ts` expands, but loads the full cascade, so a `.env.local` value outranks `.env.production`.
 
-Two gaps to plan around:
-
-- Nub does not currently implement `--env-file-if-exists` as its own flag. If you pass it, Nub does not treat it as an env-file directive — it forwards it to Node, where Node 20.12+/22+ honors it for the file it runs, but Nub's own `.env`-merge layer will not pick those variables up the way it does for `--env-file`. Prefer `--env-file` with files you know exist, or rely on auto-discovery (which already skips missing files).
-- Nub's `--env-file` applies to the run it is on; it is not a general `nub exec`-style env injector for arbitrary child processes. For loading an env file into a tool that is not the Nub-run entry (a Prisma CLI invocation, say), `dotenv-cli` remains the portable answer.
-
-### A note on Bun's `--env-file` "cascade"
-
-It is sometimes assumed that Bun's `--env-file=.env` expands into a cascade — also loading `.env.local`, `.env.development`, and so on. It does not. In Bun, the explicit-files path and the default cascade are **mutually exclusive**: when one or more `--env-file` arguments are present, Bun loads only those named files (splitting on commas, last-wins) and skips the default `.env`/`.env.local`/`.env.<mode>` discovery entirely. The cascade is the *default* behavior you get when you pass no `--env-file` at all. This matches Node's single-file `--env-file` semantics and matches Nub's behavior, so there is nothing special to reproduce here — `--env-file` means "load exactly these files" in all three runtimes.
+The shell environment still wins over any file. See [Environment variables](/docs/runtime/env).
 
 ## Shell commands: `Bun.$`
 
-Bun's `$` template tag runs shell commands with a chainable result API. The closest mirror in the Node ecosystem is [`dax`](https://github.com/dsherret/dax) — its `$` tag has the same tagged-template shape, the same chainable output methods (`.text()`, `.json()`, `.lines()`, `.quiet()`, `.noThrow()`), and the same auto-escaping of interpolated values. Most `Bun.$` call sites port over as a one-word import change:
+The closest Node counterpart to Bun's `$` is [`dax`](https://github.com/dsherret/dax). It has the same tagged-template shape, the same chainable output methods, and the same escaping of interpolated values, so most call sites change only their import:
 
 ```ts
 // before (Bun)
@@ -107,165 +90,33 @@ import { $ } from "dax";
 const out = await $`ls -la ${dir}`.text();
 ```
 
-dax is maintained by David Sherret (ts-morph, the Deno team), and it goes further than most `$` libraries in the way that matters most for a Bun migrant: it parses and runs a real shell — pipes, redirects, globs, `&&` — using [deno_task_shell](https://github.com/denoland/deno_task_shell)'s parser, and ships common Unix commands (`cat`, `cp`, `mkdir`, `rm`, …) built in so those pipelines run on Windows too. So a `Bun.$` pipeline like ``await $`cat file.txt | grep foo`.text()`` carries over unchanged instead of needing to be restructured. Interpolated values are auto-escaped, exactly as in Bun, so `${userInput}` cannot break out of its argument.
+The dax package runs a real shell language, with pipes, redirects, globs, and `&&`, and ships common commands such as `cat`, `cp`, and `rm` so pipelines run on Windows too. A pipeline like ``$`cat file.txt | grep foo` `` carries over unchanged.
 
-[`zx`](https://github.com/google/zx) is the more widely adopted `$` library and a reasonable choice too; dax is the closer mirror to Bun's chainable API and is cross-platform by default. For call sites that were never really shell — running one program with an argument array, capturing structured output, streaming — [`execa`](https://github.com/sindresorhus/execa) is the trusted, feature-complete option and is closer in shape to `Bun.spawn` than to `$`.
+[`zx`](https://github.com/google/zx) is the more widely used `$` library. For a call that runs one program with an argument array rather than a shell line, [`execa`](https://github.com/sindresorhus/execa) is closer to `Bun.spawn`.
 
 ## Database access: `Bun.sql`
 
-Bun ships `Bun.sql`, a Postgres client modeled on [postgres.js](https://github.com/porsager/postgres). It has no Node equivalent. Two clean replacements, depending on what you already have:
+Bun's Postgres client, `Bun.sql`, is modeled on [postgres.js](https://github.com/porsager/postgres), so that package is the nearest swap. Construct the client yourself and close it on shutdown:
 
-- **`postgres` (postgres.js)** — a near-zero-friction swap, because `Bun.sql` is modeled on it. The tagged-template API is largely the same; the main change is constructing the client yourself and calling `sql.end()` at process shutdown.
+```ts
+import postgres from "postgres";
+const sql = postgres(process.env.DATABASE_URL!);
+const rows = await sql`select * from users where id = ${id}`;
+await sql.end();
+```
 
-  ```ts
-  import postgres from "postgres";
-  const sql = postgres(process.env.DATABASE_URL!);
-  const rows = await sql`select * from users where id = ${id}`;
-  await sql.end();
-  ```
+If the project already uses Prisma, whose driver adapters pull in [`pg`](https://github.com/brianc/node-postgres), use `pg` for raw queries instead of adding a second client:
 
-- **`pg`** — if you already use Prisma (whose driver adapters pull in `pg`), reusing `pg` for raw queries avoids adding a second Postgres client:
+```ts
+import { Pool } from "pg";
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const sql = "select * from users where id = $1";
+const { rows } = await pool.query(sql, [id]);
+```
 
-  ```ts
-  import { Pool } from "pg";
-  const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-  const sql = "select * from users where id = $1";
-  const { rows } = await pool.query(sql, [id]);
-  ```
+## `import.meta` and CommonJS globals
 
-If you use Prisma, the migration is mostly about *raw* queries — your Prisma models are unaffected by the runtime swap. Pick one raw-query client and use it consistently.
-
-## The full `Bun.*` and `bun:*` API map
-
-This is the comprehensive reference: every Bun-specific API, grouped by category, with the recommended Node or npm-ecosystem replacement. Three things to read off it. First, a large share of Bun's "APIs" are standard Web APIs (`fetch`, `WebSocket`, `Request`/`Response`, `Blob`, `URL`, `crypto.subtle`, `structuredClone`, streams) — those are present on Node and on Nub's runtime, so there is nothing to migrate. Second, anything that exists only to make TypeScript/JSX run (`Bun.Transpiler`) is unnecessary under Nub, which runs TypeScript directly. Third, the genuinely Bun-only batteries — the `Bun.*` server, database, FS, hashing, and shell helpers — each map to a maintained Node primitive or a well-established npm package, listed below. Pick one replacement per call site and keep it consistent.
-
-Each named package is chosen to mirror Bun's ergonomics as closely as possible while being current and well-maintained — the pick is the one a Bun developer would actually be happy to adopt, not the smallest dependency that technically covers the call. Where the standard library covers a surface cleanly, the `node:*` module is the first choice. There is no broad `Bun.*` compatibility shim for Node worth adopting (the one historical attempt is archived), so the path is per-API replacement, not preserving the Bun surface wholesale.
-
-### Process, shell, and system
-
-| Bun API | Recommended replacement | Notes |
-| --- | --- | --- |
-| `Bun.$` (shell) | [`dax`](https://github.com/dsherret/dax) | See the [shell section](#shell-commands-bun) above. dax mirrors Bun's chainable `$` and runs real pipelines cross-platform; [`execa`](https://github.com/sindresorhus/execa) for structured, non-shell spawning. |
-| `Bun.spawn`, `Bun.spawnSync` | [`execa`](https://github.com/sindresorhus/execa) or `node:child_process` | execa is the ergonomic promise-based wrapper (streaming, `.pipe()`, typed results); `node:child_process` (`spawn`/`spawnSync`) is the zero-dependency stdlib analog. Wrap either to reproduce the web-stream `.stdout` shape. |
-| `Bun.which(cmd)` | [`which`](https://github.com/npm/node-which) | Or resolve manually against `process.env.PATH` with `node:fs`. |
-| `Bun.openInEditor()` | [`open`](https://github.com/sindresorhus/open) or [`launch-editor`](https://github.com/yyx990803/launch-editor) | Opens a file in the user's editor; no Node built-in. |
-| `Bun.env` | `process.env` | Direct rename. |
-| `Bun.argv` | `process.argv` | Direct rename. |
-| `Bun.main` | `process.argv[1]` (resolved) or `import.meta.main` (Node 24+) | The entry module path. |
-| `Bun.version`, `Bun.revision` | `process.versions`, `process.version` | Nub runs Node, so report the Node version. |
-
-### File system and globbing
-
-| Bun API | Recommended replacement | Notes |
-| --- | --- | --- |
-| `Bun.file(path)` | `node:fs` / `node:fs/promises` (`readFile`, `createReadStream`) | `Bun.file` returns a lazy `Blob`-like handle; the closest Node shape is `fs.openAsBlob(path)` (Node 20+) for a real `Blob`, else `readFile`. |
-| `Bun.write(path, data)` | `node:fs/promises` `writeFile` | Wrap if you depend on `Bun.write`'s auto-`mkdir` of parent directories (`mkdir(dirname, { recursive: true })` first). |
-| `Bun.stdin`, `Bun.stdout`, `Bun.stderr` | `process.stdin` / `process.stdout` / `process.stderr` | Node's streams; wrap if you read them as web streams. |
-| `Bun.Glob` | [`tinyglobby`](https://github.com/SuperchupuDev/tinyglobby) or [`fast-glob`](https://github.com/mrmlnc/fast-glob) | `node:fs` also has a built-in `glob`/`globSync` (Node 22+) for simpler patterns. tinyglobby is the lightweight current choice. |
-| `Bun.FileSystemRouter` | [`find-my-way`](https://github.com/delvedor/find-my-way) or a framework's router | File-system-based route resolution; most frameworks (Next, Nitro, Hono with a file-router plugin) provide their own. |
-| `Bun.mmap` | [`mmap-io`](https://github.com/ozra/mmap-io) | Memory-mapped files; niche, native addon. Prefer streaming reads unless you specifically need mmap. |
-
-### HTTP, networking, and real-time
-
-| Bun API | Recommended replacement | Notes |
-| --- | --- | --- |
-| `Bun.serve` | [`Hono`](https://hono.dev) (`@hono/node-server`), [`Fastify`](https://fastify.dev), or [`Express`](https://expressjs.com) | `node:http` is the raw primitive; a framework is the practical replacement. Hono is the closest in spirit (Web-standard `Request`/`Response`) and runs unchanged on Node. |
-| `Bun.serve` WebSocket handler | [`ws`](https://github.com/websockets/ws) | The standard Node WebSocket server. Pair with your HTTP framework's upgrade handling. |
-| `new WebSocket()` (client) | Built-in on the runtime | The `WebSocket` client global is present on modern Node and on Nub's runtime — no dependency. |
-| `Bun.listen`, `Bun.connect` (TCP) | `node:net` (`createServer`, `connect`) | Direct standard-library mapping. |
-| `Bun.udpSocket` | `node:dgram` | Direct standard-library mapping. |
-| `Bun.dns.lookup`, `Bun.dns.prefetch` | `node:dns` / `node:dns/promises` | No prefetch primitive in Node; the lookups map directly. |
-| `Bun.Cookie`, `Bun.CookieMap` | [`cookie`](https://github.com/jshttp/cookie) (parse/serialize) | Or your framework's cookie helpers. |
-| `Bun.CSRF.generate`, `Bun.CSRF.verify` | [`csrf-csrf`](https://github.com/Psifi-Solutions/csrf-csrf) or [`csrf`](https://github.com/pillarjs/csrf) | Framework-level CSRF middleware where available. |
-| `fetch`, `Request`, `Response`, `Headers`, `FormData` | Built-in on the runtime | Standard Web APIs — present on Node and Nub; nothing to migrate. |
-
-### Databases and storage
-
-| Bun API | Recommended replacement | Notes |
-| --- | --- | --- |
-| `Bun.sql`, `Bun.SQL` (Postgres) | [`postgres`](https://github.com/porsager/postgres) (postgres.js) or [`pg`](https://github.com/brianc/node-postgres) | See the [database section](#database-access-bunsql) above. `Bun.sql` is modeled on postgres.js, so it is the near-drop-in; `pg` if you already pull it in via Prisma. |
-| `bun:sqlite` | [`better-sqlite3`](https://github.com/WiseLibs/better-sqlite3) or `node:sqlite` (Node 22.5+) | better-sqlite3 is the mature, battle-tested mirror — a fully synchronous `prepare().get()/.all()/.run()` API, exactly `bun:sqlite`'s shape. `node:sqlite` is the zero-dependency stdlib option with the same synchronous shape (still marked experimental). |
-| `Bun.redis`, `Bun.RedisClient` | [`ioredis`](https://github.com/redis/ioredis) or [`redis`](https://github.com/redis/node-redis) | Both are maintained, full-featured Redis/Valkey clients. |
-| `Bun.s3`, `Bun.S3Client` | [`@aws-sdk/client-s3`](https://github.com/aws/aws-sdk-js-v3) | The official AWS SDK; works with any S3-compatible store. |
-| `Bun.secrets` | [`@napi-rs/keyring`](https://github.com/Brooooooklyn/keyring-node) | OS credential-store access (macOS Keychain, Windows Credential Manager, libsecret) through prebuilt N-API binaries. The long-established `keytar` is archived and unmaintained — do not reach for it. |
-
-### Hashing, crypto, and compression
-
-| Bun API | Recommended replacement | Notes |
-| --- | --- | --- |
-| `Bun.password.hash`, `Bun.password.verify` | `node:crypto` `scrypt` or [`@node-rs/argon2`](https://github.com/napi-rs/node-rs/tree/main/packages/argon2) | `Bun.password` defaults to argon2id; `@node-rs/argon2` matches that algorithm. `node:crypto`'s `scrypt` is the zero-dependency standard-library path. [`bcrypt`](https://github.com/kelektiv/node.bcrypt.js) if you need bcrypt specifically. |
-| `Bun.hash`, `Bun.hash.*` (non-crypto) | [`xxhash-wasm`](https://github.com/jungomi/xxhash-wasm) or `node:crypto` | `Bun.hash` is a fast non-cryptographic hash (wyhash family); xxhash-wasm is a close, fast equivalent. For a stable cryptographic digest use `node:crypto`. |
-| `Bun.CryptoHasher` | `node:crypto` `createHash` / `createHmac` | Direct mapping for SHA/MD5/HMAC; streaming `update`/`digest` shape is the same. |
-| `Bun.sha` | `node:crypto` `createHash('sha256')` | Convenience one-shot SHA. |
-| `Bun.gzipSync`, `Bun.gunzipSync` | `node:zlib` (`gzipSync`, `gunzipSync`) | Direct standard-library mapping. |
-| `Bun.deflateSync`, `Bun.inflateSync` | `node:zlib` (`deflateSync`, `inflateSync`) | Direct standard-library mapping. |
-| `Bun.zstdCompressSync`, `Bun.zstdDecompressSync` (+ async) | `node:zlib` zstd (Node 22.15+ / 23.8+) | Node added zstd support recently; on older floors use [`@mongodb-js/zstd`](https://github.com/mongodb-js/zstd) or [`fzstd`](https://github.com/101arrowz/fzstd). Check your pinned Node version. |
-| `crypto.subtle`, `crypto.randomUUID`, `crypto.getRandomValues` | Built-in on the runtime | Standard Web Crypto — present on Node and Nub. |
-
-### Build, transpile, and modules
-
-| Bun API | Recommended replacement | Notes |
-| --- | --- | --- |
-| `Bun.Transpiler` | Not needed under Nub | Nub runs TypeScript and JSX directly, so an in-process transpiler API is unnecessary. If you genuinely need to transpile a string at runtime, use [`oxc-transform`](https://github.com/oxc-project/oxc) or [`esbuild`](https://github.com/evanw/esbuild)'s `transform`. |
-| `Bun.build` | [`esbuild`](https://github.com/evanw/esbuild), [`tsup`](https://github.com/egoist/tsup), or [`rolldown`](https://github.com/rolldown/rolldown) | For application/library bundling. tsup wraps esbuild for the common library case; rolldown is the Rust-based Rollup-compatible bundler. |
-| `Bun.plugin` (loader plugins) | The bundler's plugin API (esbuild/rollup/rolldown plugins) | Bun's runtime-loader plugin model has no Node equivalent; move custom loaders into your bundler or a `module.register()` hook. |
-| `Bun.resolveSync` | `import.meta.resolve()` or `node:module` `createRequire(...).resolve` | `import.meta.resolve` is the standard ESM resolver; `createRequire().resolve` for CJS-style resolution. |
-| `import.meta.dir`, `import.meta.file` | `import.meta.dirname`, `import.meta.filename` | Node ESM equivalents (Node 20.11+/21.2+). See the [`import.meta` section](#importmeta-and-cjs-globals) above. |
-
-### Testing
-
-| Bun API | Recommended replacement | Notes |
-| --- | --- | --- |
-| `bun:test` | [`vitest`](https://vitest.dev) or `node:test` | Vitest is the closest in ergonomics (describe/it/expect, watch mode, mocking) and runs under Nub. `node:test` + `node:assert` is the zero-dependency standard-library runner. |
-| `bun:test` mocking (`mock`, `spyOn`) | Vitest's `vi.fn`/`vi.spyOn`, or `node:test`'s `mock` | Vitest's mocking is the nearest match to Bun's. |
-| `bun:test` snapshots | Vitest snapshots | Built into Vitest; `node:test` has no native snapshot support. |
-
-### FFI and native
-
-| Bun API | Recommended replacement | Notes |
-| --- | --- | --- |
-| `bun:ffi` (`dlopen`, `CString`, …) | [`koffi`](https://github.com/Koromix/koffi) | The maintained, actively developed FFI library for Node (successor to the unmaintained `ffi-napi`). |
-| `Node-API` (N-API addons) | Node-API | Works identically — N-API addons are a Node standard. Build with [`node-gyp`](https://github.com/nodejs/node-gyp) or [`napi-rs`](https://github.com/napi-rs/napi-rs) for Rust. |
-| `bun:jsc` (engine internals) | No equivalent | JavaScriptCore-specific; no V8/Node counterpart. Remove or replace with `node:v8` / `node:vm` where a feature overlaps (heap snapshots, serialization). |
-
-### HTML, text, and parsing
-
-| Bun API | Recommended replacement | Notes |
-| --- | --- | --- |
-| `HTMLRewriter` | [`cheerio`](https://github.com/cheeriojs/cheerio) or [`node-html-parser`](https://github.com/taoqf/node-html-parser) | jQuery-style select-and-mutate covers most `HTMLRewriter` uses (rewrite attributes, inject or replace elements); both are DOM-buffered, not streaming. No maintained npm port of Cloudflare's *streaming* rewriter exists — true streaming rewrite is a genuine gap. Nub does not provide a built-in rewriter. |
-| `Bun.escapeHTML` | [`escape-html`](https://github.com/component/escape-html) | Tiny, single-purpose. |
-| `Bun.stringWidth` | [`string-width`](https://github.com/sindresorhus/string-width) | Terminal display width (handles wide chars, ANSI). |
-| `Bun.stripANSI` | [`strip-ansi`](https://github.com/chalk/strip-ansi) | Removes ANSI escape codes. |
-| `Bun.wrapAnsi` | [`wrap-ansi`](https://github.com/chalk/wrap-ansi) | ANSI-aware word wrap. |
-| `Bun.markdown` | [`marked`](https://github.com/markedjs/marked) or [`markdown-it`](https://github.com/markdown-it/markdown-it) | Markdown-to-HTML. |
-| `Bun.color` | [`culori`](https://github.com/Evercoder/culori) or [`color`](https://github.com/Qix-/color) | Color parsing/conversion across formats. |
-| `Bun.semver` | [`semver`](https://github.com/npm/node-semver) | The canonical semver library; Bun's API is a subset. |
-| `Bun.TOML.parse` | [`smol-toml`](https://github.com/squirrelchat/smol-toml) or [`@iarna/toml`](https://github.com/iarna/iarna-toml) | TOML parsing. |
-| `Bun.YAML.parse` | [`yaml`](https://github.com/eemeli/yaml) | YAML parsing/stringifying. |
-| `Bun.Image` | [`sharp`](https://github.com/lovell/sharp) | Image decode/encode/transform. |
-
-### Utilities, timing, and inspection
-
-| Bun API | Recommended replacement | Notes |
-| --- | --- | --- |
-| `Bun.inspect` | `node:util` `inspect` | Direct mapping; same depth/colors options. |
-| `Bun.deepEquals`, `Bun.deepMatch` | `node:util` `isDeepStrictEqual`, or [`dequal`](https://github.com/lukeed/dequal) | `isDeepStrictEqual` for strict equality; dequal for a fast loose-equality check. |
-| `Bun.sleep`, `Bun.sleepSync` | `node:timers/promises` `setTimeout(ms)` | `await setTimeout(ms)` for async; for a true sync sleep use `Atomics.wait` on a `SharedArrayBuffer` (rarely needed). |
-| `Bun.nanoseconds` | `process.hrtime.bigint()` | High-resolution monotonic clock. |
-| `Bun.randomUUIDv7` | [`uuid`](https://github.com/uuidjs/uuid) (`v7`) | `crypto.randomUUID()` is built-in but emits v4; uuid's `v7` for time-ordered IDs. |
-| `Bun.peek` | No equivalent | Synchronously reads a settled promise's value; restructure to `await` or track resolution yourself. |
-| `Bun.fileURLToPath`, `Bun.pathToFileURL` | `node:url` (`fileURLToPath`, `pathToFileURL`) | Direct standard-library mapping. |
-| `Bun.readableStreamTo*` (`Text`, `JSON`, `Blob`, `ArrayBuffer`, `Bytes`, `Array`, `FormData`) | Consume the web stream directly | `new Response(stream).text()/.json()/.blob()/.arrayBuffer()/.formData()` covers most; `node:stream` `Readable.fromWeb` to bridge to Node streams. |
-| `Bun.deflate`/buffer sinks (`Bun.ArrayBufferSink`, `Bun.allocUnsafe`, `Bun.concatArrayBuffers`) | `Buffer` (`Buffer.allocUnsafe`, `Buffer.concat`) and `node:stream` | Node's `Buffer` covers the allocation/concatenation helpers; use a `PassThrough` stream for sink-style accumulation. |
-| `Bun.gc`, `Bun.generateHeapSnapshot` | `node:v8` (`writeHeapSnapshot`, `--expose-gc` for `global.gc`) | Heap snapshot and manual GC; GC requires the `--expose-gc` flag. |
-| `Bun.stdin/stdout` byte sinks, `Bun.indexOfLine` | `node:buffer` / `node:readline` | Line scanning via `node:readline` over the stream. |
-| `Bun.cron` (scheduling) | [`croner`](https://github.com/Hexagon/croner) or [`node-cron`](https://github.com/node-cron/node-cron) | In-process cron scheduling. croner is the actively maintained, dependency-free choice. |
-
-A practical migration tactic for the high-frequency APIs (`Bun.file`, `Bun.write`, `Bun.spawn`, `Bun.$`): write one small shim module that re-exports Node primitives under the call shapes your code already uses, import it everywhere those APIs were used, and the diff stays localized to that one file instead of spreading across every call site.
-
-## `import.meta` and CJS globals
-
-Bun and Node have converged here, so these are mechanical renames in ESM:
+These are direct renames in ESM:
 
 | Bun | Node (ESM) |
 | --- | --- |
@@ -275,42 +126,162 @@ Bun and Node have converged here, so these are mechanical renames in ESM:
 | `__dirname` (in ESM) | `import.meta.dirname` |
 | `__filename` (in ESM) | `import.meta.filename` |
 
+## The full `Bun.*` and `bun:*` API map
+
+Standard web APIs such as `fetch`, `WebSocket`, `Blob`, `URL`, `crypto.subtle`, and streams exist on Node too, so they need no change. `Bun.Transpiler` is unnecessary, because Nub runs TypeScript directly. Everything else maps to a Node module or an npm package below, with the `node:*` module first where it covers the call.
+
+For the most-used APIs, such as `Bun.file`, `Bun.write`, and `Bun.spawn`, one small module that re-exports Node equivalents under the call shapes your code already uses keeps the diff in one file.
+
+### Process, shell, and system
+
+| Bun API | Recommended replacement | Notes |
+| --- | --- | --- |
+| `Bun.$` (shell) | [`dax`](https://github.com/dsherret/dax) | See [shell commands](#shell-commands-bun) above. [`execa`](https://github.com/sindresorhus/execa) for non-shell spawning. |
+| `Bun.spawn`, `Bun.spawnSync` | [`execa`](https://github.com/sindresorhus/execa) or `node:child_process` | execa is the promise-based wrapper (streaming, `.pipe()`, typed results); `node:child_process` is the zero-dependency option. Wrap either to reproduce the web-stream `.stdout` shape. |
+| `Bun.which(cmd)` | [`which`](https://github.com/npm/node-which) | Or resolve manually against `process.env.PATH` with `node:fs`. |
+| `Bun.openInEditor()` | [`open`](https://github.com/sindresorhus/open) or [`launch-editor`](https://github.com/yyx990803/launch-editor) | Opens a file in the user's editor; no Node built-in. |
+| `Bun.env` | `process.env` | Direct rename. |
+| `Bun.argv` | `process.argv` | Direct rename. |
+| `Bun.main` | `process.argv[1]` (resolved) or `import.meta.main` (Node 24+) | The entry module path. |
+| `Bun.version`, `Bun.revision` | `process.versions`, `process.version` | Report the Node version. |
+
+### File system and globbing
+
+| Bun API | Recommended replacement | Notes |
+| --- | --- | --- |
+| `Bun.file(path)` | `node:fs` / `node:fs/promises` (`readFile`, `createReadStream`) | `Bun.file` returns a lazy `Blob`-like handle; the closest Node shape is `fs.openAsBlob(path)` (Node 20+), else `readFile`. |
+| `Bun.write(path, data)` | `node:fs/promises` `writeFile` | `Bun.write` creates parent directories; call `mkdir(dirname, { recursive: true })` first. |
+| `Bun.stdin`, `Bun.stdout`, `Bun.stderr` | `process.stdin` / `process.stdout` / `process.stderr` | Node streams; wrap them if you read them as web streams. |
+| `Bun.Glob` | [`tinyglobby`](https://github.com/SuperchupuDev/tinyglobby) or [`fast-glob`](https://github.com/mrmlnc/fast-glob) | `node:fs` also has `glob`/`globSync` (Node 22+) for simpler patterns. |
+| `Bun.FileSystemRouter` | [`find-my-way`](https://github.com/delvedor/find-my-way) or a framework's router | Most frameworks (Next, Nitro, Hono with a file-router plugin) provide their own. |
+| `Bun.mmap` | [`mmap-io`](https://github.com/ozra/mmap-io) | A native addon. Prefer streaming reads unless you need mmap. |
+
+### HTTP, networking, and real-time
+
+| Bun API | Recommended replacement | Notes |
+| --- | --- | --- |
+| `Bun.serve` | [`Hono`](https://hono.dev) (`@hono/node-server`), [`Fastify`](https://fastify.dev), or [`Express`](https://expressjs.com) | `node:http` is the raw primitive. Hono is the closest in spirit, with web-standard `Request`/`Response`. |
+| `Bun.serve` WebSocket handler | [`ws`](https://github.com/websockets/ws) | The standard Node WebSocket server. Pair it with your HTTP framework's upgrade handling. |
+| `new WebSocket()` (client) | Built in | The `WebSocket` client global is present under Nub. |
+| `Bun.listen`, `Bun.connect` (TCP) | `node:net` (`createServer`, `connect`) | Direct mapping. |
+| `Bun.udpSocket` | `node:dgram` | Direct mapping. |
+| `Bun.dns.lookup`, `Bun.dns.prefetch` | `node:dns` / `node:dns/promises` | Node has no prefetch; lookups map directly. |
+| `Bun.Cookie`, `Bun.CookieMap` | [`cookie`](https://github.com/jshttp/cookie) (parse/serialize) | Or your framework's cookie helpers. |
+| `Bun.CSRF.generate`, `Bun.CSRF.verify` | [`csrf-csrf`](https://github.com/Psifi-Solutions/csrf-csrf) or [`csrf`](https://github.com/pillarjs/csrf) | Or your framework's CSRF middleware. |
+| `fetch`, `Request`, `Response`, `Headers`, `FormData` | Built in | Standard web APIs; nothing to migrate. |
+
+### Databases and storage
+
+| Bun API | Recommended replacement | Notes |
+| --- | --- | --- |
+| `Bun.sql`, `Bun.SQL` (Postgres) | [`postgres`](https://github.com/porsager/postgres) (postgres.js) or [`pg`](https://github.com/brianc/node-postgres) | See [database access](#database-access-bunsql) above. |
+| `bun:sqlite` | [`better-sqlite3`](https://github.com/WiseLibs/better-sqlite3) or `node:sqlite` (Node 22.5+) | better-sqlite3 has the same synchronous `prepare().get()/.all()/.run()` shape as `bun:sqlite`. `node:sqlite` is the zero-dependency option, still marked experimental. |
+| `Bun.redis`, `Bun.RedisClient` | [`ioredis`](https://github.com/redis/ioredis) or [`redis`](https://github.com/redis/node-redis) | Full-featured Redis and Valkey clients. |
+| `Bun.s3`, `Bun.S3Client` | [`@aws-sdk/client-s3`](https://github.com/aws/aws-sdk-js-v3) | The official AWS SDK; works with any S3-compatible store. |
+| `Bun.secrets` | [`@napi-rs/keyring`](https://github.com/Brooooooklyn/keyring-node) | OS credential stores (macOS Keychain, Windows Credential Manager, libsecret). The older `keytar` is archived. |
+
+### Hashing, crypto, and compression
+
+| Bun API | Recommended replacement | Notes |
+| --- | --- | --- |
+| `Bun.password.hash`, `Bun.password.verify` | `node:crypto` `scrypt` or [`@node-rs/argon2`](https://github.com/napi-rs/node-rs/tree/main/packages/argon2) | `Bun.password` defaults to argon2id, which `@node-rs/argon2` matches. [`bcrypt`](https://github.com/kelektiv/node.bcrypt.js) if you need bcrypt. |
+| `Bun.hash`, `Bun.hash.*` (non-crypto) | [`xxhash-wasm`](https://github.com/jungomi/xxhash-wasm) or `node:crypto` | `Bun.hash` is a fast non-cryptographic hash (wyhash family). Use `node:crypto` for a cryptographic digest. |
+| `Bun.CryptoHasher` | `node:crypto` `createHash` / `createHmac` | Same streaming `update`/`digest` shape. |
+| `Bun.sha` | `node:crypto` `createHash('sha256')` | One-shot SHA. |
+| `Bun.gzipSync`, `Bun.gunzipSync` | `node:zlib` (`gzipSync`, `gunzipSync`) | Direct mapping. |
+| `Bun.deflateSync`, `Bun.inflateSync` | `node:zlib` (`deflateSync`, `inflateSync`) | Direct mapping. |
+| `Bun.zstdCompressSync`, `Bun.zstdDecompressSync` (+ async) | `node:zlib` zstd (Node 22.15+ / 23.8+) | On older Node, use [`@mongodb-js/zstd`](https://github.com/mongodb-js/zstd) or [`fzstd`](https://github.com/101arrowz/fzstd). |
+| `crypto.subtle`, `crypto.randomUUID`, `crypto.getRandomValues` | Built in | Standard Web Crypto. |
+
+### Build, transpile, and modules
+
+| Bun API | Recommended replacement | Notes |
+| --- | --- | --- |
+| `Bun.Transpiler` | Not needed under Nub | To transpile a string at runtime, use [`oxc-transform`](https://github.com/oxc-project/oxc) or [`esbuild`](https://github.com/evanw/esbuild)'s `transform`. |
+| `Bun.build` | [`esbuild`](https://github.com/evanw/esbuild), [`tsup`](https://github.com/egoist/tsup), or [`rolldown`](https://github.com/rolldown/rolldown) | tsup wraps esbuild for libraries; rolldown is a Rollup-compatible bundler. |
+| `Bun.plugin` (loader plugins) | The bundler's plugin API, or a `module.register()` hook | Bun's runtime-loader plugins have no Node equivalent. |
+| `Bun.resolveSync` | `import.meta.resolve()` or `node:module` `createRequire(...).resolve` | `createRequire().resolve` for CommonJS-style resolution. |
+| `import.meta.dir`, `import.meta.file` | `import.meta.dirname`, `import.meta.filename` | Node 20.11+/21.2+. See [`import.meta`](#importmeta-and-commonjs-globals) above. |
+
+### Testing
+
+| Bun API | Recommended replacement | Notes |
+| --- | --- | --- |
+| `bun:test` | [`vitest`](https://vitest.dev) or `node:test` | Vitest is the closest in ergonomics (describe/it/expect, watch mode, mocking). `node:test` with `node:assert` is the zero-dependency runner. |
+| `bun:test` mocking (`mock`, `spyOn`) | Vitest's `vi.fn`/`vi.spyOn`, or `node:test`'s `mock` | Vitest's mocking is the nearest match. |
+| `bun:test` snapshots | Vitest snapshots | `node:test` has no snapshot support. |
+
+### FFI and native
+
+| Bun API | Recommended replacement | Notes |
+| --- | --- | --- |
+| `bun:ffi` (`dlopen`, `CString`, …) | [`koffi`](https://github.com/Koromix/koffi) | The maintained FFI library for Node, succeeding `ffi-napi`. |
+| `Node-API` (N-API addons) | Node-API | Works the same. Build with [`node-gyp`](https://github.com/nodejs/node-gyp), or [`napi-rs`](https://github.com/napi-rs/napi-rs) for Rust. |
+| `bun:jsc` (engine internals) | No equivalent | JavaScriptCore-specific. Use `node:v8` or `node:vm` where a feature overlaps (heap snapshots, serialization). |
+
+### HTML, text, and parsing
+
+| Bun API | Recommended replacement | Notes |
+| --- | --- | --- |
+| `HTMLRewriter` | [`cheerio`](https://github.com/cheeriojs/cheerio) or [`node-html-parser`](https://github.com/taoqf/node-html-parser) | Both parse the whole document rather than streaming it, which covers most rewrites. No maintained npm port of the streaming rewriter exists, and Nub has no built-in one. |
+| `Bun.escapeHTML` | [`escape-html`](https://github.com/component/escape-html) | Single-purpose. |
+| `Bun.stringWidth` | [`string-width`](https://github.com/sindresorhus/string-width) | Terminal display width (wide characters, ANSI). |
+| `Bun.stripANSI` | [`strip-ansi`](https://github.com/chalk/strip-ansi) | Removes ANSI escape codes. |
+| `Bun.wrapAnsi` | [`wrap-ansi`](https://github.com/chalk/wrap-ansi) | ANSI-aware word wrap. |
+| `Bun.markdown` | [`marked`](https://github.com/markedjs/marked) or [`markdown-it`](https://github.com/markdown-it/markdown-it) | Markdown to HTML. |
+| `Bun.color` | [`culori`](https://github.com/Evercoder/culori) or [`color`](https://github.com/Qix-/color) | Color parsing and conversion. |
+| `Bun.semver` | [`semver`](https://github.com/npm/node-semver) | Bun's API is a subset. |
+| `Bun.TOML.parse` | [`smol-toml`](https://github.com/squirrelchat/smol-toml) or [`@iarna/toml`](https://github.com/iarna/iarna-toml) | TOML parsing. |
+| `Bun.YAML.parse` | [`yaml`](https://github.com/eemeli/yaml) | YAML parsing and stringifying. |
+| `Bun.Image` | [`sharp`](https://github.com/lovell/sharp) | Image decode, encode, and transform. |
+
+### Utilities, timing, and inspection
+
+| Bun API | Recommended replacement | Notes |
+| --- | --- | --- |
+| `Bun.inspect` | `node:util` `inspect` | Same depth and colors options. |
+| `Bun.deepEquals`, `Bun.deepMatch` | `node:util` `isDeepStrictEqual`, or [`dequal`](https://github.com/lukeed/dequal) | `isDeepStrictEqual` for strict equality; dequal for a fast loose check. |
+| `Bun.sleep`, `Bun.sleepSync` | `node:timers/promises` `setTimeout(ms)` | `await setTimeout(ms)`. For a synchronous sleep, `Atomics.wait` on a `SharedArrayBuffer`. |
+| `Bun.nanoseconds` | `process.hrtime.bigint()` | High-resolution monotonic clock. |
+| `Bun.randomUUIDv7` | [`uuid`](https://github.com/uuidjs/uuid) (`v7`) | `crypto.randomUUID()` emits v4 only. |
+| `Bun.peek` | No equivalent | Reads a settled promise's value synchronously; restructure to `await`. |
+| `Bun.fileURLToPath`, `Bun.pathToFileURL` | `node:url` (`fileURLToPath`, `pathToFileURL`) | Direct mapping. |
+| `Bun.readableStreamTo*` (`Text`, `JSON`, `Blob`, `ArrayBuffer`, `Bytes`, `Array`, `FormData`) | Consume the web stream directly | `new Response(stream).text()` and its siblings cover most; `Readable.fromWeb` bridges to Node streams. |
+| `Bun.ArrayBufferSink`, `Bun.allocUnsafe`, `Bun.concatArrayBuffers` | `Buffer` (`Buffer.allocUnsafe`, `Buffer.concat`) and `node:stream` | A `PassThrough` stream for sink-style accumulation. |
+| `Bun.gc`, `Bun.generateHeapSnapshot` | `node:v8` (`writeHeapSnapshot`, `--expose-gc` for `global.gc`) | Manual GC requires `--expose-gc`. |
+| `Bun.indexOfLine` | `node:readline` | Line scanning over the stream. |
+| `Bun.cron` (scheduling) | [`croner`](https://github.com/Hexagon/croner) or [`node-cron`](https://github.com/node-cron/node-cron) | In-process cron scheduling; croner has no dependencies. |
+
 ## Production server and Docker
 
-If your server runtime targets Bun (for example a framework preset like Nitro's `bun` preset), switch it to its Node target (`node-server` / `node`) and run the built entry with `node`. The Docker base image changes from a Bun image to a Node image plus a global Nub install:
+If your server targets Bun, such as Nitro's `bun` preset, switch to its Node target (`node-server` or `node`). The Docker base image becomes a Node image with Nub installed:
 
 ```dockerfile
-FROM node:26-slim
+FROM node:{{NODE_MAJOR}}-slim
 RUN npm install -g @nubjs/nub
 # ... copy app, nub install, build ...
 CMD ["node", ".output/server/index.mjs"]
 ```
 
-Use `node` directly to run a built, already-transpiled server bundle; reach for Nub in the build stage (install, run scripts, run TypeScript entrypoints) where its augmentation earns its keep.
+A built, already-transpiled server bundle runs on plain `node`. Nub does the build-stage work: installing, running scripts, and running TypeScript entry points. See [Docker](/docs/deployment/docker).
 
 ## CI and Dependabot
 
-- **CI setup:** replace a Bun setup action with Nub's. See the [setup-nub](/docs/deployment/github-action) page for the GitHub Action.
-- **Dependabot / Renovate:** these bots do not have native Nub support. Use `package-ecosystem: "npm"` so the bot understands your manifest, and add a workflow step that runs `nub install` after the bot's update to regenerate the lockfile in Nub's format. A bot that bumps `package.json` but cannot regenerate the lockfile will otherwise leave the two out of sync.
+- **CI** — replace the Bun setup action with [setup-nub](/docs/deployment/github-action).
+- **Dependabot and Renovate** — neither supports Nub directly. Use `package-ecosystem: "npm"` and add a workflow step that runs `nub install` after the bot's update, so the lockfile stays in sync with `package.json`.
 
-## Supply-chain cooldown (`minimumReleaseAge`)
+## Supply-chain cooldown
 
-Bun's `bunfig.toml` supports `[install].minimumReleaseAge` — a supply-chain hardening gate that refuses to install package versions newer than a threshold. Nub honors the same gate. As a Nub-identity project it lives in `.npmrc` as `minimum-release-age`, in **minutes**:
+Bun's `[install].minimumReleaseAge` refuses package versions newer than a threshold, and Nub honors the same gate. Nub reads it from `bunfig.toml` and converts Bun's seconds to minutes, rounding up. Bun's `minimumReleaseAgeExcludes` maps to Nub's `minimumReleaseAgeExclude`.
+
+In `.npmrc`, the setting is in minutes:
 
 ```ini
 # .npmrc
 minimum-release-age=1440   # one day
 ```
 
-If you are migrating a `bunfig.toml`, note the unit change: bunfig expresses `minimumReleaseAge` in **seconds**, and `nub install` converts it to the engine's minutes (rounding up so a small non-zero gate never collapses to zero). Bun's `minimumReleaseAgeExcludes` maps to Nub's `minimumReleaseAgeExclude`.
+## Gotchas
 
-## Gotchas worth pre-empting
-
-- **Peer dependencies are not auto-installed.** The biggest behavioral difference from Bun. Add missing peers explicitly; expect more than one to surface.
-- **A bunfig `[install].linker` value is not read.** Nub mirrors Bun's resolution, not its `node_modules` layout. Choose a layout with `install.linker` in `nub.jsonc`, `node-linker` in `.npmrc`, or the `--node-linker` flag — see [layout settings](/docs/install#layout-settings).
-- **`nub run a b` is not multi-script.** It runs `a` with `b` as an argument (same as pnpm and Bun's plain `run`). Use a `/regex/` selector or `npm-run-all2` for real fan-out.
-- **`--env-file` suppresses auto-discovery.** Once you pass an explicit file, the automatic `.env*` cascade is off for that run — pass every file you need, or rely on auto-discovery instead.
-- **`--env-file-if-exists` is not a first-class Nub flag yet.** Use `--env-file` with files you know exist, or auto-discovery (which already tolerates missing files).
-- **Pin a realistic Node version.** Nub runs the Node you pin; a too-old floor fails at runtime on missing globals, not at install. Pin a current LTS or stable and set `engines.node`.
-- **Memory profile differs from Bun.** Node generally uses more memory than Bun for the same parallel fan-out. If you parallelized many heavy tasks (type-check, lint, test) under Bun and hit OOM kills after migrating, cap concurrency (for example, run at most two heavy tasks at once, and order the most memory-hungry last).
-- **A benign `module.register()` deprecation warning** may appear on newer Node from loader hooks; it is harmless and resolves as tooling adopts `module.registerHooks()`. Silence it with `--no-warnings` or a specific `--disable-warning` if it is noisy.
+- **Bun's `[install].linker` is not read.** Choose a layout with `install.linker` in `nub.jsonc`, `node-linker` in `.npmrc`, or the `--node-linker` flag. See [layout settings](/docs/install#layout-settings).
+- **Memory use is higher.** Node generally uses more memory than Bun for the same parallel fan-out. If heavy tasks such as type checking, linting, and tests hit out-of-memory kills after the move, run fewer at once.

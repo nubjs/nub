@@ -131,12 +131,11 @@ export function arm({ esm = true, cjs = true } = {}) {
   const wantCjs = cjs && !armed.cjs;
   if (!wantEsm && !wantCjs) return;
 
-  const [major = 0, minor = 0] = process.versions.node
-    .split(".")
-    .map((n) => parseInt(n, 10));
-  if (major < 18 || (major === 18 && minor < 19)) {
+  // A probe, not a version band: 19.x and 20.0–20.5 sort above 18.19 but predate
+  // `module.register` (20.6.0, backported to 18.19.0).
+  if (typeof module_.register !== "function" && typeof module_.registerHooks !== "function") {
     process.stderr.write(
-      `The Nub loader requires Node 18.19 or newer; got ${process.versions.node}. Hooks are inactive.\n`,
+      `The Nub loader requires Node 18.19+ on the 18.x line, or 20.6 or newer; got ${process.versions.node}. Hooks are inactive.\n`,
     );
     return;
   }

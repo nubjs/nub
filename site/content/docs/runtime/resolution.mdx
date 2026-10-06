@@ -1,30 +1,30 @@
 ---
 title: Module resolution
-description: The TypeScript-aware resolution Nub layers on top of Node — tsconfig path aliases and base URL, extends chains, extensionless imports, and the JavaScript-to-TypeScript extension swap.
+description: The TypeScript-aware resolution Nub layers on top of Node, covering tsconfig path aliases and base URL, extends chains, extensionless imports, and the JavaScript-to-TypeScript extension swap.
 ---
 
-Nub adds a TypeScript-aware resolution layer on top of Node's own resolver.
+If your editor's Go-to-Definition follows an import and `tsc` accepts it, Nub resolves it the same way at runtime. No `tsconfig-paths` package, no build step.
 
 ```ts
-// tsconfig.json paths alias — works with no extra tooling
+// tsconfig.json paths alias
 import { db } from "@db";
 
-// extensionless — resolves ./config.ts
+// extensionless, resolves ./config.ts
 import { config } from "./config";
 
-// .js→.ts swap — resolves ./handler.ts when no .js exists on disk
+// .js→.ts swap, resolves ./handler.ts when no .js exists on disk
 import { handler } from "./handler.js";
 ```
 
-If your editor's Go-to-Definition works on an import and `tsc` accepts it, Nub resolves it the same way at runtime — no `tsconfig-paths` package, no build step. Nub handles only the cases Node does not define: `tsconfig.json` path aliases, extensionless imports in TypeScript files, the `.js`→`.ts` emit-convention swap, and subpaths into dependencies that declare no `exports`. Everything else — package names, `exports` / `imports` maps, export conditions — falls through to Node unchanged.
+Everything else goes to Node's own resolver unchanged: package names, `exports` and `imports` maps, export conditions, and every subpath into a dependency that declares `exports`.
 
-## `tsconfig.json`
+## Settings from `tsconfig.json`
 
-Nub reads your nearest `tsconfig.json` and applies its resolution settings at runtime — `paths`, `baseUrl`, `extends` — matching what your editor and `tsc` already do.
+Nub reads your nearest `tsconfig.json` and applies `paths`, `baseUrl`, and `extends` at runtime.
 
 ### `paths`
 
-The `compilerOptions.paths` and `compilerOptions.baseUrl` mappings resolve `@/...`-style aliases.
+The `compilerOptions.paths` mappings resolve `@/...`-style aliases, from any importing file, `.js` included.
 
 ```json title="tsconfig.json"
 {
@@ -43,13 +43,11 @@ import { db } from "@db";
 import { Button } from "@/components/Button";
 ```
 
-Matching follows the `tsc` rules: an exact pattern wins outright, and among wildcard patterns the longest matching prefix wins. Node builtins always take precedence — `import "os"` is `node:os`, never `baseUrl/os.ts`.
+Matching follows the `tsc` rules: an exact pattern wins, then the longest matching wildcard prefix. Node builtins always win, so `import "os"` is `node:os`, never `baseUrl/os.ts`.
 
 <Callout>
 Read the [full docs](https://www.typescriptlang.org/tsconfig/paths.html) for `paths` on typescriptlang.org.
 </Callout>
-
-Path aliases work from any file, not just TypeScript ones — a `.js` file that imports a `paths` alias resolves it too. (The relative extensionless and `.js`→`.ts` behaviors below are the ones scoped to TypeScript-family parents.)
 
 ### `baseUrl`
 
@@ -60,104 +58,79 @@ With `baseUrl` set and no matching `paths` entry, a bare specifier resolves rela
 ```
 
 ```ts
-import { config } from "lib/config";   // resolves <baseUrl>/lib/config.ts
+import { config } from "lib/config";   // <baseUrl>/lib/config.ts
+import { z } from "zod";               // no <baseUrl>/zod: node_modules
 ```
-
-A bare specifier with no `baseUrl`-relative file on disk falls through to Node's node_modules resolution.
 
 ### `extends`
 
-Nub walks up to the nearest `tsconfig.json` and follows `extends` chains, including array `extends` (later entries win) and package extends like `extends: "@tsconfig/node20/tsconfig.json"` resolved through node_modules. The TS 5.5 `${configDir}` template is interpolated against the consuming config's directory.
+Nub follows `extends` chains as `tsc` does, including array `extends`, configs from packages such as `@tsconfig/node20/tsconfig.json`, and the `${configDir}` template.
 
-Configs are read once per process. Edit your `tsconfig.json` and restart the process, or run under [`nub watch`](/docs/watch), which restarts it.
+Configs are read once per process. After editing `tsconfig.json`, restart the process, or run under [`nub watch`](/docs/watch), which restarts it for you.
 
 ## Extensionless imports
 
-In TypeScript-family files, extensionless imports resolve the way `tsc` resolves them — `import "./foo"` finds `./foo.ts`.
+In TypeScript files, a relative import without an extension resolves the way `tsc` resolves it.
 
 ```ts
-// from a .ts / .tsx / .mts / .cts file:
-import { config } from "./config";   // resolves ./config.ts
-// resolves ./fixtures/index.ts (or its package.json "main")
-import data from "./fixtures";
+// from a .ts / .tsx / .mts / .cts file
+import { config } from "./config";   // ./config.ts
+import data from "./fixtures";       // ./fixtures/index.ts, or "main"
 ```
 
-The probe order is extension-aware — it depends on the parent file's extension:
+The probe order depends on the importing file's extension:
 
 ```text
 .ts  parent →  .ts  .tsx  .js  .jsx  .json
-.tsx parent →  .tsx  .ts  .jsx  .js  .json   # JSX extensions sort first
+.tsx parent →  .tsx  .ts  .jsx  .js  .json
 .mts parent →  .mts  .ts  .mjs  .js  .json
 .cts parent →  .cts  .ts  .cjs  .js  .json
 ```
 
-A directory import honors the directory's `package.json` `"main"` before falling back to probing `index.<ext>` in that same parent-aware order. Only `"main"` is consulted — `exports` is never read for a directory-path import, matching Node, which honors `exports` only for package-name resolution.
+A directory import reads the directory's `package.json` `"main"` first, then probes `index` in the same order. A plain `.js` file still needs relative extensions, as under Node.
 
-This probing is scoped to TypeScript-family parent files (`.ts` / `.tsx` / `.mts` / `.cts`) with a relative specifier. A plain `.js` file requires relative extensions, as under Node. Subpaths into a dependency are covered below and follow a different rule.
+## Extension swap
 
-## Package subpaths
-
-A subpath into a dependency gets the same probing, so an extensionless import finds the file on disk and a workspace package whose `main` points at TypeScript source resolves by subpath too.
-
-```ts
-// finds node_modules/prismjs/components/prism-python.js
-import "prismjs/components/prism-python";
-
-// a workspace package with "main": "./index.ts" and no exports map
-// resolves packages/lib/prompt.ts
-import { createPrompt } from "@repo/lib/prompt";
-```
-
-The order here is fixed, and unlike relative imports it does not vary with the importing file's extension:
-
-```text
-.js  .json  .ts  .tsx
-```
-
-JavaScript sorts first because a published package's `.ts` is unshipped source that Nub does not transpile inside node_modules. A workspace package symlinked into node_modules ships no `.js`, so the probe reaches its TypeScript.
-
-Subpath probing applies from any importing file, `.js` included.
-
-A subpath naming a directory resolves that directory's `index` file, the way a `require` of the same subpath already does:
-
-```ts
-import { parse } from "qs/lib";   // resolves qs/lib/index.js
-```
-
-Nub's probe consults only `index`; a directory's own `package.json` `main` is left to Node's resolver.
-
-<Callout>A dependency that declares `exports` is never probed; its map alone decides what is reachable, as on Node.</Callout>
-
-## .js → .ts resolution
-
-With `moduleResolution: "nodenext"`, `tsc` requires a `.js` extension even though the file on disk is `.ts`, so Nub maps the written `.js` back to the `.ts` on disk.
+With `moduleResolution: "nodenext"`, `tsc` requires a `.js` extension on an import of a `.ts` file. Nub maps the written `.js` to the `.ts` on disk.
 
 ```ts
 // resolves ./handler.ts when no ./handler.js exists
 import { handler } from "./handler.js";
 
-// and across a package subpath, into a workspace package built from TS
+// also across a package subpath into a TypeScript workspace package
 import { createPrompt } from "@repo/lib/prompt.js";
 ```
 
-The swap only fires when the written extension points at a file that doesn't exist. The same rewrite covers `.jsx → .tsx`, `.mjs → .mts`, and `.cjs → .cts`, and likewise a real `.cjs` wins over a sibling `.cts`.
+The swap only applies when the written file does not exist. It also maps `.jsx` to `.tsx`, `.mjs` to `.mts`, and `.cjs` to `.cts`.
 
-## Node's resolver
+## Package subpaths
 
-Node's own resolver handles everything else, unchanged:
+A subpath into a dependency without an `exports` map is probed too, from any importing file. An extensionless subpath finds the file on disk, and a workspace package whose `main` points at TypeScript resolves by subpath.
 
-- package names
-- `exports` / `imports` maps
-- export conditions
-- every subpath into a dependency that declares `exports`
+```ts
+// node_modules/prismjs/components/prism-python.js
+import "prismjs/components/prism-python";
 
-<Callout>
-Read the [full docs](https://nodejs.org/api/packages.html) for package entry points and conditions on nodejs.org.
-</Callout>
+// a workspace package with "main": "./index.ts": packages/lib/prompt.ts
+import { createPrompt } from "@repo/lib/prompt";
 
-## Adding export conditions
+// a directory subpath: qs/lib/index.js
+import { parse } from "qs/lib";
+```
 
-Add your own in a [nub.jsonc](/docs/config#conditions) and every run in the project resolves against them.
+The probe order is fixed for subpaths:
+
+```text
+.js  .json  .ts  .tsx
+```
+
+JavaScript comes first because Nub does not transpile inside `node_modules`, where a published package's `.ts` files are unshipped source. A symlinked workspace package ships no `.js`, so the probe reaches its TypeScript.
+
+<Callout>A dependency that declares `exports` is never probed. Its map alone decides what is reachable, as on Node.</Callout>
+
+## Export conditions
+
+Add your own conditions in a [nub.jsonc](/docs/config#conditions), and every resolution in the project matches against them, a bare-specifier [preload](/docs/config#preload) included.
 
 ```jsonc title="nub.jsonc"
 {
@@ -177,11 +150,13 @@ Add your own in a [nub.jsonc](/docs/config#conditions) and every run in the proj
 }
 ```
 
-Every resolution in the project matches against them, a bare-specifier [preload](/docs/config#preload) included.
+<Callout>
+Read the [full docs](https://nodejs.org/api/packages.html) for package entry points and conditions on nodejs.org.
+</Callout>
 
-### The Nub condition
+## The `nub` condition
 
-The Nub CLI matches a `nub` condition on every run it augments, so a package that publishes a branch for it resolves there. It works the same way as the `bun` and `deno` conditions those runtimes set.
+The Nub CLI matches a `nub` condition on every run it augments, so a package that publishes a branch for it resolves there. It works like the `bun` and `deno` conditions those runtimes set.
 
 ```json title="node_modules/example/package.json"
 {
@@ -194,29 +169,20 @@ The Nub CLI matches a `nub` condition on every run it augments, so a package tha
 }
 ```
 
-Point the branch at JavaScript. Files inside `node_modules` are [never transpiled](/docs/runtime/typescript), so a TypeScript target fails to load under Nub.
+Point the branch at JavaScript. Files inside `node_modules` are [never transpiled](/docs/runtime/typescript#plain-javascript), so a TypeScript target fails to load.
 
-Two runs do not match it. Passing `--node` runs with Node's own conditions and nothing else, and the standalone [runner](https://www.npmjs.com/package/@nubjs/runner) leaves Node's condition set alone so a file resolves the same way under it as under tsx. Both fall through to `default`.
+A run under `--node` does not match the condition, and neither does the standalone [runner](https://www.npmjs.com/package/@nubjs/runner), so a file resolves the same way under it as under tsx. Both fall through to `default`.
 
 ## Yarn Plug'n'Play
 
-Nub enables Plug'n'Play automatically. Walking up from the working directory, it detects a `.pnp.cjs` at the project root and injects it ahead of its own preload (`--require .pnp.cjs` on the fast tier, the `NODE_OPTIONS` equivalent on the compat tier), so PnP's resolver patches install first and Nub's TypeScript resolution layers on top.
+Nub enables Plug'n'Play automatically. It detects a `.pnp.cjs` at the project root and loads it ahead of its own preload, so PnP resolution works for file runs, `nub run`, and `nubx`.
 
 ```bash
 nub index.ts        # .pnp.cjs is detected and loaded automatically
 nub run build       # same for run scripts and nubx
 ```
 
-Both `require` and `import` resolve under PnP, by different paths:
-
-| Module system | Resolved by |
-|---|---|
-| CommonJS (`require`) | PnP's own `_resolveFilename` patch, installed by the injected `--require .pnp.cjs` |
-| ESM (`import`) | Nub's resolve hook calling `pnpapi.resolveRequest` — honoring import conditions (a dual package picks its `import` build) and tagging the format (zip-stored pure-ESM loads as ESM) |
-
-Nub doesn't register Yarn's `.pnp.loader.mjs` (its ESM resolver collides with the fast tier's `module.registerHooks`), so the same `pnpapi.resolveRequest` path serves both tiers.
-
-Zip-stored packages resolve too — `import` from a `.yarn/cache` zip, and `nubx` running a zip-stored binary. This is the runtime *running* a PnP project; Nub does not produce a PnP install. Package `extends` chains resolve through the node_modules walk rather than the PnP API, which covers the npm and pnpm installs where that form appears.
+Both `require` and `import` resolve under PnP, including packages stored as zips in `.yarn/cache`. Nub runs a PnP project; it does not produce a PnP install.
 
 <Callout>
 Read the [full docs](https://yarnpkg.com/features/pnp) for Plug'n'Play on yarnpkg.com.

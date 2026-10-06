@@ -58,7 +58,7 @@
 //! audited for exactness and must be corrected in place, never silently dropped.
 //! NOTE the site sync is MANUAL — nothing programmatic consumes this table for
 //! copy, so an edit to a row requires a matching pass over site/content (the
-//! Modern APIs tables) by hand.
+//! Modern APIs page) by hand.
 //!
 //! ## How to add a feature
 //!
@@ -628,20 +628,20 @@ static FEATURES: &[Feature] = &[
         evidence: "native on Node 24+",
     },
     // ── Promise.try ─────────────────────────────────────────────────────────
-    // Native on Node 24+; polyfilled on 22.x.
+    // Native on Node 23+; polyfilled below.
     Feature {
         name: "Promise.try",
         mitigations: &[
             (
-                band((18, 19, 0), Some((24, 0, 0))),
+                band((18, 19, 0), Some((23, 0, 0))),
                 Mitigation::Polyfill {
                     runtime_file: "polyfills.cjs",
                     global: "Promise.try",
                 },
             ),
-            (band((24, 0, 0), None), Mitigation::Native),
+            (band((23, 0, 0), None), Mitigation::Native),
         ],
-        evidence: "native on Node 24+",
+        evidence: "native on Node 23+ (typeof probe on 22.23.2 vs 23.0.0)",
     },
     // ── Stage 3+ library surfaces ───────────────────────────────────────────
     // union is the detect anchor for all SEVEN set methods (union/intersection/
@@ -789,20 +789,20 @@ static FEATURES: &[Feature] = &[
     // same stale-floor premise as Promise.withResolvers below; bands are measured,
     // not read off release notes.
     //
-    // URL.parse is the awkward one: Node backported it to 20.19 but the 21.x line
-    // never got it, so the row has a HOLE — native on 20.19-20.x, absent again
+    // URL.parse is the awkward one: Node backported it to 20.18 but the 21.x line
+    // never got it, so the row has a HOLE — native on 20.18-20.x, absent again
     // across all of 21.x, native from 22.1. Same shape as the eventsource 21.x hole.
     Feature {
         name: "URL.parse",
         mitigations: &[
             (
-                band((18, 19, 0), Some((20, 19, 0))),
+                band((18, 19, 0), Some((20, 18, 0))),
                 Mitigation::Polyfill {
                     runtime_file: "polyfills.cjs",
                     global: "URL.parse",
                 },
             ),
-            (band((20, 19, 0), Some((21, 0, 0))), Mitigation::Native),
+            (band((20, 18, 0), Some((21, 0, 0))), Mitigation::Native),
             (
                 band((21, 0, 0), Some((22, 1, 0))),
                 Mitigation::Polyfill {
@@ -812,7 +812,7 @@ static FEATURES: &[Feature] = &[
             ),
             (band((22, 1, 0), None), Mitigation::Native),
         ],
-        evidence: "Stage 4; native 22.1 and backported to 20.19; the 21.x line never got it",
+        evidence: "Stage 4; native 22.1 and backported to 20.18.0 (#52280); the 21.x line never got it",
     },
     // isWellFormed/toWellFormed ship together; isWellFormed is the detect anchor.
     Feature {
@@ -890,18 +890,21 @@ static FEATURES: &[Feature] = &[
         ],
         evidence: "Stage 4 (resizable ArrayBuffer / transfer); native on Node 21+",
     },
-    // Stage 3, in no Node. A micro-architectural hint, so a validate-and-return
-    // implementation is fully faithful — the spec lets an implementation do nothing.
+    // A micro-architectural hint, so a validate-and-return implementation is
+    // fully faithful — the spec lets an implementation do nothing.
     Feature {
         name: "Atomics.pause",
-        mitigations: &[(
-            band((18, 19, 0), None),
-            Mitigation::Polyfill {
-                runtime_file: "polyfills.cjs",
-                global: "Atomics.pause",
-            },
-        )],
-        evidence: "TC39 Stage 3 (proposal-atomics-microwait); absent on every Node through 26.5",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((24, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "polyfills.cjs",
+                    global: "Atomics.pause",
+                },
+            ),
+            (band((24, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "TC39 proposal-atomics-microwait; native on Node 24+ (typeof probe on 23.11.1 vs 24.0.0)",
     },
     // ── Promise.withResolvers ───────────────────────────────────────────────
     // TC39 Stage 4 / ES2024; native on Node 22+, absent on the 18.19–21.x compat
@@ -1037,20 +1040,23 @@ static FEATURES: &[Feature] = &[
         evidence: "TC39 Stage 4 (Explicit Resource Management); native on Node 24+",
     },
     // ── Temporal ────────────────────────────────────────────────────────────
-    // Not shipped by ANY Node version, so polyfilled across the whole floor — but
+    // Native on Node 26+, polyfilled below it — but
     // installed as a LAZY global by the preload entry (A37: the polyfill is ~18ms
     // to load, so it is deferred behind a getter), NOT eagerly in polyfills.cjs.
     // The feature-detect lives in preload-common.cjs (`installTemporalLazyGlobal`).
     Feature {
         name: "Temporal",
-        mitigations: &[(
-            band((18, 19, 0), None),
-            Mitigation::Polyfill {
-                runtime_file: "preload-common.cjs",
-                global: "globalThis.Temporal",
-            },
-        )],
-        evidence: "TC39 proposal; not in any Node through 26; lazy global (A37)",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((26, 0, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "preload-common.cjs",
+                    global: "globalThis.Temporal",
+                },
+            ),
+            (band((26, 0, 0), None), Mitigation::Native),
+        ],
+        evidence: "TC39 Stage 4; native on Node 26+ (typeof probe on 25.9.0 vs 26.0.0); lazy global (A37)",
     },
     // ── Worker (browser-shape global) ───────────────────────────────────────
     // The browser-shape `Worker` global is not shipped by any Node version (Node

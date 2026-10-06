@@ -3,33 +3,23 @@ title: Corepack-style shims
 description: Optional shims for bare package-manager commands. Install them and a bare pnpm, npm, or yarn command routes through Nub to the package manager your project pins, with no extra Node process in front.
 ---
 
-Default Nub usage needs no shims: `nub install`, `nub add`, and `nub run` already provision and run the pinned package manager. The shims are for typing the manager directly — bare `pnpm install`, `npm ci`, `yarn add` — and still routing through Nub. One command turns that on.
+Default Nub usage needs no shims, because `nub install`, `nub add`, and `nub run` already run the pinned package manager. The shims route a bare `pnpm`, `npm`, or `yarn` command through Nub too, whether you type it or a tool you don't control invokes it.
 
 <ShimDemo />
 
-After `nub pm shim`, bare `pnpm` resolves to a shim — a hardlink to the Nub binary. The shims live in `$XDG_DATA_HOME/nub/shims` when that variable is set, `%LOCALAPPDATA%\nub\shims` on Windows, and `~/.local/share/nub/shims` otherwise. On a cold cache, `pnpm --version` (or any pinned-PM command) provisions the pinned pnpm, then dispatches to it in-process under the project's Node. The dim `pnpm@9.5.0 (via nub shim)` line names the manager and version it ran; it prints on stderr on every dispatch, so piped stdout stays clean.
+Each shim is a hardlink to the Nub binary, so no Node process starts in front of the package manager. On a cold cache the first command provisions the pinned version, then runs it in-process under the project's Node. The dim `(via nub shim)` line names the manager and version, and goes to stderr so piped stdout stays clean.
 
-To remove the shims, `nub pm unshim` deletes the shim directory and strips the PATH block, restoring the previous `pnpm`.
+The shims live in the first of these directories:
 
-```console
-$ nub pm unshim
-nub pm unshim: removed /Users/you/.local/share/nub/shims
-  PATH: removed the shims block from /Users/you/.zshrc
-```
+- `$XDG_DATA_HOME/nub/shims` — when that variable is set
+- `%LOCALAPPDATA%\nub\shims` — Windows
+- `~/.local/share/nub/shims`
 
-## Shims vs the pin
-
-Two separate steps. The pin lives in `package.json`: `nub pm use pnpm` writes the `packageManager` field (and a `devEngines.packageManager` range) and aligns the lockfile, setting which manager the project uses. It does not touch your PATH or install any shim.
-
-With a pin set, `nub install` already runs the right pnpm. The shims are the separate opt-in that makes the *bare* `pnpm` command — typed at a shell, or invoked by a tool you don't control — route through Nub too.
-
-## Per-invocation overhead
-
-A shim runs before every command, so its overhead matters. A corepack-style shim is a Node script (`#!/usr/bin/env node`), so invoking it boots the Node interpreter to read your pin and load the manager before any install work begins. The Nub shim is a hardlink to the native binary: the process that resolves the pin and dispatches is the one already running — no extra interpreter in front of the package manager.
+The shims do not choose the manager; the `packageManager` pin in `package.json` does. Set it with [`nub pm use`](/docs/pm#nub-pm-use), which never touches your PATH.
 
 ## Strict by default
 
-In a pinned project, a shim refuses to run a *different* package manager — which would produce a competing lockfile and `node_modules`. Bare `yarn add react` in a pnpm-pinned project exits nonzero and names what to run instead:
+In a pinned project, a shim refuses to run a different package manager, which would write a competing lockfile and `node_modules`. The error names the command to run instead:
 
 ```console
 $ yarn add react   # ❌ wrong package manager for this project
@@ -45,29 +35,56 @@ and node_modules.
                 or remove the shims: nub pm unshim
 ```
 
-Runner commands fall through to the system tool whatever the pin — `npx`, `pnpx`, and the `init` / `create` / `dlx` / `exec` verbs — so `npm create vite` works in a pnpm project. A package manager spawned by a running install — a lifecycle script shelling out to a different one — also falls through, so an install you never typed directly isn't broken.
+Runner commands fall through to the system tool whatever the pin, so `npm create vite` works in a pnpm project:
+
+- The `npx` and `pnpx` commands
+- The `init`, `create`, `dlx`, and `exec` verbs of every manager
+
+A package manager that a lifecycle script spawns during an install also falls through.
+
+## Missing system manager
+
+An unpinned command falls through to the system manager. When there is none, as on a fresh machine or in a minimal container, the shim runs a default instead: the version family the committed lockfile implies, or the registry `latest` without one. It names the choice on stderr and writes no pin.
+
+A resolved `latest` is remembered for 24 hours, and the last resolved version is reused when the registry is unreachable.
 
 ## Running npm installs on Nub's engine
 
-The shims run the package manager the project pins. One opt-in changes that for the two npm verbs an install pipeline runs:
+One opt-in routes npm's two install verbs to Nub's engine instead of the pinned npm:
 
 ```sh
-nub pm shim --route-installs
+nub pm shim --route-installs      # turn routing on
+nub pm shim --no-route-installs   # turn it off, keep the shims
 ```
 
-With the marker set, a bare `npm ci` in a project with a `package-lock.json` runs `nub ci`, and a bare `npm install` runs `nub install`, both on Nub's engine and from the same lockfile. The notice on stderr names the swap:
+With routing on, a bare `npm ci` in a project with a `package-lock.json` runs `nub ci`, and a bare `npm install` runs `nub install`, from the same lockfile:
 
 ```console
 $ npm ci
 npm ci → nub ci (via nub shim)
 ```
 
-The rest of npm is untouched. Everything else runs the real npm with the argv as typed: `npm test`, `npm run`, `npx`, `npm publish`, a global install, an install that names a package, and an install with a flag Nub does not translate (`--legacy-peer-deps`, `--workspace`, `--prefix`, `--no-package-lock`). So does an `npm install` a lifecycle script spawns under a running install. Translated flags: `--ignore-scripts`, `--omit=dev` (also `--production` and `NODE_ENV=production`), `--omit=optional`, and `--include`, which wins over `--omit` in either order as it does for npm; `--no-audit`, `--no-fund`, `--prefer-offline`, and the log-level and progress flags are accepted and ignored.
+Every other npm command runs the real npm with the argv as typed. For the two install verbs, the input decides:
 
-A routed install runs every lifecycle script, as npm does, under the `node` on PATH: the install itself consults no Node pin and provisions nothing. It hands the scripts `NODE_ENV=production` exactly when dev dependencies are omitted. An `ignore-scripts=true` in the project or user `.npmrc`, or `npm_config_ignore_scripts` in the environment, is honored, and `--ignore-scripts=false` on the command line outranks it. The default trust list still applies to `nub install` typed directly.
+| npm input | Routed install |
+| --- | --- |
+| `--ignore-scripts` | Translated |
+| `--omit=dev`, `--production`, `NODE_ENV=production` | Translated |
+| `--omit=optional` | Translated |
+| `--include` | Translated; wins over `--omit` in either order, as in npm |
+| `--no-audit`, `--no-fund`, `--prefer-offline`, log-level and progress flags | Accepted and ignored |
+| `--legacy-peer-deps`, `--workspace`, `--prefix`, `--no-package-lock` | Not routed; runs the real npm |
+| A named package, a global install | Not routed; runs the real npm |
+| An `npm install` spawned by a lifecycle script during an install | Not routed; runs the real npm |
 
-`nub pm shim --no-route-installs` turns the routing off and keeps the shims; `nub pm unshim` removes both.
+A routed install runs every lifecycle script, as npm does, under the `node` on PATH. It consults no Node pin and provisions nothing, and it hands the scripts `NODE_ENV=production` exactly when dev dependencies are omitted. An `ignore-scripts=true` in the project or user `.npmrc`, or `npm_config_ignore_scripts` in the environment, is honored, and `--ignore-scripts=false` on the command line outranks it.
 
-## Missing system manager
+## Removing the shims
 
-An unpinned invocation falls through to the system manager. When there is none — a fresh machine, a minimal container — the shim runs a dynamic default instead of failing: the version family the committed lockfile implies, or the registry `latest` when there is no lockfile. It announces the choice on stderr and writes no pin. The `latest` resolution is remembered for 24 hours, so repeat invocations dispatch with no registry round-trip, and when the registry is unreachable the last resolved version keeps working.
+The `nub pm unshim` command deletes the shim directory and the PATH block, restoring the previous `pnpm`. It also removes install routing.
+
+```console
+$ nub pm unshim
+nub pm unshim: removed /Users/you/.local/share/nub/shims
+  PATH: removed the shims block from /Users/you/.zshrc
+```
