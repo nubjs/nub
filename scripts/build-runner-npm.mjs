@@ -2,9 +2,8 @@
 //
 // The `@nubjs/runner` package ships a curated slice of runtime/ verbatim — the
 // `nubr` command and the preload entrypoints, plus the shared resolve/transpile
-// machinery (transform-core and friends) — laid out FLAT at the package root so
-// every relative require works
-// unchanged. This script copies that slice into npm/runner/ and, when a built
+// machinery (transform-core and friends). This script preserves relative paths
+// when it copies that slice into npm/runner/ and, when a built
 // addon is present (or --addon points at one), places it in the current
 // platform's npm/runner-<platform>/ package. Release CI runs it once per
 // platform leg; locally it stages whatever the dev tree has built.
@@ -35,6 +34,10 @@ const RUNTIME_FILES = [
   "transform-core.mjs",
   "preload-common.cjs",
   "preload-async-hooks.mjs",
+  "util/rate.cjs",
+  "util/debounce.cjs",
+  "util/throttle.cjs",
+  "util/internals.cjs",
   "pnp-util.cjs",
   "floor-builtin.mjs",
   "cache-evict.mjs",
@@ -58,7 +61,9 @@ for (const f of RUNTIME_FILES) {
     console.error(`missing runtime file: ${src}`);
     process.exit(1);
   }
-  cpSync(src, join(runnerDir, f));
+  const dest = join(runnerDir, f);
+  mkdirSync(dirname(dest), { recursive: true });
+  cpSync(src, dest);
 }
 cpSync(join(repo, "LICENSE"), join(runnerDir, "LICENSE"));
 console.log(`staged ${RUNTIME_FILES.length} runtime files into npm/runner/`);
