@@ -51,9 +51,11 @@ fn open_lock(global_virtual_store: &Path) -> miette::Result<std::fs::File> {
         )
     })?;
     let path = global_virtual_store.join(LOCK_FILE);
+    // NFS shared locks require read access; pruning's exclusive locks require write access.
     std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
+        .read(true)
         .write(true)
         .open(&path)
         .map_err(|e| {
@@ -481,6 +483,25 @@ fn registry_error(path: &Path, error: std::io::Error) -> miette::Report {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registry_lock_supports_read_and_write_without_truncation() {
+        use std::io::{Read, Write};
+
+        let tmp = tempfile::tempdir().expect("tempdir should be created");
+        let path = tmp.path().join(LOCK_FILE);
+        std::fs::write(&path, b"existing lock").expect("lock file should be created");
+        let mut file = open_lock(tmp.path()).expect("lock file should open");
+        let mut content = String::new();
+        file.read_to_string(&mut content)
+            .expect("shared NFS locks require read access");
+        assert_eq!(
+            content, "existing lock",
+            "opening must not truncate the lock"
+        );
+        file.write_all(b" marker")
+            .expect("exclusive NFS locks require write access");
+    }
 
     #[test]
     fn prune_keeps_registered_and_removes_historical_entries() {
