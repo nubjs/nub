@@ -1601,14 +1601,18 @@ jobs:
       - name: Install site deps (for github-slugger)
         run: pnpm install --frozen-lockfile
         working-directory: site
-      # node 24 strips the script's erasable TS types natively — no build step.
-      - name: Validate internal docs links & anchors
-        run: node scripts/check-docs-links.ts
-      # A fenced line wider than its rendered column gives the page a horizontal
-      # scrollbar. `next build` does not care, so this is the only gate for it.
-      - name: Check fenced code-block width
-        run: node scripts/lint-code-line-length.mjs
-        working-directory: site
+      # These scans are read-only and independent once the shared site deps exist.
+      - parallel:
+          # node 24 strips the script's erasable TS types natively — no build step.
+          - name: Validate internal docs links & anchors
+            run: node scripts/check-docs-links.ts
+          # A fenced line wider than its rendered column gives the page a horizontal
+          # scrollbar. `next build` does not care, so this is the only gate for it.
+          - name: Check fenced code-block width
+            run: node scripts/lint-code-line-length.mjs
+            working-directory: site
+      - name: Wait for documentation checks
+        wait-all: true
 
   site-build:
     name: Site build
