@@ -1,0 +1,99 @@
+{
+  "name": "react",
+  "versions": {
+    "18.3.1": {
+      "name": "react",
+      "version": "18.3.1",
+      "keywords": [
+        "react"
+      ],
+      "license": "MIT",
+      "_id": "react@18.3.1",
+      "maintainers": [
+        {
+          "name": "gnoff",
+          "email": "jcs.gnoff@gmail.com"
+        },
+        {
+          "name": "fb",
+          "email": "opensource+npm@fb.com"
+        },
+        {
+          "name": "sophiebits",
+          "email": "npm@sophiebits.com"
+        },
+        {
+          "name": "react-bot",
+          "email": "react-core@meta.com"
+        }
+      ],
+      "homepage": "https://reactjs.org/",
+      "bugs": {
+        "url": "https://github.com/facebook/react/issues"
+      },
+      "dist": {
+        "shasum": "49ab892009c53933625bd16b2533fc754cab2891",
+        "tarball": "http://localhost:4874/react/-/react-18.3.1.tgz",
+        "fileCount": 20,
+        "integrity": "sha512-wS+hAgJShR0KhEvPJArfuPVN1+Hz1t0Y6n5jLrGQbkb4urgPE/0Rve+1kMB1v/oWgHgm4WIcV+i7F2pTVj+2iQ==",
+        "signatures": [
+          {
+            "sig": "MEYCIQD4bKnxwSChEiNXzYZhC0iktGYAxTQK0lT0AU53l29tQwIhAI9uXiqQy53jgncvM8p62DhArQf2fAINw4uzOgxat0xP",
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+          }
+        ],
+        "unpackedSize": 318101
+      },
+      "main": "index.js",
+      "engines": {
+        "node": ">=0.10.0"
+      },
+      "exports": {
+        ".": {
+          "default": "./index.js",
+          "react-server": "./react.shared-subset.js"
+        },
+        "./jsx-runtime": "./jsx-runtime.js",
+        "./package.json": "./package.json",
+        "./jsx-dev-runtime": "./jsx-dev-runtime.js"
+      },
+      "gitHead": "a87edf62d7d69705ddbcec9a24f0780b3db7535f",
+      "_npmUser": {
+        "name": "react-bot",
+        "email": "react-core@meta.com"
+      },
+      "browserify": {
+        "transform": [
+          "loose-envify"
+        ]
+      },
+      "repository": {
+        "url": "git+https://github.com/facebook/react.git",
+        "type": "git",
+        "directory": "packages/react"
+      },
+      "_npmVersion": "10.5.0",
+      "description": "React is a JavaScript library for building user interfaces.",
+      "directories": {},
+      "_nodeVersion": "18.20.0",
+      "dependencies": {
+        "loose-envify": "^1.1.0"
+      },
+      "_hasShrinkwrap": false,
+      "_npmOperationalInternal": {
+        "tmp": "tmp/react_18.3.1_1714149746245_0.9248363663866765",
+        "host": "s3://npm-registry-packages"
+      }
+    }
+  },
+  "time": {
+    "created": "2011-10-26T17:46:21.942Z",
+    "modified": "2026-08-14T17:35:11.448Z",
+    "18.3.1": "2024-04-26T16:42:26.496Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "18.3.1"
+  }
+}

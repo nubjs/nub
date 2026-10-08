@@ -1,0 +1,128 @@
+{
+  "name": "debug",
+  "versions": {
+    "4.4.3": {
+      "name": "debug",
+      "version": "4.4.3",
+      "repository": {
+        "type": "git",
+        "url": "git://github.com/debug-js/debug.git"
+      },
+      "description": "Lightweight debugging utility for Node.js and the browser",
+      "keywords": [
+        "debug",
+        "log",
+        "debugger"
+      ],
+      "author": {
+        "name": "Josh Junon",
+        "url": "https://github.com/qix-"
+      },
+      "contributors": [
+        {
+          "name": "TJ Holowaychuk",
+          "email": "tj@vision-media.ca"
+        },
+        {
+          "name": "Nathan Rajlich",
+          "email": "nathan@tootallnate.net",
+          "url": "http://n8.io"
+        },
+        {
+          "name": "Andrew Rhyne",
+          "email": "rhyneandrew@gmail.com"
+        }
+      ],
+      "license": "MIT",
+      "scripts": {
+        "lint": "xo",
+        "test": "npm run test:node && npm run test:browser && npm run lint",
+        "test:node": "mocha test.js test.node.js",
+        "test:browser": "karma start --single-run",
+        "test:coverage": "cat ./coverage/lcov.info | coveralls"
+      },
+      "dependencies": {
+        "ms": "^2.1.3"
+      },
+      "devDependencies": {
+        "brfs": "^2.0.1",
+        "browserify": "^16.2.3",
+        "coveralls": "^3.0.2",
+        "karma": "^3.1.4",
+        "karma-browserify": "^6.0.0",
+        "karma-chrome-launcher": "^2.2.0",
+        "karma-mocha": "^1.3.0",
+        "mocha": "^5.2.0",
+        "mocha-lcov-reporter": "^1.2.0",
+        "sinon": "^14.0.0",
+        "xo": "^0.23.0"
+      },
+      "peerDependenciesMeta": {
+        "supports-color": {
+          "optional": true
+        }
+      },
+      "main": "./src/index.js",
+      "browser": "./src/browser.js",
+      "engines": {
+        "node": ">=6.0"
+      },
+      "xo": {
+        "rules": {
+          "import/extensions": "off"
+        }
+      },
+      "_id": "debug@4.4.3",
+      "gitHead": "6b2c5fbdb7d414483d9e306ef234acb4cd7ea67c",
+      "bugs": {
+        "url": "https://github.com/debug-js/debug/issues"
+      },
+      "homepage": "https://github.com/debug-js/debug#readme",
+      "_nodeVersion": "22.15.0",
+      "_npmVersion": "10.9.2",
+      "dist": {
+        "integrity": "sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA==",
+        "shasum": "c6ae432d9bd9662582fce08709b038c58e9e3d6a",
+        "tarball": "http://localhost:4874/debug/-/debug-4.4.3.tgz",
+        "fileCount": 7,
+        "unpackedSize": 42793,
+        "signatures": [
+          {
+            "keyid": "SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U",
+            "sig": "MEQCICInafSZ+sajZhfNPQj8Qh6jqz8p8TN8EukVSyY1yMj+AiAptzBLrvHsI3+t0d+QToir6keiBEy9LngkCOpDUm81uA=="
+          }
+        ]
+      },
+      "_npmUser": {
+        "name": "qix",
+        "email": "npm@josh.junon.me"
+      },
+      "directories": {},
+      "maintainers": [
+        {
+          "name": "qix",
+          "email": "npm@josh.junon.me"
+        },
+        {
+          "name": "tootallnate",
+          "email": "nathan@tootallnate.net"
+        }
+      ],
+      "_npmOperationalInternal": {
+        "host": "s3://npm-registry-packages-npm-production",
+        "tmp": "tmp/debug_4.4.3_1757784319517_0.5445999490016855"
+      },
+      "_hasShrinkwrap": false
+    }
+  },
+  "time": {
+    "created": "2011-11-29T01:11:23.618Z",
+    "modified": "2025-09-13T17:25:19.913Z",
+    "4.4.3": "2025-09-13T17:25:19.732Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "4.4.3"
+  }
+}

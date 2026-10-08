@@ -1,0 +1,99 @@
+{
+  "name": "@babel/code-frame",
+  "versions": {
+    "7.29.7": {
+      "name": "@babel/code-frame",
+      "version": "7.29.7",
+      "author": "The Babel Team (https://babel.dev/team)",
+      "license": "MIT",
+      "_id": "@babel/code-frame@7.29.7",
+      "maintainers": [
+        {
+          "name": "hzoo",
+          "email": "hi@henryzoo.com"
+        },
+        {
+          "name": "existentialism",
+          "email": "bng412@gmail.com"
+        },
+        {
+          "name": "nicolo-ribaudo",
+          "email": "nicolo.ribaudo@gmail.com"
+        },
+        {
+          "name": "jlhwung",
+          "email": "jlhwung@gmail.com"
+        }
+      ],
+      "homepage": "https://babel.dev/docs/en/next/babel-code-frame",
+      "bugs": "https://github.com/babel/babel/issues?utf8=%E2%9C%93&q=is%3Aissue+is%3Aopen",
+      "dist": {
+        "shasum": "f2fbbfea87c44a21590ec515b778b2c26d8866e7",
+        "tarball": "http://localhost:4874/@babel/code-frame/-/@babel/code-frame-7.29.7.tgz",
+        "fileCount": 5,
+        "integrity": "sha512-Aup7aUOfpbAUg2ROOJN6Iw5f9DMBlzu0mIkm/malLQFN/YQgO48wCj0Kxa3sEHJvPVFg7siR+qRInwXd2qhQKw==",
+        "signatures": [
+          {
+            "sig": "MEQCIHU9VDPzlBCJwXlOkYlp2BfF9m6CyZfFQhZFFJsIpEY/AiAQMEoVzDcSXu+thQWnUS392BZCfK6mKtq42jNLVGafuw==",
+            "keyid": "SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U"
+          }
+        ],
+        "attestations": {
+          "url": "https://registry.npmjs.org/-/npm/v1/attestations/@babel%2fcode-frame@7.29.7",
+          "provenance": {
+            "predicateType": "https://slsa.dev/provenance/v1"
+          }
+        },
+        "unpackedSize": 34632
+      },
+      "main": "./lib/index.js",
+      "type": "commonjs",
+      "engines": {
+        "node": ">=6.9.0"
+      },
+      "_npmUser": {
+        "name": "GitHub Actions",
+        "email": "npm-oidc-no-reply@github.com",
+        "trustedPublisher": {
+          "id": "github",
+          "oidcConfigId": "oidc:8f45378a-d953-4dff-96dc-dc77da57f198"
+        }
+      },
+      "repository": {
+        "url": "https://github.com/babel/babel.git",
+        "type": "git",
+        "directory": "packages/babel-code-frame"
+      },
+      "description": "Generate errors that contain a code frame that point to source locations.",
+      "directories": {},
+      "dependencies": {
+        "js-tokens": "^4.0.0",
+        "picocolors": "^1.1.1",
+        "@babel/helper-validator-identifier": "^7.29.7"
+      },
+      "publishConfig": {
+        "access": "public"
+      },
+      "_hasShrinkwrap": false,
+      "devDependencies": {
+        "charcodes": "^0.2.0",
+        "strip-ansi": "^4.0.0",
+        "import-meta-resolve": "^4.1.0"
+      },
+      "_npmOperationalInternal": {
+        "tmp": "tmp/code-frame_7.29.7_1779707738077_0.36919419301808465",
+        "host": "s3://npm-registry-packages-npm-production"
+      }
+    }
+  },
+  "time": {
+    "created": "2017-10-30T18:34:05.205Z",
+    "modified": "2026-06-16T13:57:37.882Z",
+    "7.29.7": "2026-05-25T11:15:38.208Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "7.29.7"
+  }
+}

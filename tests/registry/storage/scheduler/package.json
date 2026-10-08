@@ -1,0 +1,87 @@
+{
+  "name": "scheduler",
+  "versions": {
+    "0.23.2": {
+      "name": "scheduler",
+      "version": "0.23.2",
+      "keywords": [
+        "react"
+      ],
+      "license": "MIT",
+      "_id": "scheduler@0.23.2",
+      "maintainers": [
+        {
+          "name": "gnoff",
+          "email": "jcs.gnoff@gmail.com"
+        },
+        {
+          "name": "fb",
+          "email": "opensource+npm@fb.com"
+        },
+        {
+          "name": "sophiebits",
+          "email": "npm@sophiebits.com"
+        },
+        {
+          "name": "react-bot",
+          "email": "react-core@meta.com"
+        }
+      ],
+      "homepage": "https://reactjs.org/",
+      "bugs": {
+        "url": "https://github.com/facebook/react/issues"
+      },
+      "dist": {
+        "shasum": "414ba64a3b282892e944cf2108ecc078d115cdc3",
+        "tarball": "http://localhost:4874/scheduler/-/scheduler-0.23.2.tgz",
+        "fileCount": 17,
+        "integrity": "sha512-UOShsPwz7NrMUqhR6t0hWjFduvOzbtv7toDH1/hIrfRNIDBnnBWd0CwJTGvTpngVlmwGCdP9/Zl/tVrDqcuYzQ==",
+        "signatures": [
+          {
+            "sig": "MEQCIHmjHRBcPwZvAcsyuaBQqQW5cEsumK0soBy0P/8j+an9AiBUt6d43C5LVFg3fAD10bP8LZAtJ0kI/nY7twdFehhpLw==",
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+          }
+        ],
+        "unpackedSize": 93383
+      },
+      "main": "index.js",
+      "gitHead": "a87edf62d7d69705ddbcec9a24f0780b3db7535f",
+      "_npmUser": {
+        "name": "react-bot",
+        "email": "react-core@meta.com"
+      },
+      "browserify": {
+        "transform": [
+          "loose-envify"
+        ]
+      },
+      "repository": {
+        "url": "git+https://github.com/facebook/react.git",
+        "type": "git",
+        "directory": "packages/scheduler"
+      },
+      "_npmVersion": "10.5.0",
+      "description": "Cooperative scheduler for the browser environment.",
+      "directories": {},
+      "_nodeVersion": "18.20.0",
+      "dependencies": {
+        "loose-envify": "^1.1.0"
+      },
+      "_hasShrinkwrap": false,
+      "_npmOperationalInternal": {
+        "tmp": "tmp/scheduler_0.23.2_1714149942264_0.027629921682904568",
+        "host": "s3://npm-registry-packages"
+      }
+    }
+  },
+  "time": {
+    "created": "2011-01-11T11:22:36.888Z",
+    "modified": "2026-08-14T17:35:29.069Z",
+    "0.23.2": "2024-04-26T16:45:42.436Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "0.23.2"
+  }
+}

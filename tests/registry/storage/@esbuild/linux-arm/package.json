@@ -1,0 +1,76 @@
+{
+  "name": "@esbuild/linux-arm",
+  "versions": {
+    "0.21.5": {
+      "name": "@esbuild/linux-arm",
+      "version": "0.21.5",
+      "license": "MIT",
+      "_id": "@esbuild/linux-arm@0.21.5",
+      "maintainers": [
+        {
+          "name": "evanw",
+          "email": "evan.exe@gmail.com"
+        },
+        {
+          "name": "esbuild",
+          "email": "evan.exe+esbuild@gmail.com"
+        }
+      ],
+      "homepage": "https://github.com/evanw/esbuild#readme",
+      "bugs": {
+        "url": "https://github.com/evanw/esbuild/issues"
+      },
+      "os": [
+        "linux"
+      ],
+      "cpu": [
+        "arm"
+      ],
+      "dist": {
+        "shasum": "fc6fd11a8aca56c1f6f3894f2bea0479f8f626b9",
+        "tarball": "http://localhost:4874/@esbuild/linux-arm/-/@esbuild/linux-arm-0.21.5.tgz",
+        "fileCount": 3,
+        "integrity": "sha512-bPb5AHZtbeNGjCKVZ9UGqGwo8EUu4cLq68E95A53KlxAPRmUyYv2D6F0uUI65XisGOL1hBP5mTronbgo+0bFcA==",
+        "signatures": [
+          {
+            "sig": "MEQCIGo7ERM4LkjrySSXEVvlqdB0q8qnpxtWydbBL66l9cFRAiBmE3Qjiwtwpm70nMxgpJpup3UNfZqpypt5cP/NgV39YA==",
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+          }
+        ],
+        "unpackedSize": 9306619
+      },
+      "engines": {
+        "node": ">=12"
+      },
+      "gitHead": "fc37c2fa9de2ad77476a6d4a8f1516196b90187e",
+      "_npmUser": {
+        "name": "evanw",
+        "email": "evan.exe@gmail.com"
+      },
+      "repository": {
+        "url": "git+https://github.com/evanw/esbuild.git",
+        "type": "git"
+      },
+      "_npmVersion": "10.5.1",
+      "description": "The Linux ARM binary for esbuild, a JavaScript bundler.",
+      "directories": {},
+      "_nodeVersion": "22.0.0",
+      "_hasShrinkwrap": false,
+      "preferUnplugged": true,
+      "_npmOperationalInternal": {
+        "tmp": "tmp/linux-arm_0.21.5_1717967832795_0.7908159969943724",
+        "host": "s3://npm-registry-packages"
+      }
+    }
+  },
+  "time": {
+    "created": "2022-12-05T23:45:22.028Z",
+    "modified": "2026-08-08T19:59:05.375Z",
+    "0.21.5": "2024-06-09T21:17:13.044Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "0.21.5"
+  }
+}

@@ -1,0 +1,84 @@
+{
+  "name": "js-tokens",
+  "versions": {
+    "4.0.0": {
+      "name": "js-tokens",
+      "version": "4.0.0",
+      "keywords": [
+        "JavaScript",
+        "js",
+        "token",
+        "tokenize",
+        "regex"
+      ],
+      "author": {
+        "name": "Simon Lydell"
+      },
+      "license": "MIT",
+      "_id": "js-tokens@4.0.0",
+      "maintainers": [
+        {
+          "name": "lydell",
+          "email": "simon.lydell@gmail.com"
+        }
+      ],
+      "homepage": "https://github.com/lydell/js-tokens#readme",
+      "bugs": {
+        "url": "https://github.com/lydell/js-tokens/issues"
+      },
+      "dist": {
+        "shasum": "19203fb59991df98e3a287050d4647cdeaf32499",
+        "tarball": "http://localhost:4874/js-tokens/-/js-tokens-4.0.0.tgz",
+        "integrity": "sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==",
+        "signatures": [
+          {
+            "sig": "MEUCIHTFYsC9RMPKFuD2Ff2bRCSWNb36hIt4dZfUv4vusrrOAiEAp3qTBJDVdCmqIySFXqJpqfON89dldxEoM1XZQXYkKkg=",
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+          }
+        ]
+      },
+      "files": [
+        "index.js"
+      ],
+      "gitHead": "0eb6e9daee32160ab0fca979b6dc91a1991b720c",
+      "scripts": {
+        "dev": "npm run build && npm test",
+        "test": "mocha --ui tdd",
+        "build": "node generate-index.js",
+        "esprima-compare": "node esprima-compare ./index.js everything.js/es5.js"
+      },
+      "_npmUser": {
+        "name": "lydell",
+        "email": "simon.lydell@gmail.com"
+      },
+      "repository": {
+        "url": "git+https://github.com/lydell/js-tokens.git",
+        "type": "git"
+      },
+      "_npmVersion": "5.6.0",
+      "description": "A regex that tokenizes JavaScript.",
+      "directories": {},
+      "_nodeVersion": "8.9.4",
+      "devDependencies": {
+        "mocha": "5.0.0",
+        "esprima": "4.0.0",
+        "coffeescript": "2.1.1",
+        "everything.js": "1.0.3"
+      },
+      "_npmOperationalInternal": {
+        "tmp": "tmp/js-tokens-4.0.0.tgz_1517140737182_0.3507722308859229",
+        "host": "s3://npm-registry-packages"
+      }
+    }
+  },
+  "time": {
+    "created": "2014-03-08T22:30:50.672Z",
+    "modified": "2025-12-08T21:09:55.633Z",
+    "4.0.0": "2018-01-28T11:58:58.170Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "4.0.0"
+  }
+}

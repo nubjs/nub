@@ -1,0 +1,138 @@
+{
+  "name": "@esbuild/win32-x64",
+  "versions": {
+    "0.21.5": {
+      "name": "@esbuild/win32-x64",
+      "version": "0.21.5",
+      "license": "MIT",
+      "_id": "@esbuild/win32-x64@0.21.5",
+      "maintainers": [
+        {
+          "name": "evanw",
+          "email": "evan.exe@gmail.com"
+        },
+        {
+          "name": "esbuild",
+          "email": "evan.exe+esbuild@gmail.com"
+        }
+      ],
+      "homepage": "https://github.com/evanw/esbuild#readme",
+      "bugs": {
+        "url": "https://github.com/evanw/esbuild/issues"
+      },
+      "os": [
+        "win32"
+      ],
+      "cpu": [
+        "x64"
+      ],
+      "dist": {
+        "shasum": "acad351d582d157bb145535db2a6ff53dd514b5c",
+        "tarball": "http://localhost:4874/@esbuild/win32-x64/-/@esbuild/win32-x64-0.21.5.tgz",
+        "fileCount": 3,
+        "integrity": "sha512-tQd/1efJuzPC6rCFwEvLtci/xNFcTZknmXs98FYDfGE4wP9ClFV98nyKrzJKVPMhdDnjzLhdUyMX4PsQAPjwIw==",
+        "signatures": [
+          {
+            "sig": "MEUCIGzbo9qCJMyjtNOa7usL73UQNWJjnXxdy/iCPWn8KMZWAiEAuJ1dlQCAeKYk98ablrtmKpm8CBezvhzXWRaQKif5crM=",
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+          }
+        ],
+        "unpackedSize": 9914373
+      },
+      "engines": {
+        "node": ">=12"
+      },
+      "gitHead": "fc37c2fa9de2ad77476a6d4a8f1516196b90187e",
+      "_npmUser": {
+        "name": "evanw",
+        "email": "evan.exe@gmail.com"
+      },
+      "repository": {
+        "url": "git+https://github.com/evanw/esbuild.git",
+        "type": "git"
+      },
+      "_npmVersion": "10.5.1",
+      "description": "The Windows 64-bit binary for esbuild, a JavaScript bundler.",
+      "directories": {},
+      "_nodeVersion": "22.0.0",
+      "_hasShrinkwrap": false,
+      "preferUnplugged": true,
+      "_npmOperationalInternal": {
+        "tmp": "tmp/win32-x64_0.21.5_1717967803253_0.9524844189276784",
+        "host": "s3://npm-registry-packages"
+      }
+    },
+    "0.25.0": {
+      "name": "@esbuild/win32-x64",
+      "version": "0.25.0",
+      "license": "MIT",
+      "_id": "@esbuild/win32-x64@0.25.0",
+      "maintainers": [
+        {
+          "name": "evanw",
+          "email": "evan.exe@gmail.com"
+        },
+        {
+          "name": "esbuild",
+          "email": "evan.exe+esbuild@gmail.com"
+        }
+      ],
+      "homepage": "https://github.com/evanw/esbuild#readme",
+      "bugs": {
+        "url": "https://github.com/evanw/esbuild/issues"
+      },
+      "os": [
+        "win32"
+      ],
+      "cpu": [
+        "x64"
+      ],
+      "dist": {
+        "shasum": "c8e119a30a7c8d60b9d2e22d2073722dde3b710b",
+        "tarball": "http://localhost:4874/@esbuild/win32-x64/-/@esbuild/win32-x64-0.25.0.tgz",
+        "fileCount": 3,
+        "integrity": "sha512-ZENoHJBxA20C2zFzh6AI4fT6RraMzjYw4xKWemRTRmRVtN9c5DcH9r/f2ihEkMjOW5eGgrwCslG/+Y/3bL+DHQ==",
+        "signatures": [
+          {
+            "sig": "MEUCIQC98RzU5EryGOoMwAqa7Hy+dm++/b1Ggep0QMLUmZh6eAIgXS38Ori1gDZXBUEaBpJ5oyzbwdQKXEQSadmjR8vAJcY=",
+            "keyid": "SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U"
+          }
+        ],
+        "unpackedSize": 10497541
+      },
+      "engines": {
+        "node": ">=18"
+      },
+      "gitHead": "e9174d671b1882758cd32ac5e146200f5bee3e45",
+      "_npmUser": {
+        "name": "evanw",
+        "email": "evan.exe@gmail.com"
+      },
+      "repository": {
+        "url": "git+https://github.com/evanw/esbuild.git",
+        "type": "git"
+      },
+      "_npmVersion": "10.5.1",
+      "description": "The Windows 64-bit binary for esbuild, a JavaScript bundler.",
+      "directories": {},
+      "_nodeVersion": "22.0.0",
+      "_hasShrinkwrap": false,
+      "preferUnplugged": true,
+      "_npmOperationalInternal": {
+        "tmp": "tmp/win32-x64_0.25.0_1738983709545_0.7292347300605284",
+        "host": "s3://npm-registry-packages-npm-production"
+      }
+    }
+  },
+  "time": {
+    "created": "2022-12-06T00:00:28.917Z",
+    "modified": "2026-08-08T20:00:43.827Z",
+    "0.21.5": "2024-06-09T21:16:43.519Z",
+    "0.25.0": "2025-02-08T03:01:49.786Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "0.25.0"
+  }
+}

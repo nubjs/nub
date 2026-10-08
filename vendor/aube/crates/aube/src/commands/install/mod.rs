@@ -1323,7 +1323,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         is_workspace_project,
         lockfile_pre_parse: lockfile_pre_parse.as_ref(),
         revalidate_release_policy,
-        effective_package_extensions_checksum,
+        effective_package_extensions_checksum: effective_package_extensions_checksum.clone(),
     })?;
 
     // Deprecation messages from freshly-resolved packages. Only the
@@ -1742,6 +1742,23 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 };
             let read_package_hook: Option<Box<dyn aube_resolver::ReadPackageHook>> =
                 read_package_host.map(|h| Box::new(h) as Box<dyn aube_resolver::ReadPackageHook>);
+            // Signal packageExtensions drift to the resolver so it skips
+            // lockfile reuse for extension-targeted packages (forcing a fresh
+            // fetch + extension application). Without this, an edited
+            // extension's injected dep silently misses on a warm re-resolve
+            // that reuses the stale locked subgraph.
+            let dependency_policy_for_resolver = dependency_policy
+                .clone()
+                .with_package_extensions_drifted(match &lockfile_pre_parse {
+                    Some((g, _)) => !matches!(
+                        resolve::package_extensions_drift(
+                            g,
+                            effective_package_extensions_checksum.as_deref(),
+                        ),
+                        aube_lockfile::DriftStatus::Fresh
+                    ),
+                    None => false,
+                });
             let mut resolver = configure_resolver(
                 resolver,
                 &cwd,
@@ -1758,6 +1775,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                     // just to be discarded.
                     target_lockfile_kind: lockfile_enabled.then_some(write_kind),
                     dependency_policy: dependency_policy.clone(),
+
                     cache_full_packuments: true,
                     ignore_scripts: opts.ignore_scripts,
                 },

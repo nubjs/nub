@@ -1,0 +1,98 @@
+{
+  "name": "@babel/helper-validator-identifier",
+  "versions": {
+    "7.29.7": {
+      "name": "@babel/helper-validator-identifier",
+      "version": "7.29.7",
+      "author": "The Babel Team (https://babel.dev/team)",
+      "license": "MIT",
+      "_id": "@babel/helper-validator-identifier@7.29.7",
+      "maintainers": [
+        {
+          "name": "hzoo",
+          "email": "hi@henryzoo.com"
+        },
+        {
+          "name": "existentialism",
+          "email": "bng412@gmail.com"
+        },
+        {
+          "name": "nicolo-ribaudo",
+          "email": "nicolo.ribaudo@gmail.com"
+        },
+        {
+          "name": "jlhwung",
+          "email": "jlhwung@gmail.com"
+        }
+      ],
+      "dist": {
+        "shasum": "bd87084ced0c796ec46bda492de6e83d29e89fc2",
+        "tarball": "http://localhost:4874/@babel/helper-validator-identifier/-/@babel/helper-validator-identifier-7.29.7.tgz",
+        "fileCount": 9,
+        "integrity": "sha512-qehxGkRj55h/ff8EMaJ+cYhyaKlHIxqYDn682wQD7RNp9UujOQsHog2uS0r2vzr4pW+sXf90NeeayjcNaX3fFg==",
+        "signatures": [
+          {
+            "sig": "MEUCIGBdBB4QfZ/SflJYFVxueO7K2HuqiQfnp8Hbi4YVtTMxAiEA5R+HMWqQPOQp0RG9sAYDC9I2FlOnlfmVi6TNV8Yk6eM=",
+            "keyid": "SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U"
+          }
+        ],
+        "attestations": {
+          "url": "https://registry.npmjs.org/-/npm/v1/attestations/@babel%2fhelper-validator-identifier@7.29.7",
+          "provenance": {
+            "predicateType": "https://slsa.dev/provenance/v1"
+          }
+        },
+        "unpackedSize": 48813
+      },
+      "main": "./lib/index.js",
+      "type": "commonjs",
+      "engines": {
+        "node": ">=6.9.0"
+      },
+      "exports": {
+        ".": {
+          "types": "./lib/index.d.ts",
+          "default": "./lib/index.js"
+        },
+        "./package.json": "./package.json"
+      },
+      "_npmUser": {
+        "name": "GitHub Actions",
+        "email": "npm-oidc-no-reply@github.com",
+        "trustedPublisher": {
+          "id": "github",
+          "oidcConfigId": "oidc:a14d44f5-9ab2-4bc8-a9bb-046a1425e63c"
+        }
+      },
+      "repository": {
+        "url": "https://github.com/babel/babel.git",
+        "type": "git",
+        "directory": "packages/babel-helper-validator-identifier"
+      },
+      "description": "Validate identifier/keywords name",
+      "directories": {},
+      "publishConfig": {
+        "access": "public"
+      },
+      "_hasShrinkwrap": false,
+      "devDependencies": {
+        "charcodes": "^0.2.0",
+        "@unicode/unicode-17.0.0": "^1.6.10"
+      },
+      "_npmOperationalInternal": {
+        "tmp": "tmp/helper-validator-identifier_7.29.7_1779707731399_0.5548765856816935",
+        "host": "s3://npm-registry-packages-npm-production"
+      }
+    }
+  },
+  "time": {
+    "created": "2020-03-20T15:39:13.517Z",
+    "modified": "2026-07-09T08:49:41.064Z",
+    "7.29.7": "2026-05-25T11:15:31.539Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "7.29.7"
+  }
+}

@@ -1,0 +1,24 @@
+# Verdaccio config for nub integration tests.
+#
+# Serves entirely from ./storage — no uplinks, no proxy. The storage dir
+# is committed to the repo with pre-seeded tarballs and packuments, so
+# the test suite runs without any network access to npmjs.org.
+#
+# Every package seeded into this registry is checked against the Socket.dev
+# malware API (SocketSdk.checkMalware) before being committed. See
+# check-safety.mts for the safety check + scan.mts for the re-scan-on-update.
+#
+# To add a new package to the fixture set:
+#
+#   1. Run: node tests/registry/seed.mts <pkg>@<version>
+#      (seed.mts downloads from npm, checks against Socket, seeds the storage)
+#   2. Commit the new files under tests/registry/storage/.
+#   3. Run: node tests/registry/scan.mts
+#      (re-scans all storage entries against the Socket malware API)
+
+storage: ./storage
+
+packages:
+  '**':
+    access: $all
+    publish: $all

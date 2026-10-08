@@ -1,0 +1,95 @@
+{
+  "name": "@types/semver",
+  "versions": {
+    "7.5.0": {
+      "name": "@types/semver",
+      "version": "7.5.0",
+      "license": "MIT",
+      "_id": "@types/semver@7.5.0",
+      "maintainers": [
+        {
+          "name": "types",
+          "email": "ts-npm-types@microsoft.com"
+        }
+      ],
+      "contributors": [
+        {
+          "url": "https://github.com/Bartvds",
+          "name": "Bart van der Schoor",
+          "githubUsername": "Bartvds"
+        },
+        {
+          "url": "https://github.com/BendingBender",
+          "name": "BendingBender",
+          "githubUsername": "BendingBender"
+        },
+        {
+          "url": "https://github.com/LucianBuzzo",
+          "name": "Lucian Buzzo",
+          "githubUsername": "LucianBuzzo"
+        },
+        {
+          "url": "https://github.com/ajafff",
+          "name": "Klaus Meinhardt",
+          "githubUsername": "ajafff"
+        },
+        {
+          "url": "https://github.com/ExE-Boss",
+          "name": "ExE Boss",
+          "githubUsername": "ExE-Boss"
+        },
+        {
+          "url": "https://github.com/peterblazejewicz",
+          "name": "Piotr Błażejewicz",
+          "githubUsername": "peterblazejewicz"
+        }
+      ],
+      "homepage": "https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/semver",
+      "dist": {
+        "shasum": "591c1ce3a702c45ee15f47a42ade72c2fd78978a",
+        "tarball": "http://localhost:4874/@types/semver/-/@types/semver-7.5.0.tgz",
+        "fileCount": 49,
+        "integrity": "sha512-G8hZ6XJiHnuhQKR7ZmysCeJWE08o8T0AXtk5darsCaTVsYZhhgUrq53jizaR2FvsoeCwJhlmwTjkXBY5Pn/ZHw==",
+        "signatures": [
+          {
+            "sig": "MEUCIQDvspNtDpHKPuFigPCxljr5dd/JjQR/UkfmPRUcsXehWAIgSIyRyxmsEreORUjQzojqbQGGPTrE/cwlklIlqIs1edI=",
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+          }
+        ],
+        "unpackedSize": 23724
+      },
+      "main": "",
+      "types": "index.d.ts",
+      "scripts": {},
+      "_npmUser": {
+        "name": "types",
+        "email": "ts-npm-types@microsoft.com"
+      },
+      "repository": {
+        "url": "https://github.com/DefinitelyTyped/DefinitelyTyped.git",
+        "type": "git",
+        "directory": "types/semver"
+      },
+      "description": "TypeScript definitions for semver",
+      "directories": {},
+      "dependencies": {},
+      "_hasShrinkwrap": false,
+      "typeScriptVersion": "4.3",
+      "_npmOperationalInternal": {
+        "tmp": "tmp/semver_7.5.0_1683572596059_0.7908315671322592",
+        "host": "s3://npm-registry-packages"
+      },
+      "typesPublisherContentHash": "a1ae8c1d9f9371bb1030d232fd0c118ad40215d3dd62afb98c7d6f15678c60de"
+    }
+  },
+  "time": {
+    "created": "2016-05-17T18:54:10.714Z",
+    "modified": "2026-08-02T08:01:52.287Z",
+    "7.5.0": "2023-05-08T19:03:16.235Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "7.5.0"
+  }
+}

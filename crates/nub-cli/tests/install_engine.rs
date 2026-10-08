@@ -35,17 +35,54 @@ fn pm_tmpdir(tag: &str) -> PathBuf {
     dir
 }
 
+/// The Verdaccio offline test registry URL (set by `tests/registry/start.bash`
+/// via `NUB_TEST_REGISTRY`). When set, tests run against the pre-seeded
+/// offline registry instead of registry.npmjs.org.
+fn test_registry() -> Option<String> {
+    std::env::var("NUB_TEST_REGISTRY")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+/// Point a `Command` at the offline Verdaccio registry when
+/// `NUB_TEST_REGISTRY` is set: writes a project `.npmrc` + bypasses any
+/// inherited HTTP_PROXY for localhost (reqwest honors NO_PROXY, without
+/// which a fleet proxy intercepts the loopback request and returns 405).
+/// No-op when the env var is unset, so non-Verdaccio runs are unchanged.
+fn apply_test_registry(cmd: &mut Command, dir: &Path) {
+    if let Some(registry) = test_registry() {
+        // Merge the registry line into any existing .npmrc rather than
+        // overwriting it: the release-age test pre-writes `minimum-release-age`
+        // and depends on both settings being present at spawn time.
+        let npmrc = dir.join(".npmrc");
+        let existing = std::fs::read_to_string(&npmrc).unwrap_or_default();
+        if !existing
+            .lines()
+            .any(|l| l.trim_start().starts_with("registry="))
+        {
+            let prefix = if existing.is_empty() || existing.ends_with('\n') {
+                ""
+            } else {
+                "\n"
+            };
+            std::fs::write(&npmrc, format!("{existing}{prefix}registry={registry}\n")).unwrap();
+        }
+        cmd.env("NO_PROXY", "localhost,127.0.0.1")
+            .env("no_proxy", "localhost,127.0.0.1");
+    }
+}
+
 /// Spawn `nub <args>` in `dir` with the aube store/cache isolated to fresh
 /// temp roots (XDG_DATA_HOME carries the CAS store, XDG_CACHE_HOME the
 /// packument cache) so tests never warm-hit the dev box's real store.
 fn run_install(dir: &Path, args: &[&str]) -> (String, String, i32) {
-    let out = Command::new(nub_binary())
-        .args(args)
+    let mut cmd = Command::new(nub_binary());
+    cmd.args(args)
         .current_dir(dir)
         .env("XDG_DATA_HOME", pm_tmpdir("xdg-data"))
-        .env("XDG_CACHE_HOME", pm_tmpdir("xdg-cache"))
-        .output()
-        .expect("failed to spawn nub");
+        .env("XDG_CACHE_HOME", pm_tmpdir("xdg-cache"));
+    apply_test_registry(&mut cmd, dir);
+    let out = cmd.output().expect("failed to spawn nub");
     (
         String::from_utf8_lossy(&out.stdout).to_string(),
         String::from_utf8_lossy(&out.stderr).to_string(),
@@ -56,14 +93,14 @@ fn run_install(dir: &Path, args: &[&str]) -> (String, String, i32) {
 /// Like [`run_install`], but with `CI=true` in the environment so the
 /// install hits nub's CI-aware frozen-mode auto-default.
 fn run_install_ci(dir: &Path, args: &[&str]) -> (String, String, i32) {
-    let out = Command::new(nub_binary())
-        .args(args)
+    let mut cmd = Command::new(nub_binary());
+    cmd.args(args)
         .current_dir(dir)
         .env("CI", "true")
         .env("XDG_DATA_HOME", pm_tmpdir("xdg-data"))
-        .env("XDG_CACHE_HOME", pm_tmpdir("xdg-cache"))
-        .output()
-        .expect("failed to spawn nub");
+        .env("XDG_CACHE_HOME", pm_tmpdir("xdg-cache"));
+    apply_test_registry(&mut cmd, dir);
+    let out = cmd.output().expect("failed to spawn nub");
     (
         String::from_utf8_lossy(&out.stdout).to_string(),
         String::from_utf8_lossy(&out.stderr).to_string(),
@@ -71,17 +108,10 @@ fn run_install_ci(dir: &Path, args: &[&str]) -> (String, String, i32) {
     )
 }
 
-/// Offline guard for the `#[ignore]` network tests: true when the registry
-/// answers a TCP connect within 3s.
+/// Offline guard for the `#[ignore]` network tests: true when the offline
+/// Verdaccio test registry is available (`NUB_TEST_REGISTRY` set).
 fn registry_reachable() -> bool {
-    use std::net::{TcpStream, ToSocketAddrs};
-    "registry.npmjs.org:443"
-        .to_socket_addrs()
-        .ok()
-        .and_then(|mut addrs| addrs.next())
-        .is_some_and(|addr| {
-            TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(3)).is_ok()
-        })
+    test_registry().is_some()
 }
 
 #[test]
@@ -147,7 +177,6 @@ fn install_dir_initializes_one_project_snapshot_from_final_cwd() {
 /// `packageManager` / `devEngines` into `package.json`: that exclusivity claim
 /// is reserved for the explicit `nub pm use nub` command.
 #[test]
-#[ignore = "network: resolves + fetches is-positive@3.1.0 from the npm registry"]
 fn install_truly_fresh_project_claims_nub_identity() {
     if !registry_reachable() {
         eprintln!("skipping: registry.npmjs.org unreachable");
@@ -238,7 +267,6 @@ fn install_truly_fresh_project_claims_nub_identity() {
 /// that the default is NOT empty — so a regression that silences the default,
 /// or one that fails to silence `--silent`, both fail.
 #[test]
-#[ignore = "network: resolves + fetches is-positive@3.1.0 from the npm registry"]
 fn install_silent_flag_suppresses_all_nonerror_output() {
     if !registry_reachable() {
         eprintln!("skipping: registry.npmjs.org unreachable");
@@ -291,7 +319,6 @@ fn install_silent_flag_suppresses_all_nonerror_output() {
 /// the lockfile and merely rewrote the new settings hash while `--force`
 /// correctly failed the same pinned version under the hard age gate.
 #[test]
-#[ignore = "network: resolves is-number@7 and revalidates its publish time"]
 fn release_age_policy_drift_bare_install_matches_force_validation() {
     if !registry_reachable() {
         eprintln!("skipping: registry.npmjs.org unreachable");
@@ -310,16 +337,16 @@ fn release_age_policy_drift_bare_install_matches_force_validation() {
     std::fs::write(dir.join(".npmrc"), "minimum-release-age=0\n").unwrap();
 
     let run = |args: &[&str]| {
-        Command::new(nub_binary())
-            .args(args)
+        let mut cmd = Command::new(nub_binary());
+        cmd.args(args)
             .current_dir(&dir)
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))
             .env("XDG_DATA_HOME", &data)
             .env("XDG_CACHE_HOME", &cache)
-            .env_remove("CI")
-            .output()
-            .expect("run release-age install")
+            .env_remove("CI");
+        apply_test_registry(&mut cmd, &dir);
+        cmd.output().expect("run release-age install")
     };
 
     let baseline = run(&["install"]);
@@ -442,7 +469,6 @@ fn per_verb_reporter_overrides_pre_verb_silent() {
 /// truly-fresh project: nub stays pnpm-shaped — writes `pnpm-lock.yaml` and
 /// does NOT stamp the manifest.
 #[test]
-#[ignore = "network: resolves + fetches is-positive@3.1.0 from the npm registry"]
 fn install_with_pnpm_workspace_stays_pnpm_shaped_no_stamp() {
     if !registry_reachable() {
         eprintln!("skipping: registry.npmjs.org unreachable");
@@ -1004,13 +1030,13 @@ fn install_links_yarn_workspace_member_into_consumer() {
 /// warm-satisfied loop, unlike [`run_install`] which isolates a fresh store
 /// per call.
 fn run_install_in_store(dir: &Path, store: &Path, cache: &Path, args: &[&str]) -> (String, i32) {
-    let out = Command::new(nub_binary())
-        .args(args)
+    let mut cmd = Command::new(nub_binary());
+    cmd.args(args)
         .current_dir(dir)
         .env("XDG_DATA_HOME", store)
-        .env("XDG_CACHE_HOME", cache)
-        .output()
-        .expect("failed to spawn nub");
+        .env("XDG_CACHE_HOME", cache);
+    apply_test_registry(&mut cmd, dir);
+    let out = cmd.output().expect("failed to spawn nub");
     (
         String::from_utf8_lossy(&out.stderr).to_string(),
         out.status.code().unwrap_or(-1),
@@ -1028,7 +1054,6 @@ fn run_install_in_store(dir: &Path, store: &Path, cache: &Path, args: &[&str]) -
 /// still trips the gate) is covered by
 /// `cold_install_with_trust_downgrade_still_aborts`.
 #[test]
-#[ignore = "network: resolves + fetches is-positive@3.1.0 from the npm registry"]
 fn warm_satisfied_install_short_circuits_under_no_downgrade() {
     if !registry_reachable() {
         eprintln!("skipping: registry.npmjs.org unreachable");
