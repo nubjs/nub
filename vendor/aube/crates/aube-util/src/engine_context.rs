@@ -397,11 +397,12 @@ pub struct EngineContext {
     /// [`embedder_overrides`]: Self::embedder_overrides
     pub embedder_package_extensions: Option<BTreeMap<String, serde_json::Value>>,
 
-    /// Bundled ecosystem `packageExtensions` defaults an embedder supplies,
-    /// applied as the LOWEST-precedence layer on top of the user/project
-    /// extensions. Additive only — `apply_package_extensions` uses
+    /// Bundled ecosystem `packageExtensions` defaults (Yarn ∪ pnpm ∪
+    /// nub-phantom) an embedder supplies, applied as the LOWEST-precedence
+    /// layer on top of the user/project extensions. Additive only — `apply_package_extensions` uses
     /// `extend_missing`, so a dependency a package already declares is never
     /// overwritten, and user extensions (parsed first in
+
     /// `resolve_dependency_policy`) win per-key over bundled ones.
     ///
     /// Deliberately SEPARATE from [`embedder_package_extensions`]: that seam

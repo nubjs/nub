@@ -24,6 +24,9 @@ path = "src/lib.rs"
 nub-phantom-core = { path = "../nub-phantom-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Used by the `emit-extensions` bin's dedup matcher (selector → name+range
+# against a scanned version), mirroring aube-resolver's `package_selector_matches`.
+node-semver = "2"
 
 [lints]
 workspace = true

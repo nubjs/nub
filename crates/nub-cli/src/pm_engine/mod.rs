@@ -1409,6 +1409,21 @@ fn apply_config_scope(
         c.embedder_overrides = Some(effective);
         c.trusted_dependencies_honored = trusted;
         c.embedder_package_extensions = Some(effective_pe);
+        // Bundled ecosystem defaults (Yarn ∪ pnpm ∪ nub-phantom), applied as
+        // the lowest-precedence packageExtensions layer. Role-gated to the
+        // identities that apply packageExtensions at all - nub identity and
+        // pnpm compat - so npm/yarn-classic/bun compat installs mirror the
+        // incumbent (which applies no curated extension list) instead of gaining
+        // resolve edges it would not. (Yarn Berry applies @yarnpkg/extensions
+        // by default via @yarnpkg/plugin-compat; the Yarn role doesn't
+        // currently split classic vs Berry, so Berry compat is a follow-up.)
+        // Kept out of the checksum by reading them through
+        // the separate `bundled_package_extensions` seam.
+        let mut bundled = c.bundled_package_extensions.take().unwrap_or_default();
+        if matches!(role, config_scope::Role::Nub | config_scope::Role::Pnpm) {
+            bundled.extend(bundled_package_extensions_defaults());
+        }
+        c.bundled_package_extensions = (!bundled.is_empty()).then_some(bundled);
     });
 
     if noise == ConfigScopeNoise::Warn {
@@ -1445,6 +1460,29 @@ fn apply_config_scope(
         }
     }
     Ok(())
+}
+
+/// Bundled ecosystem `packageExtensions` defaults (Yarn ∪ pnpm ∪
+/// nub-phantom), vendored at `vendor/package-extensions/unified.json` and
+/// kept fresh by `scripts/sync-package-extensions.ts`. Applied as the
+/// lowest-precedence layer in aube's `resolve_dependency_policy` (user
+/// extensions win per-key via `extend_missing`'s first-write-wins), and
+/// deliberately excluded from the lockfile `packageExtensionsChecksum` by
+/// flowing through the separate `bundled_package_extensions` seam.
+///
+/// A parse failure is non-fatal: the bundled file is committed and
+/// compile-time-`include_str!`'d, so corruption would be a bad commit, not
+/// a runtime input — warn and install with no bundled defaults rather than
+/// abort an install over data the user never authored.
+fn bundled_package_extensions_defaults() -> std::collections::BTreeMap<String, serde_json::Value> {
+    const BUNDLED: &str = include_str!("../../../../vendor/package-extensions/unified.json");
+    match serde_json::from_str(BUNDLED) {
+        Ok(map) => map,
+        Err(err) => {
+            tracing::warn!("ignoring unparseable bundled package-extensions defaults: {err}");
+            std::collections::BTreeMap::new()
+        }
+    }
 }
 
 /// Does the active PM honor `catalog:` specifiers? pnpm@9+, bun@1.2+, and
@@ -5497,5 +5535,158 @@ mod tests {
             "busybox-w32 up-cases environment names, so `$npm_package_name` in a lifecycle \
              body expands to nothing unless the spawn re-binds the lowercase names"
         );
+    }
+
+    // The bundled ecosystem defaults (Yarn ∪ pnpm ∪ nub-phantom) must load
+    // from the vendored `vendor/package-extensions/unified.json` and parse
+    // into the selector -> body map aube consumes. This guards the
+    // `include_str!` path and the data's correctness: the map is non-empty,
+    // carries the pnpm-specific `@angular/build@*` entry, and carries the
+    // Yarn `gatsby-core-utils@<2.14.0-next.1` entry with BOTH `got` and
+    // `@babel/runtime` — the latter checks the sync script's deep-merge of
+    // @yarnpkg/extensions' one duplicate selector (last-wins would drop
+    // `@babel/runtime`).
+    #[test]
+    fn bundled_package_extensions_defaults_load() {
+        let map = bundled_package_extensions_defaults();
+        assert!(
+            map.len() > 100,
+            "bundled defaults should carry 100+ entries, got {}",
+            map.len()
+        );
+        // pnpm-specific entry not in Yarn.
+        let angular = map
+            .get("@angular/build@*")
+            .expect("@angular/build@* present");
+        let tslib = angular
+            .get("dependencies")
+            .and_then(|d| d.get("tslib"))
+            .and_then(|v| v.as_str());
+        assert_eq!(
+            tslib,
+            Some("^2.3.0"),
+            "@angular/build@* -> dependencies.tslib"
+        );
+
+        // Yarn entry whose selector is duplicated in the source array; the
+        // two bodies (got, @babel/runtime) must both survive the deep-merge.
+        let gatsby = map
+            .get("gatsby-core-utils@<2.14.0-next.1")
+            .expect("gatsby-core-utils entry present");
+        let deps = gatsby
+            .get("dependencies")
+            .expect("gatsby-core-utils entry has dependencies");
+        assert_eq!(
+            deps.get("got").and_then(|v| v.as_str()),
+            Some("8.3.2"),
+            "gatsby-core-utils -> dependencies.got"
+        );
+        assert_eq!(
+            deps.get("@babel/runtime").and_then(|v| v.as_str()),
+            Some("^7.14.8"),
+            "gatsby-core-utils -> dependencies.@babel/runtime (survives dup-selector merge)"
+        );
+    }
+
+    // The bundled ecosystem `packageExtensions` defaults are role-gated in
+    // `apply_config_scope`: applied only under nub identity and pnpm compat
+    // (`Role::Nub | Role::Pnpm`), and dropped under npm/yarn/bun compat —
+    // whose incumbents apply no curated extension list, so nub mirrors them
+    // instead of grafting resolve edges the incumbent would not. This is the
+    // NEGATIVE-case guard for that gate (the positive case — the bundled set
+    // shaping the graph under nub identity — is covered by the network
+    // `bundled_default_shapes_graph_and_stays_out_of_checksum` install test in
+    // `tests/package_extensions.rs`). It drives `apply_config_scope` with a
+    // `DetectedLockfile` of each kind and reads the
+    // `bundled_package_extensions` seam back off the process-global
+    // `EngineContext` — no install, no network: the gate is a pure function of
+    // the resolved role, so exercising the role -> field mapping is sufficient.
+    #[test]
+    fn bundled_package_extensions_gate_blocks_compat_roles() {
+        use aube_util::{EngineContext, engine_context, set_engine_context};
+
+        // Takes `ENGINE_GLOBAL_LOCK` for the whole test and restores the
+        // process-global `EngineContext` on DROP (not a tail statement, so a
+        // panicking assert still restores it) — the same shape as
+        // `install_report.rs`'s `EngineGuard`. Without the lock this test's
+        // 8 `set_engine_context(EngineContext::default())` writes race any
+        // other test in this binary that reads or writes the same global.
+        struct EngineGuard {
+            context: EngineContext,
+            _lock: std::sync::MutexGuard<'static, ()>,
+        }
+        impl EngineGuard {
+            fn take() -> Self {
+                let lock = crate::pm_engine::ENGINE_GLOBAL_LOCK
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                Self {
+                    _lock: lock,
+                    context: engine_context(),
+                }
+            }
+        }
+        impl Drop for EngineGuard {
+            fn drop(&mut self) {
+                set_engine_context(self.context.clone());
+            }
+        }
+        let _guard = EngineGuard::take();
+
+        // A manifest carrying a dependency the bundled set WOULD extend
+        // (`gatsby-core-utils@2.13.0` satisfies the bundled
+        // `gatsby-core-utils@<2.14.0-next.1` selector injecting `got`). The
+        // body is irrelevant to the gate — only the resolved role matters —
+        // but mirroring the real affected package keeps the intent legible.
+        let manifest =
+            r#"{"name":"gate","version":"1.0.0","dependencies":{"gatsby-core-utils":"2.13.0"}}"#;
+
+        // Reset the process-global EngineContext to a clean default before each
+        // role so a prior test's residue can't mask the gate. `apply_config_scope`
+        // is the single writer of `bundled_package_extensions` here. Safe under
+        // the guard above: this test now holds `ENGINE_GLOBAL_LOCK` for its
+        // full duration, and the guard restores the pre-test context on drop.
+        let bundled_for_kind = |kind: Option<LockfileKind>| -> Option<
+            std::collections::BTreeMap<String, serde_json::Value>,
+        > {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("package.json"), manifest).unwrap();
+            let detected = kind.map(|k| DetectedLockfile {
+                kind: k,
+                dir: dir.path().to_path_buf(),
+                fresh: false,
+            });
+            let mut context = EngineContext::default();
+            context.bundled_package_extensions =
+                Some(compat_db::bundled_package_extensions().clone());
+            set_engine_context(context);
+            apply_config_scope(detected.as_ref(), dir.path(), ConfigScopeNoise::Silent)
+                .expect("Silent scoping never hard-errors on a bare manifest");
+            engine_context().bundled_package_extensions
+        };
+
+        // Compat roles retain the shared @nubjs/extensions snapshot but do not
+        // receive the extra Yarn/pnpm catalog.
+        for kind in [
+            LockfileKind::Npm,
+            LockfileKind::NpmShrinkwrap,
+            LockfileKind::Yarn,
+            LockfileKind::YarnBerry,
+            LockfileKind::Bun,
+        ] {
+            let bundled = bundled_for_kind(Some(kind)).expect("shared snapshot is preserved");
+            assert!(bundled.contains_key("reactcss@*"));
+            assert!(!bundled.contains_key("@angular/build@*"));
+        }
+
+        // Positive side of the same gate: nub identity (no lockfile → role
+        // defaults to Nub) and pnpm compat must receive the bundled set, and it
+        // must be the non-empty defaults map — not a vacuous `Some(empty)`.
+        for kind in [None, Some(LockfileKind::Aube), Some(LockfileKind::Pnpm)] {
+            let bundled =
+                bundled_for_kind(kind).expect("nub identity / pnpm must receive the bundled set");
+            assert!(bundled.contains_key("reactcss@*"));
+            assert!(bundled.contains_key("@angular/build@*"));
+        }
     }
 }
