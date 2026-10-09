@@ -22,6 +22,8 @@ pub enum Verdict {
     /// Undeclared but only ever loaded under a try/catch — a soft/optional load,
     /// not a hard break.
     SoftPhantom,
+    /// Appears only in declarations and is not satisfied by declared types.
+    TypeOnly,
     /// Declared as an OPTIONAL peer (`peerDependenciesMeta.<x>.optional`). NOT a
     /// phantom — the pick-your-plugin pattern. Tracked so the report can show how
     /// much a naive scan over-counts.
@@ -163,12 +165,25 @@ pub fn classify(manifest: &Manifest, references: &[Reference]) -> Vec<Finding> {
         .map(|(package, agg)| {
             let deep_path_only =
                 agg.from_deep_path && !agg.from_main && !agg.from_subpath && !agg.from_types;
-            // Referenced ONLY from the type surface, so TypeScript's `@types`
-            // fallback applies and a runtime resolution never happens. See
-            // `types_package_for`.
-            let types_only =
+            let type_surface_only =
                 agg.from_types && !agg.from_main && !agg.from_subpath && !agg.from_deep_path;
-            let verdict = verdict_for(manifest, &package, agg.all_soft, deep_path_only, types_only);
+            let type_dependency_is_dev_only =
+                manifest.dev_deps.contains(&types_package_for(&package));
+            let base = verdict_for(
+                manifest,
+                &package,
+                agg.all_soft,
+                deep_path_only,
+                type_surface_only,
+            );
+            let verdict = if type_surface_only
+                && !type_dependency_is_dev_only
+                && matches!(base, Verdict::HardPhantom | Verdict::SoftPhantom)
+            {
+                Verdict::TypeOnly
+            } else {
+                base
+            };
             Finding {
                 package,
                 verdict,
@@ -408,10 +423,11 @@ mod tests {
             "a runtime occurrence is not satisfied by @types/geojson"
         );
 
-        // And with no types package declared it stays a phantom.
+        // An undeclared reference confined to declarations gets its own
+        // classification rather than becoming a runtime target.
         let bare = Manifest::parse(br#"{"name":"p"}"#).unwrap();
         let f = classify(&bare, &[type_ref("geojson", "geojson")]);
-        assert_eq!(f[0].verdict, Verdict::HardPhantom);
+        assert_eq!(f[0].verdict, Verdict::TypeOnly);
     }
 
     #[test]
@@ -478,6 +494,73 @@ mod tests {
         let f = classify(&m, &[deep("ava"), also_main]);
         assert_eq!(f[0].verdict, Verdict::HardPhantom);
         assert!(!f[0].is_deep_path_only());
+    }
+
+    #[test]
+    fn type_surface_only_needs_no_types_twin_at_all() {
+        let m = Manifest::parse(br#"{"name":"@typescript-eslint/types"}"#).unwrap();
+        let typescript = Reference {
+            package: "typescript".into(),
+            raw: "typescript".into(),
+            file: "index.d.ts".into(),
+            soft: false,
+            from_main: false,
+            from_subpath: false,
+            from_types: true,
+            from_deep_path: false,
+        };
+        let f = classify(&m, &[typescript]);
+        let v = f.iter().find(|x| x.package == "typescript").unwrap();
+        assert_eq!(v.verdict, Verdict::TypeOnly);
+    }
+
+    #[test]
+    fn declared_types_fallback_satisfies_a_type_surface_reference() {
+        let m = Manifest::parse(br#"{"name":"consumer","dependencies":{"@types/geojson":"*"}}"#)
+            .unwrap();
+        let reference = Reference {
+            package: "geojson".into(),
+            raw: "geojson".into(),
+            file: "index.d.ts".into(),
+            soft: false,
+            from_main: false,
+            from_subpath: false,
+            from_types: true,
+            from_deep_path: false,
+        };
+
+        let findings = classify(&m, &[reference]);
+
+        assert_eq!(findings[0].verdict, Verdict::Declared);
+    }
+
+    #[test]
+    fn legacy_deep_path_reference_is_not_type_only() {
+        let m = Manifest::parse(br#"{"name":"consumer"}"#).unwrap();
+        let type_reference = Reference {
+            package: "ghost".into(),
+            raw: "ghost".into(),
+            file: "index.d.ts".into(),
+            soft: false,
+            from_main: false,
+            from_subpath: false,
+            from_types: true,
+            from_deep_path: false,
+        };
+        let runtime_reference = Reference {
+            package: "ghost".into(),
+            raw: "ghost".into(),
+            file: "legacy.js".into(),
+            soft: false,
+            from_main: false,
+            from_subpath: false,
+            from_types: false,
+            from_deep_path: true,
+        };
+
+        let findings = classify(&m, &[type_reference, runtime_reference]);
+
+        assert_eq!(findings[0].verdict, Verdict::HardPhantom);
     }
 
     #[test]
