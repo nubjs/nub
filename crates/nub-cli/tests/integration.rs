@@ -9628,6 +9628,137 @@ fn node_compat_env_forces_vanilla_tree_wide() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A compat LAUNCH — `--node`, or a plain `node` through the persistent shim —
+/// covers that process and the bare `node` processes beneath it. It is not the
+/// user's `NODE_COMPAT`: a `nub` command started inside the tree is its own
+/// invocation and augments, along with its own subtree (#1005).
+/// `process.versions.nub` is the discriminator, present only while augmentation
+/// is active. Unix-only (both shims are reached through an argv0=`node` link).
+// @lat: [[compat-mode-tests#Compat mode#A compat launch does not opt out a nested nub invocation]]
+#[cfg(unix)]
+#[test]
+fn compat_launch_does_not_opt_out_a_nested_nub_invocation() {
+    let dir = unique_test_cache().join("compat-launch");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // The per-invocation hijack shim, which augments by default.
+    let hijack_dir = dir.join("nub-node-shim-test");
+    std::fs::create_dir_all(&hijack_dir).unwrap();
+    let hijack_node = hijack_dir.join("node");
+    std::os::unix::fs::symlink(nub_binary(), &hijack_node).expect("symlink nub → node");
+
+    // The persistent shim, recognized by its `nub/node-shim` directory shape. A
+    // hard link, not a symlink: Linux reads `current_exe` from `/proc/self/exe`,
+    // which follows a symlink back to the `nub` binary.
+    let persistent_dir = dir.join("nub").join("node-shim");
+    std::fs::create_dir_all(&persistent_dir).unwrap();
+    let persistent_node = persistent_dir.join("node");
+    if std::fs::hard_link(nub_binary(), &persistent_node).is_err() {
+        std::fs::copy(nub_binary(), &persistent_node).expect("copy nub → node");
+    }
+
+    let proj = dir.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(proj.join("package.json"), r#"{"name":"compat-launch"}"#).unwrap();
+    std::fs::write(
+        proj.join("probe.js"),
+        "console.log('PROBE=' + (process.versions.nub ? 'augmented' : 'vanilla'));\n",
+    )
+    .unwrap();
+    // Reports its own mode, then runs its arguments as a child command.
+    std::fs::write(
+        proj.join("launcher.cjs"),
+        r#"const { spawnSync } = require('node:child_process');
+const mode = process.versions.nub ? 'augmented' : 'vanilla';
+require('node:fs').writeSync(1, `LAUNCHER=${mode}\n`);
+const [command, ...args] = process.argv.slice(2);
+const child = spawnSync(command, args, { stdio: 'inherit' });
+if (child.error) throw child.error;
+process.exit(child.status ?? 1);
+"#,
+    )
+    .unwrap();
+
+    // The hijack shim leads PATH, standing in for a shim an outer invocation
+    // left behind: a bare `node` beneath a compat launch lands on it.
+    let ambient_path = std::env::var_os("PATH").unwrap();
+    let mut path_entries = vec![hijack_dir];
+    path_entries.extend(std::env::split_paths(&ambient_path));
+    let path = std::env::join_paths(path_entries).unwrap();
+
+    let run = |program: &Path, args: &[&str]| {
+        let out = Command::new(program)
+            .args(args)
+            .current_dir(&proj)
+            .env("PATH", &path)
+            .env("XDG_CACHE_HOME", unique_test_cache())
+            .env_remove("NODE_COMPAT")
+            .output()
+            .expect("spawn");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{program:?} {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let nub = nub_binary();
+    let nub = nub.to_str().unwrap();
+
+    // 1. A plain `node` from the persistent shim is vanilla; `nub probe.js`
+    //    beneath it augments.
+    let out = run(&persistent_node, &["launcher.cjs", nub, "probe.js"]);
+    assert!(
+        out.contains("LAUNCHER=vanilla"),
+        "the persistent shim must run `node` vanilla: {out}"
+    );
+    assert!(
+        out.contains("PROBE=augmented"),
+        "`nub probe.js` beneath the persistent shim's `node` must augment: {out}"
+    );
+
+    // 2. The same beneath an explicit `--node` run.
+    let out = run(Path::new(nub), &["--node", "launcher.cjs", nub, "probe.js"]);
+    assert!(
+        out.contains("LAUNCHER=vanilla"),
+        "`nub --node` must run its own file vanilla: {out}"
+    );
+    assert!(
+        out.contains("PROBE=augmented"),
+        "`nub probe.js` beneath a `--node` run must augment: {out}"
+    );
+
+    // 3. A bare `node` beneath the `--node` run continues it, even through a
+    //    shim that augments by default.
+    let out = run(
+        Path::new(nub),
+        &["--node", "launcher.cjs", "node", "probe.js"],
+    );
+    assert!(
+        out.contains("PROBE=vanilla"),
+        "a bare `node` beneath a `--node` run must stay vanilla: {out}"
+    );
+
+    // 4. The nested `nub` starts a fresh invocation: a bare `node` beneath IT
+    //    augments, rather than inheriting the outer compat launch.
+    let nested = [
+        "--node",
+        "launcher.cjs",
+        nub,
+        "launcher.cjs",
+        "node",
+        "probe.js",
+    ];
+    let out = run(Path::new(nub), &nested);
+    assert!(
+        out.contains("LAUNCHER=augmented") && out.contains("PROBE=augmented"),
+        "a nested `nub` and the `node` beneath it must both augment: {out}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `nub watch` has no `--node` flag, but a truthy `NODE_COMPAT` (the ambient
 /// tree-wide opt-out) must still force vanilla — no flag injection, no preload,
 /// no eager `.env*`. The watch loop never exits on its own, so the probe writes

@@ -687,7 +687,8 @@ fn runtime_snapshot_reaches_the_local_bin_routes() {
 /// outside the project forces that path with no network involved. The fetched
 /// bin's `#!/usr/bin/env node` shebang re-enters nub as a PATH shim rather than
 /// reading `--node` from argv, so augmentation is disabled by `dlx_child_env`
-/// stamping `NODE_COMPAT` for the child — a genuinely different mechanism.
+/// stamping the compat-launch marker for the child — a genuinely different
+/// mechanism.
 #[cfg(unix)]
 #[test]
 fn nubx_node_flag_reaches_the_dlx_fallback_fetch_path() {

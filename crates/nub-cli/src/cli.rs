@@ -601,12 +601,15 @@ fn env_file_sets(key: &str) -> bool {
 /// compat from its OWN inherited environment, not from this process's argv.
 /// An ambient `NODE_COMPAT` already survives the hop for free (real env vars
 /// inherit); a bare `--node` flag does not, since it never became an env var.
-/// Stamping `NODE_COMPAT=1` here is what makes `--node` reach the re-entrant
-/// child the same way the persistent env var already does.
+/// Stamping the compat-launch marker here is what makes `--node` reach the
+/// re-entrant child.
 pub(crate) fn dlx_child_env(compat_mode: bool) -> BTreeMap<String, String> {
     let mut values = BTreeMap::new();
     if compat_mode {
-        values.insert("NODE_COMPAT".to_string(), "1".to_string());
+        values.insert(
+            nub_core::node::spawn::COMPAT_LAUNCH_ENV.to_string(),
+            "1".to_string(),
+        );
     }
     if no_env_file() {
         return values;
@@ -3617,8 +3620,15 @@ fn run_as_node() -> Result<i32> {
     // respect node semantics — version resolution/provisioning is the shim's
     // job, augmentation belongs to `nub`/`nubx`. The per-invocation hijack
     // (temp-dir shim, inside a `nub …` subtree the user opted into) keeps
-    // augment-by-default. `--node`/`NODE_COMPAT` force vanilla in either case.
-    let compat = compat_flag || nub_core::node::shim::invoked_as_persistent_node_shim();
+    // augment-by-default. `--node`/`NODE_COMPAT` force vanilla in either case,
+    // and so does descending from a compat launch: this `node` continues that
+    // invocation rather than starting one. A falsy `NODE_COMPAT` set for this
+    // one command still opts it back in, as it did when the launch was carried
+    // by that variable.
+    let continues_compat =
+        nub_core::node::spawn::inherits_compat_launch() && node_compat_env_setting() != Some(false);
+    let compat =
+        compat_flag || nub_core::node::shim::invoked_as_persistent_node_shim() || continues_compat;
     // The hijack resolves a version; it does not add a launch wrapper. The
     // configured `prefix` belongs to the `nub` entrypoints (see `crate::prefix`),
     // and this is the one flag `run_file_in_dir` has to tell the two apart.
@@ -6212,13 +6222,13 @@ fn build_script_command(
     for (k, v) in &npm_env {
         command.env(k, v);
     }
-    // Compat is tree-wide, not only a choice made by this one launcher. An
-    // inherited PATH can already contain a Nub node shim from an outer logical
-    // invocation; stamping the neutral public opt-out makes any such bare
-    // `node` descendant stay vanilla. Apply it last so an explicit `--node` (or
-    // resolved `nodeCompat`) cannot be undone by a forwarded env file.
+    // Compat covers the script's bare `node` descendants too. An inherited PATH
+    // can already contain a Nub node shim from an outer logical invocation; the
+    // marker keeps a `node` that reaches it vanilla. A `nub` the script names is
+    // its own invocation and is not opted out (`COMPAT_LAUNCH_ENV`). Applied
+    // last so a forwarded env file cannot undo it.
     if compat_mode {
-        command.env("NODE_COMPAT", "1");
+        command.env(nub_core::node::spawn::COMPAT_LAUNCH_ENV, "1");
     }
 
     // An explicit `--color` has to reach the CHILD, not just Nub's own framing —
