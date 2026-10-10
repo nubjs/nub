@@ -3948,13 +3948,10 @@ const REAP_LEGACY_ENTRY_CAP: usize = 256;
 /// a directory scan + per-entry `stat`, which is exactly the synchronous cost the
 /// latency-sensitive run path must not pay. Drive it ONLY off the thread via
 /// [`spawn_stale_shim_reaper`], which detaches it so the run never waits on it.
-fn reap_stale_shims() {
-    reap_stale_shims_in(&env::temp_dir(), std::process::id(), pid_is_alive);
-}
-
-/// Core of [`reap_stale_shims`], parameterized over the temp dir, this process's
-/// pid, and a pid-liveness probe so it is unit-testable without touching the
-/// shared global temp dir or real process state.
+///
+/// Parameterized over the temp dir, this process's pid, and a pid-liveness
+/// probe so it is unit-testable without touching the shared global temp dir or
+/// real process state.
 fn reap_stale_shims_in(temp: &Path, self_pid: u32, is_alive: impl Fn(u32) -> bool) {
     let Ok(entries) = fs::read_dir(temp) else {
         return;
@@ -4038,14 +4035,21 @@ fn parse_shim_dir_name(name: &str) -> Option<(u32, ShimDirNameKind)> {
     (pid != 0).then_some((pid, kind))
 }
 
-/// Spawn [`reap_stale_shims`] on a DETACHED background thread so the sweep's
+/// Spawn [`reap_stale_shims_in`] on a DETACHED background thread so the sweep's
 /// directory scan never adds latency to the run/spawn/teardown path. Fire and
 /// forget: if the process exits before the sweep finishes, any not-yet-reaped
 /// stale dirs are collected by a later run. Call once, early.
+///
+/// The temp dir is resolved HERE, on the calling thread. With `TMPDIR` unset
+/// macOS answers `temp_dir` through `confstr`, whose first call initializes
+/// libSystem's notify state. Run on the reaper thread, that raced the launch
+/// thread's `fork` for the Node child: the child inherited the half-initialized
+/// state, aborted in `_notify_fork_child` before `exec`, and the run exited 137.
 pub fn spawn_stale_shim_reaper() {
+    let temp = env::temp_dir();
     let _ = std::thread::Builder::new()
         .name("nub-shim-reaper".into())
-        .spawn(reap_stale_shims);
+        .spawn(move || reap_stale_shims_in(&temp, std::process::id(), pid_is_alive));
 }
 
 /// Is `pid` a currently-live process? Used by the shim reaper to avoid reaping a
