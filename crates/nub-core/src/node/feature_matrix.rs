@@ -168,6 +168,28 @@ const fn band(lo: (u32, u32, u32), hi: Option<(u32, u32, u32)>) -> VersionBand {
 /// from this — do not add a parallel table elsewhere.
 // @lat: [[architecture#Architecture#Feature support across Node versions]]
 static FEATURES: &[Feature] = &[
+    Feature {
+        name: "util.debounce",
+        mitigations: &[
+            (band((18, 19, 0), Some((26, 10, 0))), Mitigation::Polyfill {
+                runtime_file: "util/rate.cjs",
+                global: "util.debounce",
+            }),
+            (band((26, 10, 0), None), Mitigation::Native),
+        ],
+        evidence: "nodejs/node#65899; native from Node 26.10.0",
+    },
+    Feature {
+        name: "util.throttle",
+        mitigations: &[
+            (band((18, 19, 0), Some((26, 10, 0))), Mitigation::Polyfill {
+                runtime_file: "util/rate.cjs",
+                global: "util.throttle",
+            }),
+            (band((26, 10, 0), None), Mitigation::Native),
+        ],
+        evidence: "nodejs/node#65899; native from Node 26.10.0",
+    },
     // ── vm.Module / vm.SourceTextModule ────────────────────────────────────
     // Flag added in Node 9.6.0 (#14253) and NEVER unflagged through Node 26 —
     // `vm.Module` stays experimental and the flag is always required. So inject

@@ -45,6 +45,7 @@ const { createRequire } = getBuiltin("node:module");
 const runtimeRequire = typeof compileBootstrap?.createRequire === "function"
   ? compileBootstrap.createRequire(__filename)
   : createRequire(__filename);
+const { installUtilRateShims } = require("./util/rate.cjs");
 
 // Install every globalThis/prototype polyfill that doesn't depend on loading the
 // ESM side-effect modules (worker-polyfill, navigator-locks). Synchronous and
@@ -53,6 +54,7 @@ const runtimeRequire = typeof compileBootstrap?.createRequire === "function"
 // resolve hook would otherwise clobber a later import of them.
 function installSyncPolyfills(preloaded) {
   preloaded = preloaded || {};
+  installUtilRateShims();
 
   // ── Web Storage: neutralize the throwing localStorage getter ────────
   // When nub injects `--experimental-webstorage` on the 22.4–24 band AND the user
