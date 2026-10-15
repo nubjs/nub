@@ -1,7 +1,7 @@
 // The compat tier (Node 18.19–22.14, 23.0–23.4) loads nub's preload with `--import`,
 // and Node's ESM loader reads that file through libuv's threadpool, so the pool
 // already exists when preload.mjs runs — beside the threads its imports create
-// (the native addon's runtime), and libuv before 1.50 (Node ≤ 22.21) gives its
+// (the native addon's runtime), and libuv before 1.50 (Node ≤ 22.16) gives its
 // workers no thread name to tell them apart by. Node runs every `--require` before
 // it loads any `--import` (measured on Node 18.19, 20.19 and 22.13: 7 threads here,
 // 15 once an `--import` preload's body runs), so this builds the pool itself: libuv
@@ -16,8 +16,18 @@
 // opt-in since), building no pool at all. The addon is loaded before the snapshot
 // is taken, so the threads its own runtime starts stay out of the diff. Linux
 // only, and only for a pool nub sized (the launcher's ownership marker); a user's
-// pool is left for libuv to build when it is first used.
+// pool is left for libuv to build when it is first used. A value a fast-tier parent
+// had not settled when it spawned this process is that parent's, marked taken (see
+// installThreadpoolPolicy), and goes before the `--import` load can build from it.
 const WORKERS = Symbol.for("nub.threadpool.workers");
+if (
+  process.env.__NUB_UV_THREADPOOL_SIZE_TAKEN !== undefined &&
+  process.env.UV_THREADPOOL_SIZE === process.env.__NUB_AUGMENTED_UV_THREADPOOL_SIZE &&
+  require("node:worker_threads").isMainThread
+) {
+  delete process.env.UV_THREADPOOL_SIZE;
+  delete process.env.__NUB_UV_THREADPOOL_SIZE_TAKEN;
+}
 if (
   process.platform === "linux" &&
   process[WORKERS] === undefined &&
