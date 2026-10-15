@@ -644,17 +644,16 @@ impl Linker {
         // Gate is conservative and additive: any miss (tier not built,
         // non-macOS, non-APFS dst, cross-volume, or the clone itself
         // erroring) falls through to the unchanged per-file path, so
-        // default behavior is byte-for-byte today's. `tree_key` is the
-        // global-store subdir name regardless of `apply_hashes` — the
-        // tree tier is a shared global resource keyed the same way the
-        // GVS is, so per-project `.aube/` materializations can clone
-        // from the same trees the GVS built.
-        let tree_key = self.virtual_store_subdir(dep_path);
-        let tree_src = self.store.tree_path(&tree_key);
+        // default behavior is byte-for-byte today's. The tree's
+        // coordinate is the global-store subdir name regardless of
+        // `apply_hashes` — the tree tier is a shared global resource keyed
+        // the same way the GVS is, so per-project `.aube/` materializations
+        // can clone from the same trees the GVS built.
+        let tree_coordinate = self.virtual_store_subdir(dep_path);
         let used_clonedir = self.try_clonedir_fill(
             &pkg_nm_dir,
             &pkg_nm_parent,
-            &tree_src,
+            &tree_coordinate,
             dep_path,
             pkg,
             index,
@@ -1138,6 +1137,10 @@ impl Linker {
     ///    against `pkg_nm_parent` (the dir the clone lands inside).
     /// 2. Ensure the tree source exists (lazily build it once from the
     ///    CAS, reflinking each file — the per-package amortized cost).
+    ///    The source is looked up by `tree_coordinate` plus the index
+    ///    content digest (`aube_store::tree_key`), never the coordinate
+    ///    alone: the clone copies the tree verbatim, so a key that does
+    ///    not pin the content would materialize another package's bytes.
     /// 3. One `clonefile(2)` of the whole tree into `pkg_nm_dir`.
     ///
     /// `pub(crate)` so the hoisted linker reuses the identical whole-dir
@@ -1148,7 +1151,7 @@ impl Linker {
         &self,
         pkg_nm_dir: &Path,
         pkg_nm_parent: &Path,
-        tree_src: &Path,
+        tree_coordinate: &str,
         dep_path: &str,
         pkg: &LockedPackage,
         index: &PackageIndex,
@@ -1161,7 +1164,7 @@ impl Linker {
             let _ = (
                 pkg_nm_dir,
                 pkg_nm_parent,
-                tree_src,
+                tree_coordinate,
                 dep_path,
                 pkg,
                 index,
@@ -1216,11 +1219,32 @@ impl Linker {
             }
 
             // Ensure the clone source exists. Build it once if missing.
-            if !tree_src.exists() && self.build_tree(tree_src, dep_path, pkg, index).is_err() {
-                // Tree build failed (e.g. a CAS shard went missing) —
-                // fall back to the per-file path, which surfaces the
-                // same error with full attribution + index invalidation.
-                return Ok(false);
+            let tree_src = self
+                .store
+                .tree_path(&aube_store::tree_key(tree_coordinate, index));
+            let tree_src = tree_src.as_path();
+            match std::fs::metadata(tree_src).and_then(|m| m.modified()) {
+                // A reused tree's mtime is its last-use stamp: `store prune`
+                // keeps the most recently used content variant of a live
+                // coordinate and ages out the rest. Refreshed at most daily
+                // so a warm install pays one stat per package, not a write.
+                Ok(modified) => {
+                    let now = std::time::SystemTime::now();
+                    if now
+                        .duration_since(modified)
+                        .is_ok_and(|age| age.as_secs() > 86_400)
+                    {
+                        let _ = std::fs::File::open(tree_src).and_then(|f| f.set_modified(now));
+                    }
+                }
+                Err(_) => {
+                    if self.build_tree(tree_src, dep_path, pkg, index).is_err() {
+                        // Tree build failed (e.g. a CAS shard went missing) —
+                        // fall back to the per-file path, which surfaces the
+                        // same error with full attribution + index invalidation.
+                        return Ok(false);
+                    }
+                }
             }
 
             // The destination must not pre-exist for clonefile. The
