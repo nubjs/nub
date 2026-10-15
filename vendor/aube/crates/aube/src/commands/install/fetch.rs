@@ -1,5 +1,8 @@
 use super::critical_path::is_likely_native_build;
 use super::git_prepare::{prepare_scratch_copy, run_git_dep_prepare};
+#[cfg(test)]
+use super::index_remap::remap_indices_to_contextualized;
+use super::index_remap::strip_peer_context_suffix;
 use super::lifecycle::run_import_on_blocking;
 use super::settings::{
     default_lockfile_network_concurrency, resolve_network_concurrency,
@@ -13,7 +16,7 @@ use crate::progress::InstallProgress;
 use aube_lockfile::dep_path_filename::dep_path_to_filename;
 use miette::{Context, IntoDiagnostic, miette};
 use rayon::prelude::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// `failed to fetch …` as a report, carrying the sandbox help when the
 /// registry client classified the failure as a network deny — the one case
@@ -612,23 +615,77 @@ where
     let no_integrity_index =
         crate::state::read_no_integrity_index_for(project_root, packages.values());
 
-    // Parallel index check (rayon)
-    let check_results: Vec<_> = packages
-        .par_iter()
-        .filter(|(_, pkg)| pkg.local_source.is_none())
+    // Verify each distinct store entry once, before the per-dep_path
+    // check. Peer placements re-enter the same (registry name, version,
+    // read key) once per dep_path, and every verified load stats one
+    // file per index entry (or the first file under fast-trust);
+    // grouping the loads means the verification runs a single time no
+    // matter how many placements share the package. Packages that will
+    // take the already-linked shortcut never needed a load, so they
+    // are excluded here to keep the shortcut's zero-read behavior.
+    let needs_check: Vec<bool> = packages
+        .iter()
         .map(|(dep_path, pkg)| {
+            if pkg.local_source.is_some() {
+                return false;
+            }
+            match already_linked_shortcut {
+                Some(plan) if !force_index_dep_paths.contains(dep_path) => {
+                    let entry_name =
+                        dep_path_to_filename(dep_path, virtual_store_dir_max_length);
+                    let entry = aube_dir.join(&entry_name);
+                    !plan.entry_is_current(&entry, dep_path, virtual_store_dir_max_length)
+                }
+                _ => true,
+            }
+        })
+        .collect();
+    let mut store_keys: Vec<(&str, &str, Option<&str>)> = Vec::new();
+    let mut seen_keys: std::collections::HashSet<(&str, &str, Option<&str>)> =
+        std::collections::HashSet::new();
+    for ((_, pkg), needs) in packages.iter().zip(&needs_check) {
+        if !needs {
+            continue;
+        }
+        let read_key = warm_read_key(pkg, &no_integrity_index);
+        // `None` must re-fetch (see `warm_read_key`), never a load.
+        if read_key.is_none() {
+            continue;
+        }
+        let key = (
+            pkg.registry_name(),
+            pkg.version.as_str(),
+            read_key,
+        );
+        if seen_keys.insert(key) {
+            store_keys.push(key);
+        }
+    }
+    let verified: HashMap<(&str, &str, Option<&str>), Option<aube_store::PackageIndex>> =
+        store_keys
+            .par_iter()
+            .map(|key| {
+                (
+                    *key,
+                    super::warm_load_index(store, key.0, key.1, key.2),
+                )
+            })
+            .collect();
+
+    let packages_refs: Vec<(&String, &aube_lockfile::LockedPackage)> = packages.iter().collect();
+
+    // Parallel index check (rayon)
+    let check_results: Vec<_> = packages_refs
+        .par_iter()
+        .enumerate()
+        .filter(|(_, (_, pkg))| pkg.local_source.is_none())
+        .map(|(i, (dep_path, pkg))| {
             // `force_index_dep_paths` is the project-local closure the
             // linker materializes as real directories rather than
             // shared-store symlinks, so its freshness test is a
             // different one; those always take the verified path.
-            if let Some(plan) = already_linked_shortcut
-                && !force_index_dep_paths.contains(dep_path)
-            {
-                let entry_name = dep_path_to_filename(dep_path, virtual_store_dir_max_length);
-                let entry = aube_dir.join(&entry_name);
-                if plan.entry_is_current(&entry, dep_path, virtual_store_dir_max_length) {
-                    return (dep_path.clone(), pkg, CheckResult::AlreadyLinked);
-                }
+            if !needs_check[i] {
+                return (dep_path.to_string(), pkg, CheckResult::AlreadyLinked);
             }
             // Keyed by registry name so two npm-aliases of the same
             // real package share one store index entry instead of
@@ -660,18 +717,18 @@ where
             // store predating this index) → re-fetch rather than read the
             // content-free selector that, in a shared store, could return
             // a different project's bytes for the same name@version.
+            // The grouped verification above keeps the staleness window
+            // the same size as a single pass: every dep_path of one
+            // store entry now sees the same verified snapshot.
             let read_key = warm_read_key(pkg, &no_integrity_index);
-            match read_key {
-                None => (dep_path.clone(), pkg, CheckResult::NeedsFetch),
-                Some(key) => match super::warm_load_index(
-                    store,
-                    pkg.registry_name(),
-                    &pkg.version,
-                    Some(key),
-                ) {
-                    Some(index) => (dep_path.clone(), pkg, CheckResult::Cached(index)),
-                    None => (dep_path.clone(), pkg, CheckResult::NeedsFetch),
-                },
+            let key = (
+                pkg.registry_name(),
+                pkg.version.as_str(),
+                read_key,
+            );
+            match verified.get(&key).cloned().flatten() {
+                Some(index) => (dep_path.to_string(), pkg, CheckResult::Cached(index)),
+                None => (dep_path.to_string(), pkg, CheckResult::NeedsFetch),
             }
         })
         .collect();
@@ -1266,60 +1323,6 @@ pub(super) fn version_from_dep_path(dep_path: &str, name: &str) -> String {
     tail.split('(').next().unwrap_or(tail).to_string()
 }
 
-/// Re-key a canonical-indexed indices map to match the peer-contextualized
-/// dep_paths in `graph`. Each contextualized entry points at the same
-/// underlying files as its canonical name@version, so we look each graph
-/// entry up by canonical and clone the index — a no-op when canonical ==
-/// contextualized (i.e. the package has no peer deps).
-pub(super) fn remap_indices_to_contextualized(
-    canonical_indices: &BTreeMap<String, aube_store::PackageIndex>,
-    graph: &aube_lockfile::LockfileGraph,
-) -> BTreeMap<String, aube_store::PackageIndex> {
-    let mut out = BTreeMap::new();
-    for (dep_path, pkg) in &graph.packages {
-        let canonical_key = pkg.spec_key();
-        // The peer-context pass appends a `(peer@ver)` suffix (or a
-        // parenthesized `(<short-hash>)` when it exceeds the cap) onto a
-        // package's canonical dep_path. Source-backed deps (git /
-        // remote tarball / file) are streamed from the resolver — and
-        // therefore keyed in `canonical_indices` — under their
-        // *source-coordinate* dep_path (`name@git+<short>`), not their
-        // semver `spec_key()`. So once such a dep picks up a peer
-        // suffix, neither the contextualized `dep_path` (carries the
-        // suffix) nor `spec_key()` (semver, not the git coordinate)
-        // matches the streamed key, and the index would be silently
-        // dropped — later tripping `ERR_AUBE_MISSING_PACKAGE_INDEX` in
-        // the linker's global-virtual-store pass. Stripping the suffix
-        // recovers the exact canonical coordinate the index was stored
-        // under (the peer-context pass builds the key as
-        // `{canonical_base}{suffix}`, so this is its precise inverse).
-        let canonical_dep_path = strip_peer_context_suffix(dep_path);
-        if let Some(idx) = canonical_indices
-            .get(dep_path)
-            .or_else(|| canonical_indices.get(canonical_dep_path))
-            .or_else(|| canonical_indices.get(&canonical_key))
-        {
-            out.insert(dep_path.clone(), idx.clone());
-        }
-    }
-    out
-}
-
-/// Strip the peer-context suffix from a `dep_path`, recovering the
-/// canonical dep_path the resolver streamed it under (and that
-/// `canonical_indices` is keyed by). The peer-context pass in
-/// `aube-resolver` appends either a parenthesized `(peer@ver)…` tail
-/// or, when the suffix body exceeds the length cap, a single
-/// parenthesized short hash `(<short-hash>)` (pnpm's
-/// `createPeerDepGraphHash`). Both forms begin at the first `(`, so
-/// cutting there is the exact inverse and recovers the canonical
-/// coordinate. A `dep_path` with no suffix is returned unchanged — a
-/// bare `_<hex>` tail belongs to a `git+`/`url+`/`file+` source
-/// coordinate and is never a peer marker, so it is preserved.
-pub(super) fn strip_peer_context_suffix(dep_path: &str) -> &str {
-    dep_path.split('(').next().unwrap_or(dep_path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::lockfile_tarball_url_matches_metadata;
@@ -1472,7 +1475,7 @@ mod tests {
             .packages
             .insert(contextualized.clone(), git_pkg(&contextualized));
 
-        let out = super::remap_indices_to_contextualized(&canonical_indices, &graph);
+        let out = super::remap_indices_to_contextualized(canonical_indices, &graph);
         assert!(
             out.contains_key(&contextualized),
             "git dep with peer suffix should recover its canonical index; got {:?}",
@@ -1496,7 +1499,7 @@ mod tests {
             .packages
             .insert(contextualized.clone(), git_pkg(&contextualized));
 
-        let out = super::remap_indices_to_contextualized(&canonical_indices, &graph);
+        let out = super::remap_indices_to_contextualized(canonical_indices, &graph);
         assert!(
             out.contains_key(&contextualized),
             "git dep with hashed peer suffix should recover its canonical index; got {:?}",
@@ -1518,7 +1521,7 @@ mod tests {
             .packages
             .insert(canonical.to_string(), git_pkg(canonical));
 
-        let out = super::remap_indices_to_contextualized(&canonical_indices, &graph);
+        let out = super::remap_indices_to_contextualized(canonical_indices, &graph);
         assert!(out.contains_key(canonical));
     }
 }

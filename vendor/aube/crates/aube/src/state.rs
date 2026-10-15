@@ -1222,6 +1222,22 @@ pub fn read_state_delta_snapshot(project_dir: &Path) -> Option<DeltaStateSnapsho
     })
 }
 
+/// Layout and package count from one read of the install state.
+pub struct StartupStateSnapshot {
+    pub layout: InstallLayoutState,
+    /// Missing fingerprints retain the lockfile-count fallback for older state.
+    pub package_count: Option<usize>,
+}
+
+pub fn read_state_startup_snapshot(project_dir: &Path) -> Option<StartupStateSnapshot> {
+    let state = read_state(&state_dir(project_dir))?;
+    Some(StartupStateSnapshot {
+        layout: state.layout?,
+        package_count: (!state.package_content_hashes.is_empty())
+            .then_some(state.package_content_hashes.len()),
+    })
+}
+
 /// Read the installed layout snapshot used by the install warm path.
 ///
 /// Missing layout state means the install predates layout tracking and
@@ -2392,7 +2408,8 @@ mod tests {
         gvs_nested_links_are_current, hash_file, hash_release_age_settings, hash_release_policy,
         hash_settings, install_state_file, member_lockfiles_stale, new_workspace_member,
         preview_list, read_hoisted_placements, read_or_migrate_fresh_state, read_state,
-        relative_path_or_original, release_policy_changed_since_last_run, remove_state, state_dir,
+        read_state_startup_snapshot, relative_path_or_original,
+        release_policy_changed_since_last_run, remove_state, state_dir,
         verify_install_layout, write_hoisted_placements, write_state,
     };
     use std::collections::BTreeMap;
@@ -2893,6 +2910,58 @@ mod tests {
             hashes.get("packages/foo/package.json"),
             Some(&hash_file(&ws_pkg))
         );
+    }
+
+    #[test]
+    fn startup_snapshot_preserves_layout_count_and_legacy_fallback() {
+        let project_dir = temp_project_dir("startup-snapshot");
+        let directory = state_dir(&project_dir);
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = install_state_file(&directory);
+        let mut value = serde_json::json!({
+            "lockfile_hash": "lock",
+            "package_json_hashes": {},
+            "aube_version": "0.0.0",
+            "layout": {
+                "linker": "isolated", "direct_entries": {}, "packages": {},
+                "gvs_nested_links": {"entry/dep": "../other"}
+            },
+            "package_content_hashes": {"one@1.0.0": "hash", "two@1.0.0": "hash"}
+        });
+        std::fs::write(&path, value.to_string()).unwrap();
+        let snapshot = read_state_startup_snapshot(&project_dir).unwrap();
+        assert_eq!(snapshot.package_count, Some(2));
+        assert_eq!(
+            snapshot.layout.gvs_nested_links.unwrap()["entry/dep"],
+            "../other"
+        );
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("package_content_hashes");
+        std::fs::write(&path, value.to_string()).unwrap();
+        assert_eq!(
+            read_state_startup_snapshot(&project_dir)
+                .unwrap()
+                .package_count,
+            None
+        );
+        value["package_content_hashes"] = serde_json::json!({});
+        std::fs::write(&path, value.to_string()).unwrap();
+        assert_eq!(
+            read_state_startup_snapshot(&project_dir)
+                .unwrap()
+                .package_count,
+            None
+        );
+        value.as_object_mut().unwrap().remove("layout");
+        std::fs::write(&path, value.to_string()).unwrap();
+        assert!(read_state_startup_snapshot(&project_dir).is_none());
+        std::fs::write(&path, "{").unwrap();
+        assert!(read_state_startup_snapshot(&project_dir).is_none());
+        std::fs::remove_file(&path).unwrap();
+        assert!(read_state_startup_snapshot(&project_dir).is_none());
+        std::fs::remove_dir_all(project_dir).unwrap();
     }
 
     #[test]
@@ -3905,3 +3974,7 @@ mod tests {
         assert_ne!(first, changed_store);
     }
 }
+
+#[cfg(test)]
+#[path = "state/startup_bench.rs"]
+mod startup_bench;
