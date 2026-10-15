@@ -64,6 +64,7 @@ const ENV_FILE_DENYLIST: &[&str] = &[
     "__NUB_AUGMENTED_NODE_COMPILE_CACHE_PRESENT",
     "__NUB_AUGMENTED_PATH_PRESENT",
     "__NUB_AUGMENTED_UV_THREADPOOL_SIZE_PRESENT",
+    "__NUB_UV_THREADPOOL_SIZE_TAKEN",
 ];
 
 /// The runtime-control keys Nub refuses to source from env files.
