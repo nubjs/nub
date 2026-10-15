@@ -10220,7 +10220,7 @@
             "name": "ignore-existing",
             "usage": "--ignore-existing",
             "help": "Ignore any existing patch entry for this package.",
-            "help_long": "Ignore any existing patch entry for this package.\n\nExtracts a pristine copy from `node_modules` rather than re-applying the existing patch first. Accepted for pnpm parity; aube already extracts from the *linked* (post-patch) tree, so this flag is effectively informational here.",
+            "help_long": "Ignore any existing patch entry for this package.\n\nStarts the edit copy from the pristine package bytes as well, so the recommitted patch replaces the declared one wholesale instead of building on its changes.",
             "help_first_line": "Ignore any existing patch entry for this package.",
             "short": [],
             "long": [

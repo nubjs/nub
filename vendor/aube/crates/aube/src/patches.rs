@@ -205,7 +205,9 @@ fn resolve_patches_against_graph(
 
 /// Brand a patch-group resolution failure with the matching
 /// `ERR_AUBE_PATCH_*` code (rewritten to `ERR_NUB_*` by the embedder).
-fn map_patch_resolve_err(e: aube_lockfile::patch_groups::PatchResolveError) -> miette::Report {
+pub(crate) fn map_patch_resolve_err(
+    e: aube_lockfile::patch_groups::PatchResolveError,
+) -> miette::Report {
     use aube_lockfile::patch_groups::PatchResolveError;
     match e {
         PatchResolveError::InvalidRange(r) => miette!(

@@ -277,6 +277,186 @@ pub(crate) fn apply_multi_file_patch(pkg_dir: &Path, patch_text: &str) -> Result
     Ok(())
 }
 
+/// Apply a multi-file unified diff in reverse: reconstruct the
+/// pre-patch tree from a post-patch one. `aube patch` uses this to
+/// rebuild the pristine source snapshot out of the linked (already
+/// patched) tree, so `patch-commit`'s diff is always pristine →
+/// edited and a recommit replaces the whole patch file instead of
+/// stacking incremental hunks on top of the previous content.
+pub fn apply_multi_file_patch_reversed(pkg_dir: &Path, patch_text: &str) -> Result<(), String> {
+    apply_multi_file_patch(pkg_dir, &reverse_patch_text(patch_text))
+}
+
+/// Reverse a multi-file unified diff, producing the patch that undoes
+/// it. The transform is purely textual: `diff --git` paths,
+/// `---`/`+++` headers, and the `@@ -a,b +c,d @@` ranges are swapped,
+/// and inside a hunk the `-`/`+` line markers trade places (context
+/// lines and `\ No newline` pragmas pass through). Hunk line counts
+/// are tracked while reversing so a *content* line that happens to
+/// start with `-- ` is not mistaken for a `--- ` file header.
+fn reverse_patch_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    // A `--- ...` header stashed (content + line ending) until its
+    // `+++ ...` partner arrives, so the two can be emitted swapped.
+    let mut pending_from: Option<(String, String)> = None;
+    // Remaining (old, new) line counts of the hunk being reversed,
+    // counted by the ORIGINAL line markers. `None` outside hunks.
+    let mut hunk_remaining: Option<(usize, usize)> = None;
+
+    for raw in text.split_inclusive('\n') {
+        let (core, ending) = match raw.strip_suffix('\n') {
+            Some(with_lf) => match with_lf.strip_suffix('\r') {
+                Some(c) => (c, "\r\n"),
+                None => (with_lf, "\n"),
+            },
+            None => (raw, ""),
+        };
+
+        if let Some((from_content, from_ending)) = pending_from.take() {
+            if let Some(to_content) = core.strip_prefix("+++ ") {
+                out.push_str("--- ");
+                out.push_str(to_content);
+                out.push_str(ending);
+                out.push_str("+++ ");
+                out.push_str(&from_content);
+                out.push_str(&from_ending);
+                continue;
+            }
+            // Malformed patch (a `--- ` with no `+++ ` partner):
+            // flush the stashed header unchanged and process this
+            // line normally.
+            out.push_str("--- ");
+            out.push_str(&from_content);
+            out.push_str(&from_ending);
+        }
+
+        if let Some((old, new)) = hunk_remaining.as_mut() {
+            let first = core.as_bytes().first();
+            let is_hunk_line = matches!(first, Some(b'-') | Some(b'+') | Some(b' ') | Some(b'\\'))
+                || core.is_empty();
+            if is_hunk_line {
+                match first {
+                    Some(b'-') => {
+                        out.push('+');
+                        out.push_str(&core[1..]);
+                        *old = old.saturating_sub(1);
+                    }
+                    Some(b'+') => {
+                        out.push('-');
+                        out.push_str(&core[1..]);
+                        *new = new.saturating_sub(1);
+                    }
+                    Some(b' ') => {
+                        out.push_str(core);
+                        *old = old.saturating_sub(1);
+                        *new = new.saturating_sub(1);
+                    }
+                    // `\ No newline at end of file` pragma — attached to
+                    // the previous line, not counted.
+                    Some(b'\\') => out.push_str(core),
+                    // Blank line: pnpm's parser treats it as context.
+                    None => {
+                        *old = old.saturating_sub(1);
+                        *new = new.saturating_sub(1);
+                    }
+                    _ => unreachable!("hunk-line classes exhausted above"),
+                }
+                out.push_str(ending);
+                if *old == 0 && *new == 0 {
+                    hunk_remaining = None;
+                }
+                continue;
+            }
+            // A line that is no hunk line ends the hunk (mirrors
+            // `parse_hunks`); reprocess it as a boundary line below.
+            hunk_remaining = None;
+        }
+
+        if let Some(rest) = core.strip_prefix("diff --git ") {
+            out.push_str(&reverse_diff_git_line(rest));
+            out.push_str(ending);
+            continue;
+        }
+        if let Some(from) = core.strip_prefix("--- ") {
+            pending_from = Some((from.to_string(), ending.to_string()));
+            continue;
+        }
+        if core.starts_with("@@")
+            && let Some((old_count, new_count)) = hunk_line_counts(core)
+            && let Some(header) = reverse_hunk_header(core)
+        {
+            out.push_str(&header);
+            out.push_str(ending);
+            hunk_remaining = ((old_count, new_count) != (0, 0)).then_some((old_count, new_count));
+            continue;
+        }
+        // `index`, `new file mode`, `similarity index` and other git
+        // decorations the hunk applier ignores — pass through.
+        out.push_str(core);
+        out.push_str(ending);
+    }
+    if let Some((from_content, from_ending)) = pending_from.take() {
+        out.push_str("--- ");
+        out.push_str(&from_content);
+        out.push_str(&from_ending);
+    }
+    out
+}
+
+/// Swap the ranges of an `@@ -old +new @@ ...` hunk header so the hunk
+/// applies in reverse. Returns `None` for a malformed header.
+fn reverse_hunk_header(line: &str) -> Option<String> {
+    let body = line.strip_prefix("@@ -")?;
+    let (ranges, rest) = body.split_once(" @@")?;
+    let (old, new) = ranges.split_once(" +")?;
+    Some(format!("@@ -{new} +{old} @@{rest}"))
+}
+
+/// Swap the `a/<path>` and `b/<path>` of a `diff --git` line's tail so
+/// the reversed patch's post-edit path is the original's pre-edit
+/// path. Handles git's `"a/path" "b/path"` quoted form as well.
+fn reverse_diff_git_line(rest: &str) -> String {
+    if let Some(after) = rest.strip_prefix("\"a/") {
+        let quoted = || -> Option<String> {
+            let end_a = after.find("\" \"b/")?;
+            let a = unescape_git_quoted(&after[..end_a])?;
+            let after_b = &after[end_a + 5..];
+            let close = after_b.rfind('"')?;
+            let b = unescape_git_quoted(&after_b[..close])?;
+            Some(format!(
+                "diff --git \"a/{}\" \"b/{}\"",
+                escape_git_quoted(&b),
+                escape_git_quoted(&a)
+            ))
+        };
+        return quoted().unwrap_or_else(|| format!("diff --git {rest}"));
+    }
+    let Some(body) = rest.strip_prefix("a/") else {
+        return format!("diff --git {rest}");
+    };
+    // Prefer the split point where both paths agree (the only shape
+    // aube generates); fall back to the first ` b/` for renames.
+    let mut split = None;
+    let mut search_from = 0;
+    while let Some(rel) = body[search_from..].find(" b/") {
+        let abs = search_from + rel;
+        if body[..abs] == body[abs + 3..] {
+            split = Some(abs);
+            break;
+        }
+        search_from = abs + 1;
+    }
+    let abs = split.or_else(|| body.find(" b/"));
+    match abs {
+        Some(i) => format!("diff --git a/{} b/{}", &body[i + 3..], &body[..i]),
+        None => format!("diff --git {rest}"),
+    }
+}
+
+fn escape_git_quoted(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// One contiguous run of like-typed lines inside a hunk — a block of
 /// context, a block of deletions, or a block of insertions. Mirrors
 /// pnpm's `PatchMutationPart` (`@pnpm/patch-package`'s `parse.ts`).
@@ -1354,5 +1534,111 @@ mod tests {
         // marker (deletion side), and the new content does too.
         let body = "--- a/x\n+++ b/x\n@@ -1,2 +1,3 @@\n first\n-second\n\\ No newline at end of file\n+second\n+third\n\\ No newline at end of file\n";
         assert_eq!(apply_body(original, body).unwrap(), "first\nsecond\nthird");
+    }
+
+    // ===== Reversed application (`aube patch` pristine-snapshot rebuild):
+    // applying a patch and then its reverse must restore the original bytes.
+
+    #[test]
+    fn reversed_patch_restores_pristine_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        let pristine = "one\ntwo\nthree\nfour\nfive\n";
+        std::fs::write(pkg.join("index.js"), pristine).unwrap();
+
+        let patch = "diff --git a/index.js b/index.js\n\
+                     --- a/index.js\n\
+                     +++ b/index.js\n\
+                     @@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n\
+                     @@ -4,2 +4,3 @@\n four\n+four-point-five\n five\n";
+        apply_multi_file_patch(&pkg, patch).unwrap();
+        assert_ne!(
+            std::fs::read_to_string(pkg.join("index.js")).unwrap(),
+            pristine
+        );
+
+        apply_multi_file_patch_reversed(&pkg, patch).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(pkg.join("index.js")).unwrap(),
+            pristine
+        );
+    }
+
+    #[test]
+    fn reversed_patch_reverses_additions_and_deletions() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("old.js"), "old\n").unwrap();
+
+        let patch = "diff --git a/new.js b/new.js\n\
+                     --- /dev/null\n\
+                     +++ b/new.js\n\
+                     @@ -0,0 +1 @@\n+new\n\
+                     diff --git a/old.js b/old.js\n\
+                     --- a/old.js\n\
+                     +++ /dev/null\n\
+                     @@ -1 +0,0 @@\n-old\n";
+        apply_multi_file_patch(&pkg, patch).unwrap();
+        assert!(pkg.join("new.js").exists());
+        assert!(!pkg.join("old.js").exists());
+
+        apply_multi_file_patch_reversed(&pkg, patch).unwrap();
+        assert!(!pkg.join("new.js").exists(), "reversed addition removes");
+        assert_eq!(
+            std::fs::read_to_string(pkg.join("old.js")).unwrap(),
+            "old\n",
+            "reversed deletion recreates"
+        );
+    }
+
+    #[test]
+    fn reverse_does_not_mistake_hunk_content_for_file_headers() {
+        // A deleted line whose content starts with `-- ` produces a hunk
+        // line `--- ...` that must not be read as a file header while
+        // reversing — the hunk line counts gate that.
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        let pristine = "flag\n-- stripped\ndone\n";
+        std::fs::write(pkg.join("x"), pristine).unwrap();
+
+        let patch = "diff --git a/x b/x\n\
+                     --- a/x\n\
+                     +++ b/x\n\
+                     @@ -1,3 +1,2 @@\n flag\n--- stripped\n done\n";
+        apply_multi_file_patch(&pkg, patch).unwrap();
+        apply_multi_file_patch_reversed(&pkg, patch).unwrap();
+        assert_eq!(std::fs::read_to_string(pkg.join("x")).unwrap(), pristine);
+    }
+
+    #[test]
+    fn reverse_patch_text_swaps_headers_and_ranges() {
+        let patch = "diff --git a/a.js b/a.js\n\
+                     --- a/a.js\n\
+                     +++ b/a.js\n\
+                     @@ -1,2 +1,3 @@ tail context\n one\n+two\n three\n";
+        assert_eq!(
+            reverse_patch_text(patch),
+            "diff --git a/a.js b/a.js\n\
+             --- b/a.js\n\
+             +++ a/a.js\n\
+             @@ -1,3 +1,2 @@ tail context\n one\n-two\n three\n"
+        );
+    }
+
+    #[test]
+    fn reverse_patch_text_swaps_dev_null_sides() {
+        let addition = "diff --git a/n.js b/n.js\n--- /dev/null\n+++ b/n.js\n@@ -0,0 +1 @@\n+n\n";
+        assert_eq!(
+            reverse_patch_text(addition),
+            "diff --git a/n.js b/n.js\n--- b/n.js\n+++ /dev/null\n@@ -1 +0,0 @@\n-n\n"
+        );
+        let deletion = "diff --git a/o.js b/o.js\n--- a/o.js\n+++ /dev/null\n@@ -1 +0,0 @@\n-o\n";
+        assert_eq!(
+            reverse_patch_text(deletion),
+            "diff --git a/o.js b/o.js\n--- /dev/null\n+++ a/o.js\n@@ -0,0 +1 @@\n+o\n"
+        );
     }
 }
