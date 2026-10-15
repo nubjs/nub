@@ -3,6 +3,7 @@ import type { Metadata } from 'next';
 import { InlineTOC } from 'fumadocs-ui/components/inline-toc';
 import { blog } from '@/lib/source';
 import { renderInlineCode, stripInlineCode } from '@/lib/inline-code';
+import { formatDate } from '@/lib/blog-date';
 import { getMDXComponents } from '../../../../../mdx-components';
 import { BlogTOC } from './blog-toc';
 
@@ -113,13 +114,4 @@ export function postMetadata(page: BlogPage, titleOverride?: string): Metadata {
       images: [ogImage],
     },
   };
-}
-
-function formatDate(date: string | Date | undefined): string {
-  if (!date) return '';
-  return new Date(date).toLocaleDateString('en-US', {
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-  });
 }
