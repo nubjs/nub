@@ -54,7 +54,7 @@ jobs:
         run: npm run lat:check
 
       - name: Verify local search and agent integration
-        run: node --test scripts/lat.test.mjs
+        run: node --test scripts/lat.test.mjs scripts/codex-hooks.test.mjs
         env:
           LAT_SMOKE: "1"
 
