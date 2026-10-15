@@ -70,9 +70,10 @@ common.claimServeEntry();
 // `major > 22 || (major === 22 && minor >= 15)` band claimed the API on 23.0–23.4,
 // where it does not exist — the same off-by-one-line defect that crashed the Rust
 // spawn path's tier choice. A `typeof` probe cannot drift from Node's release
-// history the way a hand-maintained band can.
-const [__major = 0, __minor = 0] = process.versions.node.split(".").map((n) => parseInt(n, 10));
-const __isCompatTier = __major > 18 || (__major === 18 && __minor >= 19);
+// history the way a hand-maintained band can. The compat test is a probe for the
+// same reason: `module.register` arrived in 20.6.0 and was backported to 18.19.0,
+// so 19.x and 20.0–20.5 sort above the 18.19 floor without the API.
+const __isCompatTier = typeof module.register === "function";
 const __isFastTier = typeof module.registerHooks === "function";
 
 // Native TypeScript support (`process.features.typescript`). Where absent (the
@@ -124,7 +125,7 @@ if (__isFastTier) {
   common.installCjsRequireHooks(core, !__hasNativeTs);
 } else {
   process.stderr.write(
-    `Nub requires Node 18.19 or newer for runtime augmentation; got ${process.versions.node}. Preload is inactive.\n`,
+    `Nub requires Node 18.19+ on the 18.x line, or 20.6 or newer, for runtime augmentation; got ${process.versions.node}. Preload is inactive.\n`,
   );
 }
 

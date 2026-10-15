@@ -1,174 +1,30 @@
 ---
-title: The virtual store
-description: How Nub's default linker works — one symlink per package into a machine-global store, with install-time phantom detection and per-package ejection — its warm-install performance, and the flat and project-local opt-outs.
+title: Store and layout
+description: How Nub arranges node_modules and where it keeps packages on disk — the shared virtual store, the flat and project-local layouts, store and cache locations, and pruning.
 ---
 
-Every install links an **isolated virtual store** by default: direct dependencies sit at the top of `node_modules`, transitive packages link into a per-machine store, and undeclared (phantom) dependencies fail instead of resolving by accident.
-
-## One symlink per package
-
-Incumbent package managers build `node_modules` file by file: npm copies every file into every project, and pnpm and Bun hardlink every file from a machine cache — faster, but still one syscall per file, tens of thousands for a typical app.
-
-Nub's default layout links **one symlink per package**. Package files live in a machine-global store, one real copy per package version, deduplicated by content hash:
-
-```console
-$ nub store path
-/Users/you/.local/share/nub/store/v1
-```
-
-Each store entry holds a package version's real files plus symlinks to its **declared** dependencies. The project's `node_modules` then symlinks each package straight into the store:
+By default, Nub links each package version once per machine, into a shared virtual store, and each project's `node_modules` symlinks into it. Direct dependencies sit at the top level, and an undeclared (phantom) import fails instead of resolving by accident.
 
 ```text
 my-app/
 └── node_modules/
-    ├── ms     →  ~/.local/share/nub/store/…/ms@2.1.3
-    └── react  →  ~/.local/share/nub/store/…/react@19.2.0
+    ├── ms     →  ~/.cache/nub/pm/store/…/ms@2.1.3
+    └── react  →  ~/.cache/nub/pm/store/…/react@19.2.0
 ```
 
-Two properties follow:
+## Layouts
 
-- **Warm installs scale with package count, not file count.** Linking a project is O(packages) symlinks instead of O(files) hardlinks or copies.
-- **The store is sealed.** Node resolves a symlink to its real path before loading, so code loaded from the store resolves imports from inside its store entry — its declared dependencies and nothing else. An undeclared import fails at resolve time instead of working by accident.
-
-No other package manager ships this as its default. Bun shipped it for its isolated linker and reverted to opt-in three weeks later; pnpm keeps it behind the off-by-default `enableGlobalVirtualStore` flag. The blocker is the same in both trackers: widely-used packages import **phantom dependencies** — packages they never declare — and a sealed store breaks them. The history and the mechanism below are in the blog post: [how we built a 5x faster package manager](/blog/unblocking-the-global-virtual-store).
-
-## Phantom detection and ejection
-
-Nub can make this layout the default because the install detects the packages that would break, and only those fall back.
-
-As each tarball is imported into the store, Nub parses that version's published code with [Oxc](https://oxc.rs): it walks the module graph from the package's `exports`, `main`, and `bin` entry points and checks every static, unguarded import against the dependencies the package declares. Published versions are immutable, so each verdict is computed once per content fingerprint and cached machine-wide next to the store. The scan runs on the download fan-out threads, overlapped with network time.
-
-At link time, a flagged package is **ejected**: hardlinked into the project as real files instead of symlinked into the store, so its resolution walk passes through the project again — and the undeclared target is linked where that walk finds it. Everything that transitively imports the flagged package is ejected with it; ejecting the offender alone would leave its store-resident importers loading the shared copy — two real paths, two module instances. The ejected closure measures 0.3–2.1% of real large trees, and the symlinked majority keeps the one-link-per-package relink.
-
-Detection and ejection are on for every install, with no configuration. Three toolchains whose resolvers cannot follow symlinks out of the project — Next.js, whose Turbopack canonicalizes paths and confines the module graph to a single project root; bare React Native, whose Metro config crawls by real path; and Remix 3, whose asset server serves npm packages to the browser only from inside the project's `node_modules` — automatically get a **project-local** store instead: the same isolated layout, with every link staying inside `node_modules`. See [shared vs per-project store](/docs/install#shared-vs-per-project-store).
-
-## Performance
-
-A warm install — store populated, frozen lockfile — is where the layout's advantage shows: relinking costs O(packages) while every other installer pays O(files), so the gap widens as trees grow.
-
-<Bench
-  label="warm install · 1168 packages · Linux (ubuntu-latest)"
-  source="https://github.com/nubjs/nub/tree/main/tests/bench/install"
-  accent="pink"
-  max={12945}
-  caption="hyperfine, 25 runs / 6 warmup, near-idle ubuntu-latest runner · bun 1.3.14, pnpm 10.34.4, npm on Node 24."
-  rows={[
-    { cmd: 'nub install', ms: 346, us: true },
-    { cmd: 'nub install --node-linker hoisted', ms: 1461, ratio: 4.2 },
-    { cmd: 'bun install', ms: 1896, ratio: 5.5 },
-    { cmd: 'pnpm install', ms: 3453, ratio: 10 },
-    { cmd: 'npm ci', ms: 12945, ratio: 37.4 },
-  ]}
-/>
-
-The two Nub rows isolate the layout's contribution. With `--node-linker hoisted`, Nub links Bun's exact flat layout with the same per-file hardlink syscall — 1.3× faster than Bun on the same work. The default row is the same install with the one-symlink-per-package relink. On a thinner 313-package tree the default's lead over Bun is 1.7×.
-
-## The flat opt-out
-
-To get a plain, flat `node_modules` instead — npm's layout, no virtual store — set one line in `.npmrc`:
+The default is isolated under every incumbent. Two `.npmrc` settings change it:
 
 ```ini title=".npmrc"
-node-linker=hoisted
-```
-
-For a single command, without touching config:
-
-```bash
-nub install --node-linker hoisted
-```
-
-Nub reads `node-linker` from `.npmrc` under every incumbent, including pnpm 11 and later. Files still materialize from the global content store by reflink or hardlink, so a flat tree costs little extra disk.
-
-<Callout title="Layout versus hoist patterns">
-The `node-linker` setting picks the layout: `isolated` (the default symlink tree) or `hoisted` (flat). It is unrelated to `hoist`, `shamefully-hoist`, and `public-hoist-pattern`, which lift packages to the top level *within* the isolated layout and leave the virtual store in place.
-</Callout>
-
-## Per package manager
-
-Nub does not take layout from an incumbent's branded config:
-
-| Incumbent | Its own flat-layout config | Under Nub |
-|---|---|---|
-| **pnpm** | `nodeLinker: hoisted` in `pnpm-workspace.yaml` or global `config.yaml` | No effect — set `node-linker=hoisted` |
-| **npm** | `install-strategy=hoisted` | No effect — set `node-linker=hoisted` |
-| **Yarn** | `nodeLinker: node-modules` in `.yarnrc.yml` | No effect — set `node-linker=hoisted` |
-| **Bun** | `linker = "hoisted"` under `[install]` in `bunfig.toml` | No effect — set `node-linker=hoisted` |
-
-The same rule covers hoisting keys, the modules directory, and virtual-store paths — see [layout settings](/docs/install#layout-settings) for the full field list. The layout fields in `nub.jsonc` apply under every incumbent.
-
-Yarn Plug'n'Play is refused rather than ignored, because Nub installs a `node_modules` tree and a PnP project has none:
-
-```console
-$ nub install                                                    # ❌
-Error: nub: this project is configured for Yarn Plug'n'Play (nodeLinker:
-pnp, or Yarn Berry's default) — nub installs a node_modules tree and
-doesn't support PnP yet, so the result would diverge from yarn's. Install
-with yarn, or set `nodeLinker: node-modules` in .yarnrc.yml.
-[ERR_NUB_PNP_UNSUPPORTED]
-```
-
-## Flat vs project-local
-
-Two settings turn off different halves of the default:
-
-```ini title=".npmrc"
-# a flat, npm-style tree — no virtual store at all
-node-linker=hoisted
-
-# keep the isolated layout, but move the store inside the project
+# keep the isolated layout, but put the store inside the project
 enableGlobalVirtualStore=false
+
+# a flat, npm-style tree with no virtual store
+node-linker=hoisted
 ```
 
-The `enableGlobalVirtualStore=false` form keeps isolation and its phantom-dependency protection; it only relocates the store from the shared per-machine location to `node_modules/.store/` inside the project. That makes the tree self-contained — it survives a Docker `COPY --from` into a fresh image, where the shared store would not exist. Nub already does this automatically in CI and under `nub ci`. See [store and disk layout](/docs/install#store-and-disk-layout) for the shared-versus-project-local store in full.
-
-<Callout>
-Read the [full docs](https://pnpm.io/settings/node-modules#enableglobalvirtualstore) on pnpm.io.
-</Callout>
-
-## Reclaiming disk space
-
-A store entry is keyed by the package's whole resolved dependency graph, so bumping one dependency re-keys that package and every package that reaches it. The entries left behind stay on disk. Collect them with a prune:
-
-```bash
-nub store prune
-```
-
-```
-Pruned 4 packages (0.1 MB) from the global virtual store
-Pruned 1 stale project record from the global virtual store registry
-Pruned 4 files (0.0 MB) from the store
-```
-
-Nub records every project that installs against the shared store. A prune keeps the entries those projects still link to — directly, or through another entry's own dependencies — and removes the rest. A registered project whose directory is gone stops counting as a store user; the prune drops its record and says so, and whatever only that project reached goes with it. The next install in a project that needs an entry extracts it again.
-
-`--dry-run` prints the same plan without removing anything, and `--dry-run --json` prints it as JSON.
-
-The extracted-tree cache, the copy of each package that the linker clones into projects, is held rather than collected. The first prune to find an entry unreferenced reports it; only a prune that still finds it unreferenced 30 days later removes it. Installing in a project that needs the entry clears the hold.
-
-```
-Holding 30029 entries of the extracted-tree cache unreferenced for 30 days
-before removal. Install in any project that still needs them and they are
-kept.
-```
-
-That delay is what makes the command safe to run on a store you have had for a while. A project only becomes visible to the prune once it has installed at least once, so on the day you upgrade every project you have not touched yet looks unreferenced. Without the hold, one install followed by one prune would delete the rest.
-
-With nothing registered at all, a prune skips that cache rather than treating an empty registry as an empty store:
-
-```
-No projects are registered against the store; skipping the extracted-tree
-cache. Run an install in each project you want kept, then prune again.
-```
-
-<Callout>
-Any install registers a project, including one that reports no work to do. Running an install once in each project registers it.
-</Callout>
-
-Earlier versions of Nub kept the shared store in a different layout. A prune removes what that layout left behind once no project links into it, on the same 30-day hold.
-
-## Project configuration
-
-Any project can pick the layout with one [`linker`](/docs/config#installlinker) field — `global-virtual-store` for the shared store (the default), `isolated` for a project-local one, or `hoisted` for a flat, real-directory tree.
+The same choice is the [`linker`](/docs/config#installlinker) field in `nub.jsonc`: `global-virtual-store` for the shared store (the default), `isolated` for a project-local one, or `hoisted` for a flat tree.
 
 ```jsonc title="nub.jsonc"
 {
@@ -179,21 +35,53 @@ Any project can pick the layout with one [`linker`](/docs/config#installlinker) 
 }
 ```
 
-Two of the strategies accept an extra option, written in the object form; `hoisted` takes none. Under `isolated` that option is `hoist`, which fills the hidden fallback tree at `node_modules/.store/node_modules/` — the directory your dependencies reach when they import something they never declared. It takes `true`, `false`, or a pattern list.
+### Flat layout
 
-```jsonc title="nub.jsonc"
-{
-  // ...
-  "install": {
-    "linker": {
-      "strategy": "isolated",
-      "hoist": ["*eslint*", "@types/*"]
-    }
-  }
-}
+A flat `node_modules`, with no virtual store, is npm's layout. It suits a project that relies on phantom dependencies. Set `node-linker=hoisted` in `.npmrc`, or pass the flag for one command:
+
+```bash
+nub install --node-linker hoisted
 ```
 
-Under `global-virtual-store` that option is `eject`, which writes matching packages into the project as real directories instead of linking them out of the shared store.
+Nub reads `node-linker` from `.npmrc` under every incumbent. Files still come from the global content store by reflink or hardlink, so a flat tree costs little extra disk.
+
+<Callout title="Layout versus hoist patterns">
+The `node-linker` setting picks the layout. The `hoist`, `shamefully-hoist`, and `public-hoist-pattern` settings are separate: they lift packages to the top level within the isolated layout and keep the virtual store.
+</Callout>
+
+### Shared vs per-project store
+
+Outside CI, the virtual store is shared across projects: a package version materializes once per machine and every project links to it. The links point outside the project, so a `node_modules` copied to another machine does not resolve.
+
+In CI, and under `nub ci`, each project gets its own virtual store at `node_modules/.store/`, with real directories and relative links. That tree survives a Docker `COPY --from` into a fresh image. Force it for any install:
+
+```ini title=".npmrc"
+enableGlobalVirtualStore=false
+```
+
+The project-local store has the same shape as pnpm's `node_modules/.pnpm/`, but the two are not shared, so alternating between the tools relinks the tree.
+
+<Callout>
+Read the [full docs](https://pnpm.io/settings/node-modules#enableglobalvirtualstore) on pnpm.io.
+</Callout>
+
+### Ejection
+
+Some packages and tools break when a dependency's real path is outside the project. Nub detects them and moves only those into the project, so the rest of the tree keeps sharing:
+
+| What breaks | Example | What Nub does |
+|---|---|---|
+| A package importing a backend it never declares | `@hookform/resolvers/zod` reaching your `zod` | Materializes the adapter into the project |
+| A package writing generated code beside itself | Prisma's postinstall running `prisma generate` | Materializes the package so `generate` stays project-local |
+| A bundler or asset server that resolves by real path | Next.js; Metro, in bare React Native and Expo before SDK 56; Remix 3 | Gives the project a self-contained store |
+| A dev server that gates real-path access by allow-list | Vite | Writes `node_modules/.modules.yaml`, which Vite reads — no `vite.config` change |
+
+Add packages of your own in `.npmrc` or `nub.jsonc`:
+
+```ini title=".npmrc"
+# a package whose presence gives the whole project its own store
+disableGlobalVirtualStoreForPackages=my-bundler   # comma-separated
+```
 
 ```jsonc title="nub.jsonc"
 {
@@ -201,15 +89,160 @@ Under `global-virtual-store` that option is `eject`, which writes matching packa
   "install": {
     "linker": {
       "strategy": "global-virtual-store",
+      // written into the project as real directories
       "eject": ["electron", "@company/native-*"]
     }
   }
 }
 ```
 
-The two are not interchangeable: `hoist` fills a directory that only exists when the store is project-local, and a package linked out of a shared store never walks through the project on the way to it. Naming one under the other strategy is rejected.
+### Hoisting and paths
 
-A related field, [`publicHoist`](/docs/config#installpublichoist), is outside `linker` because it applies under every strategy — it puts packages in the project's own top-level `node_modules` for tools that resolve from the project root, like TypeScript looking for `@types/*`.
+The remaining layout settings are pnpm's, set in `.npmrc`:
+
+```ini title=".npmrc"
+hoist-pattern=lodash
+public-hoist-pattern=@types/*
+shamefully-hoist=true
+hoist-workspace-packages=false
+hoisting-limits=workspaces
+modules-dir=vendor_modules
+virtual-store-dir=.store
+```
+
+<Callout>
+Read the [full docs](https://pnpm.io/settings/node-modules) on pnpm.io.
+</Callout>
+
+In `nub.jsonc`, [`publicHoist`](/docs/config#installpublichoist) lifts packages to the project's top-level `node_modules`, for tools like TypeScript that look for `@types/*` there. Under the `isolated` strategy, the `hoist` option fills the hidden fallback tree at `node_modules/.store/node_modules/`, which dependencies reach when they import something they never declared:
+
+```jsonc title="nub.jsonc"
+{
+  // ...
+  "install": {
+    "publicHoist": ["@types/*"],
+    "linker": {
+      "strategy": "isolated",
+      "hoist": ["*eslint*", "@types/*"]  // true, false, or a pattern list
+    }
+  }
+}
+```
+
+The `hoist` option is valid only under `isolated`, and `eject` only under `global-virtual-store`. Naming one under the other strategy is an error.
+
+## Disk locations
+
+Nub keeps package files and download caches outside the project, in these directories.
+
+### Content store
+
+Package files are deduplicated by content hash in a global store at `$XDG_DATA_HOME/nub/store/v1/` (default `~/.local/share/nub/store/v1/`). A given package version is on disk once, shared across projects.
+
+```console
+$ nub store path
+/Users/you/.local/share/nub/store/v1
+```
+
+Files reach `node_modules` by reflink on APFS and btrfs, hardlink on ext4, or copy as a fallback.
+
+### Relocating the store
+
+The store location is the `store-dir` setting. Set it persistently with `nub config set`, which writes the project's config:
+
+```console
+$ nub config set store-dir /srv/nub-store
+set store-dir=/srv/nub-store (/home/you/app/.npmrc)
+$ nub store path
+/srv/nub-store/v1
+```
+
+For a single run, such as a CI job or a test sandbox, use the environment variable:
+
+```console
+$ npm_config_store_dir=/tmp/scratch-store nub install
+```
+
+Sources, highest first:
+
+- `npm_config_store_dir` (environment)
+- `storeDir` in `pnpm-workspace.yaml` (pnpm incumbent)
+- `store-dir` in the project `.npmrc`
+- `store-dir` in the user `~/.npmrc`
+- `$XDG_DATA_HOME/nub/store/` (default)
+
+Nub appends the `v1/` suffix to the configured directory. A relative path resolves against the project root.
+
+### Cache directory
+
+Registry metadata and the shared virtual store live in a cache at `$XDG_CACHE_HOME/nub/pm/` (default `~/.cache/nub/pm/`). Move it, for example to a faster volume or a CI cache mount, with `cache-dir`:
+
+```ini title=".npmrc"
+cache-dir=/mnt/fast/nub-cache
+```
+
+Two environment variables set the same thing, and both outrank the file:
+
+```bash
+# neutral — npm and pnpm read it too
+npm_config_cache_dir=/mnt/fast/nub-cache nub install
+# Nub's own spelling, which wins over the above
+NUB_CACHE_DIR=/mnt/fast/nub-cache nub install
+```
+
+Print the effective value:
+
+```console
+$ npm_config_cache_dir=/mnt/fast/nub-cache nub config get cache-dir
+/mnt/fast/nub-cache
+```
+
+Keep `cache-dir` on the same volume as `store-dir`. The shared virtual store hardlinks out of the content store, and a hardlink cannot cross filesystems, so a split falls back to a per-file copy and Nub warns.
+
+A few caches stay at the platform default regardless: the advisory database, the bootstrapped `node-gyp`, git clones, and the registry behind `nub link -g`.
+
+### Offline installs
+
+When the store already holds every package, an install relinks from it with no network access:
+
+```bash
+nub install                   # offline when the store has every package
+nub install --offline         # force offline
+nub install --prefer-offline  # try the cache first
+```
+
+When Nub provisioned the project's Node, a native addon build also works offline: Nub fills the `node-gyp` header cache from that Node. On Windows, `node-gyp` still downloads the headers, because the official Node zip carries none.
+
+## Reclaiming disk space
+
+A store entry is keyed by its whole resolved dependency graph, so one bump leaves several old entries behind. Remove them with a prune:
+
+```bash
+nub store prune
+```
+
+```text
+Pruned 4 packages (0.1 MB) from the global virtual store
+Pruned 1 stale project record from the global virtual store registry
+Pruned 4 files (0.0 MB) from the store
+```
+
+A prune keeps every entry a registered project still links to, directly or through another entry, and removes the rest. Every install registers its project, including one that reports no work to do. A registered project whose directory is gone stops counting, and the prune drops its record. Pass `--dry-run` to print the plan without removing anything, or `--dry-run --json` for JSON.
+
+The extracted-tree cache, the copy of each package that the linker clones into projects, is held for 30 days. The first prune to find an entry unreferenced reports it, and only a prune 30 days later removes it. An install that needs the entry clears the hold.
+
+```text
+Holding 30029 entries of the extracted-tree cache unreferenced for 30 days
+before removal. Install in any project that still needs them and they are
+kept.
+```
+
+With no projects registered at all, a prune skips that cache:
+
+```text
+No projects are registered against the store; skipping the extracted-tree
+cache. Run an install in each project you want kept, then prune again.
+```
 
 ## GYP-based native builds
 
@@ -225,12 +258,46 @@ Some packages that compile native code with node-gyp fail to build under the iso
 }
 ```
 
-Every node-gyp run generates with `--depth=.` and writes into `build/`, and GYP joins its output paths against that depth. A dependency reference pointing outside the package directory — which any non-flat `node_modules` produces — then resolves one level short of its target. The build either fails with a Python `FileNotFoundError` naming a `.target.mk` path, or writes a duplicate tree next to the intended one.
-
-Install that project flat:
+GYP resolves such a reference one level short of its target when it points outside the package directory, as it does in any non-flat `node_modules`. The build either fails with a Python `FileNotFoundError` naming a `.target.mk` path, or writes a duplicate tree next to the intended one. Install that project flat:
 
 ```bash
 nub install --node-linker hoisted
 ```
 
-The limitation is GYP's, not the linker's: GYP assumes a single source tree rooted at `--depth`, and the same builds fail the same way under pnpm's virtual store. A package that reaches a dependency's headers through `include_dirs` instead is unaffected — that path is a compiler flag and never reaches the computation.
+## How it works
+
+The shared layout rests on two mechanisms: store entries that link to each other, and a scan for imports a package never declared.
+
+### One symlink per package
+
+Each store entry holds a package version's real files plus symlinks to its declared dependencies, and the project's `node_modules` symlinks each package straight into the store. Two properties follow:
+
+- **Warm installs scale with package count, not file count.** Linking a project takes one symlink per package instead of one hardlink or copy per file.
+- **The store is sealed.** Node resolves a symlink to its real path before loading, so code in the store resolves imports from inside its own entry: its declared dependencies and nothing else.
+
+Widely used packages import phantom dependencies, packages they never declare, and a sealed store breaks them. The blog post [how we built a 5x faster package manager](/blog/unblocking-the-global-virtual-store) covers the history.
+
+### Phantom detection
+
+As each tarball enters the store, Nub parses the version's published code with [Oxc](https://oxc.rs). It walks the module graph from the package's `exports`, `main`, and `bin` entry points and checks every static, unguarded import against the declared dependencies. Each verdict is cached machine-wide per content fingerprint.
+
+At link time, a flagged package is ejected: hardlinked into the project as real files, so its resolution walk passes through the project, where Nub links the undeclared target. Everything that transitively imports the flagged package is ejected with it, so the package loads from one path. The rest of the tree stays symlinked. The toolchains that need a whole project-local store are listed under [ejection](#ejection).
+
+## Performance
+
+The benchmark is a warm reinstall of a 1,168-package tree: store populated, lockfile present, `node_modules` removed between runs.
+
+<Bench
+  label="warm install · 1168 packages · Linux (ubuntu-latest)"
+  source="https://github.com/nubjs/nub/tree/main/tests/bench/install"
+  accent="pink"
+  max={12945}
+  caption="hyperfine, 25 runs / 6 warmup, near-idle ubuntu-latest runner · bun 1.3.14, pnpm 10.34.4, npm on Node 24."
+  rows={[
+    { cmd: 'nub install', ms: 346, us: true },
+    { cmd: 'nub install --node-linker hoisted', ms: 1461, ratio: 4.2 },
+    { cmd: 'bun install', ms: 1896, ratio: 5.5 },
+    { cmd: 'pnpm install', ms: 3453, ratio: 10 },
+    { cmd: 'npm ci', ms: 12945, ratio: 37.4 },
+  ]}
+/>

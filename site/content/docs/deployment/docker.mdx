@@ -3,19 +3,21 @@ title: Docker
 description: Official Nub Docker images, and how to add Nub to your own image. The images install Nub onto an official Node base.
 ---
 
-Nub augments the Node already in your image — it is not a separate runtime. The official images start from an official `node` base and layer Nub on top, so `node`, `npm`, and `nub` are all present.
-
-## Official images
+The official images start from an official `node` base and install Nub on top, so `node`, `npm`, and `nub` are all present:
 
 ```dockerfile title="Dockerfile"
 FROM ghcr.io/nubjs/nub:{{NUB_VERSION}}
+
 COPY --chown=node:node package.json package-lock.json ./
 RUN nub ci
+
 COPY --chown=node:node . .
 CMD ["nub", "run", "start"]
 ```
 
-The image runs as the non-root `node` user, so copy your project in with `--chown=node:node` — a bare `COPY . .` creates root-owned files that `nub install` then cannot write alongside.
+Change `package-lock.json` to the lockfile the project already uses. Copying the manifests before the source keeps the install layer cached, and a `.dockerignore` should exclude `node_modules`, `.git`, and local `.env` files.
+
+## Official images
 
 Two variants, both on the current Node release line, digest-pinned and published for `linux/amd64` and `linux/arm64`:
 
@@ -24,77 +26,54 @@ Two variants, both on the current Node release line, digest-pinned and published
 | `latest`, `<version>`, `slim`, `<version>-slim` | `node:26-slim` | glibc |
 | `alpine`, `<version>-alpine` | `node:26-alpine` | musl |
 
-Run a TypeScript file directly — the entrypoint passes any non-command argument to `nub`:
+The images run as the non-root `node` user (uid 1000). Copy the project in with `--chown=node:node`, because a bare `COPY . .` creates root-owned files that `nub install` cannot write beside.
+
+The entrypoint passes any argument that is not a command to `nub`, so a TypeScript file runs directly:
 
 ```bash
 docker run --rm -v "$PWD:/app" ghcr.io/nubjs/nub script.ts
 ```
 
-Signals reach the runtime: `docker stop` delivers `SIGTERM` to `nub`, which forwards it to the Node process for a clean shutdown. The `node` user is uid 1000, so when you bind-mount a directory that `nub install` must write into, run with `--user "$(id -u)"` and the writes carry your host ownership.
+When a bind-mounted directory must take writes from `nub install`, run with `--user "$(id -u)"` so the files carry your host ownership.
 
-## Adding Nub to your own image
+## Your own image
 
-If you already build on a `node` base, install Nub with one line. At install time, npm selects the correct per-platform binary — including the musl build on Alpine — and the package's postinstall sets the execute bit, so installing as root and then dropping to a non-root user works.
+On an existing `node` base, install Nub with npm. npm selects the platform binary, including the musl build on Alpine.
 
 ```dockerfile title="Dockerfile"
-FROM node:26-slim
+FROM node:{{NODE_MAJOR}}-slim
 RUN npm install -g @nubjs/nub
 ```
 
 On Alpine, add `libgcc` and `libstdc++` for the native addon:
 
 ```dockerfile title="Dockerfile"
-FROM node:26-alpine
+FROM node:{{NODE_MAJOR}}-alpine
 RUN apk add --no-cache libgcc libstdc++ && npm install -g @nubjs/nub
 ```
 
-To pin the floor Node version instead of the current line, use a `22` base (`node:22-slim` or `node:22-alpine`) — the lowest version Nub's fast tier supports.
-
 ## Web services
 
-Container platforms route traffic to the port they provide through `PORT`. Bind the server to `0.0.0.0`, not `127.0.0.1`:
+Container platforms send traffic to the port in `PORT`. Bind the server to `0.0.0.0`, not `127.0.0.1`:
 
 ```ts title="server.ts"
 import { createServer } from "node:http";
 
-const host = "0.0.0.0";
 const port = Number(process.env.PORT || 8080);
 
 createServer((request, response) => {
-  if (request.url !== "/alive") {
-    response.writeHead(404);
-    response.end();
-    return;
-  }
-
   response.writeHead(200, { "content-type": "application/json" });
-  response.end(JSON.stringify({
-    alive: true,
-    runtime: "nub-on-node",
-  }));
-}).listen(port, host);
+  response.end(JSON.stringify({ alive: true, runtime: "nub-on-node" }));
+}).listen(port, "0.0.0.0");
 ```
 
-Copy manifests before source files so dependency installation stays cached. The image runs as `node`, so use `--chown=node:node` for files the install must write beside:
-
-```dockerfile title="Dockerfile"
-FROM ghcr.io/nubjs/nub:{{NUB_VERSION}}
-
-COPY --chown=node:node package.json package-lock.json ./
-RUN nub ci
-
-COPY --chown=node:node . .
-EXPOSE 8080
-CMD ["nub", "run", "start"]
-```
-
-Change `package-lock.json` to the project's existing lockfile. Exclude `node_modules`, `.git`, and local `.env` files with `.dockerignore`.
+The [deployment guides](/docs/deployment) cover each platform's port and health-check settings.
 
 ## Multi-stage builds
 
-Install with `nub ci` in the build stage. It writes a self-contained `node_modules` — real files, project-local links — that survives a `COPY --from` into the final stage. A plain `nub install` shares packages through a machine-global store the final stage doesn't have, so the copied tree would point at files that aren't there.
+Install with `nub ci` in the build stage. It writes a self-contained `node_modules` that survives a `COPY --from` into the final stage. A plain `nub install` links packages from a machine-global store the final stage does not have.
 
-The tree the build stage installs carries `devDependencies` the final image never runs. Pass `--prod` (or `-P`) to relink it from the same lockfile with only `dependencies`, once the build no longer needs the rest:
+The `--prod` flag (or `-P`) relinks the tree from the same lockfile with only `dependencies`, once the build no longer needs the rest:
 
 ```dockerfile title="Dockerfile"
 FROM ghcr.io/nubjs/nub:{{NUB_VERSION}} AS build

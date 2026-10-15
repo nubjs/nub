@@ -49,9 +49,23 @@ impl NodeVersion {
     /// `doc/changelogs/CHANGELOG_V23.md` (nodejs/node#55698).
     const MIN_AUGMENTED_23: Self = Self::new(23, 5, 0);
 
-    /// True if this Node version is at or above the hard floor.
+    /// The compat tier's `module.register` shipped in 20.6.0 and was backported
+    /// to 18.19.0, so 19.x and 20.0–20.5 sort above [`Self::MIN_SUPPORTED`]
+    /// with no hook API at all: the `--import preload.mjs` path threw
+    /// `module_.register is not a function` before any user code ran. Verified
+    /// against real 19.3.0 (absent) and 20.10.0/21.0.0 (present).
+    const REGISTER_GAP: (Self, Self) = (Self::new(19, 0, 0), Self::new(20, 6, 0));
+
+    /// True if this Node version carries a hook API Nub can register with:
+    /// at or above the hard floor, and outside [`Self::REGISTER_GAP`].
     pub(crate) fn is_supported(&self) -> bool {
-        *self >= Self::MIN_SUPPORTED
+        *self >= Self::MIN_SUPPORTED && !self.in_register_gap()
+    }
+
+    /// True for 19.x and 20.0–20.5, which predate `module.register`.
+    pub(crate) fn in_register_gap(&self) -> bool {
+        let (lo, hi) = &Self::REGISTER_GAP;
+        self >= lo && self < hi
     }
 
     /// The fast-tier floor that governs THIS version's release line: 23.5.0 on
@@ -506,6 +520,17 @@ mod tests {
         // `module.registerHooks` on that line (nodejs/node#55698).
         assert_eq!(NodeVersion::new(23, 5, 0).tier(), SupportTier::FastPath);
         assert_eq!(NodeVersion::new(23, 11, 1).tier(), SupportTier::FastPath);
+    }
+
+    #[test]
+    fn tier_19_x_and_20_0_through_20_5_are_unsupported() {
+        // Above the 18.19 floor by version order, but `module.register` only
+        // reached 20.x at 20.6.0 and never reached 19.x.
+        assert_eq!(NodeVersion::new(19, 0, 0).tier(), SupportTier::Unsupported);
+        assert_eq!(NodeVersion::new(19, 9, 0).tier(), SupportTier::Unsupported);
+        assert_eq!(NodeVersion::new(20, 5, 1).tier(), SupportTier::Unsupported);
+        assert_eq!(NodeVersion::new(20, 6, 0).tier(), SupportTier::Compat);
+        assert_eq!(NodeVersion::new(21, 0, 0).tier(), SupportTier::Compat);
     }
 
     #[test]

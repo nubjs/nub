@@ -110,7 +110,7 @@ pub(crate) const PROJECT_INIT_TEMPLATE: &str = r#"{
   // "nodeCompat": true, // plain Node behavior, with Nub's version selection
   // "nodeExecutable": "$(mise which node)", // a path, or a command printing one
   // "prefix": "dotenvx run --", // in front of every file run, script, and watch
-  // "envFile": [".env", ".env.local"], // true | false | path | paths
+  // "envFile": [".env", ".env.local"], // true | false | "varlock" | paths
   // "loader": { ".graphql": "text" },
   // "conditions": ["development"],
   // "tsconfig": "./tsconfig.runtime.json", // runtime transforms, not type checking
@@ -122,7 +122,7 @@ pub(crate) const PROJECT_INIT_TEMPLATE: &str = r#"{
   // "emitDecoratorMetadata": true,
   // "verifyDeps": "warn", // warn | error | true | false
 
-  // installs — applied only when Nub is the project's package manager
+  // installs — layout applies to every project; release age only when Nub is the package manager
   // "install": {
   //   "linker": "global-virtual-store", // global-virtual-store | isolated | hoisted
   //   "publicHoist": ["@types/*"],
@@ -145,7 +145,7 @@ pub(crate) const GLOBAL_INIT_TEMPLATE: &str = r#"{
   // "nodeCompat": true, // plain Node behavior, with Nub's version selection
   // "nodeExecutable": "$(mise which node)", // a path, or a command printing one
   // "prefix": "dotenvx run --", // in front of every file run, script, and watch
-  // "envFile": [".env", ".env.local"], // true | false | path | paths
+  // "envFile": [".env", ".env.local"], // true | false | "varlock" | paths
   // "loader": { ".graphql": "text" },
   // "conditions": ["development"],
   // "tsconfig": "./tsconfig.runtime.json", // runtime transforms, not type checking
@@ -157,7 +157,7 @@ pub(crate) const GLOBAL_INIT_TEMPLATE: &str = r#"{
   // "emitDecoratorMetadata": true,
   // "verifyDeps": "warn", // warn | error | true | false
 
-  // installs — personal defaults for projects where Nub is the package manager
+  // installs — personal defaults; release age only where Nub is the package manager
   // "install": {
   //   "linker": "global-virtual-store", // global-virtual-store | isolated | hoisted
   //   "publicHoist": ["@types/*"],
