@@ -31,6 +31,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+# shellcheck source=tests/bench/install/provenance.sh
+source "$(cd "$(dirname "$0")" && pwd)/provenance.sh"   # bench_env_json / bench_inject_env
 NUB="${NUB:-$REPO_ROOT/target/release/nub}"
 # Resolve NUB to an absolute path — the timed install commands run with --cwd set
 # to a fixture dir, so a relative NUB= override must still resolve.
@@ -72,6 +74,11 @@ command -v perl &>/dev/null || { echo "ERROR: perl not found." >&2; exit 1; }
 [[ -x "$NUB" ]] || { echo "ERROR: nub binary not found at $NUB" >&2; exit 1; }
 
 HAS_BUN=0; command -v bun &>/dev/null && HAS_BUN=1
+
+# Tool versions captured once for provenance stamping (see provenance.sh).
+NUB_SEMVER="$("$NUB" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+PNPM_VERSION="$(pnpm --version 2>/dev/null || echo '(not installed)')"
+BUN_VERSION="$([[ $HAS_BUN -eq 1 ]] && bun --version 2>/dev/null || echo '(not installed)')"
 
 mkdir -p "$RESULTS_DIR"
 
@@ -127,7 +134,7 @@ run_warm() {
   echo "[setup] pre-populating nub CAS store + GVS (showing any GVS warning)..."
   # Capture nub's stderr so the GVS auto-disable warning is visible for the
   # ineligible fixture. env -u CI → GVS on (default).
-  env -u CI "$NUB" install --frozen-lockfile --cwd "$WD_NUB" 2>&1 | tail -6 || true
+  env -u CI "$NUB" --cwd "$WD_NUB" install --frozen-lockfile 2>&1 | tail -6 || true
 
   # Report which linking path nub actually took. Both GVS-on and GVS-off use the
   # node_modules/<pkg> -> .store/<pkg>/node_modules/<pkg> symlink layout, so the
@@ -145,7 +152,7 @@ run_warm() {
   fi
 
   local outfile="$RESULTS_DIR/warm-gvs-${fixture}-${TIMESTAMP}.json"
-  local nub_cmd="env -u CI NPM_CONFIG_USERCONFIG='$EMPTY_NPMRC' NPM_CONFIG_GLOBALCONFIG='$EMPTY_NPMRC' '$NUB' install --frozen-lockfile --cwd '$WD_NUB' -s"
+  local nub_cmd="env -u CI NPM_CONFIG_USERCONFIG='$EMPTY_NPMRC' NPM_CONFIG_GLOBALCONFIG='$EMPTY_NPMRC' '$NUB' --cwd '$WD_NUB' install --frozen-lockfile -s"
 
   local HF_ARGS=(
     --warmup "$WARMUP" --runs "$RUNS"
@@ -170,9 +177,15 @@ run_warm() {
   fi
 
   # re-populate nub node_modules consumed by the symlink check above
-  env -u CI "$NUB" install --frozen-lockfile --cwd "$WD_NUB" -s 2>/dev/null || true
+  env -u CI "$NUB" --cwd "$WD_NUB" install --frozen-lockfile -s 2>/dev/null || true
 
   hyperfine "${HF_ARGS[@]}" --export-json "$outfile"
+
+  # Stamp provenance (tool versions/platform/arch/timestamp/load) into the result.
+  local gvs_env_args=(nub="$NUB_SEMVER" pnpm="$PNPM_VERSION")
+  [[ $HAS_BUN -eq 1 && -f "$FIXTURE_DIR/$fixture/bun.lock" ]] && gvs_env_args+=(bun="$BUN_VERSION")
+  bench_inject_env "$outfile" "$(bench_env_json "${gvs_env_args[@]}")"
+
   echo "  [results saved → $outfile]"
   echo ""
 
