@@ -1,0 +1,4 @@
+node_modules/
+pnpm-lock.yaml
+# Verdaccio regenerates its internal state db into storage/ on startup.
+storage/.verdaccio-db.json

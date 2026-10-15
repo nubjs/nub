@@ -1,0 +1,143 @@
+{
+  "name": "semver",
+  "versions": {
+    "7.8.5": {
+      "name": "semver",
+      "version": "7.8.5",
+      "author": {
+        "name": "GitHub Inc."
+      },
+      "license": "ISC",
+      "_id": "semver@7.8.5",
+      "maintainers": [
+        {
+          "name": "saquibkhan",
+          "email": "saquibkhan@github.com"
+        },
+        {
+          "name": "npm-cli-ops",
+          "email": "npm-cli+bot@github.com"
+        },
+        {
+          "name": "reggi",
+          "email": "reggi@github.com"
+        },
+        {
+          "name": "owlstronaut",
+          "email": "owlstronaut@github.com"
+        }
+      ],
+      "homepage": "https://github.com/npm/node-semver#readme",
+      "bugs": {
+        "url": "https://github.com/npm/node-semver/issues"
+      },
+      "bin": {
+        "semver": "bin/semver.js"
+      },
+      "tap": {
+        "nyc-arg": [
+          "--exclude",
+          "tap-snapshots/**"
+        ],
+        "timeout": 30,
+        "coverage-map": "map.js"
+      },
+      "dist": {
+        "shasum": "39b646037dd50c14fb451e7e4cac58ed8b863f69",
+        "tarball": "http://localhost:4874/semver/-/semver-7.8.5.tgz",
+        "fileCount": 53,
+        "integrity": "sha512-Y7/KDsb8LjooZpwaqGyulO6DQlksgCncchHGk+sZIY4SBvUocMBEFH5Ur1fI4dV+Jvl0w6cjvucaIi40puRioA==",
+        "signatures": [
+          {
+            "sig": "MEQCIA1IMvQVanynk4boyVwPRYxqwVyNO88VINzVnIEactQlAiB/YQz4fEE45VLTLw/CEEHBWzh+hzED63yilqQQZPcQ1Q==",
+            "keyid": "SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U"
+          }
+        ],
+        "attestations": {
+          "url": "https://registry.npmjs.org/-/npm/v1/attestations/semver@7.8.5",
+          "provenance": {
+            "predicateType": "https://slsa.dev/provenance/v1"
+          }
+        },
+        "unpackedSize": 101065
+      },
+      "main": "index.js",
+      "engines": {
+        "node": ">=10"
+      },
+      "gitHead": "6e05b7637396ac66522cff8731f07cfe0ef49a29",
+      "scripts": {
+        "lint": "npm run eslint",
+        "snap": "tap",
+        "test": "tap",
+        "eslint": "eslint \"**/*.{js,cjs,ts,mjs,jsx,tsx}\"",
+        "lintfix": "npm run eslint -- --fix",
+        "postlint": "template-oss-check",
+        "posttest": "npm run lint",
+        "template-oss-apply": "template-oss-apply --force"
+      },
+      "_npmUser": {
+        "name": "GitHub Actions",
+        "email": "npm-oidc-no-reply@github.com",
+        "trustedPublisher": {
+          "id": "github",
+          "oidcConfigId": "oidc:7a0c479c-0252-4ccd-81e5-c43546a76551"
+        }
+      },
+      "repository": {
+        "url": "git+https://github.com/npm/node-semver.git",
+        "type": "git"
+      },
+      "_npmVersion": "11.17.0",
+      "description": "The semantic version parser used by npm.",
+      "directories": {},
+      "templateOSS": {
+        "engines": ">=10",
+        "publish": "true",
+        "version": "5.0.0",
+        "distPaths": [
+          "classes/",
+          "functions/",
+          "internal/",
+          "ranges/",
+          "index.js",
+          "preload.js",
+          "range.bnf"
+        ],
+        "allowPaths": [
+          "/classes/",
+          "/functions/",
+          "/internal/",
+          "/ranges/",
+          "/index.js",
+          "/preload.js",
+          "/range.bnf",
+          "/benchmarks"
+        ],
+        "//@npmcli/template-oss": "This file is partially managed by @npmcli/template-oss. Edits may be overwritten."
+      },
+      "_nodeVersion": "26.3.1",
+      "_hasShrinkwrap": false,
+      "devDependencies": {
+        "tap": "^16.0.0",
+        "benchmark": "^2.1.4",
+        "@npmcli/template-oss": "5.0.0",
+        "@npmcli/eslint-config": "^7.0.0"
+      },
+      "_npmOperationalInternal": {
+        "tmp": "tmp/semver_7.8.5_1781893968841_0.7233670850228506",
+        "host": "s3://npm-registry-packages-npm-production"
+      }
+    }
+  },
+  "time": {
+    "created": "2011-02-12T00:20:25.690Z",
+    "modified": "2026-07-06T14:05:00.791Z",
+    "7.8.5": "2026-06-19T18:32:48.972Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "7.8.5"
+  }
+}

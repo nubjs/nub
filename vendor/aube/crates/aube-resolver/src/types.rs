@@ -65,6 +65,26 @@ pub struct DependencyPolicy {
     pub trust_policy_exclude: crate::trust::TrustExcludeRules,
     pub trust_policy_ignore_after: Option<u64>,
     pub block_exotic_subdeps: bool,
+    /// True when the lockfile's `packageExtensions` checksum drifted from the
+    /// project's current extensions. The resolver then skips lockfile reuse
+    /// for extension-targeted packages so the packument is re-fetched and the
+    /// extension re-applied - otherwise an injected dep silently misses.
+    /// Defaults to `false`; an embedder that enforces a packageExtensions
+    /// checksum (e.g. nub) sets this when drift is detected. Standalone aube
+    /// leaves it `false`, so the reuse path is unchanged. Must stay `pub` so
+    /// struct-update syntax outside this crate (crate aube's install command)
+    /// can construct the policy.
+    pub package_extensions_drifted: bool,
+}
+
+impl DependencyPolicy {
+    /// Set the packageExtensions-drift signal. An embedder that enforces a
+    /// packageExtensions checksum calls this when drift is detected so the
+    /// resolver skips lockfile reuse for extension-targeted packages.
+    pub fn with_package_extensions_drifted(mut self, drifted: bool) -> Self {
+        self.package_extensions_drifted = drifted;
+        self
+    }
 }
 
 impl Default for DependencyPolicy {
@@ -76,6 +96,7 @@ impl Default for DependencyPolicy {
             trust_policy_exclude: crate::trust::TrustExcludeRules::default(),
             trust_policy_ignore_after: None,
             block_exotic_subdeps: true,
+            package_extensions_drifted: false,
         }
     }
 }

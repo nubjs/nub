@@ -1,0 +1,307 @@
+{
+  "name": "ms",
+  "versions": {
+    "2.1.3": {
+      "name": "ms",
+      "version": "2.1.3",
+      "license": "MIT",
+      "_id": "ms@2.1.3",
+      "maintainers": [
+        {
+          "name": "elsigh",
+          "email": "lsimon@commoner.com"
+        },
+        {
+          "name": "leerobinson",
+          "email": "lrobinson2011@gmail.com"
+        },
+        {
+          "name": "hankvercel",
+          "email": "hank@vercel.com"
+        },
+        {
+          "name": "okbel",
+          "email": "belen@vercel.com"
+        },
+        {
+          "name": "samsisle",
+          "email": "samko9522@gmail.com"
+        },
+        {
+          "name": "cleishm",
+          "email": "chris@leishman.org"
+        },
+        {
+          "name": "nazarenooviedo",
+          "email": "nazareno@basement.studio"
+        },
+        {
+          "name": "chibicode",
+          "email": "shu@chibicode.com"
+        },
+        {
+          "name": "gielcobben",
+          "email": "g.cobben@gmail.com"
+        },
+        {
+          "name": "jaredpalmer",
+          "email": "jared@palmer.net"
+        },
+        {
+          "name": "jkrems",
+          "email": "jan.krems@gmail.com"
+        },
+        {
+          "name": "prateekbh",
+          "email": "prateek89born@gmail.com"
+        },
+        {
+          "name": "kikobeats",
+          "email": "josefrancisco.verdu@gmail.com"
+        },
+        {
+          "name": "gmonaco",
+          "email": "gbmonaco@google.com"
+        },
+        {
+          "name": "housseindjirdeh",
+          "email": "houssein.djirdeh@gmail.com"
+        },
+        {
+          "name": "developit",
+          "email": "jason@developit.ca"
+        },
+        {
+          "name": "spanicker",
+          "email": "shubhie@gmail.com"
+        },
+        {
+          "name": "keanulee",
+          "email": "npm@keanulee.com"
+        },
+        {
+          "name": "atcastle",
+          "email": "atcastle@gmail.com"
+        },
+        {
+          "name": "janicklas-ralph",
+          "email": "janicklasralph036@gmail.com"
+        },
+        {
+          "name": "skllcrn",
+          "email": "skllcrn@zeit.co"
+        },
+        {
+          "name": "paco",
+          "email": "pvco.coursey@gmail.com"
+        },
+        {
+          "name": "guybedford",
+          "email": "guybedford@gmail.com"
+        },
+        {
+          "name": "ragojose",
+          "email": "ragojosefrancisco@gmail.com"
+        },
+        {
+          "name": "williamli",
+          "email": "williamli@bbi.io"
+        },
+        {
+          "name": "msweeneydev",
+          "email": "mail@msweeneydev.com"
+        },
+        {
+          "name": "coetry",
+          "email": "allenhai03@gmail.com"
+        },
+        {
+          "name": "rabaut",
+          "email": "rabautse@gmail.com"
+        },
+        {
+          "name": "lfades",
+          "email": "luisito453@gmail.com"
+        },
+        {
+          "name": "mfix22",
+          "email": "mrfix84@gmail.com"
+        },
+        {
+          "name": "ijjk",
+          "email": "jj@jjsweb.site"
+        },
+        {
+          "name": "arzafran",
+          "email": "franco@basement.studio"
+        },
+        {
+          "name": "umegaya",
+          "email": "iyatomi@gmail.com"
+        },
+        {
+          "name": "timer",
+          "email": "timer150@gmail.com"
+        },
+        {
+          "name": "anatrajkovska",
+          "email": "ana.trajkovska2015@gmail.com"
+        },
+        {
+          "name": "paulogdm",
+          "email": "paulogdemitri@gmail.com"
+        },
+        {
+          "name": "andybitz",
+          "email": "artzbitz@gmail.com"
+        },
+        {
+          "name": "mglagola",
+          "email": "mark.glagola@gmail.com"
+        },
+        {
+          "name": "lucleray",
+          "email": "luc.leray@gmail.com"
+        },
+        {
+          "name": "zeit-bot",
+          "email": "team@zeit.co"
+        },
+        {
+          "name": "styfle",
+          "email": "steven@ceriously.com"
+        },
+        {
+          "name": "juancampa",
+          "email": "juancampa@gmail.com"
+        },
+        {
+          "name": "dav-is",
+          "email": "mail@connordav.is"
+        },
+        {
+          "name": "quietshu",
+          "email": "ds303077135@gmail.com"
+        },
+        {
+          "name": "joecohens",
+          "email": "joecohenr@gmail.com"
+        },
+        {
+          "name": "codetheory",
+          "email": "thecodetheory@gmail.com"
+        },
+        {
+          "name": "matheuss",
+          "email": "matheus.frndes@gmail.com"
+        },
+        {
+          "name": "igorklopov",
+          "email": "igor@klopov.com"
+        },
+        {
+          "name": "leo",
+          "email": "mindrun@icloud.com"
+        },
+        {
+          "name": "nkzawa",
+          "email": "naoyuki.kanezawa@gmail.com"
+        },
+        {
+          "name": "tootallnate",
+          "email": "nathan@tootallnate.net"
+        },
+        {
+          "name": "rauchg",
+          "email": "rauchg@gmail.com"
+        },
+        {
+          "name": "timneutkens",
+          "email": "tim@timneutkens.nl"
+        },
+        {
+          "name": "javivelasco",
+          "email": "javier.velasco86@gmail.com"
+        },
+        {
+          "name": "iamevilrabbit",
+          "email": "hello@evilrabb.it"
+        }
+      ],
+      "homepage": "https://github.com/vercel/ms#readme",
+      "bugs": {
+        "url": "https://github.com/vercel/ms/issues"
+      },
+      "dist": {
+        "shasum": "574c8138ce1d2b5861f0b44579dbadd60c6615b2",
+        "tarball": "http://localhost:4874/ms/-/ms-2.1.3.tgz",
+        "fileCount": 4,
+        "integrity": "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==",
+        "signatures": [
+          {
+            "sig": "MEYCIQCpp8dz4QhYMwrrNgFARRXozR4wAyDcUVNXEBw0PmSj+wIhALlCZH2KJyCo9qv/3CfMFsvx9bXKQNQBOqmLstIPXP2L",
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+          }
+        ],
+        "unpackedSize": 6721,
+        "npm-signature": "-----BEGIN PGP SIGNATURE-----\r\nVersion: OpenPGP.js v3.0.13\r\nComment: https://openpgpjs.org\r\n\r\nwsFcBAEBCAAQBQJfz4WbCRA9TVsSAnZWagAA5A8P/jNowbVOl1ORENKivAXb\nQ3NncrkWHdRjUGeUhX89Ih3N+woNugnSTOEKACswARtqXMf5M1Iy8GODorDp\noz+pqU0HGU+KjLO/sL+TGxJJJAMfX3vhRZTHk5ZzKDi9s6iAM3nMeE5rwNUS\n7wprOzbKNE9hev82zLgfY8kF7UhxY09BH/GBS+kWGD3ViM8R5vl49JEfrvN9\nSKris0FTSP/YL1QrRNjvMMfGh9WhMOC/FLkJnIErcw2I8g/XmBOApjqM9KhG\n42/ls4gXuaUinNXC68wAbntxhHtJo2403NVmU7UJDDdulEBbTXZ18cKHt520\nUkRZp8piQb1m3QR8XPjvpnShlOutYdQJfjltY5z12Wfwj5OBVsurWeFtJRme\nBxn9pdrKW45doypT1Lc7LXoIftLBtToVtWRThEVihq4I9f4zpR9Uzc3qp1jU\nlEo9ndqf9rg9oVV8fSK+dIDuUUyp7NrI5uCfcUMfKEgwWortapNKNvMuHp7r\noZhuGRekRc1kG8YmsYfLKv3kRS8uiXa/jbwD4PkNGbev7KhEptCnGZm78z9k\nV0KOdaCU3Igo6rK23kgsAFhxDvMANHby3dLYQMbZOoqkZLv4qiPS/7raPOLc\n5q/ezwT2JZLWZlTbZnigAVuZ5aHmLb6QEuMLcIQaelDkH7XWCNpED8cM2pFX\nTllW\r\n=eZCP\r\n-----END PGP SIGNATURE-----\r\n"
+      },
+      "main": "./index",
+      "gitHead": "1c6264b795492e8fdecbc82cb8802fcfbfc08d26",
+      "scripts": {
+        "lint": "eslint lib/* bin/*",
+        "test": "mocha tests.js",
+        "precommit": "lint-staged"
+      },
+      "_npmUser": {
+        "name": "styfle",
+        "email": "steven@ceriously.com"
+      },
+      "repository": {
+        "url": "git+https://github.com/vercel/ms.git",
+        "type": "git"
+      },
+      "_npmVersion": "6.14.6",
+      "description": "Tiny millisecond conversion utility",
+      "directories": {},
+      "lint-staged": {
+        "*.js": [
+          "npm run lint",
+          "prettier --single-quote --write",
+          "git add"
+        ]
+      },
+      "_nodeVersion": "12.18.3",
+      "eslintConfig": {
+        "env": {
+          "es6": true,
+          "node": true
+        },
+        "extends": "eslint:recommended"
+      },
+      "_hasShrinkwrap": false,
+      "devDependencies": {
+        "husky": "0.14.3",
+        "mocha": "4.0.1",
+        "eslint": "4.18.2",
+        "prettier": "2.0.5",
+        "expect.js": "0.3.1",
+        "lint-staged": "5.0.0"
+      },
+      "_npmOperationalInternal": {
+        "tmp": "tmp/ms_2.1.3_1607435675054_0.7617026089064693",
+        "host": "s3://npm-registry-packages"
+      }
+    }
+  },
+  "time": {
+    "created": "2011-12-21T19:38:08.664Z",
+    "modified": "2025-09-08T19:56:54.242Z",
+    "2.1.3": "2020-12-08T13:54:35.223Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "2.1.3"
+  }
+}

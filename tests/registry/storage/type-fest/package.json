@@ -1,0 +1,236 @@
+{
+  "name": "type-fest",
+  "versions": {
+    "4.0.0": {
+      "name": "type-fest",
+      "version": "4.0.0",
+      "keywords": [
+        "typescript",
+        "ts",
+        "types",
+        "utility",
+        "util",
+        "utilities",
+        "omit",
+        "merge",
+        "json",
+        "generics"
+      ],
+      "author": {
+        "url": "https://sindresorhus.com",
+        "name": "Sindre Sorhus",
+        "email": "sindresorhus@gmail.com"
+      },
+      "license": "(MIT OR CC0-1.0)",
+      "_id": "type-fest@4.0.0",
+      "maintainers": [
+        {
+          "name": "sindresorhus",
+          "email": "sindresorhus@gmail.com"
+        }
+      ],
+      "homepage": "https://github.com/sindresorhus/type-fest#readme",
+      "bugs": {
+        "url": "https://github.com/sindresorhus/type-fest/issues"
+      },
+      "xo": {
+        "rules": {
+          "import/extensions": "off",
+          "@typescript-eslint/ban-types": "off",
+          "@typescript-eslint/no-redeclare": "off",
+          "@typescript-eslint/ban-ts-comment": "off",
+          "@typescript-eslint/naming-convention": "off",
+          "@typescript-eslint/no-unsafe-argument": "off",
+          "@typescript-eslint/no-confusing-void-expression": "off"
+        }
+      },
+      "tsd": {
+        "compilerOptions": {
+          "noUnusedLocals": false
+        }
+      },
+      "dist": {
+        "shasum": "1c87b05c3f0304a2f911b5a47bb45fa4d62031db",
+        "tarball": "http://localhost:4874/type-fest/-/type-fest-4.0.0.tgz",
+        "fileCount": 107,
+        "integrity": "sha512-d/oYtUnPM9zar2fqqGLYPzgcY0qUlYK0evgNVti93xpzfjGkMgZHu9Lvgrkn0rqGXTgsFRxFamzjGoD9Uo+dgw==",
+        "signatures": [
+          {
+            "sig": "MEYCIQCU6lE/xe1+HnXjz0W+d1iWYVNldx1k4gPyMNYqnxrujwIhAKSH0pVTQcFMCNUGu9T8wSUmA5kEEZn+1NN4l4v2SLRY",
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+          }
+        ],
+        "unpackedSize": 273971
+      },
+      "types": "./index.d.ts",
+      "engines": {
+        "node": ">=16"
+      },
+      "funding": "https://github.com/sponsors/sindresorhus",
+      "gitHead": "404618725f3f06650925756ed39e1fab0aefe6d0",
+      "scripts": {
+        "test": "xo && tsd && tsc && node script/test/source-files-extension.js"
+      },
+      "_npmUser": {
+        "name": "sindresorhus",
+        "email": "sindresorhus@gmail.com"
+      },
+      "repository": {
+        "url": "git+https://github.com/sindresorhus/type-fest.git",
+        "type": "git"
+      },
+      "_npmVersion": "9.2.0",
+      "description": "A collection of essential TypeScript types",
+      "directories": {},
+      "_nodeVersion": "16.20.0",
+      "_hasShrinkwrap": false,
+      "devDependencies": {
+        "xo": "^0.55.0",
+        "tsd": "^0.28.1",
+        "typescript": "^5.0.4",
+        "expect-type": "^0.15.0",
+        "@sindresorhus/tsconfig": "~0.7.0"
+      },
+      "_npmOperationalInternal": {
+        "tmp": "tmp/type-fest_4.0.0_1689501995179_0.05315412686798049",
+        "host": "s3://npm-registry-packages"
+      }
+    },
+    "4.41.0": {
+      "name": "type-fest",
+      "version": "4.41.0",
+      "keywords": [
+        "typescript",
+        "ts",
+        "types",
+        "utility",
+        "util",
+        "utilities",
+        "omit",
+        "merge",
+        "json",
+        "generics"
+      ],
+      "author": {
+        "url": "https://sindresorhus.com",
+        "name": "Sindre Sorhus",
+        "email": "sindresorhus@gmail.com"
+      },
+      "license": "(MIT OR CC0-1.0)",
+      "_id": "type-fest@4.41.0",
+      "maintainers": [
+        {
+          "name": "sindresorhus",
+          "email": "sindresorhus@gmail.com"
+        }
+      ],
+      "homepage": "https://github.com/sindresorhus/type-fest#readme",
+      "bugs": {
+        "url": "https://github.com/sindresorhus/type-fest/issues"
+      },
+      "xo": {
+        "rules": {
+          "import/extensions": "off",
+          "object-curly-newline": [
+            "error",
+            {
+              "multiline": true,
+              "consistent": true
+            }
+          ],
+          "n/file-extension-in-import": "off",
+          "@typescript-eslint/ban-types": "off",
+          "@typescript-eslint/no-redeclare": "off",
+          "@typescript-eslint/ban-ts-comment": "off",
+          "@typescript-eslint/naming-convention": "off",
+          "@typescript-eslint/no-unsafe-argument": "off",
+          "@typescript-eslint/no-extraneous-class": "off",
+          "import/consistent-type-specifier-style": [
+            "error",
+            "prefer-top-level"
+          ],
+          "@typescript-eslint/no-confusing-void-expression": "off"
+        },
+        "overrides": [
+          {
+            "files": "**/*.d.ts",
+            "rules": {
+              "no-restricted-imports": [
+                "error",
+                "tsd",
+                "expect-type"
+              ]
+            }
+          }
+        ]
+      },
+      "tsd": {
+        "compilerOptions": {
+          "noUnusedLocals": false
+        }
+      },
+      "dist": {
+        "shasum": "6ae1c8e5731273c2bf1f58ad39cbae2c91a46c58",
+        "tarball": "http://localhost:4874/type-fest/-/type-fest-4.41.0.tgz",
+        "fileCount": 170,
+        "integrity": "sha512-TeTSQ6H5YHvpqVwBRcnLDCBnDOHWYu7IvGbHT6N8AOymcr9PJGjc1GTtiWZTYg0NCgYwvnYWEkVChQAr9bjfwA==",
+        "signatures": [
+          {
+            "sig": "MEUCIHwhmKqb37jBAgdcT90DZ5lXAXV5XjevIm1uzNMIucssAiEAuUeo4QKb/0goBUFTYX7jdFvMlX+jUuu3Z9Sho6JNs+A=",
+            "keyid": "SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U"
+          }
+        ],
+        "unpackedSize": 444035
+      },
+      "types": "./index.d.ts",
+      "engines": {
+        "node": ">=16"
+      },
+      "funding": "https://github.com/sponsors/sindresorhus",
+      "gitHead": "68469722a9521122b6cb40376c4c4544aef28228",
+      "scripts": {
+        "test": "run-p test:*",
+        "test:xo": "xo",
+        "test:tsc": "tsc",
+        "test:tsd": "tsd",
+        "test:source-files-extension": "node script/test/source-files-extension.js"
+      },
+      "_npmUser": {
+        "name": "sindresorhus",
+        "email": "sindresorhus@gmail.com"
+      },
+      "repository": {
+        "url": "git+https://github.com/sindresorhus/type-fest.git",
+        "type": "git"
+      },
+      "_npmVersion": "10.9.2",
+      "description": "A collection of essential TypeScript types",
+      "directories": {},
+      "sideEffects": false,
+      "_nodeVersion": "23.6.1",
+      "_hasShrinkwrap": false,
+      "devDependencies": {
+        "xo": "^0.60.0",
+        "tsd": "^0.32.0",
+        "typescript": "~5.8.3",
+        "expect-type": "^1.1.0",
+        "npm-run-all2": "^7.0.1"
+      },
+      "_npmOperationalInternal": {
+        "tmp": "tmp/type-fest_4.41.0_1746516019157_0.21708505007036227",
+        "host": "s3://npm-registry-packages-npm-production"
+      }
+    }
+  },
+  "time": {
+    "created": "2019-03-13T10:40:42.413Z",
+    "modified": "2026-07-04T22:51:13.436Z",
+    "4.0.0": "2023-07-16T10:06:35.385Z",
+    "4.41.0": "2025-05-06T07:20:19.356Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "4.41.0"
+  }
+}
