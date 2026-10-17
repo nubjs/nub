@@ -69,6 +69,7 @@ aube generates this page from [`settings.toml`](https://github.com/aubepkg/aube/
 | [`httpProxy`](#setting-httpproxy) | `url` | Proxy URL for outgoing HTTP requests. |
 | [`noProxy`](#setting-noproxy) | `string` | Comma-separated list of domains that bypass the proxy. |
 | [`localAddress`](#setting-localaddress) | `string` | Local interface IP address to bind registry connections to. |
+| [`dnsResolver`](#setting-dnsresolver) | `"builtin" \| "system"` | Resolver used to look up registry hosts. |
 | [`maxsockets`](#setting-maxsockets) | `int` | Idle connection pool size per host. |
 | [`strictSsl`](#setting-strictssl) | `bool` | Validate SSL certificates for HTTPS requests. |
 | [`lockfile`](#setting-lockfile) | `bool` | Read and generate `aube-lock.yaml`. |
@@ -1470,6 +1471,22 @@ Local interface IP address to bind registry connections to.
 Used on multi-homed hosts where outbound traffic must leave a
 specific interface. Parsed as an IP address; unparseable values are
 dropped at load time with a warning.
+
+### `dnsResolver` {#setting-dnsresolver}
+
+Resolver used to look up registry hosts.
+
+- Type: `"builtin" | "system"`
+- Default: `"builtin"`
+- Environment: `npm_config_dns_resolver`, `NPM_CONFIG_DNS_RESOLVER`, `AUBE_DNS_RESOLVER`
+- .npmrc keys: `dns-resolver`, `dnsResolver`
+
+`builtin` resolves in process and caches each host for the run.
+`system` uses the operating system's resolver, which honors
+`/etc/hosts` and the system's address ordering. On a dual-stack
+host, `builtin` connects over IPv4 when both families are
+available; `system` prefers IPv6 the way curl and node do, which
+matters where IPv4 leaves through a metered NAT gateway.
 
 ### `maxsockets` {#setting-maxsockets}
 

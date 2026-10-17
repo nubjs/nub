@@ -240,9 +240,16 @@ fn build_http_client_inner(
     // Not on Android even when the feature is on: hickory reads the OS
     // DNS config through JNI and aborts without a JVM (Termux/CLI
     // builds), so the getaddrinfo resolver stays in place there.
+    // `dns-resolver=system` opts out at runtime: hickory orders A
+    // before AAAA, so a dual-stack host whose IPv4 leaves through a
+    // NAT gateway pays for every byte that getaddrinfo would have
+    // sent over IPv6.
     #[cfg(feature = "hickory-dns")]
     {
-        builder = builder.hickory_dns(cfg!(not(target_os = "android")));
+        builder = builder.hickory_dns(
+            cfg!(not(target_os = "android"))
+                && config.dns_resolver == crate::config::DnsResolver::Builtin,
+        );
     }
     builder = builder
         .tcp_keepalive(std::time::Duration::from_secs(60))

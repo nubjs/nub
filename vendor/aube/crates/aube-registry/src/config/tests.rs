@@ -2376,6 +2376,7 @@ fn test_parses_proxy_and_ssl_settings() {
              noproxy=localhost,.internal\n\
              strict-ssl=false\n\
              local-address=127.0.0.1\n\
+             dns-resolver=system\n\
              maxsockets=12\n",
     )
     .unwrap();
@@ -2414,6 +2415,22 @@ fn test_parses_proxy_and_ssl_settings() {
         Some("127.0.0.1".parse::<std::net::IpAddr>().unwrap())
     );
     assert_eq!(config.max_sockets, Some(12));
+    assert_eq!(config.dns_resolver, DnsResolver::System);
+}
+
+#[test]
+fn test_dns_resolver_defaults_to_builtin_and_ignores_garbage() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".npmrc"), "dnsResolver=ipv6\n").unwrap();
+    let mut config = NpmConfig::default();
+    config.apply(load_npmrc_entries_with_home(
+        Some(home.path()),
+        None,
+        dir.path(),
+        None,
+    ));
+    assert_eq!(config.dns_resolver, DnsResolver::Builtin);
 }
 
 #[test]
@@ -3201,6 +3218,7 @@ fn translate_npm_config_env_maps_proxy_and_tls_knobs() {
         ("NPM_CONFIG_NOPROXY", "localhost,.internal", "noproxy"),
         ("NPM_CONFIG_STRICT_SSL", "false", "strict-ssl"),
         ("NPM_CONFIG_LOCAL_ADDRESS", "127.0.0.1", "local-address"),
+        ("NPM_CONFIG_DNS_RESOLVER", "system", "dns-resolver"),
         ("NPM_CONFIG_MAXSOCKETS", "16", "maxsockets"),
     ];
     for (name, value, expected_key) in cases {

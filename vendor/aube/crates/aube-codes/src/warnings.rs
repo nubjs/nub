@@ -71,6 +71,7 @@ pub const WARN_AUBE_UNTRUSTED_PROXY: &str = "WARN_AUBE_UNTRUSTED_PROXY";
 pub const WARN_AUBE_UNTRUSTED_STRICT_SSL_DISABLE: &str = "WARN_AUBE_UNTRUSTED_STRICT_SSL_DISABLE";
 pub const WARN_AUBE_INVALID_LOCAL_ADDRESS: &str = "WARN_AUBE_INVALID_LOCAL_ADDRESS";
 pub const WARN_AUBE_INVALID_MAXSOCKETS: &str = "WARN_AUBE_INVALID_MAXSOCKETS";
+pub const WARN_AUBE_INVALID_DNS_RESOLVER: &str = "WARN_AUBE_INVALID_DNS_RESOLVER";
 pub const WARN_AUBE_UNSCOPED_AUTH_RESCOPED: &str = "WARN_AUBE_UNSCOPED_AUTH_RESCOPED";
 pub const WARN_AUBE_UNTRUSTED_AUTH_ENV: &str = "WARN_AUBE_UNTRUSTED_AUTH_ENV";
 pub const WARN_AUBE_UNTRUSTED_TOKEN_HELPER: &str = "WARN_AUBE_UNTRUSTED_TOKEN_HELPER";
@@ -465,6 +466,12 @@ pub const ALL: &[CodeMeta] = &[
         name: WARN_AUBE_INVALID_MAXSOCKETS,
         category: category::REGISTRY_CONFIG,
         description: "`maxsockets` was 0 or non-numeric.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: WARN_AUBE_INVALID_DNS_RESOLVER,
+        category: category::REGISTRY_CONFIG,
+        description: "`dns-resolver` was neither `builtin` nor `system`.",
         exit_code: None,
     },
     CodeMeta {
