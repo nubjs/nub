@@ -1517,6 +1517,27 @@ examples = []
 typedAccessorUnused = true
 npmShared = true
 
+[dnsResolver]
+description = "Resolver used to look up registry hosts."
+type = '"builtin" | "system"'
+default = "\"builtin\""
+docs = """
+`builtin` resolves in process and caches each host for the run.
+`system` uses the operating system's resolver, which honors
+`/etc/hosts` and the system's address ordering. On a dual-stack
+host, `builtin` connects over IPv4 when both families are
+available; `system` prefers IPv6 the way curl and node do, which
+matters where IPv4 leaves through a metered NAT gateway.
+"""
+sources.cli = []
+sources.env = ["npm_config_dns_resolver", "NPM_CONFIG_DNS_RESOLVER", "AUBE_DNS_RESOLVER"]
+sources.npmrc = ["dns-resolver", "dnsResolver"]
+examples = []
+# Consumed inside `aube_registry::config::NpmConfig::apply` via a
+# string-keyed match on the raw `.npmrc` entries — same reason as
+# `noProxy` above.
+typedAccessorUnused = true
+
 [maxsockets]
 description = "Idle connection pool size per host."
 type = "int"

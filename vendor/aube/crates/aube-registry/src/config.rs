@@ -17,7 +17,7 @@ pub use load::{
     SplitNpmrcEntries, load_npmrc_entries, load_npmrc_entries_split, load_project_npmrc_entries,
     load_user_npmrc_entries,
 };
-pub use types::{AuthConfig, NpmConfig, TlsConfig};
+pub use types::{AuthConfig, DnsResolver, NpmConfig, TlsConfig};
 pub use url::{normalize_registry_url_pub, registry_uri_key_pub};
 
 pub(crate) use token::run_token_helper;

@@ -130,6 +130,7 @@ pub(super) fn translate_config_env(
         "noproxy" | "no_proxy" => "noproxy",
         "strict_ssl" => "strict-ssl",
         "local_address" => "local-address",
+        "dns_resolver" => "dns-resolver",
         "maxsockets" => "maxsockets",
         _ => return None,
     };
