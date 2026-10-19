@@ -56,7 +56,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: "Release the dispatched commit across every channel. Run from main after the version-bump commit is pushed; the version comes from npm/nub/package.json and the run creates the v<version> tag. Re-running a failed release may instead select its existing v<semver> tag. Default off = build + assemble only (for CI debugging)."
+        description: "Release the dispatched commit across every channel. Run from main after the version-bump commit is pushed; the version comes from npm/nub/package.json and the run creates the v<version> tag. Default off = build + assemble only (for CI debugging)."
         type: boolean
         default: false
       canary:
@@ -171,15 +171,14 @@ jobs:
       # the dispatched commit carries, under a SemVer `v<version>` tag.
       #
       # THE TAG IS AN OUTPUT OF THE RELEASE, NOT ITS TRIGGER (2026-09-23). A
-      # publishing dispatch normally selects `main`: the version is read from
+      # publishing dispatch selects `main`: the version is read from
       # the dispatched commit's npm/nub/package.json, the tag name is derived
       # from it, and await-approval creates that tag at GITHUB_SHA once the
-      # maintainer approves the run. Selecting an existing `v*` tag is the
-      # re-run path for a release whose approval already created its tag;
-      # the ancestor-of-origin/main guard in
-      # stable-immutable-release applies either way. Any other ref is refused
-      # here, loudly, rather than by a silent job-level `if:` that would look
-      # like a green build-only run.
+      # maintainer approves the run. `release-approval` admits no other ref, so
+      # a release from one could never be approved: it is refused here, loudly,
+      # before the build, rather than by a silent job-level `if:` that would
+      # look like a green build-only run. A failed release is re-run from its
+      # own run, which keeps the ref, the commit and the built artifacts.
       - id: publish_tag
         name: Resolve and validate the stable publish tag
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
@@ -188,22 +187,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          case "$PUBLISH_REF" in
-            refs/heads/main)
-              TAG_VERSION="$(node -e "console.log(require('./npm/nub/package.json').version)")"
-              TAG="v$TAG_VERSION"
-              echo "releasing the dispatched commit ${GITHUB_SHA} as $TAG"
-              ;;
-            refs/tags/v*)
-              TAG="${PUBLISH_REF#refs/tags/}"
-              TAG_VERSION="${TAG#v}"
-              echo "re-running the release of the existing tag $TAG"
-              ;;
-            *)
-              echo "::error::A publishing dispatch must select main or an existing v<semver> tag; got '$PUBLISH_REF'. Push the version-bump commit to main, then dispatch this workflow from main."
-              exit 1
-              ;;
-          esac
+          if [ "$PUBLISH_REF" != "refs/heads/main" ]; then
+            echo "::error::A publishing dispatch must select main; got '$PUBLISH_REF'. Push the version-bump commit to main, then dispatch this workflow from main. A failed release is re-run from its own run page instead."
+            exit 1
+          fi
+          TAG_VERSION="$(node -e "console.log(require('./npm/nub/package.json').version)")"
+          TAG="v$TAG_VERSION"
+          echo "releasing the dispatched commit ${GITHUB_SHA} as $TAG"
           node - "$TAG_VERSION" <<'NODE'
           const version = process.argv[2];
           const prereleaseIdentifier = '(?:0|[1-9]\\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)';
@@ -213,11 +203,6 @@ jobs:
             process.exit(1);
           }
           NODE
-          COMMITTED=$(node -e "console.log(require('./npm/nub/package.json').version)")
-          if [ "$TAG_VERSION" != "$COMMITTED" ]; then
-            echo "::error::Tag v$TAG_VERSION does not match committed version $COMMITTED. Run 'make version V=$TAG_VERSION', commit it to main, then dispatch this workflow from main."
-            exit 1
-          fi
           # Pre-flight the tag state here so a wrong one costs a minute rather
           # than a full 8-platform build: await-approval creates the tag, and
           # stable-immutable-release re-checks it after every gate has run. An
@@ -281,7 +266,7 @@ jobs:
             [ "$served" = "$VERSION" ] || { echo "::error::npm answered '$served' for @nubjs/nub@$VERSION"; exit 1; }
             built="$(npm view "@nubjs/nub@$VERSION" gitHead 2>/dev/null)" || built=""
             [ -n "$built" ] && [ "$built" = "$GITHUB_SHA" ] \
-              || { echo "::error::@nubjs/nub@$VERSION is already published from commit ${built:-<unknown>}, not from this run's $GITHUB_SHA, and no $TAG exists. Create the tag at the commit that built it (the \"Release tag writes\" ruleset refuses everyone but the release deploy key, so pause it for that one write), then dispatch selecting that tag."; exit 1; }
+              || { echo "::error::@nubjs/nub@$VERSION is already published from commit ${built:-<unknown>}, not from this run's $GITHUB_SHA, and no $TAG exists. Re-run await-approval in the run that published it, which tags that run's commit; if that run can no longer be re-run, release a new version."; exit 1; }
           fi
           echo "✓ $TAG will be created at $GITHUB_SHA once the maintainer approves this run"
       # Build matrix as data, so a non-publishing debug dispatch with

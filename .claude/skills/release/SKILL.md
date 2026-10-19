@@ -98,7 +98,13 @@ gh run list -R nubjs/nub --workflow release.yml --limit 1   # the run id, to wat
 # resolves through. Never push v0 by hand.
 ```
 
-A release that dies before its approval — a failed build, a run whose held approval expired after 30 days — leaves no tag: re-dispatch from `main` with `publish=true` and the same notes. If `main` has moved past the bump commit since, the re-dispatch releases the new tip under the same version, so revise the notes to cover it. A release that dies after its approval created the tag re-dispatches selecting that `v<ver>` tag as the ref. Every other ref is refused by `verify`, and a tag that points at any commit but the dispatched one is refused there too: release a new version rather than moving a published tag.
+Only `main` can be dispatched: `release-approval` admits no other ref, so `verify` refuses one before the build. How a failed release recovers depends on how far it got:
+
+- **Before `stable-immutable-release` creates the draft** (a failed test or build): nothing is left behind. Fix `main` and re-dispatch from it with the same version, revising the notes if the fix belongs in them.
+- **From the draft on**: re-run the failed jobs from the run's page, never re-dispatch. The re-run keeps the run's commit, artifacts and notes, so the draft's assets still byte-match; a dispatch from a moved `main` builds different bytes, and the draft's comparison refuses them. A re-run of `await-approval` waits for the approval again. GitHub allows re-runs for 30 days after the dispatch.
+- **A run that cannot continue** (its approval hold expired, or it is past the re-run window before its approval) is abandoned: `stager reject '@nubjs/*@<ver>'` drops its staged versions, `gh release delete v<ver> --yes` deletes its draft (a draft has no tag), and the next version is released in its place.
+
+A dispatch whose version tag already exists at another commit is refused by `verify`: release a new version rather than moving a published tag.
 
 Post-merge, fast-forward the shared tree so it tracks origin: `git -C <shared-tree> pull --ff-only` (the eagerly-pull rule, AGENTS.md "Default to a PR flow" — the shared checkout otherwise drifts behind as PRs land).
 
@@ -194,7 +200,7 @@ gh api repos/nubjs/nub/releases/generate-notes \
 
 Append that block under a `---` separator below the curated sections, save `notes.md`, and dispatch with it. The curated narrative stays on top; this exhaustive PR list goes underneath.
 
-To correct the notes after the dispatch (a re-dispatch of the same tag rewrites the draft's body from its own `notes` input; after the promotion, edit in place):
+To correct the notes after the dispatch, edit the release in place, draft or published (a re-run of `stable-immutable-release` rewrites a draft's body from the run's own `notes` input, so edit again after one):
 
 ```bash
 gh release edit v<ver> --notes-file notes.md
@@ -298,7 +304,7 @@ A complete release has: the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub
 
 The 8 `nub-launcher-*` assets are what `nub compile --platform <foreign>` fetches to cross-compile, so a release missing one silently disables cross-compiling to that platform for everyone on that version.
 
-**If CI failed partway:** Re-run the failed job from the Actions UI. The `stable-immutable-release` job rebuilds the deterministic archives and re-uploads missing assets before npm starts; `publish-npm` skips packages already published or already staged during a partial attempt; a run whose approval hold expired (30 days) is re-dispatched selecting its tag (Step 3); `github-release` only promotes the asset-complete prerelease. Do not re-cut a version for a failed upload or partial npm publish.
+**If CI failed partway:** Re-run the failed job from the Actions UI. The `stable-immutable-release` job rebuilds the deterministic archives and re-uploads missing assets before npm starts; `publish-npm` skips packages already published or already staged during a partial attempt; a run whose approval hold expired (30 days) is abandoned for the next version (Step 3); `github-release` only promotes the asset-complete prerelease. Do not re-cut a version for a failed upload or partial npm publish.
 
 Then confirm the Homebrew channel actually moved — the tap lives in another repo, so a green release run here is not evidence that it did:
 
