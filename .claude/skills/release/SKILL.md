@@ -114,18 +114,19 @@ The workflow runs, in order: `verify` (version consistency, notes present), `pri
 
 `publish-npm` does not publish. It runs `npm stage publish` for every package, because the trusted publisher on each `@nubjs` package is stage-only, and then ends. The run moves to `await-approval`, a job on the `release-approval` environment whose required reviewer is the maintainer: GitHub holds the run there with no runner, for up to 30 days. Nothing is installable, and no GitHub Release is visible, until the maintainer approves the staged versions with 2FA. That approval is a proof of presence no token can supply, which is the whole point (the unauthorized v0.9.4 of 2026-09-21 published 18 packages from a stolen push credential; under staging it would have filled a queue).
 
-The approval goes through `stager` (`~/Documents/projects/stager`, on PATH). An agent RUNS it; the maintainer supplies the one click on the npm page it prints:
+The approval goes through `stager` (`~/Documents/stager`, on PATH), and the MAINTAINER runs it, in their own terminal. The agent hands over the command and parks on `stager await`:
 
 ```bash
-stager approve '@nubjs/*@<ver>'     # prints an npmjs.com URL; the maintainer approves there (tick "skip 2FA for
-                                    # 5 minutes" so the other 18 pass without another URL); then stager approves
-                                    # the run's pending deployment, which resumes it
-stager await '@nubjs/*@<ver>'       # blocks, with no timeout, until npm serves every version — park on this
+stager                              # the maintainer: `a` approves every ready version, Enter, sign in on the npm
+                                    # page it opens, then ONE code from the authenticator approves all 19, oldest
+                                    # first; stager then approves the run's pending deployment, which resumes it
+stager await '@nubjs/*@<ver>'       # the agent: blocks, with no timeout, until npm serves every version — park on this
 stager reject '@nubjs/*@<ver>'      # drops the staged versions and fails the held run
-stager                              # the interactive picker: every staged version, with its commit and run
 ```
 
-`stager` approves every staged version of a package oldest-first, so two versions staged at once end with `latest` on the higher one. A version still `validating` (npm's malware review, up to an hour) is approved once the review finishes; stager waits for it. Without stager: `npm stage approve <id>` per package (or the Staged Packages tab on npmjs.com), then approve the pending deployment on the run's page. A deployment approved before the npm approval fails `npm-served` at its registry check; re-run that job after approving.
+Never `stager approve` (or the stager daemon's Approve notification) for a release: both approve through the browser, the maintainer's npm account cannot use "skip 2FA for 5 minutes", so they cost one browser approval per package, each on a link that expires within minutes. v0.9.7 burned two sign-ins and two dead links that way (2026-10-19).
+
+`stager` approves every staged version of a package oldest-first, so two versions staged at once end with `latest` on the higher one. A version still `validating` (npm's malware review, up to an hour) cannot be approved yet: `stager` lists its release under the table with nothing to decide, so run it again once the review finishes (the stager daemon's notification says when). Without stager: `npm stage approve <id>` per package (or the Staged Packages tab on npmjs.com), then approve the pending deployment on the run's page. A deployment approved before the npm approval fails `npm-served` at its registry check; re-run that job after approving.
 
 **Park on `stager await` (a background shell) rather than on the run.** It returns when the versions are live; the run's remaining jobs then take a few minutes. The release is not done until `stable-immutable-release`, `publish-npm`, `await-approval` and `github-release` are green.
 
@@ -332,7 +333,7 @@ A complete release has the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub-
 | Bump | `make version V=<ver>` → `make version-check` |
 | Notes | write `notes.md` (curated sections + generated `## What's Changed`) BEFORE the dispatch |
 | Cut | `git commit -m "v<ver>" -- <version files>` → `git push origin main` (never `--tags`) → `gh workflow run release.yml -R nubjs/nub -f publish=true -f notes="$(cat notes.md)"` |
-| Approve | `stager approve '@nubjs/*@<ver>'` (maintainer clicks the npm URL) → `stager await '@nubjs/*@<ver>'` |
+| Approve | the maintainer runs `stager` (`a`, Enter, sign in, one code) → the agent parks on `stager await '@nubjs/*@<ver>'` |
 | Blog | `site/content/blog/nub-<x>-<y>-<z>.mdx` — back-dated to `publishedAt` (direct to `main`) |
 | Tap | automatic via `bump-homebrew-tap`; verify with `gh api repos/nubjs/homebrew-tap/contents/Formula/nub.rb --jq .content \| base64 -d \| head -5` |
 | Loop | `gh issue comment <n> --body "Fixed in v<ver>: <release URL>"` (every closed issue + merged PR) |
