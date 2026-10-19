@@ -6,8 +6,8 @@ name: Release
 #   - STABLE (`workflow_dispatch` with publish=true and notes, from main): stage
 #     + verify the immutable versioned assets as a draft release carrying the
 #     notes, stage the npm `latest` versions, then HOLD on the `release-approval`
-#     environment until the maintainer approves the staged versions (`stager
-#     approve` approves on npm and resumes the run), push the `v<version>` tag
+#     environment until the maintainer approves the staged versions (`stager`,
+#     with one authenticator code, approves on npm and resumes the run), push the `v<version>` tag
 #     and move `v<major>`, promote the GitHub Release, then docker/homebrew/
 #     winget and post-publish install smokes. The run reads its version from the
 #     dispatched commit's npm/nub/package.json; there is no tag trigger, so
@@ -1811,7 +1811,7 @@ jobs:
     # STAGED PUBLISHING (2026-09-22). Every publish here is `npm stage publish`:
     # the trusted publisher on each @nubjs package is stage-only, so this job can
     # put a version in npm's staged queue and nothing else. A staged version is
-    # not installable until a maintainer approves it with 2FA (`stager approve`,
+    # not installable until a maintainer approves it with 2FA (`stager`,
     # or the Staged Packages tab on npmjs.com) — a proof of presence that no OIDC
     # token and no GitHub credential can supply. This job ends once the 19
     # versions are queued; the `await-approval` job below then holds the run,
@@ -1987,7 +1987,7 @@ jobs:
             echo "Version \`$VERSION\` of every package below is in npm's staged queue and is not installable until a maintainer approves it with 2FA. This run is now held on the \`release-approval\` environment; it resumes when that deployment is approved, and then promotes the GitHub Release, moves the actions tag and runs the install smokes."
             echo
             echo '```'
-            echo "stager approve '@nubjs/*@$VERSION'     # approve in the browser (one click), then resume this run"
+            echo "stager                                 # in your own terminal: a, Enter, then ONE authenticator code approves every version and resumes this run"
             echo "stager reject '@nubjs/*@$VERSION'      # drop the staged versions and fail this run"
             echo "stager await '@nubjs/*@$VERSION'       # block, with no timeout, until npm serves every version"
             echo '```'
@@ -2002,7 +2002,7 @@ jobs:
     # Held by the environment's required reviewer, not by a runner: GitHub keeps
     # the run in the waiting state, with no runner and no six-hour cap (the
     # limit is 30 days), until the maintainer approves the deployment — which
-    # `stager approve` does right after the npm approval (and `stager reject`
+    # `stager` does right after the npm approval (and `stager reject`
     # rejects, failing the run). The npm approval is the gate; this approval is
     # only the resume signal, and npm-served checks the registry before anything
     # is published.
@@ -2033,7 +2033,7 @@ jobs:
           deadline=$(( $(date +%s) + 20 * 60 ))
           until curl -sf "https://registry.npmjs.org/@nubjs%2fnub/$VERSION" > /dev/null; do
             if [ "$(date +%s)" -ge "$deadline" ]; then
-              echo "::error::@nubjs/nub@$VERSION is not served by npm — the deployment was approved but this staged version was not. Approve it (stager approve '@nubjs/*@$VERSION'), then re-run this job."
+              echo "::error::@nubjs/nub@$VERSION is not served by npm — the deployment was approved but this staged version was not. Approve it by running stager in a terminal, then re-run this job."
               exit 1
             fi
             sleep 30
@@ -2407,7 +2407,7 @@ jobs:
           for pkg in $PKGS; do
             until [ "$(npm view "$pkg@$VERSION" version 2>/dev/null)" = "$VERSION" ]; do
               if [ "$(date +%s)" -ge "$deadline" ]; then
-                echo "::error::$pkg@$VERSION is not served by npm — the deployment was approved but this staged version was not. Approve it (stager approve '@nubjs/*@$VERSION'), then re-run this job."
+                echo "::error::$pkg@$VERSION is not served by npm — the deployment was approved but this staged version was not. Approve it by running stager in a terminal, then re-run this job."
                 exit 1
               fi
               echo "… $pkg@$VERSION not served yet — $(date -u +%H:%M:%SZ)"
