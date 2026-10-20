@@ -2310,6 +2310,19 @@ fn user_preload_named_preload_mjs_does_not_disable_augmentation() {
 }
 
 #[test]
+fn temporal_namespace_installers() {
+    let (stdout, stderr, code) = run_nub_with_env(
+        "temporal-lazy",
+        "namespace.test.mjs",
+        &[("NODE_COMPAT", "1")],
+    );
+    assert_eq!(
+        code, 0,
+        "Temporal installer tests failed: {stdout}\n{stderr}"
+    );
+}
+
+#[test]
 fn temporal_lazy_global_and_import() {
     // A37: Temporal is installed as a lazy global — loaded on first access, not
     // eagerly at startup (the polyfill is ~18ms). It must still be fully usable
