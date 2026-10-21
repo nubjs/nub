@@ -11375,16 +11375,18 @@ fn shim_plan_with(
     let nesting = Nesting::from_env(|k| env::var(k).ok());
 
     // A GLOBAL op (`npm install -g`, `yarn global add`, `npm ls -g`) writes the
-    // user's global prefix, never this project's lockfile/node_modules, so the
-    // cross-PM project-pin refusal does not apply — `decide` lets it fall through.
+    // user's global prefix, and a registry verb (`npm login`, `npm view`) the
+    // registry — never this project's lockfile/node_modules, so the cross-PM
+    // project-pin refusal does not apply and `decide` lets either fall through.
     let global = shim::is_global_invocation(invoked, args);
+    let outside_project = global || shim::is_registry_invocation(invoked, args);
 
     let decision = shim::decide(
         invoked,
         &pin_state,
         args.first().map(String::as_str),
         nesting,
-        global,
+        outside_project,
     );
 
     // `nub pm shim --route-installs`: a top-level `npm ci` / bare `npm
