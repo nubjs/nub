@@ -1168,7 +1168,7 @@ jobs:
           node-version: ${{ matrix.node }}
       # Side-install the off-matrix tier representatives for the version_tiers
       # integration test: compat 22.13, unsupported 18.18, detect-module in-band
-      # 20.11 (flag still required there), and 26.5 (carries the node:ffi/vfs/
+      # 20.11 (flag still required there), and 26.12 (carries the node:ffi/vfs/
       # stream-iter enabler modules). actions/setup-node only manages one
       # PATH-active Node per job; these go into private dirs and are exposed to
       # the test via TEST_NODE_BIN_<MAJOR>_<MINOR>_<PATCH> — the env-var prefix
@@ -1192,16 +1192,16 @@ jobs:
           dir_22_13=$(install_node 22.13.0)
           dir_18_18=$(install_node 18.18.0)
           dir_20_11=$(install_node 20.11.0)
-          dir_26_5=$(install_node 26.5.0)
+          dir_26_12=$(install_node 26.12.1)
           "$dir_22_13/node" --version
           "$dir_18_18/node" --version
           "$dir_20_11/node" --version
-          "$dir_26_5/node" --version
+          "$dir_26_12/node" --version
           {
             echo "TEST_NODE_BIN_22_13_0=$dir_22_13"
             echo "TEST_NODE_BIN_18_18_0=$dir_18_18"
             echo "TEST_NODE_BIN_20_11_0=$dir_20_11"
-            echo "TEST_NODE_BIN_26_5_0=$dir_26_5"
+            echo "TEST_NODE_BIN_26_12_1=$dir_26_12"
           } >> "$GITHUB_ENV"
       - name: pinned package managers + socket firewall
         shell: bash
@@ -1216,9 +1216,9 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           # The soak scripts are erasable-TS .mts and need a type-stripping
-          # Node; the compat legs run them with the side-installed 26.5
+          # Node; the compat legs run them with the side-installed 26.12
           # instead of the PATH Node (18/20 can't execute .mts).
-          NODE_BIN="${TEST_NODE_BIN_26_5_0:+$TEST_NODE_BIN_26_5_0/node}"
+          NODE_BIN="${TEST_NODE_BIN_26_12_1:+$TEST_NODE_BIN_26_12_1/node}"
           NODE_BIN="${NODE_BIN:-node}"
           # Pinned pnpm/npm only on the current-line leg: the compat legs
           # exist to test OLD Nodes, which the pinned PMs don't support.
