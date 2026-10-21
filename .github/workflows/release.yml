@@ -3253,7 +3253,7 @@ jobs:
 
       - name: Submit manifest to winget-pkgs
         if: steps.gate.outputs.enabled == 'true'
-        uses: vedantmgoyal9/winget-releaser@f29ed1ffd34f91223a2aebaa71beaab0901ff9fd # v2
+        uses: vedantmgoyal9/winget-releaser@f29ed1ffd34f91223a2aebaa71beaab0901ff9fd # pinned commit; upstream has no immutable version tag
         with:
           identifier: Nub.Nub
           version: ${{ steps.gate.outputs.version }}
