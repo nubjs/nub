@@ -7,7 +7,11 @@ Default Nub usage needs no shims: `nub install`, `nub add`, and `nub run` alread
 
 <ShimDemo />
 
-After `nub pm shim`, bare `pnpm` resolves to a shim — a hardlink to the Nub binary. The shims live in `$XDG_DATA_HOME/nub/shims` when that variable is set, `%LOCALAPPDATA%\nub\shims` on Windows, and `~/.local/share/nub/shims` otherwise. On a cold cache, `pnpm --version` (or any pinned-PM command) provisions the pinned pnpm, then dispatches to it in-process under the project's Node. The dim `pnpm@9.5.0 (via nub shim)` line names the manager and version it ran; it prints on stderr on every dispatch, so piped stdout stays clean.
+After `nub pm shim`, bare `pnpm` resolves to a shim — a hardlink to the Nub binary. The shims live in `$XDG_DATA_HOME/nub/shims` when that variable is set, `%LOCALAPPDATA%\nub\shims` on Windows, and `~/.local/share/nub/shims` otherwise. On a cold cache, `pnpm --version` (or any pinned-PM command) provisions the pinned pnpm, then starts its launcher under the project's Node. The dim `pnpm@9.5.0 (via nub shim)` line names the manager and version it ran; it prints on stderr on every dispatch, so piped stdout stays clean.
+
+For pnpm 12, the shims use pnpm's Corepack-compatible JavaScript launchers. The launcher downloads and caches the native pnpm binary on first use. Existing cached pnpm packages do not need to be removed.
+
+That binary download uses pnpm's Corepack settings, not the registry or credentials in `.npmrc`. Set `COREPACK_NPM_REGISTRY` for a custom registry. If it requires authentication, use `COREPACK_NPM_TOKEN`, or both `COREPACK_NPM_USERNAME` and `COREPACK_NPM_PASSWORD`. By default, pnpm verifies the download with npm's signing keys, so mirrors that strip signatures fail. For re-signed packages, configure trusted keys in `COREPACK_INTEGRITY_KEYS`. `COREPACK_ENABLE_NETWORK=0` prevents the first-run download but permits runs once the binary is cached.
 
 To remove the shims, `nub pm unshim` deletes the shim directory and strips the PATH block, restoring the previous `pnpm`.
 
