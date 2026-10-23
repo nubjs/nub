@@ -17,5 +17,5 @@ Extract a package into an edit directory so it can be patched
   When omitted, `aube` picks a fresh temp dir under the system tmpdir.
 - **`--ignore-existing`** — Ignore any existing patch entry for this package.
 
-  Extracts a pristine copy from `node_modules` rather than re-applying the existing patch first. Accepted for pnpm parity; aube already extracts from the *linked* (post-patch) tree, so this flag is effectively informational here.
+  Starts the edit copy from the pristine package bytes as well, so the recommitted patch replaces the declared one wholesale instead of building on its changes.
 - **`-h --help`** — Print help

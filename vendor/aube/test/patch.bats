@@ -64,7 +64,7 @@ EOF
 	assert_failure
 }
 
-@test "patch-commit extends an existing patch at its declared path" {
+@test "patch-commit replaces an existing patch with the full consolidated diff" {
 	cat >package.json <<'EOF'
 {
   "name": "patch-existing-test",
@@ -79,7 +79,7 @@ packages:
   - .
 EOF
 
-	run aube install --ignore-scripts
+	run aube install
 	assert_success
 
 	run aube patch is-odd@3.0.1
@@ -94,25 +94,40 @@ EOF
 	mv "$generated_patch" "$declared_patch"
 	sed -i.bak "s#$generated_patch#$declared_patch#" pnpm-workspace.yaml
 	rm pnpm-workspace.yaml.bak
-	run aube install --ignore-scripts
+	run aube install
 	assert_success
 
+	# Re-patch the same package: the edit dir starts from the currently
+	# effective (patched) tree, and the recommit must REPLACE the patch
+	# file with one consolidated pristine→edited diff rather than
+	# appending incremental hunks to it.
 	run aube patch is-odd@3.0.1
 	assert_success
 	edit_dir="$(echo "$output" | grep -oE '/[^ ]*/user' | head -1)"
 	run grep -q "existing-patch-marker" "$edit_dir/index.js"
 	assert_success
+	# Edit the SAME line the first patch added — the classic repeated
+	# patching of one file.
+	sed -i.bak "s/existing-patch-marker/existing-patch-marker-v2/" "$edit_dir/index.js"
+	rm "$edit_dir/index.js.bak"
 	echo "// second-patch-marker" >>"$edit_dir/index.js"
 	retry_parent="$BATS_TEST_TMPDIR/retry-edit"
 	cp -R "$(dirname "$edit_dir")" "$retry_parent"
 
 	run aube patch-commit "$edit_dir"
 	assert_success
+	# A retry from a leftover edit snapshot rewrites identical bytes.
 	run aube patch-commit "$retry_parent/user"
 	assert_success
 	assert [ -f "$declared_patch" ]
 	assert [ ! -f "patches/is-odd@3.0.1.patch" ]
-	run grep -q '^+// existing-patch-marker' "$declared_patch"
+	# One consolidated section for the file, not one per patch session.
+	run grep -c '^diff --git' "$declared_patch"
+	assert_output "1"
+	# The old hunks are gone: the patch carries only the latest content.
+	run grep -q '^+// existing-patch-marker$' "$declared_patch"
+	assert_failure
+	run grep -q '^+// existing-patch-marker-v2' "$declared_patch"
 	assert_success
 	run grep -c '^+// second-patch-marker' "$declared_patch"
 	assert_output "1"
@@ -120,9 +135,9 @@ EOF
 	assert_success
 
 	rm -rf node_modules
-	run aube install --ignore-scripts
+	run aube install
 	assert_success
-	run grep -q "existing-patch-marker" node_modules/is-odd/index.js
+	run grep -q "existing-patch-marker-v2" node_modules/is-odd/index.js
 	assert_success
 	run grep -q "second-patch-marker" node_modules/is-odd/index.js
 	assert_success

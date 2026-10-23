@@ -1,8 +1,14 @@
 //! `aube patch-commit <dir>` — diff a `aube patch` edit directory
-//! against its frozen source snapshot, write the unified diff to the
-//! package's declared patch path (or a new file under `patches-dir`),
-//! record a new `patchedDependencies` entry when needed, and re-run
-//! install so the patched files land in the linked tree.
+//! against its frozen pristine source snapshot, write the unified diff
+//! to the package's declared patch path (or a new file under
+//! `patches-dir`), record a new `patchedDependencies` entry when
+//! needed, and re-run install so the patched files land in the linked
+//! tree.
+//!
+//! Because the diff base is the pristine package (see `patch`'s
+//! reverse-apply reconstruction), the generated diff is the complete
+//! patch: recommitting REPLACES the previous patch file content rather
+//! than appending another set of hunks to it.
 //!
 //! The patch format is git-compatible: each per-file hunk is wrapped
 //! in `diff --git a/<rel> b/<rel>` so a generated patch round-trips
@@ -79,7 +85,7 @@ pub async fn run(args: PatchCommitArgs) -> Result<()> {
         .into_diagnostic()
         .map_err(|e| miette!("failed to create {}: {e}", abs_dir.display()))?;
 
-    // Snapshot any existing patch so a re-patch can be rolled back to
+    // Snapshot any existing patch so a recommit can be rolled back to
     // the previous content if the manifest write fails. atomic_write
     // replaces unconditionally, so without the snapshot a re-patch
     // failure would leave the manifest pointing at a path that lost
@@ -94,15 +100,6 @@ pub async fn run(args: PatchCommitArgs) -> Result<()> {
             ));
         }
     };
-    let mut combined_patch = match &prior_patch {
-        Some(bytes) if had_existing_patch => String::from_utf8(bytes.clone())
-            .into_diagnostic()
-            .map_err(|e| miette!("existing patch {} is not UTF-8: {e}", abs_path.display()))?,
-        _ => String::new(),
-    };
-    if !combined_patch.is_empty() && !combined_patch.ends_with('\n') {
-        combined_patch.push('\n');
-    }
 
     // Invalidate freshness before mutating the patch. Declared patch
     // paths can live outside the default patches/ directory covered by
@@ -117,15 +114,15 @@ pub async fn run(args: PatchCommitArgs) -> Result<()> {
         )
     })?;
 
-    // A failed best-effort snapshot cleanup can leave the edit tree
-    // behind. Make retrying the exact patch-commit idempotent instead
-    // of appending its incremental hunks a second time.
-    if !had_existing_patch || !combined_patch.ends_with(&patch) {
-        combined_patch.push_str(&patch);
-        aube_util::fs_atomic::atomic_write(&abs_path, combined_patch.as_bytes())
-            .into_diagnostic()
-            .map_err(|e| miette!("failed to write {}: {e}", abs_path.display()))?;
-    }
+    // The diff was computed against the pristine source snapshot (see
+    // `patch` reverse-applying any declared patch), so it IS the whole
+    // patch: overwrite unconditionally rather than append. Retrying a
+    // patch-commit after a failed edit-snapshot cleanup rewrites
+    // identical bytes, which keeps that retry idempotent by
+    // construction.
+    aube_util::fs_atomic::atomic_write(&abs_path, patch.as_bytes())
+        .into_diagnostic()
+        .map_err(|e| miette!("failed to write {}: {e}", abs_path.display()))?;
 
     // Manifest write failure means the patch on disk is not
     // referenced anywhere. Restore the prior patch if there was one
@@ -178,7 +175,7 @@ pub async fn run(args: PatchCommitArgs) -> Result<()> {
 
     // The patch and declaration are now committed. Drop the edit
     // snapshot before relinking so an unrelated install failure cannot
-    // lead the user to recommit the same incremental diff.
+    // lead the user to recommit the same diff.
     if let Some(parent) = state.user_dir.parent() {
         let _ = std::fs::remove_dir_all(parent);
     }

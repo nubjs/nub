@@ -39,6 +39,7 @@ pub(crate) use materialize::{
 };
 pub use patches::Patches;
 pub(crate) use patches::apply_multi_file_patch;
+pub use patches::apply_multi_file_patch_reversed;
 pub use pool::default_linker_parallelism;
 pub use quarantine::strip_quarantine_from_tree;
 pub use sweep::{is_physical_importer, mkdirp, remove_dir_all_with_retry, sweep_stale_tmp_dirs};
