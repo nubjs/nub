@@ -379,7 +379,7 @@ fn bundle_inner(
         },
         resolve: Some(ResolveOptions {
             alias: alias_entries(&opts.alias)?,
-            // Nub's runtime key leads the set, so a package resolves to the same
+            // The `nub` condition leads the set, so a package resolves to the same
             // branch here as it does on a `nub <file>` run. `exports` is resolved
             // at BUILD time in a compiled binary, so a bundler that omitted the
             // condition would silently ship a different file than the one the same
@@ -6247,7 +6247,7 @@ mod tests {
         );
     }
 
-    /// Nub's runtime key reaches the bundler's resolver with no flag passed, so a
+    /// The `nub` condition reaches the bundler's resolver with no flag passed, so a
     /// package's `nub` branch picks the file a `nub <file>` run would load.
     ///
     /// `exports` is resolved at BUILD time here, and a resolution that skipped the key
@@ -6256,13 +6256,13 @@ mod tests {
     /// catches that, since a bundle that resolved nothing also fails the first
     /// assertion.
     #[test]
-    fn the_nub_runtime_key_selects_its_exports_branch_with_no_flag() {
+    fn the_nub_condition_selects_its_exports_branch_with_no_flag() {
         const PKG: &str = r#"{
             "name": "keyed",
             "exports": { ".": { "nub": "./nub.js", "default": "./default.js" } }
         }"#;
         const FILES: &[(&str, &str)] = &[
-            ("nub.js", "export const WHICH = 'runtime-key';\n"),
+            ("nub.js", "export const WHICH = 'nub-branch';\n"),
             ("default.js", "export const WHICH = 'default-branch';\n"),
         ];
         const SRC: &str = "import { WHICH } from 'keyed';\nglobalThis.OUT = WHICH;\n";
@@ -6271,7 +6271,7 @@ mod tests {
         plain.minify = false;
         let selected = bundle_with_package(SRC, "keyed", PKG, FILES, &plain);
         assert!(
-            emits_literal(&selected, "runtime-key"),
+            emits_literal(&selected, "nub-branch"),
             "the bundler must resolve the `nub` branch with no flag passed; got:\n{selected}"
         );
         assert!(
