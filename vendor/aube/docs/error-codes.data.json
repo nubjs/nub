@@ -819,6 +819,12 @@
       "exit_code": null
     },
     {
+      "name": "WARN_AUBE_INVALID_DNS_RESOLVER",
+      "category": "Registry config (trust gates)",
+      "description": "`dns-resolver` was neither `builtin` nor `system`.",
+      "exit_code": null
+    },
+    {
       "name": "WARN_AUBE_UNSCOPED_AUTH_RESCOPED",
       "category": "Registry config (trust gates)",
       "description": "An unscoped registry credential was pinned to the registry declared by the same config source.",

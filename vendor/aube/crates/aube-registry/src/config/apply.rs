@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use super::env::env_any;
 use super::token::sanitize_token_helper;
-use super::types::{AuthConfig, NpmConfig, NpmrcSource};
+use super::types::{AuthConfig, DnsResolver, NpmConfig, NpmrcSource};
 use super::url::{
     is_public_npmjs_url, lookup_by_uri_prefix, normalize_npmrc_uri_key, normalize_registry_url,
     package_scope, registry_uri_key,
@@ -420,6 +420,15 @@ impl NpmConfig {
                     Err(e) => tracing::warn!(
                         code = aube_codes::warnings::WARN_AUBE_INVALID_LOCAL_ADDRESS,
                         "ignoring invalid local-address {value:?}: {e}"
+                    ),
+                }
+            } else if matches!(key.as_str(), "dns-resolver" | "dnsResolver") {
+                match value.trim() {
+                    "builtin" => self.dns_resolver = DnsResolver::Builtin,
+                    "system" => self.dns_resolver = DnsResolver::System,
+                    _ => tracing::warn!(
+                        code = aube_codes::warnings::WARN_AUBE_INVALID_DNS_RESOLVER,
+                        "ignoring dns-resolver={value:?}: expected `builtin` or `system`"
                     ),
                 }
             } else if key == "maxsockets" {
