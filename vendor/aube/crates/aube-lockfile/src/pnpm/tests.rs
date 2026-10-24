@@ -704,6 +704,49 @@ snapshots:
 }
 
 #[test]
+fn parse_file_dep_escaping_the_lockfile_root_is_not_rebased() {
+    // `file:` versions are relative to the lockfile directory, so a package
+    // outside the workspace root keeps its leading `..`.
+    let dir = tempfile::tempdir().unwrap();
+    let lockfile_path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &lockfile_path,
+        r#"
+lockfileVersion: '9.0'
+
+importers:
+  .: {}
+
+  apps/app:
+    dependencies:
+      dep:
+        specifier: file:../../../dep
+        version: file:../dep
+
+packages:
+  dep@file:../dep:
+    resolution: {directory: ../dep, type: directory}
+
+snapshots:
+  dep@file:../dep: {}
+"#,
+    )
+    .unwrap();
+
+    let graph = parse(&lockfile_path).unwrap();
+    let dep = graph
+        .packages
+        .values()
+        .find(|pkg| pkg.name == "dep")
+        .expect("dep");
+    assert_eq!(
+        dep.local_source,
+        Some(LocalSource::Directory("../dep".into()))
+    );
+    assert_eq!(graph.importers["apps/app"][0].dep_path, dep.dep_path);
+}
+
+#[test]
 fn parse_transitive_url_entry_uses_pnpm_version_field() {
     // Regression: pnpm writes non-registry transitive entries with
     // the tarball URL in the dep-path key and the real semver in a
