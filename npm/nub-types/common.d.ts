@@ -193,6 +193,17 @@ interface Math {
   sumPrecise(items: Iterable<number>): number;
 }
 
+// JSON.parse options (Stage 2.7, 2026-09): an overload beside lib.es5's reviver
+// form. Neither option is coerced at runtime — a non-boolean is a TypeError — and
+// `preferNullPrototype` defaults to the value of `freeze`. The inline object type,
+// rather than a named interface, cannot collide with a future lib's options type.
+interface JSON {
+  parse(
+    text: string,
+    options: { freeze?: boolean | undefined; preferNullPrototype?: boolean | undefined },
+  ): any;
+}
+
 // Iterator.concat (Stage 4; native only on Node 26+, polyfilled below). TypeScript's
 // iterator libraries declare `from` and the helpers on IteratorConstructor but not
 // this, so no `reference lib` reaches it on any version. The sibling statics Nub also
