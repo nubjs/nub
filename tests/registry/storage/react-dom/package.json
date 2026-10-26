@@ -1,0 +1,116 @@
+{
+  "name": "react-dom",
+  "versions": {
+    "18.3.1": {
+      "name": "react-dom",
+      "version": "18.3.1",
+      "keywords": [
+        "react"
+      ],
+      "license": "MIT",
+      "_id": "react-dom@18.3.1",
+      "maintainers": [
+        {
+          "name": "zpao",
+          "email": "paul@oshannessy.com"
+        },
+        {
+          "name": "gnoff",
+          "email": "jcs.gnoff@gmail.com"
+        },
+        {
+          "name": "fb",
+          "email": "opensource+npm@fb.com"
+        },
+        {
+          "name": "sophiebits",
+          "email": "npm@sophiebits.com"
+        },
+        {
+          "name": "react-bot",
+          "email": "react-core@meta.com"
+        }
+      ],
+      "homepage": "https://reactjs.org/",
+      "bugs": {
+        "url": "https://github.com/facebook/react/issues"
+      },
+      "dist": {
+        "shasum": "c2265d79511b57d479b3dd3fdfa51536494c5cb4",
+        "tarball": "http://localhost:4874/react-dom/-/react-dom-18.3.1.tgz",
+        "fileCount": 32,
+        "integrity": "sha512-5m4nQKp+rZRb09LNH59GM4BxTh9251/ylbKIbpe7TpGxfJ+9kv6BLkLBXIjjspbgbnIBNqlI23tRnTWT0snUIw==",
+        "signatures": [
+          {
+            "sig": "MEQCIBgs6vDETA10ELaVd+qrTsj8Epj+CNwukjKzegXwgk1jAiBFFV5NUIaUVA0qvHRTQhjYx2O3WXd9xUUPRnGSAxyHLQ==",
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+          }
+        ],
+        "unpackedSize": 4513549
+      },
+      "main": "index.js",
+      "browser": {
+        "./server.js": "./server.browser.js"
+      },
+      "exports": {
+        ".": "./index.js",
+        "./client": "./client.js",
+        "./server": {
+          "deno": "./server.browser.js",
+          "worker": "./server.browser.js",
+          "browser": "./server.browser.js",
+          "default": "./server.node.js"
+        },
+        "./profiling": "./profiling.js",
+        "./test-utils": "./test-utils.js",
+        "./server.node": "./server.node.js",
+        "./package.json": "./package.json",
+        "./server.browser": "./server.browser.js"
+      },
+      "gitHead": "a87edf62d7d69705ddbcec9a24f0780b3db7535f",
+      "scripts": {
+        "start": "node server.js"
+      },
+      "_npmUser": {
+        "name": "react-bot",
+        "email": "react-core@meta.com"
+      },
+      "browserify": {
+        "transform": [
+          "loose-envify"
+        ]
+      },
+      "repository": {
+        "url": "git+https://github.com/facebook/react.git",
+        "type": "git",
+        "directory": "packages/react-dom"
+      },
+      "_npmVersion": "10.5.0",
+      "description": "React package for working with the DOM.",
+      "directories": {},
+      "_nodeVersion": "18.20.0",
+      "dependencies": {
+        "scheduler": "^0.23.2",
+        "loose-envify": "^1.1.0"
+      },
+      "_hasShrinkwrap": false,
+      "peerDependencies": {
+        "react": "^18.3.1"
+      },
+      "_npmOperationalInternal": {
+        "tmp": "tmp/react-dom_18.3.1_1714149769672_0.01003563756568382",
+        "host": "s3://npm-registry-packages"
+      }
+    }
+  },
+  "time": {
+    "created": "2014-05-06T18:59:36.160Z",
+    "modified": "2026-08-14T17:36:48.281Z",
+    "18.3.1": "2024-04-26T16:42:49.931Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "18.3.1"
+  }
+}

@@ -1,0 +1,78 @@
+{
+  "name": "picocolors",
+  "versions": {
+    "1.1.1": {
+      "name": "picocolors",
+      "version": "1.1.1",
+      "main": "./picocolors.js",
+      "types": "./picocolors.d.ts",
+      "browser": {
+        "./picocolors.js": "./picocolors.browser.js"
+      },
+      "sideEffects": false,
+      "description": "The tiniest and the fastest library for terminal output formatting with ANSI colors",
+      "keywords": [
+        "terminal",
+        "colors",
+        "formatting",
+        "cli",
+        "console"
+      ],
+      "author": {
+        "name": "Alexey Raspopov"
+      },
+      "repository": {
+        "type": "git",
+        "url": "git+https://github.com/alexeyraspopov/picocolors.git"
+      },
+      "license": "ISC",
+      "_id": "picocolors@1.1.1",
+      "gitHead": "6f0a4638348ed20633d623ee973f9c9a96f65104",
+      "bugs": {
+        "url": "https://github.com/alexeyraspopov/picocolors/issues"
+      },
+      "homepage": "https://github.com/alexeyraspopov/picocolors#readme",
+      "_nodeVersion": "22.9.0",
+      "_npmVersion": "10.8.3",
+      "dist": {
+        "integrity": "sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA==",
+        "shasum": "3d321af3eab939b083c8f929a1d12cda81c26b6b",
+        "tarball": "http://localhost:4874/picocolors/-/picocolors-1.1.1.tgz",
+        "fileCount": 7,
+        "unpackedSize": 6373,
+        "signatures": [
+          {
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+            "sig": "MEUCIQD1ga0Ghvdul0FY1X3tDEHWjLF2ImSjnhKBBPgfOq1CvAIgSrqciFjzA8uVTKSuA6NKBADmO/cxtGcYXQhHjD0U1Nw="
+          }
+        ]
+      },
+      "_npmUser": {
+        "name": "alexeyraspopov",
+        "email": "oleksii.raspopov@gmail.com"
+      },
+      "directories": {},
+      "maintainers": [
+        {
+          "name": "alexeyraspopov",
+          "email": "oleksii.raspopov@gmail.com"
+        }
+      ],
+      "_npmOperationalInternal": {
+        "host": "s3://npm-registry-packages",
+        "tmp": "tmp/picocolors_1.1.1_1729102803686_0.7395028803649382"
+      },
+      "_hasShrinkwrap": false
+    }
+  },
+  "time": {
+    "created": "2021-09-27T00:33:41.501Z",
+    "modified": "2024-10-16T18:20:04.161Z",
+    "1.1.1": "2024-10-16T18:20:03.921Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "1.1.1"
+  }
+}

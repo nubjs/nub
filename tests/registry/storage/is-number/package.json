@@ -1,0 +1,419 @@
+{
+  "name": "is-number",
+  "versions": {
+    "7.0.0": {
+      "name": "is-number",
+      "description": "Returns true if a number or string value is a finite number. Useful for regex matches, parsing, user input, etc.",
+      "version": "7.0.0",
+      "homepage": "https://github.com/jonschlinkert/is-number",
+      "author": {
+        "name": "Jon Schlinkert",
+        "url": "https://github.com/jonschlinkert"
+      },
+      "contributors": [
+        {
+          "name": "Jon Schlinkert",
+          "url": "http://twitter.com/jonschlinkert"
+        },
+        {
+          "name": "Olsten Larck",
+          "url": "https://i.am.charlike.online"
+        },
+        {
+          "name": "Rouven Weßling",
+          "url": "www.rouvenwessling.de"
+        }
+      ],
+      "repository": {
+        "type": "git",
+        "url": "git+https://github.com/jonschlinkert/is-number.git"
+      },
+      "bugs": {
+        "url": "https://github.com/jonschlinkert/is-number/issues"
+      },
+      "license": "MIT",
+      "files": [
+        "index.js"
+      ],
+      "main": "index.js",
+      "engines": {
+        "node": ">=0.12.0"
+      },
+      "scripts": {
+        "test": "mocha"
+      },
+      "devDependencies": {
+        "ansi": "^0.3.1",
+        "benchmark": "^2.1.4",
+        "gulp-format-md": "^1.0.0",
+        "mocha": "^3.5.3"
+      },
+      "keywords": [
+        "cast",
+        "check",
+        "coerce",
+        "coercion",
+        "finite",
+        "integer",
+        "is",
+        "isnan",
+        "is-nan",
+        "is-num",
+        "is-number",
+        "isnumber",
+        "isfinite",
+        "istype",
+        "kind",
+        "math",
+        "nan",
+        "num",
+        "number",
+        "numeric",
+        "parseFloat",
+        "parseInt",
+        "test",
+        "type",
+        "typeof",
+        "value"
+      ],
+      "verb": {
+        "toc": false,
+        "layout": "default",
+        "tasks": [
+          "readme"
+        ],
+        "related": {
+          "list": [
+            "is-plain-object",
+            "is-primitive",
+            "isobject",
+            "kind-of"
+          ]
+        },
+        "plugins": [
+          "gulp-format-md"
+        ],
+        "lint": {
+          "reflinks": true
+        }
+      },
+      "gitHead": "98e8ff1da1a89f93d1397a24d7413ed15421c139",
+      "_id": "is-number@7.0.0",
+      "_npmVersion": "6.1.0",
+      "_nodeVersion": "10.0.0",
+      "_npmUser": {
+        "name": "jonschlinkert",
+        "email": "github@sellside.com"
+      },
+      "dist": {
+        "integrity": "sha512-41Cifkg6e8TylSpdtTpeLVMqvSBEVzTttHvERD741+pnZ8ANv0004MRL43QKPDlK9cGvNp6NZWZUBlbGXYxxng==",
+        "shasum": "7535345b896734d5f80c4d06c50955527a14f12b",
+        "tarball": "http://localhost:4874/is-number/-/is-number-7.0.0.tgz",
+        "fileCount": 4,
+        "unpackedSize": 9615,
+        "npm-signature": "-----BEGIN PGP SIGNATURE-----\r\nVersion: OpenPGP.js v3.0.4\r\nComment: https://openpgpjs.org\r\n\r\nwsFcBAEBCAAQBQJbPOMKCRA9TVsSAnZWagAABmIP/iUfV7gQnAsn2vRNKWIu\nlxkfXFutnV1Bo5P8mlv37Zg+PN5/Ri/RATtKGEosAvHL/HK2HkFH+rLYkupg\nCYaAVXNOJiFN9vK61YYp0TB0PBtGDQ2UwcElxDQ8OP6Djni4fl2fLjVZ+JeN\nPF1bKPE6oMevNg3GtNMrb1QKZNGjplOKFmlmm9fe653LHwIH1zPYy6QQ+cgG\nQ8Czmhdf+NuX8WXqR1h5mHTKCCVAqzcpJ21uX9292aoWlzlijzg9cc8KEPEY\ncbUjJf4NMLs89/8G6tcpDP5qoVjQnWIgfM0mDXt4P7ESdqjusdyNa+3eS/Yi\nsQuevXmth+41kvQaVy7rLbeAssWNbc7IJ+X1qpgnUqTz4rtiAaRnZ6rzAE2s\nrr723lN2H7ALlnDVm5qzXLTTjHwbdYMYuaYHTOMovytYWeRnwhfNCpKeQcEe\nUYR3sm2tEdxsMI5ciu5ULGj/PEKnSOsQcq2y4QjNFz4F5ReXiv+CtphQubAr\nVkKwrjIovN97YXmyrkfJB1zCInCMUz11YgRY0wNaCJPJ4E0V4KdfWgCEyt+F\nqKcdylewrOAma06WozqUXzRH3uNNbMTfsE1nGqbcofJPNBre/VriCwF7zS/H\nLhGfCe6LJuY2Q+2Eel1vtwnY+vAoaWrr7QisjcvywYHvqWlRob2IxC1Ygp3A\nvUY+\r\n=M7jx\r\n-----END PGP SIGNATURE-----\r\n",
+        "signatures": [
+          {
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+            "sig": "MEUCIGex85Xx5rKhEgNSkg7z5bBu7vbcFbJnWJZbV3f9Td8GAiEA5wzgLXU41sE6ezCKGrmzsyMtm6M+2OhefJJhkzPEAoc="
+          }
+        ]
+      },
+      "maintainers": [
+        {
+          "email": "brian.woodward@gmail.com",
+          "name": "doowb"
+        },
+        {
+          "email": "github@sellside.com",
+          "name": "jonschlinkert"
+        },
+        {
+          "email": "me@rouvenwessling.de",
+          "name": "realityking"
+        }
+      ],
+      "directories": {},
+      "_npmOperationalInternal": {
+        "host": "s3://npm-registry-packages",
+        "tmp": "tmp/is-number_7.0.0_1530716938183_0.28831183290614004"
+      },
+      "_hasShrinkwrap": false
+    },
+    "3.0.0": {
+      "name": "is-number",
+      "description": "Returns true if the value is a number. comprehensive tests.",
+      "version": "3.0.0",
+      "homepage": "https://github.com/jonschlinkert/is-number",
+      "author": {
+        "name": "Jon Schlinkert",
+        "url": "https://github.com/jonschlinkert"
+      },
+      "contributors": [
+        {
+          "name": "Charlike Mike Reagent",
+          "url": "http://www.tunnckocore.tk"
+        },
+        {
+          "name": "Jon Schlinkert",
+          "email": "jon.schlinkert@sellside.com",
+          "url": "http://twitter.com/jonschlinkert"
+        }
+      ],
+      "repository": {
+        "type": "git",
+        "url": "git+https://github.com/jonschlinkert/is-number.git"
+      },
+      "bugs": {
+        "url": "https://github.com/jonschlinkert/is-number/issues"
+      },
+      "license": "MIT",
+      "files": [
+        "index.js"
+      ],
+      "main": "index.js",
+      "engines": {
+        "node": ">=0.10.0"
+      },
+      "scripts": {
+        "test": "mocha"
+      },
+      "dependencies": {
+        "kind-of": "^3.0.2"
+      },
+      "devDependencies": {
+        "benchmarked": "^0.2.5",
+        "chalk": "^1.1.3",
+        "gulp-format-md": "^0.1.10",
+        "mocha": "^3.0.2"
+      },
+      "keywords": [
+        "check",
+        "coerce",
+        "coercion",
+        "integer",
+        "is",
+        "is-nan",
+        "is-num",
+        "is-number",
+        "istype",
+        "kind",
+        "math",
+        "nan",
+        "num",
+        "number",
+        "numeric",
+        "test",
+        "type",
+        "typeof",
+        "value"
+      ],
+      "verb": {
+        "related": {
+          "list": [
+            "even",
+            "is-even",
+            "is-odd",
+            "is-primitive",
+            "kind-of",
+            "odd"
+          ]
+        },
+        "toc": false,
+        "layout": "default",
+        "tasks": [
+          "readme"
+        ],
+        "plugins": [
+          "gulp-format-md"
+        ],
+        "lint": {
+          "reflinks": true
+        },
+        "reflinks": [
+          "verb",
+          "verb-generate-readme"
+        ]
+      },
+      "gitHead": "af885e2e890b9ef0875edd2b117305119ee5bdc5",
+      "_id": "is-number@3.0.0",
+      "_shasum": "24fd6201a4782cf50561c810276afc7d12d71195",
+      "_from": ".",
+      "_npmVersion": "3.10.3",
+      "_nodeVersion": "6.3.0",
+      "_npmUser": {
+        "name": "jonschlinkert",
+        "email": "github@sellside.com"
+      },
+      "maintainers": [
+        {
+          "name": "jonschlinkert",
+          "email": "github@sellside.com"
+        },
+        {
+          "name": "doowb",
+          "email": "brian.woodward@gmail.com"
+        }
+      ],
+      "dist": {
+        "shasum": "24fd6201a4782cf50561c810276afc7d12d71195",
+        "tarball": "http://localhost:4874/is-number/-/is-number-3.0.0.tgz",
+        "integrity": "sha512-4cboCqIpliH+mAvFNegjZQ4kgKc3ZUhQVr3HvWbSh5q3WH2v82ct+T2Y1hdU5Gdtorx/cLifQjqCbL7bpznLTg==",
+        "signatures": [
+          {
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+            "sig": "MEUCIEpkuzJnkIAtuDMAI3VLqzFNwNANap4m9nyeUneW72kRAiEAtsctBWg1OtEaj2FSH+9ViALZU1O0hQFCVzwGMWHfVnk="
+          }
+        ]
+      },
+      "_npmOperationalInternal": {
+        "host": "packages-12-west.internal.npmjs.com",
+        "tmp": "tmp/is-number-3.0.0.tgz_1473555089490_0.21388969756662846"
+      },
+      "directories": {}
+    },
+    "6.0.0": {
+      "name": "is-number",
+      "description": "Returns true if the value is a number. comprehensive tests.",
+      "version": "6.0.0",
+      "homepage": "https://github.com/jonschlinkert/is-number",
+      "author": {
+        "name": "Jon Schlinkert",
+        "url": "https://github.com/jonschlinkert"
+      },
+      "contributors": [
+        {
+          "name": "Jon Schlinkert",
+          "url": "http://twitter.com/jonschlinkert"
+        },
+        {
+          "name": "Olsten Larck",
+          "url": "https://i.am.charlike.online"
+        },
+        {
+          "name": "Rouven Weßling",
+          "url": "www.rouvenwessling.de"
+        }
+      ],
+      "repository": {
+        "type": "git",
+        "url": "git+https://github.com/jonschlinkert/is-number.git"
+      },
+      "bugs": {
+        "url": "https://github.com/jonschlinkert/is-number/issues"
+      },
+      "license": "MIT",
+      "files": [
+        "index.js"
+      ],
+      "main": "index.js",
+      "engines": {
+        "node": ">=0.10.0"
+      },
+      "scripts": {
+        "test": "mocha"
+      },
+      "devDependencies": {
+        "benchmarked": "^2.0.0",
+        "chalk": "^2.1.0",
+        "gulp-format-md": "^1.0.0",
+        "mocha": "^3.0.1"
+      },
+      "keywords": [
+        "check",
+        "coerce",
+        "coercion",
+        "integer",
+        "is",
+        "is-nan",
+        "is-num",
+        "is-number",
+        "istype",
+        "kind",
+        "math",
+        "nan",
+        "num",
+        "number",
+        "numeric",
+        "test",
+        "type",
+        "typeof",
+        "value"
+      ],
+      "verb": {
+        "toc": false,
+        "layout": "default",
+        "tasks": [
+          "readme"
+        ],
+        "related": {
+          "list": [
+            "isobject",
+            "is-plain-object",
+            "is-primitive",
+            "kind-of"
+          ]
+        },
+        "plugins": [
+          "gulp-format-md"
+        ],
+        "lint": {
+          "reflinks": true
+        }
+      },
+      "gitHead": "b0953635829711e7dceec0eaa92bc56521a546eb",
+      "_id": "is-number@6.0.0",
+      "_npmVersion": "5.8.0",
+      "_nodeVersion": "9.9.0",
+      "_npmUser": {
+        "name": "jonschlinkert",
+        "email": "github@sellside.com"
+      },
+      "dist": {
+        "integrity": "sha512-Wu1VHeILBK8KAWJUAiSZQX94GmOE45Rg6/538fKwiloUu21KncEkYGPqob2oSZ5mUT73vLGrHQjKw3KMPwfDzg==",
+        "shasum": "e6d15ad31fc262887cccf217ae5f9316f81b1995",
+        "tarball": "http://localhost:4874/is-number/-/is-number-6.0.0.tgz",
+        "fileCount": 4,
+        "unpackedSize": 8960,
+        "signatures": [
+          {
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA",
+            "sig": "MEUCIHw0y05qyjN2G0Uw0DINiC25SvWlVSgd2UD/ddJM8scPAiEArxOqwwCq3PKUhw7VEm21DI141kJs/ktPkaANlO5cGOs="
+          }
+        ]
+      },
+      "maintainers": [
+        {
+          "email": "brian.woodward@gmail.com",
+          "name": "doowb"
+        },
+        {
+          "email": "github@sellside.com",
+          "name": "jonschlinkert"
+        },
+        {
+          "email": "me@rouvenwessling.de",
+          "name": "realityking"
+        }
+      ],
+      "directories": {},
+      "_npmOperationalInternal": {
+        "host": "s3://npm-registry-packages",
+        "tmp": "tmp/is-number_6.0.0_1522515759840_0.005598684369539919"
+      },
+      "_hasShrinkwrap": false
+    }
+  },
+  "time": {
+    "created": "2014-09-22T01:58:51.592Z",
+    "modified": "2023-05-26T16:12:33.057Z",
+    "7.0.0": "2018-07-04T15:08:58.238Z",
+    "3.0.0": "2016-09-11T00:51:30.912Z",
+    "6.0.0": "2018-03-31T17:02:39.953Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "7.0.0"
+  }
+}
