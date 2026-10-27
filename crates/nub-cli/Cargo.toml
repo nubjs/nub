@@ -159,9 +159,9 @@ aube-manifest = { path = "../../vendor/aube/crates/aube-manifest" }
 # `default-features = false` they must be re-named here. `rustls` is the crate's
 # only TLS backend (upstream: "embedders depend with default-features = false,
 # features = [\"rustls\"]"); `publish` gates `commands::publish`, which
-# pm_engine/publish_family.rs calls directly. `hickory-dns` stays OFF
-# deliberately — reqwest's hickory-dns feature flips the default DNS resolver
-# for every client in the final binary, nub's included.
+# pm_engine/publish_family.rs calls directly. DNS selection lives on the
+# target-specific aube-registry dependency below: reqwest's hickory-dns feature
+# changes the default resolver for every client in the final binary.
 aube = { path = "../../vendor/aube/crates/aube", default-features = false, features = [
     "rustls",
     "publish",
@@ -179,17 +179,7 @@ aube-workspace = { path = "../../vendor/aube/crates/aube-workspace" }
 aube-settings = { path = "../../vendor/aube/crates/aube-settings" }
 # Registry URL normalization helpers for translating incumbent Bun config into
 # the engine's existing `.npmrc`-shaped registry/auth model.
-#
-# `hickory-dns` is named explicitly to PRESERVE pre-v1.32 behavior, not to add
-# any: this crate used to call `.hickory_dns(cfg!(not(target_os = "android")))`
-# unconditionally, and jdx/aube#1068 moved it behind a non-default feature so
-# embedders can opt out. Leaving it off would silently drop the in-process DNS
-# cache and serialize the first cold lookup per origin. The Android carve-out
-# (hickory reads OS DNS config via JNI and aborts without a JVM on Termux)
-# still lives inside the gate.
-aube-registry = { path = "../../vendor/aube/crates/aube-registry", features = [
-    "hickory-dns",
-] }
+aube-registry = { path = "../../vendor/aube/crates/aube-registry" }
 # Engine error-code constants + the bespoke exit-code table; consumed by the
 # presentation layer (src/pm_engine/present.rs) for the ERR_AUBE_→ERR_NUB_
 # rewrite and the cli_main-compatible exit mapping.
@@ -280,6 +270,14 @@ url = "2.5"
 # thread-create EAGAIN — the same exit-101 abort the tokio cap closes. We cap it
 # under the same headroom budget; unconstrained boxes keep rayon's default.
 rayon = "1"
+
+# Preserve Hickory's in-process DNS caching outside macOS. macOS needs the
+# system resolver for VPN interface-scoped DNS (#942); excluding the feature
+# also covers auxiliary reqwest clients through Cargo feature unification.
+# Android keeps the feature but the engine's HTTP builders disable Hickory:
+# reading Android DNS config requires a JVM via JNI, absent in Termux/CLI use.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+aube-registry = { path = "../../vendor/aube/crates/aube-registry", features = ["hickory-dns"] }
 
 [target.'cfg(unix)'.dependencies]
 # fd-level capture of the engine's raw println/eprintln hint lines so the
