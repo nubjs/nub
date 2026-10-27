@@ -80,9 +80,12 @@ const __pnp = (() => {
 // pending, and this worker is the only place that tier can see the entry go by.
 // Sent only when that wait is actually needed, and answered exactly once.
 let entryLoad = null;
+let utilRateShimsEnabled = true;
+const { resolveUtilRateFacade } = createRequire(import.meta.url)("./util/rate.cjs");
 
 export async function initialize(data) {
   if (data && data.standaloneLoader) CLOBBER_MAP.clear();
+  if (data && data.standaloneLoader) utilRateShimsEnabled = false;
   if (data && data.entryLoad) {
     entryLoad = {
       port: data.entryLoad.port,
@@ -114,6 +117,8 @@ export async function resolve(specifier, context, nextResolve) {
   ) {
     entryLoad.mainResolved = true;
   }
+  const utilFacade = resolveUtilRateFacade(specifier, context, utilRateShimsEnabled);
+  if (utilFacade) return utilFacade;
   const r = resolveSpec(specifier, context.parentURL);
   if (r) return r;
   // Yarn PnP: resolve deps through PnP's own resolver — identical to the fast tier,
