@@ -314,10 +314,24 @@ mod tests {
             "react (runtime-only, in widgets.js) must NOT leak into type_coupled_peers: {:?}",
             r.type_coupled_peers
         );
-        // The real widgets.d.ts WAS walked: its undeclared type import surfaced.
+        // `the-backend` is an undeclared, UNSATISFIED (no `@types/the-backend`)
+        // type-only import — TypeOnly per pnpm#14128, never a compat/eject target.
+        // Proving widgets.d.ts was genuinely walked needs the raw reference, not
+        // `r.targets` (which correctly excludes it now).
+        let manifest =
+            super::manifest::Manifest::parse(&fs::read(root.join("package.json")).unwrap())
+                .unwrap();
+        let walk = super::graph::walk(&root, &manifest.entry_points);
         assert!(
-            r.targets.iter().any(|t| t.name == "the-backend"),
+            walk.references
+                .iter()
+                .any(|r| r.package == "the-backend" && r.from_types && !r.from_main),
             "widgets.d.ts should be walked from the type surface: {:?}",
+            walk.references
+        );
+        assert!(
+            r.targets.iter().all(|t| t.name != "the-backend"),
+            "an unsatisfied type-only import must stay TypeOnly, never a compat target: {:?}",
             r.targets
         );
         assert_eq!(scan_index(&index_of(&root)).unwrap(), r);
