@@ -32,7 +32,9 @@ test("both agents invoke the same fast, non-blocking prompt reminder", () => {
     const hooks = JSON.parse(read(path)).hooks.UserPromptSubmit;
     assert.deepEqual(hooks, [{ hooks: [{
       type: "command",
-      command: `node "$(git rev-parse --show-toplevel)/${hook}"`,
+      command: path === ".codex/hooks.json"
+        ? `sh "$(git rev-parse --show-toplevel)/scripts/exec-hook.sh" node "$(git rev-parse --show-toplevel)/${hook}"`
+        : `node "$(git rev-parse --show-toplevel)/${hook}"`,
       timeout: 5,
     }] }]);
   }
