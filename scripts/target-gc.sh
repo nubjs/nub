@@ -117,7 +117,7 @@ old_ifs=$IFS; IFS=:
 for _k in ${NUB_GC_KEEP:-}; do [ -n "$_k" ] && keep="$keep$(canon "$_k")$nl"; done
 IFS=$old_ifs
 
-# The directory nub-dev resolves into: the symlink points at <dir>/fast/nub,
+# The directory nub-dev resolves into: the symlink points at <dir>/debug/nub,
 # where <dir> is a shared bucket OR an isolated worktree's target/ — whichever
 # --print-target answered when make install-dev last ran. Both shapes are
 # collectible, so both are kept; no path filter, because narrowing this to the

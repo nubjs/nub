@@ -115,6 +115,19 @@
 # Cargo execs this wrapper for capability probes (`rustc -vV`, `--print …`) at
 # startup and during build-script target detection. Those return in milliseconds
 # and must never queue, or every cargo startup serializes behind the build fleet.
+# MBX/Blaze set Cargo's wrapper environment variables themselves. Chain the
+# machine-wide Nub governors explicitly after their rustc wrapper so cached and
+# incremental compiles still obey host-wide limits.
+if [ -n "${NUB_RUSTC_QOS_WRAPPER:-}" ]; then
+  _qos_wrapper=$NUB_RUSTC_QOS_WRAPPER
+  unset NUB_RUSTC_QOS_WRAPPER
+  exec "$_qos_wrapper" "$@"
+fi
+if [ -n "${NUB_RUSTC_GOVERNOR:-}" ]; then
+  _governor=$NUB_RUSTC_GOVERNOR
+  unset NUB_RUSTC_GOVERNOR
+  exec "$_governor" "$@"
+fi
 for _a in "$@"; do
   case $_a in
     -vV|--version|--print|--print=*) exec "$@" ;;

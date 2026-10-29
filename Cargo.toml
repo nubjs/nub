@@ -62,8 +62,10 @@ codegen-units = 1
 strip = true
 panic = "abort"
 
-# Fast local-iteration profile for `nub-dev` / `make install-dev`. NOT a ship
-# profile — the release block above is untouched. Inherits `dev` (debug
+# Fast profile for CI analysis gates and non-Blaze local builds. `make
+# install-dev` uses the same settings through `CARGO_PROFILE_DEV_*` so its plain
+# dev-profile command can use MBX + Blaze. NOT a ship profile — the release
+# block above is untouched. Inherits `dev` (debug
 # assertions + overflow checks stay on), but drops everything the release build
 # pays for serial-tail codegen: no LTO, many codegen units, line-tables-only
 # debuginfo. nub-cli is the most-edited crate AND the release build's ~300s

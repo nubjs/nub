@@ -31,7 +31,7 @@ jobs:
           "runner architecture: $arch"
           if ($arch -ne 'ARM64') { throw "expected ARM64, got $arch — this is not a Windows-on-ARM runner" }
 
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes tags; commit verified upstream
+      - uses: dtolnay/rust-toolchain@ff7f6a3374ce205788da40198ec918bd5d67aea7  # 1.99.0 # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes tags; commit verified upstream
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: '24'

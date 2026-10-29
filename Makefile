@@ -11,6 +11,7 @@ PROFILE ?= release
 BIN_DIR ?= /usr/local/bin
 RUST_BUILD = $(CURDIR)/scripts/rust-build.sh
 TARGET   = target/$(PROFILE)/nub
+MBX_BIN ?= $(shell command -v mbx 2>/dev/null || { command -v mise >/dev/null 2>&1 && { mbx_root=$$(mise where mr-boxington 2>/dev/null) && test -x "$$mbx_root/mbx" && printf '%s' "$$mbx_root/mbx"; }; })
 
 # PROFILE names a cargo profile AND the target/<dir> the copy steps read from, so
 # the two must agree. `debug` is the odd one out: cargo's profile is named `dev`
@@ -25,7 +26,7 @@ else
   CARGO_FLAGS = --profile $(PROFILE)
 endif
 
-.PHONY: build addon addon-fast install-dev uninstall-dev qos-global build-status build-slots-off build-slots-on target-gc test-target-gc test test-build-slots verify test-node-matrix bench clean npm-build npm-publish npm-publish-dry
+.PHONY: build addon addon-fast addon-dev blaze-ready install-dev uninstall-dev qos-global build-status build-slots-off build-slots-on target-gc test-target-gc test test-build-slots verify test-node-matrix bench clean npm-build npm-publish npm-publish-dry
 
 build: addon
 	$(CARGO) build $(CARGO_FLAGS)
@@ -52,17 +53,17 @@ addon:
 	 echo "Warning: could not find nub-native library"
 	@echo "Built: runtime/addons/nub-native.node"
 
-# Dev install uses the `fast` profile (no LTO, cgu=256), NOT release: nub-dev is
-# the iteration binary, and the release profile's lto=thin + cgu=1 makes every
-# rebuild re-LTO-codegen the whole binary (the ~300s nub-cli critical-path tail).
-# The fast profile rebuilds it in a fraction of that. addon-fast builds the
-# native addon under the same profile so a single `cargo build --profile fast`
-# pass serves both.
+# Dev install uses Cargo's default `dev` profile with the fast profile's
+# iteration settings. This plain build command lets MBX route it through Blaze;
+# release builds retain their separate LTO profile. MBX caches compiler work,
+# while Blaze keeps the active workspace ready for quick rebuilds after edits.
+# Blaze v0.20261027.0 requires its pinned nightly toolchain. Regular builds and
+# project checks remain on the repository's stable Rust 1.99.0 toolchain.
 # Builds through scripts/rust-build.sh and symlinks to the target dir IT picked.
 # Hardcoding $(CURDIR)/target left nub-dev pointing at a stale binary: every
 # documented rebuild path (the post-merge refresh, the dev-loop) goes through the
 # wrapper, which normally writes to the SHARED dir, so nothing updated
-# ./target/fast/nub and `nub-dev` silently served whatever was built last time
+# ./target/debug/nub and `nub-dev` silently served whatever was built last time
 # make ran.
 #
 # The path comes from NUB_BUILD_TARGET_OUT — the dir THIS build resolved — not
@@ -70,32 +71,59 @@ addon:
 # landing on the shared tree during the build moves the content key, and the
 # symlink then names a bucket the build never wrote to (nub-dev dangling, seen
 # on a 27-minute rebuild that overlapped a merge). One build, one resolution.
-install-dev: addon-fast qos-global
-	@tf=$$(mktemp); \
-	  NUB_BUILD_TARGET_OUT=$$tf scripts/rust-build.sh build --profile fast || { rm -f $$tf; exit 1; }; \
+install-dev: blaze-ready addon-dev qos-global
+	@cargo_shim=$$("$(MBX_BIN)" setup --status 2>&1 | sed -n 's/^mbx setup is installed and current: //p'); \
+	  ra_jit_bin=$$(command -v ra-jit 2>/dev/null || printf '%s' "$${CARGO_HOME:-$$HOME/.cargo}/bin/ra-jit"); \
+	  ra_jit_dir=$$(dirname "$$ra_jit_bin"); \
+	  tf=$$(mktemp); \
+	  mkdir -p "$(BIN_DIR)" && \
+	  PATH="$$ra_jit_dir:$$PATH" NUB_CARGO_COMMAND="$$cargo_shim" NUB_CARGO_WRAPPER="$${CARGO_HOME:-$$HOME/.cargo}/rustc-qos.sh" NUB_BUILD_GOVERNOR="$${CARGO_HOME:-$$HOME/.cargo}/rustc-gov.sh" MBX_BLAZE=1 BLAZE_OTHER_TOOLCHAIN=1 RUSTUP_TOOLCHAIN=nightly-2026-10-27 \
+	  CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_PROFILE_DEV_CODEGEN_UNITS=256 \
+	  CARGO_PROFILE_DEV_INCREMENTAL=true NUB_BUILD_TARGET_OUT=$$tf \
+	  scripts/rust-build.sh build -p nub-cli || { rm -f $$tf; exit 1; }; \
 	  t=$$(cat $$tf); rm -f $$tf; \
-	  test -x $$t/fast/nub || { echo "install-dev: no binary at $$t/fast/nub" >&2; exit 1; }; \
-	  ln -sf $$t/fast/nub $(BIN_DIR)/nub-dev && \
-	  ln -sf $$t/fast/nub $(BIN_DIR)/nubx-dev && \
-	  ln -sf $$t/fast/nub $(BIN_DIR)/nubr-dev || \
+	  test -x $$t/debug/nub || { echo "install-dev: no binary at $$t/debug/nub" >&2; exit 1; }; \
+	  ln -sf $$t/debug/nub $(BIN_DIR)/nub-dev && \
+	  ln -sf $$t/debug/nub $(BIN_DIR)/nubx-dev && \
+	  ln -sf $$t/debug/nub $(BIN_DIR)/nubr-dev || \
 	  { echo "install-dev: cannot link into $(BIN_DIR); pass a writable BIN_DIR=<dir> on PATH" >&2; exit 1; }; \
-	  echo "Installed: $(BIN_DIR)/nub-dev -> $$t/fast/nub"; \
-	  echo "Installed: $(BIN_DIR)/nubx-dev -> $$t/fast/nub"; \
-	  echo "Installed: $(BIN_DIR)/nubr-dev -> $$t/fast/nub"
+	  echo "Installed: $(BIN_DIR)/nub-dev -> $$t/debug/nub"; \
+	  echo "Installed: $(BIN_DIR)/nubx-dev -> $$t/debug/nub"; \
+	  echo "Installed: $(BIN_DIR)/nubr-dev -> $$t/debug/nub"
 	@echo ""
-	@nub-dev --version
+	@$(BIN_DIR)/nub-dev --version
 
-# Native addon built under the `fast` profile (mirrors `addon`, which is release).
-# See `addon` for the rm-before-cp code-signing rationale.
-addon-fast:
-	cd crates/nub-native && $(CARGO) build --profile fast
+# Dev builds require the pinned, prebuilt MBX and Blaze tools. Fail before any
+# compilation so an incomplete setup cannot quietly run a plain Cargo build.
+blaze-ready:
+	@test -x "$(MBX_BIN)" || { echo "install-dev requires mr-boxington 1.28.0 or newer (mbx on PATH or installed by mise)" >&2; exit 1; }
+	@"$(MBX_BIN)" --version | awk 'NR == 1 { split($$2, v, "."); if ((v[1] + 0) > 1 || ((v[1] + 0) == 1 && (v[2] + 0) >= 28)) exit 0; exit 1 } END { if (NR == 0) exit 1 }' || { echo "install-dev requires mr-boxington 1.28.0 or newer" >&2; exit 1; }
+	@command -v ra-jit >/dev/null 2>&1 || test -x "$${CARGO_HOME:-$$HOME/.cargo}/bin/ra-jit" || { echo "install-dev requires the prebuilt Blaze ra-jit binary on PATH or in CARGO_HOME/bin" >&2; exit 1; }
+	@"$(MBX_BIN)" setup --status >/dev/null 2>&1 || { echo "install-dev requires the MBX Cargo shim; run: mbx setup" >&2; exit 1; }
+
+# Native addon in the same Blaze-enabled dev profile as nub-dev.
+# Keep this workspace's explicit output in the root target/ used by the addon
+# staging and cleanup scripts.
+addon-dev: blaze-ready qos-global
+	@cargo_shim=$$("$(MBX_BIN)" setup --status 2>&1 | sed -n 's/^mbx setup is installed and current: //p'); \
+	  ra_jit_bin=$$(command -v ra-jit 2>/dev/null || printf '%s' "$${CARGO_HOME:-$$HOME/.cargo}/bin/ra-jit"); \
+	  ra_jit_dir=$$(dirname "$$ra_jit_bin"); \
+	  cd crates/nub-native && PATH="$$ra_jit_dir:$$PATH" CARGO_TARGET_DIR="$(CURDIR)/target" \
+	  RUSTUP_TOOLCHAIN=nightly-2026-10-27 MBX_BLAZE=1 BLAZE_OTHER_TOOLCHAIN=1 \
+	  CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_PROFILE_DEV_CODEGEN_UNITS=256 \
+	  CARGO_PROFILE_DEV_INCREMENTAL=true NUB_BUILD_FG="$${NUB_BUILD_FG:-}" \
+	  NUB_RUSTC_QOS_WRAPPER="$${CARGO_HOME:-$$HOME/.cargo}/rustc-qos.sh" NUB_RUSTC_GOVERNOR="$${CARGO_HOME:-$$HOME/.cargo}/rustc-gov.sh" \
+	  $(QOS) "$$cargo_shim" build
 	@mkdir -p runtime/addons
 	@rm -f runtime/addons/nub-native.node
-	@cp target/fast/libnub_native.dylib runtime/addons/nub-native.node 2>/dev/null || \
-	 cp target/fast/libnub_native.so runtime/addons/nub-native.node 2>/dev/null || \
-	 cp target/fast/nub_native.dll runtime/addons/nub-native.node 2>/dev/null || \
-	 echo "Warning: could not find nub-native library"
-	@echo "Built: runtime/addons/nub-native.node (fast profile)"
+	@cp target/debug/libnub_native.dylib runtime/addons/nub-native.node 2>/dev/null || \
+	 cp target/debug/libnub_native.so runtime/addons/nub-native.node 2>/dev/null || \
+	 cp target/debug/nub_native.dll runtime/addons/nub-native.node 2>/dev/null || \
+	 echo "Warning: could not find dev-profile native library"
+	@echo "Built: runtime/addons/nub-native.node (Blaze dev profile)"
+
+# Keep the existing addon command on the Blaze-enabled developer path.
+addon-fast: addon-dev
 
 # Machine-global rustc governor: every cargo invocation on this host — any
 # worktree, clone, or direct `cargo` call — compiles at utility QoS, waits its

@@ -87,9 +87,10 @@ codegen-units = 1
 strip = true
 panic = "unwind"
 
-# Fast local-iteration profile, mirroring the main workspace's `fast` profile so
-# `make addon-fast` (which builds nub-native under `--profile fast`) behaves the
-# same here. panic stays unwind via the dev-inherited default.
+# Fast iteration profile for direct Cargo analysis builds, mirroring the main
+# workspace's `fast` profile. `make addon-fast` applies these settings to the
+# dev profile so its plain command can use MBX + Blaze. panic stays unwind via
+# the dev-inherited default.
 [profile.fast]
 inherits = "dev"
 opt-level = 0
