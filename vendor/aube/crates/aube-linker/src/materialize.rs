@@ -645,11 +645,14 @@ impl Linker {
         // non-macOS, non-APFS dst, cross-volume, or the clone itself
         // erroring) falls through to the unchanged per-file path, so
         // default behavior is byte-for-byte today's. The tree's
-        // coordinate is the global-store subdir name regardless of
-        // `apply_hashes` — the tree tier is a shared global resource keyed
-        // the same way the GVS is, so per-project `.aube/` materializations
-        // can clone from the same trees the GVS built.
-        let tree_coordinate = self.virtual_store_subdir(dep_path);
+        // coordinate is the entry name this materialization writes, so
+        // `store prune` can match it to a live project: a shared-store entry
+        // is reached through the hashed name, a per-project `.aube/` entry
+        // (every `file:` package, even in shared-store mode) is marked by its
+        // un-hashed name from the project's registry record. A hashed
+        // coordinate on a per-project entry matched nothing, so prune aged
+        // out the trees of every live `file:` package.
+        let tree_coordinate = subdir.clone();
         let used_clonedir = self.try_clonedir_fill(
             &pkg_nm_dir,
             &pkg_nm_parent,

@@ -2854,6 +2854,8 @@ fn clonedir_materialize_matches_per_file_byte_for_byte() {
 /// place — must each materialize their OWN files. The whole-dir clone
 /// copies a shared store tree verbatim, so a tree keyed by dep path alone
 /// handed the second project the first tarball's bytes with no error.
+/// The tree is named after the per-project entry, not the graph-hashed
+/// shared-store name, so `store prune` can find it from the project.
 #[cfg(target_os = "macos")]
 #[test]
 fn clonedir_never_reuses_a_tree_across_different_content_at_one_dep_path() {
@@ -2866,7 +2868,16 @@ fn clonedir_never_reuses_a_tree_across_different_content_at_one_dep_path() {
         dep_path: dep_path.to_string(),
         ..Default::default()
     };
-    let linker = Linker::new_with_gvs(&store, LinkStrategy::Reflink, false);
+    // A `file:` package in shared-store mode: its dep path carries a graph
+    // hash, but it is materialized into the project's own `.aube/`.
+    let linker =
+        Linker::new_with_gvs(&store, LinkStrategy::Reflink, false).with_graph_hashes(GraphHashes {
+            node_hash: [(dep_path.to_string(), "d5a626a38a6be695".to_string())].into(),
+        });
+    assert_ne!(
+        linker.virtual_store_subdir(dep_path),
+        linker.aube_dir_entry_name(dep_path)
+    );
 
     for (project, body) in [("a", "AAA"), ("b", "BBB")] {
         let mut index = PackageIndex::default();
@@ -2893,7 +2904,7 @@ fn clonedir_never_reuses_a_tree_across_different_content_at_one_dep_path() {
         assert!(
             store
                 .tree_path(&aube_store::tree_key(
-                    &linker.virtual_store_subdir(dep_path),
+                    &linker.aube_dir_entry_name(dep_path),
                     &index
                 ))
                 .exists(),

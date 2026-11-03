@@ -932,10 +932,11 @@ const GRACE: std::time::Duration = std::time::Duration::from_secs(30 * 86_400);
 /// virtual-store subdir name (its coordinate) plus a content digest, and
 /// nothing else names it. Two
 /// name spaces reach it, because that key carries the graph-hash fold only
-/// when the install used the shared store: a global-virtual-store install's
-/// trees are named after the entries its project links reach, while a
-/// project-local install's trees carry the un-hashed `.aube/` entry names,
-/// which appear nowhere in the link walk. Both are marked, per project.
+/// when the entry lives in the shared store: a shared-store entry's tree is
+/// named after the entry its project links reach, while a per-project
+/// `.aube/` entry's tree (a project-local install, or a `file:` package in a
+/// shared-store install) carries the un-hashed entry name, which appears
+/// nowhere in the link walk. Both are marked, per project.
 ///
 /// A marked coordinate can hold several content variants — every rebuild of a
 /// `file:` tarball adds one — and the virtual-store entry cannot say which
