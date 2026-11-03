@@ -2622,7 +2622,8 @@ fn unbind_peers_on_unlocked(
 /// Pin each direct dependency of `importer` whose locked snapshot `filtered`
 /// dropped to that exact locked version in `manifest`, so re-resolving the
 /// member cannot move it. Returns `(name, original spec)` for every pin. Only
-/// plain semver ranges are pinned; aliases and protocol specs are left alone.
+/// plain semver ranges that still admit the locked version are pinned;
+/// aliases and protocol specs are left alone.
 fn pin_unlocked_direct_deps(
     existing: &aube_lockfile::LockfileGraph,
     filtered: &aube_lockfile::LockfileGraph,
@@ -2645,7 +2646,14 @@ fn pin_unlocked_direct_deps(
             let Some(spec) = section.get_mut(&dep.name) else {
                 continue;
             };
-            if node_semver::Range::parse(spec.as_str()).is_ok() && locked.alias_of.is_none() {
+            // A range edited since the last install to exclude the locked
+            // version resolves normally; pinning it would record the new
+            // range beside the old version.
+            let still_in_range = node_semver::Range::parse(spec.as_str())
+                .ok()
+                .zip(node_semver::Version::parse(&locked.version).ok())
+                .is_some_and(|(range, version)| range.satisfies(&version));
+            if still_in_range && locked.alias_of.is_none() {
                 pins.push((
                     dep.name.clone(),
                     std::mem::replace(spec, locked.version.clone()),
