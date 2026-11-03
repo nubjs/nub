@@ -46,19 +46,20 @@ fn real_node() -> Option<PathBuf> {
         .and_then(|node| node.canonicalize().ok())
 }
 
-/// Writes `<root>/shim/node`, logging each invocation's arguments to
-/// `<root>/shim.log`. `target` is the command it `exec`s; `None` re-resolves `node`
-/// on PATH without the shim's directory, as mise's fallback does.
-fn write_shim(root: &Path, target: Option<&Path>) -> PathBuf {
-    let dir = root.join("shim");
+/// Writes `<root>/<name>/node`, logging each invocation's arguments to
+/// `<root>/<name>.log`. `target` is the command it `exec`s; `None` re-resolves `node`
+/// on PATH without the fixture's shim directories, as mise's fallback steps over its
+/// own (and over other managers' shims it recognises), so the lookup lands on nub.
+fn write_shim(root: &Path, name: &str, target: Option<&Path>) -> PathBuf {
+    let dir = root.join(name);
     std::fs::create_dir_all(&dir).unwrap();
-    let log = root.join("shim.log");
+    let log = root.join(format!("{name}.log"));
     let target = match target {
         Some(node) => format!("'{}'", node.display()),
         None => format!(
-            "\"$(PATH=$(printf %s \"$PATH\" | tr : '\\n' | grep -vxF '{}' | paste -sd: -) \
+            "\"$(PATH=$(printf %s \"$PATH\" | tr : '\\n' | grep -vF '{}/' | paste -sd: -) \
              command -v node)\"",
-            dir.display()
+            root.display()
         ),
     };
     let script = format!(
@@ -74,20 +75,19 @@ fn write_shim(root: &Path, target: Option<&Path>) -> PathBuf {
     dir
 }
 
-fn run_nub(root: &Path, shim_dir: &Path, node: &Path, args: &[&str]) -> std::process::Output {
-    let path = std::env::join_paths([
-        shim_dir.to_path_buf(),
-        node.parent().unwrap().to_path_buf(),
-        PathBuf::from("/usr/bin"),
-        PathBuf::from("/bin"),
-    ])
+fn run_nub(root: &Path, path: &[PathBuf], args: &[&str]) -> std::process::Output {
+    let path = std::env::join_paths(
+        path.iter()
+            .cloned()
+            .chain([PathBuf::from("/usr/bin"), PathBuf::from("/bin")]),
+    )
     .unwrap();
     std::fs::write(root.join("package.json"), r#"{"name":"p","private":true}"#).unwrap();
     Command::new(nub_binary())
         .args(args)
         .current_dir(root)
         .env("PATH", path)
-        // A fresh version cache, so the `--version` probe through the shim runs.
+        // A fresh version cache, so the `--version` probe through each shim runs.
         .env("XDG_CACHE_HOME", root.join("cache"))
         .env_remove("NODE_COMPAT")
         .env_remove("NODE_OPTIONS")
@@ -95,48 +95,63 @@ fn run_nub(root: &Path, shim_dir: &Path, node: &Path, args: &[&str]) -> std::pro
         .expect("spawn nub")
 }
 
-fn shim_calls(root: &Path) -> Vec<String> {
-    std::fs::read_to_string(root.join("shim.log"))
+fn shim_calls(root: &Path, name: &str) -> Vec<String> {
+    std::fs::read_to_string(root.join(format!("{name}.log")))
         .unwrap_or_default()
         .lines()
         .map(str::to_string)
         .collect()
 }
 
-#[test]
-fn a_shim_that_falls_back_to_nub_is_skipped_for_the_next_node_on_path() {
-    let Some(node) = real_node() else {
-        eprintln!("skipping: no Node on PATH");
-        return;
-    };
-    let root = tmp("loop");
-    let shim_dir = write_shim(&root, None);
-
-    let out = run_nub(&root, &shim_dir, &node, &["-p", "process.execPath"]);
-    // Probes (`--version` and the flag probes) reach the Node behind the shim
-    // and are fine; the launch must happen once, not once per round trip.
-    let calls = shim_calls(&root);
-    let launches = calls
-        .iter()
-        .filter(|call| call.ends_with("-p process.execPath"))
-        .count();
-    assert_eq!(
-        launches,
-        1,
-        "nub relaunched the shim; calls: {calls:?}\nstderr:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+fn assert_ok(out: &std::process::Output) {
     assert_eq!(
         out.status.code(),
         Some(0),
         "stderr:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(
-        Path::new(String::from_utf8_lossy(&out.stdout).trim()),
-        node,
-        "the run lands on the Node after the shim"
-    );
+}
+
+/// One fallback shim, then two: with both, re-entry through the second must not
+/// pick the first again, so every shim handed back on the way is skipped.
+#[test]
+fn fallback_shims_ahead_of_the_real_node_are_each_launched_once() {
+    let Some(node) = real_node() else {
+        eprintln!("skipping: no Node on PATH");
+        return;
+    };
+    for shims in [&["mise"][..], &["mise", "volta"]] {
+        let root = tmp(&format!("loop-{}", shims.len()));
+        let mut path: Vec<_> = shims
+            .iter()
+            .map(|name| write_shim(&root, name, None))
+            .collect();
+        path.push(node.parent().unwrap().to_path_buf());
+
+        let out = run_nub(&root, &path, &["-p", "process.execPath"]);
+        // Probes (`--version` and the flag probes) reach the Node behind a shim and
+        // are fine; the launch must happen once per shim, not once per round trip.
+        for name in shims {
+            let calls = shim_calls(&root, name);
+            let launches = calls
+                .iter()
+                .filter(|call| call.ends_with("-p process.execPath"))
+                .count();
+            assert_eq!(
+                launches,
+                1,
+                "nub relaunched {name} ({} shims); calls: {calls:?}\nstderr:\n{}",
+                shims.len(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        assert_ok(&out);
+        assert_eq!(
+            Path::new(String::from_utf8_lossy(&out.stdout).trim()),
+            node,
+            "the run lands on the Node after the shims"
+        );
+    }
 }
 
 #[test]
@@ -146,7 +161,7 @@ fn a_working_shim_still_runs_the_nested_node_a_script_starts() {
         return;
     };
     let root = tmp("nested");
-    let shim_dir = write_shim(&root, Some(&node));
+    let shim_dir = write_shim(&root, "mise", Some(&node));
     std::fs::write(
         root.join("outer.js"),
         "process.stdout.write(require('child_process').execSync('node inner.js').toString())",
@@ -154,17 +169,45 @@ fn a_working_shim_still_runs_the_nested_node_a_script_starts() {
     .unwrap();
     std::fs::write(root.join("inner.js"), "console.log('inner ran')").unwrap();
 
-    let out = run_nub(&root, &shim_dir, &node, &["outer.js"]);
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "stderr:\n{}",
-        String::from_utf8_lossy(&out.stderr)
+    let out = run_nub(
+        &root,
+        &[shim_dir, node.parent().unwrap().to_path_buf()],
+        &["outer.js"],
     );
+    assert_ok(&out);
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "inner ran");
-    let calls = shim_calls(&root);
+    let calls = shim_calls(&root, "mise");
     assert!(
         calls.iter().any(|call| call.contains("inner.js")),
         "the nested `node` must still resolve through the shim; calls: {calls:?}"
+    );
+}
+
+/// Each level is a real Node starting `node` through nub's PATH hijack: nesting,
+/// not a hand-back, however deep it goes.
+#[test]
+fn a_deep_chain_of_nested_node_runs_stays_on_the_same_node() {
+    let Some(node) = real_node() else {
+        eprintln!("skipping: no Node on PATH");
+        return;
+    };
+    let root = tmp("deep");
+    std::fs::write(
+        root.join("level.js"),
+        "const n = Number(process.argv[2]);\n\
+         if (n < 20) process.stdout.write(require('child_process').execSync(`node level.js ${n + 1}`));\n\
+         else console.log(`depth ${n} ${process.execPath}`);\n",
+    )
+    .unwrap();
+
+    let out = run_nub(
+        &root,
+        &[node.parent().unwrap().to_path_buf()],
+        &["level.js", "0"],
+    );
+    assert_ok(&out);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        format!("depth 20 {}", node.display())
     );
 }
