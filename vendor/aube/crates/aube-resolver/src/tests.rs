@@ -6787,6 +6787,47 @@ async fn overrides_match_a_catalog_dependency_by_its_catalog_reference() {
     }
 }
 
+// The frozen-lockfile check must reach the same verdict as resolution on a
+// `catalog:` dependency. With a bare override and a range-keyed one, only the
+// bare one applies to the catalog reference, so the importer records 2.0.0;
+// a check that read `catalog:` as satisfying `>=3` expected 3.0.1 and rejected
+// the lockfile the resolver had just written.
+#[tokio::test]
+async fn frozen_check_accepts_what_resolution_wrote_for_a_catalog_dependency() {
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:0",
+    ));
+    let mut catalogs: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    catalogs
+        .entry("default".to_string())
+        .or_default()
+        .insert("is-odd".to_string(), "^3.0.0".to_string());
+    let overrides: BTreeMap<String, String> = [("is-odd", "2.0.0"), ("is-odd@>=3", "3.0.1")]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let mut resolver = Resolver::new(client)
+        .with_catalogs(catalogs.clone())
+        .with_overrides(overrides.clone());
+    resolver.cache.insert(
+        "is-odd".to_string(),
+        make_packument("is-odd", &["2.0.0", "3.0.1"], "3.0.1"),
+    );
+    let mut manifest = PackageJson::default();
+    manifest
+        .dependencies
+        .insert("is-odd".to_string(), "catalog:".to_string());
+
+    let graph = resolver.resolve(&manifest, None).await.unwrap();
+    let direct = &graph.importers["."][0];
+    assert_eq!(direct.specifier.as_deref(), Some("2.0.0"));
+    assert_eq!(direct.dep_path, "is-odd@2.0.0");
+    assert_eq!(
+        graph.check_drift(&manifest, &overrides, &[], &catalogs),
+        aube_lockfile::DriftStatus::Fresh
+    );
+}
+
 #[tokio::test]
 async fn fresh_resolve_preserves_jsr_name_as_folder_name() {
     let jsr_collections = make_packument("@jsr/std__collections", &["1.1.6"], "1.1.6");

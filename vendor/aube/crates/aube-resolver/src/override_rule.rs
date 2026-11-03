@@ -245,13 +245,8 @@ pub fn matches(
     match_parent_chain(&rule.parents, ancestors)
 }
 
-/// [`matches`] for a dependency declared as a `catalog:` reference.
-///
-/// pnpm applies overrides to a manifest before it resolves catalogs, so the
-/// selector meets the raw `catalog:` text rather than the catalog's range.
-/// Its range check is `isSubRange`, which for a spec that is not a semver
-/// range reduces to text equality: `foo@catalog:` matches, `foo@^1` never
-/// does, whatever range the catalog holds.
+/// [`matches`] for a dependency declared as a `catalog:` reference; see
+/// [`aube_util::pkg::override_version_applies_to_catalog_reference`].
 pub fn matches_catalog_reference(
     rule: &OverrideRule,
     task_name: &str,
@@ -259,11 +254,10 @@ pub fn matches_catalog_reference(
     ancestors: &[AncestorFrame<'_>],
 ) -> bool {
     rule.target.name == task_name
-        && rule
-            .target
-            .version_req
-            .as_deref()
-            .is_none_or(|req| req == catalog_spec)
+        && aube_util::pkg::override_version_applies_to_catalog_reference(
+            rule.target.version_req.as_deref(),
+            catalog_spec,
+        )
         && match_parent_chain(&rule.parents, ancestors)
 }
 
