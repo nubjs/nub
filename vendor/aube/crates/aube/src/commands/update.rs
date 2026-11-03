@@ -828,7 +828,7 @@ async fn run_inner(
     //     command line. We filter both `pkg.name` matches AND
     //     `pkg.alias_of` matches so an indirect aliased entry
     //     (`other-alias: npm:dep-of-pkg-with-1-dep@x`) is also dropped.
-    let filtered_existing = existing.as_ref().map(|graph| {
+    let mut filtered_existing = existing.as_ref().map(|graph| {
         let mut filtered = graph.clone();
         let manifest_keys: std::collections::HashSet<&str> =
             manifest_keys_to_update.iter().map(String::as_str).collect();
@@ -967,7 +967,23 @@ async fn run_inner(
     resolver = resolver
         .with_project_root(resolve_root)
         .with_workspace_member_importers(workspace_member_importers);
-    let resolver_manifests = [(resolve_importer.clone(), resolver_manifest)];
+    let mut resolver_manifests = vec![(resolve_importer.clone(), resolver_manifest)];
+    // A root update carries every other importer over as locked (see
+    // `carry_over_other_importers`), except one whose tree binds a peer to a
+    // package this update unlocked: that binding was decided against the old
+    // version, so the member is resolved again here alongside the root, with
+    // the rest of its tree still locked by `filtered_existing`.
+    if resolve_importer == "."
+        && let (Some(existing), Some(filtered)) = (existing.as_ref(), filtered_existing.as_mut())
+    {
+        for importer in unbind_peers_on_unlocked(existing, filtered) {
+            let member_manifest =
+                aube_manifest::PackageJson::from_path(&cwd.join(&importer).join("package.json"))
+                    .map_err(miette::Report::new)
+                    .wrap_err_with(|| format!("failed to read {importer}/package.json"))?;
+            resolver_manifests.push((importer, member_manifest));
+        }
+    }
     let mut graph = resolver
         .resolve_workspace(
             &resolver_manifests,
@@ -2457,7 +2473,7 @@ fn carry_over_other_importers(
         ..
     } = previous;
     for (key, deps) in importers {
-        if key == updated_importer {
+        if key == updated_importer || updated.importers.contains_key(&key) {
             continue;
         }
         if let Some(skipped) = skipped_optional_dependencies.get(&key) {
@@ -2521,6 +2537,67 @@ fn importer_package_names(
         .packages
         .into_values()
         .flat_map(|p| std::iter::once(p.name).chain(p.alias_of))
+        .collect()
+}
+
+/// Drop, from `filtered`, every locked peer edge that points at a package the
+/// update unlocked (present in `existing`, absent from `filtered`), so the
+/// resolver binds that peer afresh instead of re-locking the old version
+/// through the edge; the package holding the peer keeps its own version.
+/// Returns the importers other than `.` whose tree held such an edge: they
+/// must be resolved again, since carrying them over would keep the stale
+/// binding.
+fn unbind_peers_on_unlocked(
+    existing: &aube_lockfile::LockfileGraph,
+    filtered: &mut aube_lockfile::LockfileGraph,
+) -> Vec<String> {
+    let unlocked: BTreeSet<String> = existing
+        .packages
+        .keys()
+        .filter(|dep_path| !filtered.packages.contains_key(*dep_path))
+        .cloned()
+        .collect();
+    if unlocked.is_empty() {
+        return Vec::new();
+    }
+    let stale_peers = |pkg: &aube_lockfile::LockedPackage| -> Vec<String> {
+        pkg.peer_dependencies
+            .keys()
+            .filter(|peer| {
+                pkg.dependencies.get(*peer).is_some_and(|version| {
+                    unlocked.contains(&format!("{peer}@{version}")) || unlocked.contains(version)
+                })
+            })
+            .cloned()
+            .collect()
+    };
+    let mut stale_dep_paths = BTreeSet::new();
+    for pkg in filtered.packages.values_mut() {
+        let peers = stale_peers(pkg);
+        if peers.is_empty() {
+            continue;
+        }
+        stale_dep_paths.insert(pkg.dep_path.clone());
+        for peer in peers {
+            pkg.dependencies.remove(&peer);
+        }
+    }
+    if stale_dep_paths.is_empty() {
+        return Vec::new();
+    }
+    existing
+        .importers
+        .keys()
+        .filter(|key| key.as_str() != ".")
+        .filter(|key| {
+            let mut own = existing.clone();
+            own.importers.retain(|k, _| k == *key);
+            own.filter_deps(|_| true)
+                .packages
+                .keys()
+                .any(|dep_path| stale_dep_paths.contains(dep_path))
+        })
+        .cloned()
         .collect()
 }
 
