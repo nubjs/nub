@@ -69,10 +69,15 @@ fn apply_publish_config_overrides(manifest_json: &mut serde_json::Value) -> bool
     else {
         return false;
     };
-    let overrides: Vec<(String, serde_json::Value)> = PUBLISH_CONFIG_OVERRIDES
+    // In `publishConfig`'s own key order, which is where pnpm appends them;
+    // `retain` keeps the remaining keys in order too.
+    let is_override = |key: &str| PUBLISH_CONFIG_OVERRIDES.contains(&key);
+    let overrides: Vec<(String, serde_json::Value)> = config
         .iter()
-        .filter_map(|key| config.remove(*key).map(|value| ((*key).to_string(), value)))
+        .filter(|(key, _)| is_override(key))
+        .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
+    config.retain(|key, _| !is_override(key));
     if overrides.is_empty() {
         return false;
     }
