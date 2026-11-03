@@ -330,6 +330,72 @@ snapshots:
     assert_eq!(host.optional_dependencies.get("native").unwrap(), "1.0.0");
 }
 
+/// A snapshot whose key names a peer it declares but whose `dependencies`
+/// omit it (written by nub before #937 was fixed) gets the edge back on
+/// read, so a plain install against that lockfile links the peer.
+#[test]
+fn parse_links_a_declared_peer_named_only_in_the_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let lockfile_path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &lockfile_path,
+        r#"
+lockfileVersion: '9.0'
+
+importers:
+  .:
+    dependencies:
+      '@s/node-core':
+        specifier: 1.0.0
+        version: 1.0.0(@o/core@2.0.0(@o/api@1.0.0))
+
+packages:
+  '@o/api@1.0.0':
+    resolution: {integrity: sha512-api}
+
+  '@o/core@2.0.0':
+    resolution: {integrity: sha512-core}
+    peerDependencies:
+      '@o/api': '*'
+
+  '@s/node-core@1.0.0':
+    resolution: {integrity: sha512-nodecore}
+    peerDependencies:
+      '@o/core': ^2.0.0
+      unrelated: '*'
+    peerDependenciesMeta:
+      '@o/core':
+        optional: true
+      unrelated:
+        optional: true
+
+snapshots:
+  '@o/api@1.0.0': {}
+
+  '@o/core@2.0.0(@o/api@1.0.0)':
+    dependencies:
+      '@o/api': 1.0.0
+
+  '@s/node-core@1.0.0(@o/core@2.0.0(@o/api@1.0.0))': {}
+"#,
+    )
+    .unwrap();
+
+    let graph = parse(&lockfile_path).unwrap();
+    let node_core = graph
+        .packages
+        .get("@s/node-core@1.0.0(@o/core@2.0.0(@o/api@1.0.0))")
+        .unwrap();
+    assert_eq!(
+        node_core.dependencies.get("@o/core").map(String::as_str),
+        Some("2.0.0(@o/api@1.0.0)")
+    );
+    assert!(
+        !node_core.dependencies.contains_key("unrelated"),
+        "a declared peer the key does not name stays unlinked"
+    );
+}
+
 #[test]
 fn parse_package_platform_fields_accept_scalar_strings() {
     let dir = tempfile::tempdir().unwrap();
