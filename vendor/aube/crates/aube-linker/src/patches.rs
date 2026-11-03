@@ -200,7 +200,7 @@ fn check_patch_path(pkg_dir: &Path, rel: &str) -> Result<(), String> {
 /// rename only re-points a directory entry, so a file still linked to the
 /// global store stays byte-identical there; any hunk then replaces it
 /// through `atomic_write`. An existing destination is refused rather than
-/// clobbered.
+/// clobbered, unless it is the source itself under a case-only rename.
 fn rename_in_package(from: &Path, to: &Path) -> Result<(), String> {
     if !from.exists() {
         return Err(format!(
@@ -208,7 +208,7 @@ fn rename_in_package(from: &Path, to: &Path) -> Result<(), String> {
             from.display()
         ));
     }
-    if to.symlink_metadata().is_ok() {
+    if to.symlink_metadata().is_ok() && !is_case_only_rename(from, to) {
         return Err(format!(
             "cannot rename {} to {}: the destination already exists",
             from.display(),
@@ -226,6 +226,23 @@ fn rename_in_package(from: &Path, to: &Path) -> Result<(), String> {
             to.display()
         )
     })
+}
+
+/// `readme.md` → `README.md` on a case-insensitive filesystem (default
+/// macOS and Windows): the destination lookup finds the source itself.
+/// pnpm's `fs-extra` `moveSync` lets that through, and `rename` then
+/// stores the new casing. Identity alone is not enough, because the
+/// linker hardlinks identical files from the store, so two names in one
+/// package can share an inode; the destination's exact name must also be
+/// absent from its directory, meaning the lookup only matched by folding.
+fn is_case_only_rename(from: &Path, to: &Path) -> bool {
+    let (Some(dir), Some(name)) = (to.parent(), to.file_name()) else {
+        return false;
+    };
+    same_file::is_same_file(from, to).unwrap_or(false)
+        && std::fs::read_dir(dir).is_ok_and(|mut entries| {
+            entries.all(|entry| entry.is_ok_and(|entry| entry.file_name() != name))
+        })
 }
 
 pub(crate) fn apply_multi_file_patch(pkg_dir: &Path, patch_text: &str) -> Result<(), String> {
@@ -1381,6 +1398,71 @@ mod tests {
         let err = apply_multi_file_patch(&pkg, patch).unwrap_err();
         assert!(err.contains("already exists"), "{err}");
         assert_eq!(std::fs::read_to_string(pkg.join("b.js")).unwrap(), "b\n");
+    }
+
+    // On a case-insensitive filesystem the destination already "exists" as
+    // the source. On a case-sensitive one (Linux CI) it does not, so there
+    // this covers only the plain rename path; both must end on the new name.
+    #[test]
+    fn git_case_only_rename_applies_hunks_under_the_new_name() {
+        let (_dir, pkg) = pkg_with(&[("LICENSE", "ISC License\n")]);
+        let case_insensitive = pkg.join("License").exists();
+        let patch = "diff --git a/LICENSE b/License\n\
+                     similarity index 97%\n\
+                     rename from LICENSE\n\
+                     rename to License\n\
+                     --- a/LICENSE\n\
+                     +++ b/License\n\
+                     @@ -1 +1 @@\n\
+                     -ISC License\n\
+                     +ISC License (patched)\n";
+        apply_multi_file_patch(&pkg, patch)
+            .unwrap_or_else(|e| panic!("case_insensitive={case_insensitive}: {e}"));
+        let names: Vec<String> = std::fs::read_dir(&pkg)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names, ["License"], "case_insensitive={case_insensitive}");
+        assert_eq!(
+            std::fs::read_to_string(pkg.join("License")).unwrap(),
+            "ISC License (patched)\n"
+        );
+    }
+
+    #[test]
+    fn git_rename_onto_another_name_of_the_same_or_a_case_folded_file_is_refused() {
+        // A second hard link to the source's inode is a distinct entry.
+        let (_dir, pkg) = pkg_with(&[
+            ("LICENSE", "license\n"),
+            ("a.js", "a\n"),
+            ("README.md", "readme\n"),
+        ]);
+        std::fs::hard_link(pkg.join("LICENSE"), pkg.join("COPYING")).unwrap();
+        let rename = |from: &str, to: &str| {
+            apply_multi_file_patch(
+                &pkg,
+                &format!("diff --git a/{from} b/{to}\nrename from {from}\nrename to {to}\n"),
+            )
+        };
+        let err = rename("LICENSE", "COPYING").unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert!(pkg.join("LICENSE").exists() && pkg.join("COPYING").exists());
+
+        // Folded onto a different file: this collides only where the
+        // filesystem is case-insensitive; on Linux the name is simply free.
+        let case_insensitive = pkg.join("readme.md").exists();
+        let result = rename("a.js", "readme.MD");
+        if case_insensitive {
+            let err = result.unwrap_err();
+            assert!(err.contains("already exists"), "{err}");
+            assert!(pkg.join("a.js").exists());
+            assert_eq!(
+                std::fs::read_to_string(pkg.join("README.md")).unwrap(),
+                "readme\n"
+            );
+        } else {
+            result.unwrap();
+        }
     }
 
     // `pnpm patch-commit` diffs with `--irreversible-delete`, and git
