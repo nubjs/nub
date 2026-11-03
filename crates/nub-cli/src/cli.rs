@@ -3494,6 +3494,7 @@ fn run_nubr() -> Result<i32> {
     let runtime = nub_core::node::spawn::find_runtime_dir(&nub_binary)
         .context("nubr: the nub runtime could not be located")?;
     let mut cmd = std::process::Command::new(node.path.as_str());
+    nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
     cmd.arg(runtime.join("nubr.mjs"))
         .args(&args)
         .stdin(std::process::Stdio::inherit())
@@ -7103,6 +7104,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         node_args.push(file.to_string());
         node_args.extend(args.iter().cloned());
         let mut cmd = std::process::Command::new(node.path.as_str());
+        nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
         cmd.args(&node_args)
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
@@ -7363,6 +7365,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
             crate::env_owner::wrapped_marker(schema_dir),
         );
     }
+    nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
     cmd.args(&node_args)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
