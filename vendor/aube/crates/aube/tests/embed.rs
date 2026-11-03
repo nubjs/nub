@@ -299,6 +299,77 @@ async fn facade_warm_install_registers_the_host_virtual_store() {
     assert!(std::fs::read_dir(projects_dir).unwrap().next().is_some());
 }
 
+// nubjs/nub#841: switching the virtual-store mode wipes the old tree, and an
+// install that then fails before linking (frozen-lockfile drift, a resolve
+// error) must leave that tree in place rather than deleting it first.
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_install_after_a_virtual_store_mode_change_keeps_the_old_tree() {
+    initialize_test_host();
+    let project = tempfile::tempdir().unwrap();
+    let host_cache = project.path().join("host-cache");
+    let host_store = project.path().join("host-store");
+    seed_cached_registry_package(&host_cache, &host_store);
+    // `hoist=false` lets the shared store actually be used; with the default
+    // hidden hoist tree the layout stays per-project and no mode change exists.
+    std::fs::write(project.path().join(".npmrc"), "hoist=false\n").unwrap();
+    let manifest = r#"{"dependencies":{"cached-only":"1.0.0"}}
+"#;
+    std::fs::write(project.path().join("package.json"), manifest).unwrap();
+    let install = |gvs: bool, frozen_mode: aube::embed::FrozenMode| {
+        let mut options = InstallOptions::new(project.path());
+        options.ignore_scripts = true;
+        options.network_mode = aube::embed::NetworkMode::Offline;
+        options.control = InstallControl::silent();
+        options.frozen_mode = frozen_mode;
+        aube::embed::install_with_overrides(
+            options,
+            aube::embed::EmbedderInstallOverrides {
+                use_global_virtual_store: Some(gvs),
+                cache_dir: Some(host_cache.clone()),
+                store_dir: Some(host_store.clone()),
+            },
+        )
+    };
+    let package = cached_package_materialization(project.path());
+
+    install(true, aube::embed::FrozenMode::Prefer)
+        .await
+        .unwrap();
+    let linked = std::fs::canonicalize(&package).unwrap();
+    let global_store = std::fs::canonicalize(host_cache.join("virtual-store")).unwrap();
+    assert!(
+        linked.starts_with(&global_store),
+        "the first install must link through the global virtual store, got {}",
+        linked.display()
+    );
+
+    // A dependency that is neither locked nor reachable offline: the frozen
+    // install fails its drift check, the non-frozen one fails to resolve.
+    std::fs::write(
+        project.path().join("package.json"),
+        r#"{"dependencies":{"cached-only":"1.0.0","missing-probe":"1.0.0"}}
+"#,
+    )
+    .unwrap();
+    for mode in [
+        aube::embed::FrozenMode::Frozen,
+        aube::embed::FrozenMode::Prefer,
+    ] {
+        install(false, mode).await.unwrap_err();
+        assert!(
+            package.is_file(),
+            "a {mode:?} install that failed before linking deleted the previous tree"
+        );
+    }
+
+    std::fs::write(project.path().join("package.json"), manifest).unwrap();
+    install(false, aube::embed::FrozenMode::Frozen)
+        .await
+        .unwrap();
+    assert_cached_package_is_project_local(project.path(), project.path());
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn facade_install_preserves_non_utf8_storage_paths() {
