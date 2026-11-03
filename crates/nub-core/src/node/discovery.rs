@@ -1140,13 +1140,75 @@ fn parent_pid() -> Option<u32> {
     None
 }
 
-/// Run `node --version` and parse the output, with a disk cache
-/// keyed on the binary's path + mtime to avoid spawning on repeat calls.
+/// The version of the Node at `node_path`, from a disk cache keyed on the binary's
+/// path + mtime when that key can be trusted.
+///
+/// It cannot be trusted for a version manager's shim (mise, asdf, nodenv, Volta):
+/// one path whose Node depends on the directory it runs in, so a version recorded
+/// in one project was handed to another, and nub injected a flag only the recorded
+/// Node accepts into the real one — `node: bad option`, exit 9. The first probe
+/// therefore also asks for `process.execPath`, the way uv asks a Python for
+/// `sys.executable` before caching anything about a pyenv shim: a path that is
+/// not the binary that answered is remembered as a shim, and read fresh each time.
 fn detect_version(node_path: &Path) -> Result<NodeVersion, DiscoveryError> {
-    if let Some(cached) = read_version_cache(node_path) {
-        return Ok(cached);
+    match read_version_entry(node_path) {
+        Some(VersionEntry::Binary(version)) => return Ok(version),
+        Some(VersionEntry::Shim) => return probe_version_flag(node_path),
+        None => {}
     }
+    match probe_identity(node_path) {
+        Some((version, exec_path)) => {
+            let direct = is_same_binary(node_path, &exec_path);
+            write_version_cache(node_path, direct.then_some(&version));
+            Ok(version)
+        }
+        // A binary that could not say where it lives still has a version to report;
+        // nothing is cached, since nothing about its identity was learned.
+        None => probe_version_flag(node_path),
+    }
+}
 
+/// `node -e` printing `process.version` and `process.execPath`, one per line. `None`
+/// when the probe fails or answers in any other shape.
+fn probe_identity(node_path: &Path) -> Option<(NodeVersion, PathBuf)> {
+    let mut probe = Command::new(node_path);
+    mark_node_launch(&mut probe, node_path);
+    // NODE_OPTIONS is cleared for the reason `accepted_env_flags` gives: `-e`, unlike
+    // `--version`, runs its preloads.
+    let output = probe
+        .arg("-e")
+        .arg("process.stdout.write(process.version + \"\\n\" + process.execPath)")
+        .env_remove("NODE_OPTIONS")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let (version, exec_path) = stdout.split_once('\n')?;
+    let exec_path = exec_path.trim();
+    if exec_path.is_empty() {
+        return None;
+    }
+    Some((version.trim().parse().ok()?, PathBuf::from(exec_path)))
+}
+
+/// Whether two paths name one file. Hard links count, which a canonical-path
+/// comparison misses; where the inode test is unavailable a miss only costs a
+/// re-probe per launch.
+fn is_same_binary(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(a), Ok(b)) = (fs::metadata(a), fs::metadata(b)) {
+            return a.dev() == b.dev() && a.ino() == b.ino();
+        }
+    }
+    same_file_path(a, b)
+}
+
+/// `node --version`, uncached.
+fn probe_version_flag(node_path: &Path) -> Result<NodeVersion, DiscoveryError> {
     let mut probe = Command::new(node_path);
     mark_node_launch(&mut probe, node_path);
     let output = probe
@@ -1166,8 +1228,6 @@ fn detect_version(node_path: &Path) -> Result<NodeVersion, DiscoveryError> {
         .trim()
         .parse::<NodeVersion>()
         .map_err(|e| DiscoveryError::VersionDetection(e.to_string()))?;
-
-    write_version_cache(node_path, &version);
     Ok(version)
 }
 
@@ -1676,27 +1736,41 @@ pub fn node_store_dir() -> Option<PathBuf> {
     Some(cache_dir()?.join("node"))
 }
 
+/// What the discovery cache remembers about one `node` path.
+enum VersionEntry {
+    /// The path is the Node binary that answered, so its version holds until it is
+    /// replaced.
+    Binary(NodeVersion),
+    /// The path handed the probe to a different binary: a version manager's shim,
+    /// whose version is read fresh on every launch.
+    Shim,
+}
+
+/// The cached version of a path that is itself a Node binary. A shim has none.
 fn read_version_cache(node_path: &Path) -> Option<NodeVersion> {
+    match read_version_entry(node_path)? {
+        VersionEntry::Binary(version) => Some(version),
+        VersionEntry::Shim => None,
+    }
+}
+
+fn read_version_entry(node_path: &Path) -> Option<VersionEntry> {
     let cache = cache_dir()?.join("node-discovery.json");
     let content = fs::read_to_string(&cache).ok()?;
     let data: serde_json::Value = serde_json::from_str(&content).ok()?;
     let key = node_path.to_string_lossy();
     let entry = data.get(key.as_ref())?;
-    let cached_mtime = entry.get("mtime")?.as_u64()?;
-    let cached_version = entry.get("version")?.as_str()?;
-
-    let actual_mtime = fs::metadata(node_path)
-        .ok()?
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
-
-    if cached_mtime == actual_mtime {
-        cached_version.parse().ok()
-    } else {
-        None
+    if entry.get("mtime")?.as_u64()? != node_mtime_secs(node_path)? {
+        return None;
+    }
+    // An entry with no `kind` predates the shim check and may hold a version a
+    // shim reported for some other directory, so it is a miss.
+    match entry.get("kind")?.as_str()? {
+        "binary" => Some(VersionEntry::Binary(
+            entry.get("version")?.as_str()?.parse().ok()?,
+        )),
+        "shim" => Some(VersionEntry::Shim),
+        _ => None,
     }
 }
 
@@ -1715,7 +1789,8 @@ fn safe_cache_dir(dir: std::path::PathBuf) -> Option<std::path::PathBuf> {
     }
 }
 
-fn write_version_cache(node_path: &Path, version: &NodeVersion) {
+/// Record `node_path` as a Node binary of `version`, or as a shim when `None`.
+fn write_version_cache(node_path: &Path, version: Option<&NodeVersion>) {
     let Some(dir) = cache_dir() else { return };
     // Share the runtime cache's validated base rather than creating this one
     // ourselves: this write is what used to reach the root FIRST and leave it with
@@ -1741,10 +1816,14 @@ fn write_version_cache(node_path: &Path, version: &NodeVersion) {
         .unwrap_or(0);
 
     let key = node_path.to_string_lossy().to_string();
-    data[key] = serde_json::json!({
-        "version": version.to_string(),
-        "mtime": mtime,
-    });
+    data[key] = match version {
+        Some(version) => serde_json::json!({
+            "kind": "binary",
+            "version": version.to_string(),
+            "mtime": mtime,
+        }),
+        None => serde_json::json!({ "kind": "shim", "mtime": mtime }),
+    };
 
     let _ = fs::write(
         &cache,
@@ -1755,8 +1834,8 @@ fn write_version_cache(node_path: &Path, version: &NodeVersion) {
 /// The set of flag NAMES the given Node binary accepts (its
 /// `process.allowedNodeEnvironmentFlags`) — the authoritative universe of flags
 /// nub may inject or propagate via `NODE_OPTIONS`. Spawns the binary once with a
-/// tiny `-e` probe and caches the result on disk keyed by (path, mtime), so every
-/// repeat call is spawn-free (one probe per binary, ever). Returns `None` if the
+/// tiny `-e` probe and caches the result on disk keyed by (path, version, mtime),
+/// so every repeat call is spawn-free (one probe per binary, ever). Returns `None` if the
 /// probe cannot run or produces nothing usable — callers then fall back to plain
 /// version-band gating rather than dropping flags they still need.
 ///
@@ -1779,8 +1858,11 @@ fn write_version_cache(node_path: &Path, version: &NodeVersion) {
 /// self-correcting: a flag the running Node no longer accepts is simply dropped, no
 /// nub release required.
 // @lat: [[research/node-experimental-flag-lifecycle#Node experimental-flag lifecycle#Decision / mitigation (implemented)]]
-pub fn accepted_env_flags(node_path: &Path) -> Option<std::collections::BTreeSet<String>> {
-    if let Some(cached) = read_env_flags_cache(node_path) {
+pub fn accepted_env_flags(
+    node_path: &Path,
+    version: &NodeVersion,
+) -> Option<std::collections::BTreeSet<String>> {
+    if let Some(cached) = read_env_flags_cache(node_path, version) {
         return Some(cached);
     }
 
@@ -1810,13 +1892,13 @@ pub fn accepted_env_flags(node_path: &Path) -> Option<std::collections::BTreeSet
         return None;
     }
 
-    write_env_flags_cache(node_path, &flags);
+    write_env_flags_cache(node_path, version, &flags);
     Some(flags)
 }
 
 /// Whether this Node binary ACCEPTS `flag` on the command line. Spawns the binary
 /// once per (binary, flag) with a no-op `-e` probe and caches the verdict on disk
-/// keyed by (path, mtime), so repeat calls are spawn-free. `None` when the probe
+/// keyed by (path, version, mtime), so repeat calls are spawn-free. `None` when the probe
 /// cannot run at all; callers then fall back to pure version-band gating, matching
 /// [`accepted_env_flags`]' contract.
 ///
@@ -1833,8 +1915,8 @@ pub fn accepted_env_flags(node_path: &Path) -> Option<std::collections::BTreeSet
 /// hit EVERY augmented invocation on that Node, from binaries already shipped.
 /// This restores the same self-correcting property the `Unflag` rows get from
 /// Stage 4: a flag the running Node no longer accepts is simply dropped.
-pub fn accepts_argv_flag(node_path: &Path, flag: &str) -> Option<bool> {
-    if let Some(cached) = read_argv_flag_cache(node_path, flag) {
+pub fn accepts_argv_flag(node_path: &Path, version: &NodeVersion, flag: &str) -> Option<bool> {
+    if let Some(cached) = read_argv_flag_cache(node_path, version, flag) {
         return Some(cached);
     }
 
@@ -1867,19 +1949,19 @@ pub fn accepts_argv_flag(node_path: &Path, flag: &str) -> Option<bool> {
         return None;
     }
 
-    write_argv_flag_cache(node_path, flag, accepted);
+    write_argv_flag_cache(node_path, version, flag, accepted);
     Some(accepted)
 }
 
 /// Read the cached argv-flag verdict for (binary, flag), honoring the mtime key.
-fn read_argv_flag_cache(node_path: &Path, flag: &str) -> Option<bool> {
-    read_flag_entry(node_path)?.argv.get(flag).copied()
+fn read_argv_flag_cache(node_path: &Path, version: &NodeVersion, flag: &str) -> Option<bool> {
+    read_flag_entry(node_path, version)?.argv.get(flag).copied()
 }
 
 /// Record the argv-flag verdict for (binary, flag). Best-effort: a failed write
 /// only costs a re-probe.
-fn write_argv_flag_cache(node_path: &Path, flag: &str, accepted: bool) {
-    update_flag_entry(node_path, |entry| {
+fn write_argv_flag_cache(node_path: &Path, version: &NodeVersion, flag: &str, accepted: bool) {
+    update_flag_entry(node_path, version, |entry| {
         entry.argv.insert(flag.to_string(), accepted);
     });
 }
@@ -1897,27 +1979,39 @@ fn node_mtime_secs(node_path: &Path) -> Option<u64> {
 }
 
 /// Read the cached `allowedNodeEnvironmentFlags` set for a binary, honoring the
-/// (path, mtime) key so a rebuilt/replaced Node at the same path re-probes.
-fn read_env_flags_cache(node_path: &Path) -> Option<std::collections::BTreeSet<String>> {
-    let env = read_flag_entry(node_path)?.env?;
+/// (path, version, mtime) key so a rebuilt/replaced Node at the same path re-probes.
+fn read_env_flags_cache(
+    node_path: &Path,
+    version: &NodeVersion,
+) -> Option<std::collections::BTreeSet<String>> {
+    let env = read_flag_entry(node_path, version)?.env?;
     Some(env.into_iter().collect())
 }
 
-fn write_env_flags_cache(node_path: &Path, flags: &std::collections::BTreeSet<String>) {
-    update_flag_entry(node_path, |entry| {
+fn write_env_flags_cache(
+    node_path: &Path,
+    version: &NodeVersion,
+    flags: &std::collections::BTreeSet<String>,
+) {
+    update_flag_entry(node_path, version, |entry| {
         entry.env = Some(flags.iter().cloned().collect());
     });
 }
 
 /// Both probe verdicts for ONE Node binary: its `allowedNodeEnvironmentFlags` set
-/// and its per-flag argv verdicts. They share the (path, mtime) key and are read on
-/// the same spawn, so they share a file and a launch reads one.
+/// and its per-flag argv verdicts. They share the (path, version, mtime) key and are
+/// read on the same spawn, so they share a file and a launch reads one.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct NodeFlagEntry {
     /// The binary this describes. Stored so a hashed-filename collision is a miss
     /// (one re-probe) rather than another binary's verdicts.
     path: String,
     mtime: u64,
+    /// The version that answered. Part of the key because one path can serve
+    /// several Nodes: a version manager's shim answers with whichever Node the
+    /// directory selects, and each has its own flags.
+    #[serde(default)]
+    version: String,
     /// Absent until the env-flag probe has run; the argv probe writes the file first
     /// whenever a `Mitigation::UnflagArgv` row applies to a Node nub did not install.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1949,30 +2043,38 @@ struct NodeFlagEntry {
 /// reads them now) and leaving them keeps a downgrade working.
 const FLAG_ENTRY_DIR: &str = "node-flags";
 
-/// The entry filename for `node_path`: a hash, so an arbitrary filesystem path
-/// becomes a fixed-width name that cannot escape the directory. A collision costs
-/// one re-probe, never a wrong verdict — `read_flag_entry` compares the stored path.
-fn flag_entry_name(node_path: &Path) -> String {
-    blake3::hash(node_path.to_string_lossy().as_bytes())
+/// The entry filename for `node_path` answering as `version`: a hash, so an
+/// arbitrary filesystem path becomes a fixed-width name that cannot escape the
+/// directory. A collision costs one re-probe, never a wrong verdict —
+/// `read_flag_entry` compares the stored path and version.
+fn flag_entry_name(node_path: &Path, version: &NodeVersion) -> String {
+    blake3::hash(format!("{}\0{version}", node_path.to_string_lossy()).as_bytes())
         .to_hex()
         .to_string()
 }
 
-fn read_flag_entry(node_path: &Path) -> Option<NodeFlagEntry> {
-    read_flag_entry_in(&cache_dir()?, node_path)
+fn read_flag_entry(node_path: &Path, version: &NodeVersion) -> Option<NodeFlagEntry> {
+    read_flag_entry_in(&cache_dir()?, node_path, version)
 }
 
 /// `read_flag_entry` against an explicit cache root, so a test can drive it without
 /// mutating process-global environment (`XDG_CACHE_HOME`) — the seam
 /// `nub_store_node_in` established.
-fn read_flag_entry_in(cache_root: &Path, node_path: &Path) -> Option<NodeFlagEntry> {
+fn read_flag_entry_in(
+    cache_root: &Path,
+    node_path: &Path,
+    version: &NodeVersion,
+) -> Option<NodeFlagEntry> {
     let path = cache_root
         .join(FLAG_ENTRY_DIR)
-        .join(flag_entry_name(node_path));
+        .join(flag_entry_name(node_path, version));
     let entry: NodeFlagEntry = serde_json::from_str(&fs::read_to_string(&path).ok()?).ok()?;
     // Any doubt means "probe it again", which is always correct and merely slower:
     // a hash collision, or a binary rebuilt in place since the verdict was recorded.
-    if entry.path != node_path.to_string_lossy() || entry.mtime != node_mtime_secs(node_path)? {
+    if entry.path != node_path.to_string_lossy()
+        || entry.version != version.to_string()
+        || entry.mtime != node_mtime_secs(node_path)?
+    {
         return None;
     }
     Some(entry)
@@ -1980,11 +2082,15 @@ fn read_flag_entry_in(cache_root: &Path, node_path: &Path) -> Option<NodeFlagEnt
 
 /// Read-modify-write one binary's entry. Best-effort throughout: a cache that
 /// cannot be written is a slower launch, never a failed one.
-fn update_flag_entry(node_path: &Path, mutate: impl FnOnce(&mut NodeFlagEntry)) {
+fn update_flag_entry(
+    node_path: &Path,
+    version: &NodeVersion,
+    mutate: impl FnOnce(&mut NodeFlagEntry),
+) {
     let Some(cache_root) = cache_dir().and_then(safe_cache_dir) else {
         return;
     };
-    update_flag_entry_in(&cache_root, node_path, mutate);
+    update_flag_entry_in(&cache_root, node_path, version, mutate);
 }
 
 /// `update_flag_entry` against an explicit cache root — the write half of the
@@ -1992,6 +2098,7 @@ fn update_flag_entry(node_path: &Path, mutate: impl FnOnce(&mut NodeFlagEntry)) 
 fn update_flag_entry_in(
     cache_root: &Path,
     node_path: &Path,
+    version: &NodeVersion,
     mutate: impl FnOnce(&mut NodeFlagEntry),
 ) {
     let dir = cache_root.join(FLAG_ENTRY_DIR);
@@ -2003,8 +2110,9 @@ fn update_flag_entry_in(
     };
     // A stale entry is replaced wholesale rather than merged — the old verdicts
     // describe a different binary at the same path.
-    let mut entry = read_flag_entry_in(cache_root, node_path).unwrap_or_default();
+    let mut entry = read_flag_entry_in(cache_root, node_path, version).unwrap_or_default();
     entry.path = node_path.to_string_lossy().into_owned();
+    entry.version = version.to_string();
     entry.mtime = mtime;
     mutate(&mut entry);
 
@@ -2014,10 +2122,10 @@ fn update_flag_entry_in(
     // Written through a temp file and renamed: the two probes write the same entry,
     // so a concurrent reader must never see a half-written one. A torn read would
     // only cost a re-probe, but rename is free here and removes the case.
-    let final_path = dir.join(flag_entry_name(node_path));
+    let final_path = dir.join(flag_entry_name(node_path, version));
     let staging = dir.join(format!(
         "{}.{}.tmp",
-        flag_entry_name(node_path),
+        flag_entry_name(node_path, version),
         std::process::id()
     ));
     if fs::write(&staging, body).is_ok() && fs::rename(&staging, &final_path).is_err() {
@@ -2549,7 +2657,11 @@ mod tests {
             "#!/bin/sh\necho \"node: bad option: $1\" >&2\nexit 9\n",
         );
         assert_eq!(
-            accepts_argv_flag(&rejects, "--js-defer-import-eval"),
+            accepts_argv_flag(
+                &rejects,
+                &NodeVersion::new(26, 0, 0),
+                "--js-defer-import-eval"
+            ),
             Some(false),
             "a 'bad option' rejection is the one durable verdict"
         );
@@ -2558,7 +2670,11 @@ mod tests {
         // and pays one re-probe rather than losing the feature permanently.
         let flaky = fake("node-flaky", "#!/bin/sh\necho 'killed' >&2\nexit 1\n");
         assert_eq!(
-            accepts_argv_flag(&flaky, "--js-defer-import-eval"),
+            accepts_argv_flag(
+                &flaky,
+                &NodeVersion::new(26, 0, 0),
+                "--js-defer-import-eval"
+            ),
             None,
             "a non-'bad option' failure must NOT become a cached negative verdict"
         );
@@ -3382,50 +3498,62 @@ mod tests {
     fn a_damaged_entry_for_one_binary_does_not_hide_anothers_verdicts() {
         let dir = unique_tmp("flagcache-isolation");
         let cache = dir.join("cache");
+        let v24 = NodeVersion::new(24, 0, 0);
         let (mine, other) = (dir.join("node-a"), dir.join("node-b"));
         std::fs::write(&mine, b"a").unwrap();
         std::fs::write(&other, b"b").unwrap();
 
-        update_flag_entry_in(&cache, &mine, |e| {
+        update_flag_entry_in(&cache, &mine, &v24, |e| {
             e.env = Some(vec!["--experimental-vm-modules".to_string()]);
         });
-        update_flag_entry_in(&cache, &other, |e| e.env = Some(vec![]));
+        update_flag_entry_in(&cache, &other, &v24, |e| e.env = Some(vec![]));
 
         // Corrupt the OTHER binary's entry, exactly as a truncated write would.
-        let damaged = cache.join(FLAG_ENTRY_DIR).join(flag_entry_name(&other));
+        let damaged = cache
+            .join(FLAG_ENTRY_DIR)
+            .join(flag_entry_name(&other, &v24));
         std::fs::write(&damaged, b"{not json").unwrap();
 
         assert_eq!(
-            read_flag_entry_in(&cache, &mine).and_then(|e| e.env),
+            read_flag_entry_in(&cache, &mine, &v24).and_then(|e| e.env),
             Some(vec!["--experimental-vm-modules".to_string()]),
             "a damaged entry for a different binary must not affect this one"
         );
         assert!(
-            read_flag_entry_in(&cache, &other).is_none(),
+            read_flag_entry_in(&cache, &other, &v24).is_none(),
             "the damaged entry itself must read as a miss, not as empty verdicts"
         );
     }
 
-    /// Both probes key on (path, mtime) and are read on the same spawn, so they
+    /// Both probes key on (path, version, mtime) and are read on the same spawn, so they
     /// share one file — and a binary rebuilt in place invalidates both together.
     #[test]
     fn both_verdicts_share_one_entry_and_lapse_when_the_binary_changes() {
         let dir = unique_tmp("flagcache-roundtrip");
         let cache = dir.join("cache");
+        let v24 = NodeVersion::new(24, 0, 0);
         let node = dir.join("node");
         std::fs::write(&node, b"v1").unwrap();
 
-        update_flag_entry_in(&cache, &node, |e| e.env = Some(vec!["--permission".into()]));
-        update_flag_entry_in(&cache, &node, |e| {
+        update_flag_entry_in(&cache, &node, &v24, |e| {
+            e.env = Some(vec!["--permission".into()])
+        });
+        update_flag_entry_in(&cache, &node, &v24, |e| {
             e.argv.insert("--js-defer-import-eval".into(), false);
         });
 
-        let entry = read_flag_entry_in(&cache, &node).expect("both writes land in one entry");
+        let entry = read_flag_entry_in(&cache, &node, &v24).expect("both writes land in one entry");
         assert_eq!(
             entry.env.as_deref(),
             Some(&["--permission".to_string()][..])
         );
         assert_eq!(entry.argv.get("--js-defer-import-eval"), Some(&false));
+        // A version manager's shim is one path serving several Nodes, so a verdict
+        // recorded while it answered as one version is no answer for another.
+        assert!(
+            read_flag_entry_in(&cache, &node, &NodeVersion::new(26, 0, 0)).is_none(),
+            "the same path answering as a different version must re-probe"
+        );
         assert_eq!(
             std::fs::read_dir(cache.join(FLAG_ENTRY_DIR))
                 .unwrap()
@@ -3444,7 +3572,7 @@ mod tests {
             .set_modified(later)
             .unwrap();
         assert!(
-            read_flag_entry_in(&cache, &node).is_none(),
+            read_flag_entry_in(&cache, &node, &v24).is_none(),
             "a binary replaced at the same path must re-probe, not reuse the old verdicts"
         );
     }
@@ -3456,16 +3584,19 @@ mod tests {
     fn an_entry_recorded_for_a_different_path_is_a_miss() {
         let dir = unique_tmp("flagcache-collision");
         let cache = dir.join("cache");
+        let v24 = NodeVersion::new(24, 0, 0);
         let node = dir.join("node");
         std::fs::write(&node, b"x").unwrap();
-        update_flag_entry_in(&cache, &node, |e| e.env = Some(vec![]));
+        update_flag_entry_in(&cache, &node, &v24, |e| e.env = Some(vec![]));
 
-        let entry_path = cache.join(FLAG_ENTRY_DIR).join(flag_entry_name(&node));
+        let entry_path = cache
+            .join(FLAG_ENTRY_DIR)
+            .join(flag_entry_name(&node, &v24));
         let mut entry: NodeFlagEntry =
             serde_json::from_str(&std::fs::read_to_string(&entry_path).unwrap()).unwrap();
         entry.path = "/somewhere/else/bin/node".into();
         std::fs::write(&entry_path, serde_json::to_string(&entry).unwrap()).unwrap();
 
-        assert!(read_flag_entry_in(&cache, &node).is_none());
+        assert!(read_flag_entry_in(&cache, &node, &v24).is_none());
     }
 }
