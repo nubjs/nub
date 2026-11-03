@@ -591,6 +591,38 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
             {
                 local_pkg.version = ver.clone();
             }
+            // The main package loop below skips these entries, so the
+            // metadata the writer persisted for them is restored here or
+            // nowhere. Platform arrays decide whether a direct URL optional
+            // survives `filter_graph` on this host; peers decide what the
+            // linker places beside it.
+            if let Some(pkg_info) = pkg_info {
+                local_pkg.os = pkg_info.os.iter().cloned().collect();
+                local_pkg.cpu = pkg_info.cpu.iter().cloned().collect();
+                local_pkg.libc = pkg_info.libc.iter().cloned().collect();
+                local_pkg.engines = pkg_info.engines.clone();
+                local_pkg.peer_dependencies =
+                    pkg_info.peer_dependencies.clone().unwrap_or_default();
+                local_pkg.peer_dependencies_meta = pkg_info
+                    .peer_dependencies_meta
+                    .clone()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(k, v)| {
+                        (
+                            k,
+                            PeerDepMeta {
+                                optional: v.optional,
+                            },
+                        )
+                    })
+                    .collect();
+            }
+            if let Some(snap) = snap
+                && let Some(bundled) = snap.bundled_dependencies.clone()
+            {
+                local_pkg.bundled_dependencies = bundled;
+            }
             if let Some(pkg_info) = pkg_info
                 && let Some(ref res) = pkg_info.resolution
                 && let Some(mut ls) = local_source_from_resolution(res)

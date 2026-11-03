@@ -4393,6 +4393,125 @@ snapshots:
 }
 
 #[test]
+fn parse_restores_platform_and_peers_of_a_direct_url_tarball_dep() {
+    // A direct local dep is synthesized in the importer loop and skipped by
+    // the main package loop, so anything the writer put on its `packages:`
+    // entry is restored there or lost. Losing `os`/`cpu` leaves a native
+    // optional for another platform in the graph that `filter_graph` can no
+    // longer drop, so a frozen install would fetch and link it.
+    let url = "https://example.invalid/builds/abc/native-darwin-arm64";
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &path,
+        format!(
+            r#"
+lockfileVersion: '9.0'
+
+importers:
+  .:
+    optionalDependencies:
+      native:
+        specifier: {url}
+        version: {url}
+
+packages:
+  native@{url}:
+    resolution: {{integrity: sha512-fake, tarball: {url}}}
+    version: 1.2.3
+    cpu: [arm64]
+    os: [darwin]
+    peerDependencies:
+      host-app: ^2.0.0
+    peerDependenciesMeta:
+      host-app:
+        optional: true
+
+snapshots:
+  native@{url}: {{}}
+"#
+        ),
+    )
+    .unwrap();
+
+    let graph = parse(&path).unwrap();
+    let native = graph
+        .packages
+        .values()
+        .find(|p| p.name == "native")
+        .expect("native entry");
+    assert_eq!(native.version, "1.2.3");
+    assert_eq!(native.os.iter().collect::<Vec<_>>(), ["darwin"]);
+    assert_eq!(native.cpu.iter().collect::<Vec<_>>(), ["arm64"]);
+    assert_eq!(
+        native.peer_dependencies.get("host-app").map(String::as_str),
+        Some("^2.0.0")
+    );
+    assert!(native.peer_dependencies_meta["host-app"].optional);
+}
+
+#[test]
+fn parse_keeps_scoped_url_tarball_dep_of_a_url_tarball_package() {
+    // `next` from a preview-build URL depends on `@next/env` from a
+    // sibling URL. The `@` of the scope inside the dep value is not an
+    // npm-alias separator; reading it as one invented the alias
+    // `@next/env@next/env` and failed the install with "npm-alias
+    // references missing package".
+    let base = "https://vercel-packages.vercel.app/next/commits/7b58e58";
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &path,
+        format!(
+            r#"
+lockfileVersion: '9.0'
+
+importers:
+  .:
+    dependencies:
+      next:
+        specifier: {base}/next
+        version: {base}/next
+
+packages:
+  '@next/env@{base}/@next/env':
+    resolution: {{integrity: sha512-env, tarball: {base}/@next/env}}
+    version: 16.4.0-preview
+  next@{base}/next:
+    resolution: {{integrity: sha512-next, tarball: {base}/next}}
+    version: 16.4.0-preview
+
+snapshots:
+  '@next/env@{base}/@next/env': {{}}
+  next@{base}/next:
+    dependencies:
+      '@next/env': {base}/@next/env
+"#
+        ),
+    )
+    .unwrap();
+
+    let graph = parse(&path).unwrap();
+    let next = graph
+        .packages
+        .values()
+        .find(|p| p.name == "next")
+        .expect("next entry");
+    let env_value = next.dependencies.get("@next/env").expect("@next/env edge");
+    assert_eq!(env_value, &format!("{base}/@next/env"));
+    // The linker maps a URL edge to the hashed package key this way.
+    let env_key = crate::shared_local_dep_path("@next/env", env_value).unwrap();
+    let env = graph.packages.get(&env_key).unwrap_or_else(|| {
+        panic!(
+            "edge {env_key} resolves to a package; keys: {:?}",
+            graph.packages.keys().collect::<Vec<_>>()
+        )
+    });
+    assert_eq!(env.name, "@next/env");
+    assert_eq!(env.alias_of, None);
+}
+
+#[test]
 fn git_resolution_integrity_roundtrips() {
     let sha = "abcdef0123456789abcdef0123456789abcdef01";
     let integrity = "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==";

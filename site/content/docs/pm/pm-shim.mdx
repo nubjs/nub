@@ -45,7 +45,7 @@ and node_modules.
                 or remove the shims: nub pm unshim
 ```
 
-Runner commands fall through to the system tool whatever the pin — `npx`, `pnpx`, and the `init` / `create` / `dlx` / `exec` verbs — so `npm create vite` works in a pnpm project. A package manager spawned by a running install — a lifecycle script shelling out to a different one — also falls through, so an install you never typed directly isn't broken.
+Runner commands fall through to the system tool whatever the pin — `npx`, `pnpx`, and the `init` / `create` / `dlx` / `exec` verbs — so `npm create vite` works in a pnpm project. So do commands that never touch the project: global installs (`npm install -g`) and registry and account commands such as `npm login`, `npm whoami`, and `npm view`. `npm publish` still refuses, because it packs the project. A package manager spawned by a running install — a lifecycle script shelling out to a different one — also falls through, so an install you never typed directly isn't broken.
 
 ## Running npm installs on Nub's engine
 

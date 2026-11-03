@@ -256,7 +256,10 @@ pub(super) fn rewrite_snapshot_alias_deps(
         let Some((real_name, resolved)) = parse_dep_path(bare) else {
             continue;
         };
-        if real_name == *dep_name {
+        // A URL-tarball value such as `https://host/…/@next/env` splits at
+        // the scope's `@` into a "name" that is really a URL prefix. Only a
+        // registry package name can be an alias target.
+        if real_name == *dep_name || !is_package_name(&real_name) {
             continue;
         }
         let peer_suffix = dep_value.find('(').map(|i| &dep_value[i..]).unwrap_or("");
@@ -265,6 +268,29 @@ pub(super) fn rewrite_snapshot_alias_deps(
         alias_remaps.push((alias_dep_path, real_dep_path, dep_name.clone(), real_name));
         *dep_value = format!("{resolved}{peer_suffix}");
     }
+}
+
+/// `name` or `@scope/name` with no URL, path or protocol characters.
+fn is_package_name(name: &str) -> bool {
+    let bare = match name.strip_prefix('@') {
+        Some(scoped) => match scoped.split_once('/') {
+            Some((scope, rest)) if !scope.is_empty() => {
+                if !is_name_part(scope) {
+                    return false;
+                }
+                rest
+            }
+            _ => return false,
+        },
+        None => name,
+    };
+    is_name_part(bare)
+}
+
+fn is_name_part(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~'))
 }
 
 #[cfg(test)]

@@ -45,6 +45,8 @@ export default { name: "config" };       // ordinary script
 export function handler() { … }          // ordinary script
 ```
 
+Only the program itself is checked. A file passed to `--test` runs as a test, a file passed to `--check` is only parsed, and a file after `-e` code is an argument to that code; none of them is served.
+
 CommonJS works through the same check, so a `.ts` file in a package without `"type": "module"` is served too:
 
 ```js
