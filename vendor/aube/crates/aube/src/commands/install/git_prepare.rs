@@ -119,6 +119,11 @@ pub(super) async fn run_git_dep_prepare(
     // dep's clone directory.
     opts.skip_root_lifecycle = false;
     opts.run_dev_preinstall = true;
+    // pnpm prepares a git dep with `strictDepBuilds` off (git-fetcher's
+    // `prepare_env`): an unapproved build among the dep's own
+    // devDependencies is skipped with a warning, not a failed prepare.
+    opts.cli_flags
+        .push(("strictDepBuilds".to_string(), "false".to_string()));
     let spec = spec.to_string();
     tokio::task::spawn_blocking(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()

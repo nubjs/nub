@@ -684,6 +684,15 @@ pub async fn run(
     let mut install_opts =
         install::InstallOptions::with_mode(super::chained_frozen_mode(install::FrozenMode::Fix));
     apply_dangerously_allow_all_builds(&mut install_opts, dangerously_allow_all_builds);
+    // pnpm 12 never fails a global install on an unreviewed build
+    // (`cli_args/global/install.rs`): it warns, and `add -g --allow-build`
+    // is the approval. The global add re-enters this path from inside the
+    // global package dir, which is how it is recognized here.
+    if is_global_install_dir(&cwd) {
+        install_opts
+            .cli_flags
+            .push(("strictDepBuilds".to_string(), "false".to_string()));
+    }
     install_opts.ignore_scripts = ignore_scripts;
     install_opts.run_dev_preinstall = true;
     install_opts.script_command = "add";
@@ -734,6 +743,13 @@ pub async fn run(
         return Err(first);
     }
     Ok(())
+}
+
+fn is_global_install_dir(cwd: &std::path::Path) -> bool {
+    super::global::GlobalLayout::resolve()
+        .ok()
+        .and_then(|layout| crate::dirs::canonicalize(&layout.pkg_dir).ok())
+        .is_some_and(|pkg_dir| cwd.starts_with(pkg_dir))
 }
 
 pub(super) fn apply_dangerously_allow_all_builds(

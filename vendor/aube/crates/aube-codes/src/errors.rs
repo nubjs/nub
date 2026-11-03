@@ -91,6 +91,8 @@ pub const ERR_AUBE_SCRIPT_NON_ZERO_EXIT: &str = "ERR_AUBE_SCRIPT_NON_ZERO_EXIT";
 #[rustfmt::skip] pub const ERR_AUBE_BUILD_POLICY_UNSUPPORTED_VALUE: &str = "ERR_AUBE_BUILD_POLICY_UNSUPPORTED_VALUE";
 #[rustfmt::skip] pub const ERR_AUBE_BUILD_POLICY_INVALID_VERSION_UNION: &str = "ERR_AUBE_BUILD_POLICY_INVALID_VERSION_UNION";
 #[rustfmt::skip] pub const ERR_AUBE_BUILD_POLICY_WILDCARD_WITH_VERSION: &str = "ERR_AUBE_BUILD_POLICY_WILDCARD_WITH_VERSION";
+#[rustfmt::skip] pub const ERR_AUBE_BUILD_POLICY_WILDCARD_APPROVAL: &str = "ERR_AUBE_BUILD_POLICY_WILDCARD_APPROVAL";
+pub const ERR_AUBE_IGNORED_BUILDS: &str = "ERR_AUBE_IGNORED_BUILDS";
 
 // ── workspace / filter ──────────────────────────────────────────────
 pub const ERR_AUBE_WORKSPACE_PARSE: &str = "ERR_AUBE_WORKSPACE_PARSE";
@@ -116,6 +118,7 @@ pub const ERR_AUBE_CONFIG_NESTED_AUBE_KEY: &str = "ERR_AUBE_CONFIG_NESTED_AUBE_K
 pub const ERR_AUBE_NO_BRANDED_CONFIG_FILE: &str = "ERR_AUBE_NO_BRANDED_CONFIG_FILE";
 #[rustfmt::skip] pub const ERR_AUBE_CONFIG_SETTING_UNSUPPORTED: &str = "ERR_AUBE_CONFIG_SETTING_UNSUPPORTED";
 pub const ERR_AUBE_CONFLICTING_BUILD_FLAGS: &str = "ERR_AUBE_CONFLICTING_BUILD_FLAGS";
+#[rustfmt::skip] pub const ERR_AUBE_OVERRIDING_IGNORED_BUILT_DEPENDENCIES: &str = "ERR_AUBE_OVERRIDING_IGNORED_BUILT_DEPENDENCIES";
 pub const ERR_AUBE_ACCESS_INVALID_ARGUMENT: &str = "ERR_AUBE_ACCESS_INVALID_ARGUMENT";
 pub const ERR_AUBE_PUBLISH_SOURCE_NOT_FOUND: &str = "ERR_AUBE_PUBLISH_SOURCE_NOT_FOUND";
 pub const ERR_AUBE_SHIM_CREATE_FAILED: &str = "ERR_AUBE_SHIM_CREATE_FAILED";
@@ -516,6 +519,18 @@ pub const ALL: &[CodeMeta] = &[
         description: "A build-allowlist pattern combined a wildcard name with a version union.",
         exit_code: None,
     },
+    CodeMeta {
+        name: ERR_AUBE_IGNORED_BUILDS,
+        category: category::SCRIPTS,
+        description: "`strictDepBuilds` is on (the default) and the install, add or rebuild skipped one or more dependency build scripts that nothing approved. The message lists them. `node_modules`, the approved builds and the project's own lifecycle scripts are already in place; approve the packages with `aube approve-builds`, deny them with `false` in `allowBuilds`, or set `strictDepBuilds=false` to skip them with a warning. pnpm's `ERR_PNPM_IGNORED_BUILDS`; exits 1, as pnpm does.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: ERR_AUBE_BUILD_POLICY_WILDCARD_APPROVAL,
+        category: category::SCRIPTS,
+        description: "A build-allowlist entry approved packages by wildcard (`\"*\": true`, `\"@scope/*\": true`). Approvals must name each package, matching pnpm's exact-name `allowBuilds`, so the entry approves nothing; a wildcard still works as a `false` denial.",
+        exit_code: None,
+    },
     // Linker
     CodeMeta {
         name: ERR_AUBE_PATCH_FAILED,
@@ -679,6 +694,12 @@ pub const ALL: &[CodeMeta] = &[
         name: ERR_AUBE_CONFLICTING_BUILD_FLAGS,
         category: category::ENGINE_CLI,
         description: "`aube add` was passed the same package name in both `--allow-build` and `--deny-build`.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: ERR_AUBE_OVERRIDING_IGNORED_BUILT_DEPENDENCIES,
+        category: category::ENGINE_CLI,
+        description: "`aube add --allow-build=<pkg>` named a package the project already denies (`false` in `allowBuilds`, `neverBuiltDependencies`, or `dependenciesMeta.<pkg>.built: false`). A flag does not overturn a recorded denial; change the entry itself. pnpm's `ERR_PNPM_OVERRIDING_IGNORED_BUILT_DEPENDENCIES`.",
         exit_code: None,
     },
     CodeMeta {

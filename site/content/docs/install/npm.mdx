@@ -135,7 +135,7 @@ node-linker=hoisted
 
 When an undeclared package fails to resolve at runtime, Nub's error names it and points at this opt-out.
 
-Lifecycle scripts run under Nub's deny-by-default trust posture plus a gated default-trust floor (see [the default-trust floor](/docs/install#default-trust-floor)), not npm's run-everything default. Curated, age-vetted packages build automatically; everything else is skipped with `WARN_NUB_IGNORED_BUILD_SCRIPTS` until `nub approve-builds`. Platform-gated optionals (e.g. `fsevents`) resolve and round-trip into the lock.
+Lifecycle scripts run under Nub's deny-by-default trust posture plus a gated default-trust floor (see [the default-trust floor](/docs/install#default-trust-floor)), not npm's run-everything default. Curated, age-vetted packages build automatically; any other build script fails the install with [`ERR_NUB_IGNORED_BUILDS`](/docs/install#unapproved-build-scripts) until `nub approve-builds` approves or denies it. Platform-gated optionals (e.g. `fsevents`) resolve and round-trip into the lock.
 
 ## Gaps
 

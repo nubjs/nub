@@ -333,7 +333,7 @@ fn run_failing_pre_script_short_circuits_with_its_code() {
 #[test]
 fn approve_builds_surfaces_and_runs_a_local_source_dep() {
     // Regression for the `file:`-dep approve-builds dead-end: install
-    // warns about a local-source dependency's build script, but
+    // reports a local-source dependency's build script, but
     // `ignored-builds` / `approve-builds` then reported nothing to
     // approve — the warned dep was keyed only in the install-recorded
     // set, never in the store the enumeration read. This pins the whole
@@ -362,14 +362,29 @@ fn approve_builds_surfaces_and_runs_a_local_source_dep() {
         }"#,
     );
 
-    // Install gates the build: the marker must not exist yet, and the
-    // ignored-build warning must fire naming the source key.
-    sbx.cmd()
-        .arg("install")
-        .assert()
-        .success()
-        .stderr(predicates::str::contains("dep@file:./dep"));
+    // Install gates the build and, under the default `strictDepBuilds`,
+    // fails naming the source key — after linking, so the dep is in place
+    // and the next step is approving it. A repeat install from the
+    // up-to-date state fails the same way.
+    for _ in 0..2 {
+        sbx.cmd()
+            .arg("install")
+            .assert()
+            .code(1)
+            .stderr(predicates::str::contains("ERR_AUBE_IGNORED_BUILDS"))
+            .stderr(predicates::str::contains("dep@file:./dep"));
+    }
     let node_modules = sbx.project.join("node_modules");
+    assert!(
+        node_modules.join("dep/package.json").exists(),
+        "the failing install must still link the dependency"
+    );
+    // Naming the package to `rebuild` does not approve it either.
+    sbx.cmd()
+        .args(["rebuild", "dep"])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("ERR_AUBE_IGNORED_BUILDS"));
     assert!(
         !marker_exists_under(&node_modules, "BUILT_527_MARKER"),
         "postinstall must not run before approval"
@@ -399,7 +414,7 @@ fn approve_builds_surfaces_and_runs_a_local_source_dep() {
         "approve-builds must run a local-source dep's build in the same invocation"
     );
 
-    // Reinstalling keeps the build and clears the warning.
+    // Reinstalling keeps the build and clears the failure.
     sbx.cmd()
         .arg("install")
         .assert()
@@ -414,6 +429,83 @@ fn approve_builds_surfaces_and_runs_a_local_source_dep() {
         .assert()
         .success()
         .stdout(predicates::str::contains("No ignored builds"));
+}
+
+/// A `file:` dependency whose postinstall writes `marker` into its own dir.
+fn write_marker_dep(sbx: &Sandbox, name: &str, marker: &str) {
+    sbx.write_file(
+        &format!("{name}/package.json"),
+        &format!(
+            r#"{{
+                "name": "{name}",
+                "version": "1.0.0",
+                "scripts": {{ "postinstall": "node -e \"require('fs').writeFileSync('{marker}','ok')\"" }}
+            }}"#
+        ),
+    );
+}
+
+#[test]
+fn allow_build_records_denials_and_never_overturns_one() {
+    // pnpm 12's `--allow-build` grammar: `!pkg` records a denial, and an
+    // approval of a package the project denies is refused rather than
+    // silently flipping the entry.
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    write_marker_dep(&sbx, "dep", "DENIED_DEP_BUILT");
+    sbx.write_manifest(r#"{"name":"e2e-allow-build-denial","version":"0.0.0"}"#);
+
+    sbx.cmd()
+        .args(["add", "file:./dep", "--allow-build=!dep"])
+        .assert()
+        .success();
+    let manifest = fs::read_to_string(sbx.project.join("package.json")).unwrap();
+    assert!(
+        manifest.contains(r#""dep": false"#),
+        "`--allow-build=!dep` must record a denial:\n{manifest}"
+    );
+
+    sbx.cmd()
+        .args(["add", "file:./dep", "--allow-build=dep"])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains(
+            "ERR_AUBE_OVERRIDING_IGNORED_BUILT_DEPENDENCIES",
+        ));
+    assert_eq!(
+        fs::read_to_string(sbx.project.join("package.json")).unwrap(),
+        manifest,
+        "a refused approval must leave the denial in place"
+    );
+    assert!(!marker_exists_under(
+        &sbx.project.join("node_modules"),
+        "DENIED_DEP_BUILT"
+    ));
+}
+
+#[test]
+fn dangerously_allow_all_builds_from_npmrc_runs_builds_but_keeps_denials() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    write_marker_dep(&sbx, "open", "OPEN_BUILT");
+    write_marker_dep(&sbx, "denied", "DENIED_BUILT");
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-allow-all-npmrc",
+            "version": "0.0.0",
+            "dependencies": { "open": "file:./open", "denied": "file:./denied" },
+            "aube": { "allowBuilds": { "denied": false } }
+        }"#,
+    );
+    sbx.write_file(".npmrc", "dangerouslyAllowAllBuilds=true\n");
+
+    sbx.cmd().arg("install").assert().success();
+    let node_modules = sbx.project.join("node_modules");
+    assert!(marker_exists_under(&node_modules, "OPEN_BUILT"));
+    assert!(
+        !marker_exists_under(&node_modules, "DENIED_BUILT"),
+        "an explicit `false` must outrank dangerouslyAllowAllBuilds"
+    );
 }
 
 #[test]

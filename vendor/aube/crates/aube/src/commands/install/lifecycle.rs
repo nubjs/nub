@@ -669,16 +669,12 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     jail_policy: &JailBuildPolicy,
     // `Some` enables install-delta mode: only current graph entries
     // whose dep_path changed since the prior install are eligible.
-    // Policy still gates those packages below. This differs from
-    // `selected_names`, which is rebuild's explicit user selection
-    // and intentionally bypasses policy.
+    // Policy still gates those packages below.
     selected_dep_paths: Option<&std::collections::BTreeSet<String>>,
-    // `Some` enables selective mode: only deps whose in-tree `name`
-    // (the alias when one is configured) is in the set are eligible,
-    // and the policy is bypassed for those deps. `None` is the
-    // default install path: every dep is eligible and the policy
-    // gates which ones actually run. Match is by `pkg.name`, matching
-    // pnpm's `pnpm rebuild <name>`.
+    // `Some` enables selective mode (`rebuild <name>`): only deps whose
+    // in-tree `name` (the alias when one is configured) is in the set are
+    // eligible. The policy still gates them, as in pnpm 12. `None` is the
+    // default install path: every dep is eligible.
     selected_names: Option<&std::collections::HashSet<String>>,
 ) -> miette::Result<DepLifecycleOutcome> {
     // Pass 1 (serial, cheap): walk the graph, keep only the packages
@@ -727,40 +723,40 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         // alongside the job so the floor is never silent about what
         // it let through.
         let mut via_floor = false;
-        if let Some(selected) = selected_names {
-            // Selective mode: user named this dep explicitly, so
-            // bypass the policy. Match by `pkg.name` (the in-tree
-            // alias when one is configured), matching pnpm's
-            // `pnpm rebuild <name>`.
-            if !selected.contains(&pkg.name) {
-                continue;
+        // Selective mode (`rebuild <name>`) narrows the candidates by
+        // `pkg.name` (the in-tree alias when one is configured), matching
+        // pnpm's `pnpm rebuild <name>`. Naming a package is not an
+        // approval: pnpm 12's rebuild "never builds a disallowed package",
+        // so the policy below still gates it.
+        if let Some(selected) = selected_names
+            && !selected.contains(&pkg.name)
+        {
+            continue;
+        }
+        // Use registry_name(), not pkg.name. pkg.name is the in-tree
+        // alias (`h3-safe`). Real package is `h3`. Allowlist entry for
+        // `h3` would miss if we checked against the alias. Attacker
+        // writes `"h3-safe": "npm:h3@0.19.0"` to sneak a denied pkg
+        // through the allowlist. registry_name() strips alias back to
+        // real name. #860 added a per-package source key
+        // (`Option<String>`); `decide_package` consults the explicit
+        // allowlist/denylist by name+version+source. We keep nub's
+        // `defaultTrust` floor as a belt-and-suspenders arm that only
+        // fires on `Unspecified`, so explicit entries always win.
+        let source_key = pkg.source_approval_key();
+        let git_repository_key = pkg.git_repository_approval_key();
+        match policy.decide_package_with_git_repository(
+            pkg.registry_name(),
+            &pkg.version,
+            source_key.as_deref(),
+            git_repository_key.as_deref(),
+        ) {
+            aube_scripts::AllowDecision::Allow => {}
+            aube_scripts::AllowDecision::Unspecified if floor.trusts(pkg, &graph.times) => {
+                via_floor = true;
             }
-        } else {
-            // Use registry_name(), not pkg.name. pkg.name is the in-tree
-            // alias (`h3-safe`). Real package is `h3`. Allowlist entry for
-            // `h3` would miss if we checked against the alias. Attacker
-            // writes `"h3-safe": "npm:h3@0.19.0"` to sneak a denied pkg
-            // through the allowlist. registry_name() strips alias back to
-            // real name. #860 added a per-package source key
-            // (`Option<String>`); `decide_package` consults the explicit
-            // allowlist/denylist by name+version+source. We keep nub's
-            // `defaultTrust` floor as a belt-and-suspenders arm that only
-            // fires on `Unspecified`, so explicit entries always win.
-            let source_key = pkg.source_approval_key();
-            let git_repository_key = pkg.git_repository_approval_key();
-            match policy.decide_package_with_git_repository(
-                pkg.registry_name(),
-                &pkg.version,
-                source_key.as_deref(),
-                git_repository_key.as_deref(),
-            ) {
-                aube_scripts::AllowDecision::Allow => {}
-                aube_scripts::AllowDecision::Unspecified if floor.trusts(pkg, &graph.times) => {
-                    via_floor = true;
-                }
-                aube_scripts::AllowDecision::Deny | aube_scripts::AllowDecision::Unspecified => {
-                    continue;
-                }
+            aube_scripts::AllowDecision::Deny | aube_scripts::AllowDecision::Unspecified => {
+                continue;
             }
         }
         let package_dir = materialized_pkg_dir(
@@ -1863,10 +1859,15 @@ pub(super) fn unreviewed_dep_builds(
     floor: &super::default_trust::DefaultTrustFloor,
     virtual_store_dir_max_length: usize,
     placements: Option<&aube_linker::HoistedPlacements>,
+    // `rebuild <name>`'s selection, by in-tree name; `None` scans every package.
+    selected_names: Option<&std::collections::HashSet<String>>,
 ) -> miette::Result<UnreviewedScan> {
     let mut unreviewed = Vec::new();
     let mut deferred = Vec::new();
     for (dep_path, pkg) in &graph.packages {
+        if selected_names.is_some_and(|names| !names.contains(&pkg.name)) {
+            continue;
+        }
         // A package the `defaultTrust` floor vouches for is not
         // unreviewed — its scripts ran. Same decision seam as
         // `run_dep_lifecycle_scripts` so the warning and the runner

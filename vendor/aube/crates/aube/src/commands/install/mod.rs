@@ -199,6 +199,31 @@ pub fn resolve_prefer_frozen_lockfile() -> Option<bool> {
     aube_settings::resolved::prefer_frozen_lockfile(&ctx)
 }
 
+/// `rebuild`'s counterpart of the install's unreviewed-builds report:
+/// the packages in the selection (every package without one) whose build
+/// scripts nothing approved, as `ERR_AUBE_IGNORED_BUILDS` under `strict`
+/// and a warning otherwise — pnpm 12's `rebuild` fails the same way.
+pub(crate) fn report_unreviewed_rebuilds(
+    aube_dir: &std::path::Path,
+    graph: &aube_lockfile::LockfileGraph,
+    policy: &aube_scripts::BuildPolicy,
+    virtual_store_dir_max_length: usize,
+    placements: Option<&aube_linker::HoistedPlacements>,
+    selected_names: Option<&std::collections::HashSet<String>>,
+    strict: bool,
+) -> miette::Result<()> {
+    let scan = lifecycle::unreviewed_dep_builds(
+        aube_dir,
+        graph,
+        policy,
+        &DefaultTrustFloor::disabled(),
+        virtual_store_dir_max_length,
+        placements,
+        selected_names,
+    )?;
+    unreviewed_builds::report(&scan.unreviewed, strict)
+}
+
 pub(crate) fn emit_pre_summary(cwd: &std::path::Path, uses_shared_store: bool, is_noop: bool) {
     if let Some(hook) = PRE_SUMMARY_HOOK.get() {
         hook(PreSummary {
@@ -657,7 +682,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         total
     };
     if let Some(total) = fast_path_total {
-        emit_up_to_date(&cwd);
+        emit_up_to_date(&cwd, &opts)?;
         control::complete(total);
         return Ok(());
     }
@@ -835,22 +860,15 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         if let Some(override_policy) = opts.build_policy_override.as_deref() {
             (override_policy.clone(), Vec::new())
         } else {
-            // With the `defaultTrust` floor active the documented
-            // precedence puts explicit `allowBuilds` entries above
-            // `dangerouslyAllowAllBuilds` in both directions, so the
-            // allow-all posture composes via `allow_all_except_denied`
-            // (explicit `false` survives). Without the floor, the
-            // pnpm-parity short-circuit (allow-all drops the map)
-            // stays untouched.
-            let compose_allow_all = opts.dangerously_allow_all_builds && default_trust_enabled;
+            // The flag reaches `opts` directly; the setting (`.npmrc`, env,
+            // pnpm's `pnpm-workspace.yaml`) only through the settings layer.
+            let dangerously_allow_all_builds = opts.dangerously_allow_all_builds
+                || aube_settings::resolved::dangerously_allow_all_builds(&settings_ctx);
             let (mut build_policy, policy_warnings) = build_policy_from_manifest_sources(
                 lifecycle_manifests.iter().map(|(_, manifest)| manifest),
                 &ws_config_shared,
-                opts.dangerously_allow_all_builds && !compose_allow_all,
+                dangerously_allow_all_builds,
             );
-            if compose_allow_all {
-                build_policy = build_policy.allow_all_except_denied();
-            }
             if let Some(inherited) = opts.inherited_build_policy.as_deref() {
                 build_policy.merge(inherited);
             }

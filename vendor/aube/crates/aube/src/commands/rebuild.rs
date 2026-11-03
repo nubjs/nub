@@ -13,7 +13,10 @@ use std::collections::HashSet;
 /// named deps and skip the root hooks. Match is by graph `name`, which
 /// is the in-tree alias when one is configured (so `aube rebuild
 /// my-alias` works for a manifest entry like
-/// `"my-alias": "npm:real-pkg@1.0"`, matching pnpm).
+/// `"my-alias": "npm:real-pkg@1.0"`, matching pnpm). Naming a package
+/// does not approve it: as in pnpm 12, an unapproved package is reported
+/// as an ignored build — `ERR_AUBE_IGNORED_BUILDS` under the default
+/// `strictDepBuilds`, a warning otherwise.
 ///
 /// Unlike the other lifecycle shortcuts, `rebuild` intentionally does not
 /// auto-install: `aube install` already runs these same four hooks after
@@ -25,9 +28,8 @@ pub struct RebuildArgs {
     /// Optional package names. When supplied, only matching deps'
     /// scripts run; the root lifecycle hooks (preinstall, install,
     /// postinstall, prepare) are skipped. Match is by graph `name`,
-    /// not by `dep_path`. The active `allowBuilds` /
-    /// `onlyBuiltDependencies` policy is bypassed for the named
-    /// deps — naming the package is the explicit opt-in.
+    /// not by `dep_path`. The active `allowBuilds` policy still decides
+    /// which of them may run.
     #[usage(arg, name = "PACKAGE")]
     pub packages: Vec<String>,
 }
@@ -86,6 +88,7 @@ pub async fn run(
         .into_diagnostic()?;
     }
 
+    let mut ignored_builds = Ok(());
     if let Some(graph) = graph {
         if let Some(selected) = selected.as_ref() {
             let known: HashSet<&str> = graph.packages.values().map(|p| p.name.as_str()).collect();
@@ -104,13 +107,44 @@ pub async fn run(
             }
         }
 
-        let (policy, warnings) =
-            super::install::build_policy_from_sources(&manifest, &workspace, false);
+        let (policy, warnings) = super::install::build_policy_from_sources(
+            &manifest,
+            &workspace,
+            aube_settings::resolved::dangerously_allow_all_builds(&settings_ctx),
+        );
         for warning in warnings {
             eprintln!("warn: {warning}");
         }
 
-        if selected.is_some() || policy.has_any_allow_rule() {
+        // The generated accessor already reads `nodeLinker` from
+        // `raw_workspace`, which is the same map `workspace.node_linker`
+        // is parsed out of — no need for a separate fallback on the
+        // typed struct field.
+        let node_linker_setting = aube_settings::resolved::node_linker(&settings_ctx);
+        let hoisting_limits = crate::commands::settings_hoisting_limits_to_linker(
+            aube_settings::resolved::hoisting_limits(&settings_ctx),
+        );
+        let hoisted_placements = match node_linker_setting {
+            aube_settings::resolved::NodeLinker::Pnp => {
+                return Err(miette!(
+                    "node-linker=pnp is not supported by aube; use `isolated` (default) or `hoisted`"
+                ));
+            }
+            aube_settings::resolved::NodeLinker::Hoisted => {
+                Some(match crate::state::read_hoisted_placements(&cwd) {
+                    Some(placements) => placements,
+                    None => aube_linker::HoistedPlacements::from_graph(
+                        &cwd,
+                        &graph,
+                        &modules_dir_name,
+                        hoisting_limits,
+                    )?,
+                })
+            }
+            aube_settings::resolved::NodeLinker::Isolated => None,
+        };
+
+        if policy.has_any_allow_rule() {
             let child_concurrency =
                 aube_settings::resolved::child_concurrency(&settings_ctx) as usize;
             let (jail_policy, jail_policy_warnings) =
@@ -118,33 +152,6 @@ pub async fn run(
             for warning in jail_policy_warnings {
                 eprintln!("warn: {warning}");
             }
-            // The generated accessor already reads `nodeLinker` from
-            // `raw_workspace`, which is the same map `workspace.node_linker`
-            // is parsed out of — no need for a separate fallback on the
-            // typed struct field.
-            let node_linker_setting = aube_settings::resolved::node_linker(&settings_ctx);
-            let hoisting_limits = crate::commands::settings_hoisting_limits_to_linker(
-                aube_settings::resolved::hoisting_limits(&settings_ctx),
-            );
-            let hoisted_placements = match node_linker_setting {
-                aube_settings::resolved::NodeLinker::Pnp => {
-                    return Err(miette!(
-                        "node-linker=pnp is not supported by aube; use `isolated` (default) or `hoisted`"
-                    ));
-                }
-                aube_settings::resolved::NodeLinker::Hoisted => {
-                    Some(match crate::state::read_hoisted_placements(&cwd) {
-                        Some(placements) => placements,
-                        None => aube_linker::HoistedPlacements::from_graph(
-                            &cwd,
-                            &graph,
-                            &modules_dir_name,
-                            hoisting_limits,
-                        )?,
-                    })
-                }
-                aube_settings::resolved::NodeLinker::Isolated => None,
-            };
             let side_effects_cache_root =
                 if aube_settings::resolved::side_effects_cache(&settings_ctx) {
                     let store = super::open_store(&cwd)?;
@@ -201,8 +208,7 @@ pub async fn run(
                 &graph,
                 &policy,
                 // No defaultTrust floor on rebuild: no advisory gate
-                // runs here, and `aube rebuild <name>` already
-                // bypasses the policy for explicitly named packages.
+                // runs here.
                 &super::install::DefaultTrustFloor::disabled(),
                 super::resolve_virtual_store_dir_max_length(&settings_ctx),
                 canonicalize_package_dir,
@@ -252,6 +258,18 @@ pub async fn run(
                 &refreshed_bin_links,
             )?;
         }
+        // Held until the root hooks below have run, the order an install
+        // fails in.
+        ignored_builds = super::install::report_unreviewed_rebuilds(
+            &aube_dir,
+            &graph,
+            &policy,
+            super::resolve_virtual_store_dir_max_length(&settings_ctx),
+            hoisted_placements.as_ref(),
+            selected.as_ref(),
+            aube_settings::resolved::strict_dep_builds(&settings_ctx)
+                || aube_settings::resolved::paranoid(&settings_ctx),
+        );
     }
 
     if selected.is_none() {
@@ -266,7 +284,7 @@ pub async fn run(
         }
     }
 
-    Ok(())
+    ignored_builds
 }
 
 async fn run_filtered(

@@ -57,8 +57,7 @@
 //!   consults the cooling defense, it never substitutes for it.
 //!
 //! `aube rebuild` does not consult the floor: no advisory gate runs
-//! there, and `aube rebuild <name>` already bypasses the policy for
-//! explicitly named packages.
+//! there.
 
 use aube_scripts::AllowDecision;
 use std::collections::{BTreeMap, HashSet};
@@ -769,11 +768,10 @@ mod tests {
     #[test]
     fn explicit_false_survives_dangerously_allow_all_when_the_floor_is_active() {
         // The documented chain when defaultTrust is on: explicit entry
-        // > allow-all > floor. The install path composes this via
-        // `allow_all_except_denied`; pin the end-to-end decision here.
+        // > allow-all > floor.
         let pkg = listed_pkg();
         let times = times_published_minutes_ago(&pkg, 10 * 1440);
-        let policy = policy_from(&[("esbuild", false)], false).allow_all_except_denied();
+        let policy = policy_from(&[("esbuild", false)], true);
         assert_eq!(
             decide_with_floor(&policy, &active_floor(), &pkg, &times),
             AllowDecision::Deny

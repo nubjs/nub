@@ -483,6 +483,16 @@ pub struct WorkspaceConfig {
     #[serde(default, rename = "sideEffectsCache")]
     pub side_effects_cache: Option<bool>,
 
+    /// Fail an install that skipped unapproved dependency build scripts.
+    /// Same typed/raw duality as `child_concurrency`.
+    #[serde(default, rename = "strictDepBuilds")]
+    pub strict_dep_builds: Option<bool>,
+
+    /// Run every dependency build script `allowBuilds` does not deny.
+    /// Same typed/raw duality as `child_concurrency`.
+    #[serde(default, rename = "dangerouslyAllowAllBuilds")]
+    pub dangerously_allow_all_builds: Option<bool>,
+
     /// Run approved dependency lifecycle scripts in a restricted build
     /// jail. Same typed/raw duality as `child_concurrency`.
     #[serde(default, rename = "jailBuilds")]
