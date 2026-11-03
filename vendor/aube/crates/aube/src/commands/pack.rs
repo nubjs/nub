@@ -70,7 +70,7 @@ pub async fn run(args: PackArgs) -> miette::Result<()> {
     let project_root = crate::dirs::project_root()?;
 
     run_pack_lifecycle_pre(&project_root, args.ignore_scripts).await?;
-    let archive = build_archive(&project_root)?;
+    let archive = build_pack_archive(&project_root)?;
     run_pack_lifecycle_post(&project_root, args.ignore_scripts).await?;
 
     let dest_dir = args
@@ -233,26 +233,49 @@ pub(crate) struct BuiltArchive {
     pub tarball: Vec<u8>,
 }
 
-/// Build a tarball for `project_dir` entirely in memory. Shared between
-/// `aube pack` (writes the bytes to disk) and the forthcoming
-/// `aube publish` (hashes and uploads them).
+/// Build a tarball for `project_dir` entirely in memory, rewriting only
+/// `catalog:` specs. Used for a prepared git dependency, which is packed
+/// outside its workspace; `aube pack` uses [`build_pack_archive`].
 pub(crate) fn build_archive(project_dir: &Path) -> miette::Result<BuiltArchive> {
-    let package_json = catalog_rewritten_package_json(project_dir)?;
-    build_archive_with_package_json(project_dir, package_json)
+    let package_json = rewritten_package_json(project_dir, rewrite_catalog_dependencies)?;
+    build_archive_with_package_json(project_dir, package_json.map(|(bytes, _)| bytes))
 }
 
-/// Return an in-memory `package.json` with publish-time catalog protocol
-/// references replaced by their concrete catalog ranges. The source manifest
-/// stays untouched. `None` means no catalog references were present, so the
+/// Build the `aube pack` tarball: the packed `package.json` is the same
+/// exported manifest `aube publish` uploads (`workspace:` / `catalog:`
+/// resolved, `publishConfig` overrides applied), and a `publishConfig.name`
+/// renames the artifact, as in pnpm.
+pub(crate) fn build_pack_archive(project_dir: &Path) -> miette::Result<BuiltArchive> {
+    let package_json =
+        rewritten_package_json(project_dir, super::exportable_manifest::export_manifest)?;
+    let Some((bytes, manifest_json)) = package_json else {
+        return build_archive_with_package_json(project_dir, None);
+    };
+    let mut archive = build_archive_with_package_json(project_dir, Some(bytes))?;
+    if let Some(name) = manifest_json.get("name").and_then(|v| v.as_str())
+        && name != archive.name
+    {
+        archive.name = name.to_string();
+        archive.filename = tarball_filename(&archive.name, &archive.version);
+    }
+    Ok(archive)
+}
+
+/// Return an in-memory `package.json` after `rewrite`, preserving the source
+/// file's indent and line endings, alongside the rewritten JSON. The source
+/// manifest stays untouched. `None` means `rewrite` changed nothing, so the
 /// archive can copy the original bytes without reformatting them.
-fn catalog_rewritten_package_json(project_dir: &Path) -> miette::Result<Option<Vec<u8>>> {
+fn rewritten_package_json(
+    project_dir: &Path,
+    rewrite: impl FnOnce(&Path, &mut serde_json::Value) -> miette::Result<bool>,
+) -> miette::Result<Option<(Vec<u8>, serde_json::Value)>> {
     let manifest_path = project_dir.join("package.json");
     let raw = std::fs::read_to_string(&manifest_path)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to read {}", manifest_path.display()))?;
     let mut manifest_json: serde_json::Value =
         aube_manifest::parse_json(&manifest_path, raw.clone()).map_err(miette::Report::new)?;
-    if !rewrite_catalog_dependencies(project_dir, &mut manifest_json)? {
+    if !rewrite(project_dir, &mut manifest_json)? {
         return Ok(None);
     }
 
@@ -276,7 +299,7 @@ fn catalog_rewritten_package_json(project_dir: &Path) -> miette::Result<Option<V
     if raw.ends_with(line_ending) {
         rewritten.push_str(line_ending);
     }
-    Ok(Some(rewritten.into_bytes()))
+    Ok(Some((rewritten.into_bytes(), manifest_json)))
 }
 
 /// Rewrite `catalog:` / `catalog:<name>` references in every dependency field
@@ -828,7 +851,7 @@ mod tests {
         )
         .unwrap();
 
-        let archive = build_archive(dir.path()).unwrap();
+        let archive = build_pack_archive(dir.path()).unwrap();
         let package_json = archived_package_json(&archive);
 
         assert_eq!(package_json["dependencies"]["regular"], "^1.2.3");
@@ -838,6 +861,37 @@ mod tests {
 
         let on_disk = std::fs::read_to_string(dir.path().join("package.json")).unwrap();
         assert!(on_disk.contains("catalog:peers"));
+    }
+
+    #[test]
+    fn pack_archive_resolves_workspace_dependencies_and_publish_config_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - packages/*\n",
+        )
+        .unwrap();
+        let app = dir.path().join("packages/app");
+        let lib = dir.path().join("packages/lib");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(
+            lib.join("package.json"),
+            r#"{"name":"lib","version":"1.2.3"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            app.join("package.json"),
+            r#"{"name":"app","version":"1.0.0","dependencies":{"lib":"workspace:*"},"publishConfig":{"name":"@acme/app"}}"#,
+        )
+        .unwrap();
+
+        let archive = build_pack_archive(&app).unwrap();
+        let package_json = archived_package_json(&archive);
+
+        assert_eq!(package_json["dependencies"]["lib"], "1.2.3");
+        assert_eq!(package_json["name"], "@acme/app");
+        assert_eq!(archive.filename, "acme-app-1.0.0.tgz");
     }
 
     #[test]
@@ -854,7 +908,7 @@ mod tests {
         )
         .unwrap();
 
-        let archive = build_archive(dir.path()).unwrap();
+        let archive = build_pack_archive(dir.path()).unwrap();
         let packed = String::from_utf8(archived_package_json_bytes(&archive)).unwrap();
 
         assert!(packed.ends_with("\r\n"));
