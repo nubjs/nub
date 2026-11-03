@@ -377,14 +377,36 @@ async fn run_inner(
             if all_direct_keys.contains(name.as_str()) {
                 return Err(miette!("package '{name}' is not a dependency"));
             }
-            // Indirect dep: must exist in the lockfile graph (either as
-            // its own name or as the real-name of an aliased entry).
-            let in_graph = existing.as_ref().is_some_and(|g| {
-                g.packages
-                    .values()
-                    .any(|p| p.name == *name || p.alias_of.as_deref() == Some(name.as_str()))
-            });
+            // Indirect dep: must exist in this project's own part of the
+            // lockfile graph (either as its own name or as the real-name of
+            // an aliased entry). A shared workspace lockfile also carries
+            // every other member's tree; a name found only there is not a
+            // dependency of this project (nubjs/nub#1001).
+            let in_graph = existing
+                .as_ref()
+                .is_some_and(|g| importer_package_names(g, &cwd_importer).contains(name.as_str()));
             if !in_graph {
+                let declared_by = existing
+                    .as_ref()
+                    .map(|g| {
+                        importers_declaring(
+                            g,
+                            name,
+                            &cwd_importer,
+                            &crate::dirs::find_workspace_root(&cwd).unwrap_or_else(|| cwd.clone()),
+                        )
+                    })
+                    .unwrap_or_default();
+                if let Some(member) = declared_by.first() {
+                    return Err(miette!(
+                        help = format!(
+                            "run `{prog} --filter {member} update {name}`, or `{prog} update -r {name}` to update it in every project that declares it",
+                            prog = aube_util::prog()
+                        ),
+                        "package '{name}' is not a dependency of this project (declared by {})",
+                        declared_by.join(", ")
+                    ));
+                }
                 return Err(miette!("package '{name}' is not a dependency"));
             }
             if ignored_updates.contains(name.as_str()) {
@@ -1131,14 +1153,38 @@ async fn run_inner(
             if new_spec == original {
                 continue;
             }
-            if manifest.dependencies.contains_key(key) {
-                manifest.dependencies.insert(key.clone(), new_spec);
+            let section = if manifest.dependencies.contains_key(key) {
+                &mut manifest.dependencies
             } else if manifest.dev_dependencies.contains_key(key) {
-                manifest.dev_dependencies.insert(key.clone(), new_spec);
+                &mut manifest.dev_dependencies
             } else if manifest.optional_dependencies.contains_key(key) {
-                manifest.optional_dependencies.insert(key.clone(), new_spec);
+                &mut manifest.optional_dependencies
             } else {
                 continue;
+            };
+            section.insert(key.clone(), new_spec.clone());
+            // Record the rewritten range on the importer too, so the lockfile
+            // agrees with the manifest it is written beside. Left stale, the
+            // chained install reads it as drift and re-resolves the whole
+            // workspace, which can move another importer's copy of the same
+            // package (nubjs/nub#1001). Only where the importer holds the
+            // range the resolver was handed: anything else is an override's.
+            let resolved_with = {
+                let m = &resolver_manifests[0].1;
+                m.dependencies
+                    .get(key)
+                    .or_else(|| m.dev_dependencies.get(key))
+                    .or_else(|| m.optional_dependencies.get(key))
+                    .cloned()
+            };
+            for dep in graph
+                .importers
+                .get_mut(resolve_importer.as_str())
+                .into_iter()
+                .flatten()
+                .filter(|dep| dep.name == *key && dep.specifier == resolved_with)
+            {
+                dep.specifier = Some(new_spec.clone());
             }
             wrote_any = true;
         }
@@ -2050,6 +2096,10 @@ async fn run_filtered(
                 // lockfile; fall back to the shared workspace-root
                 // lockfile (the one `aube install` writes) when there
                 // isn't one yet.
+                // Only the project's own importer counts: the shared
+                // lockfile also holds every other member's tree.
+                let project_importer = super::workspace_importer_path(&root, &pkg.dir)
+                    .unwrap_or_else(|_| ".".to_string());
                 let project_lockfile_names: BTreeSet<String> =
                     aube_lockfile::parse_lockfile(&pkg.dir, &project_manifest)
                         .ok()
@@ -2058,7 +2108,7 @@ async fn run_filtered(
                                 aube_lockfile::parse_lockfile(&ws, &project_manifest).ok()
                             })
                         })
-                        .map(|g| g.packages.values().map(|p| p.name.clone()).collect())
+                        .map(|g| importer_package_names(&g, &project_importer))
                         .unwrap_or_default();
                 // Compare each arg's bare name (stripping any
                 // `@<spec>` suffix) against the project's declared deps
@@ -2274,8 +2324,18 @@ async fn write_update_lockfile(
         super::write_and_log_lockfile(cwd, graph, manifest)?;
         return Ok(());
     };
-    if workspace_root == cwd || !resolve_shared_workspace_lockfile(&workspace_root)? {
+    if !resolve_shared_workspace_lockfile(&workspace_root)? {
         super::write_and_log_lockfile(cwd, graph, manifest)?;
+        return Ok(());
+    }
+    if workspace_root == cwd {
+        // The root update resolved only the root importer. Writing that graph
+        // as the whole shared lockfile dropped every member, and the chained
+        // install then re-resolved them from scratch, bumping packages nobody
+        // named (nubjs/nub#1001). Carry the other importers over as locked.
+        let previous = read_workspace_lockfile(&workspace_root, manifest)?;
+        let merged = carry_over_other_importers(graph.clone(), previous, source_importer);
+        super::write_and_log_lockfile(cwd, &merged, manifest)?;
         return Ok(());
     }
 
@@ -2378,6 +2438,57 @@ async fn merge_update_graph_into_workspace_lockfile(
     Ok(())
 }
 
+/// `updated` (one importer's fresh resolve, with its own top-level metadata)
+/// plus every other importer of `previous` with the packages it locks. A
+/// package the update re-resolved wins over the previous entry at the same
+/// key; whatever no importer reaches any more is dropped.
+fn carry_over_other_importers(
+    mut updated: aube_lockfile::LockfileGraph,
+    previous: aube_lockfile::LockfileGraph,
+    updated_importer: &str,
+) -> aube_lockfile::LockfileGraph {
+    let aube_lockfile::LockfileGraph {
+        importers,
+        packages,
+        skipped_optional_dependencies,
+        workspace_extra_fields,
+        times,
+        catalogs,
+        ..
+    } = previous;
+    for (key, deps) in importers {
+        if key == updated_importer {
+            continue;
+        }
+        if let Some(skipped) = skipped_optional_dependencies.get(&key) {
+            updated
+                .skipped_optional_dependencies
+                .insert(key.clone(), skipped.clone());
+        }
+        if let Some(extra) = workspace_extra_fields.get(&key) {
+            updated
+                .workspace_extra_fields
+                .insert(key.clone(), extra.clone());
+        }
+        updated.importers.insert(key, deps);
+    }
+    for (dep_path, pkg) in packages {
+        updated.packages.entry(dep_path).or_insert(pkg);
+    }
+    for (spec, time) in times {
+        updated.times.entry(spec).or_insert(time);
+    }
+    for (catalog, entries) in catalogs {
+        let target = updated.catalogs.entry(catalog).or_default();
+        for (name, entry) in entries {
+            target.entry(name).or_insert(entry);
+        }
+    }
+    let mut merged = updated.filter_deps(|_| true);
+    retain_package_times(&mut merged);
+    merged
+}
+
 fn retain_package_times(graph: &mut aube_lockfile::LockfileGraph) {
     let live_specs: BTreeSet<String> = graph
         .packages
@@ -2390,6 +2501,49 @@ fn retain_package_times(graph: &mut aube_lockfile::LockfileGraph) {
         })
         .collect();
     graph.times.retain(|spec, _| live_specs.contains(spec));
+}
+
+/// Names (and aliased real names) of every package reachable from
+/// `importer`, falling back to `.` when the graph has no such importer (a
+/// member's own lockfile keys its single importer `.`).
+fn importer_package_names(
+    graph: &aube_lockfile::LockfileGraph,
+    importer: &str,
+) -> BTreeSet<String> {
+    let key = if graph.importers.contains_key(importer) {
+        importer
+    } else {
+        "."
+    };
+    let mut own = graph.clone();
+    own.importers.retain(|k, _| k == key);
+    own.filter_deps(|_| true)
+        .packages
+        .into_values()
+        .flat_map(|p| std::iter::once(p.name).chain(p.alias_of))
+        .collect()
+}
+
+/// Workspace members, other than `importer`, whose lockfile importer lists
+/// `name` as a direct dependency — named by `package.json#name` when it has
+/// one, else by importer path.
+fn importers_declaring(
+    graph: &aube_lockfile::LockfileGraph,
+    name: &str,
+    importer: &str,
+    workspace_root: &std::path::Path,
+) -> Vec<String> {
+    graph
+        .importers
+        .iter()
+        .filter(|(key, deps)| key.as_str() != importer && deps.iter().any(|d| d.name == name))
+        .map(|(key, _)| {
+            aube_manifest::PackageJson::from_path(&workspace_root.join(key).join("package.json"))
+                .ok()
+                .and_then(|m| m.name)
+                .unwrap_or_else(|| key.clone())
+        })
+        .collect()
 }
 
 fn read_workspace_lockfile(
