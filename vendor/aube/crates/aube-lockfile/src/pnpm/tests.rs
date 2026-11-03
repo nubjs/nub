@@ -704,9 +704,11 @@ snapshots:
 }
 
 #[test]
-fn parse_file_dep_escaping_the_lockfile_root_is_not_rebased() {
-    // `file:` versions are relative to the lockfile directory, so a package
-    // outside the workspace root keeps its leading `..`.
+fn parse_member_local_versions_use_pnpm_anchoring() {
+    // pnpm 10/11 write a `file:` version relative to the lockfile directory and
+    // a `link:` version relative to the importer. Neither anchoring is visible
+    // from a leading `..`: a `file:` package outside the workspace root keeps
+    // one, and a `link:` into the importer's own subtree has none.
     let dir = tempfile::tempdir().unwrap();
     let lockfile_path = dir.path().join("pnpm-lock.yaml");
     std::fs::write(
@@ -722,28 +724,44 @@ importers:
       dep:
         specifier: file:../../../dep
         version: file:../dep
+      ldep:
+        specifier: link:./vendored
+        version: link:vendored
+      tdep:
+        specifier: file:../../../tarballs/tdep-1.0.0.tgz
+        version: file:../tarballs/tdep-1.0.0.tgz
 
 packages:
   dep@file:../dep:
     resolution: {directory: ../dep, type: directory}
+  tdep@file:../tarballs/tdep-1.0.0.tgz:
+    resolution: {tarball: file:../tarballs/tdep-1.0.0.tgz}
+    version: 1.0.0
 
 snapshots:
   dep@file:../dep: {}
+  tdep@file:../tarballs/tdep-1.0.0.tgz: {}
 "#,
     )
     .unwrap();
 
     let graph = parse(&lockfile_path).unwrap();
-    let dep = graph
-        .packages
-        .values()
-        .find(|pkg| pkg.name == "dep")
-        .expect("dep");
+    let source = |name: &str| {
+        let dep = graph.importers["apps/app"]
+            .iter()
+            .find(|dep| dep.name == name)
+            .unwrap_or_else(|| panic!("{name} missing from apps/app"));
+        graph.packages[&dep.dep_path].local_source.clone()
+    };
+    assert_eq!(source("dep"), Some(LocalSource::Directory("../dep".into())));
     assert_eq!(
-        dep.local_source,
-        Some(LocalSource::Directory("../dep".into()))
+        source("tdep"),
+        Some(LocalSource::Tarball("../tarballs/tdep-1.0.0.tgz".into()))
     );
-    assert_eq!(graph.importers["apps/app"][0].dep_path, dep.dep_path);
+    assert_eq!(
+        source("ldep"),
+        Some(LocalSource::Link("apps/app/vendored".into()))
+    );
 }
 
 #[test]
