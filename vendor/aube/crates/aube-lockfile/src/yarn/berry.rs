@@ -288,6 +288,7 @@ pub(super) fn parse_berry_str(
                     dep_path: dep_path.clone(),
                     local_source,
                     declared_dependencies: declared,
+                    declared_dependencies_known: true,
                     ..Default::default()
                 },
             );

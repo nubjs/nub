@@ -924,6 +924,7 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
                 // when re-emitting a pnpm-sourced graph into one of
                 // their formats.
                 declared_dependencies: BTreeMap::new(),
+                declared_dependencies_known: false,
                 // pnpm's format doesn't carry per-package license or
                 // funding metadata, so a pnpm → npm conversion
                 // degrades to empty rather than re-fetching each
