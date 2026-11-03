@@ -24,16 +24,17 @@
 //!   sticky `/tmp`, a cross-uid attacker can neither write inside it nor rename it
 //!   away, which also closes the verify→load (TOCTOU) window for any principal but
 //!   the user themselves (same-uid is already game-over — they own the binary).
-//!   Windows validates the base directory alone: not a reparse point, owned by the
-//!   user (or SYSTEM/Administrators), and writable by no other principal — an
-//!   existing base carrying inherited grants is hardened to a protected private
-//!   DACL rather than declined, and missing components are created with that DACL
-//!   attached. Ancestors are not validated, matching npm, pnpm, Cargo, uv and Deno:
-//!   their DACLs are the system's to set, and an account with write access to one
-//!   already controls the user's profile (nub's own binary and PATH included), so
-//!   refusing the cache there disabled the runtime without protecting it (#908).
-//!   A base swapped from above is still caught at its directly-loaded entrypoints
-//!   by R2.
+//!   Unix also checks every ancestor: each must be owned by the user or root, and
+//!   one that a group or the world can write must be sticky, or another account
+//!   could rename the private base away and plant its own. Windows applies the same
+//!   rule through each ancestor's DACL, with one exception: the user's own profile
+//!   (`FOLDERID_Profile`, not the spoofable `%USERPROFILE%`) and every directory
+//!   between it and the base go unchecked, because an account that can write the
+//!   profile already controls the user. That is where Codex's Windows sandbox grants
+//!   a foreign SID full control, which used to disable the runtime on every command
+//!   (#908). The base itself is validated as on Unix; an existing one carrying
+//!   inherited grants is hardened to a protected private DACL rather than declined,
+//!   and missing components are created with that DACL attached.
 //!
 //! - **R2 — verify the loaded code against a baked-in hash (integrity backstop).**
 //!   `build.rs` bakes the BLAKE3 digest of the directly-loaded entrypoints
@@ -560,43 +561,119 @@ fn is_safe_dir(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|meta| !meta.file_type().is_symlink() && meta.is_dir())
 }
 
-/// Validate the Windows cache directory itself: a real directory, not a reparse
-/// point, owned by this user (or SYSTEM/Administrators) and writable by nobody else.
-/// Missing components are created one at a time with the private DACL already
-/// attached, never through `create_dir_all`, so nothing nub creates inherits a
-/// shared parent's access.
+/// Validate a Windows cache base and the namespace above it. Missing components
+/// are created one at a time with the private DACL already attached, never through
+/// `create_dir_all`, so nothing nub creates inherits a shared parent's access.
 ///
-/// Ancestors are deliberately NOT validated. Their DACLs are the system's, and a
-/// principal holding write access to one (Codex's Windows sandbox grants a foreign
-/// SID full control of `C:\Users\<user>`) already controls everything else under
-/// that profile, nub's own binary included, so refusing the cache there protected
-/// nothing while disabling the runtime on every command (#908). npm, pnpm, Cargo,
-/// uv and Deno validate no ancestor of their caches either. A base swapped from
-/// above still meets R2, which re-hashes every directly-loaded entrypoint against
-/// the binary's baked digests on load.
+/// - **The base** must be a real directory, not a reparse point, owned by this user
+///   (or SYSTEM/Administrators) and writable by nobody else. An existing base that
+///   inherited wider grants is hardened to the private DACL instead of declined.
+/// - **Its parents** must not let another account delete, rename or replace a child,
+///   the same rule Unix applies through its sticky-parent check: a private base
+///   under a parent someone else can write is renamed away and swapped after R2 has
+///   hashed it and before Node opens it.
+/// - **Except inside the user's own profile.** The profile directory and every
+///   parent between it and the base are not checked. Any account that can write the
+///   profile already controls this user (the Startup folder, PowerShell profiles),
+///   so checking there protects nothing, and it is exactly where Codex's Windows
+///   sandbox puts a foreign SID with full control of `C:\Users\<user>` (#908).
+///   `C:\Users` and the volume root above it, and every parent of a base outside the
+///   profile, are still checked.
 #[cfg(windows)]
 fn walk_windows_base(path: &Path, create_missing: bool) -> std::io::Result<()> {
+    walk_windows_base_under(path, create_missing, trusted_profile().as_deref())
+}
+
+/// The signed-in user's profile directory from the shell's known-folder record
+/// (`SHGetKnownFolderPath(FOLDERID_Profile)`, which `dirs_next::home_dir` reads on
+/// Windows), never `%USERPROFILE%`, which whoever starts nub can set to anything.
+#[cfg(windows)]
+fn trusted_profile() -> Option<PathBuf> {
+    dirs_next::home_dir()
+}
+
+/// Whether `path` is `profile` or inside it, comparing Windows spellings: case,
+/// separators and a `\\?\` verbatim prefix do not distinguish two paths there.
+#[cfg(windows)]
+fn is_within_profile(path: &Path, profile: &Path) -> bool {
+    let spelling = |path: &Path| {
+        path.to_str().map(|text| {
+            super::spawn::strip_verbatim(text, true)
+                .replace('/', "\\")
+                .trim_end_matches('\\')
+                .to_lowercase()
+        })
+    };
+    match (spelling(path), spelling(profile)) {
+        (Some(path), Some(profile)) => {
+            path == profile
+                || path
+                    .strip_prefix(&profile)
+                    .is_some_and(|rest| rest.starts_with('\\'))
+        }
+        _ => false,
+    }
+}
+
+/// [`walk_windows_base`] with the trusted profile passed in, so tests can stand a
+/// throwaway directory in for the real one.
+#[cfg(windows)]
+fn walk_windows_base_under(
+    path: &Path,
+    create_missing: bool,
+    profile: Option<&Path>,
+) -> std::io::Result<()> {
     use std::os::windows::fs::MetadataExt;
 
-    if create_missing {
-        let mut chain: Vec<_> = path.ancestors().collect();
-        chain.reverse();
-        for component in chain {
-            match fs::symlink_metadata(component) {
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    match crate::windows_security::create_private_directory(component) {
-                        Ok(()) => {}
-                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                        Err(error) => return Err(error),
-                    }
+    let reparse = |metadata: &fs::Metadata| {
+        metadata.file_type().is_symlink() || metadata.file_attributes() & 0x0400 != 0
+    };
+    let create = |component: &Path| -> std::io::Result<()> {
+        match fs::symlink_metadata(component) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && create_missing => {
+                match crate::windows_security::create_private_directory(component) {
+                    Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => Err(error),
+                    _ => Ok(()),
                 }
-                Err(error) => return Err(error),
             }
+            _ => Ok(()),
+        }
+    };
+
+    let mut chain: Vec<_> = path.ancestors().collect();
+    chain.reverse();
+    let (base, parents) = chain
+        .split_last()
+        .ok_or_else(|| std::io::Error::other("the cache directory has no path"))?;
+    for (index, &parent) in parents.iter().enumerate() {
+        create(parent)?;
+        if profile.is_some_and(|profile| is_within_profile(parent, profile)) {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(parent)?;
+        if reparse(&metadata) {
+            return Err(std::io::Error::other(format!(
+                "its parent {} is a symlink or reparse point",
+                parent.display()
+            )));
+        }
+        if !metadata.is_dir() {
+            return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory));
+        }
+        if !crate::windows_security::directory_is_stable(parent, false, index == 0)? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "its parent {} lets another account replace the cache directory",
+                    parent.display()
+                ),
+            ));
         }
     }
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || metadata.file_attributes() & 0x0400 != 0 {
+
+    create(base)?;
+    let metadata = fs::symlink_metadata(base)?;
+    if reparse(&metadata) {
         return Err(std::io::Error::other(
             "the cache directory is a symlink or reparse point",
         ));
@@ -604,7 +681,7 @@ fn walk_windows_base(path: &Path, create_missing: bool) -> std::io::Result<()> {
     if !metadata.is_dir() {
         return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory));
     }
-    if crate::windows_security::directory_is_stable(path, true, false)? {
+    if crate::windows_security::directory_is_stable(base, true, false)? {
         return Ok(());
     }
     // The base is NOT necessarily created by this walk: node discovery writes
@@ -621,13 +698,13 @@ fn walk_windows_base(path: &Path, create_missing: bool) -> std::io::Result<()> {
             unsafe_dir,
         ));
     }
-    if let Err(error) = crate::windows_security::harden_private_directory(path) {
+    if let Err(error) = crate::windows_security::harden_private_directory(base) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             format!("{unsafe_dir}, and making it private failed: {error}"),
         ));
     }
-    if crate::windows_security::directory_is_stable(path, true, false)? {
+    if crate::windows_security::directory_is_stable(base, true, false)? {
         return Ok(());
     }
     Err(std::io::Error::new(
@@ -1464,45 +1541,62 @@ mod tests {
         fs::remove_dir_all(&created).unwrap();
     }
 
-    /// #908: Codex's Windows sandbox grants a foreign SID full control of
-    /// `C:\Users\<user>`, the ancestor of both default bases, and validating that
-    /// ancestor left the runtime unextractable on every command. Only the base's own
-    /// DACL decides now: one created below such a parent is private and used, and one
-    /// that inherited the shared grant is refused as-is and hardened on adoption.
+    /// #908 and its limit. Codex's Windows sandbox grants a foreign SID full control
+    /// of the profile; inside the profile that parent is trusted, so the base is used.
+    /// The same grant on a parent outside the profile lets that account rename the
+    /// base away, so there it is refused. A throwaway directory stands in for the
+    /// profile, so the test never edits the real one.
     #[cfg(windows)]
     #[test]
-    fn windows_runtime_cache_is_used_below_an_ancestor_another_account_can_write() {
-        let shared = tmp_base("nub-rtc-shared-ancestor");
-        crate::windows_security::create_shared_directory(&shared).unwrap();
+    fn windows_runtime_cache_trusts_the_profile_but_not_a_shared_parent_outside_it() {
+        use crate::windows_security::{create_shared_directory, directory_is_stable};
+
+        assert!(is_within_profile(
+            Path::new(r"\\?\C:\Users\Ann\.cache\nub"),
+            Path::new(r"c:\users\ann")
+        ));
+        assert!(!is_within_profile(
+            Path::new(r"C:\Users\Anne\.cache"),
+            Path::new(r"C:\Users\Ann")
+        ));
+
+        let root = ensure_safe_base(&tmp_base("nub-rtc-profile")).unwrap();
+        let profile = root.join("profile");
+        let shared = root.join("shared");
+        create_shared_directory(&profile).unwrap();
+        create_shared_directory(&shared).unwrap();
         assert!(
-            !crate::windows_security::directory_is_stable(&shared, false, false).unwrap(),
-            "control: the parent grants Everyone full control"
+            !directory_is_stable(&profile, false, false).unwrap(),
+            "control: the stand-in profile grants Everyone full control"
         );
 
-        let base = shared.join("nub");
-        let dir = extract_with(std::slice::from_ref(&base))
-            .expect("the runtime extracts below a parent another account can write");
-        let base = fs::canonicalize(&base).unwrap();
-        assert!(dir.starts_with(&base), "extracted into {dir:?}");
-        assert!(verify_entrypoints(&dir), "the extraction verifies");
+        let inside = profile.join(".cache").join("nub");
+        walk_windows_base_under(&inside, true, Some(&profile))
+            .expect("a base inside the profile is used despite the profile's grant");
         assert!(
-            crate::windows_security::directory_is_stable(&base, true, false).unwrap(),
-            "the created base carries the private DACL, not the parent's grant"
+            directory_is_stable(&inside, true, false).unwrap(),
+            "the base is created with the private DACL"
         );
 
-        let inherited = shared.join("inherited");
+        let outside = shared.join("nub");
+        let refusal = walk_windows_base_under(&outside, true, Some(&profile))
+            .expect_err("a base under a shared parent outside the profile is refused");
+        assert!(
+            refusal.to_string().contains("lets another account replace"),
+            "{refusal}"
+        );
+
+        let inherited = profile.join("inherited");
         fs::create_dir(&inherited).unwrap();
         assert!(
-            !is_safe_dir(&inherited),
-            "a base that inherited the shared grant is refused as-is"
+            walk_windows_base_under(&inherited, false, Some(&profile)).is_err(),
+            "a base that inherited the grant is refused as-is"
         );
-        let hardened = ensure_safe_base(&inherited).expect("a base we own is hardened");
-        assert!(
-            crate::windows_security::directory_is_stable(&hardened, true, false).unwrap(),
-            "adoption hardens the base to the private DACL"
-        );
+        walk_windows_base_under(&inherited, true, Some(&profile))
+            .expect("a base we own is hardened on adoption");
+        assert!(directory_is_stable(&inherited, true, false).unwrap());
 
-        fs::remove_dir_all(&shared).unwrap();
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[cfg(windows)]
@@ -1540,11 +1634,23 @@ mod tests {
             ensure_safe_base(&junction).is_none(),
             "a junction must never be adopted as the runtime-cache base"
         );
-        // Only the base itself is checked: a redirected parent (a profile folder
-        // moved to another drive) is the system's business.
+        // A junction among the parents is the user's own business inside the profile
+        // (where `%TEMP%` puts this one) and a refusal outside it.
         assert!(
-            ensure_safe_base(&junction.join("nub")).is_some(),
-            "a base below a junction is adopted"
+            walk_windows_base_under(&junction.join("nub"), true, Some(&root)).is_ok(),
+            "a base below a junction inside the profile is adopted"
+        );
+        assert!(
+            walk_windows_base_under(
+                &junction.join("nub2"),
+                true,
+                Some(Path::new(
+                    r"C:
+o-such-profile"
+                ))
+            )
+            .is_err(),
+            "a base below a junction outside the profile is refused"
         );
         fs::remove_dir(&junction).unwrap();
         fs::remove_dir_all(&root).unwrap();
