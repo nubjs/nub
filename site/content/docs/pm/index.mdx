@@ -5,6 +5,8 @@ description: Provision and run the package manager your project pins — corepac
 
 Nub reads your project's package-manager pin, fetches that exact version from the npm registry — integrity-verified, cached under `~/.cache/nub/pm` — and runs it under the project's Node. There is no corepack `enable` step and no baked version table, so a six-month-old Nub binary provisions today's pnpm.
 
+`nub install` is separate: it always runs Nub's own engine, and the pin (or, without one, the lockfile) decides which manager's lockfile format, config files, and behavior it follows. Running the pinned manager itself, as a bare `pnpm` or `yarn` command, is what the [shims](/docs/pm/pm-shim) are for.
+
 ```console
 $ nub pm which
 /Users/you/.cache/nub/pm/pnpm/9.15.4/package/bin/pnpm.cjs
@@ -130,7 +132,7 @@ Versions live at `~/.cache/nub/pm/<pm>/<version>`. A cached exact pin runs fully
 
 ### `nub pm shim`
 
-The shims are an opt-in: run `nub pm shim` and a bare `pnpm`, `npm`, or `yarn` command routes through Nub to the pinned manager, with `nub pm unshim` to remove them. Default usage needs none of this — `nub install` and `nub run` already run the pin. See [Corepack-style shims](/docs/pm/pm-shim) for the install, the strict-by-default refusal, and the per-invocation overhead.
+The shims are an opt-in: run `nub pm shim` and a bare `pnpm`, `npm`, or `yarn` command routes through Nub to the pinned manager, with `nub pm unshim` to remove them. Default usage needs none of this — `nub install` and `nub run` work on Nub's own engine. See [Corepack-style shims](/docs/pm/pm-shim) for the install, the strict-by-default refusal, and the per-invocation overhead.
 
 ## Pinning Nub itself
 
