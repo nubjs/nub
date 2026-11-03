@@ -231,17 +231,26 @@ fn rename_in_package(from: &Path, to: &Path) -> Result<(), String> {
 /// `readme.md` → `README.md` on a case-insensitive filesystem (default
 /// macOS and Windows): the destination lookup finds the source itself.
 /// pnpm's `fs-extra` `moveSync` lets that through, and `rename` then
-/// stores the new casing. Identity alone is not enough, because the
-/// linker hardlinks identical files from the store, so two names in one
-/// package can share an inode; the destination's exact name must also be
-/// absent from its directory, meaning the lookup only matched by folding.
+/// stores the new casing. It must be the source's own directory entry:
+/// the linker hardlinks identical files from the store, so another entry
+/// can share the source's inode, and `rename` between two links to one
+/// inode succeeds without doing anything. So the name has to fold to the
+/// source's own name in the same directory, and not exist there verbatim.
 fn is_case_only_rename(from: &Path, to: &Path) -> bool {
-    let (Some(dir), Some(name)) = (to.parent(), to.file_name()) else {
+    let (Some(dir), Some(from_name), Some(to_name)) =
+        (to.parent(), from.file_name(), to.file_name())
+    else {
         return false;
     };
-    same_file::is_same_file(from, to).unwrap_or(false)
+    let folds_to_source = match (from_name.to_str(), to_name.to_str()) {
+        (Some(from_name), Some(to_name)) => from_name.to_lowercase() == to_name.to_lowercase(),
+        _ => false,
+    };
+    from.parent() == Some(dir)
+        && folds_to_source
+        && same_file::is_same_file(from, to).unwrap_or(false)
         && std::fs::read_dir(dir).is_ok_and(|mut entries| {
-            entries.all(|entry| entry.is_ok_and(|entry| entry.file_name() != name))
+            entries.all(|entry| entry.is_ok_and(|entry| entry.file_name() != to_name))
         })
 }
 
@@ -1448,20 +1457,33 @@ mod tests {
         assert!(err.contains("already exists"), "{err}");
         assert!(pkg.join("LICENSE").exists() && pkg.join("COPYING").exists());
 
-        // Folded onto a different file: this collides only where the
-        // filesystem is case-insensitive; on Linux the name is simply free.
+        // Folded onto a different entry: these collide only where the
+        // filesystem is case-insensitive; on Linux the names are free. The
+        // second shares the source's inode, so identity cannot tell it apart.
         let case_insensitive = pkg.join("readme.md").exists();
-        let result = rename("a.js", "readme.MD");
+        let entries = || {
+            let mut names: Vec<String> = std::fs::read_dir(&pkg)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort();
+            names
+        };
+        let folded_onto_other = rename("a.js", "readme.MD");
+        let folded_onto_hard_link = rename("LICENSE", "Copying");
         if case_insensitive {
-            let err = result.unwrap_err();
-            assert!(err.contains("already exists"), "{err}");
-            assert!(pkg.join("a.js").exists());
+            for result in [folded_onto_other, folded_onto_hard_link] {
+                let err = result.unwrap_err();
+                assert!(err.contains("already exists"), "{err}");
+            }
+            assert_eq!(entries(), ["COPYING", "LICENSE", "README.md", "a.js"]);
             assert_eq!(
                 std::fs::read_to_string(pkg.join("README.md")).unwrap(),
                 "readme\n"
             );
         } else {
-            result.unwrap();
+            folded_onto_other.unwrap();
+            folded_onto_hard_link.unwrap();
         }
     }
 
