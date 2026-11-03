@@ -191,9 +191,25 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           persist-credentials: false
+      # setup-node takes "latest" literally, prerelease included: index.json listed
+      # v27.0.0-alpha.0.0.0 first on 2026-10-29, which nub rightly refuses for the
+      # fixture's ">=18", so the leg ran 26.13.0 and failed its version check.
+      - name: Resolve "latest" to the newest release
+        id: node
+        shell: bash
+        env:
+          NODE_SPEC: ${{ matrix.node }}
+        run: |
+          set -euo pipefail
+          version="$NODE_SPEC"
+          if [[ "$version" == "latest" ]]; then
+            version=$(curl -fsSL --retry 3 https://nodejs.org/dist/index.json \
+              | jq -er '[.[] | select(.version | contains("-") | not)][0].version')
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
-          node-version: ${{ matrix.node }}
+          node-version: ${{ steps.node.outputs.version }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: nub-bundle

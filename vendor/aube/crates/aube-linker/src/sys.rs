@@ -1884,10 +1884,12 @@ mod tests {
     /// The clause would be dead and the suite would say nothing. This is the
     /// one test that fails in that direction.
     ///
-    /// `/bin/echo` stands in for the interpreter because it is a real native
-    /// executable (so it does not open with `#!`) and it makes the two
-    /// branches distinguishable: delegating ECHOES the target path, while
-    /// falling back EXECUTES the target through `sh`.
+    /// The stand-in interpreter is an executable with no `#!` line, which is
+    /// all the probe inspects; `exec` hands it to the shell on `ENOEXEC`, as
+    /// POSIX requires. Delegating prints a marker with the target path, while
+    /// falling back EXECUTES the target through `sh`. A symlink to `/bin/echo`
+    /// stood in here until Ubuntu 26.04: its uutils multicall binary refuses
+    /// to run under the name `sh`.
     #[cfg(unix)]
     #[test]
     fn a_real_interpreter_beside_the_wrapper_is_still_preferred() {
@@ -1913,8 +1915,9 @@ mod tests {
             },
         )
         .unwrap();
-        // A genuine native binary under the interpreter's name.
-        std::os::unix::fs::symlink("/bin/echo", bin_dir.join("sh")).unwrap();
+        let interpreter = bin_dir.join("sh");
+        std::fs::write(&interpreter, "echo DELEGATED \"$@\"\n").unwrap();
+        std::fs::set_permissions(&interpreter, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let out = std::process::Command::new(bin_dir.join("tool"))
             .arg("one")
@@ -1922,9 +1925,9 @@ mod tests {
             .expect("the wrapper should be executable");
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
-            stdout.contains("cli.sh") && stdout.contains("one"),
-            "a real interpreter beside the wrapper must be PREFERRED — `/bin/echo` \
-             should have echoed the target and args. Falling back here means the \
+            stdout.contains("DELEGATED") && stdout.contains("cli.sh") && stdout.contains("one"),
+            "a real interpreter beside the wrapper must be PREFERRED — the stand-in \
+             should have printed the target and args. Falling back here means the \
              probe never succeeds and the preference clause is dead: stdout={stdout:?} \
              stderr={:?}",
             String::from_utf8_lossy(&out.stderr),
