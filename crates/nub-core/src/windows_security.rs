@@ -118,6 +118,7 @@ const ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE: u8 = 11;
 const ACE_OBJECT_TYPE_PRESENT: u32 = 0x1;
 const ACE_INHERITED_OBJECT_TYPE_PRESENT: u32 = 0x2;
 const INHERIT_ONLY_ACE: u8 = 0x08;
+const INHERITED_ACE: u8 = 0x10;
 
 const WIN_CREATOR_OWNER_SID: i32 = 3;
 const WIN_LOCAL_SYSTEM_SID: i32 = 22;
@@ -296,6 +297,25 @@ fn create_directory_with_sddl(path: &Path, sddl: &str) -> io::Result<()> {
 }
 
 pub fn directory_is_stable(path: &Path, leaf: bool, volume_root: bool) -> io::Result<bool> {
+    dacl_is_stable(path, leaf, volume_root, false)
+}
+
+/// [`directory_is_stable`] for a directory below a TRUSTED one, judging only the
+/// grants set on it directly. An ACE carrying `INHERITED_ACE` was copied down from
+/// the parent, so it is the parent's grant: trusted when the parent is (the user's
+/// profile), and already judged when the parent was checked the same way. An
+/// explicit inherit-only template IS counted here, because it reaches the next
+/// directory as an inherited ACE that this rule would then accept.
+pub fn directory_is_stable_below_trusted(path: &Path) -> io::Result<bool> {
+    dacl_is_stable(path, false, false, true)
+}
+
+fn dacl_is_stable(
+    path: &Path,
+    leaf: bool,
+    volume_root: bool,
+    explicit_only: bool,
+) -> io::Result<bool> {
     let current = current_user_sid()?;
     let path = wide_path(path);
     let mut owner = ptr::null_mut();
@@ -354,7 +374,11 @@ pub fn directory_is_stable(path: &Path, leaf: bool, volume_root: bool) -> io::Re
         // base was usable on any Windows machine. The LEAF still counts them: its
         // children are the cache CONTENTS, which no later component validates, so
         // an inherit-only grant there does reach the files we are protecting.
-        if !leaf && header.ace_flags & INHERIT_ONLY_ACE != 0 {
+        if explicit_only {
+            if header.ace_flags & INHERITED_ACE != 0 {
+                continue;
+            }
+        } else if !leaf && header.ace_flags & INHERIT_ONLY_ACE != 0 {
             continue;
         }
         if usize::from(header.ace_size) < 8 {
