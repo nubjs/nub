@@ -1042,12 +1042,13 @@ pub(crate) fn run_use_nub(root: &Path, exact_pin: Option<&str>) -> Result<i32> {
     }
     println!("  - real pnpm refuses to run here (ERR_PNPM_OTHER_PM_EXPECTED) — by design;");
     println!("    `nub pm use pnpm` reverses this switch completely");
-    // Turborepo recognizes nub from 2.10.2 (vercel/turborepo#13120), and only
-    // through the exact `packageManager` field.
+    // Turborepo recognizes nub from 2.10.2 (vercel/turborepo#13120), through the
+    // exact `packageManager` field only; 2.10.3 (vercel/turborepo#13189) also
+    // accepts the devEngines range a bare switch writes.
     if exact_pin.is_some() {
         println!("  - turbo needs 2.10.2 or later to recognize nub");
     } else {
-        println!("  - turbo needs 2.10.2 or later and an exact packageManager pin (`nub pm pin`)");
+        println!("  - turbo needs 2.10.3 or later to recognize nub");
     }
     println!("  - hosted update bots (Renovate/Dependabot) can't regenerate {NUB_LOCKFILE} yet");
     println!("  - lockfile-sniffing deploy platforms won't auto-detect a PM — run installs");
