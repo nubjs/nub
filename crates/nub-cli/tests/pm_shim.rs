@@ -544,11 +544,18 @@ fn pnpm_12_cached_shims_run_the_node_launchers() {
     std::fs::create_dir_all(pkg.join("bin")).unwrap();
     std::fs::write(
         pkg.join("package.json"),
-        r#"{"name":"pnpm","version":"12.0.0","bin":{"pnpm":"pnpm","pnpx":"pnpx"}}"#,
+        r#"{"name":"pnpm","version":"12.0.0","bin":{"pn":"pn","pnx":"pnx","pnpm":"pnpm","pnpx":"pnpx"}}"#,
     )
     .unwrap();
-    std::fs::write(pkg.join("pnpm"), "This is a native binary placeholder.\n").unwrap();
-    std::fs::write(pkg.join("pnpx"), "#!/bin/sh\nexec pnpm dlx \"$@\"\n").unwrap();
+    // pnpm 12's root bins are placeholders that its `preinstall` overwrites
+    // with the native binary; Node cannot parse them.
+    for placeholder in ["pn", "pnx", "pnpm", "pnpx"] {
+        std::fs::write(
+            pkg.join(placeholder),
+            "# pnpm's native binary replaces this file\n",
+        )
+        .unwrap();
+    }
     std::fs::write(nub_cache.join(".npmrc"), "registry=http://127.0.0.1:1/\n").unwrap();
     let path = std::env::var("PATH").unwrap();
     for entry in ["pnpm", "pnpx"] {
