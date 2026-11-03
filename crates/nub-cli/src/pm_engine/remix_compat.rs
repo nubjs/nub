@@ -21,24 +21,24 @@
 //!
 //! Defaults are computed before resolution, so the signal is the declared
 //! range. Under semver a prerelease satisfies a range only through a comparator
-//! naming the same `major.minor.patch` with a prerelease tag, so a range admits a
-//! `3.0.0-*` version exactly when it spells one: `^3.0.0` and `>=2` cannot select
-//! one, while `3.0.0-rc.5` or `^3.0.0-beta.1` can (directly, or through a lockfile
-//! that pinned it). A spec that is not a semver range at all — a dist-tag such as
-//! `next`, a `catalog:` or `npm:` spec — is ambiguous and ejects: the worst case
-//! is a redundant project-local install, never a broken one.
+//! naming the same `major.minor.patch` with a prerelease tag, so `^3.0.0` and
+//! `>=2` cannot select a `3.0.0-*` version while `3.0.0-rc.5`, `^3.0.0-beta.1`
+//! or `<3.0.0-rc.3` can (directly, or through a lockfile that pinned it). A spec
+//! that is not a semver range at all — a dist-tag such as `next`, a `catalog:` or
+//! `npm:` spec — is ambiguous and ejects: the worst case is a redundant
+//! project-local install, never a broken one.
 
 use std::path::{Path, PathBuf};
 
 use super::expo_compat::declared_direct_ranges;
 
-/// The first `remix` release whose dependency range guarantees an asset server
-/// that mounts a global virtual store (`@remix-run/assets` >= 0.7.0). Only
-/// prereleases of it predate the fix.
-const REMIX_STORE_AWARE_RELEASE: &str = "3.0.0";
+/// The `remix` versions whose asset server predates the store mount: every
+/// prerelease of 3.0.0, the first release whose dependency range guarantees
+/// `@remix-run/assets` >= 0.7.0.
+const REMIX_STORE_UNAWARE: &str = ">=3.0.0-0 <3.0.0";
 
 /// Whether the workspace at `root` declares a `remix` dependency that can
-/// resolve to a prerelease of [`REMIX_STORE_AWARE_RELEASE`] — i.e. GVS must be
+/// resolve to a version in [`REMIX_STORE_UNAWARE`] — i.e. GVS must be
 /// ejected for it. `false` when no manifest declares `remix` or every declared
 /// range excludes those prereleases; `true` when any range admits one OR is not
 /// a semver range. Same dependency scope as the aube trigger (dependencies /
@@ -52,14 +52,23 @@ pub(crate) fn remix_needs_project_local_store(root: &Path, workspace_members: &[
 }
 
 fn range_may_select_unaware_prerelease(range: &str) -> bool {
-    let range = range.trim();
     if node_semver::Range::parse(range).is_err() {
         return true;
     }
-    let prerelease = format!("{REMIX_STORE_AWARE_RELEASE}-");
-    range
-        .match_indices(&prerelease)
-        .any(|(at, _)| !range[..at].ends_with(|c: char| c.is_ascii_digit() || c == '.'))
+    let unaware = node_semver::Range::parse(REMIX_STORE_UNAWARE).expect("valid range");
+    // An interval overlap is not enough: `>=2` overlaps the window yet admits no
+    // prerelease. Prerelease admission is decided per comparator set, so each
+    // `||` alternative is tested on its own, with the smallest version the overlap
+    // contains — every `3.0.0-*` in an overlap is admitted alike, or none is. The
+    // crate is the resolver's own, so a spelling npm's `semver` reads differently
+    // (`>=3.0.x-rc.1` keeps its tag here, loses it there) is judged as installed.
+    range.split("||").any(|alternative| {
+        node_semver::Range::parse(alternative).is_ok_and(|set| {
+            set.intersect(&unaware)
+                .and_then(|overlap| overlap.min_version())
+                .is_some_and(|version| set.satisfies(&version))
+        })
+    })
 }
 
 #[cfg(test)]
@@ -80,12 +89,17 @@ mod tests {
 
     #[test]
     fn only_ranges_admitting_a_3_0_0_prerelease_eject() {
+        let mut wrong = Vec::new();
         for (deps, want) in [
             (r#"{"remix":"3.0.0-rc.5"}"#, true),
             (r#"{"remix":"3.0.0-rc.1"}"#, true),
             (r#"{"remix":"^3.0.0-beta.1"}"#, true),
             (r#"{"remix":">=3.0.0-alpha.0"}"#, true),
             (r#"{"remix":"3.0.0-rc.1 || ^3.1.0"}"#, true),
+            (r#"{"remix":">=3.0.x-rc.1 <3.0.0"}"#, true),
+            (r#"{"remix":"<3.0.0-rc.3"}"#, true),
+            (r#"{"remix":">=2 || 3.0.0-rc.5"}"#, true),
+            (r#"{"remix":">=3.0.0-rc.1 >=3.1.0"}"#, false),
             (r#"{"remix":"next"}"#, true),
             (r#"{"remix":"catalog:"}"#, true),
             (r#"{"remix":"3.0.0"}"#, false),
@@ -100,8 +114,11 @@ mod tests {
             (r#"{}"#, false),
         ] {
             let dir = project_with(&format!(r#"{{"name":"app","dependencies":{deps}}}"#));
-            assert_eq!(ejects(dir.path()), want, "dependencies={deps}");
+            if ejects(dir.path()) != want {
+                wrong.push(format!("dependencies={deps} should eject: {want}"));
+            }
         }
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     #[test]
