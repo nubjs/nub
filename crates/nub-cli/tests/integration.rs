@@ -1955,6 +1955,7 @@ fn the_entry_tsconfig_check_follows_the_real_path_and_skips_dependencies() {
             .arg(entry)
             .current_dir(&dir)
             .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .env_remove("NODE_COMPAT")
             .output()
             .expect("failed to spawn nub");
         (
