@@ -401,17 +401,16 @@ function safeRequireResolve(specifier) {
   try { return __require.resolve(specifier); } catch { return null; }
 }
 
-// Resolved URL per vendored specifier (null = unresolvable), memoized for the
-// life of the process. A vendored package lives in nub's OWN distribution, so
-// its location cannot change under a running process — but the resolve is far
-// from free: `__require` has a nub-internal parent, so each call re-enters the
-// registered resolve hook, which takes the isNubInternalParent branch and pays a
-// `createRequire` plus a nested hook round trip. Transpiled decorator output
-// imports three helpers (`decorate`/`decorateMetadata`/`decorateParam`) per
-// decorated file, so a NestJS-shaped tree repeated that on every import site:
-// ~18ms each, ~54ms per file, 10.8s to load a 200-file tree that costs 0.2s
-// undecorated (#795). Distinct specifiers number in the low tens; importers do
-// not.
+// Resolved URL per vendored specifier (`null` = unresolvable), kept for the life
+// of the realm. A vendored package lives in Nub's own distribution — the
+// checkout's node_modules in dev, the content-keyed extracted runtime dir in a
+// release — so its location cannot change under a running process, and `--watch`
+// restarts the process rather than re-resolving in place. The resolve is not
+// free: `__require` has a Nub-internal parent, so each call re-enters the resolve
+// hook and pays a `createRequire` plus a nested hook round trip. Transpiled
+// decorator output imports up to three helpers per decorated file, so unmemoized
+// that cost scaled with the number of decorated files instead of the handful of
+// distinct helpers (#795).
 const vendoredResolutions = new Map();
 
 export function barePkg(specifier) {
