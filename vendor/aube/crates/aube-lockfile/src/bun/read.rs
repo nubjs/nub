@@ -232,6 +232,7 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
                 // registry on the next resolve. Empty/default → None.
                 tarball_url: entry.registry_url.clone(),
                 declared_dependencies: declared,
+                declared_dependencies_known: true,
                 bin: bin_map,
                 extra_meta,
                 ..Default::default()
