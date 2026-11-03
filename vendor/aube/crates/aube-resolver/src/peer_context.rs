@@ -1401,7 +1401,8 @@ fn propagate_peer_suffixes_to_ancestors(
     // `@sentry/node-core` and `@opentelemetry/core`). The edge is added
     // after `cumulative` is final, so it never feeds the peer's own
     // segments back into the node's suffix — those stay nested in the
-    // segment, as pnpm writes them.
+    // segment, as pnpm writes them. An optional peer's edge is optional,
+    // like the ones `visit_peer_context` wires.
     let mut peer_edges: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for key in &pkg_keys {
         let (Some(pkg), Some(segments)) = (graph.packages.get(key), cumulative.get(key)) else {
@@ -1470,7 +1471,16 @@ fn propagate_peer_suffixes_to_ancestors(
     let mut new_packages: BTreeMap<String, LockedPackage> = BTreeMap::new();
     for (old_key, mut pkg) in packages {
         if let Some(edges) = peer_edges.remove(&old_key) {
-            pkg.dependencies.extend(edges);
+            for (name, tail) in edges {
+                if pkg
+                    .peer_dependencies_meta
+                    .get(&name)
+                    .is_some_and(|m| m.optional)
+                {
+                    pkg.optional_dependencies.insert(name.clone(), tail.clone());
+                }
+                pkg.dependencies.insert(name, tail);
+            }
         }
         let new_key = rewrite.get(&old_key).cloned().unwrap_or(old_key);
         for (name, tail) in pkg.dependencies.iter_mut() {
@@ -2071,7 +2081,13 @@ fn visit_peer_context<'g>(
     // Peers that were satisfied purely from the ancestor scope may not
     // have been in `pkg.dependencies` at all (no auto-install needed).
     // Wire them as deps now so the linker creates the sibling symlink
-    // and the lockfile snapshot records them.
+    // and the lockfile snapshot records them. An optional peer's edge is
+    // an optional edge, as pnpm records it (`optionalDependencies` in
+    // the snapshot): platform filtering may drop it, and it never makes
+    // a provider reachable only through optional edges required. Later
+    // fixed-point passes see the edge in `pkg.dependencies` and keep the
+    // classification through `pkg.optional_dependencies`.
+    let mut optional_peer_edges: Vec<String> = Vec::new();
     for (peer_name, provider) in &peer_context {
         if visited_dep_names.contains(peer_name) {
             continue;
@@ -2093,6 +2109,13 @@ fn visit_peer_context<'g>(
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| provider.target_tail.clone());
             new_dependencies.insert(peer_name.clone(), new_tail);
+            if pkg
+                .peer_dependencies_meta
+                .get(peer_name)
+                .is_some_and(|m| m.optional)
+            {
+                optional_peer_edges.push(peer_name.clone());
+            }
         }
     }
 
@@ -2100,6 +2123,7 @@ fn visit_peer_context<'g>(
     let new_optional_dependencies: BTreeMap<String, String> = pkg
         .optional_dependencies
         .keys()
+        .chain(optional_peer_edges.iter())
         .filter_map(|name| {
             new_dependencies
                 .get(name)
@@ -2286,6 +2310,10 @@ mod tests {
             Some("1.0.0"),
             "a peer the key claims must also be an edge, or the linker never \
              places it next to node-core"
+        );
+        assert!(
+            node_core.optional_dependencies.contains_key("core"),
+            "the edge for an optional peer is an optional edge"
         );
     }
 

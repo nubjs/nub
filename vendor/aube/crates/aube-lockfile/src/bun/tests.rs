@@ -2227,3 +2227,74 @@ fn test_unknown_protocol_tail_stays_a_registry_pin_by_default() {
     assert_eq!(foo.version, "exotic:bar");
     assert!(foo.local_source.is_none());
 }
+
+/// A resolved optional peer's edge is classified optional in the graph,
+/// but bun records peers in `peerDependencies`/`optionalPeers` only, so
+/// the writer must not turn the edge into an `optionalDependencies` entry.
+#[test]
+fn write_keeps_an_optional_peer_edge_out_of_optional_dependencies() {
+    let mut graph = LockfileGraph::default();
+    graph.importers.insert(
+        ".".to_string(),
+        ["openai", "zod"]
+            .into_iter()
+            .map(|name| DirectDep {
+                name: name.to_string(),
+                dep_path: format!("{name}@1.0.0"),
+                dep_type: DepType::Production,
+                specifier: Some("1.0.0".to_string()),
+            })
+            .collect(),
+    );
+    let mut openai = LockedPackage {
+        name: "openai".to_string(),
+        version: "1.0.0".to_string(),
+        dep_path: "openai@1.0.0".to_string(),
+        integrity: Some(fake_sri('o')),
+        ..Default::default()
+    };
+    openai
+        .peer_dependencies
+        .insert("zod".to_string(), "^1.0.0".to_string());
+    openai
+        .peer_dependencies_meta
+        .insert("zod".to_string(), crate::PeerDepMeta { optional: true });
+    openai
+        .dependencies
+        .insert("zod".to_string(), "1.0.0".to_string());
+    openai
+        .optional_dependencies
+        .insert("zod".to_string(), "1.0.0".to_string());
+    let zod = LockedPackage {
+        name: "zod".to_string(),
+        version: "1.0.0".to_string(),
+        dep_path: "zod@1.0.0".to_string(),
+        integrity: Some(fake_sri('z')),
+        ..Default::default()
+    };
+    for pkg in [openai, zod] {
+        graph.packages.insert(pkg.dep_path.clone(), pkg);
+    }
+    let manifest = aube_manifest::PackageJson {
+        name: Some("root".to_string()),
+        dependencies: [
+            ("openai".to_string(), "1.0.0".to_string()),
+            ("zod".to_string(), "1.0.0".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+
+    let out = tempfile::NamedTempFile::new().unwrap();
+    write(out.path(), &graph, &manifest).unwrap();
+    let text = std::fs::read_to_string(out.path()).unwrap();
+    let openai_line = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("\"openai\": [\"openai@"))
+        .expect("openai entry");
+    assert!(
+        !openai_line.contains("optionalDependencies"),
+        "an optional peer is not an optional dependency in bun's format: {openai_line}"
+    );
+}

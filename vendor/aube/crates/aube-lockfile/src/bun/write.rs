@@ -243,7 +243,7 @@ pub fn write(
                 .unwrap_or_else(|| {
                     crate::npm::dep_value_as_version(dep_name, dep_value).to_string()
                 });
-            if pkg.optional_dependencies.contains_key(dep_name) {
+            if is_bun_optional_edge(pkg, dep_name) {
                 opt_deps_obj.insert(dep_name.clone(), Value::String(rendered));
             } else {
                 deps_obj.insert(dep_name.clone(), Value::String(rendered));
@@ -553,7 +553,7 @@ pub fn write(
                 .unwrap_or_else(|| {
                     crate::npm::dep_value_as_version(dep_name, dep_value).to_string()
                 });
-            if pkg.optional_dependencies.contains_key(dep_name) {
+            if is_bun_optional_edge(pkg, dep_name) {
                 opt_deps_obj.insert(dep_name.clone(), Value::String(rendered));
             } else {
                 deps_obj.insert(dep_name.clone(), Value::String(rendered));
@@ -876,4 +876,17 @@ fn inline_json(value: &serde_json::Value, _base_indent: usize) -> String {
             format!("{{ {} }}", parts.join(", "))
         }
     }
+}
+
+/// Whether `dep_name` goes in an entry's `optionalDependencies`.
+///
+/// The graph classifies a resolved optional peer's edge as optional, as
+/// pnpm's snapshot does, but the package does not declare it as a
+/// dependency. That edge stays in the `dependencies` bucket here, where
+/// this writer has always placed peer edges, so the classification does
+/// not move it into an `optionalDependencies` entry bun never wrote.
+fn is_bun_optional_edge(pkg: &LockedPackage, dep_name: &str) -> bool {
+    pkg.optional_dependencies.contains_key(dep_name)
+        && !(pkg.peer_dependencies.contains_key(dep_name)
+            && !pkg.declared_dependencies.contains_key(dep_name))
 }

@@ -1237,6 +1237,16 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
     }
     for (key, name, tail) in missing_peer_edges {
         if let Some(pkg) = packages.get_mut(&key) {
+            // An optional peer is an optional edge (pnpm's snapshot
+            // `optionalDependencies`), so platform filtering can still
+            // drop a provider that only an optional dependency brought in.
+            if pkg
+                .peer_dependencies_meta
+                .get(&name)
+                .is_some_and(|m| m.optional)
+            {
+                pkg.optional_dependencies.insert(name.clone(), tail.clone());
+            }
             pkg.dependencies.insert(name, tail);
         }
     }
