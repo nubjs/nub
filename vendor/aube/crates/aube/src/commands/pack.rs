@@ -382,13 +382,21 @@ pub(crate) fn rewrite_catalog_dependencies(
     Ok(true)
 }
 
+/// `package_json` replaces the packed `package.json` bytes. When given, it is
+/// also the manifest file selection reads, as in npm-packlist / pnpm: a
+/// `publishConfig.main` that moves the entry point must pack the new entry.
 pub(crate) fn build_archive_with_package_json(
     project_dir: &Path,
     package_json: Option<Vec<u8>>,
 ) -> miette::Result<BuiltArchive> {
-    let manifest = PackageJson::from_path(&project_dir.join("package.json"))
-        .map_err(miette::Report::new)
-        .wrap_err("failed to read package.json")?;
+    let manifest = match &package_json {
+        Some(bytes) => PackageJson::from_slice(bytes)
+            .into_diagnostic()
+            .wrap_err("failed to parse the packed package.json")?,
+        None => PackageJson::from_path(&project_dir.join("package.json"))
+            .map_err(miette::Report::new)
+            .wrap_err("failed to read package.json")?,
+    };
     let name = manifest
         .name
         .as_deref()
@@ -702,12 +710,24 @@ fn always_included_files(project_dir: &Path, manifest: &PackageJson) -> Vec<Stri
         }
     }
 
-    // `main` field entry. Strip any leading `./` so the path matches
-    // the walker's normalized form — otherwise `"./index.js"` becomes a
-    // second BTreeSet key alongside `"index.js"` and the file is packed
-    // twice (as `package/./index.js` and `package/index.js`).
-    if let Some(main) = manifest.extra.get("main").and_then(|v| v.as_str()) {
-        let cleaned = main.trim_start_matches("./");
+    // npm-packlist's required entries: `main`, a string `browser`, and every
+    // `bin` target. Strip any leading `./` so the path matches the walker's
+    // normalized form — otherwise `"./index.js"` becomes a second BTreeSet
+    // key alongside `"index.js"` and the file is packed twice (as
+    // `package/./index.js` and `package/index.js`).
+    let mut entries: Vec<&str> = ["main", "browser"]
+        .iter()
+        .filter_map(|field| manifest.extra.get(*field).and_then(|v| v.as_str()))
+        .collect();
+    match manifest.extra.get("bin") {
+        Some(serde_json::Value::String(bin)) => entries.push(bin),
+        Some(serde_json::Value::Object(bins)) => {
+            entries.extend(bins.values().filter_map(|v| v.as_str()));
+        }
+        _ => {}
+    }
+    for entry in entries {
+        let cleaned = entry.trim_start_matches("./");
         if !cleaned.is_empty() {
             out.push(cleaned.to_string());
         }
@@ -892,6 +912,33 @@ mod tests {
         assert_eq!(package_json["dependencies"]["lib"], "1.2.3");
         assert_eq!(package_json["name"], "@acme/app");
         assert_eq!(archive.filename, "acme-app-1.0.0.tgz");
+    }
+
+    #[test]
+    fn pack_selects_files_by_the_published_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        write_tree(
+            dir.path(),
+            &[
+                "README.md",
+                "src/index.js",
+                "dist/index.js",
+                "bin/local.js",
+                "bin/pub.js",
+            ],
+        );
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"entry","version":"1.0.0","main":"src/index.js","bin":{"x":"bin/local.js"},"files":["README.md"],"publishConfig":{"main":"dist/index.js","bin":{"x":"bin/pub.js"}}}"#,
+        )
+        .unwrap();
+
+        let archive = build_pack_archive(dir.path()).unwrap();
+
+        assert_eq!(
+            archive.files,
+            ["README.md", "bin/pub.js", "dist/index.js", "package.json"]
+        );
     }
 
     #[test]

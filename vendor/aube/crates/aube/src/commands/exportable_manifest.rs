@@ -410,7 +410,7 @@ mod tests {
             serde_json::json!({"name": "consumer", "dependencies": {"missing": "workspace:*"}}),
         )
         .unwrap_err();
-        let message = format!("{err:?}");
+        let message = err.to_string();
         assert!(
             message.contains("`missing: workspace:*`")
                 && message.contains("not a package in the workspace"),
