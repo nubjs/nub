@@ -973,14 +973,25 @@ async fn run_inner(
     // package this update unlocked: that binding was decided against the old
     // version, so the member is resolved again here alongside the root, with
     // the rest of its tree still locked by `filtered_existing`.
+    //
+    // The unlock is the root's alone. `filtered_existing` drops the updated
+    // names graph-wide (lockfile reuse matches by name, so a locked copy
+    // left in would satisfy the root's own range again), so a direct
+    // dependency of the re-resolved member that pointed at a dropped
+    // snapshot is pinned to its locked version for this resolve, and its
+    // manifest range restored on the importer afterwards.
+    let mut member_pins: Vec<(String, Vec<(String, String)>)> = Vec::new();
     if resolve_importer == "."
         && let (Some(existing), Some(filtered)) = (existing.as_ref(), filtered_existing.as_mut())
     {
         for importer in unbind_peers_on_unlocked(existing, filtered) {
-            let member_manifest =
+            let mut member_manifest =
                 aube_manifest::PackageJson::from_path(&cwd.join(&importer).join("package.json"))
                     .map_err(miette::Report::new)
                     .wrap_err_with(|| format!("failed to read {importer}/package.json"))?;
+            let pins =
+                pin_unlocked_direct_deps(existing, filtered, &importer, &mut member_manifest);
+            member_pins.push((importer.clone(), pins));
             resolver_manifests.push((importer, member_manifest));
         }
     }
@@ -993,6 +1004,13 @@ async fn run_inner(
         .await
         .map_err(miette::Report::new)
         .wrap_err("failed to resolve dependencies")?;
+    for (importer, pins) in &member_pins {
+        for dep in graph.importers.get_mut(importer).into_iter().flatten() {
+            if let Some((_, spec)) = pins.iter().find(|(name, _)| *name == dep.name) {
+                dep.specifier = Some(spec.clone());
+            }
+        }
+    }
     let age_gated_updates = if args.interactive {
         Vec::new()
     } else {
@@ -2599,6 +2617,44 @@ fn unbind_peers_on_unlocked(
         })
         .cloned()
         .collect()
+}
+
+/// Pin each direct dependency of `importer` whose locked snapshot `filtered`
+/// dropped to that exact locked version in `manifest`, so re-resolving the
+/// member cannot move it. Returns `(name, original spec)` for every pin. Only
+/// plain semver ranges are pinned; aliases and protocol specs are left alone.
+fn pin_unlocked_direct_deps(
+    existing: &aube_lockfile::LockfileGraph,
+    filtered: &aube_lockfile::LockfileGraph,
+    importer: &str,
+    manifest: &mut aube_manifest::PackageJson,
+) -> Vec<(String, String)> {
+    let mut pins = Vec::new();
+    for dep in existing.importers.get(importer).into_iter().flatten() {
+        if filtered.packages.contains_key(&dep.dep_path) {
+            continue;
+        }
+        let Some(locked) = existing.packages.get(&dep.dep_path) else {
+            continue;
+        };
+        for section in [
+            &mut manifest.dependencies,
+            &mut manifest.dev_dependencies,
+            &mut manifest.optional_dependencies,
+        ] {
+            let Some(spec) = section.get_mut(&dep.name) else {
+                continue;
+            };
+            if node_semver::Range::parse(spec.as_str()).is_ok() && locked.alias_of.is_none() {
+                pins.push((
+                    dep.name.clone(),
+                    std::mem::replace(spec, locked.version.clone()),
+                ));
+            }
+            break;
+        }
+    }
+    pins
 }
 
 /// Workspace members, other than `importer`, whose lockfile importer lists
