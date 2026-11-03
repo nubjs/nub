@@ -20,11 +20,15 @@ impl Drop for ScratchDir {
 }
 
 /// Recursively copy `src` into a fresh temp directory and return it
-/// wrapped in a [`ScratchDir`]. `.git/` is intentionally skipped —
+/// wrapped in a [`ScratchDir`]. A top-level `.git` is skipped —
 /// prepare scripts never need the history, and dropping it keeps the
-/// copy an order of magnitude smaller on large repos. Uses `cp -a`
-/// so symlinks + file modes survive (matters for repos that ship
-/// executable bits their prepare script relies on).
+/// copy an order of magnitude smaller on large repos.
+///
+/// The copy is in-process rather than a `cp -a` subprocess, which
+/// stock Windows does not have. It keeps what `cp -a` kept that a
+/// prepare script can observe: symlinks stay symlinks, permission
+/// bits (the exec bit above all) survive through `fs::copy`, and file
+/// modification times are carried over best-effort.
 pub(super) fn prepare_scratch_copy(
     src: &std::path::Path,
     spec: &str,
@@ -49,34 +53,96 @@ pub(super) fn prepare_scratch_copy(
     std::fs::create_dir_all(&dst)
         .map_err(|e| miette!("git dep {spec}: create scratch dir {}: {e}", dst.display()))?;
 
-    // Wrap the directory in `ScratchDir` *before* running any of
-    // the fallible work below. Handing ownership of cleanup to
-    // the Drop impl immediately means a failure to spawn `cp`, a
-    // non-zero cp exit, or any panic between here and the `Ok`
-    // return still removes the partially-populated temp dir
-    // instead of leaking it under `<tmp>/<tool>-git-prep-*`.
+    // Owning the directory before the fallible copy means a failure
+    // part-way through still removes the partial tree on drop instead
+    // of leaking it under `<tmp>/<tool>-git-prep-*`.
     let scratch = ScratchDir(dst);
-
-    // `cp -a src/. dst/` — the trailing `/.` copies src's contents
-    // (including dotfiles) into dst rather than creating `dst/<src>`.
-    // `-a` preserves perms/symlinks/timestamps. We exclude `.git`
-    // manually afterwards rather than with `--exclude` (non-POSIX,
-    // GNU-only).
-    let out = std::process::Command::new("cp")
-        .arg("-a")
-        .arg(format!("{}/.", src.display()))
-        .arg(scratch.path())
-        .output()
-        .map_err(|e| miette!("git dep {spec}: spawn cp for scratch copy: {e}"))?;
-    if !out.status.success() {
-        return Err(miette!(
-            "git dep {spec}: scratch copy failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    let _ = std::fs::remove_dir_all(scratch.path().join(".git"));
-
+    copy_checkout(src, scratch.path(), true)
+        .map_err(|e| miette!("git dep {spec}: scratch copy failed: {e}"))?;
     Ok(scratch)
+}
+
+fn copy_checkout(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    top_level: bool,
+) -> std::io::Result<()> {
+    let with_path = |path: &std::path::Path, e: std::io::Error| {
+        std::io::Error::new(e.kind(), format!("{}: {e}", path.display()))
+    };
+    for entry in std::fs::read_dir(src).map_err(|e| with_path(src, e))? {
+        let entry = entry.map_err(|e| with_path(src, e))?;
+        let name = entry.file_name();
+        if top_level && name == ".git" {
+            continue;
+        }
+        let from = entry.path();
+        let to = dst.join(&name);
+        let file_type = entry.file_type().map_err(|e| with_path(&from, e))?;
+        if file_type.is_symlink() {
+            copy_symlink(&from, &to, file_type).map_err(|e| with_path(&from, e))?;
+        } else if file_type.is_dir() {
+            std::fs::create_dir(&to).map_err(|e| with_path(&to, e))?;
+            copy_checkout(&from, &to, false)?;
+        } else if file_type.is_file() {
+            std::fs::copy(&from, &to).map_err(|e| with_path(&from, e))?;
+            // Times are fidelity, not correctness: a build that compares
+            // them still works from fresh ones, so a refusal (a read-only
+            // file, a filesystem without the call) does not fail the copy.
+            if let Ok(meta) = entry.metadata()
+                && let Ok(file) = std::fs::OpenOptions::new().write(true).open(&to)
+            {
+                let mut times = std::fs::FileTimes::new();
+                if let Ok(modified) = meta.modified() {
+                    times = times.set_modified(modified);
+                }
+                if let Ok(accessed) = meta.accessed() {
+                    times = times.set_accessed(accessed);
+                }
+                let _ = file.set_times(times);
+            }
+        }
+        // Git stores no other file type, so a FIFO or socket here is
+        // stray local state; skipping it also keeps `fs::copy` from
+        // blocking on a FIFO's read end.
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn copy_symlink(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    _file_type: std::fs::FileType,
+) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(std::fs::read_link(src)?, dst)
+}
+
+#[cfg(windows)]
+fn copy_symlink(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    file_type: std::fs::FileType,
+) -> std::io::Result<()> {
+    use std::os::windows::fs::FileTypeExt;
+    let target = std::fs::read_link(src)?;
+    if file_type.is_symlink_dir() {
+        return aube_linker::create_dir_link(&target, dst);
+    }
+    // A file symlink needs Developer Mode or an elevated shell. Without
+    // either, copy what it points at — what Git for Windows' `cp`
+    // produced, so the users who had one on PATH see no change.
+    match std::os::windows::fs::symlink_file(&target, dst) {
+        Ok(()) => Ok(()),
+        Err(e) if std::fs::metadata(src).is_ok_and(|m| m.is_file()) => {
+            tracing::debug!(
+                "git prepare: symlink {} unavailable ({e}); copying its target",
+                dst.display()
+            );
+            std::fs::copy(src, dst).map(|_| ())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Hard cap for nested git dep `prepare` installs. Four levels is more
@@ -132,4 +198,82 @@ pub(super) async fn run_git_dep_prepare(
     .into_diagnostic()
     .wrap_err_with(|| format!("git dep {spec}: nested install task failed"))?
     .wrap_err_with(|| format!("git dep {spec}: nested install for `prepare` failed"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scratch_copy_keeps_the_checkout_but_not_its_history() {
+        let src = tempfile::tempdir().unwrap();
+        let root = src.path();
+        std::fs::create_dir_all(root.join(".git/objects")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(root.join(".npmrc"), "x=1\n").unwrap();
+        std::fs::create_dir_all(root.join("src/nested")).unwrap();
+        std::fs::write(root.join("src/nested/a.js"), "a\n").unwrap();
+        std::fs::write(root.join("build.sh"), "#!/bin/sh\n").unwrap();
+        let mtime = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(root.join("src/nested/a.js"))
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                root.join("build.sh"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+            std::os::unix::fs::symlink("build.sh", root.join("alias.sh")).unwrap();
+        }
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file("build.sh", root.join("alias.sh")).unwrap();
+
+        let scratch = prepare_scratch_copy(root, "test").unwrap();
+        let dst = scratch.path();
+
+        assert!(
+            !dst.join(".git").exists(),
+            "the clone's history is not copied"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.join(".npmrc")).unwrap(),
+            "x=1\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.join("src/nested/a.js")).unwrap(),
+            "a\n"
+        );
+        assert_eq!(
+            std::fs::metadata(dst.join("src/nested/a.js"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            mtime,
+            "modification time carries over"
+        );
+        assert_eq!(
+            std::fs::read_link(dst.join("alias.sh")).unwrap(),
+            std::path::Path::new("build.sh"),
+            "a symlink is recreated as a symlink, target unchanged"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dst.join("build.sh"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o755, "the exec bit survives");
+        }
+
+        let copied = dst.to_path_buf();
+        drop(scratch);
+        assert!(!copied.exists(), "the scratch dir removes itself on drop");
+    }
 }
