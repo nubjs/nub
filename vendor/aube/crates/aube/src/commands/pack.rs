@@ -473,6 +473,18 @@ fn collect_files(project_dir: &Path, manifest: &PackageJson) -> miette::Result<V
         keep.insert("package.json".to_string());
     }
 
+    // One containment gate for every source above: `files` globs, the
+    // walker, and the forced entries (README/LICENSE, `main`, `browser`,
+    // `bin`), whose paths come straight from the manifest.
+    let root = project_dir
+        .canonicalize()
+        .into_diagnostic()
+        .wrap_err_with(|| format!("pack: resolve {}", project_dir.display()))?;
+    let keep: BTreeSet<String> = keep
+        .iter()
+        .filter_map(|rel| contained_rel(project_dir, &root, Path::new(rel)))
+        .collect();
+
     let mut out: Vec<PackedFile> = Vec::with_capacity(keep.len());
     for rel in keep {
         let abs = project_dir.join(&rel);
@@ -491,6 +503,34 @@ fn collect_files(project_dir: &Path, manifest: &PackageJson) -> miette::Result<V
     Ok(out)
 }
 
+/// The forward-slash, package-relative form of `rel` when it may be packed:
+/// still inside the package after `.` / `..` are resolved lexically, and
+/// still inside it once symlinks are followed (`root` is the canonical
+/// package directory). `None` for an absolute path, a `..` escape, or a
+/// symlink out of the package — the paths npm-packlist, and so pnpm, skips
+/// without a warning. Packing one would put a file from outside the package
+/// into the published tarball.
+fn contained_rel(project_dir: &Path, root: &Path, rel: &Path) -> Option<String> {
+    use std::path::Component;
+    let mut parts = Vec::new();
+    for component in rel.components() {
+        match component {
+            Component::Normal(part) => parts.push(part),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                parts.pop()?;
+            }
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    let rel: PathBuf = parts.into_iter().collect();
+    if rel.as_os_str().is_empty() {
+        return None;
+    }
+    let resolved = project_dir.join(&rel).canonicalize().ok()?;
+    resolved.starts_with(root).then(|| normalize_rel(&rel))
+}
+
 /// Expand a glob from the `files` field, rooted at `project_dir`. If the
 /// pattern matches a directory, every non-ignored file underneath is added.
 fn expand_files_glob(
@@ -507,6 +547,16 @@ fn expand_files_glob(
             continue;
         };
         if path.is_dir() {
+            // Don't walk a directory symlinked out of the package; its
+            // files would all fail the containment gate anyway.
+            if !path
+                .canonicalize()
+                .ok()
+                .zip(project_dir.canonicalize().ok())
+                .is_some_and(|(dir, root)| dir.starts_with(root))
+            {
+                continue;
+            }
             let mut sub: BTreeSet<String> = BTreeSet::new();
             walk_subdir(project_dir, &path, &mut sub)?;
             keep.extend(sub);
@@ -939,6 +989,30 @@ mod tests {
             archive.files,
             ["README.md", "bin/pub.js", "dist/index.js", "package.json"]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pack_never_packs_a_file_from_outside_the_package() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside.txt");
+        std::fs::write(&outside, "secret").unwrap();
+        let pkg = tmp.path().join("pkg");
+        write_tree(&pkg, &["README.md"]);
+        std::os::unix::fs::symlink("../outside.txt", pkg.join("linked.js")).unwrap();
+        let manifest = serde_json::json!({
+            "name": "escape",
+            "version": "1.0.0",
+            "files": ["README.md", "../outside.txt"],
+            "main": outside.to_str().unwrap(),
+            "browser": "linked.js",
+            "bin": {"a": "linked.js", "b": "../outside.txt"},
+        });
+        std::fs::write(pkg.join("package.json"), manifest.to_string()).unwrap();
+
+        let archive = build_pack_archive(&pkg).unwrap();
+
+        assert_eq!(archive.files, ["README.md", "package.json"]);
     }
 
     #[test]
