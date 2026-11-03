@@ -236,9 +236,11 @@ fn rename_in_package(from: &Path, to: &Path) -> Result<(), String> {
 /// can share the source's inode, and `rename` between two links to one
 /// inode succeeds without doing anything. So the name has to fold to the
 /// source's own name in the same directory, and not exist there verbatim.
+/// The directory is compared by identity, since its spelling in the patch
+/// may differ in case too (`lib/LICENSE` → `Lib/License`).
 fn is_case_only_rename(from: &Path, to: &Path) -> bool {
-    let (Some(dir), Some(from_name), Some(to_name)) =
-        (to.parent(), from.file_name(), to.file_name())
+    let (Some(from_dir), Some(dir), Some(from_name), Some(to_name)) =
+        (from.parent(), to.parent(), from.file_name(), to.file_name())
     else {
         return false;
     };
@@ -246,8 +248,8 @@ fn is_case_only_rename(from: &Path, to: &Path) -> bool {
         (Some(from_name), Some(to_name)) => from_name.to_lowercase() == to_name.to_lowercase(),
         _ => false,
     };
-    from.parent() == Some(dir)
-        && folds_to_source
+    folds_to_source
+        && same_file::is_same_file(from_dir, dir).unwrap_or(false)
         && same_file::is_same_file(from, to).unwrap_or(false)
         && std::fs::read_dir(dir).is_ok_and(|mut entries| {
             entries.all(|entry| entry.is_ok_and(|entry| entry.file_name() != to_name))
@@ -1414,8 +1416,22 @@ mod tests {
     // this covers only the plain rename path; both must end on the new name.
     #[test]
     fn git_case_only_rename_applies_hunks_under_the_new_name() {
-        let (_dir, pkg) = pkg_with(&[("LICENSE", "ISC License\n")]);
+        let (_dir, pkg) = pkg_with(&[]);
+        std::fs::create_dir(pkg.join("lib")).unwrap();
+        std::fs::write(pkg.join("LICENSE"), "ISC License\n").unwrap();
+        std::fs::write(pkg.join("lib/LICENSE"), "ISC License\n").unwrap();
         let case_insensitive = pkg.join("License").exists();
+        let names = |dir: &Path| {
+            let mut names: Vec<String> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort();
+            names
+        };
+        // The second section's parent differs only in case as well. As
+        // with pnpm, the file takes the new casing and the directory keeps
+        // its own.
         let patch = "diff --git a/LICENSE b/License\n\
                      similarity index 97%\n\
                      rename from LICENSE\n\
@@ -1424,18 +1440,34 @@ mod tests {
                      +++ b/License\n\
                      @@ -1 +1 @@\n\
                      -ISC License\n\
+                     +ISC License (patched)\n\
+                     diff --git a/lib/LICENSE b/Lib/License\n\
+                     similarity index 97%\n\
+                     rename from lib/LICENSE\n\
+                     rename to Lib/License\n\
+                     --- a/lib/LICENSE\n\
+                     +++ b/Lib/License\n\
+                     @@ -1 +1 @@\n\
+                     -ISC License\n\
                      +ISC License (patched)\n";
         apply_multi_file_patch(&pkg, patch)
             .unwrap_or_else(|e| panic!("case_insensitive={case_insensitive}: {e}"));
-        let names: Vec<String> = std::fs::read_dir(&pkg)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().into_string().unwrap())
-            .collect();
-        assert_eq!(names, ["License"], "case_insensitive={case_insensitive}");
-        assert_eq!(
-            std::fs::read_to_string(pkg.join("License")).unwrap(),
-            "ISC License (patched)\n"
-        );
+        let moved = if case_insensitive {
+            assert_eq!(names(&pkg), ["License", "lib"]);
+            pkg.join("lib")
+        } else {
+            assert_eq!(names(&pkg), ["Lib", "License", "lib"]);
+            pkg.join("Lib")
+        };
+        assert_eq!(names(&moved), ["License"]);
+        for file in [pkg.join("License"), moved.join("License")] {
+            assert_eq!(
+                std::fs::read_to_string(&file).unwrap(),
+                "ISC License (patched)\n",
+                "{}",
+                file.display()
+            );
+        }
     }
 
     #[test]
