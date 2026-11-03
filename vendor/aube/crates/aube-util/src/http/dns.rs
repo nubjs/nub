@@ -80,73 +80,85 @@ impl CachingSystemResolver {
     }
 
     async fn resolve_host(&self, host: String) -> Result<Resolved, ResolveError> {
-        let mut rx = {
-            let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-            match cache.get(&host) {
-                Some(Entry::Ready(addrs)) => return Ok(addrs.clone()),
-                Some(Entry::Pending(rx)) => rx.clone(),
-                None => {
-                    let (tx, rx) = watch::channel(None);
-                    cache.insert(host.clone(), Entry::Pending(rx.clone()));
-                    // Spawned rather than awaited inline so the query runs to
-                    // completion and lands in the cache even if every caller
-                    // waiting on it is dropped (a request timeout, a cancelled
-                    // prewarm).
-                    let lookup = (self.lookup)(host.clone());
-                    let cache = self.cache.clone();
-                    let key = host.clone();
-                    tokio::spawn(async move {
-                        let started = std::time::Instant::now();
-                        let outcome: Outcome = match lookup.await {
-                            Ok(addrs) if addrs.is_empty() => Err(Arc::new(io::Error::new(
-                                io::ErrorKind::NotFound,
-                                "no addresses returned",
-                            ))),
-                            Ok(addrs) => Ok(addrs.into()),
-                            Err(e) => Err(Arc::new(e)),
-                        };
-                        tracing::debug!(
-                            host = %key,
-                            elapsed = ?started.elapsed(),
-                            result = ?outcome.as_ref().map(|a| a.len()),
-                            "dns lookup"
-                        );
-                        {
-                            let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
-                            match &outcome {
-                                Ok(addrs) => {
-                                    cache.insert(key, Entry::Ready(addrs.clone()));
-                                }
-                                Err(_) => {
-                                    cache.remove(&key);
-                                }
-                            }
-                        }
-                        tx.send_replace(Some(outcome));
-                    });
-                    rx
-                }
-            }
-        };
-        let waited = rx
-            .wait_for(Option::is_some)
-            .await
-            .map(|outcome| outcome.clone().expect("waited for Some"));
-        let outcome = match waited {
-            Ok(outcome) => outcome,
-            // The lookup task was dropped before it finished (its runtime shut
-            // down). Clear the stale entry so the next caller queries afresh.
-            Err(_) => {
+        loop {
+            let (mut rx, ours) = {
                 let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(Entry::Pending(pending)) = cache.get(&host)
-                    && pending.same_channel(&rx)
-                {
-                    cache.remove(&host);
+                match cache.get(&host) {
+                    Some(Entry::Ready(addrs)) => return Ok(addrs.clone()),
+                    Some(Entry::Pending(rx)) => (rx.clone(), false),
+                    None => {
+                        let rx = self.start_lookup(host.clone());
+                        cache.insert(host.clone(), Entry::Pending(rx.clone()));
+                        (rx, true)
+                    }
                 }
-                Err(Arc::new(io::Error::other("lookup was cancelled")))
+            };
+            let waited = rx
+                .wait_for(Option::is_some)
+                .await
+                .map(|outcome| outcome.clone().expect("waited for Some"));
+            match waited {
+                Ok(outcome) => return outcome.map_err(|source| ResolveError { host, source }),
+                // The lookup task was dropped unfinished: its runtime shut down.
+                // Clear the stale entry; a waiter from another runtime then
+                // queries afresh rather than inheriting the cancellation.
+                Err(_) => {
+                    let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(Entry::Pending(pending)) = cache.get(&host)
+                        && pending.same_channel(&rx)
+                    {
+                        cache.remove(&host);
+                    }
+                    if ours {
+                        return Err(ResolveError {
+                            host,
+                            source: Arc::new(io::Error::other("lookup was cancelled")),
+                        });
+                    }
+                }
             }
-        };
-        outcome.map_err(|source| ResolveError { host, source })
+        }
+    }
+
+    /// Spawned rather than awaited by the caller, so the query runs to
+    /// completion and lands in the cache even when every caller waiting on it
+    /// is dropped (a request timeout, a cancelled prewarm). The task writes
+    /// the cache before it notifies, so a woken waiter never sees `Pending`.
+    fn start_lookup(&self, host: String) -> watch::Receiver<Option<Outcome>> {
+        let (tx, rx) = watch::channel(None);
+        let lookup = (self.lookup)(host.clone());
+        let cache = self.cache.clone();
+        tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let outcome: Outcome = match lookup.await {
+                // Never cache an empty answer for the life of the process.
+                Ok(addrs) if addrs.is_empty() => Err(Arc::new(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "no addresses returned",
+                ))),
+                Ok(addrs) => Ok(addrs.into()),
+                Err(e) => Err(Arc::new(e)),
+            };
+            tracing::debug!(
+                host = %host,
+                elapsed = ?started.elapsed(),
+                result = ?outcome.as_ref().map(|a| a.len()),
+                "dns lookup"
+            );
+            {
+                let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+                match &outcome {
+                    Ok(addrs) => {
+                        cache.insert(host, Entry::Ready(addrs.clone()));
+                    }
+                    Err(_) => {
+                        cache.remove(&host);
+                    }
+                }
+            }
+            tx.send_replace(Some(outcome));
+        });
+        rx
     }
 }
 
@@ -292,6 +304,35 @@ mod tests {
             &[addr(2)]
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_lookup_cancelled_by_its_runtime_shutting_down_is_redone_from_another_runtime() {
+        let (resolver, calls) = counting(|_| Ok(vec![addr(3)]));
+        let first = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let r = resolver.clone();
+        let abandoned = first.block_on(async move {
+            tokio::time::timeout(Duration::from_millis(5), r.resolve_host("a.example".into())).await
+        });
+        assert!(abandoned.is_err(), "left the query in flight");
+        drop(first);
+
+        let second = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let addrs = second
+            .block_on(resolver.resolve_host("a.example".into()))
+            .unwrap();
+        assert_eq!(&*addrs, &[addr(3)]);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "the cancelled query was redone"
+        );
     }
 
     #[tokio::test]
