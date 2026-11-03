@@ -1917,9 +1917,10 @@ fn the_entry_tsconfig_check_follows_the_real_path_and_skips_dependencies() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, body).unwrap();
     };
-    let run = |entry: &str| {
+    let run_with = |args: &[&str], env: &[(&str, &str)]| {
         let out = Command::new(nub_binary())
-            .arg(entry)
+            .args(args)
+            .envs(env.iter().copied())
             .current_dir(&dir)
             .env("XDG_CACHE_HOME", dir.join(".cache"))
             .env_remove("NODE_COMPAT")
@@ -1931,6 +1932,7 @@ fn the_entry_tsconfig_check_follows_the_real_path_and_skips_dependencies() {
             out.status.code(),
         )
     };
+    let run = |entry: &str| run_with(&[entry], &[]);
     write(
         "package.json",
         r#"{"name":"root","workspaces":["packages/*"]}"#,
@@ -1992,6 +1994,30 @@ fn the_entry_tsconfig_check_follows_the_real_path_and_skips_dependencies() {
             "a broken workspace config must still stop the run"
         );
         assert!(stderr.contains("missing.json"), "{stderr}");
+
+        // `--preserve-symlinks-main` keeps Node on the link path, so the check reads
+        // the link directory's config, whose `extends` does not resolve from there.
+        // Node accepts `_` for `-` in option names, from argv and NODE_OPTIONS alike.
+        let entry = "node_modules/@repro/cli/bin.cjs";
+        for (args, env) in [
+            (vec!["--preserve-symlinks-main", entry], vec![]),
+            (vec!["--preserve_symlinks_main", entry], vec![]),
+            (
+                vec![entry],
+                vec![("NODE_OPTIONS", "--preserve_symlinks_main")],
+            ),
+        ] {
+            let (_stdout, stderr, code) = run_with(&args, &env);
+            assert_ne!(
+                code,
+                Some(0),
+                "{args:?} {env:?} must check the link's config"
+            );
+            assert!(
+                stderr.contains("@repro/cli/tsconfig.json"),
+                "{args:?} {env:?}: {stderr}"
+            );
+        }
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

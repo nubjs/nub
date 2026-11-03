@@ -4242,9 +4242,16 @@ fn entry_tsconfig_dir(args: &[String], cwd: &Path, node_options: &[String]) -> O
                 .iter()
                 .map(String::as_str),
         )
-        .any(|flag| flag == "--preserve-symlinks-main");
+        .any(is_preserve_symlinks_main);
     let entry = if preserve_main { joined } else { real };
     entry.parent().map(Path::to_path_buf)
+}
+
+/// Node treats `_` and `-` as the same character in an option name, so
+/// `--preserve_symlinks_main` is the same flag.
+fn is_preserve_symlinks_main(flag: &str) -> bool {
+    flag.strip_prefix("--")
+        .is_some_and(|name| name.replace('_', "-") == "preserve-symlinks-main")
 }
 
 /// Refuse the run when the tsconfig governing `dir` will not parse.
