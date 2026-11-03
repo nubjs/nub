@@ -9,7 +9,7 @@ Turborepo and Nub solve different problems. Turborepo schedules tasks across you
 
 - Run Turborepo under Nub: `nub run <script>` where the script is `turbo run …`, or `nubx turbo run …`.
 - Install with the package manager your `packageManager` field names, because that is the one Turborepo runs each task with.
-- To install with Nub instead, switch the repo to Nub with `nub pm use nub`. Turborepo 2.10.2 and later then run every task with `nub run`.
+- To install with Nub instead, switch the repo to Nub with `nub pm use nub`. Turborepo 2.10.3 and later then run every task with `nub run`.
 
 ## Installs: keep your package manager, or switch to Nub
 
@@ -24,16 +24,15 @@ pnpm install
 nub run build         # root script: "turbo run build"
 ```
 
-**Switch the repo to Nub.** Turborepo 2.10.2 added Nub as a package manager. It detects Nub from the `packageManager` field and runs each task as `nub run <task>`:
+**Switch the repo to Nub.** Turborepo 2.10.3 and later detect Nub from the pin `nub pm use nub` writes, and run each task as `nub run <task>`:
 
 ```bash
 nub pm use nub   # moves pnpm-workspace.yaml config, renames the lockfile
-nub pm pin       # writes packageManager: "nub@<version>"
 nub install
 nub run build
 ```
 
-`nub pm use nub` moves `pnpm-workspace.yaml`'s settings into `package.json` and renames the lockfile to `nub.lock`. `nub pm pin` writes the exact `packageManager` field Turborepo reads.
+`nub pm use nub` moves `pnpm-workspace.yaml`'s settings into `package.json`, renames the lockfile to `nub.lock`, and pins Nub in `devEngines.packageManager`.
 
 Switching is a project-wide decision: afterwards real pnpm refuses to run in the repo, and `nub pm use pnpm` reverses it. See [`nub pm use`](/docs/pm#nub-pm-use).
 
