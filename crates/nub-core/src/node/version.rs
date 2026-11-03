@@ -108,13 +108,15 @@ impl NodeVersion {
     /// launcher can enforce the same range semantics as compile-time resolution.
     pub fn satisfies(&self, pin: &VersionPin) -> bool {
         match pin {
-            VersionPin::Exact(v) => {
-                self.0.major == v.0.major && self.0.minor == v.0.minor && self.0.patch == v.0.patch
-            }
+            // Prerelease included: `27.0.0-alpha.0.0.0` is neither `27.0.0` nor
+            // another alpha, and a partial pin never takes a prerelease (nvm's default).
+            VersionPin::Exact(v) => self == v,
             VersionPin::MajorMinor(major, minor) => {
-                self.0.major == *major as u64 && self.0.minor == *minor as u64
+                self.0.pre.is_empty()
+                    && self.0.major == *major as u64
+                    && self.0.minor == *minor as u64
             }
-            VersionPin::Major(major) => self.0.major == *major as u64,
+            VersionPin::Major(major) => self.0.pre.is_empty() && self.0.major == *major as u64,
             // node-semver `||` semantics: the version satisfies the range when it
             // matches ANY alternative.
             VersionPin::Range(alternatives) => alternatives.iter().any(|req| req.matches(&self.0)),
@@ -460,6 +462,22 @@ mod tests {
             VersionPin::Exact("27.0.0-alpha.0.0.0".parse().unwrap())
         );
         assert!("22-foo".parse::<VersionPin>().is_err());
+    }
+
+    #[test]
+    fn installed_prereleases_satisfy_only_their_exact_pin() {
+        let alpha: NodeVersion = "27.0.0-alpha.0.0.0".parse().unwrap();
+        let pin = VersionPin::Exact(alpha.clone());
+        assert!(alpha.satisfies(&pin));
+        assert!(
+            !"27.0.0-alpha.0.0.1"
+                .parse::<NodeVersion>()
+                .unwrap()
+                .satisfies(&pin)
+        );
+        assert!(!NodeVersion::new(27, 0, 0).satisfies(&pin));
+        assert!(!alpha.satisfies(&VersionPin::Major(27)));
+        assert!(!alpha.satisfies(&VersionPin::MajorMinor(27, 0)));
     }
 
     // ── Tier boundary cases ────────────────────────────────────────────
