@@ -417,6 +417,14 @@ fn foreground_child(child_pid: u32) -> Option<ForegroundGuard> {
     // directly, so suppress nub's redundant SIGINT forward (#26 exactly-once).
     ctrl_c::set_suppress_sigint_forward(true);
 
+    // A fast child can already be SIGTTIN-stopped before tcsetpgrp runs.
+    // Foreground ownership does not resume it; continue the whole job after
+    // the handoff so shell descendants can read the terminal too.
+    // SAFETY: child_pid identifies the child's own process group.
+    unsafe {
+        libc::kill(-(child_pid as libc::pid_t), libc::SIGCONT);
+    }
+
     Some(ForegroundGuard { nub_pgrp })
 }
 
@@ -1567,14 +1575,14 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         cmd.env(super::gc::STARTUP_ENV, startup_arg);
     }
 
-    // Compat is tree-wide, not only a choice made by this one launcher. The
-    // restored PATH deliberately preserves unrelated inherited entries, which
-    // may include a Nub shim from an outer logical invocation. Stamping the
-    // public opt-out makes any later bare `node` descendant stay vanilla even
-    // if it reaches that shim. Apply it after env-file values so `--node` or a
-    // resolved `nodeCompat` cannot be undone by forwarded project input.
+    // Compat covers the bare `node` descendants of this launch, not only the
+    // one process. The restored PATH deliberately preserves unrelated inherited
+    // entries, which may include a Nub shim from an outer logical invocation;
+    // the marker keeps a `node` that reaches it vanilla. Set after
+    // `restore_compat_environment`, which clears an inherited copy, and after
+    // env-file values, which must not undo `--node` or a resolved `nodeCompat`.
     if config.compat_mode {
-        cmd.env("NODE_COMPAT", "1");
+        cmd.env(COMPAT_LAUNCH_ENV, "1");
     }
 
     // User args always pass through.
@@ -2520,6 +2528,26 @@ pub const RUNTIME_CONFIG_ENV: &str = "__NUB_RUNTIME_CONFIG";
 /// boundary.
 const FORCE_ASYNC_TIER_ENV: &str = "__NUB_FORCE_ASYNC_TIER";
 
+/// Carries a compat launch to the bare `node` descendants that continue it. A
+/// compat child keeps whatever PATH it inherited, which can still hold a Nub
+/// shim from an outer invocation; a `node` that lands there reads this and stays
+/// vanilla ([`inherits_compat_launch`]).
+///
+/// Deliberately NOT the public `NODE_COMPAT`. That variable is the user's
+/// tree-wide opt-out and every Nub entry point honors it, so stamping it made a
+/// compat launch the user never asked to persist (a plain `node` through the
+/// persistent shim, a `--node` run) switch off a later `nub file.ts` in the same
+/// tree. This marker is read on the `node` continuation path only and is dropped
+/// at the fresh-invocation boundary with the rest of the parent's state.
+pub const COMPAT_LAUNCH_ENV: &str = "__NUB_NODE_COMPAT";
+
+/// Whether this process descends from a compat launch that no fresh Nub
+/// invocation has superseded. Meaningful only on the `node` shim path: every
+/// other entry point clears [`COMPAT_LAUNCH_ENV`] before reading anything.
+pub fn inherits_compat_launch() -> bool {
+    env::var_os(COMPAT_LAUNCH_ENV).is_some_and(|value| value == "1")
+}
+
 /// The presence bitmask stamped alongside the `__NUB_COMPAT_*` capture, so a
 /// variable captured EMPTY stays distinguishable from one that was absent.
 const COMPAT_PRESENT_ENV: &str = "__NUB_COMPAT_PRESENT";
@@ -2641,6 +2669,13 @@ static RESTORABLE_VARS: [RestorableVar; 6] = [
 /// the same detector that keeps the package manager's pools under a
 /// constrained box's ceiling.
 pub const THREADPOOL_SIZE_ENV: &str = "UV_THREADPOOL_SIZE";
+
+/// Set by the preload of a process whose pool is not built yet (preload-common.cjs
+/// `installThreadpoolPolicy`, which builds it at the first loop turn so the program
+/// can still choose its own size): a child spawned before then inherits nub's value
+/// beside this mark and deletes it, keeping Node's default. Every fresh invocation
+/// sheds it with the other markers, so a nested `nub` sizes its child again.
+const THREADPOOL_TAKEN_ENV: &str = "__NUB_UV_THREADPOOL_SIZE_TAKEN";
 
 /// The pool nub asks for on this box — see [`THREADPOOL_SIZE_ENV`].
 pub fn threadpool_size() -> usize {
@@ -2988,10 +3023,12 @@ fn augmentation_environment_restoration() -> Vec<(&'static str, Option<OsString>
 
     for marker in [
         COMPAT_PRESENT_ENV,
+        COMPAT_LAUNCH_ENV,
         RUNTIME_CONFIG_ENV,
         VERSION_ENV,
         flags::NEUTRALIZE_LOCALSTORAGE_ENV,
         FORCE_ASYNC_TIER_ENV,
+        THREADPOOL_TAKEN_ENV,
     ] {
         changes.push((marker, None));
     }
@@ -3948,13 +3985,10 @@ const REAP_LEGACY_ENTRY_CAP: usize = 256;
 /// a directory scan + per-entry `stat`, which is exactly the synchronous cost the
 /// latency-sensitive run path must not pay. Drive it ONLY off the thread via
 /// [`spawn_stale_shim_reaper`], which detaches it so the run never waits on it.
-fn reap_stale_shims() {
-    reap_stale_shims_in(&env::temp_dir(), std::process::id(), pid_is_alive);
-}
-
-/// Core of [`reap_stale_shims`], parameterized over the temp dir, this process's
-/// pid, and a pid-liveness probe so it is unit-testable without touching the
-/// shared global temp dir or real process state.
+///
+/// Parameterized over the temp dir, this process's pid, and a pid-liveness
+/// probe so it is unit-testable without touching the shared global temp dir or
+/// real process state.
 fn reap_stale_shims_in(temp: &Path, self_pid: u32, is_alive: impl Fn(u32) -> bool) {
     let Ok(entries) = fs::read_dir(temp) else {
         return;
@@ -4038,14 +4072,21 @@ fn parse_shim_dir_name(name: &str) -> Option<(u32, ShimDirNameKind)> {
     (pid != 0).then_some((pid, kind))
 }
 
-/// Spawn [`reap_stale_shims`] on a DETACHED background thread so the sweep's
+/// Spawn [`reap_stale_shims_in`] on a DETACHED background thread so the sweep's
 /// directory scan never adds latency to the run/spawn/teardown path. Fire and
 /// forget: if the process exits before the sweep finishes, any not-yet-reaped
 /// stale dirs are collected by a later run. Call once, early.
+///
+/// The temp dir is resolved HERE, on the calling thread. With `TMPDIR` unset
+/// macOS answers `temp_dir` through `confstr`, whose first call initializes
+/// libSystem's notify state. Run on the reaper thread, that raced the launch
+/// thread's `fork` for the Node child: the child inherited the half-initialized
+/// state, aborted in `_notify_fork_child` before `exec`, and the run exited 137.
 pub fn spawn_stale_shim_reaper() {
+    let temp = env::temp_dir();
     let _ = std::thread::Builder::new()
         .name("nub-shim-reaper".into())
-        .spawn(reap_stale_shims);
+        .spawn(move || reap_stale_shims_in(&temp, std::process::id(), pid_is_alive));
 }
 
 /// Is `pid` a currently-live process? Used by the shim reaper to avoid reaping a
@@ -4903,7 +4944,7 @@ mod tests {
         // stdout/stderr go to /dev/null so the worker's own captured output stays
         // clean; stdin is inherited (our pty slave) — that's the terminal under test.
         let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg("read x; exit 0");
+        cmd.arg("-c").arg("read x");
         cmd.stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
@@ -4914,16 +4955,41 @@ mod tests {
         };
         let child_pid = child.id();
 
+        // Force the child-first ordering: tcsetpgrp alone cannot resume a child
+        // that already stopped on SIGTTIN before the parent ran the handoff.
+        let stop_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let stopped = loop {
+            let mut status: libc::c_int = 0;
+            // SAFETY: observe our live child without blocking past the deadline.
+            let r = unsafe {
+                libc::waitpid(
+                    child_pid as libc::pid_t,
+                    &mut status,
+                    libc::WNOHANG | libc::WUNTRACED,
+                )
+            };
+            if r == child_pid as libc::pid_t {
+                break libc::WIFSTOPPED(status) && libc::WSTOPSIG(status) == libc::SIGTTIN;
+            }
+            if r < 0 || std::time::Instant::now() >= stop_deadline {
+                break false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        if !stopped {
+            let _ = child.kill();
+            let _ = child.wait();
+            // SAFETY: close the live PTY master after reaping the child.
+            unsafe { libc::close(master) };
+            return 2;
+        }
+
         // Apply the fix under test (or not).
         let _fg = if apply_fix {
             foreground_child(child_pid)
         } else {
             None
         };
-
-        // Let the grandchild reach its blocking terminal read; if it's going to
-        // SIGTTIN-stop (no fix), it will have stopped by now.
-        std::thread::sleep(std::time::Duration::from_millis(300));
 
         // The "keystroke": a newline to the PTY master. With the fix the child is
         // foreground and reads it → exits 0; without it the child is stopped.
@@ -4936,6 +5002,9 @@ mod tests {
         // Observe the child with WUNTRACED so a SIGTTIN STOP is reported, polling ~2s.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let verdict = loop {
+            if !apply_fix {
+                break 1; // the observed SIGTTIN stop is the negative control
+            }
             let mut status: libc::c_int = 0;
             // SAFETY: waitpid on our child, non-blocking + report-stops.
             let r = unsafe {
@@ -4950,7 +5019,7 @@ mod tests {
                     break 1; // stopped (SIGTTIN) → the hang
                 }
                 if libc::WIFEXITED(status) {
-                    break 0; // read the keystroke and exited cleanly
+                    break if libc::WEXITSTATUS(status) == 0 { 0 } else { 2 };
                 }
             }
             if std::time::Instant::now() >= deadline {
@@ -6397,6 +6466,15 @@ mod tests {
                 addition.to_path_buf()
             ]
         );
+    }
+
+    /// A process spawned during a parent's startup inherits the threadpool mark
+    /// that tells its preload to discard nub's value. A fresh `nub` among them
+    /// must shed the mark, or its own child would keep Node's four. Only a host
+    /// with more than four cores reaches that path, which CI's runners do not.
+    #[test]
+    fn a_fresh_invocation_sheds_the_threadpool_taken_mark() {
+        assert!(augmentation_environment_restoration().contains(&(THREADPOOL_TAKEN_ENV, None)));
     }
 
     #[cfg(windows)]

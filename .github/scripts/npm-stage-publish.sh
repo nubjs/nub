@@ -8,9 +8,10 @@
 #
 # Idempotent on a re-run. A version already live is skipped by the `npm view` check; a version
 # already sitting in the staged queue makes `npm stage publish` refuse (npm reserves the number
-# while it is staged), and that refusal is a success here: the approval wait downstream still
-# gates on the registry serving the version. The refusal's exact wording is matched loosely
-# because the first stage-only release is where it gets observed; anything else stays fatal.
+# while it is staged), and that refusal is a success here: release.yml's npm-served job still
+# gates on the registry serving the version after the approval. The refusal's exact wording is
+# matched loosely because the first stage-only release is where it gets observed; anything else
+# stays fatal.
 set -euo pipefail
 dir="${1:?usage: npm-stage-publish.sh <package-dir>}"
 version="${VERSION:?VERSION must name the version being released}"

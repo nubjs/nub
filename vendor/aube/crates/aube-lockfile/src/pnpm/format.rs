@@ -219,7 +219,7 @@ fn fold_explicit_keys(lines: &[&str]) -> Vec<String> {
                     && let Some(rest) = value
                 {
                     let pad = " ".repeat(indent);
-                    if rest.is_empty() || rest.ends_with(':') {
+                    if rest.is_empty() || starts_block_map(rest) {
                         // Block-map value: key on its own line, the first
                         // child re-indented two spaces past the key.
                         out.push(format!("{pad}{key}:"));
@@ -239,6 +239,21 @@ fn fold_explicit_keys(lines: &[&str]) -> Vec<String> {
         i += 1;
     }
     out
+}
+
+/// Whether the text after an explicit-key `: ` indicator is the first
+/// entry of a block map (`dependencies:`, `optional: true`,
+/// `'@scope/x': 1.0.0`) rather than an inline value (`{}`, a scalar).
+/// yaml_serde quotes any scalar that contains `: `, so an unquoted
+/// `k: v` or a quoted key followed by `:` can only be a map entry.
+fn starts_block_map(rest: &str) -> bool {
+    match rest.chars().next() {
+        Some(q @ ('\'' | '"')) => rest[1..]
+            .find(q)
+            .is_some_and(|end| rest[1 + end + 1..].starts_with(':')),
+        Some('{' | '[') => false,
+        _ => rest.ends_with(':') || rest.contains(": "),
+    }
 }
 
 /// Collect a *scalar* `yaml_serde`-emitted block sequence whose key is on
@@ -392,6 +407,36 @@ mod tests {
         );
         assert!(!out.contains("? '"), "no explicit key left:\n{out}");
         assert!(!out.contains("\n  : "), "no value indicator left:\n{out}");
+    }
+
+    #[test]
+    fn folds_explicit_long_key_whose_value_starts_with_a_scalar_field() {
+        // A URL-keyed optional snapshot with no deps is `optional: true`
+        // alone. Folding it onto the key line produced
+        // `'<url key>': optional: true`, which reads back as a string and
+        // fails the next install with "expected struct RawSnapshot".
+        let long = "@next/swc-darwin-arm64@https://vercel-packages.vercel.app/next/commits/7b58e5880cbac52ec705ee2039e963c32a854951/@next/swc-darwin-arm64";
+        let input = format!(
+            "snapshots:\n  ? '{long}'\n  : optional: true\n    dependencies:\n      '@scope/dep': 1.0.0\n  ? '{long}-2'\n  : '@scope/key': 1.0.0\n"
+        );
+        let out = reformat_for_pnpm_parity(&input);
+        assert!(
+            out.contains(&format!(
+                "  '{long}':\n    optional: true\n    dependencies:\n      '@scope/dep': 1.0.0\n"
+            )),
+            "scalar-first value block kept as a map:\n{out}"
+        );
+        assert!(
+            out.contains(&format!("  '{long}-2':\n    '@scope/key': 1.0.0\n")),
+            "quoted-key-first value block kept as a map:\n{out}"
+        );
+        let parsed: yaml_serde::Value = yaml_serde::from_str(&out).unwrap();
+        assert!(
+            parsed["snapshots"][long.to_string()]["optional"]
+                .as_bool()
+                .unwrap_or(false),
+            "round-trips as a map with optional: true:\n{out}"
+        );
     }
 
     #[test]

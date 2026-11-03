@@ -1929,22 +1929,19 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                         }
                     }
 
-                    // Defer platform-mismatched registry packages to
-                    // the post-filter_graph catch-up pass: almost all
-                    // of them are optional natives that `filter_graph`
-                    // is about to drop, so fetching up front would just
-                    // waste bandwidth. Local `file:`/`link:` deps
-                    // always fetch here — they carry empty platform
-                    // arrays and `is_supported` treats them as
-                    // unconstrained.
-                    if pkg.local_source.is_none()
-                        && !aube_resolver::is_supported(
-                            &pkg.os,
-                            &pkg.cpu,
-                            &pkg.libc,
-                            &fetch_supported_arch,
-                        )
-                    {
+                    // Defer platform-mismatched packages to the
+                    // post-filter_graph catch-up pass: almost all of
+                    // them are optional natives that `filter_graph` is
+                    // about to drop, so fetching up front would just
+                    // waste bandwidth. That includes URL-tarball
+                    // natives (`@next/swc-*` from a preview build),
+                    // which carry their manifest's platform arrays.
+                    if !aube_resolver::is_supported(
+                        &pkg.os,
+                        &pkg.cpu,
+                        &pkg.libc,
+                        &fetch_supported_arch,
+                    ) {
                         tracing::debug!(
                             "deferring tarball fetch for {}@{}: platform mismatch (catch-up will cover survivors)",
                             pkg.name,
@@ -2766,17 +2763,24 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             let missing_packages: BTreeMap<String, aube_lockfile::LockedPackage> = graph
                 .packages
                 .iter()
-                // Only non-local registry tarballs are ever deferred by
-                // the streaming platform-skip above (it fires solely for
-                // `local_source.is_none()`), so the catch-up must scope to
-                // those. Local `file:`/`link:` deps already ran their
-                // `import_local_source` + `inc_reused` up front; link-only
-                // deps legitimately leave no `indices` entry, so a plain
-                // `!indices.contains_key` filter would re-import them and
-                // double-credit `reused` (reused > resolved →
-                // WARN_AUBE_PROGRESS_OVERFLOW).
+                // Scope to what the streaming platform-skip above can
+                // have deferred: registry tarballs, and local sources
+                // whose platform arrays fail the host check (a required
+                // native `filter_graph` kept). Every other local source
+                // already ran its `import_local_source` + `inc_reused`
+                // up front; link-only deps legitimately leave no
+                // `indices` entry, so a plain `!indices.contains_key`
+                // filter would re-import them and double-credit `reused`
+                // (reused > resolved → WARN_AUBE_PROGRESS_OVERFLOW).
                 .filter(|(dep_path, pkg)| {
-                    !indices.contains_key(*dep_path) && pkg.local_source.is_none()
+                    !indices.contains_key(*dep_path)
+                        && (pkg.local_source.is_none()
+                            || !aube_resolver::is_supported(
+                                &pkg.os,
+                                &pkg.cpu,
+                                &pkg.libc,
+                                &install_supported_architectures,
+                            ))
                 })
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();

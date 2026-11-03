@@ -78,9 +78,13 @@ So Nub writes a private `node` into a temporary directory named with [[crates/nu
 
 The persistent shim installed by `nub node shim` is the opposite: it runs the resolved Node unaugmented. Version management is its job. A globally augmenting `node` would load environment files and inject globals into every Node process on the machine.
 
+For interactive Unix children, [[crates/nub-core/src/node/spawn.rs#foreground_child]] hands the terminal to the child's process group, then sends `SIGCONT`: a child that reads before the parent runs can already be stopped by `SIGTTIN`. The PTY regression test waits for that stop before handing over the terminal, and checks both the stopped negative control and a successful read. The guard restores the parent's foreground group when the child exits.
+
 ## Turning it off
 
-Both `--node` and a truthy `NODE_COMPAT` disable runtime augmentation — no hooks, no preload, no injected flags, no path shim. They compose, and `NODE_COMPAT` is stamped tree-wide so every descendant inherits it.
+Both `--node` and a truthy `NODE_COMPAT` disable runtime augmentation — no hooks, no preload, no injected flags, no path shim. They compose, and they differ in reach.
+
+`NODE_COMPAT` is the user's variable, so every descendant `node` and `nub` inherits it. A compat launch the user did not export — `--node`, `nodeCompat`, a plain `node` through the persistent shim — covers that process and the bare `node` processes beneath it. It travels as a private marker, [[crates/nub-core/src/node/spawn.rs#COMPAT_LAUNCH_ENV]], that only the `node` shim reads. A `nub` command started beneath it is a fresh invocation: it drops the marker and augments.
 
 Two details make the switch trustworthy. Compat mode does not merely skip augmentation; it restores a parent's augmented environment to its pre-Nub state. And version provisioning stays on, because running on stock Node and running on no particular Node are different requests.
 

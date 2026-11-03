@@ -1,0 +1,496 @@
+{
+  "date": "2026-10-01",
+  "machine": "c3d-standard-16 (GCE spot), 16 vCPU",
+  "node": "v26.8.1",
+  "nub": "main at 57b837b15d (v0.9.6), fast profile",
+  "bench": "tests/bench/runtime/pool-ping.sh",
+  "load": "/ping at -R 50 -c 10 for 24 s while /bcrypt (cost 12) runs at -c 64 -d 30; two rounds; busy-loops are nice-0 node processes in the server cgroup; pool16 = plain node with UV_THREADPOOL_SIZE=16, no demotion",
+  "conditions": {
+    "node/ping/hogs=0": {
+      "label": "node",
+      "mode": "ping",
+      "hogs": 0,
+      "pool": "env=unset workers=4 nices=0,0,0,0",
+      "rounds": [
+        {
+          "server": {
+            "ping": {
+              "rps": 50,
+              "n": 1200,
+              "p50": 0,
+              "p90": 0,
+              "p99": 4,
+              "max": 5,
+              "errors": 0
+            },
+            "bcrypt": {
+              "rps": 18,
+              "n": 540,
+              "p50": 3542,
+              "p90": 3548,
+              "p99": 3552,
+              "max": 3552,
+              "errors": 0
+            }
+          },
+          "hogMloopsPerSec": 0
+        },
+        {
+          "server": {
+            "ping": {
+              "rps": 50,
+              "n": 1200,
+              "p50": 0,
+              "p90": 0,
+              "p99": 4,
+              "max": 5,
+              "errors": 0
+            },
+            "bcrypt": {
+              "rps": 18,
+              "n": 540,
+              "p50": 3541,
+              "p90": 3547,
+              "p99": 3548,
+              "max": 3550,
+              "errors": 0
+            }
+          },
+          "hogMloopsPerSec": 0
+        }
+      ]
+    },
+    "nub/ping/hogs=0": {
+      "label": "nub",
+      "mode": "ping",
+      "hogs": 0,
+      "pool": "env=unset workers=16 nices=0,0,0,0,10,10,10,10,10,10,10,10,10,10,10,10",
+      "rounds": [
+        {
+          "server": {
+            "ping": {
+              "rps": 50,
+              "n": 1200,
+              "p50": 0,
+              "p90": 2,
+              "p99": 8,
+              "max": 9,
+              "errors": 0
+            },
+            "bcrypt": {
+              "rps": 66.8,
+              "n": 2003,
+              "p50": 951,
+              "p90": 958,
+              "p99": 993,
+              "max": 1104,
+              "errors": 0
+            }
+          },
+          "hogMloopsPerSec": 0
+        },
+        {
+          "server": {
+            "ping": {
+              "rps": 50,
+              "n": 1200,
+              "p50": 0,
+              "p90": 2,
+              "p99": 7,
+              "max": 9,
+              "errors": 0
+            },
+            "bcrypt": {
+              "rps": 66.8,
+              "n": 2003,
+              "p50": 951,
+              "p90": 959,
+              "p99": 979,
+              "max": 1058,
+              "errors": 0
+            }
+          },
+          "hogMloopsPerSec": 0
+        }
+      ]
+    },
+    "pool16/ping/hogs=0": {
+      "label": "pool16",
+      "mode": "ping",
+      "hogs": 0,
+      "pool": "env=16 workers=16 nices=0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
+      "rounds": [
+        {
+          "server": {
+            "ping": {
+              "rps": 50,
+              "n": 1200,
+              "p50": 1,
+              "p90": 3,
+              "p99": 8,
+              "max": 11,
+              "errors": 0
+            },
+            "bcrypt": {
+              "rps": 66.7,
+              "n": 2000,
+              "p50": 951,
+              "p90": 958,
+              "p99": 973,
+              "max": 1054,
+              "errors": 0
+            }
+          },
+          "hogMloopsPerSec": 0
+        },
+        {
+          "server": {
+            "ping": {
+              "rps": 50.7,
+              "n": 1217,
+              "p50": 0,
+              "p90": 3,
+              "p99": 7,
+              "max": 9,
+              "errors": 0
+            },
+            "bcrypt": {
+              "rps": 66.8,
+              "n": 2004,
+              "p50": 951,
+              "p90": 957,
+              "p99": 977,
+              "max": 1069,
+              "errors": 0
+            }
+          },
+          "hogMloopsPerSec": 0
+        }
+      ]
+    },
+    "node/ping/hogs=16": {
+      "label": "node",
+      "mode": "ping",
+      "hogs": 16,
+      "pool": "env=unset workers=4 nices=0,0,0,0",
+      "rounds": [
+        {
+          "server": {
+            "ping": {
+              "rps": 50,
+              "n": 1200,
+              "p50": 1,
+              "p90": 4,
+              "p99": 9,
+              "max": 10,
+              "errors": 0
+            },
+            "bcrypt": {
+              "rps": 13.5,
+              "n": 404,
+              "p50": 4525,
+              "p90": 4830,
+              "p99": 5358,
+              "max": 5494,
+              "errors": 0
+            }
+          },
+          "hogMloopsPerSec": 1365
+        },
+        {
+          "server": {
+            "ping": {
+              "rps": 50,
+              "n": 1200,
+              "p50": 1,
+              "p90": 4,
+              "p99": 11,
+              "max": 16,
+              "errors": 0
+            },
+            "bcrypt": {
+              "rps": 13.5,
+              "n": 405,
+              "p50": 4617,
+              "p90": 5116,
+              "p99": 5322,
+              "max": 5516,
+              "errors": 0
+            }
+          },
+          "hogMloopsPerSec": 1376
+        }
+      ]
+    },
+    "nub/ping/hogs=16": {
+      "label": "nub",
+      "mode": "ping",
+      "hogs": 16,
+      "pool": "env=unset workers=16 nices=0,0,0,0,10,10,10,10,10,10,10,10,10,10,10,10",
+      "rounds": [
+        {
+          "server": {
+            "ping": {
+              "rps": 50,
+              "n": 1200,
+              "p50": 1,
+              "p90": 8,
+              "p99": 19,
+              "max": 21,
+              "errors": 0
+            },
+            "bcrypt": {
+              "rps": 16.9,
+              "n": 508,
+              "p50": 3117,
+              "p90": 5880,
+              "p99": 6785,
+              "max": 6982,
+              "errors": 0
+            }
+          },
+          "hogMloopsPerSec": 1301
+        },
+        {
+          "server": {
+            "ping": {
+              "rps": 50,
+              "n": 1200,
+              "p50": 1,
+              "p90": 4,
+              "p99": 11,
+              "max": 15,
+              "errors": 0
+            },
+            "bcrypt": {
+              "rps": 16.9,
+              "n": 508,
+              "p50": 3142,
+              "p90": 5834,
+              "p99": 6729,
+              "max": 7013,
+              "errors": 0
+            }
+          },
+          "hogMloopsPerSec": 1361
+        }
+      ]
+    },
+    "pool16/ping/hogs=16": {
+      "label": "pool16",
+      "mode": "ping",
+      "hogs": 16,
+      "pool": "env=16 workers=16 nices=0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
+      "rounds": [
+        {
+          "server": {
+            "ping": {
+              "rps": 51.1,
+              "n": 1225,
+              "p50": 1,
+              "p90": 5,
+              "p99": 18,
+              "max": 22,
+              "errors": 0
+            },
+            "bcrypt": {
+              "rps": 33.7,
+              "n": 1011,
+              "p50": 1894,
+              "p90": 1995,
+              "p99": 2128,
+              "max": 2176,
+              "errors": 0
+            }
+          },
+          "hogMloopsPerSec": 1228
+        },
+        {
+          "server": {
+            "ping": {
+              "rps": 50,
+              "n": 1200,
+              "p50": 1,
+              "p90": 4,
+              "p99": 15,
+              "max": 18,
+              "errors": 0
+            },
+            "bcrypt": {
+              "rps": 33.3,
+              "n": 1000,
+              "p50": 1891,
+              "p90": 2008,
+              "p99": 2189,
+              "max": 2345,
+              "errors": 0
+            }
+          },
+          "hogMloopsPerSec": 1228
+        }
+      ]
+    },
+    "node/ping/hogs=32": {
+      "label": "node",
+      "mode": "ping",
+      "hogs": 32,
+      "pool": "env=unset workers=4 nices=0,0,0,0",
+      "rounds": [
+        {
+          "server": {
+            "ping": {
+              "rps": 50,
+              "n": 1200,
+              "p50": 2,
+              "p90": 6,
+              "p99": 11,
+              "max": 16,
+              "errors": 0
+            },
+            "bcrypt": {
+              "rps": 7.8,
+              "n": 234,
+              "p50": 8031,
+              "p90": 8576,
+              "p99": 8779,
+              "max": 8836,
+              "errors": 0
+            }
+          },
+          "hogMloopsPerSec": 2292
+        },
+        {
+          "server": {
+            "ping": {
+              "rps": 52.1,
+              "n": 1249,
+              "p50": 2,
+              "p90": 7,
+              "p99": 15,
+              "max": 18,
+              "errors": 0
+            },
+            "bcrypt": {
+              "rps": 7.4,
+              "n": 222,
+              "p50": 8525,
+              "p90": 8859,
+              "p99": 9005,
+              "max": 9028,
+              "errors": 0
+            }
+          },
+          "hogMloopsPerSec": 2359
+        }
+      ]
+    },
+    "nub/ping/hogs=32": {
+      "label": "nub",
+      "mode": "ping",
+      "hogs": 32,
+      "pool": "env=unset workers=16 nices=0,0,0,0,10,10,10,10,10,10,10,10,10,10,10,10",
+      "rounds": [
+        {
+          "server": {
+            "ping": {
+              "rps": 50,
+              "n": 1200,
+              "p50": 2,
+              "p90": 7,
+              "p99": 14,
+              "max": 17,
+              "errors": 0
+            },
+            "bcrypt": {
+              "rps": 7.9,
+              "n": 236,
+              "p50": 5679,
+              "p90": 6169,
+              "p99": 9938,
+              "max": 9976,
+              "errors": 41
+            }
+          },
+          "hogMloopsPerSec": 2096
+        },
+        {
+          "server": {
+            "ping": {
+              "rps": 50,
+              "n": 1200,
+              "p50": 2,
+              "p90": 12,
+              "p99": 36,
+              "max": 40,
+              "errors": 0
+            },
+            "bcrypt": {
+              "rps": 7.6,
+              "n": 227,
+              "p50": 5561,
+              "p90": 6247,
+              "p99": 9871,
+              "max": 9912,
+              "errors": 46
+            }
+          },
+          "hogMloopsPerSec": 2099
+        }
+      ]
+    },
+    "pool16/ping/hogs=32": {
+      "label": "pool16",
+      "mode": "ping",
+      "hogs": 32,
+      "pool": "env=16 workers=16 nices=0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
+      "rounds": [
+        {
+          "server": {
+            "ping": {
+              "rps": 52.1,
+              "n": 1250,
+              "p50": 2,
+              "p90": 8,
+              "p99": 19,
+              "max": 24,
+              "errors": 0
+            },
+            "bcrypt": {
+              "rps": 22,
+              "n": 659,
+              "p50": 2866,
+              "p90": 3015,
+              "p99": 3159,
+              "max": 3202,
+              "errors": 0
+            }
+          },
+          "hogMloopsPerSec": 2201
+        },
+        {
+          "server": {
+            "ping": {
+              "rps": 52.1,
+              "n": 1250,
+              "p50": 2,
+              "p90": 7,
+              "p99": 18,
+              "max": 24,
+              "errors": 0
+            },
+            "bcrypt": {
+              "rps": 22.1,
+              "n": 662,
+              "p50": 2856,
+              "p90": 3017,
+              "p99": 3163,
+              "max": 3450,
+              "errors": 0
+            }
+          },
+          "hogMloopsPerSec": 2266
+        }
+      ]
+    }
+  }
+}
