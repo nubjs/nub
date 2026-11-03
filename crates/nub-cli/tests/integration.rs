@@ -1904,11 +1904,10 @@ fn an_unreadable_tsconfig_stops_the_run() {
     );
 }
 
-/// #1032: the entry's tsconfig check reads the config the run will use. A workspace
-/// member reached through its `node_modules` link runs from its real directory, so
-/// its relative `extends` resolves from there; a dependency's own published
-/// tsconfig is not the project's and never stops a run.
-#[cfg(unix)]
+/// #1032: the entry's tsconfig check reads the config the run will use. A
+/// dependency's own published tsconfig is not the project's and never stops a run;
+/// a workspace member reached through its `node_modules` link runs from its real
+/// directory, so its relative `extends` resolves from there.
 #[test]
 fn the_entry_tsconfig_check_follows_the_real_path_and_skips_dependencies() {
     let dir = unique_test_cache();
@@ -1918,38 +1917,6 @@ fn the_entry_tsconfig_check_follows_the_real_path_and_skips_dependencies() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, body).unwrap();
     };
-    write(
-        "package.json",
-        r#"{"name":"root","workspaces":["packages/*"]}"#,
-    );
-    write(
-        "tsconfig.base.json",
-        r#"{"compilerOptions":{"strict":true}}"#,
-    );
-    write(
-        "packages/cli/tsconfig.json",
-        r#"{"extends":"../../tsconfig.base.json"}"#,
-    );
-    write("packages/cli/bin.cjs", "console.log('linked-ok')");
-    write(
-        "packages/broken/tsconfig.json",
-        r#"{"extends":"./missing.json"}"#,
-    );
-    write("packages/broken/bin.cjs", "console.log('broken-ran')");
-    write("node_modules/dep/package.json", r#"{"name":"dep"}"#);
-    write(
-        "node_modules/dep/tsconfig.json",
-        r#"{"extends":"../../unpublished.json"}"#,
-    );
-    write("node_modules/dep/bin.cjs", "console.log('dependency-ok')");
-    std::fs::create_dir_all(dir.join("node_modules/@repro")).unwrap();
-    std::os::unix::fs::symlink("../../packages/cli", dir.join("node_modules/@repro/cli")).unwrap();
-    std::os::unix::fs::symlink(
-        "../../packages/broken",
-        dir.join("node_modules/@repro/broken"),
-    )
-    .unwrap();
-
     let run = |entry: &str| {
         let out = Command::new(nub_binary())
             .arg(entry)
@@ -1964,14 +1931,16 @@ fn the_entry_tsconfig_check_follows_the_real_path_and_skips_dependencies() {
             out.status.code(),
         )
     };
-
-    let (stdout, stderr, code) = run("node_modules/@repro/cli/bin.cjs");
-    assert_eq!(
-        code,
-        Some(0),
-        "a linked workspace member must run: {stderr}"
+    write(
+        "package.json",
+        r#"{"name":"root","workspaces":["packages/*"]}"#,
     );
-    assert!(stdout.contains("linked-ok"), "{stdout}");
+    write("node_modules/dep/package.json", r#"{"name":"dep"}"#);
+    write(
+        "node_modules/dep/tsconfig.json",
+        r#"{"extends":"../../unpublished.json"}"#,
+    );
+    write("node_modules/dep/bin.cjs", "console.log('dependency-ok')");
 
     let (stdout, stderr, code) = run("node_modules/dep/bin.cjs");
     assert_eq!(
@@ -1981,16 +1950,50 @@ fn the_entry_tsconfig_check_follows_the_real_path_and_skips_dependencies() {
     );
     assert!(stdout.contains("dependency-ok"), "{stdout}");
 
-    // The link is followed, not exempted: a workspace member whose real config is
-    // broken still refuses, exactly as when run by its real path.
-    let (_stdout, stderr, code) = run("node_modules/@repro/broken/bin.cjs");
+    #[cfg(unix)]
+    {
+        write(
+            "tsconfig.base.json",
+            r#"{"compilerOptions":{"strict":true}}"#,
+        );
+        write(
+            "packages/cli/tsconfig.json",
+            r#"{"extends":"../../tsconfig.base.json"}"#,
+        );
+        write("packages/cli/bin.cjs", "console.log('linked-ok')");
+        write(
+            "packages/broken/tsconfig.json",
+            r#"{"extends":"./missing.json"}"#,
+        );
+        write("packages/broken/bin.cjs", "console.log('broken-ran')");
+        std::fs::create_dir_all(dir.join("node_modules/@repro")).unwrap();
+        for member in ["cli", "broken"] {
+            std::os::unix::fs::symlink(
+                format!("../../packages/{member}"),
+                dir.join("node_modules/@repro").join(member),
+            )
+            .unwrap();
+        }
+
+        let (stdout, stderr, code) = run("node_modules/@repro/cli/bin.cjs");
+        assert_eq!(
+            code,
+            Some(0),
+            "a linked workspace member must run: {stderr}"
+        );
+        assert!(stdout.contains("linked-ok"), "{stdout}");
+
+        // The link is followed, not exempted: a workspace member whose real config
+        // is broken still refuses, exactly as when run by its real path.
+        let (_stdout, stderr, code) = run("node_modules/@repro/broken/bin.cjs");
+        assert_ne!(
+            code,
+            Some(0),
+            "a broken workspace config must still stop the run"
+        );
+        assert!(stderr.contains("missing.json"), "{stderr}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
-    assert_ne!(
-        code,
-        Some(0),
-        "a broken workspace config must still stop the run"
-    );
-    assert!(stderr.contains("missing.json"), "{stderr}");
 }
 
 // ── Project-source plain JS (.js/.mjs/.cjs) transpile ───────────────
