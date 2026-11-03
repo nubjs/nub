@@ -1763,38 +1763,52 @@ function installVersionMarker() {
 }
 
 // ── libuv threadpool policy ──────────────────────────────────────────
-// The launcher sized the pool (`UV_THREADPOOL_SIZE = max(4, cores)`, spawn.rs) and
-// Node read it at startup, so the variable has done its work for THIS process.
-// Two things remain, both about the cores the extra threads would take:
+// The launcher sized the pool (`UV_THREADPOOL_SIZE = max(4, cores)`, spawn.rs) by
+// putting the variable in the environment, and libuv reads it LAZILY, at the first
+// pool use. Three things remain:
 //
-//  1. Children keep Node's default. A `cluster` or PM2 fork, or any `child_process`
+//  1. The program may still choose its own size. Under plain Node an assignment
+//     to `process.env.UV_THREADPOOL_SIZE` before the first pool use sizes the pool
+//     (a `process.env` write reaches the C environment), so on the fast tier the
+//     pool is NOT built here: the addon's `onFirstLoopTurn` settles it at the
+//     event loop's first turn, after the entry's synchronous top level, and
+//     whichever pool use comes first reads the environment as the program left
+//     it. Until then nub's value is visible to the program, as an exported value
+//     would be, so a program that only fills the variable in when it is unset
+//     defers to it. A program that set or removed it owns the pool, and nub
+//     leaves it be. Every way JS has to run later is itself visible to user code
+//     (see the addon's threadpool.rs), hence the native hook. The compat tier's
+//     `--import` preload is read through the pool, which therefore already
+//     exists, so there it is settled at once. So is a Linux pool whose workers
+//     libuv does not name (before 1.50): a pool the program built first could not
+//     be told apart from its other threads, and nothing would be demoted.
+//  2. Children keep Node's default. A `cluster` or PM2 fork, or any `child_process`
 //     spawn, inherits `process.env`; N workers each carrying a cores-sized pool is
 //     the oversubscription Node's own maintainers closed nodejs/node#61533 over.
-//     So nub's OWN value is deleted from `process.env`. Ownership is two markers
-//     the launcher stamps (spawn.rs `RestorableVar`): the value equals the
-//     `__NUB_AUGMENTED_*` record of what the launcher handed Node, AND the compat
-//     presence mask says the variable was ABSENT before the outermost nub ran (bit
-//     1 << 5 is this variable's slot). A shell value, an env-file value, or a value
-//     the launcher merely passed through fails one of the two and inherits as it
-//     would under plain Node. The markers themselves stay, which is how a nested
-//     `nub` knows to size its child again. libuv reads the variable LAZILY, at the
-//     first pool use, and a `process.env` delete reaches the C environment, so the
-//     pool is created (one `fs.access`) before the variable goes; otherwise libuv
-//     would find nothing and build Node's four. A pool of four is Node's default,
-//     so the variable goes at once and nothing is demoted.
-//  2. The threads beyond Node's four run at a lower priority on Linux, so they only
+//     So once the pool exists nub's OWN value is deleted from `process.env`. A
+//     child spawned before then inherits it, so this process first marks the
+//     value taken (THREADPOOL_TAKEN_ENV), and a preload that finds the mark
+//     deletes the value before its own first pool use. The ownership markers
+//     stay, which is how a nested `nub` knows to size its child again; it sheds
+//     the taken mark with the rest of the parent's (spawn.rs). Ownership is
+//     two markers the launcher stamps (spawn.rs `RestorableVar`): the value equals
+//     the `__NUB_AUGMENTED_*` record of what the launcher handed Node, AND the
+//     compat presence mask says the variable was ABSENT before the outermost nub
+//     ran (bit 1 << 5 is this variable's slot). A shell value, an env-file value,
+//     or a value the launcher merely passed through fails one of the two and
+//     inherits as it would under plain Node. A pool of four is Node's default, so
+//     the variable goes at once and nothing is demoted.
+//  3. The threads beyond Node's four run at a lower priority on Linux, so they only
 //     take cycles nothing else on the box wants (Chromium's best-effort tier, nice
 //     10). Measured on 16 vCPU beside twelve busy processes: the neighbours keep
 //     98.6% of their CPU instead of 92.5%, the server still gains 20% over four
 //     threads, and an idle box loses nothing. libuv creates every worker
 //     synchronously inside the first pool submit, so one submit makes them all
-//     exist; the new thread ids (or the `libuv-worker` name) name them, and
-//     `os.setPriority(tid)` targets one thread on Linux. The thread ids are exact
-//     only across the call that builds the pool: the fast tier's `--require`
-//     preload runs before any pool use and builds it here, but the compat tier's
-//     `--import` preload is itself read through the pool, so the launcher
-//     `--require`s threadpool-snapshot.cjs ahead of it to build the pool and
-//     record its threads there.
+//     exist; the new thread ids (or the `libuv-worker` name, for a pool the
+//     program built first) name them, and `os.setPriority(tid)` targets one thread
+//     on Linux. On the compat tier the launcher `--require`s
+//     threadpool-snapshot.cjs ahead of the `--import` preload to build the pool
+//     and record its threads there.
 //
 // The submit is the addon's `warmThreadpool`: one no-op task on a private libuv
 // loop, run to completion inside the call, so nothing is left on Node's loop for
@@ -1808,6 +1822,7 @@ function installVersionMarker() {
 // since), building no pool at all.
 const THREADPOOL_ENV = "UV_THREADPOOL_SIZE";
 const THREADPOOL_MARK_ENV = "__NUB_AUGMENTED_UV_THREADPOOL_SIZE";
+const THREADPOOL_TAKEN_ENV = "__NUB_UV_THREADPOOL_SIZE_TAKEN";
 const COMPAT_PRESENT_ENV = "__NUB_COMPAT_PRESENT";
 const THREADPOOL_PRESENT_BIT = 1 << 5;
 const THREADPOOL_NODE_DEFAULT = 4;
@@ -1836,7 +1851,15 @@ function buildThreadpool(addon) {
   require("node:fs").access("/", () => {});
 }
 
-function installThreadpoolPolicy() {
+// libuv names its workers `libuv-worker` from 1.50.
+function libuvNamesWorkers() {
+  const [major, minor] = process.versions.uv.split(".").map(Number);
+  return major > 1 || (major === 1 && minor >= 50);
+}
+
+// `deferred`: the caller is the fast tier's `--require` preload, which runs before
+// anything has used the pool.
+function installThreadpoolPolicy(deferred) {
   const size = process.env[THREADPOOL_ENV];
   if (size === undefined || size !== process.env[THREADPOOL_MARK_ENV]) return;
   if ((Number(process.env[COMPAT_PRESENT_ENV]) || 0) & THREADPOOL_PRESENT_BIT) return;
@@ -1850,33 +1873,66 @@ function installThreadpoolPolicy() {
     // The `--require` preload re-runs inside every loader worker; the pool is
     // process-wide, so only the main thread touches it.
     if (!require("node:worker_threads").isMainThread) return;
-    const fs = require("node:fs");
+    if (process.env[THREADPOOL_TAKEN_ENV] !== undefined) {
+      // Inherited from a process that had not yet settled its own pool.
+      delete process.env[THREADPOOL_ENV];
+      delete process.env[THREADPOOL_TAKEN_ENV];
+      return;
+    }
     const linux = process.platform === "linux";
-    const tids = () => fs.readdirSync("/proc/self/task").map(Number).filter(Boolean);
-    let workers = linux ? process[THREADPOOL_WORKERS] : undefined;
-    if (workers === undefined) {
-      const addon = loadNativeAddon();
-      const before = linux ? new Set(tids()) : null;
-      buildThreadpool(addon);
-      const isWorker = (t) => {
-        if (!before.has(t)) return true;
-        try {
-          return fs.readFileSync(`/proc/self/task/${t}/comm`, "latin1").trim() === "libuv-worker";
-        } catch {
-          return false;
-        }
-      };
-      if (linux) workers = tids().filter(isWorker);
+    const workers = linux ? process[THREADPOOL_WORKERS] : undefined;
+    const addon = workers === undefined ? loadNativeAddon() : null;
+    if (
+      deferred &&
+      typeof addon?.onFirstLoopTurn === "function" &&
+      (!linux || libuvNamesWorkers())
+    ) {
+      process.env[THREADPOOL_TAKEN_ENV] = "1";
+      if (addon.onFirstLoopTurn(() => settleThreadpool(addon, size))) return;
+      delete process.env[THREADPOOL_TAKEN_ENV];
     }
-    delete process.env[THREADPOOL_ENV];
-    if (!linux) return;
-    const os = require("node:os");
-    for (const t of workers.sort((a, b) => a - b).slice(THREADPOOL_NODE_DEFAULT)) {
-      try {
-        os.setPriority(t, THREADPOOL_EXTRA_NICE);
-      } catch {}
-    }
+    releaseThreadpool(addon, workers);
   } catch {}
+}
+
+// The deferred half: the first loop turn has come, so the entry's top level has run.
+function settleThreadpool(addon, size) {
+  try {
+    delete process.env[THREADPOOL_TAKEN_ENV];
+    if (process.env[THREADPOOL_ENV] !== size) return;
+    releaseThreadpool(addon, undefined);
+  } catch {}
+}
+
+// Build the pool unless something already has, THEN take nub's value out of
+// `process.env`: libuv reads the variable at the first submit, and a delete reaches
+// the C environment, so a pool built after it would be Node's four. On Linux, demote
+// the workers beyond four.
+function releaseThreadpool(addon, workers) {
+  const fs = require("node:fs");
+  const linux = process.platform === "linux";
+  const tids = () => fs.readdirSync("/proc/self/task").map(Number).filter(Boolean);
+  if (workers === undefined) {
+    const before = linux ? new Set(tids()) : null;
+    buildThreadpool(addon);
+    const isWorker = (t) => {
+      if (!before.has(t)) return true;
+      try {
+        return fs.readFileSync(`/proc/self/task/${t}/comm`, "latin1").trim() === "libuv-worker";
+      } catch {
+        return false;
+      }
+    };
+    if (linux) workers = tids().filter(isWorker);
+  }
+  delete process.env[THREADPOOL_ENV];
+  if (!linux) return;
+  const os = require("node:os");
+  for (const t of workers.sort((a, b) => a - b).slice(THREADPOOL_NODE_DEFAULT)) {
+    try {
+      os.setPriority(t, THREADPOOL_EXTRA_NICE);
+    } catch {}
+  }
 }
 
 // ── Default-export `fetch` handler (the auto-listener) ───────────────

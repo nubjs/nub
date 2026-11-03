@@ -358,6 +358,24 @@ fn transparent_verb_falls_through_to_the_system_pm_not_the_pin() {
         format!("FAKE:{}:create vite my-app\n", fake.display()),
         "the transparent fall-through targets the system npm, not the pinned pnpm"
     );
+
+    // A registry verb never touches the project either: `npm login` reaches the
+    // system npm instead of being refused.
+    let (stdout, stderr, code) = run(
+        &link,
+        &["login", "--auth-type=web"],
+        &proj,
+        &[
+            ("PATH", sys.to_str().unwrap()),
+            ("HOME", work.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(code, 0, "a registry verb never refuses; stderr:\n{stderr}");
+    assert_eq!(
+        stdout,
+        format!("FAKE:{}:login --auth-type=web\n", fake.display()),
+        "the registry verb runs the system npm with argv passed verbatim"
+    );
 }
 
 #[test]

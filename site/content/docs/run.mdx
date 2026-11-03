@@ -32,6 +32,8 @@ nub run test
 
 Running a script is always `nub run <script>` — barewords like `nub dev` do not fall through to scripts. A `nub build` where `build` is a script fails with a hint to run `nub run build`. See [Running files](/docs/runtime) for how `nub <file>` works.
 
+On Unix, a script with inherited terminal input and output receives the terminal's foreground process group, so interactive tools can read input and receive Ctrl-C directly. Nub resumes the group if it stopped while waiting for the handoff, and restores the terminal when the script exits.
+
 Dispatch is handled in Rust with no Node bootstrap in the wrapper, so the runner adds only a few milliseconds before your script's first byte — faster than Node's own `node --run`:
 
 <Bench
