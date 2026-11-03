@@ -245,6 +245,28 @@ pub fn matches(
     match_parent_chain(&rule.parents, ancestors)
 }
 
+/// [`matches`] for a dependency declared as a `catalog:` reference.
+///
+/// pnpm applies overrides to a manifest before it resolves catalogs, so the
+/// selector meets the raw `catalog:` text rather than the catalog's range.
+/// Its range check is `isSubRange`, which for a spec that is not a semver
+/// range reduces to text equality: `foo@catalog:` matches, `foo@^1` never
+/// does, whatever range the catalog holds.
+pub fn matches_catalog_reference(
+    rule: &OverrideRule,
+    task_name: &str,
+    catalog_spec: &str,
+    ancestors: &[AncestorFrame<'_>],
+) -> bool {
+    rule.target.name == task_name
+        && rule
+            .target
+            .version_req
+            .as_deref()
+            .is_none_or(|req| req == catalog_spec)
+        && match_parent_chain(&rule.parents, ancestors)
+}
+
 fn match_parent_chain(parents: &[Segment], ancestors: &[AncestorFrame<'_>]) -> bool {
     if parents.is_empty() {
         return true;
