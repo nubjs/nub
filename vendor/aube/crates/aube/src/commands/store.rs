@@ -1933,7 +1933,9 @@ mod extracted_tree_prune_tests {
     /// Every rebuild of a `file:` tarball adds a content variant under the
     /// same coordinate, so keeping all of a live coordinate's variants grows
     /// the tier without bound. Only the most recently used one survives once
-    /// the others go unused past the grace window. A tree named before trees
+    /// the others go unused past the grace window, and it survives even when
+    /// it is past the window too: a project left alone for a month still
+    /// clones from it on its next install. A tree named before trees
     /// carried a digest is never read again and ages out the same way, even
     /// when it is the only tree of its coordinate.
     #[test]
@@ -1947,10 +1949,19 @@ mod extracted_tree_prune_tests {
         for name in [&current, &superseded, &legacy, &lone_legacy] {
             tree(&trees, name);
         }
-        let unused = std::time::SystemTime::now() - GRACE - std::time::Duration::from_secs(86_400);
-        for name in [&superseded, &legacy, &lone_legacy] {
+        let past_grace = |extra_hours: u64| {
+            std::time::SystemTime::now()
+                - GRACE
+                - std::time::Duration::from_secs(extra_hours * 3600)
+        };
+        for (name, used) in [
+            (&current, past_grace(1)),
+            (&superseded, past_grace(24)),
+            (&legacy, past_grace(24)),
+            (&lone_legacy, past_grace(24)),
+        ] {
             std::fs::File::open(trees.join(name))
-                .and_then(|f| f.set_modified(unused))
+                .and_then(|f| f.set_modified(used))
                 .unwrap();
         }
 

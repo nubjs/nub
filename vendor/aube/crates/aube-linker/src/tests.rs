@@ -2910,6 +2910,74 @@ fn clonedir_never_reuses_a_tree_across_different_content_at_one_dep_path() {
     }
 }
 
+/// A tree's mtime is its last-use stamp for `store prune`, which ages out
+/// every variant of a live coordinate but the most recently used. So cloning
+/// from an existing tree must reuse it as-is and refresh a day-old stamp;
+/// otherwise a variant one project still clones from daily would age out
+/// beside a newer one and cost that project a rebuild.
+#[cfg(target_os = "macos")]
+#[test]
+fn clonedir_reuse_refreshes_a_stale_tree_use_stamp() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::at(dir.path().join("store/files"));
+    let dep_path = "probe@1.0.0";
+    let pkg = LockedPackage {
+        name: "probe".to_string(),
+        version: "1.0.0".to_string(),
+        dep_path: dep_path.to_string(),
+        ..Default::default()
+    };
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Reflink, false);
+    let mut index = PackageIndex::default();
+    index.insert(
+        "index.js".to_string(),
+        store.import_bytes(b"module.exports=1\n", false).unwrap(),
+    );
+    let tree = store.tree_path(&aube_store::tree_key(
+        &linker.virtual_store_subdir(dep_path),
+        &index,
+    ));
+    let materialize = |project: &str| {
+        let aube_dir = dir.path().join(project).join("node_modules/.aube");
+        std::fs::create_dir_all(&aube_dir).unwrap();
+        linker
+            .ensure_in_aube_dir(
+                &aube_dir,
+                dep_path,
+                &aube_lockfile::LockfileGraph::default(),
+                &pkg,
+                &index,
+                &mut LinkStats::default(),
+                None,
+            )
+            .expect("materialize");
+    };
+
+    materialize("a");
+    let built = std::fs::metadata(&tree).expect("tree tier must have been built");
+    let two_days_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
+    std::fs::File::open(&tree)
+        .and_then(|f| f.set_modified(two_days_ago))
+        .unwrap();
+
+    materialize("b");
+    let reused = std::fs::metadata(&tree).unwrap();
+    assert_eq!(
+        reused.ino(),
+        built.ino(),
+        "the existing tree must be reused, not rebuilt"
+    );
+    let age = std::time::SystemTime::now()
+        .duration_since(reused.modified().unwrap())
+        .unwrap_or_default();
+    assert!(
+        age.as_secs() < 3600,
+        "reusing the tree must refresh its use stamp, but it is {}s old",
+        age.as_secs()
+    );
+}
+
 // nub#566 / nub#576: a POPULATED real directory sitting in a
 // shared-store entry's slot must be replaced by the link, not collide
 // with it. The slot gets that shape whenever a tree materialized
