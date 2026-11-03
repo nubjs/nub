@@ -90,7 +90,9 @@ if [ -d "$lock" ] && [ -z "$(find "$lock" -maxdepth 0 -mmin -30 2>/dev/null)" ];
   rm -rf "$lock" 2>/dev/null
 fi
 mkdir -p "$cache" 2>/dev/null || exit 0
-mkdir "$lock" 2>/dev/null || exit 0
+# The noclobber marker makes the claim exclusive where mkdir(1) is not (uutils;
+# see _xmkdir in rustc-qos.sh).
+{ mkdir "$lock" 2>/dev/null && { (set -C; : > "$lock/.claimed"); } 2>/dev/null; } || exit 0
 trap 'rm -rf "$lock" 2>/dev/null' EXIT
 
 say() { printf 'target-gc: %s\n' "$*" >&2; }

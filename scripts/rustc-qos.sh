@@ -1,5 +1,5 @@
 #!/bin/sh
-# rustc-qos-version: 12  (build-status compares the installed copy against this)
+# rustc-qos-version: 13  (build-status compares the installed copy against this)
 # rustc-qos — machine-global cargo rustc-wrapper. Three jobs, all about stopping a
 # fleet of concurrent agent builds from bricking a 10-core dev host:
 #
@@ -168,6 +168,16 @@ _bdir=${NUB_BUILD_SEM_DIR:-$HOME/.cache/nub/build-sem}
 _bslot=""
 _cargo=""
 _exempt=""
+
+# Every claim below is an exclusive directory create, and mkdir(1) alone is not
+# one everywhere: Ubuntu 26.04's uutils mkdir lets two racing callers both
+# succeed (134 double wins in 300 two-way races, none with GNU or BSD mkdir).
+# The shell's noclobber `>` opens with O_EXCL, so a marker made that way inside
+# the new directory decides the race wherever mkdir does not. It is a dotfile,
+# so no `dir/*` walk here or in build-status ever sees it.
+_xmkdir() {
+  mkdir "$1" 2>/dev/null && { (set -C; : > "$1/.claimed"); } 2>/dev/null
+}
 
 # Collect a state directory's dead entries. An entry is named for the pid it
 # belongs to and lives exactly as long as that pid; a `name.<writer>` is a
@@ -408,7 +418,7 @@ _head_of_queue() {
 # as a hang and relaunches — at the back of the line.
 _say_queued() {
   [ $(( _tnow - _t0 )) -ge 20 ] || return 0
-  mkdir -p "$_bdir/said" 2>/dev/null && mkdir "$_bdir/said/$_cargo" 2>/dev/null || return 0
+  mkdir -p "$_bdir/said" 2>/dev/null && _xmkdir "$_bdir/said/$_cargo" || return 0
   _q=0; for _t in "$_bdir"/queue/*; do case ${_t##*/} in *.*) ;; *) [ -e "$_t" ] && _q=$((_q + 1)) ;; esac; done
   # shellcheck disable=SC2016  # the backticks are prose for the reader
   printf 'rustc-qos: this build is queued for a machine-wide build slot (%s builds waiting; `make build-status` shows the queue)\n' "$_q" >&2
@@ -459,12 +469,12 @@ if [ -n "$_cargo" ] && [ -z "$_exempt" ]; then
       # loop iteration and then finds the slot _owned. A holder killed mid-claim
       # leaves a mutex whose pid is dead, reclaimed by _reap.
       _mx="$_bdir/claim.$_cargo"
-      if mkdir "$_mx" 2>/dev/null; then
+      if _xmkdir "$_mx"; then
         { printf '%s\n' $$ > "$_mx/pid"; } 2>/dev/null
         _i=1
         while [ "$_i" -le "$_bslots" ]; do
           _d="$_bdir/slot/$_i"
-          if mkdir "$_d" 2>/dev/null; then
+          if _xmkdir "$_d"; then
             # Stamp and live marker BEFORE the pid: a reaper judges a slot by
             # those, and a pid-bearing slot with neither would read as idle. A
             # claim that cannot write is a claim on a table that cannot work.
@@ -505,8 +515,8 @@ if [ "$_limit" -gt 0 ] && mkdir -p "$_sem" 2>/dev/null; then
     _i=1
     while [ "$_i" -le "$_limit" ]; do
       _d="$_sem/$_i"
-      # mkdir is the atomic test-and-set; the pid inside is only for reclaim.
-      if mkdir "$_d" 2>/dev/null; then
+      # _xmkdir is the atomic test-and-set; the pid inside is only for reclaim.
+      if _xmkdir "$_d"; then
         { printf '%s\n' $$ > "$_d/pid"; } 2>/dev/null || true
         _slot="$_d"
         break
