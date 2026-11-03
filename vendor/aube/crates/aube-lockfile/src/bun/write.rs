@@ -885,8 +885,15 @@ fn inline_json(value: &serde_json::Value, _base_indent: usize) -> String {
 /// dependency. That edge stays in the `dependencies` bucket here, where
 /// this writer has always placed peer edges, so the classification does
 /// not move it into an `optionalDependencies` entry bun never wrote.
+///
+/// That needs the package's declared ranges to prove the edge is peer-only.
+/// An empty map is unknown provenance (the pnpm and nub.lock readers never
+/// fill it), and a genuine optional dependency that is also a peer must
+/// then stay optional, or a Bun -> nub.lock -> Bun round trip makes it
+/// required.
 fn is_bun_optional_edge(pkg: &LockedPackage, dep_name: &str) -> bool {
-    pkg.optional_dependencies.contains_key(dep_name)
-        && !(pkg.peer_dependencies.contains_key(dep_name)
-            && !pkg.declared_dependencies.contains_key(dep_name))
+    let peer_only = pkg.peer_dependencies.contains_key(dep_name)
+        && !pkg.declared_dependencies.is_empty()
+        && !pkg.declared_dependencies.contains_key(dep_name);
+    pkg.optional_dependencies.contains_key(dep_name) && !peer_only
 }

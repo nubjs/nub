@@ -2230,7 +2230,8 @@ fn test_unknown_protocol_tail_stays_a_registry_pin_by_default() {
 
 /// A resolved optional peer's edge is classified optional in the graph,
 /// but bun records peers in `peerDependencies`/`optionalPeers` only, so
-/// the writer must not turn the edge into an `optionalDependencies` entry.
+/// when the package's declared ranges show the edge is peer-only the
+/// writer must not turn it into an `optionalDependencies` entry.
 #[test]
 fn write_keeps_an_optional_peer_edge_out_of_optional_dependencies() {
     let mut graph = LockfileGraph::default();
@@ -2265,6 +2266,9 @@ fn write_keeps_an_optional_peer_edge_out_of_optional_dependencies() {
     openai
         .optional_dependencies
         .insert("zod".to_string(), "1.0.0".to_string());
+    openai
+        .declared_dependencies
+        .insert("tslib".to_string(), "^2.0.0".to_string());
     let zod = LockedPackage {
         name: "zod".to_string(),
         version: "1.0.0".to_string(),
@@ -2296,5 +2300,54 @@ fn write_keeps_an_optional_peer_edge_out_of_optional_dependencies() {
     assert!(
         !openai_line.contains("optionalDependencies"),
         "an optional peer is not an optional dependency in bun's format: {openai_line}"
+    );
+}
+
+/// A genuine optional dependency that the package also declares as a peer
+/// must survive Bun -> nub.lock -> Bun. The pnpm format keeps no declared
+/// ranges, so the second write cannot tell it from a resolved optional
+/// peer and has to keep it optional.
+#[test]
+fn optional_dependency_that_is_also_a_peer_survives_a_pnpm_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let bun_in = dir.path().join("in.lock");
+    let content = r#"{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": {
+      "dependencies": { "consumer": "1.0.0" }
+    }
+  },
+  "packages": {
+    "consumer": ["consumer@1.0.0", "", { "optionalDependencies": { "fsevents": "2.3.3" }, "peerDependencies": { "fsevents": "^2.0.0" }, "optionalPeers": ["fsevents"] }, "SRI_C"],
+    "fsevents": ["fsevents@2.3.3", "", { "os": "darwin" }, "SRI_F"]
+  }
+}"#
+    .replace("SRI_C", &fake_sri('c'))
+    .replace("SRI_F", &fake_sri('f'));
+    std::fs::write(&bun_in, content).unwrap();
+    let manifest = aube_manifest::PackageJson {
+        name: Some("root".to_string()),
+        dependencies: [("consumer".to_string(), "1.0.0".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+
+    let pnpm_path = dir.path().join("pnpm-lock.yaml");
+    crate::pnpm::write(&pnpm_path, &parse(&bun_in).unwrap(), &manifest).unwrap();
+    let bun_out = dir.path().join("out.lock");
+    write(
+        &bun_out,
+        &crate::pnpm::parse(&pnpm_path).unwrap(),
+        &manifest,
+    )
+    .unwrap();
+
+    let consumer = &parse(&bun_out).unwrap().packages["consumer@1.0.0"];
+    assert!(
+        consumer.optional_dependencies.contains_key("fsevents"),
+        "fsevents must stay an optional dependency of consumer: {:?}",
+        consumer.dependencies
     );
 }
