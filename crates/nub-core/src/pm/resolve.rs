@@ -348,54 +348,55 @@ fn disagreement_warning(
     let dev = manifest
         .get("devEngines")
         .and_then(|d| d.get("packageManager"))?;
-    // An array lists acceptable managers in any order: it agrees on the name when
-    // any entry names the pinned PM, and that entry's range is the one to check.
+    // An array lists acceptable managers in any order: the pin agrees when ANY
+    // entry naming its manager accepts it, so the verdict never depends on order.
     let pm_name = pm_pin.pm.to_string();
-    let (dev_name, dev_version) = match dev {
-        serde_json::Value::Array(items) => {
-            let named: Vec<_> = items.iter().filter_map(dev_engines_entry).collect();
-            named
-                .iter()
-                .find(|(n, _)| *n == pm_name)
-                .or_else(|| named.last())
-                .copied()?
-        }
-        other => dev_engines_entry(other)?,
+    let named: Vec<(&str, Option<&str>)> = match dev {
+        serde_json::Value::Array(items) => items.iter().filter_map(dev_engines_entry).collect(),
+        other => dev_engines_entry(other).into_iter().collect(),
     };
-    let dev_spec = match dev_version {
-        Some(v) => format!("{dev_name}@{v}"),
-        None => dev_name.to_string(),
+    let spec = |(name, version): (&str, Option<&str>)| match version {
+        Some(v) => format!("{name}@{v}"),
+        None => name.to_string(),
     };
+    let same_pm: Vec<_> = named
+        .iter()
+        .copied()
+        .filter(|(n, _)| *n == pm_name)
+        .collect();
 
     // Name mismatch: yarn classic vs Berry both print `yarn`, so compare on the
     // Display name (the user-visible PM), not the classic/Berry split.
-    if dev_name != pm_name {
+    if same_pm.is_empty() {
         return Some(PinWarning::Disagreement {
             package_manager: pm_spec.trim().to_string(),
-            dev_engines: dev_spec,
+            dev_engines: spec(*named.last()?),
             kind: DisagreementKind::Name,
         });
     }
 
-    // Same PM: does packageManager's exact version satisfy the devEngines range?
+    // Same PM: does packageManager's exact version satisfy a devEngines range?
     // Strip the Corepack hash suffix before parsing (it rides as semver build
-    // metadata and isn't part of the comparison). A devEngines entry with no
-    // version, or a version/range either side can't parse, isn't a checkable
-    // disagreement — skip rather than warn on noise.
-    let (Some(pm_version), Some(dev_range)) = (pm_pin.version.as_deref(), dev_version) else {
-        return None;
-    };
+    // metadata and isn't part of the comparison). An entry with no version, or a
+    // range that can't parse, isn't a checkable disagreement, so it accepts
+    // rather than warning on noise; so does a pin version that can't parse.
+    let pm_version = pm_pin.version.as_deref()?;
     let pm_bare = pm_version.split('+').next().unwrap_or(pm_version);
     let parsed = semver::Version::parse(pm_bare).ok()?;
-    let req = semver::VersionReq::parse(&crate::pm::registry::normalize_range(dev_range)).ok()?;
-    if !req.matches(&parsed) {
-        return Some(PinWarning::Disagreement {
-            package_manager: pm_spec.trim().to_string(),
-            dev_engines: dev_spec,
-            kind: DisagreementKind::Version,
-        });
+    let accepts = |(_, version): &(&str, Option<&str>)| {
+        version.is_none_or(|range| {
+            semver::VersionReq::parse(&crate::pm::registry::normalize_range(range))
+                .map_or(true, |req| req.matches(&parsed))
+        })
+    };
+    if same_pm.iter().any(accepts) {
+        return None;
     }
-    None
+    Some(PinWarning::Disagreement {
+        package_manager: pm_spec.trim().to_string(),
+        dev_engines: same_pm.into_iter().map(spec).collect::<Vec<_>>().join(", "),
+        kind: DisagreementKind::Version,
+    })
 }
 
 /// The project's PM identity at the NAME level — the declared-first identity
@@ -1596,6 +1597,36 @@ mod tests {
                 ..
             }]
         ));
+
+        // An array accepts the pin when any entry naming its manager does, in
+        // either order; it warns only when none does.
+        for entries in [
+            r#"[{"name":"npm","version":"^10.0.0"},{"name":"npm","version":"^11.0.0"}]"#,
+            r#"[{"name":"npm","version":"^11.0.0"},{"name":"npm","version":"^10.0.0"}]"#,
+        ] {
+            let manifest: serde_json::Value = serde_json::from_str(&format!(
+                r#"{{"packageManager":"npm@11.2.0","devEngines":{{"packageManager":{entries}}}}}"#
+            ))
+            .unwrap();
+            assert!(
+                pin_from_manifest(&manifest).warnings.is_empty(),
+                "{entries}: the ^11 entry accepts npm@11.2.0"
+            );
+        }
+        let manifest: serde_json::Value = serde_json::from_str(
+            r#"{"packageManager":"npm@11.2.0","devEngines":{"packageManager":[{"name":"npm","version":"^9.0.0"},{"name":"pnpm"},{"name":"npm","version":"^10.0.0"}]}}"#,
+        )
+        .unwrap();
+        match pin_from_manifest(&manifest).warnings.as_slice() {
+            [
+                PinWarning::Disagreement {
+                    dev_engines,
+                    kind: DisagreementKind::Version,
+                    ..
+                },
+            ] => assert_eq!(dev_engines, "npm@^9.0.0, npm@^10.0.0"),
+            other => panic!("no npm entry accepts npm@11.2.0, so a Version warning: {other:?}"),
+        }
 
         // In range → no warning (and the hash suffix is stripped before the
         // satisfaction check).
