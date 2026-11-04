@@ -82,6 +82,8 @@ Lockfile is up to date, resolution step is skipped
 
 The round-trip holds both directions, for single packages and for workspaces with `catalog:` and `workspace:` entries (verified against pnpm 10.15.1).
 
+A project that pins pnpm 11 or later (`devEngines.packageManager`, or a `packageManager` field naming pnpm 12+) gets a second section in `pnpm-lock.yaml`: a leading YAML document whose `packageManagerDependencies` records the pinned pnpm's packages and integrities. pnpm's `--frozen-lockfile` fails without it. Nub writes that document the way pnpm does, and keeps an existing one unchanged when it rewrites the lockfile.
+
 Older formats — v6 (pnpm 8) and v5.4 (pnpm 7) — keep root dependencies under a top-level `dependencies:` map instead of v9's `importers:`. Nub declines them up front and leaves your `node_modules` and lockfile untouched:
 
 ```console

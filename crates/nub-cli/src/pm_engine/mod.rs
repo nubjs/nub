@@ -610,6 +610,19 @@ pub(crate) fn run_node_gyp_bootstrap(args: &[String]) -> Result<i32> {
     }
 }
 
+/// Record the pnpm a project now pins in `pnpm-lock.yaml`'s env document —
+/// the last step of `nub pm use pnpm`, whose lockfile alignment (keep,
+/// convert, rename) writes only the project document. Returns the version
+/// recorded, `None` when the lockfile already pins it or the pin is one
+/// pnpm does not record (pnpm 10 and below).
+pub(crate) fn sync_pnpm_package_manager_pin(root: &Path) -> Result<Option<String>> {
+    let session = engine_session_quiet(Some(root))?;
+    session
+        .runtime
+        .block_on(aube::package_manager_pin::sync_pnpm_env_lockfile(root))
+        .map_err(|report| anyhow::anyhow!("{}", present::render_report(&report)))
+}
+
 /// The shared stub error for registered-but-unwired verbs: names the verb
 /// and gives the user's real-PM command so nobody is left stranded. Every
 /// *current* registration has an explicit arm (wired or an honest per-verb

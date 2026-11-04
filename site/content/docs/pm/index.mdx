@@ -63,13 +63,14 @@ using pnpm@11.5.3
     { name: "pnpm", version: "^11.5.3", onFail: "warn" }
   pnpm-lock.yaml: written (converted from package-lock.json)
   package-lock.json: removed (migrated)
+  pnpm-lock.yaml: packageManagerDependencies = pnpm@11.5.3 (+integrity)
 ```
 
 What it writes:
 
 - **`package.json#/packageManager`** — the exact version plus a `+sha512` hash from the verified tarball. This is the field corepack, pnpm, and turbo read; `use` is the only Nub command that writes it.
 - **`package.json#/devEngines/packageManager`** — `{ name, version: "^<exact>", onFail: "warn" }`, the range-and-policy form npm and pnpm enforce natively, written beside the exact pin so the two can't drift.
-- **The lockfile, in the new manager's format.** A lockfile in another format is *converted* — resolution state preserved — and the old file removed. One already in the target format is left untouched; with no lockfile, the next install creates it. The converted lockfile passes the active manager's frozen install (`pnpm install --frozen-lockfile`, etc.) byte-for-byte.
+- **The lockfile, in the new manager's format.** A lockfile in another format is *converted* — resolution state preserved — and the old file removed. One already in the target format is left untouched; with no lockfile, the next install creates it. For pnpm 11 and later, the pinned pnpm is also recorded in the lockfile's `packageManagerDependencies`, which pnpm's frozen install requires. The converted lockfile passes the active manager's frozen install (`pnpm install --frozen-lockfile`, etc.) byte-for-byte.
 
 <Callout title="Config is not migrated">
 Switching managers converts the lockfile, not your config. The `.npmrc`, any `pnpm.*` fields, `pnpm-workspace.yaml` settings, and other manager-specific config stay as they are — Nub does not translate them. Migrate the new manager's config manually.
