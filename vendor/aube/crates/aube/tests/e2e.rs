@@ -813,45 +813,51 @@ fn read_file_under(dir: &std::path::Path, name: &str) -> Option<String> {
 /// Under `sharedWorkspaceLockfile: false` a member's lockfile is its own, but
 /// install links its packages into the workspace root's virtual store and
 /// takes approvals from the root. A member-scoped rebuild has to look there:
-/// resolved against the member it found nothing and exited 0.
+/// resolved against the member it found nothing and exited 0. The root may
+/// also be config-only, a `pnpm-workspace.yaml` with no `package.json`.
 #[test]
 fn member_rebuild_with_per_project_lockfiles_runs_root_approved_builds() {
     let _guard = e2e_lock();
-    let sbx = Sandbox::new();
+    for root_manifest in [true, false] {
+        let sbx = Sandbox::new();
+        sbx.write_file(
+            "dep/package.json",
+            r#"{
+                "name": "rebuild-dep",
+                "version": "1.0.0",
+                "scripts": { "postinstall": "node -e \"require('fs').appendFileSync('RUNS', 'x')\"" }
+            }"#,
+        );
+        sbx.write_file(
+            "packages/a/package.json",
+            r#"{ "name": "a", "version": "1.0.0", "dependencies": { "rebuild-dep": "file:../../dep" } }"#,
+        );
+        sbx.write_file(
+            "pnpm-workspace.yaml",
+            "packages:\n  - packages/*\nsharedWorkspaceLockfile: false\nallowBuilds:\n  \"rebuild-dep@file:dep\": true\n",
+        );
+        if root_manifest {
+            sbx.write_manifest(r#"{ "name": "root", "version": "1.0.0", "private": true }"#);
+        }
 
-    sbx.write_file(
-        "dep/package.json",
-        r#"{
-            "name": "rebuild-dep",
-            "version": "1.0.0",
-            "scripts": { "postinstall": "node -e \"require('fs').appendFileSync('RUNS', 'x')\"" }
-        }"#,
-    );
-    sbx.write_file(
-        "packages/a/package.json",
-        r#"{ "name": "a", "version": "1.0.0", "dependencies": { "rebuild-dep": "file:../../dep" } }"#,
-    );
-    sbx.write_file(
-        "pnpm-workspace.yaml",
-        "packages:\n  - packages/*\nsharedWorkspaceLockfile: false\nallowBuilds:\n  \"rebuild-dep@file:dep\": true\n",
-    );
-    sbx.write_manifest(r#"{ "name": "root", "version": "1.0.0", "private": true }"#);
+        sbx.cmd().arg("install").assert().success();
+        let node_modules = sbx.project.join("node_modules");
+        assert_eq!(
+            read_file_under(&node_modules, "RUNS").as_deref(),
+            Some("x"),
+            "install must build rebuild-dep once in the root virtual store \
+             (root package.json: {root_manifest})"
+        );
 
-    sbx.cmd().arg("install").assert().success();
-    let node_modules = sbx.project.join("node_modules");
-    assert_eq!(
-        read_file_under(&node_modules, "RUNS").as_deref(),
-        Some("x"),
-        "install must build rebuild-dep once in the root virtual store"
-    );
-
-    sbx.cmd()
-        .args(["--filter", "a", "rebuild"])
-        .assert()
-        .success();
-    assert_eq!(
-        read_file_under(&node_modules, "RUNS").as_deref(),
-        Some("xx"),
-        "`--filter a rebuild` must re-run rebuild-dep's postinstall where install put it"
-    );
+        sbx.cmd()
+            .args(["--filter", "a", "rebuild"])
+            .assert()
+            .success();
+        assert_eq!(
+            read_file_under(&node_modules, "RUNS").as_deref(),
+            Some("xx"),
+            "`--filter a rebuild` must re-run rebuild-dep's postinstall where install put it \
+             (root package.json: {root_manifest})"
+        );
+    }
 }

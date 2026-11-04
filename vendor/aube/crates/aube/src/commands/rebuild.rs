@@ -49,10 +49,11 @@ pub async fn run(
     // from its own lockfile and everything else — store, settings, policy,
     // the project the scripts run for — from the root, as install did.
     let cwd = unshared_lockfile_workspace_root(&project_dir).unwrap_or_else(|| project_dir.clone());
+    // A root holding only `pnpm-workspace.yaml` is valid, as install accepts.
     let manifest = if cwd == project_dir {
         project_manifest.clone()
     } else {
-        load_manifest(&cwd)?
+        super::load_manifest_or_default(&cwd)?
     };
     let files = crate::commands::FileSources::load(&cwd);
     let (workspace, raw_workspace) = aube_manifest::workspace::load_both(&cwd)
