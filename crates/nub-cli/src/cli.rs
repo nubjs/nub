@@ -3496,6 +3496,7 @@ fn run_nubr() -> Result<i32> {
     let runtime = nub_core::node::spawn::find_runtime_dir(&nub_binary)
         .context("nubr: the nub runtime could not be located")?;
     let mut cmd = std::process::Command::new(node.path.as_str());
+    nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
     cmd.arg(runtime.join("nubr.mjs"))
         .args(&args)
         .stdin(std::process::Stdio::inherit())
@@ -7139,6 +7140,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         node_args.push(file.to_string());
         node_args.extend(args.iter().cloned());
         let mut cmd = std::process::Command::new(node.path.as_str());
+        nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
         cmd.args(&node_args)
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
@@ -7368,6 +7370,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     let owner_target = env_owner
         .as_ref()
         .and_then(crate::env_owner::EnvOwner::spawn_target);
+    let spawns_node = prefix.is_none() && owner_target.is_none();
     let mut cmd = match (prefix.as_ref(), owner_target) {
         (Some(prefix), owner) => {
             let mut cmd = prefix.command();
@@ -7398,6 +7401,11 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
             crate::env_owner::WRAPPED_ENV,
             crate::env_owner::wrapped_marker(schema_dir),
         );
+    }
+    if spawns_node {
+        nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
+    } else {
+        nub_core::node::discovery::unmark_node_launch(&mut cmd);
     }
     cmd.args(&node_args)
         .stdin(std::process::Stdio::inherit())

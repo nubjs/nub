@@ -87,6 +87,8 @@ Once a version is pinned, Nub finds a binary for it in order:
 
 The `PATH` walk **skips** `node_modules/.bin`, mirroring how pin discovery skips pin files under `node_modules`. An entry there is a bin some package declared, so a dependency shipping its own `node` never becomes your project's runtime.
 
+It also steps past a version manager's shim that has no Node to offer. With nothing active for the directory, mise falls back to the next `node` on `PATH`, which inside a Nub run is Nub's own; Nub detects that hand-back and uses the `node` after the shim, or reports the shim by name when there is none.
+
 ## `nub node install`
 
 Provision a version into the cache *now*, instead of on the next `nub <file>`. Use it to warm a CI cache in a setup step (the [GitHub Action](/docs/deployment/github-action) does this) or to fetch a Node before going offline.

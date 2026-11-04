@@ -920,6 +920,11 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // process cwd (a no-op); the workspace-bin path threads a member dir so a
     // node bin executes IN that member rather than inheriting the parent's cwd.
     cmd.current_dir(config.cwd);
+    if config.env_owner.is_none() && config.prefix.is_none() {
+        super::discovery::mark_node_launch(&mut cmd, config.node.path.as_std_path());
+    } else {
+        super::discovery::unmark_node_launch(&mut cmd);
+    }
 
     // Permission model detection and auto-grant.
     let has_permission = config.user_args.iter().any(|a| is_permission_flag(a));
