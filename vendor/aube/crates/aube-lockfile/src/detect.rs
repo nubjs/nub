@@ -155,6 +155,41 @@ pub fn declared_package_manager(project_dir: &Path) -> Option<DeclaredPackageMan
     })
 }
 
+/// The version `<project_dir>/package.json` declares for `tool`, with a
+/// Corepack `+sha512` suffix stripped. A `packageManager` pin answers only for
+/// the tool it names. In `devEngines.packageManager` (object or array) the
+/// entries naming `tool` give its version when they all state the same one, so
+/// a multi-tool array, which [`declared_package_manager`] reads as no single
+/// pin, still says which version of the lockfile's tool it accepts, whatever
+/// the entries' order.
+pub fn declared_version_for(project_dir: &Path, tool: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(project_dir.join("package.json")).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let strip = |v: &str| v.split('+').next().unwrap_or_default().to_string();
+    if let Some(spec) = json.get("packageManager").and_then(|v| v.as_str()) {
+        let (name, version) = spec.split_once('@').unwrap_or((spec, ""));
+        if !name.is_empty() {
+            return (name == tool && !version.is_empty()).then(|| strip(version));
+        }
+    }
+    let entries: Vec<&serde_json::Value> = match json.get("devEngines")?.get("packageManager")? {
+        serde_json::Value::Array(entries) => entries.iter().collect(),
+        other => vec![other],
+    };
+    let versions: Vec<Option<&str>> = entries
+        .into_iter()
+        .filter(|e| e.get("name").and_then(|v| v.as_str()) == Some(tool))
+        .map(|e| e.get("version").and_then(|v| v.as_str()))
+        .collect();
+    let first = *versions.first()?;
+    versions
+        .iter()
+        .all(|v| *v == first)
+        .then_some(first)
+        .flatten()
+        .map(strip)
+}
+
 /// The lockfile format a declared package manager's fresh write
 /// targets (and whose filename the contradiction error names). `None`
 /// for names that don't map onto a format aube knows — foreign tools

@@ -187,9 +187,7 @@ pub async fn run(
         }
     }
 
-    let selected =
-        aube_workspace::selector::select_workspace_packages(&source_root, &workspace_pkgs, &filter)
-            .map_err(|e| miette!("invalid --filter selector: {e}"))?;
+    let selected = super::select_projects(&source_root, &workspace_pkgs, &filter, "deploy")?;
     let mut matches: Vec<(String, PathBuf)> = selected
         .into_iter()
         .filter_map(|pkg| pkg.name.map(|name| (name, pkg.dir)))

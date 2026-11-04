@@ -328,6 +328,7 @@ function installSyncPolyfills(preloaded) {
   installArrayFromAsync();
   installMapGetOrInsert();
   installMathSumPrecise();
+  installJsonParseOptions();
   installIteratorSurface();
   installSymbolMetadata();
 }
@@ -1292,6 +1293,89 @@ function installMathSumPrecise() {
     for (let j = partials.length - 1; j >= 0; j--) total += partials[j];
     return total / scale;
   });
+}
+
+// ── JSON.parse options (TC39 Stage 2.7, 2026-09; proposal-json-parseimmutable,
+//    shipped by no engine) ──
+// `JSON.parse(text, { freeze, preferNullPrototype })`. The spec text, not the
+// README, is the source: the option is `preferNullPrototype` (the README's
+// `nullPrototype` is stale), neither option is coerced (a non-Boolean is a
+// TypeError), and `preferNullPrototype` defaults to the value of `freeze`. A
+// callable second argument is a reviver exactly as before, and an options object
+// never reaches the reviver path, so the two never combine.
+//
+// JSON.parse exists everywhere, so the detect PROBES behavior: a native
+// implementation returns a frozen, null-prototype object for `{ freeze: true }`.
+//
+// Implementation: the engine parses, then one iterative walk over the result sets
+// the prototype and freezes. Every object in the tree was created by that parse
+// and is unaliased, so no user code can observe it before the walk finishes, which
+// makes this equivalent to the spec's per-object freeze at creation. The walk
+// keeps an explicit stack because V8's parser accepts nesting far deeper than the
+// call stack. Arrays keep Array.prototype, as in the spec. The one fidelity cost
+// of wrapping a builtin: an error thrown through it carries one extra stack frame.
+function installJsonParseOptions() {
+  const nativeParse = JSON.parse;
+  if (typeof JSON.parse === "function") {
+    // A parser installed before this preload (Yarn PnP's `.pnp.cjs` loads first)
+    // may reject a non-callable second argument, so a throw reads as "no support"
+    // rather than aborting startup.
+    let probe;
+    try {
+      probe = nativeParse("{}", { freeze: true });
+    } catch {}
+    if (typeof probe === "object" && probe !== null && Object.isFrozen(probe)
+        && Object.getPrototypeOf(probe) === null) {
+      return;
+    }
+  }
+  const { freeze, keys, setPrototypeOf } = Object;
+  const { isArray } = Array;
+  const optionsError = (name) =>
+    new TypeError(`JSON.parse option "${name}" must be a boolean`);
+  // Method syntax so the replacement stays a non-constructor, like the builtin.
+  const { parse } = {
+    parse(text, reviverOrOptions) {
+      if (typeof reviverOrOptions !== "object" || reviverOrOptions === null) {
+        return nativeParse(text, reviverOrOptions);
+      }
+      // Spec order: ToString(text), then the two option reads, then the parse.
+      const jsonString = `${text}`;
+      let freezeOpt = reviverOrOptions.freeze;
+      if (freezeOpt === undefined) freezeOpt = false;
+      if (typeof freezeOpt !== "boolean") throw optionsError("freeze");
+      let nullProto = reviverOrOptions.preferNullPrototype;
+      if (nullProto === undefined) nullProto = freezeOpt;
+      if (typeof nullProto !== "boolean") throw optionsError("preferNullPrototype");
+      const result = nativeParse(jsonString);
+      if ((!freezeOpt && !nullProto) || typeof result !== "object" || result === null) {
+        return result;
+      }
+      // Indexed with a null prototype so no Array.prototype method or indexed
+      // accessor that user code installs after the preload can reach the walk.
+      const stack = setPrototypeOf([result], null);
+      let top = 1;
+      while (top > 0) {
+        const node = stack[--top];
+        if (isArray(node)) {
+          for (let i = 0; i < node.length; i++) {
+            const v = node[i];
+            if (typeof v === "object" && v !== null) stack[top++] = v;
+          }
+        } else {
+          const ks = keys(node);
+          for (let i = 0; i < ks.length; i++) {
+            const v = node[ks[i]];
+            if (typeof v === "object" && v !== null) stack[top++] = v;
+          }
+          if (nullProto) setPrototypeOf(node, null);
+        }
+        if (freezeOpt) freeze(node);
+      }
+      return result;
+    },
+  };
+  defBuiltin(JSON, "parse", parse);
 }
 
 // ── Shipped-standard ECMAScript builtins missing below their Node line ──

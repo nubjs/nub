@@ -80,7 +80,7 @@ When npm is the incumbent, Nub reads npm's `.npmrc` cascade:
 builtin   npm's builtin npmrc
 global    $PREFIX/etc/npmrc, or NPM_CONFIG_GLOBALCONFIG
 user      ~/.npmrc, or NPM_CONFIG_USERCONFIG
-project   ./.npmrc
+project   .npmrc at the workspace root, else ./.npmrc
 ```
 
 Everything at those scopes works — default and scoped registries, auth tokens, TLS, proxies, and install-shaping keys like `engine-strict` and `save-exact`. The `npm_config_*` env vars drive install behavior too. Precedence matches npm, highest first: CLI flags, then `npm_config_*`, then project, user, global, and builtin `.npmrc`.
