@@ -1861,7 +1861,7 @@ mod tests {
         // A WARM cache whose compile preamble was swapped (planted / AV-corrupted) must be
         // detected and self-healed: re-extract the trusted in-binary blob over it,
         // restoring the verified bytes — never bricked, never silently loaded.
-        let base = tmp_base("nub-rtc-heal");
+        let base = ensure_safe_base(&tmp_base("nub-rtc-heal")).unwrap();
         let target = base.join(CACHE_KEY);
         fs::create_dir_all(&target).unwrap();
         unpack_blob(&target).unwrap();
@@ -1888,7 +1888,7 @@ mod tests {
         // A dir whose entrypoints will NEVER match the baked hashes. `already_fresh`
         // skips the heal so we hit the terminal decision directly: canary proceeds
         // (never brick on a verify bug), enforce refuses (the flipped-on behavior).
-        let base = tmp_base("nub-rtc-decide");
+        let base = ensure_safe_base(&tmp_base("nub-rtc-decide")).unwrap();
         let target = base.join(CACHE_KEY);
         fs::create_dir_all(target.join("addons")).unwrap();
         fs::write(target.join("preload.mjs"), b"wrong").unwrap();
