@@ -74,31 +74,52 @@ jobs:
             # Eight workflows can file this issue, so one of them going green does not mean
             # trunk is green. Closing on any `CI` success cleared reds it never checked:
             # #590, #719, #769, #977 and #987 each closed while the workflow that filed it
-            # was still red. Every report opens with "`<workflow>` failed on main at `<sha>`.",
-            # so the issue records which workflows are implicated; clear it only once each
-            # one's latest verdict is green. Anything unreadable leaves the issue open: a
-            # missed close costs one more green, a false close hides a red trunk.
+            # was still red. Every report is "`<workflow>` failed on main at `<sha>`." with
+            # the failed run's URL two lines down, so the issue records which workflows are
+            # implicated and which run each one must recover from. Anything unreadable
+            # leaves the issue open: a missed close costs one more green, a false close
+            # hides a red trunk.
             if ! issue_text=$( { gh issue view "$existing" --repo "$REPO" --json body --jq .body &&
                 gh api --paginate "repos/$REPO/issues/$existing/comments" --jq '.[].body'; } ); then
               echo "could not read #$existing; leaving it open"
               exit 0
             fi
-            # shellcheck disable=SC2016  # the backticks are literal: they match the report's markdown
-            reported=$(sed -n 's/^`\([^`]*\)` failed on main at .*/\1/p' <<< "$issue_text" | sort -u)
+            # "<workflow>\t<newest reported failed run id>", or id 0 when a report has no URL.
+            # Ids stay strings: mawk's printf %d cannot hold an 11-digit run id.
+            # shellcheck disable=SC2016  # an awk program: its $0 and backticks are literal
+            reported=$(awk '
+              /^`[^`]*` failed on main at / { split($0, p, "`"); wf = p[2]; seen[wf] = 1; next }
+              wf != "" && match($0, /\/actions\/runs\/[0-9]+/) {
+                id = substr($0, RSTART + 14, RLENGTH - 14)
+                if (!(wf in max) || id + 0 > max[wf] + 0) max[wf] = id
+                wf = ""
+              }
+              END { for (w in seen) printf "%s\t%s\n", w, ((w in max) ? max[w] : "0") }
+            ' <<< "$issue_text" | sort)
 
             still_red=""
-            while IFS= read -r wf; do
+            while IFS=$'\t' read -r wf failed_id; do
               [[ -n "$wf" ]] || continue
-              # The newest run that reached a verdict. In-flight and cancelled runs count
-              # neither way: a merge burst cancels most push runs, so reading only the newest
-              # run would hold the issue open until main went quiet. Pull-request runs are
-              # excluded because `--branch main` also matches a fork's branch named main.
+              # The newest run that reached a verdict, which must be the failed run itself
+              # (a successful re-run keeps its id) or a newer one. In-flight and cancelled
+              # runs count neither way: a merge burst cancels most push runs, so reading only
+              # the newest run would hold the issue open until main went quiet. Without the
+              # id floor, re-running the failed run would hide it (in progress, or cancelled)
+              # and let the green from before the failure clear it. Run ids increase with
+              # creation. Pull-request runs are excluded because `--branch main` also matches
+              # a fork's branch named main.
               verdict=$(gh run list --repo "$REPO" --workflow "$wf" --branch main \
-                --status completed --limit 30 --json conclusion,event \
+                --status completed --limit 30 --json conclusion,event,databaseId \
                 --jq '[.[] | select(.event != "pull_request" and .conclusion != "cancelled"
-                                    and .conclusion != "skipped")][0].conclusion // ""' \
+                                    and .conclusion != "skipped")][0]
+                      | if . then "\(.conclusion) \(.databaseId)" else empty end' \
                 || echo "")
-              [[ "$verdict" == "success" ]] || still_red="$still_red $wf"
+              read -r conclusion run_id <<< "$verdict"
+              if [[ "$conclusion" == "success" && "$failed_id" -gt 0 \
+                    && "${run_id:-0}" -ge "$failed_id" ]]; then
+                continue
+              fi
+              still_red="$still_red $wf"
             done <<< "$reported"
 
             if [[ -n "$reported" && -z "$still_red" ]]; then
