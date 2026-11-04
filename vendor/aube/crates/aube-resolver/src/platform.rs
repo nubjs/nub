@@ -997,6 +997,142 @@ mod tests {
         assert!(!host.optional_dependencies.contains_key("native-win"));
     }
 
+    /// The Linux side of a darwin-only optional peer: `consumer` is required
+    /// and peers optionally on `fsevents`, which only the importer's
+    /// `optionalDependencies` provides. The peer edge must be optional,
+    /// so `fsevents` stays optional-only and a Linux filter drops it,
+    /// as pnpm does.
+    fn assert_darwin_only_optional_peer_is_dropped_on_linux(
+        mut graph: aube_lockfile::LockfileGraph,
+        consumer_key: &str,
+    ) {
+        let consumer = &graph.packages[consumer_key];
+        assert_eq!(
+            consumer.dependencies.get("fsevents").map(String::as_str),
+            Some("2.3.3"),
+            "the optional peer is linked"
+        );
+        assert!(
+            consumer.optional_dependencies.contains_key("fsevents"),
+            "an optional peer's edge is an optional edge"
+        );
+        assert!(
+            optional_only_packages(&graph).contains("fsevents@2.3.3"),
+            "a provider reached only through optional edges stays optional"
+        );
+
+        let linux = SupportedArchitectures {
+            os: s(&["linux"]),
+            cpu: s(&["x64"]),
+            ..Default::default()
+        };
+        filter_graph(&mut graph, &linux, &Default::default());
+        assert!(!graph.packages.contains_key("fsevents@2.3.3"));
+        assert!(
+            !graph.packages[consumer_key]
+                .dependencies
+                .contains_key("fsevents")
+        );
+    }
+
+    #[test]
+    fn optional_peer_edge_keeps_its_optional_provider_platform_filterable() {
+        use aube_lockfile::{DepType, DirectDep, LockedPackage, PeerDepMeta};
+        let mut graph = aube_lockfile::LockfileGraph::default();
+        graph.importers.insert(
+            ".".to_string(),
+            vec![
+                DirectDep {
+                    name: "consumer".to_string(),
+                    dep_path: "consumer@1.0.0".to_string(),
+                    dep_type: DepType::Production,
+                    specifier: Some("1.0.0".to_string()),
+                },
+                DirectDep {
+                    name: "fsevents".to_string(),
+                    dep_path: "fsevents@2.3.3".to_string(),
+                    dep_type: DepType::Optional,
+                    specifier: Some("2.3.3".to_string()),
+                },
+            ],
+        );
+        let mut consumer = LockedPackage {
+            name: "consumer".to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: "consumer@1.0.0".to_string(),
+            ..Default::default()
+        };
+        consumer
+            .peer_dependencies
+            .insert("fsevents".to_string(), "^2.0.0".to_string());
+        consumer
+            .peer_dependencies_meta
+            .insert("fsevents".to_string(), PeerDepMeta { optional: true });
+        let fsevents = LockedPackage {
+            name: "fsevents".to_string(),
+            version: "2.3.3".to_string(),
+            dep_path: "fsevents@2.3.3".to_string(),
+            os: ["darwin".to_string()].into_iter().collect(),
+            ..Default::default()
+        };
+        for pkg in [consumer, fsevents] {
+            graph.packages.insert(pkg.dep_path.clone(), pkg);
+        }
+
+        let graph = crate::apply_peer_contexts(graph, &Default::default()).expect("peer pass");
+        assert_darwin_only_optional_peer_is_dropped_on_linux(
+            graph,
+            "consumer@1.0.0(fsevents@2.3.3)",
+        );
+    }
+
+    /// The same shape read from a lockfile whose snapshot names the peer in
+    /// its key but omits the edge: the reader restores it as optional.
+    #[test]
+    fn restored_optional_peer_edge_keeps_its_provider_platform_filterable() {
+        let content = r#"
+lockfileVersion: '9.0'
+
+importers:
+  .:
+    dependencies:
+      consumer:
+        specifier: 1.0.0
+        version: 1.0.0(fsevents@2.3.3)
+    optionalDependencies:
+      fsevents:
+        specifier: 2.3.3
+        version: 2.3.3
+
+packages:
+  consumer@1.0.0:
+    resolution: {integrity: sha512-consumer}
+    peerDependencies:
+      fsevents: ^2.0.0
+    peerDependenciesMeta:
+      fsevents:
+        optional: true
+
+  fsevents@2.3.3:
+    resolution: {integrity: sha512-fsevents}
+    os: [darwin]
+
+snapshots:
+  consumer@1.0.0(fsevents@2.3.3): {}
+
+  fsevents@2.3.3:
+    optional: true
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pnpm-lock.yaml");
+        std::fs::write(&path, content).unwrap();
+        let graph = aube_lockfile::pnpm::parse(&path).unwrap();
+        assert_darwin_only_optional_peer_is_dropped_on_linux(
+            graph,
+            "consumer@1.0.0(fsevents@2.3.3)",
+        );
+    }
+
     /// `bundleDependencies` are transitive: the parent's tarball ships
     /// the bundled dep AND its whole closure, so on the frozen-restore
     /// path the parent→bundle edge must be cut and the now-unreachable

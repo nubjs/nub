@@ -232,6 +232,7 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
                 // registry on the next resolve. Empty/default → None.
                 tarball_url: entry.registry_url.clone(),
                 declared_dependencies: declared,
+                declared_dependencies_known: true,
                 bin: bin_map,
                 extra_meta,
                 ..Default::default()
@@ -281,6 +282,28 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
                     let optional = !entry.meta.dependencies.contains_key(dep_name);
                     crate::unsupported_edge(u, optional, path)?;
                 }
+            }
+        }
+        // bun writes no edge for a peer: the package finds it by node
+        // resolution from where it sits, which is this same walk. Without
+        // the edge, a required provider nothing else depends on (goober's
+        // peer `csstype` under react-hot-toast) is pruned before peer
+        // resolution runs. Optional peers are left to peer resolution, which
+        // binds them as a fresh resolve does; binding every placed one here
+        // would bind more than pnpm or a fresh install.
+        for peer in entry.meta.peer_dependencies.keys() {
+            if resolved.contains_key(peer) || entry.meta.optional_peers.contains(peer) {
+                continue;
+            }
+            if let Some(target_key) = resolve_nested_bun(key, peer, |k| key_info.contains_key(k))
+                && target_key != *key
+                && let Some((pname, pver)) = key_info.get(&target_key)
+            {
+                let target_dep_path = format!("{pname}@{pver}");
+                resolved.insert(
+                    peer.clone(),
+                    crate::npm::dep_path_tail(pname, &target_dep_path).to_string(),
+                );
             }
         }
         resolved_by_dep_path.insert(dep_path, resolved);

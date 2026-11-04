@@ -14,7 +14,7 @@ use super::side_effects_cache::{
 /// resolves). Silent when the hook isn't defined; the failure names the
 /// importer, since "root" was what a member's failing `prepare` used to be
 /// reported as.
-pub(super) async fn run_importer_lifecycle(
+pub(crate) async fn run_importer_lifecycle(
     workspace_root: &std::path::Path,
     importer_dir: &std::path::Path,
     importer_path: &str,

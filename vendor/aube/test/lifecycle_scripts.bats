@@ -732,8 +732,10 @@ JSON
 	assert [ ! -e postinstall.marker ]
 }
 
-@test "aube update: root postinstall is NOT triggered" {
-	# Same pnpm contract — `aube update` is a chained operation.
+@test "aube update <pkg>: root postinstall is NOT triggered" {
+	# pnpm runs the root's hooks only for an update of everything (an
+	# argumentless `pnpm update` is an install); updating named packages
+	# is a chained operation that must not re-run them.
 	cat >package.json <<'JSON'
 {
   "name": "pnpm-lifecycle-update",
@@ -750,7 +752,7 @@ JSON
 	assert_success
 	rm -f postinstall.marker
 
-	run aube update
+	run aube update is-odd
 	assert_success
 	assert [ ! -e postinstall.marker ]
 }
