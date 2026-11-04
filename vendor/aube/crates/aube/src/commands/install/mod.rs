@@ -831,6 +831,12 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     let ws_dirs = workspace_plan.ws_dirs;
     let lifecycle_manifests = workspace_plan.lifecycle_manifests;
     let default_trust_enabled = aube_settings::resolved::default_trust(&settings_ctx);
+    // The setting's env and `.npmrc` sources, not only the CLI flag, decide
+    // the policy: they already route the install off the fast path
+    // (`startup.rs`), and a policy that ignored them refused the builds the
+    // user had allowed.
+    let dangerously_allow_all_builds = opts.dangerously_allow_all_builds
+        || aube_settings::resolved::dangerously_allow_all_builds(&settings_ctx);
     // Importer keys whose per-project lockfiles a filtered install may
     // (re)write. `None` for an unfiltered install (write every importer).
     // Computed once and shared by the `--lockfile-only` short-circuit and
@@ -848,11 +854,11 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             // (explicit `false` survives). Without the floor, the
             // pnpm-parity short-circuit (allow-all drops the map)
             // stays untouched.
-            let compose_allow_all = opts.dangerously_allow_all_builds && default_trust_enabled;
+            let compose_allow_all = dangerously_allow_all_builds && default_trust_enabled;
             let (mut build_policy, policy_warnings) = build_policy_from_manifest_sources(
                 lifecycle_manifests.iter().map(|(_, manifest)| manifest),
                 &ws_config_shared,
-                opts.dangerously_allow_all_builds && !compose_allow_all,
+                dangerously_allow_all_builds && !compose_allow_all,
             );
             if compose_allow_all {
                 build_policy = build_policy.allow_all_except_denied();

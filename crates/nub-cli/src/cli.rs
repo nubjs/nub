@@ -3496,6 +3496,7 @@ fn run_nubr() -> Result<i32> {
     let runtime = nub_core::node::spawn::find_runtime_dir(&nub_binary)
         .context("nubr: the nub runtime could not be located")?;
     let mut cmd = std::process::Command::new(node.path.as_str());
+    nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
     cmd.arg(runtime.join("nubr.mjs"))
         .args(&args)
         .stdin(std::process::Stdio::inherit())
@@ -4113,7 +4114,7 @@ fn write_preload_chain(dir: &Path, esm: bool, entries: &[String]) -> Result<Opti
 /// chainer's channel implies (`import` for the `.mjs` chainer, `require` for the
 /// `.cjs` one) — the same conditions Node itself would use for that flag. That set
 /// includes [`NUB_CONDITION`], because this resolves a specifier the child Node
-/// would otherwise resolve for itself, with the runtime key already on its argv.
+/// would otherwise resolve for itself, with the `nub` condition already on its argv.
 ///
 fn bare_preload_resolver(esm: bool) -> oxc_resolver::Resolver {
     oxc_resolver::Resolver::new(oxc_resolver::ResolveOptions {
@@ -4276,13 +4277,13 @@ fn ensure_tsconfig_parses(dir: &str, explicit: Option<&str>) -> Result<()> {
     );
 }
 
-/// Nub's runtime key, set as an `exports`/`imports` condition on every run the CLI
-/// augments and honored by the compile bundler, which resolves `exports` ahead of
-/// time and so has to pick the same file.
+/// Nub's export condition, set on every run the CLI augments and honored by the
+/// compile bundler, which resolves `exports` ahead of time and so has to pick the
+/// same file.
 ///
-/// The key follows the WinterTC runtime-keys convention
-/// (<https://runtime-keys.proposal.wintertc.org/>); the registry entry is proposed
-/// separately and this does not wait on it.
+/// Not a WinterTC runtime key. The registration
+/// (<https://github.com/WinterTC55/runtime-keys/pull/39>) was withdrawn after review:
+/// Nub runs the installed Node rather than being a runtime of its own.
 pub(crate) const NUB_CONDITION: &str = "nub";
 
 pub(crate) fn runtime_node_options(
@@ -4371,7 +4372,7 @@ pub(crate) fn runtime_node_options_with(
     }
 
     let mut seen_conditions = std::collections::HashSet::new();
-    // Nub's runtime key, in the slot `bun`, `deno` and `workerd` occupy. It rides
+    // Nub's export condition, in the slot the `bun` and `deno` conditions occupy. It rides
     // every run the CLI augments so a package can point an `exports` branch at what
     // nub adds — TypeScript source above all — and is absent under `--node`/
     // `NODE_COMPAT`, which skip this function entirely and so run with Node's own
@@ -7139,6 +7140,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         node_args.push(file.to_string());
         node_args.extend(args.iter().cloned());
         let mut cmd = std::process::Command::new(node.path.as_str());
+        nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
         cmd.args(&node_args)
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
@@ -7368,6 +7370,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     let owner_target = env_owner
         .as_ref()
         .and_then(crate::env_owner::EnvOwner::spawn_target);
+    let spawns_node = prefix.is_none() && owner_target.is_none();
     let mut cmd = match (prefix.as_ref(), owner_target) {
         (Some(prefix), owner) => {
             let mut cmd = prefix.command();
@@ -7398,6 +7401,11 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
             crate::env_owner::WRAPPED_ENV,
             crate::env_owner::wrapped_marker(schema_dir),
         );
+    }
+    if spawns_node {
+        nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
+    } else {
+        nub_core::node::discovery::unmark_node_launch(&mut cmd);
     }
     cmd.args(&node_args)
         .stdin(std::process::Stdio::inherit())
