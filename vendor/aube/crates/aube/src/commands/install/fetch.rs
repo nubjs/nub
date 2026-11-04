@@ -1,5 +1,7 @@
 use super::critical_path::is_likely_native_build;
-use super::git_prepare::{prepare_scratch_copy, run_git_dep_prepare};
+use super::git_prepare::{
+    checkout_build_allowed, checkout_needs_build, prepare_scratch_copy, run_git_dep_prepare,
+};
 use super::lifecycle::run_import_on_blocking;
 use super::settings::{
     default_lockfile_network_concurrency, resolve_network_concurrency,
@@ -288,12 +290,17 @@ pub(super) async fn import_local_source(
                 }
             }
 
-            let manifest_path = pkg_root.join("package.json");
-            let needs_prepare = !ignore_scripts
-                && aube_manifest::PackageJson::from_path(&manifest_path)
-                    .ok()
-                    .is_some_and(|pj| pj.scripts.contains_key("prepare"));
-            if needs_prepare {
+            let manifest = aube_manifest::PackageJson::from_path(&pkg_root.join("package.json"));
+            let build = match &manifest {
+                Ok(manifest)
+                    if !ignore_scripts
+                        && checkout_needs_build(manifest, |p| pkg_root.join(p).exists()) =>
+                {
+                    checkout_build_allowed(inherited_build_policy.as_deref(), local, manifest)?
+                }
+                _ => false,
+            };
+            if build {
                 let index = prepare_git_checkout(
                     store,
                     &pkg_root,
@@ -355,17 +362,22 @@ pub(super) async fn import_local_source(
             // codeload archive (`hosted_git_local_source` in the
             // resolver), so it arrives here rather than in the `Git`
             // arm. It is still a source checkout and gets the same
-            // `prepare` treatment, under the same gate. The manifest
-            // is read from the just-imported index so a dep with no
-            // `prepare` costs one small file read, not an extract.
+            // build, under the same gate. The manifest is read from the
+            // just-imported index so a dep with nothing to build costs
+            // one small file read, not an extract.
             let hosted_git = if ignore_scripts {
                 None
             } else {
                 t.as_hosted_git_source()
             };
-            if let Some(g) = hosted_git
-                && index_has_prepare_script(&index)
-            {
+            let manifest = hosted_git.as_ref().and_then(|_| index_manifest(&index));
+            let build = match &manifest {
+                Some(manifest) if checkout_needs_build(manifest, |p| index.contains_key(p)) => {
+                    checkout_build_allowed(inherited_build_policy.as_deref(), local, manifest)?
+                }
+                _ => false,
+            };
+            if build && let Some(g) = hosted_git {
                 let spec = format!("{}#{}", g.url, g.resolved);
                 let integrity = (!t.integrity.is_empty()).then(|| t.integrity.clone());
                 let (checkout, _) = tokio::task::spawn_blocking(move || {
@@ -396,12 +408,11 @@ pub(super) async fn import_local_source(
     }
 }
 
-fn index_has_prepare_script(index: &aube_store::PackageIndex) -> bool {
+fn index_manifest(index: &aube_store::PackageIndex) -> Option<aube_manifest::PackageJson> {
     index
         .get("package.json")
         .and_then(|stored| std::fs::read(&stored.store_path).ok())
         .and_then(|bytes| aube_manifest::PackageJson::from_slice(&bytes).ok())
-        .is_some_and(|pj| pj.scripts.contains_key("prepare"))
 }
 
 /// Build a git dep's source checkout and import what it would publish.
@@ -412,9 +423,10 @@ fn index_has_prepare_script(index: &aube_store::PackageIndex) -> bool {
 /// inside the checkout links its deps and runs its own root lifecycle,
 /// `prepare` included; then `pack`'s file selection snapshots exactly
 /// what would be published (honors `files` and `.npmignore`, skips
-/// `node_modules`). Callers gate this on scripts being enabled, as
-/// pnpm does: with `--ignore-scripts` the only reason to pay for the
-/// nested install is gone, so they import the checkout as-is.
+/// `node_modules`). Callers gate this as pnpm does: with
+/// `--ignore-scripts`, or a build the allowlist denies, they import the
+/// checkout as-is, and one it does not mention fails the install
+/// (`checkout_build_allowed`).
 ///
 /// The build runs on a private copy, never on `checkout` itself, which
 /// is the shared `(url, commit)` git or codeload cache. Building in

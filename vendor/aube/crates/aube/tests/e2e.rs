@@ -841,13 +841,9 @@ fn path_without_cp(sbx: &Sandbox) -> std::ffi::OsString {
     std::env::join_paths(dirs).unwrap()
 }
 
-/// Preparing a git dependency copies its checkout to a scratch dir before
-/// the build runs. That copy used to spawn `cp`, which stock Windows has
-/// no copy of, so any git dep with a `prepare` failed to install there.
-#[test]
-fn git_dep_prepare_runs_with_no_cp_on_path() {
-    let _guard = e2e_lock();
-    let sbx = Sandbox::new();
+/// A local git repo whose `prepare` builds `dist/index.js`, as a
+/// `git+file:` URL.
+fn git_repo_with_prepare(sbx: &Sandbox) -> String {
     let repo = sbx.home.join("prep-repo");
     fs::create_dir_all(&repo).unwrap();
     fs::write(
@@ -889,14 +885,26 @@ fn git_dep_prepare_runs_with_no_cp_on_path() {
             .unwrap();
         assert!(status.success(), "git {args:?}");
     }
-    let url = format!(
+    format!(
         "git+file:///{}",
         repo.to_string_lossy()
             .replace('\\', "/")
             .trim_start_matches('/')
-    );
+    )
+}
+
+/// Preparing a git dependency copies its checkout to a scratch dir before
+/// the build runs. That copy used to spawn `cp`, which stock Windows has
+/// no copy of, so any git dep with a `prepare` failed to install there.
+#[test]
+fn git_dep_prepare_runs_with_no_cp_on_path() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let url = git_repo_with_prepare(&sbx);
+    // The commit-free repository key approves every commit of the repo.
     sbx.write_manifest(&format!(
-        r#"{{ "name": "consumer", "version": "0.0.0", "dependencies": {{ "prep-demo": "{url}" }} }}"#
+        r#"{{ "name": "consumer", "version": "0.0.0", "dependencies": {{ "prep-demo": "{url}" }},
+             "pnpm": {{ "allowBuilds": {{ "prep-demo@{url}": true }} }} }}"#
     ));
 
     sbx.cmd()
@@ -909,6 +917,42 @@ fn git_dep_prepare_runs_with_no_cp_on_path() {
             .unwrap_or_default(),
         "module.exports = 42;\n",
         "the dependency's prepare script built dist/ before it was linked"
+    );
+}
+
+/// A git dependency that has to be built runs its build only when the
+/// allowlist names its source or repository, as pnpm's
+/// `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED` gate does. A bare package name
+/// cannot approve it; a denial installs the checkout unbuilt.
+#[test]
+fn git_dep_prepare_is_refused_unless_the_allowlist_names_its_source() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let url = git_repo_with_prepare(&sbx);
+    let install = |allow: &str| {
+        let _ = fs::remove_dir_all(sbx.project.join("node_modules"));
+        sbx.write_manifest(&format!(
+            r#"{{ "name": "consumer", "version": "0.0.0", "dependencies": {{ "prep-demo": "{url}" }},
+                 "pnpm": {{ "allowBuilds": {{ {allow} }} }} }}"#
+        ));
+        sbx.cmd().arg("install").assert()
+    };
+
+    for allow in ["", r#""prep-demo": true"#] {
+        let out = install(allow).code(1);
+        let stderr = String::from_utf8_lossy(&out.get_output().stderr).into_owned();
+        assert!(
+            stderr.contains("ERR_AUBE_GIT_DEP_PREPARE_NOT_ALLOWED"),
+            "allowBuilds {{{allow}}} refuses the build:\n{stderr}"
+        );
+        assert!(!sbx.project.join("node_modules/prep-demo").exists());
+    }
+
+    install(r#""prep-demo": false"#).success();
+    assert!(
+        sbx.project.join("node_modules/prep-demo/build.js").exists()
+            && !sbx.project.join("node_modules/prep-demo/dist").exists(),
+        "a denied build installs the checkout as it is"
     );
 }
 
@@ -1005,9 +1049,12 @@ fn hosted_git_tarball_dep_runs_its_prepare_script() {
     );
     let (proxy, requests) = serve_through_proxy(tarball);
     let url = format!("http://codeload.github.com/acme/demo/tar.gz/{sha}");
-    sbx.write_manifest(&format!(
-        r#"{{ "name": "consumer", "version": "0.0.0", "dependencies": {{ "demo": "{url}" }} }}"#
-    ));
+    let manifest = |allow: &str| {
+        sbx.write_manifest(&format!(
+            r#"{{ "name": "consumer", "version": "0.0.0", "dependencies": {{ "demo": "{url}" }},
+                 "pnpm": {{ "allowBuilds": {{ {allow} }} }} }}"#
+        ))
+    };
     let install = |args: &[&str]| {
         let _ = fs::remove_dir_all(sbx.project.join("node_modules"));
         sbx.cmd()
@@ -1022,10 +1069,19 @@ fn hosted_git_tarball_dep_runs_its_prepare_script() {
             // `http_proxy` after this would remove it too.
             .env("HTTP_PROXY", format!("http://{proxy}/"))
             .assert()
-            .success();
     };
 
-    install(&[]);
+    manifest("");
+    let out = install(&[]).code(1);
+    assert!(
+        String::from_utf8_lossy(&out.get_output().stderr)
+            .contains("ERR_AUBE_GIT_DEP_PREPARE_NOT_ALLOWED"),
+        "an archive nobody approved is not built"
+    );
+
+    // The archive is approved under the repository it was cut from.
+    manifest(r#""demo@git+https://github.com/acme/demo.git": true"#);
+    install(&[]).success();
     assert!(
         requests
             .lock()
@@ -1046,7 +1102,7 @@ fn hosted_git_tarball_dep_runs_its_prepare_script() {
     );
 
     // Scripts disabled: the archive is linked as fetched, unbuilt.
-    install(&["--ignore-scripts"]);
+    install(&["--ignore-scripts"]).success();
     assert!(sbx.project.join("node_modules/demo/build.js").exists());
     assert!(!sbx.project.join("node_modules/demo/dist").exists());
 }
