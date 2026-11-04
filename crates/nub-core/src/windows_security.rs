@@ -317,12 +317,15 @@ pub fn directory_is_stable(path: &Path, leaf: bool, volume_root: bool) -> io::Re
 }
 
 /// The write-class rights each principal holds on the user's profile directory
-/// itself, read from its DACL: allow ACEs that are not inherit-only, less the same
-/// principal's deny ACEs. A principal holding a right here already controls every
-/// directory below the profile, so the same right granted to it further down adds
-/// nothing. Deny ACEs to a GROUP the principal belongs to are not subtracted;
-/// that needs the principal's token, and only makes this map more generous to a
-/// principal the profile's owner chose to grant rights to.
+/// itself, read from its allow ACEs that are not inherit-only. A principal holding a
+/// right there already controls every directory below the profile, so the same
+/// right granted to it further down adds nothing.
+///
+/// Any deny ACE on the profile that covers a write-class right, for any SID,
+/// credits nobody. A deny to a group the principal belongs to takes the right away
+/// from it on the profile, and telling which principals a group covers needs their
+/// tokens, so the exception is dropped rather than modelled. Profiles rarely carry
+/// one, and the Codex sandbox grant of #908 is an allow.
 pub struct ProfileGrants {
     _descriptor: LocalAllocation,
     grants: Vec<(Sid, u32)>,
@@ -331,40 +334,30 @@ pub struct ProfileGrants {
 impl ProfileGrants {
     pub fn read(profile: &Path) -> io::Result<Self> {
         let (descriptor, _owner, dacl) = owner_and_dacl(profile)?;
-        let mut allowed: Vec<(Sid, u32)> = Vec::new();
-        let mut denied: Vec<(Sid, u32)> = Vec::new();
+        let mut grants: Vec<(Sid, u32)> = Vec::new();
         if !dacl.is_null() {
             for ace in aces(dacl)? {
                 let Some(ace) = ace? else { continue };
-                if ace.flags & INHERIT_ONLY_ACE != 0 {
+                let rights = specific_rights(ace.mask) & WRITE_CLASS;
+                if ace.kind == AceKind::Deny && rights != 0 {
+                    grants.clear();
+                    break;
+                }
+                if ace.kind != AceKind::Allow || ace.flags & INHERIT_ONLY_ACE != 0 {
                     continue;
                 }
-                let list = match ace.kind {
-                    AceKind::Allow => &mut allowed,
-                    AceKind::Deny => &mut denied,
-                    AceKind::Compound => continue,
-                };
-                let rights = specific_rights(ace.mask) & WRITE_CLASS;
-                match list
+                match grants
                     .iter_mut()
                     .find(|(sid, _)| unsafe { EqualSid(*sid, ace.sid) } != 0)
                 {
                     Some((_, mask)) => *mask |= rights,
-                    None => list.push((ace.sid, rights)),
+                    None => grants.push((ace.sid, rights)),
                 }
-            }
-        }
-        for (sid, mask) in &mut allowed {
-            if let Some((_, deny)) = denied
-                .iter()
-                .find(|(other, _)| unsafe { EqualSid(*other, *sid) } != 0)
-            {
-                *mask &= !deny;
             }
         }
         Ok(Self {
             _descriptor: descriptor,
-            grants: allowed,
+            grants,
         })
     }
 

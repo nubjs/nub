@@ -1647,6 +1647,23 @@ mod tests {
             "a grant the profile denies is not held there",
         );
 
+        // Everyone is denied a write-class right on the profile, so the Guests
+        // allow there no longer proves control: Guests are part of Everyone.
+        let group_denied_profile = root.join("group-denied-profile");
+        create_directory_with_dacl(
+            &group_denied_profile,
+            &format!("D:P(D;;WO;;;WD)(A;OICI;FA;;;BG){OWNER_ONLY}"),
+        )
+        .unwrap();
+        let member_grant = group_denied_profile.join(".cache");
+        create_directory_with_dacl(&member_grant, &format!("D:P(A;OICI;FA;;;BG){OWNER_ONLY}"))
+            .unwrap();
+        refused(
+            &member_grant.join("nub"),
+            &group_denied_profile,
+            "a deny on the profile to a group drops the credit for its members",
+        );
+
         // A private profile with an explicit grant on a directory inside it.
         let private_profile = root.join("private-profile");
         create_private_directory(&private_profile).unwrap();
@@ -2091,16 +2108,19 @@ mod tests {
             });
         }
 
+        // Declined through its parent, which any account can write: a shared base
+        // that we own would be hardened rather than declined on Windows.
         let root = ensure_safe_base(&tmp_base("nub-rtc-decline")).unwrap();
-        let declined = root.join("declined");
+        let shared = root.join("shared");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::create_dir(&declined).unwrap();
-            fs::set_permissions(&declined, fs::Permissions::from_mode(0o777)).unwrap();
+            fs::create_dir(&shared).unwrap();
+            fs::set_permissions(&shared, fs::Permissions::from_mode(0o777)).unwrap();
         }
         #[cfg(windows)]
-        crate::windows_security::create_shared_directory(&declined).unwrap();
+        crate::windows_security::create_shared_directory(&shared).unwrap();
+        let declined = shared.join("nub");
 
         let run = |candidates: &[PathBuf]| {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
