@@ -549,6 +549,50 @@ fn raw_pin_name_version(manifest: &serde_json::Value) -> Option<(String, Option<
     Some((name.to_string(), version.map(str::to_string)))
 }
 
+/// The version the workspace-root manifest declares for `tool`, `+sha512`
+/// suffix stripped. A single pin ([`declared_pm_raw`]) answers only for the tool
+/// it names. A `devEngines.packageManager` array of several tools is no single
+/// pin, so the lockfile picks the tool, and the entries naming that tool give
+/// its version when they all state the same one: `[pnpm@^11, npm@^11]` beside
+/// `pnpm-lock.yaml` is pnpm 11 in either order. Mirrors
+/// `aube_lockfile::declared_version_for`.
+pub fn declared_pm_version(cwd: &Path, tool: &str) -> Option<String> {
+    let manifest = root_manifest(cwd)?;
+    let version = raw_version_for(&manifest, tool)?;
+    Some(
+        version
+            .split_once('+')
+            .map_or(version.as_str(), |(bare, _)| bare)
+            .to_string(),
+    )
+}
+
+fn raw_version_for(manifest: &serde_json::Value, tool: &str) -> Option<String> {
+    if let Some((name, version)) = raw_pin_name_version(manifest) {
+        return (name == tool).then_some(version).flatten();
+    }
+    if manifest.get("packageManager").is_some() {
+        return None;
+    }
+    let items = manifest
+        .get("devEngines")?
+        .get("packageManager")?
+        .as_array()?;
+    let versions: Vec<Option<&str>> = items
+        .iter()
+        .filter_map(dev_engines_entry)
+        .filter(|(name, _)| *name == tool)
+        .map(|(_, version)| version)
+        .collect();
+    let first = *versions.first()?;
+    versions
+        .iter()
+        .all(|v| *v == first)
+        .then_some(first)
+        .flatten()
+        .map(str::to_string)
+}
+
 /// A `devEngines.packageManager` entry's `(name, version)`, when it names a tool.
 fn dev_engines_entry(entry: &serde_json::Value) -> Option<(&str, Option<&str>)> {
     let name = entry.get("name")?.as_str()?.trim();
@@ -1954,6 +1998,13 @@ mod tests {
                 &format!(r#"{{"devEngines":{{"packageManager":{array}}}}}"#),
             );
             assert_eq!(project_pm_identity(&dir), None, "{array}");
+            // The tool the lockfile then picks still has a declared version.
+            assert_eq!(
+                declared_pm_version(&dir, "pnpm").as_deref(),
+                Some("^9"),
+                "{array}"
+            );
+            assert_eq!(declared_pm_version(&dir, "bun"), None, "{array}");
         }
         let dir = tmpdir("ident-array-one-tool");
         write_pkg(

@@ -1388,10 +1388,10 @@ fn apply_config_scope(
     // Fresh, undeclared, no lockfile: nub identity (its un-branded
     // cross-tool fields), matching the brand-symmetric default.
     .unwrap_or(Role::Nub);
-    let (major, minor) = declared
-        .as_ref()
-        .and_then(|(_, v)| v.as_deref())
-        .map(parse_major_minor)
+    // The version declared for the role's own tool, so a multi-tool `devEngines`
+    // array (no single pin; the lockfile picked the role) still gives a major.
+    let (major, minor) = nub_core::pm::resolve::declared_pm_version(cwd, role.display())
+        .map(|v| parse_major_minor(&v))
         .unwrap_or((None, None));
 
     // Scope the override sources to the role's dialect.
@@ -1662,8 +1662,9 @@ fn pnpm_incumbent_major_is_v11_plus() -> bool {
 /// The declared incumbent pnpm major, or `None` when the project does not
 /// declare pnpm as its package manager (a non-pnpm/unknown/absent
 /// `packageManager`/`devEngines` name, or an undeclared/unparseable version).
-/// Reads the pin packageManager-first, requiring the name to be LITERALLY
-/// "pnpm" — the shared major detection behind [`pnpm_incumbent_major_is_v11_plus`]
+/// Reads the version declared for pnpm itself (`declared_pm_version`: the pin
+/// when it names pnpm, else the pnpm entry of a multi-tool `devEngines` array)
+/// — the shared major detection behind [`pnpm_incumbent_major_is_v11_plus`]
 /// and [`pnpm_npmrc_key_policy`], matching
 /// `store_config_family::project_scalar_home`.
 fn declared_pnpm_major() -> Option<u64> {
@@ -1672,9 +1673,7 @@ fn declared_pnpm_major() -> Option<u64> {
 
 /// [`declared_pnpm_major`] for the project at `dir`.
 fn declared_pnpm_major_in(dir: &Path) -> Option<u64> {
-    nub_core::pm::resolve::declared_pm_raw(dir)
-        .and_then(|(name, version)| (name == "pnpm").then_some(version).flatten())
-        .and_then(|v| parse_major_minor(&v).0)
+    nub_core::pm::resolve::declared_pm_version(dir, "pnpm").and_then(|v| parse_major_minor(&v).0)
 }
 
 /// Hand nub-core this crate's incumbent detection, so its own `.npmrc` readers
@@ -2606,8 +2605,7 @@ enum ConfigSurface {
 /// one `current_dir()` read.
 fn pnpm_v11_surface(surface: &ConfigSurface, cwd: &Path) -> bool {
     matches!(surface, ConfigSurface::PnpmOrFresh)
-        && nub_core::pm::resolve::declared_pm_raw(cwd)
-            .and_then(|(name, version)| (name == "pnpm").then_some(version).flatten())
+        && nub_core::pm::resolve::declared_pm_version(cwd, "pnpm")
             .and_then(|version| parse_major_minor(&version).0)
             .is_some_and(|major| major >= 11)
 }
@@ -4237,15 +4235,20 @@ mod tests {
                 Some("pnpm-lock.yaml"),
                 Layered,
             ),
-            // Versioned entries too: a pnpm 11 entry does not make the array a
-            // pnpm 11 pin when it sits last, nor an npm entry an npm pin.
+            // Versioned entries: the lockfile picks the tool, and that tool's
+            // entry gives its major, in either order.
             (
                 r#""devEngines":{"packageManager":[{"name":"pnpm","version":"^11.0.0"},{"name":"npm","version":"^11.0.0"}]}"#,
                 Some("pnpm-lock.yaml"),
-                Layered,
+                Ignored,
             ),
             (
                 r#""devEngines":{"packageManager":[{"name":"npm","version":"^11.0.0"},{"name":"pnpm","version":"^11.0.0"}]}"#,
+                Some("pnpm-lock.yaml"),
+                Ignored,
+            ),
+            (
+                r#""devEngines":{"packageManager":[{"name":"npm","version":"^11.0.0"},{"name":"pnpm","version":"^10.0.0"}]}"#,
                 Some("pnpm-lock.yaml"),
                 Layered,
             ),
@@ -4269,13 +4272,20 @@ mod tests {
             let (root, member) = npmrc_model_workspace(fields, lockfile);
             let model = nub_core::workspace::npmrc::member_npmrc(&member);
             assert_eq!(model, expected, "{fields} + {lockfile:?}");
-            // The role readers (`declared_pm_raw`) and the config surface
-            // (`declared_package_manager`) name the same declared tool.
+            // nub-core's readers and the engine's agree on the declared tool
+            // (role vs config surface) and on each tool's declared version.
             assert_eq!(
                 nub_core::pm::resolve::declared_pm_raw(root.path()).map(|(name, _)| name),
                 aube_lockfile::declared_package_manager(root.path()).map(|d| d.name),
                 "{fields}: declared tool"
             );
+            for tool in ["pnpm", "npm", "yarn", "bun"] {
+                assert_eq!(
+                    nub_core::pm::resolve::declared_pm_version(root.path(), tool),
+                    aube_lockfile::declared_version_for(root.path(), tool),
+                    "{fields}: declared {tool} version"
+                );
+            }
         }
     }
 

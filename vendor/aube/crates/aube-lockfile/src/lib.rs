@@ -14,7 +14,7 @@ pub mod yarn;
 
 pub use detect::{
     DeclarationSource, DeclaredPackageManager, ResolvedLockfileKind, declared_package_manager,
-    resolve_project_lockfile_kind,
+    declared_version_for, resolve_project_lockfile_kind,
 };
 pub use drift::DriftStatus;
 pub use io::{
