@@ -383,6 +383,32 @@ fn data_formats_load_through_require_on_the_compat_tier() {
     }
 }
 
+/// The compat tier's twin of `data_formats_keep_values_json_cannot_carry`: the
+/// ESM path runs in the loader worker and `require()` through the classic
+/// extension shim, both on the same emitted literal.
+#[test]
+fn data_formats_keep_values_json_cannot_carry_on_the_compat_tier() {
+    let expected =
+        std::fs::read_to_string(fixtures_dir().join("data-loaders-fidelity/expected.txt"))
+            .expect("read expected.txt");
+    for entry in ["import.mjs", "require.cjs"] {
+        let Some((stdout, stderr, code)) =
+            run_nub_against_node((22, 13, 0), "data-loaders-fidelity", entry)
+        else {
+            eprintln!(
+                "skipping: Node 22.13.0 not installed (set TEST_NODE_BIN_22_13_0 or nvm install)"
+            );
+            return;
+        };
+        assert_eq!(code, 0, "{entry} failed on the compat tier: {stderr}");
+        assert_eq!(
+            stdout.trim(),
+            expected.trim(),
+            "{entry} rendered the documents differently on the compat tier"
+        );
+    }
+}
+
 /// A `loader` redirect in EITHER direction, plus the dependency boundary that
 /// makes one extension mean two things at once.
 ///

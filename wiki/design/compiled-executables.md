@@ -331,7 +331,7 @@ Named fixtures can only test what someone thought to name, and `compile-preamble
 
 Data-format imports are transform-time, and the compiler must not grow a second implementation of them. Two parsers behind one syntax would let a document mean different things depending on whether it was run or compiled.
 
-The runtime already parses YAML, TOML, JSON5 and JSONC **in Rust**, through `nub-native`'s `parseYaml`/`parseToml`/`parseJson5`/`parseJsonc`, with the JavaScript libraries only as a fallback when the addon is missing.
+The runtime already parses YAML, TOML, JSON5 and JSONC **in Rust**, through `nub-native`'s `yamlToJs`/`tomlToJs`/`json5ToJs`/`jsoncToJs`, with the JavaScript libraries only as a fallback when the addon is missing.
 
 So the four parsers and their depth and alias-expansion guards move into a small crate both sides depend on: `nub-native` keeps its `#[napi]` wrappers, and the compiler's loader plugin calls the same functions. `nub-native` is its own workspace, but the shared crate is a sibling under `crates/` rather than beneath it, so an ordinary path dependency reaches it from both. The extension table stays the runtime's — the compiler reads it rather than restating it, so the two surfaces cannot disagree about what `.yaml` means.
 

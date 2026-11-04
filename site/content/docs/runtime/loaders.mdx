@@ -67,6 +67,23 @@ const { host, port } = config;      // "localhost", 5432
 
 The object formats are typed `Record<string, unknown>`, so destructured keys are `unknown` — narrow or cast them at the use site. A data file whose top-level value is an array or scalar imports as that value via the default; cast it, since the wildcard type assumes an object.
 
+## Values
+
+YAML follows the YAML 1.2 core schema, as the `yaml` package does. `.nan` and `.inf` are numbers, an unquoted `nan`, `yes` or `2001-12-14` is a string, and an integer past `Number.MAX_SAFE_INTEGER` rounds to the nearest number.
+
+TOML values that JSON has no form for keep their type:
+
+| TOML | JavaScript |
+| --- | --- |
+| `9007199254740993` (past `Number.MAX_SAFE_INTEGER`) | `9007199254740993n` |
+| `nan`, `-inf` | `NaN`, `-Infinity` |
+| `1979-05-27T07:32:00Z` | `Date` |
+| `1979-05-27T07:32:00` (local) | `Date` in the local time zone |
+| `1979-05-27` | `Date` at UTC midnight |
+| `07:32:00` | `"07:32:00.000"` |
+
+JSON5's `NaN` and `Infinity` are numbers too.
+
 ## Text imports
 
 Add the `with { type: "text" }` import attribute to read a file's raw contents as a string, whatever its extension.

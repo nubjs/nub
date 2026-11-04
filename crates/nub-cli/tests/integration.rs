@@ -5851,6 +5851,63 @@ fn data_format_loaders() {
     );
 }
 
+/// The values JSON cannot carry — NaN, ±Infinity, -0, a TOML integer past 2^53,
+/// a date, an own `__proto__` key — reach `import` and `require()` intact. The
+/// loaders once emitted `JSON.stringify(parsed)`, which threw on the BigInt,
+/// nulled NaN and turned `__proto__` into a prototype. `expected.txt` is shared
+/// with the compat-tier and compiled-artifact runs, so every surface is held to
+/// one answer.
+#[test]
+fn data_formats_keep_values_json_cannot_carry() {
+    let expected =
+        std::fs::read_to_string(fixtures_dir().join("data-loaders-fidelity/expected.txt"))
+            .expect("read expected.txt");
+    for entry in ["import.mjs", "require.cjs"] {
+        let (stdout, stderr, code) = run_nub("data-loaders-fidelity", entry);
+        assert_eq!(code, 0, "{entry} failed: {stderr}");
+        assert_eq!(
+            stdout.trim(),
+            expected.trim(),
+            "{entry} rendered the documents differently"
+        );
+    }
+}
+
+/// `nub compile` inlines the parsed document as a literal; it must be the same
+/// literal the runtime evaluates. Run from an empty directory, so the answer
+/// cannot come from the data files beside the entry.
+#[cfg(feature = "compile")]
+#[test]
+fn a_compiled_data_import_keeps_values_json_cannot_carry() {
+    let runtime = compile_test_runtime();
+    let work = unique_test_cache();
+    let cache = work.join("cache");
+    std::fs::create_dir_all(&work).expect("create the work dir");
+    let fixture = fixtures_dir().join("data-loaders-fidelity");
+    let artifact = work.join(format!("data{}", std::env::consts::EXE_SUFFIX));
+    let compile = compile_smol_artifact(
+        &runtime,
+        &work,
+        &cache,
+        &fixture.join("import.mjs"),
+        &artifact,
+    );
+    assert!(
+        compile.status.success(),
+        "data fixture did not compile: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = run_compiled_artifact_with_timeout(&artifact, &work);
+    assert!(
+        run.status.success(),
+        "compiled data fixture failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let expected =
+        std::fs::read_to_string(fixture.join("expected.txt")).expect("read expected.txt");
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), expected.trim());
+}
+
 /// Run `entry` from a throwaway project. The data imports under test must load
 /// through the staged native addon in CI rather than the JS parser fallbacks —
 /// yaml/json5/toml are deliberately absent from this crate's test dependencies.
