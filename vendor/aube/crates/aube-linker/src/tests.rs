@@ -2601,7 +2601,7 @@ fn validate_index_key_rejects_windows_drive() {
 /// Recursively compare two trees for byte-identical content, identical
 /// symlink targets, identical +x bits, and identical directory shape.
 /// Returns a human-readable mismatch description, or `None` on match.
-#[cfg(all(unix, test))]
+#[cfg(target_os = "macos")]
 fn diff_trees(a: &Path, b: &Path) -> Option<String> {
     use std::collections::BTreeSet;
     use std::os::unix::fs::PermissionsExt;
@@ -2807,7 +2807,10 @@ fn clonedir_materialize_matches_per_file_byte_for_byte() {
     // Confirm the tree tier was actually built and the clone path taken
     // (otherwise this test would silently degrade to comparing per-file
     // against per-file and prove nothing).
-    let tree = store.tree_path(&linker.virtual_store_subdir("pkg@1.2.3"));
+    let tree = store.tree_path(&aube_store::tree_key(
+        &linker.virtual_store_subdir("pkg@1.2.3"),
+        &index,
+    ));
     assert!(
         tree.exists(),
         "tree tier must have been built (clonedir path not exercised?)"
@@ -2844,6 +2847,146 @@ fn clonedir_materialize_matches_per_file_byte_for_byte() {
     );
     // Stats parity: the clone counts every index entry as linked.
     assert_eq!(stats.files_linked, index.len());
+}
+
+/// Two packages with the same dep path but different files — two projects
+/// each depending on their own `file:../p.tgz`, or one tarball rebuilt in
+/// place — must each materialize their OWN files. The whole-dir clone
+/// copies a shared store tree verbatim, so a tree keyed by dep path alone
+/// handed the second project the first tarball's bytes with no error.
+/// The tree is named after the per-project entry, not the graph-hashed
+/// shared-store name, so `store prune` can find it from the project.
+#[cfg(target_os = "macos")]
+#[test]
+fn clonedir_never_reuses_a_tree_across_different_content_at_one_dep_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::at(dir.path().join("store/files"));
+    let dep_path = "probe@file+3697c86abcf40c0a";
+    let pkg = LockedPackage {
+        name: "probe".to_string(),
+        version: "1.0.0".to_string(),
+        dep_path: dep_path.to_string(),
+        ..Default::default()
+    };
+    // A `file:` package in shared-store mode: its dep path carries a graph
+    // hash, but it is materialized into the project's own `.aube/`.
+    let linker =
+        Linker::new_with_gvs(&store, LinkStrategy::Reflink, false).with_graph_hashes(GraphHashes {
+            node_hash: [(dep_path.to_string(), "d5a626a38a6be695".to_string())].into(),
+        });
+    assert_ne!(
+        linker.virtual_store_subdir(dep_path),
+        linker.aube_dir_entry_name(dep_path)
+    );
+
+    for (project, body) in [("a", "AAA"), ("b", "BBB")] {
+        let mut index = PackageIndex::default();
+        index.insert(
+            "index.js".to_string(),
+            store
+                .import_bytes(format!("module.exports='{body}'\n").as_bytes(), false)
+                .unwrap(),
+        );
+        let aube_dir = dir.path().join(project).join("node_modules/.aube");
+        std::fs::create_dir_all(&aube_dir).unwrap();
+        let mut stats = LinkStats::default();
+        linker
+            .ensure_in_aube_dir(
+                &aube_dir,
+                dep_path,
+                &aube_lockfile::LockfileGraph::default(),
+                &pkg,
+                &index,
+                &mut stats,
+                None,
+            )
+            .expect("materialize");
+        assert!(
+            store
+                .tree_path(&aube_store::tree_key(
+                    &linker.aube_dir_entry_name(dep_path),
+                    &index
+                ))
+                .exists(),
+            "the clonedir path must have run for project {project}"
+        );
+        let installed = aube_dir
+            .join(linker.aube_dir_entry_name(dep_path))
+            .join("node_modules/probe/index.js");
+        assert_eq!(
+            std::fs::read_to_string(&installed).unwrap(),
+            format!("module.exports='{body}'\n"),
+            "project {project} must get its own file content"
+        );
+    }
+}
+
+/// A tree's mtime is its last-use stamp for `store prune`, which ages out
+/// every variant of a live coordinate but the most recently used. So cloning
+/// from an existing tree must reuse it as-is and refresh a day-old stamp;
+/// otherwise a variant one project still clones from daily would age out
+/// beside a newer one and cost that project a rebuild.
+#[cfg(target_os = "macos")]
+#[test]
+fn clonedir_reuse_refreshes_a_stale_tree_use_stamp() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::at(dir.path().join("store/files"));
+    let dep_path = "probe@1.0.0";
+    let pkg = LockedPackage {
+        name: "probe".to_string(),
+        version: "1.0.0".to_string(),
+        dep_path: dep_path.to_string(),
+        ..Default::default()
+    };
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Reflink, false);
+    let mut index = PackageIndex::default();
+    index.insert(
+        "index.js".to_string(),
+        store.import_bytes(b"module.exports=1\n", false).unwrap(),
+    );
+    let tree = store.tree_path(&aube_store::tree_key(
+        &linker.virtual_store_subdir(dep_path),
+        &index,
+    ));
+    let materialize = |project: &str| {
+        let aube_dir = dir.path().join(project).join("node_modules/.aube");
+        std::fs::create_dir_all(&aube_dir).unwrap();
+        linker
+            .ensure_in_aube_dir(
+                &aube_dir,
+                dep_path,
+                &aube_lockfile::LockfileGraph::default(),
+                &pkg,
+                &index,
+                &mut LinkStats::default(),
+                None,
+            )
+            .expect("materialize");
+    };
+
+    materialize("a");
+    let built = std::fs::metadata(&tree).expect("tree tier must have been built");
+    let two_days_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
+    std::fs::File::open(&tree)
+        .and_then(|f| f.set_modified(two_days_ago))
+        .unwrap();
+
+    materialize("b");
+    let reused = std::fs::metadata(&tree).unwrap();
+    assert_eq!(
+        reused.ino(),
+        built.ino(),
+        "the existing tree must be reused, not rebuilt"
+    );
+    let age = std::time::SystemTime::now()
+        .duration_since(reused.modified().unwrap())
+        .unwrap_or_default();
+    assert!(
+        age.as_secs() < 3600,
+        "reusing the tree must refresh its use stamp, but it is {}s old",
+        age.as_secs()
+    );
 }
 
 // nub#566 / nub#576: a POPULATED real directory sitting in a

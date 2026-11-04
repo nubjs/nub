@@ -51,9 +51,14 @@ fn open_lock(global_virtual_store: &Path) -> miette::Result<std::fs::File> {
         )
     })?;
     let path = global_virtual_store.join(LOCK_FILE);
+    // Readable as well as writable: on Linux NFS, flock() is emulated with
+    // byte-range locks, and a shared (read) lock on a write-only
+    // descriptor fails with EBADF. The same holds for the store's
+    // `.maintenance.lock` and `.gc.lock`.
     std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
+        .read(true)
         .write(true)
         .open(&path)
         .map_err(|e| {
@@ -481,6 +486,19 @@ fn registry_error(path: &Path, error: std::io::Error) -> miette::Report {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// Linux NFS emulates flock() with byte-range locks, and the shared
+    /// install lock becomes a read lock, which a write-only descriptor
+    /// cannot take (EBADF). Local flock ignores the access mode, so this
+    /// asserts on the descriptor rather than on a successful lock.
+    #[test]
+    fn prune_lock_file_opens_readable() {
+        use std::io::Read;
+        let tmp = tempfile::tempdir().expect("tempdir should be created");
+        let mut file = open_lock(&tmp.path().join("virtual-store")).expect("lock should open");
+        file.read_to_end(&mut Vec::new())
+            .expect("the prune lock must be opened readable");
+    }
 
     #[test]
     fn prune_keeps_registered_and_removes_historical_entries() {

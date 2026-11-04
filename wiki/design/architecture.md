@@ -116,6 +116,16 @@ Four files load in precedence order, with the real process environment always wi
 
 Loading happens in the CLI before the spawn rather than in a preload. Cross-runtime load order, the expansion subset, and the security case for the ordering are in [[research/env-file-loading]].
 
+## HTTP DNS resolution
+
+Every HTTP client in the binary resolves host names through the operating system (`getaddrinfo`), so VPN-scoped and split DNS apply exactly as they do for other programs.
+
+That covers a VPN's interface-scoped resolver and `/etc/resolver/*` on macOS, NRPT and per-adapter servers on Windows, and `nsswitch` and `systemd-resolved` on Linux. An in-process resolver such as Hickory reads only the global nameserver list, and under a macOS TUN VPN that scopes DNS to its interface it fails every lookup.
+
+The registry clients wrap the system resolver in a process-wide cache. `getaddrinfo` keeps no cache of its own and an install opens hundreds of connections to a few origins, so each host is resolved once and reused for the rest of the process, and concurrent lookups of one host share a single query. A failed lookup is not cached.
+
+reqwest's `hickory-dns` Cargo feature must stay out of the dependency graph: through feature unification it switches every reqwest client in the binary to Hickory. `scripts/check-dns-features.sh` fails CI if it reappears.
+
 ## How the code is laid out
 
 Three Cargo workspaces, and the splits are structural rather than organizational.

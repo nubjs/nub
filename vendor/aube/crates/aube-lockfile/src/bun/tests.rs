@@ -2227,3 +2227,166 @@ fn test_unknown_protocol_tail_stays_a_registry_pin_by_default() {
     assert_eq!(foo.version, "exotic:bar");
     assert!(foo.local_source.is_none());
 }
+
+/// bun writes no edge for a package's resolved peer, required or optional:
+/// the peer stays in `peerDependencies`/`optionalPeers`, which is where an
+/// install from the lockfile links it from. openai declares no dependencies,
+/// so its declared ranges are known and empty.
+#[test]
+fn write_records_a_resolved_peer_only_in_its_peer_declaration() {
+    let mut graph = LockfileGraph::default();
+    graph.importers.insert(
+        ".".to_string(),
+        ["openai", "ws", "zod"]
+            .into_iter()
+            .map(|name| DirectDep {
+                name: name.to_string(),
+                dep_path: format!("{name}@1.0.0"),
+                dep_type: DepType::Production,
+                specifier: Some("1.0.0".to_string()),
+            })
+            .collect(),
+    );
+    let mut openai = LockedPackage {
+        name: "openai".to_string(),
+        version: "1.0.0".to_string(),
+        dep_path: "openai@1.0.0".to_string(),
+        integrity: Some(fake_sri('o')),
+        declared_dependencies_known: true,
+        ..Default::default()
+    };
+    for peer in ["ws", "zod"] {
+        openai
+            .peer_dependencies
+            .insert(peer.to_string(), "^1.0.0".to_string());
+        openai
+            .dependencies
+            .insert(peer.to_string(), "1.0.0".to_string());
+    }
+    openai
+        .peer_dependencies_meta
+        .insert("zod".to_string(), crate::PeerDepMeta { optional: true });
+    openai
+        .optional_dependencies
+        .insert("zod".to_string(), "1.0.0".to_string());
+    graph.packages.insert(openai.dep_path.clone(), openai);
+    for (name, c) in [("ws", 'w'), ("zod", 'z')] {
+        let pkg = LockedPackage {
+            name: name.to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: format!("{name}@1.0.0"),
+            integrity: Some(fake_sri(c)),
+            ..Default::default()
+        };
+        graph.packages.insert(pkg.dep_path.clone(), pkg);
+    }
+    let manifest = aube_manifest::PackageJson {
+        name: Some("root".to_string()),
+        dependencies: ["openai", "ws", "zod"]
+            .into_iter()
+            .map(|name| (name.to_string(), "1.0.0".to_string()))
+            .collect(),
+        ..Default::default()
+    };
+
+    let out = tempfile::NamedTempFile::new().unwrap();
+    write(out.path(), &graph, &manifest).unwrap();
+    let text = std::fs::read_to_string(out.path()).unwrap();
+    let openai_line = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("\"openai\": [\"openai@"))
+        .expect("openai entry");
+    assert!(
+        openai_line.contains("\"peerDependencies\"")
+            && !openai_line.contains("\"dependencies\"")
+            && !openai_line.contains("\"optionalDependencies\""),
+        "a resolved peer belongs in the peer declaration alone: {openai_line}"
+    );
+}
+
+/// A genuine optional dependency that the package also declares as a peer
+/// must survive Bun -> nub.lock -> Bun. The pnpm format keeps no declared
+/// ranges, so the second write cannot tell it from a resolved optional
+/// peer and has to keep it optional.
+#[test]
+fn optional_dependency_that_is_also_a_peer_survives_a_pnpm_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let bun_in = dir.path().join("in.lock");
+    let content = r#"{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": {
+      "dependencies": { "consumer": "1.0.0" }
+    }
+  },
+  "packages": {
+    "consumer": ["consumer@1.0.0", "", { "optionalDependencies": { "fsevents": "2.3.3" }, "peerDependencies": { "fsevents": "^2.0.0" }, "optionalPeers": ["fsevents"] }, "SRI_C"],
+    "fsevents": ["fsevents@2.3.3", "", { "os": "darwin" }, "SRI_F"]
+  }
+}"#
+    .replace("SRI_C", &fake_sri('c'))
+    .replace("SRI_F", &fake_sri('f'));
+    std::fs::write(&bun_in, content).unwrap();
+    let manifest = aube_manifest::PackageJson {
+        name: Some("root".to_string()),
+        dependencies: [("consumer".to_string(), "1.0.0".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+
+    let pnpm_path = dir.path().join("pnpm-lock.yaml");
+    crate::pnpm::write(&pnpm_path, &parse(&bun_in).unwrap(), &manifest).unwrap();
+    let bun_out = dir.path().join("out.lock");
+    write(
+        &bun_out,
+        &crate::pnpm::parse(&pnpm_path).unwrap(),
+        &manifest,
+    )
+    .unwrap();
+
+    let consumer = &parse(&bun_out).unwrap().packages["consumer@1.0.0"];
+    assert!(
+        consumer.optional_dependencies.contains_key("fsevents"),
+        "fsevents must stay an optional dependency of consumer: {:?}",
+        consumer.dependencies
+    );
+}
+
+/// bun writes no edge for a peer; the reader rebuilds a required one by
+/// the nesting walk node resolution would take from the package's
+/// position, so a provider nothing depends on survives pruning. Optional
+/// peers are left to peer resolution.
+#[test]
+fn parse_rebuilds_required_peer_edges_from_placement() {
+    let dir = tempfile::tempdir().unwrap();
+    let lock = dir.path().join("bun.lock");
+    let content = r#"{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": {
+      "dependencies": { "parent": "1.0.0" }
+    }
+  },
+  "packages": {
+    "maybe": ["maybe@1.0.0", "", {}, "SRI_M"],
+    "parent": ["parent@1.0.0", "", { "dependencies": { "consumer": "1.0.0" } }, "SRI_P"],
+    "provider": ["provider@1.0.0", "", {}, "SRI_A"],
+    "parent/consumer": ["consumer@1.0.0", "", { "peerDependencies": { "maybe": "^1.0.0", "provider": "^2.0.0" }, "optionalPeers": ["maybe"] }, "SRI_C"],
+    "parent/provider": ["provider@2.0.0", "", {}, "SRI_B"]
+  }
+}"#
+    .replace("SRI_M", &fake_sri('m'))
+    .replace("SRI_P", &fake_sri('p'))
+    .replace("SRI_A", &fake_sri('a'))
+    .replace("SRI_C", &fake_sri('c'))
+    .replace("SRI_B", &fake_sri('b'));
+    std::fs::write(&lock, content).unwrap();
+
+    let consumer = &parse(&lock).unwrap().packages["consumer@1.0.0"];
+    assert_eq!(
+        consumer.dependencies,
+        BTreeMap::from([("provider".to_string(), "2.0.0".to_string())]),
+        "a required peer binds to the nearest placed provider; an optional one is not rebuilt"
+    );
+}

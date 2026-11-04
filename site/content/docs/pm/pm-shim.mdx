@@ -7,7 +7,9 @@ Default Nub usage needs no shims: `nub install`, `nub add`, and `nub run` work o
 
 <ShimDemo />
 
-After `nub pm shim`, bare `pnpm` resolves to a shim — a hardlink to the Nub binary. The shims live in `$XDG_DATA_HOME/nub/shims` when that variable is set, `%LOCALAPPDATA%\nub\shims` on Windows, and `~/.local/share/nub/shims` otherwise. On a cold cache, `pnpm --version` (or any pinned-PM command) provisions the pinned pnpm, then dispatches to it in-process under the project's Node. The dim `pnpm@9.5.0 (via nub shim)` line names the manager and version it ran; it prints on stderr on every dispatch, so piped stdout stays clean.
+After `nub pm shim`, bare `pnpm` resolves to a shim — a hardlink to the Nub binary. The shims live in `$XDG_DATA_HOME/nub/shims` when that variable is set, `%LOCALAPPDATA%\nub\shims` on Windows, and `~/.local/share/nub/shims` otherwise. On a cold cache, `pnpm --version` (or any pinned-PM command) provisions the pinned pnpm, then starts its launcher under the project's Node. The dim `pnpm@9.5.0 (via nub shim)` line names the manager and version it ran; it prints on stderr on every dispatch, so piped stdout stays clean.
+
+pnpm 12 ships as a native binary. The shim runs it the way Corepack does: pnpm's own JavaScript launcher downloads the binary on first use and keeps it beside the cached package, so later runs need no network. That first download is pnpm's, not Nub's. From pnpm 12.11.0 it follows the registry and credentials in `.npmrc`; earlier 12.x releases ignore `.npmrc`, so point them at a private mirror with `COREPACK_NPM_REGISTRY` (and `COREPACK_NPM_TOKEN` if it needs auth).
 
 To remove the shims, `nub pm unshim` deletes the shim directory and strips the PATH block, restoring the previous `pnpm`.
 

@@ -292,6 +292,7 @@ impl InstallArgs {
             pnpmfile: self.pnpmfile,
             global_pnpmfile: self.global_pnpmfile,
             pre_resolution_hook_already_ran: false,
+            root_preinstall_already_ran: false,
             ignore_scripts: self.ignore_scripts,
             dry_run: self.dry_run,
             lockfile_only: self.lockfile_only,
@@ -312,6 +313,8 @@ impl InstallArgs {
             // chained-call constructor (`with_mode`) is where commands
             // with package args opt into skipping them.
             skip_root_lifecycle: false,
+            lifecycle_importers: None,
+            project_stages: ProjectStages::Install,
             run_dev_preinstall: true,
             script_command: "install",
             // Argumentless `aube install` doesn't force the live-API
@@ -393,6 +396,11 @@ pub struct InstallOptions {
     /// user invocation sets it, and an ordinary `aube install` leaves
     /// it false and runs the hook itself.
     pub pre_resolution_hook_already_ran: bool,
+    /// Set by a command that already ran the root project's `preinstall`
+    /// before its own resolution and is chaining an install — today only
+    /// an argumentless `aube update`, which runs it before the lockfile
+    /// changes, as pnpm does. The chained install then skips it.
+    pub root_preinstall_already_ran: bool,
     /// `--ignore-scripts`: skip root lifecycle scripts (`preinstall`,
     /// `install`, `postinstall`, `prepare`) *and* every dependency's
     /// lifecycle scripts, regardless of `allowBuilds`.
@@ -477,20 +485,30 @@ pub struct InstallOptions {
     /// selectors additionally skip `devDependencies` edges during
     /// graph traversal — see `aube_workspace::selector::EffectiveFilter`.
     pub workspace_filter: aube_workspace::selector::EffectiveFilter,
-    /// Skip the root package's `preinstall` / `install` / `postinstall` /
-    /// `prepare` lifecycle hooks. pnpm parity: those hooks fire only on
-    /// argumentless `pnpm install`. Every other user-facing entry point —
-    /// `add`, `remove`, `update`, `dedupe`, `dlx`, patch tooling, the
+    /// Skip the projects' own lifecycle hooks (`preinstall` through
+    /// `postprepare`). pnpm parity: those hooks fire only when the command
+    /// is an install of everything — argumentless `pnpm install`, or an
+    /// argumentless `pnpm update`. Every other user-facing entry point —
+    /// `add`, `remove`, `dedupe`, `dlx`, patch tooling, the
     /// `ensure_installed` auto-install before `run`/`test` — must skip
     /// them so a chained `aube add foo` doesn't re-run an expensive root
     /// postinstall on every invocation. Independent of `ignore_scripts`,
     /// which also skips dep scripts. `with_mode()` defaults to `true`
     /// (chained-call constructor). The exceptions are argumentless
-    /// `aube install` (`InstallArgs::into_options`), `aube ci` /
-    /// `aube deploy` (literal struct constructions), and the nested
-    /// git-prepare install — that one's "root" IS the git dep itself and
-    /// running its `prepare` is the whole point.
+    /// `aube install` (`InstallArgs::into_options`), argumentless
+    /// `aube update`, `aube ci` / `aube deploy` (literal struct
+    /// constructions), and the nested git-prepare install — that one's
+    /// "root" IS the git dep itself and running its `prepare` is the
+    /// whole point.
     pub skip_root_lifecycle: bool,
+    /// Narrow the projects whose own lifecycle hooks run to these importer
+    /// keys (`.` is the root). `None` runs them for the root and every
+    /// member the install links, or for the root and the `--filter`
+    /// selection. A non-recursive `update` in a workspace root is the
+    /// caller that needs it: pnpm runs only the root's hooks there.
+    pub lifecycle_importers: Option<std::collections::BTreeSet<String>>,
+    /// Which stages the projects' own hooks run ([`ProjectStages`]).
+    pub project_stages: ProjectStages,
     /// Run the root-only `pnpm:devPreinstall` hook before resolution.
     /// Unlike ordinary root lifecycle hooks, pnpm also runs this for
     /// `add` and `update`; other chained install callers leave it disabled.
@@ -525,6 +543,39 @@ pub struct InstallOptions {
     pub embedder_runtime: Option<crate::runtime::EmbedderRuntime>,
 }
 
+/// The stage list a command runs in each project whose own hooks it runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectStages {
+    /// pnpm's install of the project: [`aube_scripts::PROJECT_LIFECYCLE_HOOKS`],
+    /// or [`aube_scripts::PROJECT_INSTALL_HOOKS`] when devDependencies are
+    /// left out.
+    Install,
+    /// pnpm's `add` (`InstallSome`): [`aube_scripts::PROJECT_INSTALL_HOOKS`]
+    /// alone.
+    InstallSome,
+    /// npm's scripts for a bare `npm install` / `npm ci`:
+    /// [`aube_scripts::NPM_PROJECT_HOOKS`] at the root and
+    /// [`aube_scripts::NPM_MEMBER_HOOKS`] in workspace members, devDependencies
+    /// or not, and no `pnpm:devPreinstall`. Set by an embedder mirroring a
+    /// typed npm command.
+    Npm,
+}
+
+impl ProjectStages {
+    pub(crate) fn hooks(
+        self,
+        include_dev: bool,
+        is_root: bool,
+    ) -> &'static [aube_scripts::LifecycleHook] {
+        match self {
+            Self::Install if include_dev => &aube_scripts::PROJECT_LIFECYCLE_HOOKS,
+            Self::Install | Self::InstallSome => &aube_scripts::PROJECT_INSTALL_HOOKS,
+            Self::Npm if is_root => &aube_scripts::NPM_PROJECT_HOOKS,
+            Self::Npm => &aube_scripts::NPM_MEMBER_HOOKS,
+        }
+    }
+}
+
 impl InstallOptions {
     /// Construct with the given frozen mode and all other flags at their
     /// defaults. Used by commands that chain into install (`add`, `remove`,
@@ -540,6 +591,7 @@ impl InstallOptions {
             pnpmfile: None,
             global_pnpmfile: None,
             pre_resolution_hook_already_ran: false,
+            root_preinstall_already_ran: false,
             ignore_scripts: false,
             dry_run: false,
             lockfile_only: false,
@@ -564,6 +616,8 @@ impl InstallOptions {
             skip_root_lifecycle: true,
             // Chained callers opt in individually. pnpm runs this hook for
             // add/update, but not for unrelated internal installs.
+            lifecycle_importers: None,
+            project_stages: ProjectStages::Install,
             run_dev_preinstall: false,
             script_command: "install",
             // Default `false`. `aube add` and `aube update` flip

@@ -64,6 +64,19 @@ fn outer_paren_segments(s: &str) -> Vec<&str> {
     segments
 }
 
+/// The peer references in a dep_path's own suffix, parens stripped:
+/// `a@1.0.0(b@2.0.0(c@3.0.0))(d@4.0.0)` yields `b@2.0.0(c@3.0.0)` and
+/// `d@4.0.0`. Each one is the full key of the peer it names.
+pub(super) fn peer_references(dep_path: &str) -> Vec<&str> {
+    let Some(head_end) = dep_path.find('(') else {
+        return Vec::new();
+    };
+    outer_paren_segments(&dep_path[head_end..])
+        .into_iter()
+        .map(|seg| &seg[1..seg.len() - 1])
+        .collect()
+}
+
 /// Rewrite the peer-suffix references of a dep_path (or a dep *value*,
 /// which is a headless `version{suffix}`) by passing each peer
 /// reference's flat `name@version` head through `translate`. The head
