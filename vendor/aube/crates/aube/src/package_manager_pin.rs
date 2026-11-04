@@ -156,6 +156,109 @@ fn satisfies(version: &str, range: &str) -> bool {
     }
 }
 
+/// What the env document needs, decided without the network.
+enum Plan {
+    /// It already pins the wanted pnpm, or the pin is one pnpm does not
+    /// record (none, `onFail: ignore`, below pnpm 11).
+    Current,
+    /// Record `version` (or the newest release a range pin admits, when
+    /// `None`).
+    Record {
+        wanted: WantedPnpm,
+        version: Option<String>,
+    },
+}
+
+fn read_manifest(dir: &Path) -> Option<Value> {
+    let raw = std::fs::read_to_string(dir.join("package.json")).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn plan(manifest: &Value, existing: Option<&EnvLockfile>) -> Plan {
+    let Some(wanted) = wanted_pnpm(manifest) else {
+        return Plan::Current;
+    };
+    // A recorded version the pin still allows is kept, so a range pin does
+    // not move whenever a newer pnpm is published.
+    let locked = existing.and_then(|env| {
+        let version = env
+            .package_manager_dependencies()?
+            .get("pnpm")?
+            .version
+            .clone();
+        let parsed = node_semver::Version::parse(&version).ok()?;
+        (satisfies(&version, &wanted.specifier)
+            && env.pins(&version, engine_packages(&parsed), None))
+        .then_some(version)
+    });
+    let Some(version) = locked.or_else(|| offline_version(&wanted)) else {
+        // A range below pnpm 11 records nothing whichever release it picks.
+        let records = node_semver::Range::parse(">=11.0.0-0").ok();
+        let below_11 = node_semver::Range::parse(&wanted.specifier)
+            .ok()
+            .zip(records)
+            .is_some_and(|(range, records)| !range.allows_any(&records));
+        return if below_11 {
+            Plan::Current
+        } else {
+            Plan::Record {
+                wanted,
+                version: None,
+            }
+        };
+    };
+    match node_semver::Version::parse(&version) {
+        Ok(parsed) if parsed.major >= 11 => {}
+        _ => return Plan::Current,
+    }
+    if existing.is_some_and(|env| {
+        let (packages, specifier) = recorded_shape(&wanted, &version);
+        env.pins(&version, packages, specifier.as_deref())
+    }) {
+        return Plan::Current;
+    }
+    Plan::Record {
+        wanted,
+        version: Some(version),
+    }
+}
+
+/// The packages recorded for `version`, and the specifier a lockfile must
+/// carry to count as current — `None` where pnpm accepts any. pnpm 12
+/// records the pin's own specifier; pnpm 11 does only on its
+/// version-switching path (`onFail: download`), and the exact version on
+/// its sync path, where it does not check the specifier.
+fn recorded_shape(wanted: &WantedPnpm, version: &str) -> (&'static [&'static str], Option<String>) {
+    let parsed = node_semver::Version::parse(version).expect("planned versions parse");
+    let specifier_is_pin = parsed.major >= 12 || wanted.on_fail_download;
+    (
+        engine_packages(&parsed),
+        specifier_is_pin.then(|| wanted.specifier.clone()),
+    )
+}
+
+/// Whether `<lockfile_dir>/pnpm-lock.yaml`'s env document already records
+/// the pnpm `<lockfile_dir>/package.json` pins — what
+/// [`sync_pnpm_env_lockfile`] would leave alone. No network, and only the
+/// lockfile's leading document is read, so the warm install path can ask.
+pub fn env_document_is_current(lockfile_dir: &Path) -> bool {
+    let Some(manifest) = read_manifest(lockfile_dir) else {
+        return true;
+    };
+    if wanted_pnpm(&manifest).is_none() {
+        return true;
+    }
+    let path = lockfile_dir.join(LOCKFILE);
+    let Ok(file) = std::fs::File::open(&path) else {
+        return true;
+    };
+    let env = aube_lockfile::pnpm::read_env_document(file)
+        .ok()
+        .flatten()
+        .and_then(|text| EnvLockfile::parse(&text));
+    matches!(plan(&manifest, env.as_ref()), Plan::Current)
+}
+
 /// Bring the env document of `<lockfile_dir>/pnpm-lock.yaml` in line with
 /// the pnpm pin in `<lockfile_dir>/package.json`. Rewrites only that
 /// document, leaving the project document's bytes alone, and only when it
@@ -170,58 +273,31 @@ pub async fn sync_pnpm_env_lockfile(lockfile_dir: &Path) -> miette::Result<Optio
     let Ok(content) = std::fs::read_to_string(&lockfile_path) else {
         return Ok(None);
     };
-    let Some(manifest) = std::fs::read_to_string(lockfile_dir.join("package.json"))
-        .ok()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-    else {
-        return Ok(None);
-    };
-    let Some(wanted) = wanted_pnpm(&manifest) else {
+    let Some(manifest) = read_manifest(lockfile_dir) else {
         return Ok(None);
     };
     let existing = EnvLockfile::from_lockfile_content(&content);
-
-    // A recorded version the pin still allows is kept, so a range pin does
-    // not move whenever a newer pnpm is published.
-    let locked = existing.as_ref().and_then(|env| {
-        let version = env
-            .package_manager_dependencies()?
-            .get("pnpm")?
-            .version
-            .clone();
-        let parsed = node_semver::Version::parse(&version).ok()?;
-        (satisfies(&version, &wanted.specifier)
-            && env.pins(&version, engine_packages(&parsed), None))
-        .then_some(version)
-    });
-    let version = match locked {
-        Some(version) => version,
-        None => match choose_version(lockfile_dir, &wanted).await? {
-            Some(version) => version,
-            None => return Ok(None),
-        },
+    let (wanted, version) = match plan(&manifest, existing.as_ref()) {
+        Plan::Current => return Ok(None),
+        Plan::Record {
+            wanted,
+            version: Some(version),
+        } => (wanted, version),
+        Plan::Record {
+            wanted,
+            version: None,
+        } => {
+            let Some(version) = newest_in_range(lockfile_dir, &wanted.specifier).await? else {
+                return Ok(None);
+            };
+            if node_semver::Version::parse(&version).map_or(true, |v| v.major < 11) {
+                return Ok(None);
+            }
+            (wanted, version)
+        }
     };
-    let parsed = node_semver::Version::parse(&version)
-        .into_diagnostic()
-        .wrap_err_with(|| format!("pnpm version {version}"))?;
-    if parsed.major < 11 {
-        return Ok(None);
-    }
-    let packages = engine_packages(&parsed);
-    // pnpm 12 records the pin's own specifier; pnpm 11 does only on its
-    // version-switching path, and records the exact version otherwise.
-    let specifier_is_pin = parsed.major >= 12 || wanted.on_fail_download;
-    let specifier = if specifier_is_pin {
-        wanted.specifier.clone()
-    } else {
-        version.clone()
-    };
-    if existing
-        .as_ref()
-        .is_some_and(|env| env.pins(&version, packages, specifier_is_pin.then_some(&*specifier)))
-    {
-        return Ok(None);
-    }
+    let (packages, specifier) = recorded_shape(&wanted, &version);
+    let specifier = specifier.unwrap_or_else(|| version.clone());
 
     let deps: BTreeMap<String, String> = packages
         .iter()
@@ -261,41 +337,30 @@ pub async fn sync_pnpm_env_lockfile(lockfile_dir: &Path) -> miette::Result<Optio
     Ok(Some(version))
 }
 
-/// The pnpm version a pin with nothing recorded resolves to: the
-/// `packageManager` field's version when the pin allows it, the pin itself
-/// when it is exact, else the newest release in the range the project's
-/// `minimumReleaseAge` admits — the version pnpm itself switches to.
-async fn choose_version(
-    lockfile_dir: &Path,
-    wanted: &WantedPnpm,
-) -> miette::Result<Option<String>> {
+/// The version a pin with nothing recorded resolves to offline: the
+/// `packageManager` field's version when the pin allows it, else the pin
+/// itself when it is exact.
+fn offline_version(wanted: &WantedPnpm) -> Option<String> {
     if let Some(exact) = &wanted.legacy_exact
         && satisfies(exact, &wanted.specifier)
     {
-        return Ok(Some(exact.clone()));
+        return Some(exact.clone());
     }
-    if node_semver::Version::parse(&wanted.specifier)
+    node_semver::Version::parse(&wanted.specifier)
         .is_ok_and(|v| v.to_string() == wanted.specifier)
-    {
-        return Ok(Some(wanted.specifier.clone()));
-    }
-    // A range below pnpm 11 records nothing whichever release it picks, so
-    // spare the registry round trip on every install of a pnpm 10 project.
-    let records = node_semver::Range::parse(">=11.0.0-0").ok();
-    if node_semver::Range::parse(&wanted.specifier)
-        .ok()
-        .zip(records)
-        .is_some_and(|(range, records)| !range.allows_any(&records))
-    {
-        return Ok(None);
-    }
+        .then(|| wanted.specifier.clone())
+}
+
+/// The newest release in `range` the project's `minimumReleaseAge` admits —
+/// the version pnpm itself switches to for a range pin.
+async fn newest_in_range(lockfile_dir: &Path, range: &str) -> miette::Result<Option<String>> {
     let manifest = aube_manifest::PackageJson {
-        dependencies: BTreeMap::from([("pnpm".to_string(), wanted.specifier.clone())]),
+        dependencies: BTreeMap::from([("pnpm".to_string(), range.to_string())]),
         ..Default::default()
     };
     let graph = resolve(lockfile_dir, &manifest, true)
         .await
-        .wrap_err_with(|| format!("resolve pnpm@{}", wanted.specifier))?;
+        .wrap_err_with(|| format!("resolve pnpm@{range}"))?;
     Ok(graph
         .importers
         .get(".")

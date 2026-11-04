@@ -72,7 +72,7 @@ use lifecycle::{
 /// the lockfile is written (pnpm 11+ parity; see
 /// [`crate::package_manager_pin`]). Best-effort like the runtime pin: an
 /// offline install that cannot resolve the pinned pnpm warns and goes on.
-pub(super) async fn sync_package_manager_pin(lockfile_dir: &std::path::Path) {
+pub(crate) async fn sync_package_manager_pin(lockfile_dir: &std::path::Path) {
     if let Err(error) = crate::package_manager_pin::sync_pnpm_env_lockfile(lockfile_dir).await {
         tracing::warn!(
             code = aube_codes::warnings::WARN_AUBE_PACKAGE_MANAGER_PIN_NOT_RECORDED,

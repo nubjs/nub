@@ -39,6 +39,27 @@ pub fn split_env_document(content: &str) -> (Option<&str>, &str) {
     }
 }
 
+/// The env document of a lockfile, read line by line and abandoned at the
+/// separator that closes it, so a caller asking only about the pin never
+/// reads the project document. Same split as [`split_env_document`].
+pub fn read_env_document(reader: impl std::io::Read) -> std::io::Result<Option<String>> {
+    use std::io::BufRead;
+    let mut lines = std::io::BufReader::new(reader).lines();
+    match lines.next().transpose()? {
+        Some(first) if first.strip_prefix('\u{feff}').unwrap_or(&first) == "---" => {}
+        _ => return Ok(None),
+    }
+    let mut env = Vec::new();
+    for line in lines {
+        let line = line?;
+        if line == "---" {
+            break;
+        }
+        env.push(line);
+    }
+    Ok(Some(env.join("\n")))
+}
+
 /// `env` followed by `main`, in pnpm's two-document layout.
 pub fn compose_with_env_document(env: &str, main: &str) -> String {
     format!("{DOCUMENT_START}{env}{DOCUMENT_SEPARATOR}{main}")
@@ -94,7 +115,11 @@ impl EnvLockfile {
     /// Parse the env document of `content` (a whole `pnpm-lock.yaml`).
     /// `None` when there is none, or it does not parse.
     pub fn from_lockfile_content(content: &str) -> Option<Self> {
-        let env = split_env_document(content).0?;
+        Self::parse(split_env_document(content).0?)
+    }
+
+    /// Parse an env document's own text.
+    pub fn parse(env: &str) -> Option<Self> {
         yaml_serde::from_str(env).ok().map(|doc| Self { doc })
     }
 

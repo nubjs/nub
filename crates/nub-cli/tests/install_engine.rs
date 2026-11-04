@@ -1065,6 +1065,74 @@ fn warm_satisfied_install_short_circuits_under_no_downgrade() {
     );
 }
 
+/// A pnpm 12 pin makes pnpm's `--frozen-lockfile` require the pin's env
+/// document at the head of `pnpm-lock.yaml`. A lockfile written without one
+/// (what Nub wrote before it recorded the pin) must not count as up to date:
+/// the next `nub install` records it, and the install after that is a
+/// byte-for-byte no-op on the warm path.
+#[test]
+#[ignore = "network: resolves is-number@7.0.0 and pnpm@12.16.1 from the npm registry"]
+fn install_records_a_missing_pnpm_pin_then_stays_up_to_date() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = pm_tmpdir("pnpm-pin");
+    let store = pm_tmpdir("pnpm-pin-store");
+    let cache = pm_tmpdir("pnpm-pin-cache");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"pin","version":"1.0.0","dependencies":{"is-number":"7.0.0"},
+            "packageManager":"pnpm@12.16.1",
+            "devEngines":{"packageManager":{"name":"pnpm","version":"^12.16.1","onFail":"warn"}}}"#,
+    )
+    .unwrap();
+    let lockfile = dir.join("pnpm-lock.yaml");
+    let (stderr, code) = run_install_in_store(&dir, &store, &cache, &["install"]);
+    assert_eq!(code, 0, "first install must succeed: {stderr}");
+
+    // Drop the env document, leaving the lockfile an older Nub wrote.
+    let written = std::fs::read_to_string(&lockfile).unwrap();
+    let (_, project) = written
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---\n"))
+        .unwrap_or_else(|| panic!("install must record the pin's env document:\n{written}"));
+    std::fs::write(&lockfile, project).unwrap();
+    // A frozen install stays lenient (it neither fails nor writes) and leaves
+    // install state current for the document-less lockfile — the state an
+    // older Nub left behind, which the warm path would otherwise accept.
+    let (stderr, code) =
+        run_install_in_store(&dir, &store, &cache, &["install", "--frozen-lockfile"]);
+    assert_eq!(
+        code, 0,
+        "a frozen install must not reject the lockfile: {stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(&lockfile).unwrap(), project);
+
+    let (stderr, code) = run_install_in_store(&dir, &store, &cache, &["install"]);
+    assert_eq!(code, 0, "re-install must succeed: {stderr}");
+    let recorded = std::fs::read_to_string(&lockfile).unwrap();
+    assert!(
+        recorded.starts_with("---\n")
+            && recorded.contains(
+                "    packageManagerDependencies:\n      pnpm:\n        specifier: ^12.16.1\n        version: 12.16.1\n"
+            ),
+        "a lockfile missing the pin is not up to date; install must record it:\n{recorded}"
+    );
+
+    let (stderr, code) = run_install_in_store(&dir, &store, &cache, &["install"]);
+    assert_eq!(code, 0, "warm install must succeed: {stderr}");
+    assert!(
+        stderr.contains("Already up to date") && !stderr.contains("package)"),
+        "the install after recording must take the warm path: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&lockfile).unwrap(),
+        recorded,
+        "the warm install must leave the lockfile byte-identical"
+    );
+}
+
 /// SECURITY INVARIANT: trusting versions already in the lockfile must NOT weaken
 /// the gate on a version this install NEWLY resolves. There is no lockfile here,
 /// so every pick is new — including `node-gyp@10.3.0`, which dropped the

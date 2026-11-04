@@ -86,6 +86,18 @@ fn install_fast_path_eligible(
     if paranoid_requires_full_pipeline(cwd, opts) {
         return false;
     }
+    // A lockfile that does not record the pnpm the project pins is not
+    // current under pnpm 11+, whose frozen install refuses it, so a
+    // non-frozen install takes the full path that records it. A frozen one
+    // stays lenient: it must not start failing lockfiles Nub wrote before.
+    if matches!(mode, FrozenMode::Prefer)
+        && !crate::package_manager_pin::env_document_is_current(cwd)
+    {
+        tracing::debug!(
+            "install warm path skipped: pnpm-lock.yaml does not record the pinned pnpm"
+        );
+        return false;
+    }
     // Surface *why* the warm path was missed at debug level — the state
     // freshness reason is otherwise discarded here (only `.is_none()` is
     // consulted), leaving `aube install -v` silent on repeat-install loops

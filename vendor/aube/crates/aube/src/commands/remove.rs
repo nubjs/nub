@@ -206,6 +206,14 @@ pub async fn run(
         eprintln!("Pruned lockfile to {} packages", graph.packages.len());
         install::finalize_lockfile_graph(&cwd, graph, &manifest, false, None).await?;
         super::write_and_log_lockfile(&cwd, graph, &manifest)?;
+        // The follow-up install below runs frozen, which skips recording the
+        // pnpm pin, so record it here (unless the user asked for frozen).
+        if !matches!(
+            super::global_frozen_override(),
+            Some(install::FrozenOverride::Frozen)
+        ) {
+            install::sync_package_manager_pin(&cwd).await;
+        }
     }
 
     // Without the fast path, re-resolve + relink through the install
