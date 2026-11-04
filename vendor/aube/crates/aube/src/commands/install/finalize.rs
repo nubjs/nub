@@ -829,7 +829,7 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
     // the state file are all in place, so the next step is approving, and
     // a repeat install fails the same way from the warm path. Skipped
     // under `--ignore-scripts` and `virtualStoreOnly`, which collect none.
-    unreviewed_builds::report(&unreviewed_builds, strict_dep_builds_setting)
+    unreviewed_builds::report(&unreviewed_builds, strict_dep_builds_setting, cwd)
 }
 
 #[cfg(test)]

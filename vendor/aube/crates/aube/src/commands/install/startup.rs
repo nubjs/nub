@@ -184,7 +184,7 @@ pub(super) fn emit_up_to_date(cwd: &Path, opts: &InstallOptions) -> miette::Resu
         let strict = aube_settings::resolved::strict_dep_builds(&ctx)
             || aube_settings::resolved::paranoid(&ctx);
         super::print_already_up_to_date();
-        return super::unreviewed_builds::report(&unreviewed, strict);
+        return super::unreviewed_builds::report(&unreviewed, strict, cwd);
     }
     super::print_already_up_to_date();
     Ok(())

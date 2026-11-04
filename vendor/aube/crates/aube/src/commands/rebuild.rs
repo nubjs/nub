@@ -107,8 +107,10 @@ pub async fn run(
             }
         }
 
-        let (policy, warnings) = super::install::build_policy_from_sources(
-            &manifest,
+        let policy_manifests =
+            super::install::build_policy_manifests(&cwd, &manifest, &settings_ctx)?;
+        let (policy, warnings) = super::install::build_policy_from_manifest_sources(
+            policy_manifests.iter(),
             &workspace,
             aube_settings::resolved::dangerously_allow_all_builds(&settings_ctx),
         );
@@ -261,6 +263,7 @@ pub async fn run(
         // Held until the root hooks below have run, the order an install
         // fails in.
         ignored_builds = super::install::report_unreviewed_rebuilds(
+            &cwd,
             &aube_dir,
             &graph,
             &policy,

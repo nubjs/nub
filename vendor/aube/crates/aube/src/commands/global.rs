@@ -50,6 +50,9 @@ pub struct GlobalLayout {
 
 impl GlobalLayout {
     pub fn resolve() -> miette::Result<Self> {
+        let pkg_dir = resolve_pkg_dir()?;
+        let legacy_subdir = format!("global-{}", aube_util::embedder().name);
+        warn_on_legacy_global_dir(&pkg_dir, &legacy_subdir);
         let cwd = std::env::current_dir().unwrap_or_default();
 
         // `bin_dir` and `pkg_dir` are independent, and now resolve from
@@ -58,27 +61,36 @@ impl GlobalLayout {
         // under our own namespaced data root ([`prefix_dir`]). They used to
         // share one root, which is how bins ended up in a directory named
         // after another package manager and on nobody's PATH.
-        let (setting_bin, setting_pkg) = super::with_settings_ctx(&cwd, |ctx| {
-            let bin = aube_settings::resolved::global_bin_dir(ctx)
-                .and_then(|raw| super::expand_setting_path(&raw, &cwd));
-            let pkg = aube_settings::resolved::global_dir(ctx)
-                .and_then(|raw| super::expand_setting_path(&raw, &cwd));
-            (bin, pkg)
+        let setting_bin = super::with_settings_ctx(&cwd, |ctx| {
+            aube_settings::resolved::global_bin_dir(ctx)
+                .and_then(|raw| super::expand_setting_path(&raw, &cwd))
         });
-
         let bin_dir = setting_bin.map_or_else(default_bin_dir, Ok)?;
-        // A `global` leaf under the resolved root, matching pnpm's
-        // `<home>/global`. Under our own data namespace there is no sibling
-        // install to collide with, so the directory does not need the
-        // embedder's name in it — unlike the pre-2.0 layout, whose
-        // `global-<embedder>` leaf is what the migration scan still looks for.
-        let pkg_dir =
-            setting_pkg.map_or_else(|| default_pkg_dir("global"), |p| Ok(p.join("global")))?;
-
-        let legacy_subdir = format!("global-{}", aube_util::embedder().name);
-        warn_on_legacy_global_dir(&pkg_dir, &legacy_subdir);
         Ok(Self { bin_dir, pkg_dir })
     }
+}
+
+/// [`GlobalLayout::pkg_dir`]: a `global` leaf under the resolved root,
+/// matching pnpm's `<home>/global`. Under our own data namespace there is no
+/// sibling install to collide with, so the directory does not need the
+/// embedder's name in it — unlike the pre-2.0 layout, whose
+/// `global-<embedder>` leaf is what the migration scan still looks for.
+fn resolve_pkg_dir() -> miette::Result<PathBuf> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let setting_pkg = super::with_settings_ctx(&cwd, |ctx| {
+        aube_settings::resolved::global_dir(ctx)
+            .and_then(|raw| super::expand_setting_path(&raw, &cwd))
+    });
+    setting_pkg.map_or_else(|| default_pkg_dir("global"), |p| Ok(p.join("global")))
+}
+
+/// Whether `dir` lies inside the global package dir, where every global
+/// `add`, `update` and `remove` re-enters the install.
+pub(crate) fn is_global_install_dir(dir: &Path) -> bool {
+    resolve_pkg_dir()
+        .ok()
+        .and_then(|pkg_dir| crate::dirs::canonicalize(&pkg_dir).ok())
+        .is_some_and(|pkg_dir| dir.starts_with(pkg_dir))
 }
 
 /// The branded home override (standalone aube → `AUBE_HOME`). When set it

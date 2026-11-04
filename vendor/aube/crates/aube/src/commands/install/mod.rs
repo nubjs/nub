@@ -60,8 +60,7 @@ use fetch::{
 pub use frozen::{FrozenMode, FrozenOverride, GlobalVirtualStoreFlags};
 pub(crate) use gvs::detect_existing_global_virtual_store;
 pub(crate) use lifecycle::{
-    JailBuildPolicy, build_policy_from_manifest_sources, build_policy_from_sources,
-    run_dep_lifecycle_scripts,
+    JailBuildPolicy, build_policy_from_manifest_sources, run_dep_lifecycle_scripts,
 };
 use lifecycle::{
     resolve_link_strategy, run_import_on_blocking, run_importer_lifecycle,
@@ -204,6 +203,7 @@ pub fn resolve_prefer_frozen_lockfile() -> Option<bool> {
 /// scripts nothing approved, as `ERR_AUBE_IGNORED_BUILDS` under `strict`
 /// and a warning otherwise — pnpm 12's `rebuild` fails the same way.
 pub(crate) fn report_unreviewed_rebuilds(
+    cwd: &std::path::Path,
     aube_dir: &std::path::Path,
     graph: &aube_lockfile::LockfileGraph,
     policy: &aube_scripts::BuildPolicy,
@@ -221,7 +221,29 @@ pub(crate) fn report_unreviewed_rebuilds(
         placements,
         selected_names,
     )?;
-    unreviewed_builds::report(&scan.unreviewed, strict)
+    unreviewed_builds::report(&scan.unreviewed, strict, cwd)
+}
+
+/// The manifests an install builds its dependency build policy from: every
+/// physical workspace importer when the install links them all (the
+/// `recursiveInstall` default), the root alone otherwise. `rebuild` reads
+/// the same set, so a package a member's manifest approves builds there too.
+pub(crate) fn build_policy_manifests(
+    cwd: &std::path::Path,
+    root_manifest: &aube_manifest::PackageJson,
+    settings_ctx: &aube_settings::ResolveCtx<'_>,
+) -> miette::Result<Vec<aube_manifest::PackageJson>> {
+    let plan = workspace::discover_workspace_plan(
+        cwd,
+        root_manifest,
+        settings_ctx,
+        &aube_workspace::selector::EffectiveFilter::default(),
+    )?;
+    Ok(plan
+        .lifecycle_manifests
+        .into_iter()
+        .map(|(_, manifest)| manifest)
+        .collect())
 }
 
 pub(crate) fn emit_pre_summary(cwd: &std::path::Path, uses_shared_store: bool, is_noop: bool) {

@@ -25,13 +25,24 @@ pub(super) fn from_state(cwd: &std::path::Path) -> Vec<UnreviewedBuild> {
 /// while a decision is still pending — pnpm's re-raise from
 /// `.modules.yaml`. Suspicious-script findings print in both modes, ahead
 /// of the error, since they are what the approval decision should weigh.
-pub(super) fn report(unreviewed: &[UnreviewedBuild], strict: bool) -> miette::Result<()> {
+///
+/// pnpm 12 never fails a global install on one (`cli_args/global/install.rs`):
+/// it warns, and `add -g --allow-build` is the approval. Every global `add`,
+/// `update` and `remove` re-enters the install from inside the global
+/// package dir, which is how `cwd` identifies it — checked only once there
+/// is something to report, so an ordinary install never resolves the global
+/// layout.
+pub(super) fn report(
+    unreviewed: &[UnreviewedBuild],
+    strict: bool,
+    cwd: &std::path::Path,
+) -> miette::Result<()> {
     if unreviewed.is_empty() {
         return Ok(());
     }
     emit_suspicions(unreviewed);
     let spec_keys: Vec<&str> = unreviewed.iter().map(|b| b.spec_key.as_str()).collect();
-    if strict {
+    if strict && !crate::commands::global::is_global_install_dir(cwd) {
         return Err(miette::miette!(
             code = aube_codes::errors::ERR_AUBE_IGNORED_BUILDS,
             help = format!(

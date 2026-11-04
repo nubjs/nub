@@ -274,7 +274,9 @@ pub(super) async fn run_root_lifecycle_script(
 }
 
 /// Build the dependency lifecycle-script `BuildPolicy` by merging
-/// every supported source on the root manifest + workspace file:
+/// every supported source on the given manifests (the root, plus the
+/// workspace members an install links — see
+/// [`super::build_policy_manifests`]) and the workspace file:
 ///
 /// - `package.json` / `pnpm-workspace.yaml` `pnpm.allowBuilds` map
 ///   (aube's superset format — patterns with bool values)
@@ -291,21 +293,6 @@ pub(super) async fn run_root_lifecycle_script(
 /// Workspace and manifest entries in the `allowBuilds` map merge for the same
 /// pattern, with an explicit denial from either source taking precedence. The
 /// flat lists are pure append — deny always wins at `decide()` time.
-pub(crate) fn build_policy_from_sources(
-    manifest: &aube_manifest::PackageJson,
-    workspace: &aube_manifest::WorkspaceConfig,
-    dangerously_allow_all_builds: bool,
-) -> (
-    aube_scripts::BuildPolicy,
-    Vec<aube_scripts::BuildPolicyError>,
-) {
-    build_policy_from_manifest_sources(
-        std::iter::once(manifest),
-        workspace,
-        dangerously_allow_all_builds,
-    )
-}
-
 pub(crate) fn build_policy_from_manifest_sources<'a>(
     manifests: impl IntoIterator<Item = &'a aube_manifest::PackageJson>,
     workspace: &aube_manifest::WorkspaceConfig,
@@ -2080,7 +2067,7 @@ mod tests {
     fn undeclared_policy_leaves_default_trust_to_the_floor() {
         let manifest = aube_manifest::PackageJson::default();
         let workspace = aube_manifest::WorkspaceConfig::default();
-        let (policy, warnings) = build_policy_from_sources(&manifest, &workspace, false);
+        let (policy, warnings) = build_policy_from_manifest_sources([&manifest], &workspace, false);
 
         assert!(warnings.is_empty());
         assert_eq!(
@@ -2097,7 +2084,7 @@ mod tests {
     fn explicit_deny_overrides_default_trust() {
         let manifest = manifest_with_allow_build("esbuild", false);
         let workspace = aube_manifest::WorkspaceConfig::default();
-        let (policy, warnings) = build_policy_from_sources(&manifest, &workspace, false);
+        let (policy, warnings) = build_policy_from_manifest_sources([&manifest], &workspace, false);
 
         assert!(warnings.is_empty());
         assert_eq!(
@@ -2113,7 +2100,7 @@ mod tests {
         workspace
             .allow_builds
             .insert("esbuild".to_string(), yaml_serde::Value::Bool(true));
-        let (policy, warnings) = build_policy_from_sources(&manifest, &workspace, false);
+        let (policy, warnings) = build_policy_from_manifest_sources([&manifest], &workspace, false);
 
         assert!(warnings.is_empty());
         assert_eq!(
@@ -2129,7 +2116,7 @@ mod tests {
         workspace
             .allow_builds
             .insert("esbuild".to_string(), yaml_serde::Value::Bool(false));
-        let (policy, warnings) = build_policy_from_sources(&manifest, &workspace, false);
+        let (policy, warnings) = build_policy_from_manifest_sources([&manifest], &workspace, false);
 
         assert!(warnings.is_empty());
         assert_eq!(
@@ -2173,7 +2160,7 @@ mod tests {
         );
 
         let workspace = aube_manifest::WorkspaceConfig::default();
-        let (policy, warnings) = build_policy_from_sources(&manifest, &workspace, false);
+        let (policy, warnings) = build_policy_from_manifest_sources([&manifest], &workspace, false);
 
         assert!(warnings.is_empty());
         assert_eq!(

@@ -484,6 +484,41 @@ fn allow_build_records_denials_and_never_overturns_one() {
 }
 
 #[test]
+fn rebuild_and_ignored_builds_honor_a_workspace_members_approval() {
+    // Install builds what a member's manifest approves. `rebuild` and
+    // `ignored-builds` must read the same approvals: naming a package to
+    // `rebuild` does not bypass the policy, so a root-only read would report
+    // an approved package as unapproved.
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    write_marker_dep(&sbx, "dep", "MEMBER_BUILT");
+    sbx.write_manifest(
+        r#"{"name":"e2e-member-approval","version":"0.0.0","private":true,"workspaces":["packages/*"]}"#,
+    );
+    sbx.write_file(
+        "packages/a/package.json",
+        r#"{
+            "name": "a",
+            "version": "1.0.0",
+            "dependencies": { "dep": "file:../../dep" },
+            "aube": { "allowBuilds": { "dep@file:dep": true } }
+        }"#,
+    );
+
+    sbx.cmd().arg("install").assert().success();
+    assert!(marker_exists_under(
+        &sbx.project.join("node_modules"),
+        "MEMBER_BUILT"
+    ));
+    sbx.cmd().args(["rebuild", "dep"]).assert().success();
+    sbx.cmd()
+        .arg("ignored-builds")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No ignored builds"));
+}
+
+#[test]
 fn dangerously_allow_all_builds_from_npmrc_runs_builds_but_keeps_denials() {
     let _guard = e2e_lock();
     let sbx = Sandbox::new();
