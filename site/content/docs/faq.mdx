@@ -372,7 +372,7 @@ That installs the Rust binary (via the usual `@<scope>/<platform-arch>` npm dist
 npm install -g @nubjs/nub@latest
 ```
 
-Same as installing — match how you installed: `brew update && brew upgrade nub` for a Homebrew install, otherwise re-run your installer. On a script install, `nub upgrade` resolves the published release before it downloads anything: when nothing is newer it prints `already on the latest release` and stops. Pass `--version` to reinstall the version you are already running. Nub and Node version independently: Nub resolves the Node your project pins (`.node-version` / `.nvmrc` / `engines.node`) and provisions it if it's missing, falling back to the `node` on your `PATH` only when nothing is pinned. So upgrading Nub does not change your project's Node version, and upgrading Node does not change your Nub version.
+Same as installing — match how you installed: `brew update && brew upgrade nub` for a Homebrew install, otherwise re-run your installer. On a script install, `nub upgrade` resolves the published release before it downloads anything: when nothing is newer it prints `already on the latest release` and stops. Pass `--version` to reinstall the version you are already running. With mise, `nub upgrade` runs `mise upgrade --bump nub`, which updates the version in the mise config that selects Nub in the current directory: a project's `mise.toml` or your global config. Nub and Node version independently: Nub resolves the Node your project pins (`.node-version` / `.nvmrc` / `engines.node`) and provisions it if it's missing, falling back to the `node` on your `PATH` only when nothing is pinned. So upgrading Nub does not change your project's Node version, and upgrading Node does not change your Nub version.
 
 ## Is there a curl install script?
 
@@ -408,7 +408,7 @@ iex "& { $(irm https://nubjs.com/install.ps1) } canary"
 
 An existing script install switches channels in place with `nub upgrade --canary`; `nub upgrade --stable` returns to the latest stable release. On a canary build, a plain `nub upgrade` stays on the canary channel. Canary versions are date-stamped — `nub --version` prints something like `v0.5.1-canary.20260724.117`.
 
-Canary may break, and each build replaces the last. A fix that just landed reaches the channel on the next successful nightly rather than immediately. Homebrew and winget carry only stable releases.
+Canary may break, and each build replaces the last. A fix that just landed reaches the channel on the next successful nightly rather than immediately. Homebrew, winget and mise carry only stable releases.
 
 ## Does it have a dev server?
 
