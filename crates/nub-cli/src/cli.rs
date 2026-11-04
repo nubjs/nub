@@ -5241,7 +5241,12 @@ fn run_workspace_target(
         })?;
 
     let mut members = nub_core::workspace::filter::discover_members(ws_root);
-    if members.iter().all(|m| m.dir == ws_root) && !ws.include_workspace_root {
+    // A workspace whose globs match no member yet still selects among its
+    // root, as pnpm's does; only a `-w` run outside any workspace has none.
+    if project.workspace_root.is_none()
+        && members.iter().all(|m| m.dir == ws_root)
+        && !ws.include_workspace_root
+    {
         bail!("no workspace packages found under {}", ws_root.display());
     }
 

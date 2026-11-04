@@ -446,6 +446,66 @@ fn a_filter_matching_no_project_changes_nothing_unless_told_to_fail() {
     assert!(tree_snapshot(&root) == before);
 }
 
+/// A workspace whose `packages/*` matches no member yet still has the root
+/// to select from: `--filter nope` selects nothing, so no root hook runs and
+/// nothing is reset, while a filter naming the root installs it.
+#[test]
+fn a_workspace_with_no_members_yet_selects_among_its_root() {
+    let root = tmp_workspace("no-members");
+    write(
+        &root.join("package.json"),
+        r#"{"name":"ws-root","version":"1.0.0","private":true,"dependencies":{"dep":"file:./dep"},
+            "scripts":{"preinstall":"node -e \"require('fs').appendFileSync('hook.log','preinstall\\n')\""}}"#,
+    );
+    write(
+        &root.join("pnpm-workspace.yaml"),
+        "packages:\n  - 'packages/*'\n",
+    );
+    write(
+        &root.join("dep/package.json"),
+        r#"{"name":"dep","version":"1.0.0"}"#,
+    );
+    std::fs::create_dir_all(root.join("packages")).unwrap();
+    let (stdout, stderr, code) = run_nub(&root, &["install"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let hook_log = root.join("hook.log");
+    assert_eq!(std::fs::read_to_string(&hook_log).unwrap(), "preinstall\n");
+    let before = tree_snapshot(&root);
+
+    for args in [
+        &["install", "--filter", "nope"][..],
+        &["install", "--force", "--filter", "nope"],
+    ] {
+        let (_, stderr, code) = run_nub(&root, args);
+        assert_eq!(code, 0, "nub {args:?}\n{stderr}");
+        assert!(
+            tree_snapshot(&root) == before,
+            "nub {args:?} selects nothing, runs no hook and changes nothing\n{stderr}"
+        );
+    }
+    let (_, stderr, code) = run_nub(&root, &["run", "-F", "nope", "preinstall"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(tree_snapshot(&root) == before, "the run selects nothing");
+    let (_, stderr, code) = run_nub(
+        &root,
+        &["install", "--filter", "nope", "--fail-if-no-match"],
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("No projects matched the filters in"),
+        "{stderr}"
+    );
+    assert!(tree_snapshot(&root) == before, "the failure runs no hook");
+
+    let (_, stderr, code) = run_nub(&root, &["install", "--filter", "ws-root"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(&hook_log).unwrap(),
+        "preinstall\npreinstall\n",
+        "a filter naming the root installs it"
+    );
+}
+
 /// `nub ls` inside a workspace member lists that member, as pnpm does.
 #[test]
 fn list_inside_a_member_lists_the_member() {

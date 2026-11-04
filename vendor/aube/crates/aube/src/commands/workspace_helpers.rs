@@ -237,13 +237,15 @@ pub fn empty_selection_noop(
     if filter.is_empty() {
         return Ok(false);
     }
-    let root = crate::dirs::find_workspace_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+    let Some(root) = crate::dirs::find_workspace_root(cwd) else {
+        return Ok(false);
+    };
+    // A workspace whose globs match no member yet still has the root as
+    // a candidate, so the selection is evaluated with no members too.
     let Ok(workspace_pkgs) = aube_workspace::find_workspace_packages(&root) else {
         return Ok(false);
     };
-    if workspace_pkgs.is_empty()
-        || !select_projects(&root, &workspace_pkgs, filter, command)?.is_empty()
-    {
+    if !select_projects(&root, &workspace_pkgs, filter, command)?.is_empty() {
         return Ok(false);
     }
     let report = match command {
