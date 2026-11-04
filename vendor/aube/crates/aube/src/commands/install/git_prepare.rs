@@ -555,12 +555,7 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), aube_manifest::AllowBuildRaw::Bool(*v)))
                 .collect();
             let (policy, warnings) = aube_scripts::BuildPolicy::from_config(&map, &[], &[], false);
-            assert!(
-                warnings
-                    .iter()
-                    .all(|w| matches!(w, aube_scripts::BuildPolicyError::WildcardApproval(_))),
-                "{warnings:?}"
-            );
+            assert!(warnings.is_empty(), "{warnings:?}");
             checkout_build_allowed(Some(&policy), &local, &manifest)
         };
 

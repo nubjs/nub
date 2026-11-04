@@ -534,7 +534,7 @@ The neutral `allowScripts` field grants permission, and it keys on the package n
 
 That field applies in any project, whoever owns it, and npm 12 reads the same map for the same purpose — approve a package once and both tools honor it. A project owned by another package manager grants permission through its own field as well: pnpm projects use `pnpm.onlyBuiltDependencies` / `pnpm.allowBuilds`, and Bun projects use `trustedDependencies`.
 
-Each approval names a package. A wildcard approves nothing — `"*": true` draws a warning instead — though a wildcard denial such as `"@internal/*": false` works. `dangerouslyAllowAllBuilds=true` runs every build script except the ones denied.
+`dangerouslyAllowAllBuilds=true` runs every build script except the ones denied.
 
 ### Unapproved build scripts
 

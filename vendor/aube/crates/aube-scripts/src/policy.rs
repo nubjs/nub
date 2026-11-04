@@ -23,14 +23,14 @@
 //! allowlist you're asserting a specific build has been audited, so
 //! range matching would defeat the point.
 //!
-//! A `*` wildcard name only ever DENIES. `@babel/*` matches every package
-//! under the `@babel` scope, `*-loader` any name ending in `-loader`, a
-//! bare `*` every package — so as a `false` entry it is a broader denial,
-//! which is only stricter. As an approval it would be allow-all under a
-//! name nobody reviews as dangerous, approving packages that do not exist
-//! yet; pnpm matches approvals by exact name, so a wildcard approval
-//! approves nothing here and draws a warning. Wildcards must stand alone —
-//! combining them with a version spec (`@babel/*@1.0.0`) is rejected.
+//! Name patterns may also contain `*` wildcards, mirroring pnpm's
+//! `@pnpm/config.matcher`. `@babel/*` matches every package under the
+//! `@babel` scope, `*-loader` matches any name ending in `-loader`,
+//! and a bare `*` matches every package. `*` is the only supported
+//! metacharacter and always matches a possibly-empty run of any
+//! characters. Wildcards must stand alone — combining them with a
+//! version spec (`@babel/*@1.0.0`) is rejected, since a wildcard
+//! name can't be used to assert "this exact build was audited."
 
 use aube_manifest::AllowBuildRaw;
 use std::collections::{BTreeMap, HashSet};
@@ -66,10 +66,11 @@ pub struct BuildPolicy {
     /// approval, while never approving a different repository by name alone.
     allowed_git_repositories: HashSet<String>,
     denied_git_repositories: HashSet<String>,
-    /// Bare-name denial patterns containing `*` wildcards. Checked with a
+    /// Bare-name patterns containing `*` wildcards. Checked with a
     /// linear scan after the exact-match sets; wildcard rules are rare
     /// enough that the linear pass is cheaper than building an
-    /// automaton. There is no allow-side counterpart (see module docs).
+    /// automaton.
+    allowed_wildcards: Vec<String>,
     denied_wildcards: Vec<String>,
 }
 
@@ -112,6 +113,7 @@ impl BuildPolicy {
         let mut denied_sources = HashSet::new();
         let mut allowed_git_repositories = HashSet::new();
         let mut denied_git_repositories = HashSet::new();
+        let mut allowed_wildcards = Vec::new();
         let mut denied_wildcards = Vec::new();
         let mut warnings = Vec::new();
 
@@ -138,21 +140,24 @@ impl BuildPolicy {
                 }
             };
             match expand_spec(pattern) {
-                Ok(expanded) if bool_value => sort_allowed_entries(
-                    pattern,
-                    expanded,
-                    &mut allowed,
-                    &mut allowed_sources,
-                    &mut allowed_git_repositories,
-                    &mut warnings,
-                ),
-                Ok(expanded) => sort_entries(
-                    expanded,
-                    &mut denied,
-                    &mut denied_sources,
-                    &mut denied_git_repositories,
-                    &mut denied_wildcards,
-                ),
+                Ok(expanded) => {
+                    let (exact, wild) = if bool_value {
+                        (&mut allowed, &mut allowed_wildcards)
+                    } else {
+                        (&mut denied, &mut denied_wildcards)
+                    };
+                    let source = if bool_value {
+                        &mut allowed_sources
+                    } else {
+                        &mut denied_sources
+                    };
+                    let git_repositories = if bool_value {
+                        &mut allowed_git_repositories
+                    } else {
+                        &mut denied_git_repositories
+                    };
+                    sort_entries(expanded, exact, source, git_repositories, wild);
+                }
                 Err(e) => warnings.push(e),
             }
         }
@@ -164,13 +169,12 @@ impl BuildPolicy {
         // format.
         for pattern in only_built {
             match expand_spec(pattern) {
-                Ok(expanded) => sort_allowed_entries(
-                    pattern,
+                Ok(expanded) => sort_entries(
                     expanded,
                     &mut allowed,
                     &mut allowed_sources,
                     &mut allowed_git_repositories,
-                    &mut warnings,
+                    &mut allowed_wildcards,
                 ),
                 Err(e) => warnings.push(e),
             }
@@ -197,6 +201,7 @@ impl BuildPolicy {
                 denied_sources,
                 allowed_git_repositories,
                 denied_git_repositories,
+                allowed_wildcards,
                 denied_wildcards,
             },
             warnings,
@@ -231,6 +236,7 @@ impl BuildPolicy {
                 denied_sources,
                 allowed_git_repositories: HashSet::new(),
                 denied_git_repositories,
+                allowed_wildcards: Vec::new(),
                 denied_wildcards,
             },
             warnings,
@@ -321,6 +327,9 @@ impl BuildPolicy {
         if self.allowed.contains(name) || allowed_versioned {
             return AllowDecision::Allow;
         }
+        if matches_any_wildcard(name, &self.allowed_wildcards) {
+            return AllowDecision::Allow;
+        }
         AllowDecision::Unspecified
     }
 
@@ -332,6 +341,7 @@ impl BuildPolicy {
             || !self.allowed.is_empty()
             || !self.allowed_sources.is_empty()
             || !self.allowed_git_repositories.is_empty()
+            || !self.allowed_wildcards.is_empty()
     }
 
     /// Stable fingerprint of the resolved policy shape. Used by the
@@ -346,6 +356,7 @@ impl BuildPolicy {
         hash_set(&mut hasher, b"denied", &self.denied);
         hash_set(&mut hasher, b"allowed_sources", &self.allowed_sources);
         hash_set(&mut hasher, b"denied_sources", &self.denied_sources);
+        hash_vec(&mut hasher, b"allowed_wildcards", &self.allowed_wildcards);
         hash_set(
             &mut hasher,
             b"allowed_git_repositories",
@@ -374,6 +385,7 @@ impl BuildPolicy {
             .extend(other.allowed_git_repositories.iter().cloned());
         self.denied_git_repositories
             .extend(other.denied_git_repositories.iter().cloned());
+        merge_unique(&mut self.allowed_wildcards, &other.allowed_wildcards);
         merge_unique(&mut self.denied_wildcards, &other.denied_wildcards);
     }
 }
@@ -449,23 +461,6 @@ fn sort_entries(
     }
 }
 
-/// [`sort_entries`] for approvals, which have no wildcard form: a
-/// wildcard approval is reported and approves nothing.
-fn sort_allowed_entries(
-    pattern: &str,
-    entries: Vec<String>,
-    exact: &mut HashSet<String>,
-    sources: &mut HashSet<String>,
-    git_repositories: &mut HashSet<String>,
-    warnings: &mut Vec<BuildPolicyError>,
-) {
-    if entries.iter().any(|entry| entry.contains('*')) {
-        warnings.push(BuildPolicyError::WildcardApproval(pattern.to_string()));
-        return;
-    }
-    sort_entries(entries, exact, sources, git_repositories, &mut Vec::new());
-}
-
 /// Match `name` against a `*`-wildcard pattern. `*` matches any
 /// (possibly-empty) run of characters — including `/`, so `@babel/*`
 /// matches every package in the scope. Called only for patterns known
@@ -528,11 +523,6 @@ pub enum BuildPolicyError {
     #[error("build policy pattern {0:?} mixes a wildcard name with a version union")]
     #[diagnostic(code(ERR_AUBE_BUILD_POLICY_WILDCARD_WITH_VERSION))]
     WildcardWithVersion(String),
-    #[error(
-        "build policy entry {0:?} approves nothing: approvals must name each package (a wildcard still works as a denial)"
-    )]
-    #[diagnostic(code(ERR_AUBE_BUILD_POLICY_WILDCARD_APPROVAL))]
-    WildcardApproval(String),
 }
 
 /// Parse one entry from the allowBuilds map into the set of strings
@@ -973,13 +963,18 @@ mod tests {
 
     #[test]
     fn merge_deduplicates_wildcards() {
-        let mut p = policy(&[("*-internal", false)]);
-        let other = policy(&[("@types/*", false), ("*-internal", false)]);
+        let mut p = policy(&[("@babel/*", true), ("*-internal", false)]);
+        let other = policy(&[
+            ("@babel/*", true),
+            ("@types/*", true),
+            ("*-internal", false),
+        ]);
         p.merge(&other);
         p.merge(&other);
 
-        assert_eq!(p.denied_wildcards, vec!["*-internal", "@types/*"]);
-        assert_eq!(p.decide("@types/node", "1.0.0"), AllowDecision::Deny);
+        assert_eq!(p.allowed_wildcards, vec!["@babel/*", "@types/*"]);
+        assert_eq!(p.denied_wildcards, vec!["*-internal"]);
+        assert_eq!(p.decide("@types/node", "1.0.0"), AllowDecision::Allow);
         assert_eq!(p.decide("pkg-internal", "1.0.0"), AllowDecision::Deny);
     }
 
@@ -998,32 +993,44 @@ mod tests {
     }
 
     #[test]
-    fn wildcard_approval_approves_nothing_and_warns() {
-        // pnpm 12 matches approvals by exact name; `"*": true` there
-        // approves nothing. A wildcard approval would be allow-all under
-        // another name, and would approve packages nobody has seen yet.
-        for pattern in ["@babel/*", "*-loader", "*"] {
-            let map: BTreeMap<String, AllowBuildRaw> =
-                [(pattern.to_string(), AllowBuildRaw::Bool(true))]
-                    .into_iter()
-                    .collect();
-            let (p, errs) = BuildPolicy::from_config(&map, &[], &[], false);
-            assert!(
-                matches!(errs.as_slice(), [BuildPolicyError::WildcardApproval(key)] if key == pattern),
-                "{pattern}: expected one wildcard-approval warning, got {errs:?}"
-            );
-            assert_eq!(
-                p.decide("@babel/core", "7.0.0"),
-                AllowDecision::Unspecified,
-                "{pattern}"
-            );
-            assert_eq!(
-                p.decide("css-loader", "6.0.0"),
-                AllowDecision::Unspecified,
-                "{pattern}"
-            );
-            assert!(!p.has_any_allow_rule(), "{pattern}");
-        }
+    fn wildcard_scope_allows_every_scope_member() {
+        let p = policy(&[("@babel/*", true)]);
+        assert_eq!(p.decide("@babel/core", "7.0.0"), AllowDecision::Allow);
+        assert_eq!(
+            p.decide("@babel/preset-env", "7.22.0"),
+            AllowDecision::Allow
+        );
+        assert_eq!(p.decide("@swc/core", "1.3.0"), AllowDecision::Unspecified);
+        assert_eq!(
+            p.decide("babel-loader", "9.0.0"),
+            AllowDecision::Unspecified
+        );
+        assert!(p.has_any_allow_rule());
+    }
+
+    #[test]
+    fn wildcard_suffix_matches_any_prefix() {
+        let p = policy(&[("*-loader", true)]);
+        assert_eq!(p.decide("css-loader", "6.0.0"), AllowDecision::Allow);
+        assert_eq!(p.decide("babel-loader", "9.0.0"), AllowDecision::Allow);
+        assert_eq!(
+            p.decide("loader-utils", "3.0.0"),
+            AllowDecision::Unspecified
+        );
+    }
+
+    #[test]
+    fn bare_star_matches_everything_and_deny_entries_still_override_it() {
+        let map: BTreeMap<String, AllowBuildRaw> = [
+            ("*".to_string(), AllowBuildRaw::Bool(true)),
+            ("sketchy-pkg".to_string(), AllowBuildRaw::Bool(false)),
+        ]
+        .into_iter()
+        .collect();
+        let (p, errs) = BuildPolicy::from_config(&map, &[], &[], false);
+        assert!(errs.is_empty());
+        assert_eq!(p.decide("esbuild", "0.19.0"), AllowDecision::Allow);
+        assert_eq!(p.decide("sketchy-pkg", "1.0.0"), AllowDecision::Deny);
     }
 
     #[test]
@@ -1055,19 +1062,14 @@ mod tests {
     }
 
     #[test]
-    fn flat_lists_deny_by_wildcard_but_never_approve_by_one() {
+    fn wildcards_flow_through_flat_lists_too() {
         let only_built = vec!["@types/*".to_string()];
         let never_built = vec!["*-internal".to_string()];
         let (p, errs) =
             BuildPolicy::from_config(&BTreeMap::new(), &only_built, &never_built, false);
-        assert!(matches!(
-            errs.as_slice(),
-            [BuildPolicyError::WildcardApproval(_)]
-        ));
-        assert_eq!(
-            p.decide("@types/node", "20.0.0"),
-            AllowDecision::Unspecified
-        );
+        assert!(errs.is_empty());
+        assert_eq!(p.decide("@types/node", "20.0.0"), AllowDecision::Allow);
+        assert_eq!(p.decide("@types/react", "18.0.0"), AllowDecision::Allow);
         assert_eq!(p.decide("acme-internal", "1.0.0"), AllowDecision::Deny);
     }
 

@@ -91,7 +91,6 @@ pub const ERR_AUBE_SCRIPT_NON_ZERO_EXIT: &str = "ERR_AUBE_SCRIPT_NON_ZERO_EXIT";
 #[rustfmt::skip] pub const ERR_AUBE_BUILD_POLICY_UNSUPPORTED_VALUE: &str = "ERR_AUBE_BUILD_POLICY_UNSUPPORTED_VALUE";
 #[rustfmt::skip] pub const ERR_AUBE_BUILD_POLICY_INVALID_VERSION_UNION: &str = "ERR_AUBE_BUILD_POLICY_INVALID_VERSION_UNION";
 #[rustfmt::skip] pub const ERR_AUBE_BUILD_POLICY_WILDCARD_WITH_VERSION: &str = "ERR_AUBE_BUILD_POLICY_WILDCARD_WITH_VERSION";
-#[rustfmt::skip] pub const ERR_AUBE_BUILD_POLICY_WILDCARD_APPROVAL: &str = "ERR_AUBE_BUILD_POLICY_WILDCARD_APPROVAL";
 pub const ERR_AUBE_IGNORED_BUILDS: &str = "ERR_AUBE_IGNORED_BUILDS";
 #[rustfmt::skip] pub const ERR_AUBE_GIT_DEP_PREPARE_NOT_ALLOWED: &str = "ERR_AUBE_GIT_DEP_PREPARE_NOT_ALLOWED";
 
@@ -524,12 +523,6 @@ pub const ALL: &[CodeMeta] = &[
         name: ERR_AUBE_IGNORED_BUILDS,
         category: category::SCRIPTS,
         description: "`strictDepBuilds` is on (the default) and the install, add or rebuild skipped one or more dependency build scripts that nothing approved. The message lists them. `node_modules`, the approved builds and the project's own lifecycle scripts are already in place; approve the packages with `aube approve-builds`, deny them with `false` in `allowBuilds`, or set `strictDepBuilds=false` to skip them with a warning. pnpm's `ERR_PNPM_IGNORED_BUILDS`; exits 1, as pnpm does.",
-        exit_code: None,
-    },
-    CodeMeta {
-        name: ERR_AUBE_BUILD_POLICY_WILDCARD_APPROVAL,
-        category: category::SCRIPTS,
-        description: "A build-allowlist entry approved packages by wildcard (`\"*\": true`, `\"@scope/*\": true`). Approvals must name each package, matching pnpm's exact-name `allowBuilds`, so the entry approves nothing; a wildcard still works as a `false` denial.",
         exit_code: None,
     },
     CodeMeta {
