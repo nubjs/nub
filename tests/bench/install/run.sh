@@ -268,7 +268,10 @@ run_warm() {
 
   # Run nub and pnpm together for direct comparison. Per-command --prepare so
   # each tool's (untimed) teardown is isolated and rename-aside fast.
+  # --shell=sh: hyperfine 2.0 runs commands with no shell by default and refuses
+  # the `CI=1 …` and `cd … && npm ci` commands below; sh was 1.x's default.
   local HYPERFINE_ARGS=(
+    --shell=sh
     --warmup 3
     --runs 12
     --prepare "$(reset_cmd "$WD_PNPM")"
