@@ -1077,7 +1077,11 @@ pub const LAUNCH_MARKER_ENV: &str = "__NUB_NODE_LAUNCH";
 /// Set [`LAUNCH_MARKER_ENV`] on a command that SPAWNS `node` — a launch, or a probe
 /// such as `node --version`, which loops exactly like a launch does. Never on an
 /// `exec`: the marker's pid would then also be the pid of the Node it became, whose
-/// own nested `node` calls would read as a round trip.
+/// own nested `node` calls would read as a round trip. Nor on a spawn of a wrapper
+/// in front of Node (a `prefix`, an env-owner loader): one that is itself a
+/// `#!/usr/bin/env node` script reaches nub's `node` shim as nub's direct child, and
+/// would read as the Node candidate handing the launch back. Use
+/// [`unmark_node_launch`] there.
 pub fn mark_node_launch(cmd: &mut Command, node: &Path) {
     let mut chain = handed_back();
     chain.push(node.to_path_buf());
@@ -1088,6 +1092,11 @@ pub fn mark_node_launch(cmd: &mut Command, node: &Path) {
         Some(list) => cmd.env(LAUNCH_MARKER_ENV, format!("{}:{list}", std::process::id())),
         None => cmd.env_remove(LAUNCH_MARKER_ENV),
     };
+}
+
+/// Clear [`LAUNCH_MARKER_ENV`] on a command whose program is not the Node candidate.
+pub fn unmark_node_launch(cmd: &mut Command) {
+    cmd.env_remove(LAUNCH_MARKER_ENV);
 }
 
 /// The foreign `node`s that handed this launch straight back to nub, outermost

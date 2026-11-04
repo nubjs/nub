@@ -7334,6 +7334,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     let owner_target = env_owner
         .as_ref()
         .and_then(crate::env_owner::EnvOwner::spawn_target);
+    let spawns_node = prefix.is_none() && owner_target.is_none();
     let mut cmd = match (prefix.as_ref(), owner_target) {
         (Some(prefix), owner) => {
             let mut cmd = prefix.command();
@@ -7365,7 +7366,11 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
             crate::env_owner::wrapped_marker(schema_dir),
         );
     }
-    nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
+    if spawns_node {
+        nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
+    } else {
+        nub_core::node::discovery::unmark_node_launch(&mut cmd);
+    }
     cmd.args(&node_args)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
