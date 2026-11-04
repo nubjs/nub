@@ -57,8 +57,8 @@ fn run_with_timeout(
     tmp: &Path,
     serial_id: usize,
 ) -> RunOutcome {
-    let mut child = match Command::new(nub)
-        .args(flags)
+    let mut cmd = Command::new(nub);
+    cmd.args(flags)
         .arg(test_path)
         .current_dir(cwd)
         .env("NODE_TEST_KNOWN_GLOBALS", "0")
@@ -68,9 +68,15 @@ fn run_with_timeout(
         .env("TEST_SERIAL_ID", serial_id.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+        .stderr(Stdio::piped());
+    // The child leads its own process group so `reap_group` can kill the servers,
+    // workers and `process.execPath` re-spawns a test leaves behind. Killing only
+    // the leader orphaned them to PID 1, where they kept spinning, and at 16-way
+    // fan-out they piled up until the CI runner died. tests/cross-runtime/run.mjs
+    // does the same with `detached: true`.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return RunOutcome::Failed(format!("spawn error: {e}")),
     };
@@ -79,21 +85,32 @@ fn run_with_timeout(
     // chatty test: once the pipe's buffer fills, the child blocks on its next
     // write and never exits, which the gate then misreports as a hang
     // (test-stream2-large-read-stall.js logs every push and read).
+    //
+    // The read ends only when every holder of the pipe exits, so it is bounded:
+    // a descendant that left the group (`detached: true` calls setsid, as
+    // test-listen-fd-detached-inherit.js does with stderr inherited) survives
+    // `reap_group` and would otherwise wedge the whole suite.
     let drain = child.stderr.take().map(|mut s| {
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut stderr = String::new();
             let _ = s.read_to_string(&mut stderr);
-            stderr
-        })
+            let _ = tx.send(stderr);
+        });
+        rx
     });
-    let collect = |drain: Option<std::thread::JoinHandle<String>>| {
-        drain.and_then(|h| h.join().ok()).unwrap_or_default()
+    let collect = |drain: Option<std::sync::mpsc::Receiver<String>>| {
+        drain
+            .and_then(|rx| rx.recv_timeout(Duration::from_secs(5)).ok())
+            .unwrap_or_default()
     };
 
     let start = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                // A clean leader exit can still leave a server or worker running.
+                reap_group(&child);
                 let stderr = collect(drain);
                 if status.success() {
                     return RunOutcome::Passed;
@@ -110,6 +127,7 @@ fn run_with_timeout(
             }
             Ok(None) => {
                 if start.elapsed() >= PER_TEST_TIMEOUT {
+                    reap_group(&child);
                     let _ = child.kill();
                     let _ = child.wait();
                     let _ = collect(drain);
@@ -120,6 +138,19 @@ fn run_with_timeout(
             Err(e) => return RunOutcome::Failed(format!("wait error: {e}")),
         }
     }
+}
+
+/// SIGKILL the test's whole process group. The child leads its own group, so the
+/// negative pid reaches only this test's subtree, never the runner. Off unix the
+/// caller's `child.kill()` is the only cleanup.
+fn reap_group(child: &std::process::Child) {
+    #[cfg(unix)]
+    // SAFETY: kill(2) takes no pointers and cannot violate memory safety.
+    unsafe {
+        libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    let _ = child;
 }
 
 fn nub_binary() -> PathBuf {
