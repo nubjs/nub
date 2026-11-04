@@ -4683,19 +4683,42 @@ fn effective_jsx_setting(entry_abs: &Path, explicit_tsconfig: Option<&Path>) -> 
 }
 
 /// Names nub's own runtime modules in a source map by their place in the runtime,
-/// not by where the building machine extracted it.
+/// not by where the building machine keeps it.
 ///
 /// The prelude is bundled from the runtime extraction cache, so Rolldown listed
 /// each of its files relative to the output — `../../.cache/nub/runtime-0.9.7-…/
 /// compile-record.mjs`, or a temporary `XDG_CACHE_HOME` — and every artifact built
 /// with a map carried that layout into its stack frames. `runtime/<file>` resolves
 /// beside the chunk instead: `/N:/$nub/runtime/compile-record.mjs` in a single
-/// executable. Every other source keeps Rolldown's own spelling.
+/// executable.
+///
+/// The runtime's vendored packages (a Temporal polyfill on a target without one)
+/// sit in its own `node_modules/` once extracted, but a development build resolves
+/// them from the checkout, outside the runtime directory. Each is resolved from the
+/// runtime as Node would and named `runtime/node_modules/<pkg>/…` wherever it
+/// lives. Every other source, including an application's own copy of one of those
+/// packages, keeps Rolldown's spelling.
 fn runtime_source_names(runtime_dir: &Path) -> SourceMapPathTransform {
-    let mut roots = vec![runtime_dir.to_path_buf()];
-    let canonical = canonicalize_for_bundler(runtime_dir);
-    if canonical != roots[0] {
-        roots.push(canonical);
+    let mut roots = Vec::new();
+    let mut add = |dir: &Path, name: String| {
+        for spelling in [dir.to_path_buf(), canonicalize_for_bundler(dir)] {
+            if !roots.iter().any(|(root, _)| *root == spelling) {
+                roots.push((spelling, name.clone()));
+            }
+        }
+    };
+    add(runtime_dir, "runtime".to_string());
+    for package in nub_core::node::vendored_runtime::VENDORED_RUNTIME_PACKAGES {
+        let resolved = runtime_dir.ancestors().find_map(|dir| {
+            let candidate = dir.join("node_modules").join(package);
+            candidate
+                .join("package.json")
+                .is_file()
+                .then_some(candidate)
+        });
+        if let Some(dir) = resolved {
+            add(&dir, format!("runtime/node_modules/{package}"));
+        }
     }
     SourceMapPathTransform::new(Arc::new(move |source: &str, map_path: &str| {
         let named =
@@ -4706,7 +4729,11 @@ fn runtime_source_names(runtime_dir: &Path) -> SourceMapPathTransform {
 
 /// `source` arrives relative to the map's directory, which is where Node resolves
 /// it from too.
-fn runtime_source_name(roots: &[PathBuf], source: &str, map_path: &str) -> Option<String> {
+fn runtime_source_name(
+    roots: &[(PathBuf, String)],
+    source: &str,
+    map_path: &str,
+) -> Option<String> {
     let mut absolute = PathBuf::new();
     for part in Path::new(map_path).parent()?.join(source).components() {
         match part {
@@ -4717,10 +4744,10 @@ fn runtime_source_name(roots: &[PathBuf], source: &str, map_path: &str) -> Optio
             other => absolute.push(other),
         }
     }
-    roots
-        .iter()
-        .find_map(|root| absolute.strip_prefix(root).ok())
-        .map(|rel| format!("runtime/{}", slash_path(rel)))
+    roots.iter().find_map(|(root, name)| {
+        let rel = absolute.strip_prefix(root).ok()?;
+        Some(format!("{name}/{}", slash_path(rel)))
+    })
 }
 
 fn sourcemap_type(mode: SourcemapMode) -> Option<SourceMapType> {
