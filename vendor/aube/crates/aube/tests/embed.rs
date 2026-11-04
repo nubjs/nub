@@ -477,6 +477,51 @@ async fn mode_change_keeps_a_store_nested_in_node_modules() {
     );
 }
 
+/// The nested store may be a symlink to a directory elsewhere. The indices
+/// name files through the link, so the reset keeps the link itself.
+#[cfg(unix)]
+#[tokio::test]
+async fn mode_change_keeps_a_symlinked_store_in_node_modules() {
+    initialize_test_host();
+    let project = tempfile::tempdir().unwrap();
+    let host_cache = project.path().join("host-cache");
+    let external_store = project.path().join("external-store");
+    let nested_store = project.path().join("node_modules/.cache/store");
+    std::fs::create_dir_all(&external_store).unwrap();
+    std::fs::create_dir_all(nested_store.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&external_store, &nested_store).unwrap();
+    seed_cached_registry_package(&host_cache, &nested_store);
+    std::fs::write(project.path().join(".npmrc"), "hoist=false\n").unwrap();
+    std::fs::write(
+        project.path().join("package.json"),
+        r#"{"dependencies":{"cached-only":"1.0.0"}}
+"#,
+    )
+    .unwrap();
+    let install = |gvs: bool| {
+        let mut options = InstallOptions::new(project.path());
+        options.ignore_scripts = true;
+        options.network_mode = aube::embed::NetworkMode::Offline;
+        options.control = InstallControl::silent();
+        aube::embed::install_with_overrides(
+            options,
+            aube::embed::EmbedderInstallOverrides {
+                use_global_virtual_store: Some(gvs),
+                cache_dir: Some(host_cache.clone()),
+                store_dir: Some(nested_store.clone()),
+            },
+        )
+    };
+    install(true).await.unwrap();
+
+    install(false).await.unwrap();
+    assert_cached_package_is_project_local(project.path(), project.path());
+    assert!(
+        nested_store.symlink_metadata().unwrap().is_symlink(),
+        "the mode reset deleted the store symlink in node_modules"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn facade_install_preserves_non_utf8_storage_paths() {

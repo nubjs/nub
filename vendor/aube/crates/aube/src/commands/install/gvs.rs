@@ -708,6 +708,11 @@ impl PendingModeReset {
     /// when they sit inside it: the store this install just fetched into, when
     /// `storeDir` is configured under `node_modules`. Before the reset was
     /// deferred it ran ahead of the fetch, which repopulated such a store.
+    ///
+    /// Containment is lexical, on the paths the fetched indices were written
+    /// under. Canonicalizing would lose a store reached through a symlink
+    /// inside `node_modules`: its target lies outside, so nothing would look
+    /// kept, and the link the indices name would be deleted.
     pub(super) fn reset(self, keep: &[PathBuf]) -> miette::Result<()> {
         let from = if self.existing { "enabled" } else { "disabled" };
         let to = if self.planned { "enabled" } else { "disabled" };
@@ -717,18 +722,14 @@ impl PendingModeReset {
             "global virtual store {from} → {to}; removing {} and reinstalling from scratch",
             modules_dir_path.display()
         );
-        let keep: Vec<PathBuf> = keep
-            .iter()
-            .map(|path| std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
-            .collect();
-        remove_dir_all_except(&modules_dir_path, &keep).map_err(|e| {
+        remove_dir_all_except(&modules_dir_path, keep).map_err(|e| {
             miette!(
                 "global virtual store transition: failed to remove {}: {e}",
                 modules_dir_path.display()
             )
         })?;
         if !self.aube_dir.starts_with(&modules_dir_path) {
-            remove_dir_all_except(&self.aube_dir, &keep).map_err(|e| {
+            remove_dir_all_except(&self.aube_dir, keep).map_err(|e| {
                 miette!(
                     "global virtual store transition: failed to remove {}: {e}",
                     self.aube_dir.display()
@@ -741,25 +742,31 @@ impl PendingModeReset {
     }
 }
 
-/// [`remove_dir_all_if_exists`], sparing every path in `keep` (canonical)
-/// and the directories leading down to it.
+/// [`remove_dir_all_if_exists`], sparing every path in `keep` and the
+/// entries leading down to it. A symlink on the way to a kept path is kept
+/// as is rather than followed.
 fn remove_dir_all_except(path: &Path, keep: &[PathBuf]) -> std::io::Result<()> {
-    let canonical = match std::fs::canonicalize(path) {
-        Ok(canonical) => canonical,
+    if keep.iter().any(|k| k == path) {
+        return Ok(());
+    }
+    if !keep.iter().any(|k| k.starts_with(path)) {
+        return remove_dir_all_if_exists(path);
+    }
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e),
     };
-    if keep.iter().any(|k| *k == canonical) {
-        return Ok(());
-    }
-    if !keep.iter().any(|k| k.starts_with(&canonical)) {
-        return remove_dir_all_if_exists(path);
-    }
-    for entry in std::fs::read_dir(path)? {
+    for entry in entries {
         let entry = entry?;
         let child = entry.path();
-        if entry.file_type()?.is_dir() {
-            remove_dir_all_except(&child, keep)?;
+        let kind = entry.file_type()?;
+        if keep.iter().any(|k| k.starts_with(&child)) {
+            if kind.is_dir() {
+                remove_dir_all_except(&child, keep)?;
+            }
+        } else if kind.is_dir() {
+            std::fs::remove_dir_all(&child)?;
         } else {
             std::fs::remove_file(&child)?;
         }
