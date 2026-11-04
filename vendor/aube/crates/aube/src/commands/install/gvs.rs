@@ -704,7 +704,11 @@ impl PendingModeReset {
         })
     }
 
-    pub(super) fn reset(self) -> miette::Result<()> {
+    /// Remove the old tree. `keep` names directories that must survive even
+    /// when they sit inside it: the store this install just fetched into, when
+    /// `storeDir` is configured under `node_modules`. Before the reset was
+    /// deferred it ran ahead of the fetch, which repopulated such a store.
+    pub(super) fn reset(self, keep: &[PathBuf]) -> miette::Result<()> {
         let from = if self.existing { "enabled" } else { "disabled" };
         let to = if self.planned { "enabled" } else { "disabled" };
         let modules_dir_path = self.cwd.join(&self.modules_dir_name);
@@ -713,14 +717,18 @@ impl PendingModeReset {
             "global virtual store {from} → {to}; removing {} and reinstalling from scratch",
             modules_dir_path.display()
         );
-        remove_dir_all_if_exists(&modules_dir_path).map_err(|e| {
+        let keep: Vec<PathBuf> = keep
+            .iter()
+            .map(|path| std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
+            .collect();
+        remove_dir_all_except(&modules_dir_path, &keep).map_err(|e| {
             miette!(
                 "global virtual store transition: failed to remove {}: {e}",
                 modules_dir_path.display()
             )
         })?;
         if !self.aube_dir.starts_with(&modules_dir_path) {
-            remove_dir_all_if_exists(&self.aube_dir).map_err(|e| {
+            remove_dir_all_except(&self.aube_dir, &keep).map_err(|e| {
                 miette!(
                     "global virtual store transition: failed to remove {}: {e}",
                     self.aube_dir.display()
@@ -731,6 +739,32 @@ impl PendingModeReset {
             miette!("global virtual store transition: failed to remove install state: {e}")
         })
     }
+}
+
+/// [`remove_dir_all_if_exists`], sparing every path in `keep` (canonical)
+/// and the directories leading down to it.
+fn remove_dir_all_except(path: &Path, keep: &[PathBuf]) -> std::io::Result<()> {
+    let canonical = match std::fs::canonicalize(path) {
+        Ok(canonical) => canonical,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if keep.iter().any(|k| *k == canonical) {
+        return Ok(());
+    }
+    if !keep.iter().any(|k| k.starts_with(&canonical)) {
+        return remove_dir_all_if_exists(path);
+    }
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let child = entry.path();
+        if entry.file_type()?.is_dir() {
+            remove_dir_all_except(&child, keep)?;
+        } else {
+            std::fs::remove_file(&child)?;
+        }
+    }
+    Ok(())
 }
 
 fn remove_dir_all_if_exists(path: &Path) -> std::io::Result<()> {

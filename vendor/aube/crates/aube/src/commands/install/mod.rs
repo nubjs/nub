@@ -2984,7 +2984,8 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     let node_version = crate::engines::effective_node_version(node_version_override.as_deref());
     let build_node_version = crate::engines::build_node_version();
     crate::engines::run_checks(
-        &aube_dir,
+        // While a mode reset is pending the tree on disk is the old one.
+        (!mode_reset_pending).then_some(aube_dir.as_path()),
         &manifest,
         &manifests,
         &graph_for_link,
@@ -3027,7 +3028,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     // Every pre-link gate has passed: only now is it safe to drop a tree
     // linked under the other virtual-store mode (#841).
     if let Some(reset) = pending_mode_reset {
-        reset.reset()?;
+        reset.reset(&[store.store_v1_dir(), store.virtual_store_dir()])?;
     }
     let link::LinkPhaseOutput {
         stats,

@@ -370,6 +370,113 @@ async fn failed_install_after_a_virtual_store_mode_change_keeps_the_old_tree() {
     assert_cached_package_is_project_local(project.path(), project.path());
 }
 
+/// A mode-changing install with the old tree still on disk checks `engines`
+/// against what it is about to link, not the old copy: a `file:` package keeps
+/// its dep path while its manifest changes.
+#[cfg(unix)]
+#[tokio::test]
+async fn mode_changing_install_checks_engines_of_the_new_package() {
+    initialize_test_host();
+    let project = tempfile::tempdir().unwrap();
+    let host_cache = project.path().join("host-cache");
+    let host_store = project.path().join("host-store");
+    seed_cached_registry_package(&host_cache, &host_store);
+    std::fs::write(
+        project.path().join(".npmrc"),
+        "hoist=false\nengine-strict=true\n",
+    )
+    .unwrap();
+    let local = project.path().join("local");
+    std::fs::create_dir_all(&local).unwrap();
+    std::fs::write(
+        local.join("package.json"),
+        r#"{"name":"local","version":"1.0.0"}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.path().join("package.json"),
+        r#"{"dependencies":{"cached-only":"1.0.0","local":"file:./local"}}
+"#,
+    )
+    .unwrap();
+    let install = |gvs: bool| {
+        let mut options = InstallOptions::new(project.path());
+        options.ignore_scripts = true;
+        options.network_mode = aube::embed::NetworkMode::Offline;
+        options.control = InstallControl::silent();
+        aube::embed::install_with_overrides(
+            options,
+            aube::embed::EmbedderInstallOverrides {
+                use_global_virtual_store: Some(gvs),
+                cache_dir: Some(host_cache.clone()),
+                store_dir: Some(host_store.clone()),
+            },
+        )
+    };
+    install(true).await.unwrap();
+
+    std::fs::write(
+        local.join("package.json"),
+        r#"{"name":"local","version":"1.0.0","engines":{"node":">=999"}}
+"#,
+    )
+    .unwrap();
+    let error = install(false).await.unwrap_err();
+    assert_eq!(
+        aube::embed::error_code(&error).as_deref(),
+        Some("ERR_AUBE_UNSUPPORTED_ENGINE")
+    );
+    assert!(
+        cached_package_materialization(project.path()).is_file(),
+        "the rejected install deleted the previous tree"
+    );
+}
+
+/// `storeDir` may sit inside `node_modules`. The mode reset runs after the
+/// fetch has filled that store, so it must leave the store in place.
+#[cfg(unix)]
+#[tokio::test]
+async fn mode_change_keeps_a_store_nested_in_node_modules() {
+    initialize_test_host();
+    let project = tempfile::tempdir().unwrap();
+    let host_cache = project.path().join("host-cache");
+    let nested_store = project.path().join("node_modules/.cache/store");
+    seed_cached_registry_package(&host_cache, &nested_store);
+    std::fs::write(project.path().join(".npmrc"), "hoist=false\n").unwrap();
+    std::fs::write(
+        project.path().join("package.json"),
+        r#"{"dependencies":{"cached-only":"1.0.0"}}
+"#,
+    )
+    .unwrap();
+    let install = |gvs: bool| {
+        let mut options = InstallOptions::new(project.path());
+        options.ignore_scripts = true;
+        options.network_mode = aube::embed::NetworkMode::Offline;
+        options.control = InstallControl::silent();
+        options.frozen_mode = aube::embed::FrozenMode::Prefer;
+        aube::embed::install_with_overrides(
+            options,
+            aube::embed::EmbedderInstallOverrides {
+                use_global_virtual_store: Some(gvs),
+                cache_dir: Some(host_cache.clone()),
+                store_dir: Some(nested_store.clone()),
+            },
+        )
+    };
+    install(true).await.unwrap();
+    let linked = std::fs::canonicalize(cached_package_materialization(project.path())).unwrap();
+    assert!(linked.starts_with(std::fs::canonicalize(host_cache.join("virtual-store")).unwrap()));
+
+    install(false).await.unwrap();
+    assert_cached_package_is_project_local(project.path(), project.path());
+    assert!(
+        nested_store.join("v1/files").is_dir(),
+        "the mode reset deleted the store nested in node_modules"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn facade_install_preserves_non_utf8_storage_paths() {
