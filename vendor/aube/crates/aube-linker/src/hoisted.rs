@@ -905,13 +905,12 @@ fn materialize_hoisted_node(
     // result byte-for-byte, +x bits included. Any miss (tier unbuilt,
     // non-APFS, cross-volume, non-macOS, or a clone error) returns false
     // and falls through to the unchanged per-file path below.
-    let tree_key = linker.virtual_store_subdir(dep_path);
-    let tree_src = linker.store.tree_path(&tree_key);
+    let tree_coordinate = linker.virtual_store_subdir(dep_path);
     let pkg_nm_parent = pkg_dir.parent().unwrap_or(&pkg_dir).to_path_buf();
     let used_clonedir = linker.try_clonedir_fill(
         &pkg_dir,
         &pkg_nm_parent,
-        &tree_src,
+        &tree_coordinate,
         dep_path,
         pkg,
         index,

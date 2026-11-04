@@ -937,6 +937,7 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
                 // when re-emitting a pnpm-sourced graph into one of
                 // their formats.
                 declared_dependencies: BTreeMap::new(),
+                declared_dependencies_known: false,
                 // pnpm's format doesn't carry per-package license or
                 // funding metadata, so a pnpm → npm conversion
                 // degrades to empty rather than re-fetching each
@@ -1217,6 +1218,50 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
             for dep in deps {
                 dep.dep_path = rewrite_peer_suffix(&dep.dep_path, &spec_peer_to_hashed);
             }
+        }
+    }
+
+    // Link a peer the key claims but the snapshot never recorded. Earlier
+    // nub releases could write a package keyed with a peer it declares
+    // while leaving that peer out of the snapshot's `dependencies`
+    // (#937), and a lockfile read takes the snapshot as the whole truth,
+    // so the package stayed unable to import its peer on every later
+    // install. A peer named in a key is a peer resolved for that package
+    // (pnpm records each one as a snapshot edge), so the edge is
+    // recoverable from the key; for any lockfile pnpm wrote this is a
+    // no-op. Adding the edge also changes the package's virtual-store
+    // hash, so a broken global-store entry is not reused.
+    let mut missing_peer_edges: Vec<(String, String, String)> = Vec::new();
+    for (key, pkg) in &packages {
+        if pkg.peer_dependencies.is_empty() {
+            continue;
+        }
+        for peer_key in super::dep_path::peer_references(key) {
+            let Some((name, _)) = parse_dep_path(peer_key) else {
+                continue;
+            };
+            if pkg.peer_dependencies.contains_key(&name)
+                && !pkg.dependencies.contains_key(&name)
+                && packages.contains_key(peer_key)
+            {
+                let tail = dep_path_tail(peer_key, &name).to_string();
+                missing_peer_edges.push((key.clone(), name, tail));
+            }
+        }
+    }
+    for (key, name, tail) in missing_peer_edges {
+        if let Some(pkg) = packages.get_mut(&key) {
+            // An optional peer is an optional edge (pnpm's snapshot
+            // `optionalDependencies`), so platform filtering can still
+            // drop a provider that only an optional dependency brought in.
+            if pkg
+                .peer_dependencies_meta
+                .get(&name)
+                .is_some_and(|m| m.optional)
+            {
+                pkg.optional_dependencies.insert(name.clone(), tail.clone());
+            }
+            pkg.dependencies.insert(name, tail);
         }
     }
 
