@@ -626,8 +626,12 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         hide_console: opts.hide_console,
         inline_app,
         // An inline payload runs the bootstrap as `-e` and has no preload to save.
+        // A shim build keeps the preload: its generated entry and hook are the
+        // first modules Node evaluates and read the record at module evaluation,
+        // before `import()` reaches the bundle whose preamble would publish it.
         standalone_preamble: !inline_app
             && !has_code_cache
+            && !shim_plan.needed()
             && bundled.bootstrap_optional
             && supports_standalone_preamble(opts.bundle.target_node),
     };
@@ -1813,6 +1817,15 @@ fn load_icon(icon: Option<&Path>, target: &TargetPlatform) -> Result<Option<Vec<
     Ok(Some(bytes))
 }
 
+/// Whether every Node this artifact accepts has `process.getBuiltinModule`, which
+/// is how a standalone preamble reaches builtins without the bootstrap's early CJS
+/// `require` (`runtime/compile-record.mjs`). Landed at 22.3.0 with a 20.16 backport;
+/// the 20.x band is left out because a `--smol` floor there admits 21.x, which
+/// never had it, and the bootstrap preload is only ~1 ms.
+fn supports_standalone_preamble(target: Option<(u64, u64, u64)>) -> bool {
+    matches!(target, Some((major, minor, _)) if major > 22 || (major == 22 && minor >= 3))
+}
+
 /// Refuse `--hide-console` for a target whose format has no subsystem field.
 ///
 /// Refused rather than ignored, matching `--icon` and `--metadata`: the whole
@@ -1823,15 +1836,6 @@ fn load_icon(icon: Option<&Path>, target: &TargetPlatform) -> Result<Option<Vec<
 /// The HOST is not checked, only the target. Everything the flag does is byte
 /// editing plus one payload field, so a hidden Windows binary cross-compiles
 /// from macOS or Linux exactly like an icon does.
-/// Whether every Node this artifact accepts has `process.getBuiltinModule`, which
-/// is how a standalone preamble reaches builtins without the bootstrap's early CJS
-/// `require` (`runtime/compile-record.mjs`). Landed at 22.3.0 with a 20.16 backport;
-/// the 20.x band is left out because a `--smol` floor there admits 21.x, which
-/// never had it, and the bootstrap preload is only ~1 ms.
-fn supports_standalone_preamble(target: Option<(u64, u64, u64)>) -> bool {
-    matches!(target, Some((major, minor, _)) if major > 22 || (major == 22 && minor >= 3))
-}
-
 fn reject_non_windows_hide_console(hide_console: bool, target: &TargetPlatform) -> Result<()> {
     if hide_console && target.format() != ContainerFormat::Pe {
         bail!(

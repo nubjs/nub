@@ -1,30 +1,33 @@
 ---
 title: Using Nub with Turborepo
-description: How Nub and Turborepo fit together in a monorepo. Turborepo owns the task graph and cache, and Nub runs underneath every task, so TypeScript and .env files just work. Keep your package manager for installs, or switch the repo to Nub and Turborepo runs every task with nub run.
+description: Run Turborepo on top of Nub in a monorepo, with TypeScript and env files working inside every task. Keep your package manager for installs, or switch the repo to Nub and Turborepo runs every task with nub run.
 ---
 
-Turborepo and Nub solve different problems. Turborepo schedules tasks across your packages and caches their results. Nub runs underneath: it provisions the Node version your project pins and augments the Node each task spawns, so TypeScript and `.env` files work without a build step. You don't reconfigure Turborepo to adopt Nub; you run Turborepo *through* Nub.
+Turborepo schedules and caches tasks across your packages; Nub provisions Node and augments the Node each task runs. You keep your Turborepo setup and launch it through Nub.
 
-## The short version
+## Setup
 
-- Run Turborepo under Nub: `nub run <script>` where the script is `turbo run …`, or `nubx turbo run …`.
-- Install with the package manager your `packageManager` field names, because that is the one Turborepo runs each task with.
-- To install with Nub instead, switch the repo to Nub with `nub pm use nub`. Turborepo 2.10.3 and later then run every task with `nub run`.
+Run Turborepo through Nub, from a root script or with `nubx`:
 
-## Installs: keep your package manager, or switch to Nub
+```bash
+nub run build          # a root script: "turbo run build"
+nubx turbo run build   # or run turbo directly through nubx
+```
 
-For every package that defines a task, Turborepo spawns the repo's package manager with `run <task>`. It picks that manager from the `packageManager` field in the root `package.json`, together with the lockfile: in a pnpm repo, every task is `pnpm run build`.
+## Installs
 
-That manager expects the `node_modules` tree it built itself. `nub install` reads and writes the same lockfile, but it lays `node_modules` out its own way (packages live under `node_modules/.store`, where pnpm keeps them in `node_modules/.pnpm`), and pnpm can refuse to run scripts against a tree it didn't build. So pick one of these:
+For each package that defines a task, Turborepo spawns the repo's package manager with `run <task>`. It picks the manager from the `packageManager` field and the lockfile, so in a pnpm repo every task is `pnpm run build`.
 
-**Keep your package manager.** Install with it as before, and run Turborepo under Nub:
+That manager expects the `node_modules` tree it built. `nub install` reads and writes the same lockfile but lays `node_modules` out its own way, under `node_modules/.store` where pnpm uses `node_modules/.pnpm`, and pnpm can refuse to run scripts against a tree it didn't build. So choose one:
+
+**Keep your package manager** for installs, and run Turborepo under Nub:
 
 ```bash
 pnpm install
-nub run build         # root script: "turbo run build"
+nub run build
 ```
 
-**Switch the repo to Nub.** Turborepo 2.10.3 and later detect Nub from the pin `nub pm use nub` writes, and run each task as `nub run <task>`:
+**Switch the repo to Nub.** Turborepo 2.10.3 and later detect the pin that `nub pm use nub` writes, and run each task as `nub run <task>`:
 
 ```bash
 nub pm use nub   # moves pnpm-workspace.yaml config, renames the lockfile
@@ -32,17 +35,13 @@ nub install
 nub run build
 ```
 
-`nub pm use nub` moves `pnpm-workspace.yaml`'s settings into `package.json`, renames the lockfile to `nub.lock`, and pins Nub in `devEngines.packageManager`.
+`nub pm use nub` moves the `pnpm-workspace.yaml` settings into `package.json`, renames the lockfile to `nub.lock`, and pins Nub in `devEngines.packageManager`. Real pnpm then refuses to run in the repo, and `nub pm use pnpm` reverses the switch. See [`nub pm use`](/docs/pm#nub-pm-use).
 
-Switching is a project-wide decision: afterwards real pnpm refuses to run in the repo, and `nub pm use pnpm` reverses it. See [`nub pm use`](/docs/pm#nub-pm-use).
+## TypeScript inside tasks
 
-## How Nub reaches into every task
+The package manager Turborepo spawns inherits Turborepo's environment. When Turborepo runs under Nub, that environment carries Nub's augmentation, a `NODE_OPTIONS` preload and a `node` shim on the `PATH`. So the `node` a task's script invokes is Nub's augmented Node.
 
-Turborepo doesn't execute each package's script body itself. It spawns the package manager, which runs the script with `node_modules/.bin` on the path. That subprocess inherits its environment from Turborepo, which inherits it from whatever launched Turborepo.
-
-That inheritance is the seam Nub uses. Run Turborepo under Nub and the augmentation environment (a `NODE_OPTIONS` preload and a `node` shim on the path) flows down the whole tree: Nub launches Turborepo, Turborepo spawns the package manager, the package manager runs your script, and the `node` your script invokes is Nub's augmented Node.
-
-The result: a package whose build script is plain `node ./build.ts` runs TypeScript directly, with no compile step, and loads that package's `.env`, inside a Turborepo task, with no per-package configuration.
+A build script of plain `node ./build.ts` then runs TypeScript directly and loads that package's `.env`, with no per-package configuration:
 
 ```jsonc
 // packages/lib/package.json
@@ -69,18 +68,17 @@ nub run build         # root script: "turbo run build"
  Tasks:    1 successful, 1 total
 ```
 
-What matters is that **Turborepo runs under Nub**. Launch it with `nub run <script>` (where the script's command is `turbo run …`) or with `nubx turbo run …`. If you invoke the `turbo` binary directly from a plain shell, the tasks run on whatever Node is on your path with no augmentation, and a `.ts` entry fails to parse.
+<Callout type="warn" title="Launch Turborepo through Nub">
+A `turbo run` started from a plain shell runs tasks on the `node` on your `PATH` with no augmentation, and a `.ts` entry fails to parse. Keep the entry point a `nub run` script or `nubx turbo` so every run goes through Nub.
+</Callout>
 
-You don't need to rewrite your package scripts to say `nub`. A script of `node ./build.ts` is enough.
+## Node version
 
-## Choosing the Node version
+Nub provisions the Node your project pins, so every task in the monorepo runs on the same version without nvm or Corepack. Pin it with `.node-version`, `.nvmrc`, `devEngines.runtime`, or `nub node pin`. The package manager Turborepo spawns runs on that Node too, not an older one it finds on the `PATH`.
 
-Nub provisions and uses the Node version your project pins, so every task across the monorepo runs on the same version without nvm or Corepack. Pin it the way the rest of the ecosystem does: an `.nvmrc`, a `devEngines.runtime` entry, or `nub node pin`.
+## Caching and env files
 
-This also sidesteps a common monorepo failure: a package manager refusing to run under an old Node it found on the path. Because Nub's `node` shim comes first on the path, the package manager Turborepo spawns runs on the pinned Node rather than on a stale system one.
+Turborepo owns the task graph, scheduling, and caching. Nub owns the runtime and env loading under each task.
 
-## What to watch for
-
-- **Turborepo's cache is environment-aware.** Turborepo hashes a task's inputs, including declared environment variables, to decide cache hits. Nub's augmentation rides in `NODE_OPTIONS`, which Turborepo passes through to the task but doesn't fold into the cache hash unless you declare it, so adopting Nub doesn't invalidate your cache.
-- **`.env` loading is Nub's, at the task level.** Each task gets the `.env` for the package it runs in. This is independent of Turborepo's `env`/`globalEnv` declarations, which control cache hashing rather than loading. If a value must affect the cache, it still belongs in `turbo.json`.
-- **Run Turborepo under Nub, every time.** A bare `turbo run` from a shell that hasn't gone through Nub carries no augmentation. Keeping the entry point as a `nub run` script (or `nubx turbo`) makes this automatic for everyone on the project and in CI.
+- **Cache keys** — Turborepo passes `NODE_OPTIONS` through to tasks without hashing it, so adopting Nub does not invalidate your cache.
+- **Env files** — each task loads the `.env` for the package it runs in. Turborepo's `env` and `globalEnv` still control cache hashing, so a value that must affect the cache still belongs in `turbo.json`.

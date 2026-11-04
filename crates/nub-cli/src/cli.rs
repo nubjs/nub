@@ -5194,19 +5194,20 @@ fn run_workspace_target(
         })?;
 
     let mut members = nub_core::workspace::filter::discover_members(ws_root);
-    if members.is_empty() && !ws.include_workspace_root {
+    if members.iter().all(|m| m.dir == ws_root) && !ws.include_workspace_root {
         bail!("no workspace packages found under {}", ws_root.display());
     }
 
-    // --include-workspace-root: the root package is not a glob-discovered member,
-    // so synthesize it and always add it to the run set (npm semantics: it's an
-    // *addition* to the recursive set, distinct from --workspace-root which
-    // targets only the root). Its index is the appended slot.
-    let root_idx = if ws.include_workspace_root {
-        if let Ok(content) = std::fs::read_to_string(ws_root.join("package.json")) {
-            if let Ok(manifest) =
-                serde_json::from_str::<serde_json::Value>(nub_core::strip_utf8_bom(&content))
-            {
+    // The root is a candidate like any member, as in pnpm's project graph;
+    // the selector drops it from a run no inclusion selector pins.
+    let root_idx = match members.iter().position(|m| m.dir == ws_root) {
+        Some(idx) => Some(idx),
+        None => std::fs::read_to_string(ws_root.join("package.json"))
+            .ok()
+            .and_then(|content| {
+                serde_json::from_str::<serde_json::Value>(nub_core::strip_utf8_bom(&content)).ok()
+            })
+            .map(|manifest| {
                 let name = manifest
                     .get("name")
                     .and_then(|v| v.as_str())
@@ -5217,39 +5218,52 @@ fn run_workspace_target(
                     dir: ws_root.to_path_buf(),
                     manifest,
                 });
-                Some(members.len() - 1)
-            } else {
-                None
-            }
+                members.len() - 1
+            }),
+    };
+
+    // `--filter` goes through the engine's selector, the one every PM verb
+    // uses, so `run` and `install` read a selector the same way. `-r` alone
+    // is its unnarrowed `*`. The selector reads workspace config, so the
+    // project's config surface is set first: `pnpm-workspace.yaml` counts
+    // only when pnpm is the incumbent.
+    crate::pm_engine::engine_brand_preflight();
+    let filter = aube_workspace::EffectiveFilter {
+        filters: if ws.filter.is_empty() {
+            vec!["*".to_string()]
         } else {
-            None
-        }
-    } else {
-        None
+            ws.filter.clone()
+        },
+        recursive: ws.filter.is_empty(),
+        include_workspace_root: ws.include_workspace_root,
+        ..Default::default()
     };
-
-    // Resolve filter(s) to matched indices. Multiple `--filter`s union their
-    // includes and subtract their `!` exclusions (pnpm semantics). The
-    // `--workspace <name>` aliases were already folded into `ws.filter`.
-    let mut matched_set: std::collections::HashSet<usize> = if !ws.filter.is_empty() {
-        let filters: Vec<_> = ws
-            .filter
-            .iter()
-            .map(|s| nub_core::workspace::filter::Filter::parse(s))
-            .collect();
-        let v = nub_core::workspace::filter::apply_filters(&members, &filters, Some(ws_root));
-        v.into_iter().collect()
+    let member_dirs: Vec<PathBuf> = members.iter().map(|m| m.dir.clone()).collect();
+    // A directory selector resolves from the project the run started in,
+    // as pnpm's does, not from a subdirectory of it.
+    let prefix = if project.root.starts_with(ws_root) {
+        project.root.as_path()
     } else {
-        // No filter: every member (the root is opt-in via --include-workspace-root).
-        (0..members.len())
-            .filter(|i| Some(*i) != root_idx)
-            .collect()
+        cwd.as_path()
     };
-
-    // --include-workspace-root always adds the root regardless of the filter set.
-    if let Some(idx) = root_idx {
-        matched_set.insert(idx);
-    }
+    let selected = aube_workspace::selector::select_workspace_projects(
+        ws_root,
+        &member_dirs,
+        &filter,
+        aube_workspace::SelectOptions {
+            prefix,
+            root: aube_workspace::RootSelection::AutoExclude,
+        },
+    )
+    .map_err(|e| anyhow::anyhow!("invalid --filter selector: {e}"))?;
+    let selected_dirs: std::collections::HashSet<&Path> =
+        selected.iter().map(|pkg| pkg.dir.as_path()).collect();
+    let matched_set: std::collections::HashSet<usize> = members
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| selected_dirs.contains(m.dir.as_path()))
+        .map(|(idx, _)| idx)
+        .collect();
 
     // Zero-match handling. A filter that selects nothing is a clean exit-0
     // no-op (matching pnpm: `No projects matched the filters in "<dir>"`), not
@@ -7126,7 +7140,11 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     if let Some(w) = nub_core::node::discovery::engines_disagreement_warning(&cwd, &node) {
         eprintln!("{w}");
     }
-    nub_core::node::discovery::check_min_version(&node)?;
+    // Only augmentation needs the hook API; the compat branch below runs plain
+    // `node --watch`, so it skips the gate exactly as the file runner does.
+    if !compat_mode {
+        nub_core::node::discovery::check_min_version(&node)?;
+    }
 
     // `nub watch` has no `--node` flag (the watch loop is nub's, so there's no
     // "vanilla watch" CLI escape — use `node --watch` in your shell for that).
@@ -10675,6 +10693,19 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
         for line in crate::pm_engine::use_nub::regenerate_workspace_yaml(&root)? {
             println!("  {line}");
         }
+        // pnpm 11+ refuses a frozen install of a lockfile that does not record
+        // the pinned pnpm, and every alignment above writes only the project
+        // document. A failure (offline) leaves it to the next install.
+        match crate::pm_engine::sync_pnpm_package_manager_pin(&root) {
+            Ok(Some(recorded)) => println!(
+                "  pnpm-lock.yaml: packageManagerDependencies = pnpm@{recorded} (+integrity)"
+            ),
+            Ok(None) => {}
+            Err(e) => eprintln!(
+                "nub: could not record pnpm@{version} in pnpm-lock.yaml: {e:#}\n\
+                 \x20 the next `nub install` records it"
+            ),
+        }
     }
     Ok(0)
 }
@@ -11404,13 +11435,6 @@ fn shim_plan_with(
     cwd: &Path,
     route_installs: bool,
 ) -> Result<ShimPlan> {
-    use nub_core::pm::Pm;
-    use nub_core::pm::resolve::{self, PmTarget};
-    use nub_core::pm::shim::{self, Nesting, ShimDecision, ShimName};
-
-    let target = resolve::resolve_target(cwd);
-    let pin_state = shim_pin_state(cwd, target.as_ref());
-
     // Nested re-entry: when a running PM (e.g. a pnpm postinstall) spawns this
     // shim as a DIFFERENT PM, `npm_config_user_agent`/`npm_execpath` are set in
     // our environment — the ecosystem-standard "a PM is running above me" marker
@@ -11418,7 +11442,26 @@ fn shim_plan_with(
     // falls through to the system PM instead of refusing, so the install the
     // user issued one layer up isn't broken by its own lifecycle script. A
     // top-level invocation (no marker) keeps full strict behavior.
-    let nesting = Nesting::from_env(|k| env::var(k).ok());
+    let nesting = nub_core::pm::shim::Nesting::from_env(|k| env::var(k).ok());
+    shim_plan_at(invoked, args, cwd, route_installs, nesting)
+}
+
+/// [`shim_plan_with`] with the nesting read from the environment passed in, so
+/// a test is not turned into a nested invocation by the markers of an npm that
+/// happens to be running the test suite.
+fn shim_plan_at(
+    invoked: nub_core::pm::shim::ShimName,
+    args: &[String],
+    cwd: &Path,
+    route_installs: bool,
+    nesting: nub_core::pm::shim::Nesting,
+) -> Result<ShimPlan> {
+    use nub_core::pm::Pm;
+    use nub_core::pm::resolve::{self, PmTarget};
+    use nub_core::pm::shim::{self, Nesting, ShimDecision, ShimName};
+
+    let target = resolve::resolve_target(cwd);
+    let pin_state = shim_pin_state(cwd, target.as_ref());
 
     // A GLOBAL op (`npm install -g`, `yarn global add`, `npm ls -g`) writes the
     // user's global prefix, and a registry verb (`npm login`, `npm view`) the
@@ -14019,6 +14062,24 @@ mod tests {
     /// any code path that should NOT reach the network fails fast (connection
     /// refused) instead of touching the real registry — the same trick as
     /// nub-core's `pm::provision` tests.
+    /// [`shim_plan_with`] as a top-level invocation. The nesting markers an npm
+    /// exports to its children (`npm_execpath`, `npm_config_user_agent`) belong
+    /// to whatever ran the suite, not to the fixture.
+    fn top_level_plan(
+        invoked: nub_core::pm::shim::ShimName,
+        args: &[String],
+        dir: &Path,
+        route_installs: bool,
+    ) -> Result<ShimPlan> {
+        shim_plan_at(
+            invoked,
+            args,
+            dir,
+            route_installs,
+            nub_core::pm::shim::Nesting::TopLevel,
+        )
+    }
+
     fn offline_project(tag: &str, manifest: &str) -> PathBuf {
         let dir = pm_tmpdir(tag);
         std::fs::write(dir.join("package.json"), manifest).unwrap();
@@ -14567,7 +14628,7 @@ mod tests {
         // a Refuse plan), naming the pin, the field, the paste, and the escape.
         let dir = offline_project("shim-refuse", r#"{"packageManager":"pnpm@9.1.0"}"#);
         let args = vec!["install".to_string(), "react".to_string()];
-        match shim_plan(ShimName::Npm, &args, &dir).unwrap() {
+        match top_level_plan(ShimName::Npm, &args, &dir, false).unwrap() {
             ShimPlan::Refuse { message } => {
                 for needle in [
                     "pnpm",
@@ -14587,7 +14648,7 @@ mod tests {
         // A flags-only invocation (`npm --version`) still refuses, but with NO
         // "run instead" line: there is no verb to redirect, and echoing argv
         // back produced the nonsense "run instead: pnpm --version".
-        match shim_plan(ShimName::Npm, &["--version".to_string()], &dir).unwrap() {
+        match top_level_plan(ShimName::Npm, &["--version".to_string()], &dir, false).unwrap() {
             ShimPlan::Refuse { message } => {
                 assert!(
                     message.contains("pins pnpm") && message.contains("nub pm unshim"),
@@ -14604,7 +14665,7 @@ mod tests {
         // A committed-yarnPath project refuses invoked pnpm naming the yarnrc
         // provenance (decision 2: yarnPath projects, wrong name → refuse).
         let (dir, _release) = yarn_path_fixture("shim-refuse-yarnpath");
-        match shim_plan(ShimName::Pnpm, &["install".to_string()], &dir).unwrap() {
+        match top_level_plan(ShimName::Pnpm, &["install".to_string()], &dir, false).unwrap() {
             ShimPlan::Refuse { message } => assert!(
                 message.contains("yarn") && message.contains(".yarnrc.yml#yarnPath"),
                 "the yarnPath refusal must name yarn + the yarnrc provenance, got:\n{message}"
@@ -14627,7 +14688,7 @@ mod tests {
         // No npm lockfile: nothing frozen to install from, so npm keeps it.
         assert!(
             !matches!(
-                shim_plan_with(ShimName::Npm, &ci, &dir, true).unwrap(),
+                top_level_plan(ShimName::Npm, &ci, &dir, true).unwrap(),
                 ShimPlan::EngineInstall { .. }
             ),
             "without package-lock.json the real npm runs"
@@ -14637,7 +14698,7 @@ mod tests {
             r#"{"lockfileVersion":3,"packages":{}}"#,
         )
         .unwrap();
-        match shim_plan_with(ShimName::Npm, &ci, &dir, true).unwrap() {
+        match top_level_plan(ShimName::Npm, &ci, &dir, true).unwrap() {
             ShimPlan::EngineInstall {
                 route,
                 ignore_scripts,
@@ -14651,7 +14712,7 @@ mod tests {
         }
         assert!(
             !matches!(
-                shim_plan_with(ShimName::Npm, &ci, &dir, false).unwrap(),
+                top_level_plan(ShimName::Npm, &ci, &dir, false).unwrap(),
                 ShimPlan::EngineInstall { .. }
             ),
             "without the opt-in the real npm runs"
@@ -14660,7 +14721,7 @@ mod tests {
         // command line wins when it is not.
         std::fs::write(dir.join(".npmrc"), "ignore-scripts=true\n").unwrap();
         assert!(matches!(
-            shim_plan_with(ShimName::Npm, &ci, &dir, true).unwrap(),
+            top_level_plan(ShimName::Npm, &ci, &dir, true).unwrap(),
             ShimPlan::EngineInstall {
                 ignore_scripts: true,
                 ..
@@ -14668,7 +14729,7 @@ mod tests {
         ));
         let explicit = vec!["ci".to_string(), "--ignore-scripts=false".to_string()];
         assert!(matches!(
-            shim_plan_with(ShimName::Npm, &explicit, &dir, true).unwrap(),
+            top_level_plan(ShimName::Npm, &explicit, &dir, true).unwrap(),
             ShimPlan::EngineInstall {
                 ignore_scripts: false,
                 ..
@@ -14682,7 +14743,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            shim_plan_with(ShimName::Npm, &ci, &dir, true).unwrap(),
+            top_level_plan(ShimName::Npm, &ci, &dir, true).unwrap(),
             ShimPlan::EngineInstall { .. }
         ));
         // A project pinned to another PM refuses as before — routing never
@@ -14693,7 +14754,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            shim_plan_with(ShimName::Npm, &ci, &dir, true).unwrap(),
+            top_level_plan(ShimName::Npm, &ci, &dir, true).unwrap(),
             ShimPlan::Refuse { .. }
         ));
     }

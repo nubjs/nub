@@ -94,6 +94,31 @@ jobs:
       # vendored bats + committed Verdaccio fixtures, with nub standing in
       # for aube.
 
+  aube-clippy:
+    name: aube clippy (ubuntu)
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    # vendor/aube is a path dependency, so ci.yml's root clippy never lints its
+    # test targets and never reads its workspace lints.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+        with:
+          components: clippy
+      # Trunk writes, pull requests read — see the note in daily-driver.yml.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          workspaces: vendor/aube
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Lint aube's libraries and tests
+        working-directory: vendor/aube
+        run: cargo clippy --workspace --lib --tests -- -D warnings
+
   aube-parity-windows:
     name: aube cargo test (windows)
     if: github.event_name != 'pull_request' || github.event.label.name == 'ci'

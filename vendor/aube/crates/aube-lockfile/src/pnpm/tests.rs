@@ -3398,6 +3398,191 @@ snapshots:
     );
 }
 
+/// pnpm 11+'s env document as pnpm 12 writes it: a config dependency and
+/// the package-manager pin, each with its closure.
+const PNPM12_ENV_DOC: &str = "lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    configDependencies:
+      my-config:
+        specifier: 1.0.0
+        version: 1.0.0
+    packageManagerDependencies:
+      pnpm:
+        specifier: ^12.16.0
+        version: 12.16.0
+
+packages:
+
+  my-config@1.0.0:
+    resolution: {integrity: sha512-ccc}
+
+  pnpm@12.16.0:
+    resolution: {integrity: sha512-old}
+    engines: {node: '>=18'}
+    hasBin: true
+
+snapshots:
+
+  my-config@1.0.0: {}
+
+  pnpm@12.16.0: {}
+";
+
+#[test]
+fn rewriting_the_project_document_keeps_the_env_document_bytes() {
+    let project = "lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      lodash:
+        specifier: ^4.17.0
+        version: 4.17.21
+
+packages:
+
+  lodash@4.17.21:
+    resolution: {integrity: sha512-bbb}
+
+snapshots:
+
+  lodash@4.17.21: {}
+";
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pnpm-lock.yaml");
+    let original = super::compose_with_env_document(PNPM12_ENV_DOC, project);
+    std::fs::write(&path, &original).unwrap();
+    let graph = parse(&path).unwrap();
+    let mut manifest = PackageJson::default();
+    manifest
+        .dependencies
+        .insert("lodash".into(), "^4.17.0".into());
+    write(&path, &graph, &manifest).unwrap();
+    let written = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        super::split_env_document(&written).0,
+        Some(PNPM12_ENV_DOC),
+        "the env document must survive a project-document rewrite:\n{written}"
+    );
+    assert_eq!(written, original, "a no-op rewrite must be byte-identical");
+}
+
+#[test]
+fn package_manager_env_keeps_config_dependencies_and_prunes_the_old_pin() {
+    // The closure of `pnpm@12.16.1`, as the resolver hands it over.
+    let closure_lock = "lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      pnpm:
+        specifier: 12.16.1
+        version: 12.16.1
+
+packages:
+
+  '@pnpm/exe.darwin-arm64@12.16.1':
+    resolution: {integrity: sha512-arm}
+    cpu: [arm64]
+    os: [darwin]
+
+  pnpm@12.16.1:
+    resolution: {integrity: sha512-new}
+    engines: {node: '>=18'}
+    hasBin: true
+
+snapshots:
+
+  '@pnpm/exe.darwin-arm64@12.16.1':
+    optional: true
+
+  pnpm@12.16.1:
+    optionalDependencies:
+      '@pnpm/exe.darwin-arm64': 12.16.1
+";
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(&path, closure_lock).unwrap();
+    let closure = parse(&path).unwrap();
+    let mut manifest = PackageJson::default();
+    manifest
+        .dependencies
+        .insert("pnpm".into(), "12.16.1".into());
+
+    let existing = super::EnvLockfile::from_lockfile_content(&super::compose_with_env_document(
+        PNPM12_ENV_DOC,
+        "",
+    ))
+    .unwrap();
+    assert!(existing.pins("12.16.0", &["pnpm"], Some("^12.16.0")));
+    assert!(!existing.pins("12.16.1", &["pnpm"], None));
+
+    let pin = BTreeMap::from([(
+        "pnpm".to_string(),
+        super::EnvDependency {
+            specifier: "^12.16.0".into(),
+            version: "12.16.1".into(),
+        },
+    )]);
+    let env = super::render_package_manager_env(Some(&existing), pin, &closure, &manifest).unwrap();
+    assert_eq!(
+        env,
+        "lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    configDependencies:
+      my-config:
+        specifier: 1.0.0
+        version: 1.0.0
+    packageManagerDependencies:
+      pnpm:
+        specifier: ^12.16.0
+        version: 12.16.1
+
+packages:
+
+  '@pnpm/exe.darwin-arm64@12.16.1':
+    resolution: {integrity: sha512-arm}
+    cpu: [arm64]
+    os: [darwin]
+
+  my-config@1.0.0:
+    resolution: {integrity: sha512-ccc}
+
+  pnpm@12.16.1:
+    resolution: {integrity: sha512-new}
+    engines: {node: '>=18'}
+    hasBin: true
+
+snapshots:
+
+  '@pnpm/exe.darwin-arm64@12.16.1':
+    optional: true
+
+  my-config@1.0.0: {}
+
+  pnpm@12.16.1:
+    optionalDependencies:
+      '@pnpm/exe.darwin-arm64': 12.16.1
+"
+    );
+}
+
 #[test]
 fn snapshot_optional_and_transitive_peer_deps_roundtrip() {
     let yaml = r#"lockfileVersion: '9.0'
