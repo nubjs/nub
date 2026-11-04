@@ -5194,19 +5194,20 @@ fn run_workspace_target(
         })?;
 
     let mut members = nub_core::workspace::filter::discover_members(ws_root);
-    if members.is_empty() && !ws.include_workspace_root {
+    if members.iter().all(|m| m.dir == ws_root) && !ws.include_workspace_root {
         bail!("no workspace packages found under {}", ws_root.display());
     }
 
-    // --include-workspace-root: the root package is not a glob-discovered member,
-    // so synthesize it and always add it to the run set (npm semantics: it's an
-    // *addition* to the recursive set, distinct from --workspace-root which
-    // targets only the root). Its index is the appended slot.
-    let root_idx = if ws.include_workspace_root {
-        if let Ok(content) = std::fs::read_to_string(ws_root.join("package.json")) {
-            if let Ok(manifest) =
-                serde_json::from_str::<serde_json::Value>(nub_core::strip_utf8_bom(&content))
-            {
+    // The root is a candidate like any member, as in pnpm's project graph;
+    // the selector drops it from a run no inclusion selector pins.
+    let root_idx = match members.iter().position(|m| m.dir == ws_root) {
+        Some(idx) => Some(idx),
+        None => std::fs::read_to_string(ws_root.join("package.json"))
+            .ok()
+            .and_then(|content| {
+                serde_json::from_str::<serde_json::Value>(nub_core::strip_utf8_bom(&content)).ok()
+            })
+            .map(|manifest| {
                 let name = manifest
                     .get("name")
                     .and_then(|v| v.as_str())
@@ -5217,39 +5218,52 @@ fn run_workspace_target(
                     dir: ws_root.to_path_buf(),
                     manifest,
                 });
-                Some(members.len() - 1)
-            } else {
-                None
-            }
+                members.len() - 1
+            }),
+    };
+
+    // `--filter` goes through the engine's selector, the one every PM verb
+    // uses, so `run` and `install` read a selector the same way. `-r` alone
+    // is its unnarrowed `*`. The selector reads workspace config, so the
+    // project's config surface is set first: `pnpm-workspace.yaml` counts
+    // only when pnpm is the incumbent.
+    crate::pm_engine::engine_brand_preflight();
+    let filter = aube_workspace::EffectiveFilter {
+        filters: if ws.filter.is_empty() {
+            vec!["*".to_string()]
         } else {
-            None
-        }
-    } else {
-        None
+            ws.filter.clone()
+        },
+        recursive: ws.filter.is_empty(),
+        include_workspace_root: ws.include_workspace_root,
+        ..Default::default()
     };
-
-    // Resolve filter(s) to matched indices. Multiple `--filter`s union their
-    // includes and subtract their `!` exclusions (pnpm semantics). The
-    // `--workspace <name>` aliases were already folded into `ws.filter`.
-    let mut matched_set: std::collections::HashSet<usize> = if !ws.filter.is_empty() {
-        let filters: Vec<_> = ws
-            .filter
-            .iter()
-            .map(|s| nub_core::workspace::filter::Filter::parse(s))
-            .collect();
-        let v = nub_core::workspace::filter::apply_filters(&members, &filters, Some(ws_root));
-        v.into_iter().collect()
+    let member_dirs: Vec<PathBuf> = members.iter().map(|m| m.dir.clone()).collect();
+    // A directory selector resolves from the project the run started in,
+    // as pnpm's does, not from a subdirectory of it.
+    let prefix = if project.root.starts_with(ws_root) {
+        project.root.as_path()
     } else {
-        // No filter: every member (the root is opt-in via --include-workspace-root).
-        (0..members.len())
-            .filter(|i| Some(*i) != root_idx)
-            .collect()
+        cwd.as_path()
     };
-
-    // --include-workspace-root always adds the root regardless of the filter set.
-    if let Some(idx) = root_idx {
-        matched_set.insert(idx);
-    }
+    let selected = aube_workspace::selector::select_workspace_projects(
+        ws_root,
+        &member_dirs,
+        &filter,
+        aube_workspace::SelectOptions {
+            prefix,
+            root: aube_workspace::RootSelection::AutoExclude,
+        },
+    )
+    .map_err(|e| anyhow::anyhow!("invalid --filter selector: {e}"))?;
+    let selected_dirs: std::collections::HashSet<&Path> =
+        selected.iter().map(|pkg| pkg.dir.as_path()).collect();
+    let matched_set: std::collections::HashSet<usize> = members
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| selected_dirs.contains(m.dir.as_path()))
+        .map(|(idx, _)| idx)
+        .collect();
 
     // Zero-match handling. A filter that selects nothing is a clean exit-0
     // no-op (matching pnpm: `No projects matched the filters in "<dir>"`), not
