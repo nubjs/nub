@@ -5265,28 +5265,25 @@ fn run_workspace_target(
         .map(|(idx, _)| idx)
         .collect();
 
-    // Zero-match handling. A filter that selects nothing is a clean exit-0
-    // no-op (matching pnpm: `No projects matched the filters in "<dir>"`), not
-    // an error — CI commonly runs `--filter <maybe-empty>` and expects success.
-    // `--fail-if-no-match` is the opt-in that turns the empty selection back
-    // into a hard error (pnpm's `--fail-if-no-match` semantics, exit 1).
+    // Zero-match handling, as pnpm 12: a filter that selects nothing is an
+    // exit-0 no-op reporting the scope and `No projects matched the filters
+    // in "<dir>"`, since CI runs selectors like `...[origin/main]` that are
+    // empty on many commits. `--fail-if-no-match` makes it an error carrying
+    // the same notice.
     if matched_set.is_empty() {
+        let notice = format!(
+            "No projects matched the filters in \"{}\"",
+            ws_root.display()
+        );
         if ws.fail_if_no_match {
-            if !ws.filter.is_empty() {
-                bail!(
-                    "no packages matched the filter{}: {}",
-                    if ws.filter.len() == 1 { "" } else { "s" },
-                    ws.filter.join(", ")
-                );
-            }
-            bail!("no packages to run (--fail-if-no-match)");
+            bail!("{notice}");
         }
-        if !ws.filter.is_empty() {
-            eprintln!(
-                "No projects matched the filters in \"{}\"",
-                ws_root.display()
-            );
+        // pnpm reports the scope for `run`, and only the notice for `exec`.
+        if matches!(target, WorkspaceTarget::Script(..)) {
+            let total = members.len() + usize::from(root_idx.is_none());
+            eprintln!("Scope: 0 of {total} workspace projects");
         }
+        eprintln!("{notice}");
         return Ok(0);
     }
 

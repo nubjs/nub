@@ -837,6 +837,18 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     // the streaming-install write so both paths stay scoped identically.
     let per_project_write_selection =
         per_project_write_selection(&cwd, &workspace_packages, &opts.workspace_filter)?;
+    // A `--filter` that selects no project installs nothing and runs no
+    // hook, as in pnpm.
+    if per_project_write_selection
+        .as_ref()
+        .is_some_and(|selected| selected.is_empty())
+    {
+        return super::no_projects_matched(
+            &cwd,
+            &opts.workspace_filter,
+            super::NoMatchReport::Scope,
+        );
+    }
     let (build_policy, policy_warnings) =
         if let Some(override_policy) = opts.build_policy_override.as_deref() {
             (override_policy.clone(), Vec::new())

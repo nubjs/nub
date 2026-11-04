@@ -221,12 +221,54 @@ pub(crate) fn select_workspace_packages(
         ));
     }
     let matched = select_projects(&root, &workspace_pkgs, filter, command)?;
-    if matched.is_empty() {
-        return Err(miette!(
-            "aube {command}: filter {filter:?} did not match any workspace package"
-        ));
-    }
     Ok((root, matched))
+}
+
+/// What pnpm prints for a `--filter` that selects no project when that is
+/// not an error. Commands differ: `install`, `remove` and `update` report
+/// the scope, `run` reports the scope and the notice, `exec` the notice
+/// alone, and the rest print nothing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NoMatchReport {
+    Quiet,
+    Notice,
+    Scope,
+    ScopeAndNotice,
+}
+
+/// pnpm's handling of a `--filter` that selects no project: the command
+/// does nothing and exits 0, which CI relies on for selectors like
+/// `...[origin/main]` that are empty on many commits. `--fail-if-no-match`
+/// turns it into an error carrying pnpm's notice.
+pub(crate) fn no_projects_matched(
+    workspace_root: &Path,
+    filter: &aube_workspace::selector::EffectiveFilter,
+    report: NoMatchReport,
+) -> miette::Result<()> {
+    let notice = format!(
+        "No projects matched the filters in \"{}\"",
+        workspace_root.display()
+    );
+    let scope = matches!(report, NoMatchReport::Scope | NoMatchReport::ScopeAndNotice);
+    // pnpm drops the scope line from a failing `run`, and keeps it for the
+    // install family.
+    if scope && !(filter.fail_if_no_match && report == NoMatchReport::ScopeAndNotice) {
+        let members = aube_workspace::find_workspace_packages(workspace_root).unwrap_or_default();
+        let root_counted = workspace_root.join("package.json").is_file()
+            && !members.iter().any(|dir| dir == workspace_root);
+        let total = members.len() + usize::from(root_counted);
+        eprintln!("Scope: 0 of {total} workspace projects");
+    }
+    if filter.fail_if_no_match {
+        return Err(miette!("{notice}"));
+    }
+    if matches!(
+        report,
+        NoMatchReport::Notice | NoMatchReport::ScopeAndNotice
+    ) {
+        eprintln!("{notice}");
+    }
+    Ok(())
 }
 
 /// The workspace projects `filter` selects for `command`, the way pnpm

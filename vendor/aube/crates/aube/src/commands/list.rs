@@ -198,20 +198,13 @@ pub async fn run(
     let cwd = crate::dirs::workspace_or_project_root()?;
 
     // When a workspace filter is set, resolve workspace + selectors
-    // first so a no-match case takes the warn-and-exit-0 path before
-    // we try to read the lockfile. pnpm prints "No projects matched
-    // the filters in <root>" on stdout and exits 0 by default;
-    // `--fail-if-no-match` promotes it to an error. In `--parseable`
-    // mode no message is printed — machine consumers expect empty
-    // stdout when nothing matches. The result is threaded into
+    // first so a no-match case exits before we try to read the
+    // lockfile: silently with 0, as pnpm 12 does, or with an error
+    // under `--fail-if-no-match`. The result is threaded into
     // `run_filtered` so we don't re-walk the workspace on the match
     // path.
-    // Resolve the effective output format up front so the no-match
-    // suppression below honors `--format parseable` / `--format json`
-    // as well as the `--parseable` / `--json` shortcut flags. Without
-    // this, `--format parseable --filter=nonexistent` would print the
-    // human "No projects matched…" message and corrupt machine-parseable
-    // stdout.
+    // The effective output format, from `--format` or the `--parseable` /
+    // `--json` shortcut flags.
     let format = if args.json {
         ListFormat::Json
     } else if args.parseable {
@@ -233,22 +226,7 @@ pub async fn run(
         }
         let selected = super::select_projects(&cwd, &workspace_pkgs, &filter, "list")?;
         if selected.is_empty() {
-            if filter.fail_if_no_match {
-                let shown: Vec<&str> = filter
-                    .filters
-                    .iter()
-                    .chain(filter.filter_prods.iter())
-                    .map(String::as_str)
-                    .collect();
-                return Err(miette!(
-                    "{}: filter {shown:?} did not match any workspace package",
-                    aube_util::cmd("list")
-                ));
-            }
-            if format == ListFormat::Default {
-                println!("No projects matched the filters in {}", cwd.display());
-            }
-            return Ok(());
+            return super::no_projects_matched(&cwd, &filter, super::NoMatchReport::Quiet);
         }
         Some(selected)
     } else {

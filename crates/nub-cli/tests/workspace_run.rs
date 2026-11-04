@@ -324,31 +324,45 @@ fn a_stray_pnpm_workspace_yaml_leaves_an_npm_workspace_selection_alone() {
     );
 }
 
+/// A filter that selects no project is an exit-0 no-op for `install` and
+/// `run`, as in pnpm, since CI runs selectors like `...[origin/main]` that
+/// are empty on many commits. `--fail-if-no-match` makes it exit 1.
 #[test]
-fn filter_matching_no_package_is_a_clean_no_op() {
+fn a_filter_matching_no_project_does_nothing_unless_told_to_fail() {
     let root = script_workspace("no-match-filter");
-    let (_stdout, stderr, code) = run_nub(&root, &["run", "-F", "does-not-exist", "build"]);
-    assert_eq!(
-        code, 0,
-        "a filter that matches nothing exits 0 (pnpm parity)\n{stderr}"
+    write(
+        &root.join("dep/package.json"),
+        r#"{"name":"dep","version":"1.0.0"}"#,
+    );
+    write(
+        &root.join("package.json"),
+        r#"{"name":"e2e-root","private":true,"workspaces":["packages/*"],"dependencies":{"dep":"file:./dep"}}"#,
+    );
+    let notice = "No projects matched the filters in";
+
+    let (_, stderr, code) = run_nub(&root, &["install", "--filter", "nope"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("Scope: 0 of 4 workspace projects"),
+        "{stderr}"
     );
     assert!(
-        stderr.contains("No projects matched the filters"),
-        "the pnpm-style no-match message must surface, got: {stderr}"
+        !root.join("node_modules").exists(),
+        "an install that selects nothing touches no project"
     );
-}
+    let (_, stderr, code) = run_nub(&root, &["run", "-F", "nope", "build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains(notice), "{stderr}");
 
-#[test]
-fn fail_if_no_match_turns_an_empty_filter_into_an_error() {
-    let root = script_workspace("fail-if-no-match");
-    let (_stdout, stderr, code) = run_nub(
-        &root,
-        &["run", "-F", "does-not-exist", "--fail-if-no-match", "build"],
-    );
-    assert_ne!(
-        code, 0,
-        "--fail-if-no-match restores the hard error\n{stderr}"
-    );
+    for args in [
+        &["install", "--filter", "nope", "--fail-if-no-match"][..],
+        &["run", "-F", "nope", "--fail-if-no-match", "build"],
+    ] {
+        let (_, stderr, code) = run_nub(&root, args);
+        assert_eq!(code, 1, "nub {args:?}\n{stderr}");
+        assert!(stderr.contains(notice), "nub {args:?}\n{stderr}");
+    }
+    assert!(!root.join("node_modules").exists());
 }
 
 /// Offline guard for the network-backed remove test.

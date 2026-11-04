@@ -155,7 +155,11 @@ async fn run_filtered(
     filter: &aube_workspace::selector::EffectiveFilter,
     recursive: super::run::RecursiveOpts,
 ) -> miette::Result<Option<i32>> {
-    let (_root, matched) = super::select_workspace_packages(cwd, filter, "exec")?;
+    let (root, matched) = super::select_workspace_packages(cwd, filter, "exec")?;
+    if matched.is_empty() {
+        super::no_projects_matched(&root, filter, super::NoMatchReport::Notice)?;
+        return Ok(None);
+    }
     let matched = super::run::order_matched_packages(matched, &recursive)?;
 
     if let Some(concurrency) =

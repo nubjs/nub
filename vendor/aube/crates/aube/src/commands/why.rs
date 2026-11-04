@@ -158,10 +158,11 @@ fn run_filtered(
     let selected =
         super::select_projects(&workspace_root, &workspace_pkgs, workspace_filter, "why")?;
     if selected.is_empty() {
-        return Err(miette!(
-            "{}: filter {workspace_filter:?} did not match any workspace package",
-            aube_util::cmd("why")
-        ));
+        return super::no_projects_matched(
+            &workspace_root,
+            workspace_filter,
+            super::NoMatchReport::Quiet,
+        );
     }
 
     let mut importers = BTreeSet::new();

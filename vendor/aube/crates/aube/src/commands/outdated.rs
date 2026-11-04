@@ -325,6 +325,10 @@ async fn run_filtered(
     filter: &aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<Option<i32>> {
     let (root, matched) = super::select_workspace_packages(cwd, filter, "outdated")?;
+    if matched.is_empty() {
+        super::no_projects_matched(&root, filter, super::NoMatchReport::Quiet)?;
+        return Ok(None);
+    }
     let manifest = super::load_manifest(&root.join("package.json"))?;
     let graph = match aube_lockfile::parse_lockfile(&root, &manifest) {
         Ok(g) => g,

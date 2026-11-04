@@ -314,7 +314,11 @@ async fn run_recursive(
         ));
     }
 
-    let selected = select_workspace_packages(source_root, &workspace_pkgs, filter)?;
+    let projects = super::select_projects(source_root, &workspace_pkgs, filter, "publish")?;
+    if projects.is_empty() && !filter.is_empty() {
+        return super::no_projects_matched(source_root, filter, super::NoMatchReport::Quiet);
+    }
+    let selected = publishable(projects, filter);
     if selected.is_empty() {
         if !filter.is_empty() {
             return Err(miette!(
@@ -377,12 +381,20 @@ async fn run_recursive(
 /// try to publish. Drops packages without a `name`/`version`, drops
 /// private packages, and (if `filters` is non-empty) keeps only those
 /// matching at least one selector.
+#[cfg(test)]
 fn select_workspace_packages(
     workspace_root: &Path,
     workspace_pkgs: &[PathBuf],
     filters: &aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<Vec<PathBuf>> {
     let selected = super::select_projects(workspace_root, workspace_pkgs, filters, "publish")?;
+    Ok(publishable(selected, filters))
+}
+
+fn publishable(
+    selected: Vec<aube_workspace::selector::SelectedPackage>,
+    filters: &aube_workspace::selector::EffectiveFilter,
+) -> Vec<PathBuf> {
     let seen_names: Vec<String> = selected.iter().filter_map(|p| p.name.clone()).collect();
     let out: Vec<PathBuf> = selected
         .into_iter()
@@ -392,7 +404,7 @@ fn select_workspace_packages(
     if !filters.is_empty() && out.is_empty() && !seen_names.is_empty() {
         tracing::debug!("aube publish: known workspace packages: {seen_names:?}");
     }
-    Ok(out)
+    out
 }
 
 /// Result of a single-package publish attempt. Carries the resolved
