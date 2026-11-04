@@ -1028,7 +1028,7 @@ fn which_node_in(
             candidates.push(dir.join("node.exe"));
         }
         for candidate in candidates {
-            if !candidate.is_file() {
+            if !candidate.is_file() || links_back_to_nub(&candidate, persistent_shim) {
                 continue;
             }
             if handed_back
@@ -1047,6 +1047,26 @@ fn which_node_in(
         },
         None => DiscoveryError::NoNodeOnPath,
     })
+}
+
+/// A `node` in an ordinary directory that is a link back to nub: to this
+/// executable, or into one of nub's shim directories. The directory tests in
+/// [`which_node_in`] cannot see it, and resolving through it re-enters nub, which
+/// finds the same link again. A test bin dir holding `node -> <shim dir>/node`
+/// recursed without bound under a shim that predated the hand-back guard.
+fn links_back_to_nub(candidate: &Path, persistent_shim: Option<&Path>) -> bool {
+    let Ok(target) = candidate.canonicalize() else {
+        return false;
+    };
+    if env::current_exe()
+        .and_then(|exe| exe.canonicalize())
+        .is_ok_and(|exe| exe == target)
+    {
+        return true;
+    }
+    target
+        .parent()
+        .is_some_and(|dir| is_nub_shim_dir_with(dir, persistent_shim))
 }
 
 fn same_file_path(a: &Path, b: &Path) -> bool {
@@ -2357,6 +2377,34 @@ mod tests {
             which_node_in(&only_shim, Some(&canon_shim), &[]),
             Err(DiscoveryError::NoNodeOnPath)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn which_node_skips_a_link_back_to_nub_from_an_ordinary_dir() {
+        // A plain directory whose `node` is a symlink into the shim dir, or to
+        // this executable, passes every directory test; following it re-enters
+        // nub, which finds the same link again.
+        let tmp = unique_tmp("which-skip-link");
+        let shim = tmp.join("nub").join("node-shim");
+        let to_shim = tmp.join("links-to-shim");
+        let to_self = tmp.join("links-to-self");
+        let real = tmp.join("real-bin");
+        for dir in [&shim, &to_shim, &to_self, &real] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        write_fake_node(&shim.join("node"));
+        write_fake_node(&real.join("node"));
+        std::os::unix::fs::symlink(shim.join("node"), to_shim.join("node")).unwrap();
+        std::os::unix::fs::symlink(env::current_exe().unwrap(), to_self.join("node")).unwrap();
+
+        let path_var = env::join_paths([&to_shim, &to_self, &real]).unwrap();
+        let got = which_node_in(&path_var, None, &[]).unwrap();
+        assert_eq!(
+            got.canonicalize().unwrap(),
+            real.join("node").canonicalize().unwrap(),
+            "links into the shim dir and to nub itself are skipped; the real node wins"
+        );
     }
 
     #[test]
