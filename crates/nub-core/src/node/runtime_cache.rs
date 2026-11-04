@@ -191,21 +191,19 @@ fn extract_with(candidates: &[PathBuf]) -> Option<PathBuf> {
         let safe_base = match safe_base_or_reason(base) {
             Ok(safe_base) => safe_base,
             Err(reason) => {
-                // Never decline a candidate silently. A Windows-only relocation hid
-                // here for exactly that reason: the runtime cache moved to `$TMPDIR`
-                // while every other nub cache kept honouring `XDG_CACHE_HOME`, and
-                // nothing said so — the only symptom was a cache dir that never
-                // appeared where it was configured to.
+                // A declined candidate is logged at debug, and its reason reaches the
+                // user only if no later location works. Printed every time, it put a
+                // line on stderr of every run whose first location is someone else's,
+                // such as a root container job given a `$HOME` owned by the runner
+                // user, or Codex's Windows sandbox (#908), and captured output read
+                // it as the program's own.
                 //
-                // Report the reason the walker gave rather than asserting one. The
-                // old text said "unsafe owner or permissions" for every rejection,
-                // including a read-only filesystem and a transient failure of the
-                // Windows ACL query — so a log could not tell a real DACL problem
-                // from a one-off, which is exactly the distinction anyone chasing an
-                // intermittent relocation needs.
-                eprintln!(
-                    "nub: {} is not usable for the runtime cache ({reason}); \
-                     trying the next location",
+                // Keep the walker's own reason, never a guessed one: the old text said
+                // "unsafe owner or permissions" for every rejection, including a
+                // read-only filesystem and a transient failure of the Windows ACL
+                // query, which hid what an intermittent relocation needed.
+                tracing::debug!(
+                    "{} is not usable for the runtime cache ({reason}); trying the next location",
                     base.display()
                 );
                 refusals.push(format!("{}: {reason}", base.display()));
@@ -220,9 +218,8 @@ fn extract_with(candidates: &[PathBuf]) -> Option<PathBuf> {
             // (already_fresh=false) so a winner corrupted after publish still self-heals.
             Ok((dir, self_extracted)) => return verify_or_heal(&safe_base, &dir, self_extracted),
             Err(reason) => {
-                eprintln!(
-                    "nub: {} is not usable for the runtime cache ({reason}); \
-                     trying the next location",
+                tracing::debug!(
+                    "{} is not usable for the runtime cache ({reason}); trying the next location",
                     safe_base.display()
                 );
                 refusals.push(format!("{}: {reason}", safe_base.display()));
@@ -2021,6 +2018,68 @@ mod tests {
             fs::metadata(&safe_base).unwrap().mode() & 0o777,
             0o700,
             "the safe base is created owner-only"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A declined location stays off stderr when a later one is used, and its reason
+    /// is printed when no location works. Re-execs this test binary as a worker so
+    /// the assertions read the real stderr, which the test harness would otherwise
+    /// capture.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn a_declined_location_is_reported_only_when_no_location_works() {
+        if let Some(list) = std::env::var_os("NUB_RTC_DECLINE_WORKER") {
+            let candidates: Vec<PathBuf> = std::env::split_paths(&list).collect();
+            std::process::exit(if extract_with(&candidates).is_some() {
+                0
+            } else {
+                1
+            });
+        }
+
+        let root = ensure_safe_base(&tmp_base("nub-rtc-decline")).unwrap();
+        let declined = root.join("declined");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::create_dir(&declined).unwrap();
+            fs::set_permissions(&declined, fs::Permissions::from_mode(0o777)).unwrap();
+        }
+        #[cfg(windows)]
+        crate::windows_security::create_shared_directory(&declined).unwrap();
+
+        let run = |candidates: &[PathBuf]| {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "node::runtime_cache::tests::a_declined_location_is_reported_only_when_no_location_works",
+                    "--nocapture",
+                ])
+                .env("NUB_RTC_DECLINE_WORKER", std::env::join_paths(candidates).unwrap())
+                .output()
+                .unwrap();
+            (
+                output.status.success(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            )
+        };
+
+        let used = root.join("used");
+        let (extracted, stderr) = run(&[declined.clone(), used.clone()]);
+        assert!(extracted, "the second location is used: {stderr}");
+        assert!(used.join(CACHE_KEY).is_dir() && !declined.join(CACHE_KEY).exists());
+        assert_eq!(
+            stderr, "",
+            "a declined location is silent when a later one works"
+        );
+
+        let (extracted, stderr) = run(std::slice::from_ref(&declined));
+        assert!(!extracted, "no location works");
+        assert!(
+            stderr.contains("could not extract the embedded runtime")
+                && stderr.contains(&*declined.to_string_lossy()),
+            "the failure names the declined location: {stderr}"
         );
         fs::remove_dir_all(&root).unwrap();
     }
