@@ -744,12 +744,17 @@ fn npm_link_only_project(work: &Path) -> PathBuf {
     let proj = work.join("proj");
     std::fs::create_dir_all(proj.join("local-dep")).unwrap();
     // A root postinstall that records whether it ran, and with which
-    // NODE_ENV — the probe for npm's script semantics under routing.
+    // NODE_ENV — the probe for npm's script semantics under routing — a root
+    // prepare, which npm runs whether or not dev dependencies are omitted, a
+    // prepublish npm still runs on install, and a pnpm-only devPreinstall.
     std::fs::write(
         proj.join("package.json"),
         r#"{ "name": "proj", "version": "1.0.0", "dependencies": { "local-dep": "file:local-dep" },
   "optionalDependencies": { "opt-dep": "file:opt-dep" },
-  "scripts": { "postinstall": "node -e \"require('fs').writeFileSync('postinstall.txt', String(process.env.NODE_ENV))\"" } }"#,
+  "scripts": { "postinstall": "node -e \"require('fs').writeFileSync('postinstall.txt', String(process.env.NODE_ENV))\"",
+    "prepare": "node -e \"require('fs').writeFileSync('root-prepared.txt', '1')\"",
+    "prepublish": "node -e \"require('fs').writeFileSync('root-prepublished.txt', '1')\"",
+    "pnpm:devPreinstall": "node -e \"require('fs').writeFileSync('dev-preinstall.txt', '1')\"" } }"#,
     )
     .unwrap();
     // The link target's `prepare`: npm runs it in the target directory
@@ -874,6 +879,10 @@ fn routed_npm_ci_runs_on_the_engine_and_everything_else_reaches_the_real_npm() {
         "undefined",
         "the root postinstall ran, with no NODE_ENV forced on it"
     );
+    assert!(
+        proj.join("root-prepublished.txt").is_file() && !proj.join("dev-preinstall.txt").exists(),
+        "npm's root scripts ran: prepublish, and not pnpm's devPreinstall"
+    );
     let prepared = proj.join("local-dep/prepared.txt");
     assert!(
         prepared.is_file(),
@@ -904,9 +913,15 @@ fn routed_npm_ci_runs_on_the_engine_and_everything_else_reaches_the_real_npm() {
     // npm's dependency axis: an effective omit=dev hands lifecycle scripts
     // NODE_ENV=production; --include=dev takes both back.
     std::fs::remove_file(&postinstall).unwrap();
+    let root_prepared = proj.join("root-prepared.txt");
+    std::fs::remove_file(&root_prepared).unwrap();
     let (_, stderr, code) = run(&npm, &["ci", "--omit=dev"], &proj, &env);
     assert_eq!(code, 0, "stderr:\n{stderr}");
     assert_eq!(std::fs::read_to_string(&postinstall).unwrap(), "production");
+    assert!(
+        root_prepared.is_file(),
+        "npm runs the root prepare with dev dependencies omitted (pnpm's --prod does not)"
+    );
     std::fs::remove_file(&postinstall).unwrap();
     let (_, stderr, code) = run(&npm, &["ci", "--omit=dev", "--include=dev"], &proj, &env);
     assert_eq!(code, 0, "stderr:\n{stderr}");
@@ -1590,4 +1605,77 @@ fn routed_npm_ci_under_the_persistent_node_shim_records_what_the_shim_resolves()
         stamp.trim().ends_with("node19"),
         "the engine stamp names the pin the shim resolves, got {stamp:?}"
     );
+}
+
+/// A routed install in an npm workspace runs npm's stages in each project:
+/// the root's seven, and a linked member's `preinstall`, `prepare`,
+/// `install` and `postinstall` (Arborist's build order) without the
+/// root-only `prepublish`, `preprepare` and `postprepare`, which fail here.
+#[test]
+fn routed_npm_install_keeps_root_only_stages_off_workspace_members() {
+    let work = tmp("route-ws");
+    let home = work.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let shims = shims_with_routing(&home, true);
+    let proj = work.join("proj");
+    std::fs::create_dir_all(proj.join("member")).unwrap();
+    let record = |file: &str| format!("node -e \"require('fs').writeFileSync('{file}', '1')\"");
+    let root = serde_json::json!({
+        "name": "proj", "version": "1.0.0", "workspaces": ["member"],
+        "scripts": { "prepublish": record("root-prepublished.txt") },
+    });
+    let member = serde_json::json!({
+        "name": "member", "version": "1.0.0",
+        "scripts": {
+            "prepare": record("member-prepared.txt"),
+            "prepublish": "exit 1", "preprepare": "exit 1", "postprepare": "exit 1",
+        },
+    });
+    std::fs::write(proj.join("package.json"), root.to_string()).unwrap();
+    std::fs::write(proj.join("member/package.json"), member.to_string()).unwrap();
+    std::fs::write(
+        proj.join("package-lock.json"),
+        r#"{ "name": "proj", "version": "1.0.0", "lockfileVersion": 3, "requires": true,
+  "packages": {
+    "": { "name": "proj", "version": "1.0.0", "workspaces": ["member"] },
+    "member": { "name": "member", "version": "1.0.0" },
+    "node_modules/member": { "resolved": "member", "link": true }
+  } }"#,
+    )
+    .unwrap();
+    let sys = work.join("sys");
+    std::fs::create_dir_all(&sys).unwrap();
+    fake_pm(&sys, "npm");
+    let cache = work.join("cache");
+    std::fs::create_dir_all(cache.join("nub")).unwrap();
+    std::fs::write(cache.join("nub/.npmrc"), "registry=http://127.0.0.1:1/\n").unwrap();
+    let path = format!(
+        "{}:{}:{}",
+        shims.display(),
+        sys.display(),
+        std::env::var("PATH").unwrap()
+    );
+    let env: Vec<(&str, &str)> = vec![
+        ("HOME", home.to_str().unwrap()),
+        ("PATH", path.as_str()),
+        ("XDG_CACHE_HOME", cache.to_str().unwrap()),
+    ];
+    for verb in ["ci", "install"] {
+        let _ = std::fs::remove_file(proj.join("member/member-prepared.txt"));
+        let _ = std::fs::remove_file(proj.join("root-prepublished.txt"));
+        let (_, stderr, code) = run(&shims.join("npm"), &[verb], &proj, &env);
+        assert_eq!(
+            code, 0,
+            "the routed npm {verb} must succeed; stderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("via nub shim"),
+            "npm {verb} ran on the engine, got:\n{stderr}"
+        );
+        assert!(
+            proj.join("member/member-prepared.txt").is_file()
+                && proj.join("root-prepublished.txt").is_file(),
+            "npm {verb} ran the member's prepare and the root's prepublish"
+        );
+    }
 }

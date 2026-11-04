@@ -1808,6 +1808,7 @@ impl<'a> ResolveDriver<'a> {
                     }
                     m
                 },
+                declared_dependencies_known: true,
                 license: version_meta.license.clone(),
                 funding_url: version_meta.funding_url.clone(),
                 optional: false,
@@ -2346,6 +2347,7 @@ impl<'a> ResolveDriver<'a> {
                         v
                     },
                     declared_dependencies: declared,
+                    declared_dependencies_known: true,
                     ..Default::default()
                 },
             );
@@ -3121,6 +3123,7 @@ impl<'a> ResolveDriver<'a> {
                     engines: locked_pkg.engines.clone(),
                     bin: locked_pkg.bin.clone(),
                     declared_dependencies: locked_pkg.declared_dependencies.clone(),
+                    declared_dependencies_known: locked_pkg.declared_dependencies_known,
                     license: locked_pkg.license.clone(),
                     funding_url: locked_pkg.funding_url.clone(),
                     extra_meta: locked_pkg.extra_meta.clone(),

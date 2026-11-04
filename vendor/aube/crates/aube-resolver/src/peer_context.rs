@@ -1390,7 +1390,46 @@ fn propagate_peer_suffixes_to_ancestors(
         }
     }
 
-    if rewrite.is_empty() {
+    // A peer the node declares but could not resolve in its own context
+    // (an optional peer nothing above it provides) can still arrive in its
+    // cumulative set, bubbled up from a descendant that resolved the same
+    // name — typically a required peer aube auto-installed into that
+    // descendant's own deps, where pnpm hoists it to the importer instead.
+    // The node's key now claims that peer, so it gets the edge too: pnpm
+    // links the same provider for it, and a key with no matching edge
+    // leaves the package unable to import its own peer (#937:
+    // `@sentry/node-core` and `@opentelemetry/core`). The edge is added
+    // after `cumulative` is final, so it never feeds the peer's own
+    // segments back into the node's suffix — those stay nested in the
+    // segment, as pnpm writes them. An optional peer's edge is optional,
+    // like the ones `visit_peer_context` wires.
+    let mut peer_edges: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for key in &pkg_keys {
+        let (Some(pkg), Some(segments)) = (graph.packages.get(key), cumulative.get(key)) else {
+            continue;
+        };
+        for (name, seg) in segments {
+            if !pkg.peer_dependencies.contains_key(name) || pkg.dependencies.contains_key(name) {
+                continue;
+            }
+            let Some(tail) = seg
+                .strip_prefix('(')
+                .and_then(|s| s.strip_suffix(')'))
+                .and_then(|s| s.strip_prefix(name.as_str()))
+                .and_then(|s| s.strip_prefix('@'))
+            else {
+                continue;
+            };
+            if graph.packages.contains_key(&format!("{name}@{tail}")) {
+                peer_edges
+                    .entry(key.clone())
+                    .or_default()
+                    .push((name.clone(), tail.to_string()));
+            }
+        }
+    }
+
+    if rewrite.is_empty() && peer_edges.is_empty() {
         return graph;
     }
 
@@ -1431,6 +1470,18 @@ fn propagate_peer_suffixes_to_ancestors(
 
     let mut new_packages: BTreeMap<String, LockedPackage> = BTreeMap::new();
     for (old_key, mut pkg) in packages {
+        if let Some(edges) = peer_edges.remove(&old_key) {
+            for (name, tail) in edges {
+                if pkg
+                    .peer_dependencies_meta
+                    .get(&name)
+                    .is_some_and(|m| m.optional)
+                {
+                    pkg.optional_dependencies.insert(name.clone(), tail.clone());
+                }
+                pkg.dependencies.insert(name, tail);
+            }
+        }
         let new_key = rewrite.get(&old_key).cloned().unwrap_or(old_key);
         for (name, tail) in pkg.dependencies.iter_mut() {
             *tail = rewrite_tail(name, tail);
@@ -1610,6 +1661,7 @@ pub(crate) fn dedupe_peer_suffixes(graph: LockfileGraph) -> LockfileGraph {
                 engines: pkg.engines,
                 bin: pkg.bin,
                 declared_dependencies: pkg.declared_dependencies,
+                declared_dependencies_known: pkg.declared_dependencies_known,
                 license: pkg.license,
                 funding_url: pkg.funding_url,
                 extra_meta: pkg.extra_meta,
@@ -1871,20 +1923,32 @@ fn visit_peer_context<'g>(
 
         // pnpm resolves an *optional* peer (one flagged
         // `peerDependenciesMeta.optional`) only from the resolution path it
-        // is actually on — the nearest ancestor, the package's own
-        // auto-installed deps, or the workspace root — and otherwise leaves
-        // it unresolved so it surfaces under `transitivePeerDependencies`.
-        // It never reaches for a range-incompatible version or scans the
+        // is actually on — the nearest ancestor, the package's own deps, or
+        // the workspace root — and otherwise leaves it unresolved so it
+        // surfaces under `transitivePeerDependencies`. It never scans the
         // whole graph for an unrelated copy. Mirroring that is what lets
         // `typescript` (an optional peer the root provides) take a dep-path
         // suffix while debug's optional `supports-color` (which nothing on
         // the path provides) bubbles up instead of binding to a cousin.
+        //
+        // A provider on the path binds even when its version is outside
+        // the declared range: pnpm's `resolvePeersFromParents` takes the
+        // parent's copy for optional and required peers alike and only
+        // reports it as a bad peer. Dropping it instead leaves the package
+        // unable to import a peer the project installed on purpose
+        // (`@vitejs/plugin-react` and an `oxc-transform-react` newer than
+        // its peer range, #937).
         let is_optional = pkg
             .peer_dependencies_meta
             .get(peer_name)
             .is_some_and(|m| m.optional);
         let resolved = if is_optional {
-            from_ancestor.or(from_pkg_deps).or(from_root)
+            from_ancestor
+                .or(from_pkg_deps)
+                .or(from_ancestor_incompatible)
+                .or(from_pkg_deps_incompatible)
+                .or(from_root)
+                .or(from_root_incompatible)
         } else {
             from_ancestor
                 .or(from_pkg_deps)
@@ -2018,7 +2082,13 @@ fn visit_peer_context<'g>(
     // Peers that were satisfied purely from the ancestor scope may not
     // have been in `pkg.dependencies` at all (no auto-install needed).
     // Wire them as deps now so the linker creates the sibling symlink
-    // and the lockfile snapshot records them.
+    // and the lockfile snapshot records them. An optional peer's edge is
+    // an optional edge, as pnpm records it (`optionalDependencies` in
+    // the snapshot): platform filtering may drop it, and it never makes
+    // a provider reachable only through optional edges required. Later
+    // fixed-point passes see the edge in `pkg.dependencies` and keep the
+    // classification through `pkg.optional_dependencies`.
+    let mut optional_peer_edges: Vec<String> = Vec::new();
     for (peer_name, provider) in &peer_context {
         if visited_dep_names.contains(peer_name) {
             continue;
@@ -2040,6 +2110,13 @@ fn visit_peer_context<'g>(
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| provider.target_tail.clone());
             new_dependencies.insert(peer_name.clone(), new_tail);
+            if pkg
+                .peer_dependencies_meta
+                .get(peer_name)
+                .is_some_and(|m| m.optional)
+            {
+                optional_peer_edges.push(peer_name.clone());
+            }
         }
     }
 
@@ -2047,6 +2124,7 @@ fn visit_peer_context<'g>(
     let new_optional_dependencies: BTreeMap<String, String> = pkg
         .optional_dependencies
         .keys()
+        .chain(optional_peer_edges.iter())
         .filter_map(|name| {
             new_dependencies
                 .get(name)
@@ -2080,6 +2158,7 @@ fn visit_peer_context<'g>(
             engines: pkg.engines.clone(),
             bin: pkg.bin.clone(),
             declared_dependencies: pkg.declared_dependencies.clone(),
+            declared_dependencies_known: pkg.declared_dependencies_known,
             license: pkg.license.clone(),
             funding_url: pkg.funding_url.clone(),
             extra_meta: pkg.extra_meta.clone(),
@@ -2176,6 +2255,91 @@ mod tests {
         assert!(
             out.packages.contains_key("plugin@1.0.0(theme@1.0.0)"),
             "a required peer should still resolve through the graph-wide scan"
+        );
+    }
+
+    fn optional_peer(pkg: &mut LockedPackage, name: &str, range: &str) {
+        pkg.peer_dependencies
+            .insert(name.to_string(), range.to_string());
+        pkg.peer_dependencies_meta
+            .insert(name.to_string(), PeerDepMeta { optional: true });
+    }
+
+    fn importer(g: &mut LockfileGraph, deps: &[&str]) {
+        g.importers.insert(
+            ".".to_string(),
+            deps.iter()
+                .map(|name| DirectDep {
+                    name: (*name).to_string(),
+                    dep_path: format!("{name}@1.0.0"),
+                    dep_type: DepType::Production,
+                    specifier: Some("1.0.0".to_string()),
+                })
+                .collect(),
+        );
+    }
+
+    /// The `@sentry/node` shape: `node -> node-core -> otel`, where
+    /// `node-core` peers on `core` optionally and `otel` requires it, so
+    /// `core` is auto-installed into `otel`'s own deps. `core` bubbles up
+    /// onto `node-core`'s key, and `node-core` must link it too.
+    #[test]
+    fn optional_peer_named_in_key_by_a_descendant_is_linked() {
+        let mut g = LockfileGraph::default();
+        importer(&mut g, &["node"]);
+        let mut node_core = locked("node-core", &[("otel", "1.0.0")]);
+        optional_peer(&mut node_core, "core", "^1.0.0");
+        let mut otel = locked("otel", &[("core", "1.0.0")]);
+        otel.peer_dependencies
+            .insert("core".to_string(), "^1.0.0".to_string());
+        for p in [
+            locked("node", &[("node-core", "1.0.0")]),
+            node_core,
+            otel,
+            locked("core", &[]),
+        ] {
+            g.packages.insert(p.dep_path.clone(), p);
+        }
+
+        let out = apply_peer_contexts(g, &PeerContextOptions::default()).expect("peer pass");
+
+        let node_core = out
+            .packages
+            .get("node-core@1.0.0(core@1.0.0)")
+            .expect("node-core carries the core peer in its key");
+        assert_eq!(
+            node_core.dependencies.get("core").map(String::as_str),
+            Some("1.0.0"),
+            "a peer the key claims must also be an edge, or the linker never \
+             places it next to node-core"
+        );
+        assert!(
+            node_core.optional_dependencies.contains_key("core"),
+            "the edge for an optional peer is an optional edge"
+        );
+    }
+
+    /// pnpm binds an optional peer to the provider on the path even when
+    /// its version is outside the declared range, and only warns.
+    #[test]
+    fn optional_peer_binds_an_out_of_range_provider_on_the_path() {
+        let mut g = LockfileGraph::default();
+        importer(&mut g, &["plugin", "oxc"]);
+        let mut plugin = locked("plugin", &[]);
+        optional_peer(&mut plugin, "oxc", "^0.5.0");
+        g.packages.insert(plugin.dep_path.clone(), plugin);
+        let oxc = locked("oxc", &[]);
+        g.packages.insert(oxc.dep_path.clone(), oxc);
+
+        let out = apply_peer_contexts(g, &PeerContextOptions::default()).expect("peer pass");
+
+        let plugin = out
+            .packages
+            .get("plugin@1.0.0(oxc@1.0.0)")
+            .expect("the importer's out-of-range oxc resolves the optional peer");
+        assert_eq!(
+            plugin.dependencies.get("oxc").map(String::as_str),
+            Some("1.0.0")
         );
     }
 
