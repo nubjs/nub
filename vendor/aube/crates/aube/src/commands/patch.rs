@@ -67,16 +67,21 @@ pub async fn run(args: PatchArgs) -> Result<()> {
     // and lands the entry in the workspace yaml when no
     // `package.json` exists at the resolved root.
     let cwd = crate::dirs::workspace_or_project_root()?;
-    let (name, version) = parse_spec(&args.package)?;
+    let (spec_name, version) = parse_spec(&args.package)?;
 
-    // Locate the source files. The package must be installed —
-    // `aube` extracts from the linked tree
-    // (`<virtualStoreDir>/<dep_path>/...`) so the user edits exactly
-    // what the runtime would see. Honors the `virtualStoreDir`
-    // override via `resolve_virtual_store_dir_for_cwd`.
-    let pnpm_dir = super::resolve_virtual_store_dir_for_cwd(&cwd);
-    let vstore_max_len = super::resolve_virtual_store_dir_max_length_for_cwd(&cwd);
-    let pkg_dir = find_pnpm_entry(&pnpm_dir, &name, &version, vstore_max_len)?;
+    // Resolve the spec against the lockfile, as pnpm does. An npm alias
+    // is found by its registry name, the key install applies a patch
+    // under, and that is the name the patch is recorded with.
+    let locked = locked_entries(&cwd, &spec_name, &version)?;
+    let name = locked
+        .first()
+        .map_or(spec_name, |pkg| pkg.registry_name().to_string());
+    // Only a package with no store copy is snapshotted from the linked
+    // tree, so only then must one be found.
+    let original = match original_files_index(&cwd, &locked)? {
+        Some(index) => Original::Store(index),
+        None => Original::Linked(find_linked_dir(&cwd, &locked, &name, &version)?),
+    };
 
     // The edit snapshot must represent the currently declared patch.
     // In particular, a prior patch-commit can have updated the patch
@@ -95,8 +100,7 @@ pub async fn run(args: PatchArgs) -> Result<()> {
 
     let declared =
         find_applied_patch(&cwd, &name, &version)?.filter(|patch| !patch.content.trim().is_empty());
-    let original = original_files_index(&cwd, &name, &version)?;
-    if original.is_none() && declared.is_some() && args.ignore_existing {
+    if matches!(original, Original::Linked(_)) && declared.is_some() && args.ignore_existing {
         return Err(miette!(
             code = aube_codes::errors::ERR_AUBE_PATCH_FAILED,
             "`--ignore-existing` needs the original files of {name}@{version}, and the store \
@@ -135,7 +139,7 @@ pub async fn run(args: PatchArgs) -> Result<()> {
     // store copy also leaves out whatever lifecycle scripts wrote into
     // the linked package, which would otherwise land in the diff.
     let replaces_patch = match &original {
-        Some(index) => {
+        Original::Store(index) => {
             for dir in [&source_dir, &user_dir] {
                 aube_linker::copy_package_from_store(index, dir).map_err(|e| {
                     miette!(
@@ -160,9 +164,9 @@ pub async fn run(args: PatchArgs) -> Result<()> {
         // No store entry to diff against: snapshot the linked tree. When
         // it already carries a patch, the diff holds only the new edits
         // and `patch-commit` appends them to the patch file.
-        None => {
-            copy_dir_all(&pkg_dir, &source_dir)?;
-            copy_dir_all(&pkg_dir, &user_dir)?;
+        Original::Linked(pkg_dir) => {
+            copy_dir_all(pkg_dir, &source_dir)?;
+            copy_dir_all(pkg_dir, &user_dir)?;
             declared.is_none()
         }
     };
@@ -254,30 +258,100 @@ fn find_pnpm_entry(
     ))
 }
 
-/// The store index of `name@version`'s original files, read with the
-/// same key install uses: the lockfile integrity, or for a package
-/// without one, the sha512 this project bound to it. `None` when the
-/// lockfile has no registry entry for the package (a `file:`, git or
-/// tarball dependency) or the store no longer holds every file.
-fn original_files_index(
+/// Where `patch` takes a package's original files from.
+enum Original {
+    /// The store's copy, the files install linked.
+    Store(aube_store::PackageIndex),
+    /// The linked package, when the store holds no copy of it.
+    Linked(PathBuf),
+}
+
+/// The lockfile entries for `name@version`, matched on the registry
+/// name. With no such package, the name an npm alias is installed
+/// under matches instead, so `<alias>@<version>` finds it too. Empty
+/// when the project has no lockfile.
+fn locked_entries(
     cwd: &Path,
     name: &str,
     version: &str,
-) -> Result<Option<aube_store::PackageIndex>> {
+) -> Result<Vec<aube_lockfile::LockedPackage>> {
     let manifest = super::load_manifest_or_default(cwd)?;
     let graph = match aube_lockfile::parse_lockfile(cwd, &manifest) {
         Ok(graph) => graph,
-        Err(aube_lockfile::Error::NotFound(_)) => return Ok(None),
+        Err(aube_lockfile::Error::NotFound(_)) => return Ok(Vec::new()),
         Err(e) => return Err(miette::Report::new(e)).wrap_err("failed to parse lockfile"),
     };
-    let candidates: Vec<&aube_lockfile::LockedPackage> = graph
-        .packages
-        .values()
-        .filter(|pkg| {
-            pkg.version == version
-                && pkg.local_source.is_none()
-                && (pkg.name == name || pkg.registry_name() == name)
-        })
+    let matching = |by_registry_name: bool| -> Vec<aube_lockfile::LockedPackage> {
+        graph
+            .packages
+            .values()
+            .filter(|pkg| {
+                let candidate = if by_registry_name {
+                    pkg.registry_name()
+                } else {
+                    &pkg.name
+                };
+                pkg.version == version && candidate == name
+            })
+            .cloned()
+            .collect()
+    };
+    let found = matching(true);
+    Ok(if found.is_empty() {
+        matching(false)
+    } else {
+        found
+    })
+}
+
+/// The linked directory of a package the store holds no copy of. The
+/// virtual store keeps each package under its lockfile `dep_path`, the
+/// name the alias is installed under plus any peer suffix. The hoisted
+/// linker has no virtual store and places the package at
+/// `node_modules/<name>`.
+fn find_linked_dir(
+    cwd: &Path,
+    locked: &[aube_lockfile::LockedPackage],
+    name: &str,
+    version: &str,
+) -> Result<PathBuf> {
+    use aube_lockfile::dep_path_filename::dep_path_to_filename;
+    let pnpm_dir = super::resolve_virtual_store_dir_for_cwd(cwd);
+    let vstore_max_len = super::resolve_virtual_store_dir_max_length_for_cwd(cwd);
+    let linked = locked.iter().map(|pkg| {
+        pnpm_dir
+            .join(dep_path_to_filename(&pkg.dep_path, vstore_max_len))
+            .join("node_modules")
+            .join(&pkg.name)
+    });
+    let hoisted = locked
+        .iter()
+        .map(|pkg| cwd.join("node_modules").join(&pkg.name))
+        .filter(|dir| installed_version(dir).as_deref() == Some(version));
+    if let Some(dir) = linked.filter(|dir| dir.exists()).chain(hoisted).next() {
+        return Ok(dir);
+    }
+    find_pnpm_entry(&pnpm_dir, name, version, vstore_max_len)
+}
+
+fn installed_version(pkg_dir: &Path) -> Option<String> {
+    let manifest = std::fs::read_to_string(pkg_dir.join("package.json")).ok()?;
+    let manifest: serde_json::Value = serde_json::from_str(&manifest).ok()?;
+    manifest.get("version")?.as_str().map(str::to_string)
+}
+
+/// The store index of the package's original files, read with the
+/// same key install uses: the lockfile integrity, or for a package
+/// without one, the sha512 this project bound to it. `None` for a
+/// `file:`, git or tarball dependency, which has no `name@version`
+/// store entry, and when the store no longer holds every file.
+fn original_files_index(
+    cwd: &Path,
+    locked: &[aube_lockfile::LockedPackage],
+) -> Result<Option<aube_store::PackageIndex>> {
+    let candidates: Vec<&aube_lockfile::LockedPackage> = locked
+        .iter()
+        .filter(|pkg| pkg.local_source.is_none())
         .collect();
     if candidates.is_empty() {
         return Ok(None);

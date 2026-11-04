@@ -304,6 +304,59 @@ EOF
 	assert_success
 }
 
+# The alias is a name the virtual store files the package under, not
+# the one a patch is keyed by, so both spellings must find the package
+# and both must record the registry name install applies.
+@test "aube patch finds an npm-aliased install by registry name and by alias" {
+	cat >package.json <<'EOF'
+{
+  "name": "aliased-patch-cli-test",
+  "version": "1.0.0",
+  "dependencies": { "odd-alias": "npm:is-odd@3.0.1" }
+}
+EOF
+	run aube install
+	assert_success
+
+	for spec in is-odd@3.0.1 odd-alias@3.0.1; do
+		run aube patch "$spec"
+		assert_success
+		edit_dir="$(echo "$output" | grep -oE '/[^ ]*/user' | head -1)"
+		echo "// patched-as-$spec" >>"$edit_dir/index.js"
+		run aube patch-commit "$edit_dir"
+		assert_success
+	done
+
+	assert [ -f patches/is-odd@3.0.1.patch ]
+	assert [ ! -e patches/odd-alias@3.0.1.patch ]
+	run grep -c "patched-as-" node_modules/odd-alias/index.js
+	assert_output "2"
+}
+
+# The hoisted linker has no virtual store to find the package in.
+@test "aube patch works under the hoisted linker" {
+	cat >package.json <<'EOF'
+{
+  "name": "hoisted-patch-test",
+  "version": "1.0.0",
+  "dependencies": { "is-odd": "3.0.1" }
+}
+EOF
+	echo "node-linker=hoisted" >.npmrc
+	run aube install
+	assert_success
+	assert [ ! -L node_modules/is-odd ]
+
+	run aube patch is-odd@3.0.1
+	assert_success
+	edit_dir="$(echo "$output" | grep -oE '/[^ ]*/user' | head -1)"
+	echo "// patched-hoisted" >>"$edit_dir/index.js"
+	run aube patch-commit "$edit_dir"
+	assert_success
+	run grep -q "patched-hoisted" node_modules/is-odd/index.js
+	assert_success
+}
+
 @test "aube patch rejects bare names" {
 	cat >package.json <<'EOF'
 { "name": "p", "version": "1.0.0" }
