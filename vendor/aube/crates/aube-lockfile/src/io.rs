@@ -265,6 +265,15 @@ fn lockfile_write_is_noop(
     {
         return false;
     }
+    // The `catalogs` block is recorded config too, and the identity hash
+    // never sees it: a widened catalog range that keeps the same pick
+    // would otherwise leave the old specifier on disk, which our own
+    // `--frozen-lockfile` and pnpm's (ERR_PNPM_LOCKFILE_CONFIG_MISMATCH)
+    // both reject. Compare only what each writer persists, so a format
+    // that records no catalogs never looks changed.
+    if !recorded_catalogs_equal(kind, graph, &existing) {
+        return false;
+    }
     // `allow_build` doesn't affect the engine-agnostic identity hash
     // (the engine taint it would gate is computed with `engine: None`),
     // so a trivial policy is correct here.
@@ -313,6 +322,32 @@ fn lockfile_write_is_noop(
             &no_build,
             &existing_patch,
         )
+}
+
+/// Whether `a` and `b` would write the same catalog block in a `kind`
+/// lockfile: pnpm-shaped files record specifier and version, `bun.lock`
+/// only the specifier, and the npm and yarn formats record none.
+fn recorded_catalogs_equal(kind: LockfileKind, a: &LockfileGraph, b: &LockfileGraph) -> bool {
+    match kind {
+        LockfileKind::Aube | LockfileKind::Pnpm => a.catalogs == b.catalogs,
+        LockfileKind::Bun => {
+            let specifiers = |g: &LockfileGraph| -> Vec<(String, String, String)> {
+                g.catalogs
+                    .iter()
+                    .flat_map(|(cat, entries)| {
+                        entries
+                            .iter()
+                            .map(|(pkg, e)| (cat.clone(), pkg.clone(), e.specifier.clone()))
+                    })
+                    .collect()
+            };
+            specifiers(a) == specifiers(b)
+        }
+        LockfileKind::Npm
+        | LockfileKind::NpmShrinkwrap
+        | LockfileKind::Yarn
+        | LockfileKind::YarnBerry => true,
+    }
 }
 
 /// Return the [`LockfileKind`] of the lockfile already on disk in

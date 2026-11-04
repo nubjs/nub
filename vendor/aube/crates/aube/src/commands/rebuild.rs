@@ -1,35 +1,30 @@
 use super::run::load_manifest;
-use aube_scripts::LifecycleHook;
 use miette::{Context, IntoDiagnostic, miette};
 use std::collections::HashSet;
 
-/// `aube rebuild [<pkg>...]` — without args, re-run the root package's
-/// preinstall hook, then install / postinstall work for dependency
-/// packages allowed by the active `allowBuilds` /
-/// `onlyBuiltDependencies` policy, then the root package's install /
-/// postinstall / prepare lifecycle hooks.
+/// `aube rebuild [<pkg>...]` — without args, re-run install / postinstall
+/// work for dependency packages allowed by the active `allowBuilds` /
+/// `onlyBuiltDependencies` policy. The projects' own lifecycle hooks do not
+/// run: pnpm 12's `rebuild` builds dependencies only.
 ///
 /// With one or more package names, run lifecycle scripts only for the
-/// named deps and skip the root hooks. Match is by graph `name`, which
-/// is the in-tree alias when one is configured (so `aube rebuild
-/// my-alias` works for a manifest entry like
-/// `"my-alias": "npm:real-pkg@1.0"`, matching pnpm). Naming a package
-/// does not approve it: as in pnpm 12, an unapproved package is reported
-/// as an ignored build — `ERR_AUBE_IGNORED_BUILDS` under the default
-/// `strictDepBuilds`, a warning otherwise.
+/// named deps. Match is by graph `name`, which is the in-tree alias when
+/// one is configured (so `aube rebuild my-alias` works for a manifest
+/// entry like `"my-alias": "npm:real-pkg@1.0"`, matching pnpm). Naming a
+/// package does not approve it: as in pnpm 12, an unapproved package is
+/// reported as an ignored build — `ERR_AUBE_IGNORED_BUILDS` under the
+/// default `strictDepBuilds`, a warning otherwise.
 ///
 /// Unlike the other lifecycle shortcuts, `rebuild` intentionally does not
-/// auto-install: `aube install` already runs these same four hooks after
+/// auto-install: `aube install` already runs these same scripts after
 /// linking, so triggering an install here would double-run every script
 /// on a stale tree. Users who actually want a fresh install should run
 /// `aube install`.
 #[derive(Debug, usage_rs::Args)]
 pub struct RebuildArgs {
     /// Optional package names. When supplied, only matching deps'
-    /// scripts run; the root lifecycle hooks (preinstall, install,
-    /// postinstall, prepare) are skipped. Match is by graph `name`,
-    /// not by `dep_path`. The active `allowBuilds` policy still decides
-    /// which of them may run.
+    /// scripts run. Match is by graph `name`, not by `dep_path`. The
+    /// active `allowBuilds` policy still decides which of them may run.
     #[usage(arg, name = "PACKAGE")]
     pub packages: Vec<String>,
 }
@@ -64,9 +59,9 @@ pub async fn run(
     };
 
     // Selective rebuild needs a graph to match names against. Without
-    // the lockfile the unmatched-name check below never runs, root
-    // hooks are skipped (selected.is_some()), and the command would
-    // exit Ok with no scripts run and no diagnostic — invisible in CI.
+    // the lockfile the unmatched-name check below never runs, and the
+    // command would exit Ok with no scripts run and no diagnostic —
+    // invisible in CI.
     if selected.is_some() && graph.is_none() {
         return Err(miette!(
             "no lockfile found at {} — run `{}` before targeting specific packages",
@@ -77,18 +72,6 @@ pub async fn run(
 
     let modules_dir_name = aube_settings::resolved::modules_dir(&settings_ctx);
     let aube_dir = super::resolve_virtual_store_dir(&settings_ctx, &cwd);
-    if selected.is_none() {
-        aube_scripts::run_root_hook(
-            &cwd,
-            &modules_dir_name,
-            &manifest,
-            LifecycleHook::PreInstall,
-        )
-        .await
-        .into_diagnostic()?;
-    }
-
-    let mut ignored_builds = Ok(());
     if let Some(graph) = graph {
         if let Some(selected) = selected.as_ref() {
             let known: HashSet<&str> = graph.packages.values().map(|p| p.name.as_str()).collect();
@@ -260,9 +243,7 @@ pub async fn run(
                 &refreshed_bin_links,
             )?;
         }
-        // Held until the root hooks below have run, the order an install
-        // fails in.
-        ignored_builds = super::install::report_unreviewed_rebuilds(
+        return super::install::report_unreviewed_rebuilds(
             &cwd,
             &aube_dir,
             &graph,
@@ -275,19 +256,7 @@ pub async fn run(
         );
     }
 
-    if selected.is_none() {
-        for hook in [
-            LifecycleHook::Install,
-            LifecycleHook::PostInstall,
-            LifecycleHook::Prepare,
-        ] {
-            aube_scripts::run_root_hook(&cwd, &modules_dir_name, &manifest, hook)
-                .await
-                .into_diagnostic()?;
-        }
-    }
-
-    ignored_builds
+    Ok(())
 }
 
 async fn run_filtered(
