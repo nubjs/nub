@@ -32,6 +32,8 @@ Dispatch happens in Rust with no Node bootstrap, so the runner adds a few millis
 
 Scripts always run through `nub run`. A bare `nub build` does not fall through to a script; it fails with a hint to run `nub run build`. See [Running files](/docs/runtime) for what `nub <file>` does.
 
+On Unix, a script attached to the terminal gets the terminal's foreground process group, so interactive tools can read input and receive Ctrl-C directly. Nub restores the terminal when the script exits.
+
 ## Argument forwarding
 
 Arguments after the script name go to the script. The `--` separator that `npm run` requires is optional.

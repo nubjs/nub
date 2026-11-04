@@ -75,6 +75,8 @@ Once a version is pinned, Nub looks for a binary in this order:
 3. **An `nvm`-installed version**
 4. **A download from nodejs.org**, SHA-256 verified and cached
 
+The `PATH` walk steps past a version manager's shim that has no Node to offer. With nothing active for the directory, mise falls back to the next `node` on `PATH`, which inside a Nub run is Nub's own. Nub detects that hand-back and uses the `node` after the shim, or reports the shim by name when there is none.
+
 ## `nub node install`
 
 Provision a version into the cache now, instead of on the next run. Use it to warm a CI cache (the [GitHub Action](/docs/deployment/github-action) does this) or to fetch a Node before going offline.

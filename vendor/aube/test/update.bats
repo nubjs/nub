@@ -171,6 +171,137 @@ JSON
 	assert_file_not_exists packages/app/member.marker
 }
 
+# A workspace whose root and member each lock an in-range but outdated
+# version: root on @pnpm.e2e/foo, `app` on @pnpm.e2e/bar.
+_setup_outdated_workspace() {
+	mkdir -p packages/app
+	cat >pnpm-workspace.yaml <<'YAML'
+packages:
+  - packages/*
+YAML
+	echo '{"name":"root","private":true,"dependencies":{"@pnpm.e2e/foo":"100.0.0"}}' >package.json
+	echo '{"name":"app","version":"1.0.0","dependencies":{"@pnpm.e2e/bar":"100.0.0"}}' >packages/app/package.json
+	run aube install --lockfile-only
+	assert_success
+	echo '{"name":"root","private":true,"dependencies":{"@pnpm.e2e/foo":"^100.0.0"}}' >package.json
+	echo '{"name":"app","version":"1.0.0","dependencies":{"@pnpm.e2e/bar":"^100.0.0"}}' >packages/app/package.json
+	run aube install --lockfile-only
+	assert_success
+	run grep -c '@pnpm.e2e/bar@100.0.0' pnpm-lock.yaml
+	assert_success
+}
+
+@test "aube update <pkg> at the workspace root keeps members' locked versions" {
+	# nubjs/nub#1001: the root update resolved only the root importer and
+	# wrote that as the whole shared lockfile, so the chained install
+	# re-resolved every member and bumped packages nobody named.
+	_setup_outdated_workspace
+
+	run aube update @pnpm.e2e/foo
+	assert_success
+	run grep '@pnpm.e2e/foo@100.1.0' pnpm-lock.yaml
+	assert_success
+	run grep '@pnpm.e2e/bar@100.0.0' pnpm-lock.yaml
+	assert_success
+	run grep '@pnpm.e2e/bar@100.1.0' pnpm-lock.yaml
+	assert_failure
+}
+
+@test "aube update <pkg> at the workspace root rejects a member-only dependency" {
+	_setup_outdated_workspace
+	cp pnpm-lock.yaml before.yaml
+
+	run aube update @pnpm.e2e/bar
+	assert_failure
+	assert_output --partial "is not a dependency of this project"
+	assert_output --partial "by app)"
+	assert_output --partial "--filter app update @pnpm.e2e/bar"
+	run cmp pnpm-lock.yaml before.yaml
+	assert_success
+}
+
+@test "aube update <pkg> at the workspace root rebinds a member's peer on it" {
+	# A member resolving its peer from the root is locked against the
+	# root's old version; carrying that snapshot over left the member on
+	# a version the root no longer has.
+	mkdir -p packages/app
+	cat >pnpm-workspace.yaml <<'YAML'
+packages:
+  - packages/*
+autoInstallPeers: false
+resolvePeersFromWorkspaceRoot: true
+YAML
+	echo '{"name":"root","private":true,"dependencies":{"@pnpm.e2e/peer-a":"1.0.0","@pnpm.e2e/peer-b":"1.0.0","@pnpm.e2e/peer-c":"1.0.0"}}' >package.json
+	echo '{"name":"app","version":"1.0.0","dependencies":{"@pnpm.e2e/abc":"1.0.0"}}' >packages/app/package.json
+	run aube install --lockfile-only
+	assert_success
+	run grep -c 'peer-a@1.0.0' pnpm-lock.yaml
+	assert_success
+
+	run aube update @pnpm.e2e/peer-a@1.0.1
+	assert_success
+	run grep '@pnpm.e2e/abc@1.0.0(@pnpm.e2e/peer-a@1.0.1)' pnpm-lock.yaml
+	assert_success
+	run grep '@pnpm.e2e/peer-a@1.0.0' pnpm-lock.yaml
+	assert_failure
+}
+
+@test "aube update <pkg> at the workspace root keeps a member's own copy and its peer binding" {
+	# The member declares the updated package itself, so its peer binds to
+	# its own locked copy; re-resolving the member for the root's update
+	# must not move that copy (pnpm keeps app on peer-a 1.0.0).
+	mkdir -p packages/app
+	cat >pnpm-workspace.yaml <<'YAML'
+packages:
+  - packages/*
+autoInstallPeers: false
+resolvePeersFromWorkspaceRoot: true
+YAML
+	echo '{"name":"root","private":true,"dependencies":{"@pnpm.e2e/peer-a":"1.0.0","@pnpm.e2e/peer-b":"1.0.0","@pnpm.e2e/peer-c":"1.0.0"}}' >package.json
+	echo '{"name":"app","version":"1.0.0","dependencies":{"@pnpm.e2e/abc":"1.0.0","@pnpm.e2e/peer-a":"1.0.0"}}' >packages/app/package.json
+	run aube install --lockfile-only
+	assert_success
+	echo '{"name":"app","version":"1.0.0","dependencies":{"@pnpm.e2e/abc":"1.0.0","@pnpm.e2e/peer-a":"^1.0.0"}}' >packages/app/package.json
+	run aube install --lockfile-only
+	assert_success
+
+	run aube update @pnpm.e2e/peer-a@1.0.1
+	assert_success
+	run grep '@pnpm.e2e/abc@1.0.0(@pnpm.e2e/peer-a@1.0.0)' pnpm-lock.yaml
+	assert_success
+	# Both copies stay: the root's new one and the member's own.
+	run grep "^  '@pnpm.e2e/peer-a@1.0.1':" pnpm-lock.yaml
+	assert_success
+	run grep "^  '@pnpm.e2e/peer-a@1.0.0':" pnpm-lock.yaml
+	assert_success
+	run grep -B1 -A1 "specifier: \\^1.0.0" pnpm-lock.yaml
+	assert_output --partial "version: 1.0.0"
+}
+
+@test "aube update <pkg> at the workspace root re-resolves a member range edited past its lock" {
+	# The member's range now excludes its locked copy (edited without an
+	# install), so its re-resolve picks a version in the new range.
+	mkdir -p packages/app
+	cat >pnpm-workspace.yaml <<'YAML'
+packages:
+  - packages/*
+autoInstallPeers: false
+resolvePeersFromWorkspaceRoot: true
+YAML
+	echo '{"name":"root","private":true,"dependencies":{"@pnpm.e2e/peer-a":"1.0.0","@pnpm.e2e/peer-b":"1.0.0","@pnpm.e2e/peer-c":"1.0.0"}}' >package.json
+	echo '{"name":"app","version":"1.0.0","dependencies":{"@pnpm.e2e/abc":"1.0.0","@pnpm.e2e/peer-a":"1.0.0"}}' >packages/app/package.json
+	run aube install --lockfile-only
+	assert_success
+	echo '{"name":"app","version":"1.0.0","dependencies":{"@pnpm.e2e/abc":"1.0.0","@pnpm.e2e/peer-a":"^1.0.1"}}' >packages/app/package.json
+
+	run aube update @pnpm.e2e/peer-a@1.0.1 --lockfile-only
+	assert_success
+	run grep '@pnpm.e2e/abc@1.0.0(@pnpm.e2e/peer-a@1.0.1)' pnpm-lock.yaml
+	assert_success
+	run grep "^  '@pnpm.e2e/peer-a@1.0.0':" pnpm-lock.yaml
+	assert_failure
+}
+
 @test "aube update: reports version change in output" {
 	_setup_outdated_project
 
@@ -312,6 +443,46 @@ EOF
 	run grep -A8 '^catalogs:' aube-lock.yaml
 	assert_output --partial 'is-odd:'
 	assert_output --partial 'is-even:'
+}
+
+@test "aube update -r bumps a caret catalog entry to the resolved version" {
+	# pnpm 10 and 11 floor-bump a `^` catalog entry the way they bump a
+	# plain `^` range; an exact entry stays put.
+	# `-r` resolves from each member's directory, and a member reads only
+	# its own `.npmrc`, so point every member at the fixture registry.
+	export npm_config_registry="$AUBE_TEST_REGISTRY"
+	mkdir -p packages/a packages/b
+	cat >pnpm-workspace.yaml <<'YAML'
+packages:
+  - packages/*
+catalog:
+  '@pnpm.e2e/foo': 100.0.0
+  '@pnpm.e2e/bar': 100.0.0
+YAML
+	echo '{"name":"root","private":true}' >package.json
+	for pkg in a b; do
+		echo "{\"name\":\"$pkg\",\"version\":\"1.0.0\",\"dependencies\":{\"@pnpm.e2e/foo\":\"catalog:\",\"@pnpm.e2e/bar\":\"catalog:\"}}" >"packages/$pkg/package.json"
+	done
+	run aube install --lockfile-only
+	assert_success
+	sed -i.bak "s|'@pnpm.e2e/foo': 100.0.0|'@pnpm.e2e/foo': ^100.0.0|" pnpm-workspace.yaml
+	run aube install --lockfile-only
+	assert_success
+	run grep '@pnpm.e2e/foo@100.0.0' pnpm-lock.yaml
+	assert_success
+
+	run aube update -r @pnpm.e2e/foo @pnpm.e2e/bar --lockfile-only
+	assert_success
+
+	run grep "'@pnpm.e2e/foo': ^100.1.0" pnpm-workspace.yaml
+	assert_success
+	run grep "'@pnpm.e2e/bar': 100.0.0" pnpm-workspace.yaml
+	assert_success
+	run grep -A8 '^catalogs:' pnpm-lock.yaml
+	assert_output --partial 'specifier: ^100.1.0'
+	assert_output --partial 'version: 100.1.0'
+	run grep '@pnpm.e2e/bar@100.1.0' pnpm-lock.yaml
+	assert_failure
 }
 
 @test "aube update -r skips deferred install when no importer updates" {

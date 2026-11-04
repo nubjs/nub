@@ -102,15 +102,14 @@ Read the [full docs](https://docs.npmjs.com/cli/v11/configuring-npm/npmrc) on do
 
 Nub honors npm's own fields:
 
-```jsonc title="package.json"
+- `overrides`, applied during resolution and written to the lockfile
+- `workspaces`, plus npm's `--workspace` / `--workspaces` flags
+- `engines`, `os`, `cpu`, and `libc`, enforced during resolution
+
+```json title="package.json"
 {
-  // applied during resolution, written to the lock
   "overrides": { "is-number": "7.0.0" },
-
-  // plus npm's --workspace / --workspaces flags
   "workspaces": ["packages/*"],
-
-  // with os, cpu, and libc, enforced during resolution
   "engines": { "node": ">=22.15" }
 }
 ```

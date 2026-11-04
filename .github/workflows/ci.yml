@@ -235,6 +235,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # 1.95.0 # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
         with:
           toolchain: 1.95.0
+      - name: Check platform DNS feature selection
+        run: bash scripts/check-dns-features.sh
       # --profile fast, matching the dev loop and `make verify`. The analysis
       # gates emit no artifact a later step references by path, so they can share
       # ONE profile with local iteration instead of maintaining a second full
@@ -1293,6 +1295,12 @@ jobs:
       - name: Standalone runner package fixtures
         if: matrix.os == 'ubuntu-latest' && matrix.node == '22.15'
         run: tests/runner/run-matrix.sh
+      # ubuntu-26.04 mounts /tmp as a quota-limited tmpfs, and the suite copies the
+      # nub binary into many temp homes in parallel: tests failed with EDQUOT
+      # ("Disk quota exceeded"). RUNNER_TEMP is on the runner's disk.
+      - name: Keep test temp dirs on disk (Linux)
+        if: runner.os == 'Linux'
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - run: cargo test
       - name: Constrained-memory GC acceptance
         if: matrix.os == 'ubuntu-latest' && matrix.node == '24'

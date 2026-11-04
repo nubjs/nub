@@ -27,6 +27,12 @@ A process your app spawns, including a `cluster` worker, starts with Node's defa
 
 ## Opting out
 
-A `UV_THREADPOOL_SIZE` of your own always wins. The pool size is also how many tasks run at once, so memory-heavy work such as resizing large images holds more in flight on a bigger pool. Set a smaller value when memory is the limit rather than CPU.
+A `UV_THREADPOOL_SIZE` of your own wins, from the shell or an env file. On Node 22.17 and newer, so does one your program sets before it first uses the pool, as under Node:
+
+```ts
+process.env.UV_THREADPOOL_SIZE = "4";
+```
+
+The pool size is also how many tasks run at once, so memory-heavy work such as resizing large images holds more in flight on a bigger pool. Set a smaller value when memory is the limit rather than CPU.
 
 Under [`--node`](/docs/runtime#--node) or [`NODE_COMPAT`](/docs/runtime#node_compat) the pool keeps Node's default.

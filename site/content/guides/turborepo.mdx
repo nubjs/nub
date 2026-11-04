@@ -1,25 +1,45 @@
 ---
 title: Using Nub with Turborepo
-description: Run Turborepo on top of Nub in a monorepo, keeping your package manager field and lockfile, with TypeScript and env files working inside every task.
+description: Run Turborepo on top of Nub in a monorepo, with TypeScript and env files working inside every task. Keep your package manager for installs, or switch the repo to Nub and Turborepo runs every task with nub run.
 ---
 
-Turborepo schedules and caches tasks across your packages; Nub installs dependencies, provisions Node, and augments the Node each task runs. You keep your Turborepo setup and launch it through Nub.
+Turborepo schedules and caches tasks across your packages; Nub provisions Node and augments the Node each task runs. You keep your Turborepo setup and launch it through Nub.
 
 ## Setup
 
-Keep the `packageManager` field and lockfile as they are, install with Nub, and run Turborepo through Nub:
+Run Turborepo through Nub, from a root script or with `nubx`:
 
 ```bash
-nub install            # instead of pnpm install; same lockfile
 nub run build          # a root script: "turbo run build"
 nubx turbo run build   # or run turbo directly through nubx
 ```
 
-Turborepo detects the package manager from `packageManager` and the lockfile, and it has no setting that names Nub. None is needed: Nub round-trips the npm, pnpm, and bun lockfiles and reads yarn's, so Turborepo keeps seeing the package manager it knows.
+## Installs
+
+For each package that defines a task, Turborepo spawns the repo's package manager with `run <task>`. It picks the manager from the `packageManager` field and the lockfile, so in a pnpm repo every task is `pnpm run build`.
+
+That manager expects the `node_modules` tree it built. `nub install` reads and writes the same lockfile but lays `node_modules` out its own way, under `node_modules/.store` where pnpm uses `node_modules/.pnpm`, and pnpm can refuse to run scripts against a tree it didn't build. So choose one:
+
+**Keep your package manager** for installs, and run Turborepo under Nub:
+
+```bash
+pnpm install
+nub run build
+```
+
+**Switch the repo to Nub.** Turborepo 2.10.3 and later detect the pin that `nub pm use nub` writes, and run each task as `nub run <task>`:
+
+```bash
+nub pm use nub   # moves pnpm-workspace.yaml config, renames the lockfile
+nub install
+nub run build
+```
+
+`nub pm use nub` moves the `pnpm-workspace.yaml` settings into `package.json`, renames the lockfile to `nub.lock`, and pins Nub in `devEngines.packageManager`. Real pnpm then refuses to run in the repo, and `nub pm use pnpm` reverses the switch. See [`nub pm use`](/docs/pm#nub-pm-use).
 
 ## TypeScript inside tasks
 
-For each package that defines a task, Turborepo spawns the package manager, such as `pnpm run build`, and that process inherits Turborepo's environment. When Turborepo runs under Nub, that environment carries Nub's augmentation, a `NODE_OPTIONS` preload and a `node` shim on the `PATH`. So the `node` a task's script invokes is Nub's augmented Node.
+The package manager Turborepo spawns inherits Turborepo's environment. When Turborepo runs under Nub, that environment carries Nub's augmentation, a `NODE_OPTIONS` preload and a `node` shim on the `PATH`. So the `node` a task's script invokes is Nub's augmented Node.
 
 A build script of plain `node ./build.ts` then runs TypeScript directly and loads that package's `.env`, with no per-package configuration:
 
@@ -58,7 +78,7 @@ Nub provisions the Node your project pins, so every task in the monorepo runs on
 
 ## Caching and env files
 
-Turborepo owns the task graph, scheduling, and caching. Nub owns the runtime, installs, and env loading under each task.
+Turborepo owns the task graph, scheduling, and caching. Nub owns the runtime and env loading under each task.
 
 - **Cache keys** — Turborepo passes `NODE_OPTIONS` through to tasks without hashing it, so adopting Nub does not invalidate your cache.
 - **Env files** — each task loads the `.env` for the package it runs in. Turborepo's `env` and `globalEnv` still control cache hashing, so a value that must affect the cache still belongs in `turbo.json`.

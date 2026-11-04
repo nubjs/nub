@@ -118,7 +118,7 @@ nub remove -w <pkg>        # remove from the workspace root
 
 ### `nub update`
 
-Re-resolves dependencies within their ranges. With `--latest`, it rewrites the `package.json` ranges to the newest versions:
+Re-resolves dependencies within their ranges and raises each `^`/`~` range to the version it resolved. With `--latest`, it rewrites ranges to the newest release. A `catalog:` dependency's range is rewritten in the catalog that defines it, so every project using that entry moves together:
 
 ```bash
 nub update                 # up — refresh all deps within range
@@ -131,6 +131,13 @@ nub update -E -L           # pin the rewritten range to an exact version
 nub update -D              # devDependencies only
 nub update -P              # production only
 nub update --lockfile-only # refresh the lockfile, leave node_modules alone
+```
+
+In a workspace, `nub update` acts on the project you run it in, so at the workspace root it updates the root's own dependencies and every other project keeps its locked versions. To update a package a member declares, select the member with `--filter`, or pass `-r` to update it in every project that has it:
+
+```bash
+nub --filter frontend update @sveltejs/kit
+nub update -r @sveltejs/kit
 ```
 
 The interactive picker shows one row per outdated dependency:
@@ -364,15 +371,13 @@ Read the [full docs](https://pnpm.io/catalogs) on pnpm.io. The `catalog:` syntax
 
 ### `allowScripts`
 
-Which dependencies may run install scripts — see [lifecycle scripts](#lifecycle-scripts). The field applies in every project, whichever tool owns it.
+Which dependencies may run install scripts — see [lifecycle scripts](#lifecycle-scripts). The field applies in every project, whichever tool owns it. A registry dependency is keyed by name and anything else by its full specifier, and a `false` beats any allow:
 
-```jsonc title="package.json"
+```json title="package.json"
 {
   "allowScripts": {
-    "esbuild": true,  // a registry dep, by name
-    "sharp": false,   // a denial beats any allow
-
-    // anything else, by full specifier
+    "esbuild": true,
+    "sharp": false,
     "buildy@file:./buildy-1.0.0.tgz": true
   }
 }
@@ -504,6 +509,27 @@ Permission comes from the [`allowScripts`](#allowscripts) field in any project. 
 - Bun: `trustedDependencies`
 
 A package with build scripts that is not allowed is skipped. The `WARN_NUB_IGNORED_BUILD_SCRIPTS` warning names it and suggests `nub approve-builds`.
+
+### Your project's own hooks
+
+Hooks in your own `package.json` need no approval. They run in the root and in every workspace member, in pnpm's order, once dependencies are linked:
+
+```text
+preinstall → install → postinstall
+  → preprepare → prepare → postprepare
+```
+
+Members run in dependency order, each after the members it depends on. The root's `preinstall` runs first, before anything is resolved, so a guard such as `npx only-allow pnpm` can stop the install. With `--filter`, only the root and the selected members run their hooks.
+
+| Command | Hooks |
+| --- | --- |
+| `nub install`, a bare `nub update` | all six |
+| `nub install --prod` | `preinstall`, `install`, `postinstall` |
+| `nub remove <pkg>` | `preuninstall` and `uninstall` before the package is unlinked, `postuninstall` after |
+| `nub add <pkg>` in a workspace | `preinstall`, `install`, `postinstall`, in the root and the project you add to |
+| `nub add <pkg>` in a single project, `nub update <pkg>`, `nub rebuild` | none |
+
+`--ignore-scripts` skips all of them.
 
 ### Build failures
 
@@ -827,15 +853,15 @@ Set layout with [`install.linker` and `install.publicHoist` in `nub.jsonc`](/doc
 
 Running `nub pm use nub` moves a project onto Nub: it migrates pnpm workspace config into the neutral `package.json` fields, aligns the manifest, and writes `nub.lock`. A first `nub install` in a project with no declaration and no lockfile does the same.
 
-Either way, Nub records itself with a range rather than an exact pin:
+Either way, Nub records itself with a range rather than an exact pin. The caret is a floor, and `"onFail": "ignore"` means nothing enforces it:
 
-```jsonc title="package.json"
+```json title="package.json"
 {
   "devEngines": {
     "packageManager": {
       "name": "nub",
-      "version": "^0.7.1",   // a floor, not a pin
-      "onFail": "ignore"     // nothing enforces it
+      "version": "^0.7.1",
+      "onFail": "ignore"
     }
   }
 }

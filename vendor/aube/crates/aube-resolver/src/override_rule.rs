@@ -245,6 +245,22 @@ pub fn matches(
     match_parent_chain(&rule.parents, ancestors)
 }
 
+/// [`matches`] for a dependency declared as a `catalog:` reference; see
+/// [`aube_util::pkg::override_version_applies_to_catalog_reference`].
+pub fn matches_catalog_reference(
+    rule: &OverrideRule,
+    task_name: &str,
+    catalog_spec: &str,
+    ancestors: &[AncestorFrame<'_>],
+) -> bool {
+    rule.target.name == task_name
+        && aube_util::pkg::override_version_applies_to_catalog_reference(
+            rule.target.version_req.as_deref(),
+            catalog_spec,
+        )
+        && match_parent_chain(&rule.parents, ancestors)
+}
+
 fn match_parent_chain(parents: &[Segment], ancestors: &[AncestorFrame<'_>]) -> bool {
     if parents.is_empty() {
         return true;

@@ -687,7 +687,8 @@ fn runtime_snapshot_reaches_the_local_bin_routes() {
 /// outside the project forces that path with no network involved. The fetched
 /// bin's `#!/usr/bin/env node` shebang re-enters nub as a PATH shim rather than
 /// reading `--node` from argv, so augmentation is disabled by `dlx_child_env`
-/// stamping `NODE_COMPAT` for the child — a genuinely different mechanism.
+/// stamping the compat-launch marker for the child — a genuinely different
+/// mechanism.
 #[cfg(unix)]
 #[test]
 fn nubx_node_flag_reaches_the_dlx_fallback_fetch_path() {
@@ -1712,6 +1713,116 @@ fn inherited_node_options_preloads_fold_into_the_chainer() {
         order,
         vec!["CFG", "AMB", "ENTRY"],
         "both preloads must run, config before inherited, both before the entry"
+    );
+}
+
+/// A project's `preload` runs ahead of the entry, a relative path and a bare
+/// specifier in declared order, for an ESM entry and a TypeScript one, under
+/// `nub <file>` and `nub watch`.
+///
+/// Each file run is repeated beneath a plain `node` from the persistent shim,
+/// which is how a tool started with `npx` launches its children. Through 0.9.6
+/// that `node` exported `NODE_COMPAT=1` to its subtree, so every `nub` below it
+/// ran in compat mode and the preloads silently stopped while `nub config get
+/// preload` still listed them (#1005).
+#[test]
+fn project_preloads_run_before_the_entry_even_beneath_a_compat_launch() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("project");
+    let bare = root.join("node_modules").join("bare-preload");
+    std::fs::create_dir_all(&bare).unwrap();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"preloads","type":"module"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("nub.jsonc"),
+        r#"{ "preload": ["./relative.mjs", "bare-preload"] }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("relative.mjs"),
+        "(globalThis.__order ??= []).push('relative');\n",
+    )
+    .unwrap();
+    std::fs::write(
+        bare.join("package.json"),
+        r#"{"name":"bare-preload","type":"module","exports":"./register.js"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        bare.join("register.js"),
+        "(globalThis.__order ??= []).push('bare');\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("main.mjs"),
+        "console.log([...(globalThis.__order ?? []), 'entry'].join(','));\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("main.ts"),
+        "const order: string[] = (globalThis as any).__order ?? [];\n\
+         console.log([...order, 'entry'].join(','));\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("launcher.cjs"),
+        r#"const { spawnSync } = require('node:child_process');
+const [command, ...args] = process.argv.slice(2);
+const child = spawnSync(command, args, { stdio: 'inherit' });
+if (child.error) throw child.error;
+process.exit(child.status ?? 1);
+"#,
+    )
+    .unwrap();
+
+    // Recognized by its `nub/node-shim` directory shape. A hard link, not a
+    // symlink: Linux reads `current_exe` from `/proc/self/exe`, which follows a
+    // symlink back to the `nub` binary.
+    let shim_dir = temp.path().join("nub").join("node-shim");
+    std::fs::create_dir_all(&shim_dir).unwrap();
+    let shim_node = shim_dir.join(format!("node{}", std::env::consts::EXE_SUFFIX));
+    if std::fs::hard_link(nub_binary(), &shim_node).is_err() {
+        std::fs::copy(nub_binary(), &shim_node).unwrap();
+    }
+
+    let command = |program: &Path| {
+        let mut command = Command::new(program);
+        command
+            .current_dir(&root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .env("XDG_CACHE_HOME", temp.path().join("cache"))
+            .env_remove("NODE_COMPAT")
+            .stdin(Stdio::null());
+        command
+    };
+    let nub = nub_binary();
+    for entry in ["main.mjs", "main.ts"] {
+        let mut direct = command(&nub);
+        direct.arg(entry);
+        let mut beneath = command(&shim_node);
+        beneath.arg("launcher.cjs").arg(&nub).arg(entry);
+        for (label, command) in [
+            (format!("nub {entry}"), direct),
+            (format!("nub {entry} beneath the shim's node"), beneath),
+        ] {
+            let output = probe_output(&label, command);
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout).trim_end(),
+                "relative,bare,entry",
+                "{label}: both preloads must run, in order, before the entry"
+            );
+        }
+    }
+
+    let mut watch = command(&nub);
+    watch.args(["watch", "main.ts"]);
+    assert_eq!(
+        watch_first_line(watch),
+        "relative,bare,entry",
+        "nub watch main.ts: both preloads must run, in order, before the entry"
     );
 }
 

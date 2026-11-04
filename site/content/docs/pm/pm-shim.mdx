@@ -3,11 +3,13 @@ title: Corepack-style shims
 description: Optional shims for bare package-manager commands. Install them and a bare pnpm, npm, or yarn command routes through Nub to the package manager your project pins, with no extra Node process in front.
 ---
 
-Default Nub usage needs no shims, because `nub install`, `nub add`, and `nub run` already run the pinned package manager. The shims route a bare `pnpm`, `npm`, or `yarn` command through Nub too, whether you type it or a tool you don't control invokes it.
+Default Nub usage needs no shims: `nub install`, `nub add`, and `nub run` work on Nub's own engine, and the pin tells them which package manager's lockfile and config to follow. The shims run the exact pinned release for a bare `pnpm`, `npm`, or `yarn` command, whether you type it or a tool you don't control invokes it.
 
 <ShimDemo />
 
-Each shim is a hardlink to the Nub binary, so no Node process starts in front of the package manager. On a cold cache the first command provisions the pinned version, then runs it in-process under the project's Node. The dim `(via nub shim)` line names the manager and version, and goes to stderr so piped stdout stays clean.
+Each shim is a hardlink to the Nub binary, so no Node process starts in front of the package manager. On a cold cache the first command provisions the pinned version, then starts its launcher under the project's Node. The dim `(via nub shim)` line names the manager and version, and goes to stderr so piped stdout stays clean.
+
+pnpm 12 ships as a native binary, and the shim runs it the way Corepack does: pnpm's own launcher downloads the binary on first use and keeps it beside the cached package, so later runs need no network. From pnpm 12.11.0 that download follows the registry and credentials in `.npmrc`. Earlier 12.x releases ignore `.npmrc`, so point them at a private mirror with `COREPACK_NPM_REGISTRY`, and `COREPACK_NPM_TOKEN` if it needs auth.
 
 The shims live in the first of these directories:
 
@@ -35,12 +37,13 @@ and node_modules.
                 or remove the shims: nub pm unshim
 ```
 
-Runner commands fall through to the system tool whatever the pin, so `npm create vite` works in a pnpm project:
+Some commands fall through to the system tool whatever the pin, so `npm create vite` works in a pnpm project:
 
-- The `npx` and `pnpx` commands
-- The `init`, `create`, `dlx`, and `exec` verbs of every manager
+- The `npx` and `pnpx` commands, and the `init`, `create`, `dlx`, and `exec` verbs of every manager
+- Commands that never touch the project: global installs (`npm install -g`) and registry and account commands such as `npm login`, `npm whoami`, and `npm view`
+- A package manager that a lifecycle script spawns during an install
 
-A package manager that a lifecycle script spawns during an install also falls through.
+`npm publish` still refuses, because it packs the project.
 
 ## Missing system manager
 
