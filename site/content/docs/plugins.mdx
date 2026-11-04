@@ -1,16 +1,18 @@
 ---
 title: Plugins
-description: Extend the Nub CLI with your own subcommands — an unknown verb resolves to an executable named after it and runs, the same convention git and cargo use for their plugins.
+description: Extend the Nub CLI with your own subcommands, using the same executable-name convention as git and cargo plugins.
 ---
 
-Run `nub <verb>` with a verb Nub doesn't recognize and it resolves an executable named `nub-<verb>`, then runs it with the rest of the arguments forwarded untouched. This is the same convention behind `git-foo` and `cargo-foo`.
+Nub runs an unknown verb as a plugin. For `nub <verb>`, it finds an executable named `nub-<verb>` and runs it with the remaining arguments, the same convention as `git-foo` and `cargo-foo`.
 
 ```bash
 nub changeset publish      # runs nub-changeset publish
 nub release --tag beta     # runs nub-release --tag beta
 ```
 
-A plugin is a package that installs a `nub-<verb>` bin — there is no plugin manifest and no registration step. Install it like any other dependency and the verb works.
+## Installing a plugin
+
+A plugin is any package that installs a `nub-<verb>` bin. There is no manifest and no registration step.
 
 ```bash
 nub add -D nub-changeset   # ships a nub-changeset bin
@@ -19,24 +21,22 @@ nub changeset              # now resolves and runs it
 
 ## Resolution
 
-The prefixed name is resolved in two places, in order:
+Nub looks for `nub-<verb>` in two places, in order:
 
-- `node_modules/.bin` — the project-local bin, walking up from the current directory (the same chain `nub run` and `nubx` use).
-- `PATH` — a globally-installed plugin.
+- `node_modules/.bin`, walking up from the current directory
+- `PATH`, for a globally installed plugin
 
-Only the prefixed `nub-<verb>` name is ever probed — never the bare verb.
+Nub never looks up the bare verb.
 
 ## Built-in precedence
 
-A plugin can never shadow a built-in verb. Native commands and package-manager verbs are matched before any plugin lookup, so `nub run`, `nub install`, `nub add`, and the rest always dispatch to Nub itself, even if a `nub-run` bin exists in `node_modules/.bin`. The fallthrough fires only for a verb Nub has no built-in for.
+A plugin never shadows a built-in command. Nub matches `run`, `install`, `add`, and every other built-in verb before it looks for a plugin.
 
-Script names take the same priority. A verb that names a script in the local `package.json`, or one of the conventional names `dev`, `build`, `test`, `start`, and `lint`, resolves to the `nub run <verb>` hint before the plugin lookup — so a `nub-build` or `nub-test` plugin is never reached through its bare verb. Name a plugin for something that isn't a script (`nub-changeset`, `nub-release`), or invoke a script-named one through `nub run` or by its bin directly.
+Script names also come first. A verb that names a script in the local `package.json`, or one of `dev`, `build`, `test`, `start`, and `lint`, gets a `nub run <verb>` hint instead of a plugin lookup. Name a plugin after something that is not a script, or run it through its bin.
 
 ## Writing a plugin
 
-A plugin is a runnable executable named `nub-<verb>` — a compiled JavaScript bin or a native binary, the same as any other `node_modules/.bin` entry or a `git`/`cargo` subcommand. There's no plugin-specific build target: author it in TypeScript and publish the compiled output, as any other bin. Installed bins are not transpiled, so the entry that runs must be JavaScript or native.
-
-A JavaScript plugin runs under Nub's runtime augmentation, as `nub run` runs a script — the version-gated globals are present. A native executable runs directly. The plugin's exit code is what Nub returns.
+A plugin is an executable: a JavaScript bin or a native binary. Installed bins are not transpiled, so a plugin written in TypeScript publishes its compiled output.
 
 ```js title="nub-changeset"
 #!/usr/bin/env node
@@ -44,10 +44,17 @@ const target = process.argv[2] ?? "staging";
 console.log(`releasing ${target}`);
 ```
 
-To run a plugin with augmentation disabled, pass `--node` before the verb — `nub --node changeset`, the same position a file run uses. Anything after the verb is forwarded to the plugin untouched, so a trailing `nub changeset --node` reaches the plugin as an argument and does not disable augmentation. See [the runtime overview](/docs/runtime#--node) for the contract.
+A JavaScript plugin runs under Nub's runtime augmentation, as a `nub run` script does. A native plugin runs directly. Nub exits with the plugin's exit code.
+
+To run a plugin without augmentation, put `--node` before the verb. After the verb, every argument goes to the plugin untouched.
+
+```bash
+nub --node changeset       # plain Node
+nub changeset --node       # passes --node to the plugin
+```
 
 ## Related
 
 - [Bin runner](/docs/nubx) — `nubx`, for running a tool by name without installing it as a subcommand.
 - [Script runner](/docs/run) — `nub run`, which shares the bin-resolution chain.
-- [Runtime](/docs/runtime) — TypeScript-first execution and the augmentation a JS/TS plugin inherits.
+- [Runtime](/docs/runtime) — the augmentation a JavaScript plugin inherits.

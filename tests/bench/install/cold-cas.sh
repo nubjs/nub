@@ -47,6 +47,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+# shellcheck source=tests/bench/install/provenance.sh
+source "$(cd "$(dirname "$0")" && pwd)/provenance.sh"   # bench_env_json / bench_inject_env
 NUB="${NUB:-$REPO_ROOT/target/release/nub}"
 FIXTURE_DIR="$REPO_ROOT/tests/bench/install/fixtures"
 HERMETIC_BASH="$REPO_ROOT/vendor/aube/benchmarks/hermetic.bash"
@@ -127,6 +129,7 @@ fi
 # under `set -o pipefail` that non-zero status kills the script. Read the first
 # line without a pipe instead.
 NUB_VERSION="$({ "$NUB" --version 2>&1 || true; } | { IFS= read -r l; echo "$l"; })"
+NUB_SEMVER="$(echo "$NUB_VERSION" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"  # for provenance
 
 # ── Hermetic registry ────────────────────────────────────────────────────────
 REGISTRY_LABEL=""
@@ -270,13 +273,17 @@ run_cold() {
   local cmd="CI=1 XDG_DATA_HOME='$data' XDG_CACHE_HOME='$cache' NPM_CONFIG_USERCONFIG='$EMPTY_NPMRC' NPM_CONFIG_GLOBALCONFIG='$EMPTY_NPMRC' '$NUB' install --frozen-lockfile --dir '$wd' $reg_flag -s"
 
   local outfile="$RESULTS_DIR/coldcas-${fixture}-${TIMESTAMP}.json"
+  # --shell=sh: hyperfine 2.0 runs commands with no shell by default and refuses
+  # the `CI=1 XDG_…=` prefix; sh was 1.x's default.
   hyperfine \
+    --shell=sh \
     --warmup 0 \
     --runs "$COLD_RUNS" \
     --prepare "$prepare" \
     --command-name "nub install (cold-CAS, $fixture)" \
     "$cmd" \
     --export-json "$outfile"
+  bench_inject_env "$outfile" "$(bench_env_json nub="$NUB_SEMVER")"
 
   echo "  [wall-clock results → $outfile]"
 
@@ -329,12 +336,14 @@ run_warm() {
 
   local outfile="$RESULTS_DIR/warmcas-${fixture}-${TIMESTAMP}.json"
   hyperfine \
+    --shell=sh \
     --warmup 2 \
     --runs "$WARM_RUNS" \
     --prepare "$prepare" \
     --command-name "nub install (warm-store, $fixture)" \
     "$cmd" \
     --export-json "$outfile"
+  bench_inject_env "$outfile" "$(bench_env_json nub="$NUB_SEMVER")"
 
   echo "  [wall-clock results → $outfile]"
 
