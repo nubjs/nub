@@ -108,13 +108,15 @@ impl NodeVersion {
     /// launcher can enforce the same range semantics as compile-time resolution.
     pub fn satisfies(&self, pin: &VersionPin) -> bool {
         match pin {
-            VersionPin::Exact(v) => {
-                self.0.major == v.0.major && self.0.minor == v.0.minor && self.0.patch == v.0.patch
-            }
+            // Prerelease included: `27.0.0-alpha.0.0.0` is neither `27.0.0` nor
+            // another alpha, and a partial pin never takes a prerelease (nvm's default).
+            VersionPin::Exact(v) => self == v,
             VersionPin::MajorMinor(major, minor) => {
-                self.0.major == *major as u64 && self.0.minor == *minor as u64
+                self.0.pre.is_empty()
+                    && self.0.major == *major as u64
+                    && self.0.minor == *minor as u64
             }
-            VersionPin::Major(major) => self.0.major == *major as u64,
+            VersionPin::Major(major) => self.0.pre.is_empty() && self.0.major == *major as u64,
             // node-semver `||` semantics: the version satisfies the range when it
             // matches ANY alternative.
             VersionPin::Range(alternatives) => alternatives.iter().any(|req| req.matches(&self.0)),
@@ -148,9 +150,11 @@ pub enum SupportTier {
     Unsupported,
 }
 
+/// The whole version, prerelease included: it names the store directory and the
+/// download URL, so `27.0.0-alpha.0.0.0` must never print as `27.0.0`.
 impl fmt::Display for NodeVersion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.{}.{}", self.0.major, self.0.minor, self.0.patch)
+        fmt::Display::fmt(&self.0, f)
     }
 }
 
@@ -266,6 +270,11 @@ impl FromStr for VersionPin {
 
         let s = raw.strip_prefix('v').unwrap_or(raw);
 
+        // Exact first, so a prerelease's own dots (`27.0.0-alpha.0.0.0`) aren't
+        // counted as version parts.
+        if let Ok(v) = NodeVersion::from_str(s) {
+            return Ok(Self::Exact(v));
+        }
         let parts: Vec<&str> = s.split('.').collect();
         match parts.len() {
             1 => {
@@ -282,10 +291,6 @@ impl FromStr for VersionPin {
                     .parse()
                     .map_err(|_| VersionParseError(s.to_string()))?;
                 Ok(Self::MajorMinor(major, minor))
-            }
-            3 => {
-                let v = NodeVersion::from_str(s)?;
-                Ok(Self::Exact(v))
             }
             _ => Err(VersionParseError(s.to_string())),
         }
@@ -444,9 +449,35 @@ mod tests {
     }
 
     #[test]
-    fn prerelease_version_parses() {
+    fn prerelease_version_parses_and_prints_whole() {
         let v: NodeVersion = "23.0.0-rc.1".parse().unwrap();
         assert_eq!(v.major(), 23);
+        assert_eq!(
+            v.to_string(),
+            "23.0.0-rc.1",
+            "names the download, never 23.0.0"
+        );
+        assert_eq!(
+            "v27.0.0-alpha.0.0.0".parse::<VersionPin>().unwrap(),
+            VersionPin::Exact("27.0.0-alpha.0.0.0".parse().unwrap())
+        );
+        assert!("22-foo".parse::<VersionPin>().is_err());
+    }
+
+    #[test]
+    fn installed_prereleases_satisfy_only_their_exact_pin() {
+        let alpha: NodeVersion = "27.0.0-alpha.0.0.0".parse().unwrap();
+        let pin = VersionPin::Exact(alpha.clone());
+        assert!(alpha.satisfies(&pin));
+        assert!(
+            !"27.0.0-alpha.0.0.1"
+                .parse::<NodeVersion>()
+                .unwrap()
+                .satisfies(&pin)
+        );
+        assert!(!NodeVersion::new(27, 0, 0).satisfies(&pin));
+        assert!(!alpha.satisfies(&VersionPin::Major(27)));
+        assert!(!alpha.satisfies(&VersionPin::MajorMinor(27, 0)));
     }
 
     // ── Tier boundary cases ────────────────────────────────────────────

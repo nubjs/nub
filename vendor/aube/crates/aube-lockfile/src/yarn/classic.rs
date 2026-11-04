@@ -165,6 +165,7 @@ pub(super) fn parse_classic_str(
                         .collect(),
                     dep_path,
                     declared_dependencies: declared,
+                    declared_dependencies_known: true,
                     alias_of: alias_of.clone(),
                     local_source: local_source.clone(),
                     extra_meta,

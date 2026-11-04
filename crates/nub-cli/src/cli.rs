@@ -601,12 +601,15 @@ fn env_file_sets(key: &str) -> bool {
 /// compat from its OWN inherited environment, not from this process's argv.
 /// An ambient `NODE_COMPAT` already survives the hop for free (real env vars
 /// inherit); a bare `--node` flag does not, since it never became an env var.
-/// Stamping `NODE_COMPAT=1` here is what makes `--node` reach the re-entrant
-/// child the same way the persistent env var already does.
+/// Stamping the compat-launch marker here is what makes `--node` reach the
+/// re-entrant child.
 pub(crate) fn dlx_child_env(compat_mode: bool) -> BTreeMap<String, String> {
     let mut values = BTreeMap::new();
     if compat_mode {
-        values.insert("NODE_COMPAT".to_string(), "1".to_string());
+        values.insert(
+            nub_core::node::spawn::COMPAT_LAUNCH_ENV.to_string(),
+            "1".to_string(),
+        );
     }
     if no_env_file() {
         return values;
@@ -3415,6 +3418,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 registry,
                 dir,
                 allow_all_builds: false,
+                npm_lifecycle: false,
                 filter: crate::pm_engine::WorkspaceFilterFlags {
                     filter,
                     filter_prod,
@@ -3451,6 +3455,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 registry,
                 dir,
                 allow_all_builds: false,
+                npm_lifecycle: false,
                 filter: crate::pm_engine::WorkspaceFilterFlags {
                     filter,
                     filter_prod,
@@ -3491,6 +3496,7 @@ fn run_nubr() -> Result<i32> {
     let runtime = nub_core::node::spawn::find_runtime_dir(&nub_binary)
         .context("nubr: the nub runtime could not be located")?;
     let mut cmd = std::process::Command::new(node.path.as_str());
+    nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
     cmd.arg(runtime.join("nubr.mjs"))
         .args(&args)
         .stdin(std::process::Stdio::inherit())
@@ -3617,8 +3623,15 @@ fn run_as_node() -> Result<i32> {
     // respect node semantics — version resolution/provisioning is the shim's
     // job, augmentation belongs to `nub`/`nubx`. The per-invocation hijack
     // (temp-dir shim, inside a `nub …` subtree the user opted into) keeps
-    // augment-by-default. `--node`/`NODE_COMPAT` force vanilla in either case.
-    let compat = compat_flag || nub_core::node::shim::invoked_as_persistent_node_shim();
+    // augment-by-default. `--node`/`NODE_COMPAT` force vanilla in either case,
+    // and so does descending from a compat launch: this `node` continues that
+    // invocation rather than starting one. A falsy `NODE_COMPAT` set for this
+    // one command still opts it back in, as it did when the launch was carried
+    // by that variable.
+    let continues_compat =
+        nub_core::node::spawn::inherits_compat_launch() && node_compat_env_setting() != Some(false);
+    let compat =
+        compat_flag || nub_core::node::shim::invoked_as_persistent_node_shim() || continues_compat;
     // The hijack resolves a version; it does not add a launch wrapper. The
     // configured `prefix` belongs to the `nub` entrypoints (see `crate::prefix`),
     // and this is the one flag `run_file_in_dir` has to tell the two apart.
@@ -4200,14 +4213,48 @@ fn tsconfig_reported_env() -> Option<(String, String)> {
     (!reported.is_empty()).then(|| (nub_tsconfig::REPORTED_ENV.to_string(), reported.join("\n")))
 }
 
-/// Directory of the entry file for a `nub <file>` run, resolved against `cwd`.
+/// The directory whose tsconfig governs the entry of a `nub <file>` run, resolved
+/// against `cwd`. The first non-flag argument is the entry; with none (a bare
+/// `--flag`) this is `None` and the CWD-anchored check stands alone.
 ///
-/// The first non-flag argument is the entry; anything else (a bare `--flag`) leaves
-/// this `None` and the CWD-anchored check stands alone.
-fn entry_file_dir(args: &[String], cwd: &Path) -> Option<PathBuf> {
-    let entry = args.iter().find(|a| !a.starts_with('-'))?;
-    let joined = cwd.join(entry);
-    joined.parent().map(Path::to_path_buf)
+/// Mirrors the config the run itself reads (#1032). Node loads the main entry from
+/// its REAL path unless `--preserve-symlinks-main` (`NODE_PRESERVE_SYMLINKS` does
+/// not reach the main entry), and the addon reads the tsconfig of the importer's
+/// directory, so a workspace member reached through its `node_modules` link runs
+/// under its real directory's config, whose relative `extends` resolves from there.
+/// An entry whose real path is inside `node_modules` is a dependency: the runtime
+/// neither transpiles it nor applies `paths` for it, so its published tsconfig —
+/// often extending a file that was never published — governs nothing and is
+/// skipped outright rather than warned about.
+fn entry_tsconfig_dir(args: &[String], cwd: &Path, node_options: &[String]) -> Option<PathBuf> {
+    let at = args.iter().position(|a| !a.starts_with('-'))?;
+    let joined = cwd.join(&args[at]);
+    let real = std::fs::canonicalize(&joined)
+        .map(|p| PathBuf::from(strip_windows_verbatim_prefix(&p.to_string_lossy())))
+        .unwrap_or_else(|_| joined.clone());
+    if real.components().any(|c| c.as_os_str() == "node_modules") {
+        return None;
+    }
+    let inherited = env::var("NODE_OPTIONS").unwrap_or_default();
+    let preserve_main = args[..at]
+        .iter()
+        .chain(node_options)
+        .map(String::as_str)
+        .chain(
+            nub_core::node::spawn::split_node_options(&inherited)
+                .iter()
+                .map(String::as_str),
+        )
+        .any(is_preserve_symlinks_main);
+    let entry = if preserve_main { joined } else { real };
+    entry.parent().map(Path::to_path_buf)
+}
+
+/// Node treats `_` and `-` as the same character in an option name, so
+/// `--preserve_symlinks_main` is the same flag.
+fn is_preserve_symlinks_main(flag: &str) -> bool {
+    flag.strip_prefix("--")
+        .is_some_and(|name| name.replace('_', "-") == "preserve-symlinks-main")
 }
 
 /// Refuse the run when the tsconfig governing `dir` will not parse.
@@ -4818,7 +4865,7 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
         // config the addon will actually transform against, so it gets the same
         // refusal. Without this, the identical project fails from inside `sub/` and
         // merely warned from above it.
-        if let Some(entry_dir) = entry_file_dir(args, cwd)
+        if let Some(entry_dir) = entry_tsconfig_dir(args, cwd, &options)
             && TsconfigGate::for_program() == TsconfigGate::Required
         {
             ensure_tsconfig_parses(&entry_dir.to_string_lossy(), runtime.tsconfig.as_deref())?;
@@ -6212,13 +6259,13 @@ fn build_script_command(
     for (k, v) in &npm_env {
         command.env(k, v);
     }
-    // Compat is tree-wide, not only a choice made by this one launcher. An
-    // inherited PATH can already contain a Nub node shim from an outer logical
-    // invocation; stamping the neutral public opt-out makes any such bare
-    // `node` descendant stay vanilla. Apply it last so an explicit `--node` (or
-    // resolved `nodeCompat`) cannot be undone by a forwarded env file.
+    // Compat covers the script's bare `node` descendants too. An inherited PATH
+    // can already contain a Nub node shim from an outer logical invocation; the
+    // marker keeps a `node` that reaches it vanilla. A `nub` the script names is
+    // its own invocation and is not opted out (`COMPAT_LAUNCH_ENV`). Applied
+    // last so a forwarded env file cannot undo it.
     if compat_mode {
-        command.env("NODE_COMPAT", "1");
+        command.env(nub_core::node::spawn::COMPAT_LAUNCH_ENV, "1");
     }
 
     // An explicit `--color` has to reach the CHILD, not just Nub's own framing —
@@ -7093,6 +7140,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         node_args.push(file.to_string());
         node_args.extend(args.iter().cloned());
         let mut cmd = std::process::Command::new(node.path.as_str());
+        nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
         cmd.args(&node_args)
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
@@ -7322,6 +7370,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     let owner_target = env_owner
         .as_ref()
         .and_then(crate::env_owner::EnvOwner::spawn_target);
+    let spawns_node = prefix.is_none() && owner_target.is_none();
     let mut cmd = match (prefix.as_ref(), owner_target) {
         (Some(prefix), owner) => {
             let mut cmd = prefix.command();
@@ -7352,6 +7401,11 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
             crate::env_owner::WRAPPED_ENV,
             crate::env_owner::wrapped_marker(schema_dir),
         );
+    }
+    if spawns_node {
+        nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
+    } else {
+        nub_core::node::discovery::unmark_node_launch(&mut cmd);
     }
     cmd.args(&node_args)
         .stdin(std::process::Stdio::inherit())
@@ -11313,6 +11367,7 @@ fn run_shim_engine_install(
             ignore_scripts,
             no_optional: route.no_optional,
             allow_all_builds: true,
+            npm_lifecycle: true,
             ..Default::default()
         }),
         NpmInstallVerb::Install => crate::pm_engine::run_install(crate::pm_engine::InstallFlags {
@@ -11321,6 +11376,7 @@ fn run_shim_engine_install(
             ignore_scripts,
             no_optional: route.no_optional,
             allow_all_builds: true,
+            npm_lifecycle: true,
             ..Default::default()
         }),
     }
@@ -11365,16 +11421,18 @@ fn shim_plan_with(
     let nesting = Nesting::from_env(|k| env::var(k).ok());
 
     // A GLOBAL op (`npm install -g`, `yarn global add`, `npm ls -g`) writes the
-    // user's global prefix, never this project's lockfile/node_modules, so the
-    // cross-PM project-pin refusal does not apply — `decide` lets it fall through.
+    // user's global prefix, and a registry verb (`npm login`, `npm view`) the
+    // registry — never this project's lockfile/node_modules, so the cross-PM
+    // project-pin refusal does not apply and `decide` lets either fall through.
     let global = shim::is_global_invocation(invoked, args);
+    let outside_project = global || shim::is_registry_invocation(invoked, args);
 
     let decision = shim::decide(
         invoked,
         &pin_state,
         args.first().map(String::as_str),
         nesting,
-        global,
+        outside_project,
     );
 
     // `nub pm shim --route-installs`: a top-level `npm ci` / bare `npm

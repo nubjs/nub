@@ -1,0 +1,10 @@
+# Dependency build approvals. pnpm 11+ reads allowBuilds; pnpm 9 and 10 read onlyBuiltDependencies.
+# `packages` is required: pnpm 9 rejects a pnpm-workspace.yaml without it. This makes `.` the only workspace project, which is what it already is.
+packages:
+  - .
+allowBuilds:
+  esbuild: true
+  sharp: true
+onlyBuiltDependencies:
+  - esbuild
+  - sharp
