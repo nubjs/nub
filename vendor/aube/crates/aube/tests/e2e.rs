@@ -1272,6 +1272,45 @@ fn git_dep_prepack_runs_with_its_hooks_when_main_is_missing() {
     );
 }
 
+/// A git dependency's build is decided under pnpm's exact key,
+/// `<name>@git+<repository>#<commit>`, though the lockfile spells its
+/// source without `git+`.
+#[test]
+fn git_dep_build_is_decided_under_pnpms_exact_key() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let url = git_repo(
+        &sbx,
+        &[(
+            "package.json",
+            r#"{ "name": "post-demo", "version": "1.0.0",
+                 "scripts": { "postinstall": "node -e \"require('fs').writeFileSync('BUILT', '')\"" } }"#,
+        )],
+    );
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(sbx.home.join("prep-repo"))
+        .output()
+        .unwrap();
+    let key = format!(
+        "post-demo@{url}#{}",
+        String::from_utf8_lossy(&head.stdout).trim()
+    );
+    for allowed in [true, false] {
+        let _ = fs::remove_dir_all(sbx.project.join("node_modules"));
+        sbx.write_manifest(&format!(
+            r#"{{ "name": "consumer", "version": "0.0.0", "dependencies": {{ "post-demo": "{url}" }},
+                 "pnpm": {{ "allowBuilds": {{ "{key}": {allowed} }} }} }}"#
+        ));
+        sbx.cmd().arg("install").assert().success();
+        assert_eq!(
+            sbx.project.join("node_modules/post-demo/BUILT").exists(),
+            allowed,
+            "allowBuilds {{{key}: {allowed}}}"
+        );
+    }
+}
+
 /// A gzipped tarball shaped like a codeload archive: every entry under one
 /// `<owner>-<repo>-<sha>/` wrapper dir.
 fn codeload_tarball(wrapper: &str, files: &[(&str, &str)]) -> Vec<u8> {
