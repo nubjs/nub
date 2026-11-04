@@ -10689,6 +10689,19 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
         for line in crate::pm_engine::use_nub::regenerate_workspace_yaml(&root)? {
             println!("  {line}");
         }
+        // pnpm 11+ refuses a frozen install of a lockfile that does not record
+        // the pinned pnpm, and every alignment above writes only the project
+        // document. A failure (offline) leaves it to the next install.
+        match crate::pm_engine::sync_pnpm_package_manager_pin(&root) {
+            Ok(Some(recorded)) => println!(
+                "  pnpm-lock.yaml: packageManagerDependencies = pnpm@{recorded} (+integrity)"
+            ),
+            Ok(None) => {}
+            Err(e) => eprintln!(
+                "nub: could not record pnpm@{version} in pnpm-lock.yaml: {e:#}\n\
+                 \x20 the next `nub install` records it"
+            ),
+        }
     }
     Ok(0)
 }

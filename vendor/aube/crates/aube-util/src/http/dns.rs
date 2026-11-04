@@ -171,7 +171,8 @@ impl Resolve for CachingSystemResolver {
         let host = name.as_str().to_owned();
         Box::pin(async move {
             let addrs = this.resolve_host(host).await?;
-            Ok(Box::new(addrs.to_vec().into_iter()) as Addrs)
+            // The iterator owns the shared slice, so no per-lookup copy.
+            Ok(Box::new((0..addrs.len()).map(move |i| addrs[i])) as Addrs)
         })
     }
 }

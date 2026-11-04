@@ -21,6 +21,7 @@ mod deprecations;
 mod dirs;
 pub mod embed;
 mod engines;
+pub mod package_manager_pin;
 mod patches;
 mod pnpmfile;
 mod process_guard;
