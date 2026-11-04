@@ -322,6 +322,10 @@ pub struct Manifest {
     /// mechanism alone, measured with an empty file, plus the bootstrap's own
     /// evaluation.
     ///
+    /// Never set for a payload carrying the `--external` / `--allow-dynamic-import`
+    /// resolve shim: its generated entry is evaluated ahead of the bundle and reads
+    /// the record before any preamble could publish it.
+    ///
     /// Absent in legacy manifests, where `false` is exactly the preload they were
     /// built for.
     #[serde(default)]

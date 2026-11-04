@@ -363,6 +363,105 @@ fn a_smol_payload_records_whether_it_needs_the_register_hooks_shim() {
     );
 }
 
+/// An `--external` package resolves on the machine that RUNS the artifact, and a
+/// missing one stops it with the shim's "Cannot find" error.
+///
+/// Only running the artifact shows either. The shim's entry and hook evaluate before
+/// the bundle, reading the compile bootstrap's record at module evaluation, so a
+/// payload that left publishing the record to the bundle's preamble built cleanly,
+/// reported the package as shipped, and died on the hook's first line with a
+/// TypeError. The absent case therefore pins the shim's OWN message: a non-zero exit
+/// alone was satisfied by that crash.
+///
+/// Both containers that extract, `--smol` and the default embedding one. The package
+/// is CommonJS, like most of what gets externalized, and prints a token no other file
+/// can, which is what shows the run-time copy answered.
+#[cfg(feature = "compile")]
+#[test]
+fn an_external_package_resolves_where_the_artifact_runs() {
+    let runtime = compile_test_runtime();
+    let work = unique_test_cache();
+    let cache = work.join("cache");
+    let entry = work.join("app.mjs");
+    let present = work.join("present");
+    let absent = work.join("absent");
+    let package = present.join("node_modules").join("peer");
+    std::fs::create_dir_all(&package).expect("create the installed package dir");
+    std::fs::create_dir_all(&absent).expect("create the empty run dir");
+    std::fs::write(
+        &entry,
+        "import peer from \"peer\";\nconsole.log(peer(42));\n",
+    )
+    .expect("write entry");
+    std::fs::write(
+        package.join("package.json"),
+        "{ \"name\": \"peer\", \"version\": \"1.0.0\", \"main\": \"index.js\" }\n",
+    )
+    .expect("write the package manifest");
+    std::fs::write(
+        package.join("index.js"),
+        "module.exports = (n) => `peer-answered:${n}`;\n",
+    )
+    .expect("write the package");
+
+    let run = |artifact: &Path, cwd: &Path| {
+        let mut cmd = Command::new(artifact);
+        cmd.current_dir(cwd)
+            .env("XDG_CACHE_HOME", work.join("artifact-cache"));
+        // Long enough for the embedding shape's first run, which unpacks its Node.
+        run_compiled_artifact_command_with_timeout(cmd, std::time::Duration::from_secs(60))
+    };
+
+    for (shape, flags) in [("smol", &["--smol"][..]), ("embed", &[][..])] {
+        let artifact = work.join(format!("{shape}{}", std::env::consts::EXE_SUFFIX));
+        let compiled = Command::new(nub_binary())
+            .args([
+                "compile",
+                "--target",
+                &runtime.node_target,
+                "--external",
+                "peer",
+            ])
+            .args(flags)
+            .arg("--out")
+            .arg(&artifact)
+            .arg(&entry)
+            .current_dir(&work)
+            .env("XDG_CACHE_HOME", &cache)
+            .env("__NUB_LAUNCHER_TEMPLATE", &runtime.launcher)
+            .output()
+            .expect("spawn nub compile");
+        assert!(
+            compiled.status.success(),
+            "{shape}: compile failed: {}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+
+        let found = run(&artifact, &present);
+        assert!(
+            found.status.success()
+                && String::from_utf8_lossy(&found.stdout).trim() == "peer-answered:42",
+            "{shape}: an installed external must answer from the run directory; \
+             status {:?}, stdout: {}, stderr: {}",
+            found.status,
+            String::from_utf8_lossy(&found.stdout),
+            String::from_utf8_lossy(&found.stderr)
+        );
+
+        let missing = run(&artifact, &absent);
+        let stderr = String::from_utf8_lossy(&missing.stderr);
+        assert!(
+            !missing.status.success()
+                && stderr.contains("Cannot find peer.")
+                && stderr.contains("compiled with --external peer"),
+            "{shape}: a missing external must fail with the shim's own error; \
+             status {:?}, stderr: {stderr}",
+            missing.status
+        );
+    }
+    let _ = std::fs::remove_dir_all(&work);
+}
+
 /// Whether a target Node can carry the single-executable container at all.
 ///
 /// The blob's `execArgv` field is what the container needs and it reached release
