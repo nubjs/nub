@@ -1227,6 +1227,10 @@ pub struct InstallFlags {
     /// like `dangerouslyAllowAllBuilds` — an explicit `allowBuilds: false`
     /// still denies.
     pub allow_all_builds: bool,
+    /// Run npm's project lifecycle stages: `prepublish` and the `prepare`
+    /// family on every install, and no `pnpm:devPreinstall`. Not a CLI flag: set only by the `npm` shim's
+    /// install routing, alongside [`Self::allow_all_builds`].
+    pub npm_lifecycle: bool,
     /// Workspace selectors (`--filter`/`-r`/…), routed through the same
     /// `EffectiveFilter` path the registry verbs (`add`/`remove`/`update`) use.
     pub filter: WorkspaceFilterFlags,
@@ -1248,6 +1252,8 @@ pub struct CiFlags {
     pub dir: Option<std::path::PathBuf>,
     /// See [`InstallFlags::allow_all_builds`].
     pub allow_all_builds: bool,
+    /// See [`InstallFlags::npm_lifecycle`].
+    pub npm_lifecycle: bool,
     /// Workspace selectors (`--filter`/`-r`/…) — same path as `install`.
     pub filter: WorkspaceFilterFlags,
     /// Output-verbosity flags (`--reporter`/`--silent`/`--loglevel`).
@@ -1374,6 +1380,9 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     // ordinary catalog or overrides edit keeps normal prefer-frozen reuse.
     // Explicit frozen modes remain lockfile-as-truth inside the engine.
     opts.revalidate_release_policy = true;
+    if flags.npm_lifecycle {
+        opts.project_stages = aube::commands::install::ProjectStages::Npm;
+    }
     // yarn `enableScripts: false` — honor the security opt-out by forcing a
     // block-all-builds policy that overrides even nub's curated default-trust floor.
     if config.scripts_disabled {
@@ -1636,8 +1645,15 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
         strict_no_lockfile: true,
         cli_flags: Vec::new(),
         env_snapshot: super::env_snapshot(),
-        // `nub ci` is the argumentless-install shape: root lifecycle hooks run.
+        // `nub ci` is the argumentless-install shape: the projects' lifecycle
+        // hooks run, `pnpm:devPreinstall` included, as `aube ci` sets them.
         skip_root_lifecycle: false,
+        run_dev_preinstall: true,
+        project_stages: if flags.npm_lifecycle {
+            aube::commands::install::ProjectStages::Npm
+        } else {
+            aube::commands::install::ProjectStages::Install
+        },
         // Workspace scoping (`--filter`/`-r`/…) — same `workspace_filter`
         // channel as `run_install`, into `discover_workspace_plan`.
         workspace_filter: flags.filter.effective_filter(),

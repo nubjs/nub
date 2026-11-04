@@ -252,6 +252,10 @@ async fn run_inner(
             Some("update"),
         )
         .await?;
+        if runs_project_lifecycle(&args) {
+            install::run_root_preinstall(&cwd, args.ignore_scripts, args.lockfile_only, "update")
+                .await?;
+        }
     }
     let manifest_path = cwd.join("package.json");
 
@@ -1269,6 +1273,16 @@ async fn run_inner(
         // chained install fire it again would run the user's hook twice for
         // one `aube update`.
         chained.pre_resolution_hook_already_ran = true;
+        if runs_project_lifecycle(&args) {
+            // The updated project plus the workspace root, whose hooks
+            // pnpm runs for any install in the workspace.
+            let workspace_root =
+                crate::dirs::find_workspace_root(&cwd).unwrap_or_else(|| cwd.clone());
+            let project = super::workspace_importer_path(&workspace_root, &cwd)?;
+            chained.skip_root_lifecycle = false;
+            chained.root_preinstall_already_ran = true;
+            chained.lifecycle_importers = Some(BTreeSet::from([".".to_string(), project]));
+        }
         install::run_with_project_lock(chained, &lock).await?;
     }
 
@@ -2047,6 +2061,10 @@ async fn run_filtered(
         Some("update"),
     )
     .await?;
+    if runs_project_lifecycle(&args) {
+        install::run_root_preinstall(&root, args.ignore_scripts, args.lockfile_only, "update")
+            .await?;
+    }
     args.dev_preinstall_already_run = true;
     let shared_workspace_lockfile = resolve_shared_workspace_lockfile(&root)?;
     let root_manifest = if shared_workspace_lockfile {
@@ -2054,6 +2072,10 @@ async fn run_filtered(
     } else {
         None
     };
+    let mut lifecycle_importers = BTreeSet::from([".".to_string()]);
+    for pkg in &matched {
+        lifecycle_importers.insert(super::workspace_importer_path(&root, &pkg.dir)?);
+    }
     let mut exit_code = None;
     let mut completed_update = false;
     let result = async {
@@ -2213,9 +2235,13 @@ async fn run_filtered(
         if shared_workspace_lockfile && completed_update {
             super::retarget_cwd(&root)?;
             let lock = super::take_install_project_lock(&root)?;
-            if let Err(error) =
-                install::run_with_project_lock(chained_install_options(&args), &lock).await
-            {
+            let mut chained = chained_install_options(&args);
+            if runs_project_lifecycle(&args) {
+                chained.skip_root_lifecycle = false;
+                chained.root_preinstall_already_ran = true;
+                chained.lifecycle_importers = Some(lifecycle_importers);
+            }
+            if let Err(error) = install::run_with_project_lock(chained, &lock).await {
                 if exit_code == Some(130) {
                     tracing::error!(
                         code = aube_codes::errors::ERR_AUBE_INSTALL_CANCELLED,
@@ -2232,6 +2258,14 @@ async fn run_filtered(
     .await;
     super::finish_filtered_workspace(&cwd, result)?;
     Ok(exit_code)
+}
+
+/// pnpm runs the updated projects' own lifecycle hooks only for an
+/// update of everything: an argumentless `update` is an install
+/// (`mutation: 'install'`), while named packages, `--latest` and an
+/// interactive pick each update a chosen set, which runs none of them.
+fn runs_project_lifecycle(args: &UpdateArgs) -> bool {
+    args.packages.is_empty() && !args.latest && !args.interactive
 }
 
 fn chained_install_options(args: &UpdateArgs) -> install::InstallOptions {
