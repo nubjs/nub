@@ -220,29 +220,42 @@ pub(crate) fn select_workspace_packages(
             cwd.display()
         ));
     }
-    // pnpm drops the root from a recursive selection no inclusion pins for
-    // these commands, and keeps it as a candidate for every other one.
-    let root_selection = if matches!(command, "add" | "run" | "exec" | "test") {
-        aube_workspace::RootSelection::AutoExclude
-    } else {
-        aube_workspace::RootSelection::Keep
-    };
-    let matched = aube_workspace::selector::select_workspace_projects(
-        &root,
-        &workspace_pkgs,
-        filter,
-        aube_workspace::SelectOptions {
-            prefix: cwd,
-            root: root_selection,
-        },
-    )
-    .map_err(|e| miette!("invalid --filter selector: {e}"))?;
+    let matched = select_projects(&root, &workspace_pkgs, filter, command)?;
     if matched.is_empty() {
         return Err(miette!(
             "aube {command}: filter {filter:?} did not match any workspace package"
         ));
     }
     Ok((root, matched))
+}
+
+/// The workspace projects `filter` selects for `command`, the way pnpm
+/// selects them: directory selectors resolve against the directory the
+/// command was invoked from, and `run`, `exec`, `add` and `test` drop the
+/// root from a selection that names no project. Every `--filter` caller
+/// goes through here so none resolves paths against the workspace root.
+pub(crate) fn select_projects(
+    workspace_root: &Path,
+    workspace_pkgs: &[PathBuf],
+    filter: &aube_workspace::selector::EffectiveFilter,
+    command: &str,
+) -> miette::Result<Vec<aube_workspace::selector::SelectedPackage>> {
+    let prefix = crate::dirs::cwd()?;
+    let root = if matches!(command, "add" | "run" | "exec" | "test") {
+        aube_workspace::RootSelection::AutoExclude
+    } else {
+        aube_workspace::RootSelection::Keep
+    };
+    aube_workspace::selector::select_workspace_projects(
+        workspace_root,
+        workspace_pkgs,
+        filter,
+        aube_workspace::SelectOptions {
+            prefix: &prefix,
+            root,
+        },
+    )
+    .map_err(|e| miette!("invalid --filter selector: {e}"))
 }
 
 pub(crate) fn workspace_importer_path(workspace_root: &Path, dir: &Path) -> miette::Result<String> {

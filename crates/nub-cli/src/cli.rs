@@ -5221,7 +5221,10 @@ fn run_workspace_target(
 
     // `--filter` goes through the engine's selector, the one every PM verb
     // uses, so `run` and `install` read a selector the same way. `-r` alone
-    // is its unnarrowed `*`.
+    // is its unnarrowed `*`. The selector reads workspace config, so the
+    // project's config surface is set first: `pnpm-workspace.yaml` counts
+    // only when pnpm is the incumbent.
+    crate::pm_engine::engine_brand_preflight();
     let filter = aube_workspace::EffectiveFilter {
         filters: if ws.filter.is_empty() {
             vec!["*".to_string()]

@@ -119,12 +119,8 @@ pub(super) fn filter_graph_to_workspace_selection(
     graph: &aube_lockfile::LockfileGraph,
     filters: &aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<aube_lockfile::LockfileGraph> {
-    let selected = aube_workspace::selector::select_workspace_packages(
-        workspace_root,
-        workspace_packages,
-        filters,
-    )
-    .map_err(|e| miette!("invalid --filter selector: {e}"))?;
+    let selected =
+        crate::commands::select_projects(workspace_root, workspace_packages, filters, "install")?;
     if selected.is_empty() {
         return Err(miette!(
             "{}: filter {filters:?} did not match any workspace package",
@@ -174,12 +170,12 @@ pub(super) fn per_project_write_selection(
     if workspace_filter.is_empty() {
         return Ok(None);
     }
-    let selected = aube_workspace::selector::select_workspace_packages(
+    let selected = crate::commands::select_projects(
         workspace_root,
         workspace_packages,
         workspace_filter,
-    )
-    .map_err(|e| miette!("invalid --filter selector: {e}"))?;
+        "install",
+    )?;
     let mut keys = std::collections::BTreeSet::new();
     for pkg in &selected {
         keys.insert(workspace_importer_path(workspace_root, &pkg.dir)?);

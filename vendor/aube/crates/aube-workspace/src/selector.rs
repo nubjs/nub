@@ -124,24 +124,6 @@ struct IndexedPackage {
     prod_deps: BTreeSet<String>,
 }
 
-/// [`select_workspace_projects`] resolved against the workspace root, with
-/// the root a candidate like any other project.
-pub fn select_workspace_packages(
-    workspace_root: &Path,
-    workspace_pkgs: &[PathBuf],
-    filter: &EffectiveFilter,
-) -> Result<Vec<SelectedPackage>, SelectError> {
-    select_workspace_projects(
-        workspace_root,
-        workspace_pkgs,
-        filter,
-        SelectOptions {
-            prefix: workspace_root,
-            root: RootSelection::Keep,
-        },
-    )
-}
-
 /// The workspace projects `filter` selects, in discovery order with the
 /// root last. `workspace_pkgs` are the discovered members; the root joins
 /// them as a candidate whenever it has a `package.json`.
@@ -248,14 +230,12 @@ fn selector_entries(
     selector: &ProjectSelector,
 ) -> Result<BTreeSet<usize>, SelectError> {
     let mut entries: Option<BTreeSet<usize>> = if let Some(diff) = &selector.diff {
-        let changed = changed_since(workspace_root, packages, diff)?;
-        Some(match &selector.parent_dir {
-            Some(dir) => changed
-                .into_iter()
-                .filter(|&idx| normalize(&packages[idx].selected.dir).starts_with(dir))
-                .collect(),
-            None => changed,
-        })
+        Some(changed_since(
+            workspace_root,
+            packages,
+            diff,
+            selector.parent_dir.as_deref(),
+        )?)
     } else {
         selector.parent_dir.as_ref().map(|dir| {
             let glob = DirGlob::new(&dir.to_string_lossy());
@@ -514,16 +494,20 @@ fn walk_dependents(
     out
 }
 
+/// pnpm's `[<since>]` selection (`get_changed_projects`): the files `git
+/// diff` reports between the merge base of `rev` and `HEAD` and the
+/// working tree, so uncommitted and staged edits count, each credited to
+/// the project that most closely contains it. A `{dir}` part limits the
+/// diff to that pathspec, glob included.
 fn changed_since(
     workspace_root: &Path,
     packages: &[IndexedPackage],
     rev: &str,
+    pathspec_dir: Option<&Path>,
 ) -> Result<BTreeSet<usize>, SelectError> {
-    // `git diff <revspec> -- <paths>` can't accept a `--` terminator
-    // before the revspec, so a rev that begins with `-` would land as
-    // an option. Reject at the boundary as defense against the
-    // CVE-2017-1000117 class of argv injection. NUL is rejected too
-    // because it never appears in a legitimate ref.
+    // `--end-of-options` already keeps a `-`-led rev from reaching git as
+    // an option (the CVE-2017-1000117 class); refusing it here as well
+    // gives a clear error. NUL never appears in a legitimate ref.
     if rev.starts_with('-') {
         return Err(SelectError::GitFailed(format!(
             "refusing to pass revspec starting with `-` to git: {rev:?}"
@@ -534,36 +518,20 @@ fn changed_since(
             "refusing to pass revspec containing NUL byte to git".to_string(),
         ));
     }
-    let revspec = format!("{rev}...HEAD");
-    let git_root = git_root(workspace_root)?;
+    let repo_root = repo_root(workspace_root);
+    let base = merge_base(workspace_root, rev)?;
+    // Relative to the workspace root, where git runs, so the pathspec and
+    // git's own view of the worktree agree however the path was spelled.
+    let pathspec = match pathspec_dir {
+        Some(dir) => pathdiff::diff_paths(dir, normalize(workspace_root))
+            .filter(|rel| !rel.as_os_str().is_empty())
+            .unwrap_or_else(|| PathBuf::from(".")),
+        None => PathBuf::from("."),
+    };
     let output = Command::new("git")
-        .arg("diff")
-        .arg("--name-only")
-        .arg(&revspec)
-        .arg("--")
-        .current_dir(&git_root)
-        .output()
-        .map_err(SelectError::GitIo)?;
-    if !output.status.success() {
-        return Err(SelectError::GitFailed(
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ));
-    }
-    let mut out = BTreeSet::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let changed = git_root.join(line);
-        for (idx, pkg) in packages.iter().enumerate() {
-            if changed.starts_with(&pkg.selected.dir) {
-                out.insert(idx);
-            }
-        }
-    }
-    Ok(out)
-}
-
-fn git_root(workspace_root: &Path) -> Result<PathBuf, SelectError> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
+        .args(["diff", "--name-only", "-z", "--no-renames", "--no-relative"])
+        .args(["--end-of-options", &base, "--"])
+        .arg(&pathspec)
         .current_dir(workspace_root)
         .output()
         .map_err(SelectError::GitIo)?;
@@ -572,9 +540,62 @@ fn git_root(workspace_root: &Path) -> Result<PathBuf, SelectError> {
             String::from_utf8_lossy(&output.stderr).trim().to_string(),
         ));
     }
-    Ok(PathBuf::from(
-        String::from_utf8_lossy(&output.stdout).trim(),
-    ))
+    let dirs: Vec<PathBuf> = packages
+        .iter()
+        .map(|pkg| normalize(&pkg.selected.dir))
+        .collect();
+    let mut out = BTreeSet::new();
+    for file in String::from_utf8_lossy(&output.stdout).split('\0') {
+        if file.is_empty() {
+            continue;
+        }
+        let changed = repo_root.join(file);
+        let owner = changed
+            .ancestors()
+            .skip(1)
+            .find_map(|dir| dirs.iter().position(|pkg| pkg == dir));
+        if let Some(idx) = owner {
+            out.insert(idx);
+        }
+    }
+    Ok(out)
+}
+
+/// The commit `rev` and `HEAD` share, so commits made only on the `rev`
+/// side stay out of the diff. git exits 1 with no merge base (a shallow
+/// clone, unrelated histories) and 128 for a bad rev; both fall back to
+/// `rev` itself, so the diff reports a bad revision.
+fn merge_base(workspace_root: &Path, rev: &str) -> Result<String, SelectError> {
+    let output = Command::new("git")
+        .args(["merge-base", "--end-of-options", rev, "HEAD"])
+        .current_dir(workspace_root)
+        .output()
+        .map_err(SelectError::GitIo)?;
+    match output.status.code() {
+        Some(0) => {
+            let base = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Ok(if base.is_empty() {
+                rev.to_string()
+            } else {
+                base
+            })
+        }
+        Some(1 | 128) => Ok(rev.to_string()),
+        _ => Err(SelectError::GitFailed(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        )),
+    }
+}
+
+/// The nearest ancestor holding `.git`, found lexically so it compares
+/// with the project directories however a symlinked temp dir resolves.
+fn repo_root(workspace_root: &Path) -> PathBuf {
+    let start = normalize(workspace_root);
+    start
+        .ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .unwrap_or(&start)
+        .to_path_buf()
 }
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -819,7 +840,7 @@ mod tests {
         // A rev beginning with `-` would reach `git diff` as an option
         // (CVE-2017-1000117 class); the check runs before git does.
         for rev in ["--upload-pack=/tmp/evil", "main\0evil"] {
-            match changed_since(Path::new("/nonexistent"), &[], rev).unwrap_err() {
+            match changed_since(Path::new("/nonexistent"), &[], rev, None).unwrap_err() {
                 SelectError::GitFailed(msg) => assert!(msg.contains("refusing"), "{msg}"),
                 other => panic!("expected GitFailed, got {other:?}"),
             }

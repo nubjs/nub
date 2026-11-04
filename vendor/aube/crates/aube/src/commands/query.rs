@@ -121,9 +121,7 @@ fn selected_importers(
             root.display()
         ));
     }
-    let selected =
-        aube_workspace::selector::select_workspace_packages(root, &workspace_pkgs, filter)
-            .map_err(|e| miette!("invalid --filter selector: {e}"))?;
+    let selected = super::select_projects(root, &workspace_pkgs, filter, "query")?;
     if selected.is_empty() {
         return Err(miette!(
             "{}: filter {filter:?} did not match any workspace package",

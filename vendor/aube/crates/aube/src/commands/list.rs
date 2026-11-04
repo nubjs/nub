@@ -231,9 +231,7 @@ pub async fn run(
                 cwd.display()
             ));
         }
-        let selected =
-            aube_workspace::selector::select_workspace_packages(&cwd, &workspace_pkgs, &filter)
-                .map_err(|e| miette!("invalid --filter selector: {e}"))?;
+        let selected = super::select_projects(&cwd, &workspace_pkgs, &filter, "list")?;
         if selected.is_empty() {
             if filter.fail_if_no_match {
                 let shown: Vec<&str> = filter
