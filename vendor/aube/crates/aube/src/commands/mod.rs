@@ -87,6 +87,7 @@ pub mod why;
 mod auto_install;
 mod catalog_discovery;
 mod dep_filter;
+mod exportable_manifest;
 mod fs_helpers;
 mod manifest_io;
 mod package_spec;
