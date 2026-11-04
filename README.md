@@ -2,7 +2,7 @@
   <img src="https://nubjs.com/icon-border.svg" width="200px" align="center" alt="Nub logo" />
   <h1 align="center">Nub</h1>
   <p align="center">
-    A fast all-in-one toolkit that augments Node.js instead of replacing it
+    The all-in-one Node.js toolkit
   </p>
 </p>
 
@@ -61,8 +61,11 @@ curl -fsSL https://nubjs.com/install.sh | bash
 # Windows (PowerShell)
 irm https://nubjs.com/install.ps1 | iex
 
+# Windows (winget)
+winget install Nub.Nub
+
 # Homebrew (macOS / Linux)
-brew install nubjs/tap/nub
+brew install nub
 
 # Nix (flakes)
 nix run github:nubjs/nub
@@ -73,6 +76,13 @@ mise use -g nub
 # Or via npm (pnpm / yarn global add work too)
 npm install -g @nubjs/nub
 ```
+
+> [!NOTE]
+> Switching an existing `nubjs/tap` install over to the core formula takes an uninstall first:
+>
+> ```sh
+> brew uninstall nubjs/tap/nub && brew untap nubjs/tap && brew install nub
+> ```
 
 For GitHub Actions, use [`nubjs/setup-nub`](https://github.com/nubjs/setup-nub) in place of `actions/setup-node`. It's one-to-one compatible.
 
@@ -195,7 +205,7 @@ It's fast compared to existing JavaScript-based script runners.
 - 🗃️ The full pnpm workspace surface — `-r`, `--filter`, `--parallel`, `--workspace-concurrency`, `--resume-from`, `--stream`
 - 🎯 pnpm's `--filter` grammar verbatim — graph (`...@org/web`) and changed-since (`[main]`) selectors
 
-View the [full script runner docs 👉](https://nubjs.com/docs/runner/run).
+View the [full script runner docs 👉](https://nubjs.com/docs/run).
 
 <br/>
 
@@ -222,7 +232,19 @@ nubx -y cowsay@1.5.0 "hi"   # fetched from the registry (auto-approved via -y)
 - 🧩 Full `pnpm exec` / `pnpm dlx` flag parity, shell mode included
 - 🪜 Walks the resolution chain — member `.bin`, then workspace root, then ancestors
 
-View the [full package runner docs 👉](https://nubjs.com/docs/runner).
+View the [full package runner docs 👉](https://nubjs.com/docs/nubx).
+
+## Unified runner — `nubr`
+
+One name for the three runners above: a file, a `package.json` script, or an installed bin, resolved most-specific-first. The installer puts it on `PATH` beside `nub`, and [`@nubjs/runner`](https://www.npmjs.com/package/@nubjs/runner) ships the same command for a project that cannot install the binary.
+
+```sh
+nubr app.ts        # a file
+nubr build         # a package.json script
+nubr vitest run    # an installed node_modules/.bin entry
+```
+
+View the [unified runner docs 👉](https://nubjs.com/docs/standalone).
 
 <br/>
 

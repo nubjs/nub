@@ -1,0 +1,59 @@
+---
+title: "Nub 0.8.0"
+description: Reworks environment-file configuration, ships a round of package-manager correctness fixes, and adds garbage collection for the package store.
+author: The Nub Team
+date: 2026-08-27
+---
+
+Nub 0.8.0 reworks how environment files are configured, fixes a batch of package-manager correctness defects, and teaches `nub store prune` to collect the whole store. It carries a small set of breaking changes, listed first.
+
+<NubIntro />
+
+## Breaking changes
+
+**File paths in `envFile` go in an array.** `"envFile": ".env"` is now an error naming `[".env"]`; a string value is reserved for mode names, and `"varlock"` is the only one. This makes `envFile` consistent with the other list-valued config fields. ([#735](https://github.com/nubjs/nub/pull/735))
+
+**A declared `envFile` displaces a `.env.schema` hand-over, at every scope.** A `.env.schema` file decides the environment only when no `envFile` is declared. Previously the two together were a hard error, and `envFile: false` in a schema project loaded the schema anyway. Now declared intent wins: `envFile: false` loads nothing, a list loads those files, and `envFile: "varlock"` keeps the hand-over explicitly — including against a machine-wide `envFile: false`. ([#735](https://github.com/nubjs/nub/pull/735), [#774](https://github.com/nubjs/nub/pull/774))
+
+**An unreadable tsconfig refuses the run.** A project tsconfig whose `extends` target is missing previously ran under options its author never wrote. Nub now stops with the read error, as `tsc` does (TS5083). Fix the config, or run with `--node`. ([#778](https://github.com/nubjs/nub/pull/778))
+
+**Another package manager's config no longer directs the `node_modules` layout.** The layout is configured in `nub.jsonc` under every project identity; pnpm 11's `pnpm-workspace.yaml` layout keys are no longer read, and npm's `install-strategy=nested` no longer aborts the install. ([#698](https://github.com/nubjs/nub/pull/698))
+
+**Version-gated feature flags moved out of `NODE_OPTIONS`.** Flags matched to the host Node aborted any descendant process on an older Node — Electron apps exited at startup. Feature flags now ride argv instead, so an Electron dev server runs under `nub run` again. ([#777](https://github.com/nubjs/nub/pull/777))
+
+The first install after upgrading also relinks each warm tree once: hidden-hoist names are now claimed shallowest-first, matching pnpm's depth ordering. ([#775](https://github.com/nubjs/nub/pull/775))
+
+## Package manager
+
+| PR | What changed |
+| --- | --- |
+| [#737](https://github.com/nubjs/nub/pull/737) | A build failure in an `optionalDependencies` entry skips the package with a warning instead of failing the install, matching npm and pnpm. |
+| [#720](https://github.com/nubjs/nub/pull/720) | `nub store prune` garbage-collects the global virtual store and extracted-tree tiers, not just the content store. |
+| [#743](https://github.com/nubjs/nub/pull/743) | `nub outdated` applies `minimumReleaseAge` to both reported columns, marks a held version with the time it becomes installable, and exits 0 when every pending upgrade is held. |
+| [#644](https://github.com/nubjs/nub/pull/644) | A `store-dir` override moves every store tier together, so phantom-dependency protection keeps working in a relocated store. |
+| [#741](https://github.com/nubjs/nub/pull/741) | A package whose bin shares its interpreter's name no longer produces a `.bin` wrapper that resolves to itself — `nub install node` used to hang. |
+| [#717](https://github.com/nubjs/nub/pull/717) | Workspace aliases and relative-path workspace specs resolve. |
+| [#754](https://github.com/nubjs/nub/pull/754) | A member-scoped `nub update` resolves in the workspace-root frame. |
+| [#763](https://github.com/nubjs/nub/pull/763) | An empty lockfile importer reads as drift, not as a specifier-less format. |
+| [#723](https://github.com/nubjs/nub/pull/723) | A stalled registry metadata fetch is bounded and surfaced instead of hanging the install. |
+| [#740](https://github.com/nubjs/nub/pull/740) | `NUB_CACHE_DIR` moves the engine cache, and `nub config get` reports values set through the environment. |
+| [#752](https://github.com/nubjs/nub/pull/752) | The shim directories honor `XDG_DATA_HOME` on a fresh install. |
+| [#761](https://github.com/nubjs/nub/pull/761) | A source build fails loudly when a build prerequisite is missing instead of shipping a quietly degraded binary. |
+
+## Runtime and CLI
+
+| PR | What changed |
+| --- | --- |
+| [#770](https://github.com/nubjs/nub/pull/770) | Deferred module evaluation (`import defer`) is enabled on Node 26.4+. |
+| [#742](https://github.com/nubjs/nub/pull/742) | A user loader delivered through `NODE_OPTIONS` is seen by the CommonJS-sync guard. |
+| [#707](https://github.com/nubjs/nub/pull/707) | The `fetch` cache-evict builtins load synchronously, closing a startup race. |
+| [#734](https://github.com/nubjs/nub/pull/734) | `@nubjs/types` covers the six polyfilled proposals an `es2024` lib can't reach. |
+| [#701](https://github.com/nubjs/nub/pull/701) | `nub.exe` reserves an 8 MB main-thread stack on Windows, matching `node.exe`. |
+| [#739](https://github.com/nubjs/nub/pull/739) | A help flag after the verb works in the `pm` and `node` command groups. |
+| [#744](https://github.com/nubjs/nub/pull/744) | Ctrl-C signals every concurrent child of `nub run`, and `--color` takes effect. |
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.8.0) list every change in this release.
+
+## Get started
+
+<GetStarted />

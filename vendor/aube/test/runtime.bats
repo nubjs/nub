@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# shellcheck disable=SC2030,SC2031
 # Node runtime switching: version sources (.nvmrc / .node-version /
 # devEngines.runtime), install discovery (aube dir + mise dir), onFail
 # policies, and `aube runtime` CLI surface. Hermetic — no network:
@@ -260,6 +261,29 @@ _basic_project() {
 	assert_output --partial "v1.2.3"
 }
 
+@test "activated shims survive removal of the aube version that created them" {
+	local real_aube v1 v2
+	real_aube="$(command -v aube)"
+	v1="$TEST_TEMP_DIR/aube-v1"
+	v2="$TEST_TEMP_DIR/aube-v2"
+	mkdir -p "$v1" "$v2"
+	cp "$real_aube" "$v1/aube"
+	cp "$real_aube" "$v2/aube"
+	chmod +x "$v1/aube" "$v2/aube"
+	export PATH="$v1:$PATH"
+
+	run aube activate bash
+	assert_success
+	eval "$output"
+	refute [ -L "$AUBE_SHIM_DIR/pnpm" ]
+	rm "$v1/aube"
+	export PATH="${PATH/$v1/$v2}"
+
+	run pnpm --version
+	assert_success
+	assert_output --regexp '^[0-9]+\.[0-9]+\.[0-9]+'
+}
+
 @test "pnpm shim routes install through aube without changing lockfile kind" {
 	_basic_project
 	cat >yarn.lock <<-'YAML'
@@ -272,6 +296,54 @@ _basic_project() {
 	assert_success
 	assert_file_exists yarn.lock
 	refute [ -e pnpm-lock.yaml ]
+}
+
+@test "activated pnpm shim remains available inside package scripts" {
+	cat >package.json <<-'JSON'
+		{
+		  "name": "runtime-test",
+		  "version": "0.0.0",
+		  "scripts": { "nested-pnpm": "command -v pnpm" }
+		}
+	JSON
+	run aube activate bash
+	assert_success
+	eval "$output"
+
+	# `-s` drops aube's wrapper output (the echoed `$ <cmd>` line) so the
+	# assertion stays an exact match on what the script itself printed.
+	run aube run --no-install -s nested-pnpm
+	assert_success
+	assert_output "$AUBE_SHIM_DIR/pnpm"
+}
+
+@test "activated pnpm shim remains available to node descendants" {
+	cat >package.json <<-'JSON'
+		{
+		  "name": "runtime-test",
+		  "version": "0.0.0",
+		  "scripts": {
+		    "nested-pnpm": "\"$AUBE_SHIM_DIR/node\""
+		  }
+		}
+	JSON
+	mkdir -p "$TEST_TEMP_DIR/real-node"
+	cat >"$TEST_TEMP_DIR/real-node/node" <<'SH'
+#!/bin/sh
+command -v pnpm
+pnpm --version >/dev/null
+SH
+	chmod +x "$TEST_TEMP_DIR/real-node/node"
+	export PATH="$TEST_TEMP_DIR/real-node:$PATH"
+	run aube activate bash
+	assert_success
+	eval "$output"
+
+	# `-s` drops aube's wrapper output (the echoed `$ <cmd>` line) so the
+	# assertion stays an exact match on what the script itself printed.
+	run aube run --no-install -s nested-pnpm
+	assert_success
+	assert_output "$AUBE_SHIM_DIR/pnpm"
 }
 
 @test "pnpm-11 lockfile with a runtime pin installs without fetching node from the registry" {

@@ -2,6 +2,34 @@
 
 use std::path::Path;
 
+/// True when `path` is a plain directory — NOT a Unix symlink, and NOT
+/// a Windows junction.
+///
+/// The install path distinguishes "per-project materialized package" (a
+/// real directory of files) from "shared-store entry" (a link) in
+/// several places, and the obvious spelling of the negative test is
+/// silently Unix-only. Call sites used to write it as `read_link`
+/// failing with `InvalidInput`, which is the errno a Unix `readlink(2)`
+/// returns for a non-link. Windows has no equivalent: `read_link` over a
+/// plain directory fails with `ERROR_NOT_A_REPARSE_POINT` (4390), and
+/// std's error table has no entry for it, so it arrives as
+/// `Uncategorized`. Every such site therefore answered "not a real
+/// directory" for every real directory on Windows (nub#566).
+///
+/// So key off whether the entry is a link AT ALL rather than off the
+/// error kind of a failed `read_link`. That is the same property
+/// `create_dir_link`'s callers already rely on — `read_link` succeeds on
+/// both a Unix symlink and a junction reparse point — and it leaves
+/// reparse points that are NOT links (cloud-file placeholders on a
+/// OneDrive-synced tree, dedup stubs) correctly classified as the real
+/// directories they are.
+pub fn is_real_dir(path: &Path) -> bool {
+    if std::fs::read_link(path).is_ok() {
+        return false;
+    }
+    std::fs::symlink_metadata(path).is_ok_and(|md| md.is_dir())
+}
+
 /// True when `a` and `b` live on different volumes (Windows) or
 /// mounts (Linux/Mac). Used by the linker probe and warning paths to
 /// detect when hardlink/reflink can't cross the device boundary so

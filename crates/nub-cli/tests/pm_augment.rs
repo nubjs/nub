@@ -13,6 +13,7 @@
 //!
 //! It runs OFFLINE — a nub-identity project with an empty lock, no dependencies,
 //! and its registry pointed at a dead port so any accidental network fails loudly.
+//! The one test that needs a dependency build uses a local `file:` package.
 //!
 //! The harness fails LOUDLY, never vacuously: if this build cannot even LOCATE its
 //! preload (`find_public_preload` → `None`), the augmentation seam is inexercisable
@@ -71,7 +72,7 @@ fn install_runs_lifecycle_scripts_under_runtime_augmentation() {
         .map(|stem| format!("{stem}.cjs"))
         .unwrap_or_default();
 
-    let dir = fixture();
+    let dir = fixture(POSTINSTALL_PROBE);
     let (stdout, stderr, code) = run(&nub, &dir, &["install"]);
     assert_eq!(
         code, 0,
@@ -109,9 +110,128 @@ fn install_runs_lifecycle_scripts_under_runtime_augmentation() {
     );
 }
 
-/// A nub-identity project with a root postinstall probe, an empty lock, no
+/// A POSIX-only `postinstall`: braced parameter expansion with a default, and
+/// the `test` utility. `cmd.exe` leaves `${…}` literal (quotes included) and has
+/// no `test`, so under cmd this writes different bytes AND exits non-zero. The
+/// last line reads a lowercase npm variable, which busybox-w32 up-cases on load,
+/// so it is empty on Windows unless the spawn re-binds the lowercase names.
+const POSIX_SHELL_PROBE: &str = "echo \"MARK=${SHELL_PROBE:-posix}\" > shell.txt && test -d . \
+     && echo dirok >> shell.txt && echo \"$npm_package_name\" >> shell.txt";
+
+/// Lifecycle scripts run under a POSIX `sh` on every platform: the system
+/// `/bin/sh` on Unix, and on Windows the bundled busybox-w32 `sh` the engine
+/// takes from `EngineContext::default_script_shell` — NOT `cmd.exe`, which the
+/// engine defaulted to before. The body is the assertion: cmd.exe cannot run it,
+/// so a regression here fails the install rather than passing quietly.
+///
+/// Root and dependency hooks share aube's one `run_script` spawn, so this pins
+/// the shell selection for both. The dependency path end-to-end (and
+/// the cmd.exe-vs-busybox differential, which needs a real Windows runner) is
+/// `tests/busybox-lifecycle-probe/`.
+#[test]
+fn install_runs_lifecycle_scripts_under_a_posix_shell() {
+    let nub = nub_binary();
+    let dir = fixture(POSIX_SHELL_PROBE);
+    let (stdout, stderr, code) = run(&nub, &dir, &["install"]);
+    assert_eq!(
+        code, 0,
+        "install failed\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let marker = std::fs::read_to_string(dir.join("shell.txt")).unwrap_or_else(|_| {
+        panic!(
+            "the root postinstall wrote no shell.txt — the lifecycle script did not run at all.\
+             \nstdout: {stdout}\nstderr: {stderr}"
+        )
+    });
+    assert_eq!(
+        marker.replace("\r\n", "\n"),
+        "MARK=posix\ndirok\napp\n",
+        "the lifecycle shell did not expand `${{SHELL_PROBE:-posix}}` or run `test -d .`, so it \
+         is not a POSIX sh. On Windows that means the bundled busybox sidecar was not used and \
+         the engine fell back to cmd.exe. A missing last line (`app`) means `$npm_package_name` \
+         expanded to nothing: busybox up-cased the name and the spawn did not re-bind it.\
+         \nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+/// A change of lifecycle shell rebuilds dependency output that a warm install
+/// would otherwise keep. Under `cmd.exe` a build can exit 0 having written the
+/// wrong bytes, so the first install under busybox must not report that tree
+/// current. `/bin/bash` stands in for the new shell, since the shells on either
+/// side of the Windows switch cannot both run here.
+///
+/// The instrument is a DEPENDENCY build script: a root `postinstall` runs on
+/// every install, warm or not, so it cannot tell the two apart. It appends to a
+/// marker at the project root, where a re-link of the package cannot erase it.
+/// The repeat install is the control that proves the warm path skips the build.
+#[cfg(unix)]
+#[test]
+fn a_lifecycle_shell_change_rebuilds_a_warm_install() {
+    let nub = nub_binary();
+    let dir = std::env::temp_dir().join(format!("nub-warm-shell-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("dep")).unwrap();
+    std::fs::write(
+        dir.join("dep/package.json"),
+        r#"{"name":"warmshell-dep","version":"1.0.0","scripts":{"postinstall":"echo ran >> \"$INIT_CWD/marker.txt\""}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"warmshell","version":"0.0.0","private":true,"dependencies":{"warmshell-dep":"file:./dep"}}"#,
+    )
+    .unwrap();
+
+    let builds =
+        || std::fs::read_to_string(dir.join("marker.txt")).map_or(0, |s| s.lines().count());
+    let step = |label: &str, args: &[&str]| {
+        let (stdout, stderr, code) = run(&nub, &dir, args);
+        assert_eq!(
+            code, 0,
+            "{label} failed\nstdout: {stdout}\nstderr: {stderr}"
+        );
+    };
+
+    step("the first install", &["install", "--offline"]);
+    // `approve-builds` may run the approved build itself, so every count below is
+    // relative to the tree after the measured install.
+    step("approve-builds", &["approve-builds", "--all"]);
+    step("the measured install", &["install", "--offline"]);
+    let built = builds();
+    assert!(built >= 1, "the approved dependency build never ran");
+
+    step("the repeat install", &["install", "--offline"]);
+    assert_eq!(
+        builds(),
+        built,
+        "the repeat install rebuilt the dependency, so this fixture cannot tell a warm \
+         install from a cold one"
+    );
+
+    let mut npmrc = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(".npmrc"))
+        .unwrap();
+    std::io::Write::write_all(&mut npmrc, b"\nscript-shell=/bin/bash\n").unwrap();
+    drop(npmrc);
+    step(
+        "the install after the shell change",
+        &["install", "--offline"],
+    );
+    assert_eq!(
+        builds(),
+        built + 1,
+        "the install after the lifecycle shell changed did not rebuild the dependency, so \
+         it kept output the previous shell built"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A nub-identity project with the given root `postinstall`, an empty lock, no
 /// dependencies, and a dead-port registry (offline).
-fn fixture() -> PathBuf {
+fn fixture(postinstall: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
@@ -125,7 +245,7 @@ fn fixture() -> PathBuf {
     std::fs::write(dir.join("nub.lock"), EMPTY_LOCK).unwrap();
     let pkg = format!(
         r#"{{"name":"app","version":"1.0.0","packageManager":"nub@0.0.1","scripts":{{"postinstall":{}}}}}"#,
-        serde_json::to_string(POSTINSTALL_PROBE).unwrap()
+        serde_json::to_string(postinstall).unwrap()
     );
     std::fs::write(dir.join("package.json"), pkg).unwrap();
     dir

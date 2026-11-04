@@ -1,0 +1,289 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nubjs.com/schema/v0.6.json",
+  "title": "Nub project configuration",
+  "description": "Configuration for a project-root nub.jsonc file.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "The JSON Schema URL used by the editor."
+    },
+    "nodeCompat": {
+      "type": "boolean",
+      "default": false,
+      "description": "Run with plain Node behavior while keeping Nub's Node version selection."
+    },
+    "preload": {
+      "$ref": "#/$defs/stringArray",
+      "description": "Modules loaded before the entry file."
+    },
+    "nodeOptions": {
+      "$ref": "#/$defs/stringArray",
+      "description": "Node options applied to runtime commands."
+    },
+    "v8Flags": {
+      "$ref": "#/$defs/stringArray",
+      "description": "V8 flags passed on Node's command line, so the full V8 set applies."
+    },
+    "envFile": {
+      "$ref": "#/$defs/envFileSetting",
+      "description": "Environment-file loading for runtime commands."
+    },
+    "loader": {
+      "type": "object",
+      "description": "Map file extensions to Nub loaders.",
+      "propertyNames": {
+        "pattern": "^\\.[\\s\\S]+$"
+      },
+      "properties": {
+        ".tsx": {
+          "enum": [
+            "text",
+            "jsonc",
+            "json5",
+            "toml",
+            "yaml",
+            "tsx",
+            "jsx"
+          ],
+          "description": "`.tsx` is always parsed as JSX, so the `ts` loader cannot apply."
+        },
+        ".jsx": {
+          "enum": [
+            "text",
+            "jsonc",
+            "json5",
+            "toml",
+            "yaml",
+            "tsx",
+            "jsx"
+          ],
+          "description": "`.jsx` is always parsed as JSX, so the `ts` loader cannot apply."
+        }
+      },
+      "additionalProperties": {
+        "enum": [
+          "text",
+          "jsonc",
+          "json5",
+          "toml",
+          "yaml",
+          "ts",
+          "tsx",
+          "jsx"
+        ]
+      }
+    },
+    "conditions": {
+      "$ref": "#/$defs/stringArray",
+      "description": "Additional package export conditions."
+    },
+    "tsconfig": {
+      "type": "string",
+      "description": "Path to the tsconfig used by Nub's runtime."
+    },
+    "verifyDeps": {
+      "oneOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "enum": [
+            "warn",
+            "error"
+          ]
+        }
+      ],
+      "default": "warn",
+      "description": "What Nub does when dependencies may be stale before a run."
+    },
+    "install": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "linker": {
+          "oneOf": [
+            {
+              "enum": [
+                "global-virtual-store",
+                "isolated",
+                "hoisted",
+                "pnp"
+              ]
+            },
+            {
+              "type": "object",
+              "required": [
+                "strategy"
+              ],
+              "properties": {
+                "strategy": {
+                  "enum": [
+                    "global-virtual-store",
+                    "isolated",
+                    "hoisted",
+                    "pnp"
+                  ],
+                  "description": "The layout to use."
+                }
+              },
+              "allOf": [
+                {
+                  "if": {
+                    "required": [
+                      "strategy"
+                    ],
+                    "properties": {
+                      "strategy": {
+                        "const": "global-virtual-store"
+                      }
+                    }
+                  },
+                  "then": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "strategy": {
+                        "const": "global-virtual-store"
+                      },
+                      "eject": {
+                        "$ref": "#/$defs/stringArray",
+                        "description": "Packages to materialize as project-local directories instead of symlinks into the shared store."
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "required": [
+                      "strategy"
+                    ],
+                    "properties": {
+                      "strategy": {
+                        "const": "isolated"
+                      }
+                    }
+                  },
+                  "then": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "strategy": {
+                        "const": "isolated"
+                      },
+                      "hoist": {
+                        "oneOf": [
+                          {
+                            "type": "boolean"
+                          },
+                          {
+                            "$ref": "#/$defs/stringArray"
+                          }
+                        ],
+                        "description": "Packages hoisted into the hidden fallback tree that resolves a dependency's undeclared imports. true hoists every package."
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "required": [
+                      "strategy"
+                    ],
+                    "properties": {
+                      "strategy": {
+                        "const": "hoisted"
+                      }
+                    }
+                  },
+                  "then": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "strategy": {
+                        "const": "hoisted"
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "required": [
+                      "strategy"
+                    ],
+                    "properties": {
+                      "strategy": {
+                        "const": "pnp"
+                      }
+                    }
+                  },
+                  "then": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "strategy": {
+                        "const": "pnp"
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "description": "The node_modules layout. Each strategy accepts only its own options."
+        },
+        "publicHoist": {
+          "$ref": "#/$defs/stringArray",
+          "description": "Name patterns forced into the root node_modules, for tools that resolve from the project root such as tsc finding @types/*. Use [\"*\"] for every package and [] for none."
+        },
+        "minimumReleaseAge": {
+          "type": "string",
+          "pattern": "^[0-9]+[smhdw]$",
+          "examples": [
+            "30m",
+            "3d",
+            "2w"
+          ],
+          "description": "Reject package versions newer than this duration."
+        },
+        "minimumReleaseAgeExclude": {
+          "$ref": "#/$defs/stringArray",
+          "description": "Package patterns exempt from minimumReleaseAge."
+        }
+      }
+    },
+    "dlx": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Temporary package runs. Read from the global config file only; a project file carrying this block is an error.",
+      "properties": {
+        "consent": {
+          "enum": [
+            "prompt",
+            "never"
+          ],
+          "description": "Whether an implicit nubx registry fetch may be confirmed."
+        }
+      }
+    }
+  },
+  "$defs": {
+    "stringArray": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "envFileSetting": {
+      "oneOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/stringArray"
+        }
+      ]
+    }
+  }
+}

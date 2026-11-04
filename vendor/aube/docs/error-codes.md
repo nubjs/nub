@@ -60,7 +60,7 @@ is grouped by category — see [`crates/aube-codes/src/exit.rs`][exit-src]
 for the full layout — but consumers should branch on the exit *value*,
 not the category, since categories are documentation, not API.
 
-[exit-src]: https://github.com/jdx/aube/blob/main/crates/aube-codes/src/exit.rs
+[exit-src]: https://github.com/aubepkg/aube/blob/main/crates/aube-codes/src/exit.rs
 
 ## Errors
 

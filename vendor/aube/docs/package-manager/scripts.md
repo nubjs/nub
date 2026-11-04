@@ -32,6 +32,30 @@ When no `package.json` script matches, `aube run <name>` falls back to a
 local binary with the same name in `node_modules/.bin`. Scripts still win over
 bins, so a project can override a tool command with its own script.
 
+### Echoed command lines
+
+Before running a script, aube prints its command line to **stderr**, prefixed
+with `$` — the same thing npm, pnpm, and bun do:
+
+```console
+$ aubr build
+$ tsc -p .
+```
+
+`pre`/`post` scripts each get their own line, and forwarded args are appended
+so the echoed line reproduces the run exactly. It goes to stderr, so
+`aube run print-json > out.json` still captures only the script's own output.
+
+Pass `--silent` (or `-s`, or `--loglevel silent`) to suppress the echo while
+keeping the script's own stdout and stderr:
+
+```sh
+aube run --silent build
+```
+
+In `--parallel` workspace runs the echoed line carries the same `<package>: `
+prefix as the rest of that package's output.
+
 ## Local binaries
 
 ```sh
@@ -41,6 +65,11 @@ aube exec tsc -- --noEmit
 
 `exec` runs a binary from the project context with `node_modules/.bin` on
 `PATH`.
+
+Non-shell `aube exec`, the `aube run` bin fallback, and non-shell `aube dlx`
+detect native package targets and launch them directly. Shell-routed commands,
+global bins, and direct `.bin` invocation continue through installed wrappers;
+on Unix, directly launched native targets must be executable.
 
 ## One-off binaries
 

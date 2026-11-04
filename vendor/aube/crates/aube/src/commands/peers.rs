@@ -10,7 +10,6 @@
 //! reported, so it's CI-friendly.
 
 use aube_lockfile::LockfileGraph;
-use clap::{Args, Subcommand};
 use std::collections::BTreeMap;
 
 pub const CHECK_AFTER_LONG_HELP: &str = "\
@@ -32,26 +31,26 @@ Examples:
   $ aube peers check --json
 ";
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct PeersArgs {
-    #[command(subcommand)]
+    #[usage(subcommand)]
     pub command: PeersCommand,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, usage_rs::Subcommands)]
 pub enum PeersCommand {
     /// Check for unmet and missing peer-dependency issues by reading the
     /// lockfile.
     ///
     /// Exits with status 1 if any issue is reported.
-    #[command(after_long_help = CHECK_AFTER_LONG_HELP)]
     Check(PeersCheckArgs),
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
+#[usage(after_long_help = CHECK_AFTER_LONG_HELP)]
 pub struct PeersCheckArgs {
     /// Emit a JSON report instead of the human-readable tree.
-    #[arg(long)]
+    #[usage(long)]
     pub json: bool,
 }
 

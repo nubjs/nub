@@ -46,6 +46,57 @@ EOF
 	assert_output --partial "list-registries"
 }
 
+@test "aube cache path prints the resolved metadata cache directory" {
+	run aube cache path
+	assert_success
+	assert_output "$HOME/.cache/aube"
+}
+
+@test "aube cache path honors cache-dir" {
+	echo "cache-dir=$TEST_TEMP_DIR/custom-cache" >>.npmrc
+	run aube cache path
+	assert_success
+	assert_output "$TEST_TEMP_DIR/custom-cache"
+}
+
+@test "aube cache path resolves relative cache-dir from the workspace root" {
+	mkdir -p packages/lib
+	cat >pnpm-workspace.yaml <<-'EOF'
+		packages:
+		  - packages/*
+	EOF
+	echo '{"name":"root","private":true}' >package.json
+	echo '{"name":"lib","version":"1.0.0"}' >packages/lib/package.json
+	echo 'cache-dir=.cache/aube' >.npmrc
+	workspace_root="$(pwd -P)"
+
+	cd packages/lib
+	run aube cache path
+	assert_success
+	assert_output "$workspace_root/.cache/aube"
+}
+
+@test "aube cache path prefers a nested yaml-only workspace over an outer project" {
+	mkdir -p tools/packages/lib
+	echo '{"name":"outer","private":true}' >package.json
+	cat >tools/pnpm-workspace.yaml <<-'EOF'
+		packages:
+		  - packages/*
+	EOF
+	echo 'cache-dir=.cache/aube' >tools/.npmrc
+	workspace_root="$(cd tools && pwd -P)"
+
+	cd tools/packages/lib
+	run aube cache path
+	assert_success
+	assert_output "$workspace_root/.cache/aube"
+
+	run aube view is-odd --json
+	assert_success
+	[ -d "$TEST_TEMP_DIR/tools/.cache/aube/packuments-full-v1" ]
+	[ ! -e "$TEST_TEMP_DIR/tools/packages/lib/.cache/aube" ]
+}
+
 @test "aube cache list on an empty cache prints nothing" {
 	run aube cache list
 	assert_success

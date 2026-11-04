@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
-# Exercise the POSIX self-heal launcher (npm/nub/bin/launch.js) against both
-# package-manager bin-shim shapes (symlink: npm/bun/yarn; cmd-shim: pnpm), on the
-# HOST. The heal is binary-agnostic, so a fake native (make-fixture.sh) stands in for
-# a platform build. What each scenario guards is documented in README.md.
+# Exercise the POSIX self-heal launcher (npm/nub/bin/launch.js) against every on-PATH
+# bin-entry shape, on the HOST. The heal is binary-agnostic, so a fake native
+# (make-fixture.sh) stands in for a platform build. What each scenario and each style
+# guards is documented in README.md.
+#
+# Styles: symlink (npm/bun/yarn) and the pnpm 10 / pnpm >=11 cmd-shims are what a real
+# package manager writes. `scan`, `decl` and `declrel` are DERIVED — each withholds
+# every route into leadsToUs but one, because leadsToUs returns on the trailer before
+# it scans quotes, so a shape carrying both hazards cannot fail when either mechanism
+# alone regresses. A style that cannot go red is not coverage; README.md carries the
+# revert-to-red table that keeps that honest.
 #
 # Scenarios (all host-runnable; the non-owner staged-copy case needs Docker —
 # docker-non-owner.sh):
@@ -11,7 +18,8 @@
 #   polyglot       the healed entry, run AS a node script, still exec's native (race)
 #   nubx-verb      nubx keeps its verb through the heal (bin/nubx, "nubx-mode")
 #   ensure-chmod   a 0o644 native we OWN is chmod'd +x in place by ensureExecutable
-#   foreign        a `nub` on PATH that does NOT resolve to us is left untouched
+#   foreign        `nub` files on PATH that do NOT resolve to us are left untouched —
+#                  including ones that NAME our launcher without dispatching to it
 #   concurrency    N concurrent first-calls -> 0 failures (the polyglot 0/600 claim)
 #
 # Usage: run-launcher-matrix.sh [node-bin-dir ...]
@@ -79,12 +87,26 @@ run_block() {
   case "$pn" in *9.9.9-ci*) ok "healed entry runs via node too (polyglot) ($style)";;
     *) no "polyglot-as-node ($style): $pn";; esac
 
-  # nubx-verb: nubx keeps its verb through the heal.
+  # nubx-verb: nubx keeps its verb through the heal, off ONE shipped binary.
+  # The platform package has no bin/nubx any more, so the healed entry must exec
+  # bin/nub and carry the verb in __NUB_ARGV0. Assert the trampoline's SHAPE...
   : > "$dest/node.log"
   local ox; ox=$(R "$BIN/nubx" foo)
-  case "$ox" in *nubx-mode*) ok "nubx verb dispatch ($style)";; *) no "nubx verb ($style): $ox";; esac
-  case "$(cat "$BIN/nubx")" in *nub-host/bin/nubx\'*) ok "nubx healed -> bin/nubx ($style)";;
-    *) no "nubx not healed ($style)";; esac
+  case "$ox" in *nubx-mode*) ok "nubx verb dispatch, first call ($style)";; *) no "nubx verb ($style): $ox";; esac
+  case "$(cat "$BIN/nubx")" in
+    *__NUB_ARGV0=\'nubx\'*nub-host/bin/nub\'*) ok "nubx healed -> bin/nub + __NUB_ARGV0 ($style)";;
+    *) no "nubx heal shape wrong ($style): $(sed -n 2p "$BIN/nubx")";;
+  esac
+  # ...and then that it still dispatches as nubx THROUGH that healed path. This second
+  # call is the one that regressed when the duplicate was simply deleted: the first
+  # call succeeds via the node fallback either way, and only call 2 exposes a
+  # trampoline that lost the verb (exit 0, silently running `nub`).
+  : > "$dest/node.log"
+  local ox2; ox2=$(R "$BIN/nubx" foo)
+  case "$ox2" in *nubx-mode*) ok "nubx verb survives the heal, second call ($style)";;
+    *) no "nubx verb LOST post-heal ($style): $ox2";; esac
+  if [ -s "$dest/node.log" ]; then no "node spawned post-heal for nubx ($style)"
+  else ok "zero node post-heal for nubx ($style)"; fi
 
   # ensure-chmod: the fake native lands 0o644 (no +x). Because the FIRST call already
   # ran successfully above, ensureExecutable must have recovered it. We own the file
@@ -133,23 +155,52 @@ run_foreign() {
   bash "$SCRIPT_DIR/make-fixture.sh" "$dest" symlink >/dev/null
   echo "== verify-before-clobber (foreign nub) =="
   mkdir -p "$dest/foreign"
-  printf '#!/bin/sh\necho foreign-untouched\n' > "$dest/foreign/nub"
-  chmod +x "$dest/foreign/nub"
-  local before; before=$(cat "$dest/foreign/nub")
-  # Run OUR launcher with the foreign nub FIRST on PATH. Our launcher must heal only
-  # an entry whose realpath leads to us; the foreign one must be left untouched.
-  PATH="$dest/foreign:$dest/bin:$nodedir:$PATH" \
-    "$dest/node_modules/@nubjs/nub/bin/nub" --version >/dev/null 2>&1
-  if [ "$before" = "$(cat "$dest/foreign/nub")" ]; then ok "foreign nub untouched"
-  else no "foreign nub CLOBBERED"; fi
+  local ourreal
+  ourreal=$("$nodedir/node" -e 'console.log(require("fs").realpathSync(process.argv[1]))' \
+    "$dest/node_modules/@nubjs/nub/bin/nub")
+
+  # Each case: a foreign `nub` that must survive byte-for-byte. healPathEntry renames
+  # over its match with no backup, so a false positive is unrecoverable loss in a file
+  # we do not own — and an unrelated `nub@1.0.0` really is on npm.
+  probe_foreign() {
+    local label="$1" body="$2" mode="$3"
+    printf '%b' "$body" > "$dest/foreign/nub"
+    chmod "$mode" "$dest/foreign/nub"
+    local before; before=$(cat "$dest/foreign/nub")
+    # Run OUR launcher with the foreign nub FIRST on PATH. Our launcher must heal only
+    # an entry whose realpath leads to us; the foreign one must be left untouched.
+    PATH="$dest/foreign:$dest/bin:$nodedir:$PATH" \
+      "$dest/node_modules/@nubjs/nub/bin/nub" --version >/dev/null 2>&1
+    if [ "$before" = "$(cat "$dest/foreign/nub")" ]; then ok "foreign untouched: $label"
+    else no "foreign CLOBBERED: $label"; fi
+  }
+
+  probe_foreign "plain shim" '#!/bin/sh\necho foreign-untouched\n' 0755
+  # A file that only MENTIONS our launcher is not a shim that dispatches to it. These
+  # pin the two ways a `# cmd-shim-target=` line could be over-trusted: no `exec` in
+  # the body at all, and a `\s`-class straddling the newline between `#` and the key.
+  probe_foreign "declares our target, never execs" \
+    "#!/bin/sh\necho foreign-untouched\n# cmd-shim-target=$ourreal\n" 0755
+  probe_foreign "bare # then newline then key" \
+    "#!/bin/sh\nexec echo foreign-untouched\n#\ncmd-shim-target=$ourreal\n" 0755
+  # A file with no shebang is not a shim at all, whatever it declares. The `#!` check
+  # is a clobber guard, not only the perf guard the size cap is — without this probe it
+  # could be deleted with the matrix still green.
+  probe_foreign "no shebang, declares our target" \
+    "# cmd-shim-target=$ourreal\nexec echo foreign-untouched\n" 0644
 }
 
 # Sweep the matrix. Concurrency + foreign run once per Node (style varies inside).
+#
+# `scan`/`decl`/`declrel` are parse-isolating styles, so they run through run_block
+# only. The concurrency scenario guards the polyglot WRITE race, which is identical
+# whichever route matched in leadsToUs — running it per parse style bought nothing
+# and cost 200 forks each.
 for nodedir in "${NODE_DIRS[@]}"; do
-  for style in symlink pnpm; do
+  for style in symlink pnpm pnpm11 scan decl declrel; do
     run_block "$style" "$nodedir"
   done
-  for style in symlink pnpm; do
+  for style in symlink pnpm pnpm11; do
     run_concurrency "$style" "$nodedir"
   done
   run_foreign "$nodedir"

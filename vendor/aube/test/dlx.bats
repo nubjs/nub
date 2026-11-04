@@ -63,6 +63,29 @@ teardown() {
 	assert_line "local-dlx:alpha,beta"
 }
 
+@test "aube dlx launches a native bin from a scratch install" {
+	case "$(uname -s)" in
+	Darwin | Linux) ;;
+	*) skip "native fixture requires a Unix executable" ;;
+	esac
+	mkdir -p tools/native-bin
+	cat >tools/native-bin/package.json <<-'JSON'
+		{
+		  "name": "native-bin",
+		  "version": "1.0.0",
+		  "bin": {
+		    "native-aube": "native-aube"
+		  }
+		}
+	JSON
+	cp "$PROJECT_ROOT/target/debug/aube" tools/native-bin/native-aube
+	chmod +x tools/native-bin/native-aube
+
+	run aube dlx --package "file:$PWD/tools/native-bin" native-aube --version
+	assert_success
+	assert_output --regexp '\([0-9]{4}-[0-9]{2}-[0-9]{2}\)$'
+}
+
 @test "aube dlx -p installs a different package than the bin name" {
 	# The `which` npm package ships a binary named `node-which`, not `which`.
 	# Running `node-which node` prints the absolute path of the `node`

@@ -1,17 +1,19 @@
-// Nub compat-tier preload — Node 18.19–22.14, injected via `--import` (ESM).
+// Nub compat-tier preload — Node 18.19–22.14 and 23.0–23.4, injected via
+// `--import` (ESM).
 //
-// The FAST tier (Node 22.15+) is loaded separately, as a `--require` CommonJS
-// preload (runtime/preload.cjs), so Node keeps its synchronous `Module.runMain`
-// CJS entry path (top-level `executionAsyncId()===1`, sync exception origin,
+// The FAST tier (Node 22.15+, minus 23.0–23.4) is loaded separately, as a
+// `--require` CommonJS preload (runtime/preload.cjs), so Node keeps its synchronous
+// `Module.runMain` CJS entry path (top-level `executionAsyncId()===1`, sync exception origin,
 // `require.main.id` `'.'`, `module.parent` `null`). The mere presence of an
 // `--import` ESM preload forces eager ESM-loader init that routes even a CJS entry
 // through the async ESM module-job (R1) — so the fast tier must NOT use `--import`.
 //
-// THIS file stays the compat path: on 18.19–22.14, `module.registerHooks` does not
-// exist and `require(esm)` is unreliable, so hooks run async in a dedicated loader
+// THIS file stays the compat path: on 18.19–22.14 and on 23.0–23.4 (the 23.x line
+// got `module.registerHooks` only at 23.5.0), the sync hook API does not exist and
+// `require(esm)` is unreliable, so hooks run async in a dedicated loader
 // worker via `module.register`. That async machinery is why the compat tier keeps
 // `--import` — its top-level `await` is accepted here (an `--import` ESM module may
-// be async), and the < 22.15 floor has no equivalent sync surface. (Module-format
+// be async), and the compat tier has no equivalent sync surface. (Module-format
 // + decorator detection no longer needs a preloaded JS parser: it is a synchronous
 // native addon call, so there is nothing to `await`-warm-up before hooks run.)
 //
@@ -49,17 +51,29 @@ const { installSyncPolyfills } = __require("./polyfills.cjs");
 // Publish process.versions.nub (self-identification marker) before user code runs.
 // Tier-independent — same call in the fast entry (preload.cjs).
 common.installVersionMarker();
+common.installThreadpoolPolicy();
+// Consume the launcher's fetch-handler marker BEFORE any user code — the configured
+// preload chain below included — and note which entry it names, so the loader
+// worker registered below can announce that entry's load. Arming the pass itself
+// waits for the end of this file (`installServeEntry`).
+common.claimServeEntry();
 
 // ── Tier detection ──────────────────────────────────────────────────
 // This `.mjs` preload should only ever be `--import`ed for the compat tier (the
-// Rust spawn path chooses `--require preload.cjs` for 22.15+). But guard anyway: if
-// someone `--import`s it directly on an unsupported Node, emit a clear message and
-// skip hook registration rather than throw (throwing breaks user-invoked --import
-// flows). The fast-tier branch is intentionally absent here — 22.15+ goes through
-// preload.cjs.
+// Rust spawn path chooses `--require preload.cjs` for the fast tier). But guard
+// anyway: if someone `--import`s it directly on an unsupported Node, emit a clear
+// message and skip hook registration rather than throw (throwing breaks
+// user-invoked --import flows).
+//
+// The fast-tier test is the CAPABILITY, not a version band. `module.registerHooks`
+// shipped on the 23.x line at 23.5.0 and only later on 22.x at 22.15.0, so the old
+// `major > 22 || (major === 22 && minor >= 15)` band claimed the API on 23.0–23.4,
+// where it does not exist — the same off-by-one-line defect that crashed the Rust
+// spawn path's tier choice. A `typeof` probe cannot drift from Node's release
+// history the way a hand-maintained band can.
 const [__major = 0, __minor = 0] = process.versions.node.split(".").map((n) => parseInt(n, 10));
 const __isCompatTier = __major > 18 || (__major === 18 && __minor >= 19);
-const __isFastTier = __major > 22 || (__major === 22 && __minor >= 15);
+const __isFastTier = typeof module.registerHooks === "function";
 
 // Native TypeScript support (`process.features.typescript`). Where absent (the
 // whole compat tier ≤ 22.17), Node can't load a required `.ts` on its own, so the
@@ -71,8 +85,8 @@ const __hasNativeTs = !!process.features?.typescript;
 common.installWatchReporting(core);
 
 if (__isFastTier) {
-  // Defensive only — the Rust path uses preload.cjs for 22.15+. If reached, the
-  // sync registerHooks API is available; register synchronously to stay correct.
+  // Defensive only — the Rust path uses preload.cjs for the fast tier. If reached,
+  // the sync registerHooks API is available; register synchronously to stay correct.
   // Match preload.cjs: NO classic require.extensions shim on the fast tier — the
   // sync registerHooks load hook + native require(esm) cover require()'d `.ts`
   // (incl. ES modules); the classic shim would shadow require(esm) and throw a
@@ -86,9 +100,14 @@ if (__isFastTier) {
   // hooks.mjs), so no Yarn `.pnp.loader.mjs` registration is needed here either.
   // Via the shared helper so any DEP0205 from nub's own register() call (Node 26+,
   // if this compat path is ever reached there) is not leaked onto the user's stderr.
-  // On the compat tier proper (18.19–22.14) registerHooks doesn't exist, so the
-  // loader-worker is the only hook surface; the user has no action to take.
-  common.registerLoaderWorker("./preload-async-hooks.mjs", import.meta.url);
+  // On the compat tier proper (18.19–22.14, and 23.0–23.4) registerHooks doesn't
+  // exist, so the loader-worker is the only hook surface; the user has no action
+  // to take.
+  common.registerLoaderWorker(
+    "./preload-async-hooks.mjs",
+    import.meta.url,
+    common.loaderWorkerOptions(),
+  );
   // (The main-thread require() shim's module-format + decorator detection is a
   // synchronous native addon call now — no parser warm-up; the old
   // `await core.ensureParser()` for the ESM-only oxc-parser is gone.)
@@ -151,3 +170,36 @@ common.installTemporalLazyGlobal(__require);
 // compat tier (< 22.8) this is a safe no-op; it benefits 22.8–22.14 users who set
 // NODE_COMPILE_CACHE. See reenableUserCompileCache for the full rationale.
 common.reenableUserCompileCache();
+
+// ── Bounded-cache eviction ──────────────────────────────────────────
+// This tier never swept at all, so a user pinned below Node 22.15 grew both the
+// transpile cache and nub's own V8 compile-cache dir forever. Same shape as the
+// fast tier (preload.cjs): probe cheaply, and schedule the deferred sweep only
+// on the once-a-day run where one is actually due. Main thread only — the core
+// guards on that itself.
+if (core.sweepDue()) {
+  setImmediate(() => {
+    try { core.maybeSweepCache(); } catch {}
+  });
+}
+
+// ── User preloads (`nub.jsonc` `preload`) ───────────────────────────
+// LAST, so the user's entries observe a fully-augmented realm — hooks installed,
+// polyfills in place. Awaited, so a top-level `await` inside an entry settles before
+// the program starts; `require()` could not offer that (ERR_REQUIRE_ASYNC_MODULE).
+// A no-op unless the spawn path put the chainer on nub's own preload rather than its
+// own `--import`. See importUserPreloadChain.
+await common.importUserPreloadChain();
+
+// ── Default-export `fetch` handler ──────────────────────────────────
+// Arms the deferred pass that serves an entry whose default export is a `fetch`
+// handler. Tier-independent — the same call sits in preload.cjs.
+//
+// LAST, AFTER the awaited preload chain above, and that order is load-bearing. The
+// pass arms a `setImmediate`, and the chainer's own `await import()` per entry yields
+// to the event loop — so arming before it put the check phase BETWEEN two of the
+// user's preload entries, where the pass imported the entry and ran it ahead of them.
+// Arming here means every preload nub carries has already run. (A preload on its own
+// `--import` token can still follow; `claimServeEntry` detected that case up front,
+// and the pass then waits for the loader worker to announce the entry's load.)
+common.installServeEntry();

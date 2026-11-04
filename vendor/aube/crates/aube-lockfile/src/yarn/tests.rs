@@ -188,7 +188,7 @@ fn test_parse_scoped_and_multi_spec() {
 /// in the spec key and the real name only behind the `npm:` value.
 /// Without surfacing the real name into `LockedPackage.alias_of`,
 /// the install path would fetch the alias-qualified URL and 404
-/// (https://github.com/jdx/aube/discussions/681).
+/// (https://github.com/aubepkg/aube/discussions/681).
 #[test]
 fn test_parse_npm_protocol_alias_transitive() {
     let tmp = tempfile::NamedTempFile::new().unwrap();

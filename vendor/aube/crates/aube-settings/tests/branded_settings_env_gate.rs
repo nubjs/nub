@@ -56,9 +56,9 @@ static MYTOOL_NO_BRANDED_ENV: Embedder = Embedder {
     tty_progress: false,
     rich_update_picker: false,
     strict_unsupported_source: false,
-    warm_trust_revalidate: true,
     trust_policy_ignore_after_default: None,
     extra_settings_fingerprint: None,
+    unsupported_settings: &[],
 };
 
 fn ctx<'a>(
@@ -69,6 +69,7 @@ fn ctx<'a>(
         managed_aube_config: &[],
         project_aube_config: &[],
         project_npmrc: &[],
+        project_config: &[],
         user_aube_config: &[],
         user_npmrc: &[],
         workspace_yaml: ws,

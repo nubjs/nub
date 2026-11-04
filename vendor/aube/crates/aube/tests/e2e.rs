@@ -122,6 +122,112 @@ fn help_flag_lists_install_command() {
         .stdout(predicates::str::contains("install"));
 }
 
+#[cfg(unix)]
+#[test]
+fn aubr_replaces_itself_with_the_final_script_shell() {
+    use std::os::unix::fs::symlink;
+    use std::process::Stdio;
+
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    sbx.write_manifest(r#"{"name":"exec-handoff","private":true,"scripts":{"pid":"echo $$"}}"#);
+    let aubr = sbx._root.path().join("aubr");
+    symlink(assert_cmd::cargo::cargo_bin!("aube"), &aubr).unwrap();
+
+    let child = std::process::Command::new(aubr)
+        .args(["--no-install", "pid"])
+        .current_dir(&sbx.project)
+        .env_remove("AUBE_CONFIG")
+        .env("HOME", &sbx.home)
+        .env("AUBE_STORE_DIR", &sbx.store)
+        .env("AUBE_CACHE_DIR", &sbx.cache)
+        .env("XDG_CACHE_HOME", &sbx.cache)
+        .env("NO_COLOR", "1")
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let child_pid = child.id();
+    let output = child.wait_with_output().unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        child_pid.to_string()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn aubr_keeps_control_when_a_post_script_must_run() {
+    use assert_cmd::assert::OutputAssertExt;
+    use std::os::unix::fs::symlink;
+
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    sbx.write_manifest(
+        r#"{"name":"exec-handoff","private":true,"scripts":{"build":"echo build","postbuild":"echo postbuild"}}"#,
+    );
+    let aubr = sbx._root.path().join("aubr");
+    symlink(assert_cmd::cargo::cargo_bin!("aube"), &aubr).unwrap();
+
+    std::process::Command::new(aubr)
+        .args(["--no-install", "build"])
+        .current_dir(&sbx.project)
+        .env_remove("AUBE_CONFIG")
+        .env("HOME", &sbx.home)
+        .env("AUBE_STORE_DIR", &sbx.store)
+        .env("AUBE_CACHE_DIR", &sbx.cache)
+        .env("XDG_CACHE_HOME", &sbx.cache)
+        .env("NO_COLOR", "1")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("build\npostbuild\n"));
+}
+
+#[test]
+fn dynamic_completion_keeps_stdout_when_use_stderr_is_configured() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    fs::write(sbx.project.join(".npmrc"), "use-stderr=true\n").unwrap();
+
+    sbx.cmd()
+        .args([
+            "__complete_word__",
+            "--shell",
+            "bash",
+            "--line",
+            "aube config get ",
+            "--cursor",
+            "16",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("auto-install-peers"));
+}
+
+#[test]
+fn dynamic_completion_rejects_an_invalid_dir() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    sbx.write_manifest(r#"{"dependencies":{"react":"^19"}}"#);
+
+    sbx.cmd()
+        .args([
+            "__complete_word__",
+            "--shell",
+            "bash",
+            "--line",
+            "aube -C missing add ",
+            "--cursor",
+            "20",
+            "--candidates",
+            "package",
+        ])
+        .assert()
+        .success()
+        .stdout("");
+}
+
 #[test]
 fn install_on_manifest_without_deps_creates_state_file() {
     let _guard = e2e_lock();
@@ -284,7 +390,10 @@ fn approve_builds_surfaces_and_runs_a_local_source_dep() {
     // `virtual_store_subdir` (the shared global store, which `file:` deps
     // never enter), never by the `aube_dir_entry_name` that
     // `materialized_pkg_dir` reconstructs.
-    sbx.cmd().args(["approve-builds", "--all"]).assert().success();
+    sbx.cmd()
+        .args(["approve-builds", "--all"])
+        .assert()
+        .success();
     assert!(
         marker_exists_under(&node_modules, "BUILT_527_MARKER"),
         "approve-builds must run a local-source dep's build in the same invocation"
@@ -305,4 +414,746 @@ fn approve_builds_surfaces_and_runs_a_local_source_dep() {
         .assert()
         .success()
         .stdout(predicates::str::contains("No ignored builds"));
+}
+
+#[test]
+fn dependency_build_finishes_before_its_consumers_build_starts() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+
+    sbx.write_file(
+        "child/package.json",
+        r#"{
+            "name": "build-child",
+            "version": "1.0.0",
+            "scripts": {
+                "postinstall": "node -e \"setTimeout(() => require('fs').writeFileSync('READY', 'ok'), 300)\""
+            }
+        }"#,
+    );
+    sbx.write_file(
+        "parent/package.json",
+        r#"{
+            "name": "build-parent",
+            "version": "1.0.0",
+            "dependencies": { "build-child": "file:../child" },
+            "scripts": {
+                "postinstall": "node -e \"const fs=require('fs'), p=require('path').join(require('path').dirname(require.resolve('build-child/package.json')), 'READY'); if (!fs.existsSync(p)) process.exit(17); fs.writeFileSync('PARENT_READY', 'ok')\""
+            }
+        }"#,
+    );
+    sbx.write_manifest(
+        r#"{
+            "name": "dependency-build-order-e2e",
+            "version": "1.0.0",
+            "dependencies": { "build-parent": "file:./parent" }
+        }"#,
+    );
+
+    sbx.cmd()
+        .args(["install", "--dangerously-allow-all-builds"])
+        .assert()
+        .success();
+    let node_modules = sbx.project.join("node_modules");
+    assert!(
+        marker_exists_under(&node_modules, "READY"),
+        "build-child's postinstall never wrote READY under {}",
+        node_modules.display()
+    );
+    // The parent's postinstall exits 17 when READY is missing, so reaching
+    // PARENT_READY is the ordering assertion: without phases the parent starts
+    // while the child is still inside its 300ms timer and the install fails.
+    assert!(
+        marker_exists_under(&node_modules, "PARENT_READY"),
+        "build-parent's postinstall never wrote PARENT_READY under {}",
+        node_modules.display()
+    );
+}
+
+// --- optional-dependency build failures are non-fatal ---------------------
+//
+// A package reachable only through `optionalDependencies` is one the project
+// declared it can live without, so npm (`_handleOptionalFailure`) and pnpm
+// (`buildDependency`'s catch) both let its build fail without failing the
+// install. Both tests use `file:` directory deps, so they are fully offline.
+
+#[test]
+fn a_failing_optional_dependency_build_does_not_fail_the_install() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    sbx.write_file(
+        "required-dep/package.json",
+        r#"{
+            "name": "required-dep",
+            "version": "1.0.0",
+            "scripts": { "postinstall": "node -e \"require('fs').writeFileSync('REQUIRED_BUILT_MARKER','ok')\"" }
+        }"#,
+    );
+    sbx.write_file(
+        "optional-dep/package.json",
+        r#"{
+            "name": "optional-dep",
+            "version": "1.0.0",
+            "scripts": { "postinstall": "exit 1" }
+        }"#,
+    );
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-optional-build",
+            "version": "0.0.0",
+            "dependencies": { "required-dep": "file:./required-dep" },
+            "optionalDependencies": { "optional-dep": "file:./optional-dep" }
+        }"#,
+    );
+
+    // The skip must be recorded, not hidden — a native addon that silently
+    // never built is miserable to trace back from the runtime import error.
+    // Pinned on the stable warning CODE, not the spec string: the underlying
+    // build error names the package too, so a spec-only assertion would pass
+    // even if the skip stopped being warned about at all. Referenced through
+    // the constant rather than a literal — `aube-codes` is a normal dependency
+    // of this package, so an integration test can name it, and no self-test
+    // ties a constant's value to its identifier.
+    sbx.cmd()
+        .args(["install", "--dangerously-allow-all-builds"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(
+            aube_codes::warnings::WARN_AUBE_OPTIONAL_BUILD_FAILED,
+        ))
+        .stderr(predicates::str::contains("optional-dep@1.0.0"));
+
+    // Non-fatal must also mean non-blocking: the failure raises no
+    // short-circuit, so a sibling's build still runs to completion.
+    assert!(
+        marker_exists_under(&sbx.project.join("node_modules"), "REQUIRED_BUILT_MARKER"),
+        "a sibling package's build must still run after an optional build fails"
+    );
+}
+
+#[test]
+fn a_failing_required_dependency_build_still_fails_the_install() {
+    // The control for the test above: if the optional carve-out ever widened to
+    // swallow every build failure, this is what would stop passing.
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    sbx.write_file(
+        "required-dep/package.json",
+        r#"{
+            "name": "required-dep",
+            "version": "1.0.0",
+            "scripts": { "postinstall": "exit 3" }
+        }"#,
+    );
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-required-build",
+            "version": "0.0.0",
+            "dependencies": { "required-dep": "file:./required-dep" }
+        }"#,
+    );
+
+    // `.code(3)`, not `.failure()`: the script's own exit code is the
+    // install's, as under npm, pnpm and `run` — neither the generic 1 nor
+    // the exit table's 50 (nubjs/nub#670).
+    sbx.cmd()
+        .args(["install", "--dangerously-allow-all-builds"])
+        .assert()
+        .code(3)
+        .stderr(predicates::str::contains("required-dep"));
+}
+
+#[test]
+fn every_failed_required_build_is_reported_and_the_first_sets_the_exit_code() {
+    // Three required builds fail in the same phase with distinct codes. All
+    // three must be named — not whichever the scheduler drained first — and
+    // the exit code is the FIRST failure's in build order, so the same
+    // fixture answers the same way every run (nubjs/nub#670).
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    for (name, code) in [("failing-a", 3), ("failing-b", 4), ("failing-c", 7)] {
+        sbx.write_file(
+            &format!("{name}/package.json"),
+            &format!(
+                r#"{{
+                    "name": "{name}",
+                    "version": "1.0.0",
+                    "scripts": {{ "postinstall": "exit {code}" }}
+                }}"#
+            ),
+        );
+    }
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-many-failed-builds",
+            "version": "0.0.0",
+            "dependencies": {
+                "failing-a": "file:./failing-a",
+                "failing-b": "file:./failing-b",
+                "failing-c": "file:./failing-c"
+            }
+        }"#,
+    );
+
+    sbx.cmd()
+        .args(["install", "--dangerously-allow-all-builds"])
+        .assert()
+        .code(3)
+        .stderr(predicates::str::contains("3 dependency builds failed"))
+        .stderr(predicates::str::contains("failing-a@1.0.0"))
+        .stderr(predicates::str::contains("exited with code 4"))
+        .stderr(predicates::str::contains("failing-b@1.0.0"))
+        .stderr(predicates::str::contains("exited with code 7"))
+        .stderr(predicates::str::contains("failing-c@1.0.0"));
+}
+
+#[test]
+fn a_failing_root_postinstall_exits_with_the_scripts_code() {
+    // The root hook takes a different wrapper from a dependency build and
+    // used to flatten the script error to a string the same way.
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-root-postinstall",
+            "version": "0.0.0",
+            "scripts": { "postinstall": "exit 3" }
+        }"#,
+    );
+
+    sbx.cmd()
+        .args(["install"])
+        .assert()
+        .code(3)
+        .stderr(predicates::str::contains("root postinstall script failed"));
+}
+
+#[test]
+fn an_optional_dependency_that_is_also_required_still_fails_the_install() {
+    // `optional-dep` is declared BOTH optional (by the root) and as a plain
+    // dependency of `required-dep`, so one fully-required path reaches it and
+    // npm/pnpm both treat it as required. This is the case where a
+    // reachability bug would silently swallow a real failure.
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    sbx.write_file(
+        "required-dep/package.json",
+        r#"{
+            "name": "required-dep",
+            "version": "1.0.0",
+            "dependencies": { "optional-dep": "file:../optional-dep" }
+        }"#,
+    );
+    sbx.write_file(
+        "optional-dep/package.json",
+        r#"{
+            "name": "optional-dep",
+            "version": "1.0.0",
+            "scripts": { "postinstall": "exit 1" }
+        }"#,
+    );
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-dual-path-build",
+            "version": "0.0.0",
+            "dependencies": { "required-dep": "file:./required-dep" },
+            "optionalDependencies": { "optional-dep": "file:./optional-dep" }
+        }"#,
+    );
+
+    // Pinned on the lifecycle error, not a bare `.failure()`. `required-dep`
+    // reaches `optional-dep` through `file:../optional-dep`, which points
+    // outside its own directory — so if that ever stopped resolving, a bare
+    // exit-code assertion would keep passing while testing nothing, and the
+    // reachability regression this guards would go unnoticed.
+    sbx.cmd()
+        .args(["install", "--dangerously-allow-all-builds"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "lifecycle script postinstall failed",
+        ))
+        .stderr(predicates::str::contains("optional-dep@1.0.0"));
+}
+
+#[test]
+fn run_forwards_extra_args_verbatim() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    // A quote-free body takes the direct-exec path on Unix and the shell
+    // on Windows, so this pins the same argv contract on both: forwarded
+    // args reach the script as written, with nothing expanded or split.
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-run-args",
+            "version": "0.0.0",
+            "scripts": { "probe": "node probe.js" }
+        }"#,
+    );
+    fs::write(
+        sbx.project.join("probe.js"),
+        "console.log(JSON.stringify(process.argv.slice(2)))",
+    )
+    .unwrap();
+
+    sbx.cmd()
+        .args(["run", "--no-install", "probe", "--", "a b", "$HOME", "*"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(r#"["a b","$HOME","*"]"#));
+}
+
+#[test]
+fn run_reports_a_missing_command_like_a_shell() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-run-missing",
+            "version": "0.0.0",
+            "scripts": { "nope": "aube-definitely-not-a-real-binary" }
+        }"#,
+    );
+
+    // The body is shaped for direct exec, but the program does not
+    // resolve, so it must fall back to the shell rather than inventing an
+    // error — which is what keeps 127 (and the shell's own stderr) intact.
+    let assert = sbx.cmd().args(["run", "--no-install", "nope"]).assert();
+    if cfg!(unix) {
+        assert.code(127);
+    } else {
+        assert.failure();
+    }
+}
+
+/// What a `.bin/<name>` shim resolves to: the link target when it is a
+/// symlink, else the wrapper's text (which names its target).
+fn bin_shim_target(shim: &std::path::Path) -> String {
+    match fs::read_link(shim) {
+        Ok(target) => target.to_string_lossy().into_owned(),
+        Err(_) => fs::read_to_string(shim).unwrap(),
+    }
+}
+
+/// An importer's own `bin` never takes a name a dependency claimed. A
+/// package that builds itself with its own released version (rollup's
+/// `prepare` runs the devDependency `rollup`) was handed its own unbuilt
+/// `dist/bin` instead, and the build died on the missing file. The
+/// dependency's shim wins in both layouts; an own bin under a free name is
+/// still linked.
+#[test]
+fn an_importers_own_bin_never_shadows_a_dependencys_bin() {
+    let _guard = e2e_lock();
+    for linker_args in [&[][..], &["--node-linker=hoisted"][..]] {
+        let sbx = Sandbox::new();
+        sbx.write_file(
+            "vendor/tool/package.json",
+            r#"{ "name": "tool", "version": "1.0.0", "bin": { "tool": "cli.js" } }"#,
+        );
+        sbx.write_file(
+            "vendor/tool/cli.js",
+            "#!/usr/bin/env node\nconsole.log('dep')\n",
+        );
+        sbx.write_manifest(
+            r#"{
+                "name": "tool",
+                "version": "0.0.0",
+                "bin": { "tool": "dist/tool.js", "tool-dev": "dev.js" },
+                "devDependencies": { "tool": "file:./vendor/tool" }
+            }"#,
+        );
+        sbx.cmd()
+            .arg("install")
+            .args(linker_args)
+            .assert()
+            .success();
+
+        let bin_dir = sbx.project.join("node_modules/.bin");
+        let shims: Vec<_> = ["tool", "tool.cmd"]
+            .iter()
+            .map(|name| bin_dir.join(name))
+            .filter(|path| path.symlink_metadata().is_ok())
+            .collect();
+        assert!(
+            !shims.is_empty(),
+            "the dependency's bin is linked ({linker_args:?})"
+        );
+        for shim in shims {
+            let target = bin_shim_target(&shim);
+            assert!(
+                target.contains("cli.js") && !target.contains("dist/tool.js"),
+                "{} runs the dependency, not the importer's own unbuilt bin ({linker_args:?}):\n{target}",
+                shim.display()
+            );
+        }
+        assert!(
+            bin_dir.join("tool-dev").symlink_metadata().is_ok()
+                || bin_dir.join("tool-dev.cmd").symlink_metadata().is_ok(),
+            "an own bin under a free name is still linked ({linker_args:?})"
+        );
+    }
+}
+
+/// Find `program` on the test's own `PATH`.
+fn find_on_path(program: &str) -> std::path::PathBuf {
+    let names: Vec<String> = if cfg!(windows) {
+        vec![format!("{program}.exe"), format!("{program}.cmd")]
+    } else {
+        vec![program.to_string()]
+    };
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| panic!("{program} must be on PATH for this test"))
+}
+
+/// A `PATH` holding `node`, `git` and a shell, and no `cp`. On Unix the
+/// tools are symlinked into a private dir, because the dir `git` lives in
+/// (`/usr/bin`) carries `cp` too. On Windows each tool's own dir is used
+/// as is, which is what a stock PowerShell session sees.
+fn path_without_cp(sbx: &Sandbox) -> std::ffi::OsString {
+    let dirs: Vec<std::path::PathBuf> = if cfg!(windows) {
+        let system32 = std::path::PathBuf::from(
+            std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()),
+        )
+        .join("System32");
+        vec![
+            find_on_path("node").parent().unwrap().to_path_buf(),
+            find_on_path("git").parent().unwrap().to_path_buf(),
+            system32,
+        ]
+    } else {
+        let bin = sbx.home.join("bin-without-cp");
+        fs::create_dir_all(&bin).unwrap();
+        #[cfg(unix)]
+        for tool in ["node", "git", "sh"] {
+            std::os::unix::fs::symlink(find_on_path(tool), bin.join(tool)).unwrap();
+        }
+        vec![bin]
+    };
+    for dir in &dirs {
+        assert!(
+            !dir.join("cp").exists() && !dir.join("cp.exe").exists(),
+            "{} must not provide cp, or the test proves nothing",
+            dir.display()
+        );
+    }
+    std::env::join_paths(dirs).unwrap()
+}
+
+/// A local git repo holding `files`, committed once, as a `git+file:` URL.
+fn git_repo(sbx: &Sandbox, files: &[(&str, &str)]) -> String {
+    let repo = sbx.home.join("prep-repo");
+    fs::create_dir_all(&repo).unwrap();
+    for (path, contents) in files {
+        fs::write(repo.join(path), contents).unwrap();
+    }
+    for args in [
+        &["init", "-q"][..],
+        &["add", "-A"][..],
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "init",
+        ][..],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+    format!(
+        "git+file:///{}",
+        repo.to_string_lossy()
+            .replace('\\', "/")
+            .trim_start_matches('/')
+    )
+}
+
+/// A local git repo whose `prepare` builds `dist/index.js`.
+fn git_repo_with_prepare(sbx: &Sandbox) -> String {
+    git_repo(
+        sbx,
+        &[
+            (
+                "package.json",
+                r#"{
+                    "name": "prep-demo",
+                    "version": "1.0.0",
+                    "main": "dist/index.js",
+                    "files": ["dist"],
+                    "scripts": { "prepare": "node build.js" }
+                }"#,
+            ),
+            (
+                "build.js",
+                "require('fs').mkdirSync('dist', { recursive: true });\n\
+                 require('fs').writeFileSync('dist/index.js', 'module.exports = 42;\\n');\n",
+            ),
+        ],
+    )
+}
+
+/// Preparing a git dependency copies its checkout to a scratch dir before
+/// the build runs. That copy used to spawn `cp`, which stock Windows has
+/// no copy of, so any git dep with a `prepare` failed to install there.
+#[test]
+fn git_dep_prepare_runs_with_no_cp_on_path() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let url = git_repo_with_prepare(&sbx);
+    // The commit-free repository key approves every commit of the repo.
+    sbx.write_manifest(&format!(
+        r#"{{ "name": "consumer", "version": "0.0.0", "dependencies": {{ "prep-demo": "{url}" }},
+             "pnpm": {{ "allowBuilds": {{ "prep-demo@{url}": true }} }} }}"#
+    ));
+
+    sbx.cmd()
+        .arg("install")
+        .env("PATH", path_without_cp(&sbx))
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(sbx.project.join("node_modules/prep-demo/dist/index.js"))
+            .unwrap_or_default(),
+        "module.exports = 42;\n",
+        "the dependency's prepare script built dist/ before it was linked"
+    );
+}
+
+/// A git dependency that has to be built runs its build only when the
+/// allowlist names its source or repository, as pnpm's
+/// `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED` gate does. A bare package name
+/// cannot approve it; a denial installs the checkout unbuilt.
+#[test]
+fn git_dep_prepare_is_refused_unless_the_allowlist_names_its_source() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let url = git_repo_with_prepare(&sbx);
+    let install = |allow: &str| {
+        let _ = fs::remove_dir_all(sbx.project.join("node_modules"));
+        sbx.write_manifest(&format!(
+            r#"{{ "name": "consumer", "version": "0.0.0", "dependencies": {{ "prep-demo": "{url}" }},
+                 "pnpm": {{ "allowBuilds": {{ {allow} }} }} }}"#
+        ));
+        sbx.cmd().arg("install").assert()
+    };
+
+    for allow in ["", r#""prep-demo": true"#] {
+        let out = install(allow).code(1);
+        let stderr = String::from_utf8_lossy(&out.get_output().stderr).into_owned();
+        assert!(
+            stderr.contains("ERR_AUBE_GIT_DEP_PREPARE_NOT_ALLOWED"),
+            "allowBuilds {{{allow}}} refuses the build:\n{stderr}"
+        );
+        assert!(!sbx.project.join("node_modules/prep-demo").exists());
+    }
+
+    install(r#""prep-demo": false"#).success();
+    assert!(
+        sbx.project.join("node_modules/prep-demo/build.js").exists()
+            && !sbx.project.join("node_modules/prep-demo/dist").exists(),
+        "a denied build installs the checkout as it is"
+    );
+}
+
+/// A git dependency with no `prepare` but a `prepack` and its `main`
+/// missing is built too, and its publishing scripts run with their
+/// `pre`/`post` hooks, as `npm run prepack` runs them for pnpm: here
+/// `postprepack` writes the entry point.
+#[test]
+fn git_dep_prepack_runs_with_its_hooks_when_main_is_missing() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let url = git_repo(
+        &sbx,
+        &[
+            (
+                "package.json",
+                r#"{
+                    "name": "pack-demo",
+                    "version": "1.0.0",
+                    "main": "dist/index.js",
+                    "files": ["dist"],
+                    "scripts": { "prepack": "node -e 1", "postprepack": "node post.js" }
+                }"#,
+            ),
+            (
+                "post.js",
+                "require('fs').mkdirSync('dist', { recursive: true });\n\
+                 require('fs').writeFileSync('dist/index.js', 'module.exports = 9;\\n');\n",
+            ),
+        ],
+    );
+    sbx.write_manifest(&format!(
+        r#"{{ "name": "consumer", "version": "0.0.0", "dependencies": {{ "pack-demo": "{url}" }},
+             "pnpm": {{ "allowBuilds": {{ "pack-demo@{url}": true }} }} }}"#
+    ));
+
+    sbx.cmd().arg("install").assert().success();
+    assert_eq!(
+        fs::read_to_string(sbx.project.join("node_modules/pack-demo/dist/index.js"))
+            .unwrap_or_default(),
+        "module.exports = 9;\n",
+        "postprepack built the entry point before the package was packed"
+    );
+}
+
+/// A gzipped tarball shaped like a codeload archive: every entry under one
+/// `<owner>-<repo>-<sha>/` wrapper dir.
+fn codeload_tarball(wrapper: &str, files: &[(&str, &str)]) -> Vec<u8> {
+    let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut builder = tar::Builder::new(gz);
+    for (path, contents) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(
+                &mut header,
+                format!("{wrapper}/{path}"),
+                contents.as_bytes(),
+            )
+            .unwrap();
+    }
+    builder.into_inner().unwrap().finish().unwrap()
+}
+
+/// Serve `body` to every request through a plain-HTTP forward proxy on
+/// loopback, recording each request line. Lets a test reach a URL on a
+/// real host name (the codeload host is what marks a tarball as a git
+/// checkout) without the network.
+fn serve_through_proxy(
+    body: Vec<u8>,
+) -> (std::net::SocketAddr, std::sync::Arc<Mutex<Vec<String>>>) {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let requests = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let seen = requests.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            seen.lock().unwrap().push(line.trim_end().to_string());
+            loop {
+                let mut header = String::new();
+                match reader.read_line(&mut header) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) if header == "\r\n" || header == "\n" => break,
+                    Ok(_) => {}
+                }
+            }
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/x-gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(&body);
+        }
+    });
+    (addr, requests)
+}
+
+/// A hosted git dependency pinned to a commit is fetched and recorded as
+/// its codeload archive rather than as a git clone, and that route used
+/// to skip the `prepare` build the clone route runs: the install exited 0
+/// with no `dist/`. `rimraf@github:isaacs/rimraf#v6.1.3` was the reported
+/// case.
+#[test]
+fn hosted_git_tarball_dep_runs_its_prepare_script() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let tarball = codeload_tarball(
+        &format!("acme-demo-{sha}"),
+        &[
+            (
+                "package.json",
+                r#"{
+                    "name": "demo",
+                    "version": "1.0.0",
+                    "main": "dist/index.js",
+                    "files": ["dist"],
+                    "scripts": { "prepare": "node build.js" }
+                }"#,
+            ),
+            (
+                "build.js",
+                "require('fs').mkdirSync('dist', { recursive: true });\n\
+                 require('fs').writeFileSync('dist/index.js', 'module.exports = 7;\\n');\n",
+            ),
+        ],
+    );
+    let (proxy, requests) = serve_through_proxy(tarball);
+    let url = format!("http://codeload.github.com/acme/demo/tar.gz/{sha}");
+    let manifest = |allow: &str| {
+        sbx.write_manifest(&format!(
+            r#"{{ "name": "consumer", "version": "0.0.0", "dependencies": {{ "demo": "{url}" }},
+                 "pnpm": {{ "allowBuilds": {{ {allow} }} }} }}"#
+        ))
+    };
+    let install = |args: &[&str]| {
+        let _ = fs::remove_dir_all(sbx.project.join("node_modules"));
+        sbx.cmd()
+            .arg("install")
+            .args(args)
+            .env_remove("https_proxy")
+            .env_remove("HTTPS_PROXY")
+            .env_remove("no_proxy")
+            .env_remove("NO_PROXY")
+            .env_remove("http_proxy")
+            // Last: Windows env names are case-insensitive, so removing
+            // `http_proxy` after this would remove it too.
+            .env("HTTP_PROXY", format!("http://{proxy}/"))
+            .assert()
+    };
+
+    manifest("");
+    let out = install(&[]).code(1);
+    assert!(
+        String::from_utf8_lossy(&out.get_output().stderr)
+            .contains("ERR_AUBE_GIT_DEP_PREPARE_NOT_ALLOWED"),
+        "an archive nobody approved is not built"
+    );
+
+    // The archive is approved under the repository it was cut from.
+    manifest(r#""demo@git+https://github.com/acme/demo.git": true"#);
+    install(&[]).success();
+    assert!(
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains(&url)),
+        "the archive was fetched through the proxy: {:?}",
+        requests.lock().unwrap()
+    );
+    assert_eq!(
+        fs::read_to_string(sbx.project.join("node_modules/demo/dist/index.js")).unwrap_or_default(),
+        "module.exports = 7;\n",
+        "the archive's prepare script built dist/ before it was linked"
+    );
+    assert!(
+        !sbx.project.join("node_modules/demo/build.js").exists(),
+        "the prepared package is what `files` publishes, not the raw archive"
+    );
+
+    // Scripts disabled: the archive is linked as fetched, unbuilt.
+    install(&["--ignore-scripts"]).success();
+    assert!(sbx.project.join("node_modules/demo/build.js").exists());
+    assert!(!sbx.project.join("node_modules/demo/dist").exists());
 }

@@ -32,6 +32,9 @@ concurrency:
   group: publish-smoke
   cancel-in-progress: false
 
+env:
+  MBX_DISABLE: "1"
+
 jobs:
   smoke:
     name: Publish smoke packages
@@ -56,7 +59,7 @@ jobs:
               ;;
           esac
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -64,6 +67,7 @@ jobs:
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
 
       - name: Build aube
         run: cargo build -p aube

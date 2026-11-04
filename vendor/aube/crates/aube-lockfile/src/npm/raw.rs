@@ -98,6 +98,13 @@ pub(super) struct RawNpmPackage {
     pub(super) resolved: Option<String>,
     #[serde(default)]
     pub(super) link: bool,
+    /// Root importer only. npm mirrors the manifest's `workspaces` here,
+    /// which is what lets the reader tell a member apart from a local
+    /// directory dependency — the two are otherwise identical in shape.
+    /// Read as the parsed enum so the array, bun object, and string forms
+    /// all yield their patterns.
+    #[serde(default)]
+    pub(super) workspaces: Option<aube_manifest::Workspaces>,
     #[serde(default)]
     pub(super) dependencies: BTreeMap<String, String>,
     #[serde(default)]

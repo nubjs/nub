@@ -4,16 +4,28 @@
 # Usage (drop-in for cargo, from inside any worktree or the main tree):
 #   scripts/rust-build.sh build -p nub-cli --profile fast
 #   scripts/rust-build.sh test  -p nub-cli
-#   scripts/rust-build.sh clippy --all-targets --all-features -- -D warnings
+#   NUB_ALLOW_INCOMPLETE_RUNTIME=1 scripts/rust-build.sh clippy --all-targets --all-features -- -D warnings
+#
+# The grant on that third line is what CI's clippy job sets: `--all-features` turns on
+# `embed-runtime`, whose build script requires a fully staged runtime/ (the addon plus the
+# vendored node_modules), and a lint ships nothing so it opts out. It is written per-invocation
+# rather than exported here on purpose — this wrapper also execs `build` and `test`, which CAN
+# produce a binary someone runs, and the check must stay armed for those.
 #
 # WHY A SHARED TARGET DIR AT ALL. All worktrees default to ONE cargo target dir
 # (~/.cache/nub/shared-target) so a fresh worktree reuses the crates.io dependency
 # rlibs another worktree already compiled (the bulk of a build) and recompiles only
-# the ~3 workspace crates, instead of paying a ~3-min cold build. Cargo can only
-# reuse artifacts across worktrees when the target-dir PATH is byte-identical —
-# rustc bakes the target path into its fingerprints, so a private dir or a
-# CoW-cloned dir gets a 0% cross-worktree hit (measured; this is also why sccache
-# does nothing here). Sharing one path is the only mechanism that actually reuses.
+# the ~3 workspace crates, instead of paying a ~3-min cold build. Sharing one live
+# path is what lets concurrent worktrees keep converging on one warm cache.
+#
+# RELOCATION DOES NOT DEFEAT REUSE. This script used to claim a private or
+# CoW-cloned dir gets "a 0% hit" because rustc bakes the target path into its
+# fingerprints. That is FALSE, and it cost real time — it is why isolation was
+# treated as synonymous with a cold build. Measured with controls both ways: a
+# warm dir cloned to a new path rebuilt 0 crates, an empty dir rebuilt all 13,
+# touching one source rebuilt 1. Cargo revalidates a relocated dir in place. The
+# claim is true of SCCACHE, which keys on the rustc command line (absolute
+# --out-dir / -L paths); the two mechanisms were conflated.
 #
 # THE HAZARD THAT SHARING CREATES. Cargo names a crate's output by package id
 # (name + version), NOT by source content. Two worktrees whose source for the SAME
@@ -24,20 +36,55 @@
 # nowhere in your checkout. It only bites crates that OTHER crates link; a divergent
 # leaf binary (nub-cli) just rebuilds cleanly and is safe to share.
 #
-# THE RULE (what this script enforces). Share the dir while this worktree's
-# depended-on crate sources match origin/main — every sharer then agrees on those
-# crates, so nothing clobbers. The moment this worktree diverges a depended-on crate
-# from that baseline, fall back to a PRIVATE per-worktree target dir: one cold build,
-# then stable and contamination-proof. Editing only nub-cli, tests, docs, or non-Rust
-# files keeps you on the fast shared path — which is the overwhelming common case.
+# THE RULE (what this script enforces). Share while this worktree's depended-on
+# crate CONTENT matches the other sharers', and isolate otherwise. The bucket is
+# keyed by a hash of that content, so "same path" IMPLIES "same content" by
+# construction rather than by inference. A per-worktree merge-base cannot carry
+# that weight: it proves only that THIS worktree made no local changes vs ITS OWN
+# base, so two worktrees whose bases straddle a nub-core/aube commit both read
+# "shared" while disagreeing on content — measured at 4 distinct contents among 6
+# nominal sharers, i.e. live rebuild ping-pong plus the phantom-E0063 tail risk.
 #
-# Depended-on crates = every workspace/vendored crate EXCEPT the leaf binary
-# (crates/nub-cli). See .claude/skills/rust-build/SKILL.md for the full model.
+# Hashing the INDEX (not the working tree) is what makes this stable: we only reach
+# the shared branch when there are no local changes under these paths, so the key
+# moves only on rebase — never mid-edit, which would mean a cold build per save.
+#
+# SEEDING. Isolation no longer implies a cold build. A fresh private dir is cloned
+# from the matching shared bucket (CoW: `cp -c` on APFS, `--reflink` on btrfs/XFS),
+# which costs ~0 bytes and ~0 time, and cargo then rebuilds only the crates whose
+# source actually differs. Cloning happens ONLY on first creation — never over an
+# existing dir, which would clobber live artifacts.
+#
+# Depended-on crates = every workspace/vendored crate EXCEPT the leaf artifacts
+# nothing links: crates/nub-cli (bin), crates/nub-native (cdylib, own workspace),
+# crates/nub-phantom (bin, own workspace). NOTE nub-phantom-core and
+# nub-phantom-scan are NOT leaves — nub-cli depends on both — and the git pathspec
+# ':(exclude)crates/nub-phantom' matches only that directory, not those siblings
+# (verified). See .claude/skills/rust-build/SKILL.md for the full model.
 
 set -eu
 
 root=$(git rev-parse --show-toplevel)
-shared="${NUB_SHARED_TARGET:-$HOME/.cache/nub/shared-target}"
+# An EXPLICIT NUB_SHARED_TARGET is honored verbatim — no content key appended.
+# Keying exists to make SHARING sound (same path implies same content across the
+# worktrees that all converge on the one default cache); a caller naming a
+# specific path is not sharing, and silently redirecting the path it named breaks
+# every consumer that knows where its artifacts land. `make verify` is exactly
+# that caller: it points at a repo-local $(CURDIR)/target precisely to be
+# isolated from the shared cache, and its addon recipe then copies from
+# target/<profile>/.
+if [ -n "${NUB_SHARED_TARGET:-}" ]; then
+  shared="$NUB_SHARED_TARGET"
+  keyed=0
+else
+  shared="$HOME/.cache/nub/shared-target"
+  keyed=1
+fi
+
+# Leaf artifacts nothing links, so a divergence here cannot clobber a sharer.
+# Kept in one variable because the same set must apply to every query below —
+# they drifting apart is exactly how an unsound share would sneak back in.
+leaves=":(exclude)crates/nub-cli :(exclude)crates/nub-native :(exclude)crates/nub-phantom"
 
 # Baseline all sharers agree on: the merge-base with origin/main. This worktree
 # diverges a depended-on crate if, restricted to those crate dirs, EITHER:
@@ -50,27 +97,193 @@ shared="${NUB_SHARED_TARGET:-$HOME/.cache/nub/shared-target}"
 # Both checks are deliberately broad (any path under a depended-on crate, not just
 # *.rs): over-isolating on an irrelevant file costs one cold build; under-isolating
 # risks the clobber. Depended-on = every workspace/vendored crate except nub-cli.
+# `vendor/libsui` is one of them and was missing until 2026-09-02: it reaches the
+# build through `[patch.crates-io]` rather than a workspace member entry, so it
+# reads like a registry crate and was not obviously "ours". A worktree editing it
+# therefore keyed to the same bucket as one that had not, and reused the sibling's
+# rlib — surfacing as `E0599: no method named ... found` for a method sitting right
+# there in the source, on a build whose `--profile fast` clippy had just passed.
+# `runtime/` is in the set for a different reason than the crates: the binary
+# resolves `runtime/*.cjs` at run time from the tree that compiled nub-core (its
+# baked CARGO_MANIFEST_DIR), so a shared-bucket binary loads whichever SHARER
+# compiled last — a worktree with edited runtime files would test a sibling's
+# copy, silently. Isolating on runtime divergence keeps every shared-bucket
+# binary pointed at base-identical runtime content. (Observed: three worktrees'
+# red/green verdicts flipped as siblings rebuilt the common bucket.)
 # `-C "$root"` on the git queries so the pathspecs resolve from the repo root
 # regardless of the CWD the wrapper was invoked from (a subdir would otherwise
 # misread them). The final `exec cargo` still runs in the original CWD.
 base=$(git -C "$root" merge-base HEAD origin/main 2>/dev/null || true)
 diverged=""
 if [ -n "$base" ]; then
+  # shellcheck disable=SC2086  # $leaves must word-split into separate pathspecs
   diverged=$(git -C "$root" diff --name-only "$base" -- \
-    vendor/aube crates ':(exclude)crates/nub-cli' 2>/dev/null || true)
+    vendor/aube vendor/libsui crates runtime $leaves 2>/dev/null || true)
 fi
+# shellcheck disable=SC2086
 untracked=$(git -C "$root" ls-files --others --exclude-standard -- \
-  vendor/aube crates ':(exclude)crates/nub-cli' 2>/dev/null || true)
+  vendor/aube vendor/libsui crates runtime $leaves 2>/dev/null || true)
+
+# Digest binary, resolved EXPLICITLY rather than off PATH. A PATH-resolved
+# `shasum` can be a third-party perl build that HANGS rather than failing: on
+# the maintainer's Mac, MacPorts' `/opt/local/bin/shasum` never returns and
+# ignores SIGTERM, so even `timeout` cannot kill it. The `|| true` below guards
+# a non-zero exit and is no help against a hang — this wedged `make install-dev`
+# for three hours, twice, with the script producing no output at all because it
+# blocks before its own banner. Prefer coreutils `sha1sum` (a C binary, present
+# on the Linux builders and in CI), then the system perl `shasum` on macOS.
+# Every candidate is SHA-1 over the same bytes and prints `<hash>  -`, so the
+# 12-char key is unchanged and existing warm buckets stay valid.
+if command -v sha1sum >/dev/null 2>&1; then
+  digest=sha1sum
+elif [ -x /usr/bin/shasum ]; then
+  digest=/usr/bin/shasum
+else
+  digest=shasum
+fi
+
+# The content key names the bucket AND, when isolating, names the seed to clone
+# from — so it is computed unconditionally. `ls-files -s` emits the staged blob
+# OIDs, so this is a pure content hash of the depended-on crates. ~0.2s.
+# shellcheck disable=SC2086
+key=$(git -C "$root" ls-files -s -- vendor/aube vendor/libsui crates runtime $leaves 2>/dev/null \
+  | "$digest" 2>/dev/null | cut -c1-12 || true)
+if [ "$keyed" = 1 ]; then
+  bucket="$shared${key:+-$key}"
+else
+  bucket="$shared"
+fi
+
+# CoW-clone $1 into $2. The caller runs cargo against $2 no matter what this
+# returns, so $2 must never be visible half-copied — cargo would find fingerprints
+# whose artifacts are missing, the exact failure this script exists to prevent.
+# Staging under a fixed-name claim dir and renaming on success gives that: the
+# claim is also the mutual-exclusion token, so one racer clones instead of all of
+# them. Clone-only — `cp -c` (APFS) and `--reflink=always` (btrfs/XFS) fail rather
+# than silently falling back to a real multi-GB copy.
+seed_from() {
+  [ -d "$1" ] || return 1
+  _claim="$2.seeding"
+  # Retire an abandoned claim (killed clone — routine here) BEFORE the
+  # destination-exists return: that return fires on every run once $2 is
+  # published, so a retire below it would be dead code and a claim in a worktree
+  # root — which neither sweep scans — would leak untracked forever.
+  if [ -d "$_claim" ] && [ -z "$(find "$_claim" -maxdepth 0 -mmin -120 2>/dev/null)" ]; then
+    rm -rf "$_claim" 2>/dev/null
+  fi
+  [ -e "$2" ] && return 1
+  mkdir "$_claim" 2>/dev/null || return 1
+  if cp -c -a "$1/." "$_claim/" 2>/dev/null \
+    || cp -a --reflink=always "$1/." "$_claim/" 2>/dev/null; then
+    # A racer that lost the claim returns 1, and the caller's `mkdir -p "$target"`
+    # then creates the destination EMPTY — which would otherwise make this publish
+    # fail and leave BOTH processes cold, worse than no claim at all. `rmdir` only
+    # succeeds on an empty dir, so it clears that placeholder and never touches a
+    # destination something is already building in.
+    [ -d "$2" ] && rmdir "$2" 2>/dev/null
+    if [ ! -e "$2" ] && mv "$_claim" "$2" 2>/dev/null; then
+      return 0
+    fi
+  fi
+  rm -rf "$_claim" 2>/dev/null
+  return 1
+}
+
+# The newest bucket holding at least one compiled artifact, or empty output.
+# Buckets are only ever created by non-diverged worktrees, so every bucket name
+# is a base-content key. Two load-bearing filters: the `.seeding` skip (a claim
+# dir shares the `$shared-` prefix and `-t` sorts newest-first, so an
+# actively-filling claim would be the MOST likely pick — seeding from a
+# half-copied tree pairs a fresh-looking fingerprint with a truncated rlib), and
+# the rlib probe, a WARMTH heuristic rather than a completeness check: a bucket
+# mid-cold-build becomes non-empty within ~50ms (.rustc_info.json), so testing
+# for any entry would still pick it — requiring a compiled rlib skips it until
+# it holds something worth cloning. A partially-warm pick is fine for the
+# isolated seed (private target; cargo rebuilds what mismatches).
+# ALWAYS exits 0: the caller runs under `set -e`, and "no candidate" is an
+# ordinary outcome (fresh machine, or NUB_SHARED_TARGET pointing somewhere
+# bucketless as `make verify` does), answered with empty output — a nonzero
+# return here killed the script silently before any banner.
+newest_bucket() {
+  # shellcheck disable=SC2012  # names are ours and contain no newlines
+  for _b in $(ls -dt "$shared"-* 2>/dev/null | grep -v '\.seeding$'); do
+    if [ -n "$(find "$_b" -name '*.rlib' -print -quit 2>/dev/null)" ]; then
+      printf '%s\n' "$_b"
+      return 0
+    fi
+  done
+  return 0
+}
 
 if [ -n "$diverged" ] || [ -n "$untracked" ]; then
   target="$root/target"   # private, worktree-local; removed with the worktree
   why="isolated — this worktree diverges a depended-on crate from origin/main"
+  isolated=1
 else
-  target="$shared"        # shared fast path
-  why="shared — depended-on crates match origin/main"
+  target="$bucket"        # shared fast path, content-keyed
+  why="shared bucket ${key:-none} — depended-on crate content"
+  isolated=""
+  # A SHARED bucket is NEVER seeded from another bucket. Any other bucket's
+  # hashed content differs by construction (a matching key would BE this bucket),
+  # CoW clones preserve mtimes, and cargo's path-dep freshness check
+  # (LocalFingerprint::CheckDepInfo) compares mtimes rather than content — so a
+  # sharer whose checkout is older than the seeded dep-info would accept a
+  # foreign rlib as fresh: the phantom E0063 this keying exists to prevent,
+  # persisting inside a bucket other worktrees join. A key move therefore costs
+  # the first SHARER one cold build, later sharers join warm, and an isolated
+  # worktree seeding during that window falls back to the newest rlib-bearing
+  # bucket. (The isolated branch may seed foreign content because its target is
+  # PRIVATE and its just-edited divergent files carry fresh mtimes.)
+fi
+
+# `--print-target` resolves the target dir the SAME way a real build would and
+# prints it, so callers that must locate the artifact afterwards (make
+# install-dev symlinking nub-dev) follow the shared/isolated decision instead of
+# hardcoding a path that is only right in one of the two cases. It exits HERE,
+# before the seeding and the mkdir/GC below, so it is a pure read on BOTH
+# branches — tooling that compares against it (the disk-reduction bucket sweep's
+# positive control) must not materialize a bucket, a private target, or a GC
+# pass as a side effect of asking.
+if [ "${1:-}" = "--print-target" ]; then
+  printf '%s\n' "$target"
+  exit 0
+fi
+
+if [ -n "$isolated" ]; then
+  # ANY bucket will do, and the fallback is what makes seeding fire at all for
+  # the ordinary case: $bucket is keyed by this worktree's INDEX, but buckets are
+  # only created by non-diverged worktrees, so a committed or staged divergence
+  # (i.e. any feature branch) matches no bucket name. Seeding from base content is
+  # sound here only because $target is PRIVATE — a stale workspace artifact can't
+  # clobber a sibling, cargo just rebuilds it, and the crates.io rlibs we're
+  # after are identical across buckets.
+  _seed="$bucket"
+  [ -d "$_seed" ] && [ -n "$(find "$_seed" -name '*.rlib' -print -quit 2>/dev/null)" ] || _seed=$(newest_bucket)
+  [ -n "$_seed" ] && [ -d "$_seed" ] || _seed="$shared"
+  if seed_from "$_seed" "$target"; then
+    why="$why (seeded from $(basename "$_seed"))"
+  fi
 fi
 
 mkdir -p "$target"
+# NOT redundant with the mkdir: verified that `mkdir -p` on an existing dir does
+# not update its mtime, and neither does a nested write. A target dir's top level
+# goes quiescent after the first build, so without this an in-use bucket ages past
+# the GC window and is collected mid-build — a failed build, not a cold one.
+touch "$target" 2>/dev/null || true
+
+# SELF-PRUNING. scripts/target-gc.sh owns the policy — orphaned buckets after
+# a day, anything untouched 14 days, low-disk pressure collection, abandoned
+# .seeding claims — and it replaces the inline 14-day sweep that used to live
+# here. At most hourly (the stamp), in the foreground so nothing outlives this
+# process, and fail-open: a failing collector never blocks the build. The
+# `touch` above is the liveness signal that keeps this dir out of its reach.
+_gcstamp="$HOME/.cache/nub/target-gc.stamp"
+if [ -f "$root/scripts/target-gc.sh" ] \
+  && [ -z "$(find "$_gcstamp" -mmin -60 2>/dev/null)" ]; then
+  touch "$_gcstamp" 2>/dev/null || true
+  NUB_GC_KEEP="$target" sh "$root/scripts/target-gc.sh" || true
+fi
 
 # CONTENTION CONTROL. Many agent worktrees build concurrently, and every cargo
 # assumes it owns the machine — ~20 parallel builds drove the 10-core dev host to
@@ -98,14 +311,56 @@ if [ "${NUB_BUILD_FG:-}" != "1" ] && [ "$(uname)" = "Darwin" ] \
   qos="taskpolicy -c utility"
 fi
 
-printf 'rust-build: %s\n  CARGO_TARGET_DIR=%s jobs=%s qos=%s\n' \
-  "$why" "$target" "${CARGO_BUILD_JOBS:-default}" "${qos:-none}" >&2
+# The machine-global rustc wrapper (make qos-global) carries the BUILD SLOTS and
+# the GLOBAL CONCURRENCY SEMAPHORE, not just a QoS clamp, so this invocation
+# must let it run. It previously blanked RUSTC_WRAPPER — sound when the wrapper only
+# re-applied a clamp cargo had already applied, and the direct cause of the
+# 2026-08-19 saturation once the semaphore moved there: 10 of the 13 concurrent
+# builds went through this script and every one of them opted itself out of the
+# only machine-wide cap that existed. The per-cargo CARGO_BUILD_JOBS above stays
+# — it is blind to sibling builds, so it bounds ONE build, never the fleet.
+#
+# NUB_BUILD_FG=1 still opts fully out, which is the documented meaning of a
+# HUMAN's latency-sensitive foreground build; it is passed by blanking BOTH
+# wrapper keys rather than by exporting the var, so the unset below keeps
+# holding. Both, because qos-global binds the same governor to
+# rustc-workspace-wrapper as a floor under stale checkouts, and a foreground
+# build whose workspace crates still queued behind the fleet would be the
+# opposite of what was asked for.
+wrapper_off=""
+[ "${NUB_BUILD_FG:-}" = "1" ] && wrapper_off="RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER="
+
+printf 'rust-build: %s\n  CARGO_TARGET_DIR=%s jobs=%s qos=%s sem=%s\n' \
+  "$why" "$target" "${CARGO_BUILD_JOBS:-default}" "${qos:-none}" \
+  "$([ -n "$wrapper_off" ] && echo bypassed || echo global)" >&2
+# Record the target this invocation actually chose, for a caller that must
+# locate the artifact AFTERWARDS. `--print-target` cannot serve that: it
+# re-resolves from source content, so a merge landing on the shared tree during
+# a long build moves the key and the caller aims at a bucket this build never
+# wrote to (measured: a 27-minute `make install-dev` racing a merge left
+# nub-dev a dangling symlink). Resolving BEFORE the build instead only inverts
+# the window — the caller would then get a stale-but-existing binary, which is
+# the silent staleness the keying exists to prevent. Writing it here, from the
+# one resolution the build uses, is what removes the race rather than moving it.
+if [ -n "${NUB_BUILD_TARGET_OUT:-}" ]; then
+  printf '%s\n' "$target" > "$NUB_BUILD_TARGET_OUT"
+fi
 # NUB_* vars are routing input for this wrapper, not part of the command's
 # environment. In particular, tests must not expose them to spawned user code.
-unset NUB_SHARED_TARGET NUB_BUILD_JOBS NUB_BUILD_FG
-# RUSTC_WRAPPER= disables the machine-global rustc-qos wrapper (make qos-global)
-# for this invocation: QoS is already applied at the cargo level here, and with
-# NUB_BUILD_FG unset above, a foreground (NUB_BUILD_FG=1) build would otherwise
-# be re-clamped at the rustc level. Cargo treats the empty value as "no wrapper".
-# $qos word-splits deliberately (empty, or "taskpolicy -c utility").
-exec env CARGO_TARGET_DIR="$target" RUSTC_WRAPPER= $qos cargo "$@"
+unset NUB_SHARED_TARGET NUB_BUILD_JOBS NUB_BUILD_FG NUB_BUILD_TARGET_OUT
+# $qos and $wrapper_off word-split deliberately (each empty, or one assignment).
+# shellcheck disable=SC2086
+# nub-cli's build script bakes site/content/docs into the binary and records an
+# ABSOLUTE rerun-if-changed path, so in a shared bucket a sharer reuses whichever
+# tree baked last — a branch that moves docs pages tests a sibling's tree. A
+# rerun-if-env-changed on a cargo-set variable cannot catch that (cargo tracks only
+# the variables it receives), so hand it one: a content hash of the working-tree
+# docs, which the build script declares. Same tree, same key, no rerun. The
+# digest covers each file's RELATIVE path and its own digest, so a rename, a move
+# or an added empty page changes the key while an identical tree in another
+# worktree does not.
+__NUB_DOCS_KEY=$(cd "$root" && find site/content/docs -type f -print0 2>/dev/null | sort -z \
+  | xargs -0 "$digest" 2>/dev/null | "$digest" 2>/dev/null | cut -c1-12 || true)
+export __NUB_DOCS_KEY
+
+exec env CARGO_TARGET_DIR="$target" $wrapper_off $qos cargo "$@"

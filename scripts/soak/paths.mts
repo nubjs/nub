@@ -13,8 +13,8 @@ import { fileURLToPath } from 'node:url'
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 
-// Soak surfaces (repo-relative). The repo ROOT is npm-only (.npmrc,
-// package-lock.json — wpt-worker runs a root npm ci); the pnpm-side soak
+// Soak surfaces (repo-relative). The repo ROOT is nub-identity — one lockfile,
+// nub.lock, with no other manager's lockfile beside it; the pnpm-side soak
 // (workspace yaml with catalog + minimumReleaseAge, taze) is anchored in
 // tools/ so the workspace yaml never marks the repo root as a workspace —
 // nub would inherit the root engines and redirect the test matrix's
@@ -38,7 +38,13 @@ export const NPM_INSTALLERS: string[][] = [['pnpm', 'install']]
 // rustup's cargo shim — the only cargo that understands `+nightly`, and so
 // the only one whose `cargo update` can honor the [unstable]
 // min-publish-age soak (see .cargo/config.toml).
-export const RUSTUP_CARGO = path.join(os.homedir(), '.cargo/bin/cargo')
+// CARGO_HOME-aware: rustup installs its shims under $CARGO_HOME/bin.
+const CARGO_HOME = process.env.CARGO_HOME || path.join(os.homedir(), '.cargo')
+export const RUSTUP_CARGO = path.join(
+  CARGO_HOME,
+  'bin',
+  process.platform === 'win32' ? 'cargo.exe' : 'cargo',
+)
 
 // Pinned external tool manifest + the local tool rack it installs into:
 // exact versions under rack/<tool>/<version>/, flat PATH handles in bin/.

@@ -13,6 +13,7 @@ export default function HomePage() {
     <div className="relative w-full overflow-x-hidden">
       <Hero />
       <Toolkit />
+      {/* Temporarily hidden: <VideoFeature /> */}
       <RunFileBand />
       <RunScriptBand />
       <NubxBand />
@@ -20,6 +21,50 @@ export default function HomePage() {
       <FinalCta />
       <Footer />
     </div>
+  );
+}
+
+/* ------------------------------------------------------------ Video feature */
+
+function VideoFeature() {
+  return (
+    <section className="border-b border-fd-border" aria-labelledby="video-heading">
+      <Container className="py-20 md:py-28">
+        <div className="mx-auto max-w-5xl">
+          <div className="mx-auto mb-8 max-w-2xl text-center">
+            <h2
+              id="video-heading"
+              className="text-balance font-display text-3xl font-medium leading-tight md:text-4xl"
+            >
+              Watch Nub in action
+            </h2>
+            <p className="mt-4 text-lg text-fd-muted-foreground">
+              A video walkthrough by our friends at{' '}
+              <a
+                href="https://www.youtube.com/@betterstack"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-fd-foreground underline decoration-dotted decoration-fd-muted-foreground/50 underline-offset-4 hover:decoration-fd-muted-foreground"
+              >
+                Better Stack
+              </a>
+              .
+            </p>
+          </div>
+          <div className="overflow-hidden rounded-xl border border-fd-border bg-black shadow-2xl shadow-black/20">
+            <iframe
+              className="block aspect-video w-full"
+              src="https://www.youtube-nocookie.com/embed/6YRpXxbtc2c?start=2"
+              title="An Ex-Bun Dev Just Built The Anti-Bun (Nub)"
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+              referrerPolicy="strict-origin-when-cross-origin"
+              loading="lazy"
+              allowFullScreen
+            />
+          </div>
+        </div>
+      </Container>
+    </section>
   );
 }
 
@@ -126,8 +171,8 @@ function Feature({
   reverse?: boolean;
 }) {
   return (
-    <div className="grid items-center gap-12 py-14 xl:grid-cols-2">
-      <div className={`min-w-0 ${reverse ? 'xl:order-2' : ''}`}>
+    <div className="grid items-center gap-12 py-14 lg:grid-cols-2">
+      <div className={`min-w-0 ${reverse ? 'lg:order-2' : ''}`}>
         <p className={`eyebrow ${ACCENT_TEXT[accent]}`}>{eyebrow}</p>
         <h3 className="mt-3 text-balance font-display text-2xl font-medium leading-snug md:text-3xl">
           {title}
@@ -136,7 +181,7 @@ function Feature({
           {body}
         </p>
       </div>
-      <div className={`min-w-0 ${reverse ? 'xl:order-1' : ''}`}>{visual}</div>
+      <div className={`min-w-0 ${reverse ? 'lg:order-1' : ''}`}>{visual}</div>
     </div>
   );
 }
@@ -156,18 +201,23 @@ const heroLines = (major: string) => [
 function HeroPill() {
   return (
     <Link
-      href="/blog/introducing-nub"
-      className="group inline-flex items-center gap-2 rounded-full border border-fd-border bg-fd-card/50 py-1 pl-1 pr-3 text-sm leading-none text-fd-muted-foreground hover:border-ember/50"
+      href="/blog/nub-0-7-0"
+      className="group inline-flex max-w-full items-center gap-2 rounded-full border border-fd-border bg-fd-card/50 py-1 pl-1 pr-3 text-sm leading-none text-fd-muted-foreground hover:border-ember/50"
     >
       {/* flex items-center centers all three optically (verified to <0.25px against the
-          pill center); no manual vertical nudges. */}
-      <span className="rounded-full bg-ember px-2.5 py-0.5 font-mono text-[0.7rem] font-medium uppercase tracking-wider text-[#fffdf8] dark:text-[#160c08]">
+          pill center); no manual vertical nudges. The title is the only shrinkable
+          child — `max-w-full` bounds the pill to the hero column and `min-w-0` lets
+          the title shrink below its intrinsic width, so a narrow viewport ellipsizes
+          it instead of wrapping the pill to two lines. Badge and arrow stay whole. */}
+      <span className="shrink-0 rounded-full bg-ember px-2.5 py-0.5 font-mono text-[0.7rem] font-medium uppercase tracking-wider text-[#fffdf8] dark:text-[#160c08]">
         New
       </span>
-      <span className="text-fd-foreground">Introducing Nub</span>
+      <span className="min-w-0 truncate text-fd-foreground">
+        Nub v0.7 — nub.jsonc, Varlock support, Promise.allKeyed, and more
+      </span>
       <span
         aria-hidden
-        className="text-fd-muted-foreground transition-transform group-hover:translate-x-0.5"
+        className="shrink-0 text-fd-muted-foreground transition-transform group-hover:translate-x-0.5"
       >
         →
       </span>
@@ -180,9 +230,7 @@ function HeroH1({ className = '' }: { className?: string }) {
     <h1
       className={`text-balance font-display font-medium leading-[1.2] tracking-tight text-fd-foreground ${className}`}
     >
-      The all-in-one JavaScript toolkit that{' '}
-      <span className="italic text-ember">augments</span> Node.js instead of trying
-      to replace it
+      The <span className="italic text-ember">all-in-one</span> Node.js toolkit
     </h1>
   );
 }
@@ -902,21 +950,20 @@ function NubxBand() {
 
 /* ------------------------------------------------------------ Compatibility */
 
-/* Source: tests/cross-runtime/results.json, using Deno's Node-compat corpus (colinhacks/node_test @ node-25.8.1). Rates = runtime_pass / node_pass. */
+/* Source: tests/cross-runtime/results.json `scores.denoExclusions`, using Node 26.7.0's own test tree (tests/node-suite at v26.7.0) with Deno's directory set and config skips applied. Rate = the share of the tests real Node passes that this runtime ALSO passes, so numerator and denominator come from the same set. Do NOT recompute it as runtime_pass / node_pass: that draws the numerator from a larger set than the denominator and reads high (98.8 vs 98.6 for nub on the same June data). */
 const COMPAT = [
-  { name: 'Node 25.8', rate: 100, tests: '4,368 / 4,368', us: false, dim: false },
-  { name: 'Nub', rate: 98.8, tests: '4,315 / 4,368', us: true, dim: false },
-  { name: 'Deno 2.8', rate: 77.4, tests: '3,380 / 4,368', us: false, dim: true },
-  { name: 'Bun 1.3.14', rate: 40.5, tests: '1,770 / 4,368', us: false, dim: true },
+  { name: 'Node 26.7', rate: 100, tests: '4,690 / 4,690', us: false, dim: false },
+  { name: 'Nub', rate: 98.4, tests: '4,613 / 4,690', us: true, dim: false },
+  { name: 'Deno 2.9', rate: 72.4, tests: '3,397 / 4,690', us: false, dim: true },
+  { name: 'Bun 1.4', rate: 68.5, tests: '3,214 / 4,690', us: false, dim: true },
 ];
 
 function Compatibility() {
   return (
     <div className="py-14">
         <div className="mx-auto max-w-2xl text-center">
-          <p className="eyebrow text-ember">Compatibility</p>
-          <h3 className="mt-3 text-balance font-display text-2xl font-medium leading-snug md:text-3xl">
-            Node-compatible, because it <span className="italic">is</span> Node
+          <h3 className="text-balance font-display text-2xl font-medium leading-snug md:text-3xl">
+            Node.js compatibility benchmark
           </h3>
           <p className="mt-5 text-balance text-lg leading-relaxed text-fd-muted-foreground">
             Your code is transpiled and executed with the stock <Mono>node</Mono>{' '}binary, so it
@@ -957,7 +1004,7 @@ function Compatibility() {
           })}
         </div>
         <p className="mx-auto mt-6 max-w-lg text-center text-sm leading-relaxed text-fd-muted-foreground">
-          Deno&rsquo;s Node-compat corpus, scored against stock Node. Nub&rsquo;s misses come from auto-enabling experimental features and loading native addons.<br/>
+          Node 26.7&rsquo;s own test suite under Deno&rsquo;s compatibility lens, scored against stock Node. Most of Nub&rsquo;s 77 misses are tests that assert on machinery Nub installs itself &mdash; the permission model, module-loader hooks, the test runner, the compile cache &mdash; or on stack and output snapshots its preload changes.<br/>
           <a
             href="https://github.com/nubjs/nub/tree/main/tests/cross-runtime"
             target="_blank"
@@ -991,10 +1038,18 @@ const RULES = [
    `packageExtensions` row has no pm_engine dialect-scoping (no per-PM conflict);
    the nub=yes cell is grounded in the embedded aube engine, which honors a
    top-level `packageExtensions` natively (vendor/aube/crates/aube-manifest/src/lib.rs
-   `package_extensions()` → resolver package_ext.rs). Same for `allowBuilds` — a real
-   pnpm field (pnpm-workspace.yaml; pnpm/core/types/src/package.ts) that aube reads via
-   its pnpm-compat settings family; bun honors none of it (only `trustedDependencies`).
-   Both bun=no cells verified: zero refs in bun source + docs. Legend:
+   `package_extensions()` → resolver package_ext.rs). Same for `allowScripts` — a real
+   npm field (top-level package.json, npm 12; RFC npm/rfcs#868) that the engine reads at
+   the manifest root (vendor/aube/crates/aube-manifest/src/lib.rs ROOT_ALLOW_SCRIPTS_KEY).
+   pnpm=no because pnpm's own map is `allowBuilds` in pnpm-workspace.yaml, which nub
+   still reads under a pnpm incumbent — a different field, so a different row's claim.
+   Both bun=no cells verified: zero refs in bun source + docs.
+   `trustedDependencies` is nub=no on purpose: `honors_trusted_dependencies` returns
+   true for Role::Bun ALONE (config_scope.rs, asserted for every other role), so under
+   its own identity nub reads the neutral `allowScripts` and ignores bun's branded field.
+   `catalog:` is yarn=yes for berry — `role_honors_catalog` honors Role::Yarn at major>=2
+   (pm_engine/mod.rs); only a `1.x` pin refuses. Version-gated cells show the modern
+   line's truth, same as npm=yes for `overrides` (which npm gained in 8.3). Legend:
      yes  — honored
      no   — ignored
      —    — n/a
@@ -1016,19 +1071,19 @@ const PM_MATRIX: { field: ReactNode; cells: Record<(typeof PM_COLUMNS)[number], 
   },
   {
     field: <><Mono>catalog:</Mono></>,
-    cells: { npm: 'no', pnpm: 'yes', yarn: 'no', bun: 'yes', nub: 'yes' },
+    cells: { npm: 'no', pnpm: 'yes', yarn: 'yes', bun: 'yes', nub: 'yes' },
   },
   {
     field: <><Mono>packageExtensions</Mono></>,
     cells: { npm: 'no', pnpm: 'yes', yarn: 'yes', bun: 'no', nub: 'yes' },
   },
   {
-    field: <><Mono>allowBuilds</Mono></>,
-    cells: { npm: 'no', pnpm: 'yes', yarn: 'no', bun: 'no', nub: 'yes' },
+    field: <><Mono>allowScripts</Mono></>,
+    cells: { npm: 'yes', pnpm: 'no', yarn: 'no', bun: 'no', nub: 'yes' },
   },
   {
     field: <><Mono>trustedDependencies</Mono></>,
-    cells: { npm: 'no', pnpm: 'no', yarn: 'no', bun: 'yes', nub: 'yes' },
+    cells: { npm: 'no', pnpm: 'no', yarn: 'no', bun: 'yes', nub: 'no' },
   },
   {
     field: <><Mono>.npmrc</Mono></>,
@@ -1391,8 +1446,8 @@ function Footer() {
             title="Toolkit"
             links={[
               ['File runner', '/docs/runtime'],
-              ['Runner', '/docs/runner'],
-              ['Script runner', '/docs/runner/run'],
+              ['Script runner', '/docs/run'],
+              ['Bin runner', '/docs/nubx'],
               ['Package manager', '/docs/pm'],
               ['Version manager', '/docs/node'],
               ['Watch mode', '/docs/watch'],

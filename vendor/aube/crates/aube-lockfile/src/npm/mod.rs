@@ -24,8 +24,8 @@ pub(crate) use layout::{
     build_hoist_tree, canonical_key_from_dep_path, child_canonical_key, dep_path_tail,
     dep_value_as_version, segments_to_install_path,
 };
-pub(crate) use source::local_git_source_from_resolved;
 pub use read::parse;
+pub(crate) use source::local_git_source_from_resolved;
 pub use write::write;
 
 #[cfg(test)]

@@ -168,6 +168,28 @@ JSON
 	assert_output --partial "ok"
 }
 
+@test "aube list --lockfile-only reads the lockfile without node_modules" {
+	cat >package.json <<'JSON'
+{
+  "name": "list-lockfile-only",
+  "version": "1.0.0",
+  "devDependencies": {
+    "is-odd": "3.0.1"
+  }
+}
+JSON
+
+	run aube install --lockfile-only
+	assert_success
+	[ ! -e node_modules ]
+
+	run aube list --json --lockfile-only is-odd
+	assert_success
+	[ ! -e node_modules ]
+	assert_output --partial '"is-odd"'
+	assert_output --partial '"version": "3.0.1"'
+}
+
 @test "aube list --parseable emits tab-separated lines" {
 	_setup_mixed_fixture
 	run aube list --parseable

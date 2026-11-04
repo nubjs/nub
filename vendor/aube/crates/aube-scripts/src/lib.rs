@@ -14,6 +14,7 @@
 
 pub mod content_sniff;
 pub mod default_trust;
+pub mod direct;
 pub mod policy;
 
 #[cfg(target_os = "linux")]
@@ -30,37 +31,59 @@ use aube_manifest::PackageJson;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+
+const MAX_SCRIPT_OUTPUT_RECORD_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptOutputStream {
+    Stdout,
+    Stderr,
+}
+
+pub trait ScriptOutputReporter: Send + Sync + 'static {
+    fn report(&self, stream: ScriptOutputStream, line: String);
+}
 
 /// Settings that affect every package-script shell aube spawns.
 #[derive(Debug, Clone, Default)]
 pub struct ScriptSettings {
     pub node_options: Option<String>,
     pub script_shell: Option<PathBuf>,
+    /// Embedder-supplied replacement for the PLATFORM DEFAULT shell, consulted
+    /// only when [`Self::script_shell`] is unset (an explicit user
+    /// `script-shell` always wins). Copied verbatim from
+    /// [`aube_util::EngineContext::default_script_shell`]; `None` keeps aube's
+    /// own default (`sh -c`, or `cmd.exe /d /s /c` on Windows).
+    pub default_shell: Option<aube_util::ScriptShell>,
     pub unsafe_perm: Option<bool>,
     pub shell_emulator: bool,
-    /// Directory of the project's resolved Node runtime, prepended to
-    /// PATH after the project `.bin` so the switched node beats the
-    /// system one while project-local binaries still win. `None` when
-    /// no runtime switching is active.
+    /// Directory of the project's resolved Node runtime. `None` when no
+    /// runtime switching is active.
     pub node_bin_dir: Option<PathBuf>,
-    /// The resolved node executable, exported as `NODE` (and, unless
-    /// `node_execpath` overrides it, `npm_node_execpath`) for every script.
-    pub node_exe: Option<PathBuf>,
-    /// The *real* Node exported as `npm_node_execpath` when it differs from
-    /// the program driving `NODE` — a wrapping embedder points `NODE` at a
-    /// shim, but node-gyp reads `npm_node_execpath` for Node's install prefix
-    /// and must reach the real binary. `None` ⇒ falls back to `node_exe`,
-    /// where both name one binary. Mirrors `RuntimeContext::node_execpath`,
-    /// which feeds it.
+    /// The node exported as `NODE` (npm parity) — the program a
+    /// script's `$NODE` / bare `node` re-spawns. A wrapper's shim; the
+    /// real binary otherwise.
+    pub node_program: Option<PathBuf>,
+    /// The node exported as `npm_node_execpath` — the *real* binary
+    /// node-gyp reads to find Node's install prefix. Equals
+    /// [`Self::node_program`] unless a wrapper split them apart.
     pub node_execpath: Option<PathBuf>,
+    /// Extra environment an embedder contributes to every script,
+    /// applied last (after `env_clear`) so it survives the jail. Merge
+    /// semantics against aube's own values are resolved upstream; these
+    /// are plain overrides. (`NODE_OPTIONS` folding happens through
+    /// [`Self::node_options`].)
+    pub extra_env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     /// Embedder-supplied environment overlay applied verbatim to every
-    /// lifecycle spawn (`(key, value)` pairs, set last so they win over the
-    /// other `ScriptSettings`-derived keys). Generic by design — aube assigns
-    /// no meaning to the keys; an embedder fills it to route scripts through a
-    /// provisioned/augmented runtime (e.g. nub points `NODE` at its node shim,
-    /// pins `npm_node_execpath`, and injects its preload via `NODE_OPTIONS`)
-    /// without aube growing a runtime-specific field. Default-empty =
-    /// behavior-preserving: a stock aube spawns exactly as before.
+    /// lifecycle spawn (`(key, value)` pairs, set after [`Self::extra_env`]
+    /// so they win over it and over the other `ScriptSettings`-derived keys).
+    /// Generic by design — aube assigns no meaning to the keys; an embedder
+    /// fills it to route scripts through a provisioned/augmented runtime (e.g.
+    /// nub points `NODE` at its node shim, pins `npm_node_execpath`, and
+    /// injects its preload via `NODE_OPTIONS`) without aube growing a
+    /// runtime-specific field. Default-empty = behavior-preserving: a stock
+    /// aube spawns exactly as before.
     pub env_overlay: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     /// Embedder-supplied PATH entries prepended (in order, ahead of the
     /// existing PATH) to every lifecycle spawn. Counterpart to `env_overlay`
@@ -80,6 +103,14 @@ pub struct ScriptSettings {
     /// first use) the real node-gyp and forwards argv. `None` leaves
     /// `npm_config_node_gyp` unset.
     pub node_gyp_js: Option<PathBuf>,
+    /// Project root the lazy node-gyp shim bootstraps against, exported as
+    /// `AUBE_NODE_GYP_PROJECT_DIR`. The bootstrap copies this dir's
+    /// `.npmrc` into its tool dir, so a private registry / auth token
+    /// configured at project scope reaches it. Travels with
+    /// [`Self::node_gyp_js`] — a dep lifecycle script runs with its own
+    /// package dir as cwd, so without this the shim's cwd fallback would
+    /// resolve the bootstrap against a dep dir that has no `.npmrc`.
+    pub node_gyp_project_dir: Option<PathBuf>,
     /// The resolved default registry URL, exported as
     /// `npm_config_registry` (npm/pnpm parity) so dependency lifecycle
     /// scripts (and `aube run` scripts) see the same registry aube
@@ -164,10 +195,17 @@ impl Drop for ScriptJailHomeCleanup {
     }
 }
 
-static SCRIPT_SETTINGS: std::sync::OnceLock<std::sync::RwLock<ScriptSettings>> =
+#[derive(Clone, Default)]
+struct ScriptSettingsState {
+    settings: ScriptSettings,
+    node_bin_dir_precedes_project_bins: bool,
+    output_reporter: Option<std::sync::Arc<dyn ScriptOutputReporter>>,
+}
+
+static SCRIPT_SETTINGS: std::sync::OnceLock<std::sync::RwLock<ScriptSettingsState>> =
     std::sync::OnceLock::new();
 
-type ScriptSettingsSlot = std::sync::Arc<std::sync::RwLock<ScriptSettings>>;
+type ScriptSettingsSlot = std::sync::Arc<std::sync::RwLock<ScriptSettingsState>>;
 
 tokio::task_local! {
     static INSTALL_SCRIPT_SETTINGS: ScriptSettingsSlot;
@@ -177,7 +215,7 @@ tokio::task_local! {
 pub async fn scope<F: std::future::Future>(future: F) -> F::Output {
     INSTALL_SCRIPT_SETTINGS
         .scope(
-            std::sync::Arc::new(std::sync::RwLock::new(ScriptSettings::default())),
+            std::sync::Arc::new(std::sync::RwLock::new(ScriptSettingsState::default())),
             future,
         )
         .await
@@ -196,34 +234,77 @@ pub fn scope_current<F: std::future::Future>(
     }
 }
 
-fn script_settings_lock() -> &'static std::sync::RwLock<ScriptSettings> {
-    SCRIPT_SETTINGS.get_or_init(|| std::sync::RwLock::new(ScriptSettings::default()))
+fn script_settings_lock() -> &'static std::sync::RwLock<ScriptSettingsState> {
+    SCRIPT_SETTINGS.get_or_init(|| std::sync::RwLock::new(ScriptSettingsState::default()))
 }
 
 /// Replace the current install's script settings snapshot, or the process-wide
 /// fallback when called outside an install scope.
 pub fn set_script_settings(settings: ScriptSettings) {
+    set_script_settings_with_path_order(settings, false);
+}
+
+/// Replace the script settings and control whether the runtime bin directory
+/// precedes project-local bins. Wrapping runtimes use `true` so a local `node`
+/// cannot bypass their shim; selectors use `false`.
+#[doc(hidden)]
+pub fn set_script_settings_with_path_order(
+    settings: ScriptSettings,
+    node_bin_dir_precedes_project_bins: bool,
+) {
     if INSTALL_SCRIPT_SETTINGS
         .try_with(|slot| match slot.write() {
-            Ok(mut guard) => *guard = settings.clone(),
-            Err(poisoned) => *poisoned.into_inner() = settings.clone(),
+            Ok(mut guard) => {
+                guard.settings = settings.clone();
+                guard.node_bin_dir_precedes_project_bins = node_bin_dir_precedes_project_bins;
+            }
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                guard.settings = settings.clone();
+                guard.node_bin_dir_precedes_project_bins = node_bin_dir_precedes_project_bins;
+            }
         })
         .is_ok()
     {
         return;
     }
     match script_settings_lock().write() {
-        Ok(mut guard) => *guard = settings,
-        Err(poisoned) => *poisoned.into_inner() = settings,
+        Ok(mut guard) => {
+            guard.settings = settings;
+            guard.node_bin_dir_precedes_project_bins = node_bin_dir_precedes_project_bins;
+        }
+        Err(poisoned) => {
+            let mut guard = poisoned.into_inner();
+            guard.settings = settings;
+            guard.node_bin_dir_precedes_project_bins = node_bin_dir_precedes_project_bins;
+        }
     }
 }
 
-fn script_settings() -> ScriptSettings {
-    if let Ok(settings) = INSTALL_SCRIPT_SETTINGS.try_with(|slot| match slot.read() {
+/// Route lifecycle child output through an embedding host. When unset,
+/// scripts inherit the parent process's stdout and stderr as usual.
+pub fn set_output_reporter(reporter: Option<std::sync::Arc<dyn ScriptOutputReporter>>) {
+    if INSTALL_SCRIPT_SETTINGS
+        .try_with(|slot| match slot.write() {
+            Ok(mut guard) => guard.output_reporter = reporter.clone(),
+            Err(poisoned) => poisoned.into_inner().output_reporter = reporter.clone(),
+        })
+        .is_ok()
+    {
+        return;
+    }
+    match script_settings_lock().write() {
+        Ok(mut guard) => guard.output_reporter = reporter,
+        Err(poisoned) => poisoned.into_inner().output_reporter = reporter,
+    }
+}
+
+fn script_settings_state() -> ScriptSettingsState {
+    if let Ok(state) = INSTALL_SCRIPT_SETTINGS.try_with(|slot| match slot.read() {
         Ok(guard) => guard.clone(),
         Err(poisoned) => poisoned.into_inner().clone(),
     }) {
-        return settings;
+        return state;
     }
     match script_settings_lock().read() {
         Ok(guard) => guard.clone(),
@@ -240,6 +321,10 @@ pub fn script_settings_snapshot() -> ScriptSettings {
     script_settings()
 }
 
+fn script_settings() -> ScriptSettings {
+    script_settings_state().settings
+}
+
 #[cfg(test)]
 mod scoped_settings_tests {
     use super::*;
@@ -251,14 +336,23 @@ mod scoped_settings_tests {
         let second_barrier = std::sync::Arc::clone(&barrier);
 
         let first = scope(async move {
-            set_script_settings(ScriptSettings {
-                command: Some("first".to_string()),
-                ..ScriptSettings::default()
-            });
+            set_script_settings_with_path_order(
+                ScriptSettings {
+                    command: Some("first".to_string()),
+                    ..ScriptSettings::default()
+                },
+                true,
+            );
             first_barrier.wait().await;
-            tokio::spawn(scope_current(async { script_settings().command }))
-                .await
-                .unwrap()
+            tokio::spawn(scope_current(async {
+                let state = script_settings_state();
+                (
+                    state.settings.command,
+                    state.node_bin_dir_precedes_project_bins,
+                )
+            }))
+            .await
+            .unwrap()
         });
         let second = scope(async move {
             set_script_settings(ScriptSettings {
@@ -266,14 +360,22 @@ mod scoped_settings_tests {
                 ..ScriptSettings::default()
             });
             second_barrier.wait().await;
-            tokio::spawn(scope_current(async { script_settings().command }))
-                .await
-                .unwrap()
+            tokio::spawn(scope_current(async {
+                let state = script_settings_state();
+                (
+                    state.settings.command,
+                    state.node_bin_dir_precedes_project_bins,
+                )
+            }))
+            .await
+            .unwrap()
         });
 
         let (first, second) = tokio::join!(first, second);
-        assert_eq!(first.as_deref(), Some("first"));
-        assert_eq!(second.as_deref(), Some("second"));
+        assert_eq!(first.0.as_deref(), Some("first"));
+        assert!(first.1);
+        assert_eq!(second.0.as_deref(), Some("second"));
+        assert!(!second.1);
     }
 }
 
@@ -291,9 +393,178 @@ pub fn prepend_paths(bin_dirs: &[PathBuf]) -> std::ffi::OsString {
     std::env::join_paths(entries).unwrap_or(path)
 }
 
+/// Place a runtime bin directory around project-local bin directories.
+/// Wrappers lead so a local `node` cannot bypass their shim; selectors follow
+/// so package-provided commands retain normal precedence.
+pub fn order_path_entries(
+    mut project_bins: Vec<PathBuf>,
+    runtime_bin: Option<&Path>,
+    runtime_precedes_project_bins: bool,
+) -> Vec<PathBuf> {
+    let Some(runtime_bin) = runtime_bin else {
+        return project_bins;
+    };
+    if runtime_precedes_project_bins {
+        project_bins.insert(0, runtime_bin.to_path_buf());
+    } else {
+        project_bins.push(runtime_bin.to_path_buf());
+    }
+    project_bins
+}
+
+#[cfg(test)]
+mod path_entry_tests {
+    use super::*;
+
+    #[test]
+    fn wrapper_runtime_leads_project_bins() {
+        let runtime = Path::new("/shim");
+        let project = PathBuf::from("/project/node_modules/.bin");
+        assert_eq!(
+            order_path_entries(vec![project.clone()], Some(runtime), true),
+            vec![runtime.to_path_buf(), project]
+        );
+    }
+
+    #[test]
+    fn selector_runtime_follows_project_bins() {
+        let runtime = Path::new("/opt/node/bin");
+        let project = PathBuf::from("/project/node_modules/.bin");
+        assert_eq!(
+            order_path_entries(vec![project.clone()], Some(runtime), false),
+            vec![project, runtime.to_path_buf()]
+        );
+    }
+}
+
+/// How a script body is handed to its shell. Resolved from
+/// [`ScriptSettings`] by [`resolve_shell`], which is the single source of truth
+/// the spawn AND [`shell_quote_arg`] both read — quoting the body for one
+/// dialect and parsing it with another is a silent-wrong-command bug, so the
+/// two are derived from one place rather than each deciding by `cfg`.
+enum ShellInvocation {
+    /// `<program> <args…> <body>`, the body a single argv element. `args` is
+    /// `["-c"]` for a plain shell and `["sh", "-c"]` for a multi-call binary
+    /// that dispatches on an applet name (busybox).
+    Args {
+        program: PathBuf,
+        args: Vec<String>,
+        /// See [`aube_util::ScriptShell::restore_env_casing`].
+        restore_env_casing: bool,
+    },
+    /// `cmd.exe /d /s /c "<body>"`, built with `raw_arg` — see
+    /// [`spawn_shell`].
+    #[cfg(windows)]
+    CmdRaw,
+}
+
+/// Precedence: the user's explicit `script-shell` → an embedder's replacement
+/// default ([`ScriptSettings::default_shell`]) → aube's platform default.
+fn resolve_shell(settings: &ScriptSettings) -> ShellInvocation {
+    if let Some(shell) = settings.script_shell.as_deref() {
+        return ShellInvocation::Args {
+            program: shell.to_path_buf(),
+            args: vec!["-c".to_string()],
+            restore_env_casing: false,
+        };
+    }
+    if let Some(spec) = &settings.default_shell {
+        return ShellInvocation::Args {
+            program: spec.program.clone(),
+            args: spec.args.clone(),
+            restore_env_casing: spec.restore_env_casing,
+        };
+    }
+    #[cfg(windows)]
+    {
+        ShellInvocation::CmdRaw
+    }
+    #[cfg(not(windows))]
+    {
+        ShellInvocation::Args {
+            program: PathBuf::from("sh"),
+            args: vec!["-c".to_string()],
+            restore_env_casing: false,
+        }
+    }
+}
+
+/// A stable identity for the shell lifecycle scripts will actually run under,
+/// for callers that must key persisted build output on it — a cached artifact
+/// built by a different shell can hold *wrong bytes*, not merely stale ones
+/// (`cmd.exe` exits 0 while writing an unexpanded `${VAR:-default}` literally),
+/// so restoring it under a changed shell is a silent correctness bug.
+///
+/// Deliberately the applet/program NAME (`sh`, `bash`, `cmd`), never the
+/// resolved program PATH: an embedder's bundled shell lives at a per-machine,
+/// per-release path, and keying on that would invalidate every entry on an
+/// upgrade that only moved the binary.
+pub fn resolved_shell_id() -> String {
+    shell_id(&resolve_shell(&script_settings()))
+}
+
+/// The shell aube runs script bodies under when nothing replaces it. A caller
+/// keying persisted state on the shell compares against this, so state written
+/// under the default keeps the identity it already had.
+pub const PLATFORM_DEFAULT_SHELL_ID: &str = if cfg!(windows) { "cmd" } else { "sh" };
+
+/// [`resolved_shell_id`] for a caller holding the two shell settings but no
+/// configured [`ScriptSettings`] — the install-freshness hash, which runs
+/// before the settings pass and before any script spawns.
+pub fn shell_id_for(
+    script_shell: Option<&Path>,
+    default_shell: Option<&aube_util::ScriptShell>,
+) -> String {
+    shell_id(&resolve_shell(&ScriptSettings {
+        script_shell: script_shell.map(Path::to_path_buf),
+        default_shell: default_shell.cloned(),
+        ..Default::default()
+    }))
+}
+
+fn shell_id(invocation: &ShellInvocation) -> String {
+    let raw = match invocation {
+        // A multi-call binary dispatches on its leading argument (busybox
+        // `sh -c`), so that applet — not the binary's own filename — names the
+        // dialect that parses the script body.
+        ShellInvocation::Args { program, args, .. } => match args.first() {
+            Some(applet) if !applet.starts_with('-') => applet.clone(),
+            _ => program
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        },
+        #[cfg(windows)]
+        ShellInvocation::CmdRaw => "cmd".to_string(),
+    };
+    sanitize_shell_id(&raw)
+}
+
+/// The id is joined into cache paths, so a `script-shell` pointing at an oddly
+/// named binary must not escape or otherwise reshape the path.
+fn sanitize_shell_id(raw: &str) -> String {
+    let cleaned: String = raw
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '+') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "shell".to_string()
+    } else {
+        cleaned
+    }
+}
+
 /// Spawn a shell command line. On Unix we go through `sh -c`, on
 /// Windows through `cmd.exe /d /s /c` — matching what npm passes in
-/// `@npmcli/run-script`.
+/// `@npmcli/run-script` — unless an embedder supplied a replacement default
+/// ([`ScriptSettings::default_shell`]) or the user set `script-shell`.
 ///
 /// On Windows, the script command line is appended with
 /// [`std::os::windows::process::CommandExt::raw_arg`] instead of
@@ -314,39 +585,75 @@ pub fn spawn_shell(script_cmd: &str) -> tokio::process::Command {
     spawn_shell_with_settings(script_cmd, &settings)
 }
 
+/// [`spawn_shell`] for a caller that sets more environment before it spawns.
+/// Build the command with this, set the environment, then add the body with
+/// [`append_shell_body`], so a casing-restoring shell re-binds those names too.
+pub fn shell_without_body() -> tokio::process::Command {
+    shell_command(&script_settings())
+}
+
+/// Add `script_cmd` to a command from [`shell_without_body`], after every `env`
+/// call.
+pub fn append_shell_body(cmd: &mut tokio::process::Command, script_cmd: &str) {
+    append_script_body(cmd, &script_settings(), script_cmd);
+}
+
+/// Spawn a resolved program directly, skipping the shell.
+///
+/// The counterpart to [`spawn_shell`] for a script body that
+/// [`direct::direct_argv`] found to be a single plain command. `program`
+/// is the absolute path `direct_argv` resolved; `arg0` is the program as
+/// written in the script body, passed through as `argv[0]` so the child
+/// sees what a shell would have given it.
+///
+/// Env parity with the shell path is structural, not a parallel list:
+/// this calls the same [`apply_script_settings_env`] and shares
+/// `kill_on_drop`. Which now kills the tool itself rather than a shell
+/// holding it as a child — strictly more direct, and the reason the
+/// Windows Job Object story in [`spawn_shell`] does not apply here (the
+/// fast path is Unix-only).
+pub fn spawn_program<I, S>(program: &Path, arg0: &str, args: I) -> tokio::process::Command
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let settings = script_settings();
+    let mut cmd = tokio::process::Command::new(program);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.as_std_mut().arg0(arg0);
+    }
+    #[cfg(not(unix))]
+    let _ = arg0;
+    cmd.args(args);
+    apply_script_settings_env(&mut cmd, &settings);
+    cmd.kill_on_drop(true);
+    cmd
+}
+
 fn spawn_shell_with_settings(
     script_cmd: &str,
     settings: &ScriptSettings,
 ) -> tokio::process::Command {
-    #[cfg(unix)]
-    let mut cmd = {
-        let mut cmd = tokio::process::Command::new(
-            settings
-                .script_shell
-                .as_deref()
-                .unwrap_or_else(|| Path::new("sh")),
-        );
-        cmd.arg("-c").arg(script_cmd);
-        cmd
-    };
-    #[cfg(windows)]
-    let mut cmd = {
-        let mut cmd = tokio::process::Command::new(
-            settings
-                .script_shell
-                .as_deref()
-                .unwrap_or_else(|| Path::new("cmd.exe")),
-        );
-        if settings.script_shell.is_some() {
-            cmd.arg("-c").arg(script_cmd);
-        } else {
-            // `/d` skips AutoRun, `/s` flips the quote-stripping rule
-            // so only the *outer* `"..."` pair is removed, `/c` runs
-            // the command and exits. Build the raw argv tail manually
-            // so cmd.exe sees the original script bytes.
-            cmd.raw_arg("/d /s /c \"").raw_arg(script_cmd).raw_arg("\"");
+    let mut cmd = shell_command(settings);
+    append_script_body(&mut cmd, settings, script_cmd);
+    cmd
+}
+
+/// The resolved shell and its leading args, with the script environment
+/// applied but no body. [`run_script`] sets more environment after this
+/// returns, and [`append_script_body`] needs the final environment, so the
+/// body is a separate step.
+fn shell_command(settings: &ScriptSettings) -> tokio::process::Command {
+    let mut cmd = match resolve_shell(settings) {
+        ShellInvocation::Args { program, args, .. } => {
+            let mut cmd = tokio::process::Command::new(program);
+            cmd.args(args);
+            cmd
         }
-        cmd
+        #[cfg(windows)]
+        ShellInvocation::CmdRaw => tokio::process::Command::new("cmd.exe"),
     };
     apply_script_settings_env(&mut cmd, settings);
     // Aborting the `JoinSet` that drives the parallel lifecycle pass
@@ -359,6 +666,84 @@ fn spawn_shell_with_settings(
     // whole tree.
     cmd.kill_on_drop(true);
     cmd
+}
+
+/// Put the script body on `cmd` as its last argument. Call it after every `env`
+/// call: a casing-restoring shell gets a prologue built from the environment set
+/// on `cmd` at this point.
+fn append_script_body(
+    cmd: &mut tokio::process::Command,
+    settings: &ScriptSettings,
+    script_cmd: &str,
+) {
+    match resolve_shell(settings) {
+        ShellInvocation::Args {
+            restore_env_casing: true,
+            ..
+        } => {
+            let prologue = lowercase_env_prologue(cmd.as_std());
+            cmd.arg(format!("{prologue}{script_cmd}"));
+        }
+        ShellInvocation::Args { .. } => {
+            cmd.arg(script_cmd);
+        }
+        #[cfg(windows)]
+        ShellInvocation::CmdRaw => {
+            // `/d` skips AutoRun, `/s` flips the quote-stripping rule
+            // so only the *outer* `"..."` pair is removed, `/c` runs
+            // the command and exits. Build the raw argv tail manually
+            // so cmd.exe sees the original script bytes.
+            cmd.raw_arg("/d /s /c \"").raw_arg(script_cmd).raw_arg("\"");
+        }
+    }
+}
+
+/// Re-bind, at the head of a script body, the lowercase environment names set
+/// on `command`. Shared by nub's `nub run` and the lifecycle spawn here.
+///
+/// busybox-w32's shell UP-CASES every name when it loads the Windows environment,
+/// so a script body sees `NPM_PACKAGE_NAME` and `$npm_package_name` expands to
+/// nothing — while npm, pnpm, yarn and bun all deliver the lowercase name on the
+/// same fixture. Upstream considers the up-casing correct and declined the
+/// preserve-casing patch (rmyorston/busybox-w32#125), so the restoration is the
+/// spawner's to do.
+///
+/// One `export` prologue fixes all three symptoms at once, because busybox's own
+/// variable lookup is case-SENSITIVE: `$npm_package_name` expands, the lowercase
+/// name is back in the environment every child inherits, and `Object.keys` sees
+/// it — for a consumer in any language, not only Node.
+///
+/// It re-binds NAMES, never values, so nothing needs quoting and a value carrying
+/// quotes or newlines cannot break the body. Derived from the command's own env
+/// rather than from a hand-kept list, so a variable added later is covered
+/// without anyone remembering this function.
+///
+/// Scope is deliberately what the spawner set, not the whole inherited
+/// environment. busybox up-cases an inherited lowercase name too, but restoring
+/// those means re-exporting arbitrary host variables into every script body to
+/// undo a shell's documented behavior. It also keeps the prologue small: measured
+/// at 15 exportable names and 741 bytes for `nub run` against a 32767-byte command
+/// line, because `get_envs` sees only what was set rather than what was inherited.
+pub fn lowercase_env_prologue(command: &std::process::Command) -> String {
+    let mut names: Vec<&str> = command
+        .get_envs()
+        // A `None` value is a REMOVAL, and re-exporting one would put the name back.
+        .filter(|(_, value)| value.is_some())
+        .filter_map(|(name, _)| name.to_str())
+        .filter(|name| {
+            // An uppercase-only name is unaffected by the up-casing, and a name
+            // that is not a shell identifier cannot be exported at all.
+            name.contains(|c: char| c.is_ascii_lowercase())
+                && !name.starts_with(|c: char| c.is_ascii_digit())
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+        .iter()
+        .map(|name| format!("export {name}=\"${}\"; ", name.to_ascii_uppercase()))
+        .collect()
 }
 
 #[cfg(target_os = "macos")]
@@ -414,38 +799,31 @@ fn jail_profile(jail: &ScriptJail, home: &Path) -> String {
 }
 
 #[cfg(target_os = "macos")]
-fn spawn_jailed_shell(
-    script_cmd: &str,
+fn jailed_shell_command(
     settings: &ScriptSettings,
     jail: &ScriptJail,
     home: &Path,
 ) -> tokio::process::Command {
-    let shell = settings
-        .script_shell
-        .as_deref()
-        .unwrap_or_else(|| Path::new("sh"));
+    // Same shell resolution as the unjailed path, just re-hosted under
+    // `sandbox-exec` — `CmdRaw` is unreachable here (macOS-only fn). The body
+    // is appended by the caller, as for `shell_command`.
+    let ShellInvocation::Args { program, args, .. } = resolve_shell(settings);
     let profile = jail_profile(jail, home);
     let mut cmd = tokio::process::Command::new("sandbox-exec");
-    cmd.arg("-p")
-        .arg(profile)
-        .arg("--")
-        .arg(shell)
-        .arg("-c")
-        .arg(script_cmd);
+    cmd.arg("-p").arg(profile).arg("--").arg(program).args(args);
     apply_script_settings_env(&mut cmd, settings);
-    // Matches the unjailed path — see `spawn_shell_with_settings`.
+    // Matches the unjailed path — see `shell_command`.
     cmd.kill_on_drop(true);
     cmd
 }
 
 #[cfg(target_os = "linux")]
-fn spawn_jailed_shell(
-    script_cmd: &str,
+fn jailed_shell_command(
     settings: &ScriptSettings,
     jail: &ScriptJail,
     home: &Path,
 ) -> tokio::process::Command {
-    let mut cmd = spawn_shell_with_settings(script_cmd, settings);
+    let mut cmd = shell_command(settings);
     let jail = jail.clone();
     let home = home.to_path_buf();
     unsafe {
@@ -461,13 +839,12 @@ fn spawn_jailed_shell(
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn spawn_jailed_shell(
-    script_cmd: &str,
+fn jailed_shell_command(
     settings: &ScriptSettings,
     _jail: &ScriptJail,
     _home: &Path,
 ) -> tokio::process::Command {
-    spawn_shell_with_settings(script_cmd, settings)
+    shell_command(settings)
 }
 
 /// Shell-quote one arg for safe splicing into a shell command line.
@@ -492,68 +869,98 @@ fn spawn_jailed_shell(
 /// interior " and backslash per CommandLineToArgvW. Full cmd.exe
 /// metachar caret-escaping is a rabbit hole, so this is best-effort,
 /// works for the common cases, matches what node's shell-quote does.
+///
+/// The dialect follows the RESOLVED shell, not the target platform: on Windows
+/// an embedder can replace the default with a POSIX shell, and cmd-quoting an
+/// arg a POSIX shell then reparses corrupts it — `%` doubles to `%%`, while a
+/// `$var` or a backtick command substitution stays live inside the double
+/// quotes cmd-quoting emits instead of arriving as the literal the user typed.
+/// Both dialects are compiled on every platform so each stays testable.
 pub fn shell_quote_arg(arg: &str) -> String {
-    #[cfg(unix)]
-    {
-        let mut out = String::with_capacity(arg.len() + 2);
-        out.push('\'');
-        for ch in arg.chars() {
-            if ch == '\'' {
-                out.push_str("'\\''");
-            } else {
+    shell_quote_arg_with_settings(arg, &script_settings())
+}
+
+fn shell_quote_arg_with_settings(arg: &str, settings: &ScriptSettings) -> String {
+    match resolve_shell(settings) {
+        ShellInvocation::Args { ref program, .. } if !is_cmd_program(program) => quote_posix(arg),
+        _ => quote_cmd(arg),
+    }
+}
+
+/// Does this program name invoke `cmd.exe`? Mirrors npm's
+/// `/(?:^|\\)cmd(?:\.exe)?$/i`, so a user `script-shell` of `bash` selects
+/// POSIX quoting while an explicit `cmd` still selects cmd quoting. Splits on
+/// both separators by hand rather than using `Path::file_name`, which does not
+/// treat `\` as one off Windows — a Windows path reaching this on any host
+/// (a settings snapshot in a test, a cross-platform fixture) must still resolve
+/// to its last component.
+fn is_cmd_program(program: &Path) -> bool {
+    let Some(path) = program.to_str() else {
+        return false;
+    };
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    name.eq_ignore_ascii_case("cmd") || name.eq_ignore_ascii_case("cmd.exe")
+}
+
+fn quote_posix(arg: &str) -> String {
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('\'');
+    for ch in arg.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+fn quote_cmd(arg: &str) -> String {
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    let mut backslashes: usize = 0;
+    for ch in arg.chars() {
+        match ch {
+            '\\' => backslashes += 1,
+            '"' => {
+                for _ in 0..backslashes * 2 + 1 {
+                    out.push('\\');
+                }
+                out.push('"');
+                backslashes = 0;
+            }
+            // cmd.exe expands %VAR% even inside double quotes.
+            // Outer `/s /c "..."` only strips the outermost
+            // quote pair, the shell still runs env expansion
+            // on the body. Argument like `%COMSPEC%` would
+            // otherwise get replaced with the shell path
+            // before the child saw it. Double the percent so
+            // cmd passes a literal `%` through. Full
+            // caret-escaping of `^ & | < > ( )` is a deeper
+            // rabbit hole, this handles the common injection
+            // vector.
+            '%' => {
+                for _ in 0..backslashes {
+                    out.push('\\');
+                }
+                backslashes = 0;
+                out.push_str("%%");
+            }
+            _ => {
+                for _ in 0..backslashes {
+                    out.push('\\');
+                }
+                backslashes = 0;
                 out.push(ch);
             }
         }
-        out.push('\'');
-        out
     }
-    #[cfg(windows)]
-    {
-        let mut out = String::with_capacity(arg.len() + 2);
-        out.push('"');
-        let mut backslashes: usize = 0;
-        for ch in arg.chars() {
-            match ch {
-                '\\' => backslashes += 1,
-                '"' => {
-                    for _ in 0..backslashes * 2 + 1 {
-                        out.push('\\');
-                    }
-                    out.push('"');
-                    backslashes = 0;
-                }
-                // cmd.exe expands %VAR% even inside double quotes.
-                // Outer `/s /c "..."` only strips the outermost
-                // quote pair, the shell still runs env expansion
-                // on the body. Argument like `%COMSPEC%` would
-                // otherwise get replaced with the shell path
-                // before the child saw it. Double the percent so
-                // cmd passes a literal `%` through. Full
-                // caret-escaping of `^ & | < > ( )` is a deeper
-                // rabbit hole, this handles the common injection
-                // vector.
-                '%' => {
-                    for _ in 0..backslashes {
-                        out.push('\\');
-                    }
-                    backslashes = 0;
-                    out.push_str("%%");
-                }
-                _ => {
-                    for _ in 0..backslashes {
-                        out.push('\\');
-                    }
-                    backslashes = 0;
-                    out.push(ch);
-                }
-            }
-        }
-        for _ in 0..backslashes * 2 {
-            out.push('\\');
-        }
-        out.push('"');
-        out
+    for _ in 0..backslashes * 2 {
+        out.push('\\');
     }
+    out.push('"');
+    out
 }
 
 /// Translate child ExitStatus to a parent exit code.
@@ -660,14 +1067,21 @@ fn apply_script_settings_env(cmd: &mut tokio::process::Command, settings: &Scrip
     if let Some(exe) = aube_exe.as_deref() {
         cmd.env("npm_execpath", exe);
     }
-    // `npm_node_execpath` / `NODE`: the node binary scripts should use
-    // — the switched runtime's node, or the ambient `node` on PATH.
-    // Set here (not at spawn) so it survives the jail's `env_clear`.
-    // A wrapping embedder splits them: `NODE` a shim, `npm_node_execpath` the
-    // real Node node-gyp reads for the prefix. Unset ⇒ both name `node_exe`.
-    if let Some(node_exe) = settings.node_exe.as_deref() {
-        let execpath = settings.node_execpath.as_deref().unwrap_or(node_exe);
-        cmd.env("npm_node_execpath", execpath).env("NODE", node_exe);
+    // `npm_node_execpath` / `NODE`: the node binaries scripts should use
+    // — the switched runtime's node, or the ambient `node` on PATH. `NODE`
+    // is the program a script re-spawns (a wrapper's shim); the execpath
+    // is the *real* binary node-gyp reads for Node's install prefix. They
+    // coincide unless a wrapping embedder split them. Set here (not at
+    // spawn) so they survive the jail's `env_clear`.
+    let node_execpath = settings
+        .node_execpath
+        .as_deref()
+        .or(settings.node_program.as_deref());
+    if let Some(execpath) = node_execpath {
+        cmd.env("npm_node_execpath", execpath);
+    }
+    if let Some(node) = settings.node_program.as_deref().or(node_execpath) {
+        cmd.env("NODE", node);
     }
     // `npm_command`: the top-level PM command (run-script / install / …).
     if let Some(command) = settings.command.as_deref() {
@@ -681,12 +1095,16 @@ fn apply_script_settings_env(cmd: &mut tokio::process::Command, settings: &Scrip
     // `__node-gyp-bootstrap`, never an inherited/user-set value (which
     // could be stale or wrong). `aube run` stamps the same value at its
     // own spawn site; keeping both unconditional holds the two paths in
-    // lockstep. `AUBE_NODE_GYP_PROJECT_DIR` is optional — the shim falls
-    // back to the script's cwd.
+    // lockstep. `AUBE_NODE_GYP_PROJECT_DIR` pins the dir whose `.npmrc`
+    // the bootstrap inherits; the shim falls back to its own cwd when it
+    // is absent, which for a dep hook would be the dep's package dir.
     if let Some(node_gyp_js) = settings.node_gyp_js.as_deref() {
         cmd.env("npm_config_node_gyp", node_gyp_js);
         if let Some(exe) = aube_exe.as_deref() {
             cmd.env("AUBE_NODE_GYP_EXE", exe);
+        }
+        if let Some(project_dir) = settings.node_gyp_project_dir.as_deref() {
+            cmd.env("AUBE_NODE_GYP_PROJECT_DIR", project_dir);
         }
     }
     if let Some(node_options) = settings.node_options.as_deref() {
@@ -727,9 +1145,17 @@ fn apply_script_settings_env(cmd: &mut tokio::process::Command, settings: &Scrip
         }
         cmd.env("NODE_USE_ENV_PROXY", "1");
     }
-    // Embedder env overlay, applied LAST so it outranks the keys above (an
-    // embedder that, say, pins its own NODE_OPTIONS wins over the
-    // settings-derived one). Generic: aube assigns no meaning to the keys.
+    // Embedder-contributed env, applied last (after `env_clear`, so it
+    // survives the jail) and after every aube-set var, so a wrapping
+    // host has the final say. `NODE_OPTIONS` is not among these — it is
+    // folded into `settings.node_options` upstream to preserve the
+    // user's value.
+    for (key, value) in &settings.extra_env {
+        cmd.env(key, value);
+    }
+    // `env_overlay` is the embedder seam the host populates through
+    // `EngineContext`; it lands after `extra_env` so a host driving both
+    // seams gets one deterministic winner.
     for (key, value) in &settings.env_overlay {
         cmd.env(key, value);
     }
@@ -838,7 +1264,9 @@ fn jail_home(package_dir: &Path) -> PathBuf {
         })
         .collect::<String>();
     std::env::temp_dir()
-        .join("aube-jail")
+        // Brand-scoped: the jail root is a real directory under the system temp
+        // dir, so an embedder must not have the engine's brand in it.
+        .join(format!("{}-jail", aube_util::prog()))
         .join(std::process::id().to_string())
         .join(format!("{name}-{hash:016x}"))
 }
@@ -858,6 +1286,12 @@ fn apply_jail_env(
         .env("TMPDIR", home)
         .env("TMP", home)
         .env("TEMP", home)
+        // `run_script` stamps this before entering the jail, but `env_clear`
+        // removes it. Restore the outer project so the lazy node-gyp shim
+        // inherits the right registry/auth and bootstrap-lock context.
+        // `apply_script_settings_env` runs after this and intentionally lets
+        // an embedder's `extra_env` override the default.
+        .env("AUBE_NODE_GYP_PROJECT_DIR", project_root)
         .env("npm_lifecycle_event", script_name);
     if std::env::var_os("INIT_CWD").is_none() {
         cmd.env("INIT_CWD", project_root);
@@ -878,15 +1312,21 @@ fn apply_jail_env(
     }
 }
 
-/// Lifecycle hooks that `aube install` runs against the root package's
-/// `scripts` field, in this order: `preinstall` → (dependencies link) →
-/// `install` → `postinstall` → `prepare`. Matches pnpm / npm.
+/// A lifecycle script a package manager runs on its own, outside `run`.
+/// A project's install-time hooks and the stage lists below are pnpm's
+/// (`exec/lifecycle`'s `PROJECT_LIFECYCLE_STAGES` and friends).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleHook {
     PreInstall,
     Install,
     PostInstall,
+    Prepublish,
+    PrePrepare,
     Prepare,
+    PostPrepare,
+    PreUninstall,
+    Uninstall,
+    PostUninstall,
 }
 
 impl LifecycleHook {
@@ -895,7 +1335,13 @@ impl LifecycleHook {
             Self::PreInstall => "preinstall",
             Self::Install => "install",
             Self::PostInstall => "postinstall",
+            Self::Prepublish => "prepublish",
+            Self::PrePrepare => "preprepare",
             Self::Prepare => "prepare",
+            Self::PostPrepare => "postprepare",
+            Self::PreUninstall => "preuninstall",
+            Self::Uninstall => "uninstall",
+            Self::PostUninstall => "postuninstall",
         }
     }
 }
@@ -908,6 +1354,51 @@ pub const DEP_LIFECYCLE_HOOKS: [LifecycleHook; 3] = [
     LifecycleHook::Install,
     LifecycleHook::PostInstall,
 ];
+
+/// What a full install runs for each project (the root and every
+/// workspace member), in order, once its dependencies are linked.
+pub const PROJECT_LIFECYCLE_HOOKS: [LifecycleHook; 6] = [
+    LifecycleHook::PreInstall,
+    LifecycleHook::Install,
+    LifecycleHook::PostInstall,
+    LifecycleHook::PrePrepare,
+    LifecycleHook::Prepare,
+    LifecycleHook::PostPrepare,
+];
+
+/// npm's root scripts after a bare `npm install` / `npm ci`
+/// (`lib/commands/install.js`), whatever the dependency selection.
+pub const NPM_PROJECT_HOOKS: [LifecycleHook; 7] = [
+    LifecycleHook::PreInstall,
+    LifecycleHook::Install,
+    LifecycleHook::PostInstall,
+    LifecycleHook::Prepublish,
+    LifecycleHook::PrePrepare,
+    LifecycleHook::Prepare,
+    LifecycleHook::PostPrepare,
+];
+
+/// npm's scripts for a linked workspace member during that install, in
+/// Arborist's build order (`arborist/rebuild.js`): `prepublish` and the
+/// rest of the `prepare` family stay with the root.
+pub const NPM_MEMBER_HOOKS: [LifecycleHook; 4] = [
+    LifecycleHook::PreInstall,
+    LifecycleHook::Prepare,
+    LifecycleHook::Install,
+    LifecycleHook::PostInstall,
+];
+
+/// The project stages of an install that leaves devDependencies out
+/// (`--prod`): the `prepare` family is a development step, so it is dropped.
+pub const PROJECT_INSTALL_HOOKS: [LifecycleHook; 3] = DEP_LIFECYCLE_HOOKS;
+
+/// What `remove` runs in each project losing a dependency, before anything
+/// is unlinked.
+pub const PRE_UNINSTALL_HOOKS: [LifecycleHook; 2] =
+    [LifecycleHook::PreUninstall, LifecycleHook::Uninstall];
+
+/// What `remove` runs in each project losing a dependency, after unlinking.
+pub const POST_UNINSTALL_HOOKS: [LifecycleHook; 1] = [LifecycleHook::PostUninstall];
 
 /// Holds the real stderr fd saved before `aube` redirects fd 2 to
 /// `/dev/null` under `--silent`. Child processes spawned through
@@ -1042,6 +1533,11 @@ async fn run_command_killing_descendants(
     mut cmd: tokio::process::Command,
     script_name: &str,
 ) -> Result<std::process::ExitStatus, Error> {
+    let output_reporter = script_settings_state().output_reporter;
+    if output_reporter.is_some() {
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+    }
     let mut child = cmd
         .spawn()
         .map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()))?;
@@ -1077,10 +1573,103 @@ async fn run_command_killing_descendants(
             None
         }
     };
-    child
-        .wait()
-        .await
-        .map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()))
+    let Some(reporter) = output_reporter else {
+        return child
+            .wait()
+            .await
+            .map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()));
+    };
+    let stdout = child.stdout.take().ok_or_else(|| {
+        Error::Spawn(
+            script_name.to_string(),
+            "failed to capture lifecycle stdout".to_string(),
+        )
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        Error::Spawn(
+            script_name.to_string(),
+            "failed to capture lifecycle stderr".to_string(),
+        )
+    })?;
+    let (status, stdout_result, stderr_result) = tokio::join!(
+        child.wait(),
+        report_script_output(stdout, ScriptOutputStream::Stdout, reporter.clone()),
+        report_script_output(stderr, ScriptOutputStream::Stderr, reporter),
+    );
+    stdout_result.map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()))?;
+    stderr_result.map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()))?;
+    status.map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()))
+}
+
+async fn report_script_output<R: tokio::io::AsyncRead + Unpin>(
+    reader: R,
+    stream: ScriptOutputStream,
+    reporter: std::sync::Arc<dyn ScriptOutputReporter>,
+) -> std::io::Result<()> {
+    let mut reader = tokio::io::BufReader::new(reader);
+    let mut buffer = Vec::new();
+    let mut continued_record = false;
+    loop {
+        buffer.clear();
+        let mut limited = (&mut reader).take(MAX_SCRIPT_OUTPUT_RECORD_BYTES as u64);
+        if limited.read_until(b'\n', &mut buffer).await? == 0 {
+            return Ok(());
+        }
+        let record_terminated = buffer.last() == Some(&b'\n');
+        if record_terminated {
+            buffer.pop();
+            if buffer.last() == Some(&b'\r') {
+                buffer.pop();
+            }
+        }
+        if !(continued_record && record_terminated && buffer.is_empty()) {
+            reporter.report(stream, String::from_utf8_lossy(&buffer).into_owned());
+        }
+        continued_record = !record_terminated;
+    }
+}
+
+#[cfg(test)]
+mod script_output_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    #[derive(Default)]
+    struct RecordingReporter(std::sync::Mutex<Vec<String>>);
+
+    impl ScriptOutputReporter for RecordingReporter {
+        fn report(&self, _stream: ScriptOutputStream, line: String) {
+            self.0.lock().unwrap().push(line);
+        }
+    }
+
+    #[tokio::test]
+    async fn unterminated_output_is_reported_in_bounded_chunks() {
+        let reporter = std::sync::Arc::new(RecordingReporter::default());
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        let mut output = vec![b'x'; MAX_SCRIPT_OUTPUT_RECORD_BYTES * 2 + 17];
+        output.extend_from_slice(b"\nnext\n");
+        let write = tokio::spawn(async move {
+            writer.write_all(&output).await.unwrap();
+        });
+
+        report_script_output(reader, ScriptOutputStream::Stdout, reporter.clone())
+            .await
+            .unwrap();
+        write.await.unwrap();
+
+        let messages = reporter.0.lock().unwrap();
+        assert_eq!(
+            messages.iter().map(String::len).collect::<Vec<_>>(),
+            [
+                MAX_SCRIPT_OUTPUT_RECORD_BYTES,
+                MAX_SCRIPT_OUTPUT_RECORD_BYTES,
+                17,
+                4,
+            ]
+        );
+        assert_eq!(messages.last().map(String::as_str), Some("next"));
+    }
 }
 
 /// Run a single npm-style script line through `sh -c` with the usual
@@ -1096,7 +1685,8 @@ async fn run_command_killing_descendants(
 /// `&[]` — their transitive bins are already hoisted into the
 /// project-level `.bin`.
 ///
-/// Inherits stdio from the parent so the user sees script output live.
+/// Inherits stdio from the parent so the user sees script output live, unless
+/// an embedding host installed a [`ScriptOutputReporter`].
 /// Returns Err on non-zero exit so install fails fast if a lifecycle
 /// script breaks, matching pnpm.
 #[allow(clippy::too_many_arguments)]
@@ -1131,24 +1721,22 @@ pub async fn run_script(
     // `"node_modules"` at the call site, but a workspace may have
     // configured something else.
     let project_bin = project_root.join(modules_dir_name).join(".bin");
-    let settings = script_settings();
+    let state = script_settings_state();
+    let settings = &state.settings;
     let path = std::env::var_os("PATH").unwrap_or_default();
-    let mut entries: Vec<PathBuf> = Vec::with_capacity(extra_bin_dirs.len() + 2);
+    let mut project_bins: Vec<PathBuf> = Vec::with_capacity(extra_bin_dirs.len() + 1);
     for dir in extra_bin_dirs {
-        entries.push(dir.to_path_buf());
+        project_bins.push(dir.to_path_buf());
     }
-    entries.push(project_bin);
-    // The switched Node runtime sits between project bins and the
-    // inherited PATH: scripts spawning `node` (directly or via
-    // `#!/usr/bin/env node`) get the project's pinned version, while
-    // anything installed into `.bin` still wins.
-    if let Some(dir) = &settings.node_bin_dir {
-        entries.push(dir.clone());
-    }
+    project_bins.push(project_bin);
+    let mut entries = order_path_entries(
+        project_bins,
+        settings.node_bin_dir.as_deref(),
+        state.node_bin_dir_precedes_project_bins,
+    );
     entries.extend(std::env::split_paths(&path));
     let new_path = std::env::join_paths(entries).unwrap_or(path);
 
-    let settings = script_settings();
     // Embedder PATH prepends (e.g. nub's node-shim dir) lead the composed
     // PATH so a bare `node` in a build script hits the augmented runtime
     // before `extra_bin_dirs` / the project `.bin` / the system PATH. Flows
@@ -1161,8 +1749,8 @@ pub async fn run_script(
             .map_err(|e| Error::Spawn(script_name.to_string(), e.to_string()))?;
     }
     let mut cmd = match (jail, jail_home.as_deref()) {
-        (Some(jail), Some(home)) => spawn_jailed_shell(script_cmd, &settings, jail, home),
-        _ => spawn_shell_with_settings(script_cmd, &settings),
+        (Some(jail), Some(home)) => jailed_shell_command(settings, jail, home),
+        _ => shell_command(settings),
     };
     cmd.current_dir(script_dir)
         .stderr(child_stderr())
@@ -1189,13 +1777,21 @@ pub async fn run_script(
             script_name,
             &jail.env,
         );
-        apply_script_settings_env(&mut cmd, &settings);
+        apply_script_settings_env(&mut cmd, settings);
+    } else {
+        // The lazy node-gyp shim needs the outer project for registry/auth
+        // settings and bootstrap locking. The jailed branch restores this in
+        // `apply_jail_env` after clearing the environment.
+        cmd.env("AUBE_NODE_GYP_PROJECT_DIR", project_root);
     }
 
     // npm-compat manifest env, applied last so it survives the jail's
     // `env_clear`: name/version/json plus the deep-flattened
     // engines/config/bin, and the raw script body (`npm_lifecycle_script`).
     apply_npm_manifest_env(&mut cmd, manifest, script_dir, script_cmd);
+    // Last, after every `env` call above: a casing-restoring shell's prologue is
+    // derived from the environment on `cmd`.
+    append_script_body(&mut cmd, settings, script_cmd);
 
     tracing::debug!("lifecycle: {script_name} → {script_cmd}");
     let status = run_command_killing_descendants(cmd, script_name).await?;
@@ -1226,6 +1822,69 @@ pub async fn run_root_hook(
     hook: LifecycleHook,
 ) -> Result<bool, Error> {
     run_root_script_by_name(project_dir, modules_dir_name, manifest, hook.script_name()).await
+}
+
+/// Run a lifecycle hook of a WORKSPACE MEMBER. Spawns in `member_dir` with
+/// the member's own manifest, and puts the `<modules_dir>/.bin` of the
+/// member and of every ancestor directory on `PATH`, closest first — the
+/// walk npm's run-script does for any script (`set-path.js` goes all the way
+/// to the filesystem root, so a bin provided above the workspace root
+/// counts too). A member's script routinely reaches for a bin that only the
+/// root declares: puppeteer's `tools/eslint` runs `wireit`, a root
+/// devDependency, from its `prepare`. With only the member's own `.bin` on
+/// `PATH` that was a 127 on every install. `run_script` appends the root's
+/// own `.bin` after the chain; that duplicate is inert.
+///
+/// `tool_dirs` go on `PATH` after the chain and before the root's `.bin`:
+/// the embedder's lazy `node-gyp` shim above all, which npm provides to
+/// every lifecycle script from its own bundled copy (`node-gyp-bin`). A
+/// root `preinstall` that runs `node-gyp install` (theia) runs before any
+/// dependency exists, so nothing but such a shim can satisfy it.
+///
+/// Returns `Ok(false)` if the script isn't defined. The caller gates on
+/// `--ignore-scripts`.
+pub async fn run_member_hook(
+    member_dir: &Path,
+    workspace_root: &Path,
+    modules_dir_name: &str,
+    manifest: &PackageJson,
+    hook: LifecycleHook,
+    tool_dirs: &[&Path],
+) -> Result<bool, Error> {
+    let name = hook.script_name();
+    let Some(script_cmd) = manifest.scripts.get(name) else {
+        return Ok(false);
+    };
+    let chain = member_bin_chain(member_dir, modules_dir_name);
+    let extra: Vec<&Path> = chain
+        .iter()
+        .map(PathBuf::as_path)
+        .chain(tool_dirs.iter().copied())
+        .collect();
+    run_script(
+        member_dir,
+        workspace_root,
+        modules_dir_name,
+        manifest,
+        name,
+        script_cmd,
+        &extra,
+        None,
+    )
+    .await?;
+    Ok(true)
+}
+
+/// The `.bin` directories a workspace member's script sees:
+/// `<dir>/<modules_dir>/.bin` for the member's directory and every
+/// ancestor up to the filesystem root, closest first. Exactly npm's walk
+/// (`@npmcli/run-script` `set-path.js`), so a bin an enclosing project
+/// provides above the workspace root resolves here as it does there.
+fn member_bin_chain(member_dir: &Path, modules_dir_name: &str) -> Vec<PathBuf> {
+    member_dir
+        .ancestors()
+        .map(|dir| dir.join(modules_dir_name).join(".bin"))
+        .collect()
 }
 
 /// Run a named root-package script if it's defined. Used by commands
@@ -1261,7 +1920,18 @@ pub async fn run_root_script_by_name(
 /// fallback: returns `Some("node-gyp rebuild")` when the package ships
 /// a `binding.gyp` at its root AND the manifest leaves both `install`
 /// and `preinstall` empty (either one is the author's explicit
-/// opt-out from the default).
+/// opt-out from the default) AND the manifest does not set
+/// `"gypfile": false`.
+///
+/// `gypfile: false` is npm's opt-out for a package that carries a
+/// `binding.gyp` for source builds but ships prebuilt binaries for
+/// normal installs. The gate mirrors npm's `@npmcli/run-script`
+/// (`lib/run-script-pkg.js`), whose condition is `!scripts.install &&
+/// !scripts.preinstall && gypfile !== false && isNodeGypPackage(path)`.
+/// Without it, `install` shelled out to `node-gyp rebuild` for packages
+/// npm installs with no toolchain at all — `better-sqlite3` >= 13 is the
+/// canonical case — so the install failed on any machine without Python
+/// and a C++ compiler even though the package's own prebuilds load fine.
 ///
 /// `has_binding_gyp` is passed by the caller so this helper is
 /// agnostic to *how* presence was detected — the install pipeline
@@ -1274,6 +1944,9 @@ pub fn implicit_install_script(
     has_binding_gyp: bool,
 ) -> Option<&'static str> {
     if !has_binding_gyp {
+        return None;
+    }
+    if manifest.extra.get("gypfile").and_then(|v| v.as_bool()) == Some(false) {
         return None;
     }
     if manifest
@@ -1408,8 +2081,12 @@ fn unshare_one_file(path: &Path, mode: u32) -> std::io::Result<()> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
+    // `parent` is the caller's own node_modules, and a crashed run leaves this
+    // temp behind (hence the cleanup below), so the leaf is brand-scoped to the
+    // active embedder rather than hardcoded.
     let tmp = parent.join(format!(
-        ".aube-unshare-{}-{}.tmp",
+        ".{}-unshare-{}-{}.tmp",
+        aube_util::prog(),
         std::process::id(),
         file_name
     ));
@@ -1428,20 +2105,51 @@ fn unshare_one_file(path: &Path, mode: u32) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The `.bin` chain Node's own resolution implies for a package's
+/// lifecycle script: the package's own `<modules_dir>/.bin`, then every
+/// enclosing `<modules_dir>/.bin` out to `project_root`. Closest first, so
+/// a nearer copy shadows a farther one — npm/pnpm semantics.
+///
+/// Walking (rather than taking a fixed pair of levels) is load-bearing
+/// under the hoisted layout: a conflicting version nests under whichever
+/// ancestor still had the name free, so the dependency a script reaches
+/// for can sit at ANY level between the package and the root. A package at
+/// `a/<md>/b/<md>/c` whose dependency was placed at `a/<md>/` is invisible
+/// to its own level, its parent's, and the root's alike — the exact 127
+/// this chain exists to prevent.
+///
+/// Under the isolated layout this yields the dep's own
+/// `.aube/<dep_path>/<modules_dir>/.bin` plus the project root and nothing
+/// else, since no other directory on the way up carries the name.
+/// `run_script` appends the project root's `.bin` after these, so the
+/// duplicate entry there is harmless.
+fn dep_bin_chain(package_dir: &Path, project_root: &Path, modules_dir_name: &str) -> Vec<PathBuf> {
+    let mut chain = vec![package_dir.join(modules_dir_name).join(".bin")];
+    let mut cursor = Some(package_dir);
+    while let Some(dir) = cursor {
+        if dir == project_root {
+            break;
+        }
+        if dir.file_name().is_some_and(|n| n == modules_dir_name) {
+            chain.push(dir.join(".bin"));
+        }
+        cursor = dir.parent();
+    }
+    chain
+}
+
 /// Run a lifecycle hook against an installed dependency's package
 /// directory. Mirrors [`run_root_hook`] but spawns inside `package_dir`
 /// (the actual linked package directory, e.g.
 /// `node_modules/.aube/<dep_path>/node_modules/<name>`). The manifest
 /// is the dependency's own `package.json`, *not* the project root's.
 ///
-/// `dep_modules_dir` is the dep's sibling `node_modules/` — i.e.
-/// `package_dir`'s parent for unscoped packages, or `package_dir`'s
-/// grandparent for scoped (`@scope/name`). `<dep_modules_dir>/.bin`
-/// is prepended to `PATH` so the dep's postinstall can spawn tools
-/// declared in its own `dependencies` (the transitive-bin case —
-/// `prebuild-install`, `node-gyp`, `napi-postinstall`). The install
-/// driver writes shims there via `link_dep_bins`; `rebuild` mirrors
-/// the same pass.
+/// Every `<modules_dir>/.bin` from the package's own out to the project
+/// root is prepended to `PATH`, closest first, so the dep's postinstall
+/// can spawn tools declared in its own `dependencies` (the transitive-bin
+/// case — `prebuild-install`, `node-gyp`, `napi-postinstall`). The install
+/// driver writes those shims via `link_dep_bins` (isolated) and
+/// `link_hoisted_placement_bins` (hoisted).
 ///
 /// For the `install` hook specifically, if the manifest leaves both
 /// `install` and `preinstall` empty but the package has a top-level
@@ -1460,7 +2168,6 @@ fn unshare_one_file(path: &Path, mode: u32) -> std::io::Result<()> {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_dep_hook(
     package_dir: &Path,
-    dep_modules_dir: &Path,
     project_root: &Path,
     modules_dir_name: &str,
     manifest: &PackageJson,
@@ -1479,9 +2186,9 @@ pub async fn run_dep_hook(
             _ => return Ok(false),
         },
     };
-    let dep_bin_dir = dep_modules_dir.join(".bin");
-    let mut bin_dirs: Vec<&Path> = Vec::with_capacity(tool_bin_dirs.len() + 1);
-    bin_dirs.push(&dep_bin_dir);
+    let chain = dep_bin_chain(package_dir, project_root, modules_dir_name);
+    let mut bin_dirs: Vec<&Path> = Vec::with_capacity(chain.len() + tool_bin_dirs.len());
+    bin_dirs.extend(chain.iter().map(PathBuf::as_path));
     bin_dirs.extend(tool_bin_dirs.iter().copied());
     run_script(
         package_dir,
@@ -1505,6 +2212,91 @@ pub enum Error {
     #[error("script `{script}` exited with code {code}")]
     #[diagnostic(code(ERR_AUBE_SCRIPT_NON_ZERO_EXIT))]
     NonZeroExit { script: String, code: i32 },
+}
+
+/// Every required dependency build that failed in one install, in build
+/// order, so the user sees all of them rather than whichever task the
+/// scheduler happened to drain first. The first failure is the diagnostic
+/// the aggregate answers to: its `code()` is the aggregate's code and, via
+/// [`exit_code_for_report`], its script's exit code is the process's.
+///
+/// Each entry keeps the failure's own report — a wrapped [`Error`] for a
+/// script that exited non-zero, or whatever else the build step returned —
+/// so nothing about the cause is flattened into a string on the way up.
+#[derive(Debug)]
+pub struct BuildFailures {
+    failures: Vec<miette::Report>,
+    not_started: usize,
+}
+
+impl BuildFailures {
+    /// `failures` must be non-empty and in build order; `not_started` is the
+    /// number of builds in later phases that were never attempted because of
+    /// them.
+    pub fn new(failures: Vec<miette::Report>, not_started: usize) -> Self {
+        assert!(
+            !failures.is_empty(),
+            "BuildFailures needs at least one failure"
+        );
+        Self {
+            failures,
+            not_started,
+        }
+    }
+
+    pub fn failures(&self) -> &[miette::Report] {
+        &self.failures
+    }
+}
+
+impl std::fmt::Display for BuildFailures {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} dependency builds failed:", self.failures.len())?;
+        for failure in &self.failures {
+            // `{:#}` is the whole cause chain, so a wrapped script error reads
+            // `lifecycle script postinstall failed for a@1.0.0: script
+            // `postinstall` exited with code 3` rather than its outer context
+            // alone.
+            write!(f, "\n  {failure:#}")?;
+        }
+        if self.not_started > 0 {
+            write!(
+                f,
+                "\n  {} build(s) in later phases were not started",
+                self.not_started
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for BuildFailures {}
+
+impl miette::Diagnostic for BuildFailures {
+    fn code<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
+        self.failures[0].code()
+    }
+}
+
+/// The exit code a failed script asks for, when `report` is one: the child's
+/// own status for a script that exited non-zero (a signal-killed child is
+/// `128 + signum`, see [`exit_code_from_status`]), or the first failure's for
+/// a [`BuildFailures`] aggregate. `None` for any other report, including a
+/// script that could not be spawned at all — those resolve through the exit
+/// table by code like every other diagnostic.
+///
+/// This is what puts the install and rebuild paths on the same contract as
+/// `run`, npm and pnpm: a `postinstall` that exits 3 makes the command exit
+/// 3. It only works while the typed [`Error`] is still reachable through
+/// `downcast_ref`, which `wrap_err` preserves and `miette!("{e}")` does not —
+/// every caller that reports a script failure wraps rather than formats.
+pub fn exit_code_for_report(report: &miette::Report) -> Option<i32> {
+    if let Some(Error::NonZeroExit { code, .. }) = report.downcast_ref::<Error>() {
+        return Some(*code);
+    }
+    report
+        .downcast_ref::<BuildFailures>()
+        .and_then(|failures| exit_code_for_report(&failures.failures[0]))
 }
 
 #[cfg(test)]
@@ -1605,7 +2397,7 @@ mod env_overlay_tests {
     fn node_execpath_overrides_only_npm_node_execpath() {
         let mut cmd = tokio::process::Command::new("node");
         let settings = ScriptSettings {
-            node_exe: Some(PathBuf::from("/wrapper/libexec/node-shim")),
+            node_program: Some(PathBuf::from("/wrapper/libexec/node-shim")),
             node_execpath: Some(PathBuf::from("/real/node/bin/node")),
             ..Default::default()
         };
@@ -1627,10 +2419,10 @@ mod env_overlay_tests {
     /// what every non-wrapping caller sends, so this is the behavior-preserving
     /// path — unchanged from before the split existed.
     #[test]
-    fn unset_node_execpath_falls_back_to_node_exe() {
+    fn unset_node_execpath_falls_back_to_node_program() {
         let mut cmd = tokio::process::Command::new("node");
         let settings = ScriptSettings {
-            node_exe: Some(PathBuf::from("/opt/node/bin/node")),
+            node_program: Some(PathBuf::from("/opt/node/bin/node")),
             ..Default::default()
         };
         apply_script_settings_env(&mut cmd, &settings);
@@ -1639,7 +2431,7 @@ mod env_overlay_tests {
             assert_eq!(
                 env_value(&cmd, key).map(|v| v.to_string_lossy().into_owned()),
                 Some("/opt/node/bin/node".to_string()),
-                "{key} must fall back to node_exe when no split is requested"
+                "{key} must fall back to node_program when no split is requested"
             );
         }
     }
@@ -1652,7 +2444,7 @@ mod env_overlay_tests {
     fn env_overlay_outranks_the_node_execpath_split() {
         let mut cmd = tokio::process::Command::new("node");
         let settings = ScriptSettings {
-            node_exe: Some(PathBuf::from("/settings/node")),
+            node_program: Some(PathBuf::from("/settings/node")),
             node_execpath: Some(PathBuf::from("/settings/execpath")),
             env_overlay: vec![(
                 OsString::from("npm_node_execpath"),
@@ -1695,6 +2487,60 @@ mod env_overlay_tests {
         assert_eq!(composed, "/shim:/tools:/usr/bin:/bin");
         #[cfg(windows)]
         assert!(composed.starts_with("/shim;/tools;"));
+    }
+}
+
+#[cfg(test)]
+mod spawn_program_tests {
+    use super::*;
+
+    fn env_keys(cmd: &tokio::process::Command) -> Vec<String> {
+        let mut keys: Vec<String> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    /// The direct path must be indistinguishable from the shell path as
+    /// far as the child's environment goes. Diffing the two commands
+    /// pins that mechanically, rather than trusting that two call sites
+    /// stamp the same list — `aube run` exports a documented `npm_*`
+    /// surface that build tooling reads.
+    #[tokio::test]
+    async fn spawn_program_stamps_the_same_env_as_spawn_shell() {
+        let settings = ScriptSettings {
+            node_options: Some("--max-old-space-size=100".to_string()),
+            node_program: Some(PathBuf::from("/usr/bin/node")),
+            node_execpath: Some(PathBuf::from("/usr/bin/node")),
+            command: Some("run-script".to_string()),
+            http_proxy: Some("http://proxy.invalid".to_string()),
+            https_proxy: Some("http://proxy.invalid".to_string()),
+            ..ScriptSettings::default()
+        };
+        scope(async move {
+            set_script_settings(settings);
+            let shell = spawn_shell("tool --flag");
+            let direct = spawn_program(Path::new("/usr/bin/tool"), "tool", ["--flag"]);
+            assert_eq!(
+                env_keys(&shell),
+                env_keys(&direct),
+                "direct exec must export the same env keys as `sh -c`"
+            );
+        })
+        .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_program_runs_the_program_with_its_args() {
+        let mut cmd = spawn_program(Path::new("/bin/echo"), "echo", ["a b", "$HOME"]);
+        let out = cmd.output().await.unwrap();
+        assert!(out.status.success());
+        // `$HOME` arrives literally: there is no shell to expand it.
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "a b $HOME\n");
     }
 }
 
@@ -1798,9 +2644,41 @@ mod jail_tests {
         assert_eq!(env("NODE_OPTIONS"), Some("--conditions=aube"));
         assert_eq!(env("npm_config_unsafe_perm"), Some("false"));
         assert_eq!(env("npm_config_shell_emulator"), Some("true"));
+        assert_eq!(env("AUBE_NODE_GYP_PROJECT_DIR"), Some("/tmp/project"));
         assert_eq!(env("npm_lifecycle_event"), Some("postinstall"));
         assert_eq!(env("npm_package_name"), Some("pkg"));
         assert_eq!(env("npm_package_version"), Some("1.2.3"));
+    }
+
+    #[test]
+    fn embedder_env_overrides_jailed_node_gyp_project_default() {
+        let mut cmd = tokio::process::Command::new("node");
+        let settings = ScriptSettings {
+            extra_env: vec![(
+                "AUBE_NODE_GYP_PROJECT_DIR".into(),
+                "/tmp/embedder-project".into(),
+            )],
+            ..Default::default()
+        };
+
+        apply_jail_env(
+            &mut cmd,
+            std::ffi::OsStr::new("/bin"),
+            Path::new("/tmp/aube-jail/home"),
+            Path::new("/tmp/project"),
+            &PackageJson::default(),
+            "postinstall",
+            &[],
+        );
+        apply_script_settings_env(&mut cmd, &settings);
+
+        let project_dir = cmd
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new("AUBE_NODE_GYP_PROJECT_DIR"))
+            .and_then(|(_, value)| value)
+            .and_then(|value| value.to_str());
+        assert_eq!(project_dir, Some("/tmp/embedder-project"));
     }
 
     fn proxy_env(settings: ScriptSettings) -> impl Fn(&str) -> Option<String> {
@@ -1867,6 +2745,39 @@ mod jail_tests {
         });
         assert_eq!(env("NO_PROXY"), None);
         assert_eq!(env("NODE_USE_ENV_PROXY"), None);
+    }
+
+    #[test]
+    fn wrapper_node_and_execpath_are_stamped_distinctly() {
+        // A wrapping embedder: `NODE` is the shim (so `$NODE` stays
+        // wrapped) while `npm_node_execpath` is the real binary node-gyp
+        // reads. Embedder `extra_env` lands last.
+        let env = proxy_env(ScriptSettings {
+            node_program: Some(PathBuf::from("/shim/node")),
+            node_execpath: Some(PathBuf::from("/real/node-24.4.1/bin/node")),
+            extra_env: vec![("MYTOOL_WRAPPED".into(), "1".into())],
+            ..Default::default()
+        });
+        assert_eq!(env("NODE").as_deref(), Some("/shim/node"));
+        assert_eq!(
+            env("npm_node_execpath").as_deref(),
+            Some("/real/node-24.4.1/bin/node")
+        );
+        assert_eq!(env("MYTOOL_WRAPPED").as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn node_execpath_falls_back_to_node_program() {
+        // A selector supplies only `node_program`; both vars point at it.
+        let env = proxy_env(ScriptSettings {
+            node_program: Some(PathBuf::from("/opt/node/bin/node")),
+            ..Default::default()
+        });
+        assert_eq!(env("NODE").as_deref(), Some("/opt/node/bin/node"));
+        assert_eq!(
+            env("npm_node_execpath").as_deref(),
+            Some("/opt/node/bin/node")
+        );
     }
 }
 
@@ -1998,6 +2909,279 @@ mod windows_job_object_tests {
         assert!(
             reaped,
             "grandchild pid {pid} survived parent abort — job object did not kill the tree"
+        );
+    }
+}
+
+#[cfg(test)]
+mod shell_resolution_tests {
+    use super::*;
+
+    fn busybox() -> aube_util::ScriptShell {
+        aube_util::ScriptShell {
+            program: PathBuf::from(r"C:\nub\busybox.exe"),
+            args: vec!["sh".to_string(), "-c".to_string()],
+            restore_env_casing: true,
+        }
+    }
+
+    fn invocation(settings: &ScriptSettings) -> (String, Vec<String>) {
+        match resolve_shell(settings) {
+            ShellInvocation::Args { program, args, .. } => {
+                (program.to_string_lossy().into_owned(), args)
+            }
+            #[cfg(windows)]
+            ShellInvocation::CmdRaw => ("cmd.exe".to_string(), vec!["/d /s /c".to_string()]),
+        }
+    }
+
+    /// The embedder default replaces the PLATFORM default and carries its own
+    /// leading args, so a multi-call binary gets its applet name — `busybox.exe
+    /// -c <body>` is not a valid invocation and would fail to select `sh`.
+    #[test]
+    fn embedder_default_supplies_program_and_applet_args() {
+        let settings = ScriptSettings {
+            default_shell: Some(busybox()),
+            ..Default::default()
+        };
+        assert_eq!(
+            invocation(&settings),
+            (
+                r"C:\nub\busybox.exe".to_string(),
+                vec!["sh".to_string(), "-c".to_string()]
+            )
+        );
+    }
+
+    /// A user's `script-shell` outranks the embedder default — the embedder
+    /// replaces what aube would have picked, never what the user asked for.
+    #[test]
+    fn user_script_shell_outranks_the_embedder_default() {
+        let settings = ScriptSettings {
+            script_shell: Some(PathBuf::from("/bin/dash")),
+            default_shell: Some(busybox()),
+            ..Default::default()
+        };
+        assert_eq!(
+            invocation(&settings),
+            ("/bin/dash".to_string(), vec!["-c".to_string()])
+        );
+    }
+
+    /// Default-empty settings keep aube's own platform default, so standalone
+    /// aube is unaffected by the seam existing.
+    #[test]
+    fn unset_settings_keep_the_platform_default() {
+        let (program, args) = invocation(&ScriptSettings::default());
+        if cfg!(windows) {
+            assert_eq!(
+                (program.as_str(), args[0].as_str()),
+                ("cmd.exe", "/d /s /c")
+            );
+        } else {
+            assert_eq!((program.as_str(), args[0].as_str()), ("sh", "-c"));
+        }
+    }
+
+    /// The id keys persisted build output, so it must name the DIALECT and
+    /// nothing machine- or release-specific: the bundled busybox lives at a
+    /// path that moves with every embedder release, and keying on it would
+    /// invalidate every cached build on an upgrade that changed nothing.
+    #[test]
+    fn shell_id_names_the_dialect_not_the_program_path() {
+        assert_eq!(
+            shell_id(&resolve_shell(&ScriptSettings {
+                default_shell: Some(busybox()),
+                ..Default::default()
+            })),
+            "sh"
+        );
+        assert_eq!(
+            shell_id(&resolve_shell(&ScriptSettings {
+                default_shell: Some(aube_util::ScriptShell {
+                    program: PathBuf::from(r"D:\other\place\busybox.exe"),
+                    args: vec!["sh".to_string(), "-c".to_string()],
+                    restore_env_casing: true,
+                }),
+                ..Default::default()
+            })),
+            "sh",
+            "a moved bundled shell is the same dialect and must stay a cache hit"
+        );
+        assert_eq!(
+            shell_id(&resolve_shell(&ScriptSettings {
+                script_shell: Some(PathBuf::from("/usr/local/bin/bash")),
+                ..Default::default()
+            })),
+            "bash",
+            "a user script-shell participates, keyed by name so its location may vary"
+        );
+    }
+
+    /// The install-freshness hash keys on the shell before the settings pass has
+    /// run, so it resolves the same identity from the two settings directly. If
+    /// this drifted from `resolved_shell_id`, a shell change would either never
+    /// invalidate a warm install or invalidate every one of them.
+    #[test]
+    fn the_hash_helper_and_the_spawn_agree_on_the_shell() {
+        assert_eq!(shell_id_for(None, None), PLATFORM_DEFAULT_SHELL_ID);
+        assert_eq!(
+            shell_id_for(None, Some(&busybox())),
+            "sh",
+            "an embedder default must be visible to the freshness hash"
+        );
+        assert_eq!(
+            shell_id_for(Some(Path::new("/usr/local/bin/bash")), Some(&busybox())),
+            "bash",
+            "the user's script-shell outranks the embedder default here too"
+        );
+    }
+
+    /// `cmd.exe` and POSIX `sh` must never share a key: the same script body
+    /// under cmd can exit 0 having written unexpanded `${VAR:-default}` bytes.
+    #[test]
+    fn cmd_and_sh_have_distinct_ids() {
+        assert_eq!(
+            shell_id(&ShellInvocation::Args {
+                program: PathBuf::from("sh"),
+                args: vec!["-c".to_string()],
+                restore_env_casing: false,
+            }),
+            "sh"
+        );
+        #[cfg(windows)]
+        assert_eq!(shell_id(&ShellInvocation::CmdRaw), "cmd");
+    }
+
+    /// The prologue restores the lowercase names busybox-w32 up-cases, and the
+    /// filters are the whole contract: re-exporting the wrong thing is worse than
+    /// re-exporting nothing, because it puts a name back into the environment that
+    /// the caller had removed, or writes a line the shell refuses to parse.
+    #[test]
+    fn the_casing_prologue_rebinds_only_the_names_a_shell_can_export() {
+        let mut command = std::process::Command::new("sh");
+        command.env("npm_package_name", "acme");
+        command.env("npm_config_user_agent", "nub/0.9");
+        // Already uppercase: busybox leaves it alone, so re-binding it is noise.
+        command.env("NODE_OPTIONS", "--x");
+        // Not a shell identifier, and not exportable under any casing.
+        command.env("weird-name", "v");
+        command.env("2fast", "v");
+        // A REMOVAL. Re-exporting it would resurrect the name.
+        command.env_remove("npm_lifecycle_event");
+
+        let prologue = lowercase_env_prologue(&command);
+
+        assert_eq!(
+            prologue,
+            "export npm_config_user_agent=\"$NPM_CONFIG_USER_AGENT\"; \
+             export npm_package_name=\"$NPM_PACKAGE_NAME\"; ",
+            "only lowercase, exportable, still-set names belong in the prologue"
+        );
+
+        // A body prefixed with it is still one shell word away from the original.
+        let body = format!("{prologue}echo $npm_package_name");
+        assert!(
+            body.ends_with("; echo $npm_package_name"),
+            "the prologue must end in a separator so the body is a fresh command: {body}"
+        );
+    }
+
+    /// `run_script` sets `npm_lifecycle_event` and the manifest variables AFTER it
+    /// builds the shell, so the prologue must be built when the body goes on. A
+    /// shell that keeps name casing is the control: its body stays unchanged.
+    #[test]
+    fn the_body_prologue_covers_names_set_after_the_shell_was_built() {
+        let body_of = |settings: &ScriptSettings| {
+            let mut cmd = shell_command(settings);
+            cmd.env("npm_lifecycle_event", "postinstall");
+            append_script_body(&mut cmd, settings, "echo $npm_lifecycle_event");
+            cmd.as_std()
+                .get_args()
+                .last()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+
+        let restored = body_of(&ScriptSettings {
+            default_shell: Some(busybox()),
+            ..Default::default()
+        });
+        assert!(
+            restored.contains("export npm_lifecycle_event=\"$NPM_LIFECYCLE_EVENT\"; "),
+            "a name set after the shell was built must be re-bound: {restored}"
+        );
+        assert!(
+            restored.ends_with("; echo $npm_lifecycle_event"),
+            "{restored}"
+        );
+
+        let plain = body_of(&ScriptSettings {
+            script_shell: Some(PathBuf::from("sh")),
+            ..Default::default()
+        });
+        assert_eq!(
+            plain, "echo $npm_lifecycle_event",
+            "a shell that keeps name casing must get the body unchanged"
+        );
+    }
+
+    /// The leading-args form has to survive an actual spawn, not just
+    /// `resolve_shell`. `/usr/bin/env` is a stand-in for busybox with the same
+    /// shape — a program that takes a command name and then `-c` — so dropping
+    /// or reordering `args` fails here the same way `busybox.exe -c <body>`
+    /// fails on Windows, the one platform this suite cannot run.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn embedder_default_leading_args_survive_a_real_spawn() {
+        let settings = ScriptSettings {
+            default_shell: Some(aube_util::ScriptShell {
+                program: PathBuf::from("/usr/bin/env"),
+                args: vec!["sh".to_string(), "-c".to_string()],
+                restore_env_casing: false,
+            }),
+            ..Default::default()
+        };
+        let out = spawn_shell_with_settings("echo \"ok=${X:-1}\"", &settings)
+            .output()
+            .await
+            .expect("the composed shell must be spawnable");
+        assert!(
+            out.status.success(),
+            "spawn failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "ok=1",
+            "the body must reach a POSIX shell as one argv element, through the \
+             embedder's leading args"
+        );
+    }
+
+    /// Arg quoting must follow the RESOLVED shell, not the platform. Under a
+    /// POSIX default on Windows, cmd rules would corrupt the arg: `%` doubles
+    /// and `$`/backtick stay live inside the double quotes cmd-quoting emits.
+    #[test]
+    fn quoting_follows_the_resolved_shell_not_the_platform() {
+        let posix = ScriptSettings {
+            default_shell: Some(busybox()),
+            ..Default::default()
+        };
+        assert_eq!(
+            shell_quote_arg_with_settings("50%$HOME`id`", &posix),
+            "'50%$HOME`id`'",
+            "a POSIX shell needs single quotes; cmd rules would emit %% and leave $/` live"
+        );
+
+        let cmd = ScriptSettings {
+            script_shell: Some(PathBuf::from(r"C:\Windows\System32\cmd.exe")),
+            ..Default::default()
+        };
+        assert_eq!(
+            shell_quote_arg_with_settings("50%", &cmd),
+            r#""50%%""#,
+            "an explicit cmd.exe still gets cmd's percent-doubling"
         );
     }
 }
@@ -2173,5 +3357,98 @@ mod break_cas_hardlinks_tests {
             std::path::Path::new("real.txt")
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod member_bin_chain_tests {
+    use super::member_bin_chain;
+    use std::path::{Path, PathBuf};
+
+    /// A nested member (`test/installation`) sees its own `.bin`, then its
+    /// parent member's, then the root's, then anything above — closest
+    /// first, out to the filesystem root, as npm walks it.
+    #[test]
+    fn member_bin_chain_walks_every_ancestor_to_the_filesystem_root_closest_first() {
+        assert_eq!(
+            member_bin_chain(Path::new("/p/test/installation"), "node_modules"),
+            vec![
+                PathBuf::from("/p/test/installation/node_modules/.bin"),
+                PathBuf::from("/p/test/node_modules/.bin"),
+                PathBuf::from("/p/node_modules/.bin"),
+                PathBuf::from("/node_modules/.bin"),
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod dep_bin_chain_tests {
+    use super::dep_bin_chain;
+    use std::path::{Path, PathBuf};
+
+    /// The depth->=3 shape a two-level approximation misses. Package `c`
+    /// sits at `a/node_modules/b/node_modules/c`; a dependency the hoister
+    /// placed at `a/node_modules/` is reachable from NEITHER `c`'s own
+    /// level, NOR its enclosing `b/node_modules`, NOR the project root, so
+    /// omitting the intermediate ancestor is a live 127 rather than a
+    /// cosmetic gap. Order is load-bearing too: closest first, so a nearer
+    /// copy shadows a farther one.
+    #[test]
+    fn dep_bin_chain_covers_every_intermediate_ancestor_closest_first() {
+        let root = Path::new("/p");
+        let chain = dep_bin_chain(
+            Path::new("/p/node_modules/a/node_modules/b/node_modules/c"),
+            root,
+            "node_modules",
+        );
+        assert_eq!(
+            chain,
+            vec![
+                PathBuf::from("/p/node_modules/a/node_modules/b/node_modules/c/node_modules/.bin"),
+                PathBuf::from("/p/node_modules/a/node_modules/b/node_modules/.bin"),
+                PathBuf::from("/p/node_modules/a/node_modules/.bin"),
+                PathBuf::from("/p/node_modules/.bin"),
+            ],
+            "every enclosing modules dir must appear, closest first"
+        );
+    }
+
+    /// The isolated layout must be unaffected: the virtual-store hop is
+    /// the only intermediate directory carrying the name, so the walk
+    /// reproduces exactly the dep-local `.bin` plus the project root.
+    #[test]
+    fn dep_bin_chain_is_inert_under_the_isolated_layout() {
+        let chain = dep_bin_chain(
+            Path::new("/p/node_modules/.aube/lmdb@3.0.0/node_modules/lmdb"),
+            Path::new("/p"),
+            "node_modules",
+        );
+        assert_eq!(
+            chain,
+            vec![
+                PathBuf::from(
+                    "/p/node_modules/.aube/lmdb@3.0.0/node_modules/lmdb/node_modules/.bin"
+                ),
+                PathBuf::from("/p/node_modules/.aube/lmdb@3.0.0/node_modules/.bin"),
+                PathBuf::from("/p/node_modules/.bin"),
+            ]
+        );
+    }
+
+    /// A custom `modulesDir` renames every level, including the scoped
+    /// case: `@scope/name` adds a directory hop that is NOT named after
+    /// the modules dir, so it must not contribute an entry.
+    #[test]
+    fn dep_bin_chain_honors_a_custom_modules_dir_and_skips_the_scope_hop() {
+        let chain = dep_bin_chain(Path::new("/p/mods/@scope/name"), Path::new("/p"), "mods");
+        assert_eq!(
+            chain,
+            vec![
+                PathBuf::from("/p/mods/@scope/name/mods/.bin"),
+                PathBuf::from("/p/mods/.bin"),
+            ],
+            "the `@scope` directory is not a modules dir and contributes nothing"
+        );
     }
 }

@@ -120,7 +120,7 @@ impl PrimerDist {
                 .tarball
                 .clone()
                 .unwrap_or_else(|| deterministic_tarball_url(name, version)),
-            integrity: self.integrity.clone(),
+            integrity: self.integrity.as_ref().map(|i| i.to_sri()),
             shasum: None,
             unpacked_size: None,
             attestations: self.provenance.then(|| Attestations {
@@ -149,6 +149,7 @@ fn deterministic_tarball_url(name: &str, version: &str) -> String {
 static GENERATED_AT: OnceLock<Option<String>> = OnceLock::new();
 static GENERATED_AT_SECS: OnceLock<Option<u64>> = OnceLock::new();
 static AUTO_PRUNED: OnceLock<()> = OnceLock::new();
+static POPULAR_NAMES: OnceLock<Option<String>> = OnceLock::new();
 
 pub(crate) fn get(name: &str) -> Option<Seed> {
     let (_, offset, len) = PRIMER_INDEX
@@ -226,6 +227,33 @@ fn now_secs() -> u64 {
 #[cfg(test)]
 pub(crate) fn names() -> impl Iterator<Item = &'static str> {
     PRIMER_INDEX.iter().map(|(name, _, _)| *name)
+}
+
+/// Whether [`popular_package_names`] is ordered by download popularity.
+///
+/// True only when the build embedded the real `popular-top100000-v1.json`, whose
+/// order IS the popularity ranking. False for the metadata-primer fallback,
+/// which is alphabetical and holds only the primer's top-N names — a corpus that
+/// can support neither a "rank #N" claim nor a comparison of two names' relative
+/// popularity. Callers that reason about rank must check this first.
+pub fn popular_package_names_are_ranked() -> bool {
+    option_env!("AUBE_POPULAR_NAMES_RANKED").is_some()
+}
+
+/// Ranked public npm package names used as typo/squatting reference data.
+///
+/// Release builds embed the top 100,000 names, most-downloaded first. Development
+/// and downstream builds without the generated artifact fall back to the
+/// metadata-primer names, so callers always get a valid newline-delimited corpus
+/// — but that fallback is NOT ranked; see [`popular_package_names_are_ranked`].
+pub fn popular_package_names() -> &'static str {
+    POPULAR_NAMES
+        .get_or_init(|| {
+            let decoded = zstd::stream::decode_all(Cursor::new(POPULAR_NAMES_BLOB)).ok()?;
+            String::from_utf8(decoded).ok()
+        })
+        .as_deref()
+        .unwrap_or_default()
 }
 
 fn generated_at() -> Option<&'static String> {
@@ -391,6 +419,30 @@ mod tests {
             return;
         };
         assert!(super::get(name).is_some());
+    }
+
+    #[test]
+    fn bundled_popular_names_load() {
+        let names = popular_package_names();
+        if !PRIMER_INDEX.is_empty() {
+            assert!(!names.is_empty());
+        }
+        assert!(names.lines().all(|name| !name.is_empty()));
+    }
+
+    // The ranked flag is what consumers gate rank-based judgements on, so it must
+    // never claim a ranking the embedded corpus cannot back. The real file is
+    // exactly POPULAR_NAMES_TOP entries (build.rs rejects any other length under
+    // the require guard); the alphabetical primer fallback is far smaller.
+    #[test]
+    fn ranked_flag_matches_the_embedded_corpus() {
+        if popular_package_names_are_ranked() {
+            assert_eq!(
+                popular_package_names().lines().count(),
+                100_000,
+                "a ranked corpus must be the full popular-top100000 list"
+            );
+        }
     }
 
     #[test]

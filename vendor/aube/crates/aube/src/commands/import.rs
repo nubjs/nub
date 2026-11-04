@@ -1,17 +1,16 @@
-use clap::Args;
 use miette::{Context, IntoDiagnostic, miette};
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct ImportArgs {
     /// Overwrite an existing aube-lock.yaml
-    #[arg(long)]
+    #[usage(long)]
     pub force: bool,
     /// Skip lifecycle scripts when the follow-up install runs.
     ///
     /// Accepted for compatibility — `aube import` today only writes the
     /// lockfile and does not chain into install, so this is a
     /// no-op, kept so wrappers that already pass it keep working.
-    #[arg(long, hide = true)]
+    #[usage(long, hide)]
     pub ignore_scripts: bool,
     /// Write only the converted lockfile and skip linking
     /// `node_modules` afterwards.
@@ -20,7 +19,7 @@ pub struct ImportArgs {
     /// today, so this flag is a no-op kept for compatibility — CI
     /// scripts that pass `--lockfile-only` keep working without
     /// complaint.
-    #[arg(long)]
+    #[usage(long)]
     pub lockfile_only: bool,
 }
 

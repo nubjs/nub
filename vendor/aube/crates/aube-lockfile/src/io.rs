@@ -265,6 +265,15 @@ fn lockfile_write_is_noop(
     {
         return false;
     }
+    // The `catalogs` block is recorded config too, and the identity hash
+    // never sees it: a widened catalog range that keeps the same pick
+    // would otherwise leave the old specifier on disk, which our own
+    // `--frozen-lockfile` and pnpm's (ERR_PNPM_LOCKFILE_CONFIG_MISMATCH)
+    // both reject. Compare only what each writer persists, so a format
+    // that records no catalogs never looks changed.
+    if !recorded_catalogs_equal(kind, graph, &existing) {
+        return false;
+    }
     // `allow_build` doesn't affect the engine-agnostic identity hash
     // (the engine taint it would gate is computed with `engine: None`),
     // so a trivial policy is correct here.
@@ -313,6 +322,32 @@ fn lockfile_write_is_noop(
             &no_build,
             &existing_patch,
         )
+}
+
+/// Whether `a` and `b` would write the same catalog block in a `kind`
+/// lockfile: pnpm-shaped files record specifier and version, `bun.lock`
+/// only the specifier, and the npm and yarn formats record none.
+fn recorded_catalogs_equal(kind: LockfileKind, a: &LockfileGraph, b: &LockfileGraph) -> bool {
+    match kind {
+        LockfileKind::Aube | LockfileKind::Pnpm => a.catalogs == b.catalogs,
+        LockfileKind::Bun => {
+            let specifiers = |g: &LockfileGraph| -> Vec<(String, String, String)> {
+                g.catalogs
+                    .iter()
+                    .flat_map(|(cat, entries)| {
+                        entries
+                            .iter()
+                            .map(|(pkg, e)| (cat.clone(), pkg.clone(), e.specifier.clone()))
+                    })
+                    .collect()
+            };
+            specifiers(a) == specifiers(b)
+        }
+        LockfileKind::Npm
+        | LockfileKind::NpmShrinkwrap
+        | LockfileKind::Yarn
+        | LockfileKind::YarnBerry => true,
+    }
 }
 
 /// Return the [`LockfileKind`] of the lockfile already on disk in
@@ -498,7 +533,7 @@ pub fn parse_lockfile_with_kind_and_options(
     options: ParseOptions,
 ) -> Result<(LockfileGraph, LockfileKind), Error> {
     reject_bun_binary(project_dir)?;
-    for (path, kind) in lockfile_candidates(project_dir, /*include_aube=*/ true) {
+    for (path, kind) in read_candidates(project_dir, /*include_aube=*/ true) {
         if !path.exists() {
             continue;
         }
@@ -520,7 +555,7 @@ pub fn parse_for_import(
     manifest: &aube_manifest::PackageJson,
 ) -> Result<(LockfileGraph, LockfileKind), Error> {
     reject_bun_binary(project_dir)?;
-    for (path, kind) in lockfile_candidates(project_dir, /*include_aube=*/ false) {
+    for (path, kind) in read_candidates(project_dir, /*include_aube=*/ false) {
         if !path.exists() {
             continue;
         }
@@ -529,6 +564,36 @@ pub fn parse_for_import(
         return Ok((graph, kind));
     }
     Err(Error::NotFound(project_dir.to_path_buf()))
+}
+
+/// [`lockfile_candidates`] reordered so the lockfile the project's declaration
+/// resolves to leads, with raw filename precedence breaking every remaining tie.
+///
+/// A read and a write must land on the SAME file. The write path asks
+/// [`crate::resolve_project_lockfile_kind`], which honors
+/// `packageManager`/`devEngines`; filename precedence cannot see either. So a
+/// declared-npm project carrying a stray `bun.lock` resolved against bun's
+/// graph and wrote it back out as `package-lock.json`, dropping the `resolved`,
+/// `license` and `engines` that bun's format cannot carry.
+///
+/// Reorder rather than filter: when the declaration contradicts the disk, or
+/// several tools' lockfiles coexist undeclared, detection errors and the read
+/// falls back to today's precedence, leaving the write path to raise that error
+/// as it already does.
+///
+/// Order by FAMILY, not exact kind — [`crate::resolve_project_lockfile_kind`]
+/// applies [`refine_yarn_kind`], so it answers `YarnBerry` where this list says
+/// `Yarn`. The sort is stable, so npm's shrinkwrap-first precedence survives.
+fn read_candidates(project_dir: &Path, include_aube: bool) -> Vec<(PathBuf, LockfileKind)> {
+    let mut candidates = lockfile_candidates(project_dir, include_aube);
+    if let Some(resolved) = crate::detect::resolve_project_lockfile_kind(project_dir)
+        .ok()
+        .and_then(|r| r.kind())
+    {
+        let want = crate::detect::family(resolved);
+        candidates.sort_by_key(|(_, kind)| crate::detect::family(*kind) != want);
+    }
+    candidates
 }
 
 /// If only `bun.lockb` is present (without a text `bun.lock`), surface an
@@ -1000,6 +1065,58 @@ pub enum Error {
     AmbiguousLockfiles {
         /// Comma-joined filenames of the conflicting lockfiles.
         found: String,
+    },
+    #[error(
+        "lockfile {path} contains named-registry package `{dep_path}` from `{registry_name}:`, which aube does not support yet"
+    )]
+    #[diagnostic(
+        code(ERR_AUBE_UNSUPPORTED_NAMED_REGISTRY),
+        help(
+            "aube cannot install this lockfile yet; use pnpm 11.20 or newer instead for this project"
+        )
+    )]
+    UnsupportedNamedRegistry {
+        path: std::path::PathBuf,
+        dep_path: String,
+        registry_name: String,
+    },
+    /// pnpm lockfile formats older than v9 (`lockfileVersion` 5.x /
+    /// 6.0, written by pnpm 8.x and earlier) put direct deps in a
+    /// top-level `dependencies:` map and key packages as
+    /// `/name@version`, with no `importers:` or `snapshots:`. Those
+    /// parse into an *empty* graph rather than failing, so without
+    /// this guard an install would link nothing and still exit 0.
+    #[error("lockfile {path} declares lockfileVersion {version}, which aube does not support")]
+    #[diagnostic(
+        code(ERR_AUBE_UNSUPPORTED_PNPM_LOCKFILE_VERSION),
+        help(
+            "aube reads pnpm lockfile version 9 (pnpm v9 and newer). regenerate it with `npx pnpm@latest install`, or delete the lockfile and run `aube install` to resolve from package.json"
+        )
+    )]
+    UnsupportedPnpmLockfileVersion {
+        path: std::path::PathBuf,
+        version: String,
+    },
+    /// A lockfile whose declared `lockfileVersion` is v9 or newer but
+    /// whose body is pre-v9 (top-level `dependencies:`, no
+    /// `importers:`). Shares the code above: the cause the user has to
+    /// act on, and the remedy, are the same as a declared pre-v9
+    /// version.
+    #[error(
+        "lockfile {path} declares lockfileVersion {version} but its body uses the pre-v9 pnpm layout ({marker})"
+    )]
+    #[diagnostic(
+        code(ERR_AUBE_UNSUPPORTED_PNPM_LOCKFILE_VERSION),
+        help(
+            "aube reads pnpm lockfile version 9 (pnpm v9 and newer). regenerate it with `npx pnpm@latest install`, or delete the lockfile and run `aube install` to resolve from package.json"
+        )
+    )]
+    PnpmLockfileLegacyLayout {
+        path: std::path::PathBuf,
+        version: String,
+        /// Which pre-v9 shape was seen, rendered into the message so the
+        /// user can see what gave the file away.
+        marker: String,
     },
     #[error("failed to read lockfile {0}: {1}")]
     Io(std::path::PathBuf, std::io::Error),

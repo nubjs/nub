@@ -5,7 +5,8 @@
  * with the env var also set, since the kernel sampler is opt-in even
  * when diag itself is on). Emits `cat=kernel,name=<phase>` events with
  * deltas for user CPU, system CPU, peak resident set size, and page
- * faults around bracketed scopes.
+ * faults around bracketed scopes. The 50 ms concurrency sampler also
+ * records peak RSS and, on Linux, current RSS for timeline correlation.
  *
  * Linux and macOS use `libc::getrusage` directly; the macOS variant
  * reports `ru_maxrss` in bytes while Linux reports it in kibibytes, so
@@ -87,6 +88,27 @@ pub fn enabled() -> bool {
     crate::env::diag_env("DIAG_KERNEL").is_some() && snapshot().is_some()
 }
 
+/// Current resident set size for timeline sampling.
+///
+/// Linux exposes resident pages as the second field of `/proc/self/statm`.
+/// Other kernels keep reporting the portable high-water mark from
+/// [`snapshot`]; current RSS can be added when a dependency-free API is
+/// available there.
+#[cfg(target_os = "linux")]
+pub fn current_rss_bytes() -> Option<u64> {
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let resident_pages = statm.split_whitespace().nth(1)?.parse::<u64>().ok()?;
+    // Safety: sysconf is a read-only libc query. A non-positive result means
+    // the kernel did not provide a usable page size.
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    (page_size > 0).then(|| resident_pages.saturating_mul(page_size as u64))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn current_rss_bytes() -> Option<u64> {
+    None
+}
+
 /**
  * Emit a `cat=kernel,name=<phase>` event with the deltas between
  * `before` and `after`.
@@ -134,4 +156,12 @@ where
     let after = snapshot().unwrap_or_default();
     emit_phase_delta(phase, before, after);
     result
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    #[test]
+    fn current_rss_is_available() {
+        assert!(super::current_rss_bytes().is_some_and(|rss| rss > 0));
+    }
 }

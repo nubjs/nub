@@ -515,7 +515,22 @@ fn full_pkg_id(pkg: &LockedPackage, patch_hash: PatchHashFn<'_>, content: Option
     let content = content
         .map(|hex| format!(":content:{hex}"))
         .unwrap_or_default();
-    match patch_hash(&pkg.name, &pkg.version) {
+    // Resolve the patch fingerprint with the SAME precedence as
+    // `LockedPackage::lookup_patch` — alias-qualified `name@version`
+    // first, then `registry_name()@version` — so the virtual-store hash
+    // always reflects the exact patch the apply sites write to disk. An
+    // npm-aliased entry (`name` = alias) declares its patch against the
+    // registry identity in the common case, but a patch keyed by the
+    // alias must win here too; otherwise the patched node would share a
+    // dep_path with the unpatched one. The identity string keeps
+    // `pkg.name` so the alias retains its own node.
+    let patch = patch_hash(&pkg.name, &pkg.version).or_else(|| {
+        let registry_name = pkg.registry_name();
+        (registry_name != pkg.name)
+            .then(|| patch_hash(registry_name, &pkg.version))
+            .flatten()
+    });
+    match patch {
         Some(hex) => format!(
             "{}@{}:patch:{hex}{source}{content}:{integrity}",
             pkg.name, pkg.version
@@ -1131,6 +1146,61 @@ mod tests {
         assert_eq!(
             graph_identity_hash(&g1, &|_| false),
             graph_identity_hash(&g2, &|_| false)
+        );
+    }
+
+    #[test]
+    fn aliased_patch_hash_resolves_by_registry_identity() {
+        // `"odd-alias": "npm:is-odd@3.0.1"` with a patch declared against
+        // the registry identity `is-odd@3.0.1`. The graph hash must fold
+        // that patch in even though the node's `name` is the alias, so
+        // the patched node lands on a distinct dep_path from an unpatched
+        // one. Mirrors what `LockedPackage::lookup_patch` does at the
+        // apply sites.
+        let mut g = empty_graph();
+        let mut pkg = mk_pkg("odd-alias", "3.0.1", Some("sha512-A"));
+        pkg.alias_of = Some("is-odd".into());
+        g.packages.insert("odd-alias@3.0.1".into(), pkg);
+
+        let unpatched = compute_graph_hashes_with_patches(&g, &|_| false, None, &|_, _| None);
+        let patched = compute_graph_hashes_with_patches(&g, &|_| false, None, &|name, ver| {
+            (name == "is-odd" && ver == "3.0.1").then(|| "deadbeef".to_string())
+        });
+        assert_ne!(
+            unpatched.node_hash["odd-alias@3.0.1"], patched.node_hash["odd-alias@3.0.1"],
+            "a registry-name patch must change the aliased node's graph hash"
+        );
+    }
+
+    #[test]
+    fn aliased_patch_hash_prefers_alias_key_over_registry_key() {
+        // A patch declared against the alias identity must win over one
+        // declared against the registry identity — the same precedence
+        // `LockedPackage::lookup_patch` uses (`spec_key()` first). If the
+        // graph hash resolved registry-first, the on-disk bytes (patched
+        // via the alias key) and the dep_path would disagree.
+        let mut g = empty_graph();
+        let mut pkg = mk_pkg("odd-alias", "3.0.1", Some("sha512-A"));
+        pkg.alias_of = Some("is-odd".into());
+        g.packages.insert("odd-alias@3.0.1".into(), pkg);
+
+        let alias_keyed =
+            compute_graph_hashes_with_patches(
+                &g,
+                &|_| false,
+                None,
+                &|name, ver| match (name, ver) {
+                    ("odd-alias", "3.0.1") => Some("alias-patch".to_string()),
+                    ("is-odd", "3.0.1") => Some("registry-patch".to_string()),
+                    _ => None,
+                },
+            );
+        let alias_only = compute_graph_hashes_with_patches(&g, &|_| false, None, &|name, ver| {
+            (name == "odd-alias" && ver == "3.0.1").then(|| "alias-patch".to_string())
+        });
+        assert_eq!(
+            alias_keyed.node_hash["odd-alias@3.0.1"], alias_only.node_hash["odd-alias@3.0.1"],
+            "alias-keyed patch must take precedence over the registry-keyed one"
         );
     }
 }

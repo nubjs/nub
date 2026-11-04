@@ -92,7 +92,9 @@ fn eject_disabled(raw: Option<&str>) -> bool {
 /// members are injected inside the expand hook, past aube's `disk_materialize_packages`
 /// settings fold, so folding the list token here is what invalidates a warm tree on
 /// the initial ship AND on any future list edit (else the stale symlinked shape is
-/// accepted and #457 stays unfixed on existing installs).
+/// accepted and #457 stays unfixed on existing installs). It also folds
+/// [`GVS_EJECT_ALGO_VERSION`], which covers the third way a warm tree goes stale:
+/// the plan is unchanged but the LINKER writes it differently (nub#711).
 ///
 /// The token still branches on [`enabled`] SOLELY for the internal A/B seam: when
 /// an agent flips [`INTERNAL_EJECT_DISABLE_VAR`] the token changes, so a warm tree
@@ -107,7 +109,7 @@ pub(crate) fn settings_fingerprint() -> String {
 fn settings_token(enabled: bool) -> String {
     if enabled {
         format!(
-            "phantom_scanner={PHANTOM_SCANNER_VERSION};project_context={}",
+            "phantom_scanner={PHANTOM_SCANNER_VERSION};project_context={};gvs_eject_algo={GVS_EJECT_ALGO_VERSION}",
             crate::pm_engine::phantom_closure::project_context_eject_token()
         )
     } else {
@@ -125,12 +127,20 @@ pub fn register() {
     if !enabled() {
         return;
     }
-    let Some(dir) = phantom_cache_dir() else {
-        return;
-    };
     // Extract-time scan: overlap per-version analysis with the fetch phase.
+    // The sidecar dir resolves on FIRST FIRE, not here — registration precedes
+    // the engine session's `--dir` chdir, so resolving now would read the wrong
+    // project. Memoizing that first answer is safe only because
+    // [`store_v1_dir`] anchors at the walked-up project/workspace root: the
+    // recursive verbs (`update -r`, `remove -r`, `rebuild -r`) `retarget_cwd`
+    // per member mid-process, and every member of one workspace walks up to the
+    // SAME root, so the memo cannot go stale between members. Anchoring on the
+    // raw cwd instead would freeze member A's answer for member B.
+    let dir: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     aube_store::set_extract_hook(Box::new(move |index: &PackageIndex| {
-        scan_and_cache(&dir, index);
+        if let Some(dir) = dir.get_or_init(phantom_cache_dir) {
+            scan_and_cache(dir, index);
+        }
     }));
 }
 
@@ -187,13 +197,24 @@ fn scan_and_cache(dir: &Path, index: &PackageIndex) {
 /// only an unavailable or failed scan degrades to "no eject", never a crash or a
 /// false break. The write-on-scan reuses [`scan_and_cache`]'s atomic publish, so
 /// a subsequent install hits the warm sidecar when publication succeeds.
-pub(crate) fn cached_or_scan_verdict(dir: &Path, index: &PackageIndex) -> Option<ScanResult> {
+pub(crate) fn cached_or_scan_verdict(
+    dir: &Path,
+    read_fallback_dir: Option<&Path>,
+    index: &PackageIndex,
+) -> Option<ScanResult> {
     let fingerprint = index_content_fingerprint(index);
     let sidecar = sidecar_path(dir, &fingerprint);
-    if let Ok(bytes) = std::fs::read(&sidecar)
-        && let Ok(result) = serde_json::from_slice::<ScanResult>(&bytes)
-    {
-        return Some(result);
+    // `read_fallback_dir` is the global store's sidecar tier when installs
+    // are writing a project-local store: its verdicts are read, never
+    // written, the same layering the CAS itself uses.
+    let cached = std::iter::once(sidecar.clone())
+        .chain(read_fallback_dir.map(|dir| sidecar_path(dir, &fingerprint)));
+    for candidate in cached {
+        if let Ok(bytes) = std::fs::read(&candidate)
+            && let Ok(result) = serde_json::from_slice::<ScanResult>(&bytes)
+        {
+            return Some(result);
+        }
     }
     // No (or unreadable) sidecar → scan the already-loaded index now, cache it,
     // and use the verdict for this install's eject decision.
@@ -258,25 +279,42 @@ fn write_sidecar_atomic(sidecar: &Path, fingerprint: &str, result: &ScanResult) 
     }
 }
 
-/// Nub's CAS store schema dir: `<nub-data>/store/v1/`, the parent of the CAS
-/// `files/` and `index/` tiers and the `phantom/` sidecar tier. Derives from the
-/// SAME [`crate::pm_engine::nub_data_dir`] nub configures its `storeDir` setting
-/// from (`nub_data_dir()/store`), plus aube's `v1/` schema suffix — so the store
-/// handle and the sidecar dir share ONE base with the real store and cannot drift
-/// (the XDG resolution is not re-implemented here). `None` when no data home
-/// resolves. `pub(crate)` so the sidecar CONSUMER
-/// ([`crate::pm_engine::phantom_closure`]) derives its store handle from the same
-/// base this producer uses.
-pub(crate) fn store_v1_dir() -> Option<PathBuf> {
-    Some(crate::pm_engine::nub_data_dir()?.join("store/v1"))
+/// Nub's CAS store schema dirs: `<store-root>/v1/`, the parent of the CAS
+/// `files/` and `index/` tiers and the `phantom/` sidecar tier — the one the
+/// engine WRITES this run, plus the read-only global one it still reads when
+/// the default store is unwritable (a coding agent's sandbox). Resolves through
+/// [`aube::commands::resolved_project_store_v1_dirs`], the engine's own
+/// `storeDir` resolution and fallback decision, anchored at the walked-up
+/// project/workspace root — so a configured `store-dir` override moves the
+/// sidecar tier WITH the store it indexes (#643), and a project-local fallback
+/// store carries its own sidecars. The ANCHOR is the load-bearing half:
+/// `.npmrc` and `pnpm-workspace.yaml` discovery does not walk up, and the
+/// install pipeline anchors at `workspace_or_project_root()`, so resolving
+/// against the raw process cwd instead would miss the override for every
+/// command run from inside a workspace member and silently return the default
+/// store. Falls back to nub's [`crate::pm_engine::nub_data_dir`] — the same
+/// base its `storeDir` embedder default is built from — when no project root
+/// resolves at all. `None` when no data home resolves either. `pub(crate)` so
+/// the sidecar CONSUMER ([`crate::pm_engine::phantom_closure`]) derives its
+/// store handle from the same dirs this producer uses.
+pub(crate) fn store_v1_dirs() -> Option<aube::commands::StoreV1Dirs> {
+    if let Some(dirs) = aube::commands::resolved_project_store_v1_dirs() {
+        return Some(dirs);
+    }
+    Some(aube::commands::StoreV1Dirs {
+        primary: crate::pm_engine::nub_data_dir()?.join("store/v1"),
+        read_fallback: None,
+    })
 }
 
-/// The per-content sidecar directory: `<nub-data>/store/v1/phantom/`, next to the
-/// CAS + index tiers. `None` when no data home resolves (the scanner then simply
-/// doesn't arm). `pub(crate)` so the consumer reads the same directory this
-/// producer writes.
+/// The per-content sidecar directory the producer WRITES: `<store>/v1/phantom/`
+/// under the primary store, next to the CAS + index tiers. `None` when no data
+/// home resolves (the scanner then simply doesn't arm). `pub(crate)` so the
+/// consumer writes on-demand verdicts to the same directory this producer does;
+/// the consumer additionally READS the global store's sidecars through
+/// [`store_v1_dirs`]'s fallback.
 pub(crate) fn phantom_cache_dir() -> Option<PathBuf> {
-    Some(store_v1_dir()?.join("phantom"))
+    Some(store_v1_dirs()?.primary.join("phantom"))
 }
 
 /// The phantom scanner's LOGIC version — BUMP on ANY change to the scanner's
@@ -305,7 +343,39 @@ pub(crate) fn phantom_cache_dir() -> Option<PathBuf> {
 /// after upgrade; harmless and expected (the whole point is to pick up the better
 /// verdict). Just bump the number when the scanner logic changes — the coupling
 /// is structural, nothing else to remember.
-pub(crate) const PHANTOM_SCANNER_VERSION: u32 = 4;
+pub(crate) const PHANTOM_SCANNER_VERSION: u32 = 6;
+
+/// Version of what the linker's GVS-populate pass WRITES TO DISK for a given eject
+/// set — bumped when the same plan produces a different on-disk shape.
+///
+/// Distinct from [`PHANTOM_SCANNER_VERSION`] (which plan is computed) and from
+/// aube's `disk_materialize_packages` fold (which NAMES are in the seed): both of
+/// those are unchanged when only the EXECUTOR changes, so neither invalidates.
+/// nub#711 is the case in point — `link_workspace` never consulted the eject set,
+/// so every workspace install produced an all-symlinks tree. Fixing the linker
+/// moves no hash: the lockfile, the manifest, the settings and the seed are all
+/// identical, so `try_install_fast_path` reports "Already up to date" and the
+/// broken layout survives the upgrade. Only the users who filed the bug have such
+/// a tree, so without this salt the fix reaches nobody until unrelated churn
+/// (a lockfile edit, `--force`) happens to bust the state.
+///
+/// Same shape and same remedy as aube's `hoisted_layout_algo` salt, which exists
+/// because a hoisted-layout algorithm change likewise left the graph hash
+/// identical. Bump on any future change to what that pass materializes.
+///
+/// COST of a bump, measured rather than assumed: the dependency side is cheap —
+/// no refetch, no rebuild, no side-effects-cache bust, no lockfile churn, since
+/// those all stay gated on content-hash deltas. But root lifecycle hooks are
+/// gated only on the fast path being missed, so `preinstall` and
+/// `install`/`postinstall`/`prepare` re-run ONCE PER IMPORTER on the first
+/// install after a bump — meaningful in a workspace whose members drive builds
+/// from `prepare`. Accepted here: the alternative is leaving every already-installed
+/// workspace on the broken layout, and `PHANTOM_SCANNER_VERSION` bumps already
+/// carry the same cost. Narrowing the salt to "only when the eject closure is
+/// non-empty" is NOT available — the closure needs the resolved graph, and this
+/// hash is computed before resolution. The auto-install path (`nub run`) does not
+/// pay it at all: it passes no CLI flags, which skips the settings-hash check.
+pub(crate) const GVS_EJECT_ALGO_VERSION: u32 = 1;
 
 /// THE single source of truth for a phantom sidecar's location: the versioned
 /// subdir `<phantom_cache_dir>/s<PHANTOM_SCANNER_VERSION>/<fingerprint>.json`.
@@ -341,18 +411,19 @@ mod tests {
         );
     }
 
-    /// The user (enabled) token folds the scanner version AND the curated-eject list
-    /// token, so a scanner bump or a #457 list edit invalidates a warm tree and forces
-    /// a re-scan/relink; the dead on/off toggle is gone. The disabled token (reachable
-    /// only via the internal A/B seam) is version-free and distinct, so flipping the
-    /// seam still re-links to the pure-symlink shape. Pins both against a future
-    /// refactor.
+    /// The user (enabled) token folds the scanner version, the curated-eject list
+    /// token AND the GVS-eject algorithm version, so a scanner bump, a #457 list edit,
+    /// or a change to what the linker MATERIALIZES (nub#711) each invalidates a warm
+    /// tree and forces a re-scan/relink; the dead on/off toggle is gone. The disabled
+    /// token (reachable only via the internal A/B seam) is version-free and distinct,
+    /// so flipping the seam still re-links to the pure-symlink shape. Pins both
+    /// against a future refactor.
     #[test]
     fn enabled_token_folds_version_disabled_seam_token_is_distinct() {
         assert_eq!(
             settings_token(true),
             format!(
-                "phantom_scanner={PHANTOM_SCANNER_VERSION};project_context={}",
+                "phantom_scanner={PHANTOM_SCANNER_VERSION};project_context={};gvs_eject_algo={GVS_EJECT_ALGO_VERSION}",
                 crate::pm_engine::phantom_closure::project_context_eject_token()
             )
         );
@@ -423,8 +494,8 @@ mod tests {
         // No sidecar yet — the extract hook did not run for this warm CAS entry.
         // The consumer must scan on-demand.
         assert!(!sidecar.exists(), "precondition: no sidecar written yet");
-        let v =
-            cached_or_scan_verdict(&sidecar_dir, &index).expect("scan-on-miss yields a verdict");
+        let v = cached_or_scan_verdict(&sidecar_dir, None, &index)
+            .expect("scan-on-miss yields a verdict");
         assert!(
             v.has_unguarded_phantom,
             "the undeclared import must be flagged on the scan-on-miss path"
@@ -442,7 +513,7 @@ mod tests {
         // A corrupt sidecar is treated like a miss, rescanned while the CAS blobs
         // are available, and atomically replaced with valid JSON.
         std::fs::write(&sidecar, b"not-json").unwrap();
-        let repaired = cached_or_scan_verdict(&sidecar_dir, &index)
+        let repaired = cached_or_scan_verdict(&sidecar_dir, None, &index)
             .expect("a corrupt sidecar is rescanned and repaired");
         assert!(
             repaired.has_unguarded_phantom
@@ -462,11 +533,21 @@ mod tests {
         // destroying the CAS blobs leaves only the cached verdict (the fingerprint
         // is a pure function of the in-memory index).
         let _ = std::fs::remove_dir_all(base.join("store"));
-        let v2 = cached_or_scan_verdict(&sidecar_dir, &index).expect("cached verdict served");
+        let v2 = cached_or_scan_verdict(&sidecar_dir, None, &index).expect("cached verdict served");
         assert!(
             v2.has_unguarded_phantom && v2.targets.iter().any(|t| t.name == "undeclared-phantom"),
             "the repaired sidecar is served without rescanning"
         );
+
+        // A project-local sidecar tier (the sandbox store fallback) READS the
+        // global tier's verdict: with the CAS gone a rescan is impossible, so a
+        // served verdict can only have come from the fallback — and nothing is
+        // written into the local tier for it.
+        let local_dir = base.join("local-phantom");
+        let v3 = cached_or_scan_verdict(&local_dir, Some(&sidecar_dir), &index)
+            .expect("the global tier's verdict is read through");
+        assert!(v3.has_unguarded_phantom);
+        assert!(!local_dir.exists(), "a read-through writes nothing locally");
 
         let _ = std::fs::remove_dir_all(&base);
     }

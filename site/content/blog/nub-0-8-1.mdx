@@ -1,0 +1,41 @@
+---
+title: "Nub 0.8.1"
+description: Fixes a lockfile entry that pnpm 12 rejects, repairs global installs, and closes a round of Node-version and loader compatibility gaps in the runtime.
+author: The Nub Team
+date: 2026-08-29
+---
+
+A patch release: a lockfile fix for pnpm 12, global-install repairs in the package manager, and a round of Node-version and loader compatibility fixes in the runtime.
+
+## pnpm 12 and the lockfile
+
+pnpm 12 rejects a lockfile written by Nub 0.8.0 or earlier when a dependency declares a peer with `optional: false` — vitest declares `vite` that way. Nub wrote the entry as an empty mapping under `peerDependenciesMeta`; pnpm 12's reader fails on it with `ERR_PNPM_BROKEN_LOCKFILE`, where pnpm 10 accepted it. Nub now records only `optional: true` entries, as pnpm does, and pnpm 12 reads the result under `--frozen-lockfile`. ([#814](https://github.com/nubjs/nub/pull/814))
+
+## Package manager
+
+| PR | What changed |
+| --- | --- |
+| [#781](https://github.com/nubjs/nub/pull/781) | A lockfile read resolves against the declared package manager, not filename precedence — in a project declaring npm, a stray `bun.lock` no longer outranks `package-lock.json`. |
+| [#773](https://github.com/nubjs/nub/pull/773) | `nub install -g <pkg>` produces a runnable command, and `nub remove -g` unlinks the bins it created instead of leaving dangling entries behind. |
+| [#779](https://github.com/nubjs/nub/pull/779) | `nub outdated` applies the `minimumReleaseAge` window without remark, as `install` and `update` do. |
+
+## Runtime
+
+| PR | What changed |
+| --- | --- |
+| [#802](https://github.com/nubjs/nub/pull/802) | Node 23.0–23.4 route to the compat tier; `module.registerHooks` reached the 23.x line at 23.5.0, and those releases threw at startup under the fast tier. |
+| [#784](https://github.com/nubjs/nub/pull/784) | `--enable-source-maps` is withheld on every Node 26.x below 26.8, the band affected by [nodejs/node#63169](https://github.com/nodejs/node/issues/63169). |
+| [#803](https://github.com/nubjs/nub/pull/803) | CommonJS `require("node:test")`, `node:sqlite`, `node:sea` and `node:test/reporters` work again on Node 22.15.0–22.17.1, 23.5.0–23.11.1 and 24.0.0–24.3.0. |
+| [#788](https://github.com/nubjs/nub/pull/788) | A non-`file:` URL passes through the load hook untouched, so a custom-protocol ESM loader behaves as on plain Node. |
+| [#789](https://github.com/nubjs/nub/pull/789) | `--env-file` values are no longer `$VAR`-expanded, matching Node. |
+| [#809](https://github.com/nubjs/nub/pull/809) | `.env.schema` discovery walks from the project root up to the workspace root. |
+| [#798](https://github.com/nubjs/nub/pull/798) | Node's default test-file coverage exclusion stays in effect when Nub adds its own. |
+| [#800](https://github.com/nubjs/nub/pull/800) | A transpiled TypeScript file reports a `file:` URL as its `sourceURL`, so editor and DevTools breakpoints match the same script identity as under `node`. |
+| [#797](https://github.com/nubjs/nub/pull/797) | A module-resolution error in the REPL keeps its named stack frames. |
+| [#799](https://github.com/nubjs/nub/pull/799) | `URL.revokeObjectURL()` with no argument throws `ERR_MISSING_ARGS`, as Node does. |
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.8.1) list every change in this release.
+
+## Get started
+
+<GetStarted />

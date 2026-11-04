@@ -297,19 +297,19 @@ fn flatten_npm_package_env(
     }
 }
 
-/// Build the PATH with node_modules/.bin directories prepended.
-pub fn bin_path(project_root: &Path, workspace_root: Option<&Path>) -> String {
+/// The `node_modules/.bin` chain a script resolves its commands in: from the
+/// project root up to the workspace root (or the filesystem root), nearest first.
+///
+/// Every directory is added UNCONDITIONALLY — no existence check. npm
+/// (@npmcli/run-script/lib/set-path.js) and pnpm both prepend without stat'ing,
+/// so a `.bin` that a script creates mid-run (the install-then-invoke pattern,
+/// #281) is reachable. A missing PATH entry is harmless — the OS/shell silently
+/// skips it.
+pub fn bin_dirs(project_root: &Path, workspace_root: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-
-    // Walk from project root up, adding each node_modules/.bin UNCONDITIONALLY —
-    // no existence check. npm (@npmcli/run-script/lib/set-path.js) and pnpm both
-    // prepend without stat'ing, so a `.bin` that a script creates mid-run (the
-    // install-then-invoke pattern, #281) is reachable. A missing PATH entry is
-    // harmless — the OS/shell silently skips it.
     let mut dir = project_root.to_path_buf();
     for _ in 0..16 {
-        let bin_dir = dir.join("node_modules").join(".bin");
-        dirs.push(bin_dir.to_string_lossy().to_string());
+        dirs.push(dir.join("node_modules").join(".bin"));
         if workspace_root.is_some() && Some(dir.as_path()) == workspace_root {
             break;
         }
@@ -317,6 +317,15 @@ pub fn bin_path(project_root: &Path, workspace_root: Option<&Path>) -> String {
             break;
         }
     }
+    dirs
+}
+
+/// Build the PATH with node_modules/.bin directories prepended.
+pub fn bin_path(project_root: &Path, workspace_root: Option<&Path>) -> String {
+    let mut dirs: Vec<String> = bin_dirs(project_root, workspace_root)
+        .iter()
+        .map(|dir| dir.to_string_lossy().to_string())
+        .collect();
 
     let existing = env::var("PATH").unwrap_or_default();
     if dirs.is_empty() {

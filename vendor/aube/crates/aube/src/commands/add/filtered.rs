@@ -39,7 +39,14 @@ pub(super) async fn run(
     // `args.packages` list. The Bun-style `securityScanner` is
     // NOT called here: it runs post-resolve from `install::run`
     // against the full resolved graph.
-    supply_chain::run_cli_name_gates(&root, &args.packages, args.allow_low_downloads).await?;
+    supply_chain::run_cli_name_gates(
+        &root,
+        &args.packages,
+        args.allow_low_downloads,
+        crate::commands::add_supply_chain::LowDownloadPrompt::Terminal,
+        &[],
+    )
+    .await?;
 
     let mut snapshots = Vec::new();
     let lockfile_path = no_save::lockfile_path_for_project(&root)?;
@@ -82,12 +89,21 @@ pub(super) async fn run(
             &mut install_opts,
             args.dangerously_allow_all_builds,
         );
+        install_opts.ignore_scripts = args.ignore_scripts;
         install_opts.workspace_filter = filter.clone();
+        install_opts.run_dev_preinstall = true;
+        install_opts.script_command = "add";
+        let edited: Vec<_> = matched.iter().map(|pkg| pkg.dir.clone()).collect();
+        super::apply_add_lifecycle(&mut install_opts, &edited)?;
         // See the sibling `aube add` codepath for why this flag is set:
         // live OSV API on the resolved transitives.
         install_opts.osv_transitive_check = true;
         // `--lockfile-only`: write the lockfile + manifests, skip linking.
         install_opts.lockfile_only = args.lockfile_only;
+        // Same as the sibling path: the chained install owns the hooks.
+        install_opts.pnpmfile = args.pnpmfile.clone();
+        install_opts.global_pnpmfile = args.global_pnpmfile.clone();
+        install_opts.ignore_pnpmfile = args.ignore_pnpmfile;
         install::run_with_project_lock(install_opts, &lock).await?;
         Ok(())
     }

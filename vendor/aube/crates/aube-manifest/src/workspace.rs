@@ -8,9 +8,10 @@
 //!   workspace-level mutation.
 //! - [`mutations`] — the domain-specific mutations: `allowBuilds`
 //!   and `patchedDependencies`.
-//! - [`yaml_patch`] — comment-preserving diff-and-apply on top of
-//!   `yamlpatch`, with a manual injector for new sub-mappings (which
-//!   `yamlpatch::Op::Add` mishandles).
+//! - `yaml_patch` — optional comment-preserving diff-and-apply on top
+//!   of `yamlpatch`, with a manual injector for new sub-mappings (which
+//!   `yamlpatch::Op::Add` mishandles). Enabled by the
+//!   `workspace-yaml-preserve` feature.
 //!
 //! The submodules are private; the public API is re-exported from
 //! this module so callers continue to use `aube_manifest::workspace::X`.
@@ -18,6 +19,7 @@
 mod config;
 mod edits;
 mod mutations;
+#[cfg(feature = "workspace-yaml-preserve")]
 mod yaml_patch;
 
 pub use config::{
@@ -539,6 +541,39 @@ updateConfig:
     }
 
     #[test]
+    fn edit_workspace_yaml_invalidates_loaded_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aube-workspace.yaml");
+        std::fs::write(&path, "catalog:\n  is-odd: 0.1.2\n").unwrap();
+
+        let before = WorkspaceConfig::load(dir.path()).unwrap();
+        assert_eq!(
+            before.catalog.get("is-odd").map(String::as_str),
+            Some("0.1.2")
+        );
+
+        edit_workspace_yaml(&path, |map| {
+            let catalog = map
+                .get_mut(yaml_serde::Value::String("catalog".to_string()))
+                .and_then(yaml_serde::Value::as_mapping_mut)
+                .unwrap();
+            catalog.insert(
+                yaml_serde::Value::String("is-odd".to_string()),
+                yaml_serde::Value::String("3.0.1".to_string()),
+            );
+            Ok(())
+        })
+        .unwrap();
+
+        let after = WorkspaceConfig::load(dir.path()).unwrap();
+        assert_eq!(
+            after.catalog.get("is-odd").map(String::as_str),
+            Some("3.0.1")
+        );
+    }
+
+    #[cfg(feature = "workspace-yaml-preserve")]
+    #[test]
     fn edit_workspace_yaml_preserves_comments_around_unchanged_keys() {
         // The whole point of going through yamlpatch: a structural
         // change to one key must not strip comments attached to keys
@@ -585,6 +620,7 @@ allowBuilds:
         );
     }
 
+    #[cfg(feature = "workspace-yaml-preserve")]
     #[test]
     fn upsert_workspace_patched_dependency_preserves_comments_on_real_change() {
         // patch-commit on a workspace yaml that already documents
@@ -828,6 +864,7 @@ patchedDependencies:
         );
     }
 
+    #[cfg(feature = "workspace-yaml-preserve")]
     #[test]
     fn remove_workspace_patched_dependency_preserves_comments_on_real_remove() {
         // Removing one patch entry from a multi-entry list must keep

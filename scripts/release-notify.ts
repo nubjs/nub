@@ -193,7 +193,11 @@ function main() {
   let prevTag = prevArg;
   if (!prevTag) {
     try {
-      prevTag = git(["describe", "--tags", "--abbrev=0", `${newTag}^`]);
+      // `--exclude 'v[0-9]'` skips the floating `v<major>` tag that release.yml
+      // moves to each stable release (`uses: nubjs/nub/<name>@v0`
+      // resolves through it): it shares a commit with the latest release and
+      // wins git's tie-break, so without the exclusion the "previous tag" is v0.
+      prevTag = git(["describe", "--tags", "--abbrev=0", "--exclude", "v[0-9]", `${newTag}^`]);
     } catch {
       console.error(
         `release-notify: could not auto-detect the previous tag for ${newTag}. Pass it explicitly.`,

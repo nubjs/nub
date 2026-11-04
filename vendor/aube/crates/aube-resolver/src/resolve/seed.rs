@@ -64,13 +64,16 @@ pub(super) fn seed_direct_deps(
             ));
         }
         if auto_install_peers {
-            for (name, range) in manifest.non_optional_peer_dependencies() {
-                if manifest.dependencies.contains_key(name)
+            for (name, range) in &manifest.peer_dependencies {
+                if manifest.peer_dependency_is_optional(name)
+                    || manifest.dependencies.contains_key(name)
                     || manifest.dev_dependencies.contains_key(name)
                     || manifest.optional_dependencies.contains_key(name)
                 {
                     continue;
                 }
+                // pnpm materializes an importer's own required peers in its
+                // dependencies section when autoInstallPeers is enabled.
                 queue.push_back(ResolveTask::root(
                     name.clone(),
                     range.clone(),

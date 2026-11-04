@@ -28,6 +28,31 @@ pub(crate) fn pick_override_spec(
     // whose version req (`>=7 <9`) the real version doesn't satisfy.
     // Reported in #174.
     let effective_range = strip_alias_prefix(task_range);
+    pick_best(rules, ancestors, |r, frames| {
+        override_rule::matches(r, task_name, effective_range, frames)
+    })
+}
+
+/// [`pick_override_spec`] for a dependency declared as `catalog_spec`
+/// (`catalog:` / `catalog:<name>`), matched the way pnpm matches it: against
+/// the reference text, before the catalog is consulted. See
+/// [`override_rule::matches_catalog_reference`].
+pub(crate) fn pick_catalog_override_spec(
+    rules: &[override_rule::OverrideRule],
+    task_name: &str,
+    catalog_spec: &str,
+    ancestors: &[(String, String)],
+) -> Option<String> {
+    pick_best(rules, ancestors, |r, frames| {
+        override_rule::matches_catalog_reference(r, task_name, catalog_spec, frames)
+    })
+}
+
+fn pick_best(
+    rules: &[override_rule::OverrideRule],
+    ancestors: &[(String, String)],
+    is_match: impl Fn(&override_rule::OverrideRule, &[override_rule::AncestorFrame<'_>]) -> bool,
+) -> Option<String> {
     let frames: Vec<override_rule::AncestorFrame<'_>> = ancestors
         .iter()
         .map(|(n, v)| override_rule::AncestorFrame {
@@ -37,7 +62,7 @@ pub(crate) fn pick_override_spec(
         .collect();
     rules
         .iter()
-        .filter(|r| override_rule::matches(r, task_name, effective_range, &frames))
+        .filter(|r| is_match(r, &frames))
         .max_by_key(|r| {
             let named_parents = r.parents.iter().filter(|p| !p.is_wildcard()).count();
             named_parents * 2 + usize::from(r.target.version_req.is_some())

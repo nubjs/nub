@@ -7,8 +7,6 @@
 //! `aube add -g` installs live. Bins are symlinked out of it into
 //! `aube bin -g` (a separate, PATH-visible directory).
 
-use clap::Args;
-
 pub const AFTER_LONG_HELP: &str = "\
 Examples:
 
@@ -19,10 +17,10 @@ Examples:
   /home/user/.local/share/aube/global/node_modules
 ";
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct RootArgs {
     /// Print the global package directory instead of the project's
-    #[arg(short, long)]
+    #[usage(short, long)]
     pub global: bool,
 }
 

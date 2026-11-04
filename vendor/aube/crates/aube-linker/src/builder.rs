@@ -23,6 +23,7 @@ impl Linker {
             virtual_store: store.virtual_store_dir(),
             store: store.clone(),
             use_global_virtual_store,
+            project_local_dep_paths: rustc_hash::FxHashSet::default(),
             strategy,
             patches: Patches::new(),
             hashes: None,
@@ -43,23 +44,40 @@ impl Linker {
             aube_dir_override: None,
             no_integrity_read_keys: std::collections::BTreeMap::new(),
             link_progress: None,
-            disk_materialize: std::collections::HashSet::new(),
+            disk_materialize: crate::PackageNameMatcher::default(),
+            reusable_hoisted: std::collections::HashSet::new(),
         }
+    }
+
+    /// Vouch that these dep paths are already correctly and completely placed
+    /// on disk, letting the hoisted pass skip its wipe-and-refill for them.
+    ///
+    /// The caller owns this judgement (see the field docs on [`Linker`]): it
+    /// has to combine an unchanged content fingerprint with proof that the
+    /// last link ran to completion. Vouching for a dep path whose tree is
+    /// actually partial would leave that package permanently broken, so the
+    /// driver errs toward not vouching. Standalone aube never calls this, so
+    /// the set stays empty and the hoisted pass is unchanged.
+    pub fn with_reusable_hoisted(mut self, dep_paths: std::collections::HashSet<String>) -> Self {
+        self.reusable_hoisted = dep_paths;
+        self
     }
 
     /// Force a set of packages to materialize as real project-local directories
     /// even under the global virtual store (see the field docs on [`Linker`]).
-    /// Names are matched exactly against each graph package. Standalone aube and
-    /// every test omit this → the set is empty and the GVS pass is unchanged.
+    /// Entries are matched as package-name patterns against each graph package.
+    /// Standalone aube and every test omit this → the set is empty and the GVS
+    /// pass is unchanged.
     pub fn with_disk_materialize(mut self, names: &[String]) -> Self {
-        self.disk_materialize = names.iter().cloned().collect();
+        self.disk_materialize = crate::PackageNameMatcher::new(names);
         self
     }
 
-    /// Whether `pkg_name` is on the disk-materialize list. Consulted only in
-    /// the global-virtual-store link pass; always false when the list is empty.
+    /// Whether `pkg_name` is on the disk-materialize list. Consulted once per
+    /// graph package in the global-virtual-store link pass — hence the
+    /// compiled-once matcher; always false when the list is empty.
     pub(crate) fn disk_materialize_matches(&self, pkg_name: &str) -> bool {
-        !self.disk_materialize.is_empty() && self.disk_materialize.contains(pkg_name)
+        self.disk_materialize.matches(pkg_name)
     }
 
     /// Supply a shared counter the materialize pass bumps once per linked
@@ -201,6 +219,19 @@ impl Linker {
         self
     }
 
+    /// Materialize selected dep paths into the project-local virtual
+    /// store while all other packages continue to use the GVS.
+    ///
+    /// Callers use this for package-specific compatibility transforms
+    /// that must never mutate a shared store entry.
+    pub fn with_project_local_dep_paths(
+        mut self,
+        dep_paths: impl IntoIterator<Item = String>,
+    ) -> Self {
+        self.project_local_dep_paths = dep_paths.into_iter().collect();
+        self
+    }
+
     pub(crate) fn link_parallelism(&self) -> usize {
         self.link_concurrency
             .unwrap_or_else(default_linker_parallelism)
@@ -291,8 +322,8 @@ impl Linker {
     /// copy via the root-level symlink, so consumer code is
     /// unaffected. Default false (pnpm parity). No-op under
     /// `virtualStoreOnly=true` (no per-importer symlink pass runs)
-    /// and under `NodeLinker::Hoisted` (each importer gets an
-    /// independent flat tree — no shared root to dedupe against).
+    /// and under `NodeLinker::Hoisted` (its workspace-wide placement
+    /// plan deduplicates compatible packages independently).
     pub fn with_dedupe_direct_deps(mut self, on: bool) -> Self {
         self.dedupe_direct_deps = on;
         self

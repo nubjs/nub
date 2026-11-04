@@ -4,9 +4,11 @@
     "error-codes:gen": "cargo run --manifest-path ../Cargo.toml -p aube-codes --bin generate-error-codes-docs",
     "data:gen": "npm run settings:gen && npm run error-codes:gen",
     "docs:dev": "npm run data:gen && vitepress dev",
-    "docs:build": "npm run data:gen && vitepress build",
+    "docs:build": "npm run data:gen && npm run og:test && vitepress build && npm run og:generate",
     "docs:preview": "vitepress preview",
-    "icons:render": "node scripts/render-icons.mjs"
+    "icons:render": "node scripts/render-icons.mjs",
+    "og:generate": "node scripts/generate-og-images.mjs",
+    "og:test": "node --test scripts/generate-og-images.test.mjs"
   },
   "pnpm": {
     "supportedArchitectures": {

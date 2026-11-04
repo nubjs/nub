@@ -1,0 +1,20 @@
+# Frozen C ABI export set for aube-ffi.
+#
+# One exported symbol per line, sorted. The `api-stability` job in
+# .github/workflows/ci.yml builds the cdylib, reads its dynamic symbol
+# table, and fails the PR if the `aube_`-prefixed exports drift from
+# this list.
+#
+# Removing or renaming a line is a breaking C ABI change: mark the PR
+# breaking (a `!` in the conventional-commit title, e.g. `feat(ffi)!:`,
+# or the `breaking-api` label) and update this file in the same PR.
+# Adding a new export is non-breaking; append it here so CI stays green.
+#
+# Blank lines and `#` comments are ignored.
+aube_add
+aube_cancel
+aube_events_next
+aube_init
+aube_install
+aube_string_free
+aube_wait

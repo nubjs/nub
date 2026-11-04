@@ -1,9 +1,9 @@
 ---
 title: GitHub Action
-description: A drop-in replacement for the official setup-node action. Swap one line in your workflow and Nub installs itself, provisions the project's pinned Node, and fronts it on PATH so every step keeps working unchanged.
+description: A drop-in replacement for the official setup-node action. Swap one line in your workflow and Nub installs itself, provisions the project's pinned Node, and fronts it on PATH.
 ---
 
-A drop-in for [`actions/setup-node`](https://github.com/actions/setup-node). Swap one line and your workflow keeps working:
+A drop-in for [`actions/setup-node`](https://github.com/actions/setup-node) — swap one line:
 
 ```diff
 steps:
@@ -14,7 +14,7 @@ steps:
   - run: nub run test
 ```
 
-Everything that follows resolves to the project's pinned Node — the same contract as setup-node. Bare `node`, `npm`, and `npx` in later steps run the pinned version, because the action fronts that Node's bin directory on the runner's global PATH. The full [`actions/setup-node` documentation](https://github.com/actions/setup-node#readme) describes the surface this action mirrors.
+Everything that follows resolves to the project's pinned Node — the same contract as setup-node. Bare `node`, `npm`, and `npx` in later steps run the pinned version, because the action fronts that Node's bin directory on the runner's global PATH.
 
 ```yaml
 - uses: actions/checkout@v4
@@ -23,21 +23,91 @@ Everything that follows resolves to the project's pinned Node — the same contr
 - run: nub install
 ```
 
+<Callout>
+Read the [full docs](https://github.com/actions/setup-node#readme) on github.com. This action accepts the same inputs.
+</Callout>
+
 ## How it works
 
-The action installs the `nub` CLI, then eagerly provisions the project's pinned Node into Nub's cache during the setup step — downloaded and ready before any of your steps run, never lazily mid-build. The pin is resolved from the project's Node-version sources, in this order:
+The action installs the `nub` CLI from the release archive for the runner's platform, verified against the release's sha256 sidecar, into the runner tool cache, then provisions the project's pinned Node into Nub's cache during the setup step, before any of your steps run. If the archive install fails, the action falls back to `npm install -g @nubjs/nub`. The pin is resolved from the project's Node-version sources, in this order:
 
 1. `package.json#/devEngines/runtime`
 2. `.node-version`
 3. `.nvmrc`
-4. `.tool-versions` (the asdf/mise file's `nodejs` line)
+4. `.tool-versions` (the asdf/mise file's `nodejs` or `node` line)
 5. `package.json#/engines/node`
 
-That resolved Node's bin directory is added to the global PATH, so bare `node`/`npm`/`npx` and every subsequent step see the pinned version — the same PATH guarantee setup-node gives. A project with no pin is fine: the eager step skips cleanly and Nub provisions at runtime instead.
+That resolved Node's bin directory is added to the global PATH, so bare `node`/`npm`/`npx` and every subsequent step see the pinned version. With no pin declared, the eager step skips and Nub provisions at runtime.
 
 Because the pin lives in the repository, `actions/checkout` must run before this action.
 
-All `actions/setup-node` inputs are accepted, so the swap is always mechanical — inputs Nub can't honor are accepted and ignored rather than erroring.
+## Beside setup-node
+
+The action also runs after `actions/setup-node` in a workflow that keeps it. The install line is what changes:
+
+```diff
+  - uses: actions/setup-node@v4
+    with:
+      node-version: 22
+      cache: npm
++ - uses: nubjs/setup-nub@v0
++   with:
++     provision-node: false
+- - run: npm ci
++ - run: nub install --frozen-lockfile
+  - run: npm test
+```
+
+`nub install --frozen-lockfile` reads the existing `package-lock.json` unchanged, and `npm test` runs the real npm as before. `provision-node: false` leaves the Node that setup-node put on PATH in place; without it this action fronts the project's own pin. The `cache: npm` line can stay: it restores npm's own cache, which Nub does not read, and this action caches Nub's store by default.
+
+## setup-node, with Nub installed
+
+[`nubjs/nub/setup-node`](https://github.com/nubjs/nub/tree/main/setup-node) takes the inputs and outputs of `actions/setup-node` and installs `nub` beside it:
+
+```yaml
+- uses: actions/checkout@v4
+- uses: nubjs/nub/setup-node@v0
+- run: npm ci
+- run: npm test
+```
+
+Two defaults differ from the action above. With no `node-version` input, the runner's Node stays when the project's pin allows it or when there is no pin; only a pin that excludes the runner's Node is downloaded and put first on PATH, with a notice in the job log. And the package-manager shims are on by default: `npm`, `pnpm` and `yarn` in later steps run the version the project pins in `packageManager` or `devEngines`, provisioned on demand. `provision-node: false` and `shim: false` turn each off. The inputs are listed in [its README](https://github.com/nubjs/nub/tree/main/setup-node#inputs).
+
+## The install step only
+
+[`nubjs/nub/install`](https://github.com/nubjs/nub/tree/main/install) replaces the line that runs `npm ci`, `pnpm install --frozen-lockfile`, `yarn install --immutable` or `bun install --frozen-lockfile`, and changes nothing else:
+
+```diff
+  - uses: actions/setup-node@v4
+    with:
+      node-version: 22
+      cache: npm
+- - run: npm ci
++ - uses: nubjs/nub/install@v0
+  - run: npm test
+```
+
+Nub reads the lockfile unchanged, installs it into `node_modules`, and caches its store across runs, keyed on the lockfile. Node and the package managers on PATH are left alone. `working-directory` points the install at a subdirectory, `frozen-lockfile: false` lets it update the lockfile as `npm install` does, and `shim: true` adds the package-manager shims for later steps. The inputs are listed in [its README](https://github.com/nubjs/nub/tree/main/install#inputs).
+
+## npm ci, on Nub
+
+[`nubjs/nub/npm-ci`](https://github.com/nubjs/nub/tree/main/npm-ci) is the `npm ci` step for a project with a `package-lock.json`. It installs exactly what the lockfile records, under `npm ci`'s own contract, and leaves the lockfile as it found it:
+
+```diff
+  - uses: actions/setup-node@v4
+    with:
+      node-version: 22
+      cache: npm
+- - run: npm ci
++ - uses: nubjs/nub/npm-ci@v0
++   with:
++     lockfile: package-lock.json
+  - run: npm test
+```
+
+Every package is installed at the version and from the `resolved` URL the lockfile records and checked against its `integrity` hash; nothing is resolved against the registry. `node_modules` is removed first, the tree is hoisted as npm lays it out, every lifecycle script runs as it does under npm and under the job's `node` (a `.nvmrc` or `engines` pin in the project is not consulted and no Node is downloaded), and the install fails when the lockfile and `package.json` disagree. The action hashes the lockfile before and after the install and fails if a byte changed; the hash is its `lockfile-sha256` output. `args` takes `npm ci`'s own flags (`--omit=dev`, `--ignore-scripts`); a flag the engine does not honor fails the action rather than running npm.
+
+[`install`](#the-install-step-only) takes any lockfile and applies Nub's own layout and [build-script posture](/docs/install#lifecycle-scripts). `npm-ci` applies npm's, so a workflow that ran `npm ci` behaves as it did. The inputs are listed in [its README](https://github.com/nubjs/nub/tree/main/npm-ci#inputs).
 
 ## Inputs
 
@@ -55,8 +125,10 @@ All `actions/setup-node` inputs are accepted, so the swap is always mechanical �
 | `scope` | | Scope for a scoped registry; falls back to the repository owner for GitHub Packages. |
 | `always-auth` | `false` | Authenticate on every registry request. |
 | `token` | `github.token` | Token for GitHub-API rate-limit relief when resolving Nub's version range. |
+| `shim` | `false` | Run `nub pm shim` after install and put the shim directory first on PATH, so `npm`, `pnpm`, and `yarn` in later steps run the package manager the project pins. |
+| `provision-node` | `true` | Set false to leave Node alone: nothing provisioned, nothing fronted on PATH, and the `node-version` output empty. For a job where `actions/setup-node` already ran. |
 
-The setup-node inputs `check-latest`, `architecture`, `mirror`, and `mirror-token` are accepted and ignored — present so a swap never errors, with no effect. The `version` input is a deprecated alias for `nub-version` and emits a warning.
+The setup-node inputs `check-latest`, `architecture`, `mirror`, and `mirror-token` are accepted and ignored. The `version` input is a deprecated alias for `nub-version` and emits a warning.
 
 ### `nub-version`
 
@@ -92,7 +164,7 @@ Read a Node version from a file, then provision and front it on PATH. Accepts `.
 
 ### `cache`
 
-Caching is on by default — it auto-enables when the project looks installable, mirroring setup-node. The auto-detection triggers on a lockfile or a `package.json` that declares `packageManager` or `devEngines`. Set the input explicitly to override:
+Caching is on by default when the project has a lockfile or a `package.json` that declares `packageManager` or `devEngines`, mirroring setup-node. Set the input explicitly to override:
 
 ```yaml
 - uses: nubjs/setup-nub@v0
@@ -112,7 +184,7 @@ The cache key is derived from the project's lockfile and the Node pin, with the 
 
 ### `package-manager-cache`
 
-The disable knob for the automatic caching above. Set false to turn caching off without setting `cache`:
+Turns the automatic caching above off without setting `cache`:
 
 ```yaml
 - uses: nubjs/setup-nub@v0
@@ -178,9 +250,13 @@ For GitHub Packages, point at the registry and the scope defaults to the reposit
     NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
 
+<Callout>
+Read the [full docs](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-npm-registry) on docs.github.com.
+</Callout>
+
 ### `scope`
 
-Scope for a scoped registry. Falls back to the repository owner for `npm.pkg.github.com`. The `.npmrc` written by `registry-url` follows the same contract as setup-node, so existing auth setups port over unchanged.
+Scope for a scoped registry. Falls back to the repository owner for `npm.pkg.github.com`. The `.npmrc` written by `registry-url` follows the same contract as setup-node.
 
 ### `always-auth`
 
@@ -188,7 +264,31 @@ Write `always-auth=true` into the `.npmrc` to authenticate on every registry req
 
 ### `token`
 
-Token for GitHub-API rate-limit relief when resolving Nub's version range (and Node downloads on GHES). Defaults to `github.token` on github.com — most workflows don't need to set this explicitly.
+Token for GitHub-API rate-limit relief when resolving Nub's version range (and Node downloads on GHES). Defaults to `github.token` on github.com.
+
+### `provision-node`
+
+Leave Node alone. Nothing is provisioned, nothing is fronted on PATH, and the `node-version` output is empty. For a job where `actions/setup-node` already put the wanted Node on PATH; `nub` still resolves the project's pin at its own invocation:
+
+```yaml
+- uses: actions/setup-node@v4
+  with:
+    node-version: {{NODE_VERSION}}
+- uses: nubjs/setup-nub@v0
+  with:
+    provision-node: false
+```
+
+### `shim`
+
+Run `nub pm shim` after install and put the shim directory first on PATH. In a project that pins a package manager through `packageManager` or `devEngines.packageManager`, `npm`, `pnpm`, and `yarn` in later steps run that pinned version, provisioned on demand. In an unpinned project they fall through to the runner's own tool. The shims do not route those commands into Nub's own installer; use `nub install` for that.
+
+```yaml
+- uses: nubjs/setup-nub@v0
+  with:
+    shim: true
+- run: pnpm install --frozen-lockfile   # the version packageManager pins
+```
 
 ## Outputs
 
@@ -201,7 +301,7 @@ Token for GitHub-API rate-limit relief when resolving Nub's version range (and N
 
 ## Differences from setup-node
 
-The drop-in is mechanical, so the differences are small and rarely surface:
+Two behaviors differ:
 
 - The `cache` input is a boolean rather than a package-manager name. A package-manager name still works (it is treated as on), since Nub keeps a single store regardless of package manager.
 - The registry `.npmrc` is written fresh to `$RUNNER_TEMP` and pointed at via `NPM_CONFIG_USERCONFIG`, rather than merged into the user `.npmrc`. Both are parsed identically by npm and Nub's package manager.
@@ -209,4 +309,4 @@ The drop-in is mechanical, so the differences are small and rarely surface:
 ## Related
 
 - [Node manager](/docs/node) — how Nub provisions and pins Node versions.
-- [Package manager](/docs/install) — the install surface the action's registry auth feeds.
+- [Package manager](/docs/install) — what `nub install` reads, including the `.npmrc` the action writes.

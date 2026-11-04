@@ -34,7 +34,14 @@ const SHELL_LANGS = new Set([
   'shell',
   'shellscript',
   'shellsession',
+  'ansi',
 ]);
+
+// An `ansi` fence is a transcript whose output lines carry their own terminal
+// colors (`src/lib/shiki-ansi.ts`), so it gets the prompt treatment only: the
+// `$ ` lines are tagged and brightened, and the output lines are left alone
+// rather than dimmed, which would paint over the captured colors.
+const PROMPT_ONLY_LANGS = new Set(['ansi']);
 
 // First non-whitespace char of the line is `$` followed by a space or EOL — a
 // prompt line. `$VAR=…` / `$(cmd)` (no following space) are not prompts.
@@ -106,7 +113,7 @@ export function transformerConsole(): ShikiTransformer {
           properties: { class: 'console-prompt' },
           children: [{ type: 'text', value: '$ ' }],
         });
-      } else {
+      } else if (!PROMPT_ONLY_LANGS.has(this.options.lang)) {
         node.properties['data-output'] = '';
       }
     },

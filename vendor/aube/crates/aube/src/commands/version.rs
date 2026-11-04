@@ -6,56 +6,56 @@
 //! and surrounding formatting are preserved — we only rewrite the string
 //! value that follows the `"version"` key.
 
-use clap::Args;
 use miette::{Context, IntoDiagnostic, miette};
 use node_semver::{Identifier, Version};
 use std::path::Path;
 use std::process::Command;
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct VersionArgs {
     /// Bump keyword or an explicit version string.
     ///
     /// Accepts `major`, `minor`, `patch`, `premajor`, `preminor`,
-    /// `prepatch`, `prerelease`, or an explicit version. When omitted,
-    /// prints the current version.
+    /// `prepatch`, `prerelease`, `from-git`, or an explicit version.
+    /// `from-git` reads the nearest reachable version-like Git tag.
+    /// When omitted, prints the current version.
     pub new_version: Option<String>,
 
     /// Allow setting the version to its current value without erroring.
-    #[arg(long)]
+    #[usage(long)]
     pub allow_same_version: bool,
 
     /// Skip `preversion` / `version` / `postversion` lifecycle scripts.
-    #[arg(long)]
+    #[usage(long)]
     pub ignore_scripts: bool,
 
     /// Emit the result as JSON instead of `v<version>` text.
-    #[arg(long)]
+    #[usage(long)]
     pub json: bool,
 
     /// Commit message template.
     ///
     /// `%s` is replaced with the new version. Defaults to `v%s`.
-    #[arg(short = 'm', long, value_name = "MSG")]
+    #[usage(short = 'm', long, value_name = "MSG")]
     pub message: Option<String>,
 
     /// Skip git pre-commit / commit-msg hooks (passes `--no-verify`).
-    #[arg(long = "no-commit-hooks", action = clap::ArgAction::SetTrue)]
+    #[usage(long = "no-commit-hooks")]
     pub no_commit_hooks: bool,
 
     /// Don't create a git commit or tag.
     ///
     /// By default `aube version` commits the manifest change and
     /// tags it `v<version>`.
-    #[arg(long = "no-git-tag-version", action = clap::ArgAction::SetTrue)]
+    #[usage(long = "no-git-tag-version")]
     pub no_git_tag_version: bool,
 
     /// Prerelease identifier to use with the `pre*` keywords (e.g. `rc`).
-    #[arg(long, value_name = "ID")]
+    #[usage(long, value_name = "ID")]
     pub preid: Option<String>,
 
     /// GPG-sign the created tag (`git tag -s`).
-    #[arg(long)]
+    #[usage(long)]
     pub sign_git_tag: bool,
 }
 
@@ -79,7 +79,12 @@ pub async fn run(args: VersionArgs) -> miette::Result<()> {
         return Ok(());
     };
 
-    let new_version = compute_new_version(&current, bump, args.preid.as_deref())?;
+    let requested = if bump == "from-git" {
+        version_from_git(&cwd)?
+    } else {
+        bump.to_string()
+    };
+    let new_version = compute_new_version(&current, &requested, args.preid.as_deref())?;
     if new_version == current && !args.allow_same_version {
         return Err(miette!(
             "version not changed: already at {current} (pass --allow-same-version to force)"
@@ -431,6 +436,49 @@ fn is_git_repo(cwd: &Path) -> bool {
     matches!(out, Ok(o) if o.status.success())
 }
 
+fn version_from_git(cwd: &Path) -> miette::Result<String> {
+    let mut excluded = Vec::new();
+    loop {
+        let mut command = Command::new("git");
+        command.args(["describe", "--tags", "--abbrev=0", "--match=*.*.*"]);
+        for tag in &excluded {
+            command.arg(format!("--exclude={tag}"));
+        }
+        let output = command.current_dir(cwd).output().map_err(|error| {
+            miette!(
+                code = aube_codes::errors::ERR_AUBE_GIT_ERROR,
+                "failed to read version from git tags: {error}"
+            )
+        })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(miette!(
+                code = aube_codes::errors::ERR_AUBE_GIT_ERROR,
+                "git describe failed while resolving `from-git`: {}",
+                stderr.trim()
+            ));
+        }
+        let tag = String::from_utf8(output.stdout).map_err(|error| {
+            miette!(
+                code = aube_codes::errors::ERR_AUBE_GIT_ERROR,
+                "git version tag is not UTF-8: {error}"
+            )
+        })?;
+        let tag = tag.trim();
+        let candidate = tag.strip_prefix('v').unwrap_or(tag);
+        if let Ok(version) = Version::parse(candidate) {
+            return Ok(version.to_string());
+        }
+        if excluded.iter().any(|excluded| excluded == tag) {
+            return Err(miette!(
+                code = aube_codes::errors::ERR_AUBE_GIT_ERROR,
+                "git describe repeatedly returned excluded non-version tag {tag:?}"
+            ));
+        }
+        excluded.push(tag.to_string());
+    }
+}
+
 fn git_commit_and_tag(
     cwd: &Path,
     new_version: &str,
@@ -610,5 +658,75 @@ mod tests {
     #[test]
     fn invalid_explicit_rejected() {
         assert!(compute_new_version("1.2.3", "not-a-version", None).is_err());
+    }
+
+    #[test]
+    fn reads_version_from_nearest_reachable_git_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git(dir.path(), &["init"]).unwrap();
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+        run_git(dir.path(), &["add", "package.json"]).unwrap();
+        run_git(
+            dir.path(),
+            &[
+                "-c",
+                "user.name=aube",
+                "-c",
+                "user.email=aube@example.com",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        )
+        .unwrap();
+        run_git(dir.path(), &["tag", "v3.4.5"]).unwrap();
+        std::fs::write(dir.path().join("package.json"), "{\"name\":\"example\"}").unwrap();
+        run_git(dir.path(), &["add", "package.json"]).unwrap();
+        run_git(
+            dir.path(),
+            &[
+                "-c",
+                "user.name=aube",
+                "-c",
+                "user.email=aube@example.com",
+                "commit",
+                "-m",
+                "newer",
+            ],
+        )
+        .unwrap();
+        run_git(dir.path(), &["tag", "release-9.9.9"]).unwrap();
+        run_git(dir.path(), &["tag", "foo.bar.baz"]).unwrap();
+
+        assert_eq!(version_from_git(dir.path()).unwrap(), "3.4.5");
+    }
+
+    #[test]
+    fn reports_git_error_after_excluding_every_non_version_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git(dir.path(), &["init"]).unwrap();
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+        run_git(dir.path(), &["add", "package.json"]).unwrap();
+        run_git(
+            dir.path(),
+            &[
+                "-c",
+                "user.name=aube",
+                "-c",
+                "user.email=aube@example.com",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        )
+        .unwrap();
+        run_git(dir.path(), &["tag", "release-9.9.9"]).unwrap();
+
+        let error = version_from_git(dir.path()).unwrap_err();
+        assert_eq!(
+            error.code().map(|code| code.to_string()).as_deref(),
+            Some(aube_codes::errors::ERR_AUBE_GIT_ERROR)
+        );
+        assert!(error.to_string().contains("git describe failed"));
     }
 }

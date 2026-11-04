@@ -9,6 +9,7 @@ use super::injection::{materialize_injections, plan_injections};
 use super::rewrite::{DeployRoot, rewrite_local_refs};
 use crate::commands::CatalogMap;
 use crate::commands::pack::collect_package_files;
+use crate::patches::ResolvedPatch;
 use miette::{Context, IntoDiagnostic, miette};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -39,6 +40,7 @@ pub(super) fn stage_one(
     target: &Path,
     ws_index: &BTreeMap<String, (PathBuf, Option<String>)>,
     catalogs: &CatalogMap,
+    patches: &[&ResolvedPatch],
     args: &DeployArgs,
     deploy_all_files: bool,
 ) -> miette::Result<StagedDeploy> {
@@ -69,8 +71,20 @@ pub(super) fn stage_one(
     } else {
         collect_package_files(source_pkg_dir, &manifest)?
     };
+    let deploy_patch_paths: std::collections::HashSet<PathBuf> = patches
+        .iter()
+        .map(|patch| {
+            PathBuf::from(format!(".{}-deploy-patches", aube_util::embedder().name))
+                .join(format!("{}.patch", patch.content_hash()))
+        })
+        .collect();
 
     for (src, rel) in &files {
+        // Patch metadata owns its exact generated paths. Other package assets
+        // in the same directory remain part of the deploy payload.
+        if deploy_patch_paths.contains(Path::new(rel)) {
+            continue;
+        }
         let dst = target.join(rel);
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent)
@@ -127,6 +141,7 @@ pub(super) fn stage_one(
             root,
         )?;
     }
+    stage_patches(patches, target)?;
 
     Ok(StagedDeploy {
         name,
@@ -134,6 +149,44 @@ pub(super) fn stage_one(
         target: target.to_path_buf(),
         bundled_local_refs: !plan.is_empty(),
     })
+}
+
+/// Carry workspace-root patches into the standalone deploy target.
+///
+/// Patch files use a content-addressed path in aube's reserved deploy metadata
+/// directory. This avoids colliding with a selected package that publishes a
+/// file at the source workspace's declared patch path.
+fn stage_patches(patches: &[&ResolvedPatch], target: &Path) -> miette::Result<()> {
+    for patch in patches {
+        let key = &patch.key;
+        let rel = PathBuf::from(format!(".{}-deploy-patches", aube_util::embedder().name))
+            .join(format!("{}.patch", patch.content_hash()));
+        let dst = target.join(&rel);
+        if dst.exists() {
+            let existing = std::fs::read_to_string(&dst)
+                .into_diagnostic()
+                .wrap_err_with(|| format!("deploy: failed to read {}", dst.display()))?;
+            if existing != patch.content {
+                return Err(miette!(
+                    code = aube_codes::errors::ERR_AUBE_PATCH_FAILED,
+                    "deploy: patch for {key} conflicts with staged file {}",
+                    dst.display()
+                ));
+            }
+        } else {
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)
+                    .into_diagnostic()
+                    .wrap_err_with(|| format!("failed to create {}", parent.display()))?;
+            }
+            std::fs::write(&dst, &patch.content)
+                .into_diagnostic()
+                .wrap_err_with(|| format!("deploy: failed to write {}", dst.display()))?;
+        }
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        crate::patches::upsert_patched_dependency(target, key, &rel)?;
+    }
+    Ok(())
 }
 
 /// Walk `source` recursively and collect every file path. Skips only

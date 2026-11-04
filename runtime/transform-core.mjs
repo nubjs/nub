@@ -112,7 +112,7 @@ function __getBuiltin(id) {
 // Builtin bindings + the native addon, populated by __ensureBuiltins(). They stay
 // `let` (not `const`) because on the floor they are filled on first hook use rather
 // than at module eval — see the lazy-vs-eager note above.
-let createRequire, __require, module, readFileSync, writeFileSync, mkdirSync, statSync;
+let createRequire, __require, module, readFileSync, writeFileSync, mkdirSync, statSync, realpathSync;
 let fileURLToPath, pathToFileURL, join, dirname;
 // Nub's N-API addon — the in-process TS/JSX transpiler (`transform`,
 // `transformCached`, `detectModuleInfo`), the tsconfig reader + additive
@@ -138,16 +138,52 @@ function __ensureBuiltins() {
   ({ createRequire } = __getBuiltin("node:module"));
   __require = createRequire(import.meta.url);
   module = __getBuiltin("node:module");
-  ({ readFileSync, writeFileSync, mkdirSync, statSync } = __getBuiltin("node:fs"));
+  ({ readFileSync, writeFileSync, mkdirSync, statSync, realpathSync } = __getBuiltin("node:fs"));
   ({ fileURLToPath, pathToFileURL } = __getBuiltin("node:url"));
   ({ join, dirname } = __getBuiltin("node:path"));
   for (const rel of ["./addons/nub-native.node", "../runtime/addons/nub-native.node"]) {
     try { nubNative = __require(fileURLToPath(new URL(rel, import.meta.url))); break; } catch {}
   }
+  // Standalone-loader distribution (`node --import <pkg>`): the addon rides a
+  // per-platform npm package rather than a sibling addons/ dir; the loader entry
+  // resolves it and hands the absolute path over via internal env plumbing
+  // (loader-platform.cjs ensureAddonEnv). LAST in probe order, deliberately: a
+  // nub-CLI process nested under the standalone loader inherits the env var, and
+  // probing it first would load the outer loader's (possibly differently-
+  // versioned) addon over the CLI's own bundled one.
+  if (!nubNative && process.env.__NUB_ADDON_PATH) {
+    try { nubNative = __require(process.env.__NUB_ADDON_PATH); } catch {}
+  }
 }
 // Fast tier: getBuiltinModule is present, so acquire everything now (preserves the
 // original eager-at-eval behavior). The floor defers to first-use — see above.
 if (typeof process.getBuiltinModule === "function") __ensureBuiltins();
+
+// The resolved `nub.jsonc` snapshot. The Rust frontend resolves it once, after
+// the final cwd is known, and transports it unchanged through nested shim
+// launches, so every process in a run transpiles against the same config. This
+// is internal process plumbing, not a user-facing environment knob.
+let runtimeConfig = {};
+try { runtimeConfig = JSON.parse(process.env.__NUB_RUNTIME_CONFIG || "{}"); } catch {}
+const RUNTIME_LOADER = runtimeConfig.loader || {};
+const RUNTIME_TSCONFIG = runtimeConfig.tsconfig || undefined;
+// Transform-only TypeScript options may live directly in `nub.jsonc`. They
+// override the selected/nearest tsconfig because the project runtime config is
+// the more specific source for what Nub executes; `baseUrl`/`paths` stay in the
+// tsconfig reader, where editors and the resolver share them.
+const RUNTIME_COMPILER_OPTIONS = {};
+for (const key of [
+  "jsx",
+  "jsxFactory",
+  "jsxFragmentFactory",
+  "jsxImportSource",
+  "experimentalDecorators",
+  "emitDecoratorMetadata",
+]) {
+  if (runtimeConfig[key] !== null && runtimeConfig[key] !== undefined) {
+    RUNTIME_COMPILER_OPTIONS[key] = runtimeConfig[key];
+  }
+}
 
 // NOTE: the transpile-cache version component is no longer read here. nub's
 // version is baked into the native addon at compile time (`env!("CARGO_PKG_VERSION")`
@@ -171,8 +207,49 @@ export const TRANSPILE_EXTS = new Set([".ts", ".tsx", ".mts", ".cts", ".jsx"]);
 // `maybeTranspilePlainJs` gate); a no-op plain-JS file falls through to Node's
 // native loader untouched, byte-identical. node_modules is excluded at the gate.
 export const PLAIN_JS_EXTS = new Set([".js", ".mjs", ".cjs"]);
-export const DATA_EXTS = { ".jsonc": "jsonc", ".json5": "json5", ".toml": "toml", ".yaml": "yaml", ".yml": "yaml", ".txt": "txt" };
+// A bare `commonjs`/`module` format on a file nub would transpile can only have
+// been assigned by a hook layered ABOVE nub's. Node's resolver labels a `.ts` file
+// `commonjs-typescript`/`module-typescript` (or `typescript` when the package has
+// no `type`) and leaves `.jsx` unlabelled, and nub's own resolve returns no format;
+// the bare form is what tsx's resolve hook writes (getFormatFromFileUrl), and its
+// load hook then expects the RAW source back from `nextLoad` so it can run its own
+// module-format transform — a mixed `import` + `require` file becomes CJS there,
+// where nub's syntax detection would make it ESM and `require` undefined. Both
+// tiers step aside on this signal, the fast tier only once the user registration
+// is known to carry a load hook (preload-common.cjs). Plain JS is excluded: Node
+// assigns those the bare form itself.
+export function outerHookOwnsFormat(format, ext) {
+  return (format === "commonjs" || format === "module") && TRANSPILE_EXTS.has(ext) && !PLAIN_JS_EXTS.has(ext);
+}
+// The data loaders nub SHIPS — a runtime feature, not a project setting, so they stay
+// in force inside node_modules too (see dataExtsFor).
+const BUILTIN_DATA_EXTS = { ".jsonc": "jsonc", ".json5": "json5", ".toml": "toml", ".yaml": "yaml", ".yml": "yaml", ".txt": "txt" };
+// The built-ins with this project's `loader` config layered on top: an extension
+// pointed at a TS/JSX dialect moves to TRANSPILE_EXTS, anything else becomes (or
+// overrides) a data loader.
+const PROJECT_DATA_EXTS = { ...BUILTIN_DATA_EXTS };
+for (const [ext, loader] of Object.entries(RUNTIME_LOADER)) {
+  if (loader === "ts" || loader === "tsx" || loader === "jsx") {
+    delete PROJECT_DATA_EXTS[ext];
+    TRANSPILE_EXTS.add(ext);
+  } else {
+    TRANSPILE_EXTS.delete(ext);
+    PROJECT_DATA_EXTS[ext] = loader === "text" ? "txt" : loader;
+  }
+}
 export const TS_PARENT_EXTS = new Set([".ts", ".tsx", ".mts", ".cts"]);
+
+// Which data-loader map governs `url`. A project's `loader` config must not reach code
+// the project didn't write — `{".json": "text"}` would otherwise turn every dependency's
+// JSON import into a string, and pointing a built-in extension at a transpile loader
+// would DELETE a loader a dependency relies on. Same project/dependency boundary the
+// TRANSPILE_EXTS and PLAIN_JS_EXTS dispatches draw with `!isNodeModules`, but as a map
+// SWAP rather than a bail: the built-in half must keep serving deps. Both the dispatch
+// sites and loadData() route through here, so "does this load?" and "as what?" can
+// never disagree.
+export function dataExtsFor(url) {
+  return isNodeModules(url) ? BUILTIN_DATA_EXTS : PROJECT_DATA_EXTS;
+}
 
 // Packages resolved from Nub's distribution, not the user's.
 export const VENDORED_PACKAGES = new Set(["@oxc-project/runtime"]);
@@ -220,11 +297,15 @@ export function getTsconfigForDir(dir) {
   if (tsconfigCache.has(dir)) return tsconfigCache.get(dir);
   // { path: string|null, compilerOptions: object|null, tsconfigHash: string }
   const result = nubNative
-    ? nubNative.loadTsconfig(dir)
+    ? nubNative.loadTsconfig(dir, RUNTIME_TSCONFIG)
     : { path: null, compilerOptions: null, tsconfigHash: "" };
-  tsconfigCache.set(dir, result);
-  if (result.path) _reportDep?.(result.path);
-  return result;
+  const compilerOptions = Object.keys(RUNTIME_COMPILER_OPTIONS).length > 0
+    ? { ...(result.compilerOptions || {}), ...RUNTIME_COMPILER_OPTIONS }
+    : result.compilerOptions;
+  const resolved = { ...result, compilerOptions };
+  tsconfigCache.set(dir, resolved);
+  if (resolved.path) _reportDep?.(resolved.path);
+  return resolved;
 }
 
 // The NEAREST package.json's `type` decides the format of ambiguous extensions
@@ -240,7 +321,9 @@ export function getPackageType(dir) {
   for (;;) {
     const pkgPath = join(current, "package.json");
     if (fileExists(pkgPath)) {
-      try { type = JSON.parse(readFileSync(pkgPath, "utf8")).type; } catch {}
+      // Keep the runtime package-type read aligned with the Rust tsconfig reader:
+      // Windows editors and PowerShell may prefix valid JSON with one UTF-8 BOM.
+      try { type = JSON.parse(readFileSync(pkgPath, "utf8").replace(/^\uFEFF/, "")).type; } catch {}
       // Watch this package.json (a `type`/script edit should restart) and the
       // `.env*` files alongside it (the package root is where they live).
       _reportDep?.(pkgPath);
@@ -256,7 +339,28 @@ export function getPackageType(dir) {
 }
 
 // ── Filesystem helpers ──────────────────────────────────────────────
+// Is this a URL whose bytes nub may read off disk? Every branch of either load
+// hook that claims a module ends in `fileURLToPath` + `readFileSync`, so `file:`
+// is the whole answer. A load hook sees whatever scheme resolution produced:
+// `node:`, `data:`, and — because a user `module.register` loader may serve any
+// protocol it likes — `custom://x.js`, `byop://1/index.mjs`, an http-loader's
+// `https://…/x.js`. None of those are nub's to claim.
+export function isFileUrl(url) {
+  return typeof url === "string" && url.startsWith("file:");
+}
+
 export function extname(url) {
+  // Report an extension ONLY for a `file:` URL: the extension is what dispatches
+  // both load hooks into their transpile/data branches, and a non-`file:` URL that
+  // merely ENDS in something extension-shaped used to enter them anyway, where the
+  // unguarded `fileURLToPath` threw ERR_INVALID_URL_SCHEME — masking Node's own
+  // ERR_UNSUPPORTED_ESM_URL_SCHEME and killing every custom-protocol ESM loader
+  // that plain Node runs fine. `data:` was the first face of this (its payload is
+  // INLINE, so a trailing `//x.ts` comment or a sourceMappingURL reads as an
+  // extension); testing for `file:` positively covers it and every other scheme at
+  // once, and — unlike a "does this look like a scheme" test — cannot mistake a
+  // Windows drive letter for one.
+  if (!isFileUrl(url)) return "";
   const path = url.includes("?") ? url.slice(0, url.indexOf("?")) : url;
   const dot = path.lastIndexOf(".");
   return dot === -1 ? "" : path.slice(dot);
@@ -264,6 +368,28 @@ export function extname(url) {
 
 export function isNodeModules(url) {
   return url.includes("/node_modules/") || url.includes("\\node_modules\\");
+}
+
+// "Is this really a dependency?" — the ONE definition every gate that decides how a
+// file LOADS uses, so the resolve step and each load step cannot disagree about the
+// same file. (Watch-mode config reporting still uses the plain check: it asks which
+// files to watch, not how they load.)
+//
+// A `/node_modules/` segment normally settles it: Node realpaths a resolved module,
+// so the path we are handed IS the real one. Under `--preserve-symlinks` it does not
+// — a workspace package symlinked into node_modules keeps that segment while its
+// files genuinely live in the project, and calling it a dependency would refuse the
+// TypeScript that is its build output. The stat therefore happens only under the
+// flag, and only for paths that already look like a dependency; the default path
+// stays the pure substring test it always was.
+export function isDependency(url) {
+  if (!isNodeModules(url)) return false;
+  if (!PRESERVE_SYMLINKS) return true;
+  try {
+    return isNodeModules(pathToFileURL(realpathSync(fileURLToPath(url))).href);
+  } catch {
+    return true; // unreadable: trust the literal path
+  }
 }
 
 export function fileExists(filePath) {
@@ -274,6 +400,18 @@ export function fileExists(filePath) {
 function safeRequireResolve(specifier) {
   try { return __require.resolve(specifier); } catch { return null; }
 }
+
+// Resolved URL per vendored specifier (`null` = unresolvable), kept for the life
+// of the realm. A vendored package lives in Nub's own distribution — the
+// checkout's node_modules in dev, the content-keyed extracted runtime dir in a
+// release — so its location cannot change under a running process, and `--watch`
+// restarts the process rather than re-resolving in place. The resolve is not
+// free: `__require` has a Nub-internal parent, so each call re-enters the resolve
+// hook and pays a `createRequire` plus a nested hook round trip. Transpiled
+// decorator output imports up to three helpers per decorated file, so unmemoized
+// that cost scaled with the number of decorated files instead of the handful of
+// distinct helpers (#795).
+const vendoredResolutions = new Map();
 
 export function barePkg(specifier) {
   return specifier.startsWith("@")
@@ -293,10 +431,21 @@ export function barePkg(specifier) {
 // nub is forbidden. The `node:`/`data:`/builtin guards, the nub-internal-graph
 // bypass, vendored packages, and the clobber map all stay in JS and run BEFORE the
 // native resolver (see resolveSpec / resolveCjsPath).
+// Node's `--preserve-symlinks` decides whether a resolved module is keyed by its
+// real path or the path it was reached through, and the native resolver has to hand
+// back whichever one Node itself would — otherwise a symlinked workspace package
+// reached two ways instantiates twice. The flag arrives by argv OR `NODE_OPTIONS`,
+// and only one of those shows up in `execArgv`, so both are checked. The word
+// boundary matters: `--preserve-symlinks-main` is a DIFFERENT flag that governs only
+// the entry point.
+const PRESERVE_SYMLINKS =
+  process.execArgv.includes("--preserve-symlinks") ||
+  /(^|\s)--preserve-symlinks(\s|$)/.test(process.env.NODE_OPTIONS || "");
+
 function resolveTs(specifier, parentPath) {
   if (!nubNative) return null;
   try {
-    return nubNative.resolveTs(specifier, parentPath || "");
+    return nubNative.resolveTs(specifier, parentPath || "", RUNTIME_TSCONFIG, PRESERVE_SYMLINKS);
   } catch {
     return null;
   }
@@ -330,10 +479,17 @@ function isNubInternalParent(parentURL) {
   return String(parentURL).startsWith(RUNTIME_DIR_URL);
 }
 
+// Set while resolveSpec is inside its own `require.resolve` for a nub-internal
+// importer; see the re-entrancy guard there. Module-scoped, so each realm (the
+// main thread, each worker, the async tier's loader worker) carries its own — and
+// resolve hooks are synchronous, so a single flag cannot interleave.
+let resolvingInternal = false;
+
 // Resolve a specifier the way both hook tiers do. Returns `{ url, shortCircuit }`
 // to short-circuit Node's resolver, or `null` to fall through to `nextResolve`.
 // `parentURL` is the importer (a file: URL string), or "" for the entry.
-export function resolveSpec(specifier, parentURL) {
+// `fromRequire` is true when the fast tier's hook is resolving a `require()`.
+export function resolveSpec(specifier, parentURL, fromRequire = false) {
   // nub's own internal graph (importer inside nub's runtime dir OR a nub
   // dependency package): resolve natively and SHORT-CIRCUIT so nextResolve (the
   // user's loader chain) never observes nub's internals. This MUST run before the
@@ -347,9 +503,21 @@ export function resolveSpec(specifier, parentURL) {
       return { url, shortCircuit: true };
     }
     if (specifier.startsWith("data:")) return { url: specifier, shortCircuit: true };
+    // Re-entrancy guard. The `require.resolve` below runs through Node's CJS
+    // resolver, which invokes the registered resolve hook — i.e. back into this
+    // function with the same specifier and parent. Unguarded, the two call each
+    // other until V8 exhausts the stack and the RangeError lands in the catch: every
+    // nub-internal relative require cost ~849 nested hook invocations (measured on
+    // the fast-tier preload's own `./navigator-shim.mjs` / `./worker-blob-url.cjs`),
+    // ~50 CPU-ms per process, and produced the right answer only by accident of that
+    // unwind. Delegating the RE-ENTRANT call is not a behavior change: the outer
+    // frame still short-circuits the user chain, and Node's default resolver is what
+    // `require.resolve` was going to consult anyway.
+    if (resolvingInternal) return null;
     // A relative/bare import from inside nub's graph: resolve it natively from the
     // parent's own require() resolver (NOT nub's tsconfig/clobber/probe logic) and
     // short-circuit. Bare specifiers resolve from the parent package's location.
+    resolvingInternal = true;
     try {
       const parentReq = createRequire(parentURL);
       const resolved = parentReq.resolve(specifier);
@@ -358,6 +526,8 @@ export function resolveSpec(specifier, parentURL) {
       // Couldn't resolve from the parent (e.g. a non-file: parent): still short-
       // circuit by handing the specifier back as-is, so the user chain is bypassed.
       return null;
+    } finally {
+      resolvingInternal = false;
     }
   }
 
@@ -373,12 +543,20 @@ export function resolveSpec(specifier, parentURL) {
   // 2. Vendored packages (e.g. @oxc-project/runtime).
   const bare = barePkg(specifier);
   if (VENDORED_PACKAGES.has(bare)) {
-    const resolved = safeRequireResolve(specifier);
-    if (resolved) return { url: pathToFileURL(resolved).href, shortCircuit: true };
+    let url = vendoredResolutions.get(specifier);
+    if (url === undefined) {
+      const resolved = safeRequireResolve(specifier);
+      url = resolved ? pathToFileURL(resolved).href : null;
+      vendoredResolutions.set(specifier, url);
+    }
+    if (url) return { url, shortCircuit: true };
   }
 
-  // 3. Package clobbering.
-  if (CLOBBER_MAP.has(bare) && !isNodeModules(parentURL || "")) {
+  // 3. Package clobbering, for `import` only. A `require()` loads the installed
+  // package as it would on plain Node: CommonJS reads a data: URL as a file path
+  // and fails with ENOENT, and a CommonJS caller expects the package's own export
+  // shape (`require("abort-controller")` is the constructor, not a namespace).
+  if (CLOBBER_MAP.has(bare) && !isDependency(parentURL || "") && !fromRequire) {
     return { url: `data:text/javascript,${encodeURIComponent(CLOBBER_MAP.get(bare)())}`, shortCircuit: true };
   }
 
@@ -434,6 +612,21 @@ export function requireTargetIsEsm(filePath, ext) {
 }
 
 // ── Module-format detection ─────────────────────────────────────────
+// The oxc `lang` for a transpiled extension: the project's `loader` config wins
+// where it turns JSX on (`tsx`/`jsx`), otherwise the extension decides. Shared by
+// the format probe and the transform itself so the parse that DECIDES the format
+// and the parse that PRODUCES the output can never disagree about what a file is.
+// The one pairing this would silently discard — `ts` on `.tsx`/`.jsx`, which
+// still parses as JSX — is refused by the config parser (`validate_loader`), so
+// reaching the extension fallback here always means the config asked for nothing
+// different, never that a request was dropped.
+function langFor(ext) {
+  const configuredLoader = RUNTIME_LOADER[ext];
+  return configuredLoader === "tsx" || configuredLoader === "jsx"
+    ? configuredLoader
+    : ext === ".tsx" ? "tsx" : ext === ".jsx" ? "jsx" : "ts";
+}
+
 // Both signals nub needs to read off a file's syntax — the absent-`type` module
 // format and the Stage-3-decorator guard — come from ONE native call into nub's
 // N-API addon (`detectModuleInfo`, the oxc parser compiled in-process). There is
@@ -465,7 +658,7 @@ function detectModuleInfo(filePath, source, lang) {
 // format Node's loader should use. `.mts`/`.cts` are explicit; an explicit
 // `type` is authoritative; otherwise (ambiguous) we detect from source syntax —
 // full Node parity (`--experimental-detect-module`), so a CJS-syntax `.ts` with
-// no `type` runs as CJS on nub exactly as on Node. See wiki/runtime/module-format.md.
+// no `type` runs as CJS on nub exactly as on Node. See internal/runtime/module-format.md.
 // `.mjs`→module / `.cjs`→commonjs are explicit (mirroring `.mts`/`.cts`), so the
 // plain-JS gate gets the right format without a needless detect.
 export function moduleFormatFor(ext, pkgType, filePath, source) {
@@ -485,22 +678,22 @@ function moduleFormatWithInfo(ext, pkgType, filePath, source) {
   if (ext === ".cts" || ext === ".cjs") return { format: "commonjs", info: null };
   if (pkgType === "module") return { format: "module", info: null };
   if (pkgType === "commonjs") return { format: "commonjs", info: null };
-  const lang = ext === ".tsx" ? "tsx" : ext === ".jsx" ? "jsx" : "ts";
-  const info = detectModuleInfo(filePath, source, lang);
+  const info = detectModuleInfo(filePath, source, langFor(ext));
   return { format: info.hasValueEsmSyntax ? "module" : "commonjs", info };
 }
 
 // The Stage-3-decorator rejection diagnostic. oxc does not lower TC39 Stage 3
 // decorators yet (oxc-project/oxc#9170) — it passes the `@decorator` syntax
 // through verbatim with errors:[], so without this check V8 throws a bare
-// `SyntaxError: Invalid or unexpected token`. See wiki/runtime/stage3-decorators.md.
+// `SyntaxError: Invalid or unexpected token`. See internal/runtime/stage3-decorators.md.
 function stage3DecoratorError(filePath) {
   return new Error(
     `Nub: Stage 3 decorators are not supported by the transpiler yet.\n` +
     `This is an upstream limitation in oxc (oxc-project/oxc#9170).\n` +
     `  in ${filePath}\n\n` +
     `Workarounds:\n` +
-    `  1. Set "experimentalDecorators": true in tsconfig.json to use legacy decorators\n` +
+    `  1. Set "decorators": "legacy" in nub.jsonc, or set\n` +
+    `     "experimentalDecorators": true in tsconfig.json\n` +
     `     (the shape NestJS / TypeORM / class-validator are written against).\n` +
     `  2. Wait for Stage 3 decorator support in oxc; tracked upstream at\n` +
     `     https://github.com/oxc-project/oxc/issues/9170.\n\n` +
@@ -532,7 +725,7 @@ function hasDecoratorSyntax(filePath, source, lang) {
 // cache file may not be granted), or (b) the user set `NODE_COMPILE_CACHE=0` —
 // Node's compile-cache disable signal, which nub honors as "no caching in this
 // pipeline" (one knob for both V8's compile cache and nub's transpile cache; no
-// nub-specific env var). Per wiki/runtime/transpile-cache.md (the maintainer 2026-05-18).
+// nub-specific env var). Per internal/runtime/transpile-cache.md (the maintainer 2026-05-18).
 const CACHE_DISABLED =
   process.permission?.has !== undefined || process.env.NODE_COMPILE_CACHE === "0";
 // Resolved lazily (memoized) rather than at module eval, because on the floor the
@@ -541,14 +734,21 @@ const CACHE_DISABLED =
 // "not yet computed".
 let cacheDir = null;
 let cacheDirResolved = false;
+// nub's cache ROOT (`<cache>/nub`), computed WITHOUT creating anything, so the
+// sweep-due probe and the compile-cache check can name a directory without a
+// mkdir side effect on every startup.
+function cacheRoot() {
+  const base = process.env.XDG_CACHE_HOME || (process.env.HOME ? join(process.env.HOME, ".cache") : null);
+  return base ? join(base, "nub") : null;
+}
 function getCacheDir() {
   if (cacheDirResolved) return cacheDir;
   cacheDirResolved = true;
   if (CACHE_DISABLED) return cacheDir;
   __ensureBuiltins();
-  const base = process.env.XDG_CACHE_HOME || (process.env.HOME ? join(process.env.HOME, ".cache") : null);
-  if (base) {
-    cacheDir = join(base, "nub", "transpile");
+  const root = cacheRoot();
+  if (root) {
+    cacheDir = join(root, "transpile");
     try { mkdirSync(cacheDir, { recursive: true }); } catch { cacheDir = null; }
   }
   return cacheDir;
@@ -557,6 +757,28 @@ function getCacheDir() {
 // ── Bounded-cache maintenance ───────────────────────────────────────
 const CACHE_MAX_BYTES = 512 * 1024 * 1024; // 512 MiB — bounds runaway growth, not normal use
 const SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000; // ≤ one sweep per day
+
+// Is a sweep DUE right now? Deliberately cheap and side-effect-free: one
+// `statSync` against a path built without `mkdir`, loading no module the preload
+// has not already loaded. The caller uses this to decide whether to schedule the
+// sweep AT ALL, which is what lets the scheduled work be ref'd instead of
+// unref'd — see preload.cjs for why that mattered.
+//
+// It deliberately does NOT test for the main thread. The tempting cheap test —
+// "is worker_threads in `process.moduleLoadList`?" — is simply WRONG here:
+// nub's own preload already pulls worker_threads in on the MAIN thread
+// (verified), so it reports every run as a worker and nothing ever sweeps.
+// `maybeSweepCache` asks `isMainThread` authoritatively, so the worst a worker
+// thread costs is one statSync and a scheduled immediate that no-ops.
+export function sweepDue() {
+  if (CACHE_DISABLED) return false;
+  __ensureBuiltins();
+  const root = cacheRoot();
+  if (!root) return false;
+  const s = statSync(join(root, "transpile", ".sweep"), { throwIfNoEntry: false });
+  return !s || Date.now() - s.mtimeMs >= SWEEP_INTERVAL_MS;
+}
+
 export function maybeSweepCache() {
   __ensureBuiltins();
   const dir = getCacheDir();
@@ -575,9 +797,160 @@ export function maybeSweepCache() {
   } catch {
     return;
   }
+  // nub's OWN default V8 compile-cache dir gets the same daily treatment. The
+  // Rust spawn layer creates it and points NODE_COMPILE_CACHE at it for every
+  // augmented run (spawn.rs `default_compile_cache_dir`), it gains an entry per
+  // distinct module path plus a whole subdirectory per Node build, and nothing
+  // ever removed any of it — 6.9 GB across ~594k files after ~12 days on a
+  // working machine. Swept ONLY when NODE_COMPILE_CACHE is exactly nub's own
+  // dir: a dir the USER chose is theirs, and nub must not evict from it.
+  const root = cacheRoot();
+  const ownCompileCache = root ? join(root, "v8-compile-cache") : null;
+  const compileDir =
+    ownCompileCache && process.env.NODE_COMPILE_CACHE === ownCompileCache ? ownCompileCache : null;
   import("./cache-evict.mjs")
-    .then((m) => m.sweepCache(dir, CACHE_MAX_BYTES))
+    .then((m) => {
+      // Below Node 22.3 the module cannot reach `process.getBuiltinModule`; hand it
+      // the same createRequire-backed getter this file uses. See cache-evict.mjs's
+      // no-static-imports note.
+      m.setBuiltinGetter(__getBuiltin);
+      m.sweepCache(dir, CACHE_MAX_BYTES);
+      if (compileDir) m.sweepCompileCache(compileDir, CACHE_MAX_BYTES);
+    })
     .catch(() => {});
+}
+
+// ── Runtime V8 flags (`Mitigation::RuntimeV8Flag`) ──────────────────
+// A V8 syntax flag nub does NOT put on argv. The Rust spawn layer names it in
+// `__NUB_RUNTIME_V8_FLAGS` (`<node-version> <flag>…`, flags.rs RUNTIME_V8_FLAGS_ENV)
+// and both load hooks route every result through `noteRuntimeV8FlagSource`, which
+// turns the flag on with `v8.setFlagsFromString` the first time a source uses the
+// syntax. V8 consults such a flag per parse (`v8_flags.js_defer_import_eval` is read
+// in the parser alone, with an empty bootstrapper hook) and Node runs V8 with
+// `--no-freeze-flags-after-init`, so a flip made before the hook returns is in force
+// when Node compiles that module — verified on 26.4.0 and 26.7.0, identical deferral
+// to the argv flag.
+//
+// What it buys: a V8 flag that is non-default at STARTUP enters V8's flag hash, and
+// the code cache Node embeds for its own internals is keyed on that hash, so every
+// builtin compiled after startup (`node:http`, `crypto`, `zlib`, …) is rejected and
+// rebuilt from source — ~20 ms for a program loading those, measured on 26.7.0. The
+// flip charges that only to a program that actually uses the syntax, and only for
+// the internals loaded after it. The flag also never appears in `process.execArgv`,
+// where forwarding it into a Worker once killed a Next.js 16 + Turbopack build.
+//
+// Every Nub launch sets or removes the var, so a child that re-enters Nub carries its
+// own decision; it is NOT deleted here, so a process that makes no such decision — a
+// Worker, the `module.register` loader worker, a child spawned by absolute path —
+// starts from a copy of this env and gets the feature too. Two guards close the gaps
+// inheritance leaves: a polarity already on this process's own `process.execArgv`
+// wins, either sign (V8 has the flag, or the user negated it, and the parent's signal
+// must not override that); and the version stamp makes a descendant on a different
+// Node (an inherited-NODE_OPTIONS grandchild) ignore a set computed for another
+// binary, because a flag V8 does not know is an "Error: unrecognized flag" on stderr.
+// `v8_flags` is process-global, so one flip from any thread serves every isolate.
+// Node documents a post-init flag change as unsupported; for a flag the parser reads
+// as one bool at the `import` token, the exposure is a benign race with a worker
+// parsing concurrently, which sees the old value for that one parse.
+//
+// Detection is textual. The static form is always `import defer * as` — V8 allows
+// `defer` with a namespace import only — so the pattern requires the `*`, which
+// keeps prose that merely names the two words (a comment, a docs string) from
+// arming the flag. Whitespace or comments between the tokens still match. A false
+// positive that survives (the three tokens inside a string) only recreates the
+// state every program had when the flag rode argv. The dynamic form
+// `import.defer()` is NOT matched, on purpose: it aborts the process on every 26.x
+// measured (a V8 fatal in Node's phase wiring), so a program that uses only that
+// form keeps bare Node's catchable SyntaxError.
+const TOKEN_GAP = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\n]*\n)`;
+const IMPORT_DEFER_RE = new RegExp(String.raw`\bimport${TOKEN_GAP}+defer${TOKEN_GAP}*\*`);
+const RUNTIME_V8_FLAG_DETECTORS = {
+  "--js-defer-import-eval": sourceUsesImportDefer,
+};
+// Formats whose source Node compiles as an ES module. `import defer` is module-only
+// syntax, so a CommonJS, JSON or wasm result can never need the flip; a null format
+// is still undecided and is scanned.
+const ESM_FORMATS = new Set(["module", "module-typescript", "typescript"]);
+
+// The source as a string, or null when a byte-level scan for `needle` misses — so a
+// file that cannot match is never decoded.
+function sourceText(source, needle) {
+  if (typeof source === "string") return source.includes(needle) ? source : null;
+  let buf = null;
+  if (ArrayBuffer.isView(source)) {
+    buf = Buffer.from(source.buffer, source.byteOffset, source.byteLength);
+  } else if (source instanceof ArrayBuffer) {
+    buf = Buffer.from(source);
+  }
+  return buf !== null && buf.includes(needle) ? buf.toString("utf8") : null;
+}
+
+// Whether `source` (string, Buffer, TypedArray or ArrayBuffer) carries a static
+// `import defer` declaration.
+export function sourceUsesImportDefer(source) {
+  const text = sourceText(source, "defer");
+  return text !== null && IMPORT_DEFER_RE.test(text);
+}
+
+// `-e`/`-p` code never passes through a load hook, so it is scanned once at
+// arm time: the preload runs before Node compiles the eval string.
+function evalSourceFromExecArgv(execArgv) {
+  if (!Array.isArray(execArgv)) return null;
+  for (let i = 0; i < execArgv.length; i++) {
+    const arg = execArgv[i];
+    if (typeof arg !== "string") continue;
+    if (arg === "-e" || arg === "--eval" || arg === "-p" || arg === "--print" || arg === "-pe" || arg === "-ep") {
+      return i + 1 < execArgv.length && typeof execArgv[i + 1] === "string" ? execArgv[i + 1] : null;
+    }
+    if (arg.startsWith("--eval=") || arg.startsWith("--print=")) return arg.slice(arg.indexOf("=") + 1);
+  }
+  return null;
+}
+
+// Flags still to turn on, or null once nothing is armed — the hot path is one null
+// check per load. An array walked by index, never spread or iterated: the scan
+// runs inside the load hook, after user code may have deleted
+// `Array.prototype[Symbol.iterator]` (Node's own suite does, then imports).
+let pendingRuntimeV8Flags = null;
+
+function turnOnRuntimeV8Flag(flag) {
+  const i = pendingRuntimeV8Flags.indexOf(flag);
+  if (i !== -1) pendingRuntimeV8Flags.splice(i, 1);
+  if (pendingRuntimeV8Flags.length === 0) pendingRuntimeV8Flags = null;
+  try {
+    __getBuiltin("node:v8").setFlagsFromString(flag);
+  } catch {
+    // The module then fails exactly as it would on bare Node.
+  }
+}
+
+// Route a load result through the runtime-flag scan and hand it back unchanged.
+export function noteRuntimeV8FlagSource(result) {
+  if (pendingRuntimeV8Flags === null || result == null || result.source == null) return result;
+  if (result.format != null && !ESM_FORMATS.has(result.format)) return result;
+  const flags = pendingRuntimeV8Flags.slice();
+  for (let i = 0; i < flags.length; i++) {
+    if (RUNTIME_V8_FLAG_DETECTORS[flags[i]](result.source)) turnOnRuntimeV8Flag(flags[i]);
+  }
+  return result;
+}
+
+{
+  const raw = process.env.__NUB_RUNTIME_V8_FLAGS;
+  if (raw) {
+    const [stampedVersion, ...flags] = raw.split(" ").filter(Boolean);
+    const execArgv = Array.isArray(process.execArgv) ? process.execArgv : [];
+    const armed = stampedVersion === process.versions.node
+      ? flags.filter((flag) =>
+          Object.hasOwn(RUNTIME_V8_FLAG_DETECTORS, flag) &&
+          !execArgv.includes(flag) && !execArgv.includes(`--no-${flag.slice(2)}`))
+      : [];
+    if (armed.length > 0) {
+      pendingRuntimeV8Flags = armed;
+      const evalSource = evalSourceFromExecArgv(execArgv);
+      if (evalSource !== null) noteRuntimeV8FlagSource({ format: "module", source: evalSource });
+    }
+  }
 }
 
 // ── Transpile ───────────────────────────────────────────────────────
@@ -586,10 +959,10 @@ export function maybeSweepCache() {
 // from extension alone), so a CommonJS-syntax `.ts` is reported `commonjs` — the
 // fix that makes `require()` of a TS file work on the compat tier, where Node's
 // CJS translator loads it via this hook and keys on the returned format.
-export function loadTranspile(url, ext) {
+export function loadTranspile(url, ext, source) {
   __ensureBuiltins();
   const filePath = fileURLToPath(url);
-  const source = readFileSync(filePath, "utf8");
+  source ??= readFileSync(filePath, "utf8");
   const dir = dirname(filePath);
   // The transform-relevant compilerOptions slice + the byte-for-byte cache-key
   // component (`tsconfigHash`) both come from the native tsconfig reader.
@@ -604,7 +977,7 @@ export function loadTranspile(url, ext) {
   // parse (ambiguous ext, no explicit `type`), else null (a no-parse short-circuit).
   const { format, info: moduleInfo } = moduleFormatWithInfo(ext, pkgType, filePath, source);
 
-  const lang = ext === ".tsx" ? "tsx" : ext === ".jsx" ? "jsx" : "ts";
+  const lang = langFor(ext);
 
   const opts = {
     lang,
@@ -620,14 +993,15 @@ export function loadTranspile(url, ext) {
     target: "es2022",
     typescript: {},
     // Decorators default to OFF (Stage-3 mode), matching tsc: legacy semantics
-    // and metadata are opt-in via tsconfig. See wiki/runtime/non-erasable-syntax.md.
+    // and metadata are opt-in via tsconfig. See internal/runtime/non-erasable-syntax.md.
     decorator: co?.experimentalDecorators === true
       ? { legacy: true, emitDecoratorMetadata: co?.emitDecoratorMetadata === true }
       : undefined,
   };
-  if (ext === ".tsx" || ext === ".jsx") {
+  if (lang === "tsx" || lang === "jsx") {
     opts.jsx = {
       runtime: co?.jsx === "react" ? "classic" : "automatic",
+      development: co?.jsx === "react-jsxdev",
       importSource: co?.jsxImportSource || "react",
     };
     if (co?.jsxFactory) opts.jsx.pragma = co.jsxFactory;
@@ -654,14 +1028,33 @@ export function loadTranspile(url, ext) {
   // type → different format → distinct entry). `cacheDir: null/undefined` is the
   // JS enable/disable signal: native then skips all cache I/O and just transforms.
   const formatByte = format === "commonjs" ? "c" : "m";
+  // The RAW configured loader, not `lang`: a non-TS/JSX loader (`text`, `json5`)
+  // changes the output without changing `lang`, so the key must see it.
+  const runtimeHash = JSON.stringify({
+    loader: RUNTIME_LOADER[ext] || null,
+    tsconfig: RUNTIME_TSCONFIG || null,
+    compilerOptions: RUNTIME_COMPILER_OPTIONS,
+  });
+  // process.version decides how the appended `//# sourceURL` is percent-encoded:
+  // it is spelled to match THIS host's pathToFileURL, whose escape set widened
+  // mid-release-line, so the same file has two valid spellings across hosts.
+  // Native derives the band from it and folds that band into the cache key.
   const result = nubNative.transformCached(
-    filePath, source, opts, ext, tsconfigHash || "", pkgType || "", formatByte, getCacheDir() ?? undefined,
+    filePath, source, opts, ext, `${tsconfigHash || ""}\0${runtimeHash}`, pkgType || "", formatByte, getCacheDir() ?? undefined, process.version,
   );
   if (result.errors.length > 0) {
     const details = result.errors.map((e) => e.codeframe || e.message).join("\n\n");
     throw new Error(`Transpile error in ${filePath}:\n${details}`);
   }
-  return { format: result.format, source: result.code, shortCircuit: true };
+  // `responseURL` is what an OUTER user hook keys on. Node's default load sets it
+  // to the file URL, and tsx's load hook takes its CommonJS branch only when the
+  // result `nextLoad` hands back carries a `file:` responseURL — without it, tsx
+  // re-transformed a `.ts` file nub had already emitted as CJS in its ESM branch,
+  // and `require` was undefined at run time (`tsx script.ts` under `nub run`).
+  // Node itself defaults a missing responseURL to the URL, so only a hook layered
+  // above nub's can observe the difference; every file-URL result nub
+  // short-circuits carries it for that reason.
+  return { format: result.format, source: result.code, responseURL: url, shortCircuit: true };
 }
 
 // Project-source plain JS (`.js`/`.mjs`/`.cjs`) gate. Returns a transpiled load
@@ -675,14 +1068,24 @@ export function loadTranspile(url, ext) {
 // break), and oxc would reformat it (quotes/semicolons/whitespace + a sourcemap
 // footer) if we ran it through anyway. The verdict rides ONE parse (the same one
 // `detectModuleInfo` does for format detection). node_modules is gated at the call
-// sites (the byte-parity boundary). JSX-in-`.js` is out of scope (lang is "ts",
-// which does not parse JSX); use `.jsx`.
-export function maybeTranspilePlainJs(url, ext) {
+// sites (the byte-parity boundary). JSX-in-`.js` is out of scope for the syntax
+// gate (lang is "ts", which does not parse JSX); use `.jsx`, or say so explicitly
+// with a `loader` entry, which takes the unconditional path below instead.
+export function maybeTranspilePlainJs(url, ext, source) {
   __ensureBuiltins();
+  // An explicit `loader` entry pointing this extension at a code dialect moved it
+  // into TRANSPILE_EXTS, which for every other member means "always compile". Only
+  // a plain-JS extension can reach here, so this is true ONLY when the project
+  // configured one, and it must not fall through to the syntax gate below: that
+  // gate asks "does this file NEED lowering", answers no for JSX (it detects with
+  // lang "ts", which cannot parse it), and hands raw JSX to Node for V8 to reject —
+  // while the ESM path transpiles the same file on both tiers. The registration
+  // loop deliberately skips `.js`/`.cjs` because this wrapper owns them, so there
+  // is nothing else downstream to catch it.
+  if (TRANSPILE_EXTS.has(ext)) return loadTranspile(url, ext, source);
   const filePath = fileURLToPath(url);
-  let source;
   try {
-    source = readFileSync(filePath, "utf8");
+    source ??= readFileSync(filePath, "utf8");
   } catch {
     // Unreadable here → let Node's loader surface its own error.
     return null;
@@ -693,10 +1096,10 @@ export function maybeTranspilePlainJs(url, ext) {
     return null; // no-op: Node's native loader handles it, byte-identical.
   }
   // Transformable: run the SAME pipeline as TS/JSX (target es2022 lowering, tsconfig,
-  // source maps, the Stage-3 decorator guard, format detection, cache). loadTranspile
-  // re-reads + re-parses, but only for the rare file that actually needs lowering.
+  // source maps, the Stage-3 decorator guard, format detection, cache), reusing
+  // the bytes already inspected by the gate.
   try {
-    return loadTranspile(url, ext);
+    return loadTranspile(url, ext, source);
   } catch (err) {
     // #225: a plain-JS file the transformable verdict flagged (a `using` decl or
     // `v`-flag RegExp somewhere) but whose transform oxc then REJECTS — V8 tolerates
@@ -735,30 +1138,42 @@ function stripJsonComments(text) {
   return result;
 }
 
-export function loadData(url, ext) {
-  const filePath = fileURLToPath(url);
-  const raw = readFileSync(filePath, "utf8");
-  const kind = DATA_EXTS[ext];
+/// Every data extension either tier may serve — the built-ins plus whatever this
+/// project's `loader` added. The classic `require.extensions` shim registers from
+/// this so the CJS path covers exactly what the ESM path does; `dataExtsFor` still
+/// decides per-URL which of them is live inside `node_modules`.
+export function allDataExts() {
+  return new Set([...Object.keys(BUILTIN_DATA_EXTS), ...Object.keys(PROJECT_DATA_EXTS)]);
+}
 
-  if (kind === "txt") {
-    return { format: "module", source: `export default ${JSON.stringify(raw)};\n`, shortCircuit: true };
-  }
+/// The value a data module exposes as its default export. Split out of
+/// [`loadData`] so the classic `require()` handler resolves a file through the
+/// SAME parser dispatch and the same `dataExtsFor` node_modules pinning — two
+/// tiers cannot disagree about what a document means if only one function reads it.
+export function dataValue(url, ext) {
+  const raw = readFileSync(fileURLToPath(url), "utf8");
+  const kind = dataExtsFor(url)[ext];
+  if (kind === "txt") return raw;
 
-  let parsed;
   if (nubNative) {
-    if (kind === "yaml") parsed = nubNative.parseYaml(raw);
-    else if (kind === "toml") parsed = nubNative.parseToml(raw);
-    else if (kind === "json5") parsed = nubNative.parseJson5(raw);
-    else if (kind === "jsonc") parsed = nubNative.parseJsonc(raw);
+    if (kind === "yaml") return nubNative.parseYaml(raw);
+    if (kind === "toml") return nubNative.parseToml(raw);
+    if (kind === "json5") return nubNative.parseJson5(raw);
+    if (kind === "jsonc") return nubNative.parseJsonc(raw);
   } else {
-    if (kind === "yaml") parsed = lazyRequire("yaml").parse(raw);
-    else if (kind === "toml") parsed = lazyRequire("@iarna/toml").parse(raw);
-    else if (kind === "json5") parsed = lazyRequire("json5").parse(raw);
-    else if (kind === "jsonc") parsed = JSON.parse(stripJsonComments(raw));
+    if (kind === "yaml") return lazyRequire("yaml").parse(raw);
+    if (kind === "toml") return lazyRequire("@iarna/toml").parse(raw);
+    if (kind === "json5") return lazyRequire("json5").parse(raw);
+    if (kind === "jsonc") return JSON.parse(stripJsonComments(raw));
   }
+  return undefined;
+}
+
+export function loadData(url, ext) {
+  const parsed = dataValue(url, ext);
 
   if (parsed == null) {
-    return { format: "module", source: "export default undefined;\n", shortCircuit: true };
+    return { format: "module", source: "export default undefined;\n", responseURL: url, shortCircuit: true };
   }
 
   // Default export only. Data modules deliberately do NOT emit per-key named
@@ -768,7 +1183,7 @@ export function loadData(url, ext) {
   // default — `import cfg from "./c.yaml"; const { host } = cfg;` — which the
   // `@nubjs/types` `Record<string, unknown>` default type makes sound.
   const code = `export default ${JSON.stringify(parsed)};\n`;
-  return { format: "module", source: code, shortCircuit: true };
+  return { format: "module", source: code, responseURL: url, shortCircuit: true };
 }
 
 // Import Text: `import s from "./any.file" with { type: "text" }` → the raw file
@@ -784,5 +1199,5 @@ export function loadData(url, ext) {
 const __textDecoder = new TextDecoder();
 export function loadTextImport(url) {
   const text = __textDecoder.decode(readFileSync(fileURLToPath(url)));
-  return { format: "module", source: `export default ${JSON.stringify(text)};\n`, shortCircuit: true };
+  return { format: "module", source: `export default ${JSON.stringify(text)};\n`, responseURL: url, shortCircuit: true };
 }

@@ -28,13 +28,13 @@ on:
 permissions: {}
 
 env:
+  MBX_DISABLE: "1"
   DEBIAN_FRONTEND: noninteractive
 
 jobs:
   publish-ppa:
-    # github-hosted runner: namespace runners block outbound FTP (port 21)
-    # to ppa.launchpad.net, which is what dput needs to upload the source
-    # package. Ubuntu-hosted runners allow it.
+    # dput needs outbound FTP (port 21) to upload the source package to
+    # ppa.launchpad.net, which Ubuntu-hosted runners allow.
     runs-on: ubuntu-latest
     environment: ppa-publishing
     timeout-minutes: 45
@@ -87,7 +87,7 @@ jobs:
           echo "TAG=$TAG" >> "$GITHUB_ENV"
 
       - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/tags/${{ env.TAG }}
           fetch-depth: 0

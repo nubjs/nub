@@ -102,7 +102,8 @@ fn sigkill_on_nub_group_terminates_the_script_child() {
 }
 
 /// Normal completion must not leak a watcher: the guard disarms and reaps it
-/// before nub exits, so no `__pdeath-watch <child-pid>` process may remain.
+/// before nub exits. The private environment selects the watcher, leaving only
+/// its ordinary `<child-pid> <fd>` payload visible in `ps`.
 #[test]
 fn normal_exit_leaves_no_watcher_process() {
     let dir = std::env::temp_dir().join(format!("nub-pdw-clean-{}", std::process::id()));
@@ -112,13 +113,13 @@ fn normal_exit_leaves_no_watcher_process() {
     assert!(status.success(), "nub run must succeed");
 
     let child_pid = read_pid(&dir.join("child.pid"));
-    // The watcher's argv is exactly `__pdeath-watch <child-pid> <fd>`, so this
-    // match can't collide with concurrent nub instances on the host.
+    // The child PID is unique to this fixture, so the private mode's visible
+    // `<child-pid> <fd>` payload identifies only this watcher's command line.
     let ps = std::process::Command::new("ps")
         .args(["-ax", "-o", "command"])
         .output()
         .expect("ps");
-    let needle = format!("__pdeath-watch {child_pid} ");
+    let needle = format!(" {child_pid} 3");
     assert!(
         !String::from_utf8_lossy(&ps.stdout).contains(&needle),
         "a watcher for exited child {child_pid} is still running"
@@ -128,13 +129,14 @@ fn normal_exit_leaves_no_watcher_process() {
 
 /// The watcher is re-invoked through `current_exe()`, which carries whatever
 /// NAME nub is running under — `node` for anything spawned through nub's own
-/// PATH shim, not `nub`. So the hidden verb must be honored under EVERY argv0
-/// identity nub answers to. When it hung off the `nub`-only argv0 arm, a
-/// shim-named re-invocation ran `__pdeath-watch` as a script, spawning a
-/// workload (and thus another watcher) per level until the process table was
-/// exhausted (regression from #504).
+/// PATH shim, not `nub`. Its private environment mode keeps the PID/read-fd
+/// payload ordinary application arguments; the legacy hidden-token protocol
+/// remains accepted for old callers. Both forms must be honored under EVERY
+/// argv0 identity nub answers to. If the dispatcher coupled either form to
+/// `nub` argv0, a shim-named re-invocation would run a watcher payload as a
+/// workload and recursively spawn more watchers (regression from #504).
 #[test]
-fn pdeath_watch_verb_is_honored_under_every_argv0() {
+fn pdeath_watch_protocols_are_honored_under_every_argv0() {
     // Alongside the binary, so the aliases can be HARDLINKS — same-filesystem,
     // no 78MB copy per name, and the same shape as nub's real PATH shims.
     let nub = nub_binary();
@@ -147,29 +149,44 @@ fn pdeath_watch_verb_is_honored_under_every_argv0() {
 
     // `getpgrp() + 1` can never equal the child's own group (children inherit
     // ours), so the watcher deterministically takes its membership self-check
-    // exit. That keeps the assertion on "the verb was RECOGNIZED" alone — no
-    // pipe timing, and it never reaches the group kill.
+    // exit. That keeps the assertion on "the protocol was RECOGNIZED" alone —
+    // no pipe timing, and it never reaches the group kill.
     let foreign_pgid = (unsafe { libc::getpgrp() } + 1).to_string();
     for name in ["nub", "node", "nubx", "npm"] {
         let aliased = dir.join(name);
         std::fs::hard_link(&nub, &aliased).unwrap();
-        let out = std::process::Command::new(&aliased)
-            .args(["__pdeath-watch", &foreign_pgid, "3"])
-            .output()
-            .expect("spawn aliased nub");
-        assert_eq!(
-            out.status.code(),
-            Some(0),
-            "nub invoked as `{name}` did not honor __pdeath-watch (stderr: {})",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(
-            out.stdout.is_empty() && out.stderr.is_empty(),
-            "nub invoked as `{name}` ran __pdeath-watch as a workload instead of \
-             the watcher loop (stdout: {}, stderr: {})",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
+        for (protocol, env_mode, args) in [
+            (
+                "private environment mode",
+                Some("pdeath-watch"),
+                vec![foreign_pgid.as_str(), "3"],
+            ),
+            (
+                "legacy hidden token",
+                None,
+                vec!["__pdeath-watch", foreign_pgid.as_str(), "3"],
+            ),
+        ] {
+            let mut cmd = std::process::Command::new(&aliased);
+            cmd.args(args);
+            if let Some(env_mode) = env_mode {
+                cmd.env("__NUB_COMPILED_LAUNCHER_MODE", env_mode);
+            }
+            let out = cmd.output().expect("spawn aliased nub");
+            assert_eq!(
+                out.status.code(),
+                Some(0),
+                "nub invoked as `{name}` did not honor {protocol} (stderr: {})",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(
+                out.stdout.is_empty() && out.stderr.is_empty(),
+                "nub invoked as `{name}` ran {protocol} as a workload instead of \
+                 the watcher loop (stdout: {}, stderr: {})",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -196,6 +213,91 @@ fn deliberate_background_survivor_outlives_normal_exit() {
         survived,
         "deliberate background survivor (pid {survivor}) was killed on nub's \
          normal exit — the watcher failed to disarm"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Spawn `nub watch <file>` as its own process-group leader, mirroring
+/// [`spawn_nub_run`]'s topology.
+fn spawn_nub_watch(dir: &Path, file: &str) -> std::process::Child {
+    use std::os::unix::process::CommandExt;
+    let mut cmd = std::process::Command::new(nub_binary());
+    cmd.args(["watch", file])
+        .current_dir(dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // SAFETY: setpgid(0, 0) between fork and exec is async-signal-safe.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setpgid(0, 0);
+            Ok(())
+        });
+    }
+    cmd.spawn().expect("spawn nub watch")
+}
+
+/// The watch-path twin of [`sigkill_on_nub_group_terminates_the_script_child`],
+/// and a regression for the leak it did not cover.
+///
+/// `run_watch` was the one long-lived spawn in nub that called `Command::status()`
+/// directly, so its `node --watch` supervisor was never placed in nub's process
+/// group and never covered by the #480 reaper. That matters more here than
+/// anywhere else: `node --watch` is designed never to exit, so a leader death left
+/// it — and the grandchild it supervises — running under PID 1 forever, each
+/// holding an fsevents watch on a source tree. They accumulated monotonically;
+/// 99 such orphans were found on one dev host, the oldest 17 hours old.
+#[test]
+fn sigkill_on_nub_group_terminates_the_watched_node() {
+    let dir = std::env::temp_dir().join(format!("nub-pdw-watch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // The watched script records its own pid, then idles. `node --watch` keeps
+    // supervising it after it exits, which is precisely the process that leaked.
+    std::fs::write(
+        dir.join("w.js"),
+        "require('fs').writeFileSync('child.pid', String(process.pid));\nsetTimeout(() => {}, 30000);\n",
+    )
+    .unwrap();
+
+    let mut nub = spawn_nub_watch(&dir, "w.js");
+    let child_pid = read_pid(&dir.join("child.pid"));
+    assert!(
+        alive(child_pid),
+        "watched child must be alive before the kill"
+    );
+
+    // SIGKILL the nub LEADER ONLY — deliberately not the group.
+    //
+    // This distinction is the whole test. Killing the GROUP proves nothing here: on
+    // the unfixed code the watched node INHERITS nub's process group, so a group
+    // signal reaches it directly and the test passes without any reaper at all
+    // (verified — that version passed against unfixed code). Once fixed, node is its
+    // own group leader via `group_on_spawn`, so a group signal cannot reach it and
+    // only the reaper can.
+    //
+    // Killing the leader alone is also the shape of the real leak: an agent session
+    // or test harness dies, nub goes with it, and `node --watch` — which never exits
+    // on its own — reparents to launchd and runs forever.
+    unsafe { libc::kill(nub.id() as i32, libc::SIGKILL) };
+    let _ = nub.wait();
+
+    let mut died = false;
+    for _ in 0..80 {
+        if !alive(child_pid) {
+            died = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if !died {
+        // Never leak a watcher into the test environment on failure.
+        unsafe { libc::kill(child_pid, libc::SIGKILL) };
+    }
+    assert!(
+        died,
+        "watched node (pid {child_pid}) survived SIGKILL of the nub LEADER — \
+         run_watch is bypassing the group reaper again, so a dying session leaks a \
+         watcher that never exits on its own"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

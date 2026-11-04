@@ -1,0 +1,32 @@
+# repo	commit	node	what it exercises
+# One real npm-incumbent project per line, pinned to a commit whose package-lock.json
+# `npm ci` accepts. `node` is the version the project's own CI runs. Keep the columns
+# tab-separated; matrix.mjs and run.sh both read this file.
+promptfoo/promptfoo	eb18c53d1b74783069fa765a889a104fc67367c4	24	2381 packages; workspace with peer-dependency importers; lifecycle scripts
+lerna/lerna	0be4313641e4757b1b68fe8ac178187d131a9bc4	26	1939 packages; nested workspace members under a parent member's node_modules
+conwnet/github1s	2288a5fc153c1c38d49f5a304d23c4ef1b3af2d6	24	679 packages; single-package project
+lit/lit	2485edf2fa7445081f12e052d7e800944121a58f	24	2096 packages; large workspace, versionless workspace links
+louislam/dockge	f809ae192b571944ad773e9866d3e67064ae8043	22	724 packages; esbuild build scripts under the default trust list
+eclipse-theia/theia	7c303b1836421183d7013f0bd679a9a30ff0b5dc	24	1959 packages; node-gyp addons built by lifecycle scripts, member `prepare` hooks
+Redocly/redoc	8dc59a0e37dbf7d96b412b2aab0d488f65cb5678	24	1277 packages
+socketio/socket.io	1d4269cee88586f90d491e532ca6f212bd4ab2ae	24	1116 packages; workspace whose members appear in two lockfile sections
+Modernizr/Modernizr	612ec65ccdba311e8b1153b1076d18f0251943f6	24	837 packages; puppeteer browser download in postinstall
+avajs/ava	bbfd946322fdeca2b547a691d947fb4e18c0c67f	26	786 packages; multi-digest integrity strings
+meteor/meteor	02f4d27b1db832e7c1d02d26ec63c12c6671c4d2	24	356 packages
+mochajs/mocha	3a118405f375361f8084093dd85eaa89e79a5af7	24	620 packages; a tsconfig the PM must not reject
+apollographql/apollo-server	6193ea909389d61d10f893e6b66b8080ea201aa8	22	1107 packages; workspace
+puppeteer/puppeteer	f0dc34c9afd8e39d64805f61b08f306a25f7c56b	24	850 packages; workspace; browser download in postinstall
+usebruno/bruno	1622ee0c9dd2e2d56b27852c2366dccc0c382cf6	22.12	2168 packages; a member `prepare` that runs tsx over nub on the compat tier
+necolas/react-native-web	a9de220ba9e65bdea540fb5322ffb1da2b0bf442	20	single package on the compat tier
+axios/axios	b8d67bbbd6b381e1f4b1887e32686fcc89c5b0a8	26	612 packages
+nodejs/undici	b73952a4f74eff55c9bf03bdf0efabd2702986d1	24	635 packages
+graphql/graphql-js	3b9d3d4bc1d8c384569e002b51b92119aa1c4500	24	450 packages
+open-telemetry/opentelemetry-js	f62c392791a182f4c1b50a2fe0e41ecb1272772b	26	1511 packages; workspace
+jquery/jquery	5ed303d01568dfad361c4de086d28e04ba0147f5	20	734 packages on the compat tier
+josdejong/mathjs	8d214e050a0acb9f132405d55a96b683fa7b6324	22	905 packages
+moment/luxon	f427515a38f6a671f8de663e6bcc040ed81f114e	22	724 packages
+motdotla/dotenv	2fc7eac8ad77cbd5f7814355c7fa352dbcf3c358	24	606 packages
+hubotio/hubot	1a46897420780674ff8cfc7665c22d5bf33295af	24	82 packages
+hakimel/reveal.js	807b43097da554de4dba6d020b07f3f110fb766d	22	180 packages
+commitizen/cz-cli	1a8c49c02c9d52d1b4ef8cdabefb538088ddea03	24	761 packages
+rollup/rollup	02340ecdd312b0e4db8d1dc9446c0edaffedec68	24	1048 packages; a postinstall that patches transitive packages at the root

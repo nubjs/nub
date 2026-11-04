@@ -1,0 +1,1 @@
+strict compilation — a compiled program reads no .env at run time

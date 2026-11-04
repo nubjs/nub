@@ -20,10 +20,14 @@ entry always included.
 
 ```sh
 aube publish
+aube publish ./package-1.0.0.tgz
 aube publish --tag next
 aube publish --access public
 aube publish --dry-run --json
 ```
+
+Publishing a prebuilt tarball skips lifecycle scripts and working-tree
+cleanliness checks. Publishing a package directory retains both behaviors.
 
 Workspace fanout uses the global workspace selectors:
 
@@ -60,4 +64,3 @@ aube unpublish pkg --force
 ```
 
 Whole-package unpublish requires `--force`.
-

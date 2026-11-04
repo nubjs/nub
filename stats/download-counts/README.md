@@ -36,6 +36,9 @@ Daily snapshots of cumulative download counts, written by the [download-stats wo
 
 ## Reading the trend
 
+**For anything beyond a quick diff, use `node scripts/download-stats.mjs`.** It reads this same ledger off the `download-stats-data` branch and produces the weekly/monthly series, the npm+GitHub split, and a chart — with the counting rules applied (checksum assets excluded, platform packages kept out of totals, npm reporting gaps kept out of rates). `report.mjs` below remains the minimal snapshot-to-snapshot diff.
+
+
 GitHub's `download_count` is **cumulative and never resets** — a single snapshot is just a total. The `report.mjs` script diffs consecutive snapshots to compute approximate daily downloads:
 
 ```

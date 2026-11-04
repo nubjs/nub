@@ -19,9 +19,13 @@ mod resolve;
 mod semver_util;
 mod trust;
 mod types;
+mod workspace_spec;
 
-pub use direct_dep_info::DirectDepInfo;
-pub use error::{AgeGateDetails, CatalogDetails, Error, ExoticSubdepDetails, NoMatchDetails};
+pub use direct_dep_info::{AgeGatedUpdate, DirectDepInfo};
+pub use error::{
+    AgeGateDetails, CatalogDetails, Error, ExoticSubdepDetails, NoMatchDetails, UndatedDetails,
+    WorkspacePkgNotFoundDetails, WorkspaceVersionMismatchDetails,
+};
 pub use local_source::resolve_exec_script_path;
 pub use package_ext::is_deprecation_allowed;
 pub use peer_context::{
@@ -29,11 +33,15 @@ pub use peer_context::{
     hoist_auto_installed_peers, peer_pass_for_import, remove_auto_installed_peers,
 };
 pub use platform::{SupportedArchitectures, is_supported};
-pub use primer::{PruneStats as PrimerPruneStats, prune_cache as prune_primer_cache};
-pub use semver_util::{PickResult, pick_version_for_add};
+pub use primer::{
+    PruneStats as PrimerPruneStats, popular_package_names, popular_package_names_are_ranked,
+    prune_cache as prune_primer_cache,
+};
+pub use semver_util::{AgeGateCause, PickResult, pick_version_for_add};
 pub use trust::{
-    MissingTimeDetails as MissingTrustTimeDetails, TrustCheckError, TrustDowngradeDetails,
-    check_no_downgrade,
+    MissingTimeDetails as MissingTrustTimeDetails, PriorTrustEvidence, TrustCheckError,
+    TrustDowngradeDetails, check_no_downgrade, check_no_downgrade_history, evidence_for,
+    strongest_prior_evidence,
 };
 pub use trust::{PackageVersionPolicy, TrustEvidence, TrustExcludeParseError, TrustExcludeRules};
 pub use types::{
@@ -63,8 +71,8 @@ use aube_lockfile::{DirectDep, LocalSource, LockedPackage, LockfileGraph};
 use aube_manifest::PackageJson;
 #[cfg(test)]
 use error::{
-    RegistryErrorKind, build_age_gate, build_no_match, classify_registry_error,
-    format_registry_help,
+    RegistryErrorKind, build_age_gate, build_no_match, build_release_age_missing_time,
+    classify_registry_error, format_registry_help,
 };
 #[cfg(test)]
 use local_source::{dep_path_for, should_block_exotic_subdep};
@@ -109,13 +117,11 @@ pub struct Resolver {
     /// map). Defaults to the sibling `packuments-full-v1/` directory
     /// next to `packument_cache_dir`.
     packument_full_cache_dir: Option<std::path::PathBuf>,
-    /// When true (pnpm's default), a package's declared `peerDependencies`
-    /// are enqueued like regular transitives and — if not already
-    /// satisfied by the importer — hoisted to the importer's direct deps.
-    /// When false, peers neither get auto-installed as transitives nor
-    /// hoisted; unmet peers still surface as warnings via
-    /// `detect_unmet_peers`, but the user is on the hook for adding them
-    /// explicitly to `package.json`.
+    /// When true (pnpm's default), required `peerDependencies` are enqueued
+    /// during resolution. An importer's own peers become direct dependencies;
+    /// dependency peers remain contextual to the packages that require them.
+    /// When false, peers are not auto-installed and unmet dependency peers
+    /// still surface through `detect_unmet_peers`.
     auto_install_peers: bool,
     /// pnpm's `exclude-links-from-lockfile`. Round-tripped through the
     /// lockfile's `settings:` header; when true, the pnpm writer omits
@@ -143,12 +149,22 @@ pub struct Resolver {
     /// dropped before enqueueing — the resolver never fetches or locks it.
     /// Mirrors pnpm's `createOptionalDependenciesRemover` read-package hook.
     ignored_optional_dependencies: BTreeSet<String>,
-    /// pnpm's `resolution-mode` — `Highest` (default) or `TimeBased`.
+    /// pnpm's `resolution-mode`.
     resolution_mode: ResolutionMode,
     /// Project root used to resolve `file:` / `link:` paths to the
     /// target directory. Defaults to the current working directory;
     /// callers set it via `with_project_root`.
     project_root: PathBuf,
+    /// Workspace member `name` → importer path, for a caller that
+    /// resolves a SUBSET of the workspace's manifests. The driver
+    /// otherwise derives this map from the `manifests` slice, which is
+    /// only complete when the caller passes every member — true for
+    /// install, false for an `update` scoped to one member. Without it
+    /// a `workspace:<name>@<range>` alias naming some *other* member
+    /// cannot find that member's directory. Manifest-derived entries
+    /// are overlaid on top, so a caller passing the full set is
+    /// unaffected.
+    workspace_member_importers: BTreeMap<String, String>,
     /// When true, resolver-time `exec:` generators are blocked the
     /// same way fetch-time execution is blocked.
     ignore_scripts: bool,
@@ -257,8 +273,13 @@ pub(crate) struct ResolveTask {
     pub(crate) importer: String,
     /// The original specifier from package.json before any rewrites
     /// (e.g. `"npm:real-pkg@^2.0.0"` for an alias, or `"^4.17.0"` for a normal range).
-    /// Only set for root deps; recorded into the lockfile for drift detection.
+    /// Only set for root deps; retained for diagnostics and skipped-optional
+    /// drift metadata even when an override changes the lockfile specifier.
     pub(crate) original_specifier: Option<String>,
+    /// Override-applied specifier pnpm records on a direct importer dependency.
+    /// `None` when no override fired, so ordinary catalog dependencies continue
+    /// to emit their raw `catalog:` manifest specifier.
+    lockfile_override_specifier: Option<String>,
     /// Real registry package name for npm-alias tasks.
     ///
     /// When a task arrives with `range` like `"npm:h3@2.0.1-rc.20"`,
@@ -307,6 +328,12 @@ impl ResolveTask {
         self.real_name.as_deref().unwrap_or(&self.name)
     }
 
+    fn lockfile_specifier(&self) -> Option<String> {
+        self.lockfile_override_specifier
+            .clone()
+            .or_else(|| self.original_specifier.clone())
+    }
+
     /// Construct a root-importer task for `(name, range)` under
     /// `importer`, with the appropriate `dep_type` and no parent/ancestry.
     /// Every root-dep enqueue site uses this shape; the factory keeps
@@ -322,6 +349,7 @@ impl ResolveTask {
             parent: None,
             importer,
             original_specifier: Some(original),
+            lockfile_override_specifier: None,
             real_name: None,
             ancestors: Arc::from([]),
             range_from_override: false,
@@ -347,6 +375,7 @@ impl ResolveTask {
             parent: Some(parent),
             importer,
             original_specifier: None,
+            lockfile_override_specifier: None,
             real_name: None,
             ancestors,
             range_from_override: false,
@@ -356,3 +385,6 @@ impl ResolveTask {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod remote_tarball_tests;

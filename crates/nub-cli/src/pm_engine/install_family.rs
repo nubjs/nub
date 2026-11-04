@@ -1,5 +1,6 @@
 //! Install family — dependency-graph mutation and linking through the
-//! embedded aube engine. Live verbs: `nub install` / `nub ci` (clap natives,
+//! embedded aube engine. Live verbs: `nub install` / `nub ci` (natives on
+//! nub's own top-level parser,
 //! slice 2) plus the registry-dispatched `add`, `remove`, `update`, `link`,
 //! `unlink`, `import`, `prune`, `dedupe`, `rebuild`, `fetch`,
 //! `approve-builds`, `ignored-builds`, `dlx`, `create` (the dlx sugar), and
@@ -16,7 +17,7 @@
 //!
 //! # Wiring shape (registry verbs)
 //!
-//! Each verb parses its argv with **aube's own clap `Args` type** (full
+//! Each verb parses its argv with **aube's own `usage_rs::Args` type** (full
 //! upstream flag fidelity, zero hand-mirrored structs) plus
 //! [`EngineGlobals`] — the subset of aube's global flags nub honors at the
 //! verb position (`-C/--dir`, `-r`, `-F/--filter`, `--filter-prod`,
@@ -25,8 +26,8 @@
 //! preflight → runtime), applies the write-tier policy, runs the
 //! `aube::commands::<verb>::run` entry on the session runtime, and routes
 //! every failure through [`super::present`] (brand rewrite + the engine's
-//! own exit-code table). `--help` and usage errors are settled by clap at
-//! the nub layer; the rendered text also flows through the rewrite.
+//! own exit-code table). `--help` and usage errors are settled by the parser
+//! at the nub layer; the rendered text also flows through the rewrite.
 //!
 //! # Write-tier policy (yarn gate)
 //!
@@ -69,7 +70,7 @@
 //!   reach.
 //! - **`dlx` with no command / leading `--help`** renders nub-side help: the
 //!   engine's internal help path prints aube's own CLI help (the trailing
-//!   var-arg swallows `--help` before clap can settle it).
+//!   var-arg swallows `--help` before the parser can settle it).
 //! - **`approve-builds`/`patch` stdout, `unlink`/`prune` stderr are
 //!   fd-captured** ([`super::with_fd_captured`]) and re-emitted through the
 //!   rewrite: those verbs print branded hint lines (`` Run `aube
@@ -93,9 +94,12 @@
 //!   store label from the embedder identity — upstreamable as multicall
 //!   correctness), tracked with the brand-toggle fork items.
 //! - `link`/`unlink -g` use the engine's global-links registry under
-//!   `<XDG_CACHE_HOME>/aube/global-links` (`global_links_dir()` derives from
-//!   the leaf-fixed `aube_store::dirs::cache_dir()` — literally the
-//!   `cacheDir` gap in `super::nub_setting_defaults`).
+//!   `<XDG_CACHE_HOME>/nub/pm/global-links`. `global_links_dir()` derives from
+//!   `aube_store::dirs::cache_dir()`, so it follows the identity's
+//!   `cache_namespace` but NOT a `cacheDir` override — relocating the cache
+//!   leaves the global-links registry behind. Same shape as #643 on the
+//!   `storeDir` axis: an override the settings-resolved consumers honor and a
+//!   platform-default consumer does not.
 //!   Printed paths name that directory truthfully; the rewrite preserves
 //!   on-disk names by design.
 //! - `dlx` propagates the child's exit code via `std::process::exit`
@@ -116,27 +120,30 @@
 //!   edit parent is on-disk temp state, never printed.
 //!
 //! KNOWN APPROXIMATIONS (install/ci, from slice 2):
-//! - `preferFrozenLockfile` from `.npmrc` / workspace yaml is not consulted
-//!   when defaulting the frozen mode (aube's `FileSources` is crate-private
-//!   at the pinned API); without a CLI flag the mode falls back to aube's
-//!   env-aware default (CI ⇒ frozen, else prefer-frozen).
+//! - (resolved) `preferFrozenLockfile` from `.npmrc` / workspace yaml is now
+//!   consulted when defaulting the frozen mode, through the fork's
+//!   `install::resolve_prefer_frozen_lockfile` seam (`FileSources` is still
+//!   crate-private; the seam builds the `ResolveCtx` engine-side). An unset
+//!   project still falls back to aube's env-aware default (CI ⇒ frozen, else
+//!   prefer-frozen), so only a project that sets the key changes behavior.
 //! - (resolved) The yarn gate now maps aube's frozen-drift failure by its
 //!   stable `ERR_AUBE_OUTDATED_LOCKFILE` diagnostic code; the old message
 //!   substring backstop is gone.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::Result;
 use aube::commands::install::{DepSelection, FrozenMode, InstallArgs, InstallOptions};
 use aube_lockfile::LockfileKind;
 use aube_workspace::selector::EffectiveFilter;
-use clap::{Args as ClapArgs, FromArgMatches as _};
 use miette::{IntoDiagnostic as _, WrapErr as _, miette};
 
+use super::publish_family::{Parsed, separate_value_flags, verb_cli};
 use super::{EngineSession, VerbSpec, present, stub_error};
 
 /// Dispatcher for the family's registry verbs. `install`/`ci` never arrive
-/// here — they are clap verbs in cli.rs dispatching to [`run_install`] /
+/// here — they are native verbs in cli.rs dispatching to [`run_install`] /
 /// [`run_ci`] directly. The arms not yet wired fall through to the shared
 /// stub error (verb + real-PM fallback).
 pub(crate) fn run_verb(
@@ -187,42 +194,90 @@ pub(crate) fn run_verb(
 
 // ───────────────────────── parse plumbing ──────────────────────────
 
-// The subset of aube's *global* clap flags nub honors on engine verbs,
-// parsed at the verb position (nub has no pre-verb engine flag surface).
-// Spellings mirror `vendor/aube/crates/aube/src/lib.rs::Cli` exactly.
+// What nub augments onto every install-family verb, parsed at the verb
+// position (nub has no pre-verb engine flag surface). TWO groups, and the
+// distinction matters when adding a field:
+//
+//  1. The subset of aube's *global* flags nub honors. These mirror
+//     `vendor/aube/crates/aube/src/lib.rs::Cli` exactly — `--dir`, the
+//     workspace selectors, and the output flags below.
+//  2. NUB-OWN flags with no aube `Cli` counterpart: the `age_gate` group.
+//     aube exposes `minimumReleaseAge` only through config and its generic
+//     `--config.<key>` extractor (which is dead under nub, living in aube's
+//     unused `cli_main`), so these spellings come from pnpm's CLI type map
+//     rather than from aube.
+//
 // Deliberately absent: `--workspace-root` (aube chdirs to the workspace
 // root pre-dispatch; the helper is crate-private, and half-honoring the
 // flag as filter-only would silently run against the wrong directory —
 // the verb-level `-w/--workspace` on `add`/`remove` covers the use case),
-// and the output/diag flags (`--loglevel`, `--reporter`, `--diag*`, …)
-// which belong to a later output-integration slice.
-// (Plain `//` comments: a rustdoc comment on a clap `Args` struct becomes
+// and diagnostic flags (`--diag*`, …). Output flags (`--loglevel`,
+// `--reporter`, `--silent`) are forwarded through [`EngineGlobals::output`].
+// (Plain `//` comments: a rustdoc comment on a usage `Args` struct becomes
 // the augmented command's `--help` about-text, clobbering the verb's own.)
-#[derive(Debug, Default, clap::Args)]
+#[derive(Debug, Default, usage_rs::Args)]
 struct EngineGlobals {
     /// Change to directory before running (like `make -C`)
-    #[arg(short = 'C', long = "dir", visible_aliases = ["cd", "prefix"], value_name = "DIR")]
+    #[usage(
+        short = 'C',
+        long = "dir",
+        long = "cd",
+        long = "prefix",
+        value_name = "DIR"
+    )]
     dir: Option<PathBuf>,
     /// Scope to workspace packages matching PATTERN (repeatable)
-    #[arg(short = 'F', long, value_name = "PATTERN")]
+    #[usage(short = 'F', long, value_name = "PATTERN")]
     filter: Vec<String>,
     /// Production-only variant of --filter
-    #[arg(long, value_name = "PATTERN")]
+    #[usage(long, value_name = "PATTERN")]
     filter_prod: Vec<String>,
     /// Run across every workspace package (same as --filter=*)
-    #[arg(short = 'r', long)]
+    #[usage(short = 'r', long)]
     recursive: bool,
     /// Error when a workspace selector matches no packages
-    #[arg(long)]
+    #[usage(long)]
     fail_if_no_match: bool,
     /// Include the workspace root in recursive operations
-    #[arg(long, hide = true)]
+    #[usage(long, hide)]
     include_workspace_root: bool,
 
     /// Output-verbosity flags (`--reporter`, `--silent`/`-s`, `--loglevel`),
     /// forwarded to the engine's text-mode renderers.
-    #[command(flatten)]
+    #[usage(flatten)]
     output: super::output::OutputFlags,
+
+    /// Per-invocation `minimumReleaseAge` overrides — a NUB-OWN group, not an
+    /// aube `Cli` mirror (see the note above the struct).
+    ///
+    /// This rides on `EngineGlobals`, so it reaches EVERY verb in the family —
+    /// all ~20 `run_verb` arms, verified by sweeping `--help`, not estimated.
+    /// Only a minority actually consult it: `add`/`update`/`dedupe`/`import`
+    /// resolve from the registry directly, and `dlx`/`create` through their
+    /// transient install. The rest accept it and ignore it — `remove` and
+    /// `prune` only re-resolve or trim what is already there, and the
+    /// local-state verbs (`link`/`unlink`, `approve-builds`/`ignored-builds`,
+    /// the `patch*` trio, `rebuild`) never resolve at all.
+    ///
+    /// Carried anyway rather than split per-verb: the cost is an inert `--help`
+    /// line on those verbs, and threading a second args group through the
+    /// family would be more machinery than that is worth. The read-only verbs
+    /// (`why`, `list`, `licenses`, `outdated`, `audit`) are unaffected either
+    /// way — they parse through `info_family`'s own verb roots and never see
+    /// this struct.
+    #[usage(flatten)]
+    age_gate: super::min_release_age::AgeGateFlags,
+
+    /// Per-invocation platform selection (`--os`/`--cpu`/`--libc`) — the same
+    /// three flags pnpm carries on `install`/`add`/`dlx`.
+    ///
+    /// Rides `EngineGlobals` for the reason `age_gate` does: the verbs that
+    /// consult it are exactly the ones that resolve (`add`, `update`,
+    /// `dedupe`, `import`, and `dlx`/`create` through their transient
+    /// install), and threading a second args group per-verb costs more than an
+    /// inert `--help` line on the rest.
+    #[usage(flatten)]
+    platform: super::platform_flags::PlatformFlags,
 }
 
 impl EngineGlobals {
@@ -242,58 +297,108 @@ impl EngineGlobals {
     }
 }
 
-/// A settled parse: either the verb's args (run it) or a final exit code
-/// (clap already printed help / a usage error, through the rewrite).
-enum ParsedVerb<A> {
-    Run(EngineGlobals, A),
-    Done(i32),
-}
-
-/// The clap `Command` for one engine verb: aube's own args type augmented
-/// with [`EngineGlobals`]. Built by hand (no derive-level `Parser` wrapper)
-/// so the command name can carry the user's spelling — usage and errors
-/// read `nub add …`, never the engine's name.
-fn verb_command<A: ClapArgs>(typed: &str) -> clap::Command {
-    EngineGlobals::augment_args(A::augment_args(clap::Command::new(format!("nub {typed}"))))
-}
-
-/// Parse one verb's argv with aube's args type + the nub globals. Help and
-/// usage errors are rendered through the help-grade rewrite (brand pass +
-/// the config-vocabulary map — help describes nub's configured contract,
-/// see [`present::rewrite_help`]): help → stdout exit 0; usage error →
-/// stderr exit [`aube_codes::exit::EXIT_CLI_USAGE`], matching the engine's
-/// own exit table.
-fn parse_verb<A: ClapArgs>(typed: &str, args: &[String]) -> Result<ParsedVerb<A>> {
-    let argv = std::iter::once(format!("nub {typed}")).chain(args.iter().cloned());
-    match verb_command::<A>(typed).try_get_matches_from(argv) {
-        Ok(matches) => Ok(ParsedVerb::Run(
-            EngineGlobals::from_arg_matches(&matches)?,
-            A::from_arg_matches(&matches)?,
-        )),
-        Err(err) => {
-            let text = present::rewrite_help(err.render().to_string().trim_end());
-            if matches!(
-                err.kind(),
-                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
-            ) {
-                println!("{text}");
-                Ok(ParsedVerb::Done(0))
-            } else {
-                eprintln!("{text}");
-                Ok(ParsedVerb::Done(aube_codes::exit::EXIT_CLI_USAGE))
+/// One `usage_rs::Cli` root per engine verb: aube's own args type flattened
+/// beside [`EngineGlobals`].
+///
+/// usage's derive rejects generic structs, so the former hand-built
+/// `clap::Command` (and the `A: ClapArgs` parse that went with it) becomes a
+/// concrete root per verb. The command NAME is still the spelling the user
+/// typed — `publish_family`'s `verb_cli` publishes it as the root's runtime
+/// identity, so usage and errors read `nub add …`, never the engine's name.
+/// `$spec` is the portable literal the emitted spec carries.
+///
+/// The engine args come FIRST so `--help` lists the verb's own flags ahead of
+/// the nub globals, matching the augment order the clap build used.
+macro_rules! install_cli {
+    ($name:ident, $spec:tt, $engine:ty) => {
+        crate::pm_engine::publish_family::verb_cli! {
+            $name, $spec, {
+                #[usage(flatten)]
+                args: $engine,
+                #[usage(flatten)]
+                globals: EngineGlobals,
             }
         }
-    }
+    };
 }
 
-/// Sugar: early-return the settled exit code from a [`parse_verb`] call.
+/// Parse one verb's argv, or early-return the settled exit code.
+///
+/// Help → stdout exit 0; usage error → stderr exit
+/// [`aube_codes::exit::EXIT_CLI_USAGE`], matching the engine's own exit
+/// table. Both texts flow through the help-grade rewrite (brand pass + the
+/// config-vocabulary map — help describes nub's configured contract, see
+/// [`present::rewrite_help`]).
 macro_rules! parse_or_return {
-    ($typed:expr, $args:expr) => {
-        match parse_verb($typed, $args)? {
-            ParsedVerb::Run(globals, verb) => (globals, verb),
-            ParsedVerb::Done(code) => return Ok(code),
+    ($root:ident, $typed:expr, $args:expr) => {
+        match $root::parse_argv(&format!("nub {}", $typed), $args) {
+            Parsed::Ok(cli) => {
+                // Publish before the verb runs: the engine reads the age gate
+                // and the platform selection through process-global state, not
+                // through anything threaded into the verb's own args.
+                cli.globals.age_gate.apply();
+                cli.globals.platform.apply();
+                (cli.globals, cli.args)
+            }
+            Parsed::Exit(code) => return Ok(code),
         }
     };
+}
+
+install_cli!(AddCli, "nub add", aube::commands::add::AddArgs);
+install_cli!(RemoveCli, "nub remove", aube::commands::remove::RemoveArgs);
+install_cli!(UpdateCli, "nub update", aube::commands::update::UpdateArgs);
+install_cli!(ImportCli, "nub import", aube::commands::import::ImportArgs);
+install_cli!(DedupeCli, "nub dedupe", aube::commands::dedupe::DedupeArgs);
+install_cli!(PruneCli, "nub prune", aube::commands::prune::PruneArgs);
+install_cli!(
+    RebuildCli,
+    "nub rebuild",
+    aube::commands::rebuild::RebuildArgs
+);
+install_cli!(FetchCli, "nub fetch", aube::commands::fetch::FetchArgs);
+install_cli!(LinkCli, "nub link", aube::commands::link::LinkArgs);
+install_cli!(UnlinkCli, "nub unlink", aube::commands::unlink::UnlinkArgs);
+install_cli!(
+    ApproveBuildsCli,
+    "nub approve-builds",
+    aube::commands::approve_builds::ApproveBuildsArgs
+);
+install_cli!(
+    IgnoredBuildsCli,
+    "nub ignored-builds",
+    aube::commands::ignored_builds::IgnoredBuildsArgs
+);
+install_cli!(DlxCli, "nub dlx", aube::commands::dlx::DlxArgs);
+install_cli!(CreateCli, "nub create", aube::commands::create::CreateArgs);
+install_cli!(PatchCli, "nub patch", aube::commands::patch::PatchArgs);
+install_cli!(
+    PatchCommitCli,
+    "nub patch-commit",
+    aube::commands::patch_commit::PatchCommitArgs
+);
+install_cli!(
+    PatchRemoveCli,
+    "nub patch-remove",
+    aube::commands::patch_remove::PatchRemoveArgs
+);
+
+// The `dlx` help surface, which is NOT the `dlx` parse surface: `--node` is
+// nub's own and comes off argv before the parse (`take_dlx_node_flag`), so it
+// has no derive-level home on `DlxArgs`. Declared here purely so the
+// documented surface matches the real one — putting it on `DlxCli` instead
+// would let the parser claim a post-command `--node` that belongs to the
+// fetched tool.
+verb_cli! {
+    DlxHelpCli, "nub dlx", {
+        #[usage(flatten)]
+        args: aube::commands::dlx::DlxArgs,
+        #[usage(flatten)]
+        globals: EngineGlobals,
+        /// Disable Nub's runtime augmentation for this invocation.
+        #[usage(long)]
+        node: bool,
+    }
 }
 
 /// Apply the forwarded output flags (`--reporter`/`--silent`/`--loglevel`) for
@@ -350,8 +455,92 @@ fn finish_code(result: miette::Result<Option<i32>>) -> Result<i32> {
 
 // ───────────────────────── wired verbs ──────────────────────────
 
+/// Put the global bin directory on PATH after a successful global install.
+///
+/// Installing a package globally has exactly one purpose — running it by name —
+/// so an install that leaves the directory unreachable has not done what was
+/// asked. The engine has already warned and named the line; this wires it.
+///
+/// Deliberately narrow. It runs ONLY on a successful global install, only when
+/// the directory is genuinely absent from PATH (after the move to the shared
+/// user-binary directory that is already true for few systems), and it writes
+/// through the marker-keyed path so a profile can never collect a second copy
+/// of the block. A failure here is reported and swallowed: the packages are
+/// installed either way, and an unwritable profile must not fail the install.
+fn wire_global_bin_path(code: i32) {
+    if code != 0 {
+        return;
+    }
+    let Ok(layout) = aube::commands::global::GlobalLayout::resolve() else {
+        return;
+    };
+    if aube::commands::global::dir_is_on_path(&layout.bin_dir) {
+        return;
+    }
+    // Windows profile/registry editing is out of scope for v0 — the same call
+    // `nub pm shim` makes (cli.rs, `run_pm_shim_install`). Without this, the
+    // shell probe below finds no `SHELL`, falls back to the POSIX dialect, and
+    // writes `export PATH=…` into a `.profile` that neither cmd.exe nor
+    // PowerShell reads — then reports PATH configured. Printing the line is
+    // honest; the silent POSIX write is worse than either doing it properly or
+    // not doing it at all.
+    if cfg!(windows) {
+        eprintln!(
+            "  PATH: add {} to your PATH (PATH editing isn't automated on Windows yet)",
+            layout.bin_dir.display()
+        );
+        return;
+    }
+    match nub_core::pm::shim::add_global_bin_path_block(&layout.bin_dir) {
+        Ok(nub_core::pm::shim::ProfileOutcome::Added(p)) => {
+            eprintln!(
+                "  PATH: added {} to {}",
+                layout.bin_dir.display(),
+                p.display()
+            );
+            eprintln!("  Restart your shell, or source that file, to pick it up.");
+        }
+        Ok(nub_core::pm::shim::ProfileOutcome::Rewritten(p)) => {
+            eprintln!(
+                "  PATH: updated the nub global bin entry in {} to {} — restart \
+                 your shell, or source that file, to pick it up.",
+                p.display(),
+                layout.bin_dir.display()
+            );
+        }
+        // The line is in a profile this shell reads, but the CURRENT shell has
+        // not sourced it — otherwise the on-PATH check above would have
+        // returned. Say what to do about the session in hand.
+        Ok(nub_core::pm::shim::ProfileOutcome::AlreadyPresent(p)) => {
+            eprintln!(
+                "  PATH: {} is already configured in {} — restart your shell, \
+                 or source that file, to pick it up.",
+                layout.bin_dir.display(),
+                p.display()
+            );
+        }
+        // No profile this shell reads could be written. This is the ONLY path
+        // that asks the user to do it by hand, which is why the engine no
+        // longer prints a remediation of its own.
+        Ok(nub_core::pm::shim::ProfileOutcome::Manual { line }) => {
+            eprintln!(
+                "warning: {} is not on PATH, so the commands just installed will \
+                 not run.\n  No shell profile could be written — add this line \
+                 yourself:\n    {line}",
+                layout.bin_dir.display()
+            );
+        }
+        Err(e) => eprintln!("warning: could not update your shell profile: {e}"),
+    }
+}
+
 fn run_add(typed: &str, args: &[String]) -> Result<i32> {
-    let (globals, verb): (_, aube::commands::add::AddArgs) = parse_or_return!(typed, args);
+    let (globals, verb) = parse_or_return!(AddCli, typed, args);
+    // Before `engine_session`, for the reason `run_install` does it — and
+    // this is also the path `nub install <pkg> --pnpmfile <p>` lands on.
+    if verb.pnpmfile.is_some() || verb.global_pnpmfile.is_some() || verb.ignore_pnpmfile {
+        super::note_explicit_pnpmfile_choice();
+    }
     let session = super::engine_session(globals.dir.as_deref())?;
     if !verb.global && yarn_detected(&session) {
         return Err(yarn_gate_error(
@@ -360,6 +549,8 @@ fn run_add(typed: &str, args: &[String]) -> Result<i32> {
             &yarn_remedy("add", &verb.packages),
         ));
     }
+    // Read before the move: `run` consumes `verb`.
+    let is_global = verb.global;
     super::min_release_age::arm();
     let code = finish_quieted(
         &globals.output,
@@ -367,6 +558,9 @@ fn run_add(typed: &str, args: &[String]) -> Result<i32> {
         aube::commands::add::run(verb, globals.effective_filter()),
     )?;
     super::min_release_age::persist(&session.cwd, code == 0, &globals.output);
+    if is_global {
+        wire_global_bin_path(code);
+    }
     stamp_if_virgin(&session, code);
     crate::install_engine::record(&session.cwd, code);
     // `nub add vite` (or adding any dep to a vite project) changes the graph;
@@ -379,7 +573,7 @@ fn run_add(typed: &str, args: &[String]) -> Result<i32> {
 }
 
 fn run_remove(typed: &str, args: &[String]) -> Result<i32> {
-    let (globals, verb): (_, aube::commands::remove::RemoveArgs) = parse_or_return!(typed, args);
+    let (globals, verb) = parse_or_return!(RemoveCli, typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
     if !verb.global && yarn_detected(&session) {
         return Err(yarn_gate_error(
@@ -399,8 +593,7 @@ fn run_remove(typed: &str, args: &[String]) -> Result<i32> {
 }
 
 fn run_update(typed: &str, args: &[String]) -> Result<i32> {
-    let (globals, mut verb): (_, aube::commands::update::UpdateArgs) =
-        parse_or_return!(typed, args);
+    let (globals, mut verb) = parse_or_return!(UpdateCli, typed, args);
     // Intercept `--depth` (engine parity no-op): the engine's own warning
     // names aube + aube-lock.yaml via a raw eprintln the rewrite can't
     // reach. Same semantics, nub's wording.
@@ -409,6 +602,10 @@ fn run_update(typed: &str, args: &[String]) -> Result<i32> {
             "warn: --depth {depth} is ignored; nub only refreshes direct deps. \
              For a full refresh, delete the lockfile and run `nub install`."
         ));
+    }
+    // Same ordering requirement as `run_install` / `run_add`.
+    if verb.pnpmfile.is_some() || verb.global_pnpmfile.is_some() || verb.ignore_pnpmfile {
+        super::note_explicit_pnpmfile_choice();
     }
     let session = super::engine_session(globals.dir.as_deref())?;
     if !verb.global && yarn_detected(&session) {
@@ -434,7 +631,7 @@ fn run_update(typed: &str, args: &[String]) -> Result<i32> {
 }
 
 fn run_dedupe(typed: &str, args: &[String]) -> Result<i32> {
-    let (globals, verb): (_, aube::commands::dedupe::DedupeArgs) = parse_or_return!(typed, args);
+    let (globals, verb) = parse_or_return!(DedupeCli, typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
     // `--check` writes nothing (diff + exit code only) and stays usable on
     // yarn projects; a real dedupe re-resolves and rewrites the lockfile.
@@ -452,7 +649,7 @@ fn run_dedupe(typed: &str, args: &[String]) -> Result<i32> {
 }
 
 fn run_prune(typed: &str, args: &[String]) -> Result<i32> {
-    let (globals, verb): (_, aube::commands::prune::PruneArgs) = parse_or_return!(typed, args);
+    let (globals, verb) = parse_or_return!(PruneCli, typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
     // prune prints its summary via raw eprintln with a hardcoded `.aube`
     // store label (the walked directory is the *resolved* virtualStoreDir —
@@ -473,7 +670,7 @@ fn run_prune(typed: &str, args: &[String]) -> Result<i32> {
 }
 
 fn run_rebuild(typed: &str, args: &[String]) -> Result<i32> {
-    let (globals, verb): (_, aube::commands::rebuild::RebuildArgs) = parse_or_return!(typed, args);
+    let (globals, verb) = parse_or_return!(RebuildCli, typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
     finish_quieted(
         &globals.output,
@@ -483,19 +680,19 @@ fn run_rebuild(typed: &str, args: &[String]) -> Result<i32> {
 }
 
 fn run_fetch(typed: &str, args: &[String]) -> Result<i32> {
-    let (globals, verb): (_, aube::commands::fetch::FetchArgs) = parse_or_return!(typed, args);
+    let (globals, verb) = parse_or_return!(FetchCli, typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
     finish_quieted(&globals.output, &session, aube::commands::fetch::run(verb))
 }
 
 fn run_link(typed: &str, args: &[String]) -> Result<i32> {
-    let (globals, verb): (_, aube::commands::link::LinkArgs) = parse_or_return!(typed, args);
+    let (globals, verb) = parse_or_return!(LinkCli, typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
     finish_quieted(&globals.output, &session, aube::commands::link::run(verb))
 }
 
 fn run_unlink(typed: &str, args: &[String]) -> Result<i32> {
-    let (globals, verb): (_, aube::commands::unlink::UnlinkArgs) = parse_or_return!(typed, args);
+    let (globals, verb) = parse_or_return!(UnlinkCli, typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
     // The unlink-all path ends with a raw `` Run `aube install` … `` hint
     // on stderr; capture + rewrite (no children, no progress UI here). Under
@@ -511,8 +708,7 @@ fn run_unlink(typed: &str, args: &[String]) -> Result<i32> {
 }
 
 fn run_approve_builds(typed: &str, args: &[String]) -> Result<i32> {
-    let (globals, verb): (_, aube::commands::approve_builds::ApproveBuildsArgs) =
-        parse_or_return!(typed, args);
+    let (globals, verb) = parse_or_return!(ApproveBuildsCli, typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
     // No fd capture: the engine's remaining prints brand through
     // `prog()`/`cmd()` (already profile-aware), and the verb now runs the
@@ -527,8 +723,7 @@ fn run_approve_builds(typed: &str, args: &[String]) -> Result<i32> {
 }
 
 fn run_ignored_builds(typed: &str, args: &[String]) -> Result<i32> {
-    let (globals, verb): (_, aube::commands::ignored_builds::IgnoredBuildsArgs) =
-        parse_or_return!(typed, args);
+    let (globals, verb) = parse_or_return!(IgnoredBuildsCli, typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
     finish_quieted(
         &globals.output,
@@ -537,8 +732,60 @@ fn run_ignored_builds(typed: &str, args: &[String]) -> Result<i32> {
     )
 }
 
+/// Every `dlx` flag that consumes its value from the following argv token.
+///
+/// This is read off the very tables `run_dlx` parses against, so a
+/// value-taking field added to `DlxArgs`, [`EngineGlobals`], or
+/// [`super::output::OutputFlags`] cannot make `--node` stop scanning early.
+/// `require_equals` flags intentionally stay out: their next token is a
+/// positional (or a parse error), never their value.
+fn dlx_separate_value_flags() -> &'static [String] {
+    static FLAGS: OnceLock<Vec<String>> = OnceLock::new();
+    FLAGS.get_or_init(|| separate_value_flags(DlxCli::command()))
+}
+
+/// Split nub's own `--node` off a `dlx`/`x` argv → `(compat_mode, rest)`.
+///
+/// It has to come off BEFORE the parse: `DlxArgs.params` is a greedy trailing
+/// positional (`double_dash = "automatic"`), so an unrecognized leading flag
+/// does not error — it
+/// becomes the command positional and dlx asks the registry for a package
+/// named `--node` (and swallows any `-p` behind it). Only a `--node` in the
+/// flag region, before the command, is nub's; after the command the token is
+/// the fetched tool's and forwards verbatim — the three-position rule
+/// `split_subcommand_argv` already applies to `nubx`, this command's other
+/// spelling.
+fn take_dlx_node_flag(args: &[String]) -> (bool, Vec<String>) {
+    let mut compat = false;
+    let mut kept = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--node" {
+            compat = true;
+            i += 1;
+            continue;
+        }
+        if !arg.starts_with('-') || arg == "--" {
+            break;
+        }
+        kept.push(arg.clone());
+        i += 1;
+        if dlx_separate_value_flags().contains(arg) && i < args.len() {
+            kept.push(args[i].clone());
+            i += 1;
+        }
+    }
+    kept.extend(args[i..].iter().cloned());
+    (compat, kept)
+}
+
 fn run_dlx(typed: &str, args: &[String]) -> Result<i32> {
-    let (globals, verb): (_, aube::commands::dlx::DlxArgs) = parse_or_return!(typed, args);
+    // `nub --node dlx <tool>` and `nub dlx --node <tool>` both land here as
+    // `--node` in the flag region: the leading-flag normalizer in cli.rs moves a
+    // pre-verb run-flag to just after the verb.
+    let (compat_mode, args) = take_dlx_node_flag(args);
+    let (globals, verb) = parse_or_return!(DlxCli, typed, &args);
     // Bare `nub dlx` / leading `--help`: the trailing var-arg swallowed the
     // flag, and the engine's internal help path would print *aube's* CLI
     // help. Render nub's own (the same surface we just parsed), rewritten.
@@ -548,8 +795,12 @@ fn run_dlx(typed: &str, args: &[String]) -> Result<i32> {
             None | Some("--help" | "-h")
         )
     {
-        let help = verb_command::<aube::commands::dlx::DlxArgs>(typed).render_long_help();
-        println!("{}", present::rewrite_help(help.to_string().trim_end()));
+        // `DlxHelpCli`, not `DlxCli`: `--node` is nub's, comes off argv before
+        // the parse (`take_dlx_node_flag`), and has no derive-level home on
+        // `DlxArgs`. It is declared on the help-only root so the documented
+        // surface matches the real one — declaring it on the PARSE root would
+        // let the parser claim a `--node` that belongs to the fetched tool.
+        println!("{}", DlxHelpCli::long_help(&format!("nub {typed}")));
         return Ok(0);
     }
     // Transient fetch-and-run (see `engine_session_transient`): a dlx never
@@ -560,7 +811,11 @@ fn run_dlx(typed: &str, args: &[String]) -> Result<i32> {
     // std::process::exit — control does not return here on that path. Output
     // flags quiet the fetch; the run tool's own output is preserved (the
     // silencer registers the saved fd for child stderr).
-    finish_code_quieted(&globals.output, &session, aube::commands::dlx::run(verb))
+    finish_code_quieted(
+        &globals.output,
+        &session,
+        aube::commands::dlx::run_in(verb, None, crate::cli::dlx_child_env(compat_mode)),
+    )
 }
 
 /// DLX fallback for the `nubx <tool> [args]` entry point: the bin was absent
@@ -591,6 +846,7 @@ pub fn run_dlx_for_nubx(
     bin: &str,
     args: &[String],
     flags: &crate::cli::NubxDlxFlags,
+    compat_mode: bool,
 ) -> Result<(i32, bool)> {
     if flags.quiet {
         // Same knob aube's own startup flips for `--silent`: drop the animated
@@ -607,7 +863,11 @@ pub fn run_dlx_for_nubx(
     // Ok(None)); `Err` = the fetch/install failed before the tool ran. We surface
     // the Err's report exactly as `finish_code` would, but also report the
     // success bit so the consent caller never records a failed fetch.
-    match session.runtime.block_on(aube::commands::dlx::run(verb)) {
+    match session.runtime.block_on(aube::commands::dlx::run_in(
+        verb,
+        None,
+        crate::cli::dlx_child_env(compat_mode),
+    )) {
         Ok(code) => Ok((code.unwrap_or(0), true)),
         Err(report) => Ok((present::emit_report(&report), false)),
     }
@@ -638,17 +898,17 @@ fn nubx_dlx_args(
 }
 
 fn run_create(typed: &str, args: &[String]) -> Result<i32> {
-    let (globals, verb): (_, aube::commands::create::CreateArgs) = parse_or_return!(typed, args);
+    let (globals, verb) = parse_or_return!(CreateCli, typed, args);
     // Bare `nub create` / leading `--help`: the engine's internal help path
     // prints aube's own CLI help (CreateArgs collapses the template into a
-    // trailing var-arg with the help flag disabled, so clap never settles
-    // it). Render nub's own surface instead, rewritten — same shape as dlx.
+    // trailing var-arg with the help flag disabled, so the parser never
+    // settles it). Render nub's own surface instead, rewritten — same shape
+    // as dlx.
     if matches!(
         verb.params.first().map(String::as_str),
         None | Some("--help" | "-h")
     ) {
-        let help = verb_command::<aube::commands::create::CreateArgs>(typed).render_long_help();
-        println!("{}", present::rewrite_help(help.to_string().trim_end()));
+        println!("{}", CreateCli::long_help(&format!("nub {typed}")));
         return Ok(0);
     }
     // Transient: `nub create` chains into dlx (fetch the create-* package and
@@ -664,7 +924,7 @@ fn run_create(typed: &str, args: &[String]) -> Result<i32> {
 // ───────────────────────── patch workflow ──────────────────────────
 
 fn run_patch(typed: &str, args: &[String]) -> Result<i32> {
-    let (globals, mut verb): (_, aube::commands::patch::PatchArgs) = parse_or_return!(typed, args);
+    let (globals, mut verb) = parse_or_return!(PatchCli, typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
     // Default the edit dir nub-side: the engine's fallback tempdir is
     // `aube-patch-…` and that path IS the success output (module doc).
@@ -699,8 +959,7 @@ fn nub_patch_edit_parent(spec: &str) -> PathBuf {
 }
 
 fn run_patch_commit(typed: &str, args: &[String]) -> Result<i32> {
-    let (globals, verb): (_, aube::commands::patch_commit::PatchCommitArgs) =
-        parse_or_return!(typed, args);
+    let (globals, verb) = parse_or_return!(PatchCommitCli, typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
     patch_chained_install_yarn_gate(typed, &session)?;
     finish(
@@ -711,8 +970,7 @@ fn run_patch_commit(typed: &str, args: &[String]) -> Result<i32> {
 }
 
 fn run_patch_remove(typed: &str, args: &[String]) -> Result<i32> {
-    let (globals, verb): (_, aube::commands::patch_remove::PatchRemoveArgs) =
-        parse_or_return!(typed, args);
+    let (globals, verb) = parse_or_return!(PatchRemoveCli, typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
     patch_chained_install_yarn_gate(typed, &session)?;
     finish(
@@ -757,7 +1015,7 @@ fn patch_chained_install_yarn_gate(typed: &str, session: &EngineSession) -> Resu
 /// public API; see the module doc for why the engine entry is unusable
 /// (hardcoded `aube-lock.yaml` target).
 fn run_import(typed: &str, args: &[String]) -> Result<i32> {
-    let (globals, verb): (_, aube::commands::import::ImportArgs) = parse_or_return!(typed, args);
+    let (globals, verb) = parse_or_return!(ImportCli, typed, args);
     // Upstream parity no-ops, kept so wrappers that pass them keep working:
     // import never chains into install (`--ignore-scripts`) and already
     // only writes the lockfile (`--lockfile-only`).
@@ -767,6 +1025,7 @@ fn run_import(typed: &str, args: &[String]) -> Result<i32> {
     // import needs neither the runtime nor the layout policy — just the
     // chdir and the brand seams (registered before any engine read).
     super::apply_dir(globals.dir.as_deref())?;
+    crate::cli::initialize_config_snapshot(false, false)?;
     super::engine_brand_preflight();
     match import_to_pnpm_lock(verb.force) {
         Ok(summary) => {
@@ -935,7 +1194,8 @@ fn yarn_remedy(yarn_verb: &str, packages: &[String]) -> String {
 
 // ───────────────────────── install / ci (slice 2) ──────────────────────────
 
-/// `nub install` flags, as parsed by nub's clap surface. A deliberate subset
+/// `nub install` flags, as parsed by nub's own top-level parser. A deliberate
+/// subset
 /// of aube's `InstallArgs` — the flags with a nub-level contract; everything
 /// else stays at aube's defaults.
 #[derive(Debug, Default)]
@@ -946,6 +1206,13 @@ pub struct InstallFlags {
     pub prod: bool,
     pub dev: bool,
     pub ignore_scripts: bool,
+    /// `--pnpmfile` / `--global-pnpmfile` / `--ignore-pnpmfile`. An explicitly
+    /// named path is the documented way to run hooks in a project whose
+    /// incumbent is not pnpm — the scope warning in `pm_engine::mod` tells the
+    /// user exactly that, so the flags have to exist for the advice to hold.
+    pub pnpmfile: Option<std::path::PathBuf>,
+    pub global_pnpmfile: Option<std::path::PathBuf>,
+    pub ignore_pnpmfile: bool,
     pub no_optional: bool,
     pub offline: bool,
     pub prefer_offline: bool,
@@ -954,6 +1221,16 @@ pub struct InstallFlags {
     pub node_linker: Option<String>,
     pub registry: Option<String>,
     pub dir: Option<std::path::PathBuf>,
+    /// Run every lifecycle script, as npm does. Not a CLI flag: set only by the
+    /// `npm` shim's install routing, where the user typed `npm ci` and npm's
+    /// contract is that scripts run. Composes with the default-trust floor
+    /// like `dangerouslyAllowAllBuilds` — an explicit `allowBuilds: false`
+    /// still denies.
+    pub allow_all_builds: bool,
+    /// Run npm's project lifecycle stages: `prepublish` and the `prepare`
+    /// family on every install, and no `pnpm:devPreinstall`. Not a CLI flag: set only by the `npm` shim's
+    /// install routing, alongside [`Self::allow_all_builds`].
+    pub npm_lifecycle: bool,
     /// Workspace selectors (`--filter`/`-r`/…), routed through the same
     /// `EffectiveFilter` path the registry verbs (`add`/`remove`/`update`) use.
     pub filter: WorkspaceFilterFlags,
@@ -961,15 +1238,22 @@ pub struct InstallFlags {
     pub output: super::output::OutputFlags,
 }
 
-/// `nub ci` flags. `ci` is frozen + clean by definition, so only the script /
-/// optional-dep / registry knobs are configurable (mirrors `aube ci`'s
-/// `CiArgs`, whose flattened NetworkArgs carries `--registry` upstream).
+/// `nub ci` flags. `ci` is frozen + clean by definition, so the lockfile-mode
+/// knobs are fixed; the dep-axis / script / optional-dep / registry knobs stay
+/// configurable (mirrors `aube ci`'s `CiArgs`, whose flattened NetworkArgs
+/// carries `--registry` upstream).
 #[derive(Debug, Default)]
 pub struct CiFlags {
+    pub prod: bool,
+    pub dev: bool,
     pub ignore_scripts: bool,
     pub no_optional: bool,
     pub registry: Option<String>,
     pub dir: Option<std::path::PathBuf>,
+    /// See [`InstallFlags::allow_all_builds`].
+    pub allow_all_builds: bool,
+    /// See [`InstallFlags::npm_lifecycle`].
+    pub npm_lifecycle: bool,
     /// Workspace selectors (`--filter`/`-r`/…) — same path as `install`.
     pub filter: WorkspaceFilterFlags,
     /// Output-verbosity flags (`--reporter`/`--silent`/`--loglevel`).
@@ -1009,6 +1293,12 @@ impl WorkspaceFilterFlags {
 
 /// `nub install` — route through the embedded aube install engine.
 pub fn run_install(flags: InstallFlags) -> Result<i32> {
+    // Before `engine_session`, which drives the brand preflight that emits the
+    // "pnpmfile ignored" scope warning: an invocation that named its own
+    // pnpmfile has already answered the question that warning asks.
+    if flags.pnpmfile.is_some() || flags.global_pnpmfile.is_some() || flags.ignore_pnpmfile {
+        super::note_explicit_pnpmfile_choice();
+    }
     let session = super::engine_session(flags.dir.as_deref())?;
     if let Some(err) = pnpm_lockfile_version_preflight(&session) {
         return Err(err);
@@ -1033,11 +1323,19 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
         return Err(err);
     }
 
-    // Mirror `run_install_command`: defaults from clap, nub's flags on top.
+    // Mirror `run_install_command`: the engine's declared defaults, nub's
+    // flags on top.
     let mut args = default_install_args();
     args.prod = flags.prod || config.dep_selection.prod;
     args.dev = flags.dev || config.dep_selection.dev;
     args.ignore_scripts = flags.ignore_scripts;
+    // An explicitly named pnpmfile loads whatever the project's incumbent is
+    // — `detect`'s `pnpmfile_default_enabled` gate only ever suppresses the
+    // cwd DEFAULT. That is the remedy the non-pnpm-incumbent scope warning
+    // offers, so these three ride straight through to the engine.
+    args.pnpmfile = flags.pnpmfile.clone();
+    args.global_pnpmfile = flags.global_pnpmfile.clone();
+    args.ignore_pnpmfile = flags.ignore_pnpmfile;
     args.no_optional = flags.no_optional || config.dep_selection.no_optional;
     args.offline = flags.offline || config.offline;
     args.prefer_offline = flags.prefer_offline;
@@ -1045,6 +1343,7 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     args.force = flags.force;
     args.node_linker = flags.node_linker.clone();
     args.network.registry = flags.registry.clone();
+    args.dangerously_allow_all_builds = flags.allow_all_builds;
     // Config-requested frozen seeds the strict mode unless the CLI explicitly
     // opted out (`--no-frozen-lockfile`).
     args.lockfile.frozen_lockfile =
@@ -1058,8 +1357,32 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     let global_frozen = args.lockfile.frozen_override();
     let cli_flags = args.to_cli_flag_bag(global_frozen, args.virtual_store.flags());
 
-    // yaml_prefer_frozen: None — see KNOWN APPROXIMATIONS in the module doc.
-    let mut opts = args.into_options(global_frozen, None, cli_flags, super::env_snapshot());
+    // `preferFrozenLockfile` from the project's own config, and `None` — no
+    // source sets it — is the same env-aware default this used to pass
+    // unconditionally. Resolved lazily because the resolution is real file I/O
+    // (`FileSources::load` plus the workspace yaml) and `from_override` ignores
+    // the value outright once a CLI override exists — which is the common CI
+    // shape, where `--frozen-lockfile` is passed on every run.
+    let prefer_frozen = global_frozen
+        .is_none()
+        .then(aube::commands::install::resolve_prefer_frozen_lockfile)
+        .flatten();
+    let mut opts = args.into_options(
+        global_frozen,
+        prefer_frozen,
+        cli_flags,
+        super::env_snapshot(),
+    );
+    // The settings hash makes release-policy drift miss the no-op warm path.
+    // Once there is real install work, opt into revalidating the existing
+    // lockfile picks under the effective age gate. The engine only re-resolves
+    // when the age policy itself actually moved since the last install — an
+    // ordinary catalog or overrides edit keeps normal prefer-frozen reuse.
+    // Explicit frozen modes remain lockfile-as-truth inside the engine.
+    opts.revalidate_release_policy = true;
+    if flags.npm_lifecycle {
+        opts.project_stages = aube::commands::install::ProjectStages::Npm;
+    }
     // yarn `enableScripts: false` — honor the security opt-out by forcing a
     // block-all-builds policy that overrides even nub's curated default-trust floor.
     if config.scripts_disabled {
@@ -1156,7 +1479,7 @@ fn stamp_if_virgin(session: &EngineSession, code: i32) {
 }
 
 /// Write `devEngines.packageManager = {name:"nub", version:"^<x.y.z>",
-/// onFail:"warn"}` into the project manifest of a VIRGIN install — the
+/// onFail:"ignore"}` into the project manifest of a VIRGIN install — the
 /// non-locking cross-tool PM signal (see the call-site comment). Best-effort: a
 /// successful install must not fail on a manifest the stamp can't reach (no
 /// `package.json` — nub never scaffolds one — or an unwritable file).
@@ -1206,7 +1529,7 @@ fn stamp_virgin_dev_engines(cwd: &Path) {
             // a virgin lockfile state — and clobbering it would impose nub's
             // brand over another PM's declaration (the symmetric brand boundary).
             dev.entry("packageManager").or_insert_with(
-                || serde_json::json!({ "name": "nub", "version": range, "onFail": "warn" }),
+                || serde_json::json!({ "name": "nub", "version": range, "onFail": "ignore" }),
             );
         }
     });
@@ -1303,11 +1626,12 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
         // The explicit CLI flag always wins (OR'd in, never overridden) — same
         // contract as `run_install`.
         dep_selection: DepSelection::from_flags(
-            dep.prod,
-            dep.dev,
+            dep.prod || flags.prod,
+            dep.dev || flags.dev,
             dep.no_optional || flags.no_optional,
         ),
         ignore_scripts: flags.ignore_scripts,
+        dangerously_allow_all_builds: flags.allow_all_builds,
         build_policy_override: config
             .scripts_disabled
             .then(|| std::sync::Arc::new(aube_scripts::BuildPolicy::deny_all())),
@@ -1321,8 +1645,15 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
         strict_no_lockfile: true,
         cli_flags: Vec::new(),
         env_snapshot: super::env_snapshot(),
-        // `nub ci` is the argumentless-install shape: root lifecycle hooks run.
+        // `nub ci` is the argumentless-install shape: the projects' lifecycle
+        // hooks run, `pnpm:devPreinstall` included, as `aube ci` sets them.
         skip_root_lifecycle: false,
+        run_dev_preinstall: true,
+        project_stages: if flags.npm_lifecycle {
+            aube::commands::install::ProjectStages::Npm
+        } else {
+            aube::commands::install::ProjectStages::Install
+        },
         // Workspace scoping (`--filter`/`-r`/…) — same `workspace_filter`
         // channel as `run_install`, into `discover_workspace_plan`.
         workspace_filter: flags.filter.effective_filter(),
@@ -1522,6 +1853,12 @@ fn run_engine(
     yarn_gated: bool,
     output: &super::output::OutputFlags,
 ) -> Result<i32> {
+    // The two halves of the install report bracket the engine: the resolved
+    // layout prints ahead of the progress display, and the materialization
+    // digest is registered here so the engine fires it after linking — above its
+    // own success line, which stays last. Both are no-ops under `--silent`.
+    super::install_report::print_resolved_layout(&session.cwd, output, &opts.cli_flags);
+    super::install_report::register(*output);
     // Hold the output guard only across the engine run (so `--silent` suppresses
     // the progress/summary written during install) and drop it before the match
     // below, so a final error report still reaches the real stderr.
@@ -1559,17 +1896,19 @@ fn run_engine(
     }
 }
 
-/// aube's `InstallArgs` at clap defaults, via a throwaway parse (the struct
-/// has no `Default` impl and ~30 fields; the parse keeps nub compiling
-/// unchanged when upstream adds defaulted flags).
+/// aube's `InstallArgs` at its declared defaults, via a throwaway parse of an
+/// empty argv (the struct has no `Default` impl and ~30 fields; the parse
+/// keeps nub compiling unchanged when upstream adds defaulted flags).
 fn default_install_args() -> InstallArgs {
-    use clap::Parser as _;
-    #[derive(clap::Parser)]
+    #[derive(usage_rs::Cli)]
+    #[usage(name = "nub-install-defaults")]
     struct Defaults {
-        #[command(flatten)]
+        #[usage(flatten)]
         args: InstallArgs,
     }
-    Defaults::parse_from(["nub-install-defaults"]).args
+    Defaults::parse_from(&[])
+        .expect("InstallArgs declares no required argument")
+        .args
 }
 
 /// Symlink-aware `node_modules` removal, mirroring `aube ci`'s
@@ -1593,12 +1932,78 @@ fn remove_node_modules(nm: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn parse<A: ClapArgs>(typed: &str, args: &[&str]) -> (EngineGlobals, A) {
-        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        match parse_verb::<A>(typed, &args).unwrap() {
-            ParsedVerb::Run(globals, verb) => (globals, verb),
-            ParsedVerb::Done(code) => panic!("expected a parse, clap settled with exit {code}"),
-        }
+    /// Parse a verb root's argv (the words AFTER the verb) into
+    /// `(globals, engine args)`, panicking on any outcome that is not a real
+    /// parse.
+    macro_rules! parse {
+        ($root:ident, $typed:literal, $argv:expr) => {
+            match $root::parse_argv(concat!("nub ", $typed), &owned($argv)) {
+                Parsed::Ok(cli) => (cli.globals, cli.args),
+                Parsed::Exit(code) => {
+                    panic!("expected a parse, the parser settled with exit {code}")
+                }
+            }
+        };
+    }
+
+    fn owned(argv: &[&str]) -> Vec<String> {
+        argv.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The pre-command scanner derives its value-taking spellings from the
+    /// parse tables themselves. Keep this expected set explicit so a parser
+    /// surface change gets reviewed alongside the scanner's three-position
+    /// contract.
+    #[test]
+    fn dlx_node_scanner_tracks_every_separate_value_flag() {
+        let actual = dlx_separate_value_flags();
+        let expected = [
+            "--cd",
+            "--cpu",
+            "--dir",
+            "--fetch-retries",
+            "--fetch-retry-factor",
+            "--fetch-retry-maxtimeout",
+            "--fetch-retry-mintimeout",
+            "--fetch-timeout",
+            "--filter",
+            "--filter-prod",
+            "--libc",
+            "--loglevel",
+            "--minimum-release-age",
+            "--minimum-release-age-exclude",
+            "--os",
+            "--package",
+            "--prefix",
+            "--registry",
+            "--reporter",
+            "-C",
+            "-F",
+            "-p",
+        ];
+        assert_eq!(
+            actual,
+            expected.map(str::to_string).as_slice(),
+            "a flattened value flag must not make --node look post-command"
+        );
+    }
+
+    #[test]
+    fn dlx_node_flag_skips_flattened_output_values_before_the_command() {
+        let args = ["--loglevel", "debug", "--node", "prisma"].map(str::to_string);
+        assert_eq!(
+            take_dlx_node_flag(&args),
+            (
+                true,
+                ["--loglevel", "debug", "prisma"]
+                    .map(str::to_string)
+                    .to_vec()
+            )
+        );
+
+        // After the command, `--node` belongs to the fetched binary unchanged.
+        let args = ["--loglevel", "debug", "prisma", "--node"].map(str::to_string);
+        assert_eq!(take_dlx_node_flag(&args), (false, args.to_vec()));
     }
 
     #[test]
@@ -1719,66 +2124,70 @@ mod tests {
         );
     }
 
-    /// The aube args types parse through nub's verb_command with their
+    /// The aube args types parse through nub's stamped verb roots with their
     /// upstream spellings intact — spot-checked on the daily drivers
     /// (deeper flag semantics are upstream's tests; this guards the
     /// augment/flatten wiring and the alias spellings nub advertises).
     #[test]
     fn verb_args_parse_with_aubes_upstream_flag_spellings() {
-        let (_, add): (_, aube::commands::add::AddArgs) = parse(
+        let (_, add) = parse!(
+            AddCli,
             "add",
-            &["-D", "-E", "--allow-build=esbuild", "lodash", "react"],
+            &["-D", "-E", "--allow-build=esbuild", "lodash", "react"]
         );
         assert!(add.save_dev && add.save_exact);
         assert_eq!(add.allow_build, ["esbuild"]);
         assert_eq!(add.packages, ["lodash", "react"]);
 
-        let (_, rm): (_, aube::commands::remove::RemoveArgs) = parse("rm", &["-g", "lodash"]);
+        let (_, rm) = parse!(RemoveCli, "rm", &["-g", "lodash"]);
         assert!(rm.global);
         assert_eq!(rm.packages, ["lodash"]);
 
-        let (_, up): (_, aube::commands::update::UpdateArgs) =
-            parse("up", &["--latest", "--no-save", "react"]);
+        let (_, up) = parse!(UpdateCli, "up", &["--latest", "--no-save", "react"]);
         assert!(up.latest && up.no_save);
         assert_eq!(up.packages, ["react"]);
 
-        let (_, dlx): (_, aube::commands::dlx::DlxArgs) =
-            parse("dlx", &["-p", "cowsay", "-c", "cowsay hi", "|", "tr"]);
+        let (_, dlx) = parse!(
+            DlxCli,
+            "dlx",
+            &["-p", "cowsay", "-c", "cowsay hi", "|", "tr"]
+        );
         assert!(dlx.shell_mode);
         assert_eq!(dlx.package, ["cowsay"]);
         // trailing var-arg: everything after the first positional rides along
         assert_eq!(dlx.params, ["cowsay hi", "|", "tr"]);
 
         // one representative for the rest of the family's flag surfaces
-        let (_, dedupe): (_, aube::commands::dedupe::DedupeArgs) = parse("dedupe", &["--check"]);
+        let (_, dedupe) = parse!(DedupeCli, "dedupe", &["--check"]);
         assert!(dedupe.check);
-        let (_, prune): (_, aube::commands::prune::PruneArgs) =
-            parse("prune", &["--prod", "--no-optional"]);
+        let (_, prune) = parse!(PruneCli, "prune", &["--prod", "--no-optional"]);
         assert!(prune.prod && prune.no_optional);
-        let (_, fetch): (_, aube::commands::fetch::FetchArgs) = parse("fetch", &["-P"]);
+        let (_, fetch) = parse!(FetchCli, "fetch", &["-P"]);
         assert!(fetch.prod && !fetch.dev);
-        let (_, link): (_, aube::commands::link::LinkArgs) = parse("link", &["../sibling"]);
+        let (_, link) = parse!(LinkCli, "link", &["../sibling"]);
         assert_eq!(link.package.as_deref(), Some("../sibling"));
-        let (_, ab): (_, aube::commands::approve_builds::ApproveBuildsArgs) =
-            parse("approve-builds", &["--all"]);
+        let (_, ab) = parse!(ApproveBuildsCli, "approve-builds", &["--all"]);
         assert!(ab.all);
-        let (_, imp): (_, aube::commands::import::ImportArgs) = parse("import", &["--force"]);
+        let (_, imp) = parse!(ImportCli, "import", &["--force"]);
         assert!(imp.force);
-        let (_, rb): (_, aube::commands::rebuild::RebuildArgs) = parse("rb", &["esbuild"]);
+        let (_, rb) = parse!(RebuildCli, "rb", &["esbuild"]);
         assert_eq!(rb.packages, ["esbuild"]);
 
-        let (_, patch): (_, aube::commands::patch::PatchArgs) =
-            parse("patch", &["lodash@4.17.21", "--edit-dir", "/tmp/edit"]);
+        let (_, patch) = parse!(
+            PatchCli,
+            "patch",
+            &["lodash@4.17.21", "--edit-dir", "/tmp/edit"]
+        );
         assert_eq!(patch.package, "lodash@4.17.21");
         assert_eq!(patch.edit_dir.as_deref(), Some(Path::new("/tmp/edit")));
-        let (_, pc): (_, aube::commands::patch_commit::PatchCommitArgs) = parse(
+        let (_, pc) = parse!(
+            PatchCommitCli,
             "patch-commit",
-            &["/tmp/edit/user", "--patches-dir", "fixes"],
+            &["/tmp/edit/user", "--patches-dir", "fixes"]
         );
         assert_eq!(pc.edit_dir, Path::new("/tmp/edit/user"));
         assert_eq!(pc.patches_dir, Path::new("fixes"));
-        let (_, pr): (_, aube::commands::patch_remove::PatchRemoveArgs) =
-            parse("patch-remove", &["lodash@4.17.21"]);
+        let (_, pr) = parse!(PatchRemoveCli, "patch-remove", &["lodash@4.17.21"]);
         assert_eq!(pr.packages, ["lodash@4.17.21"]);
     }
 
@@ -1849,14 +2258,14 @@ mod tests {
     /// (`-r` = `--filter=*`, explicit selectors win).
     #[test]
     fn engine_globals_parse_and_merge_into_the_effective_filter() {
-        let (globals, _): (_, aube::commands::add::AddArgs) =
-            parse("add", &["-C", "/tmp", "-r", "lodash"]);
+        let (globals, _) = parse!(AddCli, "add", &["-C", "/tmp", "-r", "lodash"]);
         assert_eq!(globals.dir.as_deref(), Some(Path::new("/tmp")));
         assert_eq!(globals.effective_filter().filters, ["*"]);
 
-        let (globals, _): (_, aube::commands::remove::RemoveArgs) = parse(
+        let (globals, _) = parse!(
+            RemoveCli,
             "remove",
-            &["-r", "--filter", "app...", "--fail-if-no-match", "lodash"],
+            &["-r", "--filter", "app...", "--fail-if-no-match", "lodash"]
         );
         let filter = globals.effective_filter();
         assert_eq!(filter.filters, ["app..."], "explicit --filter beats -r");
@@ -1869,45 +2278,43 @@ mod tests {
     /// `$AUBE_HOME` all appear upstream), errors carry the engine's
     /// CLI-usage exit code. Sweeps every wired verb's rendered help.
     #[test]
-    fn clap_outcomes_are_rewritten_and_exit_like_the_engine() {
-        // An unknown flag is a usage error → EXIT_CLI_USAGE.
-        let args = vec!["--definitely-not-a-flag".to_string()];
-        match parse_verb::<aube::commands::prune::PruneArgs>("prune", &args).unwrap() {
-            ParsedVerb::Done(code) => assert_eq!(code, aube_codes::exit::EXIT_CLI_USAGE),
-            ParsedVerb::Run(..) => panic!("unknown flag must not parse"),
+    fn parse_outcomes_are_rewritten_and_exit_like_the_engine() {
+        // An unknown flag is a usage error → EXIT_CLI_USAGE. It is only one
+        // because every root sets `unknown_flags = "error"`; usage's default
+        // would bind the token as a value.
+        match PruneCli::parse_argv("nub prune", &owned(&["--definitely-not-a-flag"])) {
+            Parsed::Exit(code) => assert_eq!(code, aube_codes::exit::EXIT_CLI_USAGE),
+            Parsed::Ok(_) => panic!("unknown flag must not parse"),
         }
-        fn help_of<A: ClapArgs>(typed: &str) -> String {
-            present::rewrite_help(verb_command::<A>(typed).render_long_help().to_string())
-        }
-        use aube::commands as c;
         for (typed, help) in [
-            ("add", help_of::<c::add::AddArgs>("add")),
-            ("remove", help_of::<c::remove::RemoveArgs>("remove")),
-            ("update", help_of::<c::update::UpdateArgs>("update")),
-            ("import", help_of::<c::import::ImportArgs>("import")),
-            ("dedupe", help_of::<c::dedupe::DedupeArgs>("dedupe")),
-            ("prune", help_of::<c::prune::PruneArgs>("prune")),
-            ("rebuild", help_of::<c::rebuild::RebuildArgs>("rebuild")),
-            ("fetch", help_of::<c::fetch::FetchArgs>("fetch")),
-            ("link", help_of::<c::link::LinkArgs>("link")),
-            ("unlink", help_of::<c::unlink::UnlinkArgs>("unlink")),
+            ("add", AddCli::long_help("nub add")),
+            ("remove", RemoveCli::long_help("nub remove")),
+            ("update", UpdateCli::long_help("nub update")),
+            ("import", ImportCli::long_help("nub import")),
+            ("dedupe", DedupeCli::long_help("nub dedupe")),
+            ("prune", PruneCli::long_help("nub prune")),
+            ("rebuild", RebuildCli::long_help("nub rebuild")),
+            ("fetch", FetchCli::long_help("nub fetch")),
+            ("link", LinkCli::long_help("nub link")),
+            ("unlink", UnlinkCli::long_help("nub unlink")),
             (
                 "approve-builds",
-                help_of::<c::approve_builds::ApproveBuildsArgs>("approve-builds"),
+                ApproveBuildsCli::long_help("nub approve-builds"),
             ),
             (
                 "ignored-builds",
-                help_of::<c::ignored_builds::IgnoredBuildsArgs>("ignored-builds"),
+                IgnoredBuildsCli::long_help("nub ignored-builds"),
             ),
-            ("dlx", help_of::<c::dlx::DlxArgs>("dlx")),
-            ("patch", help_of::<c::patch::PatchArgs>("patch")),
+            ("dlx", DlxHelpCli::long_help("nub dlx")),
+            ("create", CreateCli::long_help("nub create")),
+            ("patch", PatchCli::long_help("nub patch")),
             (
                 "patch-commit",
-                help_of::<c::patch_commit::PatchCommitArgs>("patch-commit"),
+                PatchCommitCli::long_help("nub patch-commit"),
             ),
             (
                 "patch-remove",
-                help_of::<c::patch_remove::PatchRemoveArgs>("patch-remove"),
+                PatchRemoveCli::long_help("nub patch-remove"),
             ),
         ] {
             assert!(
@@ -2049,7 +2456,7 @@ mod tests {
             Some(&serde_json::json!({
                 "name": "nub",
                 "version": format!("^{}", env!("CARGO_PKG_VERSION")),
-                "onFail": "warn"
+                "onFail": "ignore"
             })),
             "value must be the non-locking caret range on the running nub version"
         );

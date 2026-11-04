@@ -8,3 +8,4 @@
 /.claude/
 /crates/aube-resolver/data/primer-top*.json
 /crates/aube-resolver/data/primer-top*.rkyv.zst
+/crates/aube-resolver/data/popular-top*.json

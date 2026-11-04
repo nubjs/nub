@@ -72,6 +72,9 @@ cat > "$A1/package.json" <<'EOF'
   "dependencies": { "next": "16.1.1", "react": "19.2.0", "react-dom": "19.2.0",
     "tailwindcss": "4.1.17", "@tailwindcss/postcss": "4.1.17" } }
 EOF
+# This matrix tests runtime compatibility, not the supply-chain soak window. Floating
+# transitive releases must not make the fixture time-dependent.
+printf 'minimumReleaseAge=0\n' > "$A1/.npmrc"
 printf "module.exports = { typescript: { ignoreBuildErrors: true }, eslint: { ignoreDuringBuilds: true } };\n" > "$A1/next.config.js"
 printf "export default { plugins: { '@tailwindcss/postcss': {} } };\n" > "$A1/postcss.config.mjs"
 printf '@import "tailwindcss";\n' > "$A1/app/globals.css"
@@ -95,6 +98,7 @@ cat > "$A2/package.json" <<'EOF'
   "scripts": { "build": "vite build --ssr src/entry-server.js --outDir dist-server" },
   "devDependencies": { "vite": "6.0.7" } }
 EOF
+printf 'minimumReleaseAge=0\n' > "$A2/.npmrc"
 cat > "$A2/src/entry-server.js" <<'EOF'
 export function render() { return `<h1>VITE_SSR_OK</h1>`; }
 EOF

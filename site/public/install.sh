@@ -107,9 +107,9 @@ fi
 
 version=${1:-latest}
 if [[ "$version" == canary ]]; then
-    # The rolling canary prerelease — rebuilt from every commit to main and
-    # published under the un-versioned `canary` tag, so there is no version to
-    # resolve. May be broken; `nub upgrade --stable` returns to a release.
+    # The rolling canary prerelease — rebuilt nightly from main and published
+    # under the un-versioned `canary` tag, so there is no version to resolve.
+    # May be broken; `nub upgrade --stable` returns to a release.
     release_tag=canary
     display_version=canary
 else
@@ -187,7 +187,7 @@ fi
 if [[ "$install_dir" == "$default_install_dir" ]]; then
     rm -rf "${install_dir:?}/bin" "${install_dir:?}/runtime"
 else
-    rm -f "${bin_dir:?}/nub" "${bin_dir:?}/nubx"
+    rm -f "${bin_dir:?}/nub" "${bin_dir:?}/nubx" "${bin_dir:?}/nubr"
 fi
 tar -xzf "$tmp_archive" -C "$install_dir" ||
     error "Failed to extract nub archive from: $url"
@@ -195,12 +195,87 @@ tar -xzf "$tmp_archive" -C "$install_dir" ||
 [[ -f "$exe" ]] || error "Archive did not contain bin/nub"
 chmod +x "$exe" || error "Failed to set permissions on $exe"
 
-# `nubx` is the same binary as `nub`, dispatched on argv[0] (cli.rs reads
-# args_os()[0].file_stem(): "nubx" -> exec). The release archive ships only
-# bin/nub, so create the nubx alias as a relative symlink alongside it. `-f`
-# makes this idempotent across reinstall/upgrade and harmless if a future
-# archive ever ships its own nubx. Relative target keeps it valid if ~/.nub moves.
-ln -sf nub "$bin_dir/nubx" || error "Failed to create nubx symlink in $bin_dir"
+# `nubx` and `nubr` are the same binary as `nub`, dispatched on argv[0] (cli.rs
+# reads args_os()[0].file_stem(): "nubx" -> exec, "nubr" -> the unified runner).
+# The release archive carries each alias as a relative symlink beside bin/nub,
+# which tar restored above. Recreate them anyway: an archive from before they
+# shipped has none, and `-f` makes this idempotent across reinstall/upgrade.
+# Relative target keeps it valid if ~/.nub moves.
+for alias in nubx nubr; do
+    ln -sf nub "$bin_dir/$alias" || error "Failed to create $alias symlink in $bin_dir"
+done
+
+# `nub pm shim` HARDLINKS ~/.nub/shims/{npm,npx,…} at the nub binary, so replacing
+# bin/nub above left every one of them pinned to the previous version's inode. That
+# fails silently — `npm --version` keeps reporting the old nub, with no error and no
+# warning — which is worse than any loud breakage. `nub upgrade` re-links after its
+# swap and so does the npm postinstall; this installer did not, so the curl channel
+# was the one upgrade path that stranded them.
+#
+# Mirrors refreshShims in npm/nub/postinstall.js: refresh-only (never CREATE a shim
+# the user did not opt into via `nub pm shim`), best-effort, and yields to a live
+# `nub pm shim` rather than interleaving with it. Independent of NUB_INSTALL_DIR.
+#
+# The shim dir is ${XDG_DATA_HOME:-$HOME/.local/share}/nub/shims — one rule, the
+# unix half of resolve_shim_dir() in crates/nub-core/src/pm/shim.rs.
+#
+# `~/.nub/shims` is the PRE-MOVE location, refreshed only so an install that
+# predates the move keeps working until the user's next `nub pm shim` migrates
+# it. Missing a live dir is SILENT staleness — the shims keep executing the
+# pre-upgrade inode with no error at all — so the transitional entry stays until
+# the move is old news. Refreshing is never CREATING: a dir that is not there is
+# skipped, so this can add nothing the user did not opt into.
+refresh_pm_shims() {
+    local d
+    for d in "${XDG_DATA_HOME:-$HOME/.local/share}/nub/shims" "$HOME/.nub/shims"; do
+        refresh_pm_shims_in "$d"
+    done
+}
+
+refresh_pm_shims_in() {
+    local shim_dir="$1"
+    # Sibling lockfile, matching ShimLock::acquire's <parent>/<name>.lock — which
+    # for a dir path is exactly "<dir>.lock". It must sit beside THIS dir or the
+    # protocol stops serializing against a concurrent `nub pm shim`.
+    local lock="${shim_dir}.lock"
+    local locked=0 refreshed=0 name target
+
+    [[ -d "$shim_dir" ]] || return 0
+
+    # shim.rs's lock protocol: create O_EXCL, steal one whose holder died. `find
+    # -mmin` is the portable mtime test (GNU `stat -c` and BSD `stat -f` take
+    # different flags), so the steal window here is 60s where the Rust and JS
+    # writers use 30. Longer is the safe direction — it only ever waits longer for
+    # a live holder, and never races one.
+    if (set -o noclobber; : > "$lock") 2>/dev/null; then
+        locked=1
+    elif [[ -n "$(find "$lock" -mmin +1 2>/dev/null)" ]] &&
+        rm -f "$lock" && (set -o noclobber; : > "$lock") 2>/dev/null; then
+        locked=1
+    else
+        return 0
+    fi
+
+    for name in npm npx pnpm pnpx yarn yarnpkg; do
+        target="$shim_dir/$name"
+        [[ -e "$target" ]] || continue
+        # A hardlink costs no disk and carries +x with the inode; a shim dir on
+        # another filesystem cannot be linked, so fall back to a copy.
+        if ln -f "$exe" "$target" 2>/dev/null ||
+            { cp -f "$exe" "$target" 2>/dev/null && chmod +x "$target" 2>/dev/null; }; then
+            refreshed=$((refreshed + 1))
+        fi
+    done
+
+    if [[ "$locked" -eq 1 ]]; then
+        rm -f "$lock"
+    fi
+    if [[ "$refreshed" -gt 0 ]]; then
+        info "Refreshed $refreshed nub shim(s) in $shim_dir"
+    fi
+    return 0
+}
+refresh_pm_shims
 
 # Install receipt: marks this dir as a nub self-managed install so `nub upgrade`
 # recognizes it as in-place-upgradeable even when NUB_INSTALL_DIR relocated it out
@@ -212,7 +287,7 @@ cat > "$install_dir/.nub-receipt" <<'RECEIPT' || error "Failed to write install 
 # in-place self-update for a non-default install location).
 RECEIPT
 
-success "Installed nub ${display_version} (with nubx) to $exe"
+success "Installed nub ${display_version} (with nubx and nubr) to $exe"
 
 # --- PATH setup ---
 
@@ -259,11 +334,33 @@ if echo "$PATH" | tr ':' '\n' | grep -qx "$bin_dir"; then
     exit 0
 fi
 
+# Being absent from $PATH does NOT mean the profile lacks our line: a profile
+# edited by an earlier run is not reflected in the current shell until it is
+# sourced. Re-running the installer from that same shell would then append the
+# block again, once per run, forever. Match the line we are about to write, so
+# a profile that already carries it is left alone.
+profile_has_line() {
+    local file=$1 line=$2
+    [[ -f "$file" ]] && grep -qxF "$line" "$file"
+}
+
+already_wired() {
+    local file=$1 line=$2
+    if profile_has_line "$file" "$line"; then
+        success "Already configured in $(tildify "$file"). Restart your shell, or run: nub --version"
+        return 0
+    fi
+    return 1
+}
+
 refresh_command=""
 
 case $(basename "${SHELL:-bash}") in
 zsh)
     config="$HOME/.zshrc"
+    if already_wired "$config" "$posix_path_line"; then
+        exit 0
+    fi
     if [[ -w "$config" ]] || [[ ! -f "$config" ]]; then
         {
             echo ''
@@ -280,6 +377,9 @@ bash)
         if [[ -w "$f" ]]; then config="$f"; break; fi
     done
     if [[ -n "$config" ]]; then
+        if already_wired "$config" "$posix_path_line"; then
+            exit 0
+        fi
         {
             echo ''
             echo '# nub'
@@ -291,6 +391,9 @@ bash)
     ;;
 fish)
     config="${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish"
+    if already_wired "$config" "$fish_path_line"; then
+        exit 0
+    fi
     if [[ -w "$config" ]] || [[ ! -f "$config" ]]; then
         mkdir -p "$(dirname "$config")"
         {

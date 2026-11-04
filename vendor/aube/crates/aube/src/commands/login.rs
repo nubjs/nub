@@ -15,25 +15,26 @@
 //! scope's packages to the right registry without further config.
 
 use crate::commands::npmrc::{NpmrcEdit, registry_host_key, resolve_registry, user_npmrc_path};
-use clap::Args;
 use miette::{IntoDiagnostic, miette};
 use std::io::{BufRead, IsTerminal};
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Args)]
+const MAX_TOKEN_RESPONSE_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, usage_rs::Args)]
 pub struct LoginArgs {
     /// Authentication flow: `legacy` (token paste; default) or `web`
     /// (OAuth flow against `{registry}/-/v1/login`).
-    #[arg(long, value_name = "TYPE", default_value = "legacy")]
+    #[usage(long, value_name = "TYPE", default = "legacy")]
     pub auth_type: String,
 
     /// Scope to bind this registry to (e.g. `@myorg`).
     ///
     /// When set, the scope->registry mapping is also written to
     /// `~/.npmrc`.
-    #[arg(long, value_name = "SCOPE")]
+    #[usage(long, value_name = "SCOPE")]
     pub scope: Option<String>,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub network: crate::cli_args::NetworkArgs,
 }
 
@@ -228,11 +229,7 @@ async fn poll_done(client: &reqwest::Client, done_url: &str) -> miette::Result<S
                 tokio::time::sleep(delay).await;
             }
             200 => {
-                let body: serde_json::Value = resp
-                    .json()
-                    .await
-                    .into_diagnostic()
-                    .map_err(|e| miette!("failed to parse doneUrl response: {e}"))?;
+                let body = read_token_response(resp).await?;
                 return body
                     .get("token")
                     .and_then(|v| v.as_str())
@@ -244,6 +241,42 @@ async fn poll_done(client: &reqwest::Client, done_url: &str) -> miette::Result<S
             }
         }
     }
+}
+
+async fn read_token_response(mut resp: reqwest::Response) -> miette::Result<serde_json::Value> {
+    if resp
+        .content_length()
+        .is_some_and(|len| len > MAX_TOKEN_RESPONSE_BYTES as u64)
+    {
+        return Err(miette::miette!(
+            code = aube_codes::errors::ERR_AUBE_WEB_LOGIN_RESPONSE_TOO_LARGE,
+            "web login token response exceeds {MAX_TOKEN_RESPONSE_BYTES} bytes"
+        ));
+    }
+
+    let mut body = bytes::BytesMut::with_capacity(
+        resp.content_length()
+            .map(|len| len as usize)
+            .unwrap_or(1024),
+    );
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .into_diagnostic()
+        .map_err(|e| miette!("failed to read doneUrl response: {e}"))?
+    {
+        if body.len().saturating_add(chunk.len()) > MAX_TOKEN_RESPONSE_BYTES {
+            return Err(miette::miette!(
+                code = aube_codes::errors::ERR_AUBE_WEB_LOGIN_RESPONSE_TOO_LARGE,
+                "web login token response exceeds {MAX_TOKEN_RESPONSE_BYTES} bytes"
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    serde_json::from_slice(&body)
+        .into_diagnostic()
+        .map_err(|e| miette!("failed to parse doneUrl response: {e}"))
 }
 
 /// Best-effort launch the OS's default browser. Failures are intentionally

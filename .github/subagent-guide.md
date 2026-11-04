@@ -60,7 +60,7 @@ Then **exit.** Your job ends at the pushed commit plus the report.
 Before you push, verify the actual behavior — not just that the project compiles. The loop, in order:
 
 1. **Build** your worktree incrementally.
-2. **Run the exact gates CI runs** — for this project that is `cargo clippy --all-targets --all-features -- -D warnings`, `cargo fmt --check`, and the scoped tests for what you changed. Match the gate flags exactly; a local `cargo test` that skips clippy/fmt is not the gate.
+2. **Run the exact gates CI runs** — for this project that is `NUB_ALLOW_INCOMPLETE_RUNTIME=1 cargo clippy --all-targets --all-features -- -D warnings`, `cargo fmt --check`, and the scoped tests for what you changed. Match the gate flags exactly; a local `cargo test` that skips clippy/fmt is not the gate. The env var is what CI's clippy job sets: `--all-features` turns on `embed-runtime`, which requires a fully staged `runtime/`, and a lint ships nothing so it opts out.
 3. **End-to-end probe** the specific behavior you changed, in a throwaway temp fixture — drive the real binary and observe, do not infer correctness from reading the diff.
 4. **Reach for Docker** when the behavior involves the global cache, config resolution, a clean first-run environment, or a floor Node version — a container is the honest way to test those.
 5. **Promote durable checks into the suite** rather than leaving them as one-off probes, when the behavior warrants a standing test.

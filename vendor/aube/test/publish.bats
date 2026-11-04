@@ -42,6 +42,29 @@ _write_publishable_pkg() {
 	assert_output --partial "index.js"
 }
 
+@test "aube publish accepts a prebuilt tarball outside a package directory" {
+	cat >package.json <<-'EOF'
+		{
+		  "name": "publish-smoke",
+		  "version": "0.1.0",
+		  "main": "index.js",
+		  "files": ["index.js"],
+		  "scripts": {"prepublishOnly": "touch publish-script-ran"}
+		}
+	EOF
+	echo 'module.exports = 1' >index.js
+	aube pack --ignore-scripts --pack-destination artifacts >/dev/null
+	rm package.json index.js
+
+	run aube publish ./artifacts/publish-smoke-0.1.0.tgz \
+		--dry-run --registry=https://r.example.com/
+	assert_success
+	assert_output --partial "publish-smoke@0.1.0"
+	assert_output --partial "package.json"
+	assert_output --partial "index.js"
+	refute [ -e publish-script-ran ]
+}
+
 @test "aube publish --dry-run URL-encodes scoped names" {
 	cat >package.json <<-'EOF'
 		{
@@ -205,7 +228,7 @@ NODE
 	assert_output "Bearer fallback-token"
 }
 
-@test "aube publish exchanges OIDC token for post-hook package name" {
+@test "aube publish preflights and exchanges OIDC token for post-hook package name" {
 	_write_publishable_pkg
 	cat >rewrite-name.mjs <<'NODE'
 import fs from 'node:fs';
@@ -220,7 +243,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 
 const server = http.createServer((req, res) => {
-  if (req.method === 'GET' && req.url === '/publish-smoke') {
+  if (req.method === 'GET' && req.url === '/publish-renamed') {
     res.statusCode = 404;
     res.end('{}');
     return;
@@ -400,12 +423,20 @@ const existing = {
   versions: { '0.1.0': { name: 'publish-smoke', version: '0.1.0' } },
 };
 const server = http.createServer((req, res) => {
+  if (req.method === 'GET') {
+    fs.appendFileSync('publish-server-get.log', `${req.url}\n`);
+  }
   if (req.method === 'GET' && req.url === '/publish-smoke') {
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify(existing));
     return;
   }
-  if (req.method === 'PUT' && req.url === '/publish-smoke') {
+  if (req.method === 'GET' && req.url === '/publish-renamed') {
+    res.statusCode = 404;
+    res.end('{}');
+    return;
+  }
+  if (req.method === 'PUT' && (req.url === '/publish-smoke' || req.url === '/publish-renamed')) {
     let size = 0;
     req.on('data', (c) => { size += c.length; });
     req.on('end', () => {
@@ -439,8 +470,9 @@ _stop_publish_server() {
 	fi
 }
 
-@test "aube publish refuses to re-publish a version already on the registry" {
+@test "aube publish runs hooks before refusing to re-publish a version" {
 	_write_publishable_pkg
+	node -e "const fs=require('fs'); const m=require('./package.json'); m.scripts={prepublishOnly:'node -e \\'require(\\\"fs\\\").writeFileSync(\\\"lifecycle.marker\\\", \\\"ran\\\")\\''}; fs.writeFileSync('package.json', JSON.stringify(m, null, 2))"
 	_start_publish_server
 	port="$(cat publish-server-port)"
 	echo "//127.0.0.1:${port}/:_authToken=fake" >.npmrc
@@ -451,12 +483,63 @@ _stop_publish_server() {
 	[ "$rc" -ne 0 ]
 	assert_output --partial "publish-smoke@0.1.0 is already on"
 	assert_output --partial "--force"
-	# The pre-flight must short-circuit before the PUT; the mock
+	assert_file_exists lifecycle.marker
+	# The final pre-flight must short-circuit before the PUT; the mock
 	# server only logs PUTs to this file.
 	[ ! -s publish-server-put.log ] || {
 		echo "unexpected PUT: $(cat publish-server-put.log)" >&2
 		false
 	}
+}
+
+@test "aube publish uses a hook-mutated target when the initial version exists" {
+	_write_publishable_pkg
+	cat >rewrite-name.mjs <<'NODE'
+import fs from 'node:fs';
+const m = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+m.publishConfig = { name: 'publish-renamed' };
+fs.writeFileSync('package.json', JSON.stringify(m, null, 2));
+NODE
+	node -e "const fs=require('fs'); const m=require('./package.json'); m.scripts={prepublishOnly:'node ./rewrite-name.mjs'}; fs.writeFileSync('package.json', JSON.stringify(m, null, 2))"
+	_start_publish_server
+	port="$(cat publish-server-port)"
+	echo "//127.0.0.1:${port}/:_authToken=fake" >.npmrc
+
+	run aube publish --no-git-checks --registry "http://127.0.0.1:${port}/"
+	rc=$status
+	_stop_publish_server
+	[ "$rc" -eq 0 ]
+	assert_output --partial "+ publish-renamed@0.1.0"
+	run grep -c "^/publish-renamed " publish-server-put.log
+	assert_success
+	[ "$output" = "1" ]
+}
+
+@test "aube publish -r skips hooks for an already-published version" {
+	mkdir -p packages/smoke
+	cat >package.json <<-'EOF'
+		{"name":"root","version":"0.0.0","private":true}
+	EOF
+	cat >pnpm-workspace.yaml <<-'EOF'
+		packages:
+		  - packages/*
+	EOF
+	(
+		cd packages/smoke
+		_write_publishable_pkg
+		node -e "const fs=require('fs'); const m=require('./package.json'); m.scripts={prepublishOnly:'node -e \\'require(\\\"fs\\\").writeFileSync(\\\"lifecycle.marker\\\", \\\"ran\\\")\\''}; fs.writeFileSync('package.json', JSON.stringify(m, null, 2))"
+	)
+	_start_publish_server
+	port="$(cat publish-server-port)"
+	echo "//127.0.0.1:${port}/:_authToken=fake" >.npmrc
+
+	run aube publish -r --no-git-checks --registry "http://127.0.0.1:${port}/"
+	rc=$status
+	_stop_publish_server
+	[ "$rc" -eq 0 ]
+	assert_output --partial "= publish-smoke@0.1.0 (already on registry, skipping)"
+	assert_file_not_exists packages/smoke/lifecycle.marker
+	[ ! -s publish-server-put.log ]
 }
 
 @test "aube publish --force re-publishes past the existence check" {
@@ -559,34 +642,46 @@ _stop_publish_server() {
 	assert_failure
 }
 
-@test "aube publish re-reads package.json after pre-pack hooks so registry metadata matches tarball" {
+@test "aube publish uses the archive manifest snapshot for registry metadata" {
 	# Regression test for Cursor Bugbot issue: if a `prepublishOnly`
 	# script mutates package.json (e.g. stamping a git SHA into the
 	# version, stripping devDependencies), `build_publish_body` must
-	# see the post-hook manifest so `versions.<v>` metadata agrees
-	# with what's in the tarball. Previously we serialized the
-	# pre-hook snapshot and consumers saw a mismatch.
+	# see the archive-time manifest so `versions.<v>` metadata agrees
+	# with what's in the tarball. A later `postpack` mutation must not
+	# alter that snapshot.
 	cat >package.json <<-'EOF'
 		{
 		  "name": "publish-mutated",
 		  "version": "0.1.0",
 		  "main": "index.js",
 		  "files": ["index.js"],
+		  "dependencies": {
+		    "foo": "catalog:"
+		  },
 		  "devDependencies": {
 		    "should-be-stripped": "1.0.0"
 		  },
 		  "scripts": {
-		    "prepublishOnly": "node ./rewrite.mjs"
+		    "prepublishOnly": "node ./rewrite.mjs",
+		    "postpack": "node ./rewrite-postpack.mjs"
 		  }
 		}
 	EOF
 	echo "module.exports = 1" >index.js
+	cat >pnpm-workspace.yaml <<-'EOF'
+		catalog:
+		  foo: ^1.2.3
+	EOF
 	cat >rewrite.mjs <<'NODE'
 import fs from 'node:fs';
 const m = JSON.parse(fs.readFileSync('package.json', 'utf8'));
 delete m.devDependencies;
 m.publishedBy = 'prepublishOnly';
 fs.writeFileSync('package.json', JSON.stringify(m, null, 2));
+NODE
+	cat >rewrite-postpack.mjs <<'NODE'
+import fs from 'node:fs';
+fs.writeFileSync('pnpm-workspace.yaml', 'catalog:\n  foo: ^9.9.9\n');
 NODE
 
 	cat >record-server.mjs <<'NODE'
@@ -641,6 +736,12 @@ NODE
 	run jq '.versions."0.1.0".devDependencies' put-body.json
 	assert_success
 	assert_output "null"
+
+	# postpack runs after the archive snapshot and must not change the
+	# catalog value used for registry metadata.
+	run jq -r '.versions."0.1.0".dependencies.foo' put-body.json
+	assert_success
+	assert_output "^1.2.3"
 }
 
 @test "aube publish --dry-run --json reports post-hook version when prepublishOnly bumps version" {
@@ -669,9 +770,15 @@ m.version = '0.1.0-sha.abc123';
 fs.writeFileSync('package.json', JSON.stringify(m, null, 2));
 NODE
 
-	run bash -c "aube publish --dry-run --json --registry=https://r.example.com/ | jq -r '.version'"
+	_start_publish_server
+	port="$(cat publish-server-port)"
+	run bash -c "aube publish --dry-run --json --registry=http://127.0.0.1:${port}/ | jq -r '.version'"
+	rc=$status
+	_stop_publish_server
+	[ "$rc" -eq 0 ]
 	assert_success
 	assert_output "0.1.0-sha.abc123"
+	assert_not_exists publish-server-get.log
 }
 
 @test "aube publish --dry-run --json emits a pnpm-compatible object" {

@@ -1,0 +1,77 @@
+name: lat check
+
+# Validates the knowledge graph under wiki/ (reached through the repo-root `lat.md`
+# symlink, which is the directory name lat resolves). `lat check` fails when a wiki
+# link points at a section that no longer exists, when a `@lat:` code reference names
+# a missing section, when a section is missing its summary paragraph, or when a
+# directory index omits a file. It reads source files too, so a Rust rename that
+# orphans a doc reference fails here rather than going stale silently — which is why
+# this runs on every pull request and not only on documentation paths.
+#
+# This job is not a REQUIRED check until someone adds it to main's branch protection;
+# adding a workflow does not do that. Note also that the trigger below is scoped to
+# `main`, so a stacked pull request based on another branch does not run it at all.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # PR CI is opt-in — request a run with `gh pr edit <n> --add-label ci`. Rationale: ci.yml.
+    types: [labeled]
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  lat-check:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: 26
+
+      # The checker is fetched by `npx` at an exact pinned version rather than added
+      # to the root package.json. It brings ~185 transitive packages, and an installer
+      # that exits 0 on a half-built tree leaves a green install step (see the "assert
+      # root deps actually installed" guard in ci.yml). Adding that much to the root
+      # install tripped exactly that guard across the whole matrix. lat.test.mjs
+      # keeps the package-script and MCP version pins aligned.
+      #
+      # The Socket Firewall shim is no longer part of that story: the root is
+      # nub-identity, and every leg now installs it with `nub install`, which
+      # carries no sfw shim.
+      - name: wiki/ carries no internal-only material
+        run: node scripts/wiki-public-lint.mjs
+
+      - name: Validate the knowledge graph
+        run: npm run lat:check
+
+      - name: Verify local search and agent integration
+        run: node --test scripts/lat.test.mjs scripts/codex-hooks.test.mjs
+        env:
+          LAT_SMOKE: "1"
+
+      # AGENTS.md is a SYMLINK to wiki/agents.md, which is what puts the
+      # entry-point document inside the graph. That makes it a regular-file /
+      # symlink pair for anything branched before the move, and git offers no
+      # auto-merge across those types: a concurrent PR editing AGENTS.md gets
+      # `CONFLICT (distinct types)`, and a resolver who keeps the symlink drops
+      # the hunk with no signal — `lat check` is green either way, because the
+      # content simply is not there to be checked.
+      #
+      # This catches the OTHER resolution, which is the recoverable one: someone
+      # restores a regular file and the entry point silently leaves the graph.
+      # The dropped-hunk direction cannot be caught mechanically; it is why the
+      # resolution instruction lives in wiki/agents.md next to the move itself.
+      # The same script the pre-commit and pre-push hooks run, rather than a
+      # third copy of the two assertions: the gates exist to say one thing at
+      # three costs, and a drifting copy would defeat that.
+      - name: AGENTS.md must stay a symlink into the graph
+        run: sh .githooks/agents-symlink-check.sh

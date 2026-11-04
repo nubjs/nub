@@ -40,7 +40,10 @@ fail() { echo "  FAIL  $1"; fails=$((fails + 1)); }
 # the pin-free fixtures dir so the probe itself isn't redirected.
 # fixtures/package.json anchors that isolation: `workspaces: []` is a workspace boundary, ending
 # nub's project walk at the fixtures dir so repo-root config (pnpm-workspace.yaml + the root
-# engines) can never capture the legs.
+# engines) can never capture the legs. It bounds the PACKAGE walk only — `nub.jsonc` discovery
+# has no workspace boundary (it walks to the filesystem root, skipping only node_modules), so a
+# repo-root nub.jsonc still applies to every leg. A stray one carrying `"nodeCompat": true`
+# reddened the whole matrix once (#695) by silently disabling augmentation.
 ACTUAL_VER="$(cd "$FIX/async-loader-collision" && "$NUB" --eval 'process.stdout.write(process.version)' 2>/dev/null || true)"
 if [[ -n "$ACTUAL_VER" && -n "$NODE_VER" && "$NODE_VER" != "unknown" && "$ACTUAL_VER" != "$NODE_VER" ]]; then
   fail "version mismatch — matrix selected $NODE_VER but nub ran on $ACTUAL_VER (a pin is masking this leg's coverage)"

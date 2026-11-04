@@ -17,6 +17,7 @@ use super::{CatalogMap, config, install};
 static GLOBAL_FROZEN: OnceLock<Option<install::FrozenOverride>> = OnceLock::new();
 static GLOBAL_VIRTUAL_STORE: OnceLock<install::GlobalVirtualStoreFlags> = OnceLock::new();
 static SKIP_AUTO_INSTALL_ON_PM_MISMATCH: AtomicBool = AtomicBool::new(false);
+pub(crate) const GVS_REGISTRY_NAMESPACE_VERSION: &str = "v1";
 
 /// Process-wide registry override from the top-level `--registry=<url>`
 /// flag. Applied in `make_client` (and any direct `NpmConfig::load`
@@ -39,6 +40,43 @@ pub(crate) struct GlobalOutputFlags {
 }
 
 static GLOBAL_OUTPUT: OnceLock<GlobalOutputFlags> = OnceLock::new();
+
+tokio::task_local! {
+    static EMBEDDER_INSTALL_OVERRIDES: install::EmbedderInstallOverrides;
+}
+
+/// Scope native storage paths to one embedded add/install invocation. Keeping
+/// them as `PathBuf`s avoids routing filesystem identity through UTF-8 setting
+/// strings while preserving task isolation between concurrent embedders.
+pub(crate) async fn scope_embedder_install_overrides<F: std::future::Future>(
+    overrides: install::EmbedderInstallOverrides,
+    future: F,
+) -> F::Output {
+    EMBEDDER_INSTALL_OVERRIDES.scope(overrides, future).await
+}
+
+pub(crate) fn has_embedder_store_override() -> bool {
+    EMBEDDER_INSTALL_OVERRIDES
+        .try_with(|overrides| overrides.store_dir.is_some())
+        .unwrap_or(false)
+}
+
+fn embedder_storage_path(
+    cwd: &std::path::Path,
+    select: impl FnOnce(&install::EmbedderInstallOverrides) -> Option<&std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    EMBEDDER_INSTALL_OVERRIDES
+        .try_with(|overrides| select(overrides).cloned())
+        .ok()
+        .flatten()
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                cwd.join(path)
+            }
+        })
+}
 
 pub(crate) fn set_registry_override(url: Option<String>) {
     *REGISTRY_OVERRIDE.write().expect("registry lock poisoned") =
@@ -115,10 +153,12 @@ pub(crate) fn global_output_flags() -> GlobalOutputFlags {
 /// project + user `~/.config/aube/config.toml`, and pnpm's global
 /// `config.yaml`. Construct once with `FileSources::load`, borrow into a
 /// `ResolveCtx` via `FileSources::ctx`.
+#[derive(Clone)]
 pub(crate) struct FileSources {
     pub managed_aube_config: Vec<(String, String)>,
     pub user_npmrc: Vec<(String, String)>,
     pub project_npmrc: Vec<(String, String)>,
+    project_config_settings: Vec<(String, String)>,
     pub user_aube_config: Vec<(String, String)>,
     pub project_aube_config: Vec<(String, String)>,
     /// pnpm's global `config.yaml` (`<configDir>/config.yaml`, pnpm v11),
@@ -133,10 +173,18 @@ impl FileSources {
             managed_aube_config: config::load_managed_aube_config_entries(),
             user_npmrc: npmrc.user,
             project_npmrc: npmrc.project,
+            project_config_settings: aube_util::engine_context().project_config_settings,
             user_aube_config: config::load_user_aube_config_entries(),
             project_aube_config: config::load_project_aube_config_entries(cwd),
             global_config_yaml: load_global_config_yaml(),
         }
+    }
+
+    pub(crate) fn extend_project_sources(&mut self, cwd: &Path) {
+        let npmrc = aube_registry::config::load_npmrc_entries_split(cwd);
+        self.project_npmrc.extend(npmrc.project);
+        self.project_aube_config
+            .extend(config::load_project_aube_config_entries(cwd));
     }
 
     pub(crate) fn ctx<'a>(
@@ -149,6 +197,7 @@ impl FileSources {
             managed_aube_config: &self.managed_aube_config,
             project_aube_config: &self.project_aube_config,
             project_npmrc: &self.project_npmrc,
+            project_config: &self.project_config_settings,
             user_aube_config: &self.user_aube_config,
             user_npmrc: &self.user_npmrc,
             workspace_yaml,
@@ -171,13 +220,12 @@ impl FileSources {
 ///
 /// `config.yaml` is a pnpm-NAMED GLOBAL file, so it is gated by the
 /// GLOBAL-scope posture `engine_context().read_pnpm_global_config` — NOT
-/// the project-derived `read_branded_pnpm_config`. Global config has no
-/// project incumbent, so an embedder whose global config is its own neutral
-/// surface (e.g. nub) clears `read_pnpm_global_config` UNCONDITIONALLY and
-/// this file is never read, regardless of the cwd's incumbent PM. A
+/// the project-derived `read_branded_pnpm_config`. The embedding host decides
+/// that posture from its identity policy; it may enable this tier for a
+/// particular pnpm major while keeping it inert for other project identities. A
 /// missing/empty/unparseable file is also an empty map — global config is
 /// best-effort and must never fail a command.
-pub(crate) fn load_global_config_yaml() -> std::collections::BTreeMap<String, yaml_serde::Value> {
+pub fn load_global_config_yaml() -> std::collections::BTreeMap<String, yaml_serde::Value> {
     let empty = std::collections::BTreeMap::new;
     if !aube_util::engine_context().read_pnpm_global_config {
         return empty();
@@ -232,6 +280,11 @@ pub(crate) fn ensure_registry_auth_for_package(
 /// back to the aube-owned default under `$XDG_DATA_HOME/aube/store/`
 /// (see [`aube_store::dirs::store_dir`] for exact resolution).
 ///
+/// The store's cache dir — packument caches, and the global virtual
+/// store unless `globalVirtualStoreDir` moves it — comes from
+/// [`resolved_cache_dir`], so `cacheDir` and `storeDir` can be pointed
+/// at the same volume without touching `XDG_CACHE_HOME`.
+///
 /// Path interpretation matches pnpm: a leading `~` expands to the
 /// user's home directory; relative paths are resolved against `cwd`
 /// (so each project sees a consistent store regardless of where the
@@ -240,29 +293,212 @@ pub(crate) fn ensure_registry_auth_for_package(
 /// across versions of aube and never collides with a pnpm store rooted
 /// at the same path.
 pub(crate) fn open_store(cwd: &std::path::Path) -> miette::Result<aube_store::Store> {
-    // The cache dir is resolved through `resolved_cache_dir`, which (a) honors a
-    // configured `cacheDir` (`.npmrc` / `AUBE_CACHE_DIR`) and (b) carries a
-    // `$TMPDIR/aube` fallback when no HOME/XDG is set. The store ctor
-    // (`with_root`/`default_location`) instead used `dirs::cache_dir()`
-    // directly: it ignored a configured `cacheDir` and hard-failed with
-    // `NoHome` when it couldn't locate one, so an install with HOME stripped
-    // from the env (e.g. pnpm's own test harness, or a minimal CI container)
-    // errored out even when a concrete `storeDir` was configured. Two latent
-    // bugs in one: this aligns the store-open with the packument-cache helper
-    // (`packument_cache_dir`, which already honored `cacheDir`) — they were
-    // split-brained — AND removes the spurious `NoHome` abort.
-    let cache_dir = resolved_cache_dir(cwd);
-    let root = match resolved_store_dir(cwd) {
-        Some(custom) => custom.join("v1").join("files"),
-        // No configured `storeDir`: the aube-owned default under XDG/HOME, or a
-        // `$TMPDIR`-rooted store when neither is available (matches the cache
-        // fallback above rather than aborting the install).
-        None => aube_store::dirs::store_dir()
-            .unwrap_or_else(|| std::env::temp_dir().join("aube").join("store/v1/files")),
-    };
-    aube_store::Store::with_root_and_cache(root, cache_dir)
+    with_settings_ctx(cwd, |ctx| open_store_with_ctx(cwd, ctx))
+}
+
+/// Open the content store using an already-resolved invocation context.
+/// Embedded installs use this so their per-call overrides are not lost by a
+/// second file/environment-only settings load.
+pub(crate) fn open_store_with_ctx(
+    cwd: &std::path::Path,
+    ctx: &aube_settings::ResolveCtx<'_>,
+) -> miette::Result<aube_store::Store> {
+    let store = open_store_for_maintenance_with_ctx(cwd, ctx)?;
+    store
+        .prepare_for_write()
         .into_diagnostic()
-        .wrap_err("failed to open store")
+        .wrap_err("failed to prepare store for writing")?;
+    Ok(store)
+}
+
+/// Resolve a Store without taking its writer lease or migrating legacy data.
+/// Store maintenance uses this constructor so dry-run can plan migrations
+/// without applying them before it acquires the exclusive maintenance lease.
+pub(crate) fn open_store_for_maintenance(
+    cwd: &std::path::Path,
+) -> miette::Result<aube_store::Store> {
+    with_settings_ctx(cwd, |ctx| open_store_for_maintenance_with_ctx(cwd, ctx))
+}
+
+fn open_store_for_maintenance_with_ctx(
+    cwd: &std::path::Path,
+    ctx: &aube_settings::ResolveCtx<'_>,
+) -> miette::Result<aube_store::Store> {
+    let roots = store_roots_with_ctx(cwd, ctx);
+    // The virtual store is always passed explicitly so this and every read-side
+    // caller resolve it through the same `global_virtual_store_dir` ladder.
+    let mut store =
+        aube_store::Store::with_dirs(roots.files, resolved_cache_dir_with_ctx(cwd, ctx))
+            .with_virtual_store_dir(global_virtual_store_dir_with_ctx(cwd, ctx));
+    if let Some(read_fallback) = roots.read_fallback {
+        store = store.with_read_fallback(read_fallback);
+    }
+    Ok(store)
+}
+
+/// Where the CAS lives for `cwd`: `files` is `<store>/v1/files`, and
+/// `read_fallback` is a second, read-only CAS root when `files` is a
+/// project-local stand-in for an unwritable global store.
+#[derive(Clone)]
+struct StoreRoots {
+    files: std::path::PathBuf,
+    read_fallback: Option<std::path::PathBuf>,
+}
+
+/// A `storeDir` the USER set is used verbatim; an unset one, or one that
+/// merely restates the embedder profile's default (nub registers its data-dir
+/// store as a settings default, so under nub `storeDir` always resolves to
+/// *something*), is a default and gets [`default_store_roots`]'s
+/// unwritable-fallback treatment.
+fn store_roots(cwd: &std::path::Path) -> StoreRoots {
+    with_settings_ctx(cwd, |ctx| store_roots_with_ctx(cwd, ctx))
+}
+
+fn store_roots_with_ctx(cwd: &std::path::Path, ctx: &aube_settings::ResolveCtx<'_>) -> StoreRoots {
+    match resolved_store_dir_with_ctx(cwd, ctx) {
+        Some(custom) if !is_embedder_default_store_dir(&custom, cwd) => StoreRoots {
+            files: custom.join("v1").join("files"),
+            read_fallback: None,
+        },
+        profile_default => {
+            default_store_roots(cwd, profile_default.map(|d| d.join("v1").join("files")))
+        }
+    }
+}
+
+fn is_embedder_default_store_dir(resolved: &std::path::Path, cwd: &std::path::Path) -> bool {
+    aube_settings::embedder_defaults()
+        .iter()
+        .find(|(key, _)| key == "storeDir")
+        .and_then(|(_, raw)| expand_setting_path(raw, cwd))
+        .is_some_and(|default| default == resolved)
+}
+
+/// The store's `v1` directories for `cwd`: `primary` is the parent of the CAS
+/// root [`open_store`] writes, and `read_fallback` is the read-only global
+/// `v1` still consulted for everything it holds when the default store is not
+/// writable. A tier layered on the store — the no-integrity bindings, nub's
+/// phantom sidecars — reads both, primary first, and writes only the
+/// primary, exactly as the CAS and index do.
+#[derive(Clone, Debug)]
+pub struct StoreV1Dirs {
+    pub primary: std::path::PathBuf,
+    pub read_fallback: Option<std::path::PathBuf>,
+}
+
+pub(crate) fn store_v1_dirs(cwd: &std::path::Path) -> StoreV1Dirs {
+    let roots = store_roots(cwd);
+    StoreV1Dirs {
+        primary: v1_of(roots.files),
+        read_fallback: roots.read_fallback.map(v1_of),
+    }
+}
+
+fn v1_of(files: std::path::PathBuf) -> std::path::PathBuf {
+    files
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or(files)
+}
+
+/// The `v1` directory store-adjacent state is WRITTEN to for `cwd`. Reads
+/// that must also see the global store go through [`store_v1_dirs`].
+pub(crate) fn store_v1_dir(cwd: &std::path::Path) -> std::path::PathBuf {
+    store_v1_dirs(cwd).primary
+}
+
+/// [`store_v1_dirs`] anchored the way [`resolved_project_store_dir`] is, for
+/// an embedder's store-adjacent tier. The same fallback decision the engine's
+/// own store handle made, so the embedder's producer and consumer key one
+/// store — and still read through to the global one for warm packages.
+pub fn resolved_project_store_v1_dirs() -> Option<StoreV1Dirs> {
+    let anchor = crate::dirs::workspace_or_project_root()
+        .or_else(|_| crate::dirs::cwd())
+        .ok()?;
+    Some(store_v1_dirs(&anchor))
+}
+
+/// The CAS root when no `storeDir` is configured: `profile_default` (the
+/// embedder's) else the aube-owned default under XDG/HOME (a `$TMPDIR`-rooted
+/// store when neither is set — the store ctors used to hard-fail with
+/// `NoHome` and aborted installs in HOME-less CI), or, when that default is
+/// not writable, a project-local store under `node_modules`.
+///
+/// The unwritable default is a coding agent's command sandbox: Codex and
+/// Claude Code confine writes to the workspace and temp dirs, so the data
+/// home EPERMs and even a network-free `file:` install died on its first CAS
+/// write. A store inside `node_modules` sits on the writable side of that
+/// line — the linker skips dot-entries when it sweeps the root, so it
+/// survives an install, and `rm -rf node_modules` disposes of it like any
+/// cache. The unwritable global store stays attached as a read-only
+/// fallback, so everything it already holds is still reused; only NEW
+/// content lands in the project-local store.
+///
+/// Decided once per process so every open — install, the lifecycle runner's
+/// read-side handle, dlx — agrees on one store. Elsewhere the probe costs one
+/// temp-file create and unlink.
+fn default_store_roots(
+    cwd: &std::path::Path,
+    profile_default: Option<std::path::PathBuf>,
+) -> StoreRoots {
+    static DECISION: std::sync::OnceLock<StoreRoots> = std::sync::OnceLock::new();
+    DECISION
+        .get_or_init(|| {
+            let default = profile_default
+                .or_else(aube_store::dirs::store_dir)
+                .unwrap_or_else(|| std::env::temp_dir().join("aube").join("store/v1/files"));
+            match probe_writable(&default) {
+                Ok(()) => StoreRoots {
+                    files: default,
+                    read_fallback: None,
+                },
+                Err(e) if is_unwritable(&e) => {
+                    let fallback = cwd
+                        .join("node_modules")
+                        .join(format!(".{}-store", aube_util::prog()))
+                        .join("v1")
+                        .join("files");
+                    let sandbox = aube_util::agent_sandbox::detect()
+                        .map(|s| format!(" (inside the {} sandbox)", s.label()))
+                        .unwrap_or_default();
+                    tracing::warn!(
+                        code = aube_codes::warnings::WARN_AUBE_STORE_FALLBACK,
+                        "store {} is not writable{sandbox}; new packages go to the project-local store {} for this run",
+                        default.display(),
+                        fallback.display()
+                    );
+                    StoreRoots {
+                        files: fallback,
+                        read_fallback: Some(default),
+                    }
+                }
+                // Anything else is reported by the first real write, with the
+                // path it failed on.
+                Err(_) => StoreRoots {
+                    files: default,
+                    read_fallback: None,
+                },
+            }
+        })
+        .clone()
+}
+
+/// Can this process create files under `root`? Creates the directory chain
+/// if missing (an empty store dir is the normal first-run state anyway) and
+/// a temp file inside it that is unlinked on drop.
+fn probe_writable(root: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(root)?;
+    tempfile::Builder::new()
+        .prefix(".write-probe-")
+        .tempfile_in(root)?;
+    Ok(())
+}
+
+fn is_unwritable(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+    )
 }
 
 /// Resolve the configured `storeDir` for `cwd`, returning `None` if
@@ -270,13 +506,38 @@ pub(crate) fn open_store(cwd: &std::path::Path) -> miette::Result<aube_store::St
 /// and `pnpm-workspace.yaml` via `aube_settings::resolved::store_dir`,
 /// then expands `~` and makes relative paths absolute against `cwd`.
 /// The returned path is the user-facing store root *without* the
-/// `v3/files` schema suffix — callers append it where needed (see
-/// [`open_store`]).
+/// `v1/files` schema suffix — callers append it where needed (see
+/// [`open_store`]). Stays crate-internal, and deliberately: the answer
+/// is only as good as `cwd`, so the export an embedder gets is
+/// [`resolved_project_store_dir`], which picks the anchor itself.
 pub(crate) fn resolved_store_dir(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
-    with_settings_ctx(cwd, |ctx| {
-        let raw = aube_settings::resolved::store_dir(ctx)?;
-        expand_setting_path(&raw, cwd)
-    })
+    with_settings_ctx(cwd, |ctx| resolved_store_dir_with_ctx(cwd, ctx))
+}
+
+pub(crate) fn resolved_store_dir_with_ctx(
+    cwd: &std::path::Path,
+    ctx: &aube_settings::ResolveCtx<'_>,
+) -> Option<std::path::PathBuf> {
+    if let Some(path) = embedder_storage_path(cwd, |overrides| overrides.store_dir.as_ref()) {
+        return Some(path);
+    }
+    let raw = aube_settings::resolved::store_dir(ctx)?;
+    expand_setting_path(&raw, cwd)
+}
+
+/// The store root for the PROJECT, anchored exactly where the install
+/// pipeline anchors it — [`crate::dirs::workspace_or_project_root`],
+/// which walks UP to the workspace root — not the process cwd. An
+/// embedder resolving a store-adjacent tier must use this: a command run
+/// from inside a workspace member sees neither the root `.npmrc` nor the
+/// root `pnpm-workspace.yaml`, so a cwd-anchored resolution silently
+/// returns the default while the engine's own store handle honors the
+/// override (#643).
+pub fn resolved_project_store_dir() -> Option<std::path::PathBuf> {
+    let anchor = crate::dirs::workspace_or_project_root()
+        .or_else(|_| crate::dirs::cwd())
+        .ok()?;
+    resolved_store_dir(&anchor)
 }
 
 /// Expand a path-typed setting value. `~` -> home dir, relative ->
@@ -314,6 +575,14 @@ pub(crate) fn with_settings_ctx<T>(
     cwd: &std::path::Path,
     f: impl FnOnce(&aube_settings::ResolveCtx<'_>) -> T,
 ) -> T {
+    with_settings_ctx_and_cli(cwd, &[], f)
+}
+
+pub(crate) fn with_settings_ctx_and_cli<T>(
+    cwd: &std::path::Path,
+    cli: &[(String, String)],
+    f: impl FnOnce(&aube_settings::ResolveCtx<'_>) -> T,
+) -> T {
     let files = FileSources::load(cwd);
     let raw_workspace = aube_manifest::workspace::load_raw(cwd).unwrap_or_default();
     // `process_env()` returns a `&'static` borrow of the once-captured
@@ -321,8 +590,24 @@ pub(crate) fn with_settings_ctx<T>(
     // builds a ResolveCtx (the typical path hits this 5+ times per
     // `aube run`).
     let env = aube_settings::values::process_env();
-    let ctx = files.ctx(&raw_workspace, env, &[]);
+    let ctx = files.ctx(&raw_workspace, env, cli);
     f(&ctx)
+}
+
+/// Pick the lockfile format a mutating command should write: preserve an
+/// existing supported file (or the `package.json`-declared package manager's
+/// format), otherwise honor `defaultLockfileFormat`. The infallible shape for
+/// call sites that cannot surface a declaration-mismatch diagnostic; a site
+/// that can uses [`resolve_lockfile_kind_for_write`] directly so the
+/// structured error reaches the user instead of collapsing to the default.
+pub(crate) fn lockfile_kind_for_write_with_ctx(
+    cwd: &std::path::Path,
+    ctx: &aube_settings::ResolveCtx<'_>,
+) -> aube_lockfile::LockfileKind {
+    resolve_lockfile_kind_for_write(cwd)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| default_lockfile_kind(ctx))
 }
 
 /// Build a registry client configured from .npmrc files in the project directory.
@@ -356,6 +641,8 @@ pub(crate) async fn run_pnpmfile_pre_resolution(
     paths: &[std::path::PathBuf],
     cwd: &std::path::Path,
     existing: Option<&aube_lockfile::LockfileGraph>,
+    manifest: &aube_manifest::PackageJson,
+    importer_ids: &[String],
 ) -> miette::Result<()> {
     if paths.is_empty() {
         return Ok(());
@@ -377,11 +664,38 @@ pub(crate) async fn run_pnpmfile_pre_resolution(
         aube_store::dirs::store_dir()
             .and_then(|p| p.parent()?.parent().map(std::path::Path::to_path_buf))
     });
+    // Only read when there is no lockfile to project — the settings a
+    // hook sees then are the ones pnpm stamps into its synthesized
+    // empty lockfile. When a lockfile exists its own `settings:` header
+    // is authoritative and this is never consulted.
+    let (settings, peers_suffix_max_length) = if existing.is_some() {
+        // Unread on this arm: with a lockfile to project, the synthesized
+        // object these two feed is never built.
+        (aube_lockfile::LockfileSettings::default(), 0)
+    } else {
+        with_settings_ctx(cwd, |ctx| {
+            (
+                aube_lockfile::LockfileSettings {
+                    auto_install_peers: aube_settings::resolved::auto_install_peers(ctx),
+                    exclude_links_from_lockfile:
+                        aube_settings::resolved::exclude_links_from_lockfile(ctx),
+                    ..Default::default()
+                },
+                aube_settings::resolved::peers_suffix_max_length(ctx),
+            )
+        })
+    };
     let ctx = crate::pnpmfile::PreResolutionContext::from_existing(
-        cwd,
-        store_dir.as_deref(),
-        existing,
-        registries,
+        crate::pnpmfile::PreResolutionInputs {
+            lockfile_dir: cwd,
+            store_dir: store_dir.as_deref(),
+            existing,
+            manifest,
+            importer_ids,
+            settings,
+            peers_suffix_max_length,
+            registries,
+        },
     );
     crate::pnpmfile::run_pre_resolution_chain(paths, cwd, &ctx)
         .await
@@ -430,6 +744,7 @@ pub(crate) fn build_resolver(
     // `add`/`update`/`dedupe`/`audit` route `<alias>:<spec>` deps the same as
     // install; empty under any non-pnpm posture.
     let named_registries = super::discover_named_registries(cwd);
+    let dependency_policy = install::resolve_dependency_policy(manifest, &ctx)?;
     Ok(install::configure_resolver(
         aube_resolver::Resolver::new(std::sync::Arc::new(make_client(cwd))),
         cwd,
@@ -441,7 +756,7 @@ pub(crate) fn build_resolver(
             named_registries: &named_registries,
             minimum_release_age_override: None,
             target_lockfile_kind,
-            dependency_policy: None,
+            dependency_policy,
             // Update / add / dedupe / audit deliberately skip the
             // full-packument disk cache install populates: the cache's
             // freshness window can outlive a registry dist-tag bump,
@@ -487,32 +802,102 @@ pub(crate) fn resolve_fetch_policy(cwd: &std::path::Path) -> aube_registry::conf
     aube_registry::config::FetchPolicy::from_ctx(&ctx)
 }
 
-/// Resolve the `cacheDir` setting for `cwd`. If an explicit override
-/// is set in `.npmrc`, expands it and returns that path. Otherwise
-/// falls back to the XDG-aware platform default (`~/.cache/aube`).
+/// Resolve the `cacheDir` setting for `cwd`. When set (via the host's own
+/// `<BRAND>_CACHE_DIR` / `npm_config_cache_dir`, or `cache-dir` in
+/// `.npmrc` / `aube-config.toml`), expands it and returns that path.
+/// Otherwise falls back to the platform cache dir:
+/// `$XDG_CACHE_HOME/aube` when `XDG_CACHE_HOME` is set,
+/// `%LOCALAPPDATA%\aube` on Windows, else `~/.cache/aube`.
 ///
-/// Note: `XDG_CACHE_HOME` is intentionally *not* a source for this
-/// setting — it's a base directory, and `aube_store::dirs::cache_dir()`
-/// already appends `/aube`. Routing it through the settings accessor
-/// would lose the subdirectory.
+/// `cacheDir` has no default baked into the generated accessor (see the
+/// exclusion list in `aube-settings/build.rs`) precisely so this
+/// function can tell "not configured" from "configured to the literal
+/// default path": every platform fallback above is a *base* directory
+/// that aube appends its own name to, so routing them through the
+/// settings accessor would lose the subdirectory.
+///
+/// The packument caches and — unless [`global_virtual_store_dir`]
+/// overrides it — the global virtual store hang off this path, so a
+/// user who moves the cache to another volume moves them together.
 pub(crate) fn resolved_cache_dir(cwd: &std::path::Path) -> std::path::PathBuf {
+    with_settings_ctx(cwd, |ctx| resolved_cache_dir_with_ctx(cwd, ctx))
+}
+
+pub(crate) fn resolved_cache_dir_with_ctx(
+    cwd: &std::path::Path,
+    ctx: &aube_settings::ResolveCtx<'_>,
+) -> std::path::PathBuf {
+    if let Some(path) = embedder_storage_path(cwd, |overrides| overrides.cache_dir.as_ref()) {
+        return path;
+    }
     let platform_default =
         || aube_store::dirs::cache_dir().unwrap_or_else(|| std::env::temp_dir().join("aube"));
-    // Check whether .npmrc explicitly sets cacheDir, rather than comparing
-    // the resolved value against the default string — a user who writes
-    // `cacheDir=~/.cache/aube` explicitly should get that literal path,
-    // not the XDG_CACHE_HOME-aware platform default.
-    let npmrc = aube_registry::config::load_npmrc_entries(cwd);
-    let has_explicit = npmrc
-        .iter()
-        .any(|(k, _)| k == "cacheDir" || k == "cache-dir");
-    if !has_explicit {
-        return platform_default();
+    // The host's first-class cache knob is read AHEAD of the settings chain.
+    // Byte-identical for standalone aube: `config_env` composes the same
+    // `AUBE_CACHE_DIR` the settings table declares, and the table already
+    // walks its aliases in reverse, so the branded form already outranked the
+    // `npm_config_*` / `pnpm_config_*` forms — this preserves that order
+    // rather than introducing one. Under an embedder with its own
+    // `config_env_prefix` it is the ONLY spelling that reaches the cache:
+    // aube's branded alias is gated off by `env_prefix = None`, and the host's
+    // form (`NUB_CACHE_DIR`) is not in the table, so without this the resolver
+    // primer — which reads `config_env` directly — was the knob's sole
+    // consumer and the cache it names silently ignored it (#654).
+    // `cacheDir` carries no `managedPolicy`, so returning early here skips no
+    // hardening pass. A setting that grows one must not be short-circuited
+    // this way, and the assert is what turns that from a note into a tripwire:
+    // the enforcement lives in `apply_managed_string` at the END of the
+    // generated accessor, which the early return never reaches.
+    debug_assert!(
+        aube_settings::meta::find("cacheDir").is_none_or(|m| m.managed_policy.is_empty()),
+        "cacheDir grew a managedPolicy; the early return below skips it"
+    );
+    if let Some(raw) = aube_util::env::config_env("CACHE_DIR")
+        && let Some(raw) = raw.to_str()
+        && !raw.is_empty()
+    {
+        return expand_setting_path(raw, cwd).unwrap_or_else(platform_default);
     }
-    with_settings_ctx(cwd, |ctx| {
-        let raw = aube_settings::resolved::cache_dir(ctx);
-        expand_setting_path(&raw, cwd).unwrap_or_else(platform_default)
-    })
+    match aube_settings::resolved::cache_dir(ctx) {
+        Some(raw) => expand_setting_path(&raw, cwd).unwrap_or_else(platform_default),
+        None => platform_default(),
+    }
+}
+
+/// Absolute path of the global virtual store — the shared tree of
+/// materialized packages that project `node_modules/.aube/<dep_path>`
+/// entries symlink into.
+///
+/// `globalVirtualStoreDir` wins when set and is used as the store root (no
+/// subdir suffix); otherwise the root lands under the resolved
+/// [`resolved_cache_dir`], in the active embedder's virtual-store subdir
+/// (`virtual-store` standalone, the host's own name when embedded) so it
+/// matches [`aube_store::Store::virtual_store_dir`]. Registry-aware entries
+/// live in a versioned child directory so older aube releases cannot create
+/// or reuse entries that the current project registry may later prune. The
+/// dedicated setting exists
+/// because this tree — unlike the rest of the cache — has to sit on
+/// the same volume as `storeDir` to be hardlinkable, which is not
+/// necessarily where the packument caches belong.
+///
+/// Every read-side caller (layout detection, mode-change reset) must
+/// resolve it the same way the install write path does, otherwise a
+/// relocated store makes them look at an empty directory and silently
+/// re-materialize.
+pub(crate) fn global_virtual_store_dir(cwd: &std::path::Path) -> std::path::PathBuf {
+    with_settings_ctx(cwd, |ctx| global_virtual_store_dir_with_ctx(cwd, ctx))
+}
+
+pub(crate) fn global_virtual_store_dir_with_ctx(
+    cwd: &std::path::Path,
+    ctx: &aube_settings::ResolveCtx<'_>,
+) -> std::path::PathBuf {
+    let root = aube_settings::resolved::global_virtual_store_dir(ctx)
+        .and_then(|raw| expand_setting_path(&raw, cwd))
+        .unwrap_or_else(|| {
+            resolved_cache_dir_with_ctx(cwd, ctx).join(aube_util::embedder().virtual_store_subdir)
+        });
+    root.join(GVS_REGISTRY_NAMESPACE_VERSION)
 }
 
 /// Resolve the `virtualStoreDirMaxLength` setting, falling back to the
@@ -551,7 +936,11 @@ pub(crate) fn default_lockfile_kind(
 ) -> aube_lockfile::LockfileKind {
     use aube_settings::resolved::DefaultLockfileFormat as Format;
     match aube_settings::resolved::default_lockfile_format(ctx) {
-        Format::Aube => aube_lockfile::LockfileKind::Aube,
+        // One format, two spellings. An embedder that renames the engine's own
+        // lockfile needs a name for it that does not carry the engine's brand;
+        // the default and every existing config keep working because `aube` is
+        // still accepted and still the default.
+        Format::Aube | Format::Nub => aube_lockfile::LockfileKind::Aube,
         Format::Pnpm => aube_lockfile::LockfileKind::Pnpm,
         Format::Npm => aube_lockfile::LockfileKind::Npm,
         Format::Yarn => aube_lockfile::LockfileKind::Yarn,
@@ -626,7 +1015,12 @@ pub(crate) fn resolve_virtual_store_dir(
             .iter()
             .any(|(k, _)| k == "virtualStoreDir" || k == "virtual-store-dir")
     });
-    let has_explicit_yaml = ctx.workspace_yaml.contains_key("virtualStoreDir");
+    // Guarded by the same posture the resolver's YAML source obeys: when layout
+    // is the embedder's own axis, a workspace-YAML `virtualStoreDir` supplies no
+    // value, so counting it as explicit here would send a project down the
+    // resolver branch with nothing to resolve.
+    let has_explicit_yaml = aube_util::engine_context().read_layout_from_workspace_yaml
+        && ctx.workspace_yaml.contains_key("virtualStoreDir");
     // Mirrors the `sources.env` list in settings.toml (`virtualStoreDir`).
     // Keep all three aliases here — dropping `AUBE_VIRTUAL_STORE_DIR`
     // silently routes through the default branch even though
@@ -669,8 +1063,16 @@ pub(crate) fn resolve_virtual_store_dir_for_cwd(cwd: &std::path::Path) -> std::p
 
 /// Disk cache directory for packument metadata. Falls back to a tmp dir if
 /// the user cache dir can't be resolved (rare).
+pub(crate) fn metadata_cache_anchor() -> miette::Result<std::path::PathBuf> {
+    let initial_cwd = crate::dirs::cwd()?;
+    Ok(crate::dirs::find_workspace_root(&initial_cwd)
+        .or_else(|| crate::dirs::find_project_root(&initial_cwd))
+        .unwrap_or(initial_cwd))
+}
+
 pub(crate) fn packument_cache_dir() -> std::path::PathBuf {
-    let cwd = crate::dirs::cwd().unwrap_or_else(|_| std::env::current_dir().unwrap_or_default());
+    let cwd =
+        metadata_cache_anchor().unwrap_or_else(|_| std::env::current_dir().unwrap_or_default());
     packument_cache_dir_for_cwd(&cwd)
 }
 
@@ -684,7 +1086,8 @@ pub(crate) fn packument_cache_dir_for_cwd(cwd: &std::path::Path) -> std::path::P
 /// human-facing commands like `aube view`. Separate from the corgi cache
 /// because the shapes differ.
 pub(crate) fn packument_full_cache_dir() -> std::path::PathBuf {
-    let cwd = crate::dirs::cwd().unwrap_or_else(|_| std::env::current_dir().unwrap_or_default());
+    let cwd =
+        metadata_cache_anchor().unwrap_or_else(|_| std::env::current_dir().unwrap_or_default());
     resolved_cache_dir(&cwd).join("packuments-full-v1")
 }
 
@@ -710,6 +1113,7 @@ mod resolve_virtual_store_dir_tests {
             managed_aube_config: &[],
             project_aube_config: &[],
             project_npmrc: &[],
+            project_config: &[],
             user_aube_config: &[],
             user_npmrc: &[],
             workspace_yaml: ws,
@@ -786,6 +1190,7 @@ mod default_lockfile_kind_tests {
             managed_aube_config: &[],
             project_aube_config: &[],
             project_npmrc: npmrc,
+            project_config: &[],
             user_aube_config: &[],
             user_npmrc: &[],
             workspace_yaml: ws,

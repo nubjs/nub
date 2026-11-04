@@ -1,5 +1,5 @@
 //! Lockfile alignment for `nub pm use` — step 3 of the identity-setting verb
-//! (spec: wiki/commands/pm/identity-policy.md §`nub pm use`). The from-state
+//! (spec: `identity-policy` (no such document) §`nub pm use`). The from-state
 //! is the lockfile(s) on disk (artifacts carry resolution state); the
 //! to-state is the target PM's format. Planning is pure — no writes, no
 //! network — so `use` can refuse BEFORE touching the manifest or registry;
@@ -325,7 +325,19 @@ pub(crate) fn convert_lockfile(
         .map_err(|e| anyhow::anyhow!("{e}"))
         .context("reading package.json for the lockfile conversion")?;
     let graph = parse_source_graph(from, from_kind, &manifest)?;
-    let written = aube_lockfile::write_lockfile_as(root, &graph, &manifest, target_kind(target))
+    let to_kind = target_kind(target);
+    // A pnpm-format lockfile is read back as already peer-resolved, so an npm
+    // or bun source (no peer contexts recorded) gets the pass `nub import`
+    // runs; without it the written snapshots lack peer suffixes and the edges
+    // of resolved optional peers.
+    let graph = if matches!(to_kind, LockfileKind::Pnpm | LockfileKind::Aube) {
+        aube_resolver::peer_pass_for_import(graph, from_kind)
+            .map_err(|e| anyhow::anyhow!("{}", super::present::rewrite(&e.to_string())))
+            .context("resolving peers for the lockfile conversion")?
+    } else {
+        graph
+    };
+    let written = aube_lockfile::write_lockfile_as(root, &graph, &manifest, to_kind)
         .map_err(|e| anyhow::anyhow!("{}", super::present::rewrite(&e.to_string())))
         .with_context(|| format!("writing {}", lockfile_name(target)))?;
     Ok(written)
@@ -590,6 +602,49 @@ mod tests {
         assert!(
             body.contains("sha512-8ND1j3y9"),
             "the integrity must survive the conversion:\n{body}"
+        );
+    }
+
+    #[test]
+    fn converting_a_bun_lockfile_to_pnpm_resolves_its_peers() {
+        // bun.lock records no peer contexts or peer edges, so the pnpm
+        // snapshot must come from the same peer pass `nub import` runs: the
+        // optional peer the root provides is suffixed and linked.
+        let sri = format!("sha512-{}==", "A".repeat(86));
+        let dir = root(
+            "convert-bun-peers",
+            &[
+                (
+                    "package.json",
+                    r#"{"name":"app","version":"1.0.0","dependencies":{"consumer":"1.0.0","provider":"1.0.0"}}"#,
+                ),
+                (
+                    "bun.lock",
+                    &format!(
+                        r#"{{
+  "lockfileVersion": 1,
+  "workspaces": {{
+    "": {{ "name": "app", "dependencies": {{ "consumer": "1.0.0", "provider": "1.0.0" }} }}
+  }},
+  "packages": {{
+    "consumer": ["consumer@1.0.0", "", {{ "peerDependencies": {{ "provider": "^1.0.0" }}, "optionalPeers": ["provider"] }}, "{sri}"],
+    "provider": ["provider@1.0.0", "", {{}}, "{sri}"]
+  }}
+}}
+"#
+                    ),
+                ),
+            ],
+        );
+        let written =
+            convert_lockfile(&dir, &dir.join("bun.lock"), LockfileKind::Bun, "pnpm").unwrap();
+        let graph = aube_lockfile::pnpm::parse(&written).unwrap();
+        let consumer = &graph.packages["consumer@1.0.0(provider@1.0.0)"];
+        assert_eq!(
+            consumer.dependencies.get("provider").map(String::as_str),
+            Some("1.0.0"),
+            "the converted snapshot must link the resolved optional peer: {:?}",
+            graph.packages.keys().collect::<Vec<_>>()
         );
     }
 

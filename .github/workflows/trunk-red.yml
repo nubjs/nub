@@ -9,7 +9,8 @@ name: Trunk red
 #
 # This workflow closes that loop: it files ONE tracking issue the first time a
 # main-branch run fails and comments on it for each subsequent failure, so the red is
-# visible and attributable to a commit. It auto-closes when main goes green again.
+# visible and attributable to a commit. It auto-closes once every workflow it reported
+# is green on main again.
 #
 # Scope: report only. It never reruns, reverts, or gates anything.
 
@@ -23,14 +24,14 @@ on:  # zizmor: ignore[dangerous-triggers] trunk-only notifier; reads CI conclusi
       - Native-dep floor
       - Daily-driver smoke
       - WPT Worker
+      - Action smoke
     branches: [main]
     types: [completed]
 
 permissions:
   contents: read
   issues: write
-  # Re-checking each implicated workflow's latest main run before clearing the flag.
-  actions: read
+  actions: read  # each reported workflow's latest main verdict, before closing the issue
 
 # Serialize so two failing workflows finishing together can't both create the
 # tracking issue (the find-or-create below is read-then-write, not atomic).
@@ -41,8 +42,10 @@ concurrency:
 jobs:
   report:
     # `skipped` and `cancelled` are not signal: main's CI concurrency group is
-    # cancel-in-progress, so a merge burst routinely cancels superseded runs.
-    if: ${{ github.event.workflow_run.conclusion == 'failure' || github.event.workflow_run.conclusion == 'success' }}
+    # cancel-in-progress, so a merge burst routinely cancels superseded runs. A
+    # pull-request run is not trunk either, but `branches: [main]` matches a fork PR
+    # opened from the fork's own main branch, so it is excluded by event.
+    if: ${{ github.event.workflow_run.event != 'pull_request' && (github.event.workflow_run.conclusion == 'failure' || github.event.workflow_run.conclusion == 'success') }}
     runs-on: ubuntu-latest
     steps:
       - name: File / update / resolve the trunk-red tracking issue
@@ -68,41 +71,41 @@ jobs:
           if [[ "$CONCLUSION" == "success" ]]; then
             [[ -n "$existing" ]] || exit 0
 
-            # Seven workflows can file this issue, so ONE of them going green does not mean
-            # trunk is green. The old rule closed on any `CI` success and cleared reds filed
-            # by the other six without ever verifying them — #550 was filed by WPT Worker
-            # and Node matrix, then closed by a CI green while both were still unchecked.
-            # Every red report opens with "`<workflow>` failed on main at `<sha>`.", so the
-            # issue already records which workflows are implicated: re-check each one's
-            # latest main run and clear the flag only once they are ALL green.
+            # Eight workflows can file this issue, so one of them going green does not mean
+            # trunk is green. Closing on any `CI` success cleared reds it never checked:
+            # #590, #719, #769, #977 and #987 each closed while the workflow that filed it
+            # was still red. Every report opens with "`<workflow>` failed on main at `<sha>`.",
+            # so the issue records which workflows are implicated; clear it only once each
+            # one's latest verdict is green. Anything unreadable leaves the issue open: a
+            # missed close costs one more green, a false close hides a red trunk.
+            if ! issue_text=$( { gh issue view "$existing" --repo "$REPO" --json body --jq .body &&
+                gh api --paginate "repos/$REPO/issues/$existing/comments" --jq '.[].body'; } ); then
+              echo "could not read #$existing; leaving it open"
+              exit 0
+            fi
             # shellcheck disable=SC2016  # the backticks are literal: they match the report's markdown
-            reported=$(gh issue view "$existing" --repo "$REPO" --json body,comments \
-              --jq '[.body] + [.comments[].body] | .[]' \
-              | sed -n 's/^`\([^`]*\)` failed on main at .*/\1/p' | sort -u)
-            [[ -n "$reported" ]] || reported="$WORKFLOW"
+            reported=$(sed -n 's/^`\([^`]*\)` failed on main at .*/\1/p' <<< "$issue_text" | sort -u)
 
             still_red=""
             while IFS= read -r wf; do
               [[ -n "$wf" ]] || continue
-              latest=$(gh run list --repo "$REPO" --workflow "$wf" --branch main --limit 1 \
-                --json conclusion --jq '.[0].conclusion // ""' 2>/dev/null || echo "")
-              # Only a terminal green clears a workflow. An IN-FLIGHT run ("") holds the
-              # issue open on purpose: during a merge burst everything reads as in-flight,
-              # and treating that as green would reinstate the very false-clear this fixes.
-              # This converges — every watched workflow re-fires trunk-red when it completes,
-              # so the last one to settle re-evaluates with all of them terminal. `cancelled`
-              # is a superseded run, which the job-level `if:` above already treats as noise.
-              case "$latest" in
-                success|cancelled|skipped) ;;
-                *) still_red="$still_red $wf" ;;
-              esac
+              # The newest run that reached a verdict. In-flight and cancelled runs count
+              # neither way: a merge burst cancels most push runs, so reading only the newest
+              # run would hold the issue open until main went quiet. Pull-request runs are
+              # excluded because `--branch main` also matches a fork's branch named main.
+              verdict=$(gh run list --repo "$REPO" --workflow "$wf" --branch main \
+                --status completed --limit 30 --json conclusion,event \
+                --jq '[.[] | select(.event != "pull_request" and .conclusion != "cancelled"
+                                    and .conclusion != "skipped")][0].conclusion // ""' \
+                || echo "")
+              [[ "$verdict" == "success" ]] || still_red="$still_red $wf"
             done <<< "$reported"
 
-            if [[ -z "${still_red// /}" ]]; then
+            if [[ -n "$reported" && -z "$still_red" ]]; then
               gh issue close "$existing" --repo "$REPO" \
                 --comment "Green again on \`$short\` — $RUN_URL"
             else
-              echo "still red:$still_red — leaving #$existing open"
+              echo "still red:${still_red:- (no reported workflow found)}; leaving #$existing open"
             fi
             exit 0
           fi

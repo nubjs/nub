@@ -1,5 +1,15 @@
 {
   "title": "Deployment",
   "defaultOpen": false,
-  "pages": ["index", "github-action", "docker"]
+  "pages": [
+    "index",
+    "github-action",
+    "docker",
+    "vercel",
+    "cloudflare",
+    "railway",
+    "render",
+    "aws-lambda",
+    "google-cloud-run"
+  ]
 }

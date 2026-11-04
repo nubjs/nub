@@ -1,0 +1,8 @@
+{
+  "name": "install-phantom-eject",
+  "private": true,
+  "dependencies": {
+    "@firebase/app": "0.10.13",
+    "@firebase/database": "1.0.8"
+  }
+}

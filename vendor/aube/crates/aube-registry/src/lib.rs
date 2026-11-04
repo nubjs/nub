@@ -1,4 +1,4 @@
-use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -208,7 +208,7 @@ pub enum NetworkMode {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Packument {
     pub name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "tolerant_string")]
     pub modified: Option<String>,
     #[serde(default)]
     pub versions: BTreeMap<String, VersionMetadata>,
@@ -228,6 +228,179 @@ pub struct Packument {
     /// time-based mode, uses it to derive the publish-date cutoff.
     #[serde(default, deserialize_with = "non_string_tolerant_map")]
     pub time: BTreeMap<String, String>,
+}
+
+/// The subset of a full packument needed to enforce publish-time and
+/// trust-downgrade policies for an exact version. Deserializing this shape
+/// skips dependency maps and distribution metadata for every historical
+/// release, avoiding the large retained heap of a full [`Packument`].
+/// Serializable so the lockfile trust-policy validator can persist it in
+/// its compact on-disk cache (`trust-history-v1/`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PackumentTrustHistory {
+    #[serde(default, deserialize_with = "non_string_tolerant_map")]
+    pub time: BTreeMap<String, String>,
+    #[serde(default)]
+    pub versions: BTreeMap<String, VersionTrustMetadata>,
+}
+
+/// One exact release plus the compact history needed for time and trust
+/// policy checks. The full registry document is decoded in a single pass:
+/// the selected release uses [`VersionMetadata`], while every other release
+/// uses [`VersionTrustMetadata`].
+#[derive(Debug)]
+pub struct ExactVersionPackument {
+    pub metadata: VersionMetadata,
+    pub history: PackumentTrustHistory,
+}
+
+pub(crate) struct ExactVersionPackumentSeed<'a> {
+    pub version: &'a str,
+}
+
+impl<'de> DeserializeSeed<'de> for ExactVersionPackumentSeed<'_> {
+    type Value = ExactVersionPackument;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(ExactVersionPackumentVisitor {
+            version: self.version,
+        })
+    }
+}
+
+struct ExactVersionPackumentVisitor<'a> {
+    version: &'a str,
+}
+
+impl<'de> Visitor<'de> for ExactVersionPackumentVisitor<'_> {
+    type Value = ExactVersionPackument;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an npm packument containing the requested exact version")
+    }
+
+    fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut metadata = None;
+        let mut history = BTreeMap::new();
+        let mut time = BTreeMap::new();
+
+        while let Some(field) = access.next_key::<String>()? {
+            match field.as_str() {
+                "versions" => {
+                    let decoded = access.next_value_seed(ExactVersionMapSeed {
+                        version: self.version,
+                    })?;
+                    metadata = decoded.0;
+                    history = decoded.1;
+                }
+                "time" => {
+                    time = access.next_value::<TolerantStringMap>()?.0;
+                }
+                _ => {
+                    access.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+
+        let metadata = metadata.ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "packument does not contain requested version {}",
+                self.version
+            ))
+        })?;
+        Ok(ExactVersionPackument {
+            metadata,
+            history: PackumentTrustHistory {
+                time,
+                versions: history,
+            },
+        })
+    }
+}
+
+struct ExactVersionMapSeed<'a> {
+    version: &'a str,
+}
+
+impl<'de> DeserializeSeed<'de> for ExactVersionMapSeed<'_> {
+    type Value = (
+        Option<VersionMetadata>,
+        BTreeMap<String, VersionTrustMetadata>,
+    );
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(ExactVersionMapVisitor {
+            version: self.version,
+        })
+    }
+}
+
+struct ExactVersionMapVisitor<'a> {
+    version: &'a str,
+}
+
+impl<'de> Visitor<'de> for ExactVersionMapVisitor<'_> {
+    type Value = (
+        Option<VersionMetadata>,
+        BTreeMap<String, VersionTrustMetadata>,
+    );
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an npm packument versions map")
+    }
+
+    fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut metadata = None;
+        let mut history = BTreeMap::new();
+        while let Some(version) = access.next_key::<String>()? {
+            if version == self.version {
+                metadata = Some(access.next_value::<VersionMetadata>()?);
+            } else {
+                history.insert(version, access.next_value::<VersionTrustMetadata>()?);
+            }
+        }
+        Ok((metadata, history))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct TolerantStringMap(
+    #[serde(deserialize_with = "non_string_tolerant_map")] BTreeMap<String, String>,
+);
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionTrustMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approver: Option<serde_json::Value>,
+    #[serde(
+        default,
+        rename = "_npmUser",
+        deserialize_with = "npm_user_tolerant",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub npm_user: Option<NpmUser>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dist: Option<VersionTrustDist>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VersionTrustDist {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestations: Option<Attestations>,
 }
 
 /// Metadata for a specific version of a package.
@@ -313,7 +486,7 @@ pub struct VersionMetadata {
     /// tarball-level re-parse.
     #[serde(default, rename = "bin", deserialize_with = "bin_map")]
     pub bin: BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "tolerant_bool")]
     pub has_install_script: bool,
     /// Deprecation message from the registry, if this version is deprecated.
     #[serde(default, deserialize_with = "deprecated_string")]
@@ -383,7 +556,7 @@ struct VersionMetadataRaw {
     funding_url: Option<String>,
     #[serde(default, rename = "bin", deserialize_with = "bin_map")]
     bin: BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "tolerant_bool")]
     has_install_script: bool,
     #[serde(default, deserialize_with = "deprecated_string")]
     deprecated: Option<String>,
@@ -420,10 +593,48 @@ impl From<VersionMetadataRaw> for VersionMetadata {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
 pub struct PeerDepMeta {
-    #[serde(default)]
     pub optional: bool,
+}
+
+/// Hand-rolled so a malformed `peerDependenciesMeta` entry degrades
+/// instead of failing the packument. Covers both shapes a mirror can
+/// produce: the whole entry being a non-object (`{"react": 1}`) and
+/// `optional` itself being off-spec (`{"react": {"optional": {}}}`).
+/// Either way the entry reads as `optional: false`, which is what a
+/// missing entry already means — so an unparseable value degrades to
+/// the stricter reading (peer required) rather than silently relaxing
+/// a peer requirement.
+impl<'de> Deserialize<'de> for PeerDepMeta {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = PeerDepMeta;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a peerDependenciesMeta entry or any other JSON value")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
+                let mut optional = false;
+                while let Some(key) = access.next_key::<String>()? {
+                    if key == "optional" {
+                        let MaybeBool(b) = access.next_value()?;
+                        optional = b;
+                    } else {
+                        let _: IgnoredAny = access.next_value()?;
+                    }
+                }
+                Ok(PeerDepMeta { optional })
+            }
+
+            visit_primitives_to!('de, PeerDepMeta::default());
+            visit_seq_to!('de, PeerDepMeta::default());
+            visit_strings_to!('de, PeerDepMeta::default());
+        }
+        de.deserialize_any(V)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -438,13 +649,24 @@ pub struct NpmUser {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Dist {
     pub tarball: String,
+    /// Strict on purpose, unlike `unpacked_size` below. A malformed
+    /// `integrity`/`shasum` aborts the packument parse rather than
+    /// degrading to `None`, because `None` here means "install this
+    /// tarball with no verification" — a mirror that can rewrite the
+    /// field is exactly the one whose bytes must not be trusted
+    /// unchecked. Failing loud on an off-spec value is the intended
+    /// outcome; do not make these tolerant without deciding that.
     pub integrity: Option<String>,
     pub shasum: Option<String>,
     /// Unpacked tarball size in bytes (`dist.unpackedSize`). Present
     /// on most modern packuments, absent on older ones — used as the
     /// best-effort install-size estimate that the progress bar shows
     /// as `4.2 MB / ~13.8 MB`. Decimal MB to match every other PM.
-    #[serde(default, rename = "unpackedSize")]
+    #[serde(
+        default,
+        rename = "unpackedSize",
+        deserialize_with = "unpacked_size_tolerant"
+    )]
     pub unpacked_size: Option<u64>,
     /// Sigstore attestations block. The trust-policy check reads
     /// `dist.attestations.provenance` as rank-1 trust evidence when
@@ -459,6 +681,155 @@ pub struct Dist {
 pub struct Attestations {
     #[serde(default)]
     pub provenance: Option<serde_json::Value>,
+}
+
+/// Deserialize `dist.unpackedSize` tolerant to any non-integer shape,
+/// dropping to `None` rather than failing the packument parse.
+///
+/// The field is a cosmetic hint — it only feeds the progress bar's
+/// `4.2 MB / ~13.8 MB` estimate — so a strict `Option<u64>` traded a
+/// wrong pixel for a dead install: one odd value anywhere in the
+/// packument aborted the whole resolve with `ERR_AUBE_REGISTRY_ERROR:
+/// invalid type: map, expected u64`, and because packument fetches run
+/// concurrently the message named whichever fetch lost the race rather
+/// than the package actually at fault.
+///
+/// The tolerance exists for the reasons [`non_string_tolerant_map`]
+/// documents (proxy mirrors that rewrite `dist` sub-fields, ancient
+/// publishes that serialized a structured value where a scalar
+/// belongs). Measured against pnpm on a registry serving
+/// `"unpackedSize": {...}`: pnpm resolves the packument and installs;
+/// aube was alone in failing.
+///
+/// Deliberately NOT extended to the rest of [`Dist`] — see the
+/// strictness note on `integrity`. This field is safe to drop because
+/// nothing but a progress-bar estimate reads it.
+fn unpacked_size_tolerant<'de, D>(de: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct V;
+
+    impl<'de> Visitor<'de> for V {
+        type Value = Option<u64>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a byte count or any other JSON value")
+        }
+
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+
+        // serde_json hands non-negative integers to `visit_u64`, so this
+        // only fires for a negative size (meaningless — drop it) or for a
+        // deserializer that signs its integers differently.
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(u64::try_from(v).ok())
+        }
+
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D2: Deserializer<'de>>(self, d: D2) -> Result<Self::Value, D2::Error> {
+            d.deserialize_any(self)
+        }
+
+        fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        visit_seq_to!('de, None);
+        visit_map_to!('de, None);
+        visit_strings_to!('de, None);
+    }
+
+    de.deserialize_any(V)
+}
+
+/// `true`/`false` when the registry sends a bool, `false` for every
+/// other shape. Backs `hasInstallScript` and `peerDependenciesMeta`'s
+/// `optional`, neither of which is worth failing an install over:
+/// `hasInstallScript` only feeds npm-lockfile round-trip fidelity and
+/// `nub query` (whether a script actually runs is decided from the
+/// installed package's own manifest), and `optional: false` is the
+/// same reading a missing entry already gets.
+struct MaybeBool(bool);
+
+impl<'de> Deserialize<'de> for MaybeBool {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = MaybeBool;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a boolean or any other JSON value")
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, b: bool) -> Result<MaybeBool, E> {
+                Ok(MaybeBool(b))
+            }
+
+            fn visit_unit<E: serde::de::Error>(self) -> Result<MaybeBool, E> {
+                Ok(MaybeBool(false))
+            }
+
+            fn visit_none<E: serde::de::Error>(self) -> Result<MaybeBool, E> {
+                Ok(MaybeBool(false))
+            }
+
+            fn visit_some<D2: Deserializer<'de>>(self, d: D2) -> Result<MaybeBool, D2::Error> {
+                d.deserialize_any(self)
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<MaybeBool, E> {
+                Ok(MaybeBool(false))
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<MaybeBool, E> {
+                Ok(MaybeBool(false))
+            }
+
+            fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<MaybeBool, E> {
+                Ok(MaybeBool(false))
+            }
+
+            visit_seq_to!('de, MaybeBool(false));
+            visit_map_to!('de, MaybeBool(false));
+            visit_strings_to!('de, MaybeBool(false));
+        }
+        de.deserialize_any(V)
+    }
+}
+
+fn tolerant_bool<'de, D>(de: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let MaybeBool(b) = MaybeBool::deserialize(de)?;
+    Ok(b)
+}
+
+/// A string when the registry sends one, `None` for every other shape.
+/// Backs the packument's top-level `modified`, whose only reader is the
+/// publish-age fallback in `aube-resolver`'s `semver_util` — and that
+/// reader treats `None` as "no publish time known", the conservative
+/// side of the age gate.
+fn tolerant_string<'de, D>(de: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let MaybeString(maybe) = MaybeString::deserialize(de)?;
+    Ok(maybe)
 }
 
 fn deprecated_string<'de, D>(de: D) -> Result<Option<String>, D::Error>
@@ -760,13 +1131,23 @@ pub enum Error {
     // Render through `redact_http_error` to scrub the URL while keeping
     // the (redacted) host for debuggability.
     #[error("HTTP error: {}", redact_http_error(.0))]
-    Http(#[from] reqwest::Error),
+    Http(#[source] reqwest::Error),
+    /// The socket was refused by policy, not by the network: the OS or a
+    /// sandbox denied it (`EPERM`, an empty network namespace, a proxy
+    /// that refuses the tunnel). Split from the transient [`Error::Http`]
+    /// because no retry fixes it and the remedy is environmental; the
+    /// resolver keys its help on this variant's message.
+    #[error("network access denied: {}", redact_http_error(.0))]
+    NetworkDenied(#[source] reqwest::Error),
     #[error("package not found: {0}")]
     #[diagnostic(code(ERR_AUBE_PACKAGE_NOT_FOUND))]
     NotFound(String),
     #[error("access entity not found: {0}")]
     #[diagnostic(code(ERR_AUBE_ACCESS_ENTITY_NOT_FOUND))]
     AccessEntityNotFound(String),
+    #[error("registry identity endpoint is unavailable")]
+    #[diagnostic(code(ERR_AUBE_REGISTRY_ERROR))]
+    AccessIdentityUnavailable,
     #[error("version not found: {0}@{1}")]
     #[diagnostic(code(ERR_AUBE_VERSION_NOT_FOUND))]
     VersionNotFound(String, String),
@@ -791,6 +1172,26 @@ pub enum Error {
     Forbidden { body: String },
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    /// A registry response body that didn't decode. Split out of
+    /// [`Error::Io`], which it used to be: the failure rendered as
+    /// `I/O error: invalid type: map, expected u64`, which reads as a
+    /// socket problem, names no package and no field. Packument fetches
+    /// run concurrently, so the resolver then attributed it to whichever
+    /// fetch surfaced first and the same bug appeared to move between
+    /// packages run to run. `context` and `near` are what make it
+    /// readable in one pass.
+    #[error("failed to decode {context}: {message}{}", render_locator(.locator))]
+    #[diagnostic(code(ERR_AUBE_METADATA_DECODE))]
+    Decode {
+        context: String,
+        /// Rendered locator for the offending field — a payload excerpt
+        /// (`near: …"unpackedSize":{…`) on the byte-oriented sonic-rs
+        /// decode, a JSON path (`at versions.1.0.0.dist.unpackedSize`)
+        /// on the `from_value` paths, which have no input text to quote.
+        /// Empty when neither is available.
+        locator: String,
+        message: String,
+    },
     #[error("registry rejected write: HTTP {status}: {body}")]
     #[diagnostic(code(ERR_AUBE_REGISTRY_WRITE_REJECTED))]
     RegistryWrite { status: u16, body: String },
@@ -816,7 +1217,34 @@ pub enum Error {
 /// so credentials never reach an error message or log; the redacted host
 /// is preserved for debuggability. Errors with no attached URL render
 /// unchanged (reqwest's Display emits no URL in that case).
+/// Render the locator clause of [`Error::Decode`], or nothing when the
+/// decode gave us neither an excerpt nor a path. Kept out of the
+/// `#[error]` format string so an absent locator doesn't leave a
+/// dangling ` — `.
+fn render_locator(locator: &str) -> String {
+    if locator.is_empty() {
+        String::new()
+    } else {
+        format!(" — {locator}")
+    }
+}
+
 fn redact_http_error(e: &reqwest::Error) -> String {
+    // reqwest's Display stops at "error sending request for url (…)"; the
+    // cause — a refused socket, an unsuccessful proxy tunnel, a TLS failure —
+    // is in the source chain. Render the chain so the failure can be acted
+    // on without `RUST_LOG`. Layers that only restate their source
+    // (`#[error(transparent)]`) are collapsed.
+    let mut parts: Vec<String> = Vec::new();
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(err) = cur {
+        let text = err.to_string();
+        if parts.last().is_none_or(|prev| !prev.ends_with(&text)) {
+            parts.push(text);
+        }
+        cur = err.source();
+    }
+    let rendered = parts.join(": ");
     match e.url() {
         Some(url) => {
             let raw = url.as_str();
@@ -824,9 +1252,21 @@ fn redact_http_error(e: &reqwest::Error) -> String {
             // reqwest interpolates the URL via `url::Url`'s Display,
             // which equals `Url::as_str()`, so a plain substring swap on
             // the rendered message reliably replaces the leaked form.
-            e.to_string().replace(raw, &safe)
+            rendered.replace(raw, &safe)
         }
-        None => e.to_string(),
+        None => rendered,
+    }
+}
+
+/// Every transport error enters through here, so the deny classification is
+/// applied once rather than at each retry loop's give-up arm.
+impl From<reqwest::Error> for Error {
+    fn from(e: reqwest::Error) -> Self {
+        if aube_util::agent_sandbox::is_hard_network_deny(&e) {
+            Error::NetworkDenied(e)
+        } else {
+            Error::Http(e)
+        }
     }
 }
 
@@ -861,6 +1301,41 @@ mod tests {
 
     fn parse(json: &str) -> VersionMetadata {
         serde_json::from_str(json).unwrap()
+    }
+
+    /// The whole point of `Error::Decode` is that the rendered string
+    /// carries the package and the offending field. Pin the rendering,
+    /// not just the fields — the excerpt reaches the user through a
+    /// `#[error(...)]` format call that a field-level test would miss.
+    #[test]
+    fn decode_error_renders_the_package_and_the_offending_field() {
+        let rendered = Error::Decode {
+            context: "packument @img/colour".to_string(),
+            locator: r#"near: …"shasum":"0000","unpackedSize":{"bytes":1}},"depend…"#.to_string(),
+            message: "invalid type: map, expected u64".to_string(),
+        }
+        .to_string();
+        assert_eq!(
+            rendered,
+            r#"failed to decode packument @img/colour: invalid type: map, expected u64 — near: …"shasum":"0000","unpackedSize":{"bytes":1}},"depend…"#
+        );
+    }
+
+    /// The `from_value` decode paths have no byte offset to quote, so
+    /// they pass an empty excerpt; it must vanish rather than leave a
+    /// dangling ` — near: ` clause.
+    #[test]
+    fn decode_error_omits_the_excerpt_clause_when_there_is_none() {
+        let rendered = Error::Decode {
+            context: "packument lodash".to_string(),
+            locator: String::new(),
+            message: "invalid type: map, expected a string".to_string(),
+        }
+        .to_string();
+        assert_eq!(
+            rendered,
+            "failed to decode packument lodash: invalid type: map, expected a string"
+        );
     }
 
     /// A registry URL carrying both `user:pass@` userinfo and a
@@ -902,6 +1377,56 @@ mod tests {
             rendered.contains("127.0.0.1"),
             "redacted host should remain for debuggability: {rendered}"
         );
+    }
+
+    #[test]
+    fn exact_version_packument_seed_keeps_only_selected_full_metadata() {
+        let json = br#"{
+            "name":"platform-package",
+            "versions":{
+                "1.0.0":{
+                    "name":"platform-package",
+                    "version":"1.0.0",
+                    "dependencies":{"discarded":"1"},
+                    "approver":{"name":"release-manager"}
+                },
+                "2.0.0":{
+                    "name":"platform-package",
+                    "version":"2.0.0",
+                    "dependencies":{"retained":"2"},
+                    "dist":{"tarball":"https://registry.example/pkg.tgz"}
+                }
+            },
+            "time":{"1.0.0":"2025-01-01T00:00:00.000Z","2.0.0":"2025-02-01T00:00:00.000Z"}
+        }"#;
+        let mut deserializer = sonic_rs::Deserializer::from_slice(json);
+        let decoded = serde::de::DeserializeSeed::deserialize(
+            ExactVersionPackumentSeed { version: "2.0.0" },
+            &mut deserializer,
+        )
+        .unwrap();
+
+        assert_eq!(decoded.metadata.version, "2.0.0");
+        assert_eq!(
+            decoded.metadata.dependencies.get("retained"),
+            Some(&"2".to_string())
+        );
+        assert!(!decoded.history.versions.contains_key("2.0.0"));
+        assert!(decoded.history.versions.contains_key("1.0.0"));
+        assert_eq!(decoded.history.time.len(), 2);
+    }
+
+    #[test]
+    fn exact_version_packument_seed_rejects_missing_selected_version() {
+        let json = br#"{"versions":{"1.0.0":{"name":"x","version":"1.0.0"}}}"#;
+        let mut deserializer = sonic_rs::Deserializer::from_slice(json);
+        let error = serde::de::DeserializeSeed::deserialize(
+            ExactVersionPackumentSeed { version: "2.0.0" },
+            &mut deserializer,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("requested version 2.0.0"));
     }
 
     #[test]

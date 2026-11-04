@@ -1,0 +1,7 @@
+{
+  "extends": "./does-not-exist.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": { "@/*": ["./*"] }
+  }
+}

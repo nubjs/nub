@@ -1,5 +1,5 @@
 //! The PM identity decision table, behaviorally, through the binary
-//! (spec: wiki/commands/pm/identity-policy.md). Identity resolution is the
+//! (spec: `identity-policy` (no such document)). Identity resolution is the
 //! engine's declaration-aware policy (pin-over-inference, Axiom 1), wired
 //! into nub's engine preflight; the contradiction/ambiguity rows render
 //! nub-side with the rewritten stable codes and the `nub pm use` remedy.
@@ -115,7 +115,7 @@ fn fresh_projects_write_the_identity_format_declared_first_else_nub() {
         Some(&serde_json::json!({
             "name": "nub",
             "version": concat!("^", env!("CARGO_PKG_VERSION")),
-            "onFail": "warn"
+            "onFail": "ignore"
         })),
         "a virgin install stamps a devEngines.packageManager caret range: {manifest}"
     );
@@ -226,9 +226,49 @@ fn undeclared_multi_lockfile_projects_error_as_ambiguous() {
         stderr.contains("package-lock.json") && stderr.contains("yarn.lock"),
         "the error must name the conflicting files: {stderr}"
     );
+    // Asserted as fragments, not the whole sentence: miette wraps the help line
+    // at terminal width, so a full-sentence `contains` breaks on the wrap point
+    // rather than on a real regression.
     assert!(
-        stderr.contains("set the declaration: nub pm use <pm> — or remove the stale lockfile"),
+        stderr.contains("remove the stale lockfile") && stderr.contains("nub pm use <pm>"),
         "the remedy must be nub's: {stderr}"
+    );
+    assert!(
+        !stderr.contains("set the declaration"),
+        "the ambiguity remedy must not advise setting a declaration: {stderr}"
+    );
+}
+
+/// A DECLARED project is never ambiguous: the declaration says who owns it,
+/// so a stray second lockfile no longer refuses the install. `nub install`
+/// writes `devEngines.packageManager: nub` itself, so leaving this ambiguous
+/// made the state inescapable — the remedy was already applied. Regression for
+/// the state a hosted builder manufactures when it runs its own install
+/// (bun/npm) beside a committed `nub.lock`.
+#[test]
+fn a_nub_declared_project_resolves_past_a_stray_lockfile() {
+    let dir = project(
+        "declared-stray",
+        r#"{"name":"app","version":"1.0.0","devEngines":{"packageManager":{"name":"nub","version":"^0.6.0","onFail":"warn"}}}"#,
+    );
+    std::fs::write(dir.join("nub.lock"), "lockfileVersion: '9.0'\n").unwrap();
+    // A REAL bun lockfile, not a `{}` placeholder: resolving past the stray
+    // means the stray still gets parsed, so an unparseable one fails the
+    // install on its own merits rather than on identity.
+    std::fs::write(
+        dir.join("bun.lock"),
+        r#"{"lockfileVersion":1,"workspaces":{"":{"name":"app"}},"packages":{}}"#,
+    )
+    .unwrap();
+    let (stdout, stderr, code) = run(&dir, &["install"]);
+    assert_eq!(code, 0, "a declared project must install: {stderr}{stdout}");
+    assert!(
+        !stderr.contains("ERR_NUB_LOCKFILE_AMBIGUOUS"),
+        "a declaration resolves ownership — no ambiguity: {stderr}"
+    );
+    assert!(
+        dir.join("nub.lock").is_file(),
+        "the canonical lockfile stays the project's own"
     );
 }
 
@@ -587,14 +627,7 @@ fn nub_profile_reads_no_branded_user_or_project_config_file() {
     // branded plants are left byte-for-byte untouched.
     std::fs::create_dir_all(dir.join("home")).unwrap();
     let set = Command::new(nub_binary())
-        .args([
-            "config",
-            "set",
-            "--location",
-            "user",
-            "minimumReleaseAge",
-            "1000",
-        ])
+        .args(["config", "set", "--global", "minimumReleaseAge", "1000"])
         .current_dir(&dir)
         .env("HOME", dir.join("home"))
         .env("USERPROFILE", dir.join("home"))
@@ -623,4 +656,93 @@ fn nub_profile_reads_no_branded_user_or_project_config_file() {
         "minimumReleaseAge = 5555\n",
         "config set must not write a nub-branded user config file"
     );
+}
+
+/// Brand boundary on the on-disk PATH surface: nub must never create a path
+/// carrying the embedded engine's brand. Two independent mechanisms broke this
+/// before, and the assertions below pin both.
+///
+/// 1. `aube_util::embedder()` falls back to the *aube* profile whenever the
+///    identity OnceLock is unset, and identity was registered only inside the
+///    PM engine's preflight. `nub run` never reaches preflight, so it wrote the
+///    engine's lazy node-gyp shim to `<cache>/aube/tools/…` and handed that path
+///    to every script as `npm_config_node_gyp`. `main` now registers identity
+///    before anything else runs.
+/// 2. On-disk marker/probe/temp names inside the engine were hardcoded to
+///    `aube` rather than composed from the active profile, so they landed
+///    brand-crossed even once identity was correct.
+///
+/// The run path is the probe because it is the one that regressed; the
+/// assertion is on the whole isolated home, so any new brand-crossed write
+/// from any subsystem trips it. `npm_config_node_gyp` is asserted positively
+/// too — absence alone would also pass if the var stopped being exported.
+#[test]
+fn nub_never_writes_an_aube_branded_path() {
+    let dir = project(
+        "brand-path",
+        r#"{"name":"app","version":"1.0.0","scripts":{"probe":"node -e \"console.log(process.env.npm_config_node_gyp)\""}}"#,
+    );
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+
+    let out = Command::new(nub_binary())
+        .args(["run", "probe"])
+        .current_dir(&dir)
+        .env("NUB_SELF_SHIM", "0")
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", dir.join("xdg-data"))
+        .env("XDG_CACHE_HOME", dir.join("xdg-cache"))
+        .output()
+        .expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let node_gyp = stdout
+        .lines()
+        .find(|l| l.contains("node-gyp"))
+        .unwrap_or_else(|| panic!("script did not print npm_config_node_gyp: {stdout}"));
+    // Separator-normalized: `cache_namespace` is the literal "nub/pm", so on
+    // Windows `Path::join` yields `…\\xdg-cache\\nub/pm\\tools\\…` — a raw
+    // `contains("/nub/")` fails there while the leak it guards is unchanged.
+    let normalized = node_gyp.replace('\\', "/");
+    assert!(
+        normalized.contains("/nub/") && !normalized.contains("/aube/"),
+        "npm_config_node_gyp must live under nub's cache namespace: {node_gyp}"
+    );
+
+    let mut offenders = Vec::new();
+    collect_brand_crossed_paths(&dir, &mut offenders);
+    assert!(
+        offenders.is_empty(),
+        "nub wrote aube-branded path(s): {offenders:#?}"
+    );
+}
+
+/// Every path under `root` whose file name carries the embedded engine's
+/// brand. Walks rather than globbing so a brand-crossed leaf at any depth is
+/// caught (the side-effects marker sits several levels inside the store).
+fn collect_brand_crossed_paths(root: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.to_ascii_lowercase().contains("aube"))
+        {
+            out.push(path.clone());
+        }
+        if path.is_dir() && !path.is_symlink() {
+            collect_brand_crossed_paths(&path, out);
+        }
+    }
 }

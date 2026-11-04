@@ -6,6 +6,10 @@
 import yamlCfg from "./config.yaml";
 import tomlCfg from "./config.toml";
 
+// The default-export handler type, which is module-scoped rather than global so it
+// cannot merge with Cloudflare's same-named global.
+import type { ExportedHandler, FetchHandler } from "@nubjs/types";
+
 // Browser-shape Worker global + its methods/handlers.
 const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
 worker.postMessage({ yaml: yamlCfg, toml: tomlCfg });
@@ -41,6 +45,86 @@ void inlineWorker;
 // reportError (WinterTC global; not in @types/node).
 reportError(new Error("boom"));
 
+// Promise.allKeyed / Promise.allSettledKeyed (TC39 await dictionary). The result
+// properties are pinned to concrete types so a mapped-type regression — losing
+// `Awaited`, or widening a value to `any` — fails this fixture instead of
+// silently typechecking.
+const dict = await Promise.allKeyed({ shape: Promise.resolve("square"), mass: 12 });
+const dictShape: string = dict.shape;
+const dictMass: number = dict.mass;
+void dictShape;
+void dictMass;
+const settledDict = await Promise.allSettledKeyed({ ok: Promise.resolve(1) });
+if (settledDict.ok.status === "fulfilled") {
+  const okValue: number = settledDict.ok.value;
+  void okValue;
+}
+
+// Stage 4 iterator additions. Exercise both the global constructor and a built-in
+// iterator, which is typed through IteratorObject even at an ES2024 target.
+const chunked = Iterator.from([1, 2, 3]).chunks(2);
+const firstChunk: number[] | undefined = chunked.next().value;
+const firstWindow: number[] | undefined = [1, 2, 3].values().windows(2).next().value;
+const partialWindow: number[] | undefined = [1, 2, 3].values().windows(5, "allow-partial").next().value;
+// @ts-expect-error `undersized` is one of two literal modes.
+[1, 2, 3].values().windows(2, "partial");
+const hasTwo: boolean = [1, 2, 3].values().includes(2);
+const hasTwoAfterSkip: boolean = [1, 2, 3].values().includes(2, 1);
+const joined: string = [1, 2, 3].values().join("-");
+void [firstChunk, firstWindow, partialWindow, hasTwo, hasTwoAfterSkip, joined];
+
+const precise: number = Math.sumPrecise([1e20, 0.1, -1e20]);
+const metadataKey: symbol = Symbol.metadata;
+Atomics.pause(1);
+void [precise, metadataKey];
+
+// Polyfilled proposals: Set methods and Array.fromAsync arrive through the entry
+// points' `reference lib` lines, the rest are hand-declared in common.d.ts. Each
+// line is written to fail if the member goes MISSING and if its signature WEAKENS —
+// the second half needs care, since an annotation alone usually proves nothing (a
+// `T`-annotated const happily accepts an `any`, and several of these types are
+// identical under a weaker signature). Each note below records the weakening the
+// line is built to catch; every one was verified red against that exact form.
+const escaped: string = RegExp.escape("foo.bar");
+// Two differently-typed sources pin the union element — a weaker
+// `concat<T>(first: Iterable<T>, ...rest: Iterable<T>[])` rejects the second.
+const concatenated: number | string | undefined = Iterator.concat(
+  [1].values(),
+  ["a"].values(),
+).next().value;
+// Narrowing an `unknown` pins the `error is Error` predicate — assigning the call
+// to a `boolean` would also accept a weaker `isError(error: unknown): boolean`.
+const maybeError: unknown = new Error("x");
+const isErrMessage: string = Error.isError(maybeError) ? maybeError.message : "";
+// Passing a trailing argument pins the variadic `(...args: U)` forwarding; a
+// zero-arity `try<T>(cb: () => T)` takes the annotation but rejects the argument.
+// (`Promise<Awaited<T>>` vs `Promise<T>` is NOT observable here — the parameter's
+// `T | PromiseLike<T>` already unwraps it — so arity is what there is to pin.)
+const tried: Promise<number> = Promise.try((n: number) => Promise.resolve(n), 1);
+// `Set<T>` is bivariant, so annotating the result `Set<number | string>` holds under
+// a weaker `union<U>(other): Set<T>` too; only USING a `string` member pins `Set<T | U>`.
+const unioned = new Set([1]).union(new Set(["a"]));
+const unionedHasString: boolean = unioned.has("a");
+const gathered: Promise<number[]> = Array.fromAsync([Promise.resolve(1)]);
+const inserted: number = new Map<string, number>().getOrInsert("k", 1);
+// Reading the callback's parameter pins the `(key: K)` argument — a weaker
+// `getOrInsertComputed(key: K, callback: () => V)` never passes the key at all.
+const computed: number = new Map<string, number>().getOrInsertComputed("k", (key) => key.length);
+const weakKey = { size: 3 };
+const weakInserted: number = new WeakMap<typeof weakKey, number>().getOrInsert(weakKey, 1);
+const weakComputed: number = new WeakMap<typeof weakKey, number>().getOrInsertComputed(
+  weakKey,
+  (key) => key.size,
+);
+void [escaped, concatenated, isErrMessage, tried, unionedHasString, gathered, inserted, computed, weakInserted, weakComputed];
+
+// Uint8Array base64/hex proposal.
+const decoded: Uint8Array<ArrayBuffer> = Uint8Array.fromBase64("SGVsbG8=");
+const encoded: string = decoded.toBase64({ alphabet: "base64url", omitPadding: true });
+const writeResult: { read: number; written: number } = decoded.setFromHex("4869");
+const fromHex: Uint8Array<ArrayBuffer> = Uint8Array.fromHex("4869");
+void [encoded, writeResult, fromHex];
+
 // Temporal namespace (inlined from @js-temporal/polyfill).
 const instant: Temporal.Instant = Temporal.Now.instant();
 const duration: Temporal.Duration = Temporal.Duration.from({ hours: 2, minutes: 30 });
@@ -50,8 +134,31 @@ console.log(instant.toString(), duration.total("minutes"));
 const fromDate: Temporal.Instant = new Date().toTemporalInstant();
 console.log(fromDate.epochMilliseconds);
 
-// import.meta.hot (undefined unless `nub watch --hot`, but the shape must typecheck).
+// import.meta.hot (undefined at runtime, but the shape must typecheck).
 if (import.meta.hot) {
   import.meta.hot.accept((mod) => console.log(mod));
   import.meta.hot.dispose((data) => console.log(data));
 }
+
+// Default-export `fetch` handler. `request` is deliberately UNANNOTATED: if the
+// ambient `declare module "@nubjs/types"` stopped resolving, the parameter would
+// become an implicit `any` and fail here under `strict` rather than pass silently.
+const served = {
+  fetch(request) {
+    return new Response(request.url);
+  },
+} satisfies ExportedHandler;
+const standalone: FetchHandler = async (request) => new Response(request.method);
+void [served, standalone];
+
+// `fetch` is REQUIRED — an empty object is not a handler. Annotating the conditional
+// is what pins it: making `fetch` optional flips this to `true` and fails the fixture.
+type FetchOptional = {} extends ExportedHandler ? true : false;
+const fetchIsRequired: false = null as unknown as FetchOptional;
+// ONE argument, which is what holds the Workers/Bun/Deno second argument out until
+// WinterTC settles it: a two-parameter handler must not be assignable.
+type SecondArgument = { fetch: (r: Request, env: unknown) => Response } extends ExportedHandler
+  ? true
+  : false;
+const oneArgumentOnly: false = null as unknown as SecondArgument;
+void [fetchIsRequired, oneArgumentOnly];

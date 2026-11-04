@@ -250,7 +250,7 @@ pub(crate) fn diag_config_from_flag(cli: &Cli) -> Option<Option<aube_util::diag:
         Some(
             cli.diag_file
                 .clone()
-                .unwrap_or_else(|| PathBuf::from("aube-diag.jsonl")),
+                .unwrap_or_else(|| PathBuf::from(format!("{}-diag.jsonl", aube_util::prog()))),
         )
     } else {
         cli.diag_file.clone()

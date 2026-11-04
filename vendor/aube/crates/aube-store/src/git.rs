@@ -4,6 +4,30 @@ use crate::{
 };
 use aube_util::url::redact_url;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// Construct a Git subprocess that disables Git's own terminal credential
+/// prompts. Credential helpers and configured tokens still work. SSH
+/// transports may still prompt independently through the user's SSH client.
+pub(crate) fn git_command() -> Command {
+    let mut command = Command::new("git");
+    command.env("GIT_TERMINAL_PROMPT", "0");
+    command
+}
+
+/// Entry-name prefixes for the two git caches, brand-scoped to the active
+/// embedder. These directories live under the embedder's own cache root, so a
+/// hardcoded `aube` leaf would put the engine's brand inside a host's tree.
+/// Writes and the `strip_prefix` read-back both route through these, so the
+/// two spellings cannot drift. `prog()` is `"aube"` under the default profile,
+/// leaving standalone aube's on-disk layout byte-identical.
+fn git_entry_prefix() -> String {
+    format!("{}-git-", aube_util::prog())
+}
+
+fn codeload_entry_prefix() -> String {
+    format!("{}-codeload-", aube_util::prog())
+}
 
 /// Render a git argv tail for error messages with any embedded
 /// userinfo stripped. A raw `{args:?}` would otherwise dump the
@@ -78,7 +102,7 @@ pub fn git_resolve_ref(url: &str, committish: Option<&str>) -> Result<String, Er
     // `--` terminates git's own option parsing so an attacker-supplied
     // url that slips a leading `-` past `validate_git_positional` (we
     // don't expect this, but defense in depth) can't land as an option.
-    let out = std::process::Command::new("git")
+    let out = git_command()
         .args(["ls-remote", "--", url])
         .output()
         .map_err(|e| Error::Git(format!("spawn git ls-remote {}: {e}", redact_url(url))))?;
@@ -255,7 +279,6 @@ pub fn git_shallow_clone(
     commit: &str,
     shallow: bool,
 ) -> Result<(PathBuf, String), Error> {
-    use std::process::Command;
     validate_git_positional(url, "git url")?;
     validate_git_positional(commit, "git commit")?;
     // Deterministic path keyed by url+commit so two callers in the
@@ -275,7 +298,7 @@ pub fn git_shallow_clone(
     // identical output either way.
     // Keep git scratch out of world-writable /tmp. Predictable names
     // under $TMPDIR are the classic symlink pre-plant vector. Attacker
-    // creates /tmp/aube-git-<k>-<c> as a symlink into $HOME/.ssh, then
+    // creates /tmp/<tool>-git-<k>-<c> as a symlink into $HOME/.ssh, then
     // the remove_dir_all below walks right through it and nukes the
     // victim's keys. 0700 on the cache root blocks the same race on a
     // shared user dir.
@@ -319,7 +342,7 @@ pub fn git_shallow_clone(
         (key, short)
     };
     let (key, commit_short) = cache_key(commit);
-    let target = git_root.join(format!("aube-git-{key}-{commit_short}"));
+    let target = git_root.join(format!("{}{key}-{commit_short}", git_entry_prefix()));
 
     // Fast path: a previous call already finished this (url, commit)
     // pair and left a complete checkout at `target`. Verify cheaply
@@ -328,7 +351,7 @@ pub fn git_shallow_clone(
     // an older aube version — it'll get replaced by the atomic
     // rename below.
     if target.join(".git").is_dir()
-        && let Ok(out) = Command::new("git")
+        && let Ok(out) = git_command()
             .args(["rev-parse", "HEAD"])
             .current_dir(&target)
             .output()
@@ -355,13 +378,13 @@ pub fn git_shallow_clone(
     // exact scratch path before git init ever ran. CSPRNG bytes make
     // that race unwinnable.
     let scratch = tempfile::Builder::new()
-        .prefix(&format!("aube-git-{key}-{commit_short}."))
+        .prefix(&format!("{}{key}-{commit_short}.", git_entry_prefix()))
         .tempdir_in(&git_root)
         .map_err(|e| Error::Io(git_root.clone(), e))?
         .keep();
 
     let run_in = |dir: &Path, args: &[&str]| -> Result<(), Error> {
-        let out = Command::new("git")
+        let out = git_command()
             .args(args)
             .current_dir(dir)
             .output()
@@ -407,7 +430,7 @@ pub fn git_shallow_clone(
         // stale reflog) could still leave HEAD on something else —
         // mirrors the defensive check the reuse path at line 1260
         // already performs.
-        let out = Command::new("git")
+        let out = git_command()
             .args(["rev-parse", "HEAD"])
             .current_dir(&scratch)
             .output()
@@ -447,7 +470,7 @@ pub fn git_shallow_clone(
         )),
         Err(_) => {
             if target.join(".git").is_dir()
-                && let Ok(out) = Command::new("git")
+                && let Ok(out) = git_command()
                     .args(["rev-parse", "HEAD"])
                     .current_dir(&target)
                     .output()
@@ -500,7 +523,7 @@ fn canonicalize_clone_dir(
         None => return target.to_path_buf(),
     };
     let (key, short) = cache_key(head_sha);
-    let canonical = parent.join(format!("aube-git-{key}-{short}"));
+    let canonical = parent.join(format!("{}{key}-{short}", git_entry_prefix()));
     if canonical.join(".git").is_dir() {
         // Race: another caller already wrote the canonical entry.
         // Drop our duplicate so disk doesn't bloat with two copies.
@@ -528,8 +551,9 @@ fn canonicalize_clone_dir(
 /// before this is called. The returned `head_sha` is `commit`
 /// lowercased.
 ///
-/// Cache layout uses a separate `aube-codeload-` prefix from the
-/// `aube-git-` prefix `git_shallow_clone` writes, so a per-dep
+/// Cache layout uses a separate `<tool>-codeload-` prefix from the
+/// `<tool>-git-` prefix `git_shallow_clone` writes (both brand-scoped
+/// via `codeload_entry_prefix` / `git_entry_prefix`), so a per-dep
 /// fallback from one path to the other doesn't trip on the other
 /// caller's marker files.
 pub fn extract_codeload_tarball(
@@ -597,7 +621,7 @@ pub(crate) fn codeload_integrity_path(target: &Path) -> PathBuf {
         .file_name()
         .and_then(|s| s.to_str())
         .map(|s| format!("{s}.integrity"))
-        .unwrap_or_else(|| "aube-codeload.integrity".to_string());
+        .unwrap_or_else(|| format!("{}-codeload.integrity", aube_util::prog()));
     target.with_file_name(file_name)
 }
 
@@ -644,7 +668,7 @@ pub(crate) fn codeload_cache_paths(
         .collect();
     let short = head_sha[..12].to_string();
     Some((
-        cache_root.join(format!("aube-codeload-{key}-{short}")),
+        cache_root.join(format!("{}{key}-{short}", codeload_entry_prefix())),
         head_sha,
     ))
 }
@@ -672,7 +696,7 @@ pub(crate) fn extract_codeload_tarball_at(
     let key_short = target
         .file_name()
         .and_then(|s| s.to_str())
-        .and_then(|s| s.strip_prefix("aube-codeload-"))
+        .and_then(|s| s.strip_prefix(codeload_entry_prefix().as_str()))
         .unwrap_or("");
 
     std::fs::create_dir_all(git_root).map_err(|e| Error::Io(git_root.to_path_buf(), e))?;
@@ -704,7 +728,7 @@ pub(crate) fn extract_codeload_tarball_at(
     // failure-recovery and concurrent-install reasoning as
     // `git_shallow_clone`'s scratch dance.
     let scratch = tempfile::Builder::new()
-        .prefix(&format!("aube-codeload-{key_short}."))
+        .prefix(&format!("{}{key_short}.", codeload_entry_prefix()))
         .tempdir_in(git_root)
         .map_err(|e| Error::Io(git_root.to_path_buf(), e))?
         .keep();

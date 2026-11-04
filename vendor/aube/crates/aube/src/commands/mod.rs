@@ -28,6 +28,7 @@ pub mod exec;
 pub mod fetch;
 pub mod find_hash;
 pub mod global;
+pub(crate) mod gvs_registry;
 pub mod ignored_builds;
 pub mod import;
 pub mod init;
@@ -72,6 +73,7 @@ pub mod set_script;
 pub mod sponsors;
 pub mod store;
 pub mod token;
+pub mod trust;
 pub mod undeprecate;
 pub mod unlink;
 pub mod unpublish;
@@ -85,6 +87,7 @@ pub mod why;
 mod auto_install;
 mod catalog_discovery;
 mod dep_filter;
+mod exportable_manifest;
 mod fs_helpers;
 mod manifest_io;
 mod package_spec;
@@ -94,7 +97,24 @@ mod script_settings;
 mod settings_context;
 mod workspace_helpers;
 
-pub(crate) use auto_install::ensure_installed;
+pub(crate) use auto_install::{
+    LazyInstallRuntime, ensure_installed, ensure_installed_in, with_lazy_install_runtime,
+};
+
+/// Resolve the directory a completion probe should inspect without changing
+/// the process cwd. Invalid `-C` targets yield no completions, matching the
+/// real command's chdir behavior without mutating an embedding host.
+pub(crate) fn completion_start_dir(dir: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    let cwd = crate::dirs::cwd().ok()?;
+    match dir {
+        Some(dir) => {
+            let resolved = cwd.join(dir).canonicalize().ok()?;
+            (resolved.is_dir() && resolved.join("package.json").try_exists().is_ok())
+                .then_some(resolved)
+        }
+        None => Some(cwd),
+    }
+}
 
 pub(crate) fn settings_hoisting_limits_to_linker(
     value: aube_settings::resolved::HoistingLimits,
@@ -110,16 +130,20 @@ pub(crate) fn settings_hoisting_limits_to_linker(
     }
 }
 pub(crate) use catalog_discovery::{
-    CatalogMap, discover_catalogs, discover_named_registries, load_workspace_catalogs,
+    CatalogMap, CatalogSource, catalog_entry_source, discover_catalogs, discover_named_registries,
+    load_workspace_catalogs,
 };
 pub(crate) use dep_filter::DepFilter;
-pub(crate) use fs_helpers::{format_virtual_store_display_prefix, remove_existing, symlink_dir};
+pub(crate) use fs_helpers::{
+    format_virtual_store_display_prefix, is_link_or_junction_metadata, remove_existing, symlink_dir,
+};
 pub(crate) use manifest_io::{
     load_manifest, load_manifest_or_default, update_manifest_json_object,
     write_manifest_dep_sections, write_manifest_json,
 };
 pub(crate) use package_spec::{
-    encode_package_name, max_satisfying_version, resolve_version, split_name_spec,
+    encode_package_name, policy_version_info, record_age_gated_update, resolve_version,
+    split_name_spec, wanted_version, warn_age_gated_updates,
 };
 pub(crate) use project_lock::take_install_project_lock;
 pub(crate) use project_lock::take_project_lock;
@@ -127,16 +151,25 @@ pub(crate) use script_settings::{configure_script_settings, configure_script_set
 pub(crate) use settings_context::{
     FileSources, GlobalOutputFlags, build_resolver, chained_frozen_mode, default_lockfile_kind,
     default_lockfile_kind_for_cwd, ensure_registry_auth_for_package, expand_setting_path,
-    global_frozen_override, global_output_flags, global_virtual_store_flags,
-    load_global_config_yaml, load_npm_config, make_client, open_store, packument_cache_dir,
+    global_frozen_override, global_output_flags, global_virtual_store_dir,
+    global_virtual_store_dir_with_ctx, global_virtual_store_flags, has_embedder_store_override,
+    load_npm_config, lockfile_kind_for_write_with_ctx, make_client, metadata_cache_anchor,
+    open_store, open_store_for_maintenance, open_store_with_ctx, packument_cache_dir,
     packument_cache_dir_for_cwd, packument_full_cache_dir, packument_full_cache_dir_for_cwd,
     project_modules_dir, resolve_fetch_policy, resolve_lockfile_kind_for_write,
     resolve_modules_dir_name_for_cwd, resolve_virtual_store_dir, resolve_virtual_store_dir_for_cwd,
     resolve_virtual_store_dir_max_length, resolve_virtual_store_dir_max_length_for_cwd,
-    resolved_cache_dir, resolved_store_dir, run_pnpmfile_pre_resolution, set_fetch_cli_overrides,
-    set_global_frozen_override, set_global_output_flags, set_global_virtual_store_flags,
-    set_registry_override, set_skip_auto_install_on_package_manager_mismatch,
-    skip_auto_install_on_package_manager_mismatch, with_settings_ctx,
+    resolved_cache_dir, resolved_cache_dir_with_ctx, resolved_store_dir,
+    resolved_store_dir_with_ctx, run_pnpmfile_pre_resolution, scope_embedder_install_overrides,
+    set_fetch_cli_overrides, set_global_frozen_override, set_global_output_flags,
+    set_global_virtual_store_flags, set_registry_override,
+    set_skip_auto_install_on_package_manager_mismatch,
+    skip_auto_install_on_package_manager_mismatch, store_v1_dir, store_v1_dirs, with_settings_ctx,
+    with_settings_ctx_and_cli,
+};
+pub use settings_context::{
+    StoreV1Dirs, load_global_config_yaml, resolved_project_store_dir,
+    resolved_project_store_v1_dirs,
 };
 pub(crate) use workspace_helpers::{
     collect_dep_closure, find_workspace_root, finish_filtered_workspace, load_graph,

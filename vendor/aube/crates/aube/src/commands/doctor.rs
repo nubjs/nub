@@ -17,7 +17,6 @@
 //! (network-bound on a cold cache, cached for 24 h thereafter), which
 //! also writes `<cacheDir>/update-check.json` on a successful fetch.
 
-use clap::Args;
 use miette::Context;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
@@ -34,10 +33,10 @@ Examples:
   $ aube doctor --json | jq .warnings
 ";
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct DoctorArgs {
     /// Emit a machine-readable JSON report instead of the grouped text.
-    #[arg(long, short = 'J')]
+    #[usage(long, short = 'J')]
     pub json: bool,
 }
 
@@ -169,7 +168,7 @@ fn runtime_section(warnings: &mut Vec<String>) -> Section {
                 ));
             }
         }
-        if let Some(bin) = &ctx.node_bin {
+        if let Some(bin) = &ctx.node_program {
             s.push("node-bin", display_path_owned(bin.clone()));
         }
     }
@@ -183,7 +182,16 @@ fn runtime_section(warnings: &mut Vec<String>) -> Section {
 
 fn dirs_section(anchor: &Path) -> Section {
     let mut s = Section::new("dirs");
-    let store_root = aube_store::dirs::store_dir()
+    // Report the same paths the install will use, so `storeDir` /
+    // `cacheDir` overrides are visible here instead of only showing
+    // the platform defaults. Printed at `v1/` granularity to match
+    // `aube store path`; `dirs::store_dir` returns the `files/` shard
+    // dir one level below it.
+    let store_root = super::resolved_store_dir(anchor)
+        .map(|dir| dir.join("v1"))
+        .or_else(|| {
+            aube_store::dirs::store_dir().and_then(|files| files.parent().map(Path::to_path_buf))
+        })
         .map(display_path_owned)
         .unwrap_or_else(|| "(unresolved)".into());
     s.push("store", store_root);
@@ -194,6 +202,10 @@ fn dirs_section(anchor: &Path) -> Section {
     s.push(
         "packument-cache",
         display_path_owned(super::resolved_cache_dir(anchor).join("packuments-v1")),
+    );
+    s.push(
+        "global-virtual-store",
+        display_path_owned(super::global_virtual_store_dir(anchor)),
     );
     s.push(
         "virtual-store",

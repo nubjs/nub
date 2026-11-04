@@ -1,0 +1,75 @@
+name: docs implementation
+
+on:
+  workflow_call:
+
+env:
+  MBX_DISABLE: "1"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build aube
+        run: mise exec -- cargo build
+      - name: Setup Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - name: Render CLI docs from usage spec
+        run: |
+          ./target/debug/aube usage > aube.usage.kdl
+          rm -rf docs/cli && mkdir -p docs/cli
+          usage g markdown -mf aube.usage.kdl --out-dir docs/cli --url-prefix /cli
+          usage g json     -f aube.usage.kdl > docs/cli/commands.json
+          node scripts/patch-generated-cli-docs.mjs
+      - name: Install docs dependencies with aube
+        run: |
+          cd docs
+          ../target/debug/aube install
+      - name: Build docs site with aube
+        env:
+          AUBE_UPDATE_STARS: "1"
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          cd docs
+          ../target/debug/aube run docs:build
+          touch .vitepress/dist/.nojekyll
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
+        with:
+          path: docs/.vitepress/dist
+          # v5 excludes dotfiles by default; .nojekyll is created above
+          # to disable GitHub Pages' Jekyll processing for the VitePress
+          # build, so it must ship inside the artifact.
+          include-hidden-files: true
+
+  deploy:
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    name: Deploy
+    permissions:
+      id-token: write
+      pages: write
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

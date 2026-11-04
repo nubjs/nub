@@ -390,6 +390,71 @@ fn update_pins_named_version_preserving_manifest_operator() {
     );
 }
 
+/// `nub up <pkg>@<version>` on an EXACT pin keeps the pin exact (`3.0.0` +
+/// `is-positive@3.1.0` -> `3.1.0`, never `^3.1.0`). This is also the path a
+/// range pick on a pinned row of the interactive picker takes: the picker
+/// hands the resolver exactly this explicit spec.
+#[test]
+#[ignore = "network: resolves is-positive from the npm registry"]
+fn update_to_a_named_version_keeps_an_exact_pin_exact() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = pm_tmpdir("updateexact");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"updateexact","version":"1.0.0","dependencies":{"is-positive":"3.0.0"}}"#,
+    )
+    .unwrap();
+
+    let up = run_nub(&dir, &["up", "is-positive@3.1.0"]);
+    assert_eq!(up.code, 0, "stdout: {}\nstderr: {}", up.stdout, up.stderr);
+    let manifest = std::fs::read_to_string(dir.join("package.json")).unwrap();
+    assert!(
+        manifest.contains("\"is-positive\": \"3.1.0\""),
+        "an exact pin must stay exact on the new version: {manifest}"
+    );
+}
+
+/// The in-range floor-bump is decided per key: a bare `^` dep updated in the
+/// same invocation as an explicit `<pkg>@latest` still gets its manifest
+/// range moved to the resolved version (`^3.0.0` -> `^3.0.1`), exactly as it
+/// does when updated alone. It used to be skipped whenever any explicit spec
+/// rode along, leaving the lockfile ahead of an unchanged manifest floor.
+#[test]
+#[ignore = "network: resolves is-positive and is-odd from the npm registry"]
+fn update_floor_bumps_a_bare_key_beside_an_explicit_latest() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = pm_tmpdir("updatemixed");
+    let manifest_with = |is_odd: &str| {
+        format!(
+            r#"{{"name":"updatemixed","version":"1.0.0","dependencies":{{"is-odd":"{is_odd}","is-positive":"3.0.0"}}}}"#
+        )
+    };
+    // Lock is-odd at 3.0.0 first, then widen its range so the lockfile trails
+    // the newest in-range release (3.0.1).
+    std::fs::write(dir.join("package.json"), manifest_with("3.0.0")).unwrap();
+    let install = run_nub(&dir, &["install", "--ignore-scripts"]);
+    assert_eq!(install.code, 0, "stderr: {}", install.stderr);
+    std::fs::write(dir.join("package.json"), manifest_with("^3.0.0")).unwrap();
+
+    let up = run_nub(&dir, &["up", "is-positive@latest", "is-odd"]);
+    assert_eq!(up.code, 0, "stdout: {}\nstderr: {}", up.stdout, up.stderr);
+    let manifest = std::fs::read_to_string(dir.join("package.json")).unwrap();
+    assert!(
+        manifest.contains("\"is-positive\": \"3.1.0\""),
+        "the explicit @latest must move the pin: {manifest}"
+    );
+    assert!(
+        manifest.contains("\"is-odd\": \"^3.0.1\""),
+        "the bare key must keep its floor-bump beside an explicit spec: {manifest}"
+    );
+}
+
 /// `nub up <pkg>@<protocol-spec>` (npm alias, `link:`, `file:`, git, a
 /// tarball URL, a non-`latest` dist-tag) is rejected up front with a
 /// non-zero exit and the manifest left untouched — pinning one of those
@@ -641,6 +706,67 @@ fn dedupe_ignores_workspace_links_and_check_passes() {
         check.code,
         0,
         "dedupe --check must pass on a deduped workspace: {}",
+        check.combined()
+    );
+}
+
+/// An `npm:` alias must not read as a dedupe change (#578). The pnpm
+/// reader synthesizes an alias-keyed package and used to keep the
+/// canonical real-name entry too, while a fresh resolve emits only the
+/// clone — so `dedupe` reported the target as removed on every run and
+/// `--check` failed forever on a byte-identical lockfile. Needs the
+/// registry: dedupe's whole job is a fresh resolve.
+#[test]
+#[ignore = "network: resolves + fetches is-number@7.0.0 from the npm registry"]
+fn dedupe_ignores_npm_alias_targets_and_check_passes() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = pm_tmpdir("dedupe-alias");
+    // `packageManager` selects pnpm-lock.yaml; the bug is specific to that
+    // format, since only its writer re-keys an alias under the real name.
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"fixture","private":true,"packageManager":"pnpm@11.17.0","dependencies":{"number-alias":"npm:is-number@7.0.0"}}"#,
+    )
+    .unwrap();
+    let (data, cache) = (
+        pm_tmpdir("dedupe-alias-data"),
+        pm_tmpdir("dedupe-alias-cache"),
+    );
+
+    let install = run_nub_with(&dir, &["install"], &data, &cache);
+    assert_eq!(
+        install.code, 0,
+        "stdout: {}\nstderr: {}",
+        install.stdout, install.stderr
+    );
+    let lock_before = std::fs::read_to_string(dir.join("pnpm-lock.yaml")).unwrap();
+
+    let dedupe = run_nub_with(&dir, &["dedupe"], &data, &cache);
+    assert_eq!(
+        dedupe.code, 0,
+        "stdout: {}\nstderr: {}",
+        dedupe.stdout, dedupe.stderr
+    );
+    assert!(
+        dedupe.combined().contains("already deduped"),
+        "an alias target must not be reported as removed: {}",
+        dedupe.combined()
+    );
+    dedupe.assert_brand_clean();
+    assert_eq!(
+        std::fs::read_to_string(dir.join("pnpm-lock.yaml")).unwrap(),
+        lock_before,
+        "dedupe must not change the lockfile"
+    );
+
+    let check = run_nub_with(&dir, &["dedupe", "--check"], &data, &cache);
+    assert_eq!(
+        check.code,
+        0,
+        "dedupe --check must pass on an aliased project: {}",
         check.combined()
     );
 }

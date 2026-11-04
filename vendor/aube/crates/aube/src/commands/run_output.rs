@@ -1,4 +1,5 @@
-//! Per-package output prefixing for parallel recursive runs.
+//! Script-run output: the echoed `$ <cmd>` line every run emits, and
+//! per-package output prefixing for parallel recursive runs.
 //!
 //! `aube run -r --parallel` and `aube exec -r --parallel` (or any mode
 //! with `--workspace-concurrency`) need to keep the stdout/stderr from
@@ -131,6 +132,30 @@ pub(crate) async fn run_command(
         .map_err(|e| miette!("stderr pump task failed: {e}"))?
         .map_err(|e| miette!("stderr pump io error: {e}"))?;
     Ok(status)
+}
+
+/// Echo a script's command line to stderr as `$ <cmd>` just before it
+/// runs. npm, pnpm, and bun all do this, and it is the only thing that
+/// tells you *what* a script name actually expanded to — invaluable when
+/// a CI log shows `aube run build` failing and the manifest has since
+/// changed.
+///
+/// Stderr, not stdout, so `aube run print-json > out.json` stays clean.
+/// Under `--silent` the caller skips this entirely; the global
+/// `--loglevel silent` guard redirecting fd 2 to `/dev/null` is a second
+/// line of defense, not the primary gate.
+///
+/// `mode` is `Some` only on the parallel recursive path, where child
+/// output is already being multiplexed with a `<pkg>: ` prefix — the echo
+/// line has to carry the same prefix or it cannot be attributed to a
+/// package. Sequential runs pass `None` and get a bare `$ <cmd>`.
+pub(crate) fn echo_script_command(cmd: &str, mode: Option<&OutputMode>) {
+    let no_color = std::env::var_os("NO_COLOR").is_some();
+    let prefix = match mode {
+        Some(mode) => format_line_prefix(mode, std::io::stderr().is_terminal() && !no_color),
+        None => String::new(),
+    };
+    eprintln!("{prefix}$ {cmd}");
 }
 
 /// Build the per-line prefix string up front so we don't re-format it

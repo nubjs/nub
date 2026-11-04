@@ -175,6 +175,79 @@ EOF
 	assert_failure
 }
 
+@test "aube unlink (no args) keeps registry deps installed through the global virtual store" {
+	# Regression: with GVS on (the default here — _common_setup unsets CI),
+	# `node_modules/.aube/<dep>` is itself a symlink into
+	# <cacheDir>/virtual-store/. Canonicalizing a dep's target escaped the
+	# project's virtual store, so every ordinary dep looked like an
+	# `aube link` and bare `aube unlink` emptied node_modules/.
+	cat >package.json <<'EOF'
+{"name": "consumer", "version": "1.0.0", "dependencies": {"semver": "7.7.4"}}
+EOF
+
+	run aube install
+	assert_success
+	run test -L node_modules/semver
+	assert_success
+	# Confirm GVS is actually in play, otherwise this asserts nothing.
+	run test -L "node_modules/.aube/semver@7.7.4"
+	assert_success
+
+	run aube unlink
+	assert_success
+	assert_output --partial "No linked packages found"
+	refute_output --partial "Unlinked semver"
+
+	run test -L node_modules/semver
+	assert_success
+	assert_file_exists node_modules/semver/package.json
+}
+
+@test "aube unlink <pkg> refuses to remove a GVS-backed registry dep" {
+	cat >package.json <<'EOF'
+{"name": "consumer", "version": "1.0.0", "dependencies": {"semver": "7.7.4"}}
+EOF
+
+	run aube install
+	assert_success
+
+	run aube unlink semver
+	assert_failure
+	assert_output --partial "not a linked package"
+
+	run test -L node_modules/semver
+	assert_success
+}
+
+@test "aube unlink removes a real link whose target sits under globalVirtualStoreDir" {
+	# The GVS root must not be an "internal" anchor: no visible
+	# node_modules/<name> symlink ever points into the shared store
+	# directly, so anchoring on it could only misfire — hiding a genuine
+	# `aube link` whose target happens to live under a user-configured
+	# globalVirtualStoreDir.
+	cat >package.json <<'EOF'
+{"name": "consumer", "version": "1.0.0"}
+EOF
+
+	mkdir -p shared-store/my-lib
+	cat >shared-store/my-lib/package.json <<'EOF'
+{"name": "my-lib", "version": "1.0.0"}
+EOF
+	echo "globalVirtualStoreDir=$PWD/shared-store" >>.npmrc
+
+	run aube link ./shared-store/my-lib
+	assert_success
+	run test -L node_modules/my-lib
+	assert_success
+
+	run aube unlink
+	assert_success
+	assert_output --partial "Unlinked my-lib"
+
+	run test -e node_modules/my-lib
+	assert_failure
+}
+
 @test "aube unlink <pkg> refuses to remove non-symlink entries" {
 	cat >package.json <<'EOF'
 {"name": "consumer", "version": "1.0.0"}

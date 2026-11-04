@@ -2,7 +2,8 @@
 //! into:
 //!
 //! - **lockfile vocabulary** (pnpm / Node `process.platform`):
-//!   `darwin` / `linux` / `win32`, `x64` / `arm64`, `libc: musl`;
+//!   `darwin` / `linux` / `win32` / `freebsd`, `x64` / `arm64`,
+//!   `libc: musl`;
 //! - **dist-file vocabulary** (nodejs.org artifact names):
 //!   `node-v{V}-darwin-arm64.tar.gz`, `node-v{V}-linux-x64-musl.tar.gz`,
 //!   `node-v{V}-win-x64.zip`.
@@ -33,6 +34,17 @@ impl Platform {
             "macos" => "darwin",
             "linux" => "linux",
             "windows" => "win32",
+            // FreeBSD reports Node's `process.platform` value verbatim.
+            // nodejs.org ships no FreeBSD artifacts, so the download
+            // path can't satisfy a request here — but resolution reaches
+            // it only after the zero-network fast paths (PATH probe,
+            // installed scan, mise delegation) miss, and a missing dist
+            // then surfaces the normal `NoMatchingVersion` /
+            // `UnsupportedPlatform` diagnostic. Detecting the platform
+            // (rather than erroring outright) is what lets those local
+            // paths, `os`-field package filtering, and multi-platform
+            // lockfile pins behave correctly on FreeBSD.
+            "freebsd" => "freebsd",
             other => {
                 return Err(Error::UnsupportedPlatform {
                     platform: format!("{other}-{}", std::env::consts::ARCH),
@@ -152,6 +164,21 @@ mod tests {
             "linux-x64-musl"
         );
         assert_eq!(plat("win32", "x64", None).dist_slug(), "win-x64");
+        assert_eq!(plat("freebsd", "x64", None).dist_slug(), "freebsd-x64");
+    }
+
+    #[test]
+    fn freebsd_token_falls_back_to_linux() {
+        // nodejs.org has no FreeBSD `files[]` token, so availability
+        // gating reuses the linux token. Download still fails later at
+        // the SHASUMS lookup (no `node-v*-freebsd-*` artifact), which is
+        // the intended graceful outcome — FreeBSD relies on system/mise
+        // Node, not aube's self-download.
+        assert_eq!(
+            plat("freebsd", "x64", None).index_files_token(),
+            "linux-x64"
+        );
+        assert_eq!(plat("freebsd", "x64", None).archive_ext(), "tar.gz");
     }
 
     #[test]

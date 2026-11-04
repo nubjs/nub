@@ -21,6 +21,13 @@
 // self-describing summary (CI-WATCH …: SUCCESS/FAILURE/STUCK/TIMEOUT/ERROR) so
 // the outcome is readable from the tail.
 //
+// NEVER PIPE THIS SCRIPT. `ci-watch.ts … | tail -20` makes `$?` tail's status,
+// not the watcher's, so a FAILED CI reads as success — and the pipe buffers
+// output, so there is nothing to eyeball either. Redirect and capture instead:
+//     node scripts/ci-watch.ts --pr N > ci.log 2>&1; rc=$?
+// (bash `${PIPESTATUS[0]}` / zsh `${pipestatus[1]}` also work, but redirecting is
+// harder to get wrong). `main()` warns on stderr when it detects a piped stdout.
+//
 // Exit codes (the contract the orchestrator gates on):
 //   0  completed AND all green
 //   1  a check/job concluded FAILURE/CANCELLED/TIMED_OUT/STARTUP_FAILURE
@@ -54,10 +61,11 @@
 //     treated as a run failure.
 
 import { execFileSync } from "node:child_process";
+import { fstatSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 // The #327 ghost-carve-out classifier is shared with scripts/merge-cascade.ts so
 // the two tools cannot drift on the merge-safety verdict — one source of truth.
-import { FAILURE_CONCLUSIONS, OK_CONCLUSIONS, classifyRollup, joinCapped, verdictForBuckets } from "./lib/ci-rollup.ts";
+import { CI_GATE_CHECK, FAILURE_CONCLUSIONS, OK_CONCLUSIONS, classifyRollup, itemName, itemState, joinCapped, verdictForBuckets } from "./lib/ci-rollup.ts";
 import type { RollupItem, Buckets, Verdict } from "./lib/ci-rollup.ts";
 
 // ---- args -------------------------------------------------------------------
@@ -230,7 +238,31 @@ function classifyPr(json: string, required: Set<string>): Verdict {
   } catch {
     return { kind: "pending", reason: "unparseable PR JSON (transient)", ghostsOnly: false, realPending: [], ghosts: [], greenNamed: 0 };
   }
-  return verdictForBuckets(classifyRollup(d.statusCheckRollup || [], required), required.size > 0);
+  const rollup = d.statusCheckRollup || [];
+  const v = verdictForBuckets(classifyRollup(rollup, required), required.size > 0);
+  if (required.size > 0) return v; // an explicit --required set already says what must be green
+  // Unscoped mode used to mean "every named check is green", which was a sound
+  // reading while every pull request got CI automatically. PR CI is opt-in now, so a
+  // pull request nobody requested a run for still carries GREEN third-party app checks
+  // (Vercel, review bots) and nothing else — enough for the old rule to report success
+  // on work that was never built. The aggregate gate is the one item that proves
+  // otherwise, so demand it before ANY green-ish verdict, including the ghosts-only
+  // "safe to --admin merge" one.
+  if (v.kind !== "success" && !(v.kind === "pending" && v.ghostsOnly)) return v;
+  const gateGreen = rollup.some((it) => {
+    if (itemName(it) !== CI_GATE_CHECK) return false;
+    const st = itemState(it);
+    return st.terminal && !st.failed && !st.skipped;
+  });
+  if (gateGreen) return v;
+  return {
+    kind: "pending",
+    reason: `\`${CI_GATE_CHECK}\` is not green — the other checks cannot stand in for it. PR CI is opt-in: request a run with \`gh pr edit <n> --add-label ci\` (or, for a pull request that does not target main, pass --required with the checks that gate it).`,
+    ghostsOnly: false,
+    realPending: [CI_GATE_CHECK],
+    ghosts: v.kind === "pending" ? v.ghosts : [],
+    greenNamed: v.kind === "pending" ? v.greenNamed : 0,
+  };
 }
 
 // A run is done only when its top-level status is "completed". Until then —
@@ -257,6 +289,10 @@ function classifyRun(json: string): Verdict {
   }
   const c = (d.conclusion || "").toUpperCase();
   if (OK_CONCLUSIONS.has(c)) return { kind: "success", reason: `${jobs.length} job(s) green (${c})` };
+  // A run whose every job was gated off concludes SKIPPED. It verified nothing, so it
+  // is not success — the routine shape now that PR CI is opt-in and a `labeled` event
+  // for some OTHER label still creates a run with all jobs skipped.
+  if (c === "SKIPPED") return { kind: "failure", reason: "run concluded SKIPPED — no job ran (PR CI is opt-in: request a run with `gh pr edit <n> --add-label ci`)" };
   return { kind: "failure", reason: `run concluded ${c || "no-conclusion"}` };
 }
 
@@ -396,8 +432,29 @@ async function watch(opts: Opts): Promise<{ code: number; summary: string }> {
   }
 }
 
+// This watcher's ENTIRE contract is its exit code, and a shell pipeline throws
+// that away: in `ci-watch.ts … | tail`, `$?` is tail's status (0 essentially
+// always), so a red CI reads as green. A pipe is detectable — fstat on fd 1 is a
+// FIFO for `| cmd` but not for `> file`, which is the correct way to capture
+// output — so warn loudly rather than let a masked failure look like a pass.
+function warnIfStdoutPiped(): void {
+  try {
+    if (!fstatSync(1).isFIFO()) return;
+  } catch {
+    return;
+  }
+  console.error(
+    "ci-watch: WARNING — stdout is a pipe. The shell reports the LAST command's\n" +
+      "  exit status, so this watcher's verdict is being discarded and a FAILED CI\n" +
+      "  will look like success. Redirect instead, and gate on the real status:\n" +
+      "    node scripts/ci-watch.ts --pr N > ci.log 2>&1; rc=$?\n" +
+      "  (or use ${PIPESTATUS[0]} in bash / ${pipestatus[1]} in zsh).",
+  );
+}
+
 async function main(): Promise<void> {
   const opts = parseArgs(process.argv.slice(2));
+  warnIfStdoutPiped();
   const { code, summary } = await watch(opts);
   // The final stdout line IS the handoff — orchestrator reads it from the tail.
   console.log(summary);

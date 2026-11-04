@@ -1,0 +1,115 @@
+name: "npm ci on Nub"
+description: "The npm ci step, run by Nub: installs exactly what package-lock.json records, under npm's own contract, and leaves the lockfile byte for byte as it was."
+author: "nubjs"
+branding:
+  icon: "package"
+  color: "purple"
+
+inputs:
+  lockfile:
+    description: "The npm lockfile in working-directory to install from: package-lock.json or npm-shrinkwrap.json. When both exist, npm ci and Nub install from npm-shrinkwrap.json, so name that one. The action fails when the file is missing and when the install would change it."
+    default: "package-lock.json"
+  working-directory:
+    description: "Directory holding package.json and the lockfile. Default: the checkout root."
+    default: "."
+  args:
+    description: "Flags for npm ci, as npm spells them: --omit=dev, --include=optional, --no-optional, --ignore-scripts, --loglevel <level>. A flag the engine does not honor fails the action; nothing falls back to npm."
+    default: ""
+  cache:
+    description: "Cache Nub's store across runs, keyed on the lockfile. Set false to disable."
+    default: "true"
+  cache-key-prefix:
+    description: "Prefix for the cache key, to scope or bust caches independently of the lockfile."
+    default: ""
+  nub-version:
+    description: "Version of Nub to install: any semver range npm understands (0.9.3, ^0.9, latest)."
+    default: "latest"
+  token:
+    description: "GitHub token for rate-limit relief when resolving Nub's version. Defaults to github.token on github.com."
+    default: ${{ github.server_url == 'https://github.com' && github.token || '' }}
+
+outputs:
+  nub-version:
+    description: "The installed Nub version (nub --version, a bare v<semver>)."
+    value: ${{ steps.nub.outputs.nub-version }}
+  cache-hit:
+    description: "Whether an exact store-cache match was restored: 'true' on an exact key hit, 'false' on a partial hit, empty on a miss."
+    value: ${{ steps.nub.outputs.cache-hit }}
+  lockfile-sha256:
+    description: "SHA-256 of the lockfile, the same before and after the install."
+    value: ${{ steps.ci.outputs.lockfile-sha256 }}
+
+runs:
+  using: "composite"
+  steps:
+    # Nub on PATH and its store cached; Node is left alone (provision-node:
+    # false), so whatever setup-node put on PATH stays there. No shim reaches PATH.
+    - uses: nubjs/setup-nub@c7b970ec04655a2f0a111cd436cc182a3b660e7a # v0.6.0
+      id: nub
+      with:
+        nub-version: ${{ inputs.nub-version }}
+        provision-node: false
+        cache: ${{ inputs.cache }}
+        cache-dependency-path: ${{ inputs.working-directory }}/${{ inputs.lockfile }}
+        cache-key-prefix: ${{ inputs.cache-key-prefix }}
+        working-directory: ${{ inputs.working-directory }}
+        shim: false
+        token: ${{ inputs.token }}
+
+    - name: npm ci on Nub's engine
+      id: ci
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        LOCKFILE: ${{ inputs.lockfile }}
+        ARGS: ${{ inputs.args }}
+        # npm's layout: one hoisted tree, transitive packages reachable from the
+        # root as npm places them.
+        npm_config_node_linker: hoisted
+      run: |
+        set -euo pipefail
+        # The engine finds the lockfile in this directory itself and, as npm ci
+        # does, takes npm-shrinkwrap.json over package-lock.json when both exist.
+        # The input has to name that same file, or the hash below would cover a
+        # file the engine never read.
+        case "$LOCKFILE" in
+          package-lock.json|npm-shrinkwrap.json) ;;
+          */*|*\\*) echo "::error::lockfile is a file name inside working-directory, not a path; point working-directory at the project that holds '${LOCKFILE}'."; exit 1 ;;
+          *) echo "::error::lockfile must be package-lock.json or npm-shrinkwrap.json, got '${LOCKFILE}'."; exit 1 ;;
+        esac
+        [ -f "$LOCKFILE" ] || { echo "::error::${LOCKFILE} not found in $(pwd). npm ci installs from a lockfile only: commit one, or use nubjs/nub/install for a project without one."; exit 1; }
+        if [ "$LOCKFILE" = package-lock.json ] && [ -f npm-shrinkwrap.json ]; then
+          echo "::error::npm-shrinkwrap.json is present, and npm ci and Nub install from it rather than package-lock.json; set lockfile: npm-shrinkwrap.json."; exit 1
+        fi
+        sha() { { command -v sha256sum >/dev/null 2>&1 && sha256sum "$1"; } || shasum -a 256 "$1"; }
+        before="$(sha "$LOCKFILE" | cut -c1-64)"
+
+        # npm's contract on Nub's engine: the routed-install path of Nub's npm
+        # shim parses npm's flags, removes node_modules, runs `nub ci` in this
+        # process and lets every lifecycle script run as npm does. The route is
+        # switched on by the marker `nub pm shim --route-installs` writes; only
+        # the marker is written here, so no shim and no PATH edit reaches the
+        # runner, and a marker created here is removed when this step ends,
+        # success or failure, while one the runner's user set stays. __NUB_ARGV0
+        # is how Nub's own launcher names the verb. This step is the job's top
+        # level, so npm's nesting markers are cleared.
+        case "${RUNNER_OS:-}" in
+          Windows) shims="$(cygpath -u "${LOCALAPPDATA}")/nub/shims" ;;
+          *)       shims="${XDG_DATA_HOME:-$HOME/.local/share}/nub/shims" ;;
+        esac
+        marker="$shims/.route-installs"
+        created_marker=0
+        if [ ! -f "$marker" ]; then
+          mkdir -p "$shims" && : > "$marker" && created_marker=1
+        fi
+        cleanup() { if [ "$created_marker" = 1 ]; then rm -f "$marker"; fi; }
+        trap cleanup EXIT
+        # shellcheck disable=SC2086
+        env -u npm_config_user_agent -u npm_execpath __NUB_ARGV0=npm nub ci $ARGS
+        # The engine's layout record; npm writes node_modules/.package-lock.json instead.
+        [ -f node_modules/.modules.yaml ] || { echo "::error::the install did not run on Nub's engine: an npm flag in args that the engine does not honor?"; exit 1; }
+
+        after="$(sha "$LOCKFILE" | cut -c1-64)"
+        [ "$before" = "$after" ] || { echo "::error::${LOCKFILE} changed during the install (sha256 ${before} -> ${after}). The lockfile is the input and is never written."; exit 1; }
+        echo "lockfile-sha256=${after}" >> "$GITHUB_OUTPUT"
+        echo "Installed from ${LOCKFILE} (sha256 ${after:0:12}), unchanged."

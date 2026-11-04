@@ -48,7 +48,7 @@ pub struct ModuleInfo {
     /// byte, no codegen, no sourcemap footer) instead of running it through oxc,
     /// which reformats no-op source. When TRUE, the file must be transpiled.
     ///
-    /// PROVENANCE — PINNED TO oxc =0.132.0's es2022 lowering set. The complete set
+    /// PROVENANCE — PINNED TO oxc =0.140.0's es2022 lowering set. The complete set
     /// of SYNTAX oxc lowers at `target:"es2022"` for plain JS is exactly:
     ///   1. `using` / `await using` declarations (ES2026 explicit resource mgmt)
     ///   2. RegExp `v`-flag literals (ES2024 unicode-sets — oxc rewrites `/…/v` to
@@ -217,7 +217,7 @@ fn specifier_is_type(spec: &ImportDeclarationSpecifier<'_>) -> bool {
 ///   * `transformable` — the source contains target-version-gated SYNTAX oxc lowers
 ///     at `target:"es2022"`: a `using`/`await using` declaration, or a `v`-flag
 ///     RegExp literal. See `ModuleInfo::transformable_syntax` for the pinned
-///     provenance of this set (oxc =0.132.0). Both fields keep going once latched
+///     provenance of this set (oxc =0.140.0). Both fields keep going once latched
 ///     (the visit completes) — correctness only needs "did we ever see one".
 struct SyntaxFinder {
     decorators: bool,

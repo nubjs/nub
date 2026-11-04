@@ -214,7 +214,7 @@ pub async fn run_scanner(
 /// finishes.
 fn write_bridge_dir() -> Result<tempfile::TempDir, String> {
     let dir = tempfile::Builder::new()
-        .prefix("aube-bun-scanner-")
+        .prefix(&format!("{}-bun-scanner-", aube_util::prog()))
         .tempdir()
         .map_err(|e| format!("failed to create bridge temp dir: {e}"))?;
     let write = |name: &str, body: &str| -> Result<(), String> {
@@ -236,7 +236,7 @@ async fn invoke(
         .map_err(|e| format!("failed to encode scanner request: {e}"))?;
 
     let bridge = write_bridge_dir()?;
-    let mut cmd = tokio::process::Command::new(crate::runtime::node_program());
+    let mut cmd = tokio::process::Command::new(crate::runtime::internal_node_program());
     cmd.current_dir(cwd)
         // `--experimental-strip-types` lets node import `.ts`
         // entrypoints (Socket's scanner package is the canonical
@@ -530,7 +530,7 @@ mod tests {
     /// Returns true iff `node --version` exits 0. e2e tests gate
     /// on this — CI runners without node skip rather than fail.
     fn node_available() -> bool {
-        std::process::Command::new(crate::runtime::node_program())
+        std::process::Command::new(crate::runtime::internal_node_program())
             .arg("--version")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -827,7 +827,7 @@ export const scanner = {
         // --experimental-strip-types. Cheap probe: `node
         // --experimental-strip-types -e ''` is a no-op on
         // supported versions and exits non-zero on unsupported.
-        let probe = std::process::Command::new(crate::runtime::node_program())
+        let probe = std::process::Command::new(crate::runtime::internal_node_program())
             .arg("--experimental-strip-types")
             .arg("-e")
             .arg("''")

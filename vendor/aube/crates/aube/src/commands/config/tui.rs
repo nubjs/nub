@@ -70,7 +70,7 @@ enum StatusKind {
 
 impl ConfigTui {
     fn new() -> Self {
-        let settings = settings_meta::all().iter().collect::<Vec<_>>();
+        let settings = settings_meta::all().collect::<Vec<_>>();
         let filtered = (0..settings.len()).collect::<Vec<_>>();
         Self {
             settings,
@@ -451,7 +451,7 @@ fn setting_detail_lines(meta: &settings_meta::SettingMeta) -> Vec<Line<'static>>
         .and_then(|target| target.value().ok().flatten())
         .unwrap_or_else(|| "undefined".to_string());
     let npmrc_key = literal_aliases(meta.npmrc_keys).into_iter().next();
-    let npmrc_effective = npmrc_key
+    let effective = npmrc_key
         .as_deref()
         .and_then(|key| config_value(key, ListLocation::Merged).ok().flatten())
         .unwrap_or_else(|| "undefined".to_string());
@@ -464,8 +464,11 @@ fn setting_detail_lines(meta: &settings_meta::SettingMeta) -> Vec<Line<'static>>
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(format!("Type: {}", meta.type_)),
-        Line::from(format!("Default: {}", meta.default)),
-        Line::from(format!("Effective .npmrc value: {npmrc_effective}")),
+        Line::from(format!("Default: {}", meta.rendered_default())),
+        // Not "`.npmrc` value": this comes from the MERGED read, which spans
+        // every config source, and since the env tier joined that read the
+        // value shown is routinely one no file holds.
+        Line::from(format!("Effective value: {effective}")),
         Line::from(format!(
             "Editing file: {}",
             target_file_label(target.as_ref())
@@ -786,7 +789,7 @@ fn config_value(key: &str, location: ListLocation) -> miette::Result<Option<Stri
     let cwd = crate::dirs::project_root_or_cwd()?;
     let entries = match location {
         ListLocation::Merged => read_merged(&cwd)?,
-        ListLocation::User | ListLocation::Global => read_single(&user_npmrc_path()?)?,
+        ListLocation::User => read_single(&user_npmrc_path()?)?,
         ListLocation::Project => read_single(&cwd.join(".npmrc"))?,
     };
 

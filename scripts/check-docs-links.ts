@@ -17,12 +17,14 @@
 //      the target page. Headings are slugified with github-slugger (the same
 //      version fumadocs uses) so anchor matching is byte-exact with what the
 //      rendered site produces.
+// A same-page `[text](#anchor)` link gets check 2 against the page it sits on.
+// Skipping those outright once left every one of them unguarded.
 //
 // This catches the class that broke once: a link to /docs/install#security
 // after that heading was removed by a merge. Reports every broken link with
 // file:line and exits non-zero if any link is broken.
 //
-// Scope: only INTERNAL /docs links are validated. External (http/https),
+// Scope: only INTERNAL /docs links and same-page anchors are validated. External (http/https),
 // mailto, and non-/docs absolute/relative links are intentionally ignored —
 // this tool owns the docs cross-reference graph, not the whole web.
 
@@ -216,15 +218,17 @@ function main(): void {
   for (const file of files) {
     const srcNoFences = stripFences(readFileSync(file, "utf8"));
     for (const { href, line } of findLinks(srcNoFences)) {
-      // Only validate internal /docs links.
-      if (!href.startsWith("/docs")) continue;
+      // Internal /docs links, plus same-page `#anchor` links checked against the
+      // page they sit on. Everything else (external URLs, assets) is out of scope.
+      const samePage = href.startsWith("#");
+      if (!samePage && !href.startsWith("/docs")) continue;
       // Split off the anchor.
       const hashIdx = href.indexOf("#");
       const urlPath = hashIdx === -1 ? href : href.slice(0, hashIdx);
       const anchor = hashIdx === -1 ? "" : href.slice(hashIdx + 1);
       linkCount++;
 
-      const targetFile = pageFileForUrl(urlPath);
+      const targetFile = samePage ? file : pageFileForUrl(urlPath);
       if (!targetFile) {
         broken.push({
           file,

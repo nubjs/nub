@@ -58,7 +58,7 @@ pub(super) fn resolve_install_layout(
 
 /// Resolve `--lockfile-dir` / `lockfileDir` into the physical lockfile
 /// directory plus the importer key this project owns inside that lockfile.
-fn resolve_lockfile_location(
+pub(super) fn resolve_lockfile_location(
     cwd: &std::path::Path,
     manifest: &aube_manifest::PackageJson,
     settings_ctx: &aube_settings::ResolveCtx<'_>,

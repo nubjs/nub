@@ -880,13 +880,20 @@ JSON
 	assert_file_exists node_modules/is-odd/package.json
 }
 
-@test "aube add --ignore-scripts is accepted (no-op)" {
-	_setup_basic_fixture
-	# Use a tiny package that doesn't actually have scripts; flag should
-	# just pass through without erroring.
+@test "aube add --ignore-scripts skips pnpm:devPreinstall" {
+	cat >package.json <<-'EOF'
+		{
+		  "name": "add-ignore-scripts",
+		  "version": "1.0.0",
+		  "scripts": {
+		    "pnpm:devPreinstall": "node -e 'require(\"fs\").writeFileSync(\"dev-preinstall.marker\", \"ran\")'"
+		  }
+		}
+	EOF
 	run aube add --ignore-scripts --save-dev is-number
 	assert_success
 	assert_file_exists node_modules/is-number/package.json
+	assert_file_not_exists dev-preinstall.marker
 }
 
 @test "aube install --prefer-offline reuses cached metadata" {
@@ -1035,6 +1042,7 @@ JSON
   "name": "preinstall-test",
   "version": "1.0.0",
   "scripts": {
+    "pnpm:devPreinstall": "echo DEV_PREINSTALL_RAN > dev-preinstall.marker",
     "preinstall": "echo PREINSTALL_RAN > preinstall.marker"
   },
   "dependencies": { "is-odd": "^3.0.1" }
@@ -1043,6 +1051,7 @@ JSON
 	run aube install --lockfile-only
 	assert_success
 	assert_file_exists aube-lock.yaml
+	assert [ ! -e dev-preinstall.marker ]
 	assert [ ! -e preinstall.marker ]
 }
 
@@ -1307,7 +1316,7 @@ JSON
 }
 
 @test "aube install self-heals when a CAS shard goes missing under a cached index" {
-	# Regression for the BuildKit cache-mount class (jdx/aube#345):
+	# Regression for the BuildKit cache-mount class (aubepkg/aube#345):
 	# a stale cached package index points at a CAS shard that's been
 	# pruned out from under it (foreign sync tool, partial wipe, a
 	# cache-mount that only covered part of the store, etc.). The fast

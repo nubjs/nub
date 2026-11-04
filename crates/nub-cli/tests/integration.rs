@@ -25,6 +25,15 @@ fn run_nub(fixture: &str, file: &str) -> (String, String, i32) {
     run_nub_with_env(fixture, file, &[])
 }
 
+#[test]
+fn gc_startup_preserves_explicit_worker_limits() {
+    let (stdout, stderr, code) = run_nub("gc-startup", "main.cjs");
+    assert_eq!(code, 0, "{stderr}");
+    let report: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(report["workers"].as_array().unwrap().len(), 4);
+    assert_eq!(report["fork"]["workers"].as_array().unwrap().len(), 4);
+}
+
 /// A unique per-invocation cache dir, so concurrent integration tests never share
 /// the transpile cache / project-keyed webstorage under the ambient
 /// `~/.cache/nub` — keeps the suite hermetic and removes the cross-test
@@ -58,6 +67,1559 @@ fn run_nub_with_env(fixture: &str, file: &str, env: &[(&str, &str)]) -> (String,
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let code = output.status.code().unwrap_or(-1);
     (stdout, stderr, code)
+}
+
+#[cfg(feature = "compile")]
+struct CompileTestRuntime {
+    launcher: PathBuf,
+    node_target: String,
+    node_exec_path: String,
+}
+
+#[cfg(feature = "compile")]
+fn compile_test_runtime() -> CompileTestRuntime {
+    let launcher = std::env::var_os("__NUB_LAUNCHER_TEMPLATE")
+        .map(PathBuf::from)
+        .expect("compile test requires __NUB_LAUNCHER_TEMPLATE to name a nub-launcher binary");
+    assert!(
+        launcher.is_file(),
+        "compile test launcher template is missing: {}",
+        launcher.display()
+    );
+    let node_version = Command::new("node")
+        .arg("--version")
+        .output()
+        .expect("compile test requires `node` on PATH so the smol artifact can run");
+    assert!(
+        node_version.status.success(),
+        "compile test requires `node --version` to succeed; stderr: {}",
+        String::from_utf8_lossy(&node_version.stderr)
+    );
+    let node_target = String::from_utf8(node_version.stdout)
+        .expect("`node --version` must write UTF-8")
+        .trim()
+        .strip_prefix('v')
+        .filter(|version| !version.is_empty())
+        .unwrap_or_else(|| panic!("`node --version` did not return a v-prefixed version"))
+        .to_owned();
+    let node_exec_path = Command::new("node")
+        .args(["-p", "process.execPath"])
+        .output()
+        .expect("compile test requires `node -p process.execPath` to succeed");
+    assert!(
+        node_exec_path.status.success(),
+        "compile test requires Node to report process.execPath; stderr: {}",
+        String::from_utf8_lossy(&node_exec_path.stderr)
+    );
+    let node_exec_path = String::from_utf8(node_exec_path.stdout)
+        .expect("Node process.execPath must be UTF-8")
+        .trim()
+        .to_owned();
+    assert!(
+        !node_exec_path.is_empty(),
+        "Node process.execPath must not be empty"
+    );
+    CompileTestRuntime {
+        launcher,
+        node_target,
+        node_exec_path,
+    }
+}
+
+#[cfg(feature = "compile")]
+fn compile_smol_artifact(
+    runtime: &CompileTestRuntime,
+    work: &Path,
+    cache: &Path,
+    entry: &Path,
+    artifact: &Path,
+) -> std::process::Output {
+    Command::new(nub_binary())
+        .args([
+            "compile",
+            "--smol",
+            "--target",
+            &runtime.node_target,
+            "--out",
+        ])
+        .arg(artifact)
+        .arg(entry)
+        .current_dir(work)
+        .env("XDG_CACHE_HOME", cache)
+        .env("__NUB_LAUNCHER_TEMPLATE", &runtime.launcher)
+        .output()
+        .expect("spawn nub compile")
+}
+
+#[cfg(feature = "compile")]
+fn terminate_compiled_artifact_tree(child: &mut std::process::Child) {
+    #[cfg(windows)]
+    {
+        // `Child::kill` terminates only the outer executable. Its Node children
+        // inherit stdio, so leaving them alive both leaks processes and used to
+        // make `wait_with_output` wait forever for pipe EOF after a timeout.
+        let pid = child.id().to_string();
+        let killed = Command::new("taskkill")
+            .args(["/PID", &pid, "/T", "/F"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if !killed {
+            let _ = child.kill();
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = child.kill();
+    }
+}
+
+#[cfg(feature = "compile")]
+fn run_compiled_artifact_command_with_timeout(
+    mut cmd: Command,
+    timeout: std::time::Duration,
+) -> std::process::Output {
+    // Drain through regular files, not pipes. A child that fills a pipe blocks
+    // before it can exit, and a timed-out descendant retaining the pipe handle
+    // prevents EOF even after the direct child is killed. Files impose neither
+    // dependency: the child can keep writing and the parent can read after the
+    // direct child reaches a terminal status.
+    let capture = unique_test_cache().with_extension("compiled-stdio");
+    std::fs::create_dir_all(&capture).expect("create compiled-artifact capture directory");
+    let stdout_path = capture.join("stdout");
+    let stderr_path = capture.join("stderr");
+    let stdout_file = std::fs::File::create(&stdout_path).expect("create stdout capture");
+    let stderr_file = std::fs::File::create(&stderr_path).expect("create stderr capture");
+    let mut child = cmd
+        .stdout(stdout_file)
+        .stderr(stderr_file)
+        .spawn()
+        .expect("spawn compiled artifact");
+    let deadline = std::time::Instant::now() + timeout;
+    let (status, timed_out) = loop {
+        if let Some(status) = child.try_wait().expect("poll compiled artifact") {
+            break (status, false);
+        }
+        if std::time::Instant::now() > deadline {
+            terminate_compiled_artifact_tree(&mut child);
+            break (
+                child.wait().expect("reap timed-out compiled artifact"),
+                true,
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let output = std::process::Output {
+        status,
+        stdout: std::fs::read(&stdout_path).expect("read compiled-artifact stdout"),
+        stderr: std::fs::read(&stderr_path).expect("read compiled-artifact stderr"),
+    };
+    let _ = std::fs::remove_dir_all(capture);
+    if timed_out {
+        panic!(
+            "compiled artifact did not exit within {timeout:?}; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+    output
+}
+
+#[cfg(feature = "compile")]
+fn run_compiled_artifact_with_timeout(artifact: &Path, cwd: &Path) -> std::process::Output {
+    let mut cmd = Command::new(artifact);
+    cmd.current_dir(cwd);
+    run_compiled_artifact_command_with_timeout(cmd, std::time::Duration::from_secs(10))
+}
+
+/// Covers the TEST HARNESS, not a compiled artifact: nothing here is compiled.
+/// `run_compiled_artifact_command_with_timeout` is what every artifact e2e runs
+/// through, so a deadlock in its stdio drain would hang those tests rather than
+/// fail them. Driving it with a plain `node -e` writing 1 MB to each stream is
+/// the cheapest way to prove it drains concurrently.
+#[cfg(feature = "compile")]
+#[test]
+fn artifact_runner_drains_large_output_without_deadlock() {
+    let runtime = compile_test_runtime();
+    let mut command = Command::new(runtime.node_exec_path);
+    command.args([
+        "-e",
+        "process.stdout.write('o'.repeat(1_000_000)); process.stderr.write('e'.repeat(1_000_000));",
+    ]);
+    let output =
+        run_compiled_artifact_command_with_timeout(command, std::time::Duration::from_secs(10));
+    assert!(output.status.success());
+    assert_eq!(output.stdout.len(), 1_000_000);
+    assert_eq!(output.stderr.len(), 1_000_000);
+}
+
+/// Also the harness, not an artifact. On Windows a grandchild inheriting stdio
+/// keeps the pipe open after the child exits, so a naive read-to-end never
+/// returns; the timeout has to fire on the CHILD rather than on end-of-stream.
+#[cfg(all(feature = "compile", windows))]
+#[test]
+fn artifact_runner_timeout_survives_a_descendant_holding_stdio() {
+    let runtime = compile_test_runtime();
+    let mut command = Command::new(runtime.node_exec_path);
+    command.args([
+        "-e",
+        r#"const { spawn } = require('node:child_process');
+spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'inherit' });
+setInterval(() => {}, 1000);"#,
+    ]);
+    let started = std::time::Instant::now();
+    let timed_out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_compiled_artifact_command_with_timeout(command, std::time::Duration::from_millis(500))
+    }));
+    assert!(
+        timed_out.is_err(),
+        "the deliberately hanging tree must time out"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "a descendant retaining stdio must not defeat the timeout"
+    );
+}
+
+/// Two contracts for a bundled CommonJS module that `require()`s an ES module,
+/// which Node has allowed since it unflagged `require(esm)`.
+///
+/// The deferred half is not a stylistic variant of the immediate one. Rolldown's
+/// scanner decides whether a `require()` result is used by walking to the nearest
+/// enclosing `ExpressionStatement` — and oxc represents a CONCISE arrow body as a
+/// `FunctionBody` holding exactly that node, so `() => require(esm)` was read as a
+/// discarded call and compiled to a bare `init_xxx()`, dropping the
+/// `__toCommonJS(namespace)` operand. The call then returned `undefined` with no
+/// error. A block body or any surrounding expression escapes the misread, so this
+/// fixture must keep the concise form to discriminate.
+/// The payload must TELL the launcher it needs `module.registerHooks`, because the
+/// launcher's refusal of an incapable Node keys on that manifest field and nothing
+/// else. The wiring is one expression in `compile::run`, and until this existed it
+/// could be replaced with a literal `false` — deleting the whole fix — with every
+/// other test still green.
+///
+/// Both directions are asserted, and the second is what makes the first mean
+/// something: a field hardwired `true` would satisfy the shim case and fail the
+/// plain one, so neither constant passes.
+///
+/// `--external` rather than `--allow-dynamic-import`, so the two compiles differ
+/// in exactly one thing. `--external`'s requirement applies unconditionally, while
+/// `--allow-dynamic-import` only installs the shim when a computed `import()`
+/// actually survives into the bundle — so testing it needs a different ENTRY too,
+/// and a two-variable comparison would not isolate the flag.
+#[cfg(feature = "compile")]
+#[test]
+fn a_smol_payload_records_whether_it_needs_the_register_hooks_shim() {
+    let runtime = compile_test_runtime();
+    let work = unique_test_cache();
+    let cache = work.join("cache");
+    let entry = work.join("app.mjs");
+    std::fs::create_dir_all(&work).expect("create the work dir");
+    std::fs::write(&entry, "console.log('ok');\n").expect("write entry");
+
+    // Read off the artifact rather than a return value: the manifest is what the
+    // launcher on a user's machine actually parses, so that is the surface worth
+    // pinning. It is stored as uncompressed JSON inside the payload.
+    let compile = |extra: &[&str], name: &str| -> String {
+        let artifact = work.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        let output = Command::new(nub_binary())
+            .args([
+                "compile",
+                "--smol",
+                "--target",
+                &runtime.node_target,
+                "--out",
+            ])
+            .arg(&artifact)
+            .arg(&entry)
+            .args(extra)
+            .current_dir(&work)
+            .env("XDG_CACHE_HOME", &cache)
+            .env("__NUB_LAUNCHER_TEMPLATE", &runtime.launcher)
+            .output()
+            .expect("spawn nub compile");
+        assert!(
+            output.status.success(),
+            "compile {extra:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let bytes = std::fs::read(&artifact).expect("read the compiled artifact");
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+
+    let shimmed = compile(&["--external", "some-pkg"], "shimmed");
+    assert!(
+        shimmed.contains(r#""requires_augmentation":true"#),
+        "--external installs the registerHooks shim, so the manifest must demand it; \
+         without that the launcher accepts a Node that cannot run the payload"
+    );
+
+    let plain = compile(&[], "plain");
+    assert!(
+        plain.contains(r#""requires_augmentation":false"#),
+        "a smol build with no shim must not demand registerHooks — doing so would refuse \
+         every 18.19-22.14 Node the compat tier still supports"
+    );
+}
+
+/// Whether a target Node can carry the single-executable container at all.
+///
+/// The blob's `execArgv` field is what the container needs and it reached release
+/// as three backports, so the band is not one floor: 24.7 and later, or the 22.20
+/// line, with 23.x excluded because it went end of life before any of them landed.
+/// Kept here rather than reached for through the compiler so a test asserting what
+/// the compiler chose cannot agree with it by construction.
+#[cfg(feature = "compile")]
+fn sea_container_is_available(target: &str) -> bool {
+    let Some((major, minor, patch)) = parse_node_version(target) else {
+        return false;
+    };
+    let version = (major, minor, patch);
+    version >= (24, 7, 0) || (version >= (22, 20, 0) && major < 23)
+}
+
+/// The single-executable container refuses `child_process.fork`, because a fork
+/// there would re-run the whole application rather than the named module.
+///
+/// The container is chosen by reading the emitted chunks for what they RESOLVE,
+/// and a payload that reaches `child_process` keeps the launcher, which has a real
+/// Node to hand a fork. That scan is syntactic and so a heuristic: the fixture
+/// below stores the require on an object and calls it through a property, which it
+/// cannot follow, and the artifact really is a single-executable as a result.
+///
+/// So this pins what happens when the scan is WRONG. Without the guard the child
+/// re-runs the application and forks again — unbounded. The fixture stops itself at
+/// generation three, and the shared runner kills the process tree at ten seconds,
+/// so a regression fails here rather than running away.
+#[cfg(feature = "compile")]
+#[test]
+fn a_single_executable_refuses_a_fork_the_container_scan_could_not_see() {
+    let runtime = compile_test_runtime();
+    let work = unique_test_cache();
+    let cache = work.join("cache");
+    let entry = work.join("app.js");
+    let artifact = work.join(format!("fork-guard{}", std::env::consts::EXE_SUFFIX));
+    std::fs::create_dir_all(&work).expect("create the work dir");
+    // CommonJS, because `require` is what the scan follows and this has to reach it
+    // by a route the scan cannot. No `"type": "module"` for the same reason.
+    std::fs::write(
+        work.join("package.json"),
+        "{ \"name\": \"fork-guard\", \"version\": \"1.0.0\", \"private\": true }\n",
+    )
+    .expect("write the fixture manifest");
+    std::fs::write(
+        &entry,
+        r#"const GEN = Number(process.env.GEN || "0");
+if (GEN > 2) { console.log("gen", GEN, "STOPPING"); process.exit(9); }
+globalThis.__holder = { r: require };
+const cp = globalThis.__holder.r("node:child_process");
+const cluster = globalThis.__holder.r("node:cluster");
+try {
+  cp.fork(__filename, [], { env: { ...process.env, GEN: String(GEN + 1) } });
+  console.log("FORKED");
+} catch (error) {
+  console.log("REFUSED:", error.message);
+}
+try {
+  cluster.fork({ GEN: String(GEN + 1) });
+  console.log("CLUSTER-FORKED");
+} catch (error) {
+  console.log("CLUSTER-REFUSED:", error.message);
+}
+"#,
+    )
+    .expect("write entry");
+    // A PASSIVE preload: it loads the module and does nothing else. That is enough,
+    // because loading is what hands `internal/cluster/primary` its own `fork`.
+    let preload = work.join("preload.cjs");
+    std::fs::write(
+        &preload,
+        "require(\"node:cluster\");\nconsole.log(\"PRELOADED-CLUSTER\");\n",
+    )
+    .expect("write the preload");
+
+    let compiled = Command::new(nub_binary())
+        .args(["compile", "--target", &runtime.node_target, "--out"])
+        .arg(&artifact)
+        .arg(&entry)
+        .current_dir(&work)
+        .env("XDG_CACHE_HOME", &cache)
+        .env("__NUB_LAUNCHER_TEMPLATE", &runtime.launcher)
+        .output()
+        .expect("spawn nub compile");
+    assert!(
+        compiled.status.success(),
+        "compile failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    // BOTH streams: which one carries the summary is the renderer's business, and
+    // reading stdout alone reported the premise broken while the build really was
+    // producing a single-executable artifact.
+    let summary = format!(
+        "{}{}",
+        String::from_utf8_lossy(&compiled.stdout),
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    if !summary.contains("a single-executable application") {
+        // Two very different reasons land here, and only one of them is this
+        // test's business.
+        //
+        // A target Node below the bands the container needs gets no
+        // single-executable at all, whatever the payload looks like. That is the
+        // host, not the code, so it returns rather than failing — otherwise the
+        // test is red for everyone on an older Node.
+        //
+        // Anything else means the payload DECLINED, which is the premise breaking,
+        // and a silent pass there is the trap this test exists to avoid: the scan
+        // learning to follow the holder shape is a fix, but the guard is still
+        // needed for the flows it has not learned, and a test that quietly stops
+        // exercising it reads as coverage while covering nothing. So it fails, and
+        // whoever taught the scan this shape has to find one it still misses.
+        assert!(
+            !sea_container_is_available(&runtime.node_target),
+            "the payload declined the single-executable container, so this test stopped \
+             exercising the fork guard. The scan has learned this fixture's shape — replace it \
+             with one the scan still misses rather than deleting the case, because the guard \
+             still covers every flow the scan has not learned. Compile summary:\n{summary}"
+        );
+        return;
+    }
+
+    // Twice, because the two refusals are reached by different mechanisms and only
+    // the second needs a preload to bring it about.
+    //
+    // Plain: the application loads cluster itself, AFTER the loader has replaced
+    // `child_process.fork`, so `internal/cluster/primary` captures the replacement
+    // and both calls end in it.
+    //
+    // Preloaded: a `NODE_OPTIONS` preload loads cluster BEFORE the blob's main, so
+    // that same const holds the ORIGINAL and nothing can reach it. Only the
+    // loader's separate patch of `cluster.fork` refuses the second call, which is
+    // the branch this half exists to exercise — without it the case passes on the
+    // first half alone.
+    for preloaded in [false, true] {
+        let mut command = Command::new(&artifact);
+        command.current_dir(&work);
+        if preloaded {
+            command.env("NODE_OPTIONS", format!("--require={}", preload.display()));
+        }
+        let ran =
+            run_compiled_artifact_command_with_timeout(command, std::time::Duration::from_secs(20));
+        let stdout = String::from_utf8_lossy(&ran.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&ran.stderr).into_owned();
+        let case = if preloaded {
+            "preloaded cluster"
+        } else {
+            "plain"
+        };
+
+        // Restored from the script this replaced: without it a run can refuse the
+        // fork, die on something else, and still satisfy every assertion below.
+        assert!(
+            ran.status.success(),
+            "{case}: the artifact exited {:?}\nstdout: {stdout}\nstderr: {stderr}",
+            ran.status.code()
+        );
+        if preloaded {
+            // The premise of this half. A preload that silently failed to run would
+            // leave the branch untested while the case still passed.
+            assert!(
+                stdout.contains("PRELOADED-CLUSTER"),
+                "{case}: the preload did not run, so cluster was not loaded before the \
+                 main and this half tested nothing\nstdout: {stdout}\nstderr: {stderr}"
+            );
+        }
+        assert!(
+            stdout.contains("REFUSED:"),
+            "{case}: the artifact did not refuse child_process.fork; it printed {stdout:?}"
+        );
+        assert!(
+            stdout.contains("CLUSTER-REFUSED:"),
+            "{case}: the artifact did not refuse cluster.fork; it printed {stdout:?}"
+        );
+        assert!(
+            !stdout.contains("FORKED\n") && !stdout.contains("CLUSTER-FORKED"),
+            "{case}: a fork succeeded, so the child re-ran the application: {stdout:?}"
+        );
+        assert!(
+            !stdout.contains("gen 1"),
+            "{case}: a second generation started, which is the re-entry this guards: {stdout:?}"
+        );
+    }
+}
+
+/// A statically traced `new Worker(...)` runs inside the single-executable
+/// container, on both spellings that reach the constructor.
+///
+/// `Module.registerHooks` is per-thread, so a worker started on a payload URL
+/// cannot load it — the loader replaces `Worker` and starts such a worker on a
+/// generated bootstrap that reinstalls the hooks first. Two routes arrive there
+/// with different arguments and only one of them is the obvious one:
+/// `node:worker_threads` hands over the `ROOT` URL the chunk built, while the
+/// runtime's WHATWG `globalThis.Worker` converts that URL to a PATH before it
+/// delegates. A fix for one is not a fix for the other, so both are asserted.
+///
+/// The `a-worker` fixture in `tests/compile-augmentation` covers the augmentation
+/// half — that the worker's TypeScript was transpiled and its globals installed —
+/// across every platform CI builds. What it does not pin is the SHAPE, which is
+/// what makes this a separate case: the payload has to still be a
+/// single-executable for any of that to have exercised this container.
+#[cfg(feature = "compile")]
+#[test]
+fn a_single_executable_runs_a_worker_through_both_constructors() {
+    let runtime = compile_test_runtime();
+    let work = unique_test_cache();
+    let cache = work.join("cache");
+    let entry = work.join("app.mjs");
+    let artifact = work.join(format!("worker-host{}", std::env::consts::EXE_SUFFIX));
+    std::fs::create_dir_all(&work).expect("create the work dir");
+    std::fs::write(
+        work.join("package.json"),
+        "{ \"name\": \"worker-host\", \"version\": \"1.0.0\", \"private\": true, \
+         \"type\": \"module\" }\n",
+    )
+    .expect("write the manifest");
+    // Answers with a value derived from `workerData`, so a worker that started but
+    // ran the WRONG module cannot satisfy the assertion by existing.
+    std::fs::write(
+        work.join("worker.mjs"),
+        r#"import { parentPort, workerData } from "node:worker_threads";
+parentPort.postMessage(`answer=${workerData + 22}`);
+"#,
+    )
+    .expect("write the worker");
+    std::fs::write(
+        &entry,
+        // The `new URL(...)` is written out at each constructor rather than hoisted
+        // into a variable: the compiler traces a worker root by the literal shape,
+        // and a hoisted target ships `worker.mjs` as a DATA asset instead — which
+        // leaves the graph unsealed and takes the whole payload back to the
+        // launcher, exactly as the premise check below then reports.
+        r#"import { Worker } from "node:worker_threads";
+
+const named = new Worker(new URL("./worker.mjs", import.meta.url), { workerData: 20 });
+named.on("error", (error) => {
+  console.log("NAMED-ERROR:", error.message);
+  process.exit(2);
+});
+named.on("message", (message) => {
+  console.log("NAMED:", message);
+  const global_ = new globalThis.Worker(new URL("./worker.mjs", import.meta.url), {
+    workerData: 20,
+  });
+  global_.onerror = (event) => {
+    console.log("GLOBAL-ERROR:", event.message);
+    process.exit(3);
+  };
+  global_.onmessage = (event) => {
+    console.log("GLOBAL:", event.data);
+    process.exit(0);
+  };
+});
+"#,
+    )
+    .expect("write entry");
+
+    let compiled = Command::new(nub_binary())
+        .args(["compile", "--target", &runtime.node_target, "--out"])
+        .arg(&artifact)
+        .arg(&entry)
+        .current_dir(&work)
+        .env("XDG_CACHE_HOME", &cache)
+        .env("__NUB_LAUNCHER_TEMPLATE", &runtime.launcher)
+        .output()
+        .expect("spawn nub compile");
+    assert!(
+        compiled.status.success(),
+        "compile failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let summary = format!(
+        "{}{}",
+        String::from_utf8_lossy(&compiled.stdout),
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    if !summary.contains("a single-executable application") {
+        // A target Node below the container's bands never gets one, whatever the
+        // payload looks like, and that is the host rather than the code. Anything
+        // else is the payload declining, which is this test's whole subject —
+        // failing there is what stops a silent revert of the decline from reading
+        // as a pass.
+        assert!(
+            !sea_container_is_available(&runtime.node_target),
+            "the payload declined the single-executable container, so the worker ran \
+             through the extracted tree and this case tested nothing. Compile \
+             summary:\n{summary}"
+        );
+        return;
+    }
+
+    let mut command = Command::new(&artifact);
+    command.current_dir(&work);
+    let ran =
+        run_compiled_artifact_command_with_timeout(command, std::time::Duration::from_secs(20));
+    let stdout = String::from_utf8_lossy(&ran.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&ran.stderr).into_owned();
+    assert!(
+        ran.status.success(),
+        "the artifact exited {:?}\nstdout: {stdout}\nstderr: {stderr}",
+        ran.status.code()
+    );
+    assert!(
+        stdout.contains("NAMED: answer=42"),
+        "the worker named through node:worker_threads did not answer\nstdout: {stdout}\n\
+         stderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("GLOBAL: answer=42"),
+        "the worker named through the WHATWG global did not answer, so the path spelling \
+         the runtime polyfill produces is not reaching the payload\nstdout: {stdout}\n\
+         stderr: {stderr}"
+    );
+}
+
+#[cfg(feature = "compile")]
+#[test]
+fn compile_resolves_commonjs_requires_of_esm() {
+    let runtime = compile_test_runtime();
+    let work = unique_test_cache();
+    let cache = work.join("cache");
+    let immediate_entry = work.join("immediate.mjs");
+    let immediate_artifact = work.join(format!("immediate{}", std::env::consts::EXE_SUFFIX));
+    let deferred_entry = work.join("deferred.mjs");
+    let deferred_artifact = work.join(format!("deferred{}", std::env::consts::EXE_SUFFIX));
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(
+        &immediate_entry,
+        "import './immediate.cjs';\nexport const token = 'esm-token';\nconsole.log('IMMEDIATE_MAIN:' + token);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        work.join("immediate.cjs"),
+        "const namespace = require('./immediate.mjs');\nconsole.log('IMMEDIATE_BACKEDGE:' + typeof namespace);\n",
+    )
+    .unwrap();
+
+    let immediate_compile = compile_smol_artifact(
+        &runtime,
+        &work,
+        &cache,
+        &immediate_entry,
+        &immediate_artifact,
+    );
+    assert!(
+        immediate_compile.status.success(),
+        "immediate mixed cycle did not compile: {}",
+        String::from_utf8_lossy(&immediate_compile.stderr)
+    );
+    assert!(
+        immediate_artifact.is_file(),
+        "immediate mixed cycle did not write its artifact"
+    );
+    let immediate_run = run_compiled_artifact_with_timeout(&immediate_artifact, &work);
+
+    std::fs::write(
+        &deferred_entry,
+        "import holder from './deferred.cjs';\nconsole.log('DEFERRED_REQUIRE:' + JSON.stringify(holder.load()?.token ?? null));\n",
+    )
+    .unwrap();
+    std::fs::write(
+        work.join("deferred.cjs"),
+        "module.exports = { load: () => require('./deferred-dep.mjs') };\n",
+    )
+    .unwrap();
+    std::fs::write(
+        work.join("deferred-dep.mjs"),
+        "export const token = 'deferred-token';\n",
+    )
+    .unwrap();
+    let deferred_compile =
+        compile_smol_artifact(&runtime, &work, &cache, &deferred_entry, &deferred_artifact);
+    assert!(
+        deferred_compile.status.success(),
+        "deferred require did not compile: {}",
+        String::from_utf8_lossy(&deferred_compile.stderr)
+    );
+    assert!(
+        deferred_artifact.is_file(),
+        "deferred require did not write its artifact"
+    );
+    let deferred_run = run_compiled_artifact_with_timeout(&deferred_artifact, &work);
+    let _ = std::fs::remove_dir_all(&work);
+
+    assert!(
+        immediate_run.status.success(),
+        "immediate mixed-cycle artifact failed: {}",
+        String::from_utf8_lossy(&immediate_run.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&immediate_run.stdout).contains("IMMEDIATE_BACKEDGE:object")
+            && String::from_utf8_lossy(&immediate_run.stdout).contains("IMMEDIATE_MAIN:esm-token"),
+        "unexpected immediate mixed-cycle output: {}",
+        String::from_utf8_lossy(&immediate_run.stdout)
+    );
+    assert!(
+        deferred_run.status.success(),
+        "deferred-require artifact failed: {}",
+        String::from_utf8_lossy(&deferred_run.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&deferred_run.stdout)
+            .contains("DEFERRED_REQUIRE:\"deferred-token\""),
+        "a deferred require of an ES module must resolve to its namespace, not undefined: {}",
+        String::from_utf8_lossy(&deferred_run.stdout)
+    );
+}
+
+#[cfg(feature = "compile")]
+fn compiled_json_string_array(value: &serde_json::Value) -> Vec<String> {
+    value
+        .as_array()
+        .expect("compiled topology result field must be an array")
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .expect("compiled topology argv item must be a string")
+                .to_owned()
+        })
+        .collect()
+}
+
+#[cfg(feature = "compile")]
+fn assert_compiled_bootstrap_first_once(args: &[String], bootstrap: &str, context: &str) {
+    assert_eq!(
+        args.first().map(String::as_str),
+        Some(bootstrap),
+        "{context} must expose the fixed-root bootstrap first: {args:?}"
+    );
+    assert_eq!(
+        args.iter().filter(|arg| arg.as_str() == bootstrap).count(),
+        1,
+        "{context} must expose the fixed-root bootstrap exactly once: {args:?}"
+    );
+}
+
+#[cfg(feature = "compile")]
+fn assert_native_node_identity(value: &str, context: &str) {
+    let basename = value
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(value)
+        .to_ascii_lowercase();
+    assert!(
+        basename == "node" || basename == "node.exe",
+        "{context} must retain native Node identity, got {value:?}"
+    );
+}
+
+#[cfg(feature = "compile")]
+fn assert_compile_path_eq(actual: &str, expected: &str, context: &str) {
+    // Windows serves the same file under several spellings at once: the verbatim
+    // `\\?\` prefix, either separator, either case, and — the one that bit here —
+    // an 8.3 short name, so a runner reports `C:\Users\RUNNER~1\...` where the test
+    // built `...\runneradmin\...`. Canonicalizing the deepest ancestor that still
+    // exists resolves short names and verbatim together; the artifact itself is
+    // already deleted by this point, so canonicalizing the full path cannot work.
+    #[cfg(windows)]
+    let normalize = |value: &str| {
+        let raw = std::path::Path::new(value);
+        let mut tail = Vec::new();
+        let mut probe = raw;
+        let resolved = loop {
+            if let Ok(real) = std::fs::canonicalize(probe) {
+                break Some(real);
+            }
+            match (probe.parent(), probe.file_name()) {
+                (Some(parent), Some(name)) => {
+                    tail.push(name.to_os_string());
+                    probe = parent;
+                }
+                _ => break None,
+            }
+        };
+        let joined = match resolved {
+            Some(mut real) => {
+                for name in tail.iter().rev() {
+                    real.push(name);
+                }
+                real.to_string_lossy().into_owned()
+            }
+            None => value.to_owned(),
+        };
+        joined
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&joined)
+            .replace('/', "\\")
+            .to_ascii_lowercase()
+    };
+    // macOS serves the temp dir as `/var/...` while a process reports its own path
+    // as `/private/var/...` — the same file under two spellings, so a textual
+    // compare fails there for every developer. Normalize the prefix rather than
+    // canonicalize: the artifact is already gone by the time this runs, so a
+    // symlink resolve would fall back to the raw value and keep the mismatch.
+    #[cfg(not(windows))]
+    let normalize = |value: &str| {
+        value
+            .strip_prefix("/private/var/")
+            .map(|rest| format!("/var/{rest}"))
+            .unwrap_or_else(|| value.to_owned())
+    };
+    assert_eq!(
+        normalize(actual),
+        normalize(expected),
+        "{context}: actual={actual:?} expected={expected:?}"
+    );
+}
+
+#[cfg(feature = "compile")]
+fn make_compile_test_node_alias(source: &Path, destination: &Path) {
+    if std::fs::hard_link(source, destination).is_ok() {
+        return;
+    }
+    std::fs::copy(source, destination).unwrap_or_else(|error| {
+        panic!(
+            "copying explicit fork Node {} to {}: {error}",
+            source.display(),
+            destination.display()
+        )
+    });
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(source)
+            .expect("read explicit fork Node permissions")
+            .permissions()
+            .mode();
+        std::fs::set_permissions(destination, std::fs::Permissions::from_mode(mode))
+            .expect("preserve explicit fork Node executable permissions");
+    }
+}
+
+#[cfg(feature = "compile")]
+#[test]
+fn compile_artifact_process_bootstrap_topology() {
+    let runtime = compile_test_runtime();
+    let work = unique_test_cache();
+    let cache = work.join("compile-cache");
+    let artifact_cache = work.join("artifact-cache");
+    let entry = work.join("topology-main.mjs");
+    let artifact = work.join(format!("topology-app{}", std::env::consts::EXE_SUFFIX));
+    let fork_child = work.join("fork-child.mjs");
+    let explicit_node = work.join(format!("explicit-node{}", std::env::consts::EXE_SUFFIX));
+    std::fs::create_dir_all(&work).unwrap();
+    make_compile_test_node_alias(Path::new(&runtime.node_exec_path), &explicit_node);
+
+    // An ordinary Node child: fork() must select the captured real Node rather
+    // than the public outer executable, retain IPC, and normalize only its Node
+    // argv. This source intentionally needs no compile preamble of its own.
+    std::fs::write(
+        &fork_child,
+        r#"const record = process[Symbol.for("nub.compile.bootstrap")];
+const bootstrap = record?.requireArg ?? null;
+const result = {
+  tag: process.argv[2] ?? process.env.FORK_TAG ?? "no-args",
+  execPath: process.execPath,
+  execArgv: process.execArgv,
+  bootstrap,
+  bootstrapCount: bootstrap === null ? 0 : process.execArgv.filter((arg) => arg === bootstrap).length,
+  customValue: process.env.CUSTOM_VALUE ?? null,
+  nestedFork: process.env.NESTED_FORK ?? null,
+  compiledEnv: process.env.__NUB_COMPILED_EXEC_PATH ?? null,
+};
+process.send(result, () => process.disconnect());
+"#,
+    )
+    .unwrap();
+
+    // Both files execute from NODE_OPTIONS. The first proves the launcher's
+    // absolute CJS bootstrap ran before inherited user ESM imports, then installs
+    // a hook which would break any later loader-visible node:module dependency in
+    // Nub's generated runtime.
+    std::fs::write(
+        work.join("loader-preload.mjs"),
+        r#"import { register } from "node:module";
+const record = process[Symbol.for("nub.compile.bootstrap")];
+process.env.COMPILE_LOADER_SAW_BOOTSTRAP = String(
+  typeof record?.createRequire === "function" &&
+  typeof record?.getBuiltin === "function" &&
+  typeof record?.requireArg === "string" &&
+  Object.isFrozen(record)
+);
+register(new URL("./hostile-loader-hooks.mjs", import.meta.url));
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        work.join("hostile-loader-hooks.mjs"),
+        r#"export async function resolve(specifier, context, nextResolve) {
+  if (specifier === "node:module") {
+    return {
+      shortCircuit: true,
+      url: "data:text/javascript,export%20const%20redirected%20%3D%20true%3B",
+    };
+  }
+  return nextResolve(specifier, context);
+}
+"#,
+    )
+    .unwrap();
+
+    std::fs::write(
+        work.join("nested-worker.mjs"),
+        r#"import { parentPort } from "node:worker_threads";
+const record = process[Symbol.for("nub.compile.bootstrap")];
+parentPort.postMessage({
+  execPath: process.execPath,
+  execArgv: process.execArgv,
+  bootstrap: record?.requireArg ?? null,
+  customValue: process.env.NESTED_CUSTOM ?? null,
+});
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        work.join("native-worker.mjs"),
+        r#"import { fork } from "node:child_process";
+import { Worker, parentPort, workerData } from "node:worker_threads";
+
+const record = process[Symbol.for("nub.compile.bootstrap")];
+const own = {
+  execPath: process.execPath,
+  execArgv: process.execArgv,
+  bootstrap: record?.requireArg ?? null,
+  customValue: process.env.NATIVE_CUSTOM ?? null,
+};
+
+function nestedWorker() {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL("./nested-worker.mjs", import.meta.url), {
+      execArgv: [],
+      env: { NESTED_CUSTOM: "nested-env-kept" },
+    });
+    const timer = setTimeout(() => {
+      worker.terminate();
+      reject(new Error("nested native Worker timed out"));
+    }, 5000);
+    worker.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    worker.once("message", (message) => {
+      clearTimeout(timer);
+      Promise.resolve(worker.terminate()).then(() => resolve(message), reject);
+    });
+  });
+}
+
+function nestedFork() {
+  return new Promise((resolve, reject) => {
+    const child = fork(workerData.forkChildPath, ["worker-nested"], {
+      execArgv: [],
+      env: { NESTED_FORK: "nested-fork-kept" },
+    });
+    let message;
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error("nested fork timed out"));
+    }, 5000);
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("message", (value) => { message = value; });
+    child.once("exit", (code, signal) => {
+      clearTimeout(timer);
+      if (code !== 0 || message === undefined) {
+        reject(new Error(`nested fork failed: code=${code} signal=${signal}`));
+      } else {
+        resolve(message);
+      }
+    });
+  });
+}
+
+if (workerData?.nested === true) {
+  own.nestedWorker = await nestedWorker();
+  own.nestedFork = await nestedFork();
+}
+parentPort.postMessage(own);
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        work.join("browser-worker.mjs"),
+        r#"const record = process[Symbol.for("nub.compile.bootstrap")];
+self.postMessage({
+  execPath: process.execPath,
+  execArgv: process.execArgv,
+  bootstrap: record?.requireArg ?? null,
+});
+"#,
+    )
+    .unwrap();
+
+    std::fs::write(
+        &entry,
+        r#"import cluster from "node:cluster";
+import { fork, spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { Worker as NativeWorker } from "node:worker_threads";
+
+const record = process[Symbol.for("nub.compile.bootstrap")];
+const bootstrap = record.requireArg;
+const forkChildPath = process.env.COMPILE_FORK_CHILD_PATH;
+const explicitNodeExecPath = process.env.COMPILE_EXPLICIT_NODE_EXEC_PATH;
+
+function identity() {
+  return {
+    execPath: process.execPath,
+    argv: process.argv,
+    argv0: process.argv[0],
+    argv1: process.argv[1],
+    argv1Absolute: /^([A-Za-z]:[\\/]|[/\\]{2}|\/)/.test(process.argv[1]),
+    argv1Exists: existsSync(process.argv[1]),
+    argvOriginal: process.argv0,
+    title: process.title,
+    execArgv: process.execArgv,
+    bootstrap,
+    bootstrapCount: process.execArgv.filter((arg) => arg === bootstrap).length,
+  };
+}
+
+function forkProbe(start, label) {
+  return new Promise((resolve, reject) => {
+    const child = start();
+    let message;
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`${label} fork timed out`));
+    }, 5000);
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("message", (value) => { message = value; });
+    child.once("exit", (code, signal) => {
+      clearTimeout(timer);
+      if (code !== 0 || message === undefined) {
+        reject(new Error(`${label} fork failed: code=${code} signal=${signal}`));
+      } else {
+        resolve(message);
+      }
+    });
+  });
+}
+
+function nativeWorkerProbe(options, label) {
+  return new Promise((resolve, reject) => {
+    const worker = new NativeWorker(new URL("./native-worker.mjs", import.meta.url), options);
+    const timer = setTimeout(() => {
+      worker.terminate();
+      reject(new Error(`${label} native Worker timed out`));
+    }, 5000);
+    worker.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    worker.once("message", (message) => {
+      clearTimeout(timer);
+      Promise.resolve(worker.terminate()).then(() => resolve(message), reject);
+    });
+  });
+}
+
+function browserWorkerProbe(options) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL("./browser-worker.mjs", import.meta.url), options);
+    const timer = setTimeout(() => {
+      worker.terminate();
+      reject(new Error("global Worker timed out"));
+    }, 5000);
+    worker.addEventListener("error", (event) => {
+      clearTimeout(timer);
+      reject(event.error ?? new Error(event.message));
+    }, { once: true });
+    worker.addEventListener("message", (event) => {
+      clearTimeout(timer);
+      Promise.resolve(worker.terminate()).then(() => resolve(event.data), reject);
+    }, { once: true });
+  });
+}
+
+function clusterProbe(label, execArgv) {
+  return new Promise((resolve, reject) => {
+    const settings = { exec: process.argv[1] };
+    if (execArgv !== undefined) settings.execArgv = execArgv;
+    cluster.setupPrimary(settings);
+    const worker = cluster.fork({ ...process.env, COMPILE_CLUSTER_CHILD: label });
+    let message;
+    const timer = setTimeout(() => {
+      worker.kill();
+      reject(new Error(`${label} cluster worker timed out`));
+    }, 5000);
+    worker.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    worker.once("message", (value) => { message = value; });
+    worker.once("exit", (code, signal) => {
+      clearTimeout(timer);
+      if (code !== 0 || message === undefined) {
+        reject(new Error(`${label} cluster worker failed: code=${code} signal=${signal}`));
+      } else {
+        resolve(message);
+      }
+    });
+  });
+}
+
+async function main() {
+  const root = identity();
+  const redirectedModule = await import("node:module");
+  const self = spawnSync(process.execPath, [], {
+    cwd: process.cwd(),
+    env: { ...process.env, COMPILE_SELF_CHILD: "1" },
+    encoding: "utf8",
+    timeout: 10000,
+  });
+  if (self.status !== 0) {
+    throw new Error(`self-spawn failed: status=${self.status} stderr=${self.stderr}`);
+  }
+  const selfLine = self.stdout.split(/\r?\n/).find((line) => line.startsWith("SELF:"));
+  if (selfLine === undefined) throw new Error(`self-spawn emitted no identity: ${self.stdout}`);
+
+  const noArgs = await forkProbe(() => fork(forkChildPath), "no-args");
+  const argsInput = ["args-shape"];
+  const argsSnapshot = JSON.stringify(argsInput);
+  const args = await forkProbe(() => fork(forkChildPath, argsInput), "args");
+
+  const falsyOptions = {
+    execPath: "",
+    execArgv: "",
+    env: { FORK_TAG: "options-shape", CUSTOM_VALUE: "custom-env-kept" },
+  };
+  const falsySnapshot = JSON.stringify(falsyOptions);
+  const options = await forkProbe(() => fork(forkChildPath, falsyOptions), "options");
+
+  const emptyArgs = ["explicit-empty"];
+  const emptyExecArgv = [];
+  const emptyOptions = { execArgv: emptyExecArgv };
+  const emptySnapshot = JSON.stringify({ emptyArgs, emptyExecArgv, emptyOptions });
+  const explicitEmpty = await forkProbe(
+    () => fork(forkChildPath, emptyArgs, emptyOptions),
+    "explicit-empty",
+  );
+
+  const flagArgs = ["explicit-flags"];
+  const authoredFlags = ["--trace-deprecation", bootstrap, "--no-warnings", bootstrap];
+  const authoredEnv = { FORK_TAG: "explicit-flags", CUSTOM_VALUE: "explicit-env-kept" };
+  const flagOptions = {
+    execPath: explicitNodeExecPath,
+    execArgv: authoredFlags,
+    env: authoredEnv,
+  };
+  const flagsSnapshot = JSON.stringify({ flagArgs, authoredFlags, authoredEnv, flagOptions });
+  const explicitFlags = await forkProbe(
+    () => fork(forkChildPath, flagArgs, flagOptions),
+    "explicit-flags",
+  );
+
+  const nativeDefault = await nativeWorkerProbe(undefined, "default");
+  const nativeCustom = await nativeWorkerProbe({
+    execArgv: [],
+    env: { NATIVE_CUSTOM: "native-env-kept" },
+    workerData: { nested: true, forkChildPath },
+  }, "custom-env");
+  const globalAuthored = ["--trace-deprecation", bootstrap, "--no-warnings"];
+  const browser = await browserWorkerProbe({ execArgv: globalAuthored });
+
+  const clusterDefault = await clusterProbe("default", undefined);
+  const clusterExplicit = await clusterProbe("explicit-empty", []);
+
+  console.log("RESULT:" + JSON.stringify({
+    root,
+    loader: {
+      sawBootstrap: process.env.COMPILE_LOADER_SAW_BOOTSTRAP,
+      nodeOptions: process.env.NODE_OPTIONS,
+      redirectedBuiltin: redirectedModule.redirected === true,
+    },
+    self: JSON.parse(selfLine.slice("SELF:".length)),
+    forks: {
+      noArgs,
+      args,
+      options,
+      explicitEmpty,
+      explicitFlags,
+      immutable: {
+        args: JSON.stringify(argsInput) === argsSnapshot,
+        falsyOptions: JSON.stringify(falsyOptions) === falsySnapshot,
+        empty: JSON.stringify({ emptyArgs, emptyExecArgv, emptyOptions }) === emptySnapshot,
+        flags: JSON.stringify({ flagArgs, authoredFlags, authoredEnv, flagOptions }) === flagsSnapshot,
+      },
+    },
+    workers: { nativeDefault, nativeCustom, browser, globalAuthored },
+    clusters: { default: clusterDefault, explicit: clusterExplicit },
+  }));
+}
+
+if (process.env.COMPILE_SELF_CHILD === "1") {
+  console.log("SELF:" + JSON.stringify(identity()));
+} else if (!cluster.isPrimary && process.env.COMPILE_CLUSTER_CHILD !== undefined) {
+  process.send({ ...identity(), clusterLabel: process.env.COMPILE_CLUSTER_CHILD }, () => {
+    process.disconnect();
+  });
+} else {
+  await main();
+}
+"#,
+    )
+    .unwrap();
+
+    let compile = compile_smol_artifact(&runtime, &work, &cache, &entry, &artifact);
+    assert!(
+        compile.status.success(),
+        "topology artifact did not compile: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    assert!(
+        artifact.is_file(),
+        "topology compile did not write its artifact"
+    );
+    let expected_artifact_path = std::fs::canonicalize(&artifact)
+        .expect("canonicalize topology artifact")
+        .to_string_lossy()
+        .into_owned();
+    let expected_explicit_node_path = std::fs::canonicalize(&explicit_node)
+        .expect("canonicalize explicit fork Node")
+        .to_string_lossy()
+        .into_owned();
+
+    let fork_child_env = fork_child.to_string_lossy().into_owned();
+    let explicit_node_env = explicit_node.to_string_lossy().into_owned();
+    let artifact_cache_env = artifact_cache.to_string_lossy().into_owned();
+    let mut command = Command::new(&artifact);
+    command
+        .current_dir(&work)
+        .env("__NUB_COMPILE_CACHE_DIR", &artifact_cache_env)
+        .env("COMPILE_FORK_CHILD_PATH", &fork_child_env)
+        .env("COMPILE_EXPLICIT_NODE_EXEC_PATH", &explicit_node_env)
+        // Relative to the explicit cwd, so a space in the host temp path never
+        // enters NODE_OPTIONS tokenization.
+        .env(
+            "NODE_OPTIONS",
+            "--import=./loader-preload.mjs --no-warnings",
+        );
+    let run =
+        run_compiled_artifact_command_with_timeout(command, std::time::Duration::from_secs(45));
+    let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&run.stderr).into_owned();
+    let result_line = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("RESULT:"))
+        .map(str::to_owned);
+    let _ = std::fs::remove_dir_all(&work);
+
+    assert!(
+        run.status.success(),
+        "topology artifact failed: status={} stdout={stdout} stderr={stderr}",
+        run.status
+    );
+    let result: serde_json::Value = serde_json::from_str(
+        result_line
+            .as_deref()
+            .unwrap_or_else(|| panic!("topology artifact emitted no RESULT record: {stdout}")),
+    )
+    .unwrap_or_else(|error| panic!("topology RESULT was not JSON: {error}; stdout={stdout}"));
+
+    let bootstrap = result["root"]["bootstrap"]
+        .as_str()
+        .expect("root bootstrap must be a string");
+    assert!(
+        bootstrap.starts_with("--require=") && bootstrap.ends_with("__nub_compile_bootstrap.cjs"),
+        "root bootstrap must be the canonical fixed-root require: {bootstrap:?}"
+    );
+    let root_args = compiled_json_string_array(&result["root"]["execArgv"]);
+    assert_compiled_bootstrap_first_once(&root_args, bootstrap, "compiled root");
+    assert!(
+        !root_args
+            .iter()
+            .any(|arg| arg.starts_with("--import") || arg == "--no-warnings"),
+        "inherited NODE_OPTIONS flags must remain outside process.execArgv: {root_args:?}"
+    );
+    assert_eq!(
+        result["loader"]["sawBootstrap"].as_str(),
+        Some("true"),
+        "the fixed CJS bootstrap must run before the inherited ESM loader"
+    );
+    assert!(
+        result["loader"]["nodeOptions"]
+            .as_str()
+            .is_some_and(|value| value.contains("loader-preload.mjs")),
+        "the hostile loader must remain present through NODE_OPTIONS"
+    );
+    assert_eq!(
+        result["loader"]["redirectedBuiltin"].as_bool(),
+        Some(true),
+        "the NODE_OPTIONS loader hook must be active for authored builtin imports"
+    );
+
+    for (context, identity) in [
+        ("compiled root", &result["root"]),
+        ("self-spawn", &result["self"]),
+    ] {
+        assert_compile_path_eq(
+            identity["execPath"]
+                .as_str()
+                .expect("compiled process.execPath must be a string"),
+            &expected_artifact_path,
+            &format!("{context} process.execPath must be the outer artifact"),
+        );
+        assert_compile_path_eq(
+            identity["argv0"]
+                .as_str()
+                .expect("compiled process.argv[0] must be a string"),
+            &expected_artifact_path,
+            &format!("{context} process.argv[0] must be the outer artifact"),
+        );
+        assert_eq!(identity["argv1Absolute"].as_bool(), Some(true));
+        assert_eq!(identity["argv1Exists"].as_bool(), Some(true));
+        assert_ne!(
+            identity["argv1"].as_str(),
+            Some(expected_artifact_path.as_str())
+        );
+        assert_native_node_identity(
+            identity["argvOriginal"]
+                .as_str()
+                .expect("process.argv0 must be a string"),
+            &format!("{context} process.argv0"),
+        );
+        assert_native_node_identity(
+            identity["title"]
+                .as_str()
+                .expect("process.title must be a string"),
+            &format!("{context} process.title"),
+        );
+        let args = compiled_json_string_array(&identity["execArgv"]);
+        assert_eq!(args, root_args, "{context} must retain honest Node flags");
+    }
+
+    let forks = &result["forks"];
+    for name in [
+        "noArgs",
+        "args",
+        "options",
+        "explicitEmpty",
+        "explicitFlags",
+    ] {
+        let expected_exec_path = if name == "explicitFlags" {
+            expected_explicit_node_path.as_str()
+        } else {
+            runtime.node_exec_path.as_str()
+        };
+        assert_compile_path_eq(
+            forks[name]["execPath"]
+                .as_str()
+                .expect("fork process.execPath must be a string"),
+            expected_exec_path,
+            &format!("{name} fork must use the selected Node executable"),
+        );
+        assert_compile_path_eq(
+            forks[name]["compiledEnv"]
+                .as_str()
+                .expect("fork compiled identity must be a string"),
+            &expected_artifact_path,
+            &format!("{name} fork must retain compiled identity for nested runtime work"),
+        );
+        let args = compiled_json_string_array(&forks[name]["execArgv"]);
+        assert_compiled_bootstrap_first_once(&args, bootstrap, &format!("{name} fork"));
+    }
+    assert_eq!(forks["noArgs"]["tag"].as_str(), Some("no-args"));
+    assert_eq!(forks["args"]["tag"].as_str(), Some("args-shape"));
+    assert_eq!(forks["options"]["tag"].as_str(), Some("options-shape"));
+    assert_eq!(
+        forks["options"]["customValue"].as_str(),
+        Some("custom-env-kept")
+    );
+    assert_eq!(
+        compiled_json_string_array(&forks["noArgs"]["execArgv"]),
+        root_args
+    );
+    assert_eq!(
+        compiled_json_string_array(&forks["args"]["execArgv"]),
+        root_args
+    );
+    assert_eq!(
+        compiled_json_string_array(&forks["options"]["execArgv"]),
+        root_args,
+        "falsy fork execArgv must normalize from the parent flags"
+    );
+    assert_eq!(
+        compiled_json_string_array(&forks["explicitEmpty"]["execArgv"]),
+        vec![bootstrap.to_owned()],
+        "explicit empty fork execArgv must receive only the bootstrap"
+    );
+    assert_eq!(
+        compiled_json_string_array(&forks["explicitFlags"]["execArgv"]),
+        vec![
+            bootstrap.to_owned(),
+            "--trace-deprecation".to_owned(),
+            "--no-warnings".to_owned(),
+        ],
+        "explicit fork flags must retain authored order after bootstrap normalization"
+    );
+    assert_eq!(
+        forks["explicitFlags"]["customValue"].as_str(),
+        Some("explicit-env-kept")
+    );
+    for field in ["args", "falsyOptions", "empty", "flags"] {
+        assert_eq!(
+            forks["immutable"][field].as_bool(),
+            Some(true),
+            "fork wrapper must not mutate the caller's {field} value"
+        );
+    }
+
+    let workers = &result["workers"];
+    let native_default_args = compiled_json_string_array(&workers["nativeDefault"]["execArgv"]);
+    assert_eq!(
+        native_default_args, root_args,
+        "native Worker without execArgv must inherit honest Node flags"
+    );
+    assert_eq!(
+        workers["nativeDefault"]["bootstrap"].as_str(),
+        Some(bootstrap)
+    );
+    assert_compile_path_eq(
+        workers["nativeDefault"]["execPath"]
+            .as_str()
+            .expect("default native Worker execPath must be a string"),
+        &expected_artifact_path,
+        "default native Worker must retain compiled identity",
+    );
+    assert_compile_path_eq(
+        workers["nativeCustom"]["execPath"]
+            .as_str()
+            .expect("custom native Worker execPath must be a string"),
+        &expected_artifact_path,
+        "custom-env native Worker must recover compiled identity through environment data",
+    );
+    assert!(
+        compiled_json_string_array(&workers["nativeCustom"]["execArgv"]).is_empty(),
+        "native Worker explicit execArgv=[] must remain publicly empty"
+    );
+    assert_eq!(
+        workers["nativeCustom"]["bootstrap"].as_str(),
+        Some(bootstrap),
+        "the generated worker wrapper must establish bootstrap with explicit execArgv=[]"
+    );
+    assert_eq!(
+        workers["nativeCustom"]["customValue"].as_str(),
+        Some("native-env-kept")
+    );
+    let nested_worker = &workers["nativeCustom"]["nestedWorker"];
+    assert_compile_path_eq(
+        nested_worker["execPath"]
+            .as_str()
+            .expect("nested Worker execPath must be a string"),
+        &expected_artifact_path,
+        "nested Worker must retain compiled identity",
+    );
+    assert!(compiled_json_string_array(&nested_worker["execArgv"]).is_empty());
+    assert_eq!(nested_worker["bootstrap"].as_str(), Some(bootstrap));
+    assert_eq!(
+        nested_worker["customValue"].as_str(),
+        Some("nested-env-kept")
+    );
+    let nested_fork = &workers["nativeCustom"]["nestedFork"];
+    assert_compile_path_eq(
+        nested_fork["execPath"]
+            .as_str()
+            .expect("nested fork execPath must be a string"),
+        &runtime.node_exec_path,
+        "nested fork must use the captured real Node",
+    );
+    assert_eq!(
+        compiled_json_string_array(&nested_fork["execArgv"]),
+        vec![bootstrap.to_owned()]
+    );
+    assert_eq!(nested_fork["bootstrap"].as_str(), Some(bootstrap));
+    assert_eq!(nested_fork["nestedFork"].as_str(), Some("nested-fork-kept"));
+    assert_compile_path_eq(
+        nested_fork["compiledEnv"]
+            .as_str()
+            .expect("nested fork compiled identity must be a string"),
+        &expected_artifact_path,
+        "nested fork must retain compiled identity",
+    );
+
+    let mut expected_browser_args = root_args.clone();
+    expected_browser_args.extend(["--trace-deprecation".to_owned(), "--no-warnings".to_owned()]);
+    let browser_args = compiled_json_string_array(&workers["browser"]["execArgv"]);
+    assert_eq!(
+        browser_args, expected_browser_args,
+        "global Worker must merge inherited then authored flags while deduplicating bootstrap"
+    );
+    assert_compiled_bootstrap_first_once(&browser_args, bootstrap, "global Worker");
+    assert_eq!(workers["browser"]["bootstrap"].as_str(), Some(bootstrap));
+    assert_compile_path_eq(
+        workers["browser"]["execPath"]
+            .as_str()
+            .expect("global Worker execPath must be a string"),
+        &expected_artifact_path,
+        "global Worker must retain compiled identity",
+    );
+
+    let clusters = &result["clusters"];
+    let extracted_entry = result["root"]["argv1"]
+        .as_str()
+        .expect("root extracted entry must be a string");
+    for name in ["default", "explicit"] {
+        assert_compile_path_eq(
+            clusters[name]["execPath"]
+                .as_str()
+                .expect("cluster process.execPath must be a string"),
+            &expected_artifact_path,
+            &format!("{name} cluster worker must retain compiled identity"),
+        );
+        let argv = compiled_json_string_array(&clusters[name]["argv"]);
+        assert_eq!(
+            argv.len(),
+            2,
+            "{name} cluster worker must expose only the outer artifact and extracted entry, without a duplicated executable path: {argv:?}"
+        );
+        assert_compile_path_eq(
+            &argv[0],
+            &expected_artifact_path,
+            &format!("{name} cluster process.argv[0] must be the outer artifact"),
+        );
+        assert_compile_path_eq(
+            &argv[1],
+            extracted_entry,
+            &format!("{name} cluster process.argv[1] must be the honest extracted entry"),
+        );
+        let args = compiled_json_string_array(&clusters[name]["execArgv"]);
+        assert_compiled_bootstrap_first_once(&args, bootstrap, &format!("{name} cluster worker"));
+    }
+    assert_eq!(
+        compiled_json_string_array(&clusters["default"]["execArgv"]),
+        root_args,
+        "default cluster worker must inherit honest Node flags"
+    );
+    assert_eq!(
+        compiled_json_string_array(&clusters["explicit"]["execArgv"]),
+        vec![bootstrap.to_owned()],
+        "cluster explicit execArgv=[] must receive only the bootstrap"
+    );
+    assert_eq!(
+        clusters["default"]["clusterLabel"].as_str(),
+        Some("default")
+    );
+    assert_eq!(
+        clusters["explicit"]["clusterLabel"].as_str(),
+        Some("explicit-empty")
+    );
 }
 
 /// Flagship provisioning, end-to-end through the binary: a project pinned (via
@@ -150,12 +1712,13 @@ fn parse_node_version(s: &str) -> Option<(u32, u32, u32)> {
     Some((maj, min, pat))
 }
 
-/// The Node version `nub` resolves in this environment (the first `node` on PATH,
-/// which is what the suite's PATH-prepend matrix selects). Resolved once.
-fn target_node_version() -> (u32, u32, u32) {
+/// The exact Node binary `nub` resolves in this environment. Direct-Node probes
+/// use the absolute path so an outer Nub invocation's temporary PATH shim cannot
+/// silently turn a plain-Node fixture into another augmented Nub run.
+fn target_node_path() -> &'static Path {
     use std::sync::OnceLock;
-    static V: OnceLock<(u32, u32, u32)> = OnceLock::new();
-    *V.get_or_init(|| {
+    static NODE: OnceLock<PathBuf> = OnceLock::new();
+    NODE.get_or_init(|| {
         // Prefer the exact binary nub would pick (`nub node which`); fall back to
         // PATH `node`. Either resolves the same version the spawned-nub tests use.
         // (`nub node which` prints the path to stdout, the explainer to stderr —
@@ -165,7 +1728,7 @@ fn target_node_version() -> (u32, u32, u32) {
         // crate dir the walk-up hits the repo-root engines.node (>=22.15.0) and
         // can report a store/nvm Node instead of the PATH-matrix Node the
         // fixture tests actually spawn.
-        let node = Command::new(nub_binary())
+        Command::new(nub_binary())
             .args(["node", "which"])
             .current_dir(fixtures_dir())
             .output()
@@ -173,8 +1736,18 @@ fn target_node_version() -> (u32, u32, u32) {
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "node".to_string());
-        let out = Command::new(&node)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("node"))
+    })
+}
+
+/// The Node version `nub` resolves in this environment (the first `node` on PATH,
+/// which is what the suite's PATH-prepend matrix selects). Resolved once.
+fn target_node_version() -> (u32, u32, u32) {
+    use std::sync::OnceLock;
+    static V: OnceLock<(u32, u32, u32)> = OnceLock::new();
+    *V.get_or_init(|| {
+        let out = Command::new(target_node_path())
             .arg("--version")
             .output()
             .expect("`node --version` to resolve the target Node version");
@@ -192,7 +1765,7 @@ fn node_at_least(want: (u32, u32, u32)) -> bool {
 /// Node 22.12 and backported to 20.19 (18.x never got it; 21.x is EOL and didn't).
 /// Below this line the compat tier's async loader-worker `load` hook can't serve a
 /// `require()` routed through Node's synchronous ESM-translator special-require —
-/// see wiki/research/compat-tier-cjs-entry-helpers.md.
+/// see internal/research/compat-tier-cjs-entry-helpers.md.
 fn node_has_require_esm() -> bool {
     let (maj, min, _) = target_node_version();
     maj >= 23 || (maj == 22 && min >= 12) || (maj == 20 && min >= 19)
@@ -286,13 +1859,13 @@ fn legacy_decorators_require_experimental_flag() {
     // special-require that path takes below require(esm). Real but narrow (a CJS
     // *entry* using helpers, on old patch versions); the named ship gate (22.15+24)
     // is unaffected. Full analysis + the v0.x fix options:
-    // wiki/research/compat-tier-cjs-entry-helpers.md. Assert the feature where it's
+    // internal/research/compat-tier-cjs-entry-helpers.md. Assert the feature where it's
     // supported; skip-with-reason (NOT silently) where it isn't.
     if !node_has_require_esm() {
         eprintln!(
             "SKIP legacy_decorators_require_experimental_flag on Node {:?}: CJS-entry helper \
              require is unsupported below require(esm) (documented v0.x limitation — see \
-             wiki/research/compat-tier-cjs-entry-helpers.md)",
+             internal/research/compat-tier-cjs-entry-helpers.md)",
             target_node_version()
         );
         return;
@@ -308,13 +1881,154 @@ fn legacy_decorators_require_experimental_flag() {
     );
 }
 
+#[test]
+fn an_unreadable_tsconfig_stops_the_run() {
+    // #731 reported that an `extends` target nub could not resolve was dropped in
+    // silence, taking `paths`, decorator flags and `customConditions` with it. The
+    // first fix reported it and carried on; that still ran the program under options
+    // its author never wrote, so it is fatal now — `tsc` (TS5083) likewise exits
+    // rather than guessing at the missing half.
+    //
+    // Asserts the DIAGNOSTIC, not just the exit code: a non-zero exit is what the
+    // old behavior produced too, by failing to resolve the alias further downstream
+    // with an error that never mentioned the config.
+    let (_stdout, stderr, code) = run_nub("tsconfig-broken-extends", "main.ts");
+    assert_ne!(code, 0, "a tsconfig that will not parse must stop the run");
+    assert!(
+        stderr.contains("does-not-exist.json"),
+        "the failure must name the file it could not read: {stderr}"
+    );
+    assert!(
+        stderr.contains("--node"),
+        "the failure must name the way past it: {stderr}"
+    );
+}
+
+/// #1032: the entry's tsconfig check reads the config the run will use. A
+/// dependency's own published tsconfig is not the project's and never stops a run;
+/// a workspace member reached through its `node_modules` link runs from its real
+/// directory, so its relative `extends` resolves from there.
+#[test]
+fn the_entry_tsconfig_check_follows_the_real_path_and_skips_dependencies() {
+    let dir = unique_test_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+    let write = |rel: &str, body: &str| {
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    };
+    let run_with = |args: &[&str], env: &[(&str, &str)]| {
+        let out = Command::new(nub_binary())
+            .args(args)
+            .envs(env.iter().copied())
+            .current_dir(&dir)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .env_remove("NODE_COMPAT")
+            .output()
+            .expect("failed to spawn nub");
+        (
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+            out.status.code(),
+        )
+    };
+    let run = |entry: &str| run_with(&[entry], &[]);
+    write(
+        "package.json",
+        r#"{"name":"root","workspaces":["packages/*"]}"#,
+    );
+    write("node_modules/dep/package.json", r#"{"name":"dep"}"#);
+    write(
+        "node_modules/dep/tsconfig.json",
+        r#"{"extends":"../../unpublished.json"}"#,
+    );
+    write("node_modules/dep/bin.cjs", "console.log('dependency-ok')");
+
+    let (stdout, stderr, code) = run("node_modules/dep/bin.cjs");
+    assert_eq!(
+        code,
+        Some(0),
+        "a dependency's own tsconfig must not stop the run: {stderr}"
+    );
+    assert!(stdout.contains("dependency-ok"), "{stdout}");
+
+    #[cfg(unix)]
+    {
+        write(
+            "tsconfig.base.json",
+            r#"{"compilerOptions":{"strict":true}}"#,
+        );
+        write(
+            "packages/cli/tsconfig.json",
+            r#"{"extends":"../../tsconfig.base.json"}"#,
+        );
+        write("packages/cli/bin.cjs", "console.log('linked-ok')");
+        write(
+            "packages/broken/tsconfig.json",
+            r#"{"extends":"./missing.json"}"#,
+        );
+        write("packages/broken/bin.cjs", "console.log('broken-ran')");
+        std::fs::create_dir_all(dir.join("node_modules/@repro")).unwrap();
+        for member in ["cli", "broken"] {
+            std::os::unix::fs::symlink(
+                format!("../../packages/{member}"),
+                dir.join("node_modules/@repro").join(member),
+            )
+            .unwrap();
+        }
+
+        let (stdout, stderr, code) = run("node_modules/@repro/cli/bin.cjs");
+        assert_eq!(
+            code,
+            Some(0),
+            "a linked workspace member must run: {stderr}"
+        );
+        assert!(stdout.contains("linked-ok"), "{stdout}");
+
+        // The link is followed, not exempted: a workspace member whose real config
+        // is broken still refuses, exactly as when run by its real path.
+        let (_stdout, stderr, code) = run("node_modules/@repro/broken/bin.cjs");
+        assert_ne!(
+            code,
+            Some(0),
+            "a broken workspace config must still stop the run"
+        );
+        assert!(stderr.contains("missing.json"), "{stderr}");
+
+        // `--preserve-symlinks-main` keeps Node on the link path, so the check reads
+        // the link directory's config, whose `extends` does not resolve from there.
+        // Node accepts `_` for `-` in option names, from argv and NODE_OPTIONS alike.
+        let entry = "node_modules/@repro/cli/bin.cjs";
+        for (args, env) in [
+            (vec!["--preserve-symlinks-main", entry], vec![]),
+            (vec!["--preserve_symlinks_main", entry], vec![]),
+            (
+                vec![entry],
+                vec![("NODE_OPTIONS", "--preserve_symlinks_main")],
+            ),
+        ] {
+            let (_stdout, stderr, code) = run_with(&args, &env);
+            assert_ne!(
+                code,
+                Some(0),
+                "{args:?} {env:?} must check the link's config"
+            );
+            assert!(
+                stderr.contains("@repro/cli/tsconfig.json"),
+                "{args:?} {env:?}: {stderr}"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ── Project-source plain JS (.js/.mjs/.cjs) transpile ───────────────
 // nub transpiles PROJECT plain JS through the same pipeline as `.ts`, so
 // transformable syntax (`using`/`await using`, `v`-flag RegExp, decorators) lowers
 // uniformly — identical source must not behave differently by extension. A native
 // `transformableSyntax` verdict (riding the existing detect parse) gates a verbatim
 // skip-return for no-op JS so byte-parity is preserved; node_modules is excluded at
-// every dispatch site. See wiki/runtime/typescript.md + the transpile-project-js
+// every dispatch site. See `typescript` (no such document) + the transpile-project-js
 // design thread.
 
 #[test]
@@ -359,6 +2073,26 @@ fn js_transpilation_smoke_guard() {
             target_node_version()
         );
     }
+}
+
+#[test]
+fn esm_source_reuse_preserves_loaded_bytes_and_module_identity() {
+    let (stdout, stderr, code) = run_nub("loader-source-reuse", "main.mjs");
+    assert_eq!(code, 0, "source reuse contract failed: {stdout}\n{stderr}");
+    assert!(stdout.contains("source-reuse:ok"), "{stdout}\n{stderr}");
+}
+
+#[test]
+fn user_hooks_layered_above_nubs_keep_ownership_of_their_files() {
+    // tsx under `nub run` is the case in the wild. The fixture's hooks model it
+    // on whichever tier this Node runs: an outer load hook keys on the
+    // `responseURL` nub's transpiled result carries; an outer resolve hook that
+    // assigns a `.ts` file a bare `commonjs` format gets the raw source back to
+    // transform itself; and a `require.extensions` handler installed before nub's
+    // compat-tier preload stays in charge of its extension.
+    let (stdout, stderr, code) = run_nub("loader-outer-hook", "main.mjs");
+    assert_eq!(code, 0, "outer-hook contract failed: {stdout}\n{stderr}");
+    assert!(stdout.contains("outer-hook:ok"), "{stdout}\n{stderr}");
 }
 
 #[test]
@@ -694,6 +2428,19 @@ fn user_preload_named_preload_mjs_does_not_disable_augmentation() {
 }
 
 #[test]
+fn temporal_namespace_installers() {
+    let (stdout, stderr, code) = run_nub_with_env(
+        "temporal-lazy",
+        "namespace.test.mjs",
+        &[("NODE_COMPAT", "1")],
+    );
+    assert_eq!(
+        code, 0,
+        "Temporal installer tests failed: {stdout}\n{stderr}"
+    );
+}
+
+#[test]
 fn temporal_lazy_global_and_import() {
     // A37: Temporal is installed as a lazy global — loaded on first access, not
     // eagerly at startup (the polyfill is ~18ms). It must still be fully usable
@@ -719,6 +2466,35 @@ fn temporal_lazy_global_and_import() {
     assert!(
         stdout.contains("temporal-instant:1970-01-01T00:00:00Z"),
         "toTemporalInstant re-exported, bound to Date.prototype, and callable: {stdout}"
+    );
+}
+
+#[test]
+fn package_clobber_applies_to_import_only() {
+    // The import clobber resolves to a data: URL, which the CommonJS loader reads
+    // as a file path (ENOENT). On the fast tier the resolve hook also sees
+    // require(), so it must leave that call to Node's resolver.
+    let (stdout, stderr, code) = run_nub("clobber-require", "main.cjs");
+    assert_eq!(
+        code, 0,
+        "require of a clobbered package must load it: {stderr}"
+    );
+    assert!(
+        stdout.contains("require-temporal:2026"),
+        "the installed package answered the require: {stdout}"
+    );
+
+    // A user-added "require" condition rides on imports too, so it must not be
+    // what tells a require() from an import.
+    let (stdout, stderr, code) = run_nub_with_env(
+        "clobber-require",
+        "import.mjs",
+        &[("NODE_OPTIONS", "--conditions=require")],
+    );
+    assert_eq!(code, 0, "import under --conditions=require: {stderr}");
+    assert!(
+        stdout.contains("import-is-global:true"),
+        "an import keeps the clobber under --conditions=require: {stdout}"
     );
 }
 
@@ -1244,6 +3020,403 @@ console.log(JSON.stringify({ okB64, okUrl, okHex, order: order.join(","), agg, a
     );
 }
 
+#[test]
+fn polyfills_never_clobber_native() {
+    // THE no-clobber guard. Installs a recognizable sentinel on every surface any
+    // installer in runtime/polyfills.cjs touches, runs installSyncPolyfills, and
+    // fails if a single sentinel was replaced. A polyfill that overwrites rather
+    // than defers to an existing implementation cannot survive this test.
+    //
+    // Deliberately driven by PLAIN `node` against the runtime file rather than
+    // through the nub binary: the preload necessarily runs before any user code, so
+    // sentinels could not be planted first. Running under the host node means the
+    // CI Node-matrix legs exercise it across versions for free — on a newer Node
+    // most surfaces are genuinely native, which is exactly the case that matters.
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let polyfills = Path::new(&manifest).join("../../runtime/polyfills.cjs");
+    assert!(polyfills.is_file(), "missing {}", polyfills.display());
+
+    let work = unique_test_cache();
+    std::fs::create_dir_all(&work).unwrap();
+    let script = work.join("_noclobber.mjs");
+    std::fs::write(
+        &script,
+        r#"
+import { createRequire } from "node:module";
+const TAP = Object.getPrototypeOf(Int8Array.prototype);
+const IP = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
+const targets = [
+  [Promise, "allKeyed"], [Promise, "allSettledKeyed"], [Promise, "withResolvers"], [Promise, "try"],
+  [RegExp, "escape"], [Error, "isError"], [URL, "parse"],
+  [String.prototype, "isWellFormed"], [String.prototype, "toWellFormed"],
+  [Object, "groupBy"], [Map, "groupBy"],
+  [Array.prototype, "toSorted"], [Array.prototype, "toReversed"], [Array.prototype, "toSpliced"], [Array.prototype, "with"],
+  [TAP, "toSorted"], [TAP, "toReversed"], [TAP, "with"],
+  [ArrayBuffer.prototype, "transfer"], [ArrayBuffer.prototype, "transferToFixedLength"], [Atomics, "pause"],
+  [Set.prototype, "union"], [Set.prototype, "intersection"], [Set.prototype, "difference"],
+  [Set.prototype, "symmetricDifference"], [Set.prototype, "isSubsetOf"], [Set.prototype, "isSupersetOf"],
+  [Set.prototype, "isDisjointFrom"], [Array, "fromAsync"],
+  [Map.prototype, "getOrInsert"], [Map.prototype, "getOrInsertComputed"],
+  [WeakMap.prototype, "getOrInsert"], [WeakMap.prototype, "getOrInsertComputed"],
+  [Math, "sumPrecise"],
+  [IP, "map"], [IP, "filter"], [IP, "take"], [IP, "drop"], [IP, "flatMap"], [IP, "reduce"],
+  [IP, "toArray"], [IP, "some"], [IP, "every"], [IP, "find"], [IP, "forEach"],
+  [IP, "chunks"], [IP, "windows"], [IP, "includes"], [IP, "join"], [IP, Symbol.dispose],
+  [Uint8Array.prototype, "toBase64"], [Uint8Array.prototype, "toHex"], [Uint8Array, "fromBase64"],
+  [globalThis, "DisposableStack"], [globalThis, "AsyncDisposableStack"],
+  [globalThis, "SuppressedError"], [globalThis, "reportError"],
+];
+if (globalThis.Iterator) {
+  for (const k of ["from", "concat", "zip", "zipKeyed"]) targets.push([globalThis.Iterator, k]);
+}
+const planted = [];
+for (const [holder, key] of targets) {
+  const sentinel = function nubSentinel() {};
+  Object.defineProperty(holder, key, { value: sentinel, writable: true, enumerable: false, configurable: true });
+  planted.push([holder, key, sentinel]);
+}
+// The one accessor in the set needs its own sentinel shape.
+Object.defineProperty(ArrayBuffer.prototype, "detached", {
+  get: function nubSentinelGetter() { return "SENTINEL"; },
+  enumerable: false, configurable: true,
+});
+createRequire(import.meta.url)(process.argv[2]).installSyncPolyfills({});
+const clobbered = planted.filter(([h, k, s]) => h[k] !== s).map(([, k]) => k);
+const d = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "detached");
+if (!d || d.get?.name !== "nubSentinelGetter") clobbered.push("detached");
+console.log(JSON.stringify({ checked: planted.length + 1, clobbered }));
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(target_node_path())
+        .arg(&script)
+        .arg(&polyfills)
+        .current_dir(&work)
+        .output()
+        .expect("failed to spawn node");
+
+    let _ = std::fs::remove_dir_all(&work);
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("bad output {stdout:?} ({e}); stderr: {stderr}"));
+    assert_eq!(
+        parsed["clobbered"].as_array().map(Vec::len),
+        Some(0),
+        "polyfills overwrote an existing implementation: {} (stderr: {stderr})",
+        parsed["clobbered"]
+    );
+    // Guard against the target list silently emptying out.
+    assert!(
+        parsed["checked"].as_u64().unwrap_or(0) >= 50,
+        "expected >=50 surfaces checked, got {}",
+        parsed["checked"]
+    );
+}
+
+#[test]
+fn iterator_stage4_helpers_and_promise_try_follow_spec() {
+    // The final Stage 4 text of iterator chunking/includes/join, plus the generic
+    // `this` of Promise.try. No Node release ships the four iterator methods, and
+    // Promise.try is deleted first so its fallback runs on 24+ too; each case below
+    // is one the pre-Stage-4 polyfill got wrong. Full conformance is checked against
+    // test262 (built-ins/Iterator/prototype, built-ins/Promise/try); this pins the
+    // observable contract. Plain `node` against the runtime file, as the no-clobber
+    // test above, so the CI Node matrix covers both tiers.
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let polyfills = Path::new(&manifest).join("../../runtime/polyfills.cjs");
+
+    let work = unique_test_cache();
+    std::fs::create_dir_all(&work).unwrap();
+    let script = work.join("_iterator_stage4.mjs");
+    std::fs::write(
+        &script,
+        r#"
+import { createRequire } from "node:module";
+const IP = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
+for (const k of ["chunks", "windows", "includes", "join"]) delete IP[k];
+delete Promise.try;
+createRequire(import.meta.url)(process.argv[2]).installSyncPolyfills({});
+
+const failures = [];
+const check = (name, fn) => {
+  try {
+    if (fn() !== true) failures.push(name);
+  } catch (e) {
+    failures.push(`${name}: ${e}`);
+  }
+};
+const throws = (Err, fn) => {
+  try {
+    fn();
+  } catch (e) {
+    return e instanceof Err;
+  }
+  return false;
+};
+const it = () => [1, 2, 3].values();
+// A receiver whose `next` must never be read, counting `return()` calls.
+const closable = () => {
+  const o = { closed: 0, get next() { throw new Error("next was read"); }, return() { o.closed++; return {}; } };
+  return o;
+};
+
+check("windows undersized", () =>
+  JSON.stringify(it().windows(5, "allow-partial").toArray()) === "[[1,2,3]]" &&
+  it().windows(5).toArray().length === 0 &&
+  JSON.stringify(it().windows(2, "allow-partial").toArray()) === "[[1,2],[2,3]]" &&
+  throws(TypeError, () => it().windows(2, "bogus")));
+check("includes skippedElements", () =>
+  it().includes(1, 1) === false && it().includes(2, 1) === true && it().includes(3, Infinity) === false &&
+  throws(TypeError, () => it().includes(1, 1.5)) && throws(TypeError, () => it().includes(1, "1")) &&
+  throws(RangeError, () => it().includes(1, -1)) && throws(RangeError, () => it().includes(1, 2 ** 53)));
+check("sizes are not coerced", () =>
+  throws(TypeError, () => it().chunks(2.5)) && throws(TypeError, () => it().chunks("2")) &&
+  throws(RangeError, () => it().chunks(0)) && throws(RangeError, () => it().windows(2 ** 32)));
+check("a bad argument closes the receiver before reading next", () =>
+  [["chunks", [0]], ["windows", [1, "x"]], ["includes", [0, -1]], ["join", [Symbol()]]]
+    .map(([m, args]) => {
+      const o = closable();
+      try { IP[m].apply(o, args); } catch {}
+      return o.closed;
+    })
+    .join() === "1,1,1,1");
+check("join uses ToString and closes on failure", () => {
+  let closed = 0;
+  const src = { next: () => ({ done: false, value: Symbol() }), return() { closed++; return {}; } };
+  return throws(TypeError, () => it().join(Symbol())) && throws(TypeError, () => IP.join.call(src)) && closed === 1;
+});
+check("return() before next() closes the source once", () => {
+  let closed = 0;
+  const src = { next: () => ({ done: false, value: 1 }), return() { closed++; return {}; } };
+  const h = IP.chunks.call(src, 2);
+  h.return();
+  h.return();
+  return closed === 1;
+});
+class Sub extends Promise {}
+check("Promise.try constructs from this", () =>
+  Sub.try(() => 1) instanceof Sub && throws(TypeError, () => Promise.try.call(1, () => 1)));
+console.log(JSON.stringify(failures));
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(target_node_path())
+        .arg(&script)
+        .arg(&polyfills)
+        .current_dir(&work)
+        .output()
+        .expect("failed to spawn node");
+
+    let _ = std::fs::remove_dir_all(&work);
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stdout, "[]",
+        "spec cases the polyfill failed (stderr: {stderr})"
+    );
+}
+
+#[test]
+fn esnext_library_polyfills() {
+    // The Stage 3+ library families: new Set methods, Array.fromAsync, the Iterator
+    // surface (helpers + from/concat/zip/zipKeyed + the Stage 3 chunks/windows/
+    // includes/join), Map/WeakMap getOrInsert, Math.sumPrecise and Symbol.metadata.
+    // Spec fidelity is verified by batteries that run the SAME assertions against
+    // the polyfill and against native (and, for Math.sumPrecise which no Node ships,
+    // against bun's native implementation); this asserts reachability + correctness
+    // through nub's real preload chain. Isolated tmpdir + cache as elsewhere.
+    let work = unique_test_cache();
+    std::fs::create_dir_all(&work).unwrap();
+    let test_file = work.join("_esnext_check.mjs");
+    std::fs::write(
+        &test_file,
+        r#"
+const setOk = [...new Set([1, 2, 3]).union(new Set([4]))].join(",") === "1,2,3,4" &&
+  [...new Set([1, 2]).intersection(new Set([2]))].join(",") === "2" &&
+  new Set([1]).isSubsetOf(new Set([1, 2])) === true &&
+  // The argument only has to be set-like: a size plus callable has/keys.
+  [...new Set([1]).union({ size: 1, has: (v) => v === 5, keys: () => [5][Symbol.iterator]() })].join(",") === "1,5";
+const fromAsyncOk = (await Array.fromAsync([Promise.resolve(1), 2])).join(",") === "1,2";
+const iterOk = [1, 2, 3, 4][Symbol.iterator]().map((x) => x * 2).filter((x) => x > 2).toArray().join(",") === "4,6,8" &&
+  Iterator.from([1, 2]).toArray().join(",") === "1,2" &&
+  Iterator.concat([1], [2]).toArray().join(",") === "1,2" &&
+  JSON.stringify(Iterator.zip([[1, 2], ["a", "b"]]).toArray()) === '[[1,"a"],[2,"b"]]' &&
+  Iterator.zipKeyed({ a: [1], b: [2] }).toArray()[0].a === 1 &&
+  JSON.stringify([1, 2, 3][Symbol.iterator]().chunks(2).toArray()) === "[[1,2],[3]]" &&
+  [1, 2, 3][Symbol.iterator]().includes(2) === true &&
+  [1, 2][Symbol.iterator]().join("-") === "1-2";
+const m = new Map();
+const mapOk = m.getOrInsert("a", 1) === 1 && m.getOrInsert("a", 9) === 1 &&
+  m.getOrInsertComputed("b", () => 2) === 2;
+// Exact summation: a left-to-right reduce overflows to Infinity here.
+const sumOk = Math.sumPrecise([1e308, 1e308, -1e308, -1e308]) === 0 &&
+  Math.sumPrecise([1, 1e100, 1, -1e100]) === 2;
+const symOk = typeof Symbol.metadata === "symbol";
+console.log(JSON.stringify({ setOk, fromAsyncOk, iterOk, mapOk, sumOk, symOk }));
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(nub_binary())
+        .arg(test_file.to_str().unwrap())
+        .current_dir(&work)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("failed to spawn nub");
+
+    let _ = std::fs::remove_dir_all(&work);
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stdout,
+        r#"{"setOk":true,"fromAsyncOk":true,"iterOk":true,"mapOk":true,"sumOk":true,"symOk":true}"#,
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn floor_builtin_polyfills() {
+    // Shipped-standard builtins that are native only on a NEWER Node than the
+    // 18.19 support floor, so each is a compat-tier-only hole. Spec fidelity is
+    // verified separately by a battery that runs the SAME assertions against the
+    // polyfill (18.19-21.x) and against NATIVE (22.15+/24/26), so native is the
+    // oracle; this asserts reachability + correctness through nub's real preload
+    // chain. Isolated tmpdir + cache, as `polyfills_available`.
+    let work = unique_test_cache();
+    std::fs::create_dir_all(&work).unwrap();
+    let test_file = work.join("_floor_check.mjs");
+    std::fs::write(
+        &test_file,
+        r#"
+const urlOk = URL.parse("https://a.example/x").href === "https://a.example/x" && URL.parse("!!") === null;
+const strOk = "a\uD800b".isWellFormed() === false && "a\uD800b".toWellFormed() === "a\uFFFDb";
+const grouped = Object.groupBy([1, 2, 3], (n) => (n % 2 ? "odd" : "even"));
+const groupOk = Object.getPrototypeOf(grouped) === null &&
+  grouped.odd.join(",") === "1,3" &&
+  Map.groupBy([1, 2], (n) => n % 2).get(1).join(",") === "1";
+const copyOk = [3, 1, 2].toSorted().join(",") === "1,2,3" &&
+  [3, 1, 2].toReversed().join(",") === "2,1,3" &&
+  [3, 1, 2].with(0, 9).join(",") === "9,1,2" &&
+  [3, 1, 2].toSpliced(1, 1).join(",") === "3,2" &&
+  new Int8Array([3, 1]).toSorted().constructor === Int8Array;
+// transfer must perform a REAL detach, not just zero the length.
+const buf = new ArrayBuffer(2);
+new Uint8Array(buf).set([7, 8]);
+const moved = buf.transfer();
+let viewThrew = false;
+try { new Uint8Array(buf); } catch { viewThrew = true; }
+const abOk = [...new Uint8Array(moved)].join(",") === "7,8" && buf.detached === true &&
+  viewThrew && new ArrayBuffer(0).detached === false;
+const pauseOk = Atomics.pause() === undefined;
+console.log(JSON.stringify({ urlOk, strOk, groupOk, copyOk, abOk, pauseOk }));
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(nub_binary())
+        .arg(test_file.to_str().unwrap())
+        .current_dir(&work)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("failed to spawn nub");
+
+    let _ = std::fs::remove_dir_all(&work);
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stdout,
+        r#"{"urlOk":true,"strOk":true,"groupOk":true,"copyOk":true,"abOk":true,"pauseOk":true}"#,
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn keyed_promise_combinator_polyfills() {
+    // Promise.allKeyed / Promise.allSettledKeyed (TC39 "await dictionary", Stage 3)
+    // ship in no engine, so this exercises the polyfill on every Node — there is no
+    // native branch to fall through to. Spec fidelity is verified separately by the
+    // differential battery (18.19 through 26.5); this asserts the API is reachable
+    // and correct through nub's real preload chain, on the three semantics a naive
+    // implementation gets wrong: the result object's NULL prototype, own-enumerable
+    // keys INCLUDING symbols, and non-enumerable installation on `Promise`.
+    // Isolated tmpdir + cache for the same hermeticity reasons as
+    // `polyfills_available`.
+    let work = unique_test_cache();
+    std::fs::create_dir_all(&work).unwrap();
+    let test_file = work.join("_keyed_check.mjs");
+    std::fs::write(
+        &test_file,
+        r#"
+const sym = Symbol("s");
+const src = Object.create(
+  { inherited: Promise.resolve("leaked") },
+  {
+    shape: { value: Promise.resolve("square"), enumerable: true },
+    mass: { value: 12, enumerable: true },
+    hidden: { value: Promise.resolve("leaked"), enumerable: false },
+    [sym]: { value: Promise.resolve("sym"), enumerable: true },
+  },
+);
+const dict = await Promise.allKeyed(src);
+const { shape, mass } = dict;
+const keyed = shape === "square" && mass === 12 && dict[sym] === "sym";
+const scoped = !("hidden" in dict) && !("inherited" in dict);
+const nullProto = Object.getPrototypeOf(dict) === null;
+const settled = await Promise.allSettledKeyed({
+  ok: Promise.resolve(1),
+  bad: Promise.reject(new Error("nope")),
+});
+const statuses = settled.ok.status + "/" + settled.bad.status + "/" + settled.bad.reason.message;
+let rejected = "";
+try {
+  await Promise.allKeyed({ a: Promise.reject(new Error("first")), b: Promise.resolve(2) });
+} catch (e) {
+  rejected = e.message;
+}
+// Promise.withResolvers: native on Node 22+, polyfilled on the 18.19-21.x compat
+// tier where it was previously missing entirely.
+const wr = Promise.withResolvers();
+wr.resolve("wr-ok");
+const withResolvers =
+  Object.getPrototypeOf(wr) === Object.prototype &&
+  Object.keys(wr).join(",") === "promise,resolve,reject" &&
+  (await wr.promise) === "wr-ok";
+// The additive contract: nub's additions stay invisible to enumeration.
+const hidden = Object.keys(Promise).filter(
+  (k) => k.endsWith("Keyed") || k === "withResolvers",
+).length;
+console.log(
+  JSON.stringify({ keyed, scoped, nullProto, statuses, rejected, withResolvers, hidden }),
+);
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(nub_binary())
+        .arg(test_file.to_str().unwrap())
+        .current_dir(&work)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("failed to spawn nub");
+
+    let _ = std::fs::remove_dir_all(&work);
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stdout,
+        r#"{"keyed":true,"scoped":true,"nullProto":true,"statuses":"fulfilled/rejected/nope","rejected":"first","withResolvers":true,"hidden":0}"#,
+        "stderr: {stderr}"
+    );
+}
+
 /// Child processes spawned via `execSync("node ...")` inside a Nub-run
 /// script should inherit Nub's TypeScript augmentation through the PATH
 /// shim — `node` resolves to the shim symlink which points back to `nub`.
@@ -1675,6 +3848,7 @@ fn run_regex_selector_propagates_failure_exit_code() {
 /// loading is off (vanilla Node doesn't read `.env`), while the default run
 /// loads it. Differential proof that the compat flag drops the augmentation
 /// layer. (Provisioning stays on, but that's network-gated and not asserted here.)
+// @lat: [[compat-mode-tests#Compat mode#Flag form drops the augmentation layer]]
 #[test]
 fn node_compat_flag_disables_augmentation() {
     let dir = std::env::temp_dir().join(format!("nub-compat-{}", std::process::id()));
@@ -1713,6 +3887,69 @@ fn node_compat_flag_disables_augmentation() {
     assert!(
         compat_out.contains("probe:unset"),
         "`--node` must NOT auto-load .env (vanilla Node behavior); got {compat_out:?} (stderr {compat_err:?})"
+    );
+}
+
+/// `--experimental-webstorage` must ride ARGV and never the inherited NODE_OPTIONS.
+/// The flag does not exist before Node 22.4 — above nub's 18.19 support floor — and
+/// NODE_OPTIONS is inherited by the whole process subtree, so a descendant on an older
+/// Node aborts at startup with exit 9 on a flag it cannot parse. That is reachable, not
+/// theoretical: a host on the 22.4–24 band running Electron 34 or older (embedded Node
+/// 20.18.1) hit exactly this, and issue #7 was the same flag reaching an older child
+/// through a nested `.nvmrc`. Argv reaches the spawned process and nothing below it.
+///
+/// This is the WIRING test: the version-band unit tests in `feature_matrix` and the
+/// `flags::should_inject_experimental_webstorage` policy tests all pass just as well
+/// with the injection wired to the wrong channel, because none of them observe which
+/// channel a real spawn actually used. Both halves are asserted together — absent from
+/// NODE_OPTIONS is only meaningful alongside present on argv, since a flag that stopped
+/// being injected at all would satisfy the first half on its own.
+#[test]
+fn webstorage_flag_rides_argv_and_never_node_options() {
+    if !node_at_least((22, 4, 0)) {
+        eprintln!("skipping: webstorage needs Node >= 22.4 (target is older)");
+        return;
+    }
+    let (maj, _, _) = target_node_version();
+    if maj >= 25 {
+        eprintln!("skipping: 25+ has Web Storage native, so nub injects no flag to place");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("nub-ws-channel-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), r#"{"name":"ws-channel"}"#).unwrap();
+    std::fs::write(
+        dir.join("probe.js"),
+        "console.log('OPTS=' + (process.env.NODE_OPTIONS || ''));\n\
+         console.log('ARGV=' + process.execArgv.join(' '));",
+    )
+    .unwrap();
+
+    let out = Command::new(nub_binary())
+        .args(["probe.js"])
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", dir.join("cache"))
+        .output()
+        .expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let opts = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("OPTS="))
+        .unwrap_or_else(|| panic!("probe printed no OPTS line; stdout={stdout:?}"));
+    let argv = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("ARGV="))
+        .unwrap_or_else(|| panic!("probe printed no ARGV line; stdout={stdout:?}"));
+
+    assert!(
+        argv.contains("--experimental-webstorage"),
+        "nub must still inject the flag on the 22.4–24 band, on argv; argv={argv:?}"
+    );
+    assert!(
+        !opts.contains("--experimental-webstorage"),
+        "the flag must NOT be in NODE_OPTIONS — that string is inherited by the whole \
+         subtree and aborts any descendant below Node 22.4; NODE_OPTIONS={opts:?}"
     );
 }
 
@@ -1962,16 +4199,18 @@ fn user_node_options_localstorage_file_is_not_clobbered() {
 }
 
 /// The localStorage neutralization must reach GRANDCHILDREN, not just the direct
-/// child (F1). nub injects `--experimental-webstorage` via NODE_OPTIONS, which
-/// inherits to the whole process subtree — so a `node`-spawned grandchild
-/// re-installs Node's throwing `localStorage` getter. The neutralize signal
-/// (`__NUB_NEUTRALIZE_LOCALSTORAGE`) is a plain env var that also inherits, so the
-/// preload re-runs and re-neutralizes at every level. Before the fix the preload
-/// DELETED that var after reading it, so the child and grandchild inherited the
-/// throwing getter with no neutralize signal → `typeof localStorage` threw two
-/// levels down. This fixture has nub run a parent that spawns a plain `node` child
-/// that spawns a plain `node` grandchild, all without `--localstorage-file`, and
-/// asserts `typeof localStorage === "undefined"` (no throw) at all three levels.
+/// child (F1). Each `node` in the chain re-installs Node's throwing `localStorage`
+/// getter, because each receives `--experimental-webstorage` itself: the flag rides
+/// ARGV (never NODE_OPTIONS, whose 22.4 floor aborted below-floor descendants), so a
+/// plain `node` picks it up by re-entering nub through the PATH shim. The neutralize
+/// signal (`__NUB_NEUTRALIZE_LOCALSTORAGE`) is a plain env var that inherits, and nub
+/// re-sets it wherever it sets the flag, so the preload re-neutralizes at every level.
+/// Two regressions this pins: the preload once DELETED that var after reading it, so
+/// the child and grandchild inherited the throwing getter with no signal; and the flag
+/// and its signal must move together, since a level that gets one without the other
+/// throws. This fixture has nub run a parent that spawns a plain `node` child that
+/// spawns a plain `node` grandchild, all without `--localstorage-file`, and asserts
+/// `typeof localStorage === "undefined"` (no throw) at all three levels.
 #[test]
 fn localstorage_neutralization_reaches_grandchildren() {
     if !node_at_least((22, 4, 0)) {
@@ -1989,7 +4228,7 @@ fn localstorage_neutralization_reaches_grandchildren() {
     // neutralize ran here too. Tag the level so a failure is self-debugging.
     std::fs::write(
         dir.join("grandchild.js"),
-        "console.log('GRANDCHILD:' + typeof localStorage);",
+        "console.log('GRANDCHILD:' + typeof localStorage + ':' + typeof sessionStorage);",
     )
     .unwrap();
     // child.js: prints its own level, then spawns the grandchild as a plain `node`
@@ -1997,7 +4236,7 @@ fn localstorage_neutralization_reaches_grandchildren() {
     // preload via inherited NODE_OPTIONS — exactly the subtree we must cover).
     std::fs::write(
         dir.join("child.js"),
-        "console.log('CHILD:' + typeof localStorage);\n\
+        "console.log('CHILD:' + typeof localStorage + ':' + typeof sessionStorage);\n\
          const cp = require('node:child_process');\n\
          const r = cp.spawnSync('node', [require('node:path').join(__dirname, 'grandchild.js')], { stdio: 'inherit' });\n\
          process.exit(r.status ?? 1);",
@@ -2006,7 +4245,7 @@ fn localstorage_neutralization_reaches_grandchildren() {
     // parent.js: top level run by nub. Spawns the child as a plain `node`.
     std::fs::write(
         dir.join("parent.js"),
-        "console.log('PARENT:' + typeof localStorage);\n\
+        "console.log('PARENT:' + typeof localStorage + ':' + typeof sessionStorage);\n\
          const cp = require('node:child_process');\n\
          const r = cp.spawnSync('node', [require('node:path').join(__dirname, 'child.js')], { stdio: 'inherit' });\n\
          process.exit(r.status ?? 1);",
@@ -2027,9 +4266,15 @@ fn localstorage_neutralization_reaches_grandchildren() {
         "grandchild chain must not throw at any level: stdout={stdout:?} stderr={stderr:?}"
     );
     for level in ["PARENT", "CHILD", "GRANDCHILD"] {
+        // `localStorage` neutralized AND `sessionStorage` live, asserted together at
+        // each level. The second half is a POSITIVE CONTROL and is what makes the
+        // first half mean anything: on this band a process that never received
+        // `--experimental-webstorage` also reports `localStorage` as "undefined", so
+        // the neutralize assertion alone passes just as well when the flag failed to
+        // arrive at all. `sessionStorage` is "object" only when the flag DID arrive.
         assert!(
-            stdout.contains(&format!("{level}:undefined")),
-            "`typeof localStorage` must be \"undefined\" (not throw) at the {level} level with no --localstorage-file; stdout={stdout:?} stderr={stderr:?}"
+            stdout.contains(&format!("{level}:undefined:object")),
+            "at the {level} level `typeof localStorage` must be \"undefined\" (neutralized, not thrown) and `typeof sessionStorage` must be \"object\" (proving --experimental-webstorage actually reached this level); stdout={stdout:?} stderr={stderr:?}"
         );
     }
 
@@ -2934,6 +5179,35 @@ fn worker_blob_wrapping_preserves_file_instanceof_blob() {
 }
 
 #[test]
+fn worker_blob_url_revoke_forwards_caller_arity() {
+    // Regression: the revokeObjectURL wrap called the native function with a fixed
+    // arity of one, so `URL.revokeObjectURL()` passed `undefined` through instead of
+    // reaching Node's zero-arg ERR_MISSING_ARGS check — nub returned silently where
+    // vanilla Node throws.
+    let (stdout, stderr, code) = run_nub("worker", "blob-url-revoke-arity.ts");
+    assert_eq!(
+        code, 0,
+        "revoke-arity fixture should run: {stderr}\n{stdout}"
+    );
+    // Node's own zero-arg guard landed in v20.12.0; on the 18.19 floor and the
+    // 20.11 compat leg plain Node returns silently, so forwarding real arity
+    // must return silently there too.
+    let expected = if node_at_least((20, 12, 0)) {
+        "revoke-no-args:ERR_MISSING_ARGS"
+    } else {
+        "revoke-no-args:no-throw"
+    };
+    assert!(
+        stdout.contains(expected),
+        "URL.revokeObjectURL() with no arguments must match plain Node ({expected}): {stdout}"
+    );
+    assert!(
+        stdout.contains("revoke-one-arg:ok"),
+        "the ordinary one-argument revoke must still succeed: {stdout}"
+    );
+}
+
+#[test]
 fn worker_error_event_carries_source_location() {
     // WHATWG ErrorEvent must carry filename/lineno/colno from where the error was
     // raised. nub fills these from the worker error's stack (they were hardcoded
@@ -3235,6 +5509,279 @@ fn reporter_hide_prefix_strips_per_line_prefix() {
     }
 }
 
+/// `--reporter-hide-prefix` hides the CHILD's per-line label, not Nub's own framing.
+/// pnpm 10.15.1 still emits `<dir> <script>: Done` with the flag set, and a bare
+/// `Done` names no package — a workspace run ended in a stack of identical,
+/// unattributable lines (#685).
+#[test]
+fn reporter_hide_prefix_keeps_the_label_on_nubs_status_line() {
+    let fixture = fixtures_dir().join("monorepo-deps");
+    let output = Command::new(nub_binary())
+        .args(["run", "-r", "--stream", "--reporter-hide-prefix", "build"])
+        .current_dir(&fixture)
+        .output()
+        .expect("spawn nub");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.lines().any(|l| l.contains("build: Done")),
+        "the per-member status line must keep its `<dir> <script>: ` label: {stderr}"
+    );
+    assert!(
+        !stderr.lines().any(|l| l.trim() == "Done"),
+        "no unattributable bare `Done` may remain: {stderr}"
+    );
+}
+
+/// `--color=always` has to reach the CHILD, not just Nub's own framing — that is the
+/// whole point of asking for it. A workspace run pipes child stdio to prefix each
+/// line, so the child sees no TTY and disables its own color; `FORCE_COLOR` is the
+/// override tools honor. Measured parity: pnpm 10.15.1 exports `FORCE_COLOR=1` here.
+/// Before #685 the flag parsed into a field nothing ever read.
+#[test]
+fn color_always_exports_force_color_to_the_script() {
+    let fixture = fixtures_dir().join("monorepo-deps");
+    let output = Command::new(nub_binary())
+        .args(["--color=always", "run", "-r", "color-probe"])
+        .current_dir(&fixture)
+        .env_remove("FORCE_COLOR")
+        .env_remove("NO_COLOR")
+        .output()
+        .expect("spawn nub");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("FC=1"),
+        "--color=always must export FORCE_COLOR=1 to the script: {stdout}"
+    );
+}
+
+/// The opt-OUT half, and pnpm's exact spelling: `--no-color` exports `FORCE_COLOR=0`
+/// (10.15.1 measured), not an unset var — a child that inherited an ambient
+/// `FORCE_COLOR=1` must still be told to stop.
+#[test]
+fn no_color_exports_force_color_zero_to_the_script() {
+    let fixture = fixtures_dir().join("monorepo-deps");
+    let output = Command::new(nub_binary())
+        .args(["--no-color", "run", "-r", "color-probe"])
+        .current_dir(&fixture)
+        .env("FORCE_COLOR", "1")
+        .output()
+        .expect("spawn nub");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("FC=0"),
+        "--no-color must export FORCE_COLOR=0, overriding the ambient value: {stdout}"
+    );
+}
+
+/// Default `auto` forces nothing either way, so a plain run stays byte-identical to
+/// pnpm's (which also leaves the child's `FORCE_COLOR` unset). This is the control
+/// that keeps the two tests above from passing for the wrong reason.
+#[test]
+fn color_auto_leaves_the_scripts_force_color_untouched() {
+    let fixture = fixtures_dir().join("monorepo-deps");
+    let output = Command::new(nub_binary())
+        .args(["run", "-r", "color-probe"])
+        .current_dir(&fixture)
+        .env_remove("FORCE_COLOR")
+        .env_remove("NO_COLOR")
+        .output()
+        .expect("spawn nub");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("FC=unset"),
+        "a default run must not force color on the child: {stdout}"
+    );
+}
+
+/// `nub --help` advertises `NO_COLOR`, but the stream-prefix path never consulted it,
+/// so a colored prefix survived the opt-out. `FORCE_COLOR=1` stands in for a TTY here
+/// (the test harness has none), which is also what makes this a real control: the
+/// first case proves the prefix CAN be colored, so the second failing to color is
+/// attributable to `NO_COLOR` rather than to there being no color anywhere.
+#[test]
+fn no_color_env_suppresses_nubs_own_prefix_color() {
+    let fixture = fixtures_dir().join("monorepo-deps");
+    let colored = Command::new(nub_binary())
+        .args(["run", "-r", "--stream", "build"])
+        .current_dir(&fixture)
+        .env("FORCE_COLOR", "1")
+        .env_remove("NO_COLOR")
+        .output()
+        .expect("spawn nub");
+    assert!(
+        String::from_utf8_lossy(&colored.stderr).contains('\x1b'),
+        "positive control: FORCE_COLOR=1 must colorize the prefix"
+    );
+
+    let plain = Command::new(nub_binary())
+        .args(["run", "-r", "--stream", "build"])
+        .current_dir(&fixture)
+        .env("FORCE_COLOR", "1")
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("spawn nub");
+    assert!(
+        !String::from_utf8_lossy(&plain.stderr).contains('\x1b'),
+        "NO_COLOR must win over FORCE_COLOR: {}",
+        String::from_utf8_lossy(&plain.stderr)
+    );
+}
+
+/// `FORCE_COLOR=0` means OFF. The old predicate tested only for the variable's
+/// PRESENCE, so the conventional disable spelling switched color on — and that now
+/// matters directly, because `--no-color` exports exactly `FORCE_COLOR=0` to
+/// children, so a nested `nub` would have colorized on its parent's opt-out.
+#[test]
+fn force_color_zero_disables_nubs_own_prefix_color() {
+    let fixture = fixtures_dir().join("monorepo-deps");
+    let output = Command::new(nub_binary())
+        .args(["run", "-r", "--stream", "build"])
+        .current_dir(&fixture)
+        .env("FORCE_COLOR", "0")
+        .env_remove("NO_COLOR")
+        .output()
+        .expect("spawn nub");
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains('\x1b'),
+        "FORCE_COLOR=0 must disable color: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// pnpm accepts `--no-color` both before and after the verb; Nub's pre-subcommand
+/// scan only sees the pre-verb position, so the post-verb spelling used to exit 2
+/// with `unexpected argument`. Both must work, and both must actually disable color.
+#[test]
+fn no_color_is_accepted_before_and_after_the_verb() {
+    let fixture = fixtures_dir().join("monorepo-deps");
+    for args in [
+        vec!["--no-color", "run", "-r", "--stream", "build"],
+        vec!["run", "-r", "--stream", "--no-color", "build"],
+    ] {
+        let output = Command::new(nub_binary())
+            .args(&args)
+            .current_dir(&fixture)
+            // FORCE_COLOR=1 makes the run colored to begin with, so the assertion
+            // below can only pass because `--no-color` turned it off. Clearing
+            // NO_COLOR matters for the same reason: an ambient one would satisfy it
+            // without the flag doing anything.
+            .env("FORCE_COLOR", "1")
+            .env_remove("NO_COLOR")
+            .output()
+            .expect("spawn nub");
+        assert!(
+            output.status.success(),
+            "`nub {}` must parse: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains('\x1b'),
+            "`nub {}` must disable color: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+/// An EMPTY `FORCE_COLOR` is Node's shortest spelling of ON — `getColorDepth` lists
+/// `case ''` alongside `'1'` and `'true'` (lib/internal/tty.js). Reading it as OFF
+/// split Nub from the very children it hands the variable to. `'false'` is the other
+/// half of the same table: Node falls through to monochrome, so Nub must too.
+#[test]
+fn force_color_values_follow_nodes_table() {
+    let fixture = fixtures_dir().join("monorepo-deps");
+    for (value, want_color) in [
+        ("", true),
+        ("1", true),
+        ("true", true),
+        ("0", false),
+        ("false", false),
+    ] {
+        let output = Command::new(nub_binary())
+            .args(["run", "-r", "--stream", "build"])
+            .current_dir(&fixture)
+            .env("FORCE_COLOR", value)
+            .env_remove("NO_COLOR")
+            .output()
+            .expect("spawn nub");
+        let got = String::from_utf8_lossy(&output.stderr).contains('\x1b');
+        assert_eq!(
+            got, want_color,
+            "FORCE_COLOR={value:?} should give color={want_color}, matching Node's getColorDepth"
+        );
+    }
+}
+
+/// Nub resolves `NO_COLOR` over `FORCE_COLOR`; Node resolves them the other way. With
+/// both set, that split a run against itself — Nub's label plain while the child
+/// colorized, because the child applied Node's order to the same two variables. In
+/// `auto` Nub now exports `FORCE_COLOR=0` for exactly that contradictory pair, so
+/// both halves of a line agree. The `FC=` probe reads what the child actually got.
+#[test]
+fn contradictory_color_env_does_not_split_nub_from_its_child() {
+    let fixture = fixtures_dir().join("monorepo-deps");
+    let output = Command::new(nub_binary())
+        .args(["run", "-r", "--stream", "color-probe"])
+        .current_dir(&fixture)
+        .env("FORCE_COLOR", "1")
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("spawn nub");
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains('\x1b'),
+        "NO_COLOR keeps Nub's own prefix plain: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("FC=0"),
+        "the child must be pinned to Nub's answer, not left to resolve the pair \
+         with Node's opposite precedence: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+/// The scope control for the case above. Nub only wraps a child's output on the
+/// prefixed path; a plain `nub run <script>` inherits stdio and frames nothing, so
+/// there is no contradiction to repair and the script must receive the environment
+/// it was given. pnpm, npm and a bare shell all pass `FORCE_COLOR=1` straight
+/// through here, and briefly nub did not.
+#[test]
+fn an_unprefixed_run_passes_the_color_env_through_untouched() {
+    let fixture = fixtures_dir().join("monorepo-deps").join("packages/core");
+    let output = Command::new(nub_binary())
+        .args(["run", "color-probe"])
+        .current_dir(&fixture)
+        .env("FORCE_COLOR", "1")
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("spawn nub");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("FC=1"),
+        "an inherited-stdio run must not rewrite the script's FORCE_COLOR: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+/// The control for the case above: with only ONE of the two set there is no
+/// contradiction, so `auto` must go on forcing nothing on the child.
+#[test]
+fn auto_still_forces_nothing_when_only_no_color_is_set() {
+    let fixture = fixtures_dir().join("monorepo-deps");
+    let output = Command::new(nub_binary())
+        .args(["run", "-r", "color-probe"])
+        .current_dir(&fixture)
+        .env("NO_COLOR", "1")
+        .env_remove("FORCE_COLOR")
+        .output()
+        .expect("spawn nub");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("FC=unset"),
+        "NO_COLOR alone already disables the child; nothing needs forcing: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
 #[test]
 fn ndjson_reporter_emits_valid_json_events() {
     // `--reporter=ndjson` emits one JSON object per line on stdout, covering
@@ -3344,6 +5891,175 @@ fn data_format_loaders() {
         stdout.contains("json5-feat:auth,logging"),
         "json5 array via default: {stdout}"
     );
+}
+
+/// Run `entry` from a throwaway project. The data imports under test must load
+/// through the staged native addon in CI rather than the JS parser fallbacks —
+/// yaml/json5/toml are deliberately absent from this crate's test dependencies.
+fn run_data_loader_probe(project: &Path, entry: &str) -> std::process::Output {
+    Command::new(nub_binary())
+        .arg(project.join(entry))
+        .current_dir(project)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("spawn nub")
+}
+
+/// 128 levels of nesting load; 129 are refused by the scanner before the tree is
+/// materialized, and the importing module never runs. The fixture stays
+/// temporary so a hostile-depth document never becomes a checked-in source file
+/// another tool might eagerly parse.
+#[test]
+fn native_yaml_loader_bounds_nesting_at_128_levels() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path();
+    let nested = |depth: usize| {
+        (0..depth)
+            .map(|level| format!("{}next:\n", "  ".repeat(level)))
+            .collect::<String>()
+            + &format!("{}ok\n", "  ".repeat(depth))
+    };
+    std::fs::write(project.join("at-limit.yaml"), nested(128)).unwrap();
+    std::fs::write(project.join("over-limit.yaml"), nested(129)).unwrap();
+    std::fs::write(
+        project.join("at-limit.ts"),
+        "import value from './at-limit.yaml';\nconsole.log(value ? 'yaml-at-limit' : 'missing');\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("over-limit.ts"),
+        "import './over-limit.yaml';\nconsole.log('must-not-run');\n",
+    )
+    .unwrap();
+
+    let at_limit = run_data_loader_probe(project, "at-limit.ts");
+    assert!(
+        at_limit.status.success(),
+        "128-level YAML must load: {}",
+        String::from_utf8_lossy(&at_limit.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&at_limit.stdout).trim(),
+        "yaml-at-limit"
+    );
+
+    let over_limit = run_data_loader_probe(project, "over-limit.ts");
+    assert!(
+        !over_limit.status.success(),
+        "over-limit YAML must fail normally rather than loading"
+    );
+    let stderr = String::from_utf8_lossy(&over_limit.stderr);
+    assert!(
+        stderr.contains("YAML parse error") && stderr.contains("128-level limit"),
+        "over-limit YAML must fail before native parsing: {stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&over_limit.stdout).contains("must-not-run"),
+        "the importer must not execute after a YAML-depth error"
+    );
+}
+
+/// A JSONC document whose entire body is `null` is a valid module, not a load
+/// error: its default export is JSON null, which the importer sees as
+/// `undefined`. The native parser must keep the JS fallback's answer here.
+#[test]
+fn a_jsonc_null_document_imports_as_undefined() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path();
+    std::fs::write(project.join("null.jsonc"), "null\n").unwrap();
+    std::fs::write(
+        project.join("null.ts"),
+        "import value from './null.jsonc';\nconsole.log(typeof value);\n",
+    )
+    .unwrap();
+
+    let output = run_data_loader_probe(project, "null.ts");
+    assert!(
+        output.status.success(),
+        "a JSONC null document must import: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "undefined");
+}
+
+#[test]
+fn native_tsconfig_and_package_metadata_accept_a_leading_utf8_bom() {
+    // The configured tsconfig is validated by the CLI, then re-read by the native
+    // resolver; its package `extends` metadata is re-read there too. Keep all
+    // three files BOM-prefixed so either missed native boundary loses the alias.
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path();
+    let bom = "\u{feff}";
+    std::fs::create_dir_all(project.join("node_modules/tsconfig-base")).unwrap();
+    std::fs::write(
+        project.join("nub.jsonc"),
+        r#"{ "tsconfig": "./tsconfig.runtime.jsonc" }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("tsconfig.runtime.jsonc"),
+        format!(
+            r#"{bom}{{ "extends": "tsconfig-base", "compilerOptions": {{ "baseUrl": ".", "paths": {{ "bom-alias": ["./alias.ts"] }} }} }}"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("node_modules/tsconfig-base/package.json"),
+        format!(r#"{bom}{{ "name": "tsconfig-base", "tsconfig": "./base.json" }}"#),
+    )
+    .unwrap();
+    std::fs::write(project.join("node_modules/tsconfig-base/base.json"), "{}").unwrap();
+    std::fs::write(
+        project.join("alias.ts"),
+        "export const value = 'bom-alias-ok';\n",
+    )
+    .unwrap();
+    // This one is read only by the JS module-format fallback. A BOM must not
+    // make it silently treat an ambiguous .ts file as CommonJS.
+    std::fs::create_dir_all(project.join("format")).unwrap();
+    std::fs::write(
+        project.join("format/package.json"),
+        format!(r#"{bom}{{ "type": "module" }}"#),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("main.ts"),
+        "import { value } from 'bom-alias';\nconsole.log(value);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("format/main.ts"),
+        "console.log(typeof module);\n",
+    )
+    .unwrap();
+
+    let run = |entry: &str| {
+        Command::new(nub_binary())
+            .arg(project.join(entry))
+            .current_dir(project)
+            .env("XDG_CACHE_HOME", unique_test_cache())
+            .env("XDG_CONFIG_HOME", project.join("config"))
+            .output()
+            .expect("spawn nub")
+    };
+    let alias = run("main.ts");
+    assert!(
+        alias.status.success(),
+        "BOM'd tsconfig/package metadata must preserve the alias: {}",
+        String::from_utf8_lossy(&alias.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&alias.stdout).trim(),
+        "bom-alias-ok"
+    );
+
+    let format = run("format/main.ts");
+    assert!(
+        format.status.success(),
+        "BOM'd package type must remain readable: {}",
+        String::from_utf8_lossy(&format.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&format.stdout).trim(), "undefined");
 }
 
 #[test]
@@ -3501,6 +6217,50 @@ fn env_file_flag_preserves_unquoted_json_value_without_auto_dotenv() {
 
     assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
     assert_eq!(stdout.trim(), r#""{\"field\":\"line1\\nline2\"}""#);
+}
+
+#[test]
+fn env_file_flag_delivers_dollar_values_unexpanded_like_node() {
+    // The deliberate asymmetry (wiki/research/env-file-loading.md, Synthesis):
+    // auto-discovered `.env*` expand `${VAR}`, the Node-compat `--env-file` flag
+    // does NOT — Node's own parser never expands, and `test/parallel/test-dotenv.js`
+    // asserts the literal value. Expanding here silently truncated any value
+    // holding a literal `$` (the `PASSWORD=foo$bar` footgun).
+    let dir = unique_test_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // UNSET covers the undefined reference (expansion would erase it); DEFINED
+    // covers a reference to a key this same file sets (expansion would resolve
+    // it), which is the case a same-file-only expander still gets wrong.
+    std::fs::write(
+        dir.join("literal.env"),
+        "DEFINED=hello\nUNSET=\"{ port: $MISSING_VAR}\"\nUSES_DEFINED=\"port $DEFINED end\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("app.js"),
+        "console.log(JSON.stringify([process.env.UNSET, process.env.USES_DEFINED]));\n",
+    )
+    .unwrap();
+
+    let out = Command::new(nub_binary())
+        .arg("--env-file=literal.env")
+        .arg("app.js")
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", dir.join("cache"))
+        .output()
+        .expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    assert_eq!(
+        stdout.trim(),
+        r#"["{ port: $MISSING_VAR}","port $DEFINED end"]"#,
+        "--env-file values must arrive byte-for-byte as Node delivers them, \
+         with no ${{VAR}} expansion; got {stdout:?}"
+    );
 }
 
 #[test]
@@ -3696,6 +6456,66 @@ fn finish_watch_probe(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+/// Wait for a RESTART to produce `needle`, re-applying `poke` as it polls.
+///
+/// Node's `--watch` supervisor builds its watch set asynchronously, and an
+/// `--env-file` is consumed before user code runs — so the first snapshot
+/// proves the child STARTED, not that the env file is being watched yet. A
+/// single write can land in that gap, be missed entirely, and then nothing
+/// ever restarts: the wait burns its full budget and the test fails having
+/// only ever seen the startup snapshot. Measured at 7 failures / 200 runs on
+/// `bac8e7be4d` before this.
+///
+/// Re-applying the same write closes the race without weakening anything —
+/// the restarted child must still report the new values to satisfy the
+/// caller's assertions. Only the reload waits need this; a wait for the
+/// FIRST snapshot has no such race and uses `wait_for_watch_snapshot`.
+fn wait_for_watch_reload(
+    path: &Path,
+    needle: &str,
+    child: &mut std::process::Child,
+    stderr: &Path,
+    mut poke: impl FnMut(),
+) -> String {
+    // The poke bound is the correctness argument, not a tuning knob. `poke`
+    // re-writes the file Node is watching, so each one RESTARTS the child;
+    // poking forever on a fixed interval livelocks as soon as the child cannot
+    // boot and append within one interval, because the next poke kills it first.
+    // Measured by sweeping boot cost against this loop: a 900ms boot returns in
+    // 2.14s, a 1000ms boot never returns. Raising the budget cannot fix that —
+    // above the cliff no budget succeeds, below it the wait returns in 1-2s. So
+    // bound the pokes instead, and let a slow child simply finish afterwards.
+    const MAX_POKES: usize = 3;
+    let mut pokes = 0;
+    for i in 0..300 {
+        if let Ok(snapshot) = std::fs::read_to_string(path)
+            && snapshot.contains(needle)
+        {
+            return snapshot;
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            finish_watch_probe(child);
+            panic!(
+                "watch probe exited {status} before writing {needle:?}; stderr: {:?}",
+                std::fs::read_to_string(stderr).ok()
+            );
+        }
+        // Every ~1s, not every tick: enough to outlast watcher registration
+        // without spamming the filesystem the watcher is reading.
+        if i % 10 == 9 && pokes < MAX_POKES {
+            poke();
+            pokes += 1;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    finish_watch_probe(child);
+    panic!(
+        "watch probe never reloaded to {needle:?}; last snapshot: {:?}; stderr: {:?}",
+        std::fs::read_to_string(path).ok(),
+        std::fs::read_to_string(stderr).ok()
+    );
+}
+
 fn wait_for_watch_snapshot(
     path: &Path,
     needle: &str,
@@ -3749,7 +6569,7 @@ fn watch_env_guard_fails_closed_on_malformed_state() {
         process.stdout.write(JSON.stringify({ code: error.code, visible, markerPresent: Object.hasOwn(process.env, '__NUB_WATCH_ENV_GUARD') }));
       }
     "#;
-    let mut cmd = Command::new("node");
+    let mut cmd = Command::new(target_node_path());
     cmd.args(["-e", script]).arg(guard);
     remove_ambient_watch_control_vars(&mut cmd);
     cmd.env("__NUB_WATCH_ENV_GUARD", "{not-json")
@@ -3784,7 +6604,7 @@ fn watch_env_guard_missing_main_state_clears_denied_and_aborts() {
         process.stdout.write(JSON.stringify({ code: error.code, visible, markerPresent: Object.hasOwn(process.env, '__NUB_WATCH_ENV_GUARD') }));
       }
     "#;
-    let mut cmd = Command::new("node");
+    let mut cmd = Command::new(target_node_path());
     cmd.args(["-e", script]).arg(guard);
     remove_ambient_watch_control_vars(&mut cmd);
     cmd.env("NODE_OPTIONS", "--no-warnings")
@@ -3830,7 +6650,7 @@ fn watch_env_guard_non_main_reentry_preserves_sanitized_ambient() {
       worker.once('message', (value) => process.stdout.write(JSON.stringify(value)));
       worker.once('error', (error) => { throw error; });
     "#;
-    let mut cmd = Command::new("node");
+    let mut cmd = Command::new(target_node_path());
     cmd.args(["-e", script]).arg(&worker).arg(&guard);
     remove_ambient_watch_control_vars(&mut cmd);
     cmd.env("NODE_OPTIONS", "--no-warnings")
@@ -3917,7 +6737,7 @@ fn watch_env_guard_compat_loader_worker_preserves_ambient() {
         "ambientKeys": nub_core::workspace::env::denied_env_file_keys(),
         "nodeOptions": ambient_node_options,
     });
-    let mut cmd = Command::new("node");
+    let mut cmd = Command::new(target_node_path());
     cmd.args(["--import", "./bootstrap.mjs", "entry.cjs"])
         .current_dir(&dir);
     remove_ambient_watch_control_vars(&mut cmd);
@@ -4010,17 +6830,22 @@ fn watch_filters_late_runtime_control_env_keys_but_reloads_ordinary_vars() {
         "first child: {first}"
     );
 
-    std::fs::write(
-        dir.join(".env"),
-        "NODE_OPTIONS=--require ./attacker.cjs\n\
+    let env_file = dir.join(".env");
+    let reloaded_env = "NODE_OPTIONS=--require ./attacker.cjs\n\
          NODE_TLS_REJECT_UNAUTHORIZED=0\n\
          NODE_EXTRA_CA_CERTS=/definitely/not/a/ca.pem\n\
          node_repl_external_module=./attacker.cjs\n\
-         ORDINARY=two\n",
-    )
-    .unwrap();
-    let snapshots_text =
-        wait_for_watch_snapshot(&snapshots, r#""ordinary":"two""#, &mut child, &stderr);
+         ORDINARY=two\n";
+    std::fs::write(&env_file, reloaded_env).unwrap();
+    let snapshots_text = wait_for_watch_reload(
+        &snapshots,
+        r#""ordinary":"two""#,
+        &mut child,
+        &stderr,
+        || {
+            let _ = std::fs::write(&env_file, reloaded_env);
+        },
+    );
     finish_watch_probe(&mut child);
 
     for line in snapshots_text.lines() {
@@ -4083,8 +6908,18 @@ fn watch_reloads_explicit_env_file_across_restarts() {
 
     // Changed values AND keys added after startup must both reach the
     // restarted child (the #479 failure froze the startup snapshot).
-    std::fs::write(dir.join("custom.env"), "ORDINARY=two\nADDED=three\n").unwrap();
-    let reloaded = wait_for_watch_snapshot(&snapshots, r#""ordinary":"two""#, &mut child, &stderr);
+    let env_file = dir.join("custom.env");
+    let reloaded_env = "ORDINARY=two\nADDED=three\n";
+    std::fs::write(&env_file, reloaded_env).unwrap();
+    let reloaded = wait_for_watch_reload(
+        &snapshots,
+        r#""ordinary":"two""#,
+        &mut child,
+        &stderr,
+        || {
+            let _ = std::fs::write(&env_file, reloaded_env);
+        },
+    );
     finish_watch_probe(&mut child);
 
     assert!(
@@ -6218,10 +9053,51 @@ fn transpile_cache_eviction_evicts_oldest_over_cap() {
     // runtime/cache-evict.mjs and sweeps a temp dir with a small cap), so it
     // verifies LRU-by-mtime eviction, the low-water target, and that the
     // `.sweep` sentinel + `*.tmp` files are skipped — without the 512 MiB
-    // shipped cap making it untestable.
+    // shipped cap making it untestable. It covers both shapes: the flat
+    // transpile dir and nub's own nested V8 compile-cache dir, whose version
+    // subdirectories are pruned once eviction empties them.
     let (stdout, stderr, code) = run_nub("cache-evict", "sweep-test.mjs");
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("EVICT-OK"), "eviction behavior: {stdout}");
+}
+
+#[test]
+fn cache_evict_module_takes_no_static_builtin_imports() {
+    // The deferred sweep reaches cache-evict.mjs through an UNAWAITED dynamic
+    // `import()`, so its import graph is in flight while the user's entry is still
+    // loading. A static `node:fs`/`node:path` import there leaves a PENDING builtin
+    // job in the ESM loadCache, and on Node 20.10–20.18 a transpiled CommonJS
+    // entry's `require()` of the same builtin then takes the ESM translator's sync
+    // path and trips `assert(this.module instanceof ModuleWrap)` —
+    // ERR_INTERNAL_ASSERTION in ~25% of runs (#706). The race is timing-dependent
+    // and so cannot be asserted directly; guard the invariant that removes it.
+    let src = std::fs::read_to_string(
+        Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap())
+            .join("../../runtime/cache-evict.mjs"),
+    )
+    .expect("read runtime/cache-evict.mjs");
+    let offenders: Vec<&str> = src
+        .lines()
+        .filter(|l| l.trim_start().starts_with("import ") && l.contains("\"node:"))
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "cache-evict.mjs must fetch builtins synchronously, not by static import: {offenders:?}"
+    );
+}
+
+#[test]
+fn data_url_with_extension_shaped_tail_imports() {
+    // A `data:` URL's payload is inline, so a trailing `//x.ts` is SOURCE, not a
+    // filename. Deriving an extension from it routed the load hooks into the
+    // transpile/data branches, where `fileURLToPath` threw ERR_INVALID_URL_SCHEME
+    // on a module plain Node imports without complaint.
+    let (stdout, stderr, code) = run_nub("data-url", "extension-tail.mjs");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("DATA-URL-OK"),
+        "data: URL dispatch: {stdout}"
+    );
 }
 
 // ── `nub run` full flag set (run.md) ────────────────────────────────────────
@@ -6596,6 +9472,64 @@ fn run_points_node_env_at_an_augmenting_shim() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The argv0=`node` route must build the effective-config snapshot exactly once,
+/// anchored to its own cwd, and a project config it never consumes must not gate
+/// it. Unix-only: the hijack is reached via an argv0=`node` symlink.
+#[cfg(unix)]
+#[test]
+fn node_argv0_initializes_one_project_config_snapshot() {
+    let dir = std::env::temp_dir().join(format!("nub-node-config-snapshot-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let proj = dir.join("proj");
+    let shim_dir = dir.join("nub-node-shim-test");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::create_dir_all(&shim_dir).unwrap();
+    std::fs::write(proj.join("nub.jsonc"), r#"{ "conditions": [] }"#).unwrap();
+    let node_shim = shim_dir.join("node");
+    std::os::unix::fs::symlink(nub_binary(), &node_shim).expect("symlink nub to node");
+    let log = dir.join("snapshot.log");
+
+    let output = Command::new(&node_shim)
+        .arg("--version")
+        .current_dir(&proj)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .env("__NUB_TEST_CONFIG_SNAPSHOT_LOG", &log)
+        .output()
+        .expect("spawn node argv0 route");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a project config must not block node argv0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let lines: Vec<_> = std::fs::read_to_string(&log)
+        .expect("node argv0 route must initialize the config snapshot")
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "the successful node argv0 route must initialize exactly one snapshot from its final cwd: {lines:?}"
+    );
+    let logged = lines[0]
+        .strip_prefix("cwd=")
+        .and_then(|rest| rest.strip_suffix(" project=loaded"))
+        .unwrap_or_else(|| panic!("unexpected snapshot log line: {}", lines[0]));
+    // Compare resolved directories, not path spellings: `std::env::temp_dir()`
+    // hands the child `/var/...` while `canonicalize` returns the `/private/var`
+    // target. Both name the same directory, and WHICH directory the snapshot
+    // resolved from is the contract under test.
+    assert_eq!(
+        Path::new(logged).canonicalize().expect("logged cwd exists"),
+        proj.canonicalize().expect("project dir exists"),
+        "the snapshot must be anchored to the argv0 route's own cwd"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The `node` PATH-shim hijack honors `--node` as an augmentation opt-out.
 /// `node foo.js` (no flag) runs FULLY augmented — `.env` is eager-loaded into the
 /// child. `node --node foo.js` strips the flag and runs the pinned Node VANILLA —
@@ -6742,6 +9676,7 @@ fn node_hijack_node_flag_opts_out_of_augmentation() {
 /// runs plain), while leaving the default (unset) augmented. `.env` eager-load
 /// is the discriminator (only loaded when augmented). Unix-only (the hijack is
 /// reached via an argv0=`node` symlink).
+// @lat: [[compat-mode-tests#Compat mode#Environment form applies tree-wide, including the node hijack]]
 #[cfg(unix)]
 #[test]
 fn node_compat_env_forces_vanilla_tree_wide() {
@@ -6848,6 +9783,137 @@ fn node_compat_env_forces_vanilla_tree_wide() {
     assert!(
         falsy_out.contains("COMPAT_ENV=from_dotenv"),
         "NODE_COMPAT=0 must be falsy — run stays augmented (`.env` loads): {falsy_out}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A compat LAUNCH — `--node`, or a plain `node` through the persistent shim —
+/// covers that process and the bare `node` processes beneath it. It is not the
+/// user's `NODE_COMPAT`: a `nub` command started inside the tree is its own
+/// invocation and augments, along with its own subtree (#1005).
+/// `process.versions.nub` is the discriminator, present only while augmentation
+/// is active. Unix-only (both shims are reached through an argv0=`node` link).
+// @lat: [[compat-mode-tests#Compat mode#A compat launch does not opt out a nested nub invocation]]
+#[cfg(unix)]
+#[test]
+fn compat_launch_does_not_opt_out_a_nested_nub_invocation() {
+    let dir = unique_test_cache().join("compat-launch");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // The per-invocation hijack shim, which augments by default.
+    let hijack_dir = dir.join("nub-node-shim-test");
+    std::fs::create_dir_all(&hijack_dir).unwrap();
+    let hijack_node = hijack_dir.join("node");
+    std::os::unix::fs::symlink(nub_binary(), &hijack_node).expect("symlink nub → node");
+
+    // The persistent shim, recognized by its `nub/node-shim` directory shape. A
+    // hard link, not a symlink: Linux reads `current_exe` from `/proc/self/exe`,
+    // which follows a symlink back to the `nub` binary.
+    let persistent_dir = dir.join("nub").join("node-shim");
+    std::fs::create_dir_all(&persistent_dir).unwrap();
+    let persistent_node = persistent_dir.join("node");
+    if std::fs::hard_link(nub_binary(), &persistent_node).is_err() {
+        std::fs::copy(nub_binary(), &persistent_node).expect("copy nub → node");
+    }
+
+    let proj = dir.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(proj.join("package.json"), r#"{"name":"compat-launch"}"#).unwrap();
+    std::fs::write(
+        proj.join("probe.js"),
+        "console.log('PROBE=' + (process.versions.nub ? 'augmented' : 'vanilla'));\n",
+    )
+    .unwrap();
+    // Reports its own mode, then runs its arguments as a child command.
+    std::fs::write(
+        proj.join("launcher.cjs"),
+        r#"const { spawnSync } = require('node:child_process');
+const mode = process.versions.nub ? 'augmented' : 'vanilla';
+require('node:fs').writeSync(1, `LAUNCHER=${mode}\n`);
+const [command, ...args] = process.argv.slice(2);
+const child = spawnSync(command, args, { stdio: 'inherit' });
+if (child.error) throw child.error;
+process.exit(child.status ?? 1);
+"#,
+    )
+    .unwrap();
+
+    // The hijack shim leads PATH, standing in for a shim an outer invocation
+    // left behind: a bare `node` beneath a compat launch lands on it.
+    let ambient_path = std::env::var_os("PATH").unwrap();
+    let mut path_entries = vec![hijack_dir];
+    path_entries.extend(std::env::split_paths(&ambient_path));
+    let path = std::env::join_paths(path_entries).unwrap();
+
+    let run = |program: &Path, args: &[&str]| {
+        let out = Command::new(program)
+            .args(args)
+            .current_dir(&proj)
+            .env("PATH", &path)
+            .env("XDG_CACHE_HOME", unique_test_cache())
+            .env_remove("NODE_COMPAT")
+            .output()
+            .expect("spawn");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{program:?} {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let nub = nub_binary();
+    let nub = nub.to_str().unwrap();
+
+    // 1. A plain `node` from the persistent shim is vanilla; `nub probe.js`
+    //    beneath it augments.
+    let out = run(&persistent_node, &["launcher.cjs", nub, "probe.js"]);
+    assert!(
+        out.contains("LAUNCHER=vanilla"),
+        "the persistent shim must run `node` vanilla: {out}"
+    );
+    assert!(
+        out.contains("PROBE=augmented"),
+        "`nub probe.js` beneath the persistent shim's `node` must augment: {out}"
+    );
+
+    // 2. The same beneath an explicit `--node` run.
+    let out = run(Path::new(nub), &["--node", "launcher.cjs", nub, "probe.js"]);
+    assert!(
+        out.contains("LAUNCHER=vanilla"),
+        "`nub --node` must run its own file vanilla: {out}"
+    );
+    assert!(
+        out.contains("PROBE=augmented"),
+        "`nub probe.js` beneath a `--node` run must augment: {out}"
+    );
+
+    // 3. A bare `node` beneath the `--node` run continues it, even through a
+    //    shim that augments by default.
+    let out = run(
+        Path::new(nub),
+        &["--node", "launcher.cjs", "node", "probe.js"],
+    );
+    assert!(
+        out.contains("PROBE=vanilla"),
+        "a bare `node` beneath a `--node` run must stay vanilla: {out}"
+    );
+
+    // 4. The nested `nub` starts a fresh invocation: a bare `node` beneath IT
+    //    augments, rather than inheriting the outer compat launch.
+    let nested = [
+        "--node",
+        "launcher.cjs",
+        nub,
+        "launcher.cjs",
+        "node",
+        "probe.js",
+    ];
+    let out = run(Path::new(nub), &nested);
+    assert!(
+        out.contains("LAUNCHER=augmented") && out.contains("PROBE=augmented"),
+        "a nested `nub` and the `node` beneath it must both augment: {out}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -7760,5 +10826,90 @@ fn phantom_dependency_miss_points_at_the_hoisted_opt_out() {
     assert!(
         !typo.contains("phantom dependency"),
         "a package absent from .store is a genuine miss, not a phantom dep — no hint: {typo}"
+    );
+}
+
+#[test]
+fn yaml_alias_bomb_is_rejected_before_loader_materialization() {
+    // Each anchor doubles the previous collection. The compact input would make
+    // yaml-rust2 clone well over the preflight budget, so the native loader must
+    // reject the scanner estimate rather than allocating the expanded tree.
+    let (_, stderr, code) = run_nub("yaml-alias-budget", "main.ts");
+    assert_ne!(code, 0, "the alias bomb must not run");
+    assert!(
+        stderr.contains("alias expansion would materialize more than the 100000-node limit"),
+        "the pre-loader materialization budget must reject it: {stderr}"
+    );
+}
+
+/// The positive control for the budget above. The fixture reuses one small
+/// anchored collection 64 times and a scalar anchor 64 more — past the
+/// 50-collection-alias cap the preflight used to carry, but only 448 nodes of
+/// actual materialization — so a budget that counted aliases instead of pricing
+/// them would refuse a document that is entirely ordinary.
+#[test]
+fn yaml_alias_reuse_within_the_budget_still_loads() {
+    let (stdout, stderr, code) = run_nub("yaml-alias-reuse", "main.ts");
+    assert_eq!(code, 0, "flat alias reuse must load; stderr: {stderr}");
+    // Assert the expanded data, not just the exit code: a loader that returned
+    // an empty shell would also exit 0.
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|err| {
+        panic!("stdout is not the probe's JSON ({err})\nstdout: {stdout}\nstderr: {stderr}")
+    });
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "configs": 64,
+            "regions": 64,
+            "last": { "enabled": true, "names": ["one", "two"] },
+            "lastRegion": "us-east-1",
+        }),
+        "every alias must expand to its anchored value; stderr: {stderr}"
+    );
+}
+
+/// A failed compile reports itself, and does not also reach `Termination`.
+///
+/// The unit tests around `error_lines` and `diagnostic_lines` all stay green if
+/// the `.or_else` in `cli.rs` is deleted, returns zero, or lets the error escape
+/// — they test the renderer, and nothing tests that anything calls it. This
+/// spawns the real binary so the wiring is what is under test.
+///
+/// `--platform` is the cheapest failure that reaches it: it is refused while
+/// resolving arguments, so no launcher template, no Node download and no bundler
+/// run are needed, and the test costs a process spawn.
+///
+/// The absence assertion is the load-bearing half. Returning the error instead
+/// of reporting it would still exit 1 and still print the message — just under
+/// `Termination`'s own `Error:` framing — so an exit-code check alone cannot
+/// tell the two apart.
+#[cfg(feature = "compile")]
+#[test]
+fn a_failed_compile_prints_the_error_tier_rather_than_escaping_to_termination() {
+    let dir = unique_test_cache();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("app.ts"), "console.log(1);\n").unwrap();
+
+    let output = Command::new(nub_binary())
+        .args(["compile", "app.ts", "--platform", "sunos-sparc"])
+        .current_dir(&dir)
+        .env("NO_COLOR", "1")
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("failed to spawn nub");
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a refused --platform exits 1; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("error  unknown --platform"),
+        "expected the error tier's label and two-space gap, got: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("Error:"),
+        "the error must not ALSO escape to Termination; got: {stderr:?}"
     );
 }

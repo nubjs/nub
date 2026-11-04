@@ -23,3 +23,7 @@ That broke `nubx esbuild`, `./node_modules/.bin/esbuild`, and any script that sh
 nub now detects native executables (ELF, Mach-O, PE) and runs them directly — a symlink on Unix, a direct-exec wrapper on Windows — instead of wrapping them in `node`. Bin shims are regenerated after dependency install scripts run, so a launcher that turns native mid-install still gets the right shim, including when the build is restored from the side-effects cache.
 
 The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.4.7) list every change in this release.
+
+## Get started
+
+<GetStarted />

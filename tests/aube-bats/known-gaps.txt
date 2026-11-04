@@ -36,6 +36,7 @@ install.bats|aube install --fix-lockfile conflicts with --prefer-frozen-lockfile
 install.bats|aube install --network-concurrency caps tarball fetches|--network-concurrency / --no-verify-store-integrity / --no-side-effects-cache not wired
 install.bats|aube install --lockfile-only conflicts with --frozen-lockfile|flag-conflict validation not wired
 ci.bats|aube clean-install is an alias for aube ci|clean-install alias not wired
+ci.bats|aube clean-install --enable-global-virtual-store overrides the CI default|clean-install alias not wired
 lockfile_dir.bats|aube install --lockfile-dir: writes lockfile to the named dir, not the project root|--lockfile-dir not wired
 lockfile_dir.bats|aube install --lockfile-dir: importer key is the project's relative path|--lockfile-dir not wired
 lockfile_dir.bats|aube install --lockfile-dir: creates the target directory if missing|--lockfile-dir not wired

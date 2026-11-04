@@ -20,11 +20,11 @@ metadata:
 
 # Ad-hoc testing on a real OS/platform via CI
 
-Some behavior can only be observed on a real target platform: macOS Seatbelt / `sandbox-exec` / Gatekeeper / codesigning, Windows `cmd.exe` / `--script-shell` shell selection / `.cmd`/`.bat` resolution / Authenticode / SmartScreen, musl-vs-glibc detection, Linux-arm64, a pinned Node floor. Docker closes the **Linux** corners cheaply (see AGENTS.md's Docker section) but runs Linux containers only — it is **not** a substitute for macOS or Windows. CI runners (`macos-latest`, `windows-latest`) are the only way to exercise those, and this skill is how you do it as a throwaway probe.
+Some behavior is only observable on a real target platform: macOS Seatbelt / `sandbox-exec` / Gatekeeper / codesigning, Windows `cmd.exe` / `--script-shell` selection / `.cmd`/`.bat` resolution / Authenticode / SmartScreen, musl-vs-glibc detection, Linux-arm64, a pinned Node floor. Docker closes the **Linux** corners cheaply but runs Linux containers only — it is not a substitute for macOS or Windows.
 
 ## The key fact: no PR is required
 
-A GitHub Actions workflow does **not** need an open pull request to run. Trigger it on the **branch** instead:
+A GitHub Actions workflow does not need an open pull request. Trigger it on the **branch**:
 
 ```yaml
 on:
@@ -36,43 +36,60 @@ on:
   workflow_dispatch:                 # INERT until the file lands on the default branch — see below
 ```
 
-With this trigger the CI capability is keyed to the **branch + workflow file**, not to a PR. Consequences:
-
-- **Push to the branch → the probe runs.** Open no PR, or close one you opened — the runs keep working.
-- **Re-run with another push** — an empty commit is the simplest: `git commit --allow-empty -m rerun && git push`. Or re-run a finished run as-is with `gh run rerun <run-id>` (`gh run list --branch <branch>` to get the id).
-- **`push` is load-bearing; `workflow_dispatch` alone will NOT work for a branch-only probe.** GitHub only registers a `workflow_dispatch` workflow if the file is on the **default branch** — so for a workflow that lives only on the feature branch, `gh workflow run <wf>.yml --ref <branch>` errors ("no workflows found") and it never appears in the Actions UI. Keep the `workflow_dispatch` entry for the day the probe graduates to `main`, but do not rely on it before then; the `push` trigger is the only thing that fires a not-on-`main` workflow.
-- **Do NOT open a PR just to get CI.** A PR signals "ready to land / please review," which a prototype is not. Opening one to trigger CI is the wrong tool and reads as premature-ship. (Worked example: PR #205 added a `macos-latest` Seatbelt probe; it was closed as premature, and the branch `push` trigger meant the macOS validation kept working off the `fs-write-confine` branch with the PR closed.)
-- Omit any `pull_request:` trigger — it ties runs to PR state, which is exactly what you're avoiding.
+- **Push to the branch → the probe runs.** Open no PR, or close one you opened.
+- **Re-run with another push:** `git commit --allow-empty -m rerun && git push`. Or re-run a finished run with `gh run rerun <run-id>` (`gh run list --branch <branch>` for the id).
+- **`push` is load-bearing; `workflow_dispatch` alone will NOT work for a branch-only probe.** GitHub only registers a `workflow_dispatch` workflow if the file is on the **default branch**, so `gh workflow run <wf>.yml --ref <branch>` errors ("no workflows found") and it never appears in the Actions UI. Keep the entry for when the probe graduates to `main`; don't rely on it before then.
+- **Do NOT open a PR just to get CI.** A PR signals "ready to land," which a prototype is not.
+- Omit any `pull_request:` trigger — it ties runs to PR state, which is what you're avoiding.
 
 ## The harness shape
 
-Keep the probe **self-contained** under `tests/<probe-name>/`, mirroring the existing ones, so the whole thing is one reviewable, reproducible unit:
+Keep the probe self-contained under `tests/<probe-name>/`, mirroring the existing ones:
 
 - A generator / runner (e.g. an SBPL profile generator + a `sandbox-exec` runner; a `.cmd` resolver harness).
-- Fast **unit + smoke tests** that assert the enforcement and the bypass/fail-closed cases.
-- A `README.md` (what it validates, how to reproduce locally) and a `results.md` (the findings, plus any heavy runs reproduced on demand).
+- Fast unit + smoke tests asserting the enforcement and the bypass/fail-closed cases.
+- A `README.md` (what it validates, how to reproduce locally) and a `results.md` (findings, plus heavy runs reproduced on demand).
 - The branch-scoped workflow `.github/workflows/<wf>.yml`.
 
-Examples to mirror: `tests/sandbox-macos-writeconfine/` + `.github/workflows/sandbox-macos-writeconfine.yml` (macOS Seatbelt write-confine), and its Windows counterpart `tests/sandbox-win-probes/` (each lives on its own probe branch, not `main`).
+Mirror `tests/sandbox-macos-writeconfine/` + `.github/workflows/sandbox-macos-writeconfine.yml`, or its Windows counterpart `tests/sandbox-win-probes/` (each on its own probe branch, not `main`).
 
-## Keep CI lean — fast core only
+**Keep CI lean — fast, deterministic core only:** unit tests + the enforcement/bypass smoke matrix, no network, no mega-fixture. Heavy or combinatorial runs are documented in `results.md` and reproduced on demand. CI capacity is shared; a 22-minute-per-push probe job is already a lot.
 
-The CI job runs the **fast, deterministic core**: unit tests + the enforcement/bypass smoke matrix, no network, no mega-fixture. Heavy or combinatorial runs (a frameworks mega-fixture, per-cache-family sweeps) are documented in `results.md` and reproduced **on demand**, not baked into every CI run. CI capacity is shared (AGENTS.md) — a probe job that takes 22 minutes per push is already a lot; don't make it a per-commit tax.
+## Test every candidate FIX in one build-free run, not one per push
+
+When the probe fails and you have several plausible repairs, do not guess-and-push: each loop costs a
+full build plus queue time. Write a job that tries **all** candidates at once against a stand-in, with
+no compile step — a `.cmd`/shell quoting question needs `cmd.exe` and a two-line stub, not the real
+binary. Minutes instead of half an hour, and the losing candidates are results you keep.
+
+Two rules that make the output trustworthy:
+
+- **Include the CURRENT broken form as a control.** It must fail. If it passes, the reproduction is
+  wrong and every other row is meaningless — say so in the output rather than reading the winners.
+- **A losing alternative is a result, not a job failure.** Exit non-zero only when the control passes
+  or when NO candidate works. Otherwise the job sits permanently red over a candidate you never
+  intended to ship, and readers learn to ignore it.
 
 ## Run and watch
 
-- Kick a run by pushing to the branch (an empty commit if the harness is unchanged: `git commit --allow-empty -m rerun && git push`); list with `gh run list --workflow <wf>.yml --branch <branch>`. (`gh workflow run` only works once the file is on the default branch — see the trigger note above.)
+- Kick a run by pushing to the branch; list with `gh run list --workflow <wf>.yml --branch <branch>`.
 - Await a specific run with the `ci-watch` skill (`scripts/ci-watch.ts`) rather than raw `gh run watch` — it waits for the run to exist, polls authoritative terminal status, fails fast, and exits 0 only on confirmed success.
-- A failure is immediately actionable — read the job log, fix the harness, push again (the `push` trigger re-runs it).
+- A failure is immediately actionable — read the job log, fix the harness, push again.
 
 ## Lifecycle
 
-- **The branch is the durable home of the probe** while it's exploratory — it persists with no PR ceremony. Push, run, iterate.
-- When the harness graduates into a permanent regression check, fold it into `main` through the normal flow (it's `tests/**` + a workflow file — a content/CI change, which AGENTS.md routes straight to `main`, no review-gate PR). Decide its steady-state trigger then (e.g. path-filtered on `main`, or `workflow_dispatch`-only).
+- **The branch is the durable home of the probe** while it's exploratory. Push, run, iterate.
+- When it graduates into a permanent regression check, fold it into `main` through the normal flow (it's `tests/**` + a workflow file — a content/CI change routed straight to `main`). Decide its steady-state trigger then.
 - If you only needed the one-time answer, leave the branch as the record (or delete it once `results.md` captures the findings) — never open a PR to "preserve" a throwaway probe.
+
+## A cross-compile CHECK is not a test run
+
+`cargo check -p nub-cli --all-targets --target x86_64-pc-windows-gnu` proves the code COMPILES for Windows. It says nothing about whether the tests PASS there, and the gap is exactly where platform behavior lives: `.cmd` shims vs `#!/usr/bin/env node`, path separators, `NODE_OPTIONS` tokenizing, `process.title`, mode bits that are no-ops.
+
+A cross-compile is a necessary pre-flight, never the evidence. If you are un-gating tests from `#[cfg(unix)]`, or writing anything whose behavior could differ by platform, run a branch probe BEFORE pushing — it needs no PR and costs one workflow run.
 
 ## When to reach for this vs the alternatives
 
-- **Local host probe** (`ad-hoc-test` skill) — the behavior reproduces on your dev machine. Cheapest; default for anything not platform-gated.
-- **Docker** (AGENTS.md) — a **Linux** corner: musl/glibc, a Node floor, a clean dependency-free environment, first-run install. Linux containers only.
-- **This skill (CI branch probe)** — a **macOS or Windows** behavior, or a real multi-runner matrix, that neither the host nor Docker can show. The PR-free, branch-scoped path.
+- **Local host probe** (`ad-hoc-test`) — the behavior reproduces on your dev machine. Default for anything not platform-gated.
+- **Docker** (AGENTS.md) — a **Linux** corner: musl/glibc, a Node floor, a clean dependency-free environment, first-run install.
+- **This skill (CI branch probe)** — a **macOS or Windows** behavior, or a real multi-runner matrix, that neither the host nor Docker can show.

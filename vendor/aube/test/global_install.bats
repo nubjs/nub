@@ -4,7 +4,7 @@ setup() {
 	load 'test_helper/common_setup'
 	_common_setup
 	# Route global installs into the per-test temp dir so nothing escapes
-	# the sandbox. `bin_dir` = AUBE_HOME, `pkg_dir` = AUBE_HOME/global-aube.
+	# the sandbox. `bin_dir` = AUBE_HOME, `pkg_dir` = AUBE_HOME/global.
 	# aube prints AUBE_HOME as-is (no canonicalize), so compare against the
 	# env var verbatim, not `pwd -P`.
 	export AUBE_HOME="$TEST_TEMP_DIR/aube-home"
@@ -24,7 +24,7 @@ teardown() {
 @test "aube root -g prints the global package directory" {
 	run aube root -g
 	assert_success
-	assert_output "$AUBE_HOME/global-aube"
+	assert_output "$AUBE_HOME/global"
 }
 
 @test "aube prefix -g prints the global prefix directory" {
@@ -45,11 +45,82 @@ teardown() {
 	assert_output "$AUBE_HOME"
 }
 
-@test "aube bin -g honors PNPM_HOME when AUBE_HOME is unset" {
+# PNPM_HOME used to win here, so that an existing pnpm user already had the
+# directory on PATH. It is no longer read: a global operation must not resolve
+# through another package manager's configuration, and the assumption had gone
+# stale anyway — pnpm 11 puts its global bins in `<home>/bin`, one level below
+# the directory this returned.
+@test "aube bin -g ignores PNPM_HOME and uses the conventional bin dir" {
 	unset AUBE_HOME
-	PNPM_HOME="$TEST_TEMP_DIR/pnpm-home" run aube bin -g
+	XDG_BIN_HOME="$TEST_TEMP_DIR/xdg-bin" PNPM_HOME="$TEST_TEMP_DIR/pnpm-home" run aube bin -g
 	assert_success
-	assert_output "$TEST_TEMP_DIR/pnpm-home"
+	assert_output "$TEST_TEMP_DIR/xdg-bin"
+	refute_output --partial "pnpm-home"
+}
+
+# The two roots are independent: bins go to the conventional user-binary
+# directory, package installs under the tool's own data namespace.
+@test "aube -g dirs split the shared bin dir from the data root" {
+	unset AUBE_HOME
+
+	run aube prefix -g
+	assert_success
+	assert_output "$XDG_DATA_HOME/aube"
+
+	run aube bin -g
+	assert_success
+	assert_output "$HOME/.local/bin"
+
+	run aube root -g
+	assert_success
+	assert_output "$XDG_DATA_HOME/aube/global"
+}
+
+@test "aube -g dirs fall back to ~/.local without XDG_DATA_HOME" {
+	unset AUBE_HOME
+	unset XDG_DATA_HOME
+
+	run aube bin -g
+	assert_success
+	assert_output "$HOME/.local/bin"
+
+	run aube root -g
+	assert_success
+	assert_output "$HOME/.local/share/aube/global"
+}
+
+@test "aube list -g warns when globals are stranded in the pnpm-era location" {
+	unset AUBE_HOME
+	# A hash pointer under the legacy pnpm-named home is what a pre-2.0
+	# aube left behind, under the `global-<embedder>` leaf that layout
+	# used. Nothing is installed in the new location, so the migration
+	# warning fires.
+	legacy="$XDG_DATA_HOME/pnpm/global-aube"
+	mkdir -p "$legacy/2d8d9b-19fcea7c050"
+	ln -s "$legacy/2d8d9b-19fcea7c050" "$legacy/deadbeef"
+
+	run aube list -g
+	assert_success
+	assert_output --partial "WARN_AUBE_GLOBAL_DIR_LEGACY_LOCATION"
+	# The message points at the legacy *home*, since that's what the user
+	# would hand to AUBE_HOME to keep the old location working.
+	assert_output --partial "$XDG_DATA_HOME/pnpm"
+	# Read-only: aube warns about the pnpm-era directory, never touches it.
+	assert_link_exists "$legacy/deadbeef"
+}
+
+@test "aube list -g stays quiet about the legacy dir once globals are installed" {
+	unset AUBE_HOME
+	legacy="$XDG_DATA_HOME/pnpm/global-aube"
+	mkdir -p "$legacy/2d8d9b-19fcea7c050"
+	ln -s "$legacy/2d8d9b-19fcea7c050" "$legacy/deadbeef"
+
+	run aube add -g semver@7.7.4
+	assert_success
+
+	run aube list -g
+	assert_success
+	refute_output --partial "WARN_AUBE_GLOBAL_DIR_LEGACY_LOCATION"
 }
 
 @test "aube list -g reports nothing on an empty global dir" {
@@ -149,7 +220,7 @@ teardown() {
 	run aube add -g is-odd@0.1.2
 	assert_success
 
-	pkg_dir="$AUBE_HOME/global-aube"
+	pkg_dir="$AUBE_HOME/global"
 	install_dir="$(find "$pkg_dir" -mindepth 1 -maxdepth 1 -type d -print -quit)"
 	rm "$install_dir/aube-lock.yaml"
 
@@ -185,7 +256,7 @@ teardown() {
 	assert_success
 
 	# At least one symlink entry (the hash) should exist in the pkg dir
-	pkg_dir="$AUBE_HOME/global-aube"
+	pkg_dir="$AUBE_HOME/global"
 	run bash -c "find '$pkg_dir' -maxdepth 1 -type l | wc -l | tr -d ' '"
 	assert_success
 	assert_output "1"
@@ -198,7 +269,7 @@ teardown() {
 	assert_success
 
 	# Only one install dir + one hash pointer should remain.
-	pkg_dir="$AUBE_HOME/global-aube"
+	pkg_dir="$AUBE_HOME/global"
 	run bash -c "find '$pkg_dir' -maxdepth 1 -type l | wc -l | tr -d ' '"
 	assert_output "1"
 	run bash -c "find '$pkg_dir' -maxdepth 1 -type d | tail -n +2 | wc -l | tr -d ' '"
@@ -213,6 +284,12 @@ teardown() {
 	run aube remove -g semver
 	assert_success
 	assert_file_not_exists "$AUBE_HOME/semver"
+	# `assert_file_not_exists` is `[ -f ]`, which follows symlinks — a
+	# *dangling* symlink passes it. With the global virtual store on, the
+	# bin's canonical target lives in the shared store rather than under
+	# the install dir, so the ownership check has to stay textual or the
+	# symlink survives as a dangle (Discussion #1219).
+	[ ! -L "$AUBE_HOME/semver" ]
 
 	run aube list -g
 	assert_success
@@ -269,7 +346,7 @@ teardown() {
 	run aube add -g aube-test-builds-marker@1.0.0
 	assert_success
 
-	pkg_dir="$AUBE_HOME/global-aube"
+	pkg_dir="$AUBE_HOME/global"
 	install_dir="$(find "$pkg_dir" -mindepth 1 -maxdepth 1 -type d -print -quit)"
 	assert_file_not_exists "$install_dir/aube-builds-marker.txt"
 
@@ -308,7 +385,7 @@ teardown() {
 	refute_output --partial "must be reviewed before install"
 	refute_output --partial "ignored build scripts"
 
-	pkg_dir="$AUBE_HOME/global-aube"
+	pkg_dir="$AUBE_HOME/global"
 	install_dir="$(find "$pkg_dir" -mindepth 1 -maxdepth 1 -type d -print -quit)"
 	# Build actually ran — the marker dep's postinstall writes the file.
 	assert_file_exists "$install_dir/aube-builds-marker.txt"
@@ -326,7 +403,7 @@ teardown() {
 	refute_output --partial "must be reviewed before install"
 	refute_output --partial "ignored build scripts"
 
-	pkg_dir="$AUBE_HOME/global-aube"
+	pkg_dir="$AUBE_HOME/global"
 	install_dir="$(find "$pkg_dir" -mindepth 1 -maxdepth 1 -type d -print -quit)"
 	assert_file_exists "$install_dir/aube-builds-marker.txt"
 }
@@ -339,7 +416,7 @@ teardown() {
 	refute_output --partial "must be reviewed before install"
 	refute_output --partial "ignored build scripts"
 
-	pkg_dir="$AUBE_HOME/global-aube"
+	pkg_dir="$AUBE_HOME/global"
 	install_dir="$(find "$pkg_dir" -mindepth 1 -maxdepth 1 -type d -print -quit)"
 	# Denied dep stayed skipped, but strictDepBuilds accepted the
 	# explicit review decision.

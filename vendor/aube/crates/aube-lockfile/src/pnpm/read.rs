@@ -1,6 +1,7 @@
 use super::dep_path::{
-    PATCH_HASH_MARKER, dep_path_tail, parse_dep_path, peerless_alias_target, rewrite_peer_suffix,
-    rewrite_snapshot_alias_deps, strip_patch_hash_suffix, version_to_dep_path,
+    PATCH_HASH_MARKER, dep_path_tail, parse_dep_path, peerless_alias_target,
+    registry_name_from_qualified_version, rewrite_peer_suffix, rewrite_snapshot_alias_deps,
+    strip_patch_hash_suffix, version_to_dep_path,
 };
 use super::raw::{
     RawBinSpec, RawDepSpec, RawPnpmLockfile, RawRuntimeVariant, local_source_from_resolution,
@@ -11,7 +12,7 @@ use crate::{
     ParseOptions, PeerDepMeta, RuntimePin, RuntimeTarget, RuntimeVariant, git_commits_match,
 };
 use aube_util::path::normalize_lexical;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 fn rebase_importer_local(local: LocalSource, importer_path: &str) -> LocalSource {
@@ -30,6 +31,73 @@ fn rebase_importer_local(local: LocalSource, importer_path: &str) -> LocalSource
         LocalSource::Portal(path) => LocalSource::Portal(rebase(path, importer_path)),
         LocalSource::Exec(path) => LocalSource::Exec(rebase(path, importer_path)),
         LocalSource::Git(_) | LocalSource::RemoteTarball(_) => local,
+    }
+}
+
+/// Upstream aube writes a literal `link:` dep's `version:` relative to the
+/// lockfile root rather than the importer, so a lockfile it wrote must not be
+/// rebased again. That form is recognisable only when the specifier carries the
+/// path: the version then equals the spec resolved from the importer, and
+/// differs from the spec itself, which is what pnpm writes.
+fn is_root_relative_link(specifier: &str, version_path: &Path, importer_path: &str) -> bool {
+    let Some(spec_path) = specifier.strip_prefix("link:").map(Path::new) else {
+        return false;
+    };
+    let version_path = normalize_lexical(version_path);
+    normalize_lexical(spec_path) != version_path
+        && normalize_lexical(&Path::new(importer_path).join(spec_path)) == version_path
+}
+
+/// Lowest `lockfileVersion` this reader understands. pnpm v9 replaced
+/// the top-level `dependencies:` map and `/name@version` package keys
+/// with `importers:` + `snapshots:`; every pass below assumes that
+/// shape, so older files must be rejected rather than parsed into an
+/// empty graph.
+pub(super) const MIN_LOCKFILE_VERSION: u64 = 9;
+
+/// Major component of a `lockfileVersion`. pnpm has written the value
+/// both as a quoted string (`'9.0'`, `'6.0'`) and as a bare YAML float
+/// (`5.4`), so both encodings are accepted.
+///
+/// Every dot-separated component must be digits: reading only the
+/// leading component would accept `9.invalid` as version 9 and let a
+/// lockfile of unknown shape through the guard. Returns `None` for
+/// anything that isn't a well-formed version number, which the caller
+/// treats as unsupported.
+pub(super) fn lockfile_version_major(value: &yaml_serde::Value) -> Option<u64> {
+    if let Some(s) = value.as_str() {
+        let s = s.trim();
+        let mut components = s.split('.');
+        let major = components.next()?;
+        if !components.all(|c| !c.is_empty() && c.bytes().all(|b| b.is_ascii_digit())) {
+            return None;
+        }
+        return major.parse().ok();
+    }
+    if let Some(u) = value.as_u64() {
+        return Some(u);
+    }
+    // A bare YAML float is numeric by construction, so truncating to
+    // the major is safe here — `9.5` is a v9-family lockfile.
+    let f = value.as_f64()?;
+    (f.is_finite() && f >= 0.0).then_some(f.trunc() as u64)
+}
+
+/// Render a `lockfileVersion` back for the error message, preserving
+/// whichever encoding the lockfile used.
+fn render_lockfile_version(value: &yaml_serde::Value) -> String {
+    if let Some(s) = value.as_str() {
+        return s.to_string();
+    }
+    if let Some(u) = value.as_u64() {
+        return u.to_string();
+    }
+    if let Some(i) = value.as_i64() {
+        return i.to_string();
+    }
+    match value.as_f64() {
+        Some(f) => f.to_string(),
+        None => "(unreadable)".to_string(),
     }
 }
 
@@ -95,6 +163,54 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
     let mut raw = parse_raw_lockfile(&content)
         .map_err(|e| Error::parse_yaml_err(path, content.clone(), &e))?;
     strip_patch_hash_markers(&mut raw);
+
+    // Version guard before any structural pass: a pre-v9 lockfile is
+    // valid YAML that yields zero importers, which would otherwise
+    // link nothing and exit 0.
+    match lockfile_version_major(&raw.lockfile_version) {
+        Some(major) if major >= MIN_LOCKFILE_VERSION => {}
+        _ => {
+            return Err(Error::UnsupportedPnpmLockfileVersion {
+                path: path.to_path_buf(),
+                version: render_lockfile_version(&raw.lockfile_version),
+            });
+        }
+    }
+
+    // Layout guard for a lockfile whose declared version does not match
+    // its body: `lockfileVersion: '9.0'` over a pre-v9 body passes the
+    // version check, and its root deps are then dropped on the floor —
+    // the graph comes back empty and the declared dependencies go
+    // unlinked.
+    //
+    // Two independent signatures, because either can appear alone: a
+    // root-level dependency block (the only shape a `link:`/`file:`-only
+    // project has, since it has no `packages:` at all), and a
+    // slash-prefixed package key (`/is-odd@3.0.1` in v6,
+    // `/is-odd/3.0.1` in v5). A package name cannot begin with `/`, and
+    // no v9+ document puts dependencies at the root, so neither shape is
+    // one pnpm or aube writes at v9.
+    let legacy_marker = [
+        ("dependencies", raw.dependencies.is_some()),
+        ("devDependencies", raw.dev_dependencies.is_some()),
+        ("optionalDependencies", raw.optional_dependencies.is_some()),
+        ("specifiers", raw.specifiers.is_some()),
+    ]
+    .into_iter()
+    .find_map(|(block, present)| present.then(|| format!("root-level `{block}:` block")))
+    .or_else(|| {
+        raw.packages
+            .keys()
+            .find(|key| key.starts_with('/'))
+            .map(|key| format!("package key `{key}`"))
+    });
+    if let Some(marker) = legacy_marker {
+        return Err(Error::PnpmLockfileLegacyLayout {
+            path: path.to_path_buf(),
+            version: render_lockfile_version(&raw.lockfile_version),
+            marker,
+        });
+    }
 
     // Parse importers (direct deps of each workspace package).
     // We track synthesized LockedPackages for local (`file:` / `link:`)
@@ -195,22 +311,21 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
                 other => other,
             };
             let snapshot_key = format!("{name}@{}", local.specifier());
-            // pnpm writes a non-root importer's local `version:` path relative to
-            // that importer, so it must be rebased to root. This covers a literal
-            // `link:`/`file:` spec (`specifier == version`), the `workspace:`
-            // protocol, AND a plain semver range pnpm resolved to a workspace
-            // sibling — that last case carries a NON-`workspace:` specifier (e.g.
-            // `^0.0.18`) but still an importer-relative `version: link:../sibling`
-            // (real-world: dub's `@dub/embed-react` -> `@dub/embed-core`). The
-            // common thread is an importer-relative path, which pnpm always spells
-            // with a leading `..`; aube's own format is already root-relative and
-            // never escapes upward, so this never double-rebases (the
-            // `not_rebased_twice` invariant).
-            let importer_relative = local.path().is_some_and(|p| p.starts_with(".."));
+            // pnpm anchors the two local protocols differently: a `link:`
+            // version is relative to its importer, a `file:` version (directory
+            // or tarball) to the lockfile directory (`fromLocal` in pnpm's
+            // local-resolver). So only `link:` is rebased to root, whatever the
+            // specifier was — a literal `link:`, `workspace:`, or a plain semver
+            // range pnpm resolved to a workspace sibling (dub's
+            // `@dub/embed-react` -> `@dub/embed-core: ^0.0.18`). Nub's writer
+            // uses the same anchoring.
             let should_rebase = importer_path != "."
-                && (info.specifier == classify_version
-                    || info.specifier.starts_with("workspace:")
-                    || importer_relative);
+                && match &local {
+                    LocalSource::Link(version_path) => {
+                        !is_root_relative_link(&info.specifier, version_path, importer_path)
+                    }
+                    _ => false,
+                };
             let local = if should_rebase {
                 rebase_importer_local(local, importer_path)
             } else {
@@ -489,6 +604,38 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
             {
                 local_pkg.version = ver.clone();
             }
+            // The main package loop below skips these entries, so the
+            // metadata the writer persisted for them is restored here or
+            // nowhere. Platform arrays decide whether a direct URL optional
+            // survives `filter_graph` on this host; peers decide what the
+            // linker places beside it.
+            if let Some(pkg_info) = pkg_info {
+                local_pkg.os = pkg_info.os.iter().cloned().collect();
+                local_pkg.cpu = pkg_info.cpu.iter().cloned().collect();
+                local_pkg.libc = pkg_info.libc.iter().cloned().collect();
+                local_pkg.engines = pkg_info.engines.clone();
+                local_pkg.peer_dependencies =
+                    pkg_info.peer_dependencies.clone().unwrap_or_default();
+                local_pkg.peer_dependencies_meta = pkg_info
+                    .peer_dependencies_meta
+                    .clone()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(k, v)| {
+                        (
+                            k,
+                            PeerDepMeta {
+                                optional: v.optional,
+                            },
+                        )
+                    })
+                    .collect();
+            }
+            if let Some(snap) = snap
+                && let Some(bundled) = snap.bundled_dependencies.clone()
+            {
+                local_pkg.bundled_dependencies = bundled;
+            }
             if let Some(pkg_info) = pkg_info
                 && let Some(ref res) = pkg_info.resolution
                 && let Some(mut ls) = local_source_from_resolution(res)
@@ -568,6 +715,13 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
         }
         let (name, version) = parse_dep_path(&dep_path)
             .ok_or_else(|| Error::parse(path, format!("invalid dep path: {dep_path}")))?;
+        if let Some(registry_name) = registry_name_from_qualified_version(&version) {
+            return Err(Error::UnsupportedNamedRegistry {
+                path: path.to_path_buf(),
+                dep_path,
+                registry_name: registry_name.to_string(),
+            });
+        }
         // Runtime pin entries (`node@runtime:24.4.1`) are not packages
         // — they're absorbed into `graph.runtimes` below. Skipping them
         // here keeps them out of the package table so the fetch/link
@@ -783,6 +937,7 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
                 // when re-emitting a pnpm-sourced graph into one of
                 // their formats.
                 declared_dependencies: BTreeMap::new(),
+                declared_dependencies_known: false,
                 // pnpm's format doesn't carry per-package license or
                 // funding metadata, so a pnpm → npm conversion
                 // degrades to empty rather than re-fetching each
@@ -854,6 +1009,10 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
     // as a filesystem name) and every reference to the raw alias
     // spelling is remapped afterwards.
     let mut alias_local_renames: BTreeMap<String, String> = BTreeMap::new();
+    // Canonical keys the loop below cloned an alias out of. Collected so the
+    // orphan sweep after it can drop the ones nothing else references — see
+    // the sweep for why.
+    let mut alias_clone_sources: BTreeSet<String> = BTreeSet::new();
     for (alias_dep_path, real_dep_path, alias_name, real_name) in alias_remaps {
         // Skip if the alias entry already exists (aube-written
         // lockfile that emitted both `aliasOf:` and an alias-keyed
@@ -893,6 +1052,18 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
                 ),
             ));
         };
+        // Record the key actually cloned from — `peerless_alias_target`
+        // may resolve to a peerless variant rather than `real_dep_path`.
+        // A `file:`-keyed target reaches this branch too (pnpm writes
+        // `version: <real>@file:<path>` for a local dep consumed under
+        // another name, and the local-rename branch above only fires when
+        // that package is ALSO a local direct dep), so gate on
+        // `local_source` here rather than assuming the branch above caught
+        // every local: the writer keys locals by `pkg.name`, so a swept
+        // local canonical is not regenerable from the clone.
+        if real_pkg.local_source.is_none() {
+            alias_clone_sources.insert(real_pkg.dep_path.clone());
+        }
         let mut aliased = real_pkg.clone();
         aliased.name = alias_name;
         aliased.dep_path = alias_dep_path.clone();
@@ -922,6 +1093,59 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
                 }
             }
         }
+    }
+
+    // Drop each alias-clone source that nothing else in the graph reaches.
+    //
+    // pnpm v9 writes only the canonical (real-name-keyed) entry for an
+    // `npm:` alias, so the loop above clones it under the alias key. That
+    // left BOTH in the graph, while a fresh resolve produces only the
+    // alias-keyed one — an asymmetry every consumer that walks `packages`
+    // raw then disagreed on (#578: dedupe reported a phantom removal on
+    // every run and `--check` failed forever; `fetch` over-counted and
+    // re-imported the tarball; `rebuild <real-name>` matched a package
+    // that is not an installed dependency). `install`/linker were immune
+    // only because they run `filter_graph`'s reachability GC first.
+    //
+    // Dropping is safe for serialization: the pnpm writer regenerates the
+    // canonical `packages:`/`snapshots:` key from the alias clone via
+    // `alias_of`. It is NOT safe unconditionally — an aliased package is
+    // frequently also a genuine dep of something else (`@isaacs/cliui`
+    // reaches `string-width@4.2.3` both through its `string-width-cjs`
+    // alias and through `wrap-ansi@7.0.0`'s own edge), so the entry only
+    // goes when no importer and no surviving package edge resolves to it.
+    // Edges resolve through `resolve_dep_edge` — the same convention
+    // `filter_graph` uses — so a git/remote-tarball child keyed
+    // `name@url+<hash>` is not mistaken for unreferenced. Both dep maps
+    // are scanned even though the parse loop already folds
+    // `optional_dependencies` into `dependencies`: a missed edge would
+    // drop a live entry, so the scan errs toward keeping.
+    //
+    // Local (`file:`) targets never enter `alias_clone_sources` (see the
+    // `local_source` gate at the insert), so their canonical entry always
+    // survives — the writer keys locals by `pkg.name`, not `alias_of`, and
+    // could not regenerate one from the clone.
+    if !alias_clone_sources.is_empty() {
+        let mut referenced: BTreeSet<String> = BTreeSet::new();
+        for deps in importers.values() {
+            for dep in deps {
+                referenced.insert(dep.dep_path.clone());
+            }
+        }
+        for pkg in packages.values() {
+            for map in [&pkg.dependencies, &pkg.optional_dependencies] {
+                for (dep_name, value) in map {
+                    if let Some(child) =
+                        crate::resolve_dep_edge(dep_name, value, |k| packages.contains_key(k))
+                    {
+                        referenced.insert(child);
+                    }
+                }
+            }
+        }
+        packages.retain(|key, pkg| {
+            pkg.alias_of.is_some() || !alias_clone_sources.contains(key) || referenced.contains(key)
+        });
     }
 
     // Normalize git / remote-tarball references so a lockfile round-trip
@@ -994,6 +1218,50 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
             for dep in deps {
                 dep.dep_path = rewrite_peer_suffix(&dep.dep_path, &spec_peer_to_hashed);
             }
+        }
+    }
+
+    // Link a peer the key claims but the snapshot never recorded. Earlier
+    // nub releases could write a package keyed with a peer it declares
+    // while leaving that peer out of the snapshot's `dependencies`
+    // (#937), and a lockfile read takes the snapshot as the whole truth,
+    // so the package stayed unable to import its peer on every later
+    // install. A peer named in a key is a peer resolved for that package
+    // (pnpm records each one as a snapshot edge), so the edge is
+    // recoverable from the key; for any lockfile pnpm wrote this is a
+    // no-op. Adding the edge also changes the package's virtual-store
+    // hash, so a broken global-store entry is not reused.
+    let mut missing_peer_edges: Vec<(String, String, String)> = Vec::new();
+    for (key, pkg) in &packages {
+        if pkg.peer_dependencies.is_empty() {
+            continue;
+        }
+        for peer_key in super::dep_path::peer_references(key) {
+            let Some((name, _)) = parse_dep_path(peer_key) else {
+                continue;
+            };
+            if pkg.peer_dependencies.contains_key(&name)
+                && !pkg.dependencies.contains_key(&name)
+                && packages.contains_key(peer_key)
+            {
+                let tail = dep_path_tail(peer_key, &name).to_string();
+                missing_peer_edges.push((key.clone(), name, tail));
+            }
+        }
+    }
+    for (key, name, tail) in missing_peer_edges {
+        if let Some(pkg) = packages.get_mut(&key) {
+            // An optional peer is an optional edge (pnpm's snapshot
+            // `optionalDependencies`), so platform filtering can still
+            // drop a provider that only an optional dependency brought in.
+            if pkg
+                .peer_dependencies_meta
+                .get(&name)
+                .is_some_and(|m| m.optional)
+            {
+                pkg.optional_dependencies.insert(name.clone(), tail.clone());
+            }
+            pkg.dependencies.insert(name, tail);
         }
     }
 

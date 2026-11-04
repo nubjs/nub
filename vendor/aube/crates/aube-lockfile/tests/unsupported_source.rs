@@ -48,9 +48,9 @@ static STRICT: Embedder = Embedder {
     tty_progress: false,
     rich_update_picker: false,
     strict_unsupported_source: true,
-    warm_trust_revalidate: true,
     trust_policy_ignore_after_default: None,
     extra_settings_fingerprint: None,
+    unsupported_settings: &[],
 };
 
 fn parse(files: &[(&str, &str)]) -> Result<LockfileGraph, Error> {
@@ -141,10 +141,7 @@ fn classic_git_protocol_dep_resolves() {
         .find(|p| p.name == "foo")
         .expect("foo must be in the graph");
     assert!(
-        matches!(
-            &pkg.local_source,
-            Some(aube_lockfile::LocalSource::Git(_))
-        ),
+        matches!(&pkg.local_source, Some(aube_lockfile::LocalSource::Git(_))),
         "expected git LocalSource, got {:?}",
         pkg.local_source
     );

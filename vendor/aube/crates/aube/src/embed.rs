@@ -9,12 +9,18 @@
 use std::path::{Path, PathBuf};
 
 pub use crate::commands::add::AddToProjectOptions;
+pub use crate::commands::install::node_gyp_bootstrap::bootstrap_node_gyp;
 pub use crate::commands::install::{
-    DepSelection, FrozenMode, InstallControl, InstallEvent, InstallOutputLevel, InstallOutputMode,
-    InstallPhase, InstallProgressSnapshot, InstallReporter,
+    DepSelection, EmbedderInstallOverrides, FrozenMode, INSTALL_OUTPUT_CODE_LIFECYCLE_SCRIPT,
+    InstallControl, InstallEvent, InstallOutputLevel, InstallOutputMode, InstallPhase,
+    InstallProgressSnapshot, InstallPrompt, InstallPromptFuture, InstallPromptHandler,
+    InstallReporter,
 };
+pub use crate::runtime::{EmbedderRuntime, set_embedder_runtime};
+pub use aube_manifest::{Error as ManifestError, PackageJson, Workspaces};
 pub use aube_registry::NetworkMode;
 pub use aube_util::{AUBE, Embedder as Host};
+pub use aube_workspace::{WorkspaceBoundary, WorkspaceDiscoveryOptions};
 
 /// Options for an in-process install.
 ///
@@ -50,11 +56,13 @@ pub struct InstallOptions {
     pub osv_transitive_check: bool,
     /// Invocation-scoped output, progress reporting, and cancellation.
     pub control: InstallControl,
-    /// Directory containing the `node` executable to run lifecycle scripts on.
-    /// Set this when the host manages its own node runtime (e.g. mise) so
-    /// scripts spawn on it and find it on PATH; `None` uses aube's own runtime
-    /// resolution / PATH fallback.
-    pub node_bin_dir: Option<PathBuf>,
+    /// How the host wants Node invoked for lifecycle scripts. Use
+    /// [`EmbedderRuntime::selector`] when the host merely manages a Node
+    /// toolchain (e.g. mise), or [`EmbedderRuntime::wrapper`] to interpose on
+    /// Node (instrumenting runtime, transpiling loader, sandbox). Takes
+    /// precedence over any process-wide [`set_embedder_runtime`]; `None` falls
+    /// back to that, else aube's own runtime resolution / PATH fallback.
+    pub runtime: Option<EmbedderRuntime>,
 }
 
 impl InstallOptions {
@@ -74,7 +82,7 @@ impl InstallOptions {
             dangerously_allow_all_builds: false,
             osv_transitive_check: false,
             control: InstallControl::default(),
-            node_bin_dir: None,
+            runtime: None,
         }
     }
 }
@@ -102,14 +110,57 @@ pub fn host() -> &'static Host {
     aube_util::embedder()
 }
 
+/// Whether `project_dir` declares a Node workspace.
+///
+/// This recognizes Aube and pnpm workspace YAML plus the npm/Yarn/Bun
+/// `package.json#workspaces` field. Invalid or unrelated package manifests are
+/// treated as non-workspaces, making this suitable for repository-wide
+/// provider probing.
+pub fn is_workspace_project_root(project_dir: &Path) -> bool {
+    aube_workspace::is_workspace_project_root(project_dir)
+}
+
+/// Discover packages declared by a Node workspace.
+///
+/// Use [`WorkspaceBoundary::ConfinedToRoot`] when `project_dir` is a security
+/// or repository boundary chosen by the host. The default preserves
+/// package-manager compatibility with parent-relative pnpm workspace globs.
+/// Confined discovery returns canonical package paths; other modes preserve
+/// the package-manager-facing lexical paths.
+pub fn discover_workspace_packages(
+    project_dir: &Path,
+    options: WorkspaceDiscoveryOptions,
+) -> Result<Vec<PathBuf>> {
+    aube_workspace::find_workspace_packages_with_options(project_dir, options)
+        .map_err(miette::Report::new)
+}
+
 /// Install the dependencies declared by a project.
 pub async fn install(options: InstallOptions) -> Result<()> {
+    install_with_overrides(options, EmbedderInstallOverrides::default()).await
+}
+
+/// Install dependencies with host-owned storage and materialization policy.
+///
+/// Unlike process-wide defaults registered by [`initialize`], these overrides
+/// apply only to this invocation and win over environment variables and
+/// project/user configuration.
+pub async fn install_with_overrides(
+    options: InstallOptions,
+    overrides: EmbedderInstallOverrides,
+) -> Result<()> {
+    // The CLI initializes diagnostics during argument dispatch, but hosts that
+    // call the embedding facade never pass through that path. Honor the same
+    // env-driven AUBE_DIAG_* surface here so embedded installs can produce a
+    // low-overhead trace without requiring host-specific plumbing.
+    aube_util::diag::init();
     let mut command_options =
         crate::commands::install::InstallOptions::with_mode(options.frozen_mode);
     command_options.project_dir = Some(options.project_dir);
     command_options.dep_selection = options.dep_selection;
     command_options.ignore_scripts = options.ignore_scripts;
     command_options.skip_root_lifecycle = !options.run_root_lifecycle;
+    command_options.run_dev_preinstall = options.run_root_lifecycle;
     command_options.dry_run = options.dry_run;
     command_options.lockfile_only = options.lockfile_only;
     command_options.force = options.force;
@@ -118,8 +169,15 @@ pub async fn install(options: InstallOptions) -> Result<()> {
     command_options.dangerously_allow_all_builds = options.dangerously_allow_all_builds;
     command_options.osv_transitive_check = options.osv_transitive_check;
     command_options.control = options.control;
-    command_options.embedder_node_bin_dir = options.node_bin_dir;
-    crate::commands::install::run(command_options).await
+    command_options.embedder_runtime = options.runtime;
+    overrides.append_to(&mut command_options.cli_flags);
+    let result = crate::commands::scope_embedder_install_overrides(
+        overrides,
+        crate::commands::install::run(command_options),
+    )
+    .await;
+    aube_util::diag::flush_file();
+    result
 }
 
 /// Add packages to a project's manifest and install the resulting graph.
@@ -134,10 +192,187 @@ pub async fn add(
     packages: &[String],
     options: AddToProjectOptions,
 ) -> Result<()> {
-    crate::commands::add::add_to_project(project_dir, packages, options).await
+    add_with_overrides(
+        project_dir,
+        packages,
+        options,
+        EmbedderInstallOverrides::default(),
+    )
+    .await
+}
+
+/// Add packages with host-owned storage and materialization policy.
+///
+/// The overrides apply to the chained install only, at higher precedence than
+/// environment variables and project/user configuration.
+pub async fn add_with_overrides(
+    project_dir: &Path,
+    packages: &[String],
+    options: AddToProjectOptions,
+    overrides: EmbedderInstallOverrides,
+) -> Result<()> {
+    // See install_with_overrides: embedded adds bypass CLI diagnostic init.
+    aube_util::diag::init();
+    let result = crate::commands::scope_embedder_install_overrides(
+        overrides.clone(),
+        crate::commands::add::add_to_project_with_overrides(
+            project_dir,
+            packages,
+            options,
+            overrides,
+        ),
+    )
+    .await;
+    aube_util::diag::flush_file();
+    result
+}
+
+/// Run a package's script (`package.json` `scripts.<name>`) in `project_dir`,
+/// the in-process equivalent of `aube run <script> -- <args>`. Runs pre/post
+/// hooks and returns the script's exit code (`None` when nothing ran).
+///
+/// The project is resolved from `project_dir` (walking up to the nearest
+/// `package.json`), never the process cwd, so concurrent calls in different
+/// projects don't race. Every spawn honors `runtime` when given, else the
+/// process-wide [`set_embedder_runtime`] — pass a per-call runtime when it
+/// varies per invocation (e.g. a fresh shim dir per command), since the
+/// process-wide registration is set-once.
+pub async fn run(
+    project_dir: &Path,
+    script: &str,
+    args: Vec<String>,
+    runtime: Option<EmbedderRuntime>,
+) -> Result<Option<i32>> {
+    crate::runtime::with_embedder_runtime(
+        runtime,
+        crate::commands::run::run_script_in(
+            project_dir.to_path_buf(),
+            script,
+            &args,
+            false,
+            false,
+            &aube_workspace::selector::EffectiveFilter::default(),
+        ),
+    )
+    .await
+}
+
+/// Run a project-local binary (`node_modules/.bin/<bin>`) in `project_dir`,
+/// the in-process equivalent of `aube exec <bin> -- <args>`. Returns the
+/// binary's exit code. The project is resolved from `project_dir`, not the
+/// process cwd; every spawn honors `runtime` when given, else the
+/// process-wide [`set_embedder_runtime`].
+pub async fn exec(
+    project_dir: &Path,
+    bin: &str,
+    args: Vec<String>,
+    runtime: Option<EmbedderRuntime>,
+) -> Result<Option<i32>> {
+    let exec_args = crate::commands::exec::ExecArgs {
+        bin: bin.to_string(),
+        args,
+        ..Default::default()
+    };
+    crate::runtime::with_embedder_runtime(
+        runtime,
+        crate::commands::exec::run_in(
+            exec_args,
+            aube_workspace::selector::EffectiveFilter::default(),
+            Some(project_dir.to_path_buf()),
+        ),
+    )
+    .await
+}
+
+/// Install one or more packages into a throwaway project and run a binary
+/// from them, the in-process equivalent of `aube dlx`. `params` is the
+/// command followed by its arguments; `packages` overrides the inferred
+/// install target (the `-p` flag), empty to infer from the command.
+///
+/// The transient install runs in its own scratch project; `project_dir`
+/// roots runtime resolution and the local-`.bin` fast path. Every spawn
+/// honors `runtime` when given, else the process-wide
+/// [`set_embedder_runtime`].
+///
+/// Unlike [`run`] / [`exec`], `dlx` changes the process working directory
+/// (into its scratch project) for the duration of the transient install —
+/// inherent to how dlx works. A host should not run `dlx` concurrently
+/// with other cwd-sensitive work in the same process.
+pub async fn dlx(
+    project_dir: &Path,
+    params: Vec<String>,
+    packages: Vec<String>,
+    runtime: Option<EmbedderRuntime>,
+) -> Result<Option<i32>> {
+    let args = crate::commands::dlx::DlxArgs {
+        params,
+        package: packages,
+        ..Default::default()
+    };
+    crate::runtime::with_embedder_runtime(
+        runtime,
+        crate::commands::dlx::run_in(
+            args,
+            Some(project_dir.to_path_buf()),
+            std::collections::BTreeMap::new(),
+        ),
+    )
+    .await
+}
+
+/// Run Node as a supervised child in `project_dir`, the in-process
+/// equivalent of `aube node -- <args>`. Unlike the CLI, this never
+/// image-replaces the host process; it returns Node's exit code. Runtime is
+/// resolved from `project_dir`; the spawn honors `runtime` when given —
+/// a wrapper's `NODE`/`NODE_OPTIONS` included — else the process-wide
+/// [`set_embedder_runtime`].
+pub async fn node(
+    project_dir: &Path,
+    args: Vec<std::ffi::OsString>,
+    runtime: Option<EmbedderRuntime>,
+) -> Result<Option<i32>> {
+    crate::runtime::with_embedder_runtime(
+        runtime,
+        crate::commands::node::run_spawn(args, Some(project_dir.to_path_buf())),
+    )
+    .await
 }
 
 /// Extract a stable `ERR_AUBE_*` identifier from a failed operation.
 pub fn error_code(error: &miette::Report) -> Option<String> {
     error.code().map(|code| code.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_manifest_types_keep_tolerant_parsing() {
+        let manifest: PackageJson = serde_json::from_str(
+            r#"{
+                "name": "app",
+                "workspaces": "packages/*",
+                "dependencies": null,
+                "devDependencies": {"local": "workspace:*", "junk": false}
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(manifest.name.as_deref(), Some("app"));
+        assert_eq!(
+            manifest.workspaces.as_ref().map(|workspaces| workspaces
+                .patterns()
+                .iter()
+                .map(String::as_str)
+                .collect()),
+            Some(vec!["packages/*"])
+        );
+        assert!(manifest.dependencies.is_empty());
+        assert_eq!(
+            manifest.dev_dependencies.get("local").map(String::as_str),
+            Some("workspace:*")
+        );
+        assert!(!manifest.dev_dependencies.contains_key("junk"));
+    }
 }
