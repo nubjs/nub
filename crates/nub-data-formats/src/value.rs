@@ -26,10 +26,10 @@ pub enum Value {
     /// means.
     Date(String),
     Array(Vec<Value>),
-    /// Entries in document order. A YAML key may be a scalar of any type, so
-    /// keys are values: a number or boolean is emitted as a computed key, whose
-    /// `String()` conversion is the one `yaml` applies. Collection keys arrive
-    /// already flattened to their YAML flow text by the YAML builder.
+    /// Entries in document order. A YAML key may be any node, so keys are
+    /// values: a number or boolean is emitted as a computed key, whose
+    /// `String()` conversion is the one `yaml` applies, and a collection as a
+    /// string holding its flow text, which is how `yaml` keys one.
     Object(Vec<(Value, Value)>),
 }
 
@@ -92,9 +92,10 @@ impl Value {
                             key.write_js(out);
                             out.push(']');
                         }
-                        // Never computed: coercing an object key runs its
-                        // `toString`, which can collide or throw.
-                        key => write_string(&key.to_js(), out),
+                        // A collection, which only YAML has. Never computed:
+                        // coercing an object key runs its `toString`, which can
+                        // collide or throw.
+                        key => write_string(&crate::yaml_flow_key(key), out),
                     }
                     out.push(':');
                     value.write_js(out);

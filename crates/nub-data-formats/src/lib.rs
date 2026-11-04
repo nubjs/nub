@@ -274,8 +274,33 @@ enum YamlCollection {
     Mapping {
         entries: Vec<(Value, Value)>,
         key: Option<Value>,
-        string_keys: HashSet<String>,
+        seen: HashSet<ScalarKey>,
     },
+}
+
+/// A mapping key as `yaml`'s `uniqueKeys` compares it: a scalar by value, so
+/// `1` and `1.0` are one key while `1` and `"1"` are two. NaN equals nothing,
+/// and neither does a collection key, which `yaml` compares by node identity.
+#[derive(PartialEq, Eq, Hash)]
+enum ScalarKey {
+    Null,
+    Bool(bool),
+    Number(u64),
+    String(String),
+}
+
+impl ScalarKey {
+    fn of(key: &Value) -> Option<Self> {
+        Some(match key {
+            Value::Null => Self::Null,
+            Value::Bool(b) => Self::Bool(*b),
+            Value::Number(n) if n.is_nan() => return None,
+            // `+ 0.0` folds -0 into 0, which `===` also treats as one value.
+            Value::Number(n) => Self::Number((n + 0.0).to_bits()),
+            Value::String(s) => Self::String(s.clone()),
+            _ => return None,
+        })
+    }
 }
 
 impl yaml_rust2::parser::MarkedEventReceiver for YamlBuilder {
@@ -304,7 +329,7 @@ impl yaml_rust2::parser::MarkedEventReceiver for YamlBuilder {
                 let mapping = YamlCollection::Mapping {
                     entries: Vec::new(),
                     key: None,
-                    string_keys: HashSet::new(),
+                    seen: HashSet::new(),
                 };
                 self.stack.push((mapping, anchor));
                 return;
@@ -324,25 +349,15 @@ impl yaml_rust2::parser::MarkedEventReceiver for YamlBuilder {
         match self.stack.last_mut() {
             None => self.root = Some(node),
             Some((YamlCollection::Sequence(items), _)) => items.push(node),
-            Some((
-                YamlCollection::Mapping {
-                    entries,
-                    key,
-                    string_keys,
-                },
-                _,
-            )) => match key.take() {
+            Some((YamlCollection::Mapping { entries, key, seen }, _)) => match key.take() {
                 None => *key = Some(node),
                 Some(k) => {
-                    let k = match k {
-                        Value::Array(_) | Value::Object(_) => Value::String(yaml_flow_key(&k)),
-                        k => k,
-                    };
-                    let duplicate = match &k {
-                        Value::String(s) => !string_keys.insert(s.clone()),
-                        other => entries.iter().any(|(e, _)| e == other),
-                    };
-                    if duplicate {
+                    // A collection key stays a structure until it is emitted.
+                    // Flattening it here would quote and escape it again inside
+                    // every enclosing collection key, doubling the text at each
+                    // level, and would make it equal to a string that spells
+                    // the same flow text.
+                    if ScalarKey::of(&k).is_some_and(|id| !seen.insert(id)) {
                         self.error = Some(yaml_rust2::ScanError::new_string(
                             mark,
                             format!("{}: duplicated key in mapping", k.to_js()),
@@ -363,7 +378,7 @@ impl yaml_rust2::parser::MarkedEventReceiver for YamlBuilder {
 /// (`-0`, not `-0.0`; `31`, not `0x1f`), and a nested collection key stays on
 /// one line. Quoting any string that is not plain-safe keeps distinct keys
 /// distinct.
-fn yaml_flow_key(value: &Value) -> String {
+pub(crate) fn yaml_flow_key(value: &Value) -> String {
     fn plain_safe(s: &str) -> bool {
         !s.is_empty()
             && core_scalar(s).is_none()
@@ -661,11 +676,6 @@ mod tests {
                 r#"[NaN]:"k",[1.5]:"k","":"k",["__proto__"]:{"x":1.0}}"#
             )
         );
-        assert!(
-            parse_yaml("a: 1\na: 2\n")
-                .unwrap_err()
-                .contains("duplicated key")
-        );
         assert_eq!(
             parse_yaml("a: &x [1]\nb: *x\n---\nc: 1\n").unwrap().to_js(),
             r#"{"a":[1.0],"b":[1.0]}"#
@@ -686,6 +696,50 @@ mod tests {
                 r#""[ a, b ]":"seq","[ [ 1, \"x,y\" ], {} ]":"nested"}"#
             )
         );
+
+        // A collection key inside another is written as structure, once.
+        // Quoting it at each level doubled the text per level, and made it equal
+        // to a string spelling the same flow text.
+        let mut key = String::from("{ a: b }");
+        for _ in 0..20 {
+            key = format!("{{ ? {key} : c }}");
+        }
+        let js = parse_yaml(&format!("? {key}\n: v\n")).unwrap().to_js();
+        assert!(
+            js.len() < 2 * key.len(),
+            "{} bytes of output for a {}-byte key",
+            js.len(),
+            key.len()
+        );
+        assert_eq!(
+            parse_yaml("? { ? [a, b] : c }\n: collection\n? { \"[ a, b ]\": c }\n: string\n")
+                .unwrap()
+                .to_js(),
+            r#"{"{ [ a, b ]: c }":"collection","{ \"[ a, b ]\": c }":"string"}"#
+        );
+    }
+
+    /// Keys collide as they do in `yaml`: a scalar by value, so `1` and `1.0`
+    /// are one key but `1` and `"1"` two; NaN never; and a collection key
+    /// never, so a repeated one overwrites the first.
+    #[test]
+    fn yaml_duplicate_keys_compare_by_value() {
+        for doc in [
+            "a: 1\na: 2\n",
+            "1: a\n1.0: b\n",
+            "0: a\n-0: b\n",
+            "~: a\nnull: b\n",
+        ] {
+            let err = parse_yaml(doc).unwrap_err();
+            assert!(err.contains("duplicated key"), "{doc:?}: {err}");
+        }
+        for doc in [
+            "1: a\n\"1\": b\n",
+            ".nan: a\n.nan: b\n",
+            "? [a]\n: 1\n? [a]\n: 2\n",
+        ] {
+            assert!(parse_yaml(doc).is_ok(), "{doc:?} was rejected");
+        }
     }
 
     /// Hex and octal integers round once, to the nearest double, as
