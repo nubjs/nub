@@ -34,6 +34,20 @@ fn rebase_importer_local(local: LocalSource, importer_path: &str) -> LocalSource
     }
 }
 
+/// Upstream aube writes a literal `link:` dep's `version:` relative to the
+/// lockfile root rather than the importer, so a lockfile it wrote must not be
+/// rebased again. That form is recognisable only when the specifier carries the
+/// path: the version then equals the spec resolved from the importer, and
+/// differs from the spec itself, which is what pnpm writes.
+fn is_root_relative_link(specifier: &str, version_path: &Path, importer_path: &str) -> bool {
+    let Some(spec_path) = specifier.strip_prefix("link:").map(Path::new) else {
+        return false;
+    };
+    let version_path = normalize_lexical(version_path);
+    normalize_lexical(spec_path) != version_path
+        && normalize_lexical(&Path::new(importer_path).join(spec_path)) == version_path
+}
+
 /// Lowest `lockfileVersion` this reader understands. pnpm v9 replaced
 /// the top-level `dependencies:` map and `/name@version` package keys
 /// with `importers:` + `snapshots:`; every pass below assumes that
@@ -297,22 +311,21 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
                 other => other,
             };
             let snapshot_key = format!("{name}@{}", local.specifier());
-            // pnpm writes a non-root importer's local `version:` path relative to
-            // that importer, so it must be rebased to root. This covers a literal
-            // `link:`/`file:` spec (`specifier == version`), the `workspace:`
-            // protocol, AND a plain semver range pnpm resolved to a workspace
-            // sibling — that last case carries a NON-`workspace:` specifier (e.g.
-            // `^0.0.18`) but still an importer-relative `version: link:../sibling`
-            // (real-world: dub's `@dub/embed-react` -> `@dub/embed-core`). The
-            // common thread is an importer-relative path, which pnpm always spells
-            // with a leading `..`; aube's own format is already root-relative and
-            // never escapes upward, so this never double-rebases (the
-            // `not_rebased_twice` invariant).
-            let importer_relative = local.path().is_some_and(|p| p.starts_with(".."));
+            // pnpm anchors the two local protocols differently: a `link:`
+            // version is relative to its importer, a `file:` version (directory
+            // or tarball) to the lockfile directory (`fromLocal` in pnpm's
+            // local-resolver). So only `link:` is rebased to root, whatever the
+            // specifier was — a literal `link:`, `workspace:`, or a plain semver
+            // range pnpm resolved to a workspace sibling (dub's
+            // `@dub/embed-react` -> `@dub/embed-core: ^0.0.18`). Nub's writer
+            // uses the same anchoring.
             let should_rebase = importer_path != "."
-                && (info.specifier == classify_version
-                    || info.specifier.starts_with("workspace:")
-                    || importer_relative);
+                && match &local {
+                    LocalSource::Link(version_path) => {
+                        !is_root_relative_link(&info.specifier, version_path, importer_path)
+                    }
+                    _ => false,
+                };
             let local = if should_rebase {
                 rebase_importer_local(local, importer_path)
             } else {
