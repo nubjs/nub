@@ -372,11 +372,21 @@ install_cli!(
 install_cli!(DlxCli, "nub dlx", aube::commands::dlx::DlxArgs);
 install_cli!(CreateCli, "nub create", aube::commands::create::CreateArgs);
 install_cli!(PatchCli, "nub patch", aube::commands::patch::PatchArgs);
-install_cli!(
-    PatchCommitCli,
-    "nub patch-commit",
-    aube::commands::patch_commit::PatchCommitArgs
-);
+crate::pm_engine::publish_family::verb_cli! {
+    PatchCommitCli, "nub patch-commit", {
+        #[usage(flatten)]
+        args: aube::commands::patch_commit::PatchCommitArgs,
+        // pnpm takes `-w` on every command. It stays off the shared globals
+        // because `add -w` and friends would then accept it and act on the
+        // member instead of the root.
+        /// Accepted for pnpm parity; the patch is always written at the
+        /// workspace root `nub patch` recorded.
+        #[usage(short = 'w', long)]
+        workspace_root: bool,
+        #[usage(flatten)]
+        globals: EngineGlobals,
+    }
+}
 install_cli!(
     PatchRemoveCli,
     "nub patch-remove",
@@ -2183,7 +2193,7 @@ mod tests {
         let (_, pc) = parse!(
             PatchCommitCli,
             "patch-commit",
-            &["/tmp/edit/user", "--patches-dir", "fixes"]
+            &["/tmp/edit/user", "--patches-dir", "fixes", "-w"]
         );
         assert_eq!(pc.edit_dir, Path::new("/tmp/edit/user"));
         assert_eq!(pc.patches_dir, Path::new("fixes"));

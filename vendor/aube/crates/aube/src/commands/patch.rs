@@ -3,23 +3,23 @@
 //! and then run `aube patch-commit <dir>` to capture the diff.
 //!
 //! Mirrors `pnpm patch`. Two directories are created under a unique
-//! temp parent: `source/` (the pristine package bytes, immutable, used
-//! as the diff base) and `user/` (the writable copy printed to the
-//! user, which carries any already-declared patch so the user edits
-//! the currently effective tree). A
+//! temp parent: `source/` (the package's original files, immutable,
+//! used as the diff base) and `user/` (the writable copy printed to
+//! the user, with any already-declared patch applied so the user
+//! edits the currently effective tree). A
 //! `.<name>_patch_state.json` sidecar (derived from the embedder name via
 //! `patch_state_filename()`; standalone aube: `.aube_patch_state.json`) carries
 //! the package identity so `patch-commit` can locate the source dir given just
 //! the user dir.
 //!
-//! aube copies out of the *linked* (post-patch) tree, so when a patch
-//! is already declared for the package the pristine `source/` is
-//! reconstructed by reverse-applying that patch. Diffing against
-//! pristine bytes is what lets `patch-commit` REPLACE the patch file
-//! on recommit instead of appending incremental hunks to it.
+//! Like pnpm, both copies come from the store rather than the linked
+//! tree, so `patch-commit` diffs original → edited and the result
+//! REPLACES the patch file on recommit. A package with no
+//! `name@version` store entry (`file:`, git, tarball) falls back to
+//! snapshotting the linked tree, and its recommit appends instead.
 
 use crate::patches::{ResolvedPatch, copy_dir_all};
-use miette::{IntoDiagnostic, Result, miette};
+use miette::{Context, IntoDiagnostic, Result, miette};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -28,8 +28,8 @@ pub struct PatchArgs {
     /// Package spec, `<name>@<version>`.
     ///
     /// The package must already be installed in `node_modules` (aube
-    /// copies from the linked virtual store, not from the registry, so
-    /// the layout matches what install would later patch).
+    /// copies the files install linked, not a fresh registry download,
+    /// so the layout matches what install would later patch).
     pub package: String,
 
     /// Directory to extract the writable copy into.
@@ -41,9 +41,9 @@ pub struct PatchArgs {
 
     /// Ignore any existing patch entry for this package.
     ///
-    /// Starts the edit copy from the pristine package bytes as well,
-    /// so the recommitted patch replaces the declared one wholesale
-    /// instead of building on its changes.
+    /// Starts the edit copy from the package's original files instead
+    /// of applying the existing patch first, so the committed patch
+    /// replaces it rather than building on it.
     #[usage(long)]
     pub ignore_existing: bool,
 }
@@ -81,14 +81,28 @@ pub async fn run(args: PatchArgs) -> Result<()> {
     // The edit snapshot must represent the currently declared patch.
     // In particular, a prior patch-commit can have updated the patch
     // and lockfile before its convenience relink failed. Refuse to
-    // snapshot that stale tree: reverse-applying the declared patch to
-    // reconstruct the pristine baseline requires the linked tree to be
-    // exactly the post-patch one.
+    // snapshot that stale state: the store lookup below reads the
+    // lockfile, and the linked-tree fallback would append a diff taken
+    // against the wrong baseline.
     if let Some(reason) = crate::state::check_needs_install(&cwd) {
         return Err(miette!(
             code = aube_codes::errors::ERR_AUBE_PATCH_FAILED,
             "installed package tree is out of date ({reason}); run `{}` before `{}`",
             aube_util::cmd("install"),
+            aube_util::cmd("patch")
+        ));
+    }
+
+    let declared =
+        find_applied_patch(&cwd, &name, &version)?.filter(|patch| !patch.content.trim().is_empty());
+    let original = original_files_index(&cwd, &name, &version)?;
+    if original.is_none() && declared.is_some() && args.ignore_existing {
+        return Err(miette!(
+            code = aube_codes::errors::ERR_AUBE_PATCH_FAILED,
+            "`--ignore-existing` needs the original files of {name}@{version}, and the store \
+             has no copy of them (as with a `file:`, git or tarball dependency); remove the \
+             patch with `{}` and run `{}` instead",
+            aube_util::cmd("patch-remove"),
             aube_util::cmd("patch")
         ));
     }
@@ -114,39 +128,50 @@ pub async fn run(args: PatchArgs) -> Result<()> {
             .map_err(|e| miette!("failed to clear {}: {e}", user_dir.display()))?;
     }
 
-    copy_dir_all(&pkg_dir, &source_dir)?;
-    copy_dir_all(&pkg_dir, &user_dir)?;
-
-    // The linked tree already has any declared patch applied, but the
-    // source snapshot must be the PRISTINE package bytes so a recommit
-    // diffs pristine → edited and replaces the patch file wholesale.
-    // Recover pristine by reverse-applying the patch install applied
-    // to this `name@version` (same selector resolution as the linker:
-    // exact > range > all). `--ignore-existing` starts the edit copy
-    // from pristine too, so the new patch replaces the old one instead
-    // of building on it.
-    if let Some(patch) = find_applied_patch(&cwd, &name, &version)?
-        && !patch.content.trim().is_empty()
-    {
-        aube_linker::apply_multi_file_patch_reversed(&source_dir, &patch.content).map_err(|e| {
-            miette!(
-                code = aube_codes::errors::ERR_AUBE_PATCH_FAILED,
-                "failed to reconstruct the pristine {name}@{version} tree from {}: {e}",
-                patch.rel,
-            )
-        })?;
-        if args.ignore_existing {
-            std::fs::remove_dir_all(&user_dir)
-                .into_diagnostic()
-                .map_err(|e| miette!("failed to clear {}: {e}", user_dir.display()))?;
-            copy_dir_all(&source_dir, &user_dir)?;
+    // Both copies start from the package's original files and the
+    // declared patch is applied to the edit copy alone, the way pnpm
+    // builds them. `source/` is then free of every patch, so the diff
+    // `patch-commit` takes is the whole patch and replaces the file. The
+    // store copy also leaves out whatever lifecycle scripts wrote into
+    // the linked package, which would otherwise land in the diff.
+    let replaces_patch = match &original {
+        Some(index) => {
+            for dir in [&source_dir, &user_dir] {
+                aube_linker::copy_package_from_store(index, dir).map_err(|e| {
+                    miette!(
+                        code = aube_codes::errors::ERR_AUBE_PATCH_FAILED,
+                        "failed to copy {name}@{version} out of the store: {e}"
+                    )
+                })?;
+            }
+            if let Some(patch) = &declared
+                && !args.ignore_existing
+            {
+                aube_linker::apply_multi_file_patch(&user_dir, &patch.content).map_err(|e| {
+                    miette!(
+                        code = aube_codes::errors::ERR_AUBE_PATCH_FAILED,
+                        "failed to apply {} to the edit copy of {name}@{version}: {e}",
+                        patch.rel
+                    )
+                })?;
+            }
+            true
         }
-    }
+        // No store entry to diff against: snapshot the linked tree. When
+        // it already carries a patch, the diff holds only the new edits
+        // and `patch-commit` appends them to the patch file.
+        None => {
+            copy_dir_all(&pkg_dir, &source_dir)?;
+            copy_dir_all(&pkg_dir, &user_dir)?;
+            declared.is_none()
+        }
+    };
 
     let state = serde_json::json!({
         "name": name,
         "version": version,
         "project": cwd.display().to_string(),
+        "replaces_patch": replaces_patch,
     });
     std::fs::write(
         parent.join(patch_state_filename()),
@@ -229,11 +254,51 @@ fn find_pnpm_entry(
     ))
 }
 
+/// The store index of `name@version`'s original files, read with the
+/// same key install uses: the lockfile integrity, or for a package
+/// without one, the sha512 this project bound to it. `None` when the
+/// lockfile has no registry entry for the package (a `file:`, git or
+/// tarball dependency) or the store no longer holds every file.
+fn original_files_index(
+    cwd: &Path,
+    name: &str,
+    version: &str,
+) -> Result<Option<aube_store::PackageIndex>> {
+    let manifest = super::load_manifest_or_default(cwd)?;
+    let graph = match aube_lockfile::parse_lockfile(cwd, &manifest) {
+        Ok(graph) => graph,
+        Err(aube_lockfile::Error::NotFound(_)) => return Ok(None),
+        Err(e) => return Err(miette::Report::new(e)).wrap_err("failed to parse lockfile"),
+    };
+    let candidates: Vec<&aube_lockfile::LockedPackage> = graph
+        .packages
+        .values()
+        .filter(|pkg| {
+            pkg.version == version
+                && pkg.local_source.is_none()
+                && (pkg.name == name || pkg.registry_name() == name)
+        })
+        .collect();
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    let store = super::open_store(cwd)?;
+    let no_integrity_index =
+        crate::state::read_no_integrity_index_for(cwd, candidates.iter().copied());
+    Ok(candidates.into_iter().find_map(|pkg| {
+        let key = pkg.integrity.as_deref().or_else(|| {
+            no_integrity_index
+                .get(&format!("{}@{}", pkg.registry_name(), pkg.version))
+                .map(String::as_str)
+        })?;
+        store.load_index_verified(pkg.registry_name(), &pkg.version, Some(key))
+    }))
+}
+
 /// The declared patch that install applies to `name@version`, resolved
 /// with the same selector priority the linker uses (pnpm's
 /// `getPatchInfo`: exact > range > all). Returns `None` when no
-/// `patchedDependencies` entry covers this package — the linked tree
-/// is pristine then, so no reconstruction is needed.
+/// `patchedDependencies` entry covers this package.
 fn find_applied_patch(cwd: &Path, name: &str, version: &str) -> Result<Option<ResolvedPatch>> {
     let entries = crate::patches::load_declared_patch_paths(cwd)?;
     if entries.is_empty() {
@@ -311,12 +376,17 @@ pub fn read_state(edit_dir: &Path) -> Result<PatchState> {
         .ok_or_else(|| miette!("patch state missing `version`"))?
         .to_string();
     let project = v.get("project").and_then(|x| x.as_str()).map(PathBuf::from);
+    let replaces_patch = v
+        .get("replaces_patch")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
     Ok(PatchState {
         name,
         version,
         project,
         source_dir: parent.join("source"),
         user_dir: edit_dir.to_path_buf(),
+        replaces_patch,
     })
 }
 
@@ -327,4 +397,10 @@ pub struct PatchState {
     pub project: Option<PathBuf>,
     pub source_dir: PathBuf,
     pub user_dir: PathBuf,
+    /// `source/` holds the package without any declared patch, so the
+    /// diff is the complete patch and replaces the patch file. False
+    /// when it is a snapshot of an already-patched linked tree, and for
+    /// an edit dir from a version that predates the field: those diffs
+    /// hold only the new edits, which are appended.
+    pub replaces_patch: bool,
 }

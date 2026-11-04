@@ -106,3 +106,9 @@ update.bats|aube update: workspace update.ignoreDeps takes precedence|update its
 # at the tail); the divergence is the intended extra key, not a reorder.
 add.bats|aube add: preserves existing package.json top-level order|nub-divergence: virgin add stamps devEngines.packageManager=nub (self-PM-pin); upstream asserts no extra top-level key
 remove.bats|aube remove: preserves package.json top-level key order|nub-divergence: virgin install stamps devEngines.packageManager=nub (self-PM-pin), adding a devEngines top-level key upstream doesn't expect
+
+# ── patch workflow: config homes and the pnpm 10 lockfile shape ─────────────
+patch.bats|aube patch round-trips through patch-commit and patch-remove|asserts the entry lands under aube.patchedDependencies; a nub-identity project records it as top-level patchedDependencies
+patch.bats|patch keyed by registry name applies to an npm-aliased install|declares the patch under pnpm.patchedDependencies in a project with no pnpm file, which nub owns and so reads no pnpm.* field (declared at the top level or in pnpm-workspace.yaml, the aliased install is patched)
+patch.bats|pnpm patch hash drift fails frozen install and refreshes plain install|parses the bare patch hash newer pnpm writes; with the pnpm major unpinned, nub writes pnpm 10's {hash, path} patchedDependencies entry
+patch.bats|non-frozen pnpm re-resolve writes compatible patch identities|parses the bare patch hash newer pnpm writes; with the pnpm major unpinned, nub writes pnpm 10's {hash, path} patchedDependencies entry

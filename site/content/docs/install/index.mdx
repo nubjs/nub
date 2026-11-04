@@ -118,7 +118,7 @@ The bundled database is larger than the one pnpm applies, so a dependency can re
 
 ### `patchedDependencies`
 
-Apply a patch file to a package's contents, keyed by name and version. Running `nub patch <pkg>` writes both the patch and this entry. A key matching no installed package fails the install, because the usual cause is a patch that silently stopped being applied.
+Apply a patch file to a package's contents, keyed by name and version. `nub patch <pkg>@<version>` opens an editable copy of the package, and `nub patch-commit` writes the patch file and this entry. Patching the same package again starts from its patched files, and the commit rewrites the patch file with all of the changes. A key matching no installed package fails the install, because the usual cause is a patch that silently stopped being applied.
 
 ```json title="package.json"
 {

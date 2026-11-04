@@ -143,6 +143,74 @@ EOF
 	assert_success
 }
 
+@test "patch-commit keeps a pnpm-written rename and deletion when it replaces the patch" {
+	cat >package.json <<'EOF'
+{
+  "name": "patch-pnpm-written-test",
+  "version": "1.0.0",
+  "dependencies": {
+    "is-odd": "3.0.1"
+  }
+}
+EOF
+	cat >pnpm-workspace.yaml <<'EOF'
+packages:
+  - .
+patchedDependencies:
+  is-odd@3.0.1: patches/is-odd@3.0.1.patch
+EOF
+	mkdir patches
+	# Written by `pnpm patch-commit`: a rename carries no hunks, and the
+	# deletion carries no content because pnpm diffs with
+	# --irreversible-delete, so neither can be undone from the patch alone.
+	cat >patches/is-odd@3.0.1.patch <<'EOF'
+diff --git a/LICENSE b/LICENSE.txt
+similarity index 100%
+rename from LICENSE
+rename to LICENSE.txt
+diff --git a/README.md b/README.md
+deleted file mode 100644
+index b08207cbb4af1d17983fafeb50e369e8b9f7fcd2..0000000000000000000000000000000000000000
+diff --git a/index.js b/index.js
+index 79d1f22a8e7a27efb8841bb83cb682ea1ff3a59c..2d87267acdf39678958cc3e937951549510f7569 100644
+--- a/index.js
++++ b/index.js
+@@ -9,6 +9,7 @@
+
+ const isNumber = require('is-number');
+
++// first-patch-marker
+ module.exports = function isOdd(value) {
+   const n = Math.abs(value);
+   if (!isNumber(n)) {
+EOF
+
+	run aube install
+	assert_success
+
+	run aube patch is-odd@3.0.1
+	assert_success
+	edit_dir="$(echo "$output" | grep -oE '/[^ ]*/user' | head -1)"
+	assert [ ! -e "$edit_dir/README.md" ]
+	assert [ ! -e "$edit_dir/LICENSE" ]
+	assert [ -f "$edit_dir/LICENSE.txt" ]
+	echo "// second-patch-marker" >>"$edit_dir/index.js"
+
+	run aube patch-commit "$edit_dir"
+	assert_success
+	run grep -c '^diff --git a/index.js' patches/is-odd@3.0.1.patch
+	assert_output "1"
+
+	rm -rf node_modules
+	run aube install
+	assert_success
+	assert [ ! -e node_modules/is-odd/README.md ]
+	assert [ ! -e node_modules/is-odd/LICENSE ]
+	assert [ -f node_modules/is-odd/LICENSE.txt ]
+	run grep -c "first-patch-marker\|second-patch-marker" node_modules/is-odd/index.js
+	assert_output "2"
+}
+
 @test "pnpm patch hash drift fails frozen install and refreshes plain install" {
 	cat >package.json <<'EOF'
 {
