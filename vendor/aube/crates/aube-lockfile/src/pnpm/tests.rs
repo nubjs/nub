@@ -704,6 +704,67 @@ snapshots:
 }
 
 #[test]
+fn parse_member_local_versions_use_pnpm_anchoring() {
+    // pnpm 10/11 write a `file:` version relative to the lockfile directory and
+    // a `link:` version relative to the importer. Neither anchoring is visible
+    // from a leading `..`: a `file:` package outside the workspace root keeps
+    // one, and a `link:` into the importer's own subtree has none.
+    let dir = tempfile::tempdir().unwrap();
+    let lockfile_path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &lockfile_path,
+        r#"
+lockfileVersion: '9.0'
+
+importers:
+  .: {}
+
+  apps/app:
+    dependencies:
+      dep:
+        specifier: file:../../../dep
+        version: file:../dep
+      ldep:
+        specifier: link:./vendored
+        version: link:vendored
+      tdep:
+        specifier: file:../../../tarballs/tdep-1.0.0.tgz
+        version: file:../tarballs/tdep-1.0.0.tgz
+
+packages:
+  dep@file:../dep:
+    resolution: {directory: ../dep, type: directory}
+  tdep@file:../tarballs/tdep-1.0.0.tgz:
+    resolution: {tarball: file:../tarballs/tdep-1.0.0.tgz}
+    version: 1.0.0
+
+snapshots:
+  dep@file:../dep: {}
+  tdep@file:../tarballs/tdep-1.0.0.tgz: {}
+"#,
+    )
+    .unwrap();
+
+    let graph = parse(&lockfile_path).unwrap();
+    let source = |name: &str| {
+        let dep = graph.importers["apps/app"]
+            .iter()
+            .find(|dep| dep.name == name)
+            .unwrap_or_else(|| panic!("{name} missing from apps/app"));
+        graph.packages[&dep.dep_path].local_source.clone()
+    };
+    assert_eq!(source("dep"), Some(LocalSource::Directory("../dep".into())));
+    assert_eq!(
+        source("tdep"),
+        Some(LocalSource::Tarball("../tarballs/tdep-1.0.0.tgz".into()))
+    );
+    assert_eq!(
+        source("ldep"),
+        Some(LocalSource::Link("apps/app/vendored".into()))
+    );
+}
+
+#[test]
 fn parse_transitive_url_entry_uses_pnpm_version_field() {
     // Regression: pnpm writes non-registry transitive entries with
     // the tarball URL in the dep-path key and the real semver in a
