@@ -354,8 +354,8 @@ fn runs_pre_post_hooks(dir: &std::path::Path, manifest: &aube_manifest::PackageJ
         declared.unwrap_or_else(|| (lockfile_package_manager(dir).to_string(), None));
     match name.as_str() {
         "pnpm" => false,
-        "yarn" => match version.as_deref().and_then(spec_major) {
-            Some(major) => major < 2,
+        "yarn" => match version.as_deref().and_then(yarn_spec_is_berry) {
+            Some(berry) => !berry,
             None => !aube_lockfile::yarn::is_berry_path(&dir.join("yarn.lock")),
         },
         _ => true,
@@ -381,14 +381,15 @@ fn lockfile_package_manager(dir: &std::path::Path) -> &'static str {
     }
 }
 
-/// The first major version a version spec names: `4` for `4.9.2`, `^4`
-/// or `>=4.0.0`.
-fn spec_major(spec: &str) -> Option<u32> {
-    spec.trim_start_matches(|c: char| !c.is_ascii_digit())
-        .split(|c: char| !c.is_ascii_digit())
-        .next()?
-        .parse()
-        .ok()
+/// Whether a Yarn version spec selects Berry: pnpm provisions the newest
+/// version a range allows, so any range reaching 2.0.0 is Berry. `None`
+/// for a spec that is not a range, which pnpm treats as no version.
+fn yarn_spec_is_berry(spec: &str) -> Option<bool> {
+    let spec = spec
+        .split_once('+')
+        .map_or(spec, |(version, _build)| version);
+    let range = node_semver::Range::parse(spec).ok()?;
+    Some(range.allows_any(&node_semver::Range::parse(">=2.0.0").ok()?))
 }
 
 /// Run the `prepublish`/`prepack`/`publish` scripts the checkout declares,
@@ -627,6 +628,21 @@ mod tests {
         assert!(hooks(r#"{"packageManager":"npm@11.0.0"}"#, &[]));
         assert!(hooks(r#"{"packageManager":"yarn@1.22.22"}"#, &[]));
         assert!(!hooks(r#"{"packageManager":"yarn@4.5.0"}"#, &[]));
+        assert!(hooks(
+            r#"{"packageManager":"yarn@1.22.22+sha512.abc"}"#,
+            &[]
+        ));
+        assert!(
+            hooks(
+                r#"{"devEngines":{"packageManager":{"name":"yarn","version":"<2"}}}"#,
+                &[]
+            ),
+            "a range below 2 is Classic"
+        );
+        assert!(!hooks(
+            r#"{"devEngines":{"packageManager":{"name":"yarn","version":"^1 || ^4"}}}"#,
+            &[]
+        ));
         assert!(!hooks(r#"{"packageManager":"pnpm@10.0.0"}"#, &[]));
         assert!(!hooks("{}", &[("pnpm-lock.yaml", "")]));
         assert!(hooks("{}", &[("yarn.lock", "# yarn lockfile v1\n")]));
