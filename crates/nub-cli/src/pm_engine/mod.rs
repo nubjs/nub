@@ -4237,6 +4237,23 @@ mod tests {
                 Some("pnpm-lock.yaml"),
                 Layered,
             ),
+            // Versioned entries too: a pnpm 11 entry does not make the array a
+            // pnpm 11 pin when it sits last, nor an npm entry an npm pin.
+            (
+                r#""devEngines":{"packageManager":[{"name":"pnpm","version":"^11.0.0"},{"name":"npm","version":"^11.0.0"}]}"#,
+                Some("pnpm-lock.yaml"),
+                Layered,
+            ),
+            (
+                r#""devEngines":{"packageManager":[{"name":"npm","version":"^11.0.0"},{"name":"pnpm","version":"^11.0.0"}]}"#,
+                Some("pnpm-lock.yaml"),
+                Layered,
+            ),
+            (
+                r#""devEngines":{"packageManager":[{"name":"npm","version":"^11.0.0"},{"name":"pnpm","version":"^11.0.0"}]}"#,
+                Some("package-lock.json"),
+                Ignored,
+            ),
             (r#""packageManager":"npm@11.20.0""#, None, Ignored),
             (r#""packageManager":"bun@1.4.3""#, None, Ignored),
             (r#""packageManager":"yarn@1.22.22""#, None, Layered),
@@ -4249,9 +4266,16 @@ mod tests {
         // `main` registers, so they and the engine posture cannot disagree.
         register_incumbent_probe();
         for (fields, lockfile, expected) in cases {
-            let (_root, member) = npmrc_model_workspace(fields, lockfile);
+            let (root, member) = npmrc_model_workspace(fields, lockfile);
             let model = nub_core::workspace::npmrc::member_npmrc(&member);
             assert_eq!(model, expected, "{fields} + {lockfile:?}");
+            // The role readers (`declared_pm_raw`) and the config surface
+            // (`declared_package_manager`) name the same declared tool.
+            assert_eq!(
+                nub_core::pm::resolve::declared_pm_raw(root.path()).map(|(name, _)| name),
+                aube_lockfile::declared_package_manager(root.path()).map(|d| d.name),
+                "{fields}: declared tool"
+            );
         }
     }
 

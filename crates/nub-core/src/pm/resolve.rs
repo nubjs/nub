@@ -348,19 +348,20 @@ fn disagreement_warning(
     let dev = manifest
         .get("devEngines")
         .and_then(|d| d.get("packageManager"))?;
-    // Mirror the identity probe's array handling: the last named entry governs.
-    let entry = match dev {
-        serde_json::Value::Array(items) => items
-            .iter()
-            .rev()
-            .find(|e| e.get("name").and_then(|n| n.as_str()).is_some())?,
-        other => other,
+    // An array lists acceptable managers in any order: it agrees on the name when
+    // any entry names the pinned PM, and that entry's range is the one to check.
+    let pm_name = pm_pin.pm.to_string();
+    let (dev_name, dev_version) = match dev {
+        serde_json::Value::Array(items) => {
+            let named: Vec<_> = items.iter().filter_map(dev_engines_entry).collect();
+            named
+                .iter()
+                .find(|(n, _)| *n == pm_name)
+                .or_else(|| named.last())
+                .copied()?
+        }
+        other => dev_engines_entry(other)?,
     };
-    let dev_name = entry.get("name")?.as_str()?.trim();
-    if dev_name.is_empty() {
-        return None;
-    }
-    let dev_version = entry.get("version").and_then(|v| v.as_str());
     let dev_spec = match dev_version {
         Some(v) => format!("{dev_name}@{v}"),
         None => dev_name.to_string(),
@@ -368,7 +369,7 @@ fn disagreement_warning(
 
     // Name mismatch: yarn classic vs Berry both print `yarn`, so compare on the
     // Display name (the user-visible PM), not the classic/Berry split.
-    if dev_name != pm_pin.pm.to_string() {
+    if dev_name != pm_name {
         return Some(PinWarning::Disagreement {
             package_manager: pm_spec.trim().to_string(),
             dev_engines: dev_spec,
@@ -515,9 +516,13 @@ pub fn project_pm_identity(cwd: &Path) -> Option<PmIdentity> {
 
 /// The raw `(name, version)` a manifest's pin fields state, with NO usability
 /// check — `packageManager` first, then `devEngines.packageManager` (object or
-/// array; an array yields its LAST named entry, the one the spec's
-/// ignore-earlier/error-last semantics make govern). The identity probe's
-/// reader; [`pin_from_manifest`] stays the strict, warning-emitting one.
+/// array). An array naming more than one distinct tool says any of them is
+/// acceptable, so it is no single pin and yields `None`, leaving the lockfile to
+/// decide; an array repeating one tool yields that tool, with a version only when
+/// every entry states the same one. That is `aube_lockfile::declared_package_manager`'s
+/// rule, which the engine and the CLI's config surface use, so the role read here
+/// never depends on the array's order. The identity probe's reader;
+/// [`pin_from_manifest`] stays the strict, warning-emitting one.
 fn raw_pin_name_version(manifest: &serde_json::Value) -> Option<(String, Option<String>)> {
     if let Some(spec) = manifest.get("packageManager").and_then(|v| v.as_str()) {
         let spec = spec.trim();
@@ -528,22 +533,26 @@ fn raw_pin_name_version(manifest: &serde_json::Value) -> Option<(String, Option<
         return (!name.is_empty()).then(|| (name.to_string(), version));
     }
     let dev = manifest.get("devEngines")?.get("packageManager")?;
-    let entry = match dev {
-        serde_json::Value::Array(items) => items
-            .iter()
-            .rev()
-            .find(|e| e.get("name").and_then(|n| n.as_str()).is_some())?,
-        other => other,
+    let entries: Vec<(&str, Option<&str>)> = match dev {
+        serde_json::Value::Array(items) => items.iter().filter_map(dev_engines_entry).collect(),
+        other => dev_engines_entry(other).into_iter().collect(),
     };
-    let name = entry.get("name")?.as_str()?.trim();
-    if name.is_empty() {
+    let (name, version) = *entries.first()?;
+    if entries.iter().any(|(n, _)| *n != name) {
         return None;
     }
-    let version = entry
-        .get("version")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    Some((name.to_string(), version))
+    let version = entries
+        .iter()
+        .all(|(_, v)| *v == version)
+        .then_some(version)
+        .flatten();
+    Some((name.to_string(), version.map(str::to_string)))
+}
+
+/// A `devEngines.packageManager` entry's `(name, version)`, when it names a tool.
+fn dev_engines_entry(entry: &serde_json::Value) -> Option<(&str, Option<&str>)> {
+    let name = entry.get("name")?.as_str()?.trim();
+    (!name.is_empty()).then(|| (name, entry.get("version").and_then(|v| v.as_str())))
 }
 
 /// Per-process, mtime-validated cache of the root manifest keyed by the
@@ -1932,16 +1941,28 @@ mod tests {
         write_pkg(&dir, r#"{"name":"app"}"#);
         assert_eq!(project_pm_identity(&dir), None);
 
-        // (d) devEngines array form: the LAST named entry governs the identity.
-        let dir = tmpdir("ident-array");
+        // (d) devEngines array form. Several distinct tools are "any of these",
+        // so no single identity in either order (the lockfile decides); one tool,
+        // repeated, is that tool.
+        for array in [
+            r#"[{"name":"bun"},{"name":"pnpm","version":"^9"}]"#,
+            r#"[{"name":"pnpm","version":"^9"},{"name":"bun"}]"#,
+        ] {
+            let dir = tmpdir("ident-array");
+            write_pkg(
+                &dir,
+                &format!(r#"{{"devEngines":{{"packageManager":{array}}}}}"#),
+            );
+            assert_eq!(project_pm_identity(&dir), None, "{array}");
+        }
+        let dir = tmpdir("ident-array-one-tool");
         write_pkg(
             &dir,
-            r#"{"devEngines":{"packageManager":[{"name":"bun"},{"name":"pnpm","version":"^9"}]}}"#,
+            r#"{"devEngines":{"packageManager":[{"name":"pnpm","version":"^9"},{"name":"pnpm","version":"^9"}]}}"#,
         );
         assert_eq!(
             project_pm_identity(&dir).map(|i| i.name),
-            Some("pnpm".to_string()),
-            "the array's last named entry (spec: error-last) is the identity"
+            Some("pnpm".to_string())
         );
     }
 }
