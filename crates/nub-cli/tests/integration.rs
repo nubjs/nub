@@ -363,6 +363,105 @@ fn a_smol_payload_records_whether_it_needs_the_register_hooks_shim() {
     );
 }
 
+/// An `--external` package resolves on the machine that RUNS the artifact, and a
+/// missing one stops it with the shim's "Cannot find" error.
+///
+/// Only running the artifact shows either. The shim's entry and hook evaluate before
+/// the bundle, reading the compile bootstrap's record at module evaluation, so a
+/// payload that left publishing the record to the bundle's preamble built cleanly,
+/// reported the package as shipped, and died on the hook's first line with a
+/// TypeError. The absent case therefore pins the shim's OWN message: a non-zero exit
+/// alone was satisfied by that crash.
+///
+/// Both containers that extract, `--smol` and the default embedding one. The package
+/// is CommonJS, like most of what gets externalized, and prints a token no other file
+/// can, which is what shows the run-time copy answered.
+#[cfg(feature = "compile")]
+#[test]
+fn an_external_package_resolves_where_the_artifact_runs() {
+    let runtime = compile_test_runtime();
+    let work = unique_test_cache();
+    let cache = work.join("cache");
+    let entry = work.join("app.mjs");
+    let present = work.join("present");
+    let absent = work.join("absent");
+    let package = present.join("node_modules").join("peer");
+    std::fs::create_dir_all(&package).expect("create the installed package dir");
+    std::fs::create_dir_all(&absent).expect("create the empty run dir");
+    std::fs::write(
+        &entry,
+        "import peer from \"peer\";\nconsole.log(peer(42));\n",
+    )
+    .expect("write entry");
+    std::fs::write(
+        package.join("package.json"),
+        "{ \"name\": \"peer\", \"version\": \"1.0.0\", \"main\": \"index.js\" }\n",
+    )
+    .expect("write the package manifest");
+    std::fs::write(
+        package.join("index.js"),
+        "module.exports = (n) => `peer-answered:${n}`;\n",
+    )
+    .expect("write the package");
+
+    let run = |artifact: &Path, cwd: &Path| {
+        let mut cmd = Command::new(artifact);
+        cmd.current_dir(cwd)
+            .env("XDG_CACHE_HOME", work.join("artifact-cache"));
+        // Long enough for the embedding shape's first run, which unpacks its Node.
+        run_compiled_artifact_command_with_timeout(cmd, std::time::Duration::from_secs(60))
+    };
+
+    for (shape, flags) in [("smol", &["--smol"][..]), ("embed", &[][..])] {
+        let artifact = work.join(format!("{shape}{}", std::env::consts::EXE_SUFFIX));
+        let compiled = Command::new(nub_binary())
+            .args([
+                "compile",
+                "--target",
+                &runtime.node_target,
+                "--external",
+                "peer",
+            ])
+            .args(flags)
+            .arg("--out")
+            .arg(&artifact)
+            .arg(&entry)
+            .current_dir(&work)
+            .env("XDG_CACHE_HOME", &cache)
+            .env("__NUB_LAUNCHER_TEMPLATE", &runtime.launcher)
+            .output()
+            .expect("spawn nub compile");
+        assert!(
+            compiled.status.success(),
+            "{shape}: compile failed: {}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+
+        let found = run(&artifact, &present);
+        assert!(
+            found.status.success()
+                && String::from_utf8_lossy(&found.stdout).trim() == "peer-answered:42",
+            "{shape}: an installed external must answer from the run directory; \
+             status {:?}, stdout: {}, stderr: {}",
+            found.status,
+            String::from_utf8_lossy(&found.stdout),
+            String::from_utf8_lossy(&found.stderr)
+        );
+
+        let missing = run(&artifact, &absent);
+        let stderr = String::from_utf8_lossy(&missing.stderr);
+        assert!(
+            !missing.status.success()
+                && stderr.contains("Cannot find peer.")
+                && stderr.contains("compiled with --external peer"),
+            "{shape}: a missing external must fail with the shim's own error; \
+             status {:?}, stderr: {stderr}",
+            missing.status
+        );
+    }
+    let _ = std::fs::remove_dir_all(&work);
+}
+
 /// Whether a target Node can carry the single-executable container at all.
 ///
 /// The blob's `execArgv` field is what the container needs and it reached release
@@ -2428,6 +2527,19 @@ fn user_preload_named_preload_mjs_does_not_disable_augmentation() {
 }
 
 #[test]
+fn temporal_namespace_installers() {
+    let (stdout, stderr, code) = run_nub_with_env(
+        "temporal-lazy",
+        "namespace.test.mjs",
+        &[("NODE_COMPAT", "1")],
+    );
+    assert_eq!(
+        code, 0,
+        "Temporal installer tests failed: {stdout}\n{stderr}"
+    );
+}
+
+#[test]
 fn temporal_lazy_global_and_import() {
     // A37: Temporal is installed as a lazy global — loaded on first access, not
     // eagerly at startup (the polyfill is ~18ms). It must still be fully usable
@@ -2453,6 +2565,35 @@ fn temporal_lazy_global_and_import() {
     assert!(
         stdout.contains("temporal-instant:1970-01-01T00:00:00Z"),
         "toTemporalInstant re-exported, bound to Date.prototype, and callable: {stdout}"
+    );
+}
+
+#[test]
+fn package_clobber_applies_to_import_only() {
+    // The import clobber resolves to a data: URL, which the CommonJS loader reads
+    // as a file path (ENOENT). On the fast tier the resolve hook also sees
+    // require(), so it must leave that call to Node's resolver.
+    let (stdout, stderr, code) = run_nub("clobber-require", "main.cjs");
+    assert_eq!(
+        code, 0,
+        "require of a clobbered package must load it: {stderr}"
+    );
+    assert!(
+        stdout.contains("require-temporal:2026"),
+        "the installed package answered the require: {stdout}"
+    );
+
+    // A user-added "require" condition rides on imports too, so it must not be
+    // what tells a require() from an import.
+    let (stdout, stderr, code) = run_nub_with_env(
+        "clobber-require",
+        "import.mjs",
+        &[("NODE_OPTIONS", "--conditions=require")],
+    );
+    assert_eq!(code, 0, "import under --conditions=require: {stderr}");
+    assert!(
+        stdout.contains("import-is-global:true"),
+        "an import keeps the clobber under --conditions=require: {stdout}"
     );
 }
 
@@ -3033,6 +3174,14 @@ for (const [holder, key] of targets) {
   Object.defineProperty(holder, key, { value: sentinel, writable: true, enumerable: false, configurable: true });
   planted.push([holder, key, sentinel]);
 }
+// JSON.parse exists everywhere, so its detect probes behavior: plant one that
+// already honors `{ freeze: true }`, as a native implementation would.
+const jsonParse = JSON.parse;
+const jsonSentinel = function nubSentinel(text) {
+  return Object.freeze(Object.setPrototypeOf(jsonParse(text), null));
+};
+Object.defineProperty(JSON, "parse", { value: jsonSentinel, writable: true, enumerable: false, configurable: true });
+planted.push([JSON, "parse", jsonSentinel]);
 // The one accessor in the set needs its own sentinel shape.
 Object.defineProperty(ArrayBuffer.prototype, "detached", {
   get: function nubSentinelGetter() { return "SENTINEL"; },
@@ -3078,7 +3227,7 @@ console.log(JSON.stringify({ checked: planted.length + 1, clobbered }));
 fn iterator_stage4_helpers_and_promise_try_follow_spec() {
     // The final Stage 4 text of iterator chunking/includes/join, plus the generic
     // `this` of Promise.try. No Node release ships the four iterator methods, and
-    // Promise.try is deleted first so its fallback runs on 24+ too; each case below
+    // Promise.try is deleted first so its fallback runs on 23+ too; each case below
     // is one the pre-Stage-4 polyfill got wrong. Full conformance is checked against
     // test262 (built-ins/Iterator/prototype, built-ins/Promise/try); this pins the
     // observable contract. Plain `node` against the runtime file, as the no-clobber
@@ -3180,6 +3329,132 @@ console.log(JSON.stringify(failures));
 }
 
 #[test]
+fn json_parse_options_follow_spec() {
+    // The Stage 2.7 spec text of JSON.parse options (proposal-json-parseimmutable).
+    // No engine ships it, so the first check pins that the polyfill, not native, is
+    // under test. test262 has no tests for the proposal yet; its existing JSON.parse
+    // suite passes identically with the wrapper installed. Plain `node` against the
+    // runtime file, as the no-clobber test above, so the CI Node matrix covers both
+    // tiers.
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let polyfills = Path::new(&manifest).join("../../runtime/polyfills.cjs");
+
+    let work = unique_test_cache();
+    std::fs::create_dir_all(&work).unwrap();
+    let script = work.join("_json_parse_options.mjs");
+    std::fs::write(
+        &script,
+        r#"
+import { createRequire } from "node:module";
+// A parser installed by an earlier preload that rejects a non-callable second
+// argument: the install-time probe must not abort on it.
+const engineParse = JSON.parse;
+const nativeParse = function parse(text, reviver) {
+  if (reviver !== undefined && typeof reviver !== "function") throw new TypeError("reviver");
+  return engineParse(text, reviver);
+};
+JSON.parse = nativeParse;
+createRequire(import.meta.url)(process.argv[2]).installSyncPolyfills({});
+
+const failures = [];
+const check = (name, fn) => {
+  try {
+    if (fn() !== true) failures.push(name);
+  } catch (e) {
+    failures.push(`${name}: ${e}`);
+  }
+};
+const throws = (Err, fn) => {
+  try {
+    fn();
+  } catch (e) {
+    return e instanceof Err;
+  }
+  return false;
+};
+const proto = Object.getPrototypeOf;
+const deepFrozen = (v) =>
+  typeof v !== "object" || v === null || (Object.isFrozen(v) && Object.values(v).every(deepFrozen));
+const text = '{"a":[1,{"b":{}}],"__proto__":{"c":1}}';
+
+check("the polyfill is installed with the builtin's shape", () =>
+  JSON.parse !== nativeParse && JSON.parse.length === 2 && JSON.parse.name === "parse" &&
+  throws(TypeError, () => new JSON.parse("1")));
+check("freeze deep-freezes and defaults preferNullPrototype to true", () => {
+  const r = JSON.parse(text, { freeze: true });
+  return deepFrozen(r) && proto(r) === null && proto(r.a[1].b) === null && proto(r.a) === Array.prototype &&
+    Object.hasOwn(r, "__proto__") && r.__proto__.c === 1;
+});
+check("preferNullPrototype is independent of freeze when given", () => {
+  const kept = JSON.parse(text, { freeze: true, preferNullPrototype: false });
+  const bare = JSON.parse(text, { preferNullPrototype: true });
+  return deepFrozen(kept) && proto(kept.a[1]) === Object.prototype &&
+    proto(bare.a[1]) === null && !Object.isFrozen(bare) && !Object.isFrozen(bare.a);
+});
+check("options are never coerced", () =>
+  [1, "true", null, new Boolean(true)].every((v) =>
+    throws(TypeError, () => JSON.parse("{}", { freeze: v })) &&
+    throws(TypeError, () => JSON.parse("{}", { preferNullPrototype: v }))));
+check("ToString(text), then freeze, then preferNullPrototype, then the parse", () => {
+  const order = [];
+  const src = { toString() { order.push("text"); return "{"; } };
+  const opts = {
+    get freeze() { order.push("freeze"); return true; },
+    get preferNullPrototype() { order.push("preferNullPrototype"); return true; },
+  };
+  return throws(SyntaxError, () => JSON.parse(src, opts)) &&
+    order.join() === "text,freeze,preferNullPrototype";
+});
+check("a callable is a reviver and its option-named properties are ignored", () => {
+  const keys = [];
+  const reviver = (k, v) => (keys.push(k), typeof v === "number" ? v * 2 : v);
+  reviver.freeze = "ignored";
+  const r = JSON.parse('{"a":1,"b":[2]}', reviver);
+  return keys.join() === "a,0,b," && r.a === 2 && r.b[0] === 4 && !Object.isFrozen(r) &&
+    proto(r) === Object.prototype;
+});
+check("the walk ignores Array.prototype changes made after the preload", () => {
+  const AP = Array.prototype;
+  const saved = { push: AP.push, pop: AP.pop };
+  AP.push = function () { return 0; };
+  AP.pop = function () { return undefined; };
+  Object.defineProperty(AP, "1", { set() {}, configurable: true });
+  try {
+    return deepFrozen(JSON.parse('{"x":{"y":[{}]}}', { freeze: true }));
+  } finally {
+    Object.assign(AP, saved);
+    delete AP[1];
+  }
+});
+check("deep nesting is walked without recursion", () => {
+  const depth = 100000;
+  let node = JSON.parse("[".repeat(depth) + "]".repeat(depth), { freeze: true });
+  while (node.length > 0 && Object.isFrozen(node)) node = node[0];
+  return node.length === 0 && Object.isFrozen(node);
+});
+console.log(JSON.stringify(failures));
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(target_node_path())
+        .arg(&script)
+        .arg(&polyfills)
+        .current_dir(&work)
+        .output()
+        .expect("failed to spawn node");
+
+    let _ = std::fs::remove_dir_all(&work);
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stdout, "[]",
+        "spec cases the polyfill failed (stderr: {stderr})"
+    );
+}
+
+#[test]
 fn esnext_library_polyfills() {
     // The Stage 3+ library families: new Set methods, Array.fromAsync, the Iterator
     // surface (helpers + from/concat/zip/zipKeyed + the Stage 3 chunks/windows/
@@ -3215,7 +3490,9 @@ const mapOk = m.getOrInsert("a", 1) === 1 && m.getOrInsert("a", 9) === 1 &&
 const sumOk = Math.sumPrecise([1e308, 1e308, -1e308, -1e308]) === 0 &&
   Math.sumPrecise([1, 1e100, 1, -1e100]) === 2;
 const symOk = typeof Symbol.metadata === "symbol";
-console.log(JSON.stringify({ setOk, fromAsyncOk, iterOk, mapOk, sumOk, symOk }));
+const parsed = JSON.parse('{"a":[{}]}', { freeze: true });
+const jsonOk = Object.isFrozen(parsed.a[0]) && Object.getPrototypeOf(parsed) === null;
+console.log(JSON.stringify({ setOk, fromAsyncOk, iterOk, mapOk, sumOk, symOk, jsonOk }));
 "#,
     )
     .unwrap();
@@ -3233,7 +3510,7 @@ console.log(JSON.stringify({ setOk, fromAsyncOk, iterOk, mapOk, sumOk, symOk }))
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
         stdout,
-        r#"{"setOk":true,"fromAsyncOk":true,"iterOk":true,"mapOk":true,"sumOk":true,"symOk":true}"#,
+        r#"{"setOk":true,"fromAsyncOk":true,"iterOk":true,"mapOk":true,"sumOk":true,"symOk":true,"jsonOk":true}"#,
         "stderr: {stderr}"
     );
 }

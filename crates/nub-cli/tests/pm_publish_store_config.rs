@@ -83,6 +83,16 @@ impl Ctx {
             .env("XDG_DATA_HOME", self.home.join("xdg-data"))
             .env("XDG_CACHE_HOME", self.home.join("xdg-cache"))
             .env("XDG_CONFIG_HOME", self.home.join("xdg-config"));
+        // HOME isolation alone is not enough: an inherited `npm_config_userconfig`
+        // (npm exports it, with the rest of its config, to every script it runs)
+        // relocates the user `.npmrc` off the isolated HOME, and the other
+        // `npm_config_*` / `pnpm_config_*` keys outrank every file a test writes.
+        for (name, _) in std::env::vars_os() {
+            let lower = name.to_string_lossy().to_ascii_lowercase();
+            if lower.starts_with("npm_config_") || lower.starts_with("pnpm_config_") {
+                cmd.env_remove(&name);
+            }
+        }
         for (name, value) in envs {
             cmd.env(name, value);
         }

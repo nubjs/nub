@@ -84,26 +84,6 @@ fn home_stop_boundary() -> Option<PathBuf> {
     aube_util::env::home_dir()
 }
 
-/// Shape-only check for a `package.json`'s `workspaces` field. Parses
-/// just enough JSON to know if the field is present and non-null,
-/// skipping the full `PackageJson` parse (which allocates IndexMaps,
-/// deps maps, scripts, the whole thing) for every ancestor in the
-/// walk. Callers up the chain run this 5-20 times per `aube run` /
-/// `aube exec` / `aube dlx`.
-fn package_json_has_workspaces(path: &Path) -> bool {
-    #[derive(serde::Deserialize)]
-    struct ShapeOnly {
-        #[serde(default)]
-        workspaces: Option<serde::de::IgnoredAny>,
-    }
-    let Ok(bytes) = std::fs::read(path) else {
-        return false;
-    };
-    serde_json::from_slice::<ShapeOnly>(&bytes)
-        .map(|s| s.workspaces.is_some())
-        .unwrap_or(false)
-}
-
 /// Walk upward from `start` looking for the nearest workspace root.
 ///
 /// A workspace root is any ancestor that either:
@@ -127,33 +107,7 @@ pub fn find_workspace_root(start: &Path) -> Option<PathBuf> {
 }
 
 fn find_workspace_root_uncached(start: &Path) -> Option<PathBuf> {
-    // Same home-boundary story as find_project_root. Without it, an
-    // `aube install` from an empty scratch dir could climb into the
-    // user's home, find a parent workspace yaml or package.json with
-    // a workspaces field, and attach to that workspace. Cap the walk
-    // at $HOME so that never happens.
-    let stop = home_stop_boundary();
-    // Any `pnpm-workspace.yaml` is a hard workspace boundary, matching
-    // pnpm: a file with no `packages:` list configures a single-package
-    // workspace (just the root package) — it does not mean "ignore this
-    // file and keep walking to an enclosing workspace". So `cd member &&
-    // aube install` anchors on the member's own yaml rather than the
-    // outer root; per-member lockfile freshness (tracked in install
-    // state) is what keeps repeat installs warm under
-    // `sharedWorkspaceLockfile=false`.
-    for dir in start.ancestors() {
-        if aube_manifest::workspace::workspace_yaml_existing(dir).is_some() {
-            return Some(dir.to_path_buf());
-        }
-        let pkg = dir.join("package.json");
-        if pkg.is_file() && package_json_has_workspaces(&pkg) {
-            return Some(dir.to_path_buf());
-        }
-        if stop.as_deref() == Some(dir) {
-            return None;
-        }
-    }
-    None
+    aube_manifest::workspace::find_workspace_root(start)
 }
 
 /// Walk upward from `start` looking for the nearest ancestor that

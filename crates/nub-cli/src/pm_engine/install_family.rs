@@ -285,7 +285,8 @@ impl EngineGlobals {
     /// `--filter=*` and a no-op when an explicit selector is present.
     fn effective_filter(&self) -> EffectiveFilter {
         let mut filters = self.filter.clone();
-        if self.recursive && filters.is_empty() && self.filter_prod.is_empty() {
+        let recursive = self.recursive && filters.is_empty() && self.filter_prod.is_empty();
+        if recursive {
             filters.push("*".to_string());
         }
         EffectiveFilter {
@@ -293,6 +294,7 @@ impl EngineGlobals {
             filter_prods: self.filter_prod.clone(),
             fail_if_no_match: self.fail_if_no_match,
             include_workspace_root: self.include_workspace_root,
+            recursive,
         }
     }
 }
@@ -1289,7 +1291,8 @@ impl WorkspaceFilterFlags {
     /// already present.
     fn effective_filter(&self) -> EffectiveFilter {
         let mut filters = self.filter.clone();
-        if self.recursive && filters.is_empty() && self.filter_prod.is_empty() {
+        let recursive = self.recursive && filters.is_empty() && self.filter_prod.is_empty();
+        if recursive {
             filters.push("*".to_string());
         }
         EffectiveFilter {
@@ -1297,6 +1300,7 @@ impl WorkspaceFilterFlags {
             filter_prods: self.filter_prod.clone(),
             fail_if_no_match: self.fail_if_no_match,
             include_workspace_root: self.include_workspace_root,
+            recursive,
         }
     }
 }

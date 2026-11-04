@@ -610,6 +610,22 @@ pub(crate) fn run_node_gyp_bootstrap(args: &[String]) -> Result<i32> {
     }
 }
 
+/// Record the pnpm a project now pins in `pnpm-lock.yaml`'s env document —
+/// the last step of `nub pm use pnpm`, whose lockfile alignment (keep,
+/// convert, rename) writes only the project document. Returns the version
+/// recorded, `None` when the lockfile already pins it or the pin is one
+/// pnpm does not record (pnpm 10 and below).
+pub(crate) fn sync_pnpm_package_manager_pin(root: &Path) -> Result<Option<String>> {
+    let session = engine_session_quiet(Some(root))?;
+    session
+        .runtime
+        .block_on(aube::package_manager_pin::sync_pnpm_env_lockfile(
+            root,
+            aube_registry::NetworkMode::Online,
+        ))
+        .map_err(|report| anyhow::anyhow!("{}", present::render_report(&report)))
+}
+
 /// The shared stub error for registered-but-unwired verbs: names the verb
 /// and gives the user's real-PM command so nobody is left stranded. Every
 /// *current* registration has an explicit arm (wired or an honest per-verb
@@ -1388,10 +1404,10 @@ fn apply_config_scope(
     // Fresh, undeclared, no lockfile: nub identity (its un-branded
     // cross-tool fields), matching the brand-symmetric default.
     .unwrap_or(Role::Nub);
-    let (major, minor) = declared
-        .as_ref()
-        .and_then(|(_, v)| v.as_deref())
-        .map(parse_major_minor)
+    // The version declared for the role's own tool, so a multi-tool `devEngines`
+    // array (no single pin; the lockfile picked the role) still gives a major.
+    let (major, minor) = nub_core::pm::resolve::declared_pm_version(cwd, role.display())
+        .map(|v| parse_major_minor(&v))
         .unwrap_or((None, None));
 
     // Scope the override sources to the role's dialect.
@@ -1662,16 +1678,30 @@ fn pnpm_incumbent_major_is_v11_plus() -> bool {
 /// The declared incumbent pnpm major, or `None` when the project does not
 /// declare pnpm as its package manager (a non-pnpm/unknown/absent
 /// `packageManager`/`devEngines` name, or an undeclared/unparseable version).
-/// Reads the pin packageManager-first, requiring the name to be LITERALLY
-/// "pnpm" — the shared major detection behind [`pnpm_incumbent_major_is_v11_plus`]
+/// Reads the version declared for pnpm itself (`declared_pm_version`: the pin
+/// when it names pnpm, else the pnpm entry of a multi-tool `devEngines` array)
+/// — the shared major detection behind [`pnpm_incumbent_major_is_v11_plus`]
 /// and [`pnpm_npmrc_key_policy`], matching
 /// `store_config_family::project_scalar_home`.
 fn declared_pnpm_major() -> Option<u64> {
-    std::env::current_dir()
-        .ok()
-        .and_then(|cwd| nub_core::pm::resolve::declared_pm_raw(&cwd))
-        .and_then(|(name, version)| (name == "pnpm").then_some(version).flatten())
-        .and_then(|v| parse_major_minor(&v).0)
+    declared_pnpm_major_in(&std::env::current_dir().ok()?)
+}
+
+/// [`declared_pnpm_major`] for the project at `dir`.
+fn declared_pnpm_major_in(dir: &Path) -> Option<u64> {
+    nub_core::pm::resolve::declared_pm_version(dir, "pnpm").and_then(|v| parse_major_minor(&v).0)
+}
+
+/// Hand nub-core this crate's incumbent detection, so its own `.npmrc` readers
+/// and pnpm-named-file gates ask the same functions the engine posture is built
+/// from rather than a second detector. Called once from `main`; set-once.
+pub(crate) fn register_incumbent_probe() {
+    nub_core::incumbent::register(nub_core::incumbent::IncumbentProbe {
+        declared_pm_name: |dir| aube_lockfile::declared_package_manager(dir).map(|d| d.name),
+        member_npmrc: |dir| {
+            workspace_npmrc_model(&resolve_config_surface(dir), declared_pnpm_major_in(dir))
+        },
+    });
 }
 
 /// How a detected pnpm major reads project/user `.npmrc` for *settings*. pnpm
@@ -2367,6 +2397,12 @@ pub(crate) fn engine_brand_preflight() {
             pnpm_npmrc_key_policy(declared_pnpm_major()),
             NpmrcKeyPolicy::Pnpm11Allowlist
         );
+    let workspace_npmrc = match workspace_npmrc_model(&surface, declared_pnpm_major()) {
+        nub_core::workspace::npmrc::MemberNpmrc::Ignored => aube_util::WorkspaceNpmrc::RootOnly,
+        nub_core::workspace::npmrc::MemberNpmrc::Layered => {
+            aube_util::WorkspaceNpmrc::RootBeneathMember
+        }
+    };
     let read_yarn_config = read_yarn_config_for_surface(&surface);
     // Classic Yarn (v1) reads `.yarnrc`; Yarn Berry (v2+) abandoned it for
     // `.yarnrc.yml` and ignores a stray legacy `.yarnrc`. Gate the engine's
@@ -2397,6 +2433,8 @@ pub(crate) fn engine_brand_preflight() {
     aube_util::update_engine_context(|c| {
         c.read_branded_pnpm_config = read_branded_pnpm_config;
         c.npmrc_settings_allowlist = npmrc_settings_allowlist;
+        c.workspace_npmrc = workspace_npmrc;
+        c.invocation_dir = cwd.clone();
         // `config.yaml` and `auth.ini` are pnpm-NAMED global files. Read them
         // only for a provable pnpm-v11+ incumbent; unknown majors use the v10
         // model and never inherit pnpm global state. Global writes remain
@@ -2583,8 +2621,7 @@ enum ConfigSurface {
 /// one `current_dir()` read.
 fn pnpm_v11_surface(surface: &ConfigSurface, cwd: &Path) -> bool {
     matches!(surface, ConfigSurface::PnpmOrFresh)
-        && nub_core::pm::resolve::declared_pm_raw(cwd)
-            .and_then(|(name, version)| (name == "pnpm").then_some(version).flatten())
+        && nub_core::pm::resolve::declared_pm_version(cwd, "pnpm")
             .and_then(|version| parse_major_minor(&version).0)
             .is_some_and(|major| major >= 11)
 }
@@ -2715,6 +2752,31 @@ fn read_yarn_config_for_surface(surface: &ConfigSurface) -> bool {
 /// `BUN_CONFIG_TOKEN` environment variables — true only under a Bun incumbent.
 /// Under any other surface those Bun-named env vars are another tool's state
 /// (name-based policy, mirroring [`read_yarn_config_for_surface`]).
+/// Whether a command run from a workspace member reads that member's `.npmrc`
+/// on top of the workspace root's, or the root's alone, mirroring the
+/// incumbent (each measured from a member dir with the registry set in one
+/// file or the other). pnpm reversed this at v11 (`workspaceDir ?? localPrefix`
+/// in its npmrc loader), so an undeclared pnpm major takes the dominant v10
+/// model. Yarn 1 layers them; Yarn Berry reads no `.npmrc` at all and keeps the
+/// layered default, as does a nub-identity project.
+fn workspace_npmrc_model(
+    surface: &ConfigSurface,
+    pnpm_major: Option<u64>,
+) -> nub_core::workspace::npmrc::MemberNpmrc {
+    use nub_core::workspace::npmrc::MemberNpmrc::{Ignored, Layered};
+    match surface {
+        ConfigSurface::NonPnpmCompat {
+            role: "npm" | "bun",
+            ..
+        } => Ignored,
+        ConfigSurface::PnpmOrFresh => match pnpm_npmrc_key_policy(pnpm_major) {
+            NpmrcKeyPolicy::Pnpm11Allowlist => Ignored,
+            NpmrcKeyPolicy::Open => Layered,
+        },
+        ConfigSurface::NonPnpmCompat { .. } | ConfigSurface::NubIdentity(_) => Layered,
+    }
+}
+
 fn read_bun_config_for_surface(surface: &ConfigSurface) -> bool {
     matches!(surface, ConfigSurface::NonPnpmCompat { role: "bun", .. })
 }
@@ -4138,6 +4200,140 @@ mod tests {
         assert!(matches!(pnpm_npmrc_key_policy(None), NpmrcKeyPolicy::Open));
     }
 
+    /// A one-member workspace whose root manifest carries `root_fields`, with
+    /// `lockfile` (if any) beside it; returns the tempdir and the member dir.
+    fn npmrc_model_workspace(
+        root_fields: &str,
+        lockfile: Option<&str>,
+    ) -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("package.json"),
+            format!(r#"{{"name":"root","workspaces":["packages/*"],{root_fields}}}"#),
+        )
+        .unwrap();
+        if let Some(lockfile) = lockfile {
+            std::fs::write(root.path().join(lockfile), "").unwrap();
+        }
+        let member = root.path().join("packages").join("a");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(member.join("package.json"), r#"{"name":"a"}"#).unwrap();
+        (root, member)
+    }
+
+    #[test]
+    fn member_npmrc_model_mirrors_each_incumbent() {
+        use nub_core::workspace::npmrc::MemberNpmrc::{Ignored, Layered};
+        let cases = [
+            (r#""packageManager":"pnpm@10.34.9""#, None, Layered),
+            (r#""packageManager":"pnpm@11.28.10""#, None, Ignored),
+            // A range in `devEngines` still names pnpm 11.
+            (
+                r#""devEngines":{"packageManager":{"name":"pnpm","version":"^11.0.0"}}"#,
+                None,
+                Ignored,
+            ),
+            (
+                r#""devEngines":{"packageManager":{"name":"pnpm","version":"~11.28.0"}}"#,
+                None,
+                Ignored,
+            ),
+            // Several tools in a `devEngines` array are no single pin, in either
+            // order: the lockfile decides, as it does for the engine.
+            (
+                r#""devEngines":{"packageManager":[{"name":"pnpm"},{"name":"npm"}]}"#,
+                Some("pnpm-lock.yaml"),
+                Layered,
+            ),
+            (
+                r#""devEngines":{"packageManager":[{"name":"npm"},{"name":"pnpm"}]}"#,
+                Some("pnpm-lock.yaml"),
+                Layered,
+            ),
+            // Versioned entries: the lockfile picks the tool, and that tool's
+            // entry gives its major, in either order.
+            (
+                r#""devEngines":{"packageManager":[{"name":"pnpm","version":"^11.0.0"},{"name":"npm","version":"^11.0.0"}]}"#,
+                Some("pnpm-lock.yaml"),
+                Ignored,
+            ),
+            (
+                r#""devEngines":{"packageManager":[{"name":"npm","version":"^11.0.0"},{"name":"pnpm","version":"^11.0.0"}]}"#,
+                Some("pnpm-lock.yaml"),
+                Ignored,
+            ),
+            (
+                r#""devEngines":{"packageManager":[{"name":"npm","version":"^11.0.0"},{"name":"pnpm","version":"^10.0.0"}]}"#,
+                Some("pnpm-lock.yaml"),
+                Layered,
+            ),
+            (
+                r#""devEngines":{"packageManager":[{"name":"npm","version":"^11.0.0"},{"name":"pnpm","version":"^11.0.0"}]}"#,
+                Some("package-lock.json"),
+                Ignored,
+            ),
+            (r#""packageManager":"npm@11.20.0""#, None, Ignored),
+            (r#""packageManager":"bun@1.4.3""#, None, Ignored),
+            (r#""packageManager":"yarn@1.22.22""#, None, Layered),
+            (r#""private":true"#, Some("package-lock.json"), Ignored),
+            (r#""private":true"#, Some("bun.lock"), Ignored),
+            (r#""private":true"#, Some("yarn.lock"), Layered),
+            (r#""private":true"#, None, Layered),
+        ];
+        // Asked the way nub-core's own `.npmrc` readers ask, through the probe
+        // `main` registers, so they and the engine posture cannot disagree.
+        register_incumbent_probe();
+        for (fields, lockfile, expected) in cases {
+            let (root, member) = npmrc_model_workspace(fields, lockfile);
+            let model = nub_core::workspace::npmrc::member_npmrc(&member);
+            assert_eq!(model, expected, "{fields} + {lockfile:?}");
+            // nub-core's readers and the engine's agree on the declared tool
+            // (role vs config surface) and on each tool's declared version.
+            assert_eq!(
+                nub_core::pm::resolve::declared_pm_raw(root.path()).map(|(name, _)| name),
+                aube_lockfile::declared_package_manager(root.path()).map(|d| d.name),
+                "{fields}: declared tool"
+            );
+            for tool in ["pnpm", "npm", "yarn", "bun"] {
+                assert_eq!(
+                    nub_core::pm::resolve::declared_pm_version(root.path(), tool),
+                    aube_lockfile::declared_version_for(root.path(), tool),
+                    "{fields}: declared {tool} version"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_declared_pnpm_pin_marks_the_workspace_root_before_its_lockfile() {
+        // nub-core's pnpm-named-file gate reads the declaration through the probe
+        // `main` registers; registering here is that production configuration.
+        register_incumbent_probe();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"name":"root","packageManager":"pnpm@11.28.10"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - 'packages/*'\n",
+        )
+        .unwrap();
+        let member = root.path().join("packages").join("a");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(member.join("package.json"), r#"{"name":"a"}"#).unwrap();
+
+        let found =
+            nub_core::workspace::detect::detect_project(&member).and_then(|p| p.workspace_root);
+        assert_eq!(
+            found.map(|p| p.canonicalize().unwrap()),
+            Some(root.path().canonicalize().unwrap()),
+            "workspace root seen from the member"
+        );
+        assert_eq!(declared_pnpm_major_in(&member), Some(11));
+    }
+
     #[test]
     fn setting_defaults_pick_the_layout_from_the_lockfile_kind() {
         let dir = tempfile::tempdir().unwrap();
@@ -4876,16 +5072,11 @@ mod tests {
         manifest(r#"{"packageManager":"pnpm@10.0.0"}"#);
         assert!(!pnpm_v11_surface(&ConfigSurface::PnpmOrFresh, root.path()));
 
-        // The extra space is load-bearing, not style. `ROOT_MANIFEST_CACHE` keys
-        // freshness on `{mtime, size}`, and its own docs say a same-mtime,
-        // same-size content edit is deliberately NOT distinguished — the size half
-        // is what covers "tests that rewrite-then-reread the same path". Written
-        // without it, this rewrite is byte-identical in LENGTH to the v10 line
-        // above, so on a filesystem whose mtime granularity is coarser than the gap
-        // between two writes (Windows) both halves of the stamp collide, the stale
-        // v10 value is served, and this assertion fails. Every other rewrite in
-        // this test already differs in length by accident.
-        manifest(r#"{"packageManager": "pnpm@11.0.0"}"#);
+        // Same length as the v10 manifest and, on Windows, often inside the same
+        // mtime tick, so only the manifest caches' racy-mtime guard
+        // (`config_cache`) makes this rewrite visible. The equal length is
+        // deliberate: it is the case that guard exists for.
+        manifest(r#"{"packageManager":"pnpm@11.0.0"}"#);
         assert!(pnpm_v11_surface(&ConfigSurface::PnpmOrFresh, root.path()));
         assert!(
             !pnpm_v11_surface(&ConfigSurface::NubIdentity(dir.clone()), root.path()),
