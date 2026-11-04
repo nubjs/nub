@@ -43,20 +43,24 @@ pub async fn run(
 
     ensure_installed(no_install).await?;
 
+    // `aube restart` has no `-s` of its own, so the echoed `$ <cmd>` line
+    // is gated on the global `--silent` / `--loglevel silent` alone.
+    let silent = super::global_output_flags().silent;
+
     if manifest.scripts.contains_key("restart") {
         // Propagate a non-zero `restart` exit up to the binary's single
         // `std::process::exit` rather than terminating in place.
-        if let Some(code) = exec_script(&cwd, &manifest, "restart", args).await? {
+        if let Some(code) = exec_script(&cwd, &manifest, "restart", args, silent).await? {
             return Ok(Some(code));
         }
     } else {
         // `stop` then `start`, each optional. A non-zero `stop` short-circuits
         // before `start` runs — matching the previous behavior where the inner
         // script runner terminated the process on the first failure.
-        if let Some(Some(code)) = exec_optional(&cwd, &manifest, "stop", &[]).await? {
+        if let Some(Some(code)) = exec_optional(&cwd, &manifest, "stop", &[], silent).await? {
             return Ok(Some(code));
         }
-        if let Some(Some(code)) = exec_optional(&cwd, &manifest, "start", args).await? {
+        if let Some(Some(code)) = exec_optional(&cwd, &manifest, "start", args, silent).await? {
             return Ok(Some(code));
         }
     }

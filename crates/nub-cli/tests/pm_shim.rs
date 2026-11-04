@@ -1,6 +1,6 @@
 //! PM-shim integration tests: spawn the real `nub` binary through PM-named
 //! links (argv0 dispatch) and as `nub pm shim`/`unshim`, asserting the ratified
-//! contract (wiki/research/package-manager-shims.md, 2026-06-09) end to end.
+//! contract (`package-manager-shims` (no such document), 2026-06-09) end to end.
 //!
 //! Hermetic by construction: every child gets an explicit PATH / HOME /
 //! XDG_CACHE_HOME, fall-through targets are fake shell scripts that print their
@@ -75,6 +75,55 @@ fn fake_pm(dir: &Path, name: &str) -> PathBuf {
     path
 }
 
+/// The caller's `PATH` with every directory holding a Nub shim removed. An
+/// installed `nub node shim` (`~/.local/share/nub/node-shim`) or PM shim dir puts
+/// a `node`/`npm` on PATH that is really Nub, and Nub resolves it through the
+/// fixture's own pins (`.nvmrc`) — provisioning a Node the test meant to leave
+/// alone. Tests that inherit PATH to find the machine's Node read this instead.
+/// A Nub binary is recognised by content, not location, so any install root works.
+fn host_path() -> String {
+    static HOST_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HOST_PATH
+        .get_or_init(|| {
+            let inherited = std::env::var_os("PATH").unwrap_or_default();
+            let kept: Vec<PathBuf> = std::env::split_paths(&inherited)
+                .filter(|dir| !holds_nub_shim(dir))
+                .collect();
+            std::env::join_paths(kept)
+                .expect("PATH entries rejoin")
+                .into_string()
+                .expect("PATH is UTF-8")
+        })
+        .clone()
+}
+
+fn holds_nub_shim(dir: &Path) -> bool {
+    const SHIM_NAMES: &[&str] = &["node", "npm", "npx", "pnpm", "pnpx", "yarn", "yarnpkg"];
+    SHIM_NAMES.iter().any(|name| {
+        let exe = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        // Only a native binary can be Nub; npm's own `npm` is a small script.
+        std::fs::metadata(&exe).is_ok_and(|m| m.is_file() && m.len() > 1 << 20)
+            && std::fs::read(&exe)
+                .is_ok_and(|bytes| bytes.windows(b"ERR_NUB_".len()).any(|w| w == b"ERR_NUB_"))
+    })
+}
+
+/// Replace the inherited inputs that can make Nub pick a different Node than the
+/// fixture sets up: PATH becomes [`host_path`] (a test's own `PATH` in `env` still
+/// wins), and an explicit binary, the caller's nvm installs, the caller's Nub
+/// install root and compat mode are dropped.
+fn strip_node_redirects(cmd: &mut Command) {
+    cmd.env("PATH", host_path());
+    for key in [
+        "NODE_EXECUTABLE",
+        "NVM_DIR",
+        "NUB_INSTALL_DIR",
+        "NODE_COMPAT",
+    ] {
+        cmd.env_remove(key);
+    }
+}
+
 /// Spawn `program args…` with a fully explicit environment (PATH/HOME/cache
 /// set per test, ambient `npm_config_registry` stripped so a dev-box override
 /// can't re-route dead-registry assertions). Returns (stdout, stderr, code).
@@ -92,6 +141,14 @@ fn run(program: &Path, args: &[&str], cwd: &Path, env: &[(&str, &str)]) -> (Stri
         // nested-re-entry tests set them back EXPLICITLY via `env`.
         cmd.env_remove("npm_config_user_agent");
         cmd.env_remove("npm_execpath");
+        // The shim dir honors XDG_DATA_HOME on a fresh install, and every test
+        // here starts from an empty HOME — so a dev box or container exporting
+        // the variable would send the shims to the XDG root and fail the
+        // `~/.local/share/nub/shims` assertions. A test that reads the launching shell's
+        // environment is not hermetic. One that WANTS the XDG path sets it back
+        // explicitly through `env` below.
+        cmd.env_remove("XDG_DATA_HOME");
+        strip_node_redirects(&mut cmd);
         for (k, v) in env {
             cmd.env(k, v);
         }
@@ -131,6 +188,7 @@ fn run_with_timeout(
         let mut cmd = Command::new(program);
         cmd.args(args).current_dir(cwd);
         cmd.env_remove("npm_config_registry");
+        strip_node_redirects(&mut cmd);
         for (k, v) in env {
             cmd.env(k, v);
         }
@@ -194,6 +252,33 @@ fn argv0_pnpm_dispatches_to_the_shim_and_falls_through_when_unpinned() {
         format!("FAKE:{}:install --frozen-lockfile\n", fake.display()),
         "the exec target must be the system pnpm with argv passed verbatim"
     );
+}
+
+#[test]
+fn argv0_pm_shim_passthrough_ignores_malformed_nub_config() {
+    let work = tmp("malformed-config");
+    let proj = work.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(proj.join("nub.jsonc"), "{ malformed").unwrap();
+    let sys = work.join("sys");
+    std::fs::create_dir_all(&sys).unwrap();
+    let fake = fake_pm(&sys, "pnpm");
+    let link = shim_link(&work, "pnpm");
+
+    let (stdout, stderr, code) = run(
+        &link,
+        &["--version"],
+        &proj,
+        &[
+            ("PATH", sys.to_str().unwrap()),
+            ("HOME", work.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "a malformed nub.jsonc must not block transparent PM-shim exec; stderr:\n{stderr}"
+    );
+    assert_eq!(stdout, format!("FAKE:{}:--version\n", fake.display()));
 }
 
 #[test]
@@ -324,6 +409,24 @@ fn transparent_verb_falls_through_to_the_system_pm_not_the_pin() {
         format!("FAKE:{}:create vite my-app\n", fake.display()),
         "the transparent fall-through targets the system npm, not the pinned pnpm"
     );
+
+    // A registry verb never touches the project either: `npm login` reaches the
+    // system npm instead of being refused.
+    let (stdout, stderr, code) = run(
+        &link,
+        &["login", "--auth-type=web"],
+        &proj,
+        &[
+            ("PATH", sys.to_str().unwrap()),
+            ("HOME", work.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(code, 0, "a registry verb never refuses; stderr:\n{stderr}");
+    assert_eq!(
+        stdout,
+        format!("FAKE:{}:login --auth-type=web\n", fake.display()),
+        "the registry verb runs the system npm with argv passed verbatim"
+    );
 }
 
 #[test]
@@ -451,7 +554,7 @@ fn pinned_name_match_runs_the_cached_pm_under_the_project_node() {
 
     // PATH is inherited: the project Node resolves from it (no Node pin here);
     // RunPinned never PATH-scans for pnpm, so an ambient real pnpm is inert.
-    let path = std::env::var("PATH").unwrap();
+    let path = host_path();
     let (stdout, stderr, code) = run(
         &link,
         &["install", "--offline"],
@@ -473,6 +576,60 @@ fn pinned_name_match_runs_the_cached_pm_under_the_project_node() {
         !stderr.contains("Installing"),
         "an exact cached pin must be a silent zero-network hit, got stderr:\n{stderr}"
     );
+}
+
+#[test]
+fn pnpm_12_cached_shims_run_the_node_launchers() {
+    let work = tmp("pnpm12");
+    let proj = work.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(
+        proj.join("package.json"),
+        r#"{"packageManager":"pnpm@12.0.0"}"#,
+    )
+    .unwrap();
+
+    let cache = work.join("cache");
+    let nub_cache = cache.join("nub");
+    let pkg = nub_cache.join("pm/pnpm/12.0.0/package");
+    std::fs::create_dir_all(pkg.join("bin")).unwrap();
+    std::fs::write(
+        pkg.join("package.json"),
+        r#"{"name":"pnpm","version":"12.0.0","bin":{"pn":"pn","pnx":"pnx","pnpm":"pnpm","pnpx":"pnpx"}}"#,
+    )
+    .unwrap();
+    // pnpm 12's root bins are placeholders that its `preinstall` overwrites
+    // with the native binary; Node cannot parse them.
+    for placeholder in ["pn", "pnx", "pnpm", "pnpx"] {
+        std::fs::write(
+            pkg.join(placeholder),
+            "# pnpm's native binary replaces this file\n",
+        )
+        .unwrap();
+    }
+    std::fs::write(nub_cache.join(".npmrc"), "registry=http://127.0.0.1:1/\n").unwrap();
+    let path = std::env::var("PATH").unwrap();
+    for entry in ["pnpm", "pnpx"] {
+        std::fs::write(
+            pkg.join(format!("bin/{entry}.mjs")),
+            format!("console.log('{entry} ' + process.argv.slice(2).join(' '))\n"),
+        )
+        .unwrap();
+        let link = shim_link(&work, entry);
+        let (stdout, stderr, code) = run(
+            &link,
+            &["--version"],
+            &proj,
+            &[
+                ("PATH", path.as_str()),
+                ("HOME", work.to_str().unwrap()),
+                ("XDG_CONFIG_HOME", work.to_str().unwrap()),
+                ("XDG_CACHE_HOME", cache.to_str().unwrap()),
+            ],
+        );
+        assert_eq!(code, 0, "the cached {entry} launcher must run: {stderr}");
+        assert_eq!(stdout, format!("{entry} --version\n"));
+    }
 }
 
 #[test]
@@ -534,7 +691,7 @@ fn pm_shim_and_unshim_round_trip_against_a_temp_home() {
     // `nub` itself is not shimmed (it's on PATH via ~/.nub/bin).
     let (stdout, stderr, code) = run(&nub_binary(), &["pm", "shim"], &home, &env);
     assert_eq!(code, 0, "nub pm shim must succeed; stderr:\n{stderr}");
-    let shims = home.join(".nub/shims");
+    let shims = home.join(".local/share/nub/shims");
     for name in ["npm", "npx", "pnpm", "pnpx", "yarn", "yarnpkg"] {
         assert!(
             shims.join(name).is_file(),
@@ -545,7 +702,9 @@ fn pm_shim_and_unshim_round_trip_against_a_temp_home() {
     let profile = std::fs::read_to_string(&zshrc).unwrap();
     assert_eq!(
         profile,
-        format!("{original}\n# nub shims\nexport PATH=\"$HOME/.nub/shims:$PATH\"\n"),
+        format!(
+            "{original}\n# nub shims\nexport PATH=\"${{XDG_DATA_HOME:-$HOME/.local/share}}/nub/shims:$PATH\"\n"
+        ),
         "the marked PATH block lands once, install.sh-shaped"
     );
     assert!(
@@ -579,6 +738,319 @@ fn pm_shim_and_unshim_round_trip_against_a_temp_home() {
     assert_eq!(code4, 0, "a second unshim is a clean no-op");
 }
 
+/// A project whose lockfile is npm's, with one `file:` dependency and no
+/// registry package, so the engine installs it with the registry dead.
+fn npm_link_only_project(work: &Path) -> PathBuf {
+    let proj = work.join("proj");
+    std::fs::create_dir_all(proj.join("local-dep")).unwrap();
+    // A root postinstall that records whether it ran, and with which
+    // NODE_ENV — the probe for npm's script semantics under routing — a root
+    // prepare, which npm runs whether or not dev dependencies are omitted, a
+    // prepublish npm still runs on install, and a pnpm-only devPreinstall.
+    std::fs::write(
+        proj.join("package.json"),
+        r#"{ "name": "proj", "version": "1.0.0", "dependencies": { "local-dep": "file:local-dep" },
+  "optionalDependencies": { "opt-dep": "file:opt-dep" },
+  "scripts": { "postinstall": "node -e \"require('fs').writeFileSync('postinstall.txt', String(process.env.NODE_ENV))\"",
+    "prepare": "node -e \"require('fs').writeFileSync('root-prepared.txt', '1')\"",
+    "prepublish": "node -e \"require('fs').writeFileSync('root-prepublished.txt', '1')\"",
+    "pnpm:devPreinstall": "node -e \"require('fs').writeFileSync('dev-preinstall.txt', '1')\"" } }"#,
+    )
+    .unwrap();
+    // The link target's `prepare`: npm runs it in the target directory
+    // (its link build pass), so its artifact must appear there — and the
+    // bin it generates must resolve through `.bin` afterwards. The optional
+    // link's `prepare` fails, which npm survives.
+    std::fs::write(
+        proj.join("local-dep/package.json"),
+        r#"{ "name": "local-dep", "version": "1.0.0", "bin": { "local-dep-bin": "gen.js" },
+  "scripts": { "prepare": "node -e \"require('fs').writeFileSync('prepared.txt', '1'); require('fs').writeFileSync('gen.js', '#!/usr/bin/env node\\nconsole.log(42)')\"" } }"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(proj.join("opt-dep")).unwrap();
+    std::fs::write(
+        proj.join("opt-dep/package.json"),
+        r#"{ "name": "opt-dep", "version": "1.0.0", "bin": { "opt-dep-bin": "bin.js" },
+  "scripts": { "prepare": "node -e process.exit(1)" } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("opt-dep/bin.js"),
+        "#!/usr/bin/env node\nconsole.log(7)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("package-lock.json"),
+        r#"{
+  "name": "proj",
+  "version": "1.0.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": { "name": "proj", "version": "1.0.0", "dependencies": { "local-dep": "file:local-dep" },
+      "optionalDependencies": { "opt-dep": "file:opt-dep" } },
+    "local-dep": { "version": "1.0.0", "bin": { "local-dep-bin": "gen.js" } },
+    "node_modules/local-dep": { "resolved": "local-dep", "link": true },
+    "opt-dep": { "version": "1.0.0", "bin": { "opt-dep-bin": "bin.js" } },
+    "node_modules/opt-dep": { "resolved": "opt-dep", "link": true, "optional": true }
+  }
+}
+"#,
+    )
+    .unwrap();
+    proj
+}
+
+/// `nub pm shim --route-installs` into a temp HOME, returning the shim dir:
+/// the marker lands beside the six links, and the `npm` link reads it.
+fn shims_with_routing(home: &Path, route: bool) -> PathBuf {
+    let env: Vec<(&str, &str)> = vec![("HOME", home.to_str().unwrap()), ("SHELL", "/bin/zsh")];
+    let args: &[&str] = if route {
+        &["pm", "shim", "--route-installs"]
+    } else {
+        &["pm", "shim"]
+    };
+    let (stdout, stderr, code) = run(&nub_binary(), args, home, &env);
+    assert_eq!(code, 0, "nub pm shim must succeed; stderr:\n{stderr}");
+    assert_eq!(
+        stdout.contains("run on nub's engine"),
+        route,
+        "the report names the routing exactly when it is on, got:\n{stdout}"
+    );
+    home.join(".local/share/nub/shims")
+}
+
+/// Under `nub pm shim --route-installs`, a top-level `npm ci` in an
+/// npm-lockfile project runs on nub's engine — the notice names the swap and
+/// the tree carries the engine's marker — while every other npm invocation,
+/// and an install argv the engine cannot honor verbatim, still reaches the
+/// real npm with its argv untouched.
+#[test]
+fn routed_npm_ci_runs_on_the_engine_and_everything_else_reaches_the_real_npm() {
+    let work = tmp("route");
+    let home = work.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let shims = shims_with_routing(&home, true);
+    let proj = npm_link_only_project(&work);
+    let sys = work.join("sys");
+    std::fs::create_dir_all(&sys).unwrap();
+    let fake = fake_pm(&sys, "npm");
+
+    // A dead registry beside a fresh store: the link-only lockfile needs no
+    // fetch, so a routed install that reaches the network fails fast here.
+    let cache = work.join("cache");
+    std::fs::create_dir_all(cache.join("nub")).unwrap();
+    std::fs::write(cache.join("nub/.npmrc"), "registry=http://127.0.0.1:1/\n").unwrap();
+    let path = format!("{}:{}:{}", shims.display(), sys.display(), host_path());
+    let env: Vec<(&str, &str)> = vec![
+        ("HOME", home.to_str().unwrap()),
+        ("PATH", path.as_str()),
+        ("XDG_CACHE_HOME", cache.to_str().unwrap()),
+    ];
+    let npm = shims.join("npm");
+
+    let (stdout, stderr, code) = run(&npm, &["ci"], &proj, &env);
+    assert_eq!(code, 0, "the routed npm ci must succeed; stderr:\n{stderr}");
+    assert!(
+        stderr.contains("npm ci → nub ci (via nub shim)"),
+        "the notice names what ran in npm's place, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("did not run"),
+        "a linked directory is not a store build, so allow-all has nothing to report as unattempted; got:\n{stderr}"
+    );
+    assert!(
+        proj.join("node_modules/.nub-engine").is_file(),
+        "the engine installed the tree (its marker is there); stdout:\n{stdout}"
+    );
+    assert!(
+        proj.join("node_modules/local-dep")
+            .symlink_metadata()
+            .is_ok(),
+        "the file: dependency is linked"
+    );
+    assert!(
+        !stdout.contains("FAKE:"),
+        "the real npm never ran, got:\n{stdout}"
+    );
+    let postinstall = proj.join("postinstall.txt");
+    assert_eq!(
+        std::fs::read_to_string(&postinstall).unwrap(),
+        "undefined",
+        "the root postinstall ran, with no NODE_ENV forced on it"
+    );
+    assert!(
+        proj.join("root-prepublished.txt").is_file() && !proj.join("dev-preinstall.txt").exists(),
+        "npm's root scripts ran: prepublish, and not pnpm's devPreinstall"
+    );
+    let prepared = proj.join("local-dep/prepared.txt");
+    assert!(
+        prepared.is_file(),
+        "the file: link's prepare ran in the link target, as npm's link build pass does"
+    );
+    let (bin_out, bin_err, bin_code) = run(
+        &proj.join("node_modules/.bin/local-dep-bin"),
+        &[],
+        &proj,
+        &env,
+    );
+    assert_eq!(
+        (bin_out.trim(), bin_code),
+        ("42", 0),
+        "the bin the link's prepare generated resolves through .bin; stderr:\n{bin_err}"
+    );
+    assert!(
+        stderr.contains("opt-dep@1.0.0 is an optional dependency and failed to build"),
+        "the optional link's failing prepare is a warning, not a failure, got:\n{stderr}"
+    );
+    let opt_link = proj.join("node_modules/opt-dep");
+    assert!(
+        opt_link.symlink_metadata().is_err()
+            && !proj.join("node_modules/.bin/opt-dep-bin").exists(),
+        "a failed optional link leaves the tree with its bin, as npm trashes the node"
+    );
+
+    // npm's dependency axis: an effective omit=dev hands lifecycle scripts
+    // NODE_ENV=production; --include=dev takes both back.
+    std::fs::remove_file(&postinstall).unwrap();
+    let root_prepared = proj.join("root-prepared.txt");
+    std::fs::remove_file(&root_prepared).unwrap();
+    let (_, stderr, code) = run(&npm, &["ci", "--omit=dev"], &proj, &env);
+    assert_eq!(code, 0, "stderr:\n{stderr}");
+    assert_eq!(std::fs::read_to_string(&postinstall).unwrap(), "production");
+    assert!(
+        root_prepared.is_file(),
+        "npm runs the root prepare with dev dependencies omitted (pnpm's --prod does not)"
+    );
+    std::fs::remove_file(&postinstall).unwrap();
+    let (_, stderr, code) = run(&npm, &["ci", "--omit=dev", "--include=dev"], &proj, &env);
+    assert_eq!(code, 0, "stderr:\n{stderr}");
+    assert_eq!(std::fs::read_to_string(&postinstall).unwrap(), "undefined");
+
+    // npm's ignore-scripts config is honored — the project .npmrc, and the
+    // environment above it — and the command line outranks both.
+    std::fs::remove_file(&postinstall).unwrap();
+    std::fs::write(proj.join(".npmrc"), "ignore-scripts=true\n").unwrap();
+    std::fs::remove_file(&prepared).unwrap();
+    let (_, stderr, code) = run(&npm, &["ci"], &proj, &env);
+    assert_eq!(code, 0, "stderr:\n{stderr}");
+    assert!(
+        !postinstall.exists() && !prepared.exists(),
+        ".npmrc ignore-scripts=true suppresses the postinstall and the link's prepare"
+    );
+    assert!(
+        opt_link.symlink_metadata().is_ok(),
+        "with scripts ignored nothing failed, so the optional link stays: the removal is tied to the failure"
+    );
+    let (_, stderr, code) = run(&npm, &["ci", "--ignore-scripts=false"], &proj, &env);
+    assert_eq!(code, 0, "stderr:\n{stderr}");
+    assert!(
+        postinstall.exists(),
+        "--ignore-scripts=false on the command line wins over .npmrc"
+    );
+    std::fs::remove_file(proj.join(".npmrc")).unwrap();
+    std::fs::remove_file(&postinstall).unwrap();
+    let with_env: Vec<(&str, &str)> = env
+        .iter()
+        .copied()
+        .chain([("NPM_CONFIG_IGNORE_SCRIPTS", "true")])
+        .collect();
+    let (_, stderr, code) = run(&npm, &["ci"], &proj, &with_env);
+    assert_eq!(code, 0, "stderr:\n{stderr}");
+    assert!(
+        !postinstall.exists(),
+        "npm_config_ignore_scripts in the environment suppresses the postinstall"
+    );
+
+    // A bare `npm install` routes too, without the frozen gate.
+    std::fs::remove_dir_all(proj.join("node_modules")).unwrap();
+    let (_, stderr, code) = run(&npm, &["install", "--no-audit"], &proj, &env);
+    assert_eq!(
+        code, 0,
+        "the routed npm install must succeed; stderr:\n{stderr}"
+    );
+    assert!(stderr.contains("npm install → nub install (via nub shim)"));
+    assert!(proj.join("node_modules/.nub-engine").is_file());
+
+    // Everything else is npm's: no verb, and an install flag outside the
+    // translated set, both exec the real npm with the argv verbatim.
+    for argv in [
+        &["--version"][..],
+        &["ci", "--legacy-peer-deps"][..],
+        &["run", "build"][..],
+    ] {
+        let (stdout, stderr, code) = run(&npm, argv, &proj, &env);
+        assert_eq!(code, 0, "{argv:?}: stderr:\n{stderr}");
+        assert_eq!(
+            stdout,
+            format!("FAKE:{}:{}\n", fake.display(), argv.join(" ")),
+            "{argv:?} must reach the real npm untouched"
+        );
+    }
+
+    // A nested call — a lifecycle script's `npm ci` under a running
+    // install — keeps the real npm: the engine is already running above it.
+    let nested: Vec<(&str, &str)> = env
+        .iter()
+        .copied()
+        .chain([
+            ("npm_config_user_agent", "npm/11.0.0 node/v24.0.0"),
+            ("npm_execpath", "/x/npm-cli.js"),
+        ])
+        .collect();
+    let (stdout, _, _) = run(&npm, &["ci"], &proj, &nested);
+    assert!(
+        stdout.starts_with("FAKE:"),
+        "a nested npm ci reaches the real npm, got:\n{stdout}"
+    );
+}
+
+/// Without the opt-in the same `npm ci` reaches the real npm, and
+/// `--no-route-installs` takes an earlier opt-in back.
+#[test]
+fn npm_ci_reaches_the_real_npm_unless_routing_is_opted_in() {
+    let work = tmp("noroute");
+    let home = work.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let shims = shims_with_routing(&home, false);
+    let proj = npm_link_only_project(&work);
+    let sys = work.join("sys");
+    std::fs::create_dir_all(&sys).unwrap();
+    let fake = fake_pm(&sys, "npm");
+    let path = format!("{}:{}", shims.display(), sys.display());
+    let env: Vec<(&str, &str)> = vec![("HOME", home.to_str().unwrap()), ("PATH", path.as_str())];
+    let npm = shims.join("npm");
+
+    let (stdout, _, _) = run(&npm, &["ci"], &proj, &env);
+    assert_eq!(stdout, format!("FAKE:{}:ci\n", fake.display()));
+
+    let home_env: Vec<(&str, &str)> = vec![("HOME", home.to_str().unwrap()), ("SHELL", "/bin/zsh")];
+    let (_, _, code) = run(
+        &nub_binary(),
+        &["pm", "shim", "--route-installs"],
+        &home,
+        &home_env,
+    );
+    assert_eq!(code, 0);
+    assert!(
+        shims.join(".route-installs").is_file(),
+        "the marker lands in the shim dir"
+    );
+    let (_, _, code) = run(
+        &nub_binary(),
+        &["pm", "shim", "--no-route-installs"],
+        &home,
+        &home_env,
+    );
+    assert_eq!(code, 0);
+    assert!(
+        !shims.join(".route-installs").exists(),
+        "--no-route-installs removes it"
+    );
+    let (stdout, _, _) = run(&npm, &["ci"], &proj, &env);
+    assert_eq!(stdout, format!("FAKE:{}:ci\n", fake.display()));
+}
+
 /// Real-network e2e: a shim-invoked bare `pnpm` in a pnpm-pinned project
 /// provisions the pinned version into a fresh store and runs it under the
 /// project's Node.
@@ -597,7 +1069,7 @@ fn shim_invoked_pnpm_runs_the_pinned_version_for_real() {
     let cache = work.join("cache");
     let link = shim_link(&work, "pnpm");
 
-    let path = std::env::var("PATH").unwrap();
+    let path = host_path();
     let (stdout, stderr, code) = run(
         &link,
         &["--version"],
@@ -653,13 +1125,18 @@ fn empty_path_entry_with_cwd_at_the_shim_does_not_loop() {
 }
 
 #[test]
-fn nub_from_the_shim_dir_defers_to_the_sibling_official_binary() {
-    // Post-`nub pm shim`, ~/.nub/shims is first on PATH and carries a `nub`
+fn nub_from_a_shim_dir_defers_to_the_official_binary() {
+    // Post-`nub pm shim`, the shim dir is first on PATH and carries a `nub`
     // hardlink. After a self-owned upgrade swaps the official binary
     // (~/.nub/bin/nub, a NEW inode), that shim hardlink still pins the OLD
-    // bytes — invoked as `nub`, the shim-dir copy must re-exec the SIBLING
-    // official binary (~/.nub/bin/nub), or upgrades never take effect
-    // (including the `nub pm shim` re-link itself).
+    // bytes — invoked as `nub`, the shim-dir copy must re-exec the official
+    // binary, or upgrades never take effect (including the `nub pm shim`
+    // re-link itself).
+    //
+    // Uses the PRE-MOVE `~/.nub/shims`: the shim dir moved to the XDG data root,
+    // but a user mid-migration still has this one on PATH, and it must keep
+    // deferring. The official binary is found via the INSTALL root, not as the
+    // shim dir's sibling — those stopped being related when the shims moved.
     let home = tmp("nub-passthrough");
     let dotnub = home.join(".nub");
     let shims = dotnub.join("shims");
@@ -686,7 +1163,7 @@ fn nub_from_the_shim_dir_defers_to_the_sibling_official_binary() {
     assert_eq!(
         stdout,
         format!("FAKE:{}:pm cache\n", official.display()),
-        "the shim-dir nub must exec the sibling ~/.nub/bin/nub with argv intact"
+        "the shim-dir nub must exec ~/.nub/bin/nub with argv intact"
     );
 
     // Post-uninstall (the sibling official binary gone): the shim-dir nub runs
@@ -872,7 +1349,7 @@ fn run_bare(
 #[test]
 fn installed_shims_intercept_a_bare_pm_via_path_and_never_mint_a_competing_lockfile() {
     let home = tmp("bare-path");
-    // Real install: produces ~/.nub/shims with the 7 hardlinks + a PATH block.
+    // Real install: produces the shim dir with the 7 hardlinks + a PATH block.
     let (_, stderr, code) = run(
         &nub_binary(),
         &["pm", "shim"],
@@ -880,7 +1357,7 @@ fn installed_shims_intercept_a_bare_pm_via_path_and_never_mint_a_competing_lockf
         &[("HOME", home.to_str().unwrap()), ("SHELL", "/bin/sh")],
     );
     assert_eq!(code, 0, "nub pm shim must succeed; stderr:\n{stderr}");
-    let shims = home.join(".nub/shims");
+    let shims = home.join(".local/share/nub/shims");
     assert!(
         shims.join("pnpm").is_file() && shims.join("npm").is_file(),
         "the shim dir must carry the PM hardlinks"
@@ -964,4 +1441,241 @@ fn installed_shims_intercept_a_bare_pm_via_path_and_never_mint_a_competing_lockf
         vec!["package.json".to_string()],
         "fall-through must not let the shim itself mint a lockfile; project held: {after_fallthrough:?}"
     );
+}
+
+/// A project pinned to a Node the machine lacks, with a lockfile-only `file:`
+/// dependency and a root `postinstall` that records the Node it ran under.
+fn npm_pinned_project(work: &Path) -> PathBuf {
+    let proj = work.join("pinned");
+    std::fs::create_dir_all(proj.join("local-dep")).unwrap();
+    std::fs::write(
+        proj.join("package.json"),
+        r#"{ "name": "pinned", "version": "1.0.0", "dependencies": { "local-dep": "file:local-dep" },
+  "scripts": { "postinstall": "node -e \"require('fs').writeFileSync('postinstall-node.txt', process.version)\"" } }"#,
+    )
+    .unwrap();
+    std::fs::write(proj.join(".nvmrc"), "v19.9.9\n").unwrap();
+    std::fs::write(
+        proj.join("local-dep/package.json"),
+        r#"{ "name": "local-dep", "version": "1.0.0" }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("package-lock.json"),
+        r#"{
+  "name": "pinned",
+  "version": "1.0.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": { "name": "pinned", "version": "1.0.0", "dependencies": { "local-dep": "file:local-dep" } },
+    "local-dep": { "version": "1.0.0" },
+    "node_modules/local-dep": { "resolved": "local-dep", "link": true }
+  }
+}
+"#,
+    )
+    .unwrap();
+    proj
+}
+
+/// npm runs lifecycle scripts with the `node` on PATH, whatever the project
+/// pins, and so does its install routed onto the engine: a `.nvmrc` naming a
+/// Node the machine lacks neither provisions one nor moves the scripts off the
+/// shell's Node, and the tree's engine stamp names the Node they ran under.
+#[test]
+fn routed_npm_ci_runs_scripts_under_the_path_node_and_provisions_nothing() {
+    let work = tmp("route-path-node");
+    let home = work.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let shims = shims_with_routing(&home, true);
+    let proj = npm_pinned_project(&work);
+    let cache = work.join("cache");
+    std::fs::create_dir_all(cache.join("nub")).unwrap();
+    std::fs::write(cache.join("nub/.npmrc"), "registry=http://127.0.0.1:1/\n").unwrap();
+    let path = format!("{}:{}", shims.display(), host_path());
+    // A dead Node mirror: an attempt to provision the pin fails fast here
+    // instead of downloading, and fails the postinstall with it.
+    let env: Vec<(&str, &str)> = vec![
+        ("HOME", home.to_str().unwrap()),
+        ("PATH", path.as_str()),
+        ("XDG_CACHE_HOME", cache.to_str().unwrap()),
+        ("NODEJS_ORG_MIRROR", "http://127.0.0.1:1/"),
+    ];
+    let (shell_node, stderr, code) = run(Path::new("node"), &["--version"], &proj, &env);
+    assert_eq!(
+        code, 0,
+        "a node on PATH is the precondition; stderr:\n{stderr}"
+    );
+    let shell_node = shell_node.trim().to_string();
+
+    let (_, stderr, code) = run(&shims.join("npm"), &["ci"], &proj, &env);
+    assert_eq!(code, 0, "the routed npm ci must succeed; stderr:\n{stderr}");
+    assert!(
+        stderr.contains("npm ci → nub ci (via nub shim)"),
+        "the install ran on the engine, got:\n{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(proj.join("postinstall-node.txt")).unwrap(),
+        shell_node,
+        "the postinstall ran under the shell's Node, not the pin; stderr:\n{stderr}"
+    );
+    assert!(
+        !cache.join("nub/node").exists() && !stderr.contains("Installing"),
+        "nothing was provisioned for the pin; stderr:\n{stderr}"
+    );
+    let major = shell_node
+        .trim_start_matches('v')
+        .split('.')
+        .next()
+        .unwrap();
+    let stamp = std::fs::read_to_string(proj.join("node_modules/.nub-engine")).unwrap();
+    assert!(
+        stamp.trim().ends_with(&format!("node{major}")),
+        "the engine stamp names the Node the scripts ran under, got {stamp:?}"
+    );
+}
+
+/// With Nub's persistent `node` shim first on PATH (`nub node shim`), a
+/// script's bare `node` resolves the project's pin, so a routed `npm ci`
+/// records the Node the shim resolves — its version in the engine stamp, its
+/// path in `npm_node_execpath` — never the real binary the shim hides.
+#[test]
+fn routed_npm_ci_under_the_persistent_node_shim_records_what_the_shim_resolves() {
+    let work = tmp("route-node-shim");
+    let home = work.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let shims = shims_with_routing(&home, true);
+    // The persistent shim: nub wearing Node's name in the dir `nub node shim`
+    // installs to on a fresh unix home.
+    let node_shim = home.join(".local/share/nub/node-shim");
+    std::fs::create_dir_all(&node_shim).unwrap();
+    shim_link(&node_shim, "node");
+    let proj = npm_pinned_project(&work);
+    std::fs::write(
+        proj.join("package.json"),
+        r#"{ "name": "pinned", "version": "1.0.0", "dependencies": { "local-dep": "file:local-dep" },
+  "scripts": { "postinstall": "node -e \"require('fs').writeFileSync('postinstall-node.txt', process.env.npm_node_execpath || '')\"" } }"#,
+    )
+    .unwrap();
+    let cache = work.join("cache");
+    std::fs::create_dir_all(cache.join("nub")).unwrap();
+    std::fs::write(cache.join("nub/.npmrc"), "registry=http://127.0.0.1:1/\n").unwrap();
+    let env_base: Vec<(&str, &str)> = vec![
+        ("HOME", home.to_str().unwrap()),
+        ("XDG_CACHE_HOME", cache.to_str().unwrap()),
+        ("NODEJS_ORG_MIRROR", "http://127.0.0.1:1/"),
+    ];
+    // The pin is satisfied from nub's own store by a Node that is really the
+    // shell's binary: a store entry's version is its directory name.
+    let (execpath, stderr, code) = run(
+        Path::new("node"),
+        &["-p", "process.execPath"],
+        &proj,
+        &env_base,
+    );
+    assert_eq!(
+        code, 0,
+        "a node on PATH is the precondition; stderr:\n{stderr}"
+    );
+    let store_bin = cache.join("nub/node/19.9.9/bin");
+    std::fs::create_dir_all(&store_bin).unwrap();
+    std::os::unix::fs::symlink(execpath.trim(), store_bin.join("node")).unwrap();
+
+    let path = format!(
+        "{}:{}:{}",
+        node_shim.display(),
+        shims.display(),
+        host_path()
+    );
+    let mut env = env_base.clone();
+    env.push(("PATH", path.as_str()));
+    let (_, stderr, code) = run(&shims.join("npm"), &["ci"], &proj, &env);
+    assert_eq!(
+        code, 0,
+        "the routed npm ci must succeed with the pin in the store; stderr:\n{stderr}"
+    );
+    let execpath_seen = std::fs::read_to_string(proj.join("postinstall-node.txt")).unwrap();
+    assert!(
+        execpath_seen.trim().ends_with("node/19.9.9/bin/node"),
+        "npm_node_execpath names the store Node the shim resolves, got {execpath_seen:?}; stderr:\n{stderr}"
+    );
+    let stamp = std::fs::read_to_string(proj.join("node_modules/.nub-engine")).unwrap();
+    assert!(
+        stamp.trim().ends_with("node19"),
+        "the engine stamp names the pin the shim resolves, got {stamp:?}"
+    );
+}
+
+/// A routed install in an npm workspace runs npm's stages in each project:
+/// the root's seven, and a linked member's `preinstall`, `prepare`,
+/// `install` and `postinstall` (Arborist's build order) without the
+/// root-only `prepublish`, `preprepare` and `postprepare`, which fail here.
+#[test]
+fn routed_npm_install_keeps_root_only_stages_off_workspace_members() {
+    let work = tmp("route-ws");
+    let home = work.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let shims = shims_with_routing(&home, true);
+    let proj = work.join("proj");
+    std::fs::create_dir_all(proj.join("member")).unwrap();
+    let record = |file: &str| format!("node -e \"require('fs').writeFileSync('{file}', '1')\"");
+    let root = serde_json::json!({
+        "name": "proj", "version": "1.0.0", "workspaces": ["member"],
+        "scripts": { "prepublish": record("root-prepublished.txt") },
+    });
+    let member = serde_json::json!({
+        "name": "member", "version": "1.0.0",
+        "scripts": {
+            "prepare": record("member-prepared.txt"),
+            "prepublish": "exit 1", "preprepare": "exit 1", "postprepare": "exit 1",
+        },
+    });
+    std::fs::write(proj.join("package.json"), root.to_string()).unwrap();
+    std::fs::write(proj.join("member/package.json"), member.to_string()).unwrap();
+    std::fs::write(
+        proj.join("package-lock.json"),
+        r#"{ "name": "proj", "version": "1.0.0", "lockfileVersion": 3, "requires": true,
+  "packages": {
+    "": { "name": "proj", "version": "1.0.0", "workspaces": ["member"] },
+    "member": { "name": "member", "version": "1.0.0" },
+    "node_modules/member": { "resolved": "member", "link": true }
+  } }"#,
+    )
+    .unwrap();
+    let sys = work.join("sys");
+    std::fs::create_dir_all(&sys).unwrap();
+    fake_pm(&sys, "npm");
+    let cache = work.join("cache");
+    std::fs::create_dir_all(cache.join("nub")).unwrap();
+    std::fs::write(cache.join("nub/.npmrc"), "registry=http://127.0.0.1:1/\n").unwrap();
+    let path = format!(
+        "{}:{}:{}",
+        shims.display(),
+        sys.display(),
+        std::env::var("PATH").unwrap()
+    );
+    let env: Vec<(&str, &str)> = vec![
+        ("HOME", home.to_str().unwrap()),
+        ("PATH", path.as_str()),
+        ("XDG_CACHE_HOME", cache.to_str().unwrap()),
+    ];
+    for verb in ["ci", "install"] {
+        let _ = std::fs::remove_file(proj.join("member/member-prepared.txt"));
+        let _ = std::fs::remove_file(proj.join("root-prepublished.txt"));
+        let (_, stderr, code) = run(&shims.join("npm"), &[verb], &proj, &env);
+        assert_eq!(
+            code, 0,
+            "the routed npm {verb} must succeed; stderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("via nub shim"),
+            "npm {verb} ran on the engine, got:\n{stderr}"
+        );
+        assert!(
+            proj.join("member/member-prepared.txt").is_file()
+                && proj.join("root-prepublished.txt").is_file(),
+            "npm {verb} ran the member's prepare and the root's prepublish"
+        );
+    }
 }

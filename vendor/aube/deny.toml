@@ -23,6 +23,7 @@ wildcards = "deny"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# Git sources are blocked intentionally. Temporary [patch] git deps must
-# update this policy explicitly and be removed once the fix reaches crates.io.
-allow-git = []
+# Git sources are blocked intentionally. The usage 6.x migration PR is an
+# explicit pre-release experiment and removes this exception when it switches
+# back to the published crates.
+allow-git = ["https://github.com/jdx/usage"]

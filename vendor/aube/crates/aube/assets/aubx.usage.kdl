@@ -1,1 +1,1 @@
-complete "params" run=#"aube completion _ --complete package --query='{{ words[CURRENT] | replace(from="'", to="'\\''") }}'"# descriptions=#true
+complete "params" run="aube __complete_word__ --candidates params --line={{ words | shell_join | shell_quote }}"

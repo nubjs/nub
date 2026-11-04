@@ -16,28 +16,33 @@
 //! sibling-dedupe → lockfile-reuse → fetch-and-pick) is staged for a
 //! later refactor.
 
-use super::fetch::FetchScheduler;
+use super::fetch::{FetchKey, FetchScheduler, TrustHistory};
 use super::seed::seed_direct_deps;
 use super::vulnerable::{is_vulnerable, prefer_non_vulnerable_pick};
 use crate::local_source::{
-    dep_path_for, is_non_registry_specifier, read_local_manifest, rebase_local,
-    resolve_exec_manifest, resolve_git_source, resolve_remote_tarball, should_block_exotic_subdep,
+    LocalManifest, dep_path_for, is_non_registry_specifier, probe_remote_tarball_manifest,
+    read_local_manifest, rebase_local, resolve_exec_manifest, resolve_git_source,
+    resolve_remote_tarball, should_block_exotic_subdep,
 };
 use crate::locked_index::LockedIndex;
 use crate::package_ext::{
-    apply_package_extensions, apply_package_extensions_to_deps, pick_override_spec,
+    apply_package_extensions, apply_package_extensions_to_deps, pick_catalog_override_spec,
+    pick_override_spec,
 };
 use crate::semver_util::{
     AgeGateCause, PickResult, Regime, classify_regime, pick_version, range_resolves_via_dist_tag,
-    version_satisfies,
+    sparse_pick_needs_refetch, version_satisfies,
 };
+use crate::workspace_spec::workspace_range_binds;
 use crate::{
     Error, ExoticSubdepDetails, FxHashMap, FxHashSet, ResolutionMode, ResolveTask, ResolvedPackage,
-    Resolver, error, is_deprecation_allowed, is_supported,
+    Resolver, WorkspacePkgNotFoundDetails, WorkspaceVersionMismatchDetails, error,
+    is_deprecation_allowed, is_supported,
 };
 use aube_lockfile::{DepType, DirectDep, LocalSource, LockedPackage, LockfileGraph};
 use aube_manifest::PackageJson;
 use aube_util::adaptive::{AdaptiveLimit, PersistentState};
+use aube_util::pkg::{WorkspaceSpec, parse_workspace_spec};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -135,6 +140,12 @@ pub(crate) struct ResolveDriver<'a> {
     resolver: &'a mut Resolver,
     existing: Option<&'a LockfileGraph>,
     workspace_packages: &'a HashMap<String, String>,
+    /// Workspace member name → its importer path (`packages/card`).
+    /// `workspace_packages` carries versions only, and the `workspace:`
+    /// alias rewrite needs the DIRECTORY to synthesize a `link:` target.
+    /// Derived from the same `manifests` slice the importer seed walks,
+    /// so the two can never disagree about the member set.
+    workspace_member_importers: BTreeMap<String, String>,
 
     /// Borrowed set of names present in the existing lockfile. Used as
     /// a prefetch gate so packuments that will hit the lockfile-reuse
@@ -183,11 +194,21 @@ pub(crate) struct ResolveDriver<'a> {
     /// mismatch or `pnpm.ignoredOptionalDependencies`).
     skipped_optional_dependencies: BTreeMap<String, BTreeMap<String, String>>,
     /// Packument fetches that failed (registry 404, network error, etc.),
-    /// keyed by package name. Errors are stored here instead of
+    /// keyed by request identity. Errors are stored here instead of
     /// propagated from `join_next` so a failed fetch for one package
-    /// doesn't crash the wrong task. Checked after the fetch-wait loop
-    /// to decide skip (optional) vs propagate (required).
-    failed_fetches: FxHashMap<String, Error>,
+    /// doesn't crash the wrong task or suppress another exact version.
+    /// Checked after the fetch-wait loop to decide skip (optional) vs
+    /// propagate (required).
+    failed_fetches: FxHashMap<FetchKey, Error>,
+    /// Compact trust histories fetched alongside an exact optional pick,
+    /// keyed by registry name. Presence also marks the cached packument as
+    /// non-authoritative, forcing a full refresh before a range pick.
+    trust_histories: FxHashMap<String, TrustHistory>,
+    /// `name@refused -> substitute` for every pick the trust gate refused and
+    /// the resolver then backtracked past, so the substitution notice is
+    /// printed once per outcome rather than once per parent that depends on
+    /// the package.
+    trust_repicks: FxHashSet<String>,
     /// Catalog picks gathered as the BFS rewrites `catalog:` task
     /// ranges. Outer key: catalog name. Inner: package name → spec.
     catalog_picks: BTreeMap<String, BTreeMap<String, String>>,
@@ -270,13 +291,30 @@ impl<'a> ResolveDriver<'a> {
                 if resolver.auto_install_peers {
                     names.extend(
                         manifest
-                            .non_optional_peer_dependencies()
-                            .map(|(name, _)| name.clone()),
+                            .peer_dependencies
+                            .keys()
+                            .filter(|name| !manifest.peer_dependency_is_optional(name))
+                            .cloned(),
                     );
                 }
                 (importer_path.clone(), names)
             })
             .collect();
+        // A member's importer path IS its directory, so the `workspace:`
+        // alias rewrite reads its `link:` targets straight off here. A
+        // manifest with no `name` cannot be aliased and is skipped.
+        //
+        // Seeded from the resolver first: a caller resolving a SUBSET of
+        // the workspace (`update` scoped to one member) supplies the
+        // members its `manifests` slice omits, without which an alias
+        // naming a sibling would find nothing. The manifests overlay it,
+        // so whenever the caller passes the full set — install — the map
+        // is exactly what it was before.
+        let mut workspace_member_importers: BTreeMap<String, String> =
+            resolver.workspace_member_importers.clone();
+        workspace_member_importers.extend(manifests.iter().filter_map(
+            |(importer_path, manifest)| Some((manifest.name.clone()?, importer_path.clone())),
+        ));
         // ISO-8601 UTC cutoff string. npm's registry `time` map uses
         // `Z`-suffixed UTC timestamps throughout, which sort
         // lexicographically — so a raw `String` doubles as a
@@ -350,6 +388,7 @@ impl<'a> ResolveDriver<'a> {
             resolver,
             existing,
             workspace_packages,
+            workspace_member_importers,
             existing_names,
             locked_index,
             importer_declared_dep_names,
@@ -361,6 +400,8 @@ impl<'a> ResolveDriver<'a> {
             resolved_times: BTreeMap::new(),
             skipped_optional_dependencies: BTreeMap::new(),
             failed_fetches: FxHashMap::default(),
+            trust_histories: FxHashMap::default(),
+            trust_repicks: FxHashSet::default(),
             catalog_picks: BTreeMap::new(),
             deferred_transitives: Vec::new(),
             deferred_auto_peers: Vec::new(),
@@ -396,10 +437,21 @@ impl<'a> ResolveDriver<'a> {
         let resolved_count = self.resolved.len();
         let lockfile_reuse_count = self.lockfile_reuse_count;
         let packument_fetch_count = self.packument_fetch_count;
+        let packument_cache_count = self.resolver.cache.len();
+        let packument_version_count: usize = self
+            .resolver
+            .cache
+            .values()
+            .map(|packument| packument.versions.len())
+            .sum();
         aube_util::diag::instant_lazy(aube_util::diag::Category::Resolver, "decision_mix", || {
             format!(
-                r#"{{"resolved":{},"lockfile_reused":{},"packuments_fetched":{}}}"#,
-                resolved_count, lockfile_reuse_count, packument_fetch_count
+                r#"{{"resolved":{},"lockfile_reused":{},"packuments_fetched":{},"packuments_cached":{},"packument_versions_cached":{}}}"#,
+                resolved_count,
+                lockfile_reuse_count,
+                packument_fetch_count,
+                packument_cache_count,
+                packument_version_count
             )
         });
 
@@ -422,6 +474,25 @@ impl<'a> ResolveDriver<'a> {
     /// popped.
     fn seed_initial_prefetches(&mut self) {
         for task in self.queue.iter() {
+            // Time-aware resolution needs publish times and trust evidence
+            // from package history. Exact optionals use the compact-history
+            // path so every platform variant can stay in the lockfile without
+            // retaining every release's dependency metadata.
+            if self.needs_time
+                && task.dep_type == DepType::Optional
+                && node_semver::Version::parse(&task.range).is_ok()
+            {
+                let ready = self
+                    .resolver
+                    .cache
+                    .get(task.name.as_str())
+                    .is_some_and(|packument| packument.versions.contains_key(&task.range));
+                if !ready {
+                    self.fetcher
+                        .ensure_exact_optional_fetch(task.name.as_str(), task.range.as_str());
+                }
+                continue;
+            }
             if !self.resolver.is_prefetchable(
                 task.name.as_str(),
                 task.range.as_str(),
@@ -433,7 +504,7 @@ impl<'a> ResolveDriver<'a> {
                 continue;
             }
             if !self.resolver.cache.contains_key(task.name.as_str()) {
-                self.fetcher.ensure_fetch(task.name.as_str());
+                self.fetcher.ensure_fetch(task.name.as_str(), false);
             }
         }
     }
@@ -454,9 +525,49 @@ impl<'a> ResolveDriver<'a> {
     /// prefetching names already covered by the lockfile check
     /// `existing_names` explicitly before invoking this.
     fn ensure_fetch(&mut self, name: &str) {
-        if !self.resolver.cache.contains_key(name) && !self.failed_fetches.contains_key(name) {
-            self.fetcher.ensure_fetch(name);
+        let force_refresh = self.trust_histories.contains_key(name);
+        let needs_full = !self.resolver.cache.contains_key(name) || force_refresh;
+        let key = FetchKey::Full(name.to_string());
+        if needs_full && !self.failed_fetches.contains_key(&key) {
+            self.fetcher.ensure_fetch(name, force_refresh);
         }
+    }
+
+    fn ensure_exact_optional_fetch(&mut self, name: &str, version: &str) {
+        let ready = self
+            .resolver
+            .cache
+            .get(name)
+            .is_some_and(|packument| packument.versions.contains_key(version));
+        let key = FetchKey::Exact(name.to_string(), version.to_string());
+        if !ready && !self.failed_fetches.contains_key(&key) {
+            self.fetcher.ensure_exact_optional_fetch(name, version);
+        }
+    }
+
+    fn cache_satisfies(&self, name: &str, exact_optional_version: Option<&str>) -> bool {
+        let Some(packument) = self.resolver.cache.get(name) else {
+            return false;
+        };
+        if let Some(version) = exact_optional_version {
+            return packument.versions.contains_key(version);
+        }
+        !self.trust_histories.contains_key(name)
+    }
+
+    fn record_fetch_result(
+        &mut self,
+        name: String,
+        packument: aube_registry::Packument,
+        trust_history: Option<TrustHistory>,
+    ) {
+        merge_fetch_result(
+            &mut self.resolver.cache,
+            &mut self.trust_histories,
+            name,
+            packument,
+            trust_history,
+        );
     }
 
     /// Outer BFS loop. Pops tasks until the queue drains, with a
@@ -560,13 +671,18 @@ impl<'a> ResolveDriver<'a> {
     /// fail-open hazard). Returns `false` (accept the offline pick) for
     /// frozen picks whose history is settled. See the big comment on the
     /// matching arm in the pick loop for the full rationale.
+    #[allow(clippy::too_many_arguments)]
     fn primer_pick_needs_refetch(
         &self,
         packument: &aube_registry::Packument,
         picked_version: &str,
+        range_str: &str,
         cutoff_for_pkg: Option<&str>,
-        range_is_dist_tag: bool,
+        pick_lowest: bool,
+        locked_version: Option<&str>,
+        sparse_seed: bool,
     ) -> bool {
+        let range_is_dist_tag = range_resolves_via_dist_tag(packument, range_str);
         // A dist-tag (`latest`, `next`, a custom tag) is a MUTABLE pointer
         // the publisher can repoint between builds. The primer bakes the
         // tag's value at build time, and `classify_regime` — which keys
@@ -582,6 +698,21 @@ impl<'a> ResolveDriver<'a> {
         // fresh-resolve refetched, so the two diverged and `update`
         // downgraded). Refetch unconditionally so the tag is re-read live.
         if range_is_dist_tag {
+            return true;
+        }
+        // An age-pruned seed has holes in settled history, so the regime
+        // argument below ("a refetch could never surface a newer
+        // satisfying version") does not hold when the range could match
+        // a version the prune dropped above the pick.
+        if sparse_seed
+            && sparse_pick_needs_refetch(
+                packument,
+                picked_version,
+                range_str,
+                pick_lowest,
+                locked_version,
+            )
+        {
             return true;
         }
         match classify_regime(packument, picked_version) {
@@ -635,12 +766,28 @@ impl<'a> ResolveDriver<'a> {
             return Ok(());
         }
 
+        // `workspace:<member>@<range>` / `workspace:<relative-path>` name
+        // a member the dependency key does not, so they have to be bound
+        // before the non-registry dispatch and before the key→member
+        // lookup below.
+        self.rewrite_workspace_alias(&mut task)?;
+
         if is_non_registry_specifier(&task.range) {
             return self.handle_local_source_task(task).await;
         }
 
         if self.try_workspace_link(&task) {
             return Ok(());
+        }
+
+        // `workspace:` never means "go to the registry". Reaching here
+        // with the protocol still on the range means no member carries
+        // this name, so say that instead of letting a literal
+        // `workspace:*` hit the registry as if it were a version range.
+        if task.range.starts_with("workspace:") && !self.workspace_packages.contains_key(&task.name)
+        {
+            let name = task.name.clone();
+            return Err(self.workspace_pkg_not_found(&task, &name));
         }
 
         if self.try_sibling_dedupe(&task) {
@@ -671,28 +818,52 @@ impl<'a> ResolveDriver<'a> {
         let _diag_task_wait =
             aube_util::diag::Span::new(aube_util::diag::Category::Resolver, "task_wait_packument")
                 .with_meta_fn(|| format!(r#"{{"name":{}}}"#, aube_util::diag::jstr(&fetch_name)));
-        while !self.resolver.cache.contains_key(&fetch_name)
-            && !self.failed_fetches.contains_key(&fetch_name)
+        let exact_optional_version = (self.needs_time
+            && task.dep_type == DepType::Optional
+            && node_semver::Version::parse(&task.range).is_ok())
+        .then_some(task.range.as_str());
+        let fetch_key = exact_optional_version.map_or_else(
+            || FetchKey::Full(fetch_name.clone()),
+            |version| FetchKey::Exact(fetch_name.clone(), version.to_string()),
+        );
+        // A compact exact result that landed after an optional full-fetch
+        // failure proves the package is reachable and leaves a trust-history
+        // marker requiring authoritative full metadata. Discard the stale
+        // prefetch failure so this range task can perform that refresh.
+        if exact_optional_version.is_none() && self.trust_histories.contains_key(&fetch_name) {
+            self.failed_fetches.remove(&fetch_key);
+        }
+        while !self.cache_satisfies(&fetch_name, exact_optional_version)
+            && (!self.failed_fetches.contains_key(&fetch_key)
+                || (exact_optional_version.is_none()
+                    && self.fetcher.has_active_exact_fetch(&fetch_name)))
         {
-            self.ensure_fetch(&fetch_name);
+            if let Some(version) = exact_optional_version {
+                self.ensure_exact_optional_fetch(&fetch_name, version);
+            } else {
+                self.ensure_fetch(&fetch_name);
+            }
             match self.fetcher.join_next().await {
-                Some(Ok(Ok((name, packument, from_primer)))) => {
-                    self.fetcher.release_in_flight(&name);
-                    if from_primer {
-                        self.fetcher.note_primer_seeded(name.clone());
+                Some(Ok((key, Ok((name, packument, source, trust_history))))) => {
+                    if let FetchKey::Exact(exact_name, _) = &key {
+                        self.failed_fetches
+                            .remove(&FetchKey::Full(exact_name.clone()));
                     }
-                    self.resolver.cache.insert(name, packument);
+                    if let super::fetch::FetchSource::Primer { sparse } = source {
+                        self.fetcher
+                            .note_primer_seeded(name.clone(), super::fetch::PrimerSeed { sparse });
+                    }
+                    self.record_fetch_result(name, packument, trust_history);
                     self.packument_fetch_count += 1;
                 }
-                Some(Ok(Err(e))) => {
+                Some(Ok((key, Err(e)))) => {
                     // Store failed fetches in the side table instead
                     // of propagating immediately. pnpm parity.
-                    let name = match &e {
-                        crate::Error::Registry(n, _) => n.clone(),
+                    match &e {
+                        crate::Error::Registry(_, _) => {}
                         _ => return Err(e),
-                    };
-                    self.fetcher.release_in_flight(&name);
-                    self.failed_fetches.insert(name, e);
+                    }
+                    self.failed_fetches.insert(key, e);
                 }
                 Some(Err(join_err)) => {
                     return Err(Error::Registry("(join)".to_string(), join_err.to_string()));
@@ -712,12 +883,19 @@ impl<'a> ResolveDriver<'a> {
         }
         self.packument_fetch_time += wait_start.elapsed();
 
+        // A different request shape may have populated this task's data while
+        // its own request failed (for example, a full fetch satisfying an
+        // exact optional). In that case the usable cache entry wins.
+        if self.cache_satisfies(&fetch_name, exact_optional_version) {
+            self.failed_fetches.remove(&fetch_key);
+        }
+
         // Post-loop: if this task's packument fetch failed, decide
         // whether to skip (optional) or propagate (required).
         // For optional deps the error stays in `failed_fetches` so
         // sibling tasks that share the same transitive optional dep
         // don't re-fetch and re-fail for each importer.
-        if task.dep_type == DepType::Optional && self.failed_fetches.contains_key(&fetch_name) {
+        if task.dep_type == DepType::Optional && self.failed_fetches.contains_key(&fetch_key) {
             tracing::debug!(
                 "skipping optional dep {}@{}: registry fetch failed",
                 task.name,
@@ -728,7 +906,7 @@ impl<'a> ResolveDriver<'a> {
             }
             return Ok(());
         }
-        if let Some(e) = self.failed_fetches.remove(&fetch_name) {
+        if let Some(e) = self.failed_fetches.remove(&fetch_key) {
             return Err(e);
         }
 
@@ -762,11 +940,12 @@ impl<'a> ResolveDriver<'a> {
             .map(|p| p.version.as_str())
             .filter(|v| !is_vulnerable(task.registry_name(), v, &self.resolver.vulnerable_ranges));
 
-        // Direct deps in time-based mode pick the lowest
-        // satisfying version; everything else (transitives,
-        // and all picks in Highest mode) picks highest.
-        let pick_lowest =
-            self.resolver.resolution_mode == ResolutionMode::TimeBased && task.is_root;
+        // Direct deps in time-based and lowest-direct modes pick the
+        // lowest satisfying version; everything else picks highest.
+        let pick_lowest = matches!(
+            self.resolver.resolution_mode,
+            ResolutionMode::TimeBased | ResolutionMode::LowestDirect
+        ) && task.is_root;
         // `minimumReleaseAgeExclude` is applied per-candidate-version
         // inside `pick_version` via the `is_age_exempt` closure below. A
         // name-only exclude rule matches every version; a `pkg@1.2.3`
@@ -919,8 +1098,11 @@ impl<'a> ResolveDriver<'a> {
                         && self.primer_pick_needs_refetch(
                             packument,
                             &meta.version,
+                            &task.range,
                             cutoff_for_pkg,
-                            range_resolves_via_dist_tag(packument, &task.range),
+                            pick_lowest,
+                            locked_version,
+                            self.fetcher.primer_seed_is_sparse(&registry_name),
                         ) =>
                 {
                     // Consume the seed flag (one refetch per package,
@@ -1001,6 +1183,7 @@ impl<'a> ResolveDriver<'a> {
                     self.packument_fetch_time += fetch_start.elapsed();
                     self.packument_fetch_count += 1;
                     self.resolver.cache.insert(registry_name.clone(), live);
+                    self.trust_histories.remove(&registry_name);
                 }
                 // Only surface `AgeGate` when the cutoff actually
                 // came from `minimumReleaseAge`. When it came from
@@ -1072,7 +1255,7 @@ impl<'a> ResolveDriver<'a> {
         let packument = self.resolver.cache.get(&registry_name).ok_or_else(|| {
             Error::Registry(registry_name.clone(), "packument not in cache".to_string())
         })?;
-        let picked_ref = prefer_non_vulnerable_pick(
+        let mut picked_ref = prefer_non_vulnerable_pick(
             task.registry_name(),
             packument,
             &task.range,
@@ -1090,20 +1273,95 @@ impl<'a> ResolveDriver<'a> {
         // compare. The check needs the live packument's `time`
         // map and all version metadata, both of which are still
         // in scope here from L1191.
-        if self.resolver.dependency_policy.trust_policy == crate::TrustPolicy::NoDowngrade {
-            crate::trust::check_no_downgrade(
+        // A compact history fetched alongside an exact optional pick carries
+        // the prior releases' trust evidence without their dependency
+        // metadata, so the check reads it instead of the version-truncated
+        // packument that landed with it.
+        if self.resolver.dependency_policy.trust_policy == crate::TrustPolicy::NoDowngrade
+            && let Err(err) = match self.trust_histories.get(&registry_name) {
+                Some(history) => crate::trust::check_no_downgrade_compact(
+                    packument,
+                    &picked_ref.version,
+                    picked_ref,
+                    history,
+                    &self.resolver.dependency_policy.trust_policy_exclude,
+                    self.resolver.dependency_policy.trust_policy_ignore_after,
+                ),
+                None => crate::trust::check_no_downgrade(
+                    packument,
+                    &picked_ref.version,
+                    picked_ref,
+                    &self.resolver.dependency_policy.trust_policy_exclude,
+                    self.resolver.dependency_policy.trust_policy_ignore_after,
+                ),
+            }
+        {
+            let downgrade = match err {
+                crate::trust::TrustCheckError::Downgrade(d) => d,
+                // A packument with no `time` entry for the picked version is a
+                // metadata anomaly, not a refused candidate: there is nothing
+                // to backtrack THROUGH, since the same missing-time shape is
+                // what every other candidate would be judged on. Stays fatal.
+                crate::trust::TrustCheckError::MissingTime(d) => {
+                    return Err(Error::TrustCheckMissingTime(Box::new(d)));
+                }
+            };
+            // Backtrack the way the age gate already does. `pick_version`
+            // treats a too-new release as "keep looking down the range", so a
+            // package that publishes one version manually between two attested
+            // ones deadlocks the two gates against each other: the age gate
+            // walks down to the manual publish and the trust gate refuses it,
+            // while a fully-signed release one version lower satisfies the
+            // range and is never considered. Refusing is still the outcome
+            // when NO satisfying version clears both gates, so neither gate is
+            // weakened — only the order of "refuse" and "keep looking" changes.
+            match crate::trust::repick_past_downgrade(
                 packument,
-                &picked_ref.version,
-                picked_ref,
+                task.registry_name(),
+                &task.range,
+                &downgrade.picked_version,
+                pick_lowest,
+                cutoff_for_pkg,
+                exempt_cutoff,
+                strict,
                 &self.resolver.dependency_policy.trust_policy_exclude,
                 self.resolver.dependency_policy.trust_policy_ignore_after,
-            )
-            .map_err(|e| match e {
-                crate::trust::TrustCheckError::Downgrade(d) => Error::TrustDowngrade(Box::new(d)),
-                crate::trust::TrustCheckError::MissingTime(d) => {
-                    Error::TrustCheckMissingTime(Box::new(d))
+                &self.resolver.vulnerable_ranges,
+                is_age_exempt,
+            ) {
+                Some(meta) => {
+                    // Never silent: the user asked for a range and is getting
+                    // something other than its head, for a supply-chain reason
+                    // they may want to act on. Deduped per refusal AND
+                    // substitute, because the same package resolves once per
+                    // parent that depends on it and two disjunctive ranges can
+                    // share a refused head while landing on different
+                    // substitutes — keying on the refusal alone would suppress
+                    // the second and leave the printed line naming a version
+                    // one of the parents is not on.
+                    if self.trust_repicks.insert(format!(
+                        "{}@{} -> {}",
+                        downgrade.name, downgrade.picked_version, meta.version
+                    )) {
+                        tracing::warn!(
+                            code = aube_codes::warnings::WARN_AUBE_TRUST_DOWNGRADE_SKIPPED,
+                            "skipped {}@{} (trustPolicy=no-downgrade): earlier published version \
+                             {} had {} but this version has {}; resolved to {}@{} instead",
+                            downgrade.name,
+                            downgrade.picked_version,
+                            downgrade.prior_version,
+                            downgrade.prior_evidence.label(),
+                            downgrade
+                                .current_evidence
+                                .map_or("no trust evidence", |e| e.label()),
+                            downgrade.name,
+                            meta.version,
+                        );
+                    }
+                    picked_ref = meta;
                 }
-            })?;
+                None => return Err(Error::TrustDowngrade(Box::new(downgrade))),
+            }
         }
 
         // Clone the picked metadata into an owned value so we can
@@ -1114,6 +1372,47 @@ impl<'a> ResolveDriver<'a> {
         // for the same reason.
         let mut picked_owned = picked_ref.clone();
         let picked_publish_time = packument.time.get(&picked_ref.version).cloned();
+
+        // Gate-steered `latest` (#681). `pick_version` widens a `latest` the
+        // cutoff blocks to `<=dist-tags.latest`, so a pick below the tag is
+        // the newest release that cleared the window. Surface it: `dlx`
+        // deletes its scratch project, so this is the only trace that the
+        // tool which ran is not the one the user asked for.
+        //
+        // Keyed on `minimum_release_age` being configured at all, NOT on
+        // `age_gate_cutoff` — that field is deliberately `None` in strict
+        // mode (it exists to spot loose-mode immature fallbacks, which strict
+        // mode never produces), and strict is exactly the posture that made
+        // this a hard failure in the first place. Time-based resolution is
+        // excluded for a different reason: it rewrites the whole graph to a
+        // date by design and needs no per-package note.
+        //
+        // Root deps only. The notice answers "which version of the thing I
+        // asked for am I getting"; a transitive dep that happens to declare a
+        // `latest` range is the resolver doing its job and not something the
+        // caller named.
+        if self.resolver.minimum_release_age.is_some()
+            && task.is_root
+            && task.range == "latest"
+            && let Some(latest) = packument.dist_tags.get("latest")
+            && latest != &picked_ref.version
+            // The trust gate can move a pick below `latest` too, and this
+            // notice names `minimumReleaseAge` by wording. Fire it only when
+            // `latest` genuinely fails the age cutoff, so a trust re-pick does
+            // not get reported as an age-gate fallback.
+            && !crate::semver_util::version_clears_cutoff(
+                packument,
+                latest,
+                if is_age_exempt(latest, None) {
+                    exempt_cutoff
+                } else {
+                    cutoff_for_pkg
+                },
+                strict,
+            )
+        {
+            aube_util::record_age_gate_downgrade(task.registry_name(), &picked_ref.version, latest);
+        }
         // Skip the readPackage hook entirely for a `(name, version)`
         // pair we've already fully processed via a prior task. The
         // mutated dep maps only drive the transitive enqueue below,
@@ -1280,7 +1579,7 @@ impl<'a> ResolveDriver<'a> {
                 name: task.name.clone(),
                 dep_path: dep_path.clone(),
                 dep_type: task.dep_type,
-                specifier: task.original_specifier.clone(),
+                specifier: task.lockfile_specifier(),
             });
         }
 
@@ -1509,6 +1808,7 @@ impl<'a> ResolveDriver<'a> {
                     }
                     m
                 },
+                declared_dependencies_known: true,
                 license: version_meta.license.clone(),
                 funding_url: version_meta.funding_url.clone(),
                 optional: false,
@@ -1622,7 +1922,9 @@ impl<'a> ResolveDriver<'a> {
                 );
                 continue;
             }
-            if !self.existing_names.contains(dep_name.as_str())
+            if self.needs_time && node_semver::Version::parse(dep_range).is_ok() {
+                self.ensure_exact_optional_fetch(dep_name, dep_range);
+            } else if !self.existing_names.contains(dep_name.as_str())
                 && self.resolver.is_prefetchable(
                     dep_name.as_str(),
                     dep_range.as_str(),
@@ -1641,101 +1943,25 @@ impl<'a> ResolveDriver<'a> {
             ));
         }
 
-        // Peer dependencies: enqueue only required peers that
-        // are truly missing from the importer/root scope. The
-        // post-pass below (`apply_peer_contexts`) computes
-        // which version each consumer sees, via ancestor
-        // scope, and assigns peer-suffixed dep_paths.
-        //
-        // pnpm's `auto-install-peers=true` fills in missing
-        // required peers, but it does not install optional peer
-        // alternatives that the user did not ask for, and it
-        // does not install a second compatible peer when the
-        // importer already declares that peer name at an
-        // incompatible version. In the latter case pnpm keeps
-        // the user's direct dependency and reports an unmet
-        // peer warning.
-        //
-        // When `auto-install-peers=false`, we skip enqueueing
-        // peers entirely. Users are on the hook for adding
-        // them to `package.json` themselves. Unmet peers still
-        // surface as warnings via `detect_unmet_peers` after
-        // resolve — in fact more so, since nothing gets
-        // auto-installed.
-        //
-        // Skip peers that are already declared as regular or
-        // optional deps of the same package — those already have a
-        // task queued via the loops above, and duplicating would
-        // just burn a queue slot.
-        if self.resolver.auto_install_peers {
-            for (dep_name, dep_range) in &version_meta.peer_dependencies {
-                let peer_optional = version_meta
+        // Peer dependencies: park the required peers nothing in scope
+        // provides; see `park_auto_install_peers`.
+        self.park_auto_install_peers(
+            &task,
+            &version_meta.peer_dependencies,
+            |name| {
+                version_meta
                     .peer_dependencies_meta
-                    .get(dep_name)
-                    .map(|m| m.optional)
-                    .unwrap_or(false);
-                // Optional peers are opt-in integrations, not
-                // auto-install candidates. Users who need one must
-                // declare it in their own manifest so the normal dep
-                // loops above resolve it explicitly.
-                if peer_optional {
-                    continue;
-                }
-                let importer_declares_peer = self
-                    .importer_declared_dep_names
-                    .get(&task.importer)
-                    .is_some_and(|names| names.contains(dep_name));
-                let root_declares_peer = self.resolver.resolve_peers_from_workspace_root
-                    && task.importer != "."
-                    && self
-                        .importer_declared_dep_names
-                        .get(".")
-                        .is_some_and(|names| names.contains(dep_name));
-                let peer_dep_is_ancestor = task.ancestors.iter().any(|(name, _)| name == dep_name);
-                if importer_declares_peer || root_declares_peer || peer_dep_is_ancestor {
-                    continue;
-                }
-                if version_meta.dependencies.contains_key(dep_name)
-                    || version_meta.optional_dependencies.contains_key(dep_name)
-                    || bundled_names.contains(dep_name)
-                {
-                    continue;
-                }
-                if self.resolver.dependency_policy.block_exotic_subdeps
-                    && is_non_registry_specifier(dep_range)
-                {
-                    tracing::warn!(
-                        code = aube_codes::warnings::WARN_AUBE_EXOTIC_SUBDEP_SKIPPED,
-                        "skipping peer dependency {dep_name} of {} — \
-                                 exotic specifier \"{dep_range}\" blocked \
-                                 by blockExoticSubdeps",
-                        task.name
-                    );
-                    continue;
-                }
-                if !self.existing_names.contains(dep_name.as_str())
-                    && self.resolver.is_prefetchable(
-                        dep_name.as_str(),
-                        dep_range.as_str(),
-                        self.workspace_packages,
-                    )
-                {
-                    self.ensure_fetch(dep_name);
-                }
-                // Park, don't enqueue: bound only after the main tree drains
-                // (see `deferred_auto_peers` / the drain in `bfs_loop`), so the
-                // peer reuses an already-resolved version instead of racing the
-                // hard deps and pulling in a registry-highest major.
-                self.deferred_auto_peers.push(ResolveTask::transitive(
-                    dep_name.clone(),
-                    dep_range.clone(),
-                    DepType::Production,
-                    dep_path.clone(),
-                    task.importer.clone(),
-                    child_ancestors.clone(),
-                ));
-            }
-        }
+                    .get(name)
+                    .is_some_and(|m| m.optional)
+            },
+            |name| {
+                version_meta.dependencies.contains_key(name)
+                    || version_meta.optional_dependencies.contains_key(name)
+                    || bundled_names.contains(name)
+            },
+            &dep_path,
+            &child_ancestors,
+        );
 
         // Root task just completed its full version-pick
         // path. Decrement the pending-directs counter so
@@ -1850,11 +2076,47 @@ impl<'a> ResolveDriver<'a> {
                 ),
             ));
         }
-        let (mut local, real_version, mut target_deps, integrity) = if let LocalSource::Git(ref g) =
-            raw_local
+        // For a host-only lockfile, an optional URL tarball whose manifest
+        // says it cannot run here is dropped without downloading it:
+        // `package.json` comes from the head of the body, which npm packs
+        // first, and `next`'s eight `@next/swc-*` binaries are ~30 MiB each.
+        // A portable lockfile skips the probe and downloads every variant,
+        // as npm and pnpm do: the integrity of a URL tarball exists only in
+        // its bytes, and an entry without one is refused by the strict
+        // reader and cannot be installed by a frozen install elsewhere.
+        if let LocalSource::RemoteTarball(t) = &raw_local
+            && task.dep_type == DepType::Optional
+            && !self.resolver.supported_architectures.accept_all
+            && let Some(probed) =
+                probe_remote_tarball_manifest(&t.url, self.resolver.client.as_ref()).await
+            && !is_supported(
+                &probed.os,
+                &probed.cpu,
+                &probed.libc,
+                &self.resolver.supported_architectures,
+            )
         {
+            tracing::debug!(
+                "skipping optional dep {}: unsupported platform (os={:?} cpu={:?} libc={:?})",
+                task.name,
+                probed.os,
+                probed.cpu,
+                probed.libc,
+            );
+            if task.is_root {
+                if let Some(spec) = task.original_specifier.as_ref() {
+                    self.skipped_optional_dependencies
+                        .entry(task.importer.clone())
+                        .or_default()
+                        .insert(task.name.clone(), spec.clone());
+                }
+                self.note_root_done();
+            }
+            return Ok(());
+        }
+        let (mut local, manifest, integrity) = if let LocalSource::Git(ref g) = raw_local {
             let shallow = aube_store::git_host_in_list(&g.url, &self.resolver.git_shallow_hosts);
-            let (resolved_local, version, deps, integrity) =
+            let (resolved_local, manifest, integrity) =
                 resolve_git_source(&task.name, g, shallow, Some(self.resolver.client.as_ref()))
                     .await
                     .map_err(|e| {
@@ -1864,33 +2126,60 @@ impl<'a> ResolveDriver<'a> {
                         )
                     })?;
             let integrity = integrity.or_else(|| {
-                self.locked_index
-                    .find_local_source_integrity(&task.name, &version, &resolved_local)
+                self.locked_index.find_local_source_integrity(
+                    &task.name,
+                    &manifest.version,
+                    &resolved_local,
+                )
             });
-            (resolved_local, version, deps, integrity)
+            (resolved_local, manifest, integrity)
         } else if let LocalSource::RemoteTarball(ref t) = raw_local {
-            let (resolved_local, version, deps) =
-                resolve_remote_tarball(&task.name, t, self.resolver.client.as_ref())
-                    .await
-                    .map_err(|e| {
-                        Error::Registry(
-                            task.name.clone(),
-                            format!("remote tarball {}: {e}", task.range),
-                        )
-                    })?;
+            // An optional that fails to download is skipped, as a registry
+            // optional whose fetch fails is. A portable lockfile downloads
+            // every platform's variant, so without this one unreachable
+            // tarball for another platform would fail the whole install.
+            let (resolved_local, manifest) = match resolve_remote_tarball(
+                &task.name,
+                t,
+                self.resolver.client.as_ref(),
+            )
+            .await
+            {
+                Ok(resolved) => resolved,
+                Err(e) if task.dep_type == DepType::Optional => {
+                    tracing::warn!(
+                        "skipping optional dependency {}: remote tarball {} could not be fetched: {e}",
+                        task.name,
+                        aube_util::url::redact_url(&task.range),
+                    );
+                    if task.is_root {
+                        self.note_root_done();
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    return Err(Error::Registry(
+                        task.name.clone(),
+                        format!(
+                            "remote tarball {}: {e}",
+                            aube_util::url::redact_url(&task.range)
+                        ),
+                    ));
+                }
+            };
             let integrity = match &resolved_local {
                 LocalSource::RemoteTarball(tarball) if !tarball.integrity.is_empty() => {
                     Some(tarball.integrity.clone())
                 }
                 _ => None,
             };
-            (resolved_local, version, deps, integrity)
+            (resolved_local, manifest, integrity)
         } else {
             // Rewrite the path to be relative to the project root so
             // every downstream consumer can resolve it with a single
             // `project_root.join(rel)`.
             let local = rebase_local(&raw_local, &importer_root, &self.resolver.project_root);
-            let (version, deps) = if matches!(local, LocalSource::Exec(_)) {
+            let manifest = if matches!(local, LocalSource::Exec(_)) {
                 if self.resolver.ignore_scripts {
                     return Err(Error::Registry(
                         task.name.clone(),
@@ -1902,12 +2191,55 @@ impl<'a> ResolveDriver<'a> {
                 }
                 resolve_exec_manifest(&task.name, &local, &self.resolver.project_root).await?
             } else {
-                let (_target_name, version, deps) = read_local_manifest(&raw_local, &importer_root)
-                    .unwrap_or_else(|_| (task.name.clone(), "0.0.0".to_string(), BTreeMap::new()));
-                (version, deps)
+                read_local_manifest(&raw_local, &importer_root).unwrap_or_else(|_| LocalManifest {
+                    version: "0.0.0".to_string(),
+                    ..Default::default()
+                })
             };
-            (local, version, deps, None)
+            (local, manifest, None)
         };
+        let LocalManifest {
+            version: real_version,
+            dependencies: mut target_deps,
+            optional_dependencies: mut target_optional_deps,
+            peer_dependencies,
+            peer_dependencies_meta,
+            bundled_dependencies,
+            os,
+            cpu,
+            libc,
+        } = manifest;
+        // Same platform rule as a registry package: an optional that
+        // cannot run here is dropped (a portable lockfile's accept-all
+        // set keeps it for the platforms that can), a required one is
+        // installed with a warning.
+        if !is_supported(&os, &cpu, &libc, &self.resolver.supported_architectures) {
+            if task.dep_type == DepType::Optional {
+                tracing::debug!(
+                    "skipping optional dep {}@{}: unsupported platform (os={os:?} cpu={cpu:?} libc={libc:?})",
+                    task.name,
+                    task.range,
+                );
+                if task.is_root
+                    && let Some(spec) = task.original_specifier.as_ref()
+                {
+                    self.skipped_optional_dependencies
+                        .entry(task.importer.clone())
+                        .or_default()
+                        .insert(task.name.clone(), spec.clone());
+                }
+                if task.is_root {
+                    self.note_root_done();
+                }
+                return Ok(());
+            }
+            tracing::warn!(
+                code = aube_codes::warnings::WARN_AUBE_UNSUPPORTED_PLATFORM_INSTALL,
+                "required dep {}@{} declares unsupported platform (os={os:?} cpu={cpu:?} libc={libc:?}); installing anyway",
+                task.name,
+                task.range,
+            );
+        }
         attach_integrity_to_git_source(&mut local, integrity.as_deref());
         // Apply `packageExtensions` to non-registry packages too. The
         // registry path applies them to the picked VersionMetadata; git /
@@ -1922,6 +2254,27 @@ impl<'a> ResolveDriver<'a> {
             &mut target_deps,
             &self.resolver.dependency_policy.package_extensions,
         );
+        // A name in both maps is an optional dep (npm semantics).
+        target_deps.retain(|name, _| !target_optional_deps.contains_key(name));
+        let bundled: FxHashSet<String> = bundled_dependencies.iter().cloned().collect();
+        target_deps.retain(|name, _| !bundled.contains(name));
+        target_optional_deps.retain(|name, _| {
+            !bundled.contains(name) && !self.resolver.ignored_optional_dependencies.contains(name)
+        });
+        // The ranges the manifest declared, which the npm / bun / yarn
+        // writers emit on a child entry instead of the resolved pin.
+        let declared: BTreeMap<String, String> = target_deps
+            .iter()
+            .chain(target_optional_deps.iter())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        // Meta-only peers resolve like `"*"`, matching the registry path.
+        let mut peer_deps = peer_dependencies;
+        for name in peer_dependencies_meta.keys() {
+            peer_deps
+                .entry(name.clone())
+                .or_insert_with(|| "*".to_string());
+        }
         let dep_path = local.dep_path(&task.name);
         let linked_name = task.name.clone();
 
@@ -1932,7 +2285,7 @@ impl<'a> ResolveDriver<'a> {
                 name: task.name.clone(),
                 dep_path: dep_path.clone(),
                 dep_type: task.dep_type,
-                specifier: task.original_specifier.clone(),
+                specifier: task.lockfile_specifier(),
             });
         }
 
@@ -1971,6 +2324,10 @@ impl<'a> ResolveDriver<'a> {
         }
 
         if self.visited.insert(std::sync::Arc::from(dep_path.as_str())) {
+            let peer_meta = peer_dependencies_meta.clone();
+            let os: aube_lockfile::PlatformList = os.into_iter().collect();
+            let cpu: aube_lockfile::PlatformList = cpu.into_iter().collect();
+            let libc: aube_lockfile::PlatformList = libc.into_iter().collect();
             self.resolved.insert(
                 dep_path.clone(),
                 LockedPackage {
@@ -1979,6 +2336,18 @@ impl<'a> ResolveDriver<'a> {
                     integrity: integrity.clone(),
                     dep_path: dep_path.clone(),
                     local_source: Some(local.clone()),
+                    peer_dependencies: peer_deps.clone(),
+                    peer_dependencies_meta,
+                    os: os.clone(),
+                    cpu: cpu.clone(),
+                    libc: libc.clone(),
+                    bundled_dependencies: {
+                        let mut v = bundled_dependencies;
+                        v.sort();
+                        v
+                    },
+                    declared_dependencies: declared,
+                    declared_dependencies_known: true,
                     ..Default::default()
                 },
             );
@@ -2000,14 +2369,9 @@ impl<'a> ResolveDriver<'a> {
                         // rewrite.
                         alias_of: None,
                         local_source: Some(local.clone()),
-                        // Local `file:`/`link:` packages never carry
-                        // npm-style platform constraints — they're
-                        // whatever the user points at, so the fetch
-                        // coordinator treats them as unconstrained
-                        // (always fetch).
-                        os: aube_lockfile::PlatformList::new(),
-                        cpu: aube_lockfile::PlatformList::new(),
-                        libc: aube_lockfile::PlatformList::new(),
+                        os,
+                        cpu,
+                        libc,
                         deprecated: None,
                         unpacked_size: None,
                         pending,
@@ -2021,6 +2385,20 @@ impl<'a> ResolveDriver<'a> {
                 let mut child_ancestors = task.ancestors.to_vec();
                 child_ancestors.push((linked_name.clone(), real_version.clone()));
                 let child_ancestors: Arc<[(String, String)]> = child_ancestors.into();
+                // An exotic optional child `should_block_exotic_subdep`
+                // would refuse is skipped with a warning instead of failing
+                // the install, as it is under a registry parent. Required
+                // children still reach the guard in their own task.
+                let children_guarded = self.resolver.dependency_policy.block_exotic_subdeps
+                    && !matches!(
+                        local,
+                        LocalSource::Directory(_) | LocalSource::Portal(_) | LocalSource::Exec(_)
+                    );
+                let own_deps: BTreeSet<String> = target_deps
+                    .keys()
+                    .chain(target_optional_deps.keys())
+                    .cloned()
+                    .collect();
                 for (child_name, child_range) in target_deps {
                     self.queue.push_back(ResolveTask::transitive(
                         child_name,
@@ -2031,12 +2409,126 @@ impl<'a> ResolveDriver<'a> {
                         child_ancestors.clone(),
                     ));
                 }
+                for (child_name, child_range) in target_optional_deps {
+                    if children_guarded && is_non_registry_specifier(&child_range) {
+                        tracing::warn!(
+                            code = aube_codes::warnings::WARN_AUBE_EXOTIC_SUBDEP_SKIPPED,
+                            "skipping optional dependency {child_name} of {} — \
+                                     exotic specifier \"{child_range}\" blocked by blockExoticSubdeps",
+                            task.name
+                        );
+                        continue;
+                    }
+                    self.queue.push_back(ResolveTask::transitive(
+                        child_name,
+                        child_range,
+                        DepType::Optional,
+                        dep_path.clone(),
+                        task.importer.clone(),
+                        child_ancestors.clone(),
+                    ));
+                }
+                self.park_auto_install_peers(
+                    &task,
+                    &peer_deps,
+                    |name| peer_meta.get(name).is_some_and(|m| m.optional),
+                    |name| own_deps.contains(name) || bundled.contains(name),
+                    &dep_path,
+                    &child_ancestors,
+                );
             }
         }
         if task.is_root {
             self.note_root_done();
         }
         Ok(())
+    }
+
+    /// Park the required peers of a just-resolved package that nothing
+    /// in scope provides, to be bound after the main tree drains.
+    ///
+    /// pnpm's `auto-install-peers=true` fills in missing required peers,
+    /// but it does not install optional peer alternatives the user did
+    /// not ask for, and it does not install a second compatible peer when
+    /// the importer already declares that peer name at an incompatible
+    /// version — pnpm keeps the direct dependency and reports an unmet
+    /// peer. With `auto-install-peers=false` nothing is parked; unmet
+    /// peers still surface through `detect_unmet_peers`. The post-pass
+    /// (`apply_peer_contexts`) decides which version each consumer sees
+    /// and assigns the peer-suffixed dep_paths.
+    ///
+    /// Peers the package also declares as a regular or optional dep (or
+    /// bundles) are skipped: those already have a task of their own.
+    fn park_auto_install_peers(
+        &mut self,
+        task: &ResolveTask,
+        peers: &BTreeMap<String, String>,
+        is_optional_peer: impl Fn(&str) -> bool,
+        is_own_dep: impl Fn(&str) -> bool,
+        dep_path: &str,
+        child_ancestors: &Arc<[(String, String)]>,
+    ) {
+        if !self.resolver.auto_install_peers {
+            return;
+        }
+        for (dep_name, dep_range) in peers {
+            // Optional peers are opt-in integrations, not auto-install
+            // candidates. Users who need one must declare it in their
+            // own manifest so the normal dep loops resolve it explicitly.
+            if is_optional_peer(dep_name) {
+                continue;
+            }
+            let importer_declares_peer = self
+                .importer_declared_dep_names
+                .get(&task.importer)
+                .is_some_and(|names| names.contains(dep_name));
+            let root_declares_peer = self.resolver.resolve_peers_from_workspace_root
+                && task.importer != "."
+                && self
+                    .importer_declared_dep_names
+                    .get(".")
+                    .is_some_and(|names| names.contains(dep_name));
+            let peer_dep_is_ancestor = task.ancestors.iter().any(|(name, _)| name == dep_name);
+            if importer_declares_peer || root_declares_peer || peer_dep_is_ancestor {
+                continue;
+            }
+            if is_own_dep(dep_name) {
+                continue;
+            }
+            if self.resolver.dependency_policy.block_exotic_subdeps
+                && is_non_registry_specifier(dep_range)
+            {
+                tracing::warn!(
+                    code = aube_codes::warnings::WARN_AUBE_EXOTIC_SUBDEP_SKIPPED,
+                    "skipping peer dependency {dep_name} of {} — \
+                             exotic specifier \"{dep_range}\" blocked \
+                             by blockExoticSubdeps",
+                    task.name
+                );
+                continue;
+            }
+            if !self.existing_names.contains(dep_name.as_str())
+                && self.resolver.is_prefetchable(
+                    dep_name.as_str(),
+                    dep_range.as_str(),
+                    self.workspace_packages,
+                )
+            {
+                self.ensure_fetch(dep_name);
+            }
+            // Park, don't enqueue: bound only after the main tree drains
+            // (see `deferred_auto_peers` / the drain in `bfs_loop`), so the
+            // peer reuses an already-resolved version instead of racing the
+            // hard deps and pulling in a registry-highest major.
+            self.deferred_auto_peers.push(ResolveTask::transitive(
+                dep_name.clone(),
+                dep_range.clone(),
+                DepType::Production,
+                dep_path.to_string(),
+                task.importer.clone(),
+                child_ancestors.clone(),
+            ));
+        }
     }
 
     /// Apply catalog, override, and `npm:`/`jsr:` alias rewrites
@@ -2056,13 +2548,28 @@ impl<'a> ResolveDriver<'a> {
         // Catalog protocol: rewrite `catalog:` / `catalog:<name>` to
         // the workspace catalog's actual range *before* the override
         // loop, so overrides can still target a catalog dep by bare
-        // name. The original `catalog:...` text stays in
-        // `original_specifier` for the lockfile importer.
+        // name. The raw `catalog:...` text stays in `original_specifier`;
+        // the separate lockfile field changes only if an override fires.
+        //
+        // The override, though, is decided against that raw text, never the
+        // catalog's range: pnpm overrides the manifest before it resolves
+        // catalogs. So a range-keyed selector (`foo@^1`) leaves a `catalog:`
+        // dependency alone, and once the reference stands no override is
+        // tried again on what it expanded to.
+        let mut catalog_override = None;
+        let mut catalog_reference_stands = false;
         if let Some((catalog_name, real_range)) = self
             .resolver
             .resolve_catalog_spec(&task.name, &task.range)?
         {
             tracing::trace!("catalog: {} {} -> {}", task.name, task.range, real_range);
+            catalog_override = pick_catalog_override_spec(
+                &self.resolver.override_rules,
+                &task.name,
+                &task.range,
+                &task.ancestors,
+            );
+            catalog_reference_stands = catalog_override.is_none();
             self.catalog_picks
                 .entry(catalog_name)
                 .or_default()
@@ -2072,12 +2579,17 @@ impl<'a> ResolveDriver<'a> {
 
         for _ in 0..2 {
             let mut changed = false;
-            if let Some(override_spec) = pick_override_spec(
-                &self.resolver.override_rules,
-                &task.name,
-                &task.range,
-                &task.ancestors,
-            ) {
+            let picked = match catalog_override.take() {
+                Some(spec) => Some(spec),
+                None if catalog_reference_stands => None,
+                None => pick_override_spec(
+                    &self.resolver.override_rules,
+                    &task.name,
+                    &task.range,
+                    &task.ancestors,
+                ),
+            };
+            if let Some(override_spec) = picked {
                 // pnpm's removal marker: an override value of `"-"`
                 // drops the dep edge entirely. Skip before
                 // catalog/alias rewrites so `-` never reaches the
@@ -2104,6 +2616,13 @@ impl<'a> ResolveDriver<'a> {
                     }
                     None => (override_spec, None),
                 };
+                // pnpm records the override-applied specifier for direct
+                // importer dependencies. Keep ordinary `catalog:` dependencies
+                // verbatim, but once an override fires use its effective value
+                // (including catalog expansion) in the lockfile importer.
+                if task.is_root {
+                    task.lockfile_override_specifier = Some(effective_spec.clone());
+                }
                 if task.range != effective_spec {
                     if let Some((catalog_name, real_range)) = pending_pick {
                         self.catalog_picks
@@ -2270,7 +2789,7 @@ impl<'a> ResolveDriver<'a> {
                 name: task.name.clone(),
                 dep_path: dep_path.clone(),
                 dep_type: task.dep_type,
-                specifier: task.original_specifier.clone(),
+                specifier: task.lockfile_specifier(),
             });
         }
         if let Some(ref parent_dp) = task.parent
@@ -2290,6 +2809,98 @@ impl<'a> ResolveDriver<'a> {
         }
     }
 
+    /// Bind a `workspace:` spec that names a member the dependency KEY
+    /// does not: the alias form (`"card": "workspace:components-card@*"`)
+    /// and the relative-path form (`"card": "workspace:../card"`), both
+    /// documented by pnpm and both an error here before this ran.
+    ///
+    /// The rewrite target is `link:`, and that is faithful rather than a
+    /// shortcut: pnpm records the plain form, the alias form and the path
+    /// form all three as `version: link:../card` in the importer entry,
+    /// so this produces exactly the graph the lockfile writer would have
+    /// to synthesize anyway. `original_specifier` is captured at task
+    /// construction, so the importer's `specifier:` still reads back the
+    /// `workspace:` text the user wrote.
+    ///
+    /// Runs BEFORE the key→member lookup in `try_workspace_link`, because
+    /// the alias target outranks a key that also happens to name a member
+    /// — real pnpm resolves `"pkg3": "workspace:pkg2@*"` to pkg2 even
+    /// when a member named pkg3 exists.
+    ///
+    /// Importer-declared deps only (`is_root`, which covers every member's
+    /// own manifest, not just the root's). A `workspace:` spec inside a
+    /// fetched package is a publish bug — pnpm rewrites the protocol away
+    /// on publish — and the path it would produce has no importer to
+    /// anchor against, so those keep failing the way they already did.
+    fn rewrite_workspace_alias(&self, task: &mut ResolveTask) -> Result<(), Error> {
+        if !task.is_root {
+            return Ok(());
+        }
+        let (target, range) = match parse_workspace_spec(&task.range) {
+            // A path addresses a directory, not a name. Hand it straight
+            // to the local-source resolver, which anchors a root-declared
+            // `link:` at the importer — the same anchor pnpm uses.
+            Some(WorkspaceSpec::Path(path)) => {
+                task.range = format!("link:{path}");
+                return Ok(());
+            }
+            Some(WorkspaceSpec::Alias { name, range }) => (name, range),
+            // The plain form. `try_workspace_link` owns it.
+            Some(WorkspaceSpec::Range(_)) | None => return Ok(()),
+        };
+        let Some(ws_version) = self.workspace_packages.get(target) else {
+            return Err(self.workspace_pkg_not_found(task, target));
+        };
+        if !workspace_range_binds(ws_version, range) {
+            return Err(Error::WorkspaceVersionMismatch(Box::new(
+                WorkspaceVersionMismatchDetails {
+                    dep_name: task.name.clone(),
+                    spec: task
+                        .original_specifier
+                        .clone()
+                        .unwrap_or_else(|| task.range.clone()),
+                    target: target.to_string(),
+                    range: range.to_string(),
+                    local_version: ws_version.clone(),
+                    importer: task.importer.clone(),
+                },
+            )));
+        }
+        // A member is an importer, so its directory IS its importer path.
+        // Missing would mean `workspace_packages` and `manifests`
+        // disagreed about the member set, which the caller builds from
+        // one source.
+        let Some(member_importer) = self.workspace_member_importers.get(target) else {
+            return Err(self.workspace_pkg_not_found(task, target));
+        };
+        let rel = aube_lockfile::link_from_importer(&task.importer, member_importer);
+        tracing::trace!(
+            "workspace alias: {} {} -> link:{}",
+            task.name,
+            task.range,
+            rel
+        );
+        task.range = format!("link:{rel}");
+        Ok(())
+    }
+
+    /// Build the "names a package this workspace does not have" error,
+    /// carrying the member list so the message can name what IS here.
+    fn workspace_pkg_not_found(&self, task: &ResolveTask, target: &str) -> Error {
+        let mut known: Vec<String> = self.workspace_packages.keys().cloned().collect();
+        known.sort();
+        Error::WorkspacePkgNotFound(Box::new(WorkspacePkgNotFoundDetails {
+            dep_name: task.name.clone(),
+            spec: task
+                .original_specifier
+                .clone()
+                .unwrap_or_else(|| task.range.clone()),
+            target: target.to_string(),
+            importer: task.importer.clone(),
+            known,
+        }))
+    }
+
     /// Try to resolve `task` against the workspace.
     ///
     /// Three cases link rather than going to the registry: an explicit
@@ -2307,12 +2918,16 @@ impl<'a> ResolveDriver<'a> {
             return false;
         };
         let matches = match task.range.strip_prefix("workspace:") {
-            // workspace:*, workspace:^, workspace:~ bind to whatever
-            // local version is. pnpm's "don't pin me, just track
-            // local" sigils.
-            Some("" | "*" | "^" | "~") => true,
-            // workspace:<range> must still satisfy the local version.
-            Some(rest) => version_satisfies(ws_version, rest),
+            // The range part carries pnpm's sigils, an ordinary semver
+            // range, or a bun/yarn member DIRECTORY. `workspace_range_binds`
+            // owns all three so the plain form here and the alias form in
+            // `rewrite_workspace_alias` cannot drift.
+            //
+            // An aliased tail (`workspace:pkg2@*`) never reaches this arm:
+            // `rewrite_workspace_alias` runs first and has already turned
+            // it into a `link:`, which is what lets the alias target
+            // outrank a dependency key that happens to name a member too.
+            Some(rest) => workspace_range_binds(ws_version, rest),
             // `link:`/`portal:` whose name is a workspace member is a
             // workspace link, not an untrusted exotic dep. pnpm records
             // a peer satisfied by a workspace member this way (e.g.
@@ -2408,7 +3023,7 @@ impl<'a> ResolveDriver<'a> {
                 name: task.name.clone(),
                 dep_path: dep_path.clone(),
                 dep_type: task.dep_type,
-                specifier: task.original_specifier.clone(),
+                specifier: task.lockfile_specifier(),
             });
         }
         if let Some(ref parent_dp) = task.parent
@@ -2508,6 +3123,7 @@ impl<'a> ResolveDriver<'a> {
                     engines: locked_pkg.engines.clone(),
                     bin: locked_pkg.bin.clone(),
                     declared_dependencies: locked_pkg.declared_dependencies.clone(),
+                    declared_dependencies_known: locked_pkg.declared_dependencies_known,
                     license: locked_pkg.license.clone(),
                     funding_url: locked_pkg.funding_url.clone(),
                     extra_meta: locked_pkg.extra_meta.clone(),
@@ -2632,6 +3248,74 @@ impl<'a> ResolveDriver<'a> {
     }
 }
 
+fn merge_fetch_result(
+    cache: &mut FxHashMap<String, aube_registry::Packument>,
+    trust_histories: &mut FxHashMap<String, TrustHistory>,
+    name: String,
+    mut packument: aube_registry::Packument,
+    trust_history: Option<TrustHistory>,
+) {
+    let Some(history) = trust_history else {
+        if trust_histories.contains_key(&name)
+            && let Some(existing) = cache.get(&name)
+        {
+            let missing_versions = existing
+                .versions
+                .iter()
+                .filter(|(version, _)| !packument.versions.contains_key(*version))
+                .map(|(version, metadata)| (version.clone(), metadata.clone()))
+                .collect::<Vec<_>>();
+            if !missing_versions.is_empty() {
+                for (version, metadata) in missing_versions {
+                    packument.versions.insert(version, metadata);
+                }
+                // Compact history contains publish times for every historical
+                // release used by no-downgrade checks, not only the selected
+                // version retained in `versions`.
+                for (version, time) in &existing.time {
+                    packument
+                        .time
+                        .entry(version.clone())
+                        .or_insert_with(|| time.clone());
+                }
+                cache.insert(name, packument);
+                return;
+            }
+        }
+        cache.insert(name.clone(), packument);
+        trust_histories.remove(&name);
+        return;
+    };
+
+    // A full result is normally authoritative. It can be stale, though: a
+    // later exact endpoint response may contain a newly published version
+    // that the cached full packument lacks. Preserve the full data while
+    // merging that missing exact version and its fresher compact history.
+    if !trust_histories.contains_key(&name)
+        && let Some(existing) = cache.get_mut(&name)
+    {
+        let has_missing_version = packument
+            .versions
+            .keys()
+            .any(|version| !existing.versions.contains_key(version));
+        if !has_missing_version {
+            return;
+        }
+        existing.versions.append(&mut packument.versions);
+        existing.time.append(&mut packument.time);
+        trust_histories.insert(name, history);
+        return;
+    }
+
+    if let Some(existing) = cache.get_mut(&name) {
+        existing.versions.append(&mut packument.versions);
+        existing.time.append(&mut packument.time);
+    } else {
+        cache.insert(name.clone(), packument);
+    }
+    trust_histories.entry(name).or_default().extend(history);
+}
+
 fn attach_integrity_to_git_source(local: &mut LocalSource, integrity: Option<&str>) {
     if let LocalSource::Git(git) = local
         && git.integrity.is_none()
@@ -2643,7 +3327,166 @@ fn attach_integrity_to_git_source(local: &mut LocalSource, integrity: Option<&st
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::semver_util::is_semver_range;
     use aube_lockfile::GitSource;
+
+    fn test_packument(versions: &[&str]) -> aube_registry::Packument {
+        aube_registry::Packument {
+            name: "shared".to_string(),
+            modified: None,
+            versions: versions
+                .iter()
+                .map(|version| {
+                    (
+                        (*version).to_string(),
+                        serde_json::from_value(serde_json::json!({
+                            "name": "shared",
+                            "version": version,
+                        }))
+                        .unwrap(),
+                    )
+                })
+                .collect(),
+            dist_tags: BTreeMap::new(),
+            time: versions
+                .iter()
+                .map(|version| {
+                    (
+                        (*version).to_string(),
+                        "2024-01-01T00:00:00.000Z".to_string(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn test_history() -> TrustHistory {
+        [(
+            "0.9.0".to_string(),
+            aube_registry::VersionTrustMetadata {
+                approver: None,
+                npm_user: None,
+                dist: None,
+            },
+        )]
+        .into_iter()
+        .collect()
+    }
+
+    #[test]
+    fn full_fetch_remains_authoritative_when_it_finishes_first() {
+        let mut cache = FxHashMap::default();
+        let mut histories = FxHashMap::default();
+
+        merge_fetch_result(
+            &mut cache,
+            &mut histories,
+            "shared".to_string(),
+            test_packument(&["1.0.0", "2.0.0"]),
+            None,
+        );
+        merge_fetch_result(
+            &mut cache,
+            &mut histories,
+            "shared".to_string(),
+            test_packument(&["1.0.0"]),
+            Some(test_history()),
+        );
+
+        assert_eq!(cache["shared"].versions.len(), 2);
+        assert!(!histories.contains_key("shared"));
+    }
+
+    #[test]
+    fn full_fetch_replaces_compact_result_when_it_finishes_last() {
+        let mut cache = FxHashMap::default();
+        let mut histories = FxHashMap::default();
+
+        merge_fetch_result(
+            &mut cache,
+            &mut histories,
+            "shared".to_string(),
+            test_packument(&["1.0.0"]),
+            Some(test_history()),
+        );
+        merge_fetch_result(
+            &mut cache,
+            &mut histories,
+            "shared".to_string(),
+            test_packument(&["1.0.0", "2.0.0"]),
+            None,
+        );
+
+        assert_eq!(cache["shared"].versions.len(), 2);
+        assert!(!histories.contains_key("shared"));
+    }
+
+    #[test]
+    fn stale_full_fetch_preserves_compact_version_when_it_finishes_last() {
+        let mut cache = FxHashMap::default();
+        let mut histories = FxHashMap::default();
+
+        let mut compact = test_packument(&["2.0.0"]);
+        compact
+            .time
+            .insert("0.9.0".to_string(), "2023-01-01T00:00:00.000Z".to_string());
+        merge_fetch_result(
+            &mut cache,
+            &mut histories,
+            "shared".to_string(),
+            compact,
+            Some(test_history()),
+        );
+        merge_fetch_result(
+            &mut cache,
+            &mut histories,
+            "shared".to_string(),
+            test_packument(&["1.0.0"]),
+            None,
+        );
+
+        assert_eq!(
+            cache["shared"]
+                .versions
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["1.0.0", "2.0.0"]
+        );
+        assert!(histories.contains_key("shared"));
+        assert_eq!(cache["shared"].time["0.9.0"], "2023-01-01T00:00:00.000Z");
+    }
+
+    #[test]
+    fn compact_fetch_adds_exact_version_missing_from_stale_full_result() {
+        let mut cache = FxHashMap::default();
+        let mut histories = FxHashMap::default();
+
+        merge_fetch_result(
+            &mut cache,
+            &mut histories,
+            "shared".to_string(),
+            test_packument(&["1.0.0"]),
+            None,
+        );
+        merge_fetch_result(
+            &mut cache,
+            &mut histories,
+            "shared".to_string(),
+            test_packument(&["2.0.0"]),
+            Some(test_history()),
+        );
+
+        assert_eq!(
+            cache["shared"]
+                .versions
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["1.0.0", "2.0.0"]
+        );
+        assert!(histories.contains_key("shared"));
+    }
 
     #[test]
     fn attach_integrity_to_git_source_fills_missing_git_integrity() {
@@ -2768,5 +3611,37 @@ mod tests {
     #[test]
     fn named_registry_plain_range_is_not_a_named_spec() {
         assert_eq!(parse_named_registry_spec("^1.2.3", "foo", &known()), None);
+    }
+
+    /// bun records a workspace member's resolution as
+    /// `<name>@workspace:<dir>`, so the tail is a DIRECTORY. Read as a semver
+    /// range it satisfies nothing, and every dependency on that member becomes
+    /// unresolvable — measured on opencode, where a registry package depending
+    /// on a workspace member failed the whole install.
+    ///
+    /// `plugin` is the case a lexical path test (leading `.`, leading `/`,
+    /// contains `/`) gets wrong: a member at a top-level directory has no
+    /// separator in its tail, yet real bun and real pnpm both resolve it.
+    #[test]
+    fn a_workspace_tail_that_is_a_path_is_not_a_version_range() {
+        for path in [
+            "packages/plugin",
+            "packages/console/app",
+            "./packages/plugin",
+            "/abs/packages/plugin",
+            "plugin",
+            "ms",
+        ] {
+            assert!(
+                !is_semver_range(path),
+                "{path} names a directory, not a version"
+            );
+        }
+        for range in ["1.2.3", "^1.0.0", "~2", ">=1 <2", "1.x", "*", ""] {
+            assert!(
+                is_semver_range(range),
+                "{range} is a version range and must still be checked against the member"
+            );
+        }
     }
 }

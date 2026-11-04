@@ -10,11 +10,18 @@
 //! express one target per invocation; the tri-state rows subsume the
 //! `-i` / `-i --latest` split into a single picker.
 //!
+//! An exact pin (`"chalk": "4.1.0"`) has no range to refresh inside, so its
+//! "latest in range" cell is computed against `^<pin>` instead — yarn's
+//! `upgrade-interactive` rule — and a pick on it is applied as an explicit
+//! `<pkg>@<version>`, which the manifest rewrite writes back as an exact pin.
+//! Without this a fully-pinned project sees a dead duplicate of `current` in
+//! every middle cell and its only offer is the `latest` jump.
+//!
 //! The interactive loop renders on stderr (stdout stays clean for report
 //! output, matching the demand picker) and requires a TTY — the caller
 //! enforces that before constructing rows.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
 use console::{Key, Term};
@@ -35,6 +42,10 @@ pub(crate) struct PickerRow {
     pub current: String,
     pub range_target: Option<String>,
     pub latest_target: Option<String>,
+    /// The manifest spec is an exact pin, so `range_target` was computed
+    /// against `^<pin>` and re-resolving the manifest range could never
+    /// reach it. A range pick on this row goes out as `<pkg>@<version>`.
+    pub pinned: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,18 +55,21 @@ pub(crate) enum PickState {
     Latest,
 }
 
-/// The confirmed selection: keys to refresh inside their manifest range and
-/// keys to bump to the `latest` dist-tag (the caller maps the latter onto
-/// the same per-key machinery as an explicit `<pkg>@latest` argument).
+/// The confirmed selection: keys to refresh inside their manifest range,
+/// keys to bump to the `latest` dist-tag (the caller maps these onto the
+/// same per-key machinery as an explicit `<pkg>@latest` argument), and
+/// exact-pin keys with the concrete version their cell displayed (applied
+/// as an explicit `<pkg>@<version>`, which the rewrite keeps pinned).
 #[derive(Debug, Default)]
 pub(crate) struct PickerSelection {
     pub in_range: BTreeSet<String>,
     pub to_latest: BTreeSet<String>,
+    pub to_version: BTreeMap<String, String>,
 }
 
 impl PickerSelection {
     pub(crate) fn is_empty(&self) -> bool {
-        self.in_range.is_empty() && self.to_latest.is_empty()
+        self.in_range.is_empty() && self.to_latest.is_empty() && self.to_version.is_empty()
     }
 }
 
@@ -77,6 +91,8 @@ impl PickerSelection {
 ///   [`build_selection`] routes a value-equal latest pick through the
 ///   in-range machinery so the `latest` dist-tag can't be applied through
 ///   the duplicate. An unparseable `current` is treated the same way.
+/// - `pinned` marks an exact-pin spec whose `wanted` the caller computed
+///   against `^<pin>`; see [`PickerRow::pinned`].
 pub(crate) fn build_row(
     key: &str,
     bucket: &'static str,
@@ -84,6 +100,7 @@ pub(crate) fn build_row(
     current: &str,
     wanted: Option<&str>,
     latest: Option<&str>,
+    pinned: bool,
 ) -> Option<PickerRow> {
     let semver_downgrade = |target: &str| {
         matches!(
@@ -118,6 +135,7 @@ pub(crate) fn build_row(
         current: current.to_string(),
         range_target: Some(range_target),
         latest_target: Some(latest_target),
+        pinned,
     })
 }
 
@@ -570,17 +588,30 @@ pub(crate) fn run(mut rows: Vec<PickerRow>) -> std::io::Result<Option<PickerSele
 /// would downgrade past what the cell displayed. (When range and latest
 /// genuinely resolve to the same version the two routes are equivalent,
 /// so the value check is safe for both duplicate shapes.)
+///
+/// On a pinned row the range side lands in `to_version` carrying the
+/// displayed version, since the manifest's own range (the pin) can't
+/// resolve to anything else.
 fn build_selection(rows: &[PickerRow], states: &[PickState]) -> PickerSelection {
     let mut selection = PickerSelection::default();
+    let mut take_range = |row: &PickerRow| {
+        if row.pinned {
+            let target = row
+                .range_target
+                .clone()
+                .unwrap_or_else(|| row.current.clone());
+            selection.to_version.insert(row.key.clone(), target);
+        } else {
+            selection.in_range.insert(row.key.clone());
+        }
+    };
     for (row, state) in rows.iter().zip(states) {
         match state {
             PickState::Keep => {}
-            PickState::Range => {
-                selection.in_range.insert(row.key.clone());
-            }
+            PickState::Range => take_range(row),
             PickState::Latest => {
                 if row.latest_target == row.range_target {
-                    selection.in_range.insert(row.key.clone());
+                    take_range(row);
                 } else {
                     selection.to_latest.insert(row.key.clone());
                 }
@@ -601,7 +632,53 @@ mod tests {
         wanted: Option<&str>,
         latest: Option<&str>,
     ) -> Option<PickerRow> {
-        build_row(key, bucket, "^1.0.0", current, wanted, latest)
+        build_row(key, bucket, "^1.0.0", current, wanted, latest, false)
+    }
+
+    #[test]
+    fn pinned_rows_route_range_picks_as_explicit_versions() {
+        // `"chalk": "4.1.0"`: the caller widened the range to `^4.1.0` and
+        // handed over its max. A range pick must carry that version out as
+        // `chalk@4.1.2` — re-resolving the manifest's own range would land
+        // on 4.1.0 again — while a distinct latest pick stays a `latest`
+        // dist-tag route, exactly like an unpinned row.
+        let rows = vec![
+            build_row(
+                "chalk",
+                "dependencies",
+                "4.1.0",
+                "4.1.0",
+                Some("4.1.2"),
+                Some("6.0.0"),
+                true,
+            )
+            .unwrap(),
+            // Widened range max == latest: both cells show 2.1.3, and either
+            // pick routes through the pinned version path.
+            build_row(
+                "ms",
+                "devDependencies",
+                "2.1.1",
+                "2.1.1",
+                Some("2.1.3"),
+                Some("2.1.3"),
+                true,
+            )
+            .unwrap(),
+        ];
+        let sel = build_selection(&rows, &[PickState::Range, PickState::Latest]);
+        assert_eq!(
+            sel.to_version,
+            BTreeMap::from([
+                ("chalk".to_string(), "4.1.2".to_string()),
+                ("ms".to_string(), "2.1.3".to_string()),
+            ])
+        );
+        assert!(sel.in_range.is_empty() && sel.to_latest.is_empty());
+
+        let sel = build_selection(&rows, &[PickState::Latest, PickState::Keep]);
+        assert_eq!(sel.to_latest.iter().collect::<Vec<_>>(), vec!["chalk"]);
+        assert!(sel.to_version.is_empty());
     }
 
     #[test]

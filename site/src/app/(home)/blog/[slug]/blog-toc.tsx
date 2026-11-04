@@ -15,7 +15,7 @@ import { TocStarNudge } from '@/components/toc-star-nudge';
  * heading; TOCItems draws the moving accent thumb along the left border.
  *
  * The owning <aside> in the server component controls placement (sticky, gutter
- * width, max-xl:hidden). This component only renders the list + scroll-spy.
+ * width, hidden below lg). This component only renders the list + scroll-spy.
  */
 export function BlogTOC({ toc }: { toc: TableOfContents }) {
   return (

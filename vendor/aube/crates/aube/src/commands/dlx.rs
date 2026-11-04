@@ -1,12 +1,11 @@
 use super::install::{FrozenMode, InstallOptions};
 use crate::commands::add::build_flags::parse_allow_build_value;
 use aube_manifest::AllowBuildRaw;
-use clap::{Args, CommandFactory};
 use miette::{Context, IntoDiagnostic, miette};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-#[derive(Debug, Default, Args)]
+#[derive(Debug, Default, usage_rs::Args)]
 // dlx forwards everything after `<command>` to the bin it runs, including
 // `--help` and `--version`. Let clap auto-inject its own `-h`/`--help` and
 // `--version` handlers and they'd silently swallow those flags before they
@@ -16,7 +15,6 @@ use std::sync::Arc;
 // `aube dlx --help` on its own (no command) still prints aube's dlx help:
 // `params` is optional and the handler intercepts a leading `--help` /
 // `-h` before treating anything as a command.
-#[command(disable_help_flag = true)]
 pub struct DlxArgs {
     /// Command (binary) to run, followed by arguments to pass through to
     /// it.
@@ -27,19 +25,19 @@ pub struct DlxArgs {
     /// installs into a throwaway project. Under `--shell-mode`/`-c` the
     /// positionals are joined and evaluated by `sh -c` instead of
     /// looked up directly.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    #[usage(arg, double_dash = "automatic")]
     pub params: Vec<String>,
     /// Run the assembled command line through `sh -c`.
     ///
     /// `<scratch>/node_modules/.bin` is prepended to `PATH`. Use this
     /// for pipelines, redirects, or env expansion (`aube dlx -p cowsay
     /// -c 'cowsay hello | tr a-z A-Z'`). Mirrors `pnpm dlx --shell-mode`.
-    #[arg(short = 'c', long)]
+    #[usage(short = 'c', long)]
     pub shell_mode: bool,
     /// Install a specific package (repeatable).
     ///
     /// Overrides inferring from the command.
-    #[arg(short = 'p', long = "package")]
+    #[usage(short = 'p', long = "package")]
     pub package: Vec<String>,
     /// Allow named packages to run lifecycle scripts during the
     /// transient install. Use `--allow-build=<pkg>`.
@@ -51,18 +49,19 @@ pub struct DlxArgs {
     /// Mirrors pnpm's `pnpm dlx --allow-build=<pkg>` compatibility
     /// surface while keeping dlx scripts skipped unless explicitly
     /// approved.
-    #[arg(
+    #[usage(
         long = "allow-build",
         value_name = "PKG",
         require_equals = true,
-        value_parser = parse_allow_build_value,
+        validate = "value != ''",
+        validate_error = "The --allow-build flag is missing a package name. Please specify the package name(s) that are allowed to run installation scripts."
     )]
     pub allow_build: Vec<String>,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub lockfile: crate::cli_args::LockfileArgs,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub network: crate::cli_args::NetworkArgs,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub virtual_store: crate::cli_args::VirtualStoreArgs,
 }
 
@@ -80,16 +79,19 @@ pub struct DlxArgs {
 ///   3. Exec `<tmp>/node_modules/.bin/<command>` from the user's original cwd.
 ///   4. tempfile removes the scratch dir on drop.
 pub async fn run(args: DlxArgs) -> miette::Result<Option<i32>> {
-    run_in(args, None).await
+    run_in(args, None, BTreeMap::new()).await
 }
 
 /// `dlx` rooted at an explicit `base_dir` instead of the process cwd for
 /// runtime resolution and the local-bin fast path — the in-process
 /// embedding entry. `None` reproduces the CLI behavior. The transient
-/// install still runs in its own scratch project regardless.
+/// install still runs in its own scratch project regardless. `child_env`
+/// adds environment values to the executed tool; the CLI path passes an
+/// empty map and is unchanged.
 pub async fn run_in(
     args: DlxArgs,
     base_dir: Option<std::path::PathBuf>,
+    child_env: BTreeMap<String, String>,
 ) -> miette::Result<Option<i32>> {
     args.network.install_overrides();
     args.lockfile.install_overrides();
@@ -103,18 +105,16 @@ pub async fn run_in(
         network: _,
         virtual_store: _,
     } = args;
+    for value in &allow_build {
+        parse_allow_build_value(value).map_err(|error| miette!("{error}"))?;
+    }
 
     // Bare `aube dlx` or `aube dlx --help` / `-h` prints aube's dlx help.
     // Once a command is present, any further flags (including `--help`)
     // belong to the installed binary.
     let first = params.first().map(String::as_str);
     if matches!(first, None | Some("--help" | "-h")) && package.is_empty() {
-        crate::Cli::command()
-            .find_subcommand_mut("dlx")
-            .expect("dlx is a registered subcommand")
-            .print_help()
-            .map_err(|e| miette!("failed to render help: {e}"))?;
-        println!();
+        crate::print_subcommand_help("dlx")?;
         return Ok(None);
     }
 
@@ -182,12 +182,13 @@ pub async fn run_in(
             // Local-bin fast path: no scratch dir was created, so nothing
             // needs to run after the tool. Hand off via image replacement
             // on the standalone binary (embedded/Windows supervise).
-            return super::exec::exec_bin_terminal(
+            return super::exec::exec_bin_terminal_with_env(
                 &initial_cwd,
                 &bin_path,
                 &bin_name,
                 &bin_args,
                 false,
+                &child_env,
             )
             .await;
         }
@@ -233,9 +234,18 @@ pub async fn run_in(
         let _cwd_guard = CwdGuard::switch_to(&project_dir)?;
         let mut opts = dlx_install_options(&allow_build);
         opts.project_dir = Some(project_dir.clone());
+        // A dlx request usually carries no version, so its synthesized range is
+        // the `latest` tag. When `minimumReleaseAge` blocks that tag the
+        // resolver now falls back to the newest release clearing the window
+        // (#681) — arm the sink so the substitution can be reported below.
+        aube_util::arm_age_gate_downgrade_collection();
         let install_result = super::install::run(opts).await;
+        // Drained unconditionally, before the `?`, so a failed install cannot
+        // leak entries into a later in-process command.
+        let downgrades = aube_util::take_age_gate_downgrades();
         let prev = _cwd_guard.original.clone();
         install_result.wrap_err("dlx install failed")?;
+        report_age_gate_downgrades(&downgrades);
         prev
         // _cwd_guard drops here, restoring cwd.
     };
@@ -263,14 +273,16 @@ pub async fn run_in(
         // globally. Read the same setting here so the scratch bin dir
         // matches where the install actually wrote the bins.
         let bin_dir = super::project_modules_dir(&project_dir).join(".bin");
-        let mut path_dirs = vec![bin_dir];
-        path_dirs.extend(crate::runtime::path_entries());
+        let path_dirs = crate::runtime::path_entries_with_project_bins(vec![bin_dir]);
         let new_path = aube_scripts::prepend_paths(&path_dirs);
-        let mut cmd = aube_scripts::spawn_shell(&line);
+        let mut cmd = aube_scripts::shell_without_body();
         crate::runtime::apply_child_env(&mut cmd);
         cmd.env("PATH", &new_path)
+            .envs(&child_env)
             .current_dir(&prev_cwd)
             .stderr(aube_scripts::child_stderr());
+        // Last, so a casing-restoring shell re-binds the names set above.
+        aube_scripts::append_shell_body(&mut cmd, &line);
         crate::process_guard::spawn_and_wait(cmd)
             .await
             .into_diagnostic()
@@ -303,6 +315,7 @@ pub async fn run_in(
             &bin_args,
             &[],
             false,
+            &child_env,
         );
         crate::process_guard::spawn_and_wait(cmd)
             .await
@@ -320,6 +333,47 @@ pub async fn run_in(
         return Ok(Some(aube_scripts::exit_code_from_status(status)));
     }
     Ok(None)
+}
+
+/// The notice for a `latest` request `minimumReleaseAge` steered to an older
+/// release: one line per package, then a single line carrying the remedies.
+///
+/// Unlike an install, dlx leaves nothing behind to inspect — the scratch
+/// project is deleted the moment the tool exits, and the exclude auto-persist
+/// deliberately does not run for a throwaway project — so this notice is the
+/// only place a user can learn that the tool they ran is not the one they
+/// asked for.
+fn age_gate_downgrade_lines(downgrades: &[aube_util::AgeGateDowngrade]) -> Vec<String> {
+    if downgrades.is_empty() {
+        return Vec::new();
+    }
+    let mut lines: Vec<String> = downgrades
+        .iter()
+        .map(|d| {
+            format!(
+                "warn: the latest {} release ({}) is younger than minimumReleaseAge; using {} instead",
+                d.name, d.blocked, d.picked
+            )
+        })
+        .collect();
+    let exempt = downgrades
+        .iter()
+        .map(|d| format!("--minimum-release-age-exclude={}", d.name))
+        .collect::<Vec<_>>()
+        .join(" ");
+    lines.push(format!(
+        "help: to take the newest release anyway: `--minimum-release-age=0`, or `{exempt}`"
+    ));
+    lines
+}
+
+/// Print [`age_gate_downgrade_lines`] before the fetched tool runs — a non-zero
+/// child exit propagates straight out of this command, so a notice emitted
+/// afterwards would be lost exactly when something went wrong.
+fn report_age_gate_downgrades(downgrades: &[aube_util::AgeGateDowngrade]) {
+    for line in age_gate_downgrade_lines(downgrades) {
+        crate::progress::safe_eprintln(&line);
+    }
 }
 
 fn dlx_manifest(install_specs: &[String], allow_build: &[String]) -> serde_json::Value {
@@ -365,6 +419,12 @@ fn dlx_manifest(install_specs: &[String], allow_build: &[String]) -> serde_json:
 
 fn dlx_install_options(allow_build: &[String]) -> InstallOptions {
     let mut opts = InstallOptions::with_mode(FrozenMode::No);
+    // The scratch project is gone the moment this command exits, so a registry
+    // record from it names a path nothing can resolve. Hygiene rather than
+    // correctness — the sweep drops such a record from the mark set and
+    // carries on — but every `nubx` would otherwise leave one behind, each
+    // costing a report line per prune until it ages out.
+    opts.register_in_store = false;
     // `dlx` executes bins from a throwaway project and deletes that project
     // immediately. Keeping package materialization inside the scratch tree is
     // what lets Node walk through `node_modules/.aube/node_modules`, the
@@ -672,6 +732,7 @@ mod tests {
             managed_aube_config: &[],
             project_aube_config: &[],
             project_npmrc: &[],
+            project_config: &[],
             user_aube_config: &[],
             user_npmrc: &[],
             workspace_yaml: &empty_workspace,
@@ -930,6 +991,56 @@ mod tests {
         let (name, value) = synthesize_dlx_dep("git+https://host/u/r.git#v1");
         assert_eq!(name, "r");
         assert_eq!(value, "git+https://host/u/r.git#v1");
+    }
+
+    fn downgrade(name: &str, picked: &str, blocked: &str) -> aube_util::AgeGateDowngrade {
+        aube_util::AgeGateDowngrade {
+            name: name.to_string(),
+            picked: picked.to_string(),
+            blocked: blocked.to_string(),
+        }
+    }
+
+    /// Nothing steered means nothing printed — the common case must stay silent.
+    #[test]
+    fn age_gate_downgrade_lines_are_empty_without_a_downgrade() {
+        assert!(age_gate_downgrade_lines(&[]).is_empty());
+    }
+
+    /// The reported case (#681). Both versions have to appear: which release
+    /// the window blocked, and which one is actually about to run.
+    #[test]
+    fn age_gate_downgrade_lines_name_both_versions_and_the_remedies() {
+        let lines = age_gate_downgrade_lines(&[downgrade("skills", "1.5.21", "1.5.22")]);
+        assert_eq!(
+            lines,
+            vec![
+                "warn: the latest skills release (1.5.22) is younger than minimumReleaseAge; \
+                 using 1.5.21 instead"
+                    .to_string(),
+                "help: to take the newest release anyway: `--minimum-release-age=0`, or \
+                 `--minimum-release-age-exclude=skills`"
+                    .to_string(),
+            ]
+        );
+    }
+
+    /// A `-p`-multi-package dlx gets a line per package but one remedy line,
+    /// and the exclude flag repeats rather than comma-joining — the settings
+    /// reader takes the LAST matching CLI entry, so a comma list would be one
+    /// entry it never splits.
+    #[test]
+    fn age_gate_downgrade_lines_repeat_the_exclude_flag_per_package() {
+        let lines = age_gate_downgrade_lines(&[
+            downgrade("a", "1.0.0", "1.1.0"),
+            downgrade("b", "2.0.0", "2.1.0"),
+        ]);
+        assert_eq!(lines.len(), 3, "two warnings and one help line: {lines:?}");
+        assert_eq!(
+            lines[2],
+            "help: to take the newest release anyway: `--minimum-release-age=0`, or \
+             `--minimum-release-age-exclude=a --minimum-release-age-exclude=b`"
+        );
     }
 
     #[test]

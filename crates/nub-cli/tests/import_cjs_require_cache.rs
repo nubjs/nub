@@ -159,3 +159,42 @@ fn user_async_loader_preserves_native_cjs_handoff() {
         "the inner require('node:assert') must use the native handoff, not the user resolve hook (node major {major}); stdout={stdout:?} stderr={stderr:?}"
     );
 }
+
+/// #669 — the SECOND delivery channel for guard (2). The counter-test above sends
+/// its loader as `--import` of a module that calls `module.register()`, so the
+/// guard fires on the runtime detector and the flag scan is never exercised.
+/// `--experimental-loader` registers natively — no `module.register()` call — and
+/// `NODE_OPTIONS` flags are not hoisted into `process.execArgv`, so both of the
+/// original channels were blind to it and the relabel ran against a live user
+/// loader: Node then rejected `commonjs-sync` with a null source
+/// (ERR_INVALID_RETURN_PROPERTY_VALUE). This is how OpenTelemetry's documented ESM
+/// attach is delivered, which is what made it a crash on startup rather than a
+/// corner case. Same fixture and same assertion as the counter-test — only the
+/// channel differs, which is the whole point.
+#[test]
+fn user_loader_via_experimental_loader_flag_preserves_native_cjs_handoff() {
+    let Some(major) = path_node_major() else {
+        eprintln!("skipping experimental-loader channel: no usable node on PATH");
+        return;
+    };
+    if major < 26 {
+        eprintln!("skipping experimental-loader channel: needs node major >= 26 (got {major})");
+        return;
+    }
+    let (stdout, stderr, code) = run_nub(
+        "counter-entry.mjs",
+        &[("NODE_OPTIONS", "--experimental-loader=./user-hooks.mjs")],
+    );
+    assert!(
+        !stderr.contains("ERR_INVALID_RETURN_PROPERTY_VALUE"),
+        "the relabel must decline for a NODE_OPTIONS --experimental-loader, not hand Node a null-source commonjs-sync (node major {major}); stderr={stderr:?}"
+    );
+    assert_eq!(
+        code, 0,
+        "with a user async loader delivered by --experimental-loader, import()-of-CJS must still run (node major {major}); stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("counter cjs-builtin-ok"),
+        "the inner require('node:assert') must use the native handoff, not the user resolve hook (node major {major}); stdout={stdout:?} stderr={stderr:?}"
+    );
+}

@@ -1,0 +1,49 @@
+name: CI opt-in
+
+# The `ci` label is a BUTTON, not a state.
+#
+# Adding it to a pull request is what starts every PR-gated workflow in this repo —
+# they all trigger on `labeled` and guard on the label NAME (see the rationale block
+# in ci.yml). This workflow takes the label straight back off, so the pull request
+# returns to "CI not requested" and the very same `gh pr edit <n> --add-label ci`
+# asks for the next round. Two things would go wrong without the removal: a second
+# run would need a remove-then-add pair, and a leftover `ci` label would read as
+# "CI ran and passed here" long after the commit it ran against was replaced.
+on:
+  pull_request:
+    types: [labeled]
+
+permissions: {}
+
+jobs:
+  drop-label:
+    name: Drop the ci label
+    # A `labeled` event fires for every label, so this is scoped the same way the
+    # gated workflows are — adding `bug` must not touch anything.
+    if: github.event.label.name == 'ci'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      # No checkout: this job only calls the API, so it never needs the tree — and a
+      # workflow that never checks out PR-authored code cannot be poisoned by it.
+      #
+      # A `pull_request` event raised from a FORK hands the job a READ-ONLY token, so
+      # the delete 403s there. That is not worth a red check: the CI the maintainer
+      # asked for is already running, and the only cost is that the next round needs
+      # the label removed by hand. Same-repo branches — every agent-opened PR here —
+      # get a writable token and the round trip works.
+      - name: Remove the ci label
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if gh api --method DELETE --silent "repos/${REPO}/issues/${PR}/labels/ci"; then
+            echo "ci label removed — \`gh pr edit ${PR} --add-label ci\` requests the next run"
+          else
+            echo "::notice::could not remove the ci label (read-only token on a fork pull request?) — remove it by hand before requesting the next run"
+          fi

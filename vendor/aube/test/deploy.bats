@@ -31,6 +31,125 @@ _setup_workspace_fixture() {
 	[ ! -f out/pnpm-workspace.yaml ]
 }
 
+@test "aube deploy: preserves workspace-root dependency patches" {
+	_setup_workspace_fixture
+	mkdir -p patches packages/lib/patches
+	printf '\npatchedDependencies:\n  is-odd@3.0.1: patches/is-odd@3.0.1.patch\n' >>pnpm-workspace.yaml
+	cat >patches/is-odd@3.0.1.patch <<'EOF'
+diff --git a/index.js b/index.js
+--- a/index.js
++++ b/index.js
+@@ -8,1 +8,2 @@
+ 'use strict';
++// deployed-patch-marker
+EOF
+	printf 'selected package file\n' >packages/lib/patches/is-odd@3.0.1.patch
+
+	run aube deploy --filter @test/lib ./out
+	assert_success
+	run find out/.aube-deploy-patches -type f -name '*.patch'
+	assert_success
+
+	run grep -q "deployed-patch-marker" out/node_modules/is-odd/index.js
+	assert_success
+	run grep -q "selected package file" out/patches/is-odd@3.0.1.patch
+	assert_success
+	run grep -Fq '"is-odd@3.0.1": ".aube-deploy-patches/' out/package.json
+	assert_success
+}
+
+@test "aube deploy: preserves registry-name patches for npm aliases" {
+	_setup_workspace_fixture
+	perl -0pi -e 's/"is-odd": "\^3\.0\.1"/"odd-alias": "npm:is-odd\@3.0.1"/' packages/lib/package.json
+	mkdir -p patches
+	printf '\npatchedDependencies:\n  is-odd@3.0.1: patches/is-odd@3.0.1.patch\n' >>pnpm-workspace.yaml
+	cat >patches/is-odd@3.0.1.patch <<'EOF'
+diff --git a/index.js b/index.js
+--- a/index.js
++++ b/index.js
+@@ -8,1 +8,2 @@
+ 'use strict';
++// deployed-alias-patch-marker
+EOF
+
+	# Exercise importer filtering against an existing lockfile, where the
+	# package key uses the alias but patchedDependencies uses the real name.
+	run aube install
+	assert_success
+	run aube deploy --filter @test/lib ./out
+	assert_success
+
+	run grep -q "deployed-alias-patch-marker" out/node_modules/odd-alias/index.js
+	assert_success
+	run grep -Fq '"is-odd@3.0.1": ".aube-deploy-patches/' out/package.json
+	assert_success
+}
+
+@test "aube deploy: reserves generated patch metadata paths" {
+	_setup_workspace_fixture
+	mkdir -p patches
+	printf '\npatchedDependencies:\n  is-odd@3.0.1: patches/is-odd@3.0.1.patch\n' >>pnpm-workspace.yaml
+	cat >patches/is-odd@3.0.1.patch <<'EOF'
+diff --git a/index.js b/index.js
+--- a/index.js
++++ b/index.js
+@@ -8,1 +8,2 @@
+ 'use strict';
++// deployed-metadata-collision-marker
+EOF
+
+	# Discover the generated content-addressed name, then make the selected
+	# package publish conflicting bytes at that exact reserved path.
+	run aube deploy --filter @test/lib ./seed
+	assert_success
+	metadata_file="$(find seed/.aube-deploy-patches -type f -name '*.patch' | head -n 1)"
+	metadata_rel="${metadata_file#seed/}"
+	mkdir -p packages/lib/.aube-deploy-patches
+	printf 'selected package conflict\n' >"packages/lib/$metadata_rel"
+	printf 'selected package asset\n' >packages/lib/.aube-deploy-patches/asset.txt
+
+	run aube deploy --filter @test/lib ./out
+	assert_success
+	run grep -q "deployed-metadata-collision-marker" out/node_modules/is-odd/index.js
+	assert_success
+	run grep -q "selected package conflict" "out/$metadata_rel"
+	assert_failure
+	run grep -q "selected package asset" out/.aube-deploy-patches/asset.txt
+	assert_success
+}
+
+@test "aube deploy: excludes patches outside the selected package closure" {
+	_setup_workspace_fixture
+	mkdir -p patches packages/lib/patches
+	printf '\npatchedDependencies:\n  is-even@1.0.0: patches/is-even@1.0.0.patch\n' >>pnpm-workspace.yaml
+	cat >patches/is-even@1.0.0.patch <<'EOF'
+diff --git a/index.js b/index.js
+--- a/index.js
++++ b/index.js
+@@ -2,1 +2,2 @@
+ 'use strict';
++// unrelated-workspace-patch
+EOF
+	printf 'selected package file\n' >packages/lib/patches/is-even@1.0.0.patch
+
+	# Populate a lockfile where is-even is reachable only from @test/app,
+	# not from the selected @test/lib importer.
+	run aube install
+	assert_success
+	rm patches/is-even@1.0.0.patch
+	run aube deploy --filter @test/lib ./out
+	assert_success
+
+	# The unrelated workspace patch neither collides with nor replaces the
+	# selected package's publishable file at the same relative path.
+	run grep -q "selected package file" out/patches/is-even@1.0.0.patch
+	assert_success
+	run grep -q 'is-even@1.0.0' out/package.json
+	assert_failure
+	run grep -q 'is-even@1.0.0' out/aube-lock.yaml
+	assert_failure
+}
+
 @test "aube deploy: subsets the source lockfile into the target" {
 	_setup_workspace_fixture
 

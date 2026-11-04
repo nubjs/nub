@@ -24,8 +24,8 @@ function platformPkg() {
 // npm normalizes file modes on extract: a file referenced by a package's `bin`
 // field lands 0o755, everything else 0o644. The platform packages
 // (`@nubjs/nub-<platform>`) deliberately declare NO `bin` field — they're carriers
-// selected by npm's os/cpu filters — so their `bin/nub` / `bin/nubx` extract 0o644
-// (no +x). Something must add it back.
+// selected by npm's os/cpu filters — so their `bin/nub` extracts 0o644 (no +x).
+// Something must add it back.
 //
 // `bin/launch.js` also chmods at runtime, but that runs as the END user and chmod
 // only succeeds for the file's OWNER. The canonical container/CI pattern installs
@@ -41,12 +41,15 @@ function platformPkg() {
 // runtime chmod is the second line of defense.
 function chmodExecutable(pkg) {
   const ext = process.platform === "win32" ? ".exe" : "";
-  for (const verb of ["nub", "nubx"]) {
+  for (const verb of ["nub", "nubx", "nubr"]) {
     let binPath;
     try {
       binPath = require.resolve(`${pkg}/bin/${verb}${ext}`);
     } catch {
-      continue; // an older platform package may not ship bin/nubx.
+      // `nubx` / `nubr` are expected to miss: current platform packages ship only
+      // `bin/nub` and the verb rides in `__NUB_ARGV0`. Still probed so a newer launcher
+      // paired with an older platform package chmods that package's `bin/nubx` too.
+      continue;
     }
     try {
       // Preserve read/write bits, add execute for user/group/other (umask-free —
@@ -62,7 +65,7 @@ function chmodExecutable(pkg) {
 // Re-link existing PM shims to the freshly-installed binary.
 //
 // `nub pm shim` populates ~/.nub/shims with HARDLINKS to the nub binary
-// (crates/nub-core/src/pm/shim.rs; spec: wiki/research/package-manager-shims.md).
+// (crates/nub-core/src/pm/shim.rs; spec: `package-manager-shims` (no such document)).
 // An `npm i -g @nubjs/nub` upgrade extracts a NEW binary — new inode — so the
 // shims keep executing the OLD bytes until re-linked. This is the installer-side
 // re-link: if (and only if) a shims dir already exists, point every entry we own
@@ -88,7 +91,33 @@ function refreshShims(pkg) {
     return;
   }
 
-  const shimDir = path.join(os.homedir(), ".nub", "shims");
+  // Resolution, matching resolve_shim_dir() in crates/nub-core/src/pm/shim.rs:
+  // an explicitly-set XDG_DATA_HOME wins on every platform, else %LOCALAPPDATA%
+  // on Windows, else ~/.local/share.
+  //
+  // `~/.nub/shims` is the PRE-MOVE location, refreshed only so an install that
+  // predates the move keeps working until the user's next `nub pm shim` migrates
+  // it. Missing a live dir is silent staleness — the shims keep executing the
+  // pre-upgrade inode with no error — so the transitional entry stays until the
+  // move is old news. Refreshing never CREATES: an absent dir is skipped.
+  const home = os.homedir();
+  const roots = [];
+  if (process.env.XDG_DATA_HOME) {
+    roots.push(process.env.XDG_DATA_HOME);
+  } else if (process.platform === "win32" && process.env.LOCALAPPDATA) {
+    roots.push(process.env.LOCALAPPDATA);
+  } else {
+    roots.push(path.join(home, ".local", "share"));
+  }
+  for (const dir of [
+    ...roots.map((r) => path.join(r, "nub", "shims")),
+    path.join(home, ".nub", "shims"), // pre-move, transitional
+  ]) {
+    refreshShimsIn(dir, binPath, binStat, ext);
+  }
+}
+
+function refreshShimsIn(shimDir, binPath, binStat, ext) {
   let entries;
   try {
     entries = fs.readdirSync(shimDir); // ENOENT/ENOTDIR = no opt-in, do nothing
@@ -162,7 +191,49 @@ function refreshShims(pkg) {
   }
 
   if (refreshed > 0) {
-    console.log(`refreshed ${refreshed} nub shim${refreshed === 1 ? "" : "s"} in ~/.nub/shims`);
+    console.log(`refreshed ${refreshed} nub shim${refreshed === 1 ? "" : "s"} in ${shimDir}`);
+  }
+}
+
+// Drop any `<binDir>\<verb>.exe` that a previous version's heal installed.
+//
+// bin/launch.js drops a hardlinked `nub.exe` beside npm's shims on Windows so PATHEXT
+// reaches the binary directly. That is the point — and it is also why the heal cannot
+// maintain itself: once the `.exe` wins PATHEXT, cmd.exe never dispatches through npm's
+// `.cmd` again, so launch.js never runs again, so its "is this link current?" check is
+// structurally unreachable for exactly the users the feature serves. After
+// `npm i -g @nubjs/nub@<newer>` the old hardlink still pins the PREVIOUS version's inode
+// and those users silently keep executing the old binary — no error, no version warning.
+//
+// Removing it here is the self-correcting fix rather than re-linking: the next `nub` call
+// finds no `.exe`, falls through npm's shim into launch.js, and the heal recreates the
+// link against the new binary. All the PATH-walk and verify-before-clobber logic stays in
+// one place instead of being duplicated here.
+//
+// KNOWN GAP: this runs only when lifecycle scripts do. Under `--ignore-scripts` (or npm
+// v12's default) an upgrade leaves the stale `.exe` in place and cmd.exe keeps running the
+// old binary. Same class as every other postinstall-dependent step here, and the reason
+// the launcher's own recovery paths never rely on this file having run.
+function dropStaleWindowsExe() {
+  if (process.platform !== "win32") return;
+  const path = require("path");
+  for (const dir of (process.env.PATH || "").split(path.delimiter)) {
+    if (!dir) continue;
+    for (const verb of ["nub", "nubx", "nubr"]) {
+      // Only where npm's own shim for that verb still sits: that pairing is what marks the
+      // directory as ours. A bare `<verb>.exe` in some unrelated PATH dir is not ours to
+      // delete — there is a real unrelated `nub@1.0.0` on npm.
+      if (!fs.existsSync(path.join(dir, `${verb}.cmd`))) continue;
+      try { fs.rmSync(path.join(dir, `${verb}.exe`), { force: true }); } catch {}
+      // The bundled POSIX shell the launcher carried in beside that `.exe`
+      // (healWindowsBinDir -> `nub-sh/busybox.exe`). The heal re-stages this
+      // unconditionally, so unlike the `.exe` it is not stranded by being left here —
+      // but its currency check falls back to comparing SIZE when the inode differs,
+      // and a busybox that changed while keeping its size would be kept forever.
+      // Dropping the nub-owned dir at install time closes that, and costs one hardlink
+      // on the next call.
+      try { fs.rmSync(path.join(dir, "nub-sh"), { recursive: true, force: true }); } catch {}
+    }
   }
 }
 
@@ -170,4 +241,5 @@ const pkg = platformPkg();
 if (pkg) {
   chmodExecutable(pkg);
   refreshShims(pkg); // after chmod, so the linked inode already carries +x
+  dropStaleWindowsExe(); // the next launch.js run re-heals against the new binary
 }

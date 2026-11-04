@@ -23,7 +23,9 @@
 //! setting through" into a CI failure with a pointer to the call
 //! site that's missing.
 
-use aube_settings::meta::{SettingMeta, all};
+// `all_unfiltered`, not `all`: this audit is about the TABLE, so it must see
+// every entry regardless of which ones a given embedder declares inert.
+use aube_settings::meta::{SettingMeta, all_unfiltered};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -166,7 +168,7 @@ fn every_setting_has_a_typed_accessor_caller() {
     // settings ever happen to snake_case-collapse.
     let mut reported: BTreeSet<String> = BTreeSet::new();
 
-    for s in all() {
+    for s in all_unfiltered() {
         if s.typed_accessor_unused {
             continue;
         }
@@ -235,7 +237,7 @@ fn typed_accessor_unused_flag_is_accurate() {
     }
 
     let mut stale: Vec<&SettingMeta> = Vec::new();
-    for s in all() {
+    for s in all_unfiltered() {
         if !s.typed_accessor_unused {
             continue;
         }

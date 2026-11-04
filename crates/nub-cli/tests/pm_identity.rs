@@ -1,5 +1,5 @@
 //! The PM identity decision table, behaviorally, through the binary
-//! (spec: wiki/commands/pm/identity-policy.md). Identity resolution is the
+//! (spec: `identity-policy` (no such document)). Identity resolution is the
 //! engine's declaration-aware policy (pin-over-inference, Axiom 1), wired
 //! into nub's engine preflight; the contradiction/ambiguity rows render
 //! nub-side with the rewritten stable codes and the `nub pm use` remedy.
@@ -115,7 +115,7 @@ fn fresh_projects_write_the_identity_format_declared_first_else_nub() {
         Some(&serde_json::json!({
             "name": "nub",
             "version": concat!("^", env!("CARGO_PKG_VERSION")),
-            "onFail": "warn"
+            "onFail": "ignore"
         })),
         "a virgin install stamps a devEngines.packageManager caret range: {manifest}"
     );
@@ -226,9 +226,49 @@ fn undeclared_multi_lockfile_projects_error_as_ambiguous() {
         stderr.contains("package-lock.json") && stderr.contains("yarn.lock"),
         "the error must name the conflicting files: {stderr}"
     );
+    // Asserted as fragments, not the whole sentence: miette wraps the help line
+    // at terminal width, so a full-sentence `contains` breaks on the wrap point
+    // rather than on a real regression.
     assert!(
-        stderr.contains("set the declaration: nub pm use <pm> — or remove the stale lockfile"),
+        stderr.contains("remove the stale lockfile") && stderr.contains("nub pm use <pm>"),
         "the remedy must be nub's: {stderr}"
+    );
+    assert!(
+        !stderr.contains("set the declaration"),
+        "the ambiguity remedy must not advise setting a declaration: {stderr}"
+    );
+}
+
+/// A DECLARED project is never ambiguous: the declaration says who owns it,
+/// so a stray second lockfile no longer refuses the install. `nub install`
+/// writes `devEngines.packageManager: nub` itself, so leaving this ambiguous
+/// made the state inescapable — the remedy was already applied. Regression for
+/// the state a hosted builder manufactures when it runs its own install
+/// (bun/npm) beside a committed `nub.lock`.
+#[test]
+fn a_nub_declared_project_resolves_past_a_stray_lockfile() {
+    let dir = project(
+        "declared-stray",
+        r#"{"name":"app","version":"1.0.0","devEngines":{"packageManager":{"name":"nub","version":"^0.6.0","onFail":"warn"}}}"#,
+    );
+    std::fs::write(dir.join("nub.lock"), "lockfileVersion: '9.0'\n").unwrap();
+    // A REAL bun lockfile, not a `{}` placeholder: resolving past the stray
+    // means the stray still gets parsed, so an unparseable one fails the
+    // install on its own merits rather than on identity.
+    std::fs::write(
+        dir.join("bun.lock"),
+        r#"{"lockfileVersion":1,"workspaces":{"":{"name":"app"}},"packages":{}}"#,
+    )
+    .unwrap();
+    let (stdout, stderr, code) = run(&dir, &["install"]);
+    assert_eq!(code, 0, "a declared project must install: {stderr}{stdout}");
+    assert!(
+        !stderr.contains("ERR_NUB_LOCKFILE_AMBIGUOUS"),
+        "a declaration resolves ownership — no ambiguity: {stderr}"
+    );
+    assert!(
+        dir.join("nub.lock").is_file(),
+        "the canonical lockfile stays the project's own"
     );
 }
 
@@ -587,14 +627,7 @@ fn nub_profile_reads_no_branded_user_or_project_config_file() {
     // branded plants are left byte-for-byte untouched.
     std::fs::create_dir_all(dir.join("home")).unwrap();
     let set = Command::new(nub_binary())
-        .args([
-            "config",
-            "set",
-            "--location",
-            "user",
-            "minimumReleaseAge",
-            "1000",
-        ])
+        .args(["config", "set", "--global", "minimumReleaseAge", "1000"])
         .current_dir(&dir)
         .env("HOME", dir.join("home"))
         .env("USERPROFILE", dir.join("home"))

@@ -68,6 +68,10 @@ pub struct RuntimeContext {
     /// Directory to prepend to PATH for child processes. `None` means
     /// no switching (ambient node already satisfies, or no config).
     pub bin_dir: Option<PathBuf>,
+    /// Whether `bin_dir` must precede project-local `.bin` directories.
+    /// Wrappers require this so a dependency-provided `node` cannot bypass
+    /// the shim; selectors deliberately keep project-local binaries first.
+    pub bin_dir_precedes_project_bins: bool,
     /// The node aube spawns and exports as `NODE`: the program a
     /// script's bare `node` / `$NODE` resolves to. For a selector this
     /// is the real binary; for a wrapper it is the shim. `None` falls
@@ -112,6 +116,7 @@ impl RuntimeContext {
     fn path_fallback() -> RuntimeContext {
         RuntimeContext {
             bin_dir: None,
+            bin_dir_precedes_project_bins: false,
             node_program: None,
             node_execpath: None,
             internal_node: None,
@@ -227,6 +232,8 @@ pub struct EmbedderEnv {
 #[derive(Debug, Clone, Default)]
 pub struct EmbedderRuntime {
     bin_dir: Option<PathBuf>,
+    path_unchanged: bool,
+    bin_dir_precedes_project_bins: bool,
     node_program: Option<PathBuf>,
     node_execpath: Option<PathBuf>,
     internal_node: Option<PathBuf>,
@@ -253,6 +260,7 @@ impl EmbedderRuntime {
     pub fn wrapper(node_program: impl Into<PathBuf>) -> Self {
         Self {
             node_program: Some(node_program.into()),
+            bin_dir_precedes_project_bins: true,
             ..Default::default()
         }
     }
@@ -267,6 +275,15 @@ impl EmbedderRuntime {
     /// program's parent (e.g. a shim dir separate from the real bin).
     pub fn path_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.bin_dir = Some(dir.into());
+        self.path_unchanged = false;
+        self
+    }
+
+    /// Leave PATH unchanged while still using `node_program` for direct
+    /// spawns and exporting it as `NODE`. Bare `node` commands then resolve
+    /// from the inherited PATH by explicit host choice.
+    pub fn without_path(mut self) -> Self {
+        self.path_unchanged = true;
         self
     }
 
@@ -329,18 +346,19 @@ impl EmbedderRuntime {
         let node_program = self
             .node_program
             .clone()
-            .or_else(|| self.bin_dir.as_ref().map(|d| d.join(node_exe)))
+            .or_else(|| self.bin_dir.as_ref().map(|dir| dir.join(node_exe)))
             .map(|p| abs(&p));
-        let bin_dir = self
-            .bin_dir
-            .clone()
-            .or_else(|| {
+        let bin_dir = if self.path_unchanged {
+            None
+        } else {
+            self.bin_dir.clone().or_else(|| {
                 node_program
                     .as_ref()
                     .and_then(|p| p.parent())
                     .map(Path::to_path_buf)
             })
-            .map(|p| abs(&p));
+        }
+        .map(|p| abs(&p));
         let node_execpath = self
             .node_execpath
             .clone()
@@ -349,6 +367,7 @@ impl EmbedderRuntime {
         let internal_node = self.internal_node.clone().map(|p| abs(&p));
         RuntimeContext {
             bin_dir,
+            bin_dir_precedes_project_bins: self.bin_dir_precedes_project_bins,
             node_program,
             node_execpath,
             internal_node,
@@ -496,6 +515,48 @@ pub fn path_entries() -> Vec<PathBuf> {
     )
     .into_iter()
     .collect()
+}
+
+/// PATH entries for a Node process dispatched through the activated tool
+/// shim. The real Node executable is resolved before these entries are
+/// applied, so restoring the tool shim cannot recurse into `aube node`.
+/// Wrapping embedder runtimes still lead so their descendant `node` spawns
+/// remain wrapped; selectors leave the activated package-manager shims first.
+pub(crate) fn node_child_path_entries() -> Vec<PathBuf> {
+    let context = current();
+    let mut entries = context
+        .as_ref()
+        .and_then(|c| c.bin_dir.clone())
+        .into_iter()
+        .collect::<Vec<_>>();
+    if let Some(dir) = crate::tool_shims::activated_shim_dir() {
+        if context.is_some_and(|c| c.bin_dir_precedes_project_bins) {
+            entries.push(dir);
+        } else {
+            entries.insert(0, dir);
+        }
+    }
+    entries
+}
+
+/// Place the active runtime PATH entry around project-local `.bin`
+/// directories. Wrappers lead so a local `node` cannot bypass the shim;
+/// selectors follow so package-provided commands retain normal precedence.
+///
+/// The runtime entry resolves exactly as [`path_entries`] does: the switched
+/// runtime's bin dir, else the embedder-provisioned node dir. Without that
+/// fallback a fetched bin's `#!/usr/bin/env node` under an embedder that owns
+/// provisioning found no `node` at all — or the system one, unaugmented.
+/// The embedder dir follows the project bins, as it always has.
+pub fn path_entries_with_project_bins(project_bins: Vec<PathBuf>) -> Vec<PathBuf> {
+    let context = current();
+    let switched = context.as_ref().and_then(|c| c.bin_dir.clone());
+    let runtime_precedes = switched.is_some()
+        && context
+            .as_ref()
+            .is_some_and(|c| c.bin_dir_precedes_project_bins);
+    let runtime_bin = resolve_path_entry(switched, aube_util::engine_context().runtime_node_dir);
+    aube_scripts::order_path_entries(project_bins, runtime_bin.as_deref(), runtime_precedes)
 }
 
 /// The binary to probe for a node version when one wasn't supplied: the
@@ -783,16 +844,43 @@ pub async fn ensure_for_cwd(cwd: &Path) -> miette::Result<Arc<RuntimeContext>> {
     let project_dir = crate::dirs::find_project_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
     let manifest =
         aube_manifest::PackageJson::from_path_cached(&project_dir.join("package.json")).ok();
-    let settings = crate::commands::with_settings_ctx(&project_dir, RuntimeSettings::from_ctx);
-    let parse_options =
-        crate::commands::with_settings_ctx(&project_dir, |ctx| aube_lockfile::ParseOptions {
-            strict_store_integrity: aube_settings::resolved::strict_store_integrity(ctx)
-                || aube_settings::resolved::paranoid(ctx),
-        });
+    let (settings, parse_options) = crate::commands::with_settings_ctx(&project_dir, |ctx| {
+        (
+            RuntimeSettings::from_ctx(ctx),
+            aube_lockfile::ParseOptions {
+                strict_store_integrity: aube_settings::resolved::strict_store_integrity(ctx)
+                    || aube_settings::resolved::paranoid(ctx),
+            },
+        )
+    });
     let pin = manifest
         .as_deref()
         .and_then(|m| lockfile_node_pin(&project_dir, m, parse_options));
     ensure(&project_dir, manifest.as_deref(), settings, pin.as_ref()).await
+}
+
+/// Resolve from a manifest the caller already loaded for this project.
+/// `aubr` uses this to share one live parse between runtime selection and
+/// script dispatch without relying on process-lifetime manifest state.
+pub(crate) async fn ensure_for_cwd_with_manifest(
+    cwd: &Path,
+    manifest: &PackageJson,
+) -> miette::Result<Arc<RuntimeContext>> {
+    if let Some(ctx) = current() {
+        return Ok(ctx);
+    }
+    let project_dir = crate::dirs::find_project_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+    let (settings, parse_options) = crate::commands::with_settings_ctx(&project_dir, |ctx| {
+        (
+            RuntimeSettings::from_ctx(ctx),
+            aube_lockfile::ParseOptions {
+                strict_store_integrity: aube_settings::resolved::strict_store_integrity(ctx)
+                    || aube_settings::resolved::paranoid(ctx),
+            },
+        )
+    });
+    let pin = lockfile_node_pin(&project_dir, manifest, parse_options);
+    ensure(&project_dir, Some(manifest), settings, pin.as_ref()).await
 }
 
 /// Resolve the project's runtime once for this process.
@@ -928,6 +1016,7 @@ async fn resolve_context(
         }
         Some(res) => RuntimeContext {
             bin_dir: res.bin_dir.clone(),
+            bin_dir_precedes_project_bins: false,
             // A resolved runtime is a selector: `NODE` and
             // `npm_node_execpath` are the same binary.
             node_program: Some(res.node_bin.clone()),
@@ -1314,6 +1403,7 @@ mod tests {
             Some(bin.join(node_exe).as_path())
         );
         assert_eq!(ctx.node_execpath, ctx.node_program);
+        assert!(!ctx.bin_dir_precedes_project_bins);
         assert_eq!(ctx.source, RuntimeSource::Embedder);
     }
 
@@ -1329,6 +1419,7 @@ mod tests {
         // execpath is the real binary node-gyp reads; internal spawns
         // (pnpmfile, scanner) skip the wrapper hop.
         assert_eq!(ctx.bin_dir.as_deref(), Some(abs("/shim").as_path()));
+        assert!(ctx.bin_dir_precedes_project_bins);
         assert_eq!(
             ctx.node_program.as_deref(),
             Some(abs("/shim/node").as_path())
@@ -1344,6 +1435,56 @@ mod tests {
         assert_eq!(ctx.version.as_deref(), Some("24.4.1"));
         assert_eq!(ctx.env.len(), 1);
         assert_eq!(ctx.env[0].merge, EnvMerge::Append);
+    }
+
+    #[test]
+    fn wrapper_can_leave_path_unchanged() {
+        let ctx = EmbedderRuntime::wrapper("/shim/node")
+            .real_node("/real/node")
+            .without_path()
+            .resolve();
+        assert_eq!(ctx.bin_dir, None);
+        assert_eq!(
+            ctx.node_program.as_deref(),
+            Some(abs("/shim/node").as_path())
+        );
+        assert_eq!(
+            ctx.node_execpath.as_deref(),
+            Some(abs("/real/node").as_path())
+        );
+        assert!(ctx.bin_dir_precedes_project_bins);
+    }
+
+    #[test]
+    fn last_path_builder_call_wins() {
+        let explicit = EmbedderRuntime::wrapper("/shim/node")
+            .without_path()
+            .path_dir("/custom/bin")
+            .resolve();
+        assert_eq!(
+            explicit.bin_dir.as_deref(),
+            Some(abs("/custom/bin").as_path())
+        );
+
+        let unchanged = EmbedderRuntime::wrapper("/shim/node")
+            .path_dir("/custom/bin")
+            .without_path()
+            .resolve();
+        assert_eq!(unchanged.bin_dir, None);
+    }
+
+    #[test]
+    fn selector_without_path_keeps_selected_node() {
+        let node_exe = if cfg!(windows) { "node.exe" } else { "node" };
+        let ctx = EmbedderRuntime::selector("/opt/node/bin")
+            .without_path()
+            .resolve();
+        assert_eq!(ctx.bin_dir, None);
+        assert_eq!(
+            ctx.node_program.as_deref(),
+            Some(abs("/opt/node/bin").join(node_exe).as_path())
+        );
+        assert_eq!(ctx.node_execpath, ctx.node_program);
     }
 
     #[tokio::test]
@@ -1449,6 +1590,25 @@ mod tests {
             assert_eq!(node_program(), bin.join(node_exe));
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn wrapper_path_leads_while_selector_follows_project_bins() {
+        let project_bin = abs("/project/node_modules/.bin");
+
+        let wrapper_entries =
+            with_embedder_runtime(Some(EmbedderRuntime::wrapper("/shim/node")), async {
+                path_entries_with_project_bins(vec![project_bin.clone()])
+            })
+            .await;
+        assert_eq!(wrapper_entries, vec![abs("/shim"), project_bin.clone()]);
+
+        let selector_entries =
+            with_embedder_runtime(Some(EmbedderRuntime::selector("/opt/node/bin")), async {
+                path_entries_with_project_bins(vec![project_bin.clone()])
+            })
+            .await;
+        assert_eq!(selector_entries, vec![project_bin, abs("/opt/node/bin")]);
     }
 
     #[test]

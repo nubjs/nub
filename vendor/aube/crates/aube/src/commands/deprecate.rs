@@ -9,11 +9,10 @@
 
 use crate::commands::{make_client, split_name_spec};
 use aube_registry::config::NpmConfig;
-use clap::Args;
 use miette::{Context, IntoDiagnostic, miette};
 use serde_json::Value;
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct DeprecateArgs {
     /// Package spec: `name`, `name@version`, or `name@<range>`.
     ///
@@ -27,13 +26,13 @@ pub struct DeprecateArgs {
     pub message: String,
 
     /// Don't PUT anything — print which versions would be touched and exit.
-    #[arg(long)]
+    #[usage(long)]
     pub dry_run: bool,
 
     /// One-time password from a 2FA authenticator; sent as `npm-otp`.
-    #[arg(long, value_name = "CODE")]
+    #[usage(long, value_name = "CODE")]
     pub otp: Option<String>,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub network: crate::cli_args::NetworkArgs,
 }
 

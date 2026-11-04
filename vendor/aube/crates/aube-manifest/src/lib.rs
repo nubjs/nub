@@ -114,6 +114,44 @@ pub struct UpdateConfig {
     pub ignore_dependencies: Vec<String>,
 }
 
+/// The manifest-ROOT (un-branded) key holding the lifecycle-script allowlist,
+/// for embedders whose `manifest_namespace` is empty. npm 12 reads the same
+/// top-level `allowScripts` map out of `package.json` (RFC npm/rfcs#868), so
+/// sharing the field means one allowlist per project rather than two competing
+/// maps in one file. The pnpm-branded `pnpm.allowBuilds` map keeps its own
+/// spelling — that surface belongs to pnpm.
+///
+/// REGISTRY keys are interchangeable with npm's: a bare `name` and a pinned
+/// `name@version` mean the same thing to both tools, and both fold with
+/// `false` winning. NON-REGISTRY keys are NOT yet interchangeable, and this is
+/// a known gap rather than a claim: npm writes a source-ONLY key for a file,
+/// tarball or Git dependency (`file:../local`, `github:owner/repo#sha` — see
+/// its `lib/utils/allow-scripts-writer.js`), whereas the engine builds a
+/// name-qualified one (`pkg@file:../local`, see
+/// `aube_lockfile::…::source_approval_key`). An npm-authored approval for a
+/// non-registry package therefore reads as unreviewed here. Closing that means
+/// deciding whether a bare source key may grant whatever package occupies that
+/// source, which is a security call, not a parsing one.
+pub const ROOT_ALLOW_SCRIPTS_KEY: &str = "allowScripts";
+
+/// The pre-cutover manifest-root spelling of [`ROOT_ALLOW_SCRIPTS_KEY`]. No
+/// package manager reads a top-level `allowBuilds` — pnpm reads it from
+/// `pnpm-workspace.yaml` or `package.json#pnpm`, npm reads `allowScripts`, bun
+/// reads `trustedDependencies` — so a project still carrying it is refused
+/// with a rename remedy rather than silently losing its whole build policy.
+pub const LEGACY_ROOT_ALLOW_BUILDS_KEY: &str = "allowBuilds";
+
+/// The allowlist field name to NAME in user-facing text on the active surface:
+/// the neutral root key for a manifest-root embedder, pnpm's spelling
+/// otherwise.
+pub fn allow_scripts_field_name() -> &'static str {
+    if aube_util::embedder().manifest_namespace.is_empty() {
+        ROOT_ALLOW_SCRIPTS_KEY
+    } else {
+        LEGACY_ROOT_ALLOW_BUILDS_KEY
+    }
+}
+
 /// Parsed `package.json`.
 ///
 /// Deserializes via [`PackageJsonRaw`] (`#[serde(from = ...)]`) so a
@@ -303,17 +341,32 @@ pub enum Workspaces {
         // includes `packages`, so this doesn't lock out the catalog use
         // case.
         packages: Vec<String>,
-        #[serde(default)]
-        nohoist: Vec<String>,
+        // The three optional fields below are PRESENCE-AWARE — `Option`
+        // around an already-emptiable collection — because npm copies a
+        // manifest's `workspaces` verbatim into `packages[""]` of
+        // `package-lock.json` and so distinguishes a field that was never
+        // authored from one authored empty. Measured, npm 11.19.0:
+        // `{"packages":[…]}` comes back without `nohoist`, and
+        // `{"packages":[…],"nohoist":[]}` comes back WITH `"nohoist": []`.
+        //
+        // Collapsing the two (a bare `Vec` plus `skip_serializing_if`)
+        // reproduces the absent case and silently drops the empty one, so
+        // a project authoring `"nohoist": []` churned that key out of its
+        // lockfile on every alternating npm/nub install. `Option` is what
+        // makes the round-trip faithful in both directions; the accessors
+        // below still hand out an empty collection either way, so no
+        // caller has to care which it was.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nohoist: Option<Vec<String>>,
         /// Bun-style default catalog nested under `workspaces.catalog`.
         /// Aube reads it in addition to `pnpm-workspace.yaml`'s `catalog:`
         /// so bun projects that migrated config into package.json keep
         /// working.
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        catalog: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        catalog: Option<BTreeMap<String, String>>,
         /// Bun-style named catalogs nested under `workspaces.catalogs`.
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        catalogs: BTreeMap<String, BTreeMap<String, String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        catalogs: Option<BTreeMap<String, BTreeMap<String, String>>>,
     },
 }
 
@@ -332,7 +385,12 @@ impl Workspaces {
         static EMPTY: std::sync::OnceLock<BTreeMap<String, String>> = std::sync::OnceLock::new();
         match self {
             Workspaces::String(_) | Workspaces::Array(_) => EMPTY.get_or_init(BTreeMap::new),
-            Workspaces::Object { catalog, .. } => catalog,
+            // An authored-empty catalog and an absent one are the same
+            // thing to a caller; only the serializer needs to tell them
+            // apart, to copy npm's verbatim round-trip.
+            Workspaces::Object { catalog, .. } => catalog
+                .as_ref()
+                .unwrap_or_else(|| EMPTY.get_or_init(BTreeMap::new)),
         }
     }
 
@@ -342,7 +400,9 @@ impl Workspaces {
             std::sync::OnceLock::new();
         match self {
             Workspaces::String(_) | Workspaces::Array(_) => EMPTY.get_or_init(BTreeMap::new),
-            Workspaces::Object { catalogs, .. } => catalogs,
+            Workspaces::Object { catalogs, .. } => catalogs
+                .as_ref()
+                .unwrap_or_else(|| EMPTY.get_or_init(BTreeMap::new)),
         }
     }
 }
@@ -388,7 +448,38 @@ impl PackageJson {
     /// [`Error::Parse`] with the source content and a span so `miette`'s
     /// `fancy` handler renders a pointer at the offending byte.
     pub fn parse(path: &Path, content: String) -> Result<Self, Error> {
-        parse_json(path, content)
+        let json = content.strip_prefix('\u{FEFF}').unwrap_or(&content);
+        match parse_json_str(path, json) {
+            Ok(manifest) => Ok(manifest),
+            Err(original) => Self::retry_with_duplicate_keys(json).ok_or(original),
+        }
+    }
+
+    /// Deserialize a `package.json` from raw bytes, with the same
+    /// duplicate-key tolerance as [`Self::parse`]. For call sites that
+    /// report their own error and carry no path for a miette span.
+    pub fn from_slice(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+        if let Ok(manifest) = sonic_rs::from_slice(bytes) {
+            return Ok(manifest);
+        }
+        match serde_json::from_slice(bytes) {
+            Ok(manifest) => Ok(manifest),
+            Err(original) => match std::str::from_utf8(bytes) {
+                Ok(json) => Self::retry_with_duplicate_keys(json).ok_or(original),
+                Err(_) => Err(original),
+            },
+        }
+    }
+
+    /// `JSON.parse` keeps the LAST value for a duplicate object key, so npm and pnpm
+    /// accept manifests serde's derived struct deserializer rejects outright —
+    /// `lzma-native@0.0.5` ships `scripts` twice. Collapsing through `serde_json::Value`
+    /// applies that same last-wins rule before the typed deserializer re-runs. Callers
+    /// reach this only after the fast typed parse has already failed, and keep their own
+    /// error on `None`: it alone carries the offset miette renders a pointer from.
+    fn retry_with_duplicate_keys(json: &str) -> Option<Self> {
+        let value = serde_json::from_str::<serde_json::Value>(json).ok()?;
+        serde_json::from_value(value).ok()
     }
 
     /// True when `peerDependenciesMeta.<name>.optional` is set.
@@ -446,14 +537,16 @@ impl PackageJson {
     /// Extract the `pnpm.allowBuilds` / `aube.allowBuilds` object from
     /// the raw `package.json` payload, if present. For embedders whose native
     /// manifest config lives at root (`manifest_namespace == ""`), the
-    /// top-level `allowBuilds` map is *always* read — it is the embedder's own
-    /// un-branded key (not a foreign brand's surface), so it is honored on
-    /// every config surface (nub identity, npm/bun/yarn compat, pnpm/fresh),
-    /// not only the root-native one. This is what makes `approve-builds`
-    /// effective under an npm/bun/yarn incumbent: the approval it writes at the
-    /// top level is read back here regardless of incumbent. Standalone aube
-    /// keeps a non-empty `manifest_namespace`, so this branch never fires for
-    /// it — its behavior is unchanged. Returns a map keyed by the raw
+    /// top-level [`ROOT_ALLOW_SCRIPTS_KEY`] map is *always* read — it is the
+    /// embedder's own un-branded key (not a foreign brand's surface), so it is
+    /// honored on every config surface (nub identity, npm/bun/yarn compat,
+    /// pnpm/fresh), not only the root-native one. This is what makes
+    /// `approve-builds` effective under an npm/bun/yarn incumbent: the approval
+    /// it writes at the top level is read back here regardless of incumbent —
+    /// and under an npm incumbent it is the very field npm 12 itself gates on,
+    /// so one map serves both tools. Standalone aube keeps a non-empty
+    /// `manifest_namespace`, so this branch never fires for it — its behavior
+    /// is unchanged. Returns a map keyed by the raw
     /// pattern string (e.g. `"esbuild"`, `"@swc/core@1.3.0"`) with `bool`
     /// values preserved as `bool` and any other shape captured verbatim so the
     /// caller can warn about it. The tool's own namespace/root surface wins
@@ -471,13 +564,30 @@ impl PackageJson {
             }
         }
         if aube_util::embedder().manifest_namespace.is_empty()
-            && let Some(map) = self.extra.get("allowBuilds").and_then(|v| v.as_object())
+            && let Some(map) = self
+                .extra
+                .get(ROOT_ALLOW_SCRIPTS_KEY)
+                .and_then(|v| v.as_object())
         {
             for (k, v) in map {
                 out.insert(k.clone(), AllowBuildRaw::from_json(v));
             }
         }
         out
+    }
+
+    /// Whether this manifest still carries the pre-cutover top-level
+    /// [`LEGACY_ROOT_ALLOW_BUILDS_KEY`] map. Only meaningful for a
+    /// manifest-root embedder — for a namespaced tool the same top-level key
+    /// was never read, so it is somebody else's field and not ours to refuse.
+    /// The caller turns a hit into a hard error: silently ignoring the map
+    /// would drop every approval AND every explicit denial it records.
+    pub fn has_legacy_root_allow_builds(&self) -> bool {
+        aube_util::embedder().manifest_namespace.is_empty()
+            && self
+                .extra
+                .get(LEGACY_ROOT_ALLOW_BUILDS_KEY)
+                .is_some_and(serde_json::Value::is_object)
     }
 
     /// Extract `pnpm.onlyBuiltDependencies` / `aube.onlyBuiltDependencies`
@@ -692,15 +802,26 @@ impl PackageJson {
     /// key that matched no installed package from a hard error to a
     /// warning.
     ///
-    /// Read from exactly the homes `patchedDependencies` itself uses, so
-    /// the setting always travels with the config it governs: the
-    /// branded `pnpm.*` object (only under a pnpm incumbent, per
-    /// `pnpm_aube_objects`), this tool's own namespace, and — for a
-    /// root-namespace embedder — the neutral top-level key, which is
-    /// what keeps a nub-identity project off another tool's brand.
-    /// Deliberately NOT an npmrc/env setting: pnpm 10 honors it only
-    /// here and in the workspace yaml (verified against 10.15.1), and
-    /// accepting it where pnpm doesn't would be its own divergence.
+    /// The MANIFEST half of the lookup, and only that: the branded
+    /// `pnpm.*` object (read solely under a pnpm incumbent, per
+    /// `pnpm_aube_objects`) and this tool's own namespace, which are
+    /// exactly the manifest homes `patchedDependencies` itself uses, so
+    /// the setting travels with the config it governs. pnpm 10 honors
+    /// the knob here and in the workspace yaml and nowhere else
+    /// (verified against 10.15.1); `patches.rs` reads the yaml and
+    /// prefers it over this reader, matching how `patchedDependencies`
+    /// itself merges.
+    ///
+    /// There is deliberately no manifest-ROOT read, and a manifest-root
+    /// embedder therefore has no persistent home for the knob at all.
+    /// That un-namespaced key was nub-only: no package manager reads a
+    /// top-level `allowUnusedPatches`, and npm 12 — which ships the
+    /// feature — makes its own `--allow-unused-patches` command-line
+    /// only on purpose, ignored in `.npmrc` and env and rejected by
+    /// `npm ci`, so it cannot become project policy anywhere. Squatting
+    /// an un-namespaced `package.json` name that only one tool honors
+    /// is what removing the read undoes.
+    ///
     /// `allowNonAppliedPatches` is pnpm's deprecated spelling, still
     /// accepted by pnpm 10; the current name wins when both appear.
     pub fn allow_unused_patches(&self) -> Option<bool> {
@@ -713,13 +834,12 @@ impl PackageJson {
                 }
             }
         }
-        if aube_util::embedder().manifest_namespace.is_empty() {
-            for key in KEYS {
-                if let Some(v) = self.extra.get(key).and_then(|v| v.as_bool()) {
-                    out = Some(v);
-                }
-            }
-        }
+        // No manifest-ROOT read, and no replacement home. The root key was
+        // nub-only — no package manager reads a top-level
+        // `allowUnusedPatches` or `allowNonAppliedPatches` — so nothing
+        // outside nub ever saw it. npm ships the feature and refuses to let it
+        // be project policy at all; the remedy for a key matching no installed
+        // package is to delete the key.
         out
     }
 
@@ -907,11 +1027,22 @@ impl PackageJson {
         unresolved
     }
 
+    /// Return every raw `packageExtensions` value in precedence order so
+    /// callers can validate the enclosing shape before object extraction.
+    pub fn package_extension_values(&self) -> Vec<&serde_json::Value> {
+        let mut out = self
+            .pnpm_aube_objects()
+            .filter_map(|ns| ns.get("packageExtensions"))
+            .collect::<Vec<_>>();
+        if let Some(value) = self.extra.get("packageExtensions") {
+            out.push(value);
+        }
+        out
+    }
+
     /// Extract `packageExtensions` from root package.json. Supports
     /// top-level `packageExtensions`, `pnpm.packageExtensions`, and
-    /// `aube.packageExtensions`. Precedence (low → high):
-    /// `pnpm.packageExtensions`, `aube.packageExtensions`, top-level
-    /// `packageExtensions` — later writes win for duplicate selectors.
+    /// `aube.packageExtensions`. Later values win for duplicate selectors.
     pub fn package_extensions(&self) -> BTreeMap<String, serde_json::Value> {
         // Embedder seam: a host that scopes which packageExtensions home
         // applies per active PM (e.g. honoring the top-level home only under
@@ -921,20 +1052,11 @@ impl PackageJson {
             return scoped;
         }
         let mut out = BTreeMap::new();
-        for ns in self.pnpm_aube_objects() {
-            if let Some(obj) = ns.get("packageExtensions").and_then(|v| v.as_object()) {
+        for value in self.package_extension_values() {
+            if let Some(obj) = value.as_object() {
                 for (k, v) in obj {
                     out.insert(k.clone(), v.clone());
                 }
-            }
-        }
-        if let Some(obj) = self
-            .extra
-            .get("packageExtensions")
-            .and_then(|v| v.as_object())
-        {
-            for (k, v) in obj {
-                out.insert(k.clone(), v.clone());
             }
         }
         out
@@ -1352,34 +1474,40 @@ pub fn parse_json<T: serde::de::DeserializeOwned>(
     path: &Path,
     content: String,
 ) -> Result<T, Error> {
+    parse_json_str(path, &content)
+}
+
+/// Borrowing form of [`parse_json`], for callers that need `content` to
+/// outlive a failed parse — see [`PackageJson::parse`]'s duplicate-key
+/// fallback. Allocates an owned copy only when building the error.
+pub fn parse_json_str<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    content: &str,
+) -> Result<T, Error> {
     // Strip leading UTF-8 BOM (U+FEFF, bytes EF BB BF). Notepad on
     // Windows writes BOM by default. VS Code can be configured to do
     // the same. serde_json does not tolerate BOM, errors at "line 1
     // column 1". npm and pnpm both tolerate it. Without this strip,
     // opening package.json in Notepad, saving, then running aube
     // returns a cryptic parse error. Cheap fix, no downside.
-    let content = if let Some(stripped) = content.strip_prefix('\u{FEFF}') {
-        stripped.to_owned()
-    } else {
-        content
-    };
+    let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
     if let Ok(v) = sonic_rs::from_slice(content.as_bytes()) {
         return Ok(v);
     }
-    match serde_json::from_str(&content) {
+    match serde_json::from_str(content) {
         Ok(v) => Ok(v),
         Err(e) => {
             let trimmed = content.trim_start();
             if trimmed.starts_with("//") || trimmed.starts_with("/*") {
                 return Err(Error::parse_msg(
                     path,
-                    content,
+                    content.to_owned(),
                     "package.json cannot contain JSON comments. \
                      Remove any `//` or `/* */` lines. aube does not support JSONC for package.json"
                         .to_string(),
                 ));
             }
-            Err(Error::parse(path, content, &e))
+            Err(Error::parse(path, content.to_owned(), &e))
         }
     }
 }
@@ -1450,12 +1578,243 @@ fn line_col_to_byte_offset(content: &str, line: usize, column: usize) -> usize {
     content.len()
 }
 
+/// Detect the indentation style used in a JSON string.
+///
+/// Returns a slice of `raw` representing one level of indentation
+/// (e.g. `"  "`, `"   "`, `"    "`, `"\t"`), or `"  "` if no indentation
+/// could be detected.
+pub fn detect_json_indent(raw: &str) -> &str {
+    let mut root_indent: Option<&str> = None;
+    let mut detected: Option<&str> = None;
+
+    for line in raw.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("/*") {
+            continue;
+        }
+
+        let indent_len = line.len() - trimmed.len();
+        let current_indent = &line[..indent_len];
+
+        match root_indent {
+            None => {
+                root_indent = Some(current_indent);
+            }
+            Some(root) => {
+                if current_indent.len() > root.len() && current_indent.starts_with(root) {
+                    let candidate = &current_indent[root.len()..];
+                    if detected.is_none_or(|indent| candidate.len() < indent.len()) {
+                        detected = Some(candidate);
+                    }
+                }
+            }
+        }
+    }
+
+    detected.unwrap_or("  ")
+}
+
+/// Serialize `value` as pretty JSON using `indent` for indentation.
+pub fn serialize_json_with_indent<T: serde::Serialize>(
+    value: &T,
+    indent: &str,
+) -> Result<String, serde_json::Error> {
+    let mut buf = Vec::with_capacity(128);
+    let formatter = serde_json::ser::PrettyFormatter::with_indent(indent.as_bytes());
+    let mut serializer = serde_json::Serializer::with_formatter(&mut buf, formatter);
+    value.serialize(&mut serializer)?;
+    String::from_utf8(buf)
+        .map_err(|e| serde_json::Error::io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
+}
+
+/// The surface style of an existing JSON manifest: indent unit, line-ending
+/// flavor, and trailing-newline state. Reproducing all three keeps an
+/// `update`/`add`/settings edit diffing as the changed keys rather than as a
+/// whole-file reformat. Deliberately the UNION of what the reference PMs
+/// preserve, since each drops one: npm reproduces the indent and line ending
+/// but always appends a final newline, pnpm reproduces the indent and the
+/// trailing-newline state but never CRLF.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsonStyle {
+    pub indent: String,
+    pub crlf: bool,
+    pub trailing_newline: bool,
+}
+
+impl Default for JsonStyle {
+    /// The style used when there is no original to imitate (a manifest created
+    /// from scratch): two-space indent, LF, trailing newline.
+    fn default() -> Self {
+        JsonStyle {
+            indent: "  ".to_string(),
+            crlf: false,
+            trailing_newline: true,
+        }
+    }
+}
+
+/// Detect the [`JsonStyle`] of an existing JSON document. Indent detection is
+/// [`detect_json_indent`]; a raw `\r\n` can only be a line terminator (JSON
+/// escapes a carriage return inside a string), so its presence marks the file
+/// CRLF.
+pub fn detect_json_style(raw: &str) -> JsonStyle {
+    JsonStyle {
+        indent: detect_json_indent(raw).to_string(),
+        crlf: raw.contains("\r\n"),
+        trailing_newline: raw.ends_with('\n'),
+    }
+}
+
+/// Serialize `value` as pretty JSON in `style`: [`serialize_json_with_indent`]
+/// for the body, then the source's line ending and trailing-newline state.
+pub fn serialize_json_with_style<T: serde::Serialize>(
+    value: &T,
+    style: &JsonStyle,
+) -> Result<String, serde_json::Error> {
+    let mut out = serialize_json_with_indent(value, &style.indent)?;
+    if style.crlf {
+        // The serialized body carries no `\r` of its own, so the replace is
+        // exact.
+        out = out.replace('\n', "\r\n");
+    }
+    if style.trailing_newline {
+        out.push_str(if style.crlf { "\r\n" } else { "\n" });
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_detect_json_indent() {
+        assert_eq!(detect_json_indent("{\n  \"name\": \"foo\"\n}"), "  ");
+        assert_eq!(detect_json_indent("{\n   \"name\": \"foo\"\n}"), "   ");
+        assert_eq!(detect_json_indent("{\n    \"name\": \"foo\"\n}"), "    ");
+        assert_eq!(detect_json_indent("{\n\t\"name\": \"foo\"\n}"), "\t");
+        assert_eq!(
+            detect_json_indent("\u{FEFF}{\n\t\"name\": \"foo\"\n}"),
+            "\t"
+        );
+        assert_eq!(detect_json_indent("  {\n    \"name\": \"foo\"\n  }"), "  ");
+        assert_eq!(detect_json_indent("{\"name\":\"foo\"}"), "  ");
+    }
+
+    #[test]
+    fn detect_json_indent_uses_shallowest_indented_line() {
+        assert_eq!(
+            detect_json_indent("{\"dependencies\": {\n    \"foo\": \"1.0.0\"\n  }\n}"),
+            "  "
+        );
+    }
+
+    #[test]
+    fn test_serialize_json_with_indent() {
+        let val = serde_json::json!({
+            "name": "foo",
+            "version": "1.0.0"
+        });
+        assert_eq!(
+            serialize_json_with_indent(&val, "   ").unwrap(),
+            "{\n   \"name\": \"foo\",\n   \"version\": \"1.0.0\"\n}"
+        );
+        assert_eq!(
+            serialize_json_with_indent(&val, "\t").unwrap(),
+            "{\n\t\"name\": \"foo\",\n\t\"version\": \"1.0.0\"\n}"
+        );
+    }
+
+    #[test]
+    fn detect_json_style_reads_line_endings_and_trailing_newline() {
+        let style = detect_json_style("{\r\n    \"name\": \"x\"\r\n}");
+        assert_eq!(style.indent, "    ");
+        assert!(style.crlf);
+        assert!(!style.trailing_newline);
+
+        // Nothing to imitate — no indented line, LF, ends with a newline.
+        assert_eq!(detect_json_style("{}\n"), JsonStyle::default());
+    }
+
+    #[test]
+    fn serialize_json_with_style_round_trips_the_source_shape() {
+        let original =
+            "{\r\n\t\"name\": \"x\",\r\n\t\"dependencies\": {\r\n\t\t\"a\": \"^1.0.0\"\r\n\t}\r\n}";
+        let value: serde_json::Value = serde_json::from_str(original).unwrap();
+        let rewritten = serialize_json_with_style(&value, &detect_json_style(original)).unwrap();
+        assert_eq!(rewritten, original);
+
+        // A CRLF source's *trailing* newline is `\r\n` too.
+        let with_eof = format!("{original}\r\n");
+        let rewritten = serialize_json_with_style(&value, &detect_json_style(&with_eof)).unwrap();
+        assert_eq!(rewritten, with_eof);
+    }
+
     fn parse(json: &str) -> PackageJson {
         serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn package_json_duplicate_fields_keep_the_last_value() {
+        let manifest = PackageJson::parse(
+            Path::new("package.json"),
+            r#"{
+                "name": "first",
+                "scripts": {"install": "old"},
+                "dependencies": {"left-pad": "1.1.0"},
+                "name": "last",
+                "scripts": {"postinstall": "new"},
+                "dependencies": {"left-pad": "1.3.0"}
+            }"#
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(manifest.name.as_deref(), Some("last"));
+        assert_eq!(manifest.scripts.len(), 1);
+        assert_eq!(
+            manifest.scripts.get("postinstall").map(String::as_str),
+            Some("new")
+        );
+        assert_eq!(
+            manifest.dependencies.get("left-pad").map(String::as_str),
+            Some("1.3.0")
+        );
+    }
+
+    /// The duplicate-key retry must not mask a genuine parse failure. A
+    /// manifest that stays invalid surfaces the typed parser's OWN
+    /// diagnostic — the same message and span `parse_json_str` reports
+    /// without the retry — because the retry's `from_value` error has no
+    /// offset at all and would leave miette nothing to point at.
+    #[test]
+    fn package_json_parse_keeps_the_original_error_when_the_retry_also_fails() {
+        let path = Path::new("package.json");
+        // Valid JSON with a duplicate key, so the retry runs and its `from_value`
+        // step is what fails (`version` must be a string).
+        let content =
+            "{\n  \"name\": \"a\",\n  \"name\": \"b\",\n  \"version\": 42\n}\n".to_string();
+        let Err(Error::Parse(pe)) = PackageJson::parse(path, content.clone()) else {
+            panic!("a manifest whose `version` is not a string must produce Error::Parse");
+        };
+        let Err(Error::Parse(typed)) = parse_json_str::<PackageJson>(path, &content) else {
+            panic!("the typed parse alone must fail on the same manifest");
+        };
+        assert_eq!(pe.path, path);
+        assert_eq!(
+            pe.message, typed.message,
+            "the retry must not replace the typed parser's message"
+        );
+        assert_eq!(
+            pe.span, typed.span,
+            "the retry must not replace the typed parser's span"
+        );
+        assert!(
+            pe.span.offset() + pe.span.len() <= content.len(),
+            "span {:?} must point inside the {}-byte source",
+            pe.span,
+            content.len()
+        );
     }
 
     /// `npm_package_env` mirrors pnpm's exact flattening: name, version,

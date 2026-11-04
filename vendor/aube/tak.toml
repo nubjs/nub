@@ -66,3 +66,31 @@ cmd = [
   "--frozen-lockfile",
   "--offline",
 ]
+
+# The `run` path, which nothing above touches: argv parse, project root
+# discovery, manifest read, script lookup, PATH assembly, and the direct-exec
+# PATH search. A regression guard, not a measurement of the shell-skipping
+# change that added it — that win is a fork plus a shell's own startup, which is
+# kernel and dynamic-linker work cachegrind either attributes to the `sh` child
+# (wildly overstating it) or misses entirely. The wall-clock number lives in
+# `benchmarks/` and in the PR that made it.
+#
+# `fixtures/run` is its own directory rather than another `fixtures/medium`
+# invocation for one reason: `medium`'s `package.json` feeds the install-state
+# hash, so giving it a `scripts` block would put a one-time step in the
+# `install` series above for reasons unrelated to any code change. The fixture
+# has no dependencies, so `--no-install` is honest and no store state is needed.
+#
+# The body is `id`: a real binary rather than a shell builtin (so it exercises
+# the PATH search and the direct spawn), cheap, and with no output that varies.
+# Deliberately not a Node script — node's own startup is ~10x aube's whole
+# invocation and would bury the thing being measured.
+[bench.run]
+cmd = [
+  "./target/release/aube",
+  "-C",
+  "fixtures/run",
+  "run",
+  "--no-install",
+  "noop",
+]

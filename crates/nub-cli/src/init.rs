@@ -1,6 +1,6 @@
 //! `nub init` — scaffold a minimal modern-TS project (nub's own project init,
 //! NOT the engine's npm-style manifest write; the verb is deliberately excluded
-//! from ENGINE_VERBS). Design record: wiki/commands/init.md. The scaffold is
+//! from ENGINE_VERBS). Design record: internal/commands/init.md. The scaffold is
 //! batteries-included: type devDeps + `nub install` by default, and the
 //! nub-identity fields (`packageManager` + `devEngines`) from birth — the same
 //! fields `nub pm pin` writes, via the same writer.
@@ -190,7 +190,7 @@ fn manifest_json(name: &str, entry: &str, typescript: bool) -> String {
     out
 }
 
-/// Rationale for every setting: wiki/commands/init.md (2026-05-19 baseline;
+/// Rationale for every setting: internal/commands/init.md (2026-05-19 baseline;
 /// `lib` without `"dom"` + the `types` wiring are the 2026-07-21 revision —
 /// `@nubjs/types` covers the polyfilled globals, per the docs' TypesSetup
 /// convention).

@@ -28,7 +28,8 @@ mod public_hoist_tests;
 mod tests;
 
 pub use disk_materialize::{
-    DiskMaterializePlan, expand_disk_materialize, set_disk_materialize_expand_hook,
+    DiskMaterializePlan, PackageNameMatcher, expand_disk_materialize, package_name_matches,
+    set_disk_materialize_expand_hook,
 };
 pub use error::Error;
 pub use hoisted::HoistedPlacements;
@@ -42,9 +43,12 @@ pub use pool::default_linker_parallelism;
 pub use quarantine::strip_quarantine_from_tree;
 pub use sweep::{is_physical_importer, mkdirp, remove_dir_all_with_retry, sweep_stale_tmp_dirs};
 pub(crate) use sweep::{sweep_stale_top_level_entries, try_remove_entry};
+#[cfg(windows)]
+pub use sys::win_shim_paths;
 pub use sys::{
     BinShimOptions, create_bin_shim, create_dir_link, is_native_executable, normalize_path,
-    parse_posix_shim_target, remove_bin_shim, validate_bin_name, validate_bin_target,
+    parse_posix_shim_target, parse_win_shim_target, remove_bin_shim, validate_bin_name,
+    validate_bin_target,
 };
 
 /// Strategy for arranging packages under `node_modules/`.
@@ -273,16 +277,17 @@ pub struct Linker {
     /// the project, so Node's upward `node_modules` walk from inside the adapter
     /// can't reach the backend at the project root; materializing just the
     /// adapter puts its realpath back inside the project and the walk succeeds.
-    /// Matched by exact name against each graph package. Empty for standalone
-    /// callers and every existing test → the GVS pass is byte-for-byte
-    /// unchanged.
+    /// Matched as package-name glob patterns against each graph package. Empty
+    /// for standalone callers and every existing test → the GVS pass is
+    /// byte-for-byte unchanged.
+    ///
     /// Undeclared imports an ejected package makes are resolved by the collective
     /// project-local hidden hoist tree the linker builds over this whole set under
     /// GVS (see [`Linker::link_hidden_hoist`]) — each ejected package's realpath is
     /// project-local, so Node's upward walk from inside it passes through
     /// `.aube/node_modules/`, a blanket alias for every graph package. That
     /// replaced the former per-importer phantom-target hoist.
-    disk_materialize: std::collections::HashSet<String>,
+    disk_materialize: PackageNameMatcher,
     /// Dep paths the CALLER vouches are already correctly placed on disk, so
     /// the hoisted pass may leave their directories alone instead of wiping
     /// and refilling them.

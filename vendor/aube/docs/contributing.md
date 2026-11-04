@@ -52,10 +52,11 @@ cargo fmt --check                          # Formatting
 cargo audit --deny warnings                # RustSec advisories
 cargo deny check bans licenses sources     # License/source policy
 
-# BATS integration tests (needs Node.js 22, GNU `parallel`, and
-# `verdaccio` on PATH; the first run will `npm i -g verdaccio@6` if it
-# isn't installed). The mise task shards files across cores via
-# `bats --jobs` — prefer it over the raw runner.
+# BATS integration tests (needs Node.js 22 and `verdaccio` on PATH; the
+# first run will `npm i -g verdaccio@6` if it isn't installed). The mise
+# task shards files across cores via `bats --jobs`, driven by the
+# mise-managed `rush` binary (no GNU `parallel` needed) — prefer it over
+# the raw runner.
 mise run test:bats                            # full suite, in parallel
 mise run test:bats test/install.bats          # one or more files
 ./test/bats/bin/bats -f "<substring>" test/   # filter by test name
@@ -151,7 +152,7 @@ Keeping the fixture set committed means:
 - Test failures are reproducible on any checkout of a given commit.
 - Offline development works without caveats.
 
-The tradeoff is the ~16 MB of `.tgz` files under `test/registry/storage/`
+The tradeoff is the ~8 MB of `.tgz` files under `test/registry/storage/`
 and the manual seeding step above. For a package manager project that
 feels like the right tradeoff — we're exercising real tarball extraction
 and linking, so mock registries aren't an option.

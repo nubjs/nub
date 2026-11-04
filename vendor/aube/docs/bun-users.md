@@ -42,9 +42,10 @@ future installs keep writing `aube-lock.yaml`.
 - aube keeps package files in a global content-addressable store.
 - aube produces an isolated symlink layout under `node_modules/.aube/`
   rather than Bun's hoisted tree.
-- aube does not manage a JavaScript runtime. Use
-  [mise](https://mise.jdx.dev) (`mise use node@22`) if you need a Node
-  version alongside or in place of Bun.
+- aube does not manage the Bun runtime, only Node (see
+  [Node runtime switching](/package-manager/node-runtime)). Use
+  [mise](https://mise.jdx.dev) (`mise use bun`) if you still need Bun
+  alongside aube.
 - Dependency lifecycle scripts (`preinstall`, `install`, `postinstall`)
   are gated by an allowlist. aube reads Bun's top-level
   `trustedDependencies` array in addition to pnpm's

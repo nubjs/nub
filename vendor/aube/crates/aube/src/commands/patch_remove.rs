@@ -7,16 +7,15 @@
 //! from a vendored fix.
 
 use crate::patches::{read_patched_dependencies, remove_patched_dependency};
-use clap::Args;
 use miette::{IntoDiagnostic, Result, miette};
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct PatchRemoveArgs {
     /// Patch keys to remove, formatted as `<name>@<version>`.
     ///
     /// Same shape used as the `pnpm.patchedDependencies` map key. With
     /// no arguments, every declared patch is removed.
-    #[arg(value_name = "PATCH")]
+    #[usage(arg, name = "PATCH")]
     pub packages: Vec<String>,
 }
 

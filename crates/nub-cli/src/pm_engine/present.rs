@@ -3,7 +3,7 @@
 //! occasional informational line a family verb relays.
 //!
 //! Three jobs (the maintainer's hard requirement: no `ERR_AUBE_*`/`WARN_AUBE_*`
-//! strings and no `aube.jdx.dev` URLs may reach nub's output; the rewrite
+//! strings and no engine-doc URLs (`aube.sh`, `aube.jdx.dev`) may reach nub's output; the rewrite
 //! happens at presentation time, never by renaming codes in the fork):
 //!
 //! 1. **Rewrite** rendered text: `ERR_AUBE_*` → `ERR_NUB_*`, `WARN_AUBE_*` →
@@ -14,10 +14,11 @@
 //!    `aube-workspace.yaml`, `.aube-state`, path segments like
 //!    `share/aube/store`) that genuinely exist in the user's project or
 //!    filesystem.
-//! 2. **Exit codes**: map a failing report's diagnostic code through the
-//!    engine's own exit table (`aube_codes::exit::EXIT_TABLE`), mirroring
-//!    aube's `cli_main` (`vendor/aube/crates/aube/src/lib.rs::
-//!    report_exit_code`): codeless or unlisted codes exit
+//! 2. **Exit codes**: resolve a failing report through the engine's own
+//!    `aube::report_exit_code`, the same call aube's `cli_main` makes: a
+//!    failed lifecycle script exits with the script's own code, every other
+//!    report maps its diagnostic code through the engine's exit table
+//!    (`aube_codes::exit::EXIT_TABLE`), and codeless or unlisted codes exit
 //!    [`aube_codes::exit::EXIT_GENERIC`] (1).
 //! 3. **Passthrough**: [`warn`] / [`info`] for family code that emits its
 //!    own lines — both route through the same rewrite so no call site can
@@ -43,15 +44,12 @@ pub(crate) fn emit_report(report: &miette::Report) -> i32 {
     exit_code(report)
 }
 
-/// Resolve a report's exit code against the engine's own table, mirroring
-/// `vendor/aube/crates/aube/src/lib.rs::report_exit_code`: the diagnostic's
-/// `code()` is looked up in `aube_codes::exit::EXIT_TABLE`; no code or no
-/// entry falls back to `EXIT_GENERIC` (1).
+/// Resolve a report's exit code the way the engine's own `cli_main` does: a
+/// failed lifecycle script exits with the script's own code, anything else
+/// looks its `code()` up in `aube_codes::exit::EXIT_TABLE`, and no code or
+/// no entry falls back to `EXIT_GENERIC` (1).
 pub(crate) fn exit_code(report: &miette::Report) -> i32 {
-    report
-        .code()
-        .and_then(|code| aube_codes::exit::exit_code_for(&code.to_string()))
-        .unwrap_or(aube_codes::exit::EXIT_GENERIC)
+    aube::report_exit_code(report)
 }
 
 /// Warning passthrough for family verbs (stderr, rewritten). Use for
@@ -79,7 +77,7 @@ pub(crate) fn info(msg: &str) {
 /// `aube-lock.yaml` sitting in a project), which the word pass deliberately
 /// preserves and this map would falsify.
 ///
-/// Also used for clap usage errors (same rendering path as help). Corner:
+/// Also used for parser usage errors (same rendering path as help). Corner:
 /// a user-typed argument that happens to contain one of these spellings
 /// would be echoed back mapped — accepted, the echo still names a file the
 /// engine would treat identically.
@@ -93,25 +91,6 @@ pub(crate) fn rewrite_help(text: impl AsRef<str>) -> String {
         ),
         ("aube-workspace.yaml", "pnpm-workspace.yaml"),
         ("aube-lock.yaml", "pnpm-lock.yaml"),
-        // `set --location` long help, dotted-map paragraph: upstream edits
-        // map entries in the workspace yaml or a `package.json#aube.<map>`
-        // field; nub refuses map writes outright (brand boundary — the
-        // manifest fallback would plant a foreign-brand field). The help
-        // must state the refusal, not upstream's write behavior. Listed
-        // before the generic `package.json#aube.` mapping below, which
-        // would otherwise rewrite this paragraph first and break the match.
-        (
-            "Dotted writes for aube map settings (`allowBuilds.<pkg>`, \
-             `overrides.<pkg>`, …) edit one entry at a time. At project scope \
-             (`--local`) they land in `pnpm-workspace.yaml#<map>.<entry>` or \
-             `package.json#aube.<map>.<entry>` if no workspace yaml exists, the \
-             same place install reads from. User-scope dotted writes for these \
-             maps error: aube only reads them per project.",
-            "Workspace map settings (`allowBuilds.<pkg>`, `overrides.<pkg>`, …) \
-             are refused at any location: add the entry under the map in \
-             `pnpm-workspace.yaml` instead (for dependency build scripts, \
-             `approve-builds` manages the `allowBuilds` list).",
-        ),
         // "the aube/pnpm global directory", "aube/pnpm sidecar entries" —
         // prose, never a path token.
         ("aube/pnpm", "pnpm"),
@@ -126,33 +105,11 @@ pub(crate) fn rewrite_help(text: impl AsRef<str>) -> String {
         (".aube/<dep_path>", ".store/<dep_path>"),
         // The GVS location in engine docs;
         // described structurally — the literal path is engine cache state.
+        (
+            "`~/.cache/aube/virtual-store/v1/`",
+            "the global store cache",
+        ),
         ("`~/.cache/aube/virtual-store/`", "the global store cache"),
-        // The engine's own config file (config --location docs); described
-        // structurally like the GVS path — the literal `.config/aube`
-        // location is engine state (re-homing it is an open fork item,
-        // same as cacheDir).
-        (
-            "(`~/.config/aube/config.toml` + `~/.npmrc`)",
-            "(the engine's user config + `~/.npmrc`)",
-        ),
-        (
-            "(`~/.config/aube/config.toml` for known aube settings",
-            "(the engine's user config for known engine settings",
-        ),
-        // `set --location` long help: upstream routes non-npm-shared keys
-        // to its own config.toml; nub mirrors pnpm v11 instead (the
-        // store_config_family module doc) — non-shared scalars go to
-        // `pnpm-workspace.yaml` under a pnpm incumbent, else the project
-        // `.npmrc`; `--location`/`--local` are ignored for these. The help
-        // must describe nub's contract, divergence included.
-        (
-            "land in aube's own config (`~/.config/aube/config.toml` at user scope, \
-             `<cwd>/.config/aube/config.toml` at project scope) where sibling tools \
-             don't see them",
-            "are written to `pnpm-workspace.yaml` in a pnpm project, else the project \
-             `.npmrc` — the same files install reads — regardless of \
-             `--location`/`--local` (the confirmation line names the file written)",
-        ),
         // `patch-commit`'s arg help names the engine's on-disk state
         // sidecar; help describes the mechanism structurally.
         (
@@ -286,10 +243,26 @@ fn redact_url_token(token: &str) -> String {
     format!("{lead}{}{trail}", aube_util::url::redact_url(core))
 }
 
-/// Host of the engine's documentation site. Any URL token containing it is
-/// stripped; nub has no equivalent page to substitute, and pointing users at
-/// another tool's docs is the leak this module exists to stop.
-const ENGINE_DOC_HOST: &str = "aube.jdx.dev";
+/// Hosts of the engine's documentation and source. Any URL token containing
+/// one is stripped; nub has no equivalent page to substitute, and pointing
+/// users at another tool's docs is the leak this module exists to stop. The
+/// project moved from `aube.jdx.dev` / `github.com/jdx/aube` to `aube.sh` /
+/// `github.com/aubepkg/aube` in v2.2 and a few old-host references remain, so
+/// all four are matched.
+const ENGINE_DOC_HOSTS: [&str; 4] = [
+    "aube.jdx.dev",
+    "aube.sh",
+    "github.com/aubepkg/aube",
+    "github.com/jdx/aube",
+];
+
+/// The first engine host a line mentions, if any.
+fn find_engine_host(s: &str) -> Option<usize> {
+    ENGINE_DOC_HOSTS
+        .iter()
+        .filter_map(|host| s.find(host))
+        .min()
+}
 
 /// Remove engine-doc URL tokens from one line. A one-word introductory
 /// label (`Details:`, `See:`) immediately before a stripped URL is removed
@@ -297,11 +270,14 @@ const ENGINE_DOC_HOST: &str = "aube.jdx.dev";
 /// Returns `None` when the whole line reduces to nothing but whitespace or a
 /// dangling label that only existed to introduce the URL.
 fn strip_engine_urls(line: &str) -> Option<String> {
-    if !line.contains(ENGINE_DOC_HOST) {
+    // `None` from this function means "drop the line", so a line that mentions
+    // no engine host has to short-circuit as an unchanged `Some` — propagating
+    // the miss with `?` would delete every ordinary line the engine prints.
+    if find_engine_host(line).is_none() {
         return Some(line.to_string());
     }
     let mut s = line.to_string();
-    while let Some(at) = s.find(ENGINE_DOC_HOST) {
+    while let Some(at) = find_engine_host(&s) {
         // Expand to the whole whitespace-delimited token (catches the
         // https:// prefix and any path suffix).
         let mut start = s[..at]
@@ -485,6 +461,16 @@ mod tests {
         // Inline URL: only the token goes, the sentence stays.
         let inline = rewrite("see https://aube.jdx.dev/cli for flags");
         assert_eq!(inline, "see  for flags");
+        // The v2 hosts strip the same way (aube.sh docs, the moved GitHub repo).
+        let moved = rewrite(
+            "Details: https://aube.sh/package-manager/global-virtual-store and \
+             https://github.com/aubepkg/aube/issues/1 both apply",
+        );
+        assert!(
+            !moved.contains("aube.sh") && !moved.contains("aubepkg"),
+            "{moved}"
+        );
+        assert!(moved.contains("both apply"), "{moved}");
     }
 
     #[test]
@@ -551,5 +537,16 @@ mod tests {
         // to the generic exit, matching aube's own cli_main.
         let plain = miette::miette!("no lockfile found");
         assert_eq!(exit_code(&plain), aube_codes::exit::EXIT_GENERIC);
+        // A failed lifecycle script exits with the script's own code, not the
+        // table's 50 — and the wrap the install path adds must not hide it.
+        let script: miette::Report = aube_scripts::Error::NonZeroExit {
+            script: "postinstall".into(),
+            code: 3,
+        }
+        .into();
+        assert_eq!(
+            exit_code(&script.wrap_err("root postinstall script failed")),
+            3
+        );
     }
 }

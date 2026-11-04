@@ -2,6 +2,7 @@ import Link from 'next/link';
 import type { Metadata } from 'next';
 import { InlineTOC } from 'fumadocs-ui/components/inline-toc';
 import { blog } from '@/lib/source';
+import { renderInlineCode, stripInlineCode } from '@/lib/inline-code';
 import { getMDXComponents } from '../../../../../mdx-components';
 import { BlogTOC } from './blog-toc';
 
@@ -23,13 +24,20 @@ export function PostArticle({
   const MDXContent = page.data.body;
 
   const hasToc = page.data.toc.length > 0;
+  const rootDepth = hasToc ? Math.min(...page.data.toc.map((item) => item.depth)) : 2;
+  const toc = page.data.toc.map((item) => ({
+    ...item,
+    depth: item.depth - rootDepth + 2,
+  }));
 
   return (
-    /* Centered shell. At xl+ it widens to make room for a right gutter that
-       holds the sticky TOC; below xl it stays a single readable column. The
-       article keeps its max-w-3xl measure in both cases. */
-    <div className="mx-auto w-full min-w-0 max-w-3xl px-6 py-20 xl:grid xl:max-w-6xl xl:grid-cols-[minmax(0,1fr)_16rem] xl:gap-12">
-      <div className="min-w-0 xl:max-w-3xl">
+    /* Centered shell. At lg+ it widens to make room for a right gutter that
+       holds the sticky TOC; below lg it stays a single readable column. The
+       article keeps its max-w-3xl measure in both cases. The blog has no left
+       sidebar, so unlike the docs the gutter fits from lg (1024px): 14rem
+       there with the article column giving way, 16rem from xl. */
+    <div className="mx-auto w-full min-w-0 max-w-3xl px-6 py-20 lg:grid lg:max-w-6xl lg:grid-cols-[minmax(0,1fr)_14rem] lg:gap-10 xl:grid-cols-[minmax(0,1fr)_16rem] xl:gap-12">
+      <div className="min-w-0 lg:max-w-3xl">
         <Link
           href="/blog"
           className="font-mono text-xs uppercase tracking-[0.14em] text-fd-muted-foreground transition hover:text-ember"
@@ -45,8 +53,11 @@ export function PostArticle({
             </span>
             <span className="text-fd-muted-foreground">{page.data.author}</span>
           </div>
-          <h1 className="mt-5 font-display text-4xl font-medium leading-[1.15] tracking-tight md:text-5xl">
-            {titleOverride ?? page.data.title}
+          {/* Leading is set above the display face's tight default: a two-line
+              title reads cramped otherwise, and an inline-code chip in the
+              title is taller than the text line box it sits on. */}
+          <h1 className="mt-5 font-display text-4xl font-medium leading-[1.2] tracking-tight md:text-5xl">
+            {renderInlineCode(titleOverride ?? page.data.title)}
           </h1>
           {page.data.description ? (
             <p className="mt-5 text-xl leading-relaxed text-fd-muted-foreground">
@@ -55,10 +66,10 @@ export function PostArticle({
           ) : null}
         </header>
 
-        {/* Below xl there's no gutter, so keep the collapsible in-body TOC as
+        {/* Below lg there's no gutter, so keep the collapsible in-body TOC as
             the fallback; hide it once the sticky gutter TOC takes over. */}
         {hasToc ? (
-          <InlineTOC items={page.data.toc} className="mt-8 xl:hidden" />
+          <InlineTOC items={toc} className="mt-8 lg:hidden" />
         ) : null}
 
         <article className="prose blog-prose mt-10">
@@ -66,10 +77,10 @@ export function PostArticle({
         </article>
       </div>
 
-      {/* Sticky right-gutter TOC — xl+ only (no room for a gutter below that). */}
+      {/* Sticky right-gutter TOC — lg+ only (no room for a gutter below that). */}
       {hasToc ? (
-        <aside className="sticky top-24 hidden h-[calc(100vh-8rem)] flex-col overflow-hidden xl:flex">
-          <BlogTOC toc={page.data.toc} />
+        <aside className="sticky top-24 hidden h-[calc(100vh-8rem)] flex-col overflow-hidden lg:flex">
+          <BlogTOC toc={toc} />
         </aside>
       ) : null}
     </div>
@@ -78,7 +89,7 @@ export function PostArticle({
 
 export function postMetadata(page: BlogPage, titleOverride?: string): Metadata {
   const { description, date, author } = page.data;
-  const title = titleOverride ?? page.data.title;
+  const title = stripInlineCode(titleOverride ?? page.data.title);
   const ogImage = `/og?${new URLSearchParams({ title, eyebrow: 'Blog' }).toString()}`;
 
   return {

@@ -1,5 +1,5 @@
 //! The `nub node` version-management command group — `install` / `ls` /
-//! `uninstall` / `pin`. Spec: `wiki/commands/node-versions.md`.
+//! `uninstall` / `pin`. Spec: `internal/commands/node-versions.md`.
 //!
 //! Every operation is a thin wrapper over machinery that already ships: the
 //! resolver (`node_index::resolve_spec` / `resolve_range`), the cache layout
@@ -53,6 +53,12 @@ fn cached_versions(store: &Path) -> Vec<NodeVersion> {
 /// to guard `uninstall`. `None` when discovery can't resolve (no Node anywhere),
 /// which is not an error for these read/remove ops.
 ///
+/// It also covers a `nub.jsonc#nodeExecutable` command that exited non-zero, and
+/// swallowing that one is deliberate: the field's fail-closed contract is about
+/// which binary RUNS the user's code, and these verbs run none. A broken
+/// toolchain leaves the active mark and the active guard unset rather than
+/// blocking the store commands reached for to repair it.
+///
 /// This is the production resolver, hardwired to [`discovery::discover_node`].
 /// The `ls` / `uninstall` *cores* take the resolver as a parameter so the
 /// active-mark and active-guard paths are testable hermetically (a fake
@@ -83,7 +89,9 @@ pub enum InstallOutcome {
 /// index so a typo'd nonexistent version fails fast rather than 404ing mid-download.
 fn resolve_to_concrete(spec: &str, store: &Path, host: &HostTarget) -> Result<NodeVersion> {
     let mirror = resolve_mirror_base(host);
-    let index = node_index::load_index(store, &mirror)
+    // The index cache lives at the cache root, beside `node/`: the on-demand
+    // provisioning path and the alias resolution in discovery read the same file.
+    let index = node_index::load_index(store_root_of(store), &mirror)
         .with_context(|| "fetching the Node release index")?;
     node_index::resolve_spec(spec, &index)
         .ok_or_else(|| anyhow::anyhow!("no published Node version matches \"{spec}\""))
@@ -123,6 +131,11 @@ fn install_concrete(
     }
 
     // Already available on PATH (system / nvm) at the exact version → skip + report.
+    // An Err — including a `nodeExecutable` command that failed — costs only this
+    // shortcut. `nub node install <v>` explicitly asks for <v> in the store, and
+    // is the command that repairs an unbootstrapped machine, so a toolchain that
+    // cannot answer must not block it; installing changes nothing about which
+    // binary runs the user's code, which is what the field governs.
     if let Ok(node) = discovery::discover_node(cwd)
         && node.version == concrete
     {
@@ -187,7 +200,7 @@ pub fn install_from_pin(store: &Path, cwd: &Path) -> Result<InstallOutcome> {
                 anyhow::anyhow!("this host is not a platform nodejs.org publishes")
             })?;
             let mirror = resolve_mirror_base(&host);
-            let index = node_index::load_index(store, &mirror)
+            let index = node_index::load_index(store_root_of(store), &mirror)
                 .with_context(|| "fetching the Node release index")?;
             let concrete = node_index::resolve_range(alternatives, &index).ok_or_else(|| {
                 anyhow::anyhow!("no published Node version satisfies \"{raw}\" (from {source})")

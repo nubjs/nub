@@ -38,6 +38,7 @@ impl Resolver {
             ignored_optional_dependencies: BTreeSet::new(),
             resolution_mode: ResolutionMode::Highest,
             project_root: PathBuf::from("."),
+            workspace_member_importers: BTreeMap::new(),
             ignore_scripts: false,
             minimum_release_age: None,
             catalogs: BTreeMap::new(),
@@ -85,6 +86,7 @@ impl Resolver {
                 ignored_optional_dependencies: BTreeSet::new(),
                 resolution_mode: ResolutionMode::Highest,
                 project_root: PathBuf::from("."),
+                workspace_member_importers: BTreeMap::new(),
                 ignore_scripts: false,
                 minimum_release_age: None,
                 catalogs: BTreeMap::new(),
@@ -125,7 +127,8 @@ impl Resolver {
 
     /// Set the resolution mode. Defaults to `Highest` (pnpm's classic
     /// behavior). `TimeBased` switches direct deps to lowest-satisfying
-    /// and constrains transitives by a publish-date cutoff.
+    /// and constrains transitives by a publish-date cutoff; `LowestDirect`
+    /// switches only direct dependencies to lowest-satisfying.
     pub fn with_resolution_mode(mut self, mode: ResolutionMode) -> Self {
         self.resolution_mode = mode;
         self
@@ -293,6 +296,19 @@ impl Resolver {
     /// local package's transitive deps.
     pub fn with_project_root(mut self, project_root: PathBuf) -> Self {
         self.project_root = project_root;
+        self
+    }
+
+    /// Seed the workspace member `name` → importer-path map for a
+    /// caller that resolves only a subset of the workspace's
+    /// manifests, so a `workspace:<name>@<range>` alias can still find
+    /// a member the `manifests` slice omits. Paths are relative to the
+    /// project root, matching the importer keys.
+    pub fn with_workspace_member_importers(
+        mut self,
+        workspace_member_importers: BTreeMap<String, String>,
+    ) -> Self {
+        self.workspace_member_importers = workspace_member_importers;
         self
     }
 

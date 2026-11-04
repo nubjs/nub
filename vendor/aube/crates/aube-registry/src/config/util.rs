@@ -11,6 +11,13 @@ pub(super) fn non_empty(s: String) -> Option<String> {
     }
 }
 
+/// Normalize the scheme-specific proxy settings. pnpm treats the
+/// config-parser boolean/null spellings as unset instead of attempting
+/// to parse them as proxy hostnames.
+pub(super) fn proxy_url(s: String) -> Option<String> {
+    non_empty(s).filter(|value| !matches!(value.as_str(), "false" | "null"))
+}
+
 pub(super) fn pem_value(s: String) -> String {
     s.replace("\\n", "\n")
 }

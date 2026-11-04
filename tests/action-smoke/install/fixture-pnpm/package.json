@@ -1,0 +1,13 @@
+{
+  "name": "dropin-pnpm",
+  "version": "1.0.0",
+  "private": true,
+  "packageManager": "pnpm@10.15.1",
+  "dependencies": {
+    "is-number": "7.0.0",
+    "local-dep": "file:local-dep"
+  },
+  "scripts": {
+    "hello": "node -e \"console.log(42)\""
+  }
+}

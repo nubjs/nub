@@ -45,7 +45,9 @@ curl -fsSL https://nubjs.com/install.sh | bash
 # Windows (PowerShell)
 irm https://nubjs.com/install.ps1 | iex
 # Homebrew (macOS / Linux)
-brew install nubjs/tap/nub
+brew install nub
+# mise
+mise use -g nub
 # or via any package manager
 npm install -g @nubjs/nub
 ```
@@ -79,7 +81,7 @@ Two facts to hold onto when proposing changes:
 Nub ships its full docs offline:
 
 ```sh
-nub agent docs                   # table of contents + the overview page
+nub agent docs                   # usage + table of contents
 nub agent docs --page /docs/run  # any page's full markdown
 nub agent docs --list            # just the page list
 ```
@@ -87,7 +89,7 @@ nub agent docs --list            # just the page list
 The same pages online (agent-readable index: https://nubjs.com/llms.txt; `nub <command> --help` is the always-current per-command reference):
 
 - [Introduction](https://nubjs.com/docs)
-- Runner — [overview](https://nubjs.com/docs/runner), [script runner](https://nubjs.com/docs/runner/run), [local bins](https://nubjs.com/docs/runner/exec), [remote bins](https://nubjs.com/docs/runner/dlx), [watch mode](https://nubjs.com/docs/watch)
+- Runner — [script runner](https://nubjs.com/docs/run), [bin runner](https://nubjs.com/docs/nubx), [watch mode](https://nubjs.com/docs/watch)
 - Runtime — [overview](https://nubjs.com/docs/runtime), [TypeScript](https://nubjs.com/docs/runtime/typescript), [JSX](https://nubjs.com/docs/runtime/jsx), [env files](https://nubjs.com/docs/runtime/env), [module resolution](https://nubjs.com/docs/runtime/resolution), [loaders](https://nubjs.com/docs/runtime/loaders), [decorators](https://nubjs.com/docs/runtime/decorators), [debugging](https://nubjs.com/docs/runtime/debugging), [Web Storage](https://nubjs.com/docs/runtime/web-storage), [Web Workers](https://nubjs.com/docs/runtime/workers)
 - Package manager — [overview](https://nubjs.com/docs/install), [npm](https://nubjs.com/docs/install/npm), [pnpm](https://nubjs.com/docs/install/pnpm), [Bun](https://nubjs.com/docs/install/bun), [Yarn](https://nubjs.com/docs/install/yarn), [the virtual store](https://nubjs.com/docs/install/virtual-store), [meta-manager](https://nubjs.com/docs/pm)
 - Toolchain — [Node manager](https://nubjs.com/docs/node), [creating a project](https://nubjs.com/docs/init), [plugins](https://nubjs.com/docs/plugins), [deployment](https://nubjs.com/docs/deployment), [FAQ](https://nubjs.com/docs/faq)

@@ -1,10 +1,9 @@
 use super::{literal_aliases, setting_search_score, settings_meta};
-use clap::Args;
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct FindArgs {
     /// Words to search for.
-    #[arg(required = true)]
+    #[usage(arg, required)]
     pub query: Vec<String>,
 }
 
@@ -16,7 +15,6 @@ pub fn run(args: FindArgs) -> miette::Result<()> {
         .collect::<Vec<_>>();
 
     let mut matches = settings_meta::all()
-        .iter()
         .filter_map(|meta| {
             let score = setting_search_score(meta, &terms);
             (score > 0).then_some((score, *meta))

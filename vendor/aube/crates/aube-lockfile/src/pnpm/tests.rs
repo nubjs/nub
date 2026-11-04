@@ -1,5 +1,5 @@
 use super::{
-    dep_path::{parse_dep_path, version_to_dep_path},
+    dep_path::{parse_dep_path, registry_name_from_qualified_version, version_to_dep_path},
     parse, parse_with_options, write,
 };
 use crate::{
@@ -62,6 +62,55 @@ fn test_parse_dep_path_prerelease() {
 #[test]
 fn test_parse_dep_path_no_at() {
     assert!(parse_dep_path("invalid").is_none());
+}
+
+#[test]
+fn registry_qualified_version_requires_non_reserved_alias_and_semver() {
+    assert_eq!(
+        registry_name_from_qualified_version("work:1.0.0"),
+        Some("work")
+    );
+    assert_eq!(
+        registry_name_from_qualified_version("gh:2.1.0-beta.1"),
+        Some("gh")
+    );
+    for version in [
+        "file:1.0.0",
+        "runtime:24.0.0",
+        "work:^1.0.0",
+        "9work:1.0.0",
+        "1.0.0",
+    ] {
+        assert_eq!(registry_name_from_qualified_version(version), None);
+    }
+}
+
+#[test]
+fn parser_rejects_registry_qualified_package_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &path,
+        r#"lockfileVersion: '9.0'
+importers: {}
+packages:
+  foo@work:1.0.0:
+    resolution: {integrity: sha512-test}
+snapshots:
+  foo@work:1.0.0: {}
+"#,
+    )
+    .unwrap();
+
+    let err = parse(&path).unwrap_err();
+    assert!(matches!(
+        err,
+        crate::Error::UnsupportedNamedRegistry {
+            ref dep_path,
+            ref registry_name,
+            ..
+        } if dep_path == "foo@work:1.0.0" && registry_name == "work"
+    ));
 }
 
 #[test]
@@ -279,6 +328,72 @@ snapshots:
     let host = graph.packages.get("host@1.0.0").unwrap();
     assert_eq!(host.dependencies.get("native").unwrap(), "1.0.0");
     assert_eq!(host.optional_dependencies.get("native").unwrap(), "1.0.0");
+}
+
+/// A snapshot whose key names a peer it declares but whose `dependencies`
+/// omit it (written by nub before #937 was fixed) gets the edge back on
+/// read, so a plain install against that lockfile links the peer.
+#[test]
+fn parse_links_a_declared_peer_named_only_in_the_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let lockfile_path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &lockfile_path,
+        r#"
+lockfileVersion: '9.0'
+
+importers:
+  .:
+    dependencies:
+      '@s/node-core':
+        specifier: 1.0.0
+        version: 1.0.0(@o/core@2.0.0(@o/api@1.0.0))
+
+packages:
+  '@o/api@1.0.0':
+    resolution: {integrity: sha512-api}
+
+  '@o/core@2.0.0':
+    resolution: {integrity: sha512-core}
+    peerDependencies:
+      '@o/api': '*'
+
+  '@s/node-core@1.0.0':
+    resolution: {integrity: sha512-nodecore}
+    peerDependencies:
+      '@o/core': ^2.0.0
+      unrelated: '*'
+    peerDependenciesMeta:
+      '@o/core':
+        optional: true
+      unrelated:
+        optional: true
+
+snapshots:
+  '@o/api@1.0.0': {}
+
+  '@o/core@2.0.0(@o/api@1.0.0)':
+    dependencies:
+      '@o/api': 1.0.0
+
+  '@s/node-core@1.0.0(@o/core@2.0.0(@o/api@1.0.0))': {}
+"#,
+    )
+    .unwrap();
+
+    let graph = parse(&lockfile_path).unwrap();
+    let node_core = graph
+        .packages
+        .get("@s/node-core@1.0.0(@o/core@2.0.0(@o/api@1.0.0))")
+        .unwrap();
+    assert_eq!(
+        node_core.dependencies.get("@o/core").map(String::as_str),
+        Some("2.0.0(@o/api@1.0.0)")
+    );
+    assert!(
+        !node_core.dependencies.contains_key("unrelated"),
+        "a declared peer the key does not name stays unlinked"
+    );
 }
 
 #[test]
@@ -651,6 +766,67 @@ snapshots:
     assert_eq!(
         pkg_c.local_source,
         Some(LocalSource::Directory("gems/pkg-c".into()))
+    );
+}
+
+#[test]
+fn parse_member_local_versions_use_pnpm_anchoring() {
+    // pnpm 10/11 write a `file:` version relative to the lockfile directory and
+    // a `link:` version relative to the importer. Neither anchoring is visible
+    // from a leading `..`: a `file:` package outside the workspace root keeps
+    // one, and a `link:` into the importer's own subtree has none.
+    let dir = tempfile::tempdir().unwrap();
+    let lockfile_path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &lockfile_path,
+        r#"
+lockfileVersion: '9.0'
+
+importers:
+  .: {}
+
+  apps/app:
+    dependencies:
+      dep:
+        specifier: file:../../../dep
+        version: file:../dep
+      ldep:
+        specifier: link:./vendored
+        version: link:vendored
+      tdep:
+        specifier: file:../../../tarballs/tdep-1.0.0.tgz
+        version: file:../tarballs/tdep-1.0.0.tgz
+
+packages:
+  dep@file:../dep:
+    resolution: {directory: ../dep, type: directory}
+  tdep@file:../tarballs/tdep-1.0.0.tgz:
+    resolution: {tarball: file:../tarballs/tdep-1.0.0.tgz}
+    version: 1.0.0
+
+snapshots:
+  dep@file:../dep: {}
+  tdep@file:../tarballs/tdep-1.0.0.tgz: {}
+"#,
+    )
+    .unwrap();
+
+    let graph = parse(&lockfile_path).unwrap();
+    let source = |name: &str| {
+        let dep = graph.importers["apps/app"]
+            .iter()
+            .find(|dep| dep.name == name)
+            .unwrap_or_else(|| panic!("{name} missing from apps/app"));
+        graph.packages[&dep.dep_path].local_source.clone()
+    };
+    assert_eq!(source("dep"), Some(LocalSource::Directory("../dep".into())));
+    assert_eq!(
+        source("tdep"),
+        Some(LocalSource::Tarball("../tarballs/tdep-1.0.0.tgz".into()))
+    );
+    assert_eq!(
+        source("ldep"),
+        Some(LocalSource::Link("apps/app/vendored".into()))
     );
 }
 
@@ -1949,8 +2125,7 @@ fn patched_dependency_roundtrips_through_real_pnpm() {
     // Captured from `corepack pnpm@10.15.1 install` on the patched-deps
     // fixture — the exact bytes real pnpm wrote.
     const HASH: &str = "dcac38e61b21e4c1fbc036fbd04c2c57fc5aca4d595709258e1654cf8529c5c1";
-    const EXPECTED_BLOCK: &str =
-        "patchedDependencies:\n  is-odd@3.0.1:\n    hash: dcac38e61b21e4c1fbc036fbd04c2c57fc5aca4d595709258e1654cf8529c5c1\n    path: patches/is-odd@3.0.1.patch";
+    const EXPECTED_BLOCK: &str = "patchedDependencies:\n  is-odd@3.0.1:\n    hash: dcac38e61b21e4c1fbc036fbd04c2c57fc5aca4d595709258e1654cf8529c5c1\n    path: patches/is-odd@3.0.1.patch";
 
     let dir = tempfile::tempdir().unwrap();
     let lockfile_path = dir.path().join("pnpm-lock.yaml");
@@ -2627,6 +2802,233 @@ fn test_parse_invalid_yaml() {
     assert!(parse(&path).is_err());
 }
 
+/// pnpm 8's v6 format (top-level `dependencies:`, `/name@version`
+/// package keys) is valid YAML that yields zero importers. Before the
+/// version guard it parsed "successfully" into an empty graph and the
+/// install linked nothing while exiting 0.
+#[test]
+fn parse_rejects_pnpm_v6_lockfile() {
+    const V6: &str = include_str!("../../tests/fixtures/pnpm-v6.yaml");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(&path, V6).unwrap();
+
+    let err = parse(&path).expect_err("v6 lockfile must be rejected");
+    assert!(
+        matches!(
+            &err,
+            crate::Error::UnsupportedPnpmLockfileVersion { version, .. } if version == "6.0"
+        ),
+        "unexpected error: {err:?}"
+    );
+    assert_eq!(
+        miette::Diagnostic::code(&err)
+            .map(|c| c.to_string())
+            .as_deref(),
+        Some(aube_codes::errors::ERR_AUBE_UNSUPPORTED_PNPM_LOCKFILE_VERSION)
+    );
+}
+
+/// pnpm 6/7 wrote `lockfileVersion` as a bare YAML float rather than a
+/// quoted string, so the guard has to read both encodings.
+#[test]
+fn parse_rejects_pnpm_v5_lockfile_with_numeric_version() {
+    const V5_4: &str = include_str!("../../tests/fixtures/pnpm-v5_4-plain.yaml");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(&path, V5_4).unwrap();
+
+    let err = parse(&path).expect_err("v5.4 lockfile must be rejected");
+    assert!(
+        matches!(
+            &err,
+            crate::Error::UnsupportedPnpmLockfileVersion { version, .. } if version == "5.4"
+        ),
+        "unexpected error: {err:?}"
+    );
+}
+
+/// A `lockfileVersion` aube cannot read as a number is rejected too —
+/// guessing at the shape is what produced the silent empty install.
+#[test]
+fn parse_rejects_unreadable_lockfile_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &path,
+        "lockfileVersion: nine
+",
+    )
+    .unwrap();
+    let err = parse(&path).expect_err("non-numeric lockfileVersion must be rejected");
+    assert!(
+        matches!(&err, crate::Error::UnsupportedPnpmLockfileVersion { .. }),
+        "unexpected error: {err:?}"
+    );
+}
+
+/// A `lockfileVersion` whose components aren't all numeric is not a
+/// version aube can reason about. Reading only the leading component
+/// would accept `9.invalid` as v9 and hand a lockfile of unknown shape
+/// to the passes below — the same silent-empty-install path this guard
+/// exists to close.
+#[test]
+fn parse_rejects_malformed_lockfile_version_components() {
+    for version in ["'9.invalid'", "'9.'", "'.9'", "'9.0.x'", "'v9'", "''"] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pnpm-lock.yaml");
+        std::fs::write(
+            &path,
+            format!("lockfileVersion: {version}\n\nimporters:\n\n  .:\n    dependencies: {{}}\n"),
+        )
+        .unwrap();
+        let err = parse(&path).unwrap_err();
+        assert!(
+            matches!(&err, crate::Error::UnsupportedPnpmLockfileVersion { .. }),
+            "lockfileVersion {version} must be rejected, got {err:?}"
+        );
+    }
+}
+
+/// A pre-v9 body mislabeled with a v9 header passes the version check,
+/// so the layout is checked too: packages exist only because an
+/// importer needs them, so packages without importers is never a shape
+/// pnpm or aube writes at v9.
+#[test]
+fn parse_rejects_v9_header_over_legacy_body() {
+    const V6: &str = include_str!("../../tests/fixtures/pnpm-v6.yaml");
+    let relabeled = V6.replacen("lockfileVersion: '6.0'", "lockfileVersion: '9.0'", 1);
+    assert!(relabeled.starts_with("lockfileVersion: '9.0'"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(&path, &relabeled).unwrap();
+
+    let err = parse(&path).expect_err("mislabeled legacy body must be rejected");
+    assert!(
+        matches!(
+            &err,
+            crate::Error::PnpmLockfileLegacyLayout { version, .. } if version == "9.0"
+        ),
+        "unexpected error: {err:?}"
+    );
+    // Same stable code as a declared pre-v9 version: same cause for the
+    // user, same remedy.
+    assert_eq!(
+        miette::Diagnostic::code(&err)
+            .map(|c| c.to_string())
+            .as_deref(),
+        Some(aube_codes::errors::ERR_AUBE_UNSUPPORTED_PNPM_LOCKFILE_VERSION)
+    );
+}
+
+/// A pre-v9 body whose deps are all `link:`/`file:` has no `packages:`
+/// block at all, so no package key betrays it — the root-level
+/// dependency block is the only signature left.
+#[test]
+fn parse_rejects_v9_header_over_legacy_local_only_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &path,
+        "lockfileVersion: '9.0'\n\ndependencies:\n  a:\n    specifier: link:../a\n    version: link:../a\n",
+    )
+    .unwrap();
+
+    let err = parse(&path).expect_err("legacy local-only body must be rejected");
+    assert!(
+        matches!(
+            &err,
+            crate::Error::PnpmLockfileLegacyLayout { marker, .. }
+                if marker.contains("root-level `dependencies:`")
+        ),
+        "unexpected error: {err:?}"
+    );
+}
+
+/// v5 kept the root importer's ranges in a `specifiers:` block, so that
+/// key is a pre-v9 signature in its own right.
+#[test]
+fn parse_rejects_v9_header_over_legacy_specifiers_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &path,
+        "lockfileVersion: '9.0'\n\nspecifiers:\n  is-odd: ^3.0.1\n",
+    )
+    .unwrap();
+    let err = parse(&path).expect_err("legacy specifiers body must be rejected");
+    assert!(
+        matches!(
+            &err,
+            crate::Error::PnpmLockfileLegacyLayout { marker, .. }
+                if marker == "root-level `specifiers:` block"
+        ),
+        "unexpected error: {err:?}"
+    );
+}
+
+/// A pre-v9 *workspace* body already has a populated `importers:`
+/// block, so an empty-importers check alone would let a mislabeled one
+/// through — the slash-prefixed package keys are the signature that
+/// does not depend on importer shape.
+#[test]
+fn parse_rejects_v9_header_over_legacy_workspace_body() {
+    const V6_WORKSPACE: &str = include_str!("../../tests/fixtures/pnpm-v6-workspace.yaml");
+    let relabeled = V6_WORKSPACE.replacen("lockfileVersion: '6.0'", "lockfileVersion: '9.0'", 1);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(&path, &relabeled).unwrap();
+
+    let err = parse(&path).expect_err("mislabeled legacy workspace body must be rejected");
+    // Assert the reported marker, not just the variant: this fixture
+    // keeps its deps under `importers:`, so naming the package key
+    // proves the slash-key signature is what fired here rather than the
+    // root-block one. `/is-number@6.0.0` is the first slash-prefixed
+    // key in `BTreeMap` order.
+    assert!(
+        matches!(
+            &err,
+            crate::Error::PnpmLockfileLegacyLayout { marker, .. }
+                if marker == "package key `/is-number@6.0.0`"
+        ),
+        "unexpected error: {err:?}"
+    );
+}
+
+/// An empty v9 lockfile has importers and no packages, which must stay
+/// readable — the layout guard keys on packages *without* importers.
+#[test]
+fn parse_accepts_v9_lockfile_with_no_packages() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &path,
+        "lockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    dependencies: {}\n",
+    )
+    .unwrap();
+    assert!(parse(&path).is_ok());
+}
+
+/// Versions at or above the v9 baseline stay readable, including a
+/// hypothetical future major so a newer pnpm isn't locked out.
+#[test]
+fn parse_accepts_v9_and_newer_lockfile_versions() {
+    for version in ["'9.0'", "9", "'10.0'"] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pnpm-lock.yaml");
+        std::fs::write(
+            &path,
+            format!("lockfileVersion: {version}\n\nimporters:\n\n  .:\n    dependencies: {{}}\n"),
+        )
+        .unwrap();
+        assert!(
+            parse(&path).is_ok(),
+            "lockfileVersion {version} must stay readable"
+        );
+    }
+}
+
 #[test]
 fn test_parse_nonexistent_file() {
     let path = Path::new("/nonexistent/pnpm-lock.yaml");
@@ -3235,10 +3637,7 @@ snapshots:
     // is read for its hash only, and the path map stays empty.
     assert!(graph.patched_dependencies.is_empty());
     assert_eq!(
-        graph
-            .patched_dependency_hashes
-            .get("is-odd@3.0.1")
-            .unwrap(),
+        graph.patched_dependency_hashes.get("is-odd@3.0.1").unwrap(),
         "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
     );
     assert_eq!(
@@ -3681,7 +4080,7 @@ fn parse_synthesizes_npm_alias_from_pnpm_lockfile_catalog_specifier() {
     // — gating on `specifier.starts_with("npm:")` would silently
     // drop the dep and leave node_modules empty.
     // Repro:
-    //   https://github.com/jdx/aube/discussions/383#discussioncomment-16759640
+    //   https://github.com/aubepkg/aube/discussions/383#discussioncomment-16759640
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pnpm-lock.yaml");
     std::fs::write(
@@ -4118,6 +4517,125 @@ snapshots:
         .expect("synthesized alias entry from local package's transitive");
     assert_eq!(alias.name, "string-width-cjs");
     assert_eq!(alias.alias_of.as_deref(), Some("string-width"));
+}
+
+#[test]
+fn parse_restores_platform_and_peers_of_a_direct_url_tarball_dep() {
+    // A direct local dep is synthesized in the importer loop and skipped by
+    // the main package loop, so anything the writer put on its `packages:`
+    // entry is restored there or lost. Losing `os`/`cpu` leaves a native
+    // optional for another platform in the graph that `filter_graph` can no
+    // longer drop, so a frozen install would fetch and link it.
+    let url = "https://example.invalid/builds/abc/native-darwin-arm64";
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &path,
+        format!(
+            r#"
+lockfileVersion: '9.0'
+
+importers:
+  .:
+    optionalDependencies:
+      native:
+        specifier: {url}
+        version: {url}
+
+packages:
+  native@{url}:
+    resolution: {{integrity: sha512-fake, tarball: {url}}}
+    version: 1.2.3
+    cpu: [arm64]
+    os: [darwin]
+    peerDependencies:
+      host-app: ^2.0.0
+    peerDependenciesMeta:
+      host-app:
+        optional: true
+
+snapshots:
+  native@{url}: {{}}
+"#
+        ),
+    )
+    .unwrap();
+
+    let graph = parse(&path).unwrap();
+    let native = graph
+        .packages
+        .values()
+        .find(|p| p.name == "native")
+        .expect("native entry");
+    assert_eq!(native.version, "1.2.3");
+    assert_eq!(native.os.iter().collect::<Vec<_>>(), ["darwin"]);
+    assert_eq!(native.cpu.iter().collect::<Vec<_>>(), ["arm64"]);
+    assert_eq!(
+        native.peer_dependencies.get("host-app").map(String::as_str),
+        Some("^2.0.0")
+    );
+    assert!(native.peer_dependencies_meta["host-app"].optional);
+}
+
+#[test]
+fn parse_keeps_scoped_url_tarball_dep_of_a_url_tarball_package() {
+    // `next` from a preview-build URL depends on `@next/env` from a
+    // sibling URL. The `@` of the scope inside the dep value is not an
+    // npm-alias separator; reading it as one invented the alias
+    // `@next/env@next/env` and failed the install with "npm-alias
+    // references missing package".
+    let base = "https://vercel-packages.vercel.app/next/commits/7b58e58";
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &path,
+        format!(
+            r#"
+lockfileVersion: '9.0'
+
+importers:
+  .:
+    dependencies:
+      next:
+        specifier: {base}/next
+        version: {base}/next
+
+packages:
+  '@next/env@{base}/@next/env':
+    resolution: {{integrity: sha512-env, tarball: {base}/@next/env}}
+    version: 16.4.0-preview
+  next@{base}/next:
+    resolution: {{integrity: sha512-next, tarball: {base}/next}}
+    version: 16.4.0-preview
+
+snapshots:
+  '@next/env@{base}/@next/env': {{}}
+  next@{base}/next:
+    dependencies:
+      '@next/env': {base}/@next/env
+"#
+        ),
+    )
+    .unwrap();
+
+    let graph = parse(&path).unwrap();
+    let next = graph
+        .packages
+        .values()
+        .find(|p| p.name == "next")
+        .expect("next entry");
+    let env_value = next.dependencies.get("@next/env").expect("@next/env edge");
+    assert_eq!(env_value, &format!("{base}/@next/env"));
+    // The linker maps a URL edge to the hashed package key this way.
+    let env_key = crate::shared_local_dep_path("@next/env", env_value).unwrap();
+    let env = graph.packages.get(&env_key).unwrap_or_else(|| {
+        panic!(
+            "edge {env_key} resolves to a package; keys: {:?}",
+            graph.packages.keys().collect::<Vec<_>>()
+        )
+    });
+    assert_eq!(env.name, "@next/env");
+    assert_eq!(env.alias_of, None);
 }
 
 #[test]
@@ -5133,7 +5651,9 @@ fn npm_to_pnpm_conversion_omits_phantom_member_links_on_empty_root() {
     let manifest = PackageJson {
         name: Some("wsroot".to_string()),
         version: Some("1.0.0".to_string()),
-        workspaces: Some(aube_manifest::Workspaces::Array(vec!["packages/*".to_string()])),
+        workspaces: Some(aube_manifest::Workspaces::Array(vec![
+            "packages/*".to_string(),
+        ])),
         ..PackageJson::default()
     };
 
@@ -5271,4 +5791,131 @@ snapshots:
             .as_deref(),
         Some("is-odd")
     );
+}
+
+// pnpm's resolver drops a `peerDependenciesMeta` entry that is not
+// `optional: true` (`peerDependenciesWithoutOwn`), so its lockfile type is
+// `{ optional: true }` and pnpm 12's reader models `optional` as a required
+// field. Emitting the non-optional entry as an empty mapping — the real case
+// is vitest declaring `vite: { optional: false }` — makes pnpm 12 reject the
+// whole file with ERR_PNPM_BROKEN_LOCKFILE.
+#[test]
+fn write_omits_non_optional_peer_dependencies_meta_entries() {
+    let yaml = r#"lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      peer-host:
+        specifier: 1.0.0
+        version: 1.0.0
+
+packages:
+
+  peer-host@1.0.0:
+    resolution: {integrity: sha512-peer}
+    peerDependencies:
+      jsdom: '*'
+      vite: ^7.0.0
+    peerDependenciesMeta:
+      jsdom:
+        optional: true
+      vite: {}
+
+snapshots:
+
+  peer-host@1.0.0: {}
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(&path, yaml).unwrap();
+    let graph = parse(&path).unwrap();
+
+    // The reader stays lenient so a lockfile already carrying the broken
+    // shape still loads; the writer is what normalizes it.
+    let pkg = graph.packages.get("peer-host@1.0.0").unwrap();
+    assert!(pkg.peer_dependencies_meta["jsdom"].optional);
+    assert!(!pkg.peer_dependencies_meta["vite"].optional);
+
+    let manifest = PackageJson {
+        name: Some("peer-meta".to_string()),
+        version: Some("1.0.0".to_string()),
+        dependencies: [("peer-host".to_string(), "1.0.0".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let out = dir.path().join("out.yaml");
+    write(&out, &graph, &manifest).unwrap();
+    let written = std::fs::read_to_string(&out).unwrap();
+
+    assert!(
+        !written.contains("vite: {}"),
+        "an empty peerDependenciesMeta mapping is rejected by pnpm 12:\n{written}"
+    );
+    assert!(
+        written.contains("      jsdom:\n        optional: true\n"),
+        "the optional peer must keep its entry:\n{written}"
+    );
+    assert!(
+        !written.contains("      vite:\n"),
+        "the non-optional peer must be dropped from peerDependenciesMeta:\n{written}"
+    );
+    // Dropping the meta entry must not drop the declared peer range.
+    assert!(
+        written.contains("      vite: ^7.0.0\n"),
+        "peerDependencies must still carry the non-optional peer:\n{written}"
+    );
+}
+
+/// Property coverage for the `lockfileVersion` guard, which is new
+/// parser code in `aube-lockfile` (see CLAUDE.md's `property_based`
+/// rule). The invariant under test: acceptance depends only on the
+/// numeric major, in either encoding pnpm has used, and any
+/// non-numeric component is refused rather than half-read.
+mod lockfile_version_properties {
+    use super::super::read::lockfile_version_major;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Quoted `major.minor` strings resolve to their major, so the
+        /// v9 baseline is the only thing that decides acceptance.
+        #[test]
+        fn quoted_major_minor_resolves_to_major(major in 0u64..64, minor in 0u64..64) {
+            let value = yaml_serde::Value::String(format!("{major}.{minor}"));
+            prop_assert_eq!(lockfile_version_major(&value), Some(major));
+        }
+
+        /// A bare integer is read as the major itself.
+        #[test]
+        fn bare_integer_resolves_to_itself(major in 0u64..64) {
+            let value = yaml_serde::Value::Number(major.into());
+            prop_assert_eq!(lockfile_version_major(&value), Some(major));
+        }
+
+        /// Any component that isn't digits makes the whole value
+        /// unreadable — never a partial read of the leading number.
+        #[test]
+        fn non_numeric_component_is_refused(
+            major in 0u64..64,
+            suffix in "[a-z][a-z0-9]*",
+        ) {
+            let value = yaml_serde::Value::String(format!("{major}.{suffix}"));
+            prop_assert_eq!(lockfile_version_major(&value), None);
+        }
+
+        /// Whatever the encoding, a version resolves iff the reader
+        /// would accept it, and the accept threshold is exactly 9.
+        #[test]
+        fn acceptance_tracks_the_v9_baseline(major in 0u64..64) {
+            let quoted = yaml_serde::Value::String(format!("{major}.0"));
+            let bare = yaml_serde::Value::Number(major.into());
+            let accepted = |v: &yaml_serde::Value| {
+                lockfile_version_major(v).is_some_and(|m| m >= super::super::read::MIN_LOCKFILE_VERSION)
+            };
+            prop_assert_eq!(accepted(&quoted), major >= 9);
+            prop_assert_eq!(accepted(&bare), major >= 9);
+        }
+    }
 }

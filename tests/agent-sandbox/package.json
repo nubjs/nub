@@ -1,0 +1,9 @@
+{
+  "name": "nub-agent-sandbox-e2e",
+  "private": true,
+  "description": "Runs nub's main flows inside the default Codex CLI and Claude Code (sandbox-runtime) sandboxes and snapshots the behavior.",
+  "devDependencies": {
+    "@openai/codex": "0.152.1",
+    "@anthropic-ai/sandbox-runtime": "0.0.75"
+  }
+}

@@ -31,16 +31,31 @@ cp -RL "$REPO_ROOT/node_modules/@js-temporal/polyfill" "$REPO_ROOT/runtime/node_
 cp -RL "$REPO_ROOT/node_modules/jsbi" "$REPO_ROOT/runtime/node_modules/"
 cp -RL "$REPO_ROOT/node_modules/@petamoriken/float16" "$REPO_ROOT/runtime/node_modules/@petamoriken/"
 
-# 2. Build the release binary with the runtime embedded.
-cargo build --release -p nub-cli --features embed-runtime
+# 2. Build the release binary with the runtime embedded, and the `nub compile`
+#    launcher template. Feature set + launcher mirror .github/workflows/release.yml;
+#    the launcher is built from inside its crate because it is its own cargo
+#    workspace (excluded at the root Cargo.toml, so `-p nub-launcher` can't see it).
+#    Assumes glibc (the PKG_DIR naming above is already musl-blind) and an UNSET
+#    CARGO_TARGET_DIR — an exported one would collapse the two builds' conflicting
+#    release profiles into one dir and move the copy paths below.
+cargo build --release -p nub-cli --features embed-runtime,compile
+(cd "$REPO_ROOT/crates/nub-launcher" && cargo build --release)
 
-# 3. Copy ONLY the binary — under BOTH names (nub, nubx). The verb is the binary's
-#    own argv[0] basename, so nubx must be a real second copy. No runtime/ sidecar.
+# 3. Copy ONLY the binary, under ONE name. No runtime/ sidecar, and no second `nubx`
+#    copy: the launcher passes the verb in `__NUB_ARGV0` (npm/nub/bin/launch.js), so
+#    nubx no longer needs a separately-named file. Halves the package.
+#
+#    The `nub compile` launcher template ships beside it, under the name compile looks
+#    for (launcher.rs). The sibling-of-nub relationship is what makes it findable, so
+#    it goes in bin/ rather than anywhere tidier.
 rm -rf "$PKG_DIR/runtime"
 mkdir -p "$PKG_DIR/bin"
+rm -f "$PKG_DIR/bin/nubx"
 cp "$REPO_ROOT/target/release/nub" "$PKG_DIR/bin/nub"
-cp "$REPO_ROOT/target/release/nub" "$PKG_DIR/bin/nubx"
-chmod +x "$PKG_DIR/bin/nub" "$PKG_DIR/bin/nubx"
+chmod +x "$PKG_DIR/bin/nub"
+cp "$REPO_ROOT/crates/nub-launcher/target/release/nub-launcher" \
+   "$PKG_DIR/bin/nub-launcher-${PLATFORM}-${ARCH}"
+chmod +x "$PKG_DIR/bin/nub-launcher-${PLATFORM}-${ARCH}"
 
 echo ""
 echo "✓ Platform package ready: $PKG_DIR ($(du -sh "$PKG_DIR" | cut -f1))"

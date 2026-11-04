@@ -90,6 +90,7 @@ fn bun_incumbent_reads_project_and_global_bunfig_install_subset() {
         [install]
         registry = "https://global.registry.example/"
         linker = "hoisted"
+        minimumReleaseAge = 3600
         "#,
     )
     .unwrap();
@@ -102,11 +103,13 @@ fn bun_incumbent_reads_project_and_global_bunfig_install_subset() {
         config_get(&dir, &xdg_config, "@acme:registry"),
         "https://scope.registry.example/"
     );
-    // The global bunfig's `linker` IS read for a bun incumbent. `hoisted` is the
-    // NON-default value (nub's own default is now isolated+GVS), so resolving to
-    // `hoisted` proves the bunfig was read and overrode the embedder default —
-    // an `isolated` bunfig would be indistinguishable from that default.
-    assert_eq!(config_get(&dir, &xdg_config, "nodeLinker"), "hoisted");
+    // The global bunfig IS read for a bun incumbent — `minimumReleaseAge` is
+    // resolution config, and 3600 bunfig seconds arriving as 60 engine minutes
+    // could come from nowhere else.
+    assert_eq!(config_get(&dir, &xdg_config, "minimumReleaseAge"), "60");
+    // Its unsupported `linker` is not mapped, so the setting stays at Nub's
+    // default instead of the bunfig's `hoisted`.
+    assert_eq!(config_get(&dir, &xdg_config, "nodeLinker"), "isolated");
 }
 
 #[test]
@@ -157,7 +160,7 @@ fn nub_identity_does_not_read_project_or_global_bunfig() {
                 r#"
                 [install]
                 registry = "https://must-not-read.project.example/"
-                linker = "hoisted"
+                minimumReleaseAge = 3600
                 "#,
             ),
         ],
@@ -177,12 +180,15 @@ fn nub_identity_does_not_read_project_or_global_bunfig() {
         config_get(&dir, &xdg_config, "registry"),
         "https://registry.npmjs.org/"
     );
-    // The bunfig's `linker = "hoisted"` must NOT be read under nub identity:
-    // nodeLinker resolves to nub's own default (isolated), not the bunfig's
-    // `hoisted`. Asserting the NON-bunfig value is what proves the bunfig was
-    // ignored — the project still gets nub's isolated + GVS-aware default like
-    // any other non-injected project.
-    assert_eq!(config_get(&dir, &xdg_config, "nodeLinker"), "isolated");
+    // Resolution config in the bunfig is ignored too, not just the registry:
+    // under a bun incumbent 3600 bunfig seconds arrive as 60 engine minutes, so
+    // anything else proves the file went unread. (Asserting the exact value
+    // would pin nub's own default, which is not what this test is about.)
+    assert_ne!(
+        config_get(&dir, &xdg_config, "minimumReleaseAge"),
+        "60",
+        "the bunfig's minimumReleaseAge must not be read under nub identity"
+    );
 }
 
 #[test]

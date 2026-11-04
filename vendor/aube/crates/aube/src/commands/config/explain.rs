@@ -1,8 +1,7 @@
 use super::setting_for_key;
-use clap::Args;
 use miette::miette;
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct ExplainArgs {
     /// Setting key, `.npmrc` alias, env var, workspace YAML key, or CLI flag.
     pub key: String,
@@ -19,7 +18,7 @@ pub fn run(args: ExplainArgs) -> miette::Result<()> {
 
     println!("{}", meta.name);
     println!("  Type: {}", meta.type_);
-    println!("  Default: {}", meta.default);
+    println!("  Default: {}", meta.rendered_default());
     println!("  Description: {}", meta.description);
     print_source_line("CLI flags", meta.cli_flags);
     print_source_line("Environment", meta.env_vars);

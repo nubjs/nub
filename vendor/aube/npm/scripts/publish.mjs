@@ -15,7 +15,7 @@
 // Env:
 //   TAG           — release tag, with leading `v` (e.g. v1.0.0-beta.1)
 //   REPO          — owner/repo for the release assets (optional;
-//                   defaults to $GITHUB_REPOSITORY or `jdx/aube`)
+//                   defaults to $GITHUB_REPOSITORY or `aubepkg/aube`)
 //   NPM_TAG       — npm dist-tag (optional; defaults to `next` for
 //                   pre-releases, `latest` otherwise)
 //   NPM_REGISTRY  — npm-compatible registry URL (optional; defaults to
@@ -183,8 +183,8 @@ async function buildPlatformPackage(repo, tag, version, target) {
         name: pkgName,
         version,
         description: 'Platform binaries for aube — do not install directly, see @endevco/aube.',
-        homepage: 'https://aube.jdx.dev',
-        repository: { type: 'git', url: 'https://github.com/jdx/aube' },
+        homepage: 'https://aube.sh',
+        repository: { type: 'git', url: 'https://github.com/aubepkg/aube' },
         license: 'MIT',
         bin: bins,
         files: ['bin', 'README.md'],
@@ -222,7 +222,7 @@ function aubePublish(aubeBin, stageDir, registryUrl, npmTag, dryRun) {
 async function main() {
     const tag = assertEnv('TAG');
     const version = versionFromTag(tag);
-    const repo = process.env.REPO || process.env.GITHUB_REPOSITORY || 'jdx/aube';
+    const repo = process.env.REPO || process.env.GITHUB_REPOSITORY || 'aubepkg/aube';
     const npmTag = process.env.NPM_TAG || defaultNpmTag(version);
     const registryUrl = (process.env.NPM_REGISTRY || DEFAULT_REGISTRY).replace(/\/?$/, '/');
     const dryRun = process.env.DRY_RUN === '1';

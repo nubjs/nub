@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import spec from "../cli/commands.json";
+import { ogImagePath } from "../scripts/generate-og-images.mjs";
 
 interface Cmd {
   name: string;
@@ -37,12 +38,47 @@ const releaseMetadata = JSON.parse(
 ) as ReleaseMetadata;
 const aubeReleasedAt =
   releaseMetadata.version === aubeVersion ? (releaseMetadata.releasedAt ?? "") : "";
+const siteUrl = "https://aube.sh";
+const siteDescription = "A fast Node.js package manager";
 
 export default defineConfig({
   title: "aube",
-  description: "A fast Node.js package manager",
+  description: siteDescription,
   appearance: "force-dark",
   head: [
+    [
+      "script",
+      {},
+      `(function () {
+  try {
+    var d = document.documentElement;
+    var c = JSON.parse(localStorage.getItem("jdx-banner-cache") || "null");
+    var expires = c && c.expires ? Date.parse(c.expires) : NaN;
+    var now = Date.now();
+    var metadataValid =
+      c &&
+      typeof c.id === "string" &&
+      typeof c.height === "string" &&
+      /^[1-9]\\d*(?:\\.\\d+)?px$/.test(c.height) &&
+      Number.isFinite(c.width) &&
+      typeof c.fontSize === "string" &&
+      Number.isFinite(c.pixelRatio) &&
+      Number.isFinite(c.cachedAt) &&
+      c.cachedAt <= now &&
+      now - c.cachedAt < 300000 &&
+      (!c.expires || (typeof c.expires === "string" && Number.isFinite(expires) && now < expires));
+    var contextMatches =
+      metadataValid &&
+      c.width === innerWidth &&
+      c.fontSize === getComputedStyle(d).fontSize &&
+      c.pixelRatio === devicePixelRatio;
+    if (contextMatches && localStorage.getItem("jdx-banner-dismissed") !== c.id)
+      d.style.setProperty("--vp-layout-top-height", c.height);
+    else if (c && !metadataValid)
+      localStorage.removeItem("jdx-banner-cache");
+  } catch (e) {}
+})();`,
+    ],
     ["link", { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" }],
     ["link", { rel: "icon", href: "/favicon.ico", sizes: "any" }],
     [
@@ -74,11 +110,38 @@ export default defineConfig({
     ["link", { rel: "manifest", href: "/site.webmanifest" }],
     ["meta", { name: "theme-color", content: "#FFB13B" }],
   ],
+  transformHead({ pageData }) {
+    const title = pageData.relativePath === "index.md" ? siteDescription : pageData.title;
+    const description = pageData.description || siteDescription;
+    const image = `${siteUrl}/${ogImagePath(pageData.relativePath)}`;
+    const url = new URL(
+      pageData.relativePath.replace(/index\.md$/, "").replace(/\.md$/, ""),
+      `${siteUrl}/`,
+    ).toString();
+
+    return [
+      ["meta", { property: "og:type", content: "website" }],
+      ["meta", { property: "og:site_name", content: "aube" }],
+      ["meta", { property: "og:url", content: url }],
+      ["meta", { property: "og:title", content: title }],
+      ["meta", { property: "og:description", content: description }],
+      ["meta", { property: "og:image", content: image }],
+      ["meta", { property: "og:image:width", content: "1200" }],
+      ["meta", { property: "og:image:height", content: "630" }],
+      ["meta", { property: "og:image:alt", content: `${title} — aube` }],
+      ["meta", { name: "twitter:card", content: "summary_large_image" }],
+      ["meta", { name: "twitter:title", content: title }],
+      ["meta", { name: "twitter:description", content: description }],
+      ["meta", { name: "twitter:image", content: image }],
+      ["meta", { name: "twitter:image:alt", content: `${title} — aube` }],
+    ];
+  },
   themeConfig: {
     logo: "/logo.svg",
     nav: [
       { text: "Home", link: "/" },
       { text: "Benchmarks", link: "/benchmarks" },
+      { text: "Team", link: "/team" },
       { text: "CLI Reference", link: "/cli/" },
       { text: "Settings", link: "/settings/" },
       { text: "Releases", link: "https://github.com/jdx/aube/releases" },
@@ -92,6 +155,7 @@ export default defineConfig({
           { text: "Getting Started", link: "/getting-started" },
           { text: "Installation", link: "/installation" },
           { text: "Contributing", link: "/contributing" },
+          { text: "Team", link: "/team" },
           { text: "For pnpm users", link: "/pnpm-users" },
           { text: "For npm users", link: "/npm-users" },
           { text: "For yarn users", link: "/yarn-users" },

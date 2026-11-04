@@ -397,6 +397,114 @@ fn tarjan_scc(graph: &LockfileGraph) -> Vec<Vec<String>> {
     out
 }
 
+/// Group selected dependency builds into children-first phases.
+///
+/// The graph walk includes non-building packages only when they connect two
+/// selected builds: if `parent -> bridge -> child` and only parent/child have
+/// lifecycle scripts, child still has to finish before parent starts. An
+/// unrelated non-building child does not delay its parent. Strongly connected
+/// components collapse dependency cycles into one phase, matching pnpm's
+/// graph sequencer rather than deadlocking on a cycle.
+///
+/// Every member of `selected` that is a key of `graph.packages` appears in
+/// exactly one returned phase — `lifecycle`'s per-job phase lookup is an
+/// `expect` on that. A phase carrying no selected build is dropped rather than
+/// emitted empty, so an index into the result is a position in this sequence,
+/// not a graph depth.
+pub(super) fn dependency_build_phases(
+    graph: &LockfileGraph,
+    selected: &BTreeSet<String>,
+) -> Vec<Vec<String>> {
+    let mut components = tarjan_scc(graph);
+    for members in &mut components {
+        members.sort();
+    }
+
+    let mut component_by_path = BTreeMap::new();
+    for (index, members) in components.iter().enumerate() {
+        for dep_path in members {
+            component_by_path.insert(dep_path.as_str(), index);
+        }
+    }
+
+    // Edges point parent -> child. A component becomes ready only after all
+    // child components have drained, so Kahn's algorithm emits leaves first.
+    let mut children = vec![BTreeSet::new(); components.len()];
+    let mut parents = vec![BTreeSet::new(); components.len()];
+    for (dep_path, package) in &graph.packages {
+        let Some(&parent) = component_by_path.get(dep_path.as_str()) else {
+            continue;
+        };
+        for (child_name, child_tail) in &package.dependencies {
+            let Some(child_path) = aube_lockfile::resolve_dep_edge(child_name, child_tail, |key| {
+                graph.packages.contains_key(key)
+            }) else {
+                continue;
+            };
+            let Some(&child) = component_by_path.get(child_path.as_str()) else {
+                continue;
+            };
+            if parent != child && children[parent].insert(child) {
+                parents[child].insert(parent);
+            }
+        }
+    }
+
+    // pnpm sequences only packages that build and the ancestors connecting
+    // them. Starting at selected components and walking toward parents gives
+    // that same projection without letting unrelated graph depth serialize
+    // independent builds.
+    let mut relevant = BTreeSet::new();
+    let mut pending: Vec<usize> = selected
+        .iter()
+        .filter_map(|dep_path| component_by_path.get(dep_path.as_str()).copied())
+        .collect();
+    while let Some(component) = pending.pop() {
+        if relevant.insert(component) {
+            pending.extend(parents[component].iter().copied());
+        }
+    }
+
+    let mut remaining_children: Vec<usize> = children
+        .iter()
+        .map(|component_children| {
+            component_children
+                .iter()
+                .filter(|child| relevant.contains(child))
+                .count()
+        })
+        .collect();
+    let mut ready: BTreeSet<usize> = relevant
+        .iter()
+        .copied()
+        .filter(|index| remaining_children[*index] == 0)
+        .collect();
+    let mut phases = Vec::new();
+    while !ready.is_empty() {
+        let current = std::mem::take(&mut ready);
+        let mut selected_here = Vec::new();
+        for component in current {
+            selected_here.extend(
+                components[component]
+                    .iter()
+                    .filter(|dep_path| selected.contains(*dep_path))
+                    .cloned(),
+            );
+            for &parent in &parents[component] {
+                remaining_children[parent] -= 1;
+                if remaining_children[parent] == 0 {
+                    ready.insert(parent);
+                }
+            }
+        }
+        selected_here.sort();
+        if !selected_here.is_empty() {
+            phases.push(selected_here);
+        }
+    }
+    phases
+}
+
 fn dfs_post(start: usize, edges: &[BTreeSet<usize>], seen: &mut [bool], order: &mut Vec<usize>) {
     if seen[start] {
         return;
@@ -1044,5 +1152,54 @@ mod tests {
         let hashes = csh(&g);
         assert_eq!(hashes.len(), 2);
         assert_eq!(hashes["a@1"], hashes["b@1"]);
+    }
+
+    #[test]
+    fn build_phases_wait_through_non_building_intermediaries() {
+        let graph = graph_of(&[
+            pkg_with_deps("parent", "1", &[("bridge", "1"), ("unused", "1")]),
+            pkg_with_deps("bridge", "1", &[("child", "1")]),
+            pkg("child", "1"),
+            pkg("unused", "1"),
+            pkg("independent", "1"),
+        ]);
+        let selected = [
+            "parent@1".to_string(),
+            "child@1".to_string(),
+            "independent@1".to_string(),
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            dependency_build_phases(&graph, &selected),
+            vec![
+                vec!["child@1".to_string(), "independent@1".to_string()],
+                vec!["parent@1".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn build_phases_keep_independent_jobs_parallel_and_cycles_live() {
+        let graph = graph_of(&[
+            pkg_with_deps("parent", "1", &[("left", "1"), ("right", "1")]),
+            pkg_with_deps("left", "1", &[("right", "1")]),
+            pkg_with_deps("right", "1", &[("left", "1")]),
+            pkg("independent", "1"),
+        ]);
+        let selected = graph.packages.keys().cloned().collect();
+
+        assert_eq!(
+            dependency_build_phases(&graph, &selected),
+            vec![
+                vec![
+                    "independent@1".to_string(),
+                    "left@1".to_string(),
+                    "right@1".to_string(),
+                ],
+                vec!["parent@1".to_string()],
+            ]
+        );
     }
 }

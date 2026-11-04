@@ -1,0 +1,49 @@
+---
+title: "Nub 0.7.4"
+description: Adds guided configuration setup and reports missing registry packages before reputation warnings.
+author: The Nub Team
+date: 2026-08-08
+---
+
+Nub 0.7.4 adds a guided config initializer and makes missing-package errors authoritative during installs.
+
+## Create a project config
+
+`nub config init` creates a commented `nub.jsonc` at the project root with every supported project field visible and disabled:
+
+```bash
+nub config init
+```
+
+Only the schema URL is active, so initialization does not change runtime or install behavior. Existing files are never replaced.
+
+The global form includes machine-wide settings such as temporary-package consent:
+
+```bash
+nub config init --global
+```
+
+Config commands now use project scope by default and `--global` for user scope. The prefix form is equivalent:
+
+```bash
+nub config set --global envFile false
+nub global config set envFile false
+```
+
+The former `--location` option has been removed. Protected npm credentials still default to the user `.npmrc`; use `--local` only when a project credential is intentional.
+
+## Missing packages fail first
+
+A missing registry package now returns `ERR_NUB_PACKAGE_NOT_FOUND` before similarity or package-age checks can produce a reputation warning:
+
+```bash
+nub add @types/nub
+```
+
+Public unscoped typos can include a non-interactive suggestion in that error. Scoped package names no longer suggest unrelated basenames from another namespace, and private-registry failures never use the public npm suggestion corpus.
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.7.4) list every change in this release.
+
+## Get started
+
+<GetStarted />

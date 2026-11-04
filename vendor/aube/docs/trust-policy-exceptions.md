@@ -103,7 +103,7 @@ exception list because their published metadata has triggered legitimate
 </ul>
 
 This list is generated directly from
-[`DEFAULT_TRUST_POLICY_EXCLUDES`](https://github.com/jdx/aube/blob/main/crates/aube-resolver/src/trust.rs)
+[`DEFAULT_TRUST_POLICY_EXCLUDES`](https://github.com/aubepkg/aube/blob/main/crates/aube-resolver/src/trust.rs)
 at documentation build time, so it cannot drift from the resolver. Inclusion
 is not an accusation of malware; it records inconsistent publishing evidence
 that weakens the protection for every aube user.

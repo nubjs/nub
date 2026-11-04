@@ -1,5 +1,5 @@
 use aube_lockfile::{
-    DepType, DirectDep, LockedPackage, LockfileGraph, LockfileKind, LockfileSettings,
+    DepType, DirectDep, LocalSource, LockedPackage, LockfileGraph, LockfileKind, LockfileSettings,
 };
 use proptest::prelude::*;
 use std::collections::BTreeMap;
@@ -210,6 +210,106 @@ fn roundtrip(
 }
 
 proptest! {
+    #[test]
+    fn npm_parser_classifies_declared_remote_tarballs(
+        nested in any::<bool>(),
+        scheme in prop_oneof![Just("http"), Just("https")],
+        host in "[a-z][a-z0-9-]{0,10}",
+        first_path in "[a-z][a-z0-9-]{0,10}",
+        second_path in "[a-z][a-z0-9-]{0,10}",
+        suffix in prop_oneof![Just(".tgz"), Just(".tar.gz?download=1"), Just("/download")],
+        integrity_tail in "[A-Za-z0-9]{8,24}",
+    ) {
+        let url = format!(
+            "{scheme}://{host}.example.test/{first_path}/{second_path}{suffix}"
+        );
+        let integrity = format!("sha512-{integrity_tail}");
+        let remote_path = if nested {
+            "node_modules/parent/node_modules/remote-pkg"
+        } else {
+            "node_modules/remote-pkg"
+        };
+
+        let mut packages = serde_json::Map::new();
+        let root_dependencies = if nested {
+            serde_json::json!({
+                "parent": "1.0.0",
+                "registry-pkg": "^2.0.0"
+            })
+        } else {
+            serde_json::json!({
+                "remote-pkg": url.clone(),
+                "registry-pkg": "^2.0.0"
+            })
+        };
+        packages.insert(
+            String::new(),
+            serde_json::json!({ "dependencies": root_dependencies }),
+        );
+        if nested {
+            packages.insert(
+                "node_modules/parent".to_string(),
+                serde_json::json!({
+                    "version": "1.0.0",
+                    "dependencies": { "remote-pkg": url.clone() }
+                }),
+            );
+        }
+        packages.insert(
+            remote_path.to_string(),
+            serde_json::json!({
+                "version": "3.0.0",
+                "resolved": url.clone(),
+                "integrity": integrity.clone()
+            }),
+        );
+        packages.insert(
+            "node_modules/registry-pkg".to_string(),
+            serde_json::json!({
+                "version": "2.1.0",
+                "resolved": "https://registry.npmjs.org/registry-pkg/-/registry-pkg-2.1.0.tgz",
+                "integrity": "sha512-registry"
+            }),
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lockfile = serde_json::json!({
+            "lockfileVersion": 3,
+            "packages": packages
+        });
+        std::fs::write(
+            dir.path().join("package-lock.json"),
+            serde_json::to_vec(&lockfile).expect("serialize lockfile"),
+        )
+        .expect("write lockfile");
+
+        let graph = aube_lockfile::parse_lockfile(
+            dir.path(),
+            &aube_manifest::PackageJson::default(),
+        )
+        .expect("parse lockfile");
+        let remote = graph
+            .packages
+            .values()
+            .find(|pkg| pkg.name == "remote-pkg")
+            .expect("remote package");
+        let Some(LocalSource::RemoteTarball(source)) = &remote.local_source else {
+            return Err(TestCaseError::fail(format!(
+                "expected remote tarball source, got {:?}",
+                remote.local_source
+            )));
+        };
+        prop_assert_eq!(source.url.as_str(), url.as_str());
+        prop_assert_eq!(source.integrity.as_str(), integrity.as_str());
+
+        let registry = graph
+            .packages
+            .values()
+            .find(|pkg| pkg.name == "registry-pkg")
+            .expect("registry package");
+        prop_assert!(registry.local_source.is_none());
+    }
+
     #[test]
     fn pnpm_lockfile_roundtrips_generated_registry_graph(shape in graph_shapes()) {
         let (graph, manifest) = graph_from_shape(shape);

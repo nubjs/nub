@@ -3,7 +3,7 @@
 This page lists every security-relevant feature in aube, its default, and the
 one-line config to turn it on or off.
 
-To report a vulnerability, see the [security policy](https://github.com/jdx/aube/security/policy).
+To report a vulnerability, see the [security policy](https://github.com/aubepkg/aube/security/policy).
 
 ## The `paranoid` switch
 
@@ -146,6 +146,10 @@ structured metadata shapes npm emits after registry-side checks:
 This install-time policy validates the registry metadata shape; it does not
 cryptographically verify the attached attestation bundle.
 
+The policy runs when aube resolves a package version. Versions already present
+in the active lockfile are trusted, so frozen and repeat installs do not
+re-fetch publishing evidence for packages the project has already accepted.
+
 A trust downgrade may indicate a supply-chain incident: publisher account
 takeover, repository tampering, or a malicious co-maintainer publishing
 without the original CI flow.
@@ -223,20 +227,9 @@ continues; `advisoryCheck: required` upgrades that to a fail-closed
 `ERR_AUBE_ADVISORY_CHECK_FAILED` so CI can tell a network outage from a
 confirmed-malicious advisory.
 
-**Similar package name.** aube compares requested names with a monthly
-snapshot of the 100,000 most-downloaded npm packages before contacting the
-registry. The comparison is namespace-aware: unscoped packages are compared
-only with unscoped packages, names within the same scope are compared by
-basename, and names in different scopes are compared in full. This catches
-lookalikes such as `lodahs` → `lodash`, `@babel/parserr` → `@babel/parser`,
-and `@type/node` → `@types/node` without treating an intentional scoped fork
-as an unscoped-package impersonation.
+**Similar package name.** For each requested package subject to the reputation gates, aube verifies that the name exists before comparing it with a monthly snapshot of the 100,000 most-downloaded npm packages. Exempt names skip this preflight and are checked during normal resolution. A missing name fails with `ERR_AUBE_PACKAGE_NOT_FOUND` without a confirmation prompt; for a typo on the public npm registry, the error may include a suggestion. Unscoped packages are compared only with unscoped packages, and packages in different scopes are compared by their full names. Packages within the same scope are not compared because npm scopes are owned namespaces. This catches existing lookalikes such as `lodahs` → `lodash` without treating packages controlled by one scope owner as impersonations.
 
-Interactive sessions show a “did you mean?” prompt. Non-interactive sessions
-fail with `ERR_AUBE_SIMILAR_PACKAGE_NAME`. The popularity corpus contains
-names only, is compressed into release binaries, and is generated from the
-continuously updated ecosyste.ms npm registry index rather than an
-infrequently published npm data package.
+An existing lookalike shows a “did you mean?” prompt in interactive sessions. Non-interactive sessions fail with `ERR_AUBE_SIMILAR_PACKAGE_NAME`. The popularity corpus contains names only, is compressed into release binaries, and is generated from the continuously updated ecosyste.ms npm registry index rather than an infrequently published npm data package.
 
 **Low download count.** A typosquat or impersonation has approximately zero
 installs on day one regardless of how cleverly it's named, so a
@@ -458,7 +451,7 @@ allowBuilds:
   # ...whatever your project actually needs to build
 ```
 
-`trustPolicy=no-downgrade` and `minimumReleaseAge: 1440` (24h) are already
+`trustPolicy: no-downgrade` and `minimumReleaseAge: 1440` (24h) are already
 default-on; `paranoid: true` adds the rest of the bundle on top. Pair this
 with `aube audit` in CI so a newly disclosed CVE fails the build instead of
 silently shipping.

@@ -23,6 +23,7 @@ on:  # zizmor: ignore[dangerous-triggers] trunk-only notifier; reads CI conclusi
       - Native-dep floor
       - Daily-driver smoke
       - WPT Worker
+      - Action smoke
     branches: [main]
     types: [completed]
 

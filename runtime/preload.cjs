@@ -1,4 +1,5 @@
-// Nub fast-tier preload — Node 22.15+, injected via `--require` (CommonJS).
+// Nub fast-tier preload — Node 22.15+ excluding 23.0–23.4 (which have no sync
+// `module.registerHooks`), injected via `--require` (CommonJS).
 //
 // WHY CJS / `--require` (not the `.mjs` `--import` the compat tier uses): the mere
 // presence of `--import` forces Node to eagerly initialize the ESM loader, which
@@ -35,6 +36,15 @@
 // test-cjs-esm-warn, test-disable-require-module-with-detection,
 // test-esm-type-field-errors-2, parallel/test-require-mjs.)
 
+// The launcher only arms this on measured releases without user Node options,
+// snapshots, PnP, or environment-owner preloads. Main's heap is already configured;
+// clear the process-global override before any application can create a Worker.
+// V8's ConfigureHeap gives this flag precedence over Worker resourceLimits, even
+// with execArgv: []. Resetting it leaves main's stored heap limits unchanged.
+if (process.env.__NUB_GC_STARTUP) {
+  require("./gc-startup.cjs");
+}
+
 // Electron self-disable (issue #246). Bail before any augmentation when this
 // preload runs inside an Electron process: the fast-tier `module.registerHooks`
 // load hook below DEADLOCKS Electron's main-process module bootstrap (the call
@@ -68,6 +78,15 @@ common.restoreCompileCacheEnv();
 // Publish process.versions.nub (self-identification marker) before user code runs.
 // Tier-independent — same call in the compat entry (preload.mjs).
 common.installVersionMarker();
+// Settle nub's own UV_THREADPOOL_SIZE at the first loop turn, so a program can still
+// set its own before it first uses the pool; then strip it so children get Node's
+// default, and demote the workers beyond Node's four on Linux. `true`: nothing has
+// used the pool yet on this tier (preload.mjs settles at once).
+common.installThreadpoolPolicy(true);
+// Consume the launcher's fetch-handler marker BEFORE any user code — the configured
+// preload chain below included — and note which entry it names. Arming the pass
+// itself waits for the end of this file (`installServeEntry`).
+common.claimServeEntry();
 
 // `--no-experimental-require-module` disables require(esm) globally, so the
 // transform-core require below (and the worker/locks ESM side-effect modules)
@@ -109,23 +128,21 @@ const { installSyncPolyfills } = __require("./polyfills.cjs");
 //     load-bearing half of the nub#460 fix.
 const forceAsyncTier = !!process.env.__NUB_FORCE_ASYNC_TIER || common.shouldAutoAsyncTierAtPreload();
 
-if (!requireEsmDisabled && !forceAsyncTier) {
+// Sync `module.registerHooks` shipped on the 23.x line at 23.5.0 and on the 22.x LTS
+// line only later, at 22.15.0 — so 23.0–23.4 sorts ABOVE the 22.x fast floor while
+// carrying no sync hook API. The spawn path keeps that band on preload.mjs, but
+// NODE_OPTIONS is inherited by the WHOLE subtree: a grandchild `node` nub never saw
+// spawn can resolve to a 23.0–23.4 binary and pick this `--require` token up anyway.
+// Without this probe the registration below throws `registerHooks is not a function`
+// before any user code runs. The async branch is the correct home for it — that is
+// the same loader-worker registration the compat tier uses on exactly this band.
+const hasRegisterHooks = typeof module_.registerHooks === "function";
+
+if (hasRegisterHooks && !requireEsmDisabled && !forceAsyncTier) {
   // ── Fast tier (sync require(esm) available) ───────────────────────
 
   // ── Watch-mode dependency reporting + hooks ───────────────────────
   const watchReporting = common.installWatchReporting(core);
-
-  // Best-effort bounded-cache eviction (main thread only; the core guards on it).
-  // DEFERRED to setImmediate: maybeSweepCache probes `worker_threads.isMainThread`
-  // and dynamic-imports cache-evict.mjs, which would otherwise pull worker_threads
-  // (and its streams/worker-io transitive set) into the BOOTSTRAP module-load list
-  // on every startup — a cold-start regression (test-bootstrap-modules snapshots
-  // process.moduleLoadList at user code's first line). Running it one turn later
-  // keeps those out of the bootstrap snapshot while preserving the once-a-day sweep.
-  // unref so a purely-synchronous program still exits promptly without waiting on it.
-  setImmediate(() => {
-    try { core.maybeSweepCache(); } catch {}
-  }).unref();
 
   // ── Pre-load clobbered polyfill packages BEFORE hooks register ────
   // Packages in the core's CLOBBER_MAP can't be imported after hooks register (the
@@ -165,26 +182,62 @@ if (!requireEsmDisabled && !forceAsyncTier) {
 
   // ── Compile-cache: re-enable for the USER's modules (R8) ──────────
   common.reenableUserCompileCache();
+
+  // ── User preloads (`nub.jsonc` `preload`) ─────────────────────────
+  // LAST, so the user's entries observe a fully-augmented realm — hooks installed,
+  // polyfills in place. Measured: a `.ts` entry transpiles and its tsconfig `paths`
+  // alias resolves, matching what the old per-entry `--require` token gave by
+  // sitting after nub's own. A no-op unless the spawn path put the chainer on nub's
+  // preload rather than its own `--import`. See requireUserPreloadChain.
+  common.requireUserPreloadChain();
 } else {
   // ── Async loader-worker tier ──────────────────────────────────────
-  // Entered when EITHER require(esm) is disabled (`--no-experimental-require-module`,
-  // so the in-thread sync core can't load) OR `forceAsyncTier` is set (nub composes
-  // with a foreign async loader on a broken-compose Node — see above). Register the
-  // SAME hooks the compat tier uses, run in a dedicated loader worker via
-  // `module.register`; that worker imports
-  // transform-core.mjs as a static ESM import (not gated by the flag). The
-  // main-thread CJS require() transpile shim, which would need the core
-  // synchronously in-thread, is unavailable in this mode — an honest, additive
-  // degradation: the user opted out of require(esm), and nub's `.ts`-via-require()
-  // transpile rides on exactly that mechanism. `import`-side TS still transpiles
-  // through the registered loader-worker hooks. User require(esm) of THEIR own ES
-  // modules still gets Node's native ERR_REQUIRE_ESM, exactly as the flag promises.
+  // THREE independent entry conditions, and they do NOT share a rationale — the
+  // main-thread CJS require() shim below is installed on exactly ONE of them, so
+  // each is named separately:
+  //
+  //   1. `requireEsmDisabled` — `--no-experimental-require-module`. `core` is null
+  //      (the require(esm) of transform-core.mjs threw), so the in-thread shim has
+  //      no transform core to call and genuinely cannot be installed. An honest,
+  //      additive degradation: the user opted out of require(esm), and nub's
+  //      `.ts`-via-require() transpile rides on exactly that mechanism. User
+  //      require(esm) of THEIR own ES modules still gets Node's native
+  //      ERR_REQUIRE_ESM, exactly as the flag promises.
+  //   2. `forceAsyncTier` — nub composes with a foreign async loader on a
+  //      broken-compose Node (see above). `registerHooks` EXISTS here, so the
+  //      `!hasRegisterHooks` gate below skips the shim and this entry keeps its
+  //      long-standing behavior: loader-worker `import` coverage, no main-thread
+  //      `_resolveFilename` patch (so no tsconfig-`paths`/PnP/`.ts`-specifier
+  //      resolution from CJS while composing with a foreign loader).
+  //   3. No sync `registerHooks` — an inherited-NODE_OPTIONS 23.0–23.4 grandchild.
+  //      `core` IS loaded here and require(esm) works, so the shim's prerequisite is
+  //      present and it MUST be installed; see the call below.
+  //
+  // All three register the SAME hooks the compat tier uses, run in a dedicated loader
+  // worker via `module.register`; that worker imports transform-core.mjs as a static
+  // ESM import (not gated by the flag). `import`-side TS transpiles through those
+  // loader-worker hooks on every one of the three.
   const { pathToFileURL } = require("node:url");
   // Via the shared helper so Node 26+'s DEP0205 (steering to module.registerHooks) is
-  // not leaked onto the user's stderr — nub is forced onto module.register here
-  // because require(esm) is off, so registerHooks' in-thread sync core load is
-  // impossible; the user has no action to take. See registerLoaderWorker.
-  common.registerLoaderWorker("./preload-async-hooks.mjs", pathToFileURL(__filename).href);
+  // not leaked onto the user's stderr — on every entry above nub is forced onto
+  // module.register (require(esm) off, foreign-loader composition, or registerHooks
+  // absent outright), so the user has no action to take. See registerLoaderWorker.
+  common.registerLoaderWorker(
+    "./preload-async-hooks.mjs",
+    pathToFileURL(__filename).href,
+    common.loaderWorkerOptions(),
+  );
+
+  // Entry 3 only. `module.register` is ESM-loader-only, so without this a
+  // `require('./x.ts')` on 23.0–23.4 reaches Node raw and dies on the first type
+  // annotation: that band has neither sync `registerHooks` (23.5) nor native type
+  // stripping (unflagged at 23.6). This is the same call preload.mjs makes on the
+  // same band, with the same classic-transpile argument, so a grandchild reached
+  // through inherited NODE_OPTIONS behaves like the compat tier rather than losing
+  // require()'d TS outright. Gated on `core` because entry 1 has none.
+  if (!hasRegisterHooks && core) {
+    common.installCjsRequireHooks(core, !process.features?.typescript);
+  }
 
   // Sync, non-require(esm) polyfills still install (none of them require(esm)).
   // Clobbered-polyfill packages are CJS requires, unaffected by the flag.
@@ -196,7 +249,47 @@ if (!requireEsmDisabled && !forceAsyncTier) {
   // user's compile-cache re-enable is independent of require(esm).
   common.installTemporalLazyGlobal(__require);
   common.reenableUserCompileCache();
+
+  // ── User preloads (`nub.jsonc` `preload` + folded NODE_OPTIONS entries) ──
+  // Also loaded on THIS tier. The chainer is carried by nub's own preload on both
+  // tiers, so skipping it here silently dropped every entry whenever the async tier
+  // was selected — which an inherited `--import` triggers on the broken-compose band
+  // (22.15–24.11) via shouldAutoAsyncTierAtPreload.
+  common.requireUserPreloadChain();
 }
+
+// ── Bounded-cache eviction (BOTH branches above) ────────────────────
+// Main thread only; the core guards on that too. Deferred one turn so the
+// dynamic import of cache-evict.mjs and maybeSweepCache's `worker_threads`
+// probe stay out of the BOOTSTRAP module-load list, which test-bootstrap-modules
+// snapshots at user code's first line.
+//
+// SCHEDULED ONLY WHEN A SWEEP IS DUE, and then ref'd. It used to be armed
+// unconditionally and `.unref()`'d, so a purely SYNCHRONOUS program — the common
+// `nub script.ts` — exited before the callback could run: for a user whose runs
+// are all synchronous the cache was never swept at all and grew without bound.
+// `sweepDue()` is one statSync with no mkdir and no worker_threads, so the
+// overwhelmingly common not-due path now schedules NOTHING (strictly cheaper
+// than before), and on the once-a-day run that IS due the process waits for the
+// eviction it asked for. Placed after the tier branches so the async-loader tier
+// sweeps too — it never did; `core` is null there only when require(esm) is off,
+// which is exactly when there is no core to ask.
+if (core && core.sweepDue()) {
+  setImmediate(() => {
+    try { core.maybeSweepCache(); } catch {}
+  });
+}
+
+// ── Default-export `fetch` handler (BOTH branches above) ────────────
+// Arms the deferred pass that serves an entry whose default export is a `fetch`
+// handler. Tier-independent — the same call sits in preload.mjs — and a no-op
+// unless `claimServeEntry` above found this process marked as a top-level file
+// run. Placed after the tier branches so the shape check runs on either, and after
+// the eviction block for the same reason it is: nothing here may touch the
+// bootstrap module list. `true`: this `--require` preload runs before Node calls
+// `Module.runMain`, so the pass can ride that call (see the triggers above
+// `installServeEntry`); the `--import` entry cannot, and passes nothing.
+common.installServeEntry(true);
 
 // ── Lazy ESM-side-effect polyfills (R7) ─────────────────────────────
 // The two ESM side-effect polyfills — the browser-shape Worker global
@@ -223,12 +316,25 @@ if (!requireEsmDisabled && !forceAsyncTier) {
 // worker_threads to exist, and test-bootstrap-modules measures the main thread.
 function installLazyEsmPolyfills() {
   // Cheap main-thread detection that does NOT pull node:worker_threads into the
-  // main-thread bootstrap (requiring it eagerly is exactly the regression we're
-  // fixing): in a worker, worker_threads is already in the module-load list by the
-  // time this preload runs; on the main thread it is not.
-  const inWorkerThread = process.moduleLoadList.some(
+  // main-thread bootstrap (requiring it eagerly is exactly the regression this lazy
+  // path exists to fix). `process.moduleLoadList` alone is NOT an oracle — it says
+  // only that the module is RESIDENT, which anything running earlier in the same
+  // process can make true on the main thread. That false positive shipped: touching
+  // the lazy `MessageEvent` global in installSyncPolyfills loaded worker_threads, so
+  // the main thread took the worker branch below and eagerly loaded the very ESM
+  // polyfills this code defers. So use residency only as a GATE, then ask the
+  // authoritative `isMainThread` — free precisely because we only ask once the
+  // module is already loaded, and unpoisonable because a worker's bootstrap always
+  // loads worker_threads before any preload runs.
+  const workerThreadsResident = process.moduleLoadList.some(
     (m) => m === "NativeModule worker_threads",
   );
+  const inWorkerThread =
+    workerThreadsResident &&
+    !(process.getBuiltinModule
+      ? process.getBuiltinModule("node:worker_threads")
+      : __require("node:worker_threads")
+    ).isMainThread;
 
   const loadEsmSideEffect = (specifier) => {
     try {
@@ -279,6 +385,20 @@ function installLazyEsmPolyfills() {
     __require("./worker-blob-url.cjs").installBlobUrlSupport();
   } catch {
     // blob: worker support is best-effort; never block startup on it.
+  }
+
+  // Laziness below depends on being able to load an ES module SYNCHRONOUSLY on
+  // first access — a getter cannot await. Under `--no-experimental-require-module`
+  // loadEsmSideEffect can only fall back to a dynamic `import()`, which resolves a
+  // tick too late: the getter would hand user code `undefined` instead of the
+  // constructor. Load eagerly there and accept the startup cost; the user opted out
+  // of require(esm), which is the mechanism the lazy path is built on.
+  if (requireEsmDisabled) {
+    loadEsmSideEffect("./worker-polyfill.mjs");
+    if (typeof globalThis.navigator?.locks === "undefined") {
+      loadEsmSideEffect("./navigator-locks.mjs");
+    }
+    return;
   }
 
   // Main thread: lazy Worker global. Defined NON-ENUMERABLE so it stays invisible

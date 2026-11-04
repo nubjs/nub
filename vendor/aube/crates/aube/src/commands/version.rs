@@ -6,13 +6,12 @@
 //! and surrounding formatting are preserved — we only rewrite the string
 //! value that follows the `"version"` key.
 
-use clap::Args;
 use miette::{Context, IntoDiagnostic, miette};
 use node_semver::{Identifier, Version};
 use std::path::Path;
 use std::process::Command;
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct VersionArgs {
     /// Bump keyword or an explicit version string.
     ///
@@ -23,40 +22,40 @@ pub struct VersionArgs {
     pub new_version: Option<String>,
 
     /// Allow setting the version to its current value without erroring.
-    #[arg(long)]
+    #[usage(long)]
     pub allow_same_version: bool,
 
     /// Skip `preversion` / `version` / `postversion` lifecycle scripts.
-    #[arg(long)]
+    #[usage(long)]
     pub ignore_scripts: bool,
 
     /// Emit the result as JSON instead of `v<version>` text.
-    #[arg(long)]
+    #[usage(long)]
     pub json: bool,
 
     /// Commit message template.
     ///
     /// `%s` is replaced with the new version. Defaults to `v%s`.
-    #[arg(short = 'm', long, value_name = "MSG")]
+    #[usage(short = 'm', long, value_name = "MSG")]
     pub message: Option<String>,
 
     /// Skip git pre-commit / commit-msg hooks (passes `--no-verify`).
-    #[arg(long = "no-commit-hooks", action = clap::ArgAction::SetTrue)]
+    #[usage(long = "no-commit-hooks")]
     pub no_commit_hooks: bool,
 
     /// Don't create a git commit or tag.
     ///
     /// By default `aube version` commits the manifest change and
     /// tags it `v<version>`.
-    #[arg(long = "no-git-tag-version", action = clap::ArgAction::SetTrue)]
+    #[usage(long = "no-git-tag-version")]
     pub no_git_tag_version: bool,
 
     /// Prerelease identifier to use with the `pre*` keywords (e.g. `rc`).
-    #[arg(long, value_name = "ID")]
+    #[usage(long, value_name = "ID")]
     pub preid: Option<String>,
 
     /// GPG-sign the created tag (`git tag -s`).
-    #[arg(long)]
+    #[usage(long)]
     pub sign_git_tag: bool,
 }
 

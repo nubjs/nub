@@ -44,7 +44,12 @@ const DEFAULT_ENGINE_LEVEL: &str = "warn";
 /// just the command layer. `level` is a tracing level token (`warn`,
 /// `error`, `info`, `debug`) or `off`.
 fn engine_directives(level: &str) -> String {
-    const CRATES: [&str; 11] = [
+    const CRATES: [&str; 12] = [
+        // nub's own PM layer emits user-facing notices at this level too — a
+        // missing busybox sidecar above all, which silently drops Windows
+        // lifecycle scripts back onto `cmd.exe`. Without this directive those
+        // lines are filtered out unless the user sets `RUST_LOG`.
+        "nub_cli",
         "aube",
         "aube_registry",
         "aube_resolver",

@@ -10,6 +10,11 @@
 !.gitattributes
 !.gitmodules
 !.vercelignore
+# Fixture data for the compile-augmentation harness, which tests that a compiled
+# artifact does NOT read a .env at run time. It has to be a real dotfile to be the
+# thing under test, and leaving it untracked made the harness pass locally off an
+# uncommitted file while CI silently tested nothing.
+!tests/compile-augmentation/fixtures/*/.env
 !.worktreeinclude
 !.github/
 # nub-native is its own Cargo workspace; its .cargo/config.toml routes build
@@ -33,8 +38,12 @@
 !vendor/aube/**
 
 # Agent tooling: tracked in git. Only nested git worktrees stay out (they're checkouts, not files git can commit).
+# Track EVERY agent's config, not just Claude's — .codex/ and .mcp.json were missing here, so a fresh
+# clone gave Claude its hooks and settings while Codex got nothing and no agent got the MCP server.
 !.claude/
 !.agents/
+!.codex/
+!.mcp.json
 !.githooks/
 !.opencode/
 !.opencode/opencode.json
@@ -80,10 +89,18 @@ __pycache__/
 # nub-phantom is its own Cargo workspace too (eval tool, built on demand); its
 # default target/ lands in-tree.
 /crates/nub-phantom/target/
+# nub-launcher (the `nub compile` runtime half) is its own size-tuned workspace;
+# a local build lands its target/ in-tree.
+/crates/nub-launcher/target/
+# nub-alias (the Windows nubx.exe / nubr.exe stub) is its own workspace the same way.
+/crates/nub-alias/target/
 /dist/
 /build/
 /coverage/
-node_modules/
+# No trailing slash: with one, this matches only a DIRECTORY, and a `node_modules`
+# SYMLINK slips through — which is how an absolute path to one developer's machine
+# reached a public repo. Without it, both shapes are ignored.
+node_modules
 *.log
 *.swp
 compile_commands.json
@@ -98,6 +115,16 @@ npm/nub-*/bin/
 npm/nub/*.tgz
 npm/nub-*/*.tgz
 
+# Standalone-runner packages (npm/runner, npm/runner-<platform>): the JS is a
+# verbatim slice of runtime/ staged in by scripts/build-runner-npm.mjs, and the
+# addon comes from the platform build — only package.json + README are source.
+npm/runner/*.mjs
+npm/runner/*.cjs
+npm/runner/LICENSE
+npm/runner/*.tgz
+npm/runner-*/nub-native.node
+npm/runner-*/*.tgz
+
 # nub's localStorage/cache leaking into cwd as `0/<node-version>-<arch>-…` when
 # XDG_CACHE_HOME is unset and the store path resolves relative (a real nub bug —
 # the cache should always live under ~/.cache/nub). Ignore the stray dirs until
@@ -111,7 +138,11 @@ npm/nub-*/*.tgz
 # Kept on disk (and in the Desktop backup) but NOT published to the public repo:
 # roadmap, competitive research, design plans, per-version epics. Agents working
 # from a full local checkout still have them; the public repo does not.
-wiki/
+# `wiki/` is now TRACKED and public — the canonical home for design and research
+# docs the repo ships. The internal corpus (roadmap, per-subcommand plans, and the
+# raw provenance from the lifecycle-script investigation) lives under `internal/`,
+# which is a symlink to an external dir.
+internal
 epics/
 
 # Maintainer-local agent-orientation overlay + its Claude Code loader. Neither
@@ -132,16 +163,56 @@ tests/bench/RESULTS.md
 /bun.lockb
 .claude/jobs/
 
-# fray orchestration runtime — local-only, never tracked (internal deliberation; PUBLIC repo)
+# frizz orchestration runtime — local-only, never tracked (internal deliberation; PUBLIC repo).
+# `.frizz/` is already caught by the broad `.*` rule above; both names are listed so a
+# checkout predating the fray→frizz rename stays covered too.
 .fray/
+.frizz/
 
 # local-only design corpus (symlink to external dir) — never tracked
-wiki
+internal
 
-# The repo root is npm-only — a root pnpm-lock.yaml (beside a workspace
-# yaml) would mark the root as a workspace for nub and re-trigger the
-# engines-redirect the soak surfaces were moved to tools/ to avoid.
+# The repo root is nub-identity — `nub.lock` is the tracked lockfile and
+# devEngines.packageManager names nub — so every other PM's root lockfile is
+# residue. A root pnpm-lock.yaml (beside a workspace yaml) additionally marks
+# the root as a workspace for nub and re-triggers the engines-redirect the soak
+# surfaces were moved to tools/ to avoid.
 /pnpm-lock.yaml
+# npm leaves this behind whenever anyone runs `npm install` here to populate
+# node_modules, which the compile test suites need. Neither tracked nor ignored
+# left it one `git add` away from a commit, and it got into one.
+/package-lock.json
 
-# Maintainer-local fray worker norms (names private orchestration tooling).
+# Maintainer-local frizz worker norms (names private orchestration tooling). The tool
+# was renamed fray→frizz and only the old name was listed, so FRIZZ.md sat untracked and
+# unignored in a PUBLIC repo — one `git add -A` from being published.
 FRAY.md
+FRIZZ.md
+
+# Cross-built launcher templates staged beside the nub binary for a --platform
+# compile. Build artifacts, and large ones — a stray `git add -A` swept a 1 MB
+# musl launcher into a commit.
+/nub-launcher-*
+
+# Local-only catalog snapshots taken before schema migrations. Never tracked.
+catalog-backups/
+catalog-legacy/
+
+# Scratch: profiler dumps, one-off probes, and scan output. These reached main once
+# (7ae35e252b) and were removed in the following commit; the patterns stop a repeat.
+# Default output dir for scripts/download-stats.mjs (CSVs, summary.json, the chart).
+# Regenerated on demand from live APIs, so it is derived data, never tracked.
+/tmp/
+
+# Written by tests/compile-sea-probe/probe.mjs on every run, because the compile
+# needs a package.json beside the fixture to resolve it as a module. Its sibling
+# .node-version is already covered by the blanket dotfile rule above, so only this
+# one showed up as an untracked file after a local probe run.
+/tests/compile-sea-probe/package.json
+
+*.cpuprofile
+/p.js
+/rev.rs
+/refined.txt
+/scan-results.txt
+/site/loadbig.cjs

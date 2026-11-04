@@ -64,6 +64,23 @@ teardown() {
 	assert_file_exists node_modules/is-odd/package.json
 }
 
+@test "aube ci --disable-global-virtual-store materializes packages per-project" {
+	_setup_basic_fixture
+	run aube --disable-global-virtual-store ci
+	assert_success
+	assert_dir_exists node_modules/.aube/is-odd@3.0.1
+	run test -L node_modules/.aube/is-odd@3.0.1
+	assert_failure
+}
+
+@test "aube clean-install --enable-global-virtual-store overrides the CI default" {
+	_setup_basic_fixture
+	run env CI=1 aube clean-install --enable-global-virtual-store
+	assert_success
+	run test -L node_modules/.aube/is-odd@3.0.1
+	assert_success
+}
+
 @test "aube ci removes a symlink node_modules without wiping its target" {
 	# If node_modules is a symlink to an unrelated directory (rare but
 	# legal), ci must unlink the symlink itself and NOT recursively delete

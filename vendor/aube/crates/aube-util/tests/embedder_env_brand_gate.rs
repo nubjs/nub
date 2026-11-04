@@ -54,9 +54,9 @@ static NUBLIKE: Embedder = Embedder {
     tty_progress: false,
     rich_update_picker: false,
     strict_unsupported_source: false,
-    warm_trust_revalidate: true,
     trust_policy_ignore_after_default: None,
     extra_settings_fingerprint: None,
+    unsupported_settings: &[],
 };
 
 /// Restore the previous value of an env var around a closure. Integration-test

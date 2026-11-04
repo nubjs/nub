@@ -14,14 +14,30 @@ name: WPT Worker
 # tier), and the latest major.
 #
 # COST MODEL mirrors node-matrix.yml: build nub ONCE, reuse the bundle across every Node
-# leg (the Node version is a setup-node/PATH choice, not a rebuild). The runner is cheap
-# (subprocess-per-file, ~seconds), so every push/PR is fine.
+# leg (the Node version is a setup-node/PATH choice, not a rebuild). The runner legs are
+# cheap (subprocess-per-file, ~seconds); the one real cost is that single build, which is
+# what the path filter below keeps off changes that cannot affect it.
 
+# `paths-ignore` rather than a `paths` allowlist, for the fail-toward-running reason
+# spelled out in node-matrix.yml. `Build nub (WPT)` is ~13 min of Rust that a docs- or
+# site-only change cannot affect, and it was the longest job such a pull request ran.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "site/**"
+      - "wiki/**"
+      - "*.md"
+      - ".claude/**"
   pull_request:
+    # PR CI is opt-in — request a run with `gh pr edit <n> --add-label ci`. Rationale: ci.yml.
+    types: [labeled]
     branches: [main]
+    paths-ignore:
+      - "site/**"
+      - "wiki/**"
+      - "*.md"
+      - ".claude/**"
   workflow_dispatch:
 
 concurrency:
@@ -36,6 +52,7 @@ env:
 jobs:
   build:
     name: Build nub (WPT)
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -47,7 +64,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
       # Stable shared-key (restore main's warm cache on PR); save-if:main → PRs
       # read-only. Same debug nub-cli + nub-native footprint as ci.yml's build legs.
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           shared-key: wpt-worker
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -67,8 +84,11 @@ jobs:
           (cd crates/nub-native && cargo build)
           mkdir -p runtime/addons
           cp target/debug/libnub_native.so runtime/addons/nub-native.node
+      # The nub built directly above installs the root deps — this leg never
+      # needs a published nub. `--ignore-scripts` is preserved; `hoisted` keeps
+      # node_modules a tree of real directories for the bundle staging below.
       - name: Install runtime npm deps
-        run: npm ci --ignore-scripts
+        run: ./target/debug/nub install --frozen-lockfile --ignore-scripts --node-linker hoisted
       - name: Stage the reusable nub bundle
         shell: bash
         run: |
@@ -99,6 +119,7 @@ jobs:
   conformance:
     name: WPT (node ${{ matrix.node }})
     needs: [build]
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -129,14 +150,24 @@ jobs:
   wpt-worker-gate:
     name: WPT Worker gate
     needs: [conformance]
-    if: always()
+    if: always() && (github.event_name != 'pull_request' || github.event.label.name == 'ci')
     runs-on: ubuntu-latest
     steps:
       - shell: bash
         run: |
           set -euo pipefail
           result='${{ needs.conformance.result }}'
-          if [[ "$result" != "success" ]]; then
+          # `cancelled` is not a verdict. This job is `if: always()`, so it still runs when
+          # the RUN was cancelled -- and `cancel-in-progress` on this workflow's concurrency
+          # group (see the top of the file; it keys on workflow name plus ref) cancels an
+          # in-flight push run as soon as another push lands on the same ref. Without this
+          # arm the gate turns that supersession into a permanent failed check on a commit
+          # that is fine. It cannot mask a real failure: a conformance leg that genuinely
+          # fails aggregates to `failure`, not `cancelled`. (node-matrix.yml carries the
+          # same carve-out, and the same warning against writing a GitHub expression
+          # literally in a `run:` comment -- Actions expands that template syntax before the
+          # shell sees it, comments included.)
+          if [[ "$result" != "success" && "$result" != "cancelled" ]]; then
             echo "WPT Worker conformance failed: $result"
             exit 1
           fi

@@ -73,7 +73,7 @@ lifecycle-script behavior.
 
 **Supported:** Ubuntu 26.04 (resolute).
 
-Aube publishes signed `.deb` packages to the Launchpad PPA
+aube publishes signed `.deb` packages to the Launchpad PPA
 [`ppa:jdxcode/aube`](https://launchpad.net/~jdxcode/+archive/ubuntu/aube):
 
 ```sh
@@ -93,7 +93,7 @@ sudo apt update && sudo apt install --only-upgrade aube
 **Supported:** Fedora 43, Fedora 44, Fedora Rawhide, EPEL 10
 (RHEL / Rocky / Alma 10), both `x86_64` and `aarch64`.
 
-Aube publishes RPMs to the COPR project
+aube publishes RPMs to the COPR project
 [`jdxcode/aube`](https://copr.fedorainfracloud.org/coprs/jdxcode/aube/):
 
 ```sh
@@ -115,7 +115,7 @@ If you want to build the current checkout yourself, use the standard source
 build flow:
 
 ```sh
-git clone https://github.com/jdx/aube
+git clone https://github.com/aubepkg/aube
 cd aube
 cargo install --path crates/aube
 ```
@@ -142,7 +142,7 @@ one go:
 ```yaml
 - uses: jdx/aube-action@v1
   with:
-    version: 1.5.1         # or "latest"
+    version: 2.2.4         # or "latest"
     node-version: "22"     # or "auto" to read mise.toml / .tool-versions / .nvmrc
     run-install: true
 ```

@@ -10,6 +10,7 @@ permissions:
   contents: read
 
 env:
+  MBX_DISABLE: "1"
   CARGO_INCREMENTAL: "0"
 
 jobs:
@@ -21,7 +22,8 @@ jobs:
   # no-op.
   release-plz-release:
     name: release-plz release
-    runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=aube-rust-linux
+    # Release and release-PR jobs must never restore or save persistent caches.
+    runs-on: ubuntu-latest
     # Two commits landing on main in quick succession must not double-publish.
     concurrency:
       group: release-plz-release-${{ github.ref }}
@@ -127,6 +129,9 @@ jobs:
       AUBE_GH_TOKEN: ${{ secrets.AUBE_GH_TOKEN }}
       CERTIFICATES_P12: ${{ secrets.CERTIFICATES_P12 }}
       CERTIFICATES_P12_PASS: ${{ secrets.CERTIFICATES_P12_PASS }}
+      APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
 
   # Build + codesign the C ABI libraries and attach them (plus aube.h)
   # to the draft release. Must complete before `publish-release`:
@@ -154,21 +159,21 @@ jobs:
       CERTIFICATES_P12_PASS: ${{ secrets.CERTIFICATES_P12_PASS }}
 
   # Flip the draft release to non-draft once *every* asset uploaded
-  # cleanly. With immutable GitHub releases enabled, a published
-  # release can't have its assets replaced — so if any matrix target
-  # failed, we leave the draft in place rather than ship a release
-  # with missing platform binaries (downstream npm / COPR / PPA jobs
-  # would also fail trying to fetch the holes). To recover: manually
+  # cleanly and Communiqué has written the final notes. With immutable
+  # GitHub releases enabled, a published release can't have its assets
+  # replaced — so if any matrix target failed, we leave the draft in
+  # place rather than ship a release with missing platform binaries
+  # (downstream npm / COPR / PPA jobs would also fail trying to fetch
+  # the holes). To recover: manually
   # re-run `release.yml` (CLI binaries) or `ffi.yml` (C ABI libraries)
-  # via workflow_dispatch with the tag input, which fills in the
-  # missing assets, then either flip the draft by hand
-  # (`gh release edit $TAG --draft=false`) or workflow_dispatch the
-  # whole release-plz workflow again so this job runs.
+  # via workflow_dispatch with the tag input, which fills in the missing
+  # assets, then retry the failed jobs here. A manual publish should only
+  # happen after confirming the Communiqué notes are present too.
   publish-release:
     name: Publish release
-    needs: [release-plz-release, upload-assets, upload-ffi-assets]
+    needs: [release-plz-release, upload-assets, upload-ffi-assets, enhance-release]
     if: ${{ needs.release-plz-release.outputs.tag != '' }}
-    runs-on: namespace-profile-endev-linux-amd64
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
@@ -184,9 +189,9 @@ jobs:
   # the broken release-note generation is visible and actionable.
   enhance-release:
     name: Enhance release notes
-    needs: [release-plz-release, publish-release]
+    needs: release-plz-release
     if: ${{ needs.release-plz-release.outputs.tag != '' }}
-    runs-on: namespace-profile-endev-linux-amd64
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
@@ -195,9 +200,10 @@ jobs:
           ref: refs/tags/${{ needs.release-plz-release.outputs.tag }}
           submodules: recursive
           persist-credentials: false
-      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
           install_args: communique
+          cache: false
       - name: Enhance GitHub release with communique
         env:
           GITHUB_TOKEN: ${{ secrets.AUBE_GH_TOKEN }}
@@ -227,9 +233,9 @@ jobs:
 
           ## 💚 Sponsor aube
 
-          aube is maintained by [@jdx](https://github.com/jdx), an open source developer for [**entire.io**](https://entire.io), the title sponsor of the [jdx.dev](https://jdx.dev) open source tools including [mise](https://mise.jdx.dev/). Work on aube is funded by sponsors.
+          aube is built and maintained by [@jdx](https://github.com/jdx), an open source developer at [**entire.io**](https://entire.io/), the title sponsor of his open source work.
 
-          If aube is saving your team install time or CI minutes, please consider [sponsoring at jdx.dev](https://jdx.dev/sponsors.html). Individual and company sponsorships are what keep the project fast, free, and independent.
+          If aube saves your team install time or CI minutes, please consider becoming an [individual or company sponsor](https://jdx.dev/sponsors.html). Your support funds ongoing development and helps keep aube fast, free, and independent.
           EOF
           } > /tmp/release-notes.md
           gh release edit "$TAG" --notes-file /tmp/release-notes.md
@@ -249,7 +255,7 @@ jobs:
   # an out-of-date `aube.usage.kdl`.
   release-plz-pr:
     name: release-plz PR
-    runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=aube-rust-linux
+    runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
@@ -268,10 +274,12 @@ jobs:
       # of silently re-resolving `"latest"` pins and rewriting mise.lock.
       # release-plz refuses to run against a dirty tree, and intentional
       # lockfile bumps should land via their own PR.
-      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          cache: false
         env:
           MISE_LOCKED: "1"
-      - uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
+      - uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
         with:
           tool: release-plz
       - name: Configure git identity
@@ -353,11 +361,18 @@ jobs:
               .split('\n')
               .map((line) => {
                 if (!line.startsWith(`${name} = {`) || !line.includes('path = ')) return line;
-                const updated = line.replace(`version = "${oldVersion}"`, `version = "${newVersion}"`);
-                if (updated === line) {
-                  throw new Error(`path dependency ${name} did not contain version ${oldVersion}`);
+                const exact = `version = "${oldVersion}"`;
+                if (line.includes(exact)) {
+                  return line.replace(exact, `version = "${newVersion}"`);
                 }
-                return updated;
+                const oldMajor = oldVersion.split('.')[0];
+                const newMajor = newVersion.split('.')[0];
+                if (oldMajor === newMajor && line.includes(`version = "${oldMajor}"`)) {
+                  return line;
+                }
+                throw new Error(
+                  `path dependency ${name} did not contain version ${oldVersion} or compatible major ${oldMajor}`,
+                );
               })
               .join('\n');
           }
@@ -413,6 +428,15 @@ jobs:
 
           echo "Forced patch bump ${old_version} -> ${new_version}"
           echo "bump=true" >> "$GITHUB_OUTPUT"
+
+      # Keep the offline, reproducible lifecycle trust policy aligned with
+      # pnpm's maintained list. The generated source metadata pins the exact
+      # upstream commit included in each release.
+      - name: Refresh trusted dependencies
+        if: steps.update.outputs.bump == 'true' || steps.force.outputs.bump == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.AUBE_GH_TOKEN }}
+        run: scripts/update-trusted-dependencies.bash
 
       - name: Capture release version
         id: version

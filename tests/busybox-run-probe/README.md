@@ -17,7 +17,28 @@ end-to-end, not a standalone shell.
 shell to bundle — by driving each shell standalone. This probe is the acceptance
 test for the choice that won (busybox), through the integrated CLI.
 
-Cases (`node run-probe.mjs`), each `nub run <script>`:
+### Both shell layouts, plus a negative control
+
+The binary resolves its shell relative to itself, and there are two places that
+shell legitimately lives. The full case matrix runs against each:
+
+| layout | shape | who produces it |
+| --- | --- | --- |
+| `sidecar` | `busybox.exe` beside `nub.exe` | the win32 npm package, the release `.zip` behind `install.ps1`, `nub upgrade`'s `~/.nub/bin` |
+| `relocated` | `nub-sh/busybox.exe`, **no** sibling | the npm launcher, after hardlinking `nub.exe` into npm's global bin dir for the PATHEXT fast path (`healWindowsBinDir`) |
+
+The `relocated` layout is [#687](https://github.com/nubjs/nub/issues/687): 0.7.0
+started relocating the binary and the resolution could not follow, so every
+`nub run` on a Windows npm install failed from the second invocation onward. The
+sidecar-only probe passed throughout — it never built the shape that breaks.
+
+`no_busybox_anywhere_fails_cleanly` is the negative control, and it is what makes
+the other two rows mean anything: a `nub.exe` with neither candidate present must
+fail with the shell-resolution error. Without it, a binary that found a shell by
+some unintended third route would show all-green while the resolution under test
+did nothing.
+
+Cases (`node run-probe.mjs`), each `nub run <script>`, run once per layout:
 
 | case | body | asserts |
 | --- | --- | --- |
@@ -42,4 +63,6 @@ node tests/busybox-run-probe/run-probe.mjs "$(command -v nub)" /tmp/bbrp
 ```
 
 On Windows the workflow builds `nub`, copies `vendor/busybox-w32/busybox64.exe` to
-`busybox.exe` beside it, and runs the probe against that binary.
+`busybox.exe` beside it, and runs the probe against that binary. Staging that
+sidecar is a precondition — the probe derives the `relocated` layout's copy from it
+and exits 2 with a setup error if it is missing.

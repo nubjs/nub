@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 const DEFAULT_STATE_DIR: &str = "node_modules";
 const INSTALL_STATE_FILE_NAME: &str = "state.json";
 const FRESH_STATE_FILE_NAME: &str = "fresh.json";
+const LICENSE_STATE_FILE_NAME: &str = "licenses.json";
+const HOISTED_PLACEMENTS_FILE_NAME: &str = "hoisted-placements.json";
 
 /// The install-state directory name, `.<name>-state`. Standalone aube:
 /// `.aube-state`.
@@ -53,6 +55,15 @@ pub struct InstallState {
     pub lockfile_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lockfile_snapshot_name: Option<String>,
+    /// `(size, mtime)` of the root lockfile at install time, mirroring
+    /// `package_json_meta`'s fast path: stat once and skip the BLAKE3
+    /// re-hash when the snapshot is unchanged. Root lockfiles are the
+    /// largest file the freshness check reads (10+ MB on big
+    /// monorepos), so this is the difference between an O(1) stat and
+    /// re-reading the whole file on every `aube run` startup. Missing
+    /// field (older state) falls through to the hash path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lockfile_meta: Option<FileMeta>,
     /// Per-member lockfile fingerprints for `sharedWorkspaceLockfile=false`
     /// workspaces, keyed by the member's importer path (relative to the
     /// workspace root). That layout writes one lockfile per member and
@@ -96,6 +107,20 @@ pub struct InstallState {
     /// full eligible build scan.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub dep_build_policy_hash: String,
+    /// Resolved minimum-release-age policy. Separate from
+    /// `settings_hash` for the same reason as `dep_build_policy_hash`:
+    /// `settings_hash` mixes in the raw workspace yaml, so an ordinary
+    /// catalog / overrides / packageExtensions edit moves it without
+    /// touching the age gate. Only a real age-policy change can
+    /// invalidate lockfile picks that were already admitted under it,
+    /// and that is the one question release-policy revalidation asks.
+    /// Empty on fresh state or an install predating this field. That
+    /// reads as "previous policy unknown", which does NOT revalidate —
+    /// see [`release_policy_changed_since_last_run`] for why the two
+    /// directions carry very different costs. The next install records
+    /// the hash, and a genuine change is caught from then on.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub release_policy_hash: String,
     /// Per-package content fingerprints from the last install,
     /// keyed by dep_path. Drives delta installs. Next install diffs
     /// these against the new lockfile's hashes and only re-fetches
@@ -133,6 +158,28 @@ pub struct InstallState {
     /// `--ignore-scripts` / `strictDepBuilds=true` / `virtualStoreOnly`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unreviewed_builds: Vec<String>,
+    /// Spec keys of dependency builds the last install *wanted* to run
+    /// and could not, for a reason that run invented rather than one
+    /// the config decided: the `defaultTrust` floor's advisory-vetting
+    /// gate not covering the install, or an allowed package's
+    /// materialized directory not being on disk when the lifecycle
+    /// phase ran.
+    ///
+    /// Distinct from `unreviewed_builds`, which is a *stable* denial —
+    /// re-running the install could never change it, so sealing on it
+    /// is correct. These can differ between two otherwise-identical
+    /// runs, so a tree carrying them is incomplete rather than
+    /// finished, and `check_needs_install` must not report it up to
+    /// date (nubjs/nub#764).
+    ///
+    /// `None` means the state predates the field. Treated as "unknown,
+    /// so re-check" when the state also records unreviewed builds; a
+    /// single install turns it into `Some`, so the migration costs one
+    /// full install per project and never repeats. Deliberately NOT
+    /// `skip_serializing_if` empty — an empty vec must serialize, or
+    /// every clean install would read back as legacy-unknown.
+    #[serde(default)]
+    pub deferred_dep_builds: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -140,6 +187,9 @@ struct FreshnessState {
     lockfile_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     lockfile_snapshot_name: Option<String>,
+    /// See [`InstallState::lockfile_meta`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lockfile_meta: Option<FileMeta>,
     /// See [`InstallState::member_lockfile_hashes`]. Mirrored into the
     /// freshness sidecar so `check_needs_install` can verify per-member
     /// lockfiles without loading the full state file.
@@ -172,6 +222,11 @@ struct FreshnessState {
     layout: Option<InstallLayoutState>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     unreviewed_builds: Vec<String>,
+    /// See [`InstallState::deferred_dep_builds`]. Mirrored into the
+    /// freshness sidecar because the warm-path check reads only this
+    /// struct.
+    #[serde(default)]
+    deferred_dep_builds: Option<Vec<String>>,
 }
 
 /// `(size, mtime)` snapshot used by `R1` mtime fast path. mtime is
@@ -189,6 +244,26 @@ struct FreshnessState {
 /// mtime granularity below 2 seconds anyway, so callers running on
 /// it should not rely on the fast path. The size comparison still
 /// catches any change that grows or shrinks the file.
+///
+/// # Accepted limitation
+///
+/// A rewrite that keeps the byte length identical *and* restores the
+/// recorded mtime reports fresh without re-hashing. This is a
+/// deliberate trade, accepted for every consumer of this type
+/// (`lockfile_meta`, `package_json_meta`, `member_lockfile_meta`):
+/// closing it would mean hashing the file on every check, which is the
+/// cost the fast path exists to remove. Producing that collision takes
+/// deliberate mtime restoration — ordinary editors, formatters, VCS
+/// checkouts and package managers all move mtime forward, and a tool
+/// that restores it defeats make, ninja and git's stat cache the same
+/// way. Everything short of that collision is caught: content that
+/// changes length fails the size compare, and content rewritten at any
+/// other timestamp fails the mtime compare.
+///
+/// Callers must keep the failure direction one-way — capture the
+/// snapshot *before* hashing, never after, so a write racing the
+/// capture yields "re-hash unnecessarily" rather than "declare stale
+/// content fresh".
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileMeta {
     pub size: u64,
@@ -227,6 +302,7 @@ impl From<&InstallState> for FreshnessState {
         Self {
             lockfile_hash: state.lockfile_hash.clone(),
             lockfile_snapshot_name: state.lockfile_snapshot_name.clone(),
+            lockfile_meta: state.lockfile_meta.clone(),
             member_lockfile_hashes: state.member_lockfile_hashes.clone(),
             member_lockfile_meta: state.member_lockfile_meta.clone(),
             package_json_hashes: state.package_json_hashes.clone(),
@@ -238,6 +314,7 @@ impl From<&InstallState> for FreshnessState {
             package_json_shape_digests: state.package_json_shape_digests.clone(),
             layout: state.layout.clone(),
             unreviewed_builds: state.unreviewed_builds.clone(),
+            deferred_dep_builds: state.deferred_dep_builds.clone(),
         }
     }
 }
@@ -245,8 +322,34 @@ impl From<&InstallState> for FreshnessState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstallLayoutState {
     pub linker: InstallLayoutMode,
+    /// Tree-shaping settings captured from the successful install. Commands
+    /// that inspect the materialized tree must not reconstruct it from current
+    /// settings because `.npmrc` may have changed since installation.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub modules_dir_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hoisting_limits: Option<InstallHoistingLimits>,
+    /// Filename limit used when materializing the virtual store. This must be
+    /// read from install state because an environment or CLI override may no
+    /// longer be present when a later command inspects the installed tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virtual_store_dir_max_length: Option<usize>,
     pub direct_entries: BTreeMap<String, Vec<String>>,
     pub packages: BTreeMap<String, InstalledPackageState>,
+    /// Expected targets for dependency links nested inside shared global
+    /// virtual-store entries. Keys are project-relative paths reached through
+    /// `node_modules/.aube/<dep_path>`; values are the exact link targets.
+    /// `None` identifies state written before this topology check existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gvs_nested_links: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct InstallLicenseState {
+    fingerprint: String,
+    pub licenses: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub linked_package_dirs: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -254,6 +357,14 @@ pub struct InstallLayoutState {
 pub enum InstallLayoutMode {
     Isolated,
     Hoisted,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InstallHoistingLimits {
+    None,
+    Workspaces,
+    Dependencies,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -289,6 +400,21 @@ pub fn check_needs_install_with_flags(
     cli_flags: &[(String, String)],
 ) -> Option<String> {
     check_needs_install_inner(project_dir, Some(cli_flags))
+}
+
+/// Whether the resolved install settings differ from the last successful
+/// install. This is a narrow post-warm-miss probe for embedders that must
+/// distinguish policy/config drift from unrelated work (manifest edits,
+/// missing modules, lockfile changes). Missing legacy state returns `false`.
+pub(crate) fn install_settings_changed_since_last_run(
+    project_dir: &Path,
+    cli_flags: &[(String, String)],
+) -> bool {
+    let (_, state_path) = resolve_paths(project_dir);
+    let Some(state) = read_or_migrate_fresh_state(&state_path) else {
+        return false;
+    };
+    hash_settings(project_dir, cli_flags) != state.settings_hash
 }
 
 fn check_needs_install_inner(
@@ -355,6 +481,7 @@ fn check_needs_install_compute(
     let _diag_lock = aube_util::diag::Span::new(aube_util::diag::Category::Frozen, "lockfile_hash");
     let (lockfile_name, lockfile_path) = active_lockfile(project_dir);
     let mut lockfile_missing = false;
+    let mut refreshed_lockfile_meta = false;
     if let Some(path) = lockfile_path {
         // This branch also absorbs a `sharedWorkspaceLockfile` flip from
         // false to true. The previous false-layout install left a
@@ -363,9 +490,31 @@ fn check_needs_install_compute(
         // exists, so we land here. Its hash can't match the empty recorded
         // one, so we report a change and the full reinstall rewrites the
         // state into the shared shape.
-        let current_hash = hash_file(&path);
-        if current_hash != state.lockfile_hash {
-            return Some(format!("{lockfile_name} has changed"));
+        //
+        // `(size, mtime)` fast path first, mirroring `package_json_meta`:
+        // a matching snapshot skips re-reading + BLAKE3-hashing the
+        // lockfile — the single largest file this check touches on big
+        // monorepos. A miss (older state, mtime-only touch, or a real
+        // edit) falls through to the hash.
+        let current_meta = FileMeta::capture(&path);
+        let meta_matches = match (&current_meta, &state.lockfile_meta) {
+            (Some(current), Some(stored)) => current == stored,
+            _ => false,
+        };
+        if !meta_matches {
+            let current_hash = hash_file(&path);
+            if current_hash != state.lockfile_hash {
+                return Some(format!("{lockfile_name} has changed"));
+            }
+            // Hash matched but the snapshot drifted (touch(1), older
+            // state without the field). Refresh it so the next check
+            // takes the stat-only path.
+            if let Some(current) = current_meta
+                && state.lockfile_meta.as_ref() != Some(&current)
+            {
+                state.lockfile_meta = Some(current);
+                refreshed_lockfile_meta = true;
+            }
         }
     } else if state.member_lockfile_hashes.is_empty() {
         lockfile_missing = true;
@@ -414,6 +563,23 @@ fn check_needs_install_compute(
             "previous install omitted dependency sections; auto-installing full graph".into(),
         );
     }
+
+    // Every other input here describes what the tree was built FROM.
+    // None of them says whether the last install's dependency lifecycle
+    // phase finished, so a tree with an allowed-but-unrun build looked
+    // identical to a complete one and no later install could heal it —
+    // it reported "Already up to date" and exited 0 forever
+    // (nubjs/nub#764). The install records what it could not build; a
+    // miss here re-runs the pipeline, which is what gets those builds
+    // another attempt.
+    //
+    // Only builds deferred for a RUN-SCOPED reason land in the list.
+    // A package the config stably denies stays out, so the ordinary
+    // unreviewed-builds steady state still takes the warm path.
+    if let Some(reason) = deferred_dep_builds_stale(&state) {
+        return Some(reason);
+    }
+
     if state.dep_build_policy_hash.is_empty() {
         return Some("dependency build policy state is missing".into());
     }
@@ -480,7 +646,9 @@ fn check_needs_install_compute(
             }
         }
     }
-    if refreshed_metadata && let Err(err) = write_fresh_state(&state_path, &state) {
+    if (refreshed_metadata || refreshed_lockfile_meta)
+        && let Err(err) = write_fresh_state(&state_path, &state)
+    {
         tracing::debug!(
             path = %fresh_state_file(&state_path).display(),
             error = %err,
@@ -634,6 +802,50 @@ fn member_lockfiles_stale(project_dir: &Path, state: &FreshnessState) -> Option<
 /// `package_json_hashes` is new. Returns `Some(reason)` on the first new
 /// member, `None` when every current member was already recorded.
 /// Non-workspace projects enumerate to nothing and no-op.
+/// Whether the last install left a dependency build owed. See
+/// [`InstallState::deferred_dep_builds`] for what qualifies.
+///
+/// The `None` arm is the one-time migration for state written before
+/// the field existed. Such a state cannot say what it deferred, and a
+/// tree sealed by the pre-fix behavior is exactly the one to heal, so
+/// it re-checks once unconditionally.
+///
+/// Deliberately NOT narrowed to "only when unreviewed builds were
+/// recorded". The seal this migration exists for includes a
+/// policy-ALLOWED package whose materialized directory was missing when
+/// the lifecycle phase ran: allowed means it was never unreviewed, so
+/// that state carries an empty unreviewed list and the narrow form
+/// would leave exactly the trees it was written to rescue sealed
+/// forever. The cost is one full install per project on upgrade, and
+/// that install writes the field, so it never repeats.
+fn deferred_dep_builds_stale(state: &FreshnessState) -> Option<String> {
+    match state.deferred_dep_builds.as_deref() {
+        Some([]) => None,
+        Some(deferred) => Some(format!(
+            "a dependency build did not run on the last install ({}); retrying",
+            preview_list(deferred)
+        )),
+        None => Some(
+            "install state predates dependency-build completion tracking; re-checking builds"
+                .into(),
+        ),
+    }
+}
+
+/// Comma-joined preview of a spec-key list, capped so a napi-rs-style
+/// tree of per-platform packages cannot splat into one unreadable line.
+fn preview_list(items: &[String]) -> String {
+    const MAX_INLINE: usize = 3;
+    if items.len() <= MAX_INLINE {
+        return items.join(", ");
+    }
+    format!(
+        "{}, and {} more",
+        items[..MAX_INLINE].join(", "),
+        items.len() - MAX_INLINE
+    )
+}
+
 fn new_workspace_member(project_dir: &Path, state: &FreshnessState) -> Option<String> {
     let members = aube_workspace::find_workspace_packages(project_dir).unwrap_or_default();
     for member_dir in &members {
@@ -665,10 +877,83 @@ fn new_workspace_member(project_dir: &Path, state: &FreshnessState) -> Option<St
 pub struct WriteStateLayout<'a> {
     pub graph: &'a aube_lockfile::LockfileGraph,
     pub node_linker: aube_linker::NodeLinker,
+    pub hoisting_limits: aube_linker::HoistingLimits,
     pub modules_dir_name: &'a str,
     pub aube_dir: &'a Path,
     pub virtual_store_dir_max_length: usize,
     pub placements: Option<&'a aube_linker::HoistedPlacements>,
+    pub use_global_virtual_store: bool,
+}
+
+fn collect_gvs_nested_links(
+    project_dir: &Path,
+    layout: &WriteStateLayout<'_>,
+) -> std::io::Result<Option<BTreeMap<String, String>>> {
+    // O(edges) readlink(2) calls — parallelize per package. Each package
+    // yields `Some(links)` on success or `None` when its topology is not
+    // recordable, which aborts the whole collection exactly like the
+    // serial version did.
+    let per_package: Option<Vec<Vec<(String, String)>>> = layout
+        .graph
+        .packages
+        .par_iter()
+        .map(|(dep_path, pkg)| {
+            let globally_shareable = pkg
+                .local_source
+                .as_ref()
+                .is_none_or(aube_lockfile::LocalSource::is_globally_shareable);
+            if !globally_shareable {
+                return Some(Vec::new());
+            }
+            let aube_entry =
+                layout
+                    .aube_dir
+                    .join(aube_lockfile::dep_path_filename::dep_path_to_filename(
+                        dep_path,
+                        layout.virtual_store_dir_max_length,
+                    ));
+            if std::fs::read_link(aube_entry).is_err() {
+                // Compatibility-selected registry packages can be materialized
+                // physically in the project even while the rest of the graph uses
+                // GVS. Their links are not shared cache topology and the linker
+                // handles them separately.
+                return Some(Vec::new());
+            }
+            let package_dir = crate::commands::install::materialized_pkg_dir(
+                layout.aube_dir,
+                dep_path,
+                &pkg.name,
+                layout.virtual_store_dir_max_length,
+                layout.placements,
+            );
+            let node_modules_dir =
+                crate::commands::install::dep_modules_dir_for(&package_dir, &pkg.name);
+            let mut links = Vec::with_capacity(pkg.dependencies.len());
+            for dep_name in pkg.dependencies.keys().filter(|name| *name != &pkg.name) {
+                let link_path = node_modules_dir.join(dep_name);
+                let Ok(target) = std::fs::read_link(&link_path) else {
+                    tracing::debug!(
+                        path = %link_path.display(),
+                        "global virtual store link topology is not recordable"
+                    );
+                    return None;
+                };
+                let Some(target) = target.to_str() else {
+                    tracing::debug!(
+                        path = %link_path.display(),
+                        "global virtual store link target is not valid UTF-8"
+                    );
+                    return None;
+                };
+                links.push((
+                    relative_path_or_original(&link_path, project_dir),
+                    target.to_string(),
+                ));
+            }
+            Some(links)
+        })
+        .collect();
+    Ok(per_package.map(|groups| groups.into_iter().flatten().collect()))
 }
 
 pub struct WriteStateInput<'a> {
@@ -681,6 +966,11 @@ pub struct WriteStateInput<'a> {
     pub dep_build_policy_hash: String,
     pub layout: WriteStateLayout<'a>,
     pub unreviewed_builds: Vec<String>,
+    /// See [`InstallState::deferred_dep_builds`]. Always `Some` on the
+    /// write side — an empty vec is the positive statement "nothing was
+    /// owed", which is what distinguishes a fresh clean install from
+    /// state written before the field existed.
+    pub deferred_dep_builds: Vec<String>,
 }
 
 pub fn write_state(project_dir: &Path, input: WriteStateInput<'_>) -> Result<(), std::io::Error> {
@@ -694,22 +984,24 @@ pub fn write_state(project_dir: &Path, input: WriteStateInput<'_>) -> Result<(),
         dep_build_policy_hash,
         layout,
         unreviewed_builds,
+        deferred_dep_builds,
     } = input;
 
     let state_path = state_dir(project_dir);
     remove_legacy_state_file(&state_path)?;
+    // Captured *before* the hash: an edit landing between the two makes
+    // the stored meta stale relative to the hashed content, so the next
+    // freshness check misses the stat-only fast path and falls through
+    // to the hash — slow but correct. The reverse order would let a
+    // fresh-meta/stale-hash pair declare an edited lockfile up to date.
+    let lockfile_meta = active_lockfile(project_dir)
+        .1
+        .and_then(|path| FileMeta::capture(&path));
     let (lockfile_hash, lockfile_snapshot_name) =
         snapshot_active_lockfile(project_dir, &state_path)?;
     let settings_hash = hash_settings(project_dir, cli_flags);
-    let install_layout = InstallLayoutState::from_graph(
-        project_dir,
-        layout.graph,
-        layout.node_linker,
-        layout.modules_dir_name,
-        layout.aube_dir,
-        layout.virtual_store_dir_max_length,
-        layout.placements,
-    );
+    let release_policy_hash = hash_release_policy(project_dir, cli_flags);
+    let install_layout = InstallLayoutState::from_graph(project_dir, &layout)?;
 
     let package_json_shape_digests: BTreeMap<String, String> = package_json_hashes
         .keys()
@@ -749,10 +1041,12 @@ pub fn write_state(project_dir: &Path, input: WriteStateInput<'_>) -> Result<(),
     // to verify; empty for the default shared layout.
     let (member_lockfile_hashes, member_lockfile_meta) = collect_member_lockfile_state(project_dir);
     let local_directory_hashes = collect_local_directory_hashes(project_dir, layout.graph)?;
+    let license_fingerprint = license_state_fingerprint(&graph_lthash, &package_content_hashes);
 
     let state = InstallState {
         lockfile_hash,
         lockfile_snapshot_name,
+        lockfile_meta,
         member_lockfile_hashes,
         member_lockfile_meta,
         package_json_hashes,
@@ -762,20 +1056,87 @@ pub fn write_state(project_dir: &Path, input: WriteStateInput<'_>) -> Result<(),
         section_filtered,
         settings_hash,
         dep_build_policy_hash,
+        release_policy_hash,
         package_content_hashes,
         graph_lthash,
         package_subtree_hashes,
         package_json_shape_digests,
         layout: Some(install_layout),
         unreviewed_builds,
+        deferred_dep_builds: Some(deferred_dep_builds),
     };
 
     let fresh_state = FreshnessState::from(&state);
-    let json = serde_json::to_string_pretty(&state)?;
-    aube_util::fs_atomic::atomic_write(&install_state_file(&state_path), json.as_bytes())?;
+    if read_package_licenses(&state_path)
+        .as_ref()
+        .is_none_or(|licenses| licenses.fingerprint != license_fingerprint)
+    {
+        let license_state =
+            collect_package_license_state(project_dir, &layout, license_fingerprint);
+        let license_json = serde_json::to_vec(&license_state)?;
+        aube_util::fs_atomic::atomic_write(&license_state_file(&state_path), &license_json)?;
+    }
+    // Compact, not pretty: the per-package maps make this file O(graph)
+    // (and `gvs_nested_links` O(edges)), and it is re-read on every
+    // freshness check — indentation roughly doubles the bytes parsed for
+    // no consumer. `jq` remains the debugging story.
+    let json = serde_json::to_vec(&state)?;
+    aube_util::fs_atomic::atomic_write(&install_state_file(&state_path), &json)?;
     write_fresh_state(&state_path, &fresh_state)?;
 
     Ok(())
+}
+
+fn license_state_fingerprint(
+    graph_lthash: &str,
+    package_content_hashes: &BTreeMap<String, String>,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(graph_lthash.as_bytes());
+    for (dep_path, content_hash) in package_content_hashes {
+        hasher.update(&(dep_path.len() as u64).to_le_bytes());
+        hasher.update(dep_path.as_bytes());
+        hasher.update(content_hash.as_bytes());
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn collect_package_license_state(
+    project_dir: &Path,
+    layout: &WriteStateLayout<'_>,
+    fingerprint: String,
+) -> InstallLicenseState {
+    let mut licenses = BTreeMap::new();
+    let mut linked_package_dirs = BTreeMap::new();
+    for (dep_path, pkg) in &layout.graph.packages {
+        let package_dir = match pkg.local_source.as_ref() {
+            Some(aube_lockfile::LocalSource::Link(path)) => {
+                let package_dir = project_dir.join(path);
+                linked_package_dirs.insert(
+                    dep_path.clone(),
+                    relative_path_or_original(&package_dir, project_dir),
+                );
+                package_dir
+            }
+            _ => crate::commands::install::materialized_pkg_dir(
+                layout.aube_dir,
+                dep_path,
+                &pkg.name,
+                layout.virtual_store_dir_max_length,
+                layout.placements,
+            ),
+        };
+        if let Some(license) =
+            crate::commands::licenses::read_license(&package_dir).or_else(|| pkg.license.clone())
+        {
+            licenses.insert(dep_path.clone(), license);
+        }
+    }
+    InstallLicenseState {
+        fingerprint,
+        licenses,
+        linked_package_dirs,
+    }
 }
 
 fn collect_local_directory_hashes(
@@ -834,6 +1195,33 @@ pub fn read_state_package_content_hashes(project_dir: &Path) -> Option<BTreeMap<
     Some(state.package_content_hashes)
 }
 
+/// All delta-install fields from the last install's state, extracted in
+/// a single parse. `finalize` needs every one of them; reading each
+/// through its own accessor re-parses the full O(graph) state file (and
+/// re-resolves the settings context behind `state_dir`) once per field.
+pub struct DeltaStateSnapshot {
+    /// See [`InstallState::package_content_hashes`]. Empty map means
+    /// "no prior fingerprints" (pre-delta aube or fresh state).
+    pub package_content_hashes: BTreeMap<String, String>,
+    /// See [`InstallState::graph_lthash`]. `None` when unrecorded.
+    pub graph_lthash: Option<String>,
+    /// See [`InstallState::package_subtree_hashes`]. Empty when
+    /// unrecorded.
+    pub package_subtree_hashes: BTreeMap<String, String>,
+}
+
+/// Read the delta-install snapshot in one state-file parse. `None` when
+/// the state file is missing or malformed — callers treat that as "no
+/// prior install, full pipeline", same as the per-field accessors.
+pub fn read_state_delta_snapshot(project_dir: &Path) -> Option<DeltaStateSnapshot> {
+    let state = read_state(&state_dir(project_dir))?;
+    Some(DeltaStateSnapshot {
+        package_content_hashes: state.package_content_hashes,
+        graph_lthash: (!state.graph_lthash.is_empty()).then_some(state.graph_lthash),
+        package_subtree_hashes: state.package_subtree_hashes,
+    })
+}
+
 /// Read the installed layout snapshot used by the install warm path.
 ///
 /// Missing layout state means the install predates layout tracking and
@@ -842,14 +1230,80 @@ pub fn read_state_layout(project_dir: &Path) -> Option<InstallLayoutState> {
     read_state(&state_dir(project_dir))?.layout
 }
 
-/// Read the LtHash accumulator digest the last install wrote, if
-/// any. Empty string on fresh state or pre-lthash aube versions.
-pub fn read_state_graph_lthash(project_dir: &Path) -> Option<String> {
-    let state = read_state(&state_dir(project_dir))?;
-    if state.graph_lthash.is_empty() {
-        return None;
+/// Persist the exact hoisted tree produced by the linker. This is a separate
+/// sidecar because filtered installs deliberately do not replace the main
+/// freshness state, while commands such as `rebuild` still need to inspect
+/// the tree that is actually on disk.
+pub fn write_hoisted_placements(
+    project_dir: &Path,
+    placements: Option<&aube_linker::HoistedPlacements>,
+) -> Result<(), std::io::Error> {
+    let state_path = state_dir(project_dir);
+    let Some(placements) = placements else {
+        if state_path.is_file() {
+            return Ok(());
+        }
+        let path = state_path.join(HOISTED_PLACEMENTS_FILE_NAME);
+        return match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
+        };
+    };
+    remove_legacy_state_file(&state_path)?;
+    let path = state_path.join(HOISTED_PLACEMENTS_FILE_NAME);
+    let mut recorded: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (dep_path, package_dir) in placements.iter() {
+        recorded
+            .entry(dep_path.to_string())
+            .or_default()
+            .push(relative_path_or_original(package_dir, project_dir));
     }
-    Some(state.graph_lthash)
+    let json = serde_json::to_vec(&recorded)?;
+    aube_util::fs_atomic::atomic_write(&path, &json)
+}
+
+/// Read the exact linker-produced hoisted placement map. `None` means the
+/// install predates the sidecar (or it is unreadable), so callers may use the
+/// legacy planner-based reconstruction as a compatibility fallback.
+pub fn read_hoisted_placements(project_dir: &Path) -> Option<aube_linker::HoistedPlacements> {
+    let path = state_dir(project_dir).join(HOISTED_PLACEMENTS_FILE_NAME);
+    let recorded: BTreeMap<String, Vec<String>> =
+        serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    let by_dep_path = recorded
+        .into_iter()
+        .map(|(dep_path, paths)| {
+            let paths = paths
+                .into_iter()
+                .map(|path| project_dir.join(path))
+                .filter(|path| path.exists())
+                .collect();
+            (dep_path, paths)
+        })
+        .collect();
+    Some(aube_linker::HoistedPlacements::from_package_dirs(
+        by_dep_path,
+    ))
+}
+
+/// Read licenses captured at install time without adding them to the main
+/// freshness state parsed by every warm install.
+pub fn read_state_package_licenses(project_dir: &Path) -> InstallLicenseState {
+    let state_path = state_dir(project_dir);
+    read_package_licenses(&state_path)
+        .or_else(|| {
+            read_package_licenses(&project_dir.join(DEFAULT_STATE_DIR).join(state_dir_name()))
+        })
+        .unwrap_or_default()
+}
+
+/// Read layout state from the default `node_modules` location.
+///
+/// This fallback is useful after `modulesDir` changes: resolving the current
+/// state path then points at the new, not-yet-installed tree while the state
+/// describing the materialized tree remains under `node_modules`.
+pub fn read_default_state_layout(project_dir: &Path) -> Option<InstallLayoutState> {
+    read_state(&project_dir.join(DEFAULT_STATE_DIR).join(state_dir_name()))?.layout
 }
 
 /// Read stored subtree hashes for delta installs that want to
@@ -872,6 +1326,48 @@ pub fn read_state_dep_build_policy_hash(project_dir: &Path) -> Option<String> {
         return None;
     }
     Some(state.dep_build_policy_hash)
+}
+
+/// Whether the resolved minimum-release-age policy differs from the one the
+/// last install recorded.
+///
+/// An unknown previous policy — state missing, or written before
+/// `release_policy_hash` existed — answers `false`.
+///
+/// State the cost plainly, because it is real: on a project's first install
+/// that does actual work after upgrading past this field, a RAISED age gate is
+/// NOT applied to the versions already in the lockfile, and that same install
+/// records the new hash, so the raise is never retried. Picks sitting between
+/// the old and the new cutoff are kept, and leave the window by aging out
+/// rather than by any check. `--force` re-resolves under the current gate and
+/// is how to apply a raise retroactively. An empty hash cannot establish what
+/// gate, if any, the existing picks once cleared — a lockfile written by
+/// another package manager never saw this gate at all — so no safety argument
+/// is available from the picks themselves.
+///
+/// It is accepted because the alternative is worse and certain. Answering
+/// "changed" here fires on the upgrade hop for EVERY project, whatever moved
+/// its settings — a comment in `.npmrc`, a catalog entry, a different Node
+/// major — and revalidation discards the lockfile and re-picks every range at
+/// newest. That is the reported defect this narrowing exists to remove, and it
+/// would survive one full install per project. A deferred gate re-check is
+/// recoverable with one flag; a whole-graph version bump landed in someone's
+/// lockfile is not.
+///
+/// The two arms differ in reachability, not in answer: `read_state` returning
+/// `None` is already unreachable from the only caller, because
+/// `install_settings_changed_since_last_run` answers `false` on missing state.
+pub(crate) fn release_policy_changed_since_last_run(
+    project_dir: &Path,
+    cli_flags: &[(String, String)],
+) -> bool {
+    let Some(state) = read_state(&state_dir(project_dir)) else {
+        return false;
+    };
+    if state.release_policy_hash.is_empty() {
+        return false;
+    }
+    state.release_policy_hash != hash_release_policy(project_dir, cli_flags)
 }
 
 /// Read the node-linker layout the last install materialized, if
@@ -931,6 +1427,20 @@ pub fn read_state_unreviewed_builds(project_dir: &Path) -> Vec<String> {
     read_or_migrate_fresh_state(&state_dir(project_dir))
         .map(|s| s.unreviewed_builds)
         .unwrap_or_default()
+}
+
+/// Spec keys the last install recorded as owed a build, or `None` when
+/// the state cannot say — no state file, or state predating the field.
+/// See [`InstallState::deferred_dep_builds`].
+///
+/// `None` MUST stay distinct from `Some([])`. Flattening the two turns
+/// the one-time migration into a no-op exactly where it matters: legacy
+/// state busts freshness, but the lifecycle delta would then still
+/// narrow to changed packages, drop the stranded build, and write
+/// `Some([])` — recording the tree as clean on the very install meant
+/// to heal it.
+pub fn read_state_deferred_dep_builds(project_dir: &Path) -> Option<Vec<String>> {
+    read_or_migrate_fresh_state(&state_dir(project_dir))?.deferred_dep_builds
 }
 
 /// Remove the install state directory. Missing state is not an error.
@@ -1057,13 +1567,28 @@ struct NoIntegrityBinding {
 /// them straight from the store. Tracks a `storeDir` override so the binding
 /// moves with the store it indexes.
 pub fn no_integrity_dir(project_dir: &Path) -> PathBuf {
-    let store_v1 = match crate::commands::resolved_store_dir(project_dir) {
-        Some(custom) => custom.join("v1"),
-        None => aube_store::dirs::store_dir()
-            .and_then(|files| files.parent().map(Path::to_path_buf))
-            .unwrap_or_else(|| std::env::temp_dir().join("aube").join("store").join("v1")),
-    };
-    store_v1.join("no-integrity")
+    crate::commands::store_v1_dir(project_dir).join("no-integrity")
+}
+
+/// Every directory a binding may be READ from, [`no_integrity_dir`] first,
+/// then the read-only global store's when the default store is unwritable
+/// and installs are writing a project-local one. Only directories that
+/// exist, so an empty list means nothing is bound anywhere and the caller
+/// can skip building a registry client.
+pub fn no_integrity_read_dirs(project_dir: &Path) -> Vec<PathBuf> {
+    let dirs = crate::commands::store_v1_dirs(project_dir);
+    std::iter::once(dirs.primary)
+        .chain(dirs.read_fallback)
+        .map(|v1| v1.join("no-integrity"))
+        .filter(|dir| dir.exists())
+        .collect()
+}
+
+/// [`read_no_integrity_binding`] across [`no_integrity_read_dirs`]: the
+/// first directory holding a binding for `url` answers.
+pub fn read_no_integrity_binding_in(dirs: &[PathBuf], url: &str) -> Option<String> {
+    dirs.iter()
+        .find_map(|dir| read_no_integrity_binding(dir, url))
 }
 
 fn no_integrity_binding_file(dir: &Path, url: &str) -> PathBuf {
@@ -1106,9 +1631,9 @@ pub fn read_no_integrity_index_for<'a, I>(project_dir: &Path, pkgs: I) -> BTreeM
 where
     I: IntoIterator<Item = &'a aube_lockfile::LockedPackage>,
 {
-    let dir = no_integrity_dir(project_dir);
+    let dirs = no_integrity_read_dirs(project_dir);
     // Nothing bound yet (fresh store) → skip building a registry client.
-    if !dir.exists() {
+    if dirs.is_empty() {
         return BTreeMap::new();
     }
     let client = crate::commands::make_client(project_dir);
@@ -1116,7 +1641,7 @@ where
         .filter(|pkg| pkg.integrity.is_none() && pkg.local_source.is_none())
         .filter_map(|pkg| {
             let url = client.tarball_url(pkg.registry_name(), &pkg.version);
-            read_no_integrity_binding(&dir, &url)
+            read_no_integrity_binding_in(&dirs, &url)
                 .map(|sri| (format!("{}@{}", pkg.registry_name(), pkg.version), sri))
         })
         .collect()
@@ -1149,6 +1674,15 @@ pub fn write_no_integrity_bindings(
     Ok(())
 }
 
+fn license_state_file(state_path: &Path) -> PathBuf {
+    state_path.join(LICENSE_STATE_FILE_NAME)
+}
+
+fn read_package_licenses(state_path: &Path) -> Option<InstallLicenseState> {
+    let content = std::fs::read(license_state_file(state_path)).ok()?;
+    serde_json::from_slice(&content).ok()
+}
+
 fn fresh_state_file(state_path: &Path) -> PathBuf {
     state_path.join(FRESH_STATE_FILE_NAME)
 }
@@ -1172,8 +1706,10 @@ fn read_or_migrate_fresh_state(state_path: &Path) -> Option<FreshnessState> {
 }
 
 fn write_fresh_state(state_path: &Path, state: &FreshnessState) -> Result<(), std::io::Error> {
-    let json = serde_json::to_string_pretty(state)?;
-    aube_util::fs_atomic::atomic_write(&fresh_state_file(state_path), json.as_bytes())
+    // Compact for the same reason as `state.json` above — this sidecar
+    // is parsed on every `aube run`/`exec`/`test` startup.
+    let json = serde_json::to_vec(state)?;
+    aube_util::fs_atomic::atomic_write(&fresh_state_file(state_path), &json)
 }
 
 fn remove_legacy_state_file(state_path: &Path) -> Result<(), std::io::Error> {
@@ -1186,17 +1722,18 @@ fn remove_legacy_state_file(state_path: &Path) -> Result<(), std::io::Error> {
 impl InstallLayoutState {
     fn from_graph(
         project_dir: &Path,
-        graph: &aube_lockfile::LockfileGraph,
-        node_linker: aube_linker::NodeLinker,
-        modules_dir_name: &str,
-        aube_dir: &Path,
-        virtual_store_dir_max_length: usize,
-        placements: Option<&aube_linker::HoistedPlacements>,
-    ) -> Self {
-        let linker = match node_linker {
+        layout: &WriteStateLayout<'_>,
+    ) -> Result<Self, std::io::Error> {
+        let linker = match layout.node_linker {
             aube_linker::NodeLinker::Isolated => InstallLayoutMode::Isolated,
             aube_linker::NodeLinker::Hoisted => InstallLayoutMode::Hoisted,
         };
+        let hoisting_limits = matches!(layout.node_linker, aube_linker::NodeLinker::Hoisted)
+            .then_some(match layout.hoisting_limits {
+                aube_linker::HoistingLimits::None => InstallHoistingLimits::None,
+                aube_linker::HoistingLimits::Workspaces => InstallHoistingLimits::Workspaces,
+                aube_linker::HoistingLimits::Dependencies => InstallHoistingLimits::Dependencies,
+            });
         // Record each importer's direct-dependency symlinks — the root
         // (`.`) *and* every workspace member — relative to `project_dir`.
         // `verify_install_layout` walks these, so tracking members means a
@@ -1205,64 +1742,67 @@ impl InstallLayoutState {
         // <member>/node_modules && aube install` short-circuited to
         // "Already up to date" and never relinked the member.
         let mut direct_entries = BTreeMap::new();
-        for (importer, deps) in &graph.importers {
-            let modules_base = if importer == "." {
-                project_dir.join(modules_dir_name)
+        for (importer, deps) in &layout.graph.importers {
+            let importer_dir = if importer == "." {
+                project_dir.to_path_buf()
             } else {
-                project_dir.join(importer).join(modules_dir_name)
+                aube_util::path::normalize_lexical(&project_dir.join(importer))
             };
             let entries = deps
                 .iter()
                 .map(|dep| {
-                    // In hoisted mode a member's direct dep may have hoisted
-                    // out of `<importer>/node_modules/<name>` to the shared
-                    // workspace root (or nested under a different member), so
-                    // verify it at its ACTUAL placement — otherwise the
-                    // warm-path check reports it permanently "missing" and
-                    // re-installs on every run. `placements` is `Some` only
-                    // for hoisted; a `link:` sibling created by the post-pass
-                    // (absent from `placements`) and every isolated-mode dep
-                    // fall back to the `<importer>/node_modules/<name>` path.
-                    let path = placements
-                        .and_then(|p| p.package_dir(&dep.dep_path))
-                        .map(|p| p.to_path_buf())
-                        .unwrap_or_else(|| modules_base.join(&dep.name));
-                    relative_path_or_original(&path, project_dir)
+                    let importer_entry = importer_dir.join(layout.modules_dir_name).join(&dep.name);
+                    // A workspace-wide hoist may satisfy this direct edge from
+                    // an ancestor node_modules. Record the first placement Node
+                    // can actually see instead of a local slot the linker
+                    // intentionally left absent.
+                    let entry = layout
+                        .placements
+                        .filter(|_| matches!(layout.node_linker, aube_linker::NodeLinker::Hoisted))
+                        .and_then(|placements| {
+                            let package_dirs = placements.all_package_dirs(&dep.dep_path);
+                            importer_dir.ancestors().find_map(|ancestor| {
+                                let candidate =
+                                    ancestor.join(layout.modules_dir_name).join(&dep.name);
+                                package_dirs.contains(&candidate).then_some(candidate)
+                            })
+                        })
+                        .unwrap_or(importer_entry);
+                    relative_path_or_original(&entry, project_dir)
                 })
                 .collect();
             direct_entries.insert(importer.clone(), entries);
         }
 
         let mut packages = BTreeMap::new();
-        let direct_dep_paths: std::collections::BTreeSet<String> = graph
+        let direct_dep_paths: std::collections::BTreeSet<String> = layout
+            .graph
             .importers
             .get(".")
             .into_iter()
             .flat_map(|deps| deps.iter().map(|dep| dep.dep_path.clone()))
             .collect();
-        for dep_path in direct_dep_paths {
-            let Some(pkg) = graph.packages.get(&dep_path) else {
-                continue;
-            };
+        for (dep_path, pkg) in &layout.graph.packages {
             let is_link = matches!(
                 pkg.local_source.as_ref(),
                 Some(aube_lockfile::LocalSource::Link(_))
             );
-            let package_json_path = match pkg.local_source.as_ref() {
-                Some(aube_lockfile::LocalSource::Link(path)) => {
-                    project_dir.join(path).join("package.json")
-                }
+            let package_dir = match pkg.local_source.as_ref() {
+                Some(aube_lockfile::LocalSource::Link(path)) => project_dir.join(path),
                 _ => crate::commands::install::materialized_pkg_dir(
-                    aube_dir,
-                    &dep_path,
+                    layout.aube_dir,
+                    dep_path,
                     &pkg.name,
-                    virtual_store_dir_max_length,
-                    placements,
-                )
-                .join("package.json"),
+                    layout.virtual_store_dir_max_length,
+                    layout.placements,
+                ),
             };
+            if !direct_dep_paths.contains(dep_path) {
+                continue;
+            }
+            let package_json_path = package_dir.join("package.json");
             packages.insert(
-                dep_path,
+                dep_path.clone(),
                 InstalledPackageState {
                     name: pkg.name.clone(),
                     version: pkg.version.clone(),
@@ -1273,11 +1813,23 @@ impl InstallLayoutState {
             );
         }
 
-        Self {
+        let gvs_nested_links = if layout.use_global_virtual_store
+            && matches!(layout.node_linker, aube_linker::NodeLinker::Isolated)
+        {
+            collect_gvs_nested_links(project_dir, layout)?
+        } else {
+            None
+        };
+
+        Ok(Self {
             linker,
+            modules_dir_name: layout.modules_dir_name.to_string(),
+            hoisting_limits,
+            virtual_store_dir_max_length: Some(layout.virtual_store_dir_max_length),
             direct_entries,
             packages,
-        }
+            gvs_nested_links,
+        })
     }
 }
 
@@ -1344,7 +1896,34 @@ fn verify_install_layout(
         }
     }
 
+    if let Some(reason) = stale_gvs_nested_link(project_dir, layout) {
+        return Some(reason);
+    }
+
     None
+}
+
+pub fn gvs_nested_links_are_current(project_dir: &Path, layout: &InstallLayoutState) -> bool {
+    layout.gvs_nested_links.is_some() && stale_gvs_nested_link(project_dir, layout).is_none()
+}
+
+fn stale_gvs_nested_link(project_dir: &Path, layout: &InstallLayoutState) -> Option<String> {
+    // One entry per (package, dependency) edge in the graph — easily
+    // 10^5 on a large monorepo — so scan in parallel. `find_map_first`
+    // keeps the reported entry deterministic (first in map order) while
+    // letting rayon fan the readlink(2) calls out across threads.
+    layout
+        .gvs_nested_links
+        .as_ref()?
+        .par_iter()
+        .find_map_first(|(rel, expected)| {
+            let path = project_dir.join(rel);
+            match std::fs::read_link(&path) {
+                Ok(actual) if actual == Path::new(expected) => None,
+                Ok(_) => Some(format!("global virtual store link changed: {rel}")),
+                Err(_) => Some(format!("global virtual store link missing: {rel}")),
+            }
+        })
 }
 
 #[derive(Deserialize)]
@@ -1444,8 +2023,28 @@ fn hash_settings(project_dir: &Path, cli_flags: &[(String, String)]) -> String {
     hasher.update(b"enable_gvs=");
     hasher.update(format!("{enable_gvs:?}").as_bytes());
     hasher.update(b"\0");
+    let cache_dir = crate::commands::resolved_cache_dir_with_ctx(project_dir, &ctx);
+    hasher.update(b"cache_dir=");
+    hasher.update(cache_dir.as_os_str().as_encoded_bytes());
+    hasher.update(b"\0");
+    let store_dir = crate::commands::resolved_store_dir_with_ctx(project_dir, &ctx);
+    hasher.update(b"store_dir=");
+    if let Some(store_dir) = store_dir {
+        hasher.update(store_dir.as_os_str().as_encoded_bytes());
+    }
+    hasher.update(b"\0");
     let lockfile_enabled = aube_settings::resolved::lockfile(&ctx);
     hasher.update(format!("lockfile={lockfile_enabled}\0").as_bytes());
+    // Resolution policy is part of warm-install freshness too. A project may
+    // keep the same manifest and lockfile while tightening its release-age
+    // policy; accepting the old warm tree would skip the policy-aware install
+    // path entirely.
+    hash_release_age_settings(&mut hasher, &ctx);
+    // Catalog pruning runs after resolution, so a false→true environment
+    // change must invalidate the warm path even though it does not alter the
+    // installed dependency tree itself.
+    let catalog_prune = crate::commands::install::resolve_catalog_prune(&ctx);
+    hasher.update(format!("catalog_prune={catalog_prune}\0").as_bytes());
     // additional tree shape settings. cover enable_modules_dir flip
     // (pnpm equivalent of --lockfile-only persistent), virtual_store_only,
     // hoist_workspace_packages, dedupe_direct_deps, symlink,
@@ -1471,6 +2070,22 @@ fn hash_settings(project_dir: &Path, cli_flags: &[(String, String)]) -> String {
     // unaffected.
     if matches!(node_linker, aube_settings::resolved::NodeLinker::Hoisted) {
         hasher.update(b"hoisted_layout_algo=2\0");
+    }
+    // Hidden-hoist name-selection version. The tree at
+    // `<virtual-store>/node_modules/` now claims each name shallowest-first
+    // (pnpm's hoist sort) instead of in dep_path order, so which VERSION of a
+    // name an undeclared import resolves to can move. Nothing else in this hash
+    // sees that: the graph, the settings and the direct entries are all
+    // identical across the change, and `verify_install_layout` only lstats the
+    // top-level entries — it never inspects the tree. Without this salt a warm
+    // `node_modules` keeps the old tree and a phantom import resolves
+    // differently warm vs. fresh from one lockfile. Bump on any future
+    // hidden-hoist selection change. Gated ON the isolated linker, which is the
+    // only one that builds this tree — the hoisted linker returns from
+    // `link_all` before `link_hidden_hoist`. Stated positively so a future
+    // third linker has to opt in rather than inherit the salt by default.
+    if matches!(node_linker, aube_settings::resolved::NodeLinker::Isolated) {
+        hasher.update(b"hidden_hoist_algo=1\0");
     }
     let dedupe_direct_deps = aube_settings::resolved::dedupe_direct_deps(&ctx);
     hasher.update(format!("dedupe_direct_deps={dedupe_direct_deps}\0").as_bytes());
@@ -1519,6 +2134,31 @@ fn hash_settings(project_dir: &Path, cli_flags: &[(String, String)]) -> String {
             });
         hasher.update(b"engine=");
         hasher.update(engine.as_bytes());
+        hasher.update(b"\0");
+    }
+    // The shell dependency build scripts run under, for the same reason the
+    // engine above is here: a tree built by another shell can hold WRONG bytes
+    // rather than merely stale ones (`cmd.exe` exits 0 having written an
+    // unexpanded `${VAR:-default}` literally), and the warm path returns before
+    // any lifecycle or side-effects-cache code runs, so nothing downstream ever
+    // gets the chance to notice. Read from the settings and the engine context
+    // rather than from `ScriptSettings`, which the settings pass has not filled
+    // in at the freshness check.
+    //
+    // The PLATFORM DEFAULT contributes nothing, so every install written before
+    // this existed — all of which used that default — stays warm, and only a
+    // real shell change pays a slow install.
+    let lifecycle_shell = aube_scripts::shell_id_for(
+        aube_settings::resolved::script_shell(&ctx)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .as_deref()
+            .map(Path::new),
+        aube_util::engine_context().default_script_shell.as_ref(),
+    );
+    if lifecycle_shell != aube_scripts::PLATFORM_DEFAULT_SHELL_ID {
+        hasher.update(b"lifecycle_shell=");
+        hasher.update(lifecycle_shell.as_bytes());
         hasher.update(b"\0");
     }
     // Embedder-supplied extra fingerprint: an install-shape input the host
@@ -1616,6 +2256,38 @@ fn hash_settings(project_dir: &Path, cli_flags: &[(String, String)]) -> String {
     // returns empty string, harmless but stable.
     hasher.update(aube_resolver::platform::host_triple().2.as_bytes());
     hasher.update(b"\0");
+    // Command-line platform selection (`--os`/`--cpu`/`--libc`), which decides
+    // the same thing the host block above does — which prebuilts are correct —
+    // but from argv rather than from the machine. The host bytes are IDENTICAL
+    // across a flagged and a bare run, so without this a flagged install on a
+    // warm tree short-circuits as up-to-date and fetches nothing, and dropping
+    // the flags again leaves the foreign tree in place. Both directions have to
+    // re-materialize, which is why the selection is hashed rather than merely
+    // recorded. The config-sourced spelling of the same setting is already
+    // covered: the `pnpm` manifest key rides `INSTALL_SHAPE_FIELDS`, and
+    // `pnpm-workspace.yaml` / `.npmrc` are byte-hashed above — this closes the
+    // one path that was invisible.
+    //
+    // An axis nobody named contributes NOTHING, so an unflagged run in a
+    // process that never parsed the flags (`ensure_installed`, `verify_deps`)
+    // hashes exactly as it did before this existed.
+    hasher.update(b"archsel=");
+    let selection = aube_util::engine_context().cli_supported_architectures;
+    for (axis, values) in [
+        ("os", &selection.os),
+        ("cpu", &selection.cpu),
+        ("libc", &selection.libc),
+    ] {
+        let Some(values) = values else { continue };
+        hasher.update(axis.as_bytes());
+        hasher.update(b"=");
+        for v in values {
+            hasher.update(v.as_bytes());
+            hasher.update(b"\x1f");
+        }
+        hasher.update(b"\x1e");
+    }
+    hasher.update(b"\0");
     // Patches dir. patch-commit and patch-remove touch patches in
     // `<project>/patches/` and `.aube-patches.json`. Old fast path
     // did not hash either. User edits a patch file, next install
@@ -1652,6 +2324,40 @@ fn hash_settings(project_dir: &Path, cli_flags: &[(String, String)]) -> String {
     format!("blake3:{}", hasher.finalize().to_hex())
 }
 
+/// Fingerprint *only* the resolved minimum-release-age policy.
+///
+/// `hash_settings` also mixes in the raw workspace-yaml bytes, so it moves on
+/// every catalog / overrides / packageExtensions edit. That makes it far too
+/// broad to stand in for "did the age gate change?", which is the only drift
+/// that can invalidate lockfile picks already admitted under the gate.
+/// Resolved values only, so a no-op edit collapses to the same hash.
+fn hash_release_policy(project_dir: &Path, cli_flags: &[(String, String)]) -> String {
+    let files = crate::commands::FileSources::load(project_dir);
+    let (_ws_config, raw_workspace) =
+        aube_manifest::workspace::load_both(project_dir).unwrap_or_default();
+    let env = aube_settings::values::capture_env();
+    let ctx = files.ctx(&raw_workspace, &env, cli_flags);
+    let mut hasher = blake3::Hasher::new();
+    hash_release_age_settings(&mut hasher, &ctx);
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+fn hash_release_age_settings(hasher: &mut blake3::Hasher, ctx: &aube_settings::ResolveCtx<'_>) {
+    let minimum_release_age = aube_settings::resolved::minimum_release_age(ctx);
+    hasher.update(format!("minimum_release_age={minimum_release_age}\0").as_bytes());
+    let minimum_release_age_exclude =
+        aube_settings::resolved::minimum_release_age_exclude(ctx).unwrap_or_default();
+    hasher.update(b"minimum_release_age_exclude=");
+    for pattern in &minimum_release_age_exclude {
+        hasher.update(pattern.as_bytes());
+        hasher.update(b"\x1f");
+    }
+    hasher.update(b"\0");
+    let minimum_release_age_strict = aube_settings::resolved::minimum_release_age_strict(ctx)
+        || aube_settings::resolved::paranoid(ctx);
+    hasher.update(format!("minimum_release_age_strict={minimum_release_age_strict}\0").as_bytes());
+}
+
 fn hash_file(path: &Path) -> String {
     // BLAKE3 is 3–5× faster than SHA-256 on the state-check hot path.
     // The `"blake3:"` prefix makes old `"sha256:"` state mismatch on
@@ -1681,10 +2387,13 @@ fn empty_blake3_hash() -> &'static str {
 mod tests {
     use super::{
         InstallLayoutMode, InstallLayoutState, InstallState, InstalledPackageState,
-        collect_package_json_hashes_from_manifests, empty_blake3_hash, fresh_state_file, hash_file,
+        WriteStateInput, WriteStateLayout, collect_package_json_hashes_from_manifests,
+        deferred_dep_builds_stale, empty_blake3_hash, fresh_state_file,
+        gvs_nested_links_are_current, hash_file, hash_release_age_settings, hash_release_policy,
         hash_settings, install_state_file, member_lockfiles_stale, new_workspace_member,
-        read_or_migrate_fresh_state, relative_path_or_original, remove_state,
-        verify_install_layout,
+        preview_list, read_hoisted_placements, read_or_migrate_fresh_state, read_state,
+        relative_path_or_original, release_policy_changed_since_last_run, remove_state, state_dir,
+        verify_install_layout, write_hoisted_placements, write_state,
     };
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
@@ -1701,11 +2410,34 @@ mod tests {
     }
 
     #[test]
+    fn hoisted_placement_sidecar_preserves_exact_conflicting_version_paths() {
+        let project_dir = temp_project_dir("exact-hoisted-placements");
+        let root_v2 = project_dir.join("node_modules/foo");
+        let nested_v1 = project_dir.join("node_modules/bar/node_modules/foo");
+        std::fs::create_dir_all(&root_v2).expect("root placement should write");
+        std::fs::create_dir_all(&nested_v1).expect("nested placement should write");
+        let placements = aube_linker::HoistedPlacements::from_package_dirs(BTreeMap::from([
+            ("foo@1.0.0".to_string(), vec![nested_v1.clone()]),
+            ("foo@2.0.0".to_string(), vec![root_v2.clone()]),
+        ]));
+
+        write_hoisted_placements(&project_dir, Some(&placements))
+            .expect("placement sidecar should write");
+        let restored =
+            read_hoisted_placements(&project_dir).expect("placement sidecar should read");
+
+        assert_eq!(restored.package_dir("foo@1.0.0"), Some(nested_v1.as_path()));
+        assert_eq!(restored.package_dir("foo@2.0.0"), Some(root_v2.as_path()));
+        remove_state(&project_dir).expect("state directory should remove");
+    }
+
+    #[test]
     fn verify_install_layout_treats_legacy_empty_hash_as_cache_miss() {
         let project_dir = temp_project_dir("legacy-empty-hash");
         let state = InstallState {
             lockfile_hash: String::new(),
             lockfile_snapshot_name: None,
+            lockfile_meta: None,
             member_lockfile_hashes: BTreeMap::new(),
             member_lockfile_meta: BTreeMap::new(),
             package_json_hashes: BTreeMap::new(),
@@ -1715,12 +2447,16 @@ mod tests {
             section_filtered: false,
             settings_hash: String::new(),
             dep_build_policy_hash: String::new(),
+            release_policy_hash: String::new(),
             package_content_hashes: BTreeMap::new(),
             graph_lthash: String::new(),
             package_subtree_hashes: BTreeMap::new(),
             package_json_shape_digests: BTreeMap::new(),
             layout: Some(InstallLayoutState {
                 linker: InstallLayoutMode::Isolated,
+                modules_dir_name: String::new(),
+                hoisting_limits: None,
+                virtual_store_dir_max_length: None,
                 direct_entries: BTreeMap::new(),
                 packages: BTreeMap::from([(
                     "is-odd@3.0.1".to_string(),
@@ -1734,8 +2470,10 @@ mod tests {
                         link: false,
                     },
                 )]),
+                gvs_nested_links: None,
             }),
             unreviewed_builds: Vec::new(),
+            deferred_dep_builds: Some(Vec::new()),
         };
 
         assert_eq!(
@@ -1766,6 +2504,9 @@ mod tests {
 
         let state = InstallLayoutState {
             linker: InstallLayoutMode::Isolated,
+            modules_dir_name: String::new(),
+            hoisting_limits: None,
+            virtual_store_dir_max_length: None,
             direct_entries: BTreeMap::from([(
                 ".".to_string(),
                 vec!["node_modules/@scope/api".to_string()],
@@ -1780,6 +2521,7 @@ mod tests {
                     link: true,
                 },
             )]),
+            gvs_nested_links: None,
         };
 
         assert_eq!(verify_install_layout(&project_dir, Some(&state)), None);
@@ -1795,17 +2537,58 @@ mod tests {
 
         let state = InstallLayoutState {
             linker: InstallLayoutMode::Isolated,
+            modules_dir_name: String::new(),
+            hoisting_limits: None,
+            virtual_store_dir_max_length: None,
             direct_entries: BTreeMap::from([(
                 ".".to_string(),
                 vec!["node_modules/@scope/api".to_string()],
             )]),
             packages: BTreeMap::new(),
+            gvs_nested_links: None,
         };
 
         assert_eq!(
             verify_install_layout(&project_dir, Some(&state)),
             Some("installed entry missing: node_modules/@scope/api".to_string())
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_install_layout_flags_retargeted_gvs_nested_link() {
+        let project_dir = temp_project_dir("retargeted-gvs-link");
+        let link_path = project_dir.join("node_modules/.aube/parent@1.0.0/node_modules/child");
+        std::fs::create_dir_all(link_path.parent().expect("link parent"))
+            .expect("link parent should write");
+        std::os::unix::fs::symlink("../../child@1.0.0/node_modules/child", &link_path)
+            .expect("nested link should write");
+        let state = InstallLayoutState {
+            linker: InstallLayoutMode::Isolated,
+            modules_dir_name: "node_modules".to_string(),
+            hoisting_limits: None,
+            virtual_store_dir_max_length: Some(120),
+            direct_entries: BTreeMap::new(),
+            packages: BTreeMap::new(),
+            gvs_nested_links: Some(BTreeMap::from([(
+                "node_modules/.aube/parent@1.0.0/node_modules/child".to_string(),
+                "../../child@1.0.0/node_modules/child".to_string(),
+            )])),
+        };
+        assert!(gvs_nested_links_are_current(&project_dir, &state));
+
+        std::fs::remove_file(&link_path).expect("old link should remove");
+        std::os::unix::fs::symlink("../../child@1.0.0-stale/node_modules/child", &link_path)
+            .expect("stale link should write");
+
+        assert_eq!(
+            verify_install_layout(&project_dir, Some(&state)),
+            Some(
+                "global virtual store link changed: node_modules/.aube/parent@1.0.0/node_modules/child"
+                    .to_string()
+            )
+        );
+        assert!(!gvs_nested_links_are_current(&project_dir, &state));
     }
 
     #[test]
@@ -1828,13 +2611,18 @@ mod tests {
 
         let layout = InstallLayoutState::from_graph(
             &project_dir,
-            &graph,
-            aube_linker::NodeLinker::Isolated,
-            "node_modules",
-            &aube_dir,
-            120,
-            None,
-        );
+            &WriteStateLayout {
+                graph: &graph,
+                node_linker: aube_linker::NodeLinker::Isolated,
+                hoisting_limits: aube_linker::HoistingLimits::None,
+                modules_dir_name: "node_modules",
+                aube_dir: &aube_dir,
+                virtual_store_dir_max_length: 120,
+                placements: None,
+                use_global_virtual_store: false,
+            },
+        )
+        .expect("layout should build");
 
         // The root importer's direct symlink sits under the workspace
         // root's node_modules.
@@ -1850,6 +2638,154 @@ mod tests {
         assert_eq!(
             layout.direct_entries.get("packages/svc"),
             Some(&vec!["packages/svc/node_modules/zod".to_string()])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn from_graph_records_scoped_gvs_links_from_package_node_modules() {
+        let project_dir = temp_project_dir("scoped-gvs-links");
+        let aube_dir = project_dir.join("node_modules/.aube");
+        let dep_path = "@scope/parent@1.0.0";
+        let entry_name = aube_lockfile::dep_path_filename::dep_path_to_filename(dep_path, 120);
+        let global_entry = project_dir.join("gvs/scoped-parent");
+        let global_modules = global_entry.join("node_modules");
+        std::fs::create_dir_all(global_modules.join("@scope/parent"))
+            .expect("scoped package should write");
+        std::os::unix::fs::symlink(
+            "../../child@1.0.0/node_modules/child",
+            global_modules.join("child"),
+        )
+        .expect("nested link should write");
+        std::fs::create_dir_all(&aube_dir).expect("virtual store should write");
+        std::os::unix::fs::symlink(&global_entry, aube_dir.join(&entry_name))
+            .expect("project GVS link should write");
+
+        let graph = aube_lockfile::LockfileGraph {
+            packages: BTreeMap::from([(
+                dep_path.to_string(),
+                aube_lockfile::LockedPackage {
+                    name: "@scope/parent".to_string(),
+                    version: "1.0.0".to_string(),
+                    dep_path: dep_path.to_string(),
+                    dependencies: BTreeMap::from([("child".to_string(), "1.0.0".to_string())]),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+
+        let layout = InstallLayoutState::from_graph(
+            &project_dir,
+            &WriteStateLayout {
+                graph: &graph,
+                node_linker: aube_linker::NodeLinker::Isolated,
+                hoisting_limits: aube_linker::HoistingLimits::None,
+                modules_dir_name: "node_modules",
+                aube_dir: &aube_dir,
+                virtual_store_dir_max_length: 120,
+                placements: None,
+                use_global_virtual_store: true,
+            },
+        )
+        .expect("scoped GVS layout should build");
+
+        let expected_path = format!("node_modules/.aube/{entry_name}/node_modules/child");
+        assert_eq!(
+            layout
+                .gvs_nested_links
+                .as_ref()
+                .and_then(|links| links.get(&expected_path)),
+            Some(&"../../child@1.0.0/node_modules/child".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn from_graph_skips_unreadable_gvs_link_topology() {
+        let project_dir = temp_project_dir("unreadable-gvs-links");
+        let aube_dir = project_dir.join("node_modules/.aube");
+        let dep_path = "parent@1.0.0";
+        let entry_name = aube_lockfile::dep_path_filename::dep_path_to_filename(dep_path, 120);
+        let global_entry = project_dir.join("gvs/parent");
+        std::fs::create_dir_all(global_entry.join("node_modules/parent"))
+            .expect("package should write");
+        std::fs::create_dir_all(&aube_dir).expect("virtual store should write");
+        std::os::unix::fs::symlink(&global_entry, aube_dir.join(entry_name))
+            .expect("project GVS link should write");
+
+        let graph = aube_lockfile::LockfileGraph {
+            packages: BTreeMap::from([(
+                dep_path.to_string(),
+                aube_lockfile::LockedPackage {
+                    name: "parent".to_string(),
+                    version: "1.0.0".to_string(),
+                    dep_path: dep_path.to_string(),
+                    dependencies: BTreeMap::from([("missing".to_string(), "1.0.0".to_string())]),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+
+        let layout = InstallLayoutState::from_graph(
+            &project_dir,
+            &WriteStateLayout {
+                graph: &graph,
+                node_linker: aube_linker::NodeLinker::Isolated,
+                hoisting_limits: aube_linker::HoistingLimits::None,
+                modules_dir_name: "node_modules",
+                aube_dir: &aube_dir,
+                virtual_store_dir_max_length: 120,
+                placements: None,
+                use_global_virtual_store: true,
+            },
+        )
+        .expect("unreadable topology should not fail state recording");
+
+        assert_eq!(layout.gvs_nested_links, None);
+    }
+
+    #[test]
+    fn from_graph_records_visible_hoisted_entries_for_workspace_importers() {
+        let project_dir = temp_project_dir("layout-hoisted-importer");
+        let aube_dir = project_dir.join("node_modules/.aube");
+        let dep = aube_lockfile::DirectDep {
+            name: "is-number".to_string(),
+            dep_path: "is-number@7.0.0".to_string(),
+            dep_type: aube_lockfile::DepType::Production,
+            specifier: None,
+        };
+        let graph = aube_lockfile::LockfileGraph {
+            importers: BTreeMap::from([
+                (".".to_string(), Vec::new()),
+                ("packages/app".to_string(), vec![dep]),
+            ]),
+            ..Default::default()
+        };
+        let placements = aube_linker::HoistedPlacements::from_package_dirs(BTreeMap::from([(
+            "is-number@7.0.0".to_string(),
+            vec![project_dir.join("node_modules/is-number")],
+        )]));
+
+        let layout = InstallLayoutState::from_graph(
+            &project_dir,
+            &WriteStateLayout {
+                graph: &graph,
+                node_linker: aube_linker::NodeLinker::Hoisted,
+                hoisting_limits: aube_linker::HoistingLimits::None,
+                modules_dir_name: "node_modules",
+                aube_dir: &aube_dir,
+                virtual_store_dir_max_length: 120,
+                placements: Some(&placements),
+                use_global_virtual_store: false,
+            },
+        )
+        .expect("hoisted layout should build");
+
+        assert_eq!(
+            layout.direct_entries.get("packages/app"),
+            Some(&vec!["node_modules/is-number".to_string()])
         );
     }
 
@@ -1907,15 +2843,21 @@ mod tests {
         )
         .unwrap();
 
+        let aube_dir = root_nm.join(".aube");
         let layout = InstallLayoutState::from_graph(
             &project_dir,
-            &graph,
-            aube_linker::NodeLinker::Hoisted,
-            "node_modules",
-            &root_nm.join(".aube"),
-            120,
-            Some(&placements),
-        );
+            &WriteStateLayout {
+                graph: &graph,
+                node_linker: aube_linker::NodeLinker::Hoisted,
+                hoisting_limits: aube_linker::HoistingLimits::None,
+                modules_dir_name: "node_modules",
+                aube_dir: &aube_dir,
+                virtual_store_dir_max_length: 120,
+                placements: Some(&placements),
+                use_global_virtual_store: false,
+            },
+        )
+        .unwrap();
 
         // The member's react is tracked at the SHARED ROOT, where it hoisted.
         assert_eq!(
@@ -1961,6 +2903,7 @@ mod tests {
         let state = InstallState {
             lockfile_hash: "blake3:lock".to_string(),
             lockfile_snapshot_name: None,
+            lockfile_meta: None,
             member_lockfile_hashes: BTreeMap::new(),
             member_lockfile_meta: BTreeMap::new(),
             package_json_hashes: BTreeMap::from([(".".to_string(), "blake3:pkg".to_string())]),
@@ -1970,6 +2913,7 @@ mod tests {
             section_filtered: false,
             settings_hash: "blake3:settings".to_string(),
             dep_build_policy_hash: "blake3:dep-build-policy".to_string(),
+            release_policy_hash: "blake3:release-policy".to_string(),
             package_content_hashes: BTreeMap::from([(
                 "is-odd@3.0.1".to_string(),
                 "blake3:content".to_string(),
@@ -1982,10 +2926,15 @@ mod tests {
             package_json_shape_digests: BTreeMap::from([(".".to_string(), "shape".to_string())]),
             layout: Some(InstallLayoutState {
                 linker: InstallLayoutMode::Isolated,
+                modules_dir_name: String::new(),
+                hoisting_limits: None,
+                virtual_store_dir_max_length: None,
                 direct_entries: BTreeMap::new(),
                 packages: BTreeMap::new(),
+                gvs_nested_links: None,
             }),
             unreviewed_builds: Vec::new(),
+            deferred_dep_builds: Some(Vec::new()),
         };
         let json = serde_json::to_string(&state).expect("state should serialize");
         std::fs::write(install_state_file(&state_path), json).expect("state should write");
@@ -2018,6 +2967,7 @@ mod tests {
         let state = InstallState {
             lockfile_hash: "blake3:lock".to_string(),
             lockfile_snapshot_name: None,
+            lockfile_meta: None,
             member_lockfile_hashes: BTreeMap::new(),
             member_lockfile_meta: BTreeMap::new(),
             package_json_hashes: BTreeMap::new(),
@@ -2027,6 +2977,7 @@ mod tests {
             section_filtered: false,
             settings_hash: String::new(),
             dep_build_policy_hash: String::new(),
+            release_policy_hash: String::new(),
             package_content_hashes: BTreeMap::new(),
             graph_lthash: String::new(),
             package_subtree_hashes: BTreeMap::new(),
@@ -2036,6 +2987,7 @@ mod tests {
                 "esbuild@0.21.5".to_string(),
                 "better-sqlite3@11.5.0".to_string(),
             ],
+            deferred_dep_builds: Some(Vec::new()),
         };
         let json = serde_json::to_string(&state).expect("state should serialize");
         std::fs::write(install_state_file(&state_path), json).expect("state should write");
@@ -2048,6 +3000,77 @@ mod tests {
                 "esbuild@0.21.5".to_string(),
                 "better-sqlite3@11.5.0".to_string()
             ]
+        );
+    }
+
+    /// The retry depends on this list surviving into the freshness
+    /// sidecar: `lifecycle_delta_filter` reads it back to force a full
+    /// eligible scan, and a field left out of `FreshnessState` would
+    /// read as empty there — the delta would then drop the owed package
+    /// and the next state write would clear the marker, re-sealing the
+    /// tree while every other test still passed.
+    #[test]
+    fn deferred_dep_builds_roundtrip_reaches_the_delta_filter() {
+        use super::read_state_deferred_dep_builds;
+        let project_dir = temp_project_dir("deferred-builds-rt");
+        let state_path = project_dir.join("node_modules/.aube-state");
+        std::fs::create_dir_all(&state_path).expect("state dir should write");
+        let state = InstallState {
+            lockfile_hash: "blake3:lock".to_string(),
+            lockfile_snapshot_name: None,
+            lockfile_meta: None,
+            member_lockfile_hashes: BTreeMap::new(),
+            member_lockfile_meta: BTreeMap::new(),
+            package_json_hashes: BTreeMap::new(),
+            package_json_meta: BTreeMap::new(),
+            local_directory_hashes: Some(BTreeMap::new()),
+            aube_version: env!("CARGO_PKG_VERSION").to_string(),
+            section_filtered: false,
+            settings_hash: String::new(),
+            dep_build_policy_hash: String::new(),
+            release_policy_hash: String::new(),
+            package_content_hashes: BTreeMap::new(),
+            graph_lthash: String::new(),
+            package_subtree_hashes: BTreeMap::new(),
+            package_json_shape_digests: BTreeMap::new(),
+            layout: None,
+            unreviewed_builds: Vec::new(),
+            deferred_dep_builds: Some(vec!["esbuild@0.24.0".to_string()]),
+        };
+        let json = serde_json::to_string(&state).expect("state should serialize");
+        std::fs::write(install_state_file(&state_path), json).expect("state should write");
+        // First read migrates the fresh sidecar; the second reads it back.
+        let _ = read_state_deferred_dep_builds(&project_dir);
+        assert_eq!(
+            read_state_deferred_dep_builds(&project_dir),
+            Some(vec!["esbuild@0.24.0".to_string()]),
+            "the owed build must survive into the sidecar the delta filter reads"
+        );
+    }
+
+    /// The delta filter distinguishes three states, and collapsing the
+    /// first two makes the migration a no-op: state predating the field
+    /// (`None`, must force a full scan) is NOT the same as an install
+    /// that positively recorded nothing owed (`Some([])`, may narrow).
+    #[test]
+    fn legacy_state_reads_as_unknown_not_as_nothing_owed() {
+        use super::read_state_deferred_dep_builds;
+        let project_dir = temp_project_dir("deferred-builds-legacy");
+        let state_path = project_dir.join("node_modules/.aube-state");
+        std::fs::create_dir_all(&state_path).expect("state dir should write");
+        let legacy_json = r#"{
+            "lockfile_hash": "blake3:lock",
+            "package_json_hashes": {},
+            "aube_version": "0.0.0"
+        }"#;
+        std::fs::write(install_state_file(&state_path), legacy_json).expect("state should write");
+
+        let _ = read_state_deferred_dep_builds(&project_dir);
+        assert_eq!(
+            read_state_deferred_dep_builds(&project_dir),
+            None,
+            "pre-field state must read as unknown, or the lifecycle delta narrows and re-seals \
+             the stranded tree the migration exists to heal"
         );
     }
 
@@ -2141,6 +3164,36 @@ mod tests {
         super::read_no_integrity_index_for(project, std::slice::from_ref(&no_integrity_pkg()))
             .get("foo@1.0.0")
             .cloned()
+    }
+
+    #[test]
+    fn no_integrity_binding_reads_layer_the_writable_dir_over_the_global_one() {
+        let base = std::env::temp_dir().join(format!("aube-ni-layer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let local = base.join("local/no-integrity");
+        let global = base.join("global/no-integrity");
+        let url = "https://reg.test/dep/-/dep-1.0.0.tgz";
+        let mut bindings = std::collections::BTreeMap::new();
+        bindings.insert(url.to_string(), "sha512-global".to_string());
+        super::write_no_integrity_bindings(&global, &bindings).unwrap();
+        // Only the global store knows the URL: the warm read still finds it.
+        let dirs = vec![local.clone(), global.clone()];
+        assert_eq!(
+            super::read_no_integrity_binding_in(&dirs, url).as_deref(),
+            Some("sha512-global")
+        );
+        // A local binding for the same URL shadows the global one.
+        bindings.insert(url.to_string(), "sha512-local".to_string());
+        super::write_no_integrity_bindings(&local, &bindings).unwrap();
+        assert_eq!(
+            super::read_no_integrity_binding_in(&dirs, url).as_deref(),
+            Some("sha512-local")
+        );
+        assert_eq!(
+            super::read_no_integrity_binding_in(&dirs, "https://reg.test/other"),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -2251,6 +3304,7 @@ mod tests {
         let state = InstallState {
             lockfile_hash: String::new(),
             lockfile_snapshot_name: None,
+            lockfile_meta: None,
             member_lockfile_hashes: BTreeMap::new(),
             member_lockfile_meta: BTreeMap::new(),
             package_json_hashes: pjh,
@@ -2260,12 +3314,14 @@ mod tests {
             section_filtered: false,
             settings_hash: String::new(),
             dep_build_policy_hash: String::new(),
+            release_policy_hash: String::new(),
             package_content_hashes: BTreeMap::new(),
             graph_lthash: String::new(),
             package_subtree_hashes: BTreeMap::new(),
             package_json_shape_digests: shapes,
             layout: None,
             unreviewed_builds: Vec::new(),
+            deferred_dep_builds: Some(Vec::new()),
         };
         let reformatted = r#"{
   "name": "x",
@@ -2317,6 +3373,7 @@ mod tests {
         let state = super::FreshnessState {
             lockfile_hash: String::new(),
             lockfile_snapshot_name: None,
+            lockfile_meta: None,
             member_lockfile_hashes: hashes,
             member_lockfile_meta: BTreeMap::new(),
             package_json_hashes: BTreeMap::new(),
@@ -2328,6 +3385,7 @@ mod tests {
             package_json_shape_digests: BTreeMap::new(),
             layout: None,
             unreviewed_builds: Vec::new(),
+            deferred_dep_builds: Some(Vec::new()),
         };
 
         // Every recorded member matches what is on disk → fresh.
@@ -2394,6 +3452,7 @@ mod tests {
         let state = super::FreshnessState {
             lockfile_hash: String::new(),
             lockfile_snapshot_name: None,
+            lockfile_meta: None,
             member_lockfile_hashes: BTreeMap::new(),
             member_lockfile_meta: BTreeMap::new(),
             package_json_hashes,
@@ -2405,6 +3464,7 @@ mod tests {
             package_json_shape_digests: BTreeMap::new(),
             layout: None,
             unreviewed_builds: Vec::new(),
+            deferred_dep_builds: Some(Vec::new()),
         };
 
         // Every current member was recorded → fresh.
@@ -2450,6 +3510,7 @@ mod tests {
         let state = super::FreshnessState {
             lockfile_hash: String::new(),
             lockfile_snapshot_name: None,
+            lockfile_meta: None,
             member_lockfile_hashes: BTreeMap::new(),
             member_lockfile_meta: BTreeMap::new(),
             package_json_hashes,
@@ -2461,6 +3522,7 @@ mod tests {
             package_json_shape_digests: BTreeMap::new(),
             layout: None,
             unreviewed_builds: Vec::new(),
+            deferred_dep_builds: Some(Vec::new()),
         };
 
         // Root + apps/server both recorded → fresh (no churn on the root).
@@ -2473,6 +3535,11 @@ mod tests {
         // tree, so adding / editing / removing it must change the
         // freshness verdict — otherwise the hook silently never re-applies
         // and the lockfile + node_modules go stale on the warm path.
+        //
+        // `hash_settings` reaches the cwd-default arm of `pnpmfile::detect`, so
+        // this shares the process-global gate seam with pnpmfile's own tests
+        // even though it lives in another module of the same test binary.
+        let _lock = crate::pnpmfile::default_gate_lock();
         let dir = temp_project_dir("settings-hash-pnpmfile");
         std::fs::write(dir.join("package.json"), r#"{"name":"x"}"#).unwrap();
 
@@ -2500,5 +3567,341 @@ mod tests {
             hash_settings(&dir, &[]),
             "removing the pnpmfile must restore the baseline hash"
         );
+    }
+
+    #[test]
+    fn release_age_value_exclusions_and_strictness_change_freshness_hash() {
+        fn fingerprint(settings: &[(&str, &str)]) -> String {
+            let project: Vec<(String, String)> = settings
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect();
+            let empty_yaml = BTreeMap::new();
+            let ctx = aube_settings::ResolveCtx {
+                managed_aube_config: &[],
+                project_aube_config: &[],
+                project_npmrc: &[],
+                project_config: &project,
+                user_aube_config: &[],
+                user_npmrc: &[],
+                workspace_yaml: &empty_yaml,
+                global_config_yaml: &empty_yaml,
+                env: &[],
+                cli: &[],
+                embedder_defaults: &[],
+            };
+            let mut hasher = blake3::Hasher::new();
+            hash_release_age_settings(&mut hasher, &ctx);
+            hasher.finalize().to_hex().to_string()
+        }
+
+        let zero = fingerprint(&[("minimumReleaseAge", "0")]);
+        let weeks_999 = fingerprint(&[("minimumReleaseAge", "10069920")]);
+        assert_ne!(zero, weeks_999, "0 minutes -> 999 weeks must invalidate");
+        assert_ne!(
+            weeks_999,
+            fingerprint(&[
+                ("minimumReleaseAge", "10069920"),
+                ("minimumReleaseAgeExclude", "is-number")
+            ]),
+            "changing exclusions must invalidate"
+        );
+        assert_ne!(
+            weeks_999,
+            fingerprint(&[
+                ("minimumReleaseAge", "10069920"),
+                ("minimumReleaseAgeStrict", "true")
+            ]),
+            "changing strictness must invalidate"
+        );
+    }
+
+    #[test]
+    fn catalog_edit_moves_settings_hash_but_not_release_policy_hash() {
+        // Release-policy revalidation discards the lockfile and re-resolves the
+        // whole graph to newest-in-range, so it has to key off the age gate
+        // alone. `settings_hash` also covers the raw workspace yaml — which is
+        // where catalogs live — so using it as the trigger re-resolves
+        // everything on an ordinary dependency bump.
+        let dir = temp_project_dir("release-policy-vs-catalog");
+        std::fs::write(dir.join("package.json"), r#"{"name":"x"}"#).unwrap();
+        let workspace = dir.join("pnpm-workspace.yaml");
+        std::fs::write(
+            &workspace,
+            "minimumReleaseAge: 4320\ncatalog:\n  left-pad: 1.0.0\n",
+        )
+        .unwrap();
+
+        let settings_before = hash_settings(&dir, &[]);
+        let policy_before = hash_release_policy(&dir, &[]);
+
+        std::fs::write(
+            &workspace,
+            "minimumReleaseAge: 4320\ncatalog:\n  left-pad: 1.1.0\n",
+        )
+        .unwrap();
+        assert_ne!(
+            settings_before,
+            hash_settings(&dir, &[]),
+            "a catalog bump must still bust the broad settings hash"
+        );
+        assert_eq!(
+            policy_before,
+            hash_release_policy(&dir, &[]),
+            "a catalog bump must not read as age-policy drift"
+        );
+
+        std::fs::write(
+            &workspace,
+            "minimumReleaseAge: 10080\ncatalog:\n  left-pad: 1.1.0\n",
+        )
+        .unwrap();
+        assert_ne!(
+            policy_before,
+            hash_release_policy(&dir, &[]),
+            "changing the age gate must read as age-policy drift"
+        );
+    }
+
+    #[test]
+    fn recorded_release_policy_hash_round_trips_through_write_state() {
+        // The narrowing only works if the hash `write_state` records is the one
+        // `release_policy_changed_since_last_run` later compares against. If
+        // those two ever stop agreeing, the checker returns `true` forever and
+        // revalidation silently reverts to firing on every settings change —
+        // which the hash-only test above would not catch.
+        let dir = temp_project_dir("release-policy-round-trip");
+        std::fs::write(dir.join("package.json"), r#"{"name":"x"}"#).unwrap();
+        let workspace = dir.join("pnpm-workspace.yaml");
+        std::fs::write(&workspace, "minimumReleaseAge: 4320\n").unwrap();
+
+        // Nothing recorded yet, so there is no evidence the gate moved.
+        assert!(
+            !release_policy_changed_since_last_run(&dir, &[]),
+            "missing state must not revalidate"
+        );
+
+        let graph = aube_lockfile::LockfileGraph::default();
+        let aube_dir = dir.join("node_modules/.aube");
+        std::fs::create_dir_all(&aube_dir).unwrap();
+        let write = |dir: &Path| {
+            write_state(
+                dir,
+                WriteStateInput {
+                    section_filtered: false,
+                    package_json_hashes: BTreeMap::new(),
+                    cli_flags: &[],
+                    package_content_hashes: BTreeMap::new(),
+                    graph_lthash: String::new(),
+                    package_subtree_hashes: BTreeMap::new(),
+                    dep_build_policy_hash: String::new(),
+                    layout: WriteStateLayout {
+                        graph: &graph,
+                        node_linker: aube_linker::NodeLinker::Isolated,
+                        hoisting_limits: aube_linker::HoistingLimits::None,
+                        modules_dir_name: "node_modules",
+                        aube_dir: &aube_dir,
+                        virtual_store_dir_max_length: 120,
+                        placements: None,
+                        use_global_virtual_store: false,
+                    },
+                    unreviewed_builds: Vec::new(),
+                    deferred_dep_builds: Vec::new(),
+                },
+            )
+            .expect("state should write");
+        };
+        write(&dir);
+
+        assert!(
+            !release_policy_changed_since_last_run(&dir, &[]),
+            "an unchanged age gate must not revalidate"
+        );
+
+        // The bug this PR fixes: a catalog edit moves `settings_hash` but is not
+        // an age-policy change, so it must not force revalidation.
+        std::fs::write(
+            &workspace,
+            "minimumReleaseAge: 4320\ncatalog:\n  left-pad: 1.0.0\n",
+        )
+        .unwrap();
+        assert!(
+            !release_policy_changed_since_last_run(&dir, &[]),
+            "a catalog edit must not revalidate"
+        );
+
+        // A tightened gate still must.
+        std::fs::write(
+            &workspace,
+            "minimumReleaseAge: 10080\ncatalog:\n  left-pad: 1.0.0\n",
+        )
+        .unwrap();
+        assert!(
+            release_policy_changed_since_last_run(&dir, &[]),
+            "a raised age gate must revalidate"
+        );
+
+        // A state file predating the field (empty hash) is unknown, not changed.
+        // This is the upgrade hop: every nub before this field wrote state
+        // without it, so answering "changed" here would hand each upgrading
+        // user one full re-resolve on their next settings edit — the very
+        // symptom this PR exists to remove.
+        write(&dir);
+        let mut state = read_state(&state_dir(&dir)).expect("state should read back");
+        assert!(
+            !state.release_policy_hash.is_empty(),
+            "write_state must record the policy hash"
+        );
+        state.release_policy_hash = String::new();
+        std::fs::write(
+            install_state_file(&state_dir(&dir)),
+            serde_json::to_string(&state).expect("state should serialize"),
+        )
+        .unwrap();
+        assert!(
+            !release_policy_changed_since_last_run(&dir, &[]),
+            "state predating release_policy_hash must not revalidate"
+        );
+
+        // The DOCUMENTED COST, pinned so it cannot be flipped back without
+        // reading why: on that same upgrade-hop install a RAISED gate is not
+        // applied either, because an empty hash carries no policy to compare
+        // against. `--force` is the retroactive path. If this assertion ever
+        // fails, the upgrade hop has started re-resolving every project's whole
+        // graph again — the defect this narrowing removes.
+        std::fs::write(
+            &workspace,
+            "minimumReleaseAge: 43200\ncatalog:\n  left-pad: 1.0.0\n",
+        )
+        .unwrap();
+        assert!(
+            !release_policy_changed_since_last_run(&dir, &[]),
+            "an unknown previous policy must not revalidate even when the gate is raised"
+        );
+
+        // The unknown-is-not-changed default must not swallow a real change:
+        // once a hash is on record, raising the gate still revalidates.
+        write(&dir);
+        std::fs::write(
+            &workspace,
+            "minimumReleaseAge: 20160\ncatalog:\n  left-pad: 1.0.0\n",
+        )
+        .unwrap();
+        assert!(
+            release_policy_changed_since_last_run(&dir, &[]),
+            "a raised age gate must still revalidate once a hash is recorded"
+        );
+    }
+
+    /// Builds the last install could not run leave the tree incomplete,
+    /// so the warm path must not report it up to date (nubjs/nub#764).
+    /// The three arms are the whole contract: nothing owed takes the
+    /// warm path, an owed build busts it, and state written before the
+    /// field existed busts once so an already-sealed tree can heal.
+    #[test]
+    fn deferred_dep_builds_decide_the_warm_path() {
+        fn state(deferred: Option<Vec<String>>, unreviewed: Vec<String>) -> super::FreshnessState {
+            super::FreshnessState {
+                lockfile_hash: String::new(),
+                lockfile_snapshot_name: None,
+                lockfile_meta: None,
+                member_lockfile_hashes: BTreeMap::new(),
+                member_lockfile_meta: BTreeMap::new(),
+                package_json_hashes: BTreeMap::new(),
+                package_json_meta: BTreeMap::new(),
+                local_directory_hashes: Some(BTreeMap::new()),
+                section_filtered: false,
+                settings_hash: String::new(),
+                dep_build_policy_hash: String::new(),
+                package_json_shape_digests: BTreeMap::new(),
+                layout: None,
+                unreviewed_builds: unreviewed,
+                deferred_dep_builds: deferred,
+            }
+        }
+
+        assert_eq!(
+            deferred_dep_builds_stale(&state(Some(Vec::new()), Vec::new())),
+            None,
+            "a clean install owes no builds and must take the warm path"
+        );
+
+        // A package denied by config is denied stably: re-running the
+        // install could never change the answer, so sealing on it is
+        // correct and the warm path must survive it.
+        assert_eq!(
+            deferred_dep_builds_stale(&state(
+                Some(Vec::new()),
+                vec!["some-unapproved-pkg@1.0.0".to_string()]
+            )),
+            None,
+            "an ordinary pending approval must not force a reinstall every time"
+        );
+
+        let reason = deferred_dep_builds_stale(&state(
+            Some(vec!["esbuild@0.24.0".to_string()]),
+            vec!["esbuild@0.24.0".to_string()],
+        ))
+        .expect("an owed build must bust the warm path");
+        assert!(
+            reason.contains("esbuild@0.24.0"),
+            "the reason must name the package so the miss is diagnosable, got: {reason}"
+        );
+
+        assert!(
+            deferred_dep_builds_stale(&state(None, vec!["esbuild@0.24.0".to_string()])).is_some(),
+            "state predating the field may be hiding a stranded build, so re-check once"
+        );
+        // The seal this migration exists for includes an ALLOWED package
+        // whose directory was missing when the lifecycle phase ran.
+        // Allowed means never unreviewed, so that state's unreviewed list
+        // is empty — narrowing the migration to a non-empty list would
+        // leave exactly those trees sealed forever.
+        assert!(
+            deferred_dep_builds_stale(&state(None, Vec::new())).is_some(),
+            "legacy state must re-check even with no unreviewed builds: an allowed build that \
+             was never attempted leaves the unreviewed list empty"
+        );
+    }
+
+    /// The list is a diagnostic, so a napi-rs-style tree of per-platform
+    /// packages must not splat its whole graph into one line.
+    #[test]
+    fn preview_list_caps_the_inline_names() {
+        let one = ["a@1".to_string()];
+        assert_eq!(preview_list(&one), "a@1");
+        let many: Vec<String> = (0..6).map(|i| format!("p{i}@1")).collect();
+        assert_eq!(preview_list(&many), "p0@1, p1@1, p2@1, and 3 more");
+    }
+
+    #[test]
+    fn settings_hash_busts_warm_path_on_storage_override_change() {
+        let dir = temp_project_dir("settings-hash-storage-overrides");
+        std::fs::write(dir.join("package.json"), r#"{"name":"x"}"#).unwrap();
+
+        let first = hash_settings(
+            &dir,
+            &[
+                ("cacheDir".to_string(), "/host/cache-a".to_string()),
+                ("storeDir".to_string(), "/host/store-a".to_string()),
+            ],
+        );
+        let changed_cache = hash_settings(
+            &dir,
+            &[
+                ("cacheDir".to_string(), "/host/cache-b".to_string()),
+                ("storeDir".to_string(), "/host/store-a".to_string()),
+            ],
+        );
+        let changed_store = hash_settings(
+            &dir,
+            &[
+                ("cacheDir".to_string(), "/host/cache-a".to_string()),
+                ("storeDir".to_string(), "/host/store-b".to_string()),
+            ],
+        );
+
+        assert_ne!(first, changed_cache);
+        assert_ne!(first, changed_store);
     }
 }

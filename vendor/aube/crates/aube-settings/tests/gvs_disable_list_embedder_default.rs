@@ -25,8 +25,9 @@ const SETTING: &str = "disableGlobalVirtualStoreForPackages";
 /// aube's built-in default, verbatim from `settings.toml`. Asserting against
 /// this string list is the "default is unchanged" half of the contract.
 /// v1.35.0 dropped `vite`/`vitepress` here once #1106 made the GVS work under
-/// Vite; nub tracks that list rather than pinning its own.
-const AUBE_DEFAULT: &[&str] = &["next", "nuxt", "parcel"];
+/// Vite; v2 dropped `nuxt`/`parcel` (#1312) and added the Metro family
+/// (#1297). nub tracks that list rather than pinning its own.
+const AUBE_DEFAULT: &[&str] = &["next", "expo", "react-native", "metro"];
 
 /// A stand-in embedder list. Deliberately disjoint from `AUBE_DEFAULT` so the
 /// override assertion below fails if the embedder tier stops being consulted —
@@ -42,6 +43,7 @@ fn ctx<'a>(
         managed_aube_config: &[],
         project_aube_config: &[],
         project_npmrc: npmrc,
+        project_config: &[],
         user_aube_config: &[],
         user_npmrc: &[],
         workspace_yaml: ws,
@@ -83,7 +85,10 @@ fn gvs_list_default_unchanged_and_embedder_overridable() {
     let with_embedder = ctx(&ws, &[], embedder_defaults());
     assert_eq!(
         resolved::disable_global_virtual_store_for_packages(&with_embedder),
-        EMBEDDER_LIST.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        EMBEDDER_LIST
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
         "embedder default must replace the built-in GVS list"
     );
 

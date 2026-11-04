@@ -61,6 +61,19 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 const FAKE_VERSION: &str = "9.9.9";
 const NEW_BYTES: &[u8] = b"NEW-NUB-RELEASE-BYTES";
+/// `bin/` carries more than the two verbs: busybox.exe (the Windows script shell)
+/// and the `nub compile` launcher template. Windows swaps per-FILE instead of
+/// renaming the whole dir, so these only travel if the swap refreshes them
+/// explicitly — hence stale-vs-new marker bytes rather than a presence check.
+const NEW_SIDECAR_BYTES: &[u8] = b"NEW-NUB-SIDECAR-BYTES";
+const STALE_SIDECAR_BYTES: &[u8] = b"STALE-NUB-SIDECAR-BYTES";
+
+fn sidecar_names() -> [String; 2] {
+    [
+        "busybox.exe".to_string(),
+        format!("nub-launcher-{}.exe", target_token()),
+    ]
+}
 
 /// Build the fake release channel: `<root>/v9.9.9/nub-<target>.zip` (containing
 /// `bin/nub.exe` = `NEW_BYTES`) + its `.sha256` sidecar. The zip is created with
@@ -74,6 +87,9 @@ fn make_fake_release(root: &Path) -> String {
     let build = tmp("zip-build");
     std::fs::create_dir_all(build.join("bin")).unwrap();
     std::fs::write(build.join("bin").join("nub.exe"), NEW_BYTES).unwrap();
+    for name in sidecar_names() {
+        std::fs::write(build.join("bin").join(name), NEW_SIDECAR_BYTES).unwrap();
+    }
     let zip_path = version_dir.join(&archive_name);
     let status = Command::new("tar")
         .args(["-a", "-c", "-f"])
@@ -102,6 +118,9 @@ fn make_selfowned_install(root: &Path) -> PathBuf {
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::copy(nub_binary(), bin.join("nub.exe")).unwrap();
     std::fs::copy(nub_binary(), bin.join("nubx.exe")).unwrap();
+    for name in sidecar_names() {
+        std::fs::write(bin.join(name), STALE_SIDECAR_BYTES).unwrap();
+    }
     std::fs::write(install.join(".nub-receipt"), "# nub self-managed install\n").unwrap();
     install
 }
@@ -138,6 +157,14 @@ fn selfowned_upgrade_swaps_the_running_exe_via_the_rename_dance() {
     assert_eq!(std::fs::read(bin.join("nub.exe")).unwrap(), NEW_BYTES);
     assert_eq!(std::fs::read(bin.join("nub.exe.old")).unwrap(), old_bytes);
     assert_eq!(std::fs::read(bin.join("nubx.exe")).unwrap(), NEW_BYTES);
+    for name in sidecar_names() {
+        assert_eq!(
+            std::fs::read(bin.join(&name)).unwrap(),
+            NEW_SIDECAR_BYTES,
+            "{name} still holds the pre-upgrade bytes — the swap dropped it, so a \
+             `nub compile` (or Windows script shell) would run against a stale sidecar"
+        );
+    }
 }
 
 #[test]
@@ -171,6 +198,14 @@ fn selfowned_upgrade_rejects_a_tampered_archive_and_leaves_the_install_untouched
     // Verification precedes any swap: the install is byte-identical, no .old.
     assert_eq!(std::fs::read(bin.join("nub.exe")).unwrap(), old_bytes);
     assert!(!bin.join("nub.exe.old").exists());
+    for name in sidecar_names() {
+        assert_eq!(
+            std::fs::read(bin.join(&name)).unwrap(),
+            STALE_SIDECAR_BYTES,
+            "{name} was touched by a REFUSED upgrade — the sidecar refresh must sit \
+             behind the checksum gate like every other swap"
+        );
+    }
 }
 
 #[test]

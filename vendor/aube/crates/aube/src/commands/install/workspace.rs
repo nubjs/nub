@@ -187,6 +187,27 @@ pub(super) fn per_project_write_selection(
     Ok(Some(keys))
 }
 
+/// The importers whose own lifecycle hooks this install runs, in
+/// `lifecycle_manifests` (dependency) order. A caller's explicit set wins.
+/// Otherwise a `--filter` narrows them to the selected members plus the
+/// root, whose hooks pnpm runs under any filter; with neither, every linked
+/// importer runs its hooks.
+pub(super) fn project_hook_importers(
+    lifecycle_manifests: &[(String, aube_manifest::PackageJson)],
+    requested: Option<&std::collections::BTreeSet<String>>,
+    filter_selection: Option<&std::collections::BTreeSet<String>>,
+) -> Vec<(String, aube_manifest::PackageJson)> {
+    lifecycle_manifests
+        .iter()
+        .filter(|(importer, _)| match (requested, filter_selection) {
+            (Some(requested), _) => requested.contains(importer),
+            (None, Some(selected)) => importer == "." || selected.contains(importer),
+            (None, None) => true,
+        })
+        .cloned()
+        .collect()
+}
+
 pub(super) fn importer_project_dir(
     workspace_root: &std::path::Path,
     importer_path: &str,
@@ -255,7 +276,7 @@ pub(super) fn merge_member_lockfile_graphs(
     }
 }
 
-pub(super) fn order_lifecycle_manifests(
+pub(crate) fn order_lifecycle_manifests(
     manifests: Vec<(String, aube_manifest::PackageJson)>,
 ) -> Vec<(String, aube_manifest::PackageJson)> {
     if manifests.len() < 2 {
@@ -357,7 +378,7 @@ pub(super) fn order_lifecycle_manifests(
 /// already ships a `pnpm-lock.yaml` (or any other supported lockfile)
 /// keeps getting that file rewritten in place instead of gaining a
 /// surprise `aube-lock.yaml` next to it. This mirrors the single-project
-/// write path ([`aube_lockfile::write_lockfile_preserving_existing`]) and
+/// write path ([`aube_lockfile::write_lockfile_as`]) and
 /// pnpm's own `sharedWorkspaceLockfile=false` behavior, where each
 /// member keeps its own `pnpm-lock.yaml`. `fallback_kind` is only used
 /// for projects (root or member) that have no lockfile yet (the

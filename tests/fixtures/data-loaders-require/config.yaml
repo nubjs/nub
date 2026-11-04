@@ -1,0 +1,4 @@
+# `a: 1` is also a valid JS labeled statement, which is exactly why an
+# unregistered extension used to compile to an empty module instead of failing.
+host: example.test
+port: 8080

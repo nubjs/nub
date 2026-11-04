@@ -19,47 +19,26 @@ _write_pkg() {
 	EOF
 }
 
-@test "aube rebuild runs preinstall/install/postinstall/prepare in that order" {
-	_write_pkg '{"preinstall":"echo pre","install":"echo inst","postinstall":"echo post","prepare":"echo prep"}'
+@test "aube rebuild does not run the project's own lifecycle hooks" {
+	# pnpm 12's `rebuild` builds dependencies only; the project's hooks
+	# run on install. No auto-install on the stale tree either, which
+	# would run them.
+	_write_pkg '{"preinstall":"echo HOOK_RAN","install":"echo HOOK_RAN","postinstall":"echo HOOK_RAN","prepare":"echo HOOK_RAN"}'
+	[ ! -d node_modules ]
 	run aube rebuild
 	assert_success
-	# Strict ordering — would pass even with bugged order if we only used
-	# `assert_output --partial`, so pin each line by index.
-	assert_line -n 0 "pre"
-	assert_line -n 1 "inst"
-	assert_line -n 2 "post"
-	assert_line -n 3 "prep"
-}
-
-@test "aube rebuild runs only the defined hooks" {
-	_write_pkg '{"postinstall":"echo only-post"}'
-	run aube rebuild
-	assert_success
-	assert_output "only-post"
-}
-
-@test "aube rebuild is a no-op when no lifecycle scripts are defined" {
-	_write_pkg '{"build":"echo SHOULD_NOT_RUN"}'
-	run aube rebuild
-	assert_success
-	refute_output --partial "SHOULD_NOT_RUN"
+	refute_output --partial "HOOK_RAN"
 	refute_output --partial "Auto-installing"
 }
 
-@test "aube rebuild propagates script failures" {
-	_write_pkg '{"postinstall":"exit 7"}'
-	run aube rebuild
-	assert_failure
-}
-
 @test "aube rb is an alias for rebuild" {
-	_write_pkg '{"postinstall":"echo rb-ran"}'
+	_write_pkg '{}'
 	run aube rb
 	assert_success
-	assert_output --partial "rb-ran"
+	refute_output --partial "Unknown"
 }
 
-@test "aube recursive rebuild runs in each workspace package" {
+@test "aube recursive rebuild does not run workspace packages' own hooks" {
 	cat >pnpm-workspace.yaml <<-EOF
 		packages:
 		  - packages/*
@@ -67,7 +46,7 @@ _write_pkg() {
 	cat >package.json <<-'EOF'
 		{"name": "root", "version": "0.0.0", "private": true}
 	EOF
-	mkdir -p packages/lib-a packages/lib-b
+	mkdir -p packages/lib-a
 	cat >packages/lib-a/package.json <<-'EOF'
 		{
 		  "name": "lib-a",
@@ -75,42 +54,10 @@ _write_pkg() {
 		  "scripts": { "postinstall": "echo lib-a-rebuilt" }
 		}
 	EOF
-	cat >packages/lib-b/package.json <<-'EOF'
-		{
-		  "name": "lib-b",
-		  "version": "1.0.0",
-		  "scripts": { "postinstall": "echo lib-b-rebuilt" }
-		}
-	EOF
 
 	run aube recursive rebuild
 	assert_success
-	assert_output --partial "lib-a-rebuilt"
-	assert_output --partial "lib-b-rebuilt"
-}
-
-@test "aube rebuild sets npm lifecycle environment variables" {
-	# Mirror `aube install`'s env contract: rebuild runs via the same
-	# `aube_scripts::run_root_hook` path, so npm_lifecycle_event,
-	# npm_package_name, and npm_package_version must all be set.
-	# shellcheck disable=SC2016 # $npm_* must reach the child shell literally
-	_write_pkg '{"postinstall":"printf %s:%s:%s $npm_lifecycle_event $npm_package_name $npm_package_version"}'
-	run aube rebuild
-	assert_success
-	assert_output --partial "postinstall:rebuild-fixture:1.2.3"
-}
-
-@test "aube rebuild does not auto-install or double-run hooks on a stale tree" {
-	# rebuild's purpose is to re-run root hooks only. If it went through
-	# ensure_installed on a stale tree, install would run all four hooks
-	# and then rebuild would run them again. Assert the hook runs exactly
-	# once and no auto-install announcement appears.
-	_write_pkg '{"postinstall":"echo ran-once"}'
-	[ ! -d node_modules ]
-	run aube rebuild
-	assert_success
-	refute_output --partial "Auto-installing"
-	[ "$(grep -c ran-once <<<"$output")" = "1" ]
+	refute_output --partial "lib-a-rebuilt"
 }
 
 @test "aube rebuild re-runs allowlisted dependency lifecycle scripts" {
@@ -145,11 +92,8 @@ JSON
 	assert_file_exists aube-builds-marker.txt
 	run cat aube-builds-marker.txt
 	assert_output "ran:aube-test-builds-marker@1.0.0"
-	run cat rebuild-order.log
-	assert_line -n 0 "root-pre"
-	assert_line -n 1 "root-install"
-	assert_line -n 2 "root-post"
-	assert_line -n 3 "root-prepare"
+	# The project's own hooks are install's, not rebuild's.
+	assert_not_exists rebuild-order.log
 }
 
 @test "aube rebuild with readonly side-effects cache still re-runs dependency lifecycle scripts" {
@@ -182,7 +126,7 @@ EOF
 	assert_output "ran:aube-test-builds-marker@1.0.0"
 }
 
-@test "aube rebuild <pkg> runs only the named dep's scripts and skips root hooks" {
+@test "aube rebuild <pkg> runs only the named dep's scripts" {
 	cat >package.json <<'JSON'
 {
   "name": "rebuild-selective-test",
@@ -216,7 +160,6 @@ JSON
 	# Only the named dep's marker is recreated.
 	assert_file_exists aube-builds-marker.txt
 	assert_not_exists aube-builds-marker-2.txt
-	# Root hooks are skipped in selective mode.
 	assert_not_exists rebuild-order.log
 }
 

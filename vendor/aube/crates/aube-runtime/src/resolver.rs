@@ -127,9 +127,14 @@ impl NodeRuntime {
         // Network: pin the spec to an exact version.
         progress.on_phase(None, crate::progress::InstallPhase::Resolving);
         let platform = Platform::current()?;
-        let (version, fresh_pin) = match pinned {
-            Some(p) => (p.version.clone(), None),
-            None => {
+        let (version, fresh_pin) = match (pinned, &target) {
+            (Some(p), _) => (p.version.clone(), None),
+            // An exact version can go straight to the immutable
+            // per-release SHASUMS file. Besides saving the index
+            // round-trip, this lets an exact request resolve when a
+            // mirror serves release artifacts but no global index.
+            (None, NodeSpec::Exact(version)) => (version.clone(), None),
+            (None, _) => {
                 let selected = match index::load_index(&self.http, &self.cfg).await {
                     Ok(entries) => index::select(&entries, &target, &platform)
                         .map(|e| e.version.clone())
@@ -306,14 +311,34 @@ impl NodeRuntime {
     /// (through the disk caches).
     pub async fn resolve_for_lockfile(&self, spec: &NodeSpec) -> Result<PinnedNode, Error> {
         let platform = Platform::current()?;
-        let entries = index::load_index(&self.http, &self.cfg).await?;
-        let entry =
-            index::select(&entries, spec, &platform).ok_or_else(|| Error::NoMatchingVersion {
-                requested: spec.display(),
-                platform_note: String::new(),
-            })?;
-        let version = entry.version.clone();
-        self.build_full_pin(&version).await
+        let version = match spec {
+            NodeSpec::Exact(version) => version.clone(),
+            _ => {
+                let entries = index::load_index(&self.http, &self.cfg).await?;
+                index::select(&entries, spec, &platform)
+                    .ok_or_else(|| Error::NoMatchingVersion {
+                        requested: spec.display(),
+                        platform_note: String::new(),
+                    })?
+                    .version
+                    .clone()
+            }
+        };
+        let pin = self.build_full_pin(&version).await?;
+        // The release index is only a coarse availability gate. Validate the
+        // selected release against its checksums as well, while leaving
+        // FreeBSD and best-effort musl pins usable: those hosts intentionally
+        // rely on system/mise Node or a later live-checksum lookup.
+        if requires_official_host_variant(&platform)
+            && pin
+                .variant_for(&platform.os, &platform.cpu, platform.libc.as_deref())
+                .is_none()
+        {
+            return Err(Error::UnsupportedPlatform {
+                platform: platform.label(),
+            });
+        }
+        Ok(pin)
     }
 
     /// Build a full pin (all platforms) from SHASUMS data: the
@@ -344,6 +369,10 @@ impl NodeRuntime {
             variants,
         })
     }
+}
+
+fn requires_official_host_variant(platform: &Platform) -> bool {
+    platform.os != "freebsd" && platform.libc.as_deref() != Some("musl")
 }
 
 fn warn_version_mismatch(req: &NodeRequest) {
@@ -452,6 +481,84 @@ fn variants_from_shasums<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_variant_validation_skips_non_official_distributions() {
+        let platform = |os: &str, libc: Option<&str>| Platform {
+            os: os.to_string(),
+            cpu: "x64".to_string(),
+            libc: libc.map(str::to_string),
+        };
+
+        assert!(requires_official_host_variant(&platform("linux", None)));
+        assert!(requires_official_host_variant(&platform("darwin", None)));
+        assert!(!requires_official_host_variant(&platform(
+            "linux",
+            Some("musl")
+        )));
+        assert!(!requires_official_host_variant(&platform("freebsd", None)));
+    }
+
+    #[tokio::test]
+    async fn exact_lockfile_pin_skips_release_index() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let mirror = format!("http://{address}");
+        let version = node_semver::Version::parse("22.23.2").unwrap();
+        let cache_path = crate::paths::shasums_cache_path(&mirror, &version);
+        if let Some(path) = cache_path.as_deref() {
+            let _ = std::fs::remove_file(path);
+        }
+        struct CacheCleanup(Option<std::path::PathBuf>);
+        impl Drop for CacheCleanup {
+            fn drop(&mut self) {
+                if let Some(path) = self.0.as_deref() {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+        let _cache_cleanup = CacheCleanup(cache_path);
+        let platform = Platform::current().unwrap();
+        let filename = artifact_filename(&version, &platform);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let read = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            let path = request
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap()
+                .to_string();
+            let body = format!(
+                "{}  {filename}\n",
+                "0000000000000000000000000000000000000000000000000000000000000000"
+            );
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            path
+        });
+
+        let runtime = NodeRuntime::new(RuntimeConfig {
+            mirror: Some(mirror),
+            retries: 0,
+            ..RuntimeConfig::default()
+        });
+        let pin = runtime
+            .resolve_for_lockfile(&NodeSpec::Exact(version.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(pin.version, version);
+        assert_eq!(server.join().unwrap(), "/v22.23.2/SHASUMS256.txt");
+    }
 
     #[test]
     fn shasums_variant_mapping() {
