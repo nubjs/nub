@@ -793,3 +793,165 @@ fn an_importers_own_bin_never_shadows_a_dependencys_bin() {
         );
     }
 }
+
+/// A workspace whose members keep their own lockfiles
+/// (`sharedWorkspaceLockfile: false`), with members `a` and `b`; `b` takes a
+/// `file:` dependency so the graph is non-trivial without a registry.
+fn per_project_lockfile_workspace(sbx: &Sandbox, a_deps: &str) {
+    sbx.write_file(
+        "pnpm-workspace.yaml",
+        "packages:\n  - packages/*\nsharedWorkspaceLockfile: false\n",
+    );
+    sbx.write_manifest(r#"{ "name": "root", "version": "1.0.0", "private": true }"#);
+    sbx.write_file(
+        "packages/a/package.json",
+        &format!(r#"{{ "name": "a", "version": "1.0.0", "dependencies": {{ {a_deps} }} }}"#),
+    );
+    sbx.write_file(
+        "dep/package.json",
+        r#"{ "name": "local-dep", "version": "1.0.0" }"#,
+    );
+    sbx.write_file(
+        "packages/b/package.json",
+        r#"{ "name": "b", "version": "1.0.0", "dependencies": { "a": "workspace:*", "local-dep": "file:../../dep" } }"#,
+    );
+}
+
+/// The root lockfile of a per-project-lockfile workspace holds only the root
+/// importer, so a frozen install has to read the members' own lockfiles
+/// before judging them. Read against the root alone, every member looked like
+/// a manifest with no lockfile entry, and a frozen install of a tree the
+/// previous install had just written failed as out of date.
+#[test]
+fn frozen_install_accepts_per_project_lockfiles_it_wrote() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    per_project_lockfile_workspace(&sbx, r#""local-dep": "file:../../dep""#);
+
+    sbx.cmd().arg("install").assert().success();
+    fs::remove_dir_all(sbx.project.join("node_modules")).unwrap();
+    fs::remove_dir_all(sbx.project.join("packages/b/node_modules")).unwrap();
+    sbx.cmd()
+        .args(["install", "--frozen-lockfile"])
+        .assert()
+        .success();
+    assert!(
+        sbx.project
+            .join("packages/b/node_modules/local-dep/package.json")
+            .exists(),
+        "the frozen install must relink member b's dependencies"
+    );
+}
+
+/// A registry that serves one packument, `pinned-pkg`, whose versions the
+/// test can change between installs. `--lockfile-only` installs read only
+/// packuments, so no tarballs are needed.
+fn packument_registry() -> (String, std::sync::Arc<Mutex<Vec<&'static str>>>) {
+    use std::io::{Read, Write};
+    let versions = std::sync::Arc::new(Mutex::new(vec!["1.0.0"]));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let served = versions.clone();
+    let base = url.clone();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut request = Vec::new();
+            let mut buf = [0_u8; 4096];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => request.extend_from_slice(&buf[..n]),
+                }
+            }
+            let path = String::from_utf8_lossy(&request)
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("/")
+                .to_string();
+            let body = if path == "/pinned-pkg" {
+                let list = served.lock().unwrap().clone();
+                let entries: Vec<String> = list
+                    .iter()
+                    .map(|v| {
+                        format!(
+                            r#""{v}": {{ "name": "pinned-pkg", "version": "{v}", "dist": {{ "tarball": "{base}pinned-pkg-{v}.tgz", "integrity": "sha512-AAAA" }} }}"#
+                        )
+                    })
+                    .collect();
+                let times: Vec<String> = list
+                    .iter()
+                    .map(|v| format!(r#""{v}": "2020-01-01T00:00:00.000Z""#))
+                    .collect();
+                Some(format!(
+                    r#"{{ "name": "pinned-pkg", "dist-tags": {{ "latest": "{}" }}, "versions": {{ {} }}, "time": {{ "modified": "2020-01-01T00:00:00.000Z", {} }} }}"#,
+                    list.last().unwrap(),
+                    entries.join(", "),
+                    times.join(", ")
+                ))
+            } else {
+                None
+            };
+            let (status, body) = match body {
+                Some(body) => ("200 OK", body),
+                None => ("404 Not Found", "{}".to_string()),
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+            let _ = stream.read_to_end(&mut Vec::new());
+        }
+    });
+    (url, versions)
+}
+
+/// A member's locked version survives an install once a newer version is
+/// published, as with pnpm. The members' lockfiles used to be read only
+/// after the drift check, which compared the root-only lockfile against every
+/// member and re-resolved them all to the newest match.
+#[test]
+fn install_keeps_member_versions_locked_in_per_project_lockfiles() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let (registry, versions) = packument_registry();
+    per_project_lockfile_workspace(&sbx, r#""pinned-pkg": ">=1.0.0""#);
+    sbx.write_file(".npmrc", &format!("registry={registry}\n"));
+    let locked = |sbx: &Sandbox| {
+        let lock = fs::read_to_string(sbx.project.join("packages/a/aube-lock.yaml")).unwrap();
+        ["1.0.0", "2.0.0"]
+            .into_iter()
+            .find(|v| lock.contains(&format!("pinned-pkg@{v}:")))
+            .unwrap_or_else(|| panic!("no pinned-pkg entry in:\n{lock}"))
+    };
+
+    sbx.cmd()
+        .args(["install", "--lockfile-only"])
+        .assert()
+        .success();
+    assert_eq!(locked(&sbx), "1.0.0");
+
+    versions.lock().unwrap().push("2.0.0");
+    // Drop the cached packument, so every later resolve sees 2.0.0.
+    fs::remove_dir_all(&sbx.cache).unwrap();
+    fs::create_dir_all(&sbx.cache).unwrap();
+    sbx.cmd()
+        .args(["install", "--lockfile-only"])
+        .assert()
+        .success();
+    assert_eq!(
+        locked(&sbx),
+        "1.0.0",
+        "the member's locked version must be kept"
+    );
+
+    // Control: without the member's lockfile the same install does see 2.0.0,
+    // so the assertion above is not a stale packument cache.
+    fs::remove_file(sbx.project.join("packages/a/aube-lock.yaml")).unwrap();
+    sbx.cmd()
+        .args(["install", "--lockfile-only"])
+        .assert()
+        .success();
+    assert_eq!(locked(&sbx), "2.0.0");
+}

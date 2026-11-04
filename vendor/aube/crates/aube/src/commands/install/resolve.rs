@@ -453,6 +453,9 @@ pub(super) struct SelectLockfileInput<'a> {
     /// embedder to catch a packageExtensions edit; see
     /// [`package_extensions_drift`].
     pub effective_package_extensions_checksum: Option<String>,
+    /// Fold each workspace member's own lockfile into the parsed graph
+    /// (`sharedWorkspaceLockfile=false`).
+    pub member_lockfiles: bool,
 }
 
 /// packageExtensions drift, gated on the embedder posture. Returns `Fresh`
@@ -523,6 +526,7 @@ pub(super) fn select_lockfile_result(
         lockfile_pre_parse,
         revalidate_release_policy,
         effective_package_extensions_checksum,
+        member_lockfiles,
     } = input;
     if !lockfile_enabled {
         tracing::debug!("lockfile=false: skipping lockfile parse, re-resolving");
@@ -543,7 +547,13 @@ pub(super) fn select_lockfile_result(
                 lockfile_importer_key,
                 manifest,
                 parse_options,
-            );
+            )
+            .map(|(mut graph, kind)| {
+                if member_lockfiles {
+                    super::workspace::merge_member_lockfile_graphs(cwd, &mut graph, manifests);
+                }
+                (graph, kind)
+            });
             if let Ok((ref graph, kind)) = parsed {
                 if let DriftStatus::Stale { reason } =
                     graph.check_catalogs_drift(workspace_catalogs)
