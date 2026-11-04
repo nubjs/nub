@@ -263,6 +263,7 @@ dependencies = [
  "rayon",
  "reflink-copy",
  "rustc-hash",
+ "same-file",
  "serde_json",
  "sha2 0.11.0",
  "strum",
