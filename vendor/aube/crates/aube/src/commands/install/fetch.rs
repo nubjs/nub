@@ -1,6 +1,7 @@
 use super::critical_path::is_likely_native_build;
 use super::git_prepare::{
-    checkout_build_allowed, checkout_needs_build, prepare_scratch_copy, run_git_dep_prepare,
+    archive_has_path, checkout_build_allowed, checkout_needs_build, prepare_scratch_copy,
+    run_git_dep_prepare,
 };
 use super::lifecycle::run_import_on_blocking;
 use super::settings::{
@@ -372,7 +373,9 @@ pub(super) async fn import_local_source(
             };
             let manifest = hosted_git.as_ref().and_then(|_| index_manifest(&index));
             let build = match &manifest {
-                Some(manifest) if checkout_needs_build(manifest, |p| index.contains_key(p)) => {
+                Some(manifest)
+                    if checkout_needs_build(manifest, |p| archive_has_path(&index, p)) =>
+                {
                     checkout_build_allowed(inherited_build_policy.as_deref(), local, manifest)?
                 }
                 _ => false,

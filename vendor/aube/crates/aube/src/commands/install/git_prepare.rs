@@ -173,7 +173,7 @@ pub(super) fn checkout_needs_build(
         .get("main")
         .and_then(|v| v.as_str())
         .unwrap_or("index.js");
-    !has_file(main.trim_start_matches("./"))
+    !has_file(main)
 }
 
 /// Whether the install's build policy lets a git checkout be built.
@@ -299,15 +299,93 @@ pub(super) async fn run_git_dep_prepare(
     .wrap_err_with(|| format!("git dep {spec}: nested install for `prepare` failed"))
 }
 
+/// Whether `path`, relative to the package root, names a file or a
+/// directory in an archive's index, as `Path::exists` answers for the
+/// extracted tree. The index keys files alone, by normalized relative path,
+/// so a directory is a key prefix.
+pub(super) fn archive_has_path<V>(
+    index: &aube_util::collections::FxMap<String, V>,
+    path: &str,
+) -> bool {
+    let mut parts = Vec::new();
+    for part in path.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    return false;
+                }
+            }
+            part => parts.push(part),
+        }
+    }
+    if parts.is_empty() {
+        return true;
+    }
+    let key = parts.join("/");
+    let dir = format!("{key}/");
+    index.contains_key(&key) || index.keys().any(|k| k.starts_with(&dir))
+}
+
+/// Whether the checkout's own package manager runs `pre<script>` and
+/// `post<script>` around a script. pnpm runs a publishing script raw for a
+/// pnpm checkout and as `<pm> run <script>` for any other, and of those only
+/// Yarn Berry skips the hooks. The package manager is the one
+/// `packageManager` names, else the one its lockfile belongs to, else npm,
+/// as pnpm detects it.
+fn runs_pre_post_hooks(dir: &std::path::Path, manifest: &aube_manifest::PackageJson) -> bool {
+    let pinned = manifest
+        .extra
+        .get("packageManager")
+        .and_then(|v| v.as_str())
+        .and_then(|spec| spec.split_once('@'));
+    if let Some((name, version)) = pinned {
+        let major = version
+            .split('.')
+            .next()
+            .and_then(|m| m.parse::<u32>().ok());
+        return match name {
+            "pnpm" => false,
+            "yarn" => major.is_some_and(|m| m < 2),
+            _ => true,
+        };
+    }
+    if dir.join("pnpm-lock.yaml").exists() {
+        false
+    } else if dir.join("yarn.lock").exists() {
+        !dir.join(".yarnrc.yml").exists()
+    } else if dir.join("package-lock.json").exists()
+        || dir.join("bun.lock").exists()
+        || dir.join("bun.lockb").exists()
+    {
+        true
+    } else {
+        !dir.join("pnpm-workspace.yaml").exists()
+    }
+}
+
 /// Run the `prepublish`/`prepack`/`publish` scripts the checkout declares,
 /// in that order, as pnpm does once its nested install is done.
 async fn run_prepublish_scripts(dir: &std::path::Path) -> miette::Result<()> {
     let manifest = aube_manifest::PackageJson::from_path(&dir.join("package.json"))
         .map_err(miette::Report::new)?;
     let modules_dir_name = crate::commands::resolve_modules_dir_name_for_cwd(dir);
+    let hooks = runs_pre_post_hooks(dir, &manifest);
     for script in PREPUBLISH_SCRIPTS {
-        if has_script(&manifest, script) {
-            super::lifecycle::run_root_lifecycle_script(dir, &modules_dir_name, &manifest, script)
+        if !has_script(&manifest, script) {
+            continue;
+        }
+        let stages = if hooks {
+            vec![
+                format!("pre{script}"),
+                script.to_string(),
+                format!("post{script}"),
+            ]
+        } else {
+            vec![script.to_string()]
+        };
+        for stage in stages.iter().filter(|stage| has_script(&manifest, stage)) {
+            super::lifecycle::run_root_lifecycle_script(dir, &modules_dir_name, &manifest, stage)
                 .await?;
         }
     }
@@ -398,7 +476,7 @@ mod tests {
     #[test]
     fn a_checkout_needs_building_for_prepare_or_a_missing_packed_main() {
         let none = |_: &str| false;
-        let built = |p: &str| p == "dist/x.js";
+        let built = |p: &str| p == "./dist/x.js";
         for (json, has_file, needs) in [
             (
                 r#"{"scripts":{"prepare":"tsc"}}"#,
@@ -484,5 +562,55 @@ mod tests {
             let help = err.help().map(|h| h.to_string()).unwrap_or_default();
             assert!(help.contains(&exact), "the remedy names the key: {help}");
         }
+    }
+
+    #[test]
+    fn an_archive_path_exists_as_a_file_or_a_directory() {
+        let index: aube_util::collections::FxMap<String, ()> =
+            [("lib/index.js".to_string(), ())].into_iter().collect();
+        for path in [
+            "lib",
+            "./lib",
+            "lib/",
+            "lib/./index.js",
+            "lib/index.js",
+            ".",
+        ] {
+            assert!(archive_has_path(&index, path), "{path} exists");
+        }
+        for path in ["li", "lib/other.js", "dist/index.js", "../lib/index.js"] {
+            assert!(!archive_has_path(&index, path), "{path} is missing");
+        }
+    }
+
+    #[test]
+    fn publishing_scripts_run_with_hooks_unless_the_checkout_is_pnpm_or_yarn_berry() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks = |pm: Option<&str>, lockfiles: &[&str]| {
+            for f in [
+                "pnpm-lock.yaml",
+                "yarn.lock",
+                ".yarnrc.yml",
+                "package-lock.json",
+            ] {
+                let _ = std::fs::remove_file(dir.path().join(f));
+            }
+            for f in lockfiles {
+                std::fs::write(dir.path().join(f), "").unwrap();
+            }
+            let json = match pm {
+                Some(pm) => format!(r#"{{"packageManager":"{pm}"}}"#),
+                None => "{}".to_string(),
+            };
+            runs_pre_post_hooks(dir.path(), &manifest(&json))
+        };
+        assert!(hooks(None, &[]), "npm by default");
+        assert!(hooks(Some("npm@11.0.0"), &[]));
+        assert!(hooks(Some("yarn@1.22.22"), &[]));
+        assert!(!hooks(Some("yarn@4.5.0"), &[]));
+        assert!(!hooks(Some("pnpm@10.0.0"), &[]));
+        assert!(!hooks(None, &["pnpm-lock.yaml"]));
+        assert!(hooks(None, &["yarn.lock"]));
+        assert!(!hooks(None, &["yarn.lock", ".yarnrc.yml"]));
     }
 }

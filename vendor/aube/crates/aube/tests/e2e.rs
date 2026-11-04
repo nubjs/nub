@@ -841,28 +841,13 @@ fn path_without_cp(sbx: &Sandbox) -> std::ffi::OsString {
     std::env::join_paths(dirs).unwrap()
 }
 
-/// A local git repo whose `prepare` builds `dist/index.js`, as a
-/// `git+file:` URL.
-fn git_repo_with_prepare(sbx: &Sandbox) -> String {
+/// A local git repo holding `files`, committed once, as a `git+file:` URL.
+fn git_repo(sbx: &Sandbox, files: &[(&str, &str)]) -> String {
     let repo = sbx.home.join("prep-repo");
     fs::create_dir_all(&repo).unwrap();
-    fs::write(
-        repo.join("package.json"),
-        r#"{
-            "name": "prep-demo",
-            "version": "1.0.0",
-            "main": "dist/index.js",
-            "files": ["dist"],
-            "scripts": { "prepare": "node build.js" }
-        }"#,
-    )
-    .unwrap();
-    fs::write(
-        repo.join("build.js"),
-        "require('fs').mkdirSync('dist', { recursive: true });\n\
-         require('fs').writeFileSync('dist/index.js', 'module.exports = 42;\\n');\n",
-    )
-    .unwrap();
+    for (path, contents) in files {
+        fs::write(repo.join(path), contents).unwrap();
+    }
     for args in [
         &["init", "-q"][..],
         &["add", "-A"][..],
@@ -890,6 +875,30 @@ fn git_repo_with_prepare(sbx: &Sandbox) -> String {
         repo.to_string_lossy()
             .replace('\\', "/")
             .trim_start_matches('/')
+    )
+}
+
+/// A local git repo whose `prepare` builds `dist/index.js`.
+fn git_repo_with_prepare(sbx: &Sandbox) -> String {
+    git_repo(
+        sbx,
+        &[
+            (
+                "package.json",
+                r#"{
+                    "name": "prep-demo",
+                    "version": "1.0.0",
+                    "main": "dist/index.js",
+                    "files": ["dist"],
+                    "scripts": { "prepare": "node build.js" }
+                }"#,
+            ),
+            (
+                "build.js",
+                "require('fs').mkdirSync('dist', { recursive: true });\n\
+                 require('fs').writeFileSync('dist/index.js', 'module.exports = 42;\\n');\n",
+            ),
+        ],
     )
 }
 
@@ -953,6 +962,48 @@ fn git_dep_prepare_is_refused_unless_the_allowlist_names_its_source() {
         sbx.project.join("node_modules/prep-demo/build.js").exists()
             && !sbx.project.join("node_modules/prep-demo/dist").exists(),
         "a denied build installs the checkout as it is"
+    );
+}
+
+/// A git dependency with no `prepare` but a `prepack` and its `main`
+/// missing is built too, and its publishing scripts run with their
+/// `pre`/`post` hooks, as `npm run prepack` runs them for pnpm: here
+/// `postprepack` writes the entry point.
+#[test]
+fn git_dep_prepack_runs_with_its_hooks_when_main_is_missing() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let url = git_repo(
+        &sbx,
+        &[
+            (
+                "package.json",
+                r#"{
+                    "name": "pack-demo",
+                    "version": "1.0.0",
+                    "main": "dist/index.js",
+                    "files": ["dist"],
+                    "scripts": { "prepack": "node -e 1", "postprepack": "node post.js" }
+                }"#,
+            ),
+            (
+                "post.js",
+                "require('fs').mkdirSync('dist', { recursive: true });\n\
+                 require('fs').writeFileSync('dist/index.js', 'module.exports = 9;\\n');\n",
+            ),
+        ],
+    );
+    sbx.write_manifest(&format!(
+        r#"{{ "name": "consumer", "version": "0.0.0", "dependencies": {{ "pack-demo": "{url}" }},
+             "pnpm": {{ "allowBuilds": {{ "pack-demo@{url}": true }} }} }}"#
+    ));
+
+    sbx.cmd().arg("install").assert().success();
+    assert_eq!(
+        fs::read_to_string(sbx.project.join("node_modules/pack-demo/dist/index.js"))
+            .unwrap_or_default(),
+        "module.exports = 9;\n",
+        "postprepack built the entry point before the package was packed"
     );
 }
 
