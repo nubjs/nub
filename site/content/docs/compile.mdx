@@ -154,13 +154,15 @@ A compiled binary runs bundled, minified code, so a stack trace points at a colu
 
 ```console
 $ ./app
-/N:/$nub/__nub_sea_main.cjs:614
-        throw error;
-        ^
+/N:/src/order.ts:14
+    throw new Error("no such order");
+              ^
 
 Error: no such order
     at loadOrder (/N:/src/order.ts:14:15)
 ```
+
+A single-executable program reports its modules under a fixed `/N:/` root, which mirrors the source tree.
 
 Pick a different mode when the default doesn't fit:
 
