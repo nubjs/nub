@@ -172,21 +172,31 @@ fn a_repeated_filtered_install_is_up_to_date_and_an_unfiltered_one_after_it_is_n
 
 #[test]
 fn a_filtered_install_after_a_root_only_install_links_the_member() {
-    let dir = workspace(
-        "nonrecursive",
-        serde_json::json!({ "dep": "file:./dep" }),
-        &[("a", serde_json::json!({ "dep": "file:../../dep" }))],
-    );
-    std::fs::write(dir.join(".npmrc"), "recursive-install=false\n").unwrap();
-    nub(&dir, &["install"]);
-    assert!(
-        !dir.join("packages/a/node_modules/dep").exists(),
-        "`recursive-install=false` links only the root"
-    );
-    nub(&dir, &["install"]);
-    nub(&dir, &["install", "--filter", "a"]);
-    assert!(
-        dir.join("packages/a/node_modules/dep").exists(),
-        "a root-only install does not make a filtered one up to date"
-    );
+    // pnpm reads the setting from either file.
+    let forms: [(&str, &str); 2] = [
+        (".npmrc", "recursive-install=false\n"),
+        (
+            "pnpm-workspace.yaml",
+            "packages:\n  - packages/*\nrecursiveInstall: false\n",
+        ),
+    ];
+    for (file, setting) in forms {
+        let dir = workspace(
+            "nonrecursive",
+            serde_json::json!({ "dep": "file:./dep" }),
+            &[("a", serde_json::json!({ "dep": "file:../../dep" }))],
+        );
+        std::fs::write(dir.join(file), setting).unwrap();
+        nub(&dir, &["install"]);
+        assert!(
+            !dir.join("packages/a/node_modules/dep").exists(),
+            "`recursiveInstall: false` in {file} links only the root"
+        );
+        nub(&dir, &["install"]);
+        nub(&dir, &["install", "--filter", "a"]);
+        assert!(
+            dir.join("packages/a/node_modules/dep").exists(),
+            "a root-only install does not make a filtered one up to date ({file})"
+        );
+    }
 }
