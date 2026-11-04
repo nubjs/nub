@@ -2670,6 +2670,13 @@ static RESTORABLE_VARS: [RestorableVar; 6] = [
 /// constrained box's ceiling.
 pub const THREADPOOL_SIZE_ENV: &str = "UV_THREADPOOL_SIZE";
 
+/// Set by the preload of a process whose pool is not built yet (preload-common.cjs
+/// `installThreadpoolPolicy`, which builds it at the first loop turn so the program
+/// can still choose its own size): a child spawned before then inherits nub's value
+/// beside this mark and deletes it, keeping Node's default. Every fresh invocation
+/// sheds it with the other markers, so a nested `nub` sizes its child again.
+const THREADPOOL_TAKEN_ENV: &str = "__NUB_UV_THREADPOOL_SIZE_TAKEN";
+
 /// The pool nub asks for on this box — see [`THREADPOOL_SIZE_ENV`].
 pub fn threadpool_size() -> usize {
     let cores = std::thread::available_parallelism()
@@ -3021,6 +3028,7 @@ fn augmentation_environment_restoration() -> Vec<(&'static str, Option<OsString>
         VERSION_ENV,
         flags::NEUTRALIZE_LOCALSTORAGE_ENV,
         FORCE_ASYNC_TIER_ENV,
+        THREADPOOL_TAKEN_ENV,
     ] {
         changes.push((marker, None));
     }
@@ -6458,6 +6466,15 @@ mod tests {
                 addition.to_path_buf()
             ]
         );
+    }
+
+    /// A process spawned during a parent's startup inherits the threadpool mark
+    /// that tells its preload to discard nub's value. A fresh `nub` among them
+    /// must shed the mark, or its own child would keep Node's four. Only a host
+    /// with more than four cores reaches that path, which CI's runners do not.
+    #[test]
+    fn a_fresh_invocation_sheds_the_threadpool_taken_mark() {
+        assert!(augmentation_environment_restoration().contains(&(THREADPOOL_TAKEN_ENV, None)));
     }
 
     #[cfg(windows)]

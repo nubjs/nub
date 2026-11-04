@@ -1,8 +1,9 @@
 //! libuv threadpool sizing — `UV_THREADPOOL_SIZE` set to `max(4, cores)` on an
 //! augmented run.
 //!
-//! Node reads the variable once at startup, so the spawn is the only place it
-//! can be set; nub sets it when the user has not, and leaves a user value alone.
+//! libuv reads the variable once, at the first pool use. nub sets it when the user
+//! has not, leaves a user value alone, and lets a program replace it before that
+//! first use, as plain Node does.
 //! Under `--node` / `NODE_COMPAT` the variable is absent, the plain-Node
 //! fingerprint (libuv's own default of 4). A value from an env file is the
 //! user's too, on every launch path, while a shell value still beats the file.
@@ -119,7 +120,7 @@ fn augmented_sizes_pool_to_cores() {
     }
 }
 
-/// libuv names its workers from 1.50 (Node 22.22+, 24+); before that the fixture
+/// libuv names its workers from 1.50 (Node 22.17+, 24+); before that the fixture
 /// can only count the demoted threads.
 fn names_workers(v: &serde_json::Value) -> bool {
     let mut parts = v["uv"].as_str().unwrap_or("0.0").split('.');
@@ -432,33 +433,47 @@ fn user_value_still_inherits() {
     assert_eq!(v["nub"].as_str(), Some("3"));
 }
 
-/// The workers beyond Node's four run at nice 10 on Linux, so on a busy box they
-/// only take idle cycles. CI's runners have 4 cores, where nub sizes nothing to
-/// demote, so this drives the preload under plain `node` with the environment a
-/// launcher hands it: the value, its augmented marker, and a compat capture saying
-/// the variable was absent before nub.
+/// Run a fixture under plain `node` with the environment a launcher hands it: the
+/// value (`8`), its augmented marker, and a compat capture saying the variable was
+/// absent before nub. CI's runners have 4 cores, where nub sizes nothing beyond
+/// Node's default, so this is how a larger pool is exercised there.
 #[cfg(target_os = "linux")]
-fn demotion_under_plain_node(entry: &[&std::ffi::OsStr]) -> serde_json::Value {
-    let f = fixture();
-    let output = Command::new("node")
-        .args(entry)
+fn under_plain_node(
+    entry: &[&std::ffi::OsStr],
+    name: &str,
+    env: &[(&str, &str)],
+) -> serde_json::Value {
+    let f = fixture().with_file_name(name);
+    let mut cmd = Command::new("node");
+    cmd.args(entry)
         .arg(&f)
         .current_dir(f.parent().unwrap())
         .env("UV_THREADPOOL_SIZE", "8")
         .env("__NUB_AUGMENTED_UV_THREADPOOL_SIZE", "8")
         .env("__NUB_AUGMENTED_UV_THREADPOOL_SIZE_PRESENT", "1")
         .env("__NUB_COMPAT_UV_THREADPOOL_SIZE", "")
-        .env("__NUB_COMPAT_PRESENT", "0")
-        .output()
-        .expect("failed to spawn node");
+        .env("__NUB_COMPAT_PRESENT", "0");
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().expect("failed to spawn node");
     assert!(
         output.status.success(),
         "node exited {:?}\nstderr: {}",
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
-    let v: serde_json::Value =
-        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).expect("json");
+    serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).expect("json")
+}
+
+/// The workers beyond Node's four run at nice 10 on Linux, so on a busy box they
+/// only take idle cycles.
+#[cfg(target_os = "linux")]
+fn demotion_under_plain_node(
+    entry: &[&std::ffi::OsStr],
+    env: &[(&str, &str)],
+) -> serde_json::Value {
+    let v = under_plain_node(entry, "size.js", env);
     assert_eq!(v["size"].as_str(), Some("8"));
     assert!(
         v["env"].is_null(),
@@ -495,13 +510,26 @@ fn runtime_file(name: &str) -> PathBuf {
         .unwrap()
 }
 
-/// The fast tier: the `--require` preload runs before any pool use, so its own
-/// thread-id snapshot precedes the pool.
+/// The fast tier's `--require` preload, which settles nub's value at the first
+/// loop turn — here with nothing using the pool before then, so nub's own submit
+/// builds it.
 #[cfg(target_os = "linux")]
 #[test]
 fn extra_workers_run_at_low_priority() {
     let preload = runtime_file("preload.cjs");
-    demotion_under_plain_node(&["--require".as_ref(), preload.as_os_str()]);
+    demotion_under_plain_node(&["--require".as_ref(), preload.as_os_str()], &[]);
+}
+
+/// The same, with the program using the pool before the first turn: libuv builds
+/// it from nub's value at that use, and the workers are found by name.
+#[cfg(target_os = "linux")]
+#[test]
+fn extra_workers_run_at_low_priority_when_the_program_builds_the_pool() {
+    let preload = runtime_file("preload.cjs");
+    demotion_under_plain_node(
+        &["--require".as_ref(), preload.as_os_str()],
+        &[("USE_POOL_AT_START", "1")],
+    );
 }
 
 /// The compat tier: Node's ESM loader reads the `--import` preload through the
@@ -513,12 +541,60 @@ fn extra_workers_run_at_low_priority() {
 fn extra_workers_run_at_low_priority_on_the_compat_tier() {
     let sidecar = runtime_file("threadpool-snapshot.cjs");
     let preload = format!("file://{}", runtime_file("preload.mjs").display());
-    demotion_under_plain_node(&[
-        "--require".as_ref(),
-        sidecar.as_os_str(),
-        "--import".as_ref(),
-        preload.as_ref(),
-    ]);
+    demotion_under_plain_node(
+        &[
+            "--require".as_ref(),
+            sidecar.as_os_str(),
+            "--import".as_ref(),
+            preload.as_ref(),
+        ],
+        &[],
+    );
+}
+
+/// A program that assigns `process.env.UV_THREADPOOL_SIZE` before its first pool
+/// use gets that pool, as under plain Node, and nub demotes none of it. The fast
+/// tier only: the compat tier's preload is read through the pool, which exists
+/// before any program code runs, and a pool libuv does not name stays eager.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_program_sizes_its_own_pool_before_first_use() {
+    if !host_node_on_fast_tier() {
+        return;
+    }
+    let preload = runtime_file("preload.cjs");
+    for own in ["5", "12"] {
+        let v = under_plain_node(
+            &["--require".as_ref(), preload.as_os_str()],
+            "size.js",
+            &[("SET_POOL_SIZE", own)],
+        );
+        if !names_workers(&v) {
+            return;
+        }
+        assert_eq!(v["env"].as_str(), Some(own), "{v}");
+        assert_eq!(
+            v["workers"].as_u64(),
+            Some(own.parse().unwrap()),
+            "the program's own size must build the pool: {v}"
+        );
+        assert_eq!(v["demoted"].as_u64(), Some(0), "{v}");
+    }
+}
+
+/// A child spawned before the first loop turn inherits nub's value, still in the
+/// environment then, together with the mark that the parent has taken it, and
+/// discards it: a plain `node` child and a cluster worker start with Node's
+/// default, and the parent strips its own once settled.
+#[cfg(target_os = "linux")]
+#[test]
+fn children_spawned_during_startup_keep_nodes_default() {
+    let preload = runtime_file("preload.cjs");
+    let options = format!("--require {}", preload.display());
+    let v = under_plain_node(&[], "children.js", &[("NODE_OPTIONS", &options)]);
+    assert_eq!(v["node"].as_str(), Some("null"), "{v}");
+    assert!(v["cluster"].is_null(), "{v}");
+    assert!(v["parent"].is_null(), "{v}");
 }
 
 /// A user's value is never demoted: nub did not size that pool, so it does not

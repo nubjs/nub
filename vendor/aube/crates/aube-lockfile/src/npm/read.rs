@@ -289,6 +289,7 @@ pub fn parse(path: &Path, manifest: &aube_manifest::PackageJson) -> Result<Lockf
                 alias_of,
                 tarball_url,
                 declared_dependencies: declared,
+                declared_dependencies_known: true,
                 engines: package_entry.engines.clone(),
                 bin: package_entry.bin.clone(),
                 license: package_entry.license.as_ref().and_then(|l| l.value.clone()),

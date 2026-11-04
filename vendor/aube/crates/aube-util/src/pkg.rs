@@ -6,6 +6,23 @@ pub fn is_catalog_spec(spec: &str) -> bool {
     spec.starts_with("catalog:")
 }
 
+/// Whether an override selector's version part (`foo@<req>`, or `None` for a
+/// bare `foo`) applies to a dependency declared as `catalog_spec`
+/// (`catalog:` / `catalog:<name>`).
+///
+/// pnpm applies overrides to a manifest before it resolves catalogs, so the
+/// selector meets the reference text rather than the catalog's range. Its
+/// range check is `isSubRange`, which for a spec that is not a semver range
+/// reduces to text equality: `foo@catalog:` applies, `foo@^1` never does.
+/// Resolution and the frozen-lockfile check both decide through this one
+/// function, so a lockfile written by one is accepted by the other.
+pub fn override_version_applies_to_catalog_reference(
+    req: Option<&str>,
+    catalog_spec: &str,
+) -> bool {
+    req.is_none_or(|req| req == catalog_spec)
+}
+
 pub fn is_npm_spec(spec: &str) -> bool {
     spec.starts_with("npm:")
 }
