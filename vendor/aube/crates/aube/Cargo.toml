@@ -115,7 +115,6 @@ default = [
     "config-tui",
     "publish",
     "rustls",
-    "hickory-dns",
     "workspace-yaml-preserve",
 ]
 # Include the interactive `aube config tui` browser. Builds that want the
@@ -133,12 +132,6 @@ publish = ["dep:sigstore-sign", "dep:sigstore-oidc", "dep:sigstore-types", "dep:
 # aube-util it re-exports. rustls only (no OpenSSL / native-tls — see CLAUDE.md);
 # required. Embedders depend with `default-features = false, features = ["rustls"]`.
 rustls = ["reqwest/rustls", "aube-registry/rustls", "aube-util/rustls"]
-# In-process DNS caching. Default for the aube binary; opt-in for embedders,
-# because reqwest's hickory-dns feature flips the default resolver for every
-# client in the final binary (see aube-registry's feature docs). Lists
-# reqwest/hickory-dns directly — mirroring `rustls` — so the crate's own
-# reqwest clients keep it even if aube-registry's feature graph changes.
-hickory-dns = ["reqwest/hickory-dns", "aube-registry/hickory-dns"]
 # Preserve comments and formatting when commands mutate existing workspace
 # YAML. Embedders can omit this to avoid yamlpatch's tree-sitter dependencies.
 workspace-yaml-preserve = ["aube-manifest/workspace-yaml-preserve"]

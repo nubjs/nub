@@ -401,6 +401,18 @@ function safeRequireResolve(specifier) {
   try { return __require.resolve(specifier); } catch { return null; }
 }
 
+// Resolved URL per vendored specifier (`null` = unresolvable), kept for the life
+// of the realm. A vendored package lives in Nub's own distribution — the
+// checkout's node_modules in dev, the content-keyed extracted runtime dir in a
+// release — so its location cannot change under a running process, and `--watch`
+// restarts the process rather than re-resolving in place. The resolve is not
+// free: `__require` has a Nub-internal parent, so each call re-enters the resolve
+// hook and pays a `createRequire` plus a nested hook round trip. Transpiled
+// decorator output imports up to three helpers per decorated file, so unmemoized
+// that cost scaled with the number of decorated files instead of the handful of
+// distinct helpers (#795).
+const vendoredResolutions = new Map();
+
 export function barePkg(specifier) {
   return specifier.startsWith("@")
     ? specifier.split("/").slice(0, 2).join("/")
@@ -530,8 +542,13 @@ export function resolveSpec(specifier, parentURL) {
   // 2. Vendored packages (e.g. @oxc-project/runtime).
   const bare = barePkg(specifier);
   if (VENDORED_PACKAGES.has(bare)) {
-    const resolved = safeRequireResolve(specifier);
-    if (resolved) return { url: pathToFileURL(resolved).href, shortCircuit: true };
+    let url = vendoredResolutions.get(specifier);
+    if (url === undefined) {
+      const resolved = safeRequireResolve(specifier);
+      url = resolved ? pathToFileURL(resolved).href : null;
+      vendoredResolutions.set(specifier, url);
+    }
+    if (url) return { url, shortCircuit: true };
   }
 
   // 3. Package clobbering.

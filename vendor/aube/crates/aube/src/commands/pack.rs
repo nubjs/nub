@@ -70,7 +70,7 @@ pub async fn run(args: PackArgs) -> miette::Result<()> {
     let project_root = crate::dirs::project_root()?;
 
     run_pack_lifecycle_pre(&project_root, args.ignore_scripts).await?;
-    let archive = build_archive(&project_root)?;
+    let archive = build_pack_archive(&project_root)?;
     run_pack_lifecycle_post(&project_root, args.ignore_scripts).await?;
 
     let dest_dir = args
@@ -233,26 +233,49 @@ pub(crate) struct BuiltArchive {
     pub tarball: Vec<u8>,
 }
 
-/// Build a tarball for `project_dir` entirely in memory. Shared between
-/// `aube pack` (writes the bytes to disk) and the forthcoming
-/// `aube publish` (hashes and uploads them).
+/// Build a tarball for `project_dir` entirely in memory, rewriting only
+/// `catalog:` specs. Used for a prepared git dependency, which is packed
+/// outside its workspace; `aube pack` uses [`build_pack_archive`].
 pub(crate) fn build_archive(project_dir: &Path) -> miette::Result<BuiltArchive> {
-    let package_json = catalog_rewritten_package_json(project_dir)?;
-    build_archive_with_package_json(project_dir, package_json)
+    let package_json = rewritten_package_json(project_dir, rewrite_catalog_dependencies)?;
+    build_archive_with_package_json(project_dir, package_json.map(|(bytes, _)| bytes))
 }
 
-/// Return an in-memory `package.json` with publish-time catalog protocol
-/// references replaced by their concrete catalog ranges. The source manifest
-/// stays untouched. `None` means no catalog references were present, so the
+/// Build the `aube pack` tarball: the packed `package.json` is the same
+/// exported manifest `aube publish` uploads (`workspace:` / `catalog:`
+/// resolved, `publishConfig` overrides applied), and a `publishConfig.name`
+/// renames the artifact, as in pnpm.
+pub(crate) fn build_pack_archive(project_dir: &Path) -> miette::Result<BuiltArchive> {
+    let package_json =
+        rewritten_package_json(project_dir, super::exportable_manifest::export_manifest)?;
+    let Some((bytes, manifest_json)) = package_json else {
+        return build_archive_with_package_json(project_dir, None);
+    };
+    let mut archive = build_archive_with_package_json(project_dir, Some(bytes))?;
+    if let Some(name) = manifest_json.get("name").and_then(|v| v.as_str())
+        && name != archive.name
+    {
+        archive.name = name.to_string();
+        archive.filename = tarball_filename(&archive.name, &archive.version);
+    }
+    Ok(archive)
+}
+
+/// Return an in-memory `package.json` after `rewrite`, preserving the source
+/// file's indent and line endings, alongside the rewritten JSON. The source
+/// manifest stays untouched. `None` means `rewrite` changed nothing, so the
 /// archive can copy the original bytes without reformatting them.
-fn catalog_rewritten_package_json(project_dir: &Path) -> miette::Result<Option<Vec<u8>>> {
+fn rewritten_package_json(
+    project_dir: &Path,
+    rewrite: impl FnOnce(&Path, &mut serde_json::Value) -> miette::Result<bool>,
+) -> miette::Result<Option<(Vec<u8>, serde_json::Value)>> {
     let manifest_path = project_dir.join("package.json");
     let raw = std::fs::read_to_string(&manifest_path)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to read {}", manifest_path.display()))?;
     let mut manifest_json: serde_json::Value =
         aube_manifest::parse_json(&manifest_path, raw.clone()).map_err(miette::Report::new)?;
-    if !rewrite_catalog_dependencies(project_dir, &mut manifest_json)? {
+    if !rewrite(project_dir, &mut manifest_json)? {
         return Ok(None);
     }
 
@@ -276,7 +299,7 @@ fn catalog_rewritten_package_json(project_dir: &Path) -> miette::Result<Option<V
     if raw.ends_with(line_ending) {
         rewritten.push_str(line_ending);
     }
-    Ok(Some(rewritten.into_bytes()))
+    Ok(Some((rewritten.into_bytes(), manifest_json)))
 }
 
 /// Rewrite `catalog:` / `catalog:<name>` references in every dependency field
@@ -359,13 +382,21 @@ pub(crate) fn rewrite_catalog_dependencies(
     Ok(true)
 }
 
+/// `package_json` replaces the packed `package.json` bytes. When given, it is
+/// also the manifest file selection reads, as in npm-packlist / pnpm: a
+/// `publishConfig.main` that moves the entry point must pack the new entry.
 pub(crate) fn build_archive_with_package_json(
     project_dir: &Path,
     package_json: Option<Vec<u8>>,
 ) -> miette::Result<BuiltArchive> {
-    let manifest = PackageJson::from_path(&project_dir.join("package.json"))
-        .map_err(miette::Report::new)
-        .wrap_err("failed to read package.json")?;
+    let manifest = match &package_json {
+        Some(bytes) => PackageJson::from_slice(bytes)
+            .into_diagnostic()
+            .wrap_err("failed to parse the packed package.json")?,
+        None => PackageJson::from_path(&project_dir.join("package.json"))
+            .map_err(miette::Report::new)
+            .wrap_err("failed to read package.json")?,
+    };
     let name = manifest
         .name
         .as_deref()
@@ -442,6 +473,18 @@ fn collect_files(project_dir: &Path, manifest: &PackageJson) -> miette::Result<V
         keep.insert("package.json".to_string());
     }
 
+    // One containment gate for every source above: `files` globs, the
+    // walker, and the forced entries (README/LICENSE, `main`, `browser`,
+    // `bin`), whose paths come straight from the manifest.
+    let root = project_dir
+        .canonicalize()
+        .into_diagnostic()
+        .wrap_err_with(|| format!("pack: resolve {}", project_dir.display()))?;
+    let keep: BTreeSet<String> = keep
+        .iter()
+        .filter_map(|rel| contained_rel(project_dir, &root, Path::new(rel)))
+        .collect();
+
     let mut out: Vec<PackedFile> = Vec::with_capacity(keep.len());
     for rel in keep {
         let abs = project_dir.join(&rel);
@@ -460,6 +503,34 @@ fn collect_files(project_dir: &Path, manifest: &PackageJson) -> miette::Result<V
     Ok(out)
 }
 
+/// The forward-slash, package-relative form of `rel` when it may be packed:
+/// still inside the package after `.` / `..` are resolved lexically, and
+/// still inside it once symlinks are followed (`root` is the canonical
+/// package directory). `None` for an absolute path, a `..` escape, or a
+/// symlink out of the package — the paths npm-packlist, and so pnpm, skips
+/// without a warning. Packing one would put a file from outside the package
+/// into the published tarball.
+fn contained_rel(project_dir: &Path, root: &Path, rel: &Path) -> Option<String> {
+    use std::path::Component;
+    let mut parts = Vec::new();
+    for component in rel.components() {
+        match component {
+            Component::Normal(part) => parts.push(part),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                parts.pop()?;
+            }
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    let rel: PathBuf = parts.into_iter().collect();
+    if rel.as_os_str().is_empty() {
+        return None;
+    }
+    let resolved = project_dir.join(&rel).canonicalize().ok()?;
+    resolved.starts_with(root).then(|| normalize_rel(&rel))
+}
+
 /// Expand a glob from the `files` field, rooted at `project_dir`. If the
 /// pattern matches a directory, every non-ignored file underneath is added.
 fn expand_files_glob(
@@ -476,6 +547,16 @@ fn expand_files_glob(
             continue;
         };
         if path.is_dir() {
+            // Don't walk a directory symlinked out of the package; its
+            // files would all fail the containment gate anyway.
+            if !path
+                .canonicalize()
+                .ok()
+                .zip(project_dir.canonicalize().ok())
+                .is_some_and(|(dir, root)| dir.starts_with(root))
+            {
+                continue;
+            }
             let mut sub: BTreeSet<String> = BTreeSet::new();
             walk_subdir(project_dir, &path, &mut sub)?;
             keep.extend(sub);
@@ -679,12 +760,24 @@ fn always_included_files(project_dir: &Path, manifest: &PackageJson) -> Vec<Stri
         }
     }
 
-    // `main` field entry. Strip any leading `./` so the path matches
-    // the walker's normalized form — otherwise `"./index.js"` becomes a
-    // second BTreeSet key alongside `"index.js"` and the file is packed
-    // twice (as `package/./index.js` and `package/index.js`).
-    if let Some(main) = manifest.extra.get("main").and_then(|v| v.as_str()) {
-        let cleaned = main.trim_start_matches("./");
+    // npm-packlist's required entries: `main`, a string `browser`, and every
+    // `bin` target. Strip any leading `./` so the path matches the walker's
+    // normalized form — otherwise `"./index.js"` becomes a second BTreeSet
+    // key alongside `"index.js"` and the file is packed twice (as
+    // `package/./index.js` and `package/index.js`).
+    let mut entries: Vec<&str> = ["main", "browser"]
+        .iter()
+        .filter_map(|field| manifest.extra.get(*field).and_then(|v| v.as_str()))
+        .collect();
+    match manifest.extra.get("bin") {
+        Some(serde_json::Value::String(bin)) => entries.push(bin),
+        Some(serde_json::Value::Object(bins)) => {
+            entries.extend(bins.values().filter_map(|v| v.as_str()));
+        }
+        _ => {}
+    }
+    for entry in entries {
+        let cleaned = entry.trim_start_matches("./");
         if !cleaned.is_empty() {
             out.push(cleaned.to_string());
         }
@@ -828,7 +921,7 @@ mod tests {
         )
         .unwrap();
 
-        let archive = build_archive(dir.path()).unwrap();
+        let archive = build_pack_archive(dir.path()).unwrap();
         let package_json = archived_package_json(&archive);
 
         assert_eq!(package_json["dependencies"]["regular"], "^1.2.3");
@@ -838,6 +931,88 @@ mod tests {
 
         let on_disk = std::fs::read_to_string(dir.path().join("package.json")).unwrap();
         assert!(on_disk.contains("catalog:peers"));
+    }
+
+    #[test]
+    fn pack_archive_resolves_workspace_dependencies_and_publish_config_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - packages/*\n",
+        )
+        .unwrap();
+        let app = dir.path().join("packages/app");
+        let lib = dir.path().join("packages/lib");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(
+            lib.join("package.json"),
+            r#"{"name":"lib","version":"1.2.3"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            app.join("package.json"),
+            r#"{"name":"app","version":"1.0.0","dependencies":{"lib":"workspace:*"},"publishConfig":{"name":"@acme/app"}}"#,
+        )
+        .unwrap();
+
+        let archive = build_pack_archive(&app).unwrap();
+        let package_json = archived_package_json(&archive);
+
+        assert_eq!(package_json["dependencies"]["lib"], "1.2.3");
+        assert_eq!(package_json["name"], "@acme/app");
+        assert_eq!(archive.filename, "acme-app-1.0.0.tgz");
+    }
+
+    #[test]
+    fn pack_selects_files_by_the_published_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        write_tree(
+            dir.path(),
+            &[
+                "README.md",
+                "src/index.js",
+                "dist/index.js",
+                "bin/local.js",
+                "bin/pub.js",
+            ],
+        );
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"entry","version":"1.0.0","main":"src/index.js","bin":{"x":"bin/local.js"},"files":["README.md"],"publishConfig":{"main":"dist/index.js","bin":{"x":"bin/pub.js"}}}"#,
+        )
+        .unwrap();
+
+        let archive = build_pack_archive(dir.path()).unwrap();
+
+        assert_eq!(
+            archive.files,
+            ["README.md", "bin/pub.js", "dist/index.js", "package.json"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pack_never_packs_a_file_from_outside_the_package() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside.txt");
+        std::fs::write(&outside, "secret").unwrap();
+        let pkg = tmp.path().join("pkg");
+        write_tree(&pkg, &["README.md"]);
+        std::os::unix::fs::symlink("../outside.txt", pkg.join("linked.js")).unwrap();
+        let manifest = serde_json::json!({
+            "name": "escape",
+            "version": "1.0.0",
+            "files": ["README.md", "../outside.txt"],
+            "main": outside.to_str().unwrap(),
+            "browser": "linked.js",
+            "bin": {"a": "linked.js", "b": "../outside.txt"},
+        });
+        std::fs::write(pkg.join("package.json"), manifest.to_string()).unwrap();
+
+        let archive = build_pack_archive(&pkg).unwrap();
+
+        assert_eq!(archive.files, ["README.md", "package.json"]);
     }
 
     #[test]
@@ -854,7 +1029,7 @@ mod tests {
         )
         .unwrap();
 
-        let archive = build_archive(dir.path()).unwrap();
+        let archive = build_pack_archive(dir.path()).unwrap();
         let packed = String::from_utf8(archived_package_json_bytes(&archive)).unwrap();
 
         assert!(packed.ends_with("\r\n"));

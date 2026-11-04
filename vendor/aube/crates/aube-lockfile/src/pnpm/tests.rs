@@ -330,6 +330,72 @@ snapshots:
     assert_eq!(host.optional_dependencies.get("native").unwrap(), "1.0.0");
 }
 
+/// A snapshot whose key names a peer it declares but whose `dependencies`
+/// omit it (written by nub before #937 was fixed) gets the edge back on
+/// read, so a plain install against that lockfile links the peer.
+#[test]
+fn parse_links_a_declared_peer_named_only_in_the_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let lockfile_path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &lockfile_path,
+        r#"
+lockfileVersion: '9.0'
+
+importers:
+  .:
+    dependencies:
+      '@s/node-core':
+        specifier: 1.0.0
+        version: 1.0.0(@o/core@2.0.0(@o/api@1.0.0))
+
+packages:
+  '@o/api@1.0.0':
+    resolution: {integrity: sha512-api}
+
+  '@o/core@2.0.0':
+    resolution: {integrity: sha512-core}
+    peerDependencies:
+      '@o/api': '*'
+
+  '@s/node-core@1.0.0':
+    resolution: {integrity: sha512-nodecore}
+    peerDependencies:
+      '@o/core': ^2.0.0
+      unrelated: '*'
+    peerDependenciesMeta:
+      '@o/core':
+        optional: true
+      unrelated:
+        optional: true
+
+snapshots:
+  '@o/api@1.0.0': {}
+
+  '@o/core@2.0.0(@o/api@1.0.0)':
+    dependencies:
+      '@o/api': 1.0.0
+
+  '@s/node-core@1.0.0(@o/core@2.0.0(@o/api@1.0.0))': {}
+"#,
+    )
+    .unwrap();
+
+    let graph = parse(&lockfile_path).unwrap();
+    let node_core = graph
+        .packages
+        .get("@s/node-core@1.0.0(@o/core@2.0.0(@o/api@1.0.0))")
+        .unwrap();
+    assert_eq!(
+        node_core.dependencies.get("@o/core").map(String::as_str),
+        Some("2.0.0(@o/api@1.0.0)")
+    );
+    assert!(
+        !node_core.dependencies.contains_key("unrelated"),
+        "a declared peer the key does not name stays unlinked"
+    );
+}
+
 #[test]
 fn parse_package_platform_fields_accept_scalar_strings() {
     let dir = tempfile::tempdir().unwrap();
@@ -700,6 +766,67 @@ snapshots:
     assert_eq!(
         pkg_c.local_source,
         Some(LocalSource::Directory("gems/pkg-c".into()))
+    );
+}
+
+#[test]
+fn parse_member_local_versions_use_pnpm_anchoring() {
+    // pnpm 10/11 write a `file:` version relative to the lockfile directory and
+    // a `link:` version relative to the importer. Neither anchoring is visible
+    // from a leading `..`: a `file:` package outside the workspace root keeps
+    // one, and a `link:` into the importer's own subtree has none.
+    let dir = tempfile::tempdir().unwrap();
+    let lockfile_path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &lockfile_path,
+        r#"
+lockfileVersion: '9.0'
+
+importers:
+  .: {}
+
+  apps/app:
+    dependencies:
+      dep:
+        specifier: file:../../../dep
+        version: file:../dep
+      ldep:
+        specifier: link:./vendored
+        version: link:vendored
+      tdep:
+        specifier: file:../../../tarballs/tdep-1.0.0.tgz
+        version: file:../tarballs/tdep-1.0.0.tgz
+
+packages:
+  dep@file:../dep:
+    resolution: {directory: ../dep, type: directory}
+  tdep@file:../tarballs/tdep-1.0.0.tgz:
+    resolution: {tarball: file:../tarballs/tdep-1.0.0.tgz}
+    version: 1.0.0
+
+snapshots:
+  dep@file:../dep: {}
+  tdep@file:../tarballs/tdep-1.0.0.tgz: {}
+"#,
+    )
+    .unwrap();
+
+    let graph = parse(&lockfile_path).unwrap();
+    let source = |name: &str| {
+        let dep = graph.importers["apps/app"]
+            .iter()
+            .find(|dep| dep.name == name)
+            .unwrap_or_else(|| panic!("{name} missing from apps/app"));
+        graph.packages[&dep.dep_path].local_source.clone()
+    };
+    assert_eq!(source("dep"), Some(LocalSource::Directory("../dep".into())));
+    assert_eq!(
+        source("tdep"),
+        Some(LocalSource::Tarball("../tarballs/tdep-1.0.0.tgz".into()))
+    );
+    assert_eq!(
+        source("ldep"),
+        Some(LocalSource::Link("apps/app/vendored".into()))
     );
 }
 

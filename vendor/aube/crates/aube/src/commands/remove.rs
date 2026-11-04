@@ -68,10 +68,22 @@ pub async fn run(
     }
 
     let cwd = crate::dirs::project_root()?;
+    install::run_dev_preinstall(&cwd, args.ignore_scripts, false, false, Some("remove")).await?;
+    remove_from_project(args, true).await
+}
+
+/// Remove `args.packages` from the project at the current directory and
+/// reinstall. With `uninstall_hooks`, the project's `preuninstall` and
+/// `uninstall` run before anything changes and `postuninstall` after the
+/// reinstall; the filtered path runs them itself, across every project.
+async fn remove_from_project(args: RemoveArgs, uninstall_hooks: bool) -> miette::Result<()> {
+    let packages = &args.packages[..];
+    let cwd = crate::dirs::project_root()?;
     let lock = super::take_install_project_lock(&cwd)?;
     let manifest_path = cwd.join("package.json");
 
     let mut manifest = super::load_manifest(&manifest_path)?;
+    let manifest_before_removal = manifest.clone();
 
     for name in packages {
         let removed = if args.save_dev {
@@ -116,6 +128,16 @@ pub async fn run(
     // standalone, so a malformed policy still fails before package.json
     // is touched.
     let _resolver = super::build_resolver(&cwd, &manifest, workspace_catalogs.clone())?;
+
+    if uninstall_hooks {
+        run_uninstall_hooks(
+            &cwd,
+            &[(cwd.clone(), manifest_before_removal)],
+            &aube_scripts::PRE_UNINSTALL_HOOKS,
+            args.ignore_scripts,
+        )
+        .await?;
+    }
 
     // Write updated package.json atomically. Crash mid-write would
     // otherwise truncate the user manifest, worst-case aube failure
@@ -261,7 +283,59 @@ pub async fn run(
         };
     }
     install::run_with_project_lock(opts, &lock).await?;
+    if uninstall_hooks {
+        run_uninstall_hooks(
+            &cwd,
+            &[(cwd.clone(), manifest)],
+            &aube_scripts::POST_UNINSTALL_HOOKS,
+            args.ignore_scripts,
+        )
+        .await?;
+    }
 
+    Ok(())
+}
+
+/// Run `hooks` in each of `projects` (directory and manifest), in order.
+/// pnpm runs a `remove`'s uninstall stages in every project that loses a
+/// dependency: `preuninstall` and `uninstall` before anything is unlinked,
+/// `postuninstall` after. Skipped like every project hook — with
+/// `--ignore-scripts`, and under `virtualStoreOnly`.
+async fn run_uninstall_hooks(
+    cwd: &std::path::Path,
+    projects: &[(std::path::PathBuf, aube_manifest::PackageJson)],
+    hooks: &[aube_scripts::LifecycleHook],
+    ignore_scripts: bool,
+) -> miette::Result<()> {
+    let defined = projects.iter().any(|(_, manifest)| {
+        hooks
+            .iter()
+            .any(|hook| manifest.scripts.contains_key(hook.script_name()))
+    });
+    if ignore_scripts || !defined {
+        return Ok(());
+    }
+    let root = crate::dirs::find_workspace_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+    if super::with_settings_ctx(&root, aube_settings::resolved::virtual_store_only) {
+        return Ok(());
+    }
+    crate::runtime::ensure_for_cwd(&root).await?;
+    super::configure_script_settings_for_cwd(&root, Some("remove"))?;
+    let modules_dir_name = super::resolve_modules_dir_name_for_cwd(&root);
+    for (dir, manifest) in projects {
+        let importer = super::workspace_importer_path(&root, dir)?;
+        for &hook in hooks {
+            install::run_importer_lifecycle(
+                &root,
+                dir,
+                &importer,
+                &modules_dir_name,
+                manifest,
+                hook,
+            )
+            .await?;
+        }
+    }
     Ok(())
 }
 
@@ -354,33 +428,61 @@ async fn run_filtered(
     filter: &aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<()> {
     let cwd = crate::dirs::cwd()?;
-    let (_root, matched) = super::select_workspace_packages(&cwd, filter, "remove")?;
-    let result = async {
-        for pkg in matched {
-            // Match pnpm's recursive-remove semantics: silently skip
-            // projects that don't declare any of the named packages,
-            // and per-project narrow the package list to just the
-            // ones present so a partial overlap (e.g. `aube -r remove
-            // pkg1 pkg2` against a project that only declares `pkg1`)
-            // doesn't trip the strict "package is not a dependency"
-            // error in `run` after the first mutation has already
-            // landed. The single-project (`aube remove`) path keeps
-            // the strict per-package error so an isolated typo in
-            // one shell still fails fast.
-            let present = manifest_present_deps(&pkg.manifest, &args.packages, args.save_dev);
-            if present.is_empty() {
-                continue;
-            }
-            super::retarget_cwd(&pkg.dir)?;
-            let mut narrowed = args.clone();
-            narrowed.packages = present;
-            Box::pin(run(
-                narrowed,
-                aube_workspace::selector::EffectiveFilter::default(),
-            ))
-            .await?;
+    let (root, matched) = super::select_workspace_packages(&cwd, filter, "remove")?;
+    // Match pnpm's recursive-remove semantics: silently skip projects
+    // that don't declare any of the named packages, and per-project
+    // narrow the package list to just the ones present so a partial
+    // overlap (e.g. `aube -r remove pkg1 pkg2` against a project that
+    // only declares `pkg1`) doesn't trip the strict "package is not a
+    // dependency" error in `run` after the first mutation has already
+    // landed. The single-project (`aube remove`) path keeps the strict
+    // per-package error so an isolated typo in one shell still fails fast.
+    let mut plan: Vec<(String, std::path::PathBuf, Vec<String>)> = Vec::new();
+    let mut hook_order = Vec::new();
+    for pkg in matched {
+        let present = manifest_present_deps(&pkg.manifest, &args.packages, args.save_dev);
+        if present.is_empty() {
+            continue;
         }
-        Ok(())
+        let importer = super::workspace_importer_path(&root, &pkg.dir)?;
+        hook_order.push((importer.clone(), pkg.manifest));
+        plan.push((importer, pkg.dir, present));
+    }
+    // pnpm runs every project's `preuninstall`/`uninstall` before it
+    // unlinks anything and every `postuninstall` after, each batch in
+    // dependency order.
+    let hook_projects: Vec<(std::path::PathBuf, aube_manifest::PackageJson)> =
+        install::order_lifecycle_manifests(hook_order)
+            .into_iter()
+            .filter_map(|(importer, manifest)| {
+                plan.iter()
+                    .find(|(key, _, _)| *key == importer)
+                    .map(|(_, dir, _)| (dir.clone(), manifest))
+            })
+            .collect();
+    let result = async {
+        install::run_dev_preinstall(&root, args.ignore_scripts, false, false, Some("remove"))
+            .await?;
+        run_uninstall_hooks(
+            &root,
+            &hook_projects,
+            &aube_scripts::PRE_UNINSTALL_HOOKS,
+            args.ignore_scripts,
+        )
+        .await?;
+        for (_, dir, present) in &plan {
+            super::retarget_cwd(dir)?;
+            let mut narrowed = args.clone();
+            narrowed.packages = present.clone();
+            Box::pin(remove_from_project(narrowed, false)).await?;
+        }
+        run_uninstall_hooks(
+            &root,
+            &hook_projects,
+            &aube_scripts::POST_UNINSTALL_HOOKS,
+            args.ignore_scripts,
+        )
+        .await
     }
     .await;
     super::finish_filtered_workspace(&cwd, result)
