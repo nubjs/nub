@@ -381,15 +381,16 @@ fn lockfile_package_manager(dir: &std::path::Path) -> &'static str {
     }
 }
 
-/// Whether a Yarn version spec selects Berry: pnpm provisions the newest
-/// version a range allows, so any range reaching 2.0.0 is Berry. `None`
-/// for a spec that is not a range, which pnpm treats as no version.
+/// Whether a Yarn version spec selects Berry. pnpm provisions a range
+/// that still admits a 1.x release as Yarn Classic (`^1 || ^4` gets
+/// 1.22.22), so only a range with no 1.x left in it is Berry. `None` for
+/// a spec that is not a range, which pnpm treats as no version.
 fn yarn_spec_is_berry(spec: &str) -> Option<bool> {
     let spec = spec
         .split_once('+')
         .map_or(spec, |(version, _build)| version);
     let range = node_semver::Range::parse(spec).ok()?;
-    Some(range.allows_any(&node_semver::Range::parse(">=2.0.0").ok()?))
+    Some(!range.allows_any(&node_semver::Range::parse("<2.0.0").ok()?))
 }
 
 /// Run the `prepublish`/`prepack`/`publish` scripts the checkout declares,
@@ -639,8 +640,15 @@ mod tests {
             ),
             "a range below 2 is Classic"
         );
+        assert!(
+            hooks(
+                r#"{"devEngines":{"packageManager":{"name":"yarn","version":"^1 || ^4"}}}"#,
+                &[]
+            ),
+            "a range still admitting 1.x is provisioned as Classic"
+        );
         assert!(!hooks(
-            r#"{"devEngines":{"packageManager":{"name":"yarn","version":"^1 || ^4"}}}"#,
+            r#"{"devEngines":{"packageManager":{"name":"yarn","version":">=2"}}}"#,
             &[]
         ));
         assert!(!hooks(r#"{"packageManager":"pnpm@10.0.0"}"#, &[]));
