@@ -268,7 +268,10 @@ pub fn env_document_is_current(lockfile_dir: &Path) -> bool {
 /// A missing lockfile or manifest, or a project that pins no pnpm, is a
 /// no-op: the env document is never removed, as pnpm keeps it after a pin
 /// is dropped.
-pub async fn sync_pnpm_env_lockfile(lockfile_dir: &Path) -> miette::Result<Option<String>> {
+pub async fn sync_pnpm_env_lockfile(
+    lockfile_dir: &Path,
+    network_mode: aube_registry::NetworkMode,
+) -> miette::Result<Option<String>> {
     let lockfile_path = lockfile_dir.join(LOCKFILE);
     let Ok(content) = std::fs::read_to_string(&lockfile_path) else {
         return Ok(None);
@@ -287,7 +290,9 @@ pub async fn sync_pnpm_env_lockfile(lockfile_dir: &Path) -> miette::Result<Optio
             wanted,
             version: None,
         } => {
-            let Some(version) = newest_in_range(lockfile_dir, &wanted.specifier).await? else {
+            let Some(version) =
+                newest_in_range(lockfile_dir, &wanted.specifier, network_mode).await?
+            else {
                 return Ok(None);
             };
             if node_semver::Version::parse(&version).map_or(true, |v| v.major < 11) {
@@ -307,7 +312,7 @@ pub async fn sync_pnpm_env_lockfile(lockfile_dir: &Path) -> miette::Result<Optio
         dependencies: deps.clone(),
         ..Default::default()
     };
-    let closure = resolve(lockfile_dir, &closure_manifest, false)
+    let closure = resolve(lockfile_dir, &closure_manifest, false, network_mode)
         .await
         .wrap_err_with(|| format!("resolve pnpm@{version} for {LOCKFILE}"))?;
     let recorded: BTreeMap<String, EnvDependency> = deps
@@ -353,12 +358,16 @@ fn offline_version(wanted: &WantedPnpm) -> Option<String> {
 
 /// The newest release in `range` the project's `minimumReleaseAge` admits —
 /// the version pnpm itself switches to for a range pin.
-async fn newest_in_range(lockfile_dir: &Path, range: &str) -> miette::Result<Option<String>> {
+async fn newest_in_range(
+    lockfile_dir: &Path,
+    range: &str,
+    network_mode: aube_registry::NetworkMode,
+) -> miette::Result<Option<String>> {
     let manifest = aube_manifest::PackageJson {
         dependencies: BTreeMap::from([("pnpm".to_string(), range.to_string())]),
         ..Default::default()
     };
-    let graph = resolve(lockfile_dir, &manifest, true)
+    let graph = resolve(lockfile_dir, &manifest, true, network_mode)
         .await
         .wrap_err_with(|| format!("resolve pnpm@{range}"))?;
     Ok(graph
@@ -377,8 +386,12 @@ async fn resolve(
     lockfile_dir: &Path,
     manifest: &aube_manifest::PackageJson,
     honor_release_age: bool,
+    network_mode: aube_registry::NetworkMode,
 ) -> miette::Result<aube_lockfile::LockfileGraph> {
-    let client = Arc::new(crate::commands::make_client(lockfile_dir));
+    // The install's own network mode: `--offline` answers from the
+    // metadata cache or fails, never reaching the registry.
+    let client =
+        Arc::new(crate::commands::make_client(lockfile_dir).with_network_mode(network_mode));
     let minimum_release_age = honor_release_age
         .then(|| {
             crate::commands::with_settings_ctx(lockfile_dir, |ctx| {
@@ -388,6 +401,12 @@ async fn resolve(
         .flatten();
     let mut resolver = aube_resolver::Resolver::new(client)
         .with_packument_cache(crate::commands::packument_cache_dir_for_cwd(lockfile_dir))
+        // The full-document cache too: an age or trust check needs publish
+        // times, and without this cache the resolver fetches them through
+        // an uncached path that does not honor `--offline`.
+        .with_packument_full_cache(crate::commands::packument_full_cache_dir_for_cwd(
+            lockfile_dir,
+        ))
         .with_project_root(lockfile_dir.to_path_buf())
         .with_minimum_release_age(minimum_release_age)
         .with_supported_architectures(aube_resolver::SupportedArchitectures {

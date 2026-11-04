@@ -90,8 +90,14 @@ fn install_fast_path_eligible(
     // current under pnpm 11+, whose frozen install refuses it, so a
     // non-frozen install takes the full path that records it. A frozen one
     // stays lenient: it must not start failing lockfiles Nub wrote before.
+    // Demanded only where the install's sync would write it, or the warm
+    // path would be lost for good.
+    let workspace_root = crate::dirs::find_workspace_root(cwd);
     if matches!(mode, FrozenMode::Prefer)
-        && !crate::package_manager_pin::env_document_is_current(cwd)
+        && !crate::package_manager_pin::env_document_is_current(
+            workspace_root.as_deref().unwrap_or(cwd),
+        )
+        && pin_sync_writes_lockfile(cwd, opts, workspace_root.is_some())
     {
         tracing::debug!(
             "install warm path skipped: pnpm-lock.yaml does not record the pinned pnpm"
@@ -109,6 +115,16 @@ fn install_fast_path_eligible(
             false
         }
     }
+}
+
+/// The settings half of the install tail's pin-sync gate: a lockfile is
+/// written, and it is the shared one at the workspace root.
+fn pin_sync_writes_lockfile(cwd: &Path, opts: &InstallOptions, in_workspace: bool) -> bool {
+    let files = super::super::FileSources::load(cwd);
+    let raw_workspace = aube_manifest::workspace::load_raw(cwd).unwrap_or_default();
+    let ctx = files.ctx(&raw_workspace, &opts.env_snapshot, &opts.cli_flags);
+    aube_settings::resolved::lockfile(&ctx)
+        && (!in_workspace || aube_settings::resolved::shared_workspace_lockfile(&ctx))
 }
 
 fn compatibility_metadata_is_current(cwd: &Path, opts: &InstallOptions) -> bool {

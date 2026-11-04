@@ -240,7 +240,7 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
             && matches!(write_kind, LockfileKind::Pnpm)
             && (shared_workspace_lockfile || !has_workspace)
         {
-            super::sync_package_manager_pin(lockfile_dir).await;
+            super::sync_package_manager_pin(lockfile_dir, network_mode).await;
         }
         super::control::output(
             super::InstallOutputLevel::Info,
@@ -413,7 +413,7 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
                 .unwrap_or_else(|| lo_written.display().to_string())
         );
         if matches!(lo_write_kind, LockfileKind::Pnpm) {
-            super::sync_package_manager_pin(lockfile_dir).await;
+            super::sync_package_manager_pin(lockfile_dir, network_mode).await;
         }
     } else {
         write_per_project_lockfiles(

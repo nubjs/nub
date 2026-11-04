@@ -619,7 +619,10 @@ pub(crate) fn sync_pnpm_package_manager_pin(root: &Path) -> Result<Option<String
     let session = engine_session_quiet(Some(root))?;
     session
         .runtime
-        .block_on(aube::package_manager_pin::sync_pnpm_env_lockfile(root))
+        .block_on(aube::package_manager_pin::sync_pnpm_env_lockfile(
+            root,
+            aube_registry::NetworkMode::Online,
+        ))
         .map_err(|report| anyhow::anyhow!("{}", present::render_report(&report)))
 }
 
