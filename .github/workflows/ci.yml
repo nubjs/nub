@@ -102,6 +102,13 @@ jobs:
               - 'tests/**'
               - 'runtime/**'
               - '.github/workflows/**'
+              # Two site assets are Rust test inputs, so a change confined to
+              # site/** would otherwise skip the tests that check them on a PR
+              # and redden main instead: project_config.rs compares the
+              # published nub.jsonc schema against the parser's key set, and
+              # agent/mod.rs embeds skill.md and checks its required pointers.
+              - 'site/public/schema/**'
+              - 'site/public/skill.md'
             site:
               - 'site/**'
             types:

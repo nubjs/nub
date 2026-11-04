@@ -23,6 +23,7 @@ const r = {
   IteratorZip: t("", () => Iterator.zip([[1].values(), [2].values()]).toArray().length === 1),
   IteratorChunks: t("", () => [1,2].values().chunks(2).toArray().length === 1),
   MathSumPrecise: t("", () => Math.sumPrecise([1,2]) === 3),
+  JSONParseOptions: t("", () => Object.isFrozen(JSON.parse("[]", { freeze: true }))),
   SymbolMetadata: t("", () => typeof Symbol.metadata === "symbol"),
   PromiseAllKeyed: t("", () => Promise.allKeyed({}) instanceof Promise),
   Float16Array: t("", () => new Float16Array(1).length === 1),

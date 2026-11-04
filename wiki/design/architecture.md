@@ -22,7 +22,7 @@ The choice of per-file hooks over a bundler pass is in [[research/augmentation-l
 
 Nub supports Node 18.19 and above. Across that range a feature may be native, gated behind a flag, or absent — so making it work means a different action per version.
 
-All of it lives in one table, 50 features deep. Each carries sorted, non-overlapping version bands, and each band names exactly one mitigation:
+All of it lives in one table, 51 features deep. Each carries sorted, non-overlapping version bands, and each band names exactly one mitigation:
 
 | Mitigation | What Nub does |
 | --- | --- |
