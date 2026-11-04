@@ -1295,6 +1295,12 @@ jobs:
       - name: Standalone runner package fixtures
         if: matrix.os == 'ubuntu-latest' && matrix.node == '22.15'
         run: tests/runner/run-matrix.sh
+      # ubuntu-26.04 mounts /tmp as a quota-limited tmpfs, and the suite copies the
+      # nub binary into many temp homes in parallel: tests failed with EDQUOT
+      # ("Disk quota exceeded"). RUNNER_TEMP is on the runner's disk.
+      - name: Keep test temp dirs on disk (Linux)
+        if: runner.os == 'Linux'
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - run: cargo test
       - name: Constrained-memory GC acceptance
         if: matrix.os == 'ubuntu-latest' && matrix.node == '24'
