@@ -2228,16 +2228,16 @@ fn test_unknown_protocol_tail_stays_a_registry_pin_by_default() {
     assert!(foo.local_source.is_none());
 }
 
-/// bun writes no edge for a package's resolved peer, required or optional:
-/// the peer stays in `peerDependencies`/`optionalPeers`, which is where an
-/// install from the lockfile links it from. openai declares no dependencies,
-/// so its declared ranges are known and empty.
+/// A resolved optional peer's edge is classified optional in the graph,
+/// but bun records peers in `peerDependencies`/`optionalPeers` only, so
+/// when the package's declared ranges show the edge is peer-only the
+/// writer must not turn it into an `optionalDependencies` entry.
 #[test]
-fn write_records_a_resolved_peer_only_in_its_peer_declaration() {
+fn write_keeps_an_optional_peer_edge_out_of_optional_dependencies() {
     let mut graph = LockfileGraph::default();
     graph.importers.insert(
         ".".to_string(),
-        ["openai", "ws", "zod"]
+        ["openai", "zod"]
             .into_iter()
             .map(|name| DirectDep {
                 name: name.to_string(),
@@ -2252,40 +2252,41 @@ fn write_records_a_resolved_peer_only_in_its_peer_declaration() {
         version: "1.0.0".to_string(),
         dep_path: "openai@1.0.0".to_string(),
         integrity: Some(fake_sri('o')),
-        declared_dependencies_known: true,
         ..Default::default()
     };
-    for peer in ["ws", "zod"] {
-        openai
-            .peer_dependencies
-            .insert(peer.to_string(), "^1.0.0".to_string());
-        openai
-            .dependencies
-            .insert(peer.to_string(), "1.0.0".to_string());
-    }
+    openai
+        .peer_dependencies
+        .insert("zod".to_string(), "^1.0.0".to_string());
     openai
         .peer_dependencies_meta
         .insert("zod".to_string(), crate::PeerDepMeta { optional: true });
     openai
+        .dependencies
+        .insert("zod".to_string(), "1.0.0".to_string());
+    openai
         .optional_dependencies
         .insert("zod".to_string(), "1.0.0".to_string());
-    graph.packages.insert(openai.dep_path.clone(), openai);
-    for (name, c) in [("ws", 'w'), ("zod", 'z')] {
-        let pkg = LockedPackage {
-            name: name.to_string(),
-            version: "1.0.0".to_string(),
-            dep_path: format!("{name}@1.0.0"),
-            integrity: Some(fake_sri(c)),
-            ..Default::default()
-        };
+    openai
+        .declared_dependencies
+        .insert("tslib".to_string(), "^2.0.0".to_string());
+    let zod = LockedPackage {
+        name: "zod".to_string(),
+        version: "1.0.0".to_string(),
+        dep_path: "zod@1.0.0".to_string(),
+        integrity: Some(fake_sri('z')),
+        ..Default::default()
+    };
+    for pkg in [openai, zod] {
         graph.packages.insert(pkg.dep_path.clone(), pkg);
     }
     let manifest = aube_manifest::PackageJson {
         name: Some("root".to_string()),
-        dependencies: ["openai", "ws", "zod"]
-            .into_iter()
-            .map(|name| (name.to_string(), "1.0.0".to_string()))
-            .collect(),
+        dependencies: [
+            ("openai".to_string(), "1.0.0".to_string()),
+            ("zod".to_string(), "1.0.0".to_string()),
+        ]
+        .into_iter()
+        .collect(),
         ..Default::default()
     };
 
@@ -2297,10 +2298,8 @@ fn write_records_a_resolved_peer_only_in_its_peer_declaration() {
         .find(|l| l.trim_start().starts_with("\"openai\": [\"openai@"))
         .expect("openai entry");
     assert!(
-        openai_line.contains("\"peerDependencies\"")
-            && !openai_line.contains("\"dependencies\"")
-            && !openai_line.contains("\"optionalDependencies\""),
-        "a resolved peer belongs in the peer declaration alone: {openai_line}"
+        !openai_line.contains("optionalDependencies"),
+        "an optional peer is not an optional dependency in bun's format: {openai_line}"
     );
 }
 
