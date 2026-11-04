@@ -233,7 +233,7 @@ pub fn write(
         let mut opt_deps_obj = serde_json::Map::new();
         for (dep_name, dep_value) in &pkg.dependencies {
             let key = crate::npm::child_canonical_key(dep_name, dep_value);
-            if !canonical.contains_key(&key) {
+            if !canonical.contains_key(&key) || is_peer_only_edge(pkg, dep_name) {
                 continue;
             }
             let rendered = pkg
@@ -553,7 +553,8 @@ pub fn write(
                 .unwrap_or_else(|| {
                     crate::npm::dep_value_as_version(dep_name, dep_value).to_string()
                 });
-            if pkg.optional_dependencies.contains_key(dep_name) {
+            if pkg.optional_dependencies.contains_key(dep_name) && !is_peer_only_edge(pkg, dep_name)
+            {
                 opt_deps_obj.insert(dep_name.clone(), Value::String(rendered));
             } else {
                 deps_obj.insert(dep_name.clone(), Value::String(rendered));
@@ -876,4 +877,19 @@ fn inline_json(value: &serde_json::Value, _base_indent: usize) -> String {
             format!("{{ {} }}", parts.join(", "))
         }
     }
+}
+
+/// Whether a package's edge to `dep_name` exists only because it declares
+/// `dep_name` as a peer.
+///
+/// bun records such a peer in `peerDependencies` / `optionalPeers` and
+/// writes no edge for it, required or optional; an install from that
+/// lockfile (bun's or Nub's) links the peer from the declaration. Telling
+/// it apart from a dependency that is also a peer needs the package's
+/// declared ranges, which the pnpm and nub.lock readers never record, so
+/// without them the edge is kept and an optional one stays optional.
+fn is_peer_only_edge(pkg: &LockedPackage, dep_name: &str) -> bool {
+    pkg.declared_dependencies_known
+        && pkg.peer_dependencies.contains_key(dep_name)
+        && !pkg.declared_dependencies.contains_key(dep_name)
 }
