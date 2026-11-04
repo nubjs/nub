@@ -382,12 +382,7 @@ fn select_workspace_packages(
     workspace_pkgs: &[PathBuf],
     filters: &aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<Vec<PathBuf>> {
-    let selected = aube_workspace::selector::select_workspace_packages(
-        workspace_root,
-        workspace_pkgs,
-        filters,
-    )
-    .map_err(|e| miette!("invalid --filter selector: {e}"))?;
+    let selected = super::select_projects(workspace_root, workspace_pkgs, filters, "publish")?;
     let seen_names: Vec<String> = selected.iter().filter_map(|p| p.name.clone()).collect();
     let out: Vec<PathBuf> = selected
         .into_iter()

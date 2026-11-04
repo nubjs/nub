@@ -108,7 +108,7 @@ impl Materialization {
     /// DEFAULT hoist lets the store engage while the hidden hoist tree is built
     /// wherever it does not (CI, per-project, an incompatible-package trigger,
     /// an explicit opt-out, dlx). The `hoisted` layout discards `.aube`, so it
-    /// never uses the shared store. `reset_on_mode_change` compares this
+    /// never uses the shared store. `PendingModeReset::detect` compares this
     /// against the existing `.aube/` tree, so it MUST predict the same value
     /// the linker writes (issue #71): a mismatch wipes `node_modules` on every
     /// non-fast-path install.
@@ -657,52 +657,154 @@ else if(__av.startsWith(\"..\"))allowDirs.push(__aubeResolve(__aubeJoin(__awr,{m
     Ok(true)
 }
 
-pub(super) fn reset_on_mode_change(
-    cwd: &Path,
-    aube_dir: &Path,
-    modules_dir_name: &str,
-    planned_gvs: bool,
-    settings_ctx: &aube_settings::ResolveCtx<'_>,
-) -> miette::Result<()> {
-    let global_virtual_store =
-        crate::commands::global_virtual_store_dir_with_ctx(cwd, settings_ctx);
-    let Some(existing_gvs) = detect_existing_global_virtual_store(
-        cwd,
-        aube_dir,
-        modules_dir_name,
-        &global_virtual_store,
-    ) else {
-        return Ok(());
-    };
-    if existing_gvs == planned_gvs {
-        return Ok(());
+/// A virtual-store mode change found on disk: the existing tree was linked
+/// with the global virtual store `existing` and this install will link it
+/// `planned`. The two layouts cannot share a `node_modules`, so the old tree is
+/// removed and rebuilt from scratch.
+///
+/// Detection and removal are split on purpose. Detection runs where the
+/// layout is decided, early in `install::run`; [`Self::reset`] runs only once
+/// resolution, fetch and every pre-link gate (frozen-lockfile drift, trust
+/// policy, OSV, engines) have passed, immediately before the link phase. A
+/// failure anywhere before that point leaves the user's previous tree intact
+/// (#841). While a reset is pending nothing may write into the old tree, so
+/// the caller drains the fetch-pipelined prewarm instead of running it and
+/// skips the fetch phase's already-linked shortcut, which would otherwise
+/// classify entries of the layout about to be deleted.
+pub(super) struct PendingModeReset {
+    cwd: PathBuf,
+    aube_dir: PathBuf,
+    modules_dir_name: String,
+    existing: bool,
+    planned: bool,
+}
+
+impl PendingModeReset {
+    pub(super) fn detect(
+        cwd: &Path,
+        aube_dir: &Path,
+        modules_dir_name: &str,
+        planned_gvs: bool,
+        settings_ctx: &aube_settings::ResolveCtx<'_>,
+    ) -> Option<Self> {
+        let global_virtual_store =
+            crate::commands::global_virtual_store_dir_with_ctx(cwd, settings_ctx);
+        let existing = detect_existing_global_virtual_store(
+            cwd,
+            aube_dir,
+            modules_dir_name,
+            &global_virtual_store,
+        )?;
+        (existing != planned_gvs).then(|| Self {
+            cwd: cwd.to_path_buf(),
+            aube_dir: aube_dir.to_path_buf(),
+            modules_dir_name: modules_dir_name.to_string(),
+            existing,
+            planned: planned_gvs,
+        })
     }
 
-    let from = if existing_gvs { "enabled" } else { "disabled" };
-    let to = if planned_gvs { "enabled" } else { "disabled" };
-    let modules_dir_path = cwd.join(modules_dir_name);
-    tracing::warn!(
-        code = aube_codes::warnings::WARN_AUBE_GVS_MODE_CHANGED,
-        "global virtual store {from} → {to}; removing {} and reinstalling from scratch",
-        modules_dir_path.display()
-    );
-    remove_dir_all_if_exists(&modules_dir_path).map_err(|e| {
-        miette!(
-            "global virtual store transition: failed to remove {}: {e}",
+    /// Remove the old tree. `keep` names directories that must survive even
+    /// when they sit inside it: the store this install just fetched into, when
+    /// `storeDir` is configured under `node_modules`. Before the reset was
+    /// deferred it ran ahead of the fetch, which repopulated such a store.
+    ///
+    /// A kept path can reach the tree through a symlink either way: spelled
+    /// through a link inside `node_modules` that points elsewhere (the indices
+    /// name files through the link, so the link itself must stay), or spelled
+    /// outside through a link that points into it. So each is matched both
+    /// as written, against the walked path, and canonicalized, against the
+    /// walked path's real location.
+    pub(super) fn reset(self, keep: &[PathBuf]) -> miette::Result<()> {
+        let from = if self.existing { "enabled" } else { "disabled" };
+        let to = if self.planned { "enabled" } else { "disabled" };
+        let modules_dir_path = self.cwd.join(&self.modules_dir_name);
+        tracing::warn!(
+            code = aube_codes::warnings::WARN_AUBE_GVS_MODE_CHANGED,
+            "global virtual store {from} → {to}; removing {} and reinstalling from scratch",
             modules_dir_path.display()
-        )
-    })?;
-    if !aube_dir.starts_with(&modules_dir_path) {
-        remove_dir_all_if_exists(aube_dir).map_err(|e| {
+        );
+        let keep = KeepPaths {
+            written: keep.to_vec(),
+            real: keep
+                .iter()
+                .filter_map(|path| std::fs::canonicalize(path).ok())
+                .collect(),
+        };
+        remove_dir_all_except(&modules_dir_path, &keep).map_err(|e| {
             miette!(
                 "global virtual store transition: failed to remove {}: {e}",
-                aube_dir.display()
+                modules_dir_path.display()
             )
         })?;
+        if !self.aube_dir.starts_with(&modules_dir_path) {
+            remove_dir_all_except(&self.aube_dir, &keep).map_err(|e| {
+                miette!(
+                    "global virtual store transition: failed to remove {}: {e}",
+                    self.aube_dir.display()
+                )
+            })?;
+        }
+        state::remove_state(&self.cwd).map_err(|e| {
+            miette!("global virtual store transition: failed to remove install state: {e}")
+        })
     }
-    state::remove_state(cwd).map_err(|e| {
-        miette!("global virtual store transition: failed to remove install state: {e}")
-    })
+}
+
+struct KeepPaths {
+    written: Vec<PathBuf>,
+    real: Vec<PathBuf>,
+}
+
+impl KeepPaths {
+    /// Whether the entry at `written` (real location `real`) is kept or leads
+    /// to something kept.
+    fn covers(&self, written: &Path, real: &Path) -> bool {
+        self.written.iter().any(|k| k.starts_with(written))
+            || self.real.iter().any(|k| k.starts_with(real))
+    }
+
+    fn is_kept(&self, written: &Path, real: &Path) -> bool {
+        self.written.iter().any(|k| k == written) || self.real.iter().any(|k| k == real)
+    }
+}
+
+/// [`remove_dir_all_if_exists`], sparing every kept path and the entries
+/// leading down to it. A symlink on the way to a kept path is kept as is
+/// rather than followed.
+fn remove_dir_all_except(path: &Path, keep: &KeepPaths) -> std::io::Result<()> {
+    let real = match std::fs::canonicalize(path) {
+        Ok(real) => real,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    remove_children_except(path, &real, keep)
+}
+
+fn remove_children_except(written: &Path, real: &Path, keep: &KeepPaths) -> std::io::Result<()> {
+    if keep.is_kept(written, real) {
+        return Ok(());
+    }
+    if !keep.covers(written, real) {
+        return remove_dir_all_if_exists(written);
+    }
+    for entry in std::fs::read_dir(written)? {
+        let entry = entry?;
+        let (child, child_real) = (entry.path(), real.join(entry.file_name()));
+        let kind = entry.file_type()?;
+        if keep.covers(&child, &child_real) {
+            // A real directory's location is its parent's plus its name; a
+            // symlink is not followed, so that holds for every recursion.
+            if kind.is_dir() {
+                remove_children_except(&child, &child_real, keep)?;
+            }
+        } else if kind.is_dir() {
+            std::fs::remove_dir_all(&child)?;
+        } else {
+            std::fs::remove_file(&child)?;
+        }
+    }
+    Ok(())
 }
 
 fn remove_dir_all_if_exists(path: &Path) -> std::io::Result<()> {
@@ -722,7 +824,7 @@ mod tests {
     // Regression for issue #71: the mode-change check must predict the
     // *effective* layout, which the linker forces to per-project whenever
     // the hidden hoist tree is on (the default) or the layout is hoisted.
-    // Before the fix, `reset_on_mode_change` was fed the raw `planned_gvs`
+    // Before the fix, the mode-change check was fed the raw `planned_gvs`
     // (`true` off-CI), so a default project — whose linker materializes
     // per-project (`false`) — saw a spurious `disabled → enabled` flip on
     // every non-fast-path install (e.g. `add` in a workspace member),

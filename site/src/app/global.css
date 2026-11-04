@@ -353,6 +353,14 @@ h1, h2, h3, h4, .font-display {
   }
 }
 
+/* Docs tables keep their auto layout, but a first-column code token (a command,
+   a field, a value) stays on one line: a chip broken at its space reads as two. */
+@media (min-width: 640px) {
+  .prose table:not(.tool-matrix):not(.extensions-table) td:first-child code {
+    white-space: nowrap;
+  }
+}
+
 /* The extensions table's rows scroll inside a fixed-height pane, so its column
    headings stick to the top of that pane instead of scrolling out of reach. The
    tint is composited onto the page background rather than left translucent —

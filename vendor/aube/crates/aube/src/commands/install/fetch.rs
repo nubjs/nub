@@ -1,5 +1,8 @@
 use super::critical_path::is_likely_native_build;
-use super::git_prepare::{prepare_scratch_copy, run_git_dep_prepare};
+use super::git_prepare::{
+    archive_has_path, checkout_build_allowed, checkout_needs_build, prepare_scratch_copy,
+    run_git_dep_prepare,
+};
 use super::lifecycle::run_import_on_blocking;
 use super::settings::{
     default_lockfile_network_concurrency, resolve_network_concurrency,
@@ -288,61 +291,27 @@ pub(super) async fn import_local_source(
                 }
             }
 
-            // If the cloned repo defines a `prepare` script, treat
-            // it as a source checkout that needs to be built before
-            // we snapshot it. Matches npm/pnpm: a TypeScript repo
-            // installed from git has devDependencies + a `prepare`
-            // that compiles `src/` into `dist/`, and consumers
-            // expect the built output. We run a nested `aube
-            // install` inside the clone, which installs its deps
-            // and runs its own root lifecycle hooks (including
-            // `prepare`), then `aube pack`'s file-selection logic
-            // snapshots exactly what would be published (honors
-            // `files`, `.npmignore`, and skips `node_modules`).
-            //
-            // `--ignore-scripts` short-circuits the whole branch:
-            // the only reason we'd pay the cost of a nested install
-            // is to run `prepare`, so with scripts disabled we fall
-            // through to the plain directory import. Matches pnpm,
-            // which skips `prepare` for git deps under
-            // `--ignore-scripts` as well.
-            let manifest_path = pkg_root.join("package.json");
-            let needs_prepare = !ignore_scripts
-                && aube_manifest::PackageJson::from_path(&manifest_path)
-                    .ok()
-                    .is_some_and(|pj| pj.scripts.contains_key("prepare"));
-
-            if needs_prepare {
-                // Run `prepare` on a private copy of the checkout,
-                // not on the shared `git_shallow_clone` cache
-                // directory. The cache is keyed by (url, commit)
-                // and reused across installs; mutating it in place
-                // would leave `node_modules/`, `aube-lock.yaml`,
-                // and any generated `dist/` behind, so a later
-                // `aube install --ignore-scripts` — which falls
-                // through to the plain directory-import path —
-                // would silently pull those build artifacts into
-                // the store even though the user asked for a
-                // scripts-free install. Copying also isolates
-                // concurrent installs of the same git dep from
-                // clobbering each other's in-progress prepare.
-                //
-                // `ScratchDir` removes the copy on drop, including
-                // on the error path.
-                let scratch = prepare_scratch_copy(&pkg_root, &spec)?;
-                run_git_dep_prepare(
-                    scratch.path(),
+            let manifest = aube_manifest::PackageJson::from_path(&pkg_root.join("package.json"));
+            let build = match &manifest {
+                Ok(manifest)
+                    if !ignore_scripts
+                        && checkout_needs_build(manifest, |p| pkg_root.join(p).exists()) =>
+                {
+                    checkout_build_allowed(inherited_build_policy.as_deref(), local, manifest)?
+                }
+                _ => false,
+            };
+            if build {
+                let index = prepare_git_checkout(
+                    store,
+                    &pkg_root,
                     &spec,
                     ignore_scripts,
                     git_prepare_depth,
                     inherited_build_policy,
+                    &chain,
                 )
                 .await?;
-                let archive = crate::commands::pack::build_archive(scratch.path())
-                    .wrap_err_with(|| format!("failed to pack prepared git dep {spec}{chain}"))?;
-                let index = store
-                    .import_tarball(&archive.tarball)
-                    .map_err(|e| miette!("failed to import prepared {spec}: {e}{chain}"))?;
                 return Ok(Some(index));
             }
 
@@ -389,9 +358,110 @@ pub(super) async fn import_local_source(
             let index = store
                 .import_tarball(&bytes)
                 .map_err(|e| miette!("failed to import {}: {e}{chain}", local.specifier()))?;
+
+            // A hosted git dep pinned to a commit is recorded as its
+            // codeload archive (`hosted_git_local_source` in the
+            // resolver), so it arrives here rather than in the `Git`
+            // arm. It is still a source checkout and gets the same
+            // build, under the same gate. The manifest is read from the
+            // just-imported index so a dep with nothing to build costs
+            // one small file read, not an extract.
+            let hosted_git = if ignore_scripts {
+                None
+            } else {
+                t.as_hosted_git_source()
+            };
+            let manifest = hosted_git.as_ref().and_then(|_| index_manifest(&index));
+            let build = match &manifest {
+                Some(manifest)
+                    if checkout_needs_build(manifest, |p| archive_has_path(&index, p)) =>
+                {
+                    checkout_build_allowed(inherited_build_policy.as_deref(), local, manifest)?
+                }
+                _ => false,
+            };
+            if build && let Some(g) = hosted_git {
+                let spec = format!("{}#{}", g.url, g.resolved);
+                let integrity = (!t.integrity.is_empty()).then(|| t.integrity.clone());
+                let (checkout, _) = tokio::task::spawn_blocking(move || {
+                    aube_store::extract_codeload_tarball(
+                        &bytes,
+                        &g.url,
+                        &g.resolved,
+                        integrity.as_deref(),
+                    )
+                })
+                .await
+                .map_err(|e| miette!("codeload extract task panicked: {e}"))?
+                .map_err(|e| miette!("git dep {spec}: extract codeload archive: {e}{chain}"))?;
+                let index = prepare_git_checkout(
+                    store,
+                    &checkout,
+                    &spec,
+                    ignore_scripts,
+                    git_prepare_depth,
+                    inherited_build_policy,
+                    &chain,
+                )
+                .await?;
+                return Ok(Some(index));
+            }
             Ok(Some(index))
         }
     }
+}
+
+fn index_manifest(index: &aube_store::PackageIndex) -> Option<aube_manifest::PackageJson> {
+    index
+        .get("package.json")
+        .and_then(|stored| std::fs::read(&stored.store_path).ok())
+        .and_then(|bytes| aube_manifest::PackageJson::from_slice(&bytes).ok())
+}
+
+/// Build a git dep's source checkout and import what it would publish.
+///
+/// A TypeScript repo installed from git has devDependencies plus a
+/// `prepare` that compiles `src/` into `dist/`, and consumers expect
+/// the built output (npm and pnpm both build it). A nested install
+/// inside the checkout links its deps and runs its own root lifecycle,
+/// `prepare` included; then `pack`'s file selection snapshots exactly
+/// what would be published (honors `files` and `.npmignore`, skips
+/// `node_modules`). Callers gate this as pnpm does: with
+/// `--ignore-scripts`, or a build the allowlist denies, they import the
+/// checkout as-is, and one it does not mention fails the install
+/// (`checkout_build_allowed`).
+///
+/// The build runs on a private copy, never on `checkout` itself, which
+/// is the shared `(url, commit)` git or codeload cache. Building in
+/// place would leave `node_modules/`, a lockfile and `dist/` behind, so
+/// a later `--ignore-scripts` install, which imports the cache
+/// directory directly, would silently pick up those build artifacts.
+/// The copy also keeps concurrent installs of the same dep from
+/// clobbering each other's build, and `ScratchDir` removes it on drop,
+/// error path included.
+async fn prepare_git_checkout(
+    store: &std::sync::Arc<aube_store::Store>,
+    checkout: &std::path::Path,
+    spec: &str,
+    ignore_scripts: bool,
+    git_prepare_depth: u32,
+    inherited_build_policy: Option<std::sync::Arc<aube_scripts::BuildPolicy>>,
+    chain: &str,
+) -> miette::Result<aube_store::PackageIndex> {
+    let scratch = prepare_scratch_copy(checkout, spec)?;
+    run_git_dep_prepare(
+        scratch.path(),
+        spec,
+        ignore_scripts,
+        git_prepare_depth,
+        inherited_build_policy,
+    )
+    .await?;
+    let archive = crate::commands::pack::build_archive(scratch.path())
+        .wrap_err_with(|| format!("failed to pack prepared git dep {spec}{chain}"))?;
+    store
+        .import_tarball(&archive.tarball)
+        .map_err(|e| miette!("failed to import prepared {spec}: {e}{chain}"))
 }
 
 /// The warm-classifier index read key for `pkg`: its lockfile SRI when

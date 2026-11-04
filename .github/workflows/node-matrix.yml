@@ -207,7 +207,18 @@ jobs:
               | jq -er '[.[] | select(.version | contains("-") | not)][0].version')
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      # actions/node-versions publishes no 23.x or 25.x, so four of these legs (23.6, 23.11,
+      # 25.0, 25.2) miss the manifest and setup-node fetches nodejs.org/dist/index.json live
+      # on every run. That request retries only on 502/503/504 (@actions/http-client), so a
+      # DNS timeout or connection reset fails the leg outright (nubjs/nub#585, upstream
+      # actions/setup-node#1136). One retry turns that red back into the blip it is.
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        id: setup-node
+        continue-on-error: true
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        if: steps.setup-node.outcome == 'failure'
         with:
           node-version: ${{ steps.node.outputs.version }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4

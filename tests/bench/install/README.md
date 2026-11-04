@@ -5,7 +5,7 @@ Wall-clock comparison of `nub install` vs `pnpm install`, `bun install`, and `np
 ## Quick run
 
 ```bash
-cd /path/to/dun
+cd /path/to/nub
 cargo build --release -p nub-cli
 bash tests/bench/install/run-warm-gvs.sh
 ```
@@ -78,6 +78,8 @@ bash tests/bench/install/run.sh --cold-only
 ## Results
 
 By default, scripts write JSON to a temp directory. Pass `--save` to update checked-in JSON under `tests/bench/install/results/`.
+
+`run.sh`, `run-warm-gvs.sh`, and `cold-cas.sh` stamp each file with a top-level `env` object: `platform`, `arch`, `timestamp_utc`, the 1-minute `load_1min` at measurement time, and a `versions` map holding the version of each tool that ran.
 
 ## Methodology notes
 

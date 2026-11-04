@@ -122,13 +122,13 @@ Name matching uses `@pnpm/config.matcher` (`createMatcher`), which compiles patt
 
 There are two modes, controlled by `useGlobDirFiltering`:
 
-**Default (exact prefix match):** Uses `isSubdir(pathStartsWith, parentDir)` — selects all packages whose `rootDir` is a subdirectory of (or equal to) the specified path, treating `{./packages}` as a prefix rather than a glob. So `{./packages}` matches `packages/foo` and `packages/bar` but NOT `packages/foo/subpkg` unless `subpkg` is also a workspace member.
+**Legacy mode (exact prefix match, `legacyDirFiltering: true`):** Uses `isSubdir(pathStartsWith, parentDir)` — selects all packages whose `rootDir` is a subdirectory of (or equal to) the specified path, treating `{./packages}` as a prefix rather than a glob. So `{./packages}` matches `packages/foo` and `packages/bar`.
 
-**Glob mode (`useGlobDirFiltering: true`):** Uses `micromatch.isMatch(parentDir, formattedFilter, { format: str => str.replace(/\/$/, '') })`, with the filter normalized (backslashes to forward-slashes, trailing slash removed). This enables `{./packages/*}` and `{./packages/**}`. In glob mode `{./packages}` matches only the exact path, so `{./packages/*}` is needed to match direct children.
+**Glob mode (the default, `useGlobDirFiltering: true`):** Uses `micromatch.isMatch(parentDir, formattedFilter, { format: str => str.replace(/\/$/, '') })`, with the filter normalized (backslashes to forward-slashes, trailing slash removed). This enables `{./packages/*}` and `{./packages/**}`. In glob mode `{./packages}` matches only the exact path, so `{./packages/*}` is needed to match direct children.
 
 **Which mode pnpm uses:** The deprecated `legacyDirFiltering` config option maps to `useGlobDirFiltering = !legacyDirFiltering`; glob mode is the current default. From the integration test `'select by parentDir using glob'`: `{./packages/*}` with glob enabled selects `project-0` and `project-1`; `{/project-5}` without glob matches `project-5` and `project-5/packages/project-6` (prefix walk); with glob and `{/project-5/**}`, same result.
 
-**Recommendation for Nub:** use glob mode (micromatch) by default — the current pnpm default, and more powerful.
+Nub uses glob mode and has no legacy mode. pnpm 12's Rust port of the matcher (`DirGlob` in its `workspace-projects-filter` crate) is vendored into `aube_workspace::selector` with its tests, and both `nub run --filter` and the package-manager verbs select through it.
 
 ---
 
@@ -263,9 +263,11 @@ From `config/reader/src/concurrency.ts`:
 
 ## 10. `--include-workspace-root`
 
-By default when running with `--filter` or `--recursive`, the workspace root package (the `package.json` at `workspaceDir`) is excluded from the selected set. `--include-workspace-root` opts it back in.
+Whether a selection keeps the workspace root depends on the command, and `--include-workspace-root` only stops it being dropped.
 
-This is separate from the filter system — it's a post-filter inclusion flag applied at the CLI layer.
+The root package (the `package.json` at `workspaceDir`) is a candidate like any other project, so a selector can name it. Whether a selection that names no project keeps it depends on the command. For `run`, `exec`, `add` and `test`, pnpm appends an exclusion selector for the root (`!{<workspaceDir>}`) when no inclusion selector is present, so `-r` and `--filter '!a'` leave it out; `install`, `remove`, `update`, `list` and the other commands keep it. The exclusion is skipped when `--include-workspace-root` is set, or when the workspace patterns are absent or are exactly `["."]`.
+
+`--include-workspace-root` only suppresses that exclusion. It adds nothing to a selection an inclusion selector already decided, so `--filter a --include-workspace-root` selects `a` alone. `-w` (`--workspace-root`) appends `{<workspaceDir>}` as a selector.
 
 ---
 
@@ -292,8 +294,8 @@ For a Nub implementation:
 - Scope-elision: retry `@*/<pattern>` if unscoped pattern matches zero packages; select only if exactly one scoped match
 
 **Dir matching:**
-- Default: `isSubdir(filterPath, packageRootDir)` — all packages under the path
-- Glob mode: `micromatch.isMatch(packageRootDir, filterPath)` — normalize slashes, strip trailing `/`
+- Glob mode (default): `micromatch.isMatch(packageRootDir, filterPath)` — normalize slashes, strip trailing `/`; `./packages` matches only a project at `packages` itself
+- Legacy mode: `isSubdir(filterPath, packageRootDir)` — all packages under the path
 
 **Dependency graph:**
 - Build from workspace `package.json` manifests (deps + devDeps + optionalDeps + peerDeps)
@@ -305,8 +307,8 @@ For a Nub implementation:
 - `includeDependents` → BFS on reversed graph
 - Both → also BFS-forward from all collected dependents (adds their deps)
 - `excludeSelf` → don't include the entry package itself
-- Multiple include selectors → union
-- Exclude selectors → subtract from include union (if no include selectors, base = all packages)
+- Selectors apply in order, in runs of the same polarity: an include run adds its projects, an exclude run removes its projects from what the earlier runs selected
+- A leading exclude run starts from every project, the root included
 
 **Execution:**
 - Topological sort (Kahn's) → `T[][]` chunks
@@ -330,3 +332,4 @@ Revision history, naming the pnpm source revision each pass was read against.
 
 - 2026-05-26 — Initial write-up. Source: pnpm/pnpm `main` branch, read directly via GitHub API.
 - 2026-08-28 — Converted the implementation checklist to plain bullets; the grammar is implemented in `crates/nub-core/src/workspace/filter.rs`.
+- 2026-11-03 — Glob dir matching is pnpm's default and legacy prefix matching an opt-in; the root's inclusion is per command; selectors apply in polarity runs. Read against pnpm 12's `workspace-projects-filter` crate, now vendored as `aube_workspace::selector`, which replaced `crates/nub-core/src/workspace/filter.rs`'s selector.
