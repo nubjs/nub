@@ -187,6 +187,11 @@ pub struct InstallState {
     /// an unfiltered one, or a filter reaching another member, is not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_selection: Option<BTreeSet<String>>,
+    /// Whether `workspace_selection` was recorded at all. A state written
+    /// before the field existed has no coverage record, and the warm path
+    /// then credits it with the root alone, which every install links.
+    #[serde(default)]
+    pub workspace_selection_recorded: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -237,6 +242,8 @@ struct FreshnessState {
     /// See [`InstallState::workspace_selection`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     workspace_selection: Option<BTreeSet<String>>,
+    #[serde(default)]
+    workspace_selection_recorded: bool,
 }
 
 /// `(size, mtime)` snapshot used by `R1` mtime fast path. mtime is
@@ -326,6 +333,7 @@ impl From<&InstallState> for FreshnessState {
             unreviewed_builds: state.unreviewed_builds.clone(),
             deferred_dep_builds: state.deferred_dep_builds.clone(),
             workspace_selection: state.workspace_selection.clone(),
+            workspace_selection_recorded: state.workspace_selection_recorded,
         }
     }
 }
@@ -584,17 +592,21 @@ fn check_needs_install_compute(
     // Only the install path holds a `--filter` install to its selection.
     // The plain check serves commands that use whatever tree the last
     // install built, which a filtered install leaves usable.
-    if cli_flags.is_some()
-        && let Some(installed) = &state.workspace_selection
-    {
-        match workspace_selection {
-            None => {
+    if cli_flags.is_some() {
+        let root_only = BTreeSet::from([".".to_string()]);
+        let installed = match &state.workspace_selection {
+            Some(installed) => Some(installed),
+            None if !state.workspace_selection_recorded => Some(&root_only),
+            None => None,
+        };
+        match (installed, workspace_selection) {
+            (Some(_), None) if state.workspace_selection_recorded => {
                 return Some("the previous install was filtered to part of the workspace".into());
             }
-            Some(wanted) if !wanted.is_subset(installed) => {
-                return Some("the filter selects a project the previous install did not".into());
+            (Some(installed), Some(wanted)) if !wanted.is_subset(installed) => {
+                return Some("the install links a project the previous one did not".into());
             }
-            Some(_) => {}
+            _ => {}
         }
     }
 
@@ -1102,6 +1114,7 @@ pub fn write_state(project_dir: &Path, input: WriteStateInput<'_>) -> Result<(),
         unreviewed_builds,
         deferred_dep_builds: Some(deferred_dep_builds),
         workspace_selection,
+        workspace_selection_recorded: true,
     };
 
     let fresh_state = FreshnessState::from(&state);
@@ -2513,6 +2526,7 @@ mod tests {
             unreviewed_builds: Vec::new(),
             deferred_dep_builds: Some(Vec::new()),
             workspace_selection: None,
+            workspace_selection_recorded: true,
         };
 
         assert_eq!(
@@ -2975,6 +2989,7 @@ mod tests {
             unreviewed_builds: Vec::new(),
             deferred_dep_builds: Some(Vec::new()),
             workspace_selection: None,
+            workspace_selection_recorded: true,
         };
         let json = serde_json::to_string(&state).expect("state should serialize");
         std::fs::write(install_state_file(&state_path), json).expect("state should write");
@@ -3029,6 +3044,7 @@ mod tests {
             ],
             deferred_dep_builds: Some(Vec::new()),
             workspace_selection: None,
+            workspace_selection_recorded: true,
         };
         let json = serde_json::to_string(&state).expect("state should serialize");
         std::fs::write(install_state_file(&state_path), json).expect("state should write");
@@ -3078,6 +3094,7 @@ mod tests {
             unreviewed_builds: Vec::new(),
             deferred_dep_builds: Some(vec!["esbuild@0.24.0".to_string()]),
             workspace_selection: None,
+            workspace_selection_recorded: true,
         };
         let json = serde_json::to_string(&state).expect("state should serialize");
         std::fs::write(install_state_file(&state_path), json).expect("state should write");
@@ -3365,6 +3382,7 @@ mod tests {
             unreviewed_builds: Vec::new(),
             deferred_dep_builds: Some(Vec::new()),
             workspace_selection: None,
+            workspace_selection_recorded: true,
         };
         let reformatted = r#"{
   "name": "x",
@@ -3430,6 +3448,7 @@ mod tests {
             unreviewed_builds: Vec::new(),
             deferred_dep_builds: Some(Vec::new()),
             workspace_selection: None,
+            workspace_selection_recorded: true,
         };
 
         // Every recorded member matches what is on disk → fresh.
@@ -3510,6 +3529,7 @@ mod tests {
             unreviewed_builds: Vec::new(),
             deferred_dep_builds: Some(Vec::new()),
             workspace_selection: None,
+            workspace_selection_recorded: true,
         };
 
         // Every current member was recorded → fresh.
@@ -3569,6 +3589,7 @@ mod tests {
             unreviewed_builds: Vec::new(),
             deferred_dep_builds: Some(Vec::new()),
             workspace_selection: None,
+            workspace_selection_recorded: true,
         };
 
         // Root + apps/server both recorded → fresh (no churn on the root).
@@ -3865,6 +3886,7 @@ mod tests {
                 unreviewed_builds: unreviewed,
                 deferred_dep_builds: deferred,
                 workspace_selection: None,
+                workspace_selection_recorded: true,
             }
         }
 

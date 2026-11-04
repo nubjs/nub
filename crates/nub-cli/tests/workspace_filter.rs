@@ -200,3 +200,45 @@ fn a_filtered_install_after_a_root_only_install_links_the_member() {
         );
     }
 }
+
+#[test]
+fn a_state_without_a_coverage_record_counts_as_covering_the_root_only() {
+    let dir = workspace(
+        "legacy-state",
+        serde_json::json!({ "dep": "file:./dep" }),
+        &[("a", serde_json::json!({ "dep": "file:../../dep" }))],
+    );
+    std::fs::write(dir.join(".npmrc"), "recursive-install=false\n").unwrap();
+    let manifest = dir.join("package.json");
+    let mut root: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+    root["scripts"] = serde_json::json!({
+        "postinstall": "node -e \"require('fs').appendFileSync('../installs.log', 'x')\""
+    });
+    std::fs::write(&manifest, root.to_string()).unwrap();
+    let installs =
+        || std::fs::read_to_string(dir.join("../installs.log")).map_or(0, |log| log.len());
+
+    nub(&dir, &["install"]);
+    // What an install from before the coverage record leaves behind.
+    let state_dir = dir.join("node_modules/.store/.nub-state");
+    for file in ["state.json", "fresh.json"] {
+        let path = state_dir.join(file);
+        let mut state: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let fields = state.as_object_mut().unwrap();
+        assert!(
+            fields.remove("workspace_selection_recorded").is_some(),
+            "{file} records its coverage"
+        );
+        fields.remove("workspace_selection");
+        std::fs::write(&path, state.to_string()).unwrap();
+    }
+    nub(&dir, &["install"]);
+    assert_eq!(installs(), 1, "an unfiltered install is still up to date");
+    nub(&dir, &["install", "--filter", "a"]);
+    assert!(
+        dir.join("packages/a/node_modules/dep").exists(),
+        "a filtered install does not trust the unrecorded coverage"
+    );
+}
