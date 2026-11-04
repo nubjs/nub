@@ -52,7 +52,7 @@ test('every manifest platform key is one platformKey() can produce', () => {
     checkPins({
       a: {
         version: '1.0.0',
-        release: 'asset',
+        origin: 'gh-asset',
         platforms: { 'windows-arm64': { asset: 'a', integrity: GOOD_SRI } },
       },
     })[0]!,
