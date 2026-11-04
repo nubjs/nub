@@ -902,9 +902,10 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 && !opts.ignore_scripts
                 && !lockfile_only_effective
                 && !opts.skip_root_lifecycle
+                && !opts.root_preinstall_already_ran
                 && !aube_settings::resolved::virtual_store_only(&settings_ctx)
         });
-    let root_preinstall_ran_early = early_root.is_some();
+    let root_preinstall_ran_early = early_root.is_some() || opts.root_preinstall_already_ran;
     if let Some((_, root_manifest)) = early_root {
         let phase_start = std::time::Instant::now();
         run_importer_lifecycle(
@@ -3383,6 +3384,42 @@ pub(crate) async fn run_dev_preinstall(
         &modules_dir_name,
         &root_manifest,
         "pnpm:devPreinstall",
+    )
+    .await
+}
+
+/// The workspace root's `preinstall`, for a command that changes the
+/// lockfile itself before chaining an install (`update`). pnpm runs it
+/// before resolution, so a failing guard leaves the lockfile untouched.
+pub(crate) async fn run_root_preinstall(
+    project_dir: &std::path::Path,
+    ignore_scripts: bool,
+    lockfile_only: bool,
+    command: &str,
+) -> miette::Result<()> {
+    if ignore_scripts || lockfile_only {
+        return Ok(());
+    }
+    let root_dir =
+        crate::dirs::find_workspace_root(project_dir).unwrap_or_else(|| project_dir.to_path_buf());
+    let root_manifest = super::load_manifest_or_default(&root_dir)?;
+    if !root_manifest
+        .scripts
+        .contains_key(aube_scripts::LifecycleHook::PreInstall.script_name())
+        || super::with_settings_ctx(&root_dir, aube_settings::resolved::virtual_store_only)
+    {
+        return Ok(());
+    }
+    crate::runtime::ensure_for_cwd(&root_dir).await?;
+    super::configure_script_settings_for_cwd(&root_dir, Some(command))?;
+    let modules_dir_name = super::resolve_modules_dir_name_for_cwd(&root_dir);
+    run_importer_lifecycle(
+        &root_dir,
+        &root_dir,
+        ".",
+        &modules_dir_name,
+        &root_manifest,
+        aube_scripts::LifecycleHook::PreInstall,
     )
     .await
 }

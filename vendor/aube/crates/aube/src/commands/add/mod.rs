@@ -79,9 +79,12 @@ pub(super) fn apply_add_lifecycle(
         edited_keys.insert(super::workspace_importer_path(&root, dir)?);
     }
     let root_pushed_in = !edited_keys.contains(".");
+    // The root counts as covered whether edited or pushed in, which matters
+    // when the workspace patterns list it (`.`) among the members.
     let mut covers_workspace = true;
     for dir in &members {
-        covers_workspace &= edited_keys.contains(&super::workspace_importer_path(&root, dir)?);
+        let key = super::workspace_importer_path(&root, dir)?;
+        covers_workspace &= key == "." || edited_keys.contains(&key);
     }
     let importers = if !covers_workspace {
         let mut importers = edited_keys;

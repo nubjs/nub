@@ -292,6 +292,7 @@ impl InstallArgs {
             pnpmfile: self.pnpmfile,
             global_pnpmfile: self.global_pnpmfile,
             pre_resolution_hook_already_ran: false,
+            root_preinstall_already_ran: false,
             ignore_scripts: self.ignore_scripts,
             dry_run: self.dry_run,
             lockfile_only: self.lockfile_only,
@@ -395,6 +396,11 @@ pub struct InstallOptions {
     /// user invocation sets it, and an ordinary `aube install` leaves
     /// it false and runs the hook itself.
     pub pre_resolution_hook_already_ran: bool,
+    /// Set by a command that already ran the root project's `preinstall`
+    /// before its own resolution and is chaining an install — today only
+    /// an argumentless `aube update`, which runs it before the lockfile
+    /// changes, as pnpm does. The chained install then skips it.
+    pub root_preinstall_already_ran: bool,
     /// `--ignore-scripts`: skip root lifecycle scripts (`preinstall`,
     /// `install`, `postinstall`, `prepare`) *and* every dependency's
     /// lifecycle scripts, regardless of `allowBuilds`.
@@ -547,18 +553,25 @@ pub enum ProjectStages {
     /// pnpm's `add` (`InstallSome`): [`aube_scripts::PROJECT_INSTALL_HOOKS`]
     /// alone.
     InstallSome,
-    /// npm's root scripts after a bare `npm install` / `npm ci`:
-    /// [`aube_scripts::NPM_PROJECT_HOOKS`], devDependencies or not, and no
-    /// `pnpm:devPreinstall`. Set by an embedder mirroring a typed npm command.
+    /// npm's scripts for a bare `npm install` / `npm ci`:
+    /// [`aube_scripts::NPM_PROJECT_HOOKS`] at the root and
+    /// [`aube_scripts::NPM_MEMBER_HOOKS`] in workspace members, devDependencies
+    /// or not, and no `pnpm:devPreinstall`. Set by an embedder mirroring a
+    /// typed npm command.
     Npm,
 }
 
 impl ProjectStages {
-    pub(crate) fn hooks(self, include_dev: bool) -> &'static [aube_scripts::LifecycleHook] {
+    pub(crate) fn hooks(
+        self,
+        include_dev: bool,
+        is_root: bool,
+    ) -> &'static [aube_scripts::LifecycleHook] {
         match self {
             Self::Install if include_dev => &aube_scripts::PROJECT_LIFECYCLE_HOOKS,
             Self::Install | Self::InstallSome => &aube_scripts::PROJECT_INSTALL_HOOKS,
-            Self::Npm => &aube_scripts::NPM_PROJECT_HOOKS,
+            Self::Npm if is_root => &aube_scripts::NPM_PROJECT_HOOKS,
+            Self::Npm => &aube_scripts::NPM_MEMBER_HOOKS,
         }
     }
 }
@@ -578,6 +591,7 @@ impl InstallOptions {
             pnpmfile: None,
             global_pnpmfile: None,
             pre_resolution_hook_already_ran: false,
+            root_preinstall_already_ran: false,
             ignore_scripts: false,
             dry_run: false,
             lockfile_only: false,

@@ -104,17 +104,25 @@ impl Fixture {
         self.hooks_in(".", args)
     }
 
-    /// [`Self::hooks`] from the subdirectory `sub`.
-    fn hooks_in(&self, sub: &str, args: &[&str]) -> Vec<String> {
-        std::fs::write(&self.log, "").unwrap();
-        let out = Command::new(nub_binary())
+    /// `nub <args>` in the subdirectory `sub`, with the fixture's environment.
+    fn command(&self, sub: &str, args: &[&str]) -> Command {
+        let mut command = Command::new(nub_binary());
+        command
             .args(args)
             .current_dir(self.dir.join(sub))
             .env("LC_LOG", &self.log)
             .env("XDG_DATA_HOME", &self.data)
             .env("XDG_CACHE_HOME", &self.cache)
             .env_remove("NODE_COMPAT")
-            .env_remove("CI")
+            .env_remove("CI");
+        command
+    }
+
+    /// [`Self::hooks`] from the subdirectory `sub`.
+    fn hooks_in(&self, sub: &str, args: &[&str]) -> Vec<String> {
+        std::fs::write(&self.log, "").unwrap();
+        let out = self
+            .command(sub, args)
             .output()
             .expect("failed to spawn nub");
         assert!(
@@ -227,9 +235,61 @@ fn update_of_everything_runs_the_project_stages_and_a_named_update_does_not() {
 }
 
 #[test]
+fn update_stops_at_a_failing_root_preinstall_before_the_lockfile_changes() {
+    let fx = Fixture::new("update-guard");
+    project(&fx.dir, "root", serde_json::json!({ "dep": "file:./dep" }));
+    local_dep(&fx.dir.join("dep"));
+    fx.hooks(&["install"]);
+    // A dependency the lockfile does not have yet, so the update has a
+    // change to write, and a guard that fails while FAIL is set.
+    let manifest_path = fx.dir.join("package.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    manifest["dependencies"]["dep2"] = "file:./dep2".into();
+    manifest["scripts"]["preinstall"] = "node -e \"process.exit(process.env.FAIL ? 7 : 0)\"".into();
+    std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+    std::fs::create_dir_all(fx.dir.join("dep2")).unwrap();
+    std::fs::write(
+        fx.dir.join("dep2/package.json"),
+        r#"{"name":"dep2","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let lockfile_names_dep2 = || {
+        std::fs::read_dir(&fx.dir).unwrap().any(|entry| {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            (name.ends_with(".lock") || name.ends_with("-lock.yaml"))
+                && std::fs::read_to_string(&path).unwrap().contains("dep2")
+        })
+    };
+    let out = fx
+        .command(".", &["update"])
+        .env("FAIL", "1")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(7),
+        "the failing guard fails the update"
+    );
+    assert!(!lockfile_names_dep2(), "the lockfile is untouched");
+    fx.hooks(&["update"]);
+    assert!(
+        lockfile_names_dep2(),
+        "without the failure the update writes it"
+    );
+}
+
+#[test]
 fn workspace_add_runs_the_install_stages_of_the_root_and_the_edited_project() {
     let fx = Fixture::new("add");
     workspace(&fx);
+    // The root listed among the workspace packages, as `.`.
+    std::fs::write(
+        fx.dir.join("pnpm-workspace.yaml"),
+        "packages:\n  - .\n  - packages/*\n",
+    )
+    .unwrap();
     project(&fx.dir.join("packages/a"), "a", serde_json::json!({}));
     project(&fx.dir.join("packages/b"), "b", serde_json::json!({}));
     local_dep(&fx.dir.join("dep"));
@@ -253,6 +313,18 @@ fn workspace_add_runs_the_install_stages_of_the_root_and_the_edited_project() {
         names(&[
             "root:pnpm:devPreinstall",
             "root:preinstall",
+            "root:install+dep",
+            "root:postinstall+dep",
+        ])
+    );
+    let dep_spec = format!("file:{}", fx.dir.join("dep").display());
+    // Every member edited: with the root they cover the workspace, so pnpm
+    // runs the root's hooks alone.
+    assert_eq!(
+        fx.hooks(&["add", "--filter", "a", "--filter", "b", &dep_spec]),
+        names(&[
+            "root:pnpm:devPreinstall+dep",
+            "root:preinstall+dep",
             "root:install+dep",
             "root:postinstall+dep",
         ])

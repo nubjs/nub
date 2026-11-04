@@ -355,6 +355,7 @@ pub async fn run(
             // A fresh install into the deploy target, not a stage
             // chained after one — it runs the hook itself.
             pre_resolution_hook_already_ran: false,
+            root_preinstall_already_ran: false,
             ignore_scripts: false,
             dry_run: false,
             lockfile_only: false,

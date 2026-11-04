@@ -1506,3 +1506,76 @@ fn routed_npm_ci_under_the_persistent_node_shim_records_what_the_shim_resolves()
         "the engine stamp names the pin the shim resolves, got {stamp:?}"
     );
 }
+
+/// A routed install in an npm workspace runs npm's stages in each project:
+/// the root's seven, and a linked member's `preinstall`, `prepare`,
+/// `install` and `postinstall` (Arborist's build order) without the
+/// root-only `prepublish`, `preprepare` and `postprepare`, which fail here.
+#[test]
+fn routed_npm_install_keeps_root_only_stages_off_workspace_members() {
+    let work = tmp("route-ws");
+    let home = work.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let shims = shims_with_routing(&home, true);
+    let proj = work.join("proj");
+    std::fs::create_dir_all(proj.join("member")).unwrap();
+    let record = |file: &str| format!("node -e \"require('fs').writeFileSync('{file}', '1')\"");
+    let root = serde_json::json!({
+        "name": "proj", "version": "1.0.0", "workspaces": ["member"],
+        "scripts": { "prepublish": record("root-prepublished.txt") },
+    });
+    let member = serde_json::json!({
+        "name": "member", "version": "1.0.0",
+        "scripts": {
+            "prepare": record("member-prepared.txt"),
+            "prepublish": "exit 1", "preprepare": "exit 1", "postprepare": "exit 1",
+        },
+    });
+    std::fs::write(proj.join("package.json"), root.to_string()).unwrap();
+    std::fs::write(proj.join("member/package.json"), member.to_string()).unwrap();
+    std::fs::write(
+        proj.join("package-lock.json"),
+        r#"{ "name": "proj", "version": "1.0.0", "lockfileVersion": 3, "requires": true,
+  "packages": {
+    "": { "name": "proj", "version": "1.0.0", "workspaces": ["member"] },
+    "member": { "name": "member", "version": "1.0.0" },
+    "node_modules/member": { "resolved": "member", "link": true }
+  } }"#,
+    )
+    .unwrap();
+    let sys = work.join("sys");
+    std::fs::create_dir_all(&sys).unwrap();
+    fake_pm(&sys, "npm");
+    let cache = work.join("cache");
+    std::fs::create_dir_all(cache.join("nub")).unwrap();
+    std::fs::write(cache.join("nub/.npmrc"), "registry=http://127.0.0.1:1/\n").unwrap();
+    let path = format!(
+        "{}:{}:{}",
+        shims.display(),
+        sys.display(),
+        std::env::var("PATH").unwrap()
+    );
+    let env: Vec<(&str, &str)> = vec![
+        ("HOME", home.to_str().unwrap()),
+        ("PATH", path.as_str()),
+        ("XDG_CACHE_HOME", cache.to_str().unwrap()),
+    ];
+    for verb in ["ci", "install"] {
+        let _ = std::fs::remove_file(proj.join("member/member-prepared.txt"));
+        let _ = std::fs::remove_file(proj.join("root-prepublished.txt"));
+        let (_, stderr, code) = run(&shims.join("npm"), &[verb], &proj, &env);
+        assert_eq!(
+            code, 0,
+            "the routed npm {verb} must succeed; stderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("via nub shim"),
+            "npm {verb} ran on the engine, got:\n{stderr}"
+        );
+        assert!(
+            proj.join("member/member-prepared.txt").is_file()
+                && proj.join("root-prepublished.txt").is_file(),
+            "npm {verb} ran the member's prepare and the root's prepublish"
+        );
+    }
+}

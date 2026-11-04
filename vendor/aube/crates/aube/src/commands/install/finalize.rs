@@ -510,17 +510,23 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
     //     `PROJECT_LIFECYCLE_STAGES`, or just the install stages when
     //     devDependencies were left out. Projects go one at a time in
     //     dependency order, a linearization of pnpm's topological
-    //     scheduling. Skipped with --ignore-scripts and under
+    //     scheduling. npm builds linked members before the root's
+    //     scripts, so its stages take the root last. Skipped with
+    //     --ignore-scripts and under
     //     `virtualStoreOnly` — scripts typically resolve binaries via
     //     `node_modules/.bin`, which doesn't exist in that mode.
     //     A hook that's not defined in package.json is a silent no-op.
     //     A hook that exits non-zero fails the install (fail-fast, matching pnpm).
     if !ignore_scripts && !virtual_store_only && !skip_root_lifecycle {
         let phase_start = std::time::Instant::now();
-        let hooks = project_stages.hooks(!dep_selection.prod_only());
-        for (importer_path, importer_manifest) in project_hook_importers {
+        let include_dev = !dep_selection.prod_only();
+        let mut projects: Vec<_> = project_hook_importers.iter().collect();
+        if project_stages == super::ProjectStages::Npm {
+            projects.sort_by_key(|(importer_path, _)| importer_path == ".");
+        }
+        for (importer_path, importer_manifest) in projects {
             let project_dir = importer_project_dir(cwd, importer_path);
-            for &hook in hooks {
+            for &hook in project_stages.hooks(include_dev, importer_path == ".") {
                 if hook == aube_scripts::LifecycleHook::PreInstall
                     && importer_path == "."
                     && root_preinstall_ran_early

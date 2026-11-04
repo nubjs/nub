@@ -252,6 +252,10 @@ async fn run_inner(
             Some("update"),
         )
         .await?;
+        if runs_project_lifecycle(&args) {
+            install::run_root_preinstall(&cwd, args.ignore_scripts, args.lockfile_only, "update")
+                .await?;
+        }
     }
     let manifest_path = cwd.join("package.json");
 
@@ -1186,6 +1190,7 @@ async fn run_inner(
                 crate::dirs::find_workspace_root(&cwd).unwrap_or_else(|| cwd.clone());
             let project = super::workspace_importer_path(&workspace_root, &cwd)?;
             chained.skip_root_lifecycle = false;
+            chained.root_preinstall_already_ran = true;
             chained.lifecycle_importers = Some(BTreeSet::from([".".to_string(), project]));
         }
         install::run_with_project_lock(chained, &lock).await?;
@@ -1966,6 +1971,10 @@ async fn run_filtered(
         Some("update"),
     )
     .await?;
+    if runs_project_lifecycle(&args) {
+        install::run_root_preinstall(&root, args.ignore_scripts, args.lockfile_only, "update")
+            .await?;
+    }
     args.dev_preinstall_already_run = true;
     let shared_workspace_lockfile = resolve_shared_workspace_lockfile(&root)?;
     let root_manifest = if shared_workspace_lockfile {
@@ -2135,6 +2144,7 @@ async fn run_filtered(
             let mut chained = chained_install_options(&args);
             if runs_project_lifecycle(&args) {
                 chained.skip_root_lifecycle = false;
+                chained.root_preinstall_already_ran = true;
                 chained.lifecycle_importers = Some(lifecycle_importers);
             }
             if let Err(error) = install::run_with_project_lock(chained, &lock).await {

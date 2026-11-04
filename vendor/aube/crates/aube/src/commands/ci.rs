@@ -81,6 +81,7 @@ pub async fn run(args: CiArgs) -> miette::Result<()> {
         // `ci` is an install in its own right, not a stage chained after
         // one — it runs the hook itself.
         pre_resolution_hook_already_ran: false,
+        root_preinstall_already_ran: false,
         ignore_scripts,
         dry_run: false,
         lockfile_only: false,

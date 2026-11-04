@@ -1378,6 +1378,16 @@ pub const NPM_PROJECT_HOOKS: [LifecycleHook; 7] = [
     LifecycleHook::PostPrepare,
 ];
 
+/// npm's scripts for a linked workspace member during that install, in
+/// Arborist's build order (`arborist/rebuild.js`): `prepublish` and the
+/// rest of the `prepare` family stay with the root.
+pub const NPM_MEMBER_HOOKS: [LifecycleHook; 4] = [
+    LifecycleHook::PreInstall,
+    LifecycleHook::Prepare,
+    LifecycleHook::Install,
+    LifecycleHook::PostInstall,
+];
+
 /// The project stages of an install that leaves devDependencies out
 /// (`--prod`): the `prepare` family is a development step, so it is dropped.
 pub const PROJECT_INSTALL_HOOKS: [LifecycleHook; 3] = DEP_LIFECYCLE_HOOKS;
