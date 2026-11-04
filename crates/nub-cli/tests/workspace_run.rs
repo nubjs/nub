@@ -308,6 +308,37 @@ fn filter_paths_resolve_from_the_current_project() {
     assert!(!root.join("packages/web/node_modules/dep").exists());
 }
 
+/// pnpm's selector flags work before the verb as well as after it, and
+/// `--filter-prod` walks production dependencies only.
+#[test]
+fn selector_flags_before_the_verb_select_as_after_it() {
+    let root = script_workspace("pre-verb-flags");
+    write(
+        &root.join("packages/api/package.json"),
+        r#"{"name":"api","version":"1.0.0","devDependencies":{"web":"workspace:*"},"scripts":{"build":"echo BUILD:api"}}"#,
+    );
+    assert_eq!(
+        built_in(&root, &["--filter", "api...", "run", "build"]),
+        ["api", "utils", "web"]
+    );
+    assert_eq!(
+        built_in(&root, &["--filter-prod", "api...", "run", "build"]),
+        ["api"]
+    );
+    assert_eq!(
+        built_in(&root, &["run", "--filter-prod", "api...", "build"]),
+        ["api"]
+    );
+    assert_eq!(
+        built_in(&root, &["-C", "packages/api", "run", "build"]),
+        ["api"]
+    );
+    assert_eq!(
+        built_in(&root, &["--dir", "packages/web", "run", "build"]),
+        ["web"]
+    );
+}
+
 /// `pnpm-workspace.yaml` is pnpm's, so a workspace another manager owns
 /// ignores one, here malformed, when it selects packages.
 #[test]
