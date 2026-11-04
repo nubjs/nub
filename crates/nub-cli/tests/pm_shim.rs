@@ -75,6 +75,55 @@ fn fake_pm(dir: &Path, name: &str) -> PathBuf {
     path
 }
 
+/// The caller's `PATH` with every directory holding a Nub shim removed. An
+/// installed `nub node shim` (`~/.local/share/nub/node-shim`) or PM shim dir puts
+/// a `node`/`npm` on PATH that is really Nub, and Nub resolves it through the
+/// fixture's own pins (`.nvmrc`) — provisioning a Node the test meant to leave
+/// alone. Tests that inherit PATH to find the machine's Node read this instead.
+/// A Nub binary is recognised by content, not location, so any install root works.
+fn host_path() -> String {
+    static HOST_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HOST_PATH
+        .get_or_init(|| {
+            let inherited = std::env::var_os("PATH").unwrap_or_default();
+            let kept: Vec<PathBuf> = std::env::split_paths(&inherited)
+                .filter(|dir| !holds_nub_shim(dir))
+                .collect();
+            std::env::join_paths(kept)
+                .expect("PATH entries rejoin")
+                .into_string()
+                .expect("PATH is UTF-8")
+        })
+        .clone()
+}
+
+fn holds_nub_shim(dir: &Path) -> bool {
+    const SHIM_NAMES: &[&str] = &["node", "npm", "npx", "pnpm", "pnpx", "yarn", "yarnpkg"];
+    SHIM_NAMES.iter().any(|name| {
+        let exe = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        // Only a native binary can be Nub; npm's own `npm` is a small script.
+        std::fs::metadata(&exe).is_ok_and(|m| m.is_file() && m.len() > 1 << 20)
+            && std::fs::read(&exe)
+                .is_ok_and(|bytes| bytes.windows(b"ERR_NUB_".len()).any(|w| w == b"ERR_NUB_"))
+    })
+}
+
+/// Replace the inherited inputs that can make Nub pick a different Node than the
+/// fixture sets up: PATH becomes [`host_path`] (a test's own `PATH` in `env` still
+/// wins), and an explicit binary, the caller's nvm installs, the caller's Nub
+/// install root and compat mode are dropped.
+fn strip_node_redirects(cmd: &mut Command) {
+    cmd.env("PATH", host_path());
+    for key in [
+        "NODE_EXECUTABLE",
+        "NVM_DIR",
+        "NUB_INSTALL_DIR",
+        "NODE_COMPAT",
+    ] {
+        cmd.env_remove(key);
+    }
+}
+
 /// Spawn `program args…` with a fully explicit environment (PATH/HOME/cache
 /// set per test, ambient `npm_config_registry` stripped so a dev-box override
 /// can't re-route dead-registry assertions). Returns (stdout, stderr, code).
@@ -99,6 +148,7 @@ fn run(program: &Path, args: &[&str], cwd: &Path, env: &[(&str, &str)]) -> (Stri
         // environment is not hermetic. One that WANTS the XDG path sets it back
         // explicitly through `env` below.
         cmd.env_remove("XDG_DATA_HOME");
+        strip_node_redirects(&mut cmd);
         for (k, v) in env {
             cmd.env(k, v);
         }
@@ -138,6 +188,7 @@ fn run_with_timeout(
         let mut cmd = Command::new(program);
         cmd.args(args).current_dir(cwd);
         cmd.env_remove("npm_config_registry");
+        strip_node_redirects(&mut cmd);
         for (k, v) in env {
             cmd.env(k, v);
         }
@@ -503,7 +554,7 @@ fn pinned_name_match_runs_the_cached_pm_under_the_project_node() {
 
     // PATH is inherited: the project Node resolves from it (no Node pin here);
     // RunPinned never PATH-scans for pnpm, so an ambient real pnpm is inert.
-    let path = std::env::var("PATH").unwrap();
+    let path = host_path();
     let (stdout, stderr, code) = run(
         &link,
         &["install", "--offline"],
@@ -785,12 +836,7 @@ fn routed_npm_ci_runs_on_the_engine_and_everything_else_reaches_the_real_npm() {
     let cache = work.join("cache");
     std::fs::create_dir_all(cache.join("nub")).unwrap();
     std::fs::write(cache.join("nub/.npmrc"), "registry=http://127.0.0.1:1/\n").unwrap();
-    let path = format!(
-        "{}:{}:{}",
-        shims.display(),
-        sys.display(),
-        std::env::var("PATH").unwrap()
-    );
+    let path = format!("{}:{}:{}", shims.display(), sys.display(), host_path());
     let env: Vec<(&str, &str)> = vec![
         ("HOME", home.to_str().unwrap()),
         ("PATH", path.as_str()),
@@ -1008,7 +1054,7 @@ fn shim_invoked_pnpm_runs_the_pinned_version_for_real() {
     let cache = work.join("cache");
     let link = shim_link(&work, "pnpm");
 
-    let path = std::env::var("PATH").unwrap();
+    let path = host_path();
     let (stdout, stderr, code) = run(
         &link,
         &["--version"],
@@ -1432,7 +1478,7 @@ fn routed_npm_ci_runs_scripts_under_the_path_node_and_provisions_nothing() {
     let cache = work.join("cache");
     std::fs::create_dir_all(cache.join("nub")).unwrap();
     std::fs::write(cache.join("nub/.npmrc"), "registry=http://127.0.0.1:1/\n").unwrap();
-    let path = format!("{}:{}", shims.display(), std::env::var("PATH").unwrap());
+    let path = format!("{}:{}", shims.display(), host_path());
     // A dead Node mirror: an attempt to provision the pin fails fast here
     // instead of downloading, and fails the postinstall with it.
     let env: Vec<(&str, &str)> = vec![
@@ -1525,7 +1571,7 @@ fn routed_npm_ci_under_the_persistent_node_shim_records_what_the_shim_resolves()
         "{}:{}:{}",
         node_shim.display(),
         shims.display(),
-        std::env::var("PATH").unwrap()
+        host_path()
     );
     let mut env = env_base.clone();
     env.push(("PATH", path.as_str()));
