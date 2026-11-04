@@ -1846,13 +1846,17 @@ pub(super) fn unreviewed_dep_builds(
     floor: &super::default_trust::DefaultTrustFloor,
     virtual_store_dir_max_length: usize,
     placements: Option<&aube_linker::HoistedPlacements>,
+    // A filtered rebuild's selected projects' dependencies, by dep path.
+    selected_dep_paths: Option<&std::collections::BTreeSet<String>>,
     // `rebuild <name>`'s selection, by in-tree name; `None` scans every package.
     selected_names: Option<&std::collections::HashSet<String>>,
 ) -> miette::Result<UnreviewedScan> {
     let mut unreviewed = Vec::new();
     let mut deferred = Vec::new();
     for (dep_path, pkg) in &graph.packages {
-        if selected_names.is_some_and(|names| !names.contains(&pkg.name)) {
+        if selected_dep_paths.is_some_and(|paths| !paths.contains(dep_path))
+            || selected_names.is_some_and(|names| !names.contains(&pkg.name))
+        {
             continue;
         }
         // A package the `defaultTrust` floor vouches for is not

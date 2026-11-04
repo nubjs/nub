@@ -554,6 +554,7 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
             virtual_store_dir_max_length,
             placements_ref,
             None,
+            None,
         )?
     } else {
         super::lifecycle::UnreviewedScan::default()

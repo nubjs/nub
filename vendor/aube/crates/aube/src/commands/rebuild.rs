@@ -36,10 +36,17 @@ pub async fn run(
     if !filter.is_empty() {
         return run_filtered(&args, &filter).await;
     }
-    let selected = if args.packages.is_empty() {
+    rebuild_project(&args.packages, None).await
+}
+
+/// Rebuild the project at the current directory. `importers` narrows the
+/// rebuild to those workspace projects' dependencies, as a filtered
+/// `pnpm rebuild` does; `None` takes every dependency in the lockfile.
+async fn rebuild_project(packages: &[String], importers: Option<&[String]>) -> miette::Result<()> {
+    let selected = if packages.is_empty() {
         None
     } else {
-        Some(args.packages.iter().cloned().collect::<HashSet<String>>())
+        Some(packages.iter().cloned().collect::<HashSet<String>>())
     };
 
     let cwd = crate::dirs::project_root()?;
@@ -89,6 +96,8 @@ pub async fn run(
                 ));
             }
         }
+
+        let closure = importers.map(|importers| importers_dep_closure(&graph, importers));
 
         let policy_manifests =
             super::install::build_policy_manifests(&cwd, &manifest, &settings_ctx)?;
@@ -218,7 +227,7 @@ pub async fn run(
                     })
                     .unwrap_or(super::install::SideEffectsCacheConfig::Disabled),
                 &jail_policy,
-                None,
+                closure.as_ref(),
                 selected.as_ref(),
             )
             .await?;
@@ -250,6 +259,7 @@ pub async fn run(
             &policy,
             super::resolve_virtual_store_dir_max_length(&settings_ctx),
             hoisted_placements.as_ref(),
+            closure.as_ref(),
             selected.as_ref(),
             aube_settings::resolved::strict_dep_builds(&settings_ctx)
                 || aube_settings::resolved::paranoid(&settings_ctx),
@@ -264,20 +274,64 @@ async fn run_filtered(
     filter: &aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<()> {
     let cwd = crate::dirs::cwd()?;
-    let (_root, matched) = super::select_workspace_packages(&cwd, filter, "rebuild")?;
+    let (root, matched) = super::select_workspace_packages(&cwd, filter, "rebuild")?;
     let result = async {
+        // A shared workspace lockfile: the members have none of their own,
+        // so rebuild the selected projects' dependencies from the root, in
+        // one pass, as pnpm does.
+        if let Some(importers) = root_lockfile_importers(&root, &matched)? {
+            super::retarget_cwd(&root)?;
+            return rebuild_project(&args.packages, Some(&importers)).await;
+        }
+        let mut ignored_builds = None;
         for pkg in matched {
             super::retarget_cwd(&pkg.dir)?;
-            Box::pin(run(
-                RebuildArgs {
-                    packages: args.packages.clone(),
-                },
-                aube_workspace::selector::EffectiveFilter::default(),
-            ))
-            .await?;
+            super::install::defer_ignored_builds(
+                Box::pin(rebuild_project(&args.packages, None)).await,
+                &mut ignored_builds,
+            )?;
         }
-        Ok(())
+        ignored_builds.map_or(Ok(()), Err)
     }
     .await;
     super::finish_filtered_workspace(&cwd, result)
+}
+
+/// The selected projects' importer keys, when the workspace root's
+/// lockfile records every one of them.
+fn root_lockfile_importers(
+    root: &std::path::Path,
+    matched: &[aube_workspace::selector::SelectedPackage],
+) -> miette::Result<Option<Vec<String>>> {
+    let Ok(manifest) = load_manifest(root) else {
+        return Ok(None);
+    };
+    let graph = match aube_lockfile::parse_lockfile(root, &manifest) {
+        Ok(graph) => graph,
+        Err(aube_lockfile::Error::NotFound(_)) => return Ok(None),
+        Err(e) => return Err(miette::Report::new(e)).wrap_err("failed to parse lockfile"),
+    };
+    let importers = matched
+        .iter()
+        .map(|pkg| super::workspace_importer_path(root, &pkg.dir))
+        .collect::<miette::Result<Vec<_>>>()?;
+    Ok(importers
+        .iter()
+        .all(|importer| graph.importers.contains_key(importer))
+        .then_some(importers))
+}
+
+fn importers_dep_closure(
+    graph: &aube_lockfile::LockfileGraph,
+    importers: &[String],
+) -> std::collections::BTreeSet<String> {
+    let direct = importers
+        .iter()
+        .filter_map(|importer| graph.importers.get(importer))
+        .flatten()
+        .map(|dep| dep.dep_path.clone())
+        .collect();
+    super::dep_closure_from(graph, direct, false)
+        .into_keys()
+        .collect()
 }

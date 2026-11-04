@@ -17,6 +17,29 @@ pub(super) fn from_state(cwd: &std::path::Path) -> Vec<UnreviewedBuild> {
         .collect()
 }
 
+/// Hold back an install's `ERR_AUBE_IGNORED_BUILDS` in `pending`, so a
+/// command that does more after the install — `remove`'s `postuninstall`,
+/// the next workspace member — finishes that work and raises it last, as
+/// pnpm does (`defer_ignored_builds`). `Ok(None)` means it was held; any
+/// other error propagates at once.
+pub(crate) fn defer_ignored_builds<T>(
+    result: miette::Result<T>,
+    pending: &mut Option<miette::Report>,
+) -> miette::Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(report)
+            if report.code().is_some_and(|code| {
+                code.to_string() == aube_codes::errors::ERR_AUBE_IGNORED_BUILDS
+            }) =>
+        {
+            *pending = Some(report);
+            Ok(None)
+        }
+        Err(report) => Err(report),
+    }
+}
+
 /// Report the builds this install skipped because nothing approved them.
 /// Under `strictDepBuilds` (the default, as in pnpm 12) that is
 /// `ERR_AUBE_IGNORED_BUILDS`; otherwise the `ignored build scripts for

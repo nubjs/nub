@@ -519,6 +519,89 @@ fn rebuild_and_ignored_builds_honor_a_workspace_members_approval() {
 }
 
 #[test]
+fn remove_runs_postuninstall_before_reporting_an_unapproved_build() {
+    // pnpm 12 runs `postuninstall` inside a remove's install and raises
+    // `ERR_PNPM_IGNORED_BUILDS` only after it.
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    write_marker_dep(&sbx, "dep", "DEP_BUILT");
+    sbx.write_file(
+        "other/package.json",
+        r#"{"name":"other","version":"1.0.0"}"#,
+    );
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-remove-hooks",
+            "version": "0.0.0",
+            "dependencies": { "dep": "file:./dep", "other": "file:./other" },
+            "scripts": { "postuninstall": "node -e \"require('fs').writeFileSync('POSTUNINSTALL_RAN','ok')\"" }
+        }"#,
+    );
+
+    sbx.cmd().arg("install").assert().code(1);
+    sbx.cmd()
+        .args(["remove", "other"])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("ERR_AUBE_IGNORED_BUILDS"));
+    assert!(
+        sbx.project.join("POSTUNINSTALL_RAN").exists(),
+        "postuninstall must run before the unapproved build fails the remove"
+    );
+    let manifest = fs::read_to_string(sbx.project.join("package.json")).unwrap();
+    assert!(!manifest.contains(r#""other""#), "{manifest}");
+}
+
+#[test]
+fn filtered_rebuild_builds_only_the_selected_projects_dependencies() {
+    // Members of a shared-lockfile workspace have no lockfile of their own,
+    // so a filtered rebuild works from the root's, over the selected
+    // projects' dependencies only.
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let log = sbx.project.join("builds.log");
+    let log_js = log.display().to_string().replace('\\', "/");
+    for name in ["x", "y"] {
+        sbx.write_file(
+            &format!("{name}/package.json"),
+            &format!(
+                r#"{{
+                    "name": "{name}",
+                    "version": "1.0.0",
+                    "scripts": {{ "postinstall": "node -e \"require('fs').appendFileSync('{log_js}','{name};')\"" }}
+                }}"#
+            ),
+        );
+    }
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-filtered-rebuild",
+            "version": "0.0.0",
+            "private": true,
+            "workspaces": ["packages/*"],
+            "aube": { "allowBuilds": { "x@file:x": true, "y@file:y": true } }
+        }"#,
+    );
+    sbx.write_file(
+        "packages/a/package.json",
+        r#"{"name":"a","version":"1.0.0","dependencies":{"x":"file:../../x"}}"#,
+    );
+    sbx.write_file(
+        "packages/b/package.json",
+        r#"{"name":"b","version":"1.0.0","dependencies":{"y":"file:../../y"}}"#,
+    );
+
+    sbx.cmd().arg("install").assert().success();
+    assert_eq!(fs::read_to_string(&log).unwrap().len(), "x;y;".len());
+    fs::write(&log, "").unwrap();
+    sbx.cmd()
+        .args(["--filter", "a", "rebuild"])
+        .assert()
+        .success();
+    assert_eq!(fs::read_to_string(&log).unwrap(), "x;");
+}
+
+#[test]
 fn dangerously_allow_all_builds_from_npmrc_runs_builds_but_keeps_denials() {
     let _guard = e2e_lock();
     let sbx = Sandbox::new();

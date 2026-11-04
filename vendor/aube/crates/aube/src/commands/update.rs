@@ -2080,6 +2080,7 @@ async fn run_filtered(
     let mut completed_update = false;
     let result = async {
         let mut catalog_choices = RecursiveCatalogChoices::new();
+        let mut ignored_builds = None;
         for pkg in matched {
             let root_graph = if let Some(root_manifest) = root_manifest.as_ref() {
                 Some(read_workspace_lockfile(&root, root_manifest)?)
@@ -2204,13 +2205,17 @@ async fn run_filtered(
                     continue;
                 }
             }
-            exit_code = Box::pin(run_inner(
-                per_pkg,
-                aube_workspace::selector::EffectiveFilter::default(),
-                !shared_workspace_lockfile,
-                args.interactive.then_some(&mut catalog_choices),
-            ))
-            .await?;
+            exit_code = install::defer_ignored_builds(
+                Box::pin(run_inner(
+                    per_pkg,
+                    aube_workspace::selector::EffectiveFilter::default(),
+                    !shared_workspace_lockfile,
+                    args.interactive.then_some(&mut catalog_choices),
+                ))
+                .await,
+                &mut ignored_builds,
+            )?
+            .flatten();
             if exit_code.is_some() {
                 break;
             }
@@ -2253,7 +2258,7 @@ async fn run_filtered(
                 }
             }
         }
-        Ok(())
+        ignored_builds.map_or(Ok(()), Err)
     }
     .await;
     super::finish_filtered_workspace(&cwd, result)?;

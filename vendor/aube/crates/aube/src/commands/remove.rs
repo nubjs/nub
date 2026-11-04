@@ -282,7 +282,12 @@ async fn remove_from_project(args: RemoveArgs, uninstall_hooks: bool) -> miette:
             aube_registry::NetworkMode::Online
         };
     }
-    install::run_with_project_lock(opts, &lock).await?;
+    // pnpm runs `postuninstall` before it reports an unapproved build.
+    let mut ignored_builds = None;
+    install::defer_ignored_builds(
+        install::run_with_project_lock(opts, &lock).await,
+        &mut ignored_builds,
+    )?;
     if uninstall_hooks {
         run_uninstall_hooks(
             &cwd,
@@ -293,7 +298,7 @@ async fn remove_from_project(args: RemoveArgs, uninstall_hooks: bool) -> miette:
         .await?;
     }
 
-    Ok(())
+    ignored_builds.map_or(Ok(()), Err)
 }
 
 /// Run `hooks` in each of `projects` (directory and manifest), in order.
@@ -470,11 +475,15 @@ async fn run_filtered(
             args.ignore_scripts,
         )
         .await?;
+        let mut ignored_builds = None;
         for (_, dir, present) in &plan {
             super::retarget_cwd(dir)?;
             let mut narrowed = args.clone();
             narrowed.packages = present.clone();
-            Box::pin(remove_from_project(narrowed, false)).await?;
+            install::defer_ignored_builds(
+                Box::pin(remove_from_project(narrowed, false)).await,
+                &mut ignored_builds,
+            )?;
         }
         run_uninstall_hooks(
             &root,
@@ -482,7 +491,8 @@ async fn run_filtered(
             &aube_scripts::POST_UNINSTALL_HOOKS,
             args.ignore_scripts,
         )
-        .await
+        .await?;
+        ignored_builds.map_or(Ok(()), Err)
     }
     .await;
     super::finish_filtered_workspace(&cwd, result)

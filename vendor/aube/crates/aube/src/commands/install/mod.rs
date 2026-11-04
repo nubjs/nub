@@ -38,6 +38,7 @@ mod unreviewed_builds;
 mod workspace;
 
 pub(crate) use resolve::check_patch_drift;
+pub(crate) use unreviewed_builds::defer_ignored_builds;
 
 use advisory::resolve_osv_routing_settings;
 pub use args::{EmbedderInstallOverrides, InstallArgs, InstallOptions, ProjectStages};
@@ -211,6 +212,7 @@ pub(crate) fn report_unreviewed_rebuilds(
     policy: &aube_scripts::BuildPolicy,
     virtual_store_dir_max_length: usize,
     placements: Option<&aube_linker::HoistedPlacements>,
+    selected_dep_paths: Option<&std::collections::BTreeSet<String>>,
     selected_names: Option<&std::collections::HashSet<String>>,
     strict: bool,
 ) -> miette::Result<()> {
@@ -221,6 +223,7 @@ pub(crate) fn report_unreviewed_rebuilds(
         &DefaultTrustFloor::disabled(),
         virtual_store_dir_max_length,
         placements,
+        selected_dep_paths,
         selected_names,
     )?;
     unreviewed_builds::report(&scan.unreviewed, strict, cwd)
