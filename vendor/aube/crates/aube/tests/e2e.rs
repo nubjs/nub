@@ -602,6 +602,61 @@ fn filtered_rebuild_builds_only_the_selected_projects_dependencies() {
 }
 
 #[test]
+fn filtered_rebuild_keeps_the_dependency_groups_the_install_linked() {
+    // After `install --prod`, a package one member uses only as a
+    // devDependency is installed solely for the member that needs it in
+    // production. pnpm rebuilds it only when that member is selected.
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let log = sbx.project.join("builds.log");
+    let log_js = log.display().to_string().replace('\\', "/");
+    sbx.write_file(
+        "x/package.json",
+        &format!(
+            r#"{{
+                "name": "x",
+                "version": "1.0.0",
+                "scripts": {{ "postinstall": "node -e \"require('fs').appendFileSync('{log_js}','x;')\"" }}
+            }}"#
+        ),
+    );
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-filtered-rebuild-prod",
+            "version": "0.0.0",
+            "private": true,
+            "workspaces": ["packages/*"],
+            "aube": { "allowBuilds": { "x@file:x": true } }
+        }"#,
+    );
+    sbx.write_file(
+        "packages/a/package.json",
+        r#"{"name":"a","version":"1.0.0","devDependencies":{"x":"file:../../x"}}"#,
+    );
+    sbx.write_file(
+        "packages/b/package.json",
+        r#"{"name":"b","version":"1.0.0","dependencies":{"x":"file:../../x"}}"#,
+    );
+
+    sbx.cmd().args(["install", "--prod"]).assert().success();
+    fs::write(&log, "").unwrap();
+    sbx.cmd()
+        .args(["--filter", "a", "rebuild"])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        "",
+        "a's devDependency was not installed"
+    );
+    sbx.cmd()
+        .args(["--filter", "b", "rebuild"])
+        .assert()
+        .success();
+    assert_eq!(fs::read_to_string(&log).unwrap(), "x;");
+}
+
+#[test]
 fn dangerously_allow_all_builds_from_npmrc_runs_builds_but_keeps_denials() {
     let _guard = e2e_lock();
     let sbx = Sandbox::new();

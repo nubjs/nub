@@ -570,6 +570,11 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
     deferred_dep_builds.sort();
     deferred_dep_builds.dedup();
 
+    if !virtual_store_only {
+        state::write_dep_selection(cwd, dep_selection)
+            .into_diagnostic()
+            .wrap_err("failed to record the installed dependency groups")?;
+    }
     if !virtual_store_only && !filtered_install {
         let phase_start = std::time::Instant::now();
         // Fingerprint every package in the final graph so the next

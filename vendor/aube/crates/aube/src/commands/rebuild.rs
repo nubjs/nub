@@ -97,7 +97,14 @@ async fn rebuild_project(packages: &[String], importers: Option<&[String]>) -> m
             }
         }
 
-        let closure = importers.map(|importers| importers_dep_closure(&graph, importers));
+        // The tree the last install linked: its `--prod` / `--dev` /
+        // `--no-optional` selection drops the same edges here, so a package
+        // installed only for an unselected project stays out.
+        let closure = importers.map(|importers| {
+            let selection = crate::state::read_dep_selection(&cwd);
+            let installed = graph.filter_deps(|dep| selection.keeps(dep));
+            importers_dep_closure(&installed, importers)
+        });
 
         let policy_manifests =
             super::install::build_policy_manifests(&cwd, &manifest, &settings_ctx)?;

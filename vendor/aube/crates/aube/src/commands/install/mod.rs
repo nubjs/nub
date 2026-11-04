@@ -3361,18 +3361,7 @@ fn filter_graph_for_install(
 ) -> miette::Result<aube_lockfile::LockfileGraph> {
     let mut filtered = if opts.dep_selection.is_filtered() {
         let sel = opts.dep_selection;
-        let selected = graph.filter_deps(|d| {
-            if sel.prod_only() && d.dep_type == aube_lockfile::DepType::Dev {
-                return false;
-            }
-            if sel.dev_only() && d.dep_type != aube_lockfile::DepType::Dev {
-                return false;
-            }
-            if sel.skip_optional() && d.dep_type == aube_lockfile::DepType::Optional {
-                return false;
-            }
-            true
-        });
+        let selected = graph.filter_deps(|d| sel.keeps(d));
         let dropped = graph.packages.len() - selected.packages.len();
         if log_dropped_packages && dropped > 0 {
             tracing::debug!("{}: skipping {dropped} packages", sel.label());
