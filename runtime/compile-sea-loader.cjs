@@ -440,13 +440,26 @@
     },
     (error) => {
       done();
-      // Rethrown rather than reported, because a failed ESM ENTRY is an uncaught
-      // exception in Node and not an unhandled rejection — so it must fail the
-      // process whatever `--unhandled-rejections` says, and it must still reach an
+      // A failed ESM ENTRY is an uncaught exception in Node and not an unhandled
+      // rejection — so it must fail the process whatever `--unhandled-rejections`
+      // says, never reach an `unhandledRejection` listener, and still reach an
       // `uncaughtException` handler the application installed.
-      process.nextTick(() => {
+      //
+      // Raised through a throwing diagnostics_channel subscriber because that is
+      // the one public route into Node's `triggerUncaughtException`, which is
+      // what Node's own entry runner calls. It builds the report from the
+      // ERROR, so the header names the line that threw. A `throw` from here
+      // builds it from the throw site instead, and every compiled program's
+      // uncaught error printed this loader's line as its location. Measured on
+      // 22.23, 24.8 and 26.13. Node's runner passes `fromPromise`, which this
+      // route cannot, so a handler's `origin` reads `uncaughtException` where
+      // `nub <file>` reads `unhandledRejection`.
+      const channel = Symbol("nub.compile.entry-failure");
+      const dc = boot.getBuiltin("node:diagnostics_channel");
+      dc.subscribe(channel, () => {
         throw error;
       });
+      dc.channel(channel).publish();
     },
   );
 })();

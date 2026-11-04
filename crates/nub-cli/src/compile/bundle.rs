@@ -56,7 +56,8 @@ use rolldown_common::bundler_options::{BundlerTransformOptions, Either, JsxOptio
 use rolldown_common::{
     EmittedChunk, InnerOptions, IsExternal, ModuleType, Output, OutputFormat, Platform,
     RawCompressOptions, RawMangleOptions, RawMinifyOptions, RawMinifyOptionsDetailed,
-    ResolveOptions, ResolvedExternal, SourceMapType, StrOrBytes, TreeshakeOptions, TsConfig,
+    ResolveOptions, ResolvedExternal, SourceMapPathTransform, SourceMapType, StrOrBytes,
+    TreeshakeOptions, TsConfig,
 };
 use rolldown_error::{BuildDiagnostic, DiagnosticOptions, EventKind};
 use rolldown_utils::indexmap::FxIndexMap;
@@ -295,7 +296,7 @@ fn bundle_inner(
 
     let loader_plan = loaders::plan(&opts.loaders)?;
 
-    let options = BundlerOptions {
+    let mut options = BundlerOptions {
         input: Some(vec![InputItem {
             name: Some(stem),
             // A virtual root statically imports the compile prelude before the
@@ -431,6 +432,9 @@ fn bundle_inner(
         opts.target_node,
         opts.eager_startup,
     )?);
+    if options.sourcemap.is_some() {
+        options.sourcemap_path_transform = Some(runtime_source_names(&prelude.runtime_dir));
+    }
     let new_urls = Arc::new(NewUrlAssets {
         collected: Arc::clone(&collected),
         files: Arc::clone(&files_plugin),
@@ -4676,6 +4680,47 @@ fn effective_jsx_setting(entry_abs: &Path, explicit_tsconfig: Option<&Path>) -> 
     let resolver = oxc_resolver::Resolver::new(oxc_resolver::ResolveOptions::default());
     let tsconfig = resolver.resolve_tsconfig(&path).ok()?;
     tsconfig.compiler_options.jsx.clone()
+}
+
+/// Names nub's own runtime modules in a source map by their place in the runtime,
+/// not by where the building machine extracted it.
+///
+/// The prelude is bundled from the runtime extraction cache, so Rolldown listed
+/// each of its files relative to the output — `../../.cache/nub/runtime-0.9.7-…/
+/// compile-record.mjs`, or a temporary `XDG_CACHE_HOME` — and every artifact built
+/// with a map carried that layout into its stack frames. `runtime/<file>` resolves
+/// beside the chunk instead: `/N:/$nub/runtime/compile-record.mjs` in a single
+/// executable. Every other source keeps Rolldown's own spelling.
+fn runtime_source_names(runtime_dir: &Path) -> SourceMapPathTransform {
+    let mut roots = vec![runtime_dir.to_path_buf()];
+    let canonical = canonicalize_for_bundler(runtime_dir);
+    if canonical != roots[0] {
+        roots.push(canonical);
+    }
+    SourceMapPathTransform::new(Arc::new(move |source: &str, map_path: &str| {
+        let named =
+            runtime_source_name(&roots, source, map_path).unwrap_or_else(|| source.to_string());
+        Box::pin(async move { Ok(named) })
+    }))
+}
+
+/// `source` arrives relative to the map's directory, which is where Node resolves
+/// it from too.
+fn runtime_source_name(roots: &[PathBuf], source: &str, map_path: &str) -> Option<String> {
+    let mut absolute = PathBuf::new();
+    for part in Path::new(map_path).parent()?.join(source).components() {
+        match part {
+            std::path::Component::ParentDir => {
+                absolute.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => absolute.push(other),
+        }
+    }
+    roots
+        .iter()
+        .find_map(|root| absolute.strip_prefix(root).ok())
+        .map(|rel| format!("runtime/{}", slash_path(rel)))
 }
 
 fn sourcemap_type(mode: SourcemapMode) -> Option<SourceMapType> {

@@ -680,6 +680,128 @@ named.on("message", (message) => {
     );
 }
 
+/// An uncaught error in a single-executable program is reported where it was
+/// thrown, as `nub <file>` reports it, and the program's source map names nub's
+/// own runtime modules without the building machine's cache path.
+///
+/// The header is the part a reader looks at first. The blob's main used to
+/// rethrow the entry's rejection with a `throw` of its own, and Node builds the
+/// header from the throw site, so every such program printed the loader's
+/// `throw error;` as the location of its own bug.
+#[cfg(feature = "compile")]
+#[test]
+fn a_single_executable_reports_an_uncaught_error_where_it_was_thrown() {
+    let runtime = compile_test_runtime();
+    let work = unique_test_cache();
+    let cache = work.join("cache");
+    let artifact = work.join(format!("orders{}", std::env::consts::EXE_SUFFIX));
+    std::fs::create_dir_all(work.join("src")).expect("create the work dir");
+    std::fs::write(
+        work.join("package.json"),
+        "{ \"name\": \"orders\", \"private\": true, \"type\": \"module\" }\n",
+    )
+    .expect("write the fixture manifest");
+    std::fs::write(
+        work.join("src/order.ts"),
+        "export function loadOrder(id: string): string {\n  if (id !== \"a1\") {\n    \
+         throw new Error(\"no such order\");\n  }\n  return id;\n}\n",
+    )
+    .expect("write the module");
+    std::fs::write(
+        work.join("app.ts"),
+        "import { loadOrder } from \"./src/order.ts\";\n\nconsole.log(loadOrder(\"zz\"));\n",
+    )
+    .expect("write the entry");
+
+    let compiled = Command::new(nub_binary())
+        .args([
+            "compile",
+            "--sourcemap",
+            "--target",
+            &runtime.node_target,
+            "--out",
+        ])
+        .arg(&artifact)
+        .arg("app.ts")
+        .current_dir(&work)
+        .env("XDG_CACHE_HOME", &cache)
+        .env("__NUB_LAUNCHER_TEMPLATE", &runtime.launcher)
+        .output()
+        .expect("spawn nub compile");
+    assert!(
+        compiled.status.success(),
+        "compile failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let summary = format!(
+        "{}{}",
+        String::from_utf8_lossy(&compiled.stdout),
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    if !summary.contains("a single-executable application") {
+        assert!(
+            !sea_container_is_available(&runtime.node_target),
+            "the payload declined the single-executable container, so this case tested \
+             nothing. Compile summary:\n{summary}"
+        );
+        return;
+    }
+
+    let ran = run_compiled_artifact_with_timeout(&artifact, &work);
+    let stderr = String::from_utf8_lossy(&ran.stderr).into_owned();
+    assert_eq!(
+        ran.status.code(),
+        Some(1),
+        "an uncaught error must exit 1\nstderr: {stderr}"
+    );
+    let mut lines = stderr.lines().skip_while(|line| line.trim().is_empty());
+    let header = lines.next().unwrap_or_default();
+    let source_line = lines.next().unwrap_or_default();
+    assert!(
+        header.ends_with("order.ts:3")
+            && source_line.trim() == "throw new Error(\"no such order\");",
+        "the header must name the line that threw, not the loader that reported it\n\
+         stderr: {stderr}"
+    );
+
+    // The inline map rides inside the chunk, so it is read out of the executable.
+    let bytes = std::fs::read(&artifact).expect("read the artifact");
+    let marker = b"sourceMappingURL=data:application/json;charset=utf-8;base64,";
+    let start = bytes
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .expect("the artifact carries an inline source map")
+        + marker.len();
+    let encoded: Vec<u8> = bytes[start..]
+        .iter()
+        .copied()
+        .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+        .collect();
+    use base64::Engine as _;
+    let map: serde_json::Value = serde_json::from_slice(
+        &base64::engine::general_purpose::STANDARD
+            .decode(&encoded)
+            .expect("the inline map is base64"),
+    )
+    .expect("the inline map is JSON");
+    let sources = compiled_json_string_array(&map["sources"]);
+    let (runtime_sources, app_sources): (Vec<&String>, Vec<&String>) = sources
+        .iter()
+        .partition(|source| source.starts_with("runtime/"));
+    let mut app_sources: Vec<&str> = app_sources.iter().map(|s| s.as_str()).collect();
+    app_sources.sort_unstable();
+    assert_eq!(
+        app_sources,
+        ["../app.ts", "../src/order.ts"],
+        "every source outside the application must be named under `runtime/`, never by \
+         where the building machine keeps the runtime: {sources:?}"
+    );
+    assert!(
+        !runtime_sources.is_empty(),
+        "the prelude's runtime modules should still be mapped: {sources:?}"
+    );
+}
+
 #[cfg(feature = "compile")]
 #[test]
 fn compile_resolves_commonjs_requires_of_esm() {
