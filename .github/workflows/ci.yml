@@ -1611,8 +1611,6 @@ jobs:
           - name: Check fenced code-block width
             run: node scripts/lint-code-line-length.mjs
             working-directory: site
-      - name: Wait for documentation checks
-        wait-all: true
 
   site-build:
     name: Site build
