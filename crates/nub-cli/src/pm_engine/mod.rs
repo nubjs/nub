@@ -2367,7 +2367,15 @@ pub(crate) fn engine_brand_preflight() {
             pnpm_npmrc_key_policy(declared_pnpm_major()),
             NpmrcKeyPolicy::Pnpm11Allowlist
         );
-    let workspace_npmrc = workspace_npmrc_model(&surface, declared_pnpm_major());
+    // Whether a member's own `.npmrc` layers over the workspace root's: decided by
+    // the same nub-core detector its own `.npmrc` readers use, so PM provisioning,
+    // `ignore-scripts` and the engine never disagree on which files apply.
+    let workspace_npmrc = match cwd.as_deref().map(nub_core::workspace::npmrc::member_npmrc) {
+        Some(nub_core::workspace::npmrc::MemberNpmrc::Ignored) => {
+            aube_util::WorkspaceNpmrc::RootOnly
+        }
+        _ => aube_util::WorkspaceNpmrc::RootBeneathMember,
+    };
     let read_yarn_config = read_yarn_config_for_surface(&surface);
     // Classic Yarn (v1) reads `.yarnrc`; Yarn Berry (v2+) abandoned it for
     // `.yarnrc.yml` and ignores a stray legacy `.yarnrc`. Gate the engine's
@@ -2718,31 +2726,6 @@ fn read_yarn_config_for_surface(surface: &ConfigSurface) -> bool {
 /// `BUN_CONFIG_TOKEN` environment variables — true only under a Bun incumbent.
 /// Under any other surface those Bun-named env vars are another tool's state
 /// (name-based policy, mirroring [`read_yarn_config_for_surface`]).
-/// Whether a command run from a workspace member reads that member's `.npmrc`
-/// on top of the workspace root's, or the root's alone, mirroring the
-/// incumbent (each measured from a member dir with the registry set in one
-/// file or the other). pnpm reversed this at v11 (`workspaceDir ?? localPrefix`
-/// in its npmrc loader), so an undeclared pnpm major takes the dominant v10
-/// model. Yarn 1 layers them; Yarn Berry reads no `.npmrc` at all and keeps the
-/// layered default, as does a nub-identity project.
-fn workspace_npmrc_model(
-    surface: &ConfigSurface,
-    pnpm_major: Option<u64>,
-) -> aube_util::WorkspaceNpmrc {
-    use aube_util::WorkspaceNpmrc::{RootBeneathMember, RootOnly};
-    match surface {
-        ConfigSurface::NonPnpmCompat {
-            role: "npm" | "bun",
-            ..
-        } => RootOnly,
-        ConfigSurface::PnpmOrFresh => match pnpm_npmrc_key_policy(pnpm_major) {
-            NpmrcKeyPolicy::Pnpm11Allowlist => RootOnly,
-            NpmrcKeyPolicy::Open => RootBeneathMember,
-        },
-        ConfigSurface::NonPnpmCompat { .. } | ConfigSurface::NubIdentity(_) => RootBeneathMember,
-    }
-}
-
 fn read_bun_config_for_surface(surface: &ConfigSurface) -> bool {
     matches!(surface, ConfigSurface::NonPnpmCompat { role: "bun", .. })
 }
@@ -4165,35 +4148,6 @@ mod tests {
             NpmrcKeyPolicy::Pnpm11Allowlist
         ));
         assert!(matches!(pnpm_npmrc_key_policy(None), NpmrcKeyPolicy::Open));
-    }
-
-    #[test]
-    fn workspace_npmrc_model_mirrors_each_incumbent() {
-        use aube_util::WorkspaceNpmrc::{RootBeneathMember, RootOnly};
-        let compat = |role| ConfigSurface::NonPnpmCompat {
-            role,
-            dir: PathBuf::from("/w"),
-        };
-        let cases = [
-            (ConfigSurface::PnpmOrFresh, None, RootBeneathMember),
-            (ConfigSurface::PnpmOrFresh, Some(10), RootBeneathMember),
-            (ConfigSurface::PnpmOrFresh, Some(11), RootOnly),
-            (compat("npm"), None, RootOnly),
-            (compat("bun"), None, RootOnly),
-            (compat("yarn"), None, RootBeneathMember),
-            (
-                ConfigSurface::NubIdentity(PathBuf::from("/w")),
-                None,
-                RootBeneathMember,
-            ),
-        ];
-        for (surface, major, expected) in cases {
-            let label = format!(
-                "{:?} pnpm major {major:?}",
-                std::mem::discriminant(&surface)
-            );
-            assert_eq!(workspace_npmrc_model(&surface, major), expected, "{label}");
-        }
     }
 
     #[test]
