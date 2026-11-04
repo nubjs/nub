@@ -188,11 +188,18 @@ fn system_node() -> Option<PathBuf> {
     None
 }
 
-/// Same underlying file (device + inode) — the hardlink identity check.
+/// The shim entry is nub itself: a hardlink (same device + inode) when the shim
+/// dir shares nub's filesystem, else the byte-identical copy the install falls
+/// back to — a tmpfs `/tmp`, as on Ubuntu 26.04 runners, puts every test HOME on
+/// another device than the built binary.
 fn same_file(a: &Path, b: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     match (a.metadata(), b.metadata()) {
-        (Ok(ma), Ok(mb)) => ma.dev() == mb.dev() && ma.ino() == mb.ino(),
+        (Ok(ma), Ok(mb)) if ma.dev() == mb.dev() => ma.ino() == mb.ino(),
+        (Ok(_), Ok(_)) => match (std::fs::read(a), std::fs::read(b)) {
+            (Ok(x), Ok(y)) => x == y,
+            _ => false,
+        },
         _ => false,
     }
 }
