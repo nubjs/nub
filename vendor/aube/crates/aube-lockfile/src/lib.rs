@@ -1282,25 +1282,17 @@ impl LockfileGraph {
         })
     }
 
-    /// Pass the path of every selected path-based local package (`file:`,
-    /// `link:`, `portal:`, `exec:`) through `rebase`, re-keying it and every
-    /// importer and package edge that points at it.
+    /// Pass the path of every path-based local package (`file:`, `link:`,
+    /// `portal:`, `exec:`) through `rebase`, re-keying it and every importer
+    /// and package edge that points at it.
     ///
     /// The resolver and linker keep those paths relative to the workspace
     /// root, while a per-project lockfile (`sharedWorkspaceLockfile=false`)
     /// records them relative to its own project, as pnpm does. This moves a
-    /// graph between the two frames. Only packages whose key `select` accepts
-    /// are touched.
-    pub fn rebase_local_paths(
-        &mut self,
-        select: impl Fn(&str) -> bool,
-        rebase: impl Fn(&std::path::Path) -> std::path::PathBuf,
-    ) {
+    /// graph between the two frames.
+    pub fn rebase_local_paths(&mut self, rebase: impl Fn(&std::path::Path) -> std::path::PathBuf) {
         let mut renames: BTreeMap<String, String> = BTreeMap::new();
         for (key, pkg) in &mut self.packages {
-            if !select(key) {
-                continue;
-            }
             let Some(local) = pkg.local_source.as_mut() else {
                 continue;
             };

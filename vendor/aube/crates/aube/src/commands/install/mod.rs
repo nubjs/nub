@@ -67,7 +67,7 @@ use lifecycle::{
     resolve_link_strategy, run_import_on_blocking, run_root_lifecycle_script,
     validate_required_scripts,
 };
-pub(crate) use workspace::order_lifecycle_manifests;
+pub(crate) use workspace::{order_lifecycle_manifests, parse_project_lockfile};
 
 pub(crate) fn resolve_active_lockfile_dir(
     cwd: &std::path::Path,
