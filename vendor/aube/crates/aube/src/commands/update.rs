@@ -723,9 +723,14 @@ async fn run_inner(
 
     let mut workspace_catalogs = super::load_workspace_catalogs(&cwd)?;
     let mut catalog_targets = Vec::new();
-    if effective_latest && !no_save {
+    // A `catalog:` dep gets the same two rewrites as a plain range, applied
+    // to the catalog entry: `--latest` / `<pkg>@latest` re-resolve it at
+    // `latest`, and the cosmetic floor-bump tracks the resolved in-range
+    // version for a `^` / `~` entry (pnpm 10 and 11 both bump it).
+    if (effective_latest || cosmetic_rewrite_eligible) && !no_save {
         for key in &manifest_keys_to_update {
-            if !should_rewrite_key(key) || preserve_pin.contains(key) {
+            let explicit = should_rewrite_key(key);
+            if (!explicit && !cosmetic_rewrite_eligible) || preserve_pin.contains(key) {
                 continue;
             }
             let original = all_specifiers.get(key).map(String::as_str).unwrap_or("");
@@ -738,10 +743,15 @@ async fn run_inner(
             let Some(original_range) = entries.get(key).cloned() else {
                 continue;
             };
+            if !explicit && !original_range.starts_with('^') && !original_range.starts_with('~') {
+                continue;
+            }
             let Some(source) = super::catalog_entry_source(&cwd, catalog, key) else {
                 continue;
             };
-            entries.insert(key.clone(), "latest".to_string());
+            if explicit {
+                entries.insert(key.clone(), "latest".to_string());
+            }
             catalog_targets.push(CatalogUpdateTarget {
                 manifest_key: key.clone(),
                 catalog: catalog.to_string(),

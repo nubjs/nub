@@ -381,7 +381,7 @@ nub remove -w <pkg>        # remove from the workspace root
 
 ### `nub update`
 
-Re-resolves dependencies within their ranges; `--latest` rewrites the `package.json` ranges to the newest resolved versions:
+Re-resolves dependencies within their ranges and raises each `^`/`~` range to the version it resolved; `--latest` rewrites ranges to the newest release. A `catalog:` dependency's range is rewritten in the catalog that defines it, so every project using that entry moves together:
 
 ```bash
 nub update                 # up — refresh all deps within range
