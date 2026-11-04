@@ -793,3 +793,65 @@ fn an_importers_own_bin_never_shadows_a_dependencys_bin() {
         );
     }
 }
+
+/// The contents of the first file named `name` under `dir`, if any.
+fn read_file_under(dir: &std::path::Path, name: &str) -> Option<String> {
+    for entry in fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        let file_type = entry.file_type().ok()?;
+        if file_type.is_dir() {
+            if let Some(found) = read_file_under(&path, name) {
+                return Some(found);
+            }
+        } else if entry.file_name() == name {
+            return fs::read_to_string(path).ok();
+        }
+    }
+    None
+}
+
+/// Under `sharedWorkspaceLockfile: false` a member's lockfile is its own, but
+/// install links its packages into the workspace root's virtual store and
+/// takes approvals from the root. A member-scoped rebuild has to look there:
+/// resolved against the member it found nothing and exited 0.
+#[test]
+fn member_rebuild_with_per_project_lockfiles_runs_root_approved_builds() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+
+    sbx.write_file(
+        "dep/package.json",
+        r#"{
+            "name": "rebuild-dep",
+            "version": "1.0.0",
+            "scripts": { "postinstall": "node -e \"require('fs').appendFileSync('RUNS', 'x')\"" }
+        }"#,
+    );
+    sbx.write_file(
+        "packages/a/package.json",
+        r#"{ "name": "a", "version": "1.0.0", "dependencies": { "rebuild-dep": "file:../../dep" } }"#,
+    );
+    sbx.write_file(
+        "pnpm-workspace.yaml",
+        "packages:\n  - packages/*\nsharedWorkspaceLockfile: false\nallowBuilds:\n  \"rebuild-dep@file:dep\": true\n",
+    );
+    sbx.write_manifest(r#"{ "name": "root", "version": "1.0.0", "private": true }"#);
+
+    sbx.cmd().arg("install").assert().success();
+    let node_modules = sbx.project.join("node_modules");
+    assert_eq!(
+        read_file_under(&node_modules, "RUNS").as_deref(),
+        Some("x"),
+        "install must build rebuild-dep once in the root virtual store"
+    );
+
+    sbx.cmd()
+        .args(["--filter", "a", "rebuild"])
+        .assert()
+        .success();
+    assert_eq!(
+        read_file_under(&node_modules, "RUNS").as_deref(),
+        Some("xx"),
+        "`--filter a rebuild` must re-run rebuild-dep's postinstall where install put it"
+    );
+}
