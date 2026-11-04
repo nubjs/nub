@@ -938,15 +938,30 @@ pub fn discover_shell_node() -> Result<ResolvedNode, DiscoveryError> {
 /// find the real binary, so a caller describing what a script's `node` will run
 /// under has to ask this first: with the shim in front, PATH semantics are the
 /// pin. A dependency's `node_modules/.bin/node` is skipped as in every probe.
+/// A `node` elsewhere that links back to nub counts too, since
+/// [`which_node_in`] steps over it for the same reason.
 pub fn shell_node_is_nub_shim() -> bool {
-    for dir in env::split_paths(&env::var_os("PATH").unwrap_or_default()) {
+    let persistent = crate::node::shim::node_shim_dir()
+        .ok()
+        .and_then(|d| d.canonicalize().ok());
+    shell_node_is_nub_shim_in(
+        &env::var_os("PATH").unwrap_or_default(),
+        persistent.as_deref(),
+    )
+}
+
+fn shell_node_is_nub_shim_in(path_var: &std::ffi::OsStr, persistent_shim: Option<&Path>) -> bool {
+    for dir in env::split_paths(path_var) {
         if is_package_bin_dir(&dir) {
             continue;
         }
-        let has_node =
-            dir.join("node").is_file() || (cfg!(windows) && dir.join("node.exe").is_file());
-        if has_node {
-            return is_nub_shim_dir(&dir);
+        let node = [dir.join("node"), dir.join("node.exe")]
+            .into_iter()
+            .take(if cfg!(windows) { 2 } else { 1 })
+            .find(|candidate| candidate.is_file());
+        if let Some(node) = node {
+            return is_nub_shim_dir_with(&dir, persistent_shim)
+                || links_back_to_nub(&node, persistent_shim);
         }
     }
     false
@@ -2405,6 +2420,20 @@ mod tests {
             real.join("node").canonicalize().unwrap(),
             "links into the shim dir and to nub itself are skipped; the real node wins"
         );
+
+        // A script's bare `node` still reaches the link, so the question "is
+        // the shell's node nub's shim" must answer yes for the same PATH, or the
+        // recorded lifecycle Node is the later binary while scripts run the pin.
+        for first in [&to_shim, &to_self] {
+            let path_var = env::join_paths([first, &real]).unwrap();
+            assert!(
+                shell_node_is_nub_shim_in(&path_var, None),
+                "{} links back to nub",
+                first.display()
+            );
+        }
+        let real_first = env::join_paths([&real, &to_shim]).unwrap();
+        assert!(!shell_node_is_nub_shim_in(&real_first, None));
     }
 
     #[test]
