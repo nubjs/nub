@@ -78,9 +78,15 @@ common.restoreCompileCacheEnv();
 // Publish process.versions.nub (self-identification marker) before user code runs.
 // Tier-independent — same call in the compat entry (preload.mjs).
 common.installVersionMarker();
-// Strip nub's own UV_THREADPOOL_SIZE so children get Node's default, and demote
-// the workers beyond Node's four on Linux. Tier-independent, like the marker.
-common.installThreadpoolPolicy();
+// Settle nub's own UV_THREADPOOL_SIZE at the first loop turn, so a program can still
+// set its own before it first uses the pool; then strip it so children get Node's
+// default, and demote the workers beyond Node's four on Linux. `true`: nothing has
+// used the pool yet on this tier (preload.mjs settles at once).
+common.installThreadpoolPolicy(true);
+// Consume the launcher's fetch-handler marker BEFORE any user code — the configured
+// preload chain below included — and note which entry it names. Arming the pass
+// itself waits for the end of this file (`installServeEntry`).
+common.claimServeEntry();
 
 // `--no-experimental-require-module` disables require(esm) globally, so the
 // transform-core require below (and the worker/locks ESM side-effect modules)
@@ -216,7 +222,11 @@ if (hasRegisterHooks && !requireEsmDisabled && !forceAsyncTier) {
   // not leaked onto the user's stderr — on every entry above nub is forced onto
   // module.register (require(esm) off, foreign-loader composition, or registerHooks
   // absent outright), so the user has no action to take. See registerLoaderWorker.
-  common.registerLoaderWorker("./preload-async-hooks.mjs", pathToFileURL(__filename).href);
+  common.registerLoaderWorker(
+    "./preload-async-hooks.mjs",
+    pathToFileURL(__filename).href,
+    common.loaderWorkerOptions(),
+  );
 
   // Entry 3 only. `module.register` is ESM-loader-only, so without this a
   // `require('./x.ts')` on 23.0–23.4 reaches Node raw and dies on the first type
@@ -269,6 +279,17 @@ if (core && core.sweepDue()) {
     try { core.maybeSweepCache(); } catch {}
   });
 }
+
+// ── Default-export `fetch` handler (BOTH branches above) ────────────
+// Arms the deferred pass that serves an entry whose default export is a `fetch`
+// handler. Tier-independent — the same call sits in preload.mjs — and a no-op
+// unless `claimServeEntry` above found this process marked as a top-level file
+// run. Placed after the tier branches so the shape check runs on either, and after
+// the eviction block for the same reason it is: nothing here may touch the
+// bootstrap module list. `true`: this `--require` preload runs before Node calls
+// `Module.runMain`, so the pass can ride that call (see the triggers above
+// `installServeEntry`); the `--import` entry cannot, and passes nothing.
+common.installServeEntry(true);
 
 // ── Lazy ESM-side-effect polyfills (R7) ─────────────────────────────
 // The two ESM side-effect polyfills — the browser-shape Worker global

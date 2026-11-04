@@ -1,0 +1,73 @@
+---
+title: "Nub 0.9.5"
+description: The release archives carry the nubx and nubr aliases, the GitHub Actions move into the main repository with an npm ci step, and a run of install fixes lands.
+author: The Nub Team
+date: 2026-09-25
+---
+
+The release archives now carry the `nubx` and `nubr` aliases, the GitHub Actions move into the main repository with a new `npm-ci` step, and the package manager gets a run of install fixes.
+
+## Release archives
+
+A plain extraction of any release archive is now a complete install. The Unix tarballs carry `nubx` and `nubr` as relative symlinks, and the Windows zips carry `nubx.exe` and `nubr.exe`, small stubs that run the sibling `nub.exe` under their own name:
+
+```
+nub-darwin-arm64.tar.gz
+└── bin/
+    ├── nub
+    ├── nubx -> nub
+    └── nubr -> nub
+```
+
+Before this release, each install channel created the two aliases itself, and a channel with no hook for that lost them. The install scripts and `nub upgrade` keep their alias step as a fallback for an archive from before 0.9.5.
+
+## GitHub Actions
+
+The `setup-node` and `install` actions live in the `nubjs/nub` repository now, consumed as `nubjs/nub/setup-node@v0` and `nubjs/nub/install@v0`. A third action, `npm-ci`, replaces a `run: npm ci` line for a project with a `package-lock.json`:
+
+```diff
+  - uses: actions/setup-node@v4
+    with:
+      node-version: 22
+      cache: npm
+- - run: npm ci
++ - uses: nubjs/nub/npm-ci@v0
++   with:
++     lockfile: package-lock.json
+  - run: npm test
+```
+
+It installs exactly what the lockfile records, hoisted as npm lays it out, and runs every lifecycle script under the job's `node`. The action fails if the lockfile changed during the install, if it is missing, or if `package.json` disagrees with it. The `args` input takes the flags of `npm ci`, such as `--omit=dev`; a flag the engine does not honor fails the action rather than running npm. The [GitHub Action page](/docs/deployment/github-action) documents all three actions.
+
+## Canary channel
+
+The nightly canary no longer publishes to npm and ships only as the rolling [canary release](https://github.com/nubjs/nub/releases/tag/canary) on GitHub. An npm install of `@nubjs/nub@canary` receives no new nightlies.
+
+```bash
+curl -fsSL https://nubjs.com/install.sh | bash -s canary   # a fresh canary install
+nub upgrade --canary                                        # switch an existing install
+nub upgrade --stable                                        # return to the stable channel
+```
+
+## Bug fixes
+
+| PR | Fix |
+| --- | --- |
+| [#965](https://github.com/nubjs/nub/pull/965) | Under `node-linker=hoisted`, a package could be hoisted to where it shadowed a dependency its parent resolves further up, so `send` loaded `ms` 2.0.0 where it resolves 2.1.3. The placement walk now records the names each package resolves through an ancestor and never hoists over them. The isolated layout is unaffected. |
+| [#955](https://github.com/nubjs/nub/pull/955) | Several failed dependency builds were reported as one, and the install exited 1. Every required failure is now reported in build order, and the process exits with the first failing script's code, as under `nub run`, npm, and pnpm. |
+| [#957](https://github.com/nubjs/nub/pull/957) | An `extends` in `tsconfig.json` that points through a package `exports` subpath pattern, such as `astro/tsconfigs/strict`, resolves as it does under tsc. A lifecycle script can generate the `extends` target, so a SvelteKit `prepare` script that writes `.svelte-kit/tsconfig.json` no longer fails before the file exists. |
+| [#959](https://github.com/nubjs/nub/pull/959) | The manifest scan of a git, file, or URL tarball stopped after 64 MiB of entries, so a URL-pinned `next` failed with `unexpected EOF during skip`. The cap now matches the store's 1 GiB extraction cap. |
+| [#958](https://github.com/nubjs/nub/pull/958) | In `nub update -i`, an exact pin such as `"chalk": "4.1.0"` gets an in-range column computed as if the spec were `^4.1.0`, and the pick is written back in the pin's own style. A mixed run such as `nub update chalk@latest semver` now rewrites the range floor of `semver` the way a solo `nub update semver` does. |
+| [#966](https://github.com/nubjs/nub/pull/966) | An alias pin (`lts/*`, `lts/<codename>`, `node`, `latest`) in `.nvmrc` provisioned through `nub node install` and then failed `nub node which` and `nub run` offline. The offline discovery path now resolves an alias against the release index the last provisioning run cached. |
+| [#967](https://github.com/nubjs/nub/pull/967) | Under `nub pm shim`, the lifecycle scripts of a routed `npm install` or `npm ci` run under the `node` on PATH. The install consults no Node pin and provisions nothing, as under npm. |
+| [#967](https://github.com/nubjs/nub/pull/967) | A project's own `bin` entries no longer overwrite a dependency's entry of the same name in `node_modules/.bin`, so a `prepare` script that runs the `rollup` devDependency runs the dependency and not the project's unbuilt output. |
+
+## Release pipeline
+
+A release now stages its npm packages through OIDC trusted publishing and waits for a maintainer's 2FA approval before the GitHub Release is promoted to stable. A stable release starts from a workflow dispatch on `main`, and the run creates the version tag itself after its gates pass. ([#973](https://github.com/nubjs/nub/pull/973), [#975](https://github.com/nubjs/nub/pull/975))
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.9.5) list every change in this release.
+
+## Get started
+
+<GetStarted />

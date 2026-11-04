@@ -88,10 +88,15 @@ class Nub < Formula
     # and ignore runtime/.
     bin.install "bin/nub"
     # \`nubx\` is the same binary under a second name: nub reads its verb from the
-    # argv[0] basename (Argv0::detect in crates/nub-cli/src/cli.rs). Only one copy
-    # ships, so the alias is created here — install.sh, install.ps1 and flake.nix
-    # each do the same for their own channel.
+    # argv[0] basename (Argv0::detect in crates/nub-cli/src/cli.rs). The archive
+    # carries bin/nubx as a symlink, but \`bin.install "bin/nub"\` above takes the
+    # one file, so the alias is created here — flake.nix does the same for its
+    # channel.
     bin.install_symlink bin/"nub" => "nubx"
+    # \`nubr\` is the third name: the unified runner (a file, a package.json
+    # script, or an installed bin), the command \`@nubjs/runner\` ships, run out of
+    # the embedded runtime. Same argv[0] dispatch, same one copy.
+    bin.install_symlink bin/"nub" => "nubr"
     # The nub compile launcher template resolves as a SIBLING of the running nub
     # (compile::launcher::locate), so it has to land wherever the binary did —
     # libexec would put it out of reach. Accepted cost: brew links the keg's bin
@@ -107,6 +112,10 @@ class Nub < Formula
     # which plain \`nub\` never does — so this fails both if bin/nubx is missing and
     # if it somehow resolves back to the top-level CLI.
     assert_match "Usage: nub nubx", shell_output("#{bin}/nubx --help")
+    # Same for \`nubr\`: its \`--version\` is the bare version, where \`nub\` prints
+    # \`v<version>\`, so exact equality proves the alias dispatched. \`--version\` is
+    # answered by the binary itself and never reaches Node, which matters below.
+    assert_equal version.to_s, shell_output("#{bin}/nubr --version").strip
     # Do NOT run a transpile here: \`brew test\` runs on a clean machine with no Node
     # on PATH, and nub augments the user's Node rather than bundling one.
   end

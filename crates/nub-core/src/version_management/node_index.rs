@@ -36,7 +36,7 @@ fn normalized_mirror(mirror_base: &str) -> &str {
 /// `node-index.json` cannot be migrated safely: before mirror scoping it may
 /// contain data fetched from any mirror, so it is deliberately ignored and
 /// naturally ages out after this change.
-fn cache_path(cache_root: &Path, mirror_base: &str) -> std::path::PathBuf {
+pub(crate) fn cache_path(cache_root: &Path, mirror_base: &str) -> std::path::PathBuf {
     let mirror = normalized_mirror(mirror_base);
     let digest = Sha256::digest(mirror.as_bytes());
     let id = digest
@@ -100,6 +100,21 @@ fn fetch_index(mirror_base: &str) -> Result<Vec<IndexEntry>> {
     parse_index(&body)
 }
 
+/// The on-disk cache alone, whatever its age, and `None` when nothing was ever
+/// fetched. For the offline discovery path: an alias pin (`lts/*`) resolves against
+/// whatever index the last provisioning run left here, the way `nvm use lts/*`
+/// picks among what is installed, and never costs a network round trip on a plain
+/// `nub run`.
+pub(crate) fn load_cached_index(cache_root: &Path, mirror_base: &str) -> Option<Vec<IndexEntry>> {
+    // Up to 0.9.3 the `nub node install` command group threaded the `node/` store
+    // dir as the root, so its index sits one level down on an upgraded machine;
+    // read it there until a fetch writes the root copy.
+    let body = std::fs::read_to_string(cache_path(cache_root, mirror_base))
+        .or_else(|_| std::fs::read_to_string(cache_path(&cache_root.join("node"), mirror_base)))
+        .ok()?;
+    parse_index(&body).ok()
+}
+
 /// Load the index, preferring a fresh on-disk cache
 /// (`<cache_root>/node-index-<mirror-hash>.json`, refetched after `INDEX_TTL`). On a fetch
 /// failure but a stale-cache hit, fall back to the stale cache (offline-tolerant).
@@ -140,26 +155,25 @@ pub(crate) fn load_index(cache_root: &Path, mirror_base: &str) -> Result<Vec<Ind
 
 /// Resolve a `.nvmrc` / `.node-version` selector to a concrete version against
 /// `index`. Handles `latest`/`node`, `lts`/`lts/*`, `lts/<codename>`, bare
-/// `<major>` and `<major.minor>`, and an exact `[v]X.Y.Z`. Returns `None` when
-/// nothing matches. (`rc/<major>` lives on a different mirror — handled by the
-/// caller passing the rc index; this picks the newest entry there too.)
+/// `<major>` and `<major.minor>`, and an exact `[v]X.Y.Z[-pre]`. Returns `None`
+/// when nothing matches. Only an exact pin selects a prerelease: nodejs.org's
+/// index can list one first (`v27.0.0-alpha.0.0.0`, 2026-10-29), and nvm leaves
+/// alphas out of every alias and partial match by default.
 pub(crate) fn resolve_spec(spec: &str, index: &[IndexEntry]) -> Option<NodeVersion> {
     let spec = spec.trim();
     let lower = spec.to_ascii_lowercase();
 
     if lower == "latest" || lower == "node" {
-        return index.iter().map(|e| e.version.clone()).max();
+        return releases(index).map(|e| e.version.clone()).max();
     }
     if lower == "lts" || lower == "lts/*" {
-        return index
-            .iter()
+        return releases(index)
             .filter(|e| e.lts.is_some())
             .map(|e| e.version.clone())
             .max();
     }
     if let Some(codename) = lower.strip_prefix("lts/") {
-        return index
-            .iter()
+        return releases(index)
             .filter(|e| {
                 e.lts
                     .as_deref()
@@ -171,29 +185,26 @@ pub(crate) fn resolve_spec(spec: &str, index: &[IndexEntry]) -> Option<NodeVersi
 
     // Numeric: exact / major / major.minor (tolerate a leading `v`).
     let numeric = lower.strip_prefix('v').unwrap_or(&lower);
+    if let Ok(want) = numeric.parse::<NodeVersion>() {
+        // Exact pin — match it in the index (so a typo'd nonexistent version
+        // resolves to None rather than a doomed download).
+        return index
+            .iter()
+            .find(|e| e.version == want)
+            .map(|e| e.version.clone());
+    }
     let parts: Vec<&str> = numeric.split('.').collect();
     match parts.as_slice() {
-        [maj, min, _pat] if all_digits(maj) && all_digits(min) => {
-            // Exact pin — match it in the index (so a typo'd nonexistent version
-            // resolves to None rather than a doomed download).
-            let want: NodeVersion = numeric.parse().ok()?;
-            index
-                .iter()
-                .find(|e| e.version == want)
-                .map(|e| e.version.clone())
-        }
         [maj, min] if all_digits(maj) && all_digits(min) => {
             let (maj, min): (u64, u64) = (maj.parse().ok()?, min.parse().ok()?);
-            index
-                .iter()
+            releases(index)
                 .filter(|e| e.version.0.major == maj && e.version.0.minor == min)
                 .map(|e| e.version.clone())
                 .max()
         }
         [maj] if all_digits(maj) => {
             let maj: u64 = maj.parse().ok()?;
-            index
-                .iter()
+            releases(index)
                 .filter(|e| e.version.0.major == maj)
                 .map(|e| e.version.clone())
                 .max()
@@ -208,25 +219,23 @@ pub(crate) fn resolve_spec(spec: &str, index: &[IndexEntry]) -> Option<NodeVersi
 /// platform's index, rather than a synthetic `.0` release.
 pub(crate) fn resolve_lowest_spec(spec: &str, index: &[IndexEntry]) -> Option<NodeVersion> {
     let numeric = spec.trim().strip_prefix('v').unwrap_or(spec.trim());
+    if numeric.parse::<NodeVersion>().is_ok() {
+        // An exact selector has only one acceptable release, but it must
+        // still be present in this target's index.
+        return resolve_spec(numeric, index);
+    }
     let parts: Vec<&str> = numeric.split('.').collect();
     match parts.as_slice() {
-        [maj, min, _pat] if all_digits(maj) && all_digits(min) => {
-            // An exact selector has only one acceptable release, but it must
-            // still be present in this target's index.
-            resolve_spec(numeric, index)
-        }
         [maj, min] if all_digits(maj) && all_digits(min) => {
             let (maj, min): (u64, u64) = (maj.parse().ok()?, min.parse().ok()?);
-            index
-                .iter()
+            releases(index)
                 .filter(|e| e.version.0.major == maj && e.version.0.minor == min)
                 .map(|e| e.version.clone())
                 .min()
         }
         [maj] if all_digits(maj) => {
             let maj: u64 = maj.parse().ok()?;
-            index
-                .iter()
+            releases(index)
                 .filter(|e| e.version.0.major == maj)
                 .map(|e| e.version.clone())
                 .min()
@@ -264,6 +273,11 @@ pub(crate) fn resolve_lowest_spec_for_artifact(
         .cloned()
         .collect();
     resolve_lowest_spec(spec, &available)
+}
+
+/// The rows an alias or a partial pin may select.
+fn releases(index: &[IndexEntry]) -> impl Iterator<Item = &IndexEntry> {
+    index.iter().filter(|e| e.version.0.pre.is_empty())
 }
 
 fn all_digits(s: &str) -> bool {
@@ -444,6 +458,40 @@ mod tests {
     }
 
     #[test]
+    fn only_an_exact_pin_selects_a_prerelease() {
+        // nodejs.org/dist/index.json as of 2026-10-29: an alpha listed first.
+        let index = parse_index(
+            r#"[
+                {"version":"v27.0.0-alpha.0.0.0","lts":false},
+                {"version":"v26.13.0","lts":"Lithium"},
+                {"version":"v26.12.1","lts":false}
+            ]"#,
+        )
+        .unwrap();
+        let release = Some(NodeVersion::new(26, 13, 0));
+        for spec in ["latest", "node", "lts/*", "lts/lithium", "26", "26.13"] {
+            assert_eq!(resolve_spec(spec, &index), release, "{spec}");
+        }
+        assert_eq!(resolve_spec("27", &index), None);
+        assert_eq!(resolve_lowest_spec("27", &index), None);
+        assert_eq!(
+            resolve_spec("27.0.0", &index),
+            None,
+            "the alpha is not 27.0.0"
+        );
+
+        let alpha: NodeVersion = "27.0.0-alpha.0.0.0".parse().unwrap();
+        assert_eq!(
+            resolve_spec("v27.0.0-alpha.0.0.0", &index),
+            Some(alpha.clone())
+        );
+        assert_eq!(
+            resolve_lowest_spec("27.0.0-alpha.0.0.0", &index),
+            Some(alpha)
+        );
+    }
+
+    #[test]
     fn resolve_range_picks_newest_satisfying() {
         let index = idx();
         let req = semver::VersionReq::parse(">=20, <23").unwrap();
@@ -578,8 +626,12 @@ mod tests {
         let latest = resolve_spec("latest", &index).expect("latest");
         let lts = resolve_spec("lts", &index).expect("lts");
         let major22 = resolve_spec("22", &index).expect("a 22.x");
-        // latest >= lts, and 22 resolves into the 22 line.
+        // latest >= lts, both releases, and 22 resolves into the 22 line.
         assert!(latest >= lts);
+        assert!(
+            latest.0.pre.is_empty() && lts.0.pre.is_empty(),
+            "{latest} / {lts}"
+        );
         assert_eq!(major22.0.major, 22);
     }
 }

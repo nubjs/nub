@@ -260,3 +260,64 @@ fn guard_rewrites_when_only_package_extensions_checksum_is_added() {
         "rewritten lockfile must record the checksum:\n{written}"
     );
 }
+
+/// Regression: widening a catalog range that keeps the same pick changes
+/// only the lockfile's `catalogs` block, which the identity hash does not
+/// cover. Skipping that write left the old specifier on disk, so a frozen
+/// install (ours and pnpm's) rejected the lockfile the install just wrote.
+#[test]
+fn guard_rewrites_when_only_a_catalog_specifier_changes() {
+    aube_util::set_embedder(&NO_CHURN_TOOL);
+    assert!(aube_util::embedder().no_churn_lockfile_write);
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("package.json"), r#"{"name":"t"}"#).unwrap();
+    let manifest = PackageJson::default();
+
+    let with_catalog = |specifier: &str| {
+        let mut g = graph_with(vec![pkg("semver", "7.5.0", "sha512-AAA==")]);
+        g.catalogs.insert(
+            "default".to_string(),
+            BTreeMap::from([(
+                "semver".to_string(),
+                aube_lockfile::CatalogEntry {
+                    specifier: specifier.to_string(),
+                    version: "7.5.0".to_string(),
+                },
+            )]),
+        );
+        g
+    };
+
+    let path = write_lockfile_as(
+        dir.path(),
+        &with_catalog("7.5.0"),
+        &manifest,
+        LockfileKind::Pnpm,
+    )
+    .unwrap();
+    let first = mtime(&path);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    write_lockfile_as(
+        dir.path(),
+        &with_catalog("7.5.0"),
+        &manifest,
+        LockfileKind::Pnpm,
+    )
+    .unwrap();
+    assert_eq!(mtime(&path), first, "an unchanged catalog block is a no-op");
+
+    write_lockfile_as(
+        dir.path(),
+        &with_catalog("^7.5.0"),
+        &manifest,
+        LockfileKind::Pnpm,
+    )
+    .unwrap();
+    let written = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        written.contains("catalogs:\n  default:\n    semver:\n      specifier: ^7.5.0\n"),
+        "the widened catalog range must reach the lockfile:\n{written}"
+    );
+}

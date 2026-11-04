@@ -101,6 +101,80 @@ impl ShimName {
 /// (`npm --yes create x`) is not recognized — strictness errs toward refusing.
 const TRANSPARENT_VERBS: [&str; 4] = ["init", "create", "dlx", "exec"];
 
+/// npm's registry and account verbs, aliases included: they talk to the
+/// registry or the user's credentials and never touch the project's lockfile or
+/// node_modules. Absent: `publish`/`pack`, which pack THIS project — npm leaves
+/// pnpm's `workspace:` and `catalog:` specs unrewritten, so a cross-PM publish
+/// ships a broken manifest — `version`/`pkg`, which write package.json, and
+/// `star`, which npm 11 dropped: npm expands a unique prefix, so `npm star` is
+/// now `npm start`. npm never runs a project script for an unknown name, so a
+/// verb missing from an older npm (`trust`) only errors.
+const NPM_REGISTRY_VERBS: [&str; 32] = [
+    "access",
+    "adduser",
+    "author",
+    "bugs",
+    "deprecate",
+    "dist-tag",
+    "dist-tags",
+    "docs",
+    "find",
+    "home",
+    "info",
+    "issues",
+    "login",
+    "logout",
+    "ogr",
+    "org",
+    "owner",
+    "ping",
+    "profile",
+    "repo",
+    "s",
+    "se",
+    "search",
+    "show",
+    "team",
+    "token",
+    "trust",
+    "undeprecate",
+    "unpublish",
+    "v",
+    "view",
+    "whoami",
+];
+
+/// The subset pnpm 8 through 11 all treat as builtins: 8–10 forward them to npm
+/// (`pnpm/src/pnpm.ts`'s passthrough switch) and 11 implements them or rejects
+/// them as not implemented. Unlike npm, pnpm runs a same-named package.json
+/// script for a name it does not know, so a verb any of those majors lacks
+/// (`author`, `find`, `org`) would run project code and stays strict.
+const PNPM_REGISTRY_VERBS: [&str; 23] = [
+    "access",
+    "adduser",
+    "bugs",
+    "deprecate",
+    "dist-tag",
+    "docs",
+    "info",
+    "login",
+    "logout",
+    "owner",
+    "ping",
+    "profile",
+    "repo",
+    "s",
+    "se",
+    "search",
+    "show",
+    "team",
+    "token",
+    "unpublish",
+    "v",
+    "view",
+    "whoami",
+];
+
 /// The opt-in marker `nub pm shim --route-installs` leaves in the shim dir.
 /// While it is present, the `npm` shim runs the install verbs on nub's
 /// engine ([`npm_install_route`]); every other invocation keeps the ratified
@@ -421,22 +495,27 @@ pub enum ShimDecision {
 ///     user's global prefix and never the project's lockfile/node_modules, so the
 ///     refusal's whole rationale ("a competing lockfile and node_modules here")
 ///     does not apply. The project pin is project-scoped; a global op is not.
-///     `global` is computed from the argv by [`is_global_invocation`].
+///     `global` is computed from the argv by [`is_global_invocation`];
+///   - pinned + name mismatch + a registry or account verb (`npm login`,
+///     `npm whoami`, `npm view`) → fall through (2026-10-21), for the same
+///     reason: it talks to the registry, never to this project's dependency
+///     tree. The caller folds [`is_registry_invocation`] into `outside_project`
+///     alongside `global`.
 pub fn decide(
     invoked: ShimName,
     pin: &PinState,
     first_arg: Option<&str>,
     nesting: Nesting,
-    global: bool,
+    outside_project: bool,
 ) -> ShimDecision {
     // A nub-pinned project: nub is the manager. Foreign-PM shims refuse and
-    // redirect to nub, with the same transparent/nested/global escapes a
-    // sibling-PM mismatch gets (a `npm create vite`, a nested lifecycle call, or
-    // a global install still flows to the system PM rather than breaking).
+    // redirect to nub, with the same transparent/nested/outside-project escapes
+    // a sibling-PM mismatch gets (a `npm create vite`, a nested lifecycle call,
+    // a global install or an `npm login` still reaches the system PM).
     if let PinState::NubPinned { provenance } = pin {
         let transparent = invoked.always_transparent()
             || first_arg.is_some_and(|verb| TRANSPARENT_VERBS.contains(&verb));
-        return if transparent || nesting == Nesting::Nested || global {
+        return if transparent || nesting == Nesting::Nested || outside_project {
             ShimDecision::FallThrough { invoked }
         } else {
             ShimDecision::RefuseNubPinned {
@@ -460,12 +539,13 @@ pub fn decide(
     // A name mismatch: transparent verbs always escape; a NESTED invocation
     // (spawned by a running PM, e.g. a pnpm postinstall calling `npm`) escapes
     // too — refusing there breaks an install the user issued at one layer up,
-    // never typed `npm` for, and can't fix from the failing command; a GLOBAL op
-    // escapes too — it writes the global prefix, not this project. Only a
-    // top-level, non-transparent, project-scoped mismatch stays strict.
+    // never typed `npm` for, and can't fix from the failing command; an op
+    // OUTSIDE the project escapes too — a global op writes the global prefix, a
+    // registry verb the registry. Only a top-level, non-transparent,
+    // project-scoped mismatch stays strict.
     let transparent = invoked.always_transparent()
         || first_arg.is_some_and(|verb| TRANSPARENT_VERBS.contains(&verb));
-    if transparent || nesting == Nesting::Nested || global {
+    if transparent || nesting == Nesting::Nested || outside_project {
         ShimDecision::FallThrough { invoked }
     } else {
         ShimDecision::Refuse {
@@ -502,6 +582,29 @@ pub fn is_global_invocation(invoked: ShimName, args: &[String]) -> bool {
         // add`); it has no `-g` flag, and Berry dropped global entirely. Only
         // the FIRST token counts — a later `global` is an operand.
         ShimName::Yarn | ShimName::Yarnpkg => args.first().is_some_and(|a| a == "global"),
+    }
+}
+
+/// Whether this shim invocation is a registry or account command — `npm login`,
+/// `npm whoami`, `pnpm view react` — which reads and writes the registry and
+/// the user's credentials, never this project's lockfile or node_modules. Like
+/// [`is_global_invocation`], it lets a mismatch fall through: refusing
+/// `npm login` in a pnpm project only to suggest `pnpm login`, which pnpm 10
+/// hands straight back to npm, guards nothing. Matched on the first argv token
+/// verbatim, as [`TRANSPARENT_VERBS`] is, so a flag before the verb or an
+/// abbreviation npm would expand (`npm whoa`) still refuses. yarn is never a
+/// registry invocation: classic and Berry each run a project script for the
+/// other's registry syntax (`yarn login` vs `yarn npm login`), and the shim
+/// cannot tell which one the system yarn is.
+pub fn is_registry_invocation(invoked: ShimName, args: &[String]) -> bool {
+    let Some(verb) = args.first().map(String::as_str) else {
+        return false;
+    };
+    match invoked {
+        ShimName::Npm => NPM_REGISTRY_VERBS.contains(&verb),
+        ShimName::Pnpm => PNPM_REGISTRY_VERBS.contains(&verb),
+        // The runner binaries are transparent already.
+        ShimName::Npx | ShimName::Pnpx | ShimName::Yarn | ShimName::Yarnpkg => false,
     }
 }
 
@@ -2361,6 +2464,49 @@ mod tests {
             Npm,
             &v(&["install", "--global-style", "react"])
         ));
+    }
+
+    #[test]
+    fn is_registry_invocation_admits_registry_verbs_and_keeps_project_verbs_strict() {
+        use ShimName::*;
+        let v = |args: &[&str]| args.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+
+        // Account and registry builtins, aliases included.
+        assert!(is_registry_invocation(
+            Npm,
+            &v(&["login", "--auth-type=web"])
+        ));
+        assert!(is_registry_invocation(Npm, &v(&["whoami"])));
+        assert!(is_registry_invocation(
+            Npm,
+            &v(&["info", "react", "version"])
+        ));
+        assert!(is_registry_invocation(Npm, &v(&["author", "ls"])));
+        assert!(is_registry_invocation(Pnpm, &v(&["login"])));
+        assert!(is_registry_invocation(Pnpm, &v(&["dist-tag", "ls", "x"])));
+
+        // Commands that read or write THIS project stay strict: publishing packs
+        // it (npm would ship pnpm's `workspace:` specs unrewritten) and `version`
+        // writes package.json.
+        assert!(!is_registry_invocation(Npm, &v(&["publish"])));
+        assert!(!is_registry_invocation(Npm, &v(&["version", "patch"])));
+        assert!(!is_registry_invocation(Npm, &v(&["install"])));
+        // A name a manager does not know can run project code instead: npm 11+
+        // expands `star` to `start`, pnpm runs a package.json script for an
+        // unknown name (pnpm 10 has no `author`), and yarn classic and Berry
+        // each fall back to a script for the other's registry syntax.
+        assert!(!is_registry_invocation(Npm, &v(&["star", "react"])));
+        assert!(!is_registry_invocation(Pnpm, &v(&["author", "ls"])));
+        assert!(!is_registry_invocation(Yarn, &v(&["login"])));
+        assert!(!is_registry_invocation(Yarnpkg, &v(&["npm", "whoami"])));
+        // The verb must come first, as for the transparent verbs: a flag ahead
+        // of it, or a registry word as an operand, is not a registry command.
+        assert!(!is_registry_invocation(
+            Npm,
+            &v(&["--registry", "x", "login"])
+        ));
+        assert!(!is_registry_invocation(Npm, &v(&["install", "login"])));
+        assert!(!is_registry_invocation(Npm, &v(&[])));
     }
 
     #[test]

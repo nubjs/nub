@@ -6,10 +6,9 @@ A real compiled-app fixture for `sharp@0.35.3`. It is a standalone harness: it c
 
 sharp is the whole point: its `.node` addon lives in `@img/sharp-<platform>` while the libvips shared
 library it loads ships in a SEPARATE `@img/sharp-libvips-<platform>` package, so it exercises the
-cross-package island geometry. A second package was dropped: `better-sqlite3` resolves its addon through
-the `bindings` package, which walks up from the calling module for a `package.json` — a lookup a bundled
-chunk cannot satisfy, and one the compiler documents as unembeddable (use `--external`). It could never
-pass here, and `--external` is incompatible with this fixture's source-hiding by construction.
+cross-package island geometry. The separate `tests/compile-corpus/` harness covers
+`better-sqlite3`, whose `bindings` resolver needs the package's installed layout.
+Nub preserves that package unbundled inside the executable; it does not need `--external`.
 
 ## Invocation
 

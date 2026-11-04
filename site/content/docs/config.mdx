@@ -308,6 +308,8 @@ The program resolves from the project's `node_modules/.bin`, then `PATH`, so a w
 }
 ```
 
+The array form takes its arguments exactly as written, with no splitting. A Windows path belongs there: the string form is split like a shell, where a backslash escapes the next character, so Nub refuses one rather than quietly running `C:toolswrap.exe`.
+
 The Node process still receives [environment files](/docs/runtime/env) as before; on a file run the wrapper starts with them set too. A wrapper that owns the environment itself pairs the prefix with `"envFile": false`. Compatibility mode (`--node`) runs without the prefix.
 
 ### `envFile`

@@ -3,8 +3,8 @@
 // interface merging must keep the pair collision-free with skipLibCheck disabled.
 interface IteratorObject<T, TReturn, TNext> {
   chunks(chunkSize: number): IteratorObject<T[], undefined, unknown>;
-  windows(windowSize: number): IteratorObject<T[], undefined, unknown>;
-  includes(searchElement: T): boolean;
+  windows(windowSize: number, undersized?: "only-full" | "allow-partial"): IteratorObject<T[], undefined, unknown>;
+  includes(searchElement: T, skippedElements?: number): boolean;
   join(separator?: string): string;
 }
 

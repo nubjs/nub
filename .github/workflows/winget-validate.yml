@@ -58,7 +58,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
 
           # Resolve the single committed version directory (survives version bumps).
-          $verDir = Get-ChildItem -Directory winget/manifests/n/Nubjs/Nub |
+          $verDir = Get-ChildItem -Directory winget/manifests/n/Nub/Nub |
             Sort-Object Name | Select-Object -Last 1
           if (-not $verDir) { Write-Error "no manifest version directory found"; exit 1 }
           $manifest = $verDir.FullName
@@ -102,9 +102,11 @@ jobs:
           $links = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links'
           $env:PATH = "$links;$env:PATH"
 
-          Write-Host "=== smoke: nub --version / nubx --version ==="
-          nub --version
-          if ($LASTEXITCODE -ne 0) { Write-Error "nub --version failed"; exit 1 }
-          nubx --version
-          if ($LASTEXITCODE -ne 0) { Write-Error "nubx --version failed"; exit 1 }
-          Write-Host "OK: nub installed from the local winget manifest and both verbs run."
+          # All three aliases point at the one bin\nub.exe (see the installer
+          # manifest for how). Each must exist AND run.
+          Write-Host "=== smoke: nub / nubx / nubr --version ==="
+          foreach ($verb in @("nub", "nubx", "nubr")) {
+            & $verb --version
+            if ($LASTEXITCODE -ne 0) { Write-Error "$verb --version failed"; exit 1 }
+          }
+          Write-Host "OK: nub installed from the local winget manifest and all three verbs run."

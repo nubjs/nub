@@ -2,16 +2,12 @@
 // compiled binary runs the user's Node as a CHILD, so argv, the exit code and
 // the two output streams all have to survive a hop that plain Node never makes.
 //
-// Every other fixture here checks that a package RESOLVES. This one checks that
-// the program behaves like a program. It is one fixture rather than four because
-// the harness compares a single last line, and because these fail together — a
-// launcher that loses the exit code usually lost the streams too.
-//
 // The assertions run in a CHILD of this fixture, spawned from `process.execPath`,
 // which is the artifact itself once compiled. That is the point: it exercises the
 // artifact's own re-entry, and a binary that cannot start a copy of itself is one
 // no CLI could use to re-exec.
 import { spawnSync } from "node:child_process";
+import assert from "node:assert/strict";
 
 // `execPath` is `node` when this runs as a script and the artifact when it runs
 // compiled, so the script path is an argument in the first case and absent in the
@@ -37,4 +33,5 @@ const checks = [
   ["stderr", r.stderr.trim() === "E:a b"],
 ];
 const failed = checks.filter(([, ok]) => !ok).map(([name]) => name);
-console.log("ok:" + (failed.length ? failed.join(",") : "process"));
+assert.deepEqual(failed, []);
+console.log("ok:process");

@@ -1312,15 +1312,21 @@ fn apply_jail_env(
     }
 }
 
-/// Lifecycle hooks that `aube install` runs against the root package's
-/// `scripts` field, in this order: `preinstall` → (dependencies link) →
-/// `install` → `postinstall` → `prepare`. Matches pnpm / npm.
+/// A lifecycle script a package manager runs on its own, outside `run`.
+/// A project's install-time hooks and the stage lists below are pnpm's
+/// (`exec/lifecycle`'s `PROJECT_LIFECYCLE_STAGES` and friends).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleHook {
     PreInstall,
     Install,
     PostInstall,
+    Prepublish,
+    PrePrepare,
     Prepare,
+    PostPrepare,
+    PreUninstall,
+    Uninstall,
+    PostUninstall,
 }
 
 impl LifecycleHook {
@@ -1329,7 +1335,13 @@ impl LifecycleHook {
             Self::PreInstall => "preinstall",
             Self::Install => "install",
             Self::PostInstall => "postinstall",
+            Self::Prepublish => "prepublish",
+            Self::PrePrepare => "preprepare",
             Self::Prepare => "prepare",
+            Self::PostPrepare => "postprepare",
+            Self::PreUninstall => "preuninstall",
+            Self::Uninstall => "uninstall",
+            Self::PostUninstall => "postuninstall",
         }
     }
 }
@@ -1342,6 +1354,51 @@ pub const DEP_LIFECYCLE_HOOKS: [LifecycleHook; 3] = [
     LifecycleHook::Install,
     LifecycleHook::PostInstall,
 ];
+
+/// What a full install runs for each project (the root and every
+/// workspace member), in order, once its dependencies are linked.
+pub const PROJECT_LIFECYCLE_HOOKS: [LifecycleHook; 6] = [
+    LifecycleHook::PreInstall,
+    LifecycleHook::Install,
+    LifecycleHook::PostInstall,
+    LifecycleHook::PrePrepare,
+    LifecycleHook::Prepare,
+    LifecycleHook::PostPrepare,
+];
+
+/// npm's root scripts after a bare `npm install` / `npm ci`
+/// (`lib/commands/install.js`), whatever the dependency selection.
+pub const NPM_PROJECT_HOOKS: [LifecycleHook; 7] = [
+    LifecycleHook::PreInstall,
+    LifecycleHook::Install,
+    LifecycleHook::PostInstall,
+    LifecycleHook::Prepublish,
+    LifecycleHook::PrePrepare,
+    LifecycleHook::Prepare,
+    LifecycleHook::PostPrepare,
+];
+
+/// npm's scripts for a linked workspace member during that install, in
+/// Arborist's build order (`arborist/rebuild.js`): `prepublish` and the
+/// rest of the `prepare` family stay with the root.
+pub const NPM_MEMBER_HOOKS: [LifecycleHook; 4] = [
+    LifecycleHook::PreInstall,
+    LifecycleHook::Prepare,
+    LifecycleHook::Install,
+    LifecycleHook::PostInstall,
+];
+
+/// The project stages of an install that leaves devDependencies out
+/// (`--prod`): the `prepare` family is a development step, so it is dropped.
+pub const PROJECT_INSTALL_HOOKS: [LifecycleHook; 3] = DEP_LIFECYCLE_HOOKS;
+
+/// What `remove` runs in each project losing a dependency, before anything
+/// is unlinked.
+pub const PRE_UNINSTALL_HOOKS: [LifecycleHook; 2] =
+    [LifecycleHook::PreUninstall, LifecycleHook::Uninstall];
+
+/// What `remove` runs in each project losing a dependency, after unlinking.
+pub const POST_UNINSTALL_HOOKS: [LifecycleHook; 1] = [LifecycleHook::PostUninstall];
 
 /// Holds the real stderr fd saved before `aube` redirects fd 2 to
 /// `/dev/null` under `--silent`. Child processes spawned through
@@ -2155,6 +2212,91 @@ pub enum Error {
     #[error("script `{script}` exited with code {code}")]
     #[diagnostic(code(ERR_AUBE_SCRIPT_NON_ZERO_EXIT))]
     NonZeroExit { script: String, code: i32 },
+}
+
+/// Every required dependency build that failed in one install, in build
+/// order, so the user sees all of them rather than whichever task the
+/// scheduler happened to drain first. The first failure is the diagnostic
+/// the aggregate answers to: its `code()` is the aggregate's code and, via
+/// [`exit_code_for_report`], its script's exit code is the process's.
+///
+/// Each entry keeps the failure's own report — a wrapped [`Error`] for a
+/// script that exited non-zero, or whatever else the build step returned —
+/// so nothing about the cause is flattened into a string on the way up.
+#[derive(Debug)]
+pub struct BuildFailures {
+    failures: Vec<miette::Report>,
+    not_started: usize,
+}
+
+impl BuildFailures {
+    /// `failures` must be non-empty and in build order; `not_started` is the
+    /// number of builds in later phases that were never attempted because of
+    /// them.
+    pub fn new(failures: Vec<miette::Report>, not_started: usize) -> Self {
+        assert!(
+            !failures.is_empty(),
+            "BuildFailures needs at least one failure"
+        );
+        Self {
+            failures,
+            not_started,
+        }
+    }
+
+    pub fn failures(&self) -> &[miette::Report] {
+        &self.failures
+    }
+}
+
+impl std::fmt::Display for BuildFailures {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} dependency builds failed:", self.failures.len())?;
+        for failure in &self.failures {
+            // `{:#}` is the whole cause chain, so a wrapped script error reads
+            // `lifecycle script postinstall failed for a@1.0.0: script
+            // `postinstall` exited with code 3` rather than its outer context
+            // alone.
+            write!(f, "\n  {failure:#}")?;
+        }
+        if self.not_started > 0 {
+            write!(
+                f,
+                "\n  {} build(s) in later phases were not started",
+                self.not_started
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for BuildFailures {}
+
+impl miette::Diagnostic for BuildFailures {
+    fn code<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
+        self.failures[0].code()
+    }
+}
+
+/// The exit code a failed script asks for, when `report` is one: the child's
+/// own status for a script that exited non-zero (a signal-killed child is
+/// `128 + signum`, see [`exit_code_from_status`]), or the first failure's for
+/// a [`BuildFailures`] aggregate. `None` for any other report, including a
+/// script that could not be spawned at all — those resolve through the exit
+/// table by code like every other diagnostic.
+///
+/// This is what puts the install and rebuild paths on the same contract as
+/// `run`, npm and pnpm: a `postinstall` that exits 3 makes the command exit
+/// 3. It only works while the typed [`Error`] is still reachable through
+/// `downcast_ref`, which `wrap_err` preserves and `miette!("{e}")` does not —
+/// every caller that reports a script failure wraps rather than formats.
+pub fn exit_code_for_report(report: &miette::Report) -> Option<i32> {
+    if let Some(Error::NonZeroExit { code, .. }) = report.downcast_ref::<Error>() {
+        return Some(*code);
+    }
+    report
+        .downcast_ref::<BuildFailures>()
+        .and_then(|failures| exit_code_for_report(&failures.failures[0]))
 }
 
 #[cfg(test)]

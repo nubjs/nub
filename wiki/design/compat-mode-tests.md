@@ -7,7 +7,7 @@ lat:
 
 The behaviors `--node` and `NODE_COMPAT` guarantee, each one mapped to the test that proves it. `lat check` fails if a spec below loses its test, so this file is a coverage map rather than a description. The mechanism itself is in [[architecture]].
 
-Compat mode is the escape hatch that makes augmentation safe to ship: a user who hits a divergence can turn the whole layer off and get their installed Node back. That makes these four properties load-bearing, and each is verified by a differential run rather than by inspection.
+Compat mode is the escape hatch that makes augmentation safe to ship: a user who hits a divergence can turn the whole layer off and get their installed Node back. That makes these five properties load-bearing, and each is verified by a differential run rather than by inspection.
 
 ## Flag form drops the augmentation layer
 
@@ -20,6 +20,12 @@ Version provisioning deliberately stays on in compat mode and is not asserted he
 A truthy `NODE_COMPAT` is the persistent form of `--node`, so it must force vanilla Node on a direct `nub <file>` run and through the `node` PATH hijack alike, while an unset variable leaves the default augmented.
 
 The hijack half is reached through an `argv0=node` symlink, so the test is Unix-only. `.env` eager-loading is again the discriminator.
+
+## A compat launch does not opt out a nested nub invocation
+
+A compat launch the user did not export as `NODE_COMPAT` — `--node`, or a plain `node` through the persistent shim — keeps bare `node` descendants vanilla, while a `nub` command started beneath it augments.
+
+The nested `nub` is a fresh invocation, so a bare `node` beneath it augments too rather than inheriting the outer launch. `process.versions.nub` is the discriminator.
 
 ## Compat mode never puts the loader in front of Node
 

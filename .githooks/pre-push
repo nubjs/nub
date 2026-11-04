@@ -279,6 +279,52 @@ $PUSH_REFS
 PUSHREFS
 fi
 
+# Every tracked Cargo.lock must still satisfy its manifest. ~1.4s warm, and only
+# when the pushed range touches a Cargo.toml or Cargo.lock.
+#
+# WHY THIS EXISTS: this repo has five tracked locks across four workspaces plus a
+# path dependency, and the local build steps all omit `--locked` and silently
+# re-resolve — so a stale lock produces no local signal at all and the first thing
+# that fails is a `--locked` step in CI, ~20 minutes after the push. A lock with no
+# CI gate is worse still: `crates/nub-phantom` had none until 2026-09-02 and its
+# lock named a crate the manifest no longer selected while every check stayed green.
+#
+# Only a genuine staleness verdict (exit 1) blocks. The checker deliberately
+# reports "unverified" and exits 0 when neither the crate cache nor the network can
+# answer, so a fresh worktree or an offline push warns instead of inventing a
+# dependency problem — the failure mode of the recipe this replaced.
+# Bypass: NUB_SKIP_LOCKFILE_CHECK=1 git push   ·   git push --no-verify
+if [ -z "${NUB_SKIP_LOCKFILE_CHECK:-}" ] && [ -n "$SKILLS_ROOT" ] \
+  && [ -x "$SKILLS_ROOT/scripts/check-lockfiles.sh" ]; then
+  locks_touched=0
+  while read -r _local_ref local_sha _remote_ref remote_sha; do
+    case "$local_sha" in *[!0]*) ;; *) continue ;; esac
+    case "$remote_sha" in
+      *[!0]*) base="$remote_sha" ;;
+      *) base=$(git merge-base "$local_sha" origin/main 2>/dev/null) ;;
+    esac
+    # An undecidable range runs the check rather than skipping it, matching the
+    # other gates: skipping costs a red CI round trip, running costs a second.
+    [ -n "$base" ] || { locks_touched=1; continue; }
+    changed=$(git diff --name-only "$base" "$local_sha" -- '*Cargo.toml' '*Cargo.lock' 2>/dev/null) || locks_touched=1
+    [ -n "$changed" ] && locks_touched=1
+  done <<PUSHREFS
+$PUSH_REFS
+PUSHREFS
+  if [ "$locks_touched" = 1 ]; then
+    (cd "$SKILLS_ROOT" && scripts/check-lockfiles.sh) >&2
+    lock_rc=$?
+    if [ "$lock_rc" = 1 ]; then
+      echo "pre-push: a Cargo.lock does not satisfy its manifest (see above)." >&2
+      echo "          Fix:  scripts/check-lockfiles.sh --fix   then commit the lock." >&2
+      echo "          Bypass: NUB_SKIP_LOCKFILE_CHECK=1" >&2
+      exit 1
+    elif [ "$lock_rc" != 0 ]; then
+      echo "pre-push: lockfile check could not run (exit $lock_rc); skipping." >&2
+    fi
+  fi
+fi
+
 [ "${NUB_SKIP_SITE_CHECK:-}" = "1" ] && exit 0
 
 ROOT="$SKILLS_ROOT"

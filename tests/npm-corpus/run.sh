@@ -14,6 +14,10 @@
 #                                         same commit with a cold cache. on-failure (default)
 #                                         classifies a red; always also records the wall-clock
 #                                         of both installs.
+#        MODE=install|npm-ci   install = `nub install --frozen-lockfile` (Nub's own layout and
+#                              build-script posture); npm-ci = exactly what the npm-ci GitHub
+#                              Action runs: `npm ci` routed onto the engine, hoisted layout,
+#                              every lifecycle script.
 #        WORK=<dir>   clone and install here (default: a fresh temp dir, removed on success)
 #        KEEP=1       keep the work dir
 set -uo pipefail
@@ -23,6 +27,8 @@ NUB_ARG="${1:?usage: run.sh <path-to-nub> [owner/repo ...]}"
 shift
 NUB="$(cd "$(dirname "$NUB_ARG")" && pwd)/$(basename "$NUB_ARG")"
 [ -x "$NUB" ] || { echo "error: nub binary not executable: $NUB" >&2; exit 2; }
+MODE="${MODE:-install}"
+case "$MODE" in install|npm-ci) ;; *) echo "error: MODE must be install or npm-ci" >&2; exit 2 ;; esac
 CONTROL="${CONTROL:-on-failure}"
 case "$CONTROL" in on-failure|always|never) ;; *) echo "error: CONTROL must be on-failure, always or never" >&2; exit 2 ;; esac
 KEEP="${KEEP:-0}"
@@ -60,12 +66,14 @@ for s in "${selected[@]}"; do
 done
 [ "${#entries[@]}" -gt 0 ] || { echo "error: nothing selected from corpus.tsv" >&2; exit 2; }
 
-expected_reason() { # expected_reason <repo> → prints the reason, exits 1 if unlisted
-  grep -v '^#' "$HERE/expected-failures.txt" | awk -v r="$1" '$1 == r { $1 = ""; sub(/^ /, ""); print; found = 1 } END { exit !found }'
+expected_reason() { # expected_reason <repo> → prints the reason, exits 1 if unlisted (for this MODE)
+  grep -v '^#' "$HERE/expected-failures.txt" | awk -v r="$1" -v m="$MODE" '
+    $1 == r && ($2 !~ /^mode=/ || $2 == "mode=" m) { $1 = ""; if ($2 ~ /^mode=/) $2 = ""; sub(/^ +/, ""); print; found = 1 }
+    END { exit !found }'
 }
 elapsed() { echo $(( $(date +%s) - $1 )); }
 
-echo "== npm corpus: ${#entries[@]} project(s), nub $("$NUB" --version 2>/dev/null | head -1), node $(node --version), control=$CONTROL =="
+echo "== npm corpus: ${#entries[@]} project(s), nub $("$NUB" --version 2>/dev/null | head -1), node $(node --version), mode=$MODE, control=$CONTROL =="
 fails=0; stale=0; envreds=0; passes=0; xfails=0
 RESULTS=()
 for entry in "${entries[@]}"; do
@@ -88,7 +96,20 @@ for entry in "${entries[@]}"; do
 
   nub_log="$WORK/$name.nub.log"
   t0=$(date +%s)
-  ( cd "$dir" && "${TIMEOUT[@]}" "$NUB" install --frozen-lockfile ) > "$nub_log" 2>&1; rc=$?
+  if [ "$MODE" = npm-ci ]; then
+    # The npm-ci action's command: the shim's routed install (enabled by the marker the
+    # action writes) with npm's contract — hoisted layout, every lifecycle script.
+    mkdir -p "$XDG_DATA_HOME/nub/shims" && : > "$XDG_DATA_HOME/nub/shims/.route-installs"
+    ( cd "$dir" && env -u npm_config_user_agent -u npm_execpath npm_config_node_linker=hoisted __NUB_ARGV0=npm "${TIMEOUT[@]}" "$NUB" ci ) > "$nub_log" 2>&1; rc=$?
+    [ "$rc" -ne 0 ] || [ -f "$dir/node_modules/.modules.yaml" ] || { echo "  the routed npm ci did not run on Nub's engine" >> "$nub_log"; rc=1; }
+    # npm runs lifecycle scripts with the node on PATH and downloads nothing; a project
+    # pinned to a Node this runner lacks must not make the routed install provision one.
+    if [ "$rc" -eq 0 ] && grep -qE 'Installing from nodejs\.org|Using Node\.js .* \(resolved from' "$nub_log"; then
+      echo "  the routed npm ci provisioned or switched Node for a lifecycle script" >> "$nub_log"; rc=1
+    fi
+  else
+    ( cd "$dir" && "${TIMEOUT[@]}" "$NUB" install --frozen-lockfile ) > "$nub_log" 2>&1; rc=$?
+  fi
   nub_s=$(elapsed "$t0")
   stage="install"
   if [ "$rc" -eq 0 ]; then

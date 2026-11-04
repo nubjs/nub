@@ -116,10 +116,11 @@ fs.existsSync(path.join(globalNm, ...platName.split("/"), "bin", `nub${exe}`))
 
 const binHome = isWin ? prefix : path.join(prefix, "bin");
 const listing = fs.existsSync(binHome) ? fs.readdirSync(binHome) : [];
-console.log(`  (generated shims: ${listing.filter((f) => /^nubx?(\.|$)/.test(f)).join(", ") || "none"})`);
+console.log(`  (generated shims: ${listing.filter((f) => /^nub[xr]?(\.|$)/.test(f)).join(", ") || "none"})`);
 
 // ── dispatch through npm's OWN shims, on PATH ─────────────────────────────────────
 const NUBX_MARK = "Run a tool from";
+const NUBR_MARK = "run TypeScript on Node";
 const NUB_MARK = "all-in-one";
 const env = { ...process.env, PATH: `${binHome}${path.delimiter}${process.env.PATH}` };
 // `shell: true` is how a human's cmd.exe resolves `nub` -> nub.cmd; direct spawn of a
@@ -128,7 +129,7 @@ const viaShim = (verb) => {
   const r = spawnSync(`${verb} --help`, { shell: true, encoding: "utf8", env, cwd: root });
   return `${r.stdout ?? ""}${r.stderr ?? ""}`;
 };
-for (const [verb, mark, label] of [["nub", NUB_MARK, "nub"], ["nubx", NUBX_MARK, "nubx"]]) {
+for (const [verb, mark, label] of [["nub", NUB_MARK, "nub"], ["nubx", NUBX_MARK, "nubx"], ["nubr", NUBR_MARK, "nubr"]]) {
   const out = viaShim(verb);
   if (out.includes(mark)) { ok(`${verb} via npm's generated shim on PATH -> ${label} mode`); continue; }
   no(`${verb} via shim -> wrong: ${out.replace(/\s+/g, " ").trim().slice(0, 120)}`);

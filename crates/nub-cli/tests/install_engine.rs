@@ -1255,6 +1255,57 @@ fn approved_build_that_never_calls_node_gyp_installs_with_no_registry() {
     );
 }
 
+/// nubjs/nub#670: several failed dependency builds are ALL reported, in build
+/// order, and the install exits with the first failing script's own exit code
+/// — the contract npm, pnpm and `nub run` already keep. Pinned through the
+/// real binary because the exit code is resolved in nub's presentation layer,
+/// which the engine's own e2e suite never exercises.
+#[test]
+fn failed_dependency_builds_are_all_reported_and_exit_with_the_first_scripts_code() {
+    let dir = pm_tmpdir("many-failed-builds");
+    for (name, code) in [("failing-a", 3), ("failing-b", 4), ("failing-c", 7)] {
+        let dep = dir.join(name);
+        std::fs::create_dir_all(&dep).unwrap();
+        // `exit N` is spelled the same for sh and cmd.exe.
+        std::fs::write(
+            dep.join("package.json"),
+            format!(
+                r#"{{"name":"{name}","version":"1.0.0","scripts":{{"postinstall":"exit {code}"}}}}"#
+            ),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"app","version":"1.0.0","private":true,"dependencies":{"failing-a":"file:./failing-a","failing-b":"file:./failing-b","failing-c":"file:./failing-c"},"allowScripts":{"failing-a@file:./failing-a":true,"failing-b@file:./failing-b":true,"failing-c@file:./failing-c":true}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(".npmrc"),
+        "registry=http://127.0.0.1:1/\nfetch-retries=0\n",
+    )
+    .unwrap();
+
+    let (_, stderr, code) = run_install(&dir, &["install"]);
+    assert_eq!(
+        code, 3,
+        "the first failing script's exit code (3) must be the install's, not a generic 1 or the table's 50: {stderr}"
+    );
+    for expected in [
+        "3 dependency builds failed",
+        "failing-a@1.0.0",
+        "exited with code 4",
+        "failing-b@1.0.0",
+        "exited with code 7",
+        "failing-c@1.0.0",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "every failed build must be named with its code; missing {expected:?}: {stderr}"
+        );
+    }
+}
+
 /// `jailBuilds` is the one case the lazy shim cannot serve on its own: the jail
 /// clears the environment and substitutes a temporary HOME, so a shim re-entry
 /// resolves the tool dir under *that* home, finds nothing, and cannot refetch
@@ -1466,6 +1517,63 @@ fn ci_dep_axis_flags_select_which_dependency_sets_link() {
         dir.join("node_modules/prod-pkg").exists() && dir.join("node_modules/dev-pkg").exists(),
         "bare `ci` must link both dep sets: {err}"
     );
+}
+
+/// Two projects whose `file:` dependencies share a relative path — a tarball
+/// and a directory — but not their contents must each install their OWN
+/// files from one shared store. A local package's dep path hashes its
+/// relative path, so a store cache keyed by it handed the second project the
+/// first project's files with no error.
+///
+/// The store is shared across the two installs on purpose; offline, since
+/// both dependencies are written by the test.
+#[test]
+fn file_deps_at_the_same_relative_path_install_their_own_content() {
+    let root = pm_tmpdir("file-dep-content");
+    let store = pm_tmpdir("file-dep-content-store");
+    let cache = pm_tmpdir("file-dep-content-cache");
+    for project in ["a", "b"] {
+        let side = root.join(project);
+        for (name, dir) in [("tgz-dep", "tgz-src/package"), ("dir-dep", "dir-dep")] {
+            let pkg = side.join(dir);
+            std::fs::create_dir_all(&pkg).unwrap();
+            std::fs::write(
+                pkg.join("package.json"),
+                format!(r#"{{"name":"{name}","version":"1.0.0"}}"#),
+            )
+            .unwrap();
+            std::fs::write(
+                pkg.join("index.js"),
+                format!("module.exports='{project}'\n"),
+            )
+            .unwrap();
+        }
+        let status = Command::new("tar")
+            .args(["-czf", "../p.tgz", "package"])
+            .current_dir(side.join("tgz-src"))
+            .status()
+            .expect("failed to spawn tar");
+        assert!(status.success(), "tar must pack the fixture tarball");
+        let proj = side.join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("package.json"),
+            r#"{"name":"app","private":true,"dependencies":{"tgz-dep":"file:../p.tgz","dir-dep":"file:../dir-dep"}}"#,
+        )
+        .unwrap();
+
+        let (err, code) = run_install_in_store(&proj, &store, &cache, &["install"]);
+        assert_eq!(code, 0, "install in project {project} must succeed: {err}");
+        for dep in ["tgz-dep", "dir-dep"] {
+            let got = std::fs::read_to_string(proj.join("node_modules").join(dep).join("index.js"))
+                .unwrap();
+            assert_eq!(
+                got,
+                format!("module.exports='{project}'\n"),
+                "project {project} must get its own {dep} content"
+            );
+        }
+    }
 }
 
 /// `--os`/`--cpu` select which platform-specific optional deps get installed,
@@ -2181,5 +2289,48 @@ fn install_tolerates_a_tsconfig_whose_extends_target_is_not_installed_yet() {
     assert!(
         !err.contains("tsconfig"),
         "the install must not report the tsconfig it does not need: {err}"
+    );
+}
+
+/// The lifecycle script is what makes the `extends` target exist — sveltekit's
+/// `prepare: svelte-kit sync` writes the `./.svelte-kit/tsconfig.json` its config
+/// extends. The script's `node` is nub's PATH shim, which re-derives its own
+/// options, so the tolerant gate has to reach it or the script dies on the
+/// missing target before it can write it (#804). The script is TypeScript so the
+/// addon in that child reads the same config, and stays as quiet as the verb.
+#[test]
+fn a_lifecycle_script_can_generate_the_tsconfig_extends_target() {
+    let dir = pm_tmpdir("tsconfig-extends-generated");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"extends-generated","version":"1.0.0","scripts":{"prepare":"node prepare.ts"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("prepare.ts"),
+        r#"import fs from "node:fs";
+const target: string = ".svelte-kit/tsconfig.json";
+fs.mkdirSync(".svelte-kit", { recursive: true });
+fs.writeFileSync(target, JSON.stringify({ compilerOptions: { strict: true } }));"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("tsconfig.json"),
+        r#"{"extends":"./.svelte-kit/tsconfig.json"}"#,
+    )
+    .unwrap();
+
+    let (out, err, code) = run_install(&dir, &["install"]);
+    assert_eq!(
+        code, 0,
+        "prepare must run past the missing target: {out}\n{err}"
+    );
+    assert!(
+        dir.join(".svelte-kit/tsconfig.json").is_file(),
+        "prepare should have generated the extends target: {out}\n{err}"
+    );
+    assert!(
+        !err.contains("tsconfig"),
+        "the install must not report the tsconfig the script generates: {err}"
     );
 }

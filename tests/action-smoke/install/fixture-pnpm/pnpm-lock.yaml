@@ -1,0 +1,31 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      is-number:
+        specifier: 7.0.0
+        version: 7.0.0
+      local-dep:
+        specifier: file:local-dep
+        version: file:local-dep
+
+packages:
+
+  is-number@7.0.0:
+    resolution: {integrity: sha512-41Cifkg6e8TylSpdtTpeLVMqvSBEVzTttHvERD741+pnZ8ANv0004MRL43QKPDlK9cGvNp6NZWZUBlbGXYxxng==}
+    engines: {node: '>=0.12.0'}
+
+  local-dep@file:local-dep:
+    resolution: {directory: local-dep, type: directory}
+
+snapshots:
+
+  is-number@7.0.0: {}
+
+  local-dep@file:local-dep: {}

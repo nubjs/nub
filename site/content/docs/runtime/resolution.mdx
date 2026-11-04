@@ -181,18 +181,20 @@ Every resolution in the project matches against them, a bare-specifier [preload]
 
 ### The Nub condition
 
-The Nub CLI matches a `nub` condition on every run it augments, so a package that publishes a branch for it resolves there. The name follows the same [runtime keys](https://runtime-keys.proposal.wintertc.org/) convention `bun`, `deno` and `workerd` use.
+The Nub CLI matches a `nub` condition on every run it augments, so a package that publishes a branch for it resolves there. It works the same way as the `bun` and `deno` conditions those runtimes set.
 
 ```json title="node_modules/example/package.json"
 {
   "exports": {
     ".": {
-      "nub": "./src/index.ts",
+      "nub": "./dist/nub.js",
       "default": "./dist/index.js"
     }
   }
 }
 ```
+
+Point the branch at JavaScript. Files inside `node_modules` are [never transpiled](/docs/runtime/typescript), so a TypeScript target fails to load under Nub.
 
 Two runs do not match it. Passing `--node` runs with Node's own conditions and nothing else, and the standalone [runner](https://www.npmjs.com/package/@nubjs/runner) leaves Node's condition set alone so a file resolves the same way under it as under tsx. Both fall through to `default`.
 

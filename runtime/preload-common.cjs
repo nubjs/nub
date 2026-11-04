@@ -22,7 +22,7 @@ const getBuiltin = typeof compileBootstrap?.getBuiltin === "function"
 const module_ = getBuiltin("node:module");
 const { readdirSync, existsSync } = getBuiltin("node:fs");
 const { fileURLToPath, pathToFileURL } = getBuiltin("node:url");
-const { join, dirname, extname: pathExtname } = getBuiltin("node:path");
+const { join, dirname, extname: pathExtname, resolve: pathResolve } = getBuiltin("node:path");
 
 // Hide nub's ARGV-only V8 flags from `process.execArgv`, FIRST — before any user
 // code, and before anything here can hand the array out.
@@ -648,6 +648,9 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
   installUserAsyncLoaderDetector();
 
   function resolve(specifier, context, nextResolve) {
+    // The fetch-handler pass tells the entry's own load from a preload's import of
+    // the same file by Node resolving it first as the main, with no parent.
+    noteEntryResolve(specifier, context);
     const r = core.resolveSpec(specifier, context.parentURL);
     if (r) return r;
     // Yarn PnP (ESM): PnP doesn't patch the ESM loader, so `import` of a PnP dep must
@@ -717,6 +720,8 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
   // `noteRuntimeV8FlagSource`. A no-op (one null check) unless the spawn layer armed
   // a flag for this Node.
   function load(url, context, nextLoad) {
+    // The fetch-handler pass may be waiting for Node to start loading the entry.
+    noteEntryLoad(url);
     return core.noteRuntimeV8FlagSource(loadInner(url, context, nextLoad));
   }
 
@@ -1758,48 +1763,103 @@ function installVersionMarker() {
 }
 
 // ── libuv threadpool policy ──────────────────────────────────────────
-// The launcher sized the pool (`UV_THREADPOOL_SIZE = max(4, cores)`, spawn.rs) and
-// Node read it at startup, so the variable has done its work for THIS process.
-// Two things remain, both about the cores the extra threads would take:
+// The launcher sized the pool (`UV_THREADPOOL_SIZE = max(4, cores)`, spawn.rs) by
+// putting the variable in the environment, and libuv reads it LAZILY, at the first
+// pool use. Three things remain:
 //
-//  1. Children keep Node's default. A `cluster` or PM2 fork, or any `child_process`
+//  1. The program may still choose its own size. Under plain Node an assignment
+//     to `process.env.UV_THREADPOOL_SIZE` before the first pool use sizes the pool
+//     (a `process.env` write reaches the C environment), so on the fast tier the
+//     pool is NOT built here: the addon's `onFirstLoopTurn` settles it at the
+//     event loop's first turn, after the entry's synchronous top level, and
+//     whichever pool use comes first reads the environment as the program left
+//     it. Until then nub's value is visible to the program, as an exported value
+//     would be, so a program that only fills the variable in when it is unset
+//     defers to it. A program that set or removed it owns the pool, and nub
+//     leaves it be. Every way JS has to run later is itself visible to user code
+//     (see the addon's threadpool.rs), hence the native hook. The compat tier's
+//     `--import` preload is read through the pool, which therefore already
+//     exists, so there it is settled at once. So is a Linux pool whose workers
+//     libuv does not name (before 1.50): a pool the program built first could not
+//     be told apart from its other threads, and nothing would be demoted.
+//  2. Children keep Node's default. A `cluster` or PM2 fork, or any `child_process`
 //     spawn, inherits `process.env`; N workers each carrying a cores-sized pool is
 //     the oversubscription Node's own maintainers closed nodejs/node#61533 over.
-//     So nub's OWN value is deleted from `process.env`. Ownership is two markers
-//     the launcher stamps (spawn.rs `RestorableVar`): the value equals the
-//     `__NUB_AUGMENTED_*` record of what the launcher handed Node, AND the compat
-//     presence mask says the variable was ABSENT before the outermost nub ran (bit
-//     1 << 5 is this variable's slot). A shell value, an env-file value, or a value
-//     the launcher merely passed through fails one of the two and inherits as it
-//     would under plain Node. The markers themselves stay, which is how a nested
-//     `nub` knows to size its child again. libuv reads the variable LAZILY, at the
-//     first pool use, and a `process.env` delete reaches the C environment, so the
-//     pool is created (one `fs.access`) before the variable goes; otherwise libuv
-//     would find nothing and build Node's four. A pool of four is Node's default,
-//     so the variable goes at once and nothing is demoted.
-//  2. The threads beyond Node's four run at a lower priority on Linux, so they only
+//     So once the pool exists nub's OWN value is deleted from `process.env`. A
+//     child spawned before then inherits it, so this process first marks the
+//     value taken (THREADPOOL_TAKEN_ENV), and a preload that finds the mark
+//     deletes the value before its own first pool use. The ownership markers
+//     stay, which is how a nested `nub` knows to size its child again; it sheds
+//     the taken mark with the rest of the parent's (spawn.rs). Ownership is
+//     two markers the launcher stamps (spawn.rs `RestorableVar`): the value equals
+//     the `__NUB_AUGMENTED_*` record of what the launcher handed Node, AND the
+//     compat presence mask says the variable was ABSENT before the outermost nub
+//     ran (bit 1 << 5 is this variable's slot). A shell value, an env-file value,
+//     or a value the launcher merely passed through fails one of the two and
+//     inherits as it would under plain Node. A pool of four is Node's default, so
+//     the variable goes at once and nothing is demoted.
+//  3. The threads beyond Node's four run at a lower priority on Linux, so they only
 //     take cycles nothing else on the box wants (Chromium's best-effort tier, nice
 //     10). Measured on 16 vCPU beside twelve busy processes: the neighbours keep
 //     98.6% of their CPU instead of 92.5%, the server still gains 20% over four
 //     threads, and an idle box loses nothing. libuv creates every worker
-//     synchronously inside the first pool submit, so one `fs.access` call makes
-//     them all exist (`access` never takes the io_uring path that lets stat, read
-//     and open skip the pool); the new thread ids (or the `libuv-worker` name) name
-//     them, and `os.setPriority(tid)` targets one thread on Linux. The thread ids
-//     are exact only across the call that builds the pool: the fast tier's
-//     `--require` preload runs before any pool use and builds it here, but the
-//     compat tier's `--import` preload is itself read through the pool, so the
-//     launcher `--require`s threadpool-snapshot.cjs ahead of it to build the pool
+//     synchronously inside the first pool submit, so one submit makes them all
+//     exist; the new thread ids (or the `libuv-worker` name, for a pool the
+//     program built first) name them, and `os.setPriority(tid)` targets one thread
+//     on Linux. On the compat tier the launcher `--require`s
+//     threadpool-snapshot.cjs ahead of the `--import` preload to build the pool
 //     and record its threads there.
+//
+// The submit is the addon's `warmThreadpool`: one no-op task on a private libuv
+// loop, run to completion inside the call, so nothing is left on Node's loop for
+// user code to see. A JS submit (`fs.access`) completes AFTER user code has
+// started: its callback is a `before` for an id `async_hooks` never saw born,
+// `process.getActiveResourcesInfo()` lists it, and the loop stays alive one turn
+// longer than plain Node's, which fires an unref'd `setImmediate`. Node's own
+// suite asserts on all three (49 files). `fs.access` remains the fallback when
+// the addon is absent, because it never takes libuv's io_uring path, which stat,
+// read and open do where io_uring is on (Node 20.3–20.11.0 by default, opt-in
+// since), building no pool at all.
 const THREADPOOL_ENV = "UV_THREADPOOL_SIZE";
 const THREADPOOL_MARK_ENV = "__NUB_AUGMENTED_UV_THREADPOOL_SIZE";
+const THREADPOOL_TAKEN_ENV = "__NUB_UV_THREADPOOL_SIZE_TAKEN";
 const COMPAT_PRESENT_ENV = "__NUB_COMPAT_PRESENT";
 const THREADPOOL_PRESENT_BIT = 1 << 5;
 const THREADPOOL_NODE_DEFAULT = 4;
 const THREADPOOL_EXTRA_NICE = 10;
 const THREADPOOL_WORKERS = Symbol.for("nub.threadpool.workers");
 
-function installThreadpoolPolicy() {
+// The addon that owns the submit, or null where it cannot be loaded. It is the
+// sibling transform-core loads moments later, through the same filename, so Node's
+// module cache hands out one instance. Loaded BEFORE the thread-id snapshot around
+// the submit: loading it starts threads of its own (a native runtime's pool), and a
+// snapshot that spans the load counts those among the pool's workers — measured on
+// an 8-core Linux box as every worker demoted, and its first four spared instead.
+function loadNativeAddon() {
+  try {
+    const addon = require(require("node:path").join(__dirname, "addons", "nub-native.node"));
+    return typeof addon.warmThreadpool === "function" ? addon : null;
+  } catch {
+    return null;
+  }
+}
+
+// One pool submit, and nothing else: the addon's private-loop task, or `fs.access`
+// when the addon is missing.
+function buildThreadpool(addon) {
+  if (addon !== null && addon.warmThreadpool()) return;
+  require("node:fs").access("/", () => {});
+}
+
+// libuv names its workers `libuv-worker` from 1.50.
+function libuvNamesWorkers() {
+  const [major, minor] = process.versions.uv.split(".").map(Number);
+  return major > 1 || (major === 1 && minor >= 50);
+}
+
+// `deferred`: the caller is the fast tier's `--require` preload, which runs before
+// anything has used the pool.
+function installThreadpoolPolicy(deferred) {
   const size = process.env[THREADPOOL_ENV];
   if (size === undefined || size !== process.env[THREADPOOL_MARK_ENV]) return;
   if ((Number(process.env[COMPAT_PRESENT_ENV]) || 0) & THREADPOOL_PRESENT_BIT) return;
@@ -1813,32 +1873,555 @@ function installThreadpoolPolicy() {
     // The `--require` preload re-runs inside every loader worker; the pool is
     // process-wide, so only the main thread touches it.
     if (!require("node:worker_threads").isMainThread) return;
-    const fs = require("node:fs");
+    if (process.env[THREADPOOL_TAKEN_ENV] !== undefined) {
+      // Inherited from a process that had not yet settled its own pool.
+      delete process.env[THREADPOOL_ENV];
+      delete process.env[THREADPOOL_TAKEN_ENV];
+      return;
+    }
     const linux = process.platform === "linux";
-    const tids = () => fs.readdirSync("/proc/self/task").map(Number).filter(Boolean);
-    let workers = linux ? process[THREADPOOL_WORKERS] : undefined;
-    if (workers === undefined) {
-      const before = linux ? new Set(tids()) : null;
-      fs.access("/", () => {});
-      const isWorker = (t) => {
-        if (!before.has(t)) return true;
-        try {
-          return fs.readFileSync(`/proc/self/task/${t}/comm`, "latin1").trim() === "libuv-worker";
-        } catch {
-          return false;
-        }
-      };
-      if (linux) workers = tids().filter(isWorker);
+    const workers = linux ? process[THREADPOOL_WORKERS] : undefined;
+    const addon = workers === undefined ? loadNativeAddon() : null;
+    if (
+      deferred &&
+      typeof addon?.onFirstLoopTurn === "function" &&
+      (!linux || libuvNamesWorkers())
+    ) {
+      process.env[THREADPOOL_TAKEN_ENV] = "1";
+      if (addon.onFirstLoopTurn(() => settleThreadpool(addon, size))) return;
+      delete process.env[THREADPOOL_TAKEN_ENV];
     }
-    delete process.env[THREADPOOL_ENV];
-    if (!linux) return;
-    const os = require("node:os");
-    for (const t of workers.sort((a, b) => a - b).slice(THREADPOOL_NODE_DEFAULT)) {
-      try {
-        os.setPriority(t, THREADPOOL_EXTRA_NICE);
-      } catch {}
-    }
+    releaseThreadpool(addon, workers);
   } catch {}
+}
+
+// The deferred half: the first loop turn has come, so the entry's top level has run.
+function settleThreadpool(addon, size) {
+  try {
+    delete process.env[THREADPOOL_TAKEN_ENV];
+    if (process.env[THREADPOOL_ENV] !== size) return;
+    releaseThreadpool(addon, undefined);
+  } catch {}
+}
+
+// Build the pool unless something already has, THEN take nub's value out of
+// `process.env`: libuv reads the variable at the first submit, and a delete reaches
+// the C environment, so a pool built after it would be Node's four. On Linux, demote
+// the workers beyond four.
+function releaseThreadpool(addon, workers) {
+  const fs = require("node:fs");
+  const linux = process.platform === "linux";
+  const tids = () => fs.readdirSync("/proc/self/task").map(Number).filter(Boolean);
+  if (workers === undefined) {
+    const before = linux ? new Set(tids()) : null;
+    buildThreadpool(addon);
+    const isWorker = (t) => {
+      if (!before.has(t)) return true;
+      try {
+        return fs.readFileSync(`/proc/self/task/${t}/comm`, "latin1").trim() === "libuv-worker";
+      } catch {
+        return false;
+      }
+    };
+    if (linux) workers = tids().filter(isWorker);
+  }
+  delete process.env[THREADPOOL_ENV];
+  if (!linux) return;
+  const os = require("node:os");
+  for (const t of workers.sort((a, b) => a - b).slice(THREADPOOL_NODE_DEFAULT)) {
+    try {
+      os.setPriority(t, THREADPOOL_EXTRA_NICE);
+    } catch {}
+  }
+}
+
+// ── Default-export `fetch` handler (the auto-listener) ───────────────
+// An entry whose default export is an object with a `fetch` method is served over
+// HTTP rather than merely evaluated — the handler shape Cloudflare Workers, Bun,
+// Deno (`deno serve`) and Vercel converge on, so the same file runs on all of them
+// and under `nub <file>`. The shape of the user's own module is the whole gate: a
+// file without it runs and exits byte-for-byte as it does on plain Node, which is
+// what keeps this additive.
+//
+// The launcher sets SERVE_ENTRY_ENV for a top-level `nub <file>` and `nub watch`
+// only (never `--node`, never a bin launch, never the `node` hijack), and the
+// application's preload DELETES it before any user code runs. That delete is the
+// whole containment: a `child_process` spawn or a Worker copies `process.env` after
+// it is gone, so a server entry that forks a worker pool does not hand every worker
+// its own listener — no `worker_threads` probe needed here to tell the realms apart.
+// A launched process that never runs nub's preload cannot delete it. A test runner on
+// the compat tier is one, and `nodeRunsArgvAsProgram` answers for its children.
+//
+// Its value is the launcher's argv as a JSON array, and that is what makes "the
+// application's preload" a process this code can identify: see `markedLaunchFlags`.
+const SERVE_ENTRY_ENV = "__NUB_SERVE_ENTRY";
+
+// The entry this process was marked to serve, from `claimServeEntry` on: the file as
+// Node resolved it, the URLs a load hook may see it under, whether a preload may
+// still follow nub's own, and the state the late pass waits on — whether a hook has
+// seen Node resolve the entry as its main and then start loading it, the URL it saw
+// it loaded under, and what to run when one does. Null in every process that is not
+// the marked application.
+let serveEntry = null;
+
+// FIRST in each preload entry, before any user code — the configured preload chain
+// included: consume the marker, so nothing the user wrote ever sees it, and resolve
+// the entry, so the hooks know which URL announces it — unless Node is in a mode that
+// never runs it (`nodeRunsArgvAsProgram`). Arming the pass itself waits for
+// `installServeEntry`, at the very end of the preload.
+function claimServeEntry() {
+  const marker = process.env[SERVE_ENTRY_ENV];
+  if (marker === undefined) return;
+  const launchFlags = markedLaunchFlags(marker);
+  if (launchFlags === null) return;
+  delete process.env[SERVE_ENTRY_ENV];
+  if (!nodeRunsArgvAsProgram(launchFlags)) return;
+  const file = mainEntryPath();
+  if (!file) return;
+  serveEntry = {
+    file,
+    urls: entryUrls(file),
+    mayFollow: anotherPreloadMayFollow(),
+    taken: false,
+    mainResolved: false,
+    loadSeen: false,
+    loadUrl: null,
+    onLoad: null,
+    channel: null,
+  };
+}
+
+// NEVER START THE ENTRY OURSELVES BEFORE NODE WOULD HAVE. The inspection below can
+// reach the entry through `import()`, and an `import()` that lands while a preload is
+// still pending EVALUATES THE ENTRY EARLY — ahead of the very preloads that exist to
+// set its realm up. That is not theoretical: a single `setImmediate` here put the
+// entry between two chained preload entries on Node 18.19 and 20.11, which is exactly
+// the additivity guarantee this feature is supposed to preserve. So the pass runs on
+// three triggers, none of which can get there first:
+//
+//   1. The first pass, which reads a CommonJS entry straight off `process.mainModule`
+//      and imports NOTHING. It may only `import()` when no preload can still follow
+//      nub's own (`anotherPreloadMayFollow`), or when a hook has already seen Node
+//      start loading the entry. WHEN it runs differs by tier, and the difference is
+//      what user code can see of it. A `--require` preload runs before Node calls
+//      `Module.runMain`, which loads a CommonJS entry synchronously, so the fast tier
+//      wraps that call once and runs the pass as it returns: a CommonJS entry is
+//      inspected in the same tick, with no timer, request or promise left for the
+//      program to observe — `async_hooks` sees no `before` it never saw an `init` for,
+//      `process.getActiveResourcesInfo()` is empty as under plain Node, and the loop
+//      does not turn an extra time (which ran an unref'd `setImmediate` plain Node
+//      never would; Node's own suite asserts on each). An ES module entry has only
+//      been started by then, so its pass is a microtask, which Node's own loader
+//      already leaves such an entry a dozen of. The compat tier's `--import` preload
+//      runs inside `runMain`, after it, so a `setImmediate` still carries its pass:
+//      a microtask queued there would run ahead of Node's own import of the entry.
+//      Neither is `.unref()`d or skippable: a synchronous script must still reach
+//      the pass, or a server whose module body does nothing asynchronous would exit
+//      before binding.
+//   2. The load hook seeing the entry (`noteEntryLoad`): Node imports the entry only
+//      after awaiting the last `--import`, so by then every preload has run and an
+//      `import()` can only join the job Node already made. This fires whatever the
+//      loop is doing, which is what serves a handler whose preload or module body
+//      holds a timer, a socket or a Worker for good.
+//   3. `beforeExit`, for the hook configuration in which nub's hooks never see the
+//      entry at all — a foreign resolve hook that rewrites the entry's URL, say. It
+//      fires only once the loop drains, so it is the last resort and never the only
+//      one.
+//
+// Nothing here holds the loop open to wait for trigger 2. The loader worker's channel
+// stays unreferenced: a loop the entry or a preload keeps alive delivers its message
+// regardless, and a loop that drains reaches trigger 3, which inspects the entry
+// without it. Referencing the port instead held EVERY process whose hooks never saw
+// the entry's URL open for good, a finished plain script included.
+//
+// Declining to serve remains the right side to fail on where none of the three can
+// fire: reordering a user's preloads is a correctness break, and not binding a port
+// is not.
+function installServeEntry(beforeMain) {
+  const entry = serveEntry;
+  if (entry === null) return;
+  const report = (err) => {
+    // A throwing entry is handled inside, so nothing here is expected to reject and
+    // anything that does is nub's own defect, named as such. Leaving the promise
+    // unhandled instead would change the process's exit path.
+    process.stderr.write(`nub: could not inspect the entry for a fetch handler: ${err}\n`);
+  };
+  // Whichever late trigger fires, the other is withdrawn with it, so the process
+  // carries neither once the entry has been inspected.
+  const late = () => {
+    process.removeListener("beforeExit", late);
+    return serveEntryIfHandler(entry, true).then(() => closeEntryChannel(entry)).catch(report);
+  };
+  const pass = () =>
+    serveEntryIfHandler(entry, entry.loadSeen || !entry.mayFollow)
+      .then((deferred) => {
+        if (!deferred) {
+          closeEntryChannel(entry);
+          return;
+        }
+        // Registered ONLY when the pass above declined for want of permission to
+        // import — never on an ordinary run. A `beforeExit` listener added up front
+        // is observable to the user's own code (`process.listenerCount("beforeExit")`
+        // reads 1 where plain Node reads 0), and an unconditional one made every
+        // `nub <file>` run carry it.
+        entry.onLoad = late;
+        if (entry.loadSeen) fireEntryLoad(entry);
+        process.once("beforeExit", late);
+      })
+      .catch(report);
+  if (!beforeMain) {
+    setImmediate(pass);
+    return;
+  }
+  const runMain = module_.runMain;
+  if (typeof runMain !== "function") return;
+  // Node reads `Module.runMain` at the call, for exactly this kind of wrap. Restored
+  // as it runs: one entry, one pass. An entry that throws propagates out of the call
+  // as it would have, uninspected. A later preload that REPLACES the property rather
+  // than wrapping it withdraws the pass with it, and the entry goes unserved: the
+  // declining side, by the rule above, and the only alternative would be a resource
+  // every ordinary run carried.
+  module_.runMain = function (...args) {
+    module_.runMain = runMain;
+    const result = runMain.apply(this, args);
+    let served;
+    try {
+      served = serveMainModuleIfHandler(entry);
+    } catch (err) {
+      report(err);
+      return result;
+    }
+    if (served) closeEntryChannel(entry);
+    else Promise.resolve().then(pass);
+    return result;
+  };
+}
+
+// The URLs a load hook may see the entry under, matched without query or fragment.
+// Node's ESM resolver hands the hook the realpath unless symlinks are preserved, and
+// `_findPath` has usually resolved it already — so both spellings are watched rather
+// than guessing which one applies. A foreign resolve hook may add a query — the
+// cache-busting `?v=…` a hot-reload loader appends — and that is still the entry;
+// one that points the entry at another file has made it a different module, and
+// no URL of ours will ever name it.
+function entryUrls(file) {
+  const urls = new Set([pathToFileURL(file).href]);
+  try {
+    urls.add(pathToFileURL(getBuiltin("node:fs").realpathSync(file)).href);
+  } catch { /* unreadable — the unresolved spelling still matches Node's own */ }
+  return urls;
+}
+
+// A resolve hook saw Node resolve `specifier` with no parent, which is how Node
+// imports its main entry and nothing else — a preload's `import()` of the same file
+// carries the preload as its parent. Only a load AFTER this can be the entry's own:
+// a preload that imports `./entry.mjs?warm` ahead of the program would otherwise
+// be taken for it, and the pass would serve that module's handler while Node went
+// on to evaluate the real entry as a second one. Called from the fast tier's
+// synchronous hook; the compat tier's loader worker keeps the same note itself.
+function noteEntryResolve(specifier, context) {
+  const entry = serveEntry;
+  if (entry === null || entry.mainResolved || context.parentURL !== undefined) return;
+  if (entry.urls.has(withoutQuery(String(specifier)))) entry.mainResolved = true;
+}
+
+// A load hook saw Node start loading `url`. Called from the fast tier's synchronous
+// hook for every load, and from the compat tier's loader worker over the channel
+// `loaderWorkerOptions` hands it. Free in every process but the marked application.
+function noteEntryLoad(url) {
+  const entry = serveEntry;
+  if (entry === null || !entry.mainResolved || entry.loadSeen) return;
+  if (!entry.urls.has(withoutQuery(url))) return;
+  entry.loadSeen = true;
+  entry.loadUrl = url;
+  fireEntryLoad(entry);
+}
+
+function withoutQuery(url) {
+  const cut = url.search(/[?#]/);
+  return cut < 0 ? url : url.slice(0, cut);
+}
+
+function fireEntryLoad(entry) {
+  const onLoad = entry.onLoad;
+  if (onLoad === null) return;
+  entry.onLoad = null;
+  // Out of the hook's own stack: the sync hook runs INSIDE Node's load of the entry,
+  // and an `import()` issued from there would re-enter the loader. A microtask, not
+  // an immediate: Node has the entry's job by the time the stack unwinds, so the
+  // `import()` joins it, and this is only ever reached after the first pass declined
+  // to import — an entry on the ES-module loader's path, which Node's own loader
+  // already leaves promise reactions of its own behind on.
+  Promise.resolve().then(onLoad);
+}
+
+// For `registerLoaderWorker`, on the tiers whose hooks run in a loader worker: the
+// port that worker announces the entry's load on, or nothing. Created only when the
+// pass will have to wait for that announcement, because the port is a handle the
+// process carries until the entry loads and an ordinary run should carry nothing.
+function loaderWorkerOptions() {
+  const entry = serveEntry;
+  if (entry === null || !entry.mayFollow) return undefined;
+  const { MessageChannel } = getBuiltin("node:worker_threads");
+  const channel = new MessageChannel();
+  // The worker keeps the main-resolve note itself and announces only a load after
+  // it (preload-async-hooks.mjs), so its word stands in for `noteEntryResolve` here.
+  channel.port1.on("message", (url) => {
+    entry.mainResolved = true;
+    noteEntryLoad(url);
+  });
+  // Never referenced, so an announcement that never comes cannot hold the process
+  // open — see the triggers above `installServeEntry`.
+  channel.port1.unref();
+  entry.channel = channel;
+  return {
+    data: { entryLoad: { port: channel.port2, urls: [...entry.urls] } },
+    transferList: [channel.port2],
+  };
+}
+
+function closeEntryChannel(entry) {
+  const channel = entry.channel;
+  if (channel === null) return;
+  entry.channel = null;
+  channel.port1.close();
+}
+
+// Is this process the application the launcher marked, or a wrapper it put in
+// front of that application? An env-owner loader or a configured `prefix` runs
+// BEFORE Node in the spawn chain, and a Node-based one (`varlock` is a
+// `#!/usr/bin/env node` script) inherits nub's NODE_OPTIONS and so runs this very
+// preload; a bare flag was consumed there and never reached the application.
+//
+// The marker carries the launcher's argv instead — Node flags, the entry, then the
+// application's arguments — and the application is the process whose own argv IS
+// that list from the entry on: `argv[1]` resolves to one token, and everything after
+// it is `argv.slice(2)` verbatim, since Node stops parsing at the entry and passes
+// the rest through untouched. Which token is the entry is not something Rust can
+// name (`nub --require x server.mjs` puts `x` first), but the tail length pins it
+// to exactly one position, so no other token is ever a candidate. That is what
+// keeps an argument from impersonating the entry: `nub server.mjs
+// node_modules/.bin/varlock` would otherwise let the wrapper — whose `argv[1]` IS
+// that bin — claim the marker and starve the application of it. A wrapper is
+// always handed the command it runs, so its argv tail is longer than the marker's
+// and the equality can never hold there.
+//
+// Node has already `path.resolve`d `argv[1]` by the time a preload runs, so the same
+// call is an exact test — no second resolver, and no path spelling Rust and Node
+// could disagree on. The raw comparison covers `-` (stdin), which Node does not
+// expand. No `argv[1]` at all — `-e`, the REPL — is nothing to serve and nothing to
+// forward, so it counts as this process and the caller deletes the marker.
+//
+// A match hands back the launch's Node flags, the tokens ahead of the entry, for
+// `nodeRunsArgvAsProgram`; no match is null.
+function markedLaunchFlags(marker) {
+  const main = process.argv[1];
+  if (typeof main !== "string") return [];
+  const tokens = markerTokens(marker);
+  if (tokens === null) return null;
+  const rest = process.argv.slice(2);
+  const at = tokens.length - rest.length - 1;
+  if (at < 0) return null;
+  const entry = tokens[at];
+  if (entry === "" || (entry !== main && pathResolve(entry) !== main)) return null;
+  return rest.every((arg, i) => arg === tokens[at + 1 + i]) ? tokens.slice(0, at) : null;
+}
+
+// The launcher's argv out of the marker, or null for a value nub did not write. A
+// JSON array rather than a joined string because an argument may hold any byte but
+// NUL: ASCII unit separator was the join once, and one inside an argument split it
+// in two and moved the entry off its position. A value that does not parse is left
+// alone and claims nothing.
+function markerTokens(marker) {
+  let tokens;
+  try {
+    tokens = JSON.parse(marker);
+  } catch {
+    return null;
+  }
+  return Array.isArray(tokens) && tokens.every((token) => typeof token === "string")
+    ? tokens
+    : null;
+}
+
+// Could a preload still run after nub's own? True whenever an `--import`/`--loader`
+// token names anything but nub's own preload — a user entry on its own token, or the
+// preload chainer when the spawn path gave it one instead of loading it from inside
+// nub's preload. Deliberately conservative, and deliberately not
+// `foreignAsyncLoaderFlagPresent`, whose question is a different one: it treats the
+// chainer as nub's own (correct for tier selection, wrong here, since the chainer is
+// precisely what must not be front-run) and reads nub's compat-tier `--import` as
+// foreign.
+function anotherPreloadMayFollow() {
+  const ourDir = dirname(__filename);
+  let tokens = "";
+  try {
+    if (Array.isArray(process.execArgv)) tokens += process.execArgv.join(" ");
+  } catch { /* execArgv unavailable — the NODE_OPTIONS channel still answers */ }
+  const opts = process.env.NODE_OPTIONS;
+  if (typeof opts === "string") tokens += ` ${opts}`;
+  const re = /(?:^|\s)--(?:experimental[-_])?(?:import|loader)(?:=|\s)("[^"]*"|\S*)/g;
+  for (const match of tokens.matchAll(re)) {
+    const value = (match[1] || "").replace(/^"|"$/g, "");
+    if (value === "") continue;
+    let path = value;
+    if (path.startsWith("file:")) {
+      try { path = fileURLToPath(path); } catch { return true; }
+    }
+    if (dirname(path) !== ourDir) return true;
+  }
+  return false;
+}
+
+// Serve the entry if its default export is a handler. Resolves TRUE when it declined
+// only because it may not import yet, which is the caller's signal to arm the late
+// triggers. `entry.taken` is shared by every trigger: whichever gets a usable
+// namespace takes it SYNCHRONOUSLY, before any await, so no two can bind a listener.
+//
+// A CommonJS entry is already on `process.mainModule`, fully evaluated, so its
+// exports need no module-loader round trip. Anything else — an ES module entry, or a
+// CommonJS one the ESM loader owns on the `--import` compat tier — is reached through
+// `import()`, which returns the job Node already created for that URL. So the entry
+// evaluates exactly once whichever of us gets there first, and the promise settles
+// only after the entry's own top-level await does. The URL imported is the one a
+// load hook saw the entry under, when one did: a foreign resolve hook that rewrote
+// the entry for Node's own import — a cache-busting query keyed on the entry having
+// no parent, say — would not rewrite nub's, and importing the file's plain URL then
+// evaluates the entry a second time as a different module.
+//
+// Getting there first would cost the entry its `isEntryPoint` flag, and with it
+// `import.meta.main`; on the fast tier the
+// `--require` preload is synchronous, so Node's own import runs in the same macrotask
+// that scheduled the pass, and the compat tier is Node ≤ 22.14, which has no
+// `import.meta.main` to lose. Measured `true` on the fast tier and `undefined` on
+// 20.19 and 22.14, which is what plain Node reports on each.
+async function serveEntryIfHandler(entry, mayImport) {
+  if (entry.taken) return false;
+  if (serveMainModuleIfHandler(entry)) return false;
+  if (!mayImport) return true;
+  entry.taken = true;
+  let ns;
+  try {
+    ns = await import(entry.loadUrl ?? pathToFileURL(entry.file).href);
+  } catch {
+    // The entry threw. Node has already reported that as an uncaught error, and this
+    // is the same failure observed a second time, so it is dropped rather than
+    // doubling the report.
+    return false;
+  }
+  serveIfHandler(ns.default);
+  return false;
+}
+
+// The synchronous half: a CommonJS entry Node has already run is inspected off
+// `process.mainModule`, with nothing imported and nothing deferred. True once the
+// entry has been taken this way.
+function serveMainModuleIfHandler(entry) {
+  const main = process.mainModule;
+  if (!(main && main.loaded && main.filename === entry.file)) return false;
+  entry.taken = true;
+  serveIfHandler(main.exports);
+  return true;
+}
+
+function serveIfHandler(exported) {
+  const handler = fetchHandler(exported);
+  if (!handler) return;
+  // Required only now, so an ordinary file run never loads node:http at all.
+  require("./fetch-serve.cjs").serve(handler);
+}
+
+// Node runs `argv[1]` as the program in its script mode only. Three other modes still
+// load the preloads with a file in `argv[1]`: the test runner, which runs it in a
+// child of its own (`--test`); a syntax check, which only parses it (`--check`); and
+// `-e`/`-p` code, after which it is a plain argument. The pass's `import()` joins the
+// evaluation Node already started, and in these modes there is none to join, so the
+// import WAS the evaluation: every `nub --test` file ran twice, a checked file
+// executed, and an argument ran as a script. Node refuses all of these flags in
+// NODE_OPTIONS, so they arrive on argv alone, read here twice over: this process's
+// own `execArgv`, and the LAUNCH's flags as the marker recorded them. The second is
+// for a test runner's children. On the compat tier the runner never consumes the
+// marker (measured on 22.13), so every child inherits it and the one whose file sits
+// at the entry's position matches it — and that child, running its file as the
+// program, carries no `--test` of its own, so a test file that default-exports a
+// handler was served there and the run never ended. Either way the marker is
+// consumed before this is asked, so nothing the claimant spawns inherits it.
+function nodeRunsArgvAsProgram(launchFlags) {
+  const own = Array.isArray(process.execArgv) ? process.execArgv : [];
+  return modeRunsArgvAsProgram(own) && modeRunsArgvAsProgram(launchFlags);
+}
+
+// One flag list read the way Node's option parser reads it, not by which tokens are
+// present. Node names an option without its `=value` and reads `_` as `-`, so
+// `--no_test=1` is `--no-test`. `--check`, `--test` and `--interactive` are booleans:
+// no value turns one off (`--check=false` is a syntax check), the `--no-` spelling
+// does, and the last spelling wins, so `--test --no-test file` runs the file. An eval
+// string cannot be negated: Node refuses `--no-eval`, and `--no-print` still evaluates.
+// `-i` outranks it unless `--no-interactive` follows, so `-e 0 -i file` runs the file
+// as the program. Measured on 18.19 through 26.5.
+const EVAL_FLAGS = new Set(["--eval", "-e", "--print", "--no-print", "-p", "-pe"]);
+
+function modeRunsArgvAsProgram(flags) {
+  let evaluates = false;
+  let interactive = false;
+  let checks = false;
+  let tests = false;
+  for (const token of flags) {
+    const flag = optionName(token);
+    if (EVAL_FLAGS.has(flag)) evaluates = true;
+    else if (flag === "-i" || flag === "--interactive") interactive = true;
+    else if (flag === "--no-interactive") interactive = false;
+    else if (flag === "-c" || flag === "--check") checks = true;
+    else if (flag === "--no-check") checks = false;
+    else if (flag === "--test") tests = true;
+    else if (flag === "--no-test") tests = false;
+  }
+  return !(evaluates && !interactive) && !checks && !tests;
+}
+
+// A token as Node's parser names the option: a `--` option loses its `=value` and
+// reads `_` as `-`. A single-dash option takes no `=`, so it stays as written.
+function optionName(token) {
+  if (!token.startsWith("--")) return token;
+  const equals = token.indexOf("=");
+  return (equals === -1 ? token : token.slice(0, equals)).replace(/_/g, "-");
+}
+
+// The entry as Node itself resolved it: `resolveMainPath` is `Module._findPath` over
+// the absolute `argv[1]` with `isMain` true, so deferring to the same call inherits
+// every main-specific behavior — extension and index probing, a directory's
+// package `main`, and `--preserve-symlinks-main` — instead of reimplementing a
+// second resolver that could name a different file than the one Node loaded.
+function mainEntryPath() {
+  const main = process.argv[1];
+  // Absent for the REPL and for `--eval`/`--print` with no arguments (with arguments
+  // it is the first of them, which `nodeRunsArgvAsProgram` has already declined);
+  // `-` is stdin, which has no module identity to inspect.
+  if (typeof main !== "string" || main === "" || main === "-") return null;
+  try {
+    const found = module_._findPath(pathResolve(main), null, true);
+    return typeof found === "string" && found !== "" ? found : null;
+  } catch {
+    return null;
+  }
+}
+
+// The handler object, or null when the default export is not one. A `.ts` or `.js`
+// entry that resolves as CommonJS carries `export default` as
+// `{ __esModule: true, default: … }` after transpilation, and Node's interop hands
+// that whole object over as the namespace `default` — so unwrap exactly one level of
+// it. A CommonJS entry written as `module.exports = { fetch }` needs no unwrapping
+// and is accepted as it stands.
+function fetchHandler(value) {
+  let handler = value;
+  if (isPlainish(handler) && handler.__esModule === true && isPlainish(handler.default)) {
+    handler = handler.default;
+  }
+  return isPlainish(handler) && typeof handler.fetch === "function" ? handler : null;
+}
+
+function isPlainish(value) {
+  return typeof value === "object" && value !== null;
 }
 
 // ── User preloads (`nub.jsonc` `preload`) ───────────────────────────
@@ -1911,6 +2494,11 @@ module.exports = {
   restoreCompileCacheEnv,
   installCompiledChildProcess,
   reenableUserCompileCache,
+  claimServeEntry,
+  loaderWorkerOptions,
+  installServeEntry,
+  // For compiled artifacts, whose program root hands the entry over itself.
+  serveIfHandler,
   requireUserPreloadChain,
   importUserPreloadChain,
 };

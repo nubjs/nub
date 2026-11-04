@@ -390,6 +390,71 @@ fn update_pins_named_version_preserving_manifest_operator() {
     );
 }
 
+/// `nub up <pkg>@<version>` on an EXACT pin keeps the pin exact (`3.0.0` +
+/// `is-positive@3.1.0` -> `3.1.0`, never `^3.1.0`). This is also the path a
+/// range pick on a pinned row of the interactive picker takes: the picker
+/// hands the resolver exactly this explicit spec.
+#[test]
+#[ignore = "network: resolves is-positive from the npm registry"]
+fn update_to_a_named_version_keeps_an_exact_pin_exact() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = pm_tmpdir("updateexact");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"updateexact","version":"1.0.0","dependencies":{"is-positive":"3.0.0"}}"#,
+    )
+    .unwrap();
+
+    let up = run_nub(&dir, &["up", "is-positive@3.1.0"]);
+    assert_eq!(up.code, 0, "stdout: {}\nstderr: {}", up.stdout, up.stderr);
+    let manifest = std::fs::read_to_string(dir.join("package.json")).unwrap();
+    assert!(
+        manifest.contains("\"is-positive\": \"3.1.0\""),
+        "an exact pin must stay exact on the new version: {manifest}"
+    );
+}
+
+/// The in-range floor-bump is decided per key: a bare `^` dep updated in the
+/// same invocation as an explicit `<pkg>@latest` still gets its manifest
+/// range moved to the resolved version (`^3.0.0` -> `^3.0.1`), exactly as it
+/// does when updated alone. It used to be skipped whenever any explicit spec
+/// rode along, leaving the lockfile ahead of an unchanged manifest floor.
+#[test]
+#[ignore = "network: resolves is-positive and is-odd from the npm registry"]
+fn update_floor_bumps_a_bare_key_beside_an_explicit_latest() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = pm_tmpdir("updatemixed");
+    let manifest_with = |is_odd: &str| {
+        format!(
+            r#"{{"name":"updatemixed","version":"1.0.0","dependencies":{{"is-odd":"{is_odd}","is-positive":"3.0.0"}}}}"#
+        )
+    };
+    // Lock is-odd at 3.0.0 first, then widen its range so the lockfile trails
+    // the newest in-range release (3.0.1).
+    std::fs::write(dir.join("package.json"), manifest_with("3.0.0")).unwrap();
+    let install = run_nub(&dir, &["install", "--ignore-scripts"]);
+    assert_eq!(install.code, 0, "stderr: {}", install.stderr);
+    std::fs::write(dir.join("package.json"), manifest_with("^3.0.0")).unwrap();
+
+    let up = run_nub(&dir, &["up", "is-positive@latest", "is-odd"]);
+    assert_eq!(up.code, 0, "stdout: {}\nstderr: {}", up.stdout, up.stderr);
+    let manifest = std::fs::read_to_string(dir.join("package.json")).unwrap();
+    assert!(
+        manifest.contains("\"is-positive\": \"3.1.0\""),
+        "the explicit @latest must move the pin: {manifest}"
+    );
+    assert!(
+        manifest.contains("\"is-odd\": \"^3.0.1\""),
+        "the bare key must keep its floor-bump beside an explicit spec: {manifest}"
+    );
+}
+
 /// `nub up <pkg>@<protocol-spec>` (npm alias, `link:`, `file:`, git, a
 /// tarball URL, a non-`latest` dist-tag) is rejected up front with a
 /// non-zero exit and the manifest left untouched — pinning one of those

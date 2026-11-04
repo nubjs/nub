@@ -401,6 +401,18 @@ function safeRequireResolve(specifier) {
   try { return __require.resolve(specifier); } catch { return null; }
 }
 
+// Resolved URL per vendored specifier (`null` = unresolvable), kept for the life
+// of the realm. A vendored package lives in Nub's own distribution — the
+// checkout's node_modules in dev, the content-keyed extracted runtime dir in a
+// release — so its location cannot change under a running process, and `--watch`
+// restarts the process rather than re-resolving in place. The resolve is not
+// free: `__require` has a Nub-internal parent, so each call re-enters the resolve
+// hook and pays a `createRequire` plus a nested hook round trip. Transpiled
+// decorator output imports up to three helpers per decorated file, so unmemoized
+// that cost scaled with the number of decorated files instead of the handful of
+// distinct helpers (#795).
+const vendoredResolutions = new Map();
+
 export function barePkg(specifier) {
   return specifier.startsWith("@")
     ? specifier.split("/").slice(0, 2).join("/")
@@ -530,8 +542,13 @@ export function resolveSpec(specifier, parentURL) {
   // 2. Vendored packages (e.g. @oxc-project/runtime).
   const bare = barePkg(specifier);
   if (VENDORED_PACKAGES.has(bare)) {
-    const resolved = safeRequireResolve(specifier);
-    if (resolved) return { url: pathToFileURL(resolved).href, shortCircuit: true };
+    let url = vendoredResolutions.get(specifier);
+    if (url === undefined) {
+      const resolved = safeRequireResolve(specifier);
+      url = resolved ? pathToFileURL(resolved).href : null;
+      vendoredResolutions.set(specifier, url);
+    }
+    if (url) return { url, shortCircuit: true };
   }
 
   // 3. Package clobbering.
@@ -887,12 +904,15 @@ function evalSourceFromExecArgv(execArgv) {
 }
 
 // Flags still to turn on, or null once nothing is armed — the hot path is one null
-// check per load.
+// check per load. An array walked by index, never spread or iterated: the scan
+// runs inside the load hook, after user code may have deleted
+// `Array.prototype[Symbol.iterator]` (Node's own suite does, then imports).
 let pendingRuntimeV8Flags = null;
 
 function turnOnRuntimeV8Flag(flag) {
-  pendingRuntimeV8Flags.delete(flag);
-  if (pendingRuntimeV8Flags.size === 0) pendingRuntimeV8Flags = null;
+  const i = pendingRuntimeV8Flags.indexOf(flag);
+  if (i !== -1) pendingRuntimeV8Flags.splice(i, 1);
+  if (pendingRuntimeV8Flags.length === 0) pendingRuntimeV8Flags = null;
   try {
     __getBuiltin("node:v8").setFlagsFromString(flag);
   } catch {
@@ -904,8 +924,9 @@ function turnOnRuntimeV8Flag(flag) {
 export function noteRuntimeV8FlagSource(result) {
   if (pendingRuntimeV8Flags === null || result == null || result.source == null) return result;
   if (result.format != null && !ESM_FORMATS.has(result.format)) return result;
-  for (const flag of [...pendingRuntimeV8Flags]) {
-    if (RUNTIME_V8_FLAG_DETECTORS[flag](result.source)) turnOnRuntimeV8Flag(flag);
+  const flags = pendingRuntimeV8Flags.slice();
+  for (let i = 0; i < flags.length; i++) {
+    if (RUNTIME_V8_FLAG_DETECTORS[flags[i]](result.source)) turnOnRuntimeV8Flag(flags[i]);
   }
   return result;
 }
@@ -921,7 +942,7 @@ export function noteRuntimeV8FlagSource(result) {
           !execArgv.includes(flag) && !execArgv.includes(`--no-${flag.slice(2)}`))
       : [];
     if (armed.length > 0) {
-      pendingRuntimeV8Flags = new Set(armed);
+      pendingRuntimeV8Flags = armed;
       const evalSource = evalSourceFromExecArgv(execArgv);
       if (evalSource !== null) noteRuntimeV8FlagSource({ format: "module", source: evalSource });
     }

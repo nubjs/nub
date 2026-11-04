@@ -64,6 +64,19 @@ fn outer_paren_segments(s: &str) -> Vec<&str> {
     segments
 }
 
+/// The peer references in a dep_path's own suffix, parens stripped:
+/// `a@1.0.0(b@2.0.0(c@3.0.0))(d@4.0.0)` yields `b@2.0.0(c@3.0.0)` and
+/// `d@4.0.0`. Each one is the full key of the peer it names.
+pub(super) fn peer_references(dep_path: &str) -> Vec<&str> {
+    let Some(head_end) = dep_path.find('(') else {
+        return Vec::new();
+    };
+    outer_paren_segments(&dep_path[head_end..])
+        .into_iter()
+        .map(|seg| &seg[1..seg.len() - 1])
+        .collect()
+}
+
 /// Rewrite the peer-suffix references of a dep_path (or a dep *value*,
 /// which is a headless `version{suffix}`) by passing each peer
 /// reference's flat `name@version` head through `translate`. The head
@@ -256,7 +269,10 @@ pub(super) fn rewrite_snapshot_alias_deps(
         let Some((real_name, resolved)) = parse_dep_path(bare) else {
             continue;
         };
-        if real_name == *dep_name {
+        // A URL-tarball value such as `https://host/…/@next/env` splits at
+        // the scope's `@` into a "name" that is really a URL prefix. Only a
+        // registry package name can be an alias target.
+        if real_name == *dep_name || !is_package_name(&real_name) {
             continue;
         }
         let peer_suffix = dep_value.find('(').map(|i| &dep_value[i..]).unwrap_or("");
@@ -265,6 +281,29 @@ pub(super) fn rewrite_snapshot_alias_deps(
         alias_remaps.push((alias_dep_path, real_dep_path, dep_name.clone(), real_name));
         *dep_value = format!("{resolved}{peer_suffix}");
     }
+}
+
+/// `name` or `@scope/name` with no URL, path or protocol characters.
+fn is_package_name(name: &str) -> bool {
+    let bare = match name.strip_prefix('@') {
+        Some(scoped) => match scoped.split_once('/') {
+            Some((scope, rest)) if !scope.is_empty() => {
+                if !is_name_part(scope) {
+                    return false;
+                }
+                rest
+            }
+            _ => return false,
+        },
+        None => name,
+    };
+    is_name_part(bare)
+}
+
+fn is_name_part(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~'))
 }
 
 #[cfg(test)]

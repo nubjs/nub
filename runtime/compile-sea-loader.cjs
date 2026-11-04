@@ -101,6 +101,21 @@
   delete process.env.__NUB_RUNTIME_V8_FLAGS;
   delete process.env.__NUB_ARGV_ONLY_FLAGS;
 
+  // A top-level launch may serve a default-exported `fetch` handler, as `nub <file>`
+  // would (`serveCompiledEntry`, compile-preamble.mjs). The launcher marks its child
+  // from outside; a SEA marks itself — unless this run IS the program re-executing
+  // its own executable (`spawn(process.execPath)`), which under `nub <file>` is
+  // plain `node` with the marker already consumed, and never serves. The identity
+  // variable is the one the launcher publishes for the same test, and publishing it
+  // here is also what stops an artifact launched from inside another one from
+  // inheriting THAT executable's identity as its own.
+  if (process.env.__NUB_COMPILED_EXEC_PATH === process.execPath) {
+    delete process.env.__NUB_COMPILED_SERVE_ENTRY;
+  } else {
+    process.env.__NUB_COMPILED_SERVE_ENTRY = "1";
+  }
+  process.env.__NUB_COMPILED_EXEC_PATH = process.execPath;
+
   if (COMPILE_CACHE_KEY) {
     try {
       // nub's cache root, as `node::discovery::cache_dir` resolves it: the XDG

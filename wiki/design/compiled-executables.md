@@ -246,6 +246,8 @@ ok
 
 Two harnesses under `tests/compile-corpus/` do this continuously. One varies **which package** is compiled, across pure JavaScript, node-gyp, node-pre-gyp and napi-rs packages. The other varies **the shape of the tree** it sits in — a nested duplicate version, a scoped package, a symlinked workspace member, an isolated install, a peer dependency, and a package that reads a data file. The second axis is the one that finds path defects, because it inspects the payload rather than only running the artifact: a tree shape can produce a collision that no ordinary package would, and the binary still exits 0 printing the right answer.
 
+The package corpus requires a successful plain-Node control and compares complete stdout on both cold and warm launches, with source and dependencies hidden. Its SQLite fixture verifies rollback and persistence after reopen; its Express fixture sends an HTTP request to the compiled server.
+
 ### Platform coverage
 
 Nub publishes eight targets. Each is verified by building an artifact and running it, rather than inferred from a sibling that shares an operating system or an architecture.
@@ -339,7 +341,7 @@ Erasability is a claim about the program's own behavior, not about every surface
 
 **The `nub` command itself.** The package manager, `nub node` version management, `nub upgrade`, `nubx`. An artifact is the user's program, not a copy of the CLI that built it.
 
-**Watch-mode surfaces.** `import.meta.hot` is a committed type-only shape that is `undefined` unless `nub watch --hot` is active. An artifact is never in watch mode — but neither is an ordinary `nub app.ts`, so the artifact matches the reference run exactly and the documented `if (import.meta.hot)` guard behaves identically either way. This is an absence in the same sense that it is absent from any non-watch run, not a compile-specific gap.
+**Watch-mode surfaces.** `import.meta.hot` is a committed type-only shape that no Nub run defines. It is `undefined` in an artifact and in an ordinary `nub app.ts` alike, so the artifact matches the reference run exactly and an `if (import.meta.hot)` guard behaves identically either way. This is not a compile-specific gap.
 
 **Configuration read at run time.** Covered in full by strict compilation below: every config surface is honored when the artifact is BUILT and read by nothing when it runs.
 

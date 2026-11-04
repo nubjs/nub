@@ -14,6 +14,7 @@
 //   stepaside-dom   — consumer also has Worker via lib.dom → no TS2403, coexists → PASS
 //   stepaside-stub  — a separate DOM-shaped lib declares global Worker → step aside → PASS
 //   negative-export — common.d.ts + `export {}` breaks wildcards/globals → FAIL
+//   handler-typo    — a misspelled `fetch` key under `satisfies ExportedHandler` → FAIL
 //
 // Usage: node run.mjs   (run from npm/nub-types/test, after `npm install`)
 
@@ -54,6 +55,7 @@ const fixtures = [
   { name: "stepaside-dom", dir: "stepaside-dom", expect: "pass", dom: true },
   { name: "stepaside-stub", dir: "stepaside-stub", expect: "pass", dom: true },
   { name: "negative-export", dir: "negative-export", expect: "fail" },
+  { name: "handler-typo", dir: "handler-typo", expect: "fail" },
 ];
 
 // `dom: false` marks a compiler whose OWN lib.dom is incompatible with the pinned

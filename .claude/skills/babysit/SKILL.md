@@ -39,6 +39,8 @@ Then push. Pushing is free — PR CI is opt-in and nothing fires until it is ask
 
 ## CI
 
+Look at `gh pr checks <N>` before asking. The label is stripped within a minute of being added, so an empty label list says nothing about whether a run was requested, and a second request for the same head cancels the run already in flight — a full matrix thrown away (2026-09-19, #959: the maintainer had labelled it half an hour earlier, and the babysitter's request cancelled fifteen jobs). Checks already pending or running on the current head mean the run exists; watch that one.
+
 Ask for the run, then watch it. Both steps — the request is not optional, and until it lands the pull request has no checks at all:
 
 ```bash

@@ -91,6 +91,7 @@ Load order, expansion and the security consequences of reading a committed envir
 Why Nub spawns the user's Node rather than embedding or forking it, and how it gets in front of the process.
 
 - [[node-impersonation]] — how a shim can stand in front of every `node` invocation in a process tree
+- [[libuv-threadpool]] — what the cores-sized threadpool protects, which mechanism does the protecting, and where it is paid for in memory
 
 ## Compatibility measurements
 

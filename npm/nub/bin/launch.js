@@ -1,7 +1,7 @@
 "use strict";
-// Shared launcher used by bin/nub and bin/nubx.
+// Shared launcher used by bin/nub, bin/nubx and bin/nubr.
 //
-// bin/nub and bin/nubx ship as committed `#!/usr/bin/env node` shims because the
+// bin/nub, bin/nubx and bin/nubr ship as committed `#!/usr/bin/env node` shims because the
 // cross-platform @nubjs/nub package cannot ship a native binary (it doesn't know
 // the target platform at publish time). On Windows that is the whole story: npm's
 // generated nub.cmd / nubx.cmd invoke `node bin/nub`, which spawns the platform
@@ -381,7 +381,8 @@ function healPathEntry(verb, nativePath) {
   } catch {}
 }
 
-// argv0Name: the verb this stub represents ("nubx" for bin/nubx; undefined => nub).
+// argv0Name: the verb this stub represents ("nubx" for bin/nubx, "nubr" for bin/nubr;
+// undefined => nub).
 module.exports = function launch(argv0Name) {
   const verb = argv0Name || "nub";
   const resolved = resolveBinary(verb);

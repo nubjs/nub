@@ -11,6 +11,10 @@
 //
 //     node scripts/gen-extensions-table.mjs @nubjs/extensions@1.0.5
 //
+// `--reuse-downloads` keeps the counts already in the output file when they
+// cover npm's current week; `--keep-downloads` reuses them without checking,
+// for a reshape on a host that cannot reach the download API.
+//
 // Downloads are anchored to npm's own last-complete-week window rather than a
 // date this script computes, so every row in one file covers one identical
 // period and the caption can name it. A name npm has no counts for keeps a
@@ -18,6 +22,7 @@
 // makes is about coverage, not about popularity.
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -29,6 +34,16 @@ const args = process.argv.slice(2);
 // cover npm's CURRENT last-complete-week and every name in the dataset — so it
 // is a cache hit or a full refetch, never a stale mixture.
 const reuse = args.includes('--reuse-downloads');
+// `--reuse-downloads` still makes one live call, to learn which week is current
+// before trusting the cache. That is right for a counts refresh and wrong for a
+// pure RESHAPE, which touches no count and is then blocked by an API it does not
+// otherwise use (api.npmjs.org is reachable from far fewer places than
+// registry.npmjs.org — a sandbox that proxies the registry may 403 the download
+// API outright). `--keep-downloads` skips the check and reuses the window the
+// output file already records, so every `d` and the window itself come out
+// byte-identical and only the reshaped fields move. It is opt-in and says so on
+// stdout, because it is the one path that can emit a count a week old.
+const keep = args.includes('--keep-downloads');
 const spec = args.find((arg) => !arg.startsWith('--')) ?? '@nubjs/extensions@1.0.4';
 
 // Worst-first inside a row: the edge that can break an install is the one a
@@ -54,17 +69,41 @@ function fetchDataset(packageSpec) {
   };
 }
 
+// Ranges are checked with real semver, unpacked into a temp dir rather than
+// added to the repo's dependencies. The root package is nub-identity and every
+// CI leg installs it with a frozen lockfile, so a range check that only this
+// hand-run generator needs has no business in that graph. The 103 distinct
+// ranges in the database include compound (`3.2.x <3.2.7`), alternation and
+// prerelease forms, which is exactly the shape a hand-rolled comparator gets
+// quietly wrong. Pinned, and dependency-free across 7.x, so the unpacked
+// tarball is directly requirable.
+const SEMVER = 'semver@7.8.5';
+function fetchSemver() {
+  const dir = mkdtempSync(join(tmpdir(), 'nub-semver-'));
+  execFileSync('npm', ['pack', SEMVER, '--silent'], {
+    cwd: dir,
+    stdio: ['ignore', 'ignore', 'inherit'],
+  });
+  const tgz = execFileSync('sh', ['-c', 'ls *.tgz'], { cwd: dir, encoding: 'utf8' }).trim();
+  execFileSync('tar', ['xzf', tgz], { cwd: dir });
+  return createRequire(import.meta.url)(join(dir, 'package', 'index.js'));
+}
+
 /** `@scope/name@range` and `name@range` both split at the LAST `@`. */
 const packageName = (selector) => selector.slice(0, selector.lastIndexOf('@'));
+const packageRange = (selector) => selector.slice(selector.lastIndexOf('@') + 1);
 
 // Mirrors the dataset's own collector: three attempts with exponential backoff,
 // a long floor on 429 so a rate-limit does not turn into a retry storm, and 404
 // treated as a real "npm has no counts for this name" rather than an error.
-async function json(url) {
+async function json(url, accept) {
   for (let attempt = 0; attempt < 3; attempt++) {
     let delay = 1000 * 2 ** attempt;
     try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+      const response = await fetch(url, {
+        signal: AbortSignal.timeout(15_000),
+        headers: accept ? { accept } : undefined,
+      });
       if (response.ok) return await response.json();
       if (response.status === 404) return null;
       if (response.status === 429)
@@ -96,8 +135,53 @@ function cachedDownloads(period, names) {
   return downloads;
 }
 
+/**
+ * `dist-tags.latest` for each name, `null` where the registry has none.
+ *
+ * Only the ranged rows need it, which is ~113 of 791 requests. The abbreviated
+ * packument is asked for by Accept header: the full document carries every
+ * version's manifest and is megabytes for a package like `webpack`, where all
+ * this needs is one dist-tag.
+ */
+async function collectLatest(names) {
+  const latest = {};
+  let done = 0;
+  for (const name of names) {
+    const doc = await json(
+      `https://registry.npmjs.org/${name.replace('/', '%2f')}`,
+      'application/vnd.npm.install-v1+json',
+    );
+    latest[name] = doc?.['dist-tags']?.latest ?? null;
+    if (++done % 25 === 0) console.log(`  ${done}/${names.length} latest-version requests`);
+  }
+  return latest;
+}
+
 /** Weekly downloads for every name, keyed by name, `null` where npm has none. */
 async function collectDownloads(names) {
+  if (keep) {
+    let previous;
+    try {
+      previous = JSON.parse(readFileSync(OUT, 'utf8'));
+    } catch {
+      throw new Error('--keep-downloads needs an existing output file to reuse counts from');
+    }
+    const downloads = Object.fromEntries(previous.rows.map((row) => [row.n, row.d]));
+    // Every name, or nothing: a partial reuse is the stale MIXTURE the cache
+    // path exists to rule out, and a new name silently reading `undefined` is
+    // how a row ships with no count at all.
+    const absent = [...new Set(names)].filter((name) => !(name in downloads));
+    if (absent.length)
+      throw new Error(
+        `--keep-downloads cannot cover ${absent.length} name(s) missing from the output file: ` +
+          `${absent.slice(0, 5).join(', ')}`,
+      );
+    console.log(
+      `  KEEPING recorded counts for ${previous.downloads.start}..${previous.downloads.end} ` +
+        `without checking whether that is still the current week`,
+    );
+    return { start: previous.downloads.start, end: previous.downloads.end, downloads };
+  }
   const period = await json(`${API}/last-week`);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(period?.start) || !/^\d{4}-\d{2}-\d{2}$/.test(period?.end))
     throw new Error('npm returned an invalid weekly reporting period');
@@ -156,38 +240,98 @@ const { pkg, data } = fetchDataset(spec);
 // contributed that the scan never flagged. `findings` then annotates each edge
 // with its class where it has one. Every finding target appears in the
 // extension, so nothing is lost by walking the extension instead.
+//
+// A row is keyed by package NAME, but a selector can be narrower than the
+// package: 128 of the carried rules are scoped to the versions that had the
+// phantom (`redux-thunk@<=2.3.0` — 2.4.0 declared the peer), so each edge keeps
+// its selector's range. Dropping it once made the table claim a phantom against
+// every version of a package whose current release declares the dependency.
 const edges = new Map();
 for (const [selector, extension] of Object.entries(data.packageExtensions)) {
   const name = packageName(selector);
+  const range = packageRange(selector);
   if (!edges.has(name)) edges.set(name, new Map());
   const row = edges.get(name);
-  for (const target of Object.keys(extension.dependencies ?? {})) row.set(target, 'd');
+  const set = (target, field) => row.set(target, { field, range });
+  for (const target of Object.keys(extension.dependencies ?? {})) set(target, 'd');
   for (const target of Object.keys(extension.peerDependencies ?? {}))
     if (!row.has(target))
-      row.set(target, extension.peerDependenciesMeta?.[target]?.optional ? 'p' : 'q');
+      set(target, extension.peerDependenciesMeta?.[target]?.optional ? 'p' : 'q');
   // A `peerDependenciesMeta` key with no matching `peerDependencies` entry is a
   // different KIND of rule: the package already declares the peer and Yarn only
   // relaxes it to optional. Twelve of the carried rules are this shape, and
   // reading the two dependency fields alone leaves those rows with nothing to
   // show.
   for (const target of Object.keys(extension.peerDependenciesMeta ?? {}))
-    if (!row.has(target)) row.set(target, 'o');
+    if (!row.has(target)) set(target, 'o');
 }
 
 const classes = new Map();
 for (const finding of data.findings)
   for (const target of finding.targets)
-    classes.set(`${finding.package} ${target.target}`, CLASS_CODE[target.class] ?? '-');
+  {
+    // `-` means "carried from Yarn, never scanned", so a class this script does
+    // not know must not fall through to it: the harness also defines a
+    // `deep-path` class that 1.0.4 happens not to ship, and the day it does,
+    // the row should fail here rather than read as a Yarn rule.
+    const code = CLASS_CODE[target.class];
+    if (!code) throw new Error(`unknown class "${target.class}" on ${finding.package} -> ${target.target}`);
+    classes.set(`${finding.package} ${target.target}`, code);
+  }
 
 const fromYarn = new Set(data.yarnKeys.map(packageName));
 
 const names = [...edges.keys()];
+
+// A rule scoped to versions the package has since moved past is still CORRECT —
+// lockfiles pin old versions for years, and the rule is what makes those
+// installs work. It is just not an accusation against the current release, and
+// a table that renders the two identically reads as one. So each ranged edge is
+// checked against the package's latest version here, at generate time, and the
+// table hides the ones that no longer match by default. Doing it here rather
+// than in the component keeps semver out of the client bundle.
+const semver = fetchSemver();
+const rangedNames = names.filter((name) =>
+  [...edges.get(name).values()].some((edge) => edge.range !== '*'),
+);
+console.log(`  ${rangedNames.length} packages carry a ranged rule`);
+const latest = await collectLatest(rangedNames);
+
+/**
+ * Whether `range` no longer covers the package's current release.
+ *
+ * Unknown, unparseable, or unsatisfiable-by-anything inputs answer `false`.
+ * The table hides a stale rule by default, so every uncertain case has to land
+ * on the VISIBLE side — a rule wrongly hidden is evidence the reader never
+ * learns exists, while a rule wrongly shown is merely one they can check.
+ * `includePrerelease` so a package whose `latest` is a prerelease is compared
+ * on its version rather than dropping out of every range at once.
+ */
+function outgrew(name, range) {
+  const version = latest[name];
+  if (!version || !semver.valid(version)) return false;
+  try {
+    return !semver.satisfies(version, range, { includePrerelease: true });
+  } catch {
+    return false;
+  }
+}
+
 const { start, end, downloads } = await collectDownloads(names);
 
 const rows = names
   .map((name) => {
     const targets = [...edges.get(name)]
-      .map(([target, field]) => [target, `${classes.get(`${name} ${target}`) ?? '-'}${field}`])
+      .map(([target, { field, range }]) => {
+        const edge = [target, `${classes.get(`${name} ${target}`) ?? '-'}${field}`];
+        // The 4th element implies the 3rd: staleness only exists for a ranged
+        // rule, so a positional flag needs no placeholder.
+        if (range !== '*') {
+          edge.push(range);
+          if (outgrew(name, range)) edge.push(1);
+        }
+        return edge;
+      })
       .sort(
         (a, b) =>
           CLASS_RANK[a[1][0]] - CLASS_RANK[b[1][0]] ||
@@ -195,6 +339,10 @@ const rows = names
           a[0].localeCompare(b[0]),
       );
     const row = { n: name, d: downloads[name], t: targets };
+    // Carried only for a ranged row, where the popover names it: "the current
+    // release is 3.1.0" is what turns `<=2.3.0` from a version string into the
+    // fact that the phantom is fixed.
+    if (latest[name]) row.l = latest[name];
     if (fromYarn.has(name)) row.y = 1;
     return row;
   })
@@ -209,7 +357,8 @@ const header = {
     n: 'package name',
     d: 'weekly npm downloads, null when npm returned no count',
     y: 'present when the rule was carried from @yarnpkg/extensions',
-    t: '[target, "<class><field>"]; class r=runtime a=adapter g=guarded t=types -=not-scanned, field d=dependencies p=optional-peer q=required-peer o=existing-peer-relaxed-to-optional',
+    l: "the package's current dist-tags.latest, present on a row carrying a ranged rule",
+    t: '[target, "<class><field>", range?, outgrown?]; class r=runtime a=adapter g=guarded t=types -=not-scanned, field d=dependencies p=optional-peer q=required-peer o=existing-peer-relaxed-to-optional; range is the selector\'s version range, present when it is not *; outgrown is 1 when l no longer satisfies range, so the rule covers only versions before the current release',
   },
   version: pkg.version,
   generated: data.generated,
@@ -232,8 +381,18 @@ console.log(
     `${rows.reduce((total, row) => total + row.t.length, 0)} edges, ` +
     `downloads ${start}..${end}`,
 );
+const outgrownEdges = rows.reduce(
+  (total, row) => total + row.t.filter((edge) => edge[3]).length,
+  0,
+);
+const rangedEdges = rows.reduce((total, row) => total + row.t.filter((edge) => edge[2]).length, 0);
+const hidden = rows.filter((row) => row.t.every((edge) => edge[3]));
 console.log(
   `  ${rows.filter((row) => row.y).length} carried from Yarn, ` +
     `${missing.length} without a download count` +
     (missing.length ? `: ${missing.map((row) => row.n).join(', ')}` : ''),
+);
+console.log(
+  `  ${outgrownEdges}/${rangedEdges} ranged rules outgrown by their package's latest; ` +
+    `${hidden.length} rows hidden by default, ${rows.length - hidden.length} shown`,
 );

@@ -53,7 +53,10 @@ for name in "${packages[@]}"; do
   # the VERIFICATION is `npm trust list`: the configuration either names this
   # repo afterwards or the setup did not happen (wrong auth, 2FA, npm too old),
   # and a quiet miss here is exactly what strands the release publish later.
-  npm trust github "$name" --file release.yml --repo nubjs/nub --allow-publish -y || true
+  # Stage-only, like every other @nubjs package: release.yml can `npm stage publish`
+  # and a maintainer approves with 2FA. `--allow-publish` would let a stolen push
+  # credential publish directly, which is how the unauthorized v0.9.4 shipped.
+  npm trust github "$name" --file release.yml --repo nubjs/nub --allow-stage-publish -y || true
   npm trust list "$name" 2>/dev/null | grep -q "nubjs/nub" || {
     echo "trust is NOT configured for $name — inspect with: npm trust list \"$name\""
     exit 1

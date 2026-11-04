@@ -75,10 +75,13 @@ install-dev: addon-fast qos-global
 	  NUB_BUILD_TARGET_OUT=$$tf scripts/rust-build.sh build --profile fast || { rm -f $$tf; exit 1; }; \
 	  t=$$(cat $$tf); rm -f $$tf; \
 	  test -x $$t/fast/nub || { echo "install-dev: no binary at $$t/fast/nub" >&2; exit 1; }; \
-	  ln -sf $$t/fast/nub $(BIN_DIR)/nub-dev; \
-	  ln -sf $$t/fast/nub $(BIN_DIR)/nubx-dev; \
+	  ln -sf $$t/fast/nub $(BIN_DIR)/nub-dev && \
+	  ln -sf $$t/fast/nub $(BIN_DIR)/nubx-dev && \
+	  ln -sf $$t/fast/nub $(BIN_DIR)/nubr-dev || \
+	  { echo "install-dev: cannot link into $(BIN_DIR); pass a writable BIN_DIR=<dir> on PATH" >&2; exit 1; }; \
 	  echo "Installed: $(BIN_DIR)/nub-dev -> $$t/fast/nub"; \
-	  echo "Installed: $(BIN_DIR)/nubx-dev -> $$t/fast/nub"
+	  echo "Installed: $(BIN_DIR)/nubx-dev -> $$t/fast/nub"; \
+	  echo "Installed: $(BIN_DIR)/nubr-dev -> $$t/fast/nub"
 	@echo ""
 	@nub-dev --version
 
@@ -128,8 +131,8 @@ build-slots-on:
 	@rm -f $${NUB_BUILD_SEM_DIR:-$$HOME/.cache/nub/build-sem}/off && echo "build slots ON"
 
 uninstall-dev:
-	rm -f $(BIN_DIR)/nub-dev $(BIN_DIR)/nubx-dev
-	@echo "Removed nub-dev and nubx-dev from $(BIN_DIR)"
+	rm -f $(BIN_DIR)/nub-dev $(BIN_DIR)/nubx-dev $(BIN_DIR)/nubr-dev
+	@echo "Removed nub-dev, nubx-dev and nubr-dev from $(BIN_DIR)"
 
 test:
 	$(CARGO) test
@@ -150,6 +153,10 @@ verify:
 	}
 	NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" fmt --check
 	(cd crates/nub-native && NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" fmt --check)
+	@# Cheap and early: every tracked lock must satisfy its manifest. The build
+	@# steps below all omit `--locked` and re-resolve silently, so without this a
+	@# stale lock first surfaces in CI ~20 minutes after the push.
+	scripts/check-lockfiles.sh
 	@# PROFILE=fast, matching both the dev loop and CI's check/clippy jobs, so the
 	@# gates reuse the artifacts iteration already built instead of driving a
 	@# second full dependency compile under `dev` (~26 GB of duplicated

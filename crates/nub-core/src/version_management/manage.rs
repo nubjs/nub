@@ -89,7 +89,9 @@ pub enum InstallOutcome {
 /// index so a typo'd nonexistent version fails fast rather than 404ing mid-download.
 fn resolve_to_concrete(spec: &str, store: &Path, host: &HostTarget) -> Result<NodeVersion> {
     let mirror = resolve_mirror_base(host);
-    let index = node_index::load_index(store, &mirror)
+    // The index cache lives at the cache root, beside `node/`: the on-demand
+    // provisioning path and the alias resolution in discovery read the same file.
+    let index = node_index::load_index(store_root_of(store), &mirror)
         .with_context(|| "fetching the Node release index")?;
     node_index::resolve_spec(spec, &index)
         .ok_or_else(|| anyhow::anyhow!("no published Node version matches \"{spec}\""))
@@ -198,7 +200,7 @@ pub fn install_from_pin(store: &Path, cwd: &Path) -> Result<InstallOutcome> {
                 anyhow::anyhow!("this host is not a platform nodejs.org publishes")
             })?;
             let mirror = resolve_mirror_base(&host);
-            let index = node_index::load_index(store, &mirror)
+            let index = node_index::load_index(store_root_of(store), &mirror)
                 .with_context(|| "fetching the Node release index")?;
             let concrete = node_index::resolve_range(alternatives, &index).ok_or_else(|| {
                 anyhow::anyhow!("no published Node version satisfies \"{raw}\" (from {source})")
