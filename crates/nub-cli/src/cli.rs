@@ -8347,30 +8347,39 @@ fn is_nub_mise_backend(backend: &str) -> bool {
 }
 
 /// The config file whose request selects `tool` in this directory, from `mise
-/// ls --json <tool>` (an array of entries; the active one carries
-/// `source.path`). `None` when no config file requests it: `mise upgrade` then
-/// has no request to move, prints "All tools are up to date" and exits 0, so
-/// the caller must not run it and report success.
-fn mise_active_request_source(json: &serde_json::Value) -> Option<PathBuf> {
+/// ls --json <tool>` (an array of entries; the requested one carries
+/// `source.path`). `active` is no test for this: mise marks a requested version
+/// that is not installed yet `active: false`. `None` when no config file requests
+/// it, including a `MISE_<TOOL>_VERSION` request, whose source has no path. `mise
+/// upgrade` then has no request to move, prints "All tools are up to date" and
+/// exits 0, so the caller must not run it and report success.
+fn parse_mise_request_source(json: &serde_json::Value) -> Option<PathBuf> {
     json.as_array()?
         .iter()
-        .filter(|e| e.get("active").and_then(serde_json::Value::as_bool) == Some(true))
         .find_map(|e| Some(PathBuf::from(e.get("source")?.get("path")?.as_str()?)))
 }
 
-/// The `mise` arguments that upgrade a mise-managed nub. `--bump` moves the
-/// request past its range, which is what `nub upgrade` means, and keeps its
-/// precision, so `latest` stays `latest`. A plain `mise upgrade` stays inside
-/// the range, so an exact pin would never move. An explicit `--version` is
-/// written as asked, older versions included. Run in the caller's directory,
-/// mise moves whichever config selects nub there, a project's `mise.toml` or
-/// the global config.
-fn mise_upgrade_args(tool: &str, version_spec: &str) -> Vec<String> {
-    let request = match version_spec {
-        "latest" => tool.to_string(),
-        v => format!("{tool}@{}", v.trim_start_matches('v')),
-    };
-    vec!["upgrade".into(), "--bump".into(), request]
+/// The `mise` arguments that upgrade a mise-managed nub, whose request is in the
+/// config file `source`. For `latest`, `upgrade --bump` moves the request past
+/// its range, which is what `nub upgrade` means, and keeps its precision, so
+/// `latest` stays `latest`. A plain `mise upgrade` stays inside the range, so an
+/// exact pin would never move. Run in the caller's directory, it moves whichever
+/// config selects nub there, a project's `mise.toml` or the global config.
+///
+/// An explicit `--version` is `use --path` instead, which installs that version
+/// and writes it to `source`, older versions included. `upgrade --bump
+/// <tool>@<version>` does that only on recent mise: 2026.1.0 ignores the version,
+/// installs the newest and leaves the config alone.
+fn mise_upgrade_args(tool: &str, version_spec: &str, source: &Path) -> Vec<String> {
+    match version_spec {
+        "latest" => vec!["upgrade".into(), "--bump".into(), tool.to_string()],
+        v => vec![
+            "use".into(),
+            "--path".into(),
+            source.to_string_lossy().into_owned(),
+            format!("{tool}@{}", v.trim_start_matches('v')),
+        ],
+    }
 }
 
 /// The release-artifact platform token for the current build, mirroring
@@ -8497,7 +8506,7 @@ fn run_upgrade(
     _yes: bool,
 ) -> Result<i32> {
     /// The config file that selects a mise-managed nub here (see
-    /// [`mise_active_request_source`]), or the reason there is none to upgrade
+    /// [`parse_mise_request_source`]), or the reason there is none to upgrade
     /// through, phrased for the user.
     fn mise_request_source(tool: &str) -> std::result::Result<PathBuf, String> {
         let out = std::process::Command::new("mise")
@@ -8507,8 +8516,7 @@ fn run_upgrade(
             .map_err(|_| {
                 format!(
                     "this nub was installed by mise (as `{tool}`), but `mise` is not on PATH.\n\
-                     Run `mise {}` where it is.",
-                    mise_upgrade_args(tool, "latest").join(" ")
+                     Run `mise upgrade --bump {tool}` where it is."
                 )
             })?;
         if !out.status.success() {
@@ -8519,7 +8527,7 @@ fn run_upgrade(
         }
         serde_json::from_slice(&out.stdout)
             .ok()
-            .and_then(|json| mise_active_request_source(&json))
+            .and_then(|json| parse_mise_request_source(&json))
             .ok_or_else(|| {
                 format!(
                     "this nub was installed by mise (as `{tool}`), but no mise config file \
@@ -8538,11 +8546,11 @@ fn run_upgrade(
     ///
     /// MANUAL-VERIFICATION NOTE: like [`perform_selfowned_upgrade`], this needs a
     /// live `mise` and a published release, so the unit tests cover the pure
-    /// pieces ([`detect_mise_install`], [`mise_active_request_source`],
+    /// pieces ([`detect_mise_install`], [`parse_mise_request_source`],
     /// [`mise_upgrade_args`]) and the glue is verified against a real mise.
     fn perform_mise_upgrade(tool: &str, version_spec: &str) -> Result<i32> {
         let source = mise_request_source(tool).map_err(|e| anyhow::anyhow!("nub upgrade: {e}"))?;
-        let args = mise_upgrade_args(tool, version_spec);
+        let args = mise_upgrade_args(tool, version_spec, &source);
         println!(
             "running `mise {}` (the request is in {})",
             args.join(" "),
@@ -8607,12 +8615,12 @@ fn run_upgrade(
                     );
                     println!("  install instead: {}", canary_install_hint());
                 } else {
-                    let args = mise_upgrade_args(tool, target);
                     println!("would upgrade to {target} via mise (tool: {tool})");
                     println!("  install: {}", display_path(install_root));
-                    println!("  command: mise {}", args.join(" "));
                     match mise_request_source(tool) {
                         Ok(source) => {
+                            let args = mise_upgrade_args(tool, target, &source);
+                            println!("  command: mise {}", args.join(" "));
                             println!("  request: {}", display_path(&source));
                             // mise's own dry run names the version it would
                             // install and the file it would rewrite.
@@ -13348,45 +13356,54 @@ mod tests {
         }
     }
 
-    // `mise ls --json <tool>`: only an ACTIVE entry's config file counts. With
-    // no active request, `mise upgrade` exits 0 having moved nothing, so the
-    // upgrade must refuse rather than report success.
+    // `mise ls --json <tool>`: an entry's `source.path` is the request, whether or
+    // not that version is installed yet (mise then says `active: false`). With no
+    // config file behind the request, `mise upgrade` exits 0 having moved nothing,
+    // so the upgrade must refuse rather than report success.
     #[test]
-    fn mise_active_request_source_reads_the_active_entry() {
-        let ls = serde_json::json!([
-            {"version": "0.9.5", "install_path": "/m/installs/nub/0.9.5", "installed": true, "active": false},
-            {
+    fn parse_mise_request_source_reads_the_config_behind_the_request() {
+        let installed_only =
+            serde_json::json!({"version": "0.9.5", "installed": true, "active": false});
+        let requested = |installed: bool| {
+            serde_json::json!([installed_only, {
                 "version": "0.9.6",
                 "requested_version": "0.9.6",
-                "install_path": "/m/installs/nub/0.9.6",
                 "source": {"type": "mise.toml", "path": "/proj/mise.toml"},
-                "installed": true,
-                "active": true
-            }
-        ]);
+                "installed": installed,
+                "active": installed
+            }])
+        };
+        let source = Some(PathBuf::from("/proj/mise.toml"));
+        assert_eq!(parse_mise_request_source(&requested(true)), source);
+        assert_eq!(parse_mise_request_source(&requested(false)), source);
+
+        let from_env = serde_json::json!([{
+            "version": "0.9.5",
+            "source": {"type": "environment", "key": "MISE_NUB_VERSION", "value": "0.9.5"},
+            "active": true
+        }]);
+        assert_eq!(parse_mise_request_source(&from_env), None);
         assert_eq!(
-            mise_active_request_source(&ls),
-            Some(PathBuf::from("/proj/mise.toml"))
+            parse_mise_request_source(&serde_json::json!([installed_only])),
+            None
         );
-        let unrequested = serde_json::json!([
-            {"version": "0.9.7", "install_path": "/m/installs/nub/0.9.7", "installed": true, "active": false}
-        ]);
-        assert_eq!(mise_active_request_source(&unrequested), None);
-        assert_eq!(mise_active_request_source(&serde_json::json!({})), None);
+        assert_eq!(parse_mise_request_source(&serde_json::json!({})), None);
     }
 
-    // Without `--bump`, `mise upgrade` stays inside the request's range, so an
-    // exact pin would never move. `latest` names no version, which lets mise
-    // keep the request's precision; an explicit version is written as given.
+    // `latest` is `upgrade --bump`: without `--bump` an exact pin never moves, and
+    // naming no version lets mise keep the request's precision. An explicit version
+    // goes through `use --path`, because `upgrade --bump <tool>@<version>` ignores
+    // the version on older mise.
     #[test]
-    fn mise_upgrade_args_bump_the_request() {
+    fn mise_upgrade_args_pick_the_command_by_version_spec() {
+        let source = Path::new("/proj/mise.toml");
         assert_eq!(
-            mise_upgrade_args("nub", "latest"),
+            mise_upgrade_args("nub", "latest", source),
             ["upgrade", "--bump", "nub"]
         );
         assert_eq!(
-            mise_upgrade_args("npm:@nubjs/nub", "v0.9.6"),
-            ["upgrade", "--bump", "npm:@nubjs/nub@0.9.6"]
+            mise_upgrade_args("npm:@nubjs/nub", "v0.9.6", source),
+            ["use", "--path", "/proj/mise.toml", "npm:@nubjs/nub@0.9.6"]
         );
     }
 
