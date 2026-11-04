@@ -93,6 +93,8 @@ pub(super) async fn run(
         install_opts.workspace_filter = filter.clone();
         install_opts.run_dev_preinstall = true;
         install_opts.script_command = "add";
+        let edited: Vec<_> = matched.iter().map(|pkg| pkg.dir.clone()).collect();
+        super::apply_add_lifecycle(&mut install_opts, &edited)?;
         // See the sibling `aube add` codepath for why this flag is set:
         // live OSV API on the resolved transitives.
         install_opts.osv_transitive_check = true;

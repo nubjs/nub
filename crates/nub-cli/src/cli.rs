@@ -3418,6 +3418,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 registry,
                 dir,
                 allow_all_builds: false,
+                npm_lifecycle: false,
                 filter: crate::pm_engine::WorkspaceFilterFlags {
                     filter,
                     filter_prod,
@@ -3454,6 +3455,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 registry,
                 dir,
                 allow_all_builds: false,
+                npm_lifecycle: false,
                 filter: crate::pm_engine::WorkspaceFilterFlags {
                     filter,
                     filter_prod,
@@ -11357,6 +11359,7 @@ fn run_shim_engine_install(
             ignore_scripts,
             no_optional: route.no_optional,
             allow_all_builds: true,
+            npm_lifecycle: true,
             ..Default::default()
         }),
         NpmInstallVerb::Install => crate::pm_engine::run_install(crate::pm_engine::InstallFlags {
@@ -11365,6 +11368,7 @@ fn run_shim_engine_install(
             ignore_scripts,
             no_optional: route.no_optional,
             allow_all_builds: true,
+            npm_lifecycle: true,
             ..Default::default()
         }),
     }

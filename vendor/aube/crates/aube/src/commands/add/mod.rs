@@ -53,6 +53,54 @@ pub struct AddToProjectOptions {
     pub runtime: Option<crate::runtime::EmbedderRuntime>,
 }
 
+/// Point the chained install at the projects whose own hooks pnpm 12 runs
+/// after an `add` (`projects_running_own_scripts` for `InstallSome`): in a
+/// workspace, the root — which pnpm pushes into every run — and the projects
+/// the add edited, all with the install stages alone. When those together
+/// cover the whole workspace, only a pushed-in root runs. Outside a
+/// workspace, none do.
+pub(super) fn apply_add_lifecycle(
+    opts: &mut install::InstallOptions,
+    edited: &[std::path::PathBuf],
+) -> miette::Result<()> {
+    let Some(first) = edited.first() else {
+        return Ok(());
+    };
+    let Some(root) = crate::dirs::find_workspace_root(first) else {
+        return Ok(());
+    };
+    let members = aube_workspace::find_workspace_packages(&root)
+        .map_err(|e| miette!("failed to discover workspace packages: {e}"))?;
+    if members.is_empty() {
+        return Ok(());
+    }
+    let mut edited_keys = std::collections::BTreeSet::new();
+    for dir in edited {
+        edited_keys.insert(super::workspace_importer_path(&root, dir)?);
+    }
+    let root_pushed_in = !edited_keys.contains(".");
+    // The root counts as covered whether edited or pushed in, which matters
+    // when the workspace patterns list it (`.`) among the members.
+    let mut covers_workspace = true;
+    for dir in &members {
+        let key = super::workspace_importer_path(&root, dir)?;
+        covers_workspace &= key == "." || edited_keys.contains(&key);
+    }
+    let importers = if !covers_workspace {
+        let mut importers = edited_keys;
+        importers.insert(".".to_string());
+        importers
+    } else if root_pushed_in {
+        std::collections::BTreeSet::from([".".to_string()])
+    } else {
+        return Ok(());
+    };
+    opts.skip_root_lifecycle = false;
+    opts.lifecycle_importers = Some(importers);
+    opts.project_stages = install::ProjectStages::InstallSome;
+    Ok(())
+}
+
 /// Resolve, save, and install packages in an explicitly selected project.
 ///
 /// This is the in-process counterpart to [`run`] for embedders. It holds the
@@ -154,6 +202,7 @@ pub(crate) async fn add_to_project_with_overrides(
             install_options.ignore_scripts = options.ignore_scripts;
             install_options.run_dev_preinstall = true;
             install_options.script_command = "add";
+            apply_add_lifecycle(&mut install_options, &[project_dir.to_path_buf()])?;
             install_options.force = options.force;
             install_options.dep_selection = options.dep_selection;
             install_options.osv_transitive_check = options.osv_transitive_check && !options.offline;
@@ -687,6 +736,7 @@ pub async fn run(
     install_opts.ignore_scripts = ignore_scripts;
     install_opts.run_dev_preinstall = true;
     install_opts.script_command = "add";
+    apply_add_lifecycle(&mut install_opts, std::slice::from_ref(&cwd))?;
     install_opts.osv_transitive_check = true;
     // `--lockfile-only`: the resolver still runs and the lockfile +
     // manifest are written, but the linker never touches `node_modules`.
