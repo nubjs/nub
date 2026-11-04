@@ -157,16 +157,12 @@ _setup_no_match_workspace() {
 	[ "${#p2_idx}" -lt "${#p4_idx}" ]
 }
 
-# pnpm's "directory filtering" test (monorepo/index.ts:1662) covers two
-# sub-cases. Sub-case 1 (`--filter=./packages` matches nothing) is an
-# aube divergence: aube's path selector is "at or under", so
-# `./packages` already matches packages nested below it. pnpm v9
-# changed this to require the explicit `/**` recursive glob, gated on a
-# `legacyDirFiltering` workspace setting. aube does not implement that
-# setting (see test/PNPM_TEST_IMPORT.md "Explicitly skipped"). Only the
-# `./packages/**` sub-case ports cleanly.
+# pnpm's "directory filtering" test (monorepo/index.ts:1662): a directory
+# selector is a glob over project directories, so `./packages` matches no
+# project (none sits at `packages` itself) and `./packages/**` matches
+# every one below it.
 @test "aube list --filter=./packages/**: matches every package under the directory" {
-	# Ported from pnpm/test/monorepo/index.ts:1662 (sub-case 2).
+	# Ported from pnpm/test/monorepo/index.ts:1662.
 	# `--depth=-1` is pnpm's spelling for "list project headers only,
 	# no deps". project-1 has a real dep (is-odd) so this also locks
 	# the contract that `--depth=-1` skips dep enumeration even when
@@ -195,6 +191,10 @@ _setup_no_match_workspace() {
 	# Populate the lockfile so `list --parseable` has something to walk.
 	run aube install
 	assert_success
+
+	run aube list --filter=./packages --parseable --depth=-1
+	assert_success
+	refute_output --partial "/packages/project-"
 
 	run aube list --filter='./packages/**' --parseable --depth=-1
 	assert_success

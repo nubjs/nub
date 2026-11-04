@@ -172,6 +172,49 @@ fn recursive_run_propagates_a_real_script_failure() {
     );
 }
 
+/// `run --filter` reads selectors as every PM verb does (pnpm's grammar): a
+/// directory selector is a glob over project directories, and the root is a
+/// candidate that a selection no inclusion selector pins leaves out.
+#[test]
+fn run_filter_selects_by_directory_glob_and_treats_the_root_as_pnpm_does() {
+    let root = script_workspace("dir-glob");
+    write(
+        &root.join("package.json"),
+        r#"{"name":"e2e-root","private":true,"workspaces":["packages/*"],"scripts":{"build":"echo BUILD:e2e-root"}}"#,
+    );
+    let built = |args: &[&str]| {
+        let (stdout, stderr, code) = run_nub(&root, args);
+        assert_eq!(code, 0, "nub {args:?} failed\n{stdout}{stderr}");
+        let mut names: Vec<String> = stdout
+            .lines()
+            .filter_map(|line| line.split("BUILD:").nth(1))
+            .map(|name| name.trim().to_string())
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(
+        built(&["run", "--filter", "./packages/*", "build"]),
+        ["api", "utils", "web"]
+    );
+    assert_eq!(
+        built(&["run", "--filter", "{packages/[aw]*}", "build"]),
+        ["api", "web"]
+    );
+    // No project sits at `packages` itself.
+    assert!(built(&["run", "--filter", "./packages", "build"]).is_empty());
+    assert_eq!(built(&["run", "-r", "build"]), ["api", "utils", "web"]);
+    assert_eq!(
+        built(&["run", "--filter", "!api", "build"]),
+        ["utils", "web"]
+    );
+    assert_eq!(
+        built(&["run", "--filter", "*", "build"]),
+        ["api", "e2e-root", "utils", "web"]
+    );
+    assert_eq!(built(&["run", "--filter", ".", "build"]), ["e2e-root"]);
+}
+
 #[test]
 fn filter_matching_no_package_is_a_clean_no_op() {
     let root = script_workspace("no-match-filter");

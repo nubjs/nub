@@ -220,9 +220,23 @@ pub(crate) fn select_workspace_packages(
             cwd.display()
         ));
     }
-    let matched =
-        aube_workspace::selector::select_workspace_packages(&root, &workspace_pkgs, filter)
-            .map_err(|e| miette!("invalid --filter selector: {e}"))?;
+    // pnpm drops the root from a recursive selection no inclusion pins for
+    // these commands, and keeps it as a candidate for every other one.
+    let root_selection = if matches!(command, "add" | "run" | "exec" | "test") {
+        aube_workspace::RootSelection::AutoExclude
+    } else {
+        aube_workspace::RootSelection::Keep
+    };
+    let matched = aube_workspace::selector::select_workspace_projects(
+        &root,
+        &workspace_pkgs,
+        filter,
+        aube_workspace::SelectOptions {
+            prefix: cwd,
+            root: root_selection,
+        },
+    )
+    .map_err(|e| miette!("invalid --filter selector: {e}"))?;
     if matched.is_empty() {
         return Err(miette!(
             "aube {command}: filter {filter:?} did not match any workspace package"
