@@ -350,15 +350,8 @@ pub(crate) fn package_build_is_allowed(
     policy: &aube_scripts::BuildPolicy,
     pkg: &aube_lockfile::LockedPackage,
 ) -> bool {
-    let source_key = pkg.source_approval_key();
-    let git_repository_key = pkg.git_repository_approval_key();
     matches!(
-        policy.decide_package_with_git_repository(
-            pkg.registry_name(),
-            &pkg.version,
-            source_key.as_deref(),
-            git_repository_key.as_deref(),
-        ),
+        default_trust::decide_package_build(policy, pkg),
         aube_scripts::AllowDecision::Allow
     )
 }

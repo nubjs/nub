@@ -35,7 +35,6 @@ When Bun is the incumbent package manager, Nub installs against it and writes no
     { feature: <code>bun.lockb</code>, status: 'no', note: 'Binary lockfile refused — convert to bun.lock text first.' },
     // ── Install behavior ──────────────────────────────────────────────
     { feature: <><code>[install].linker</code></>, status: 'no', note: 'Set layout in nub.jsonc or .npmrc instead.' },
-    { feature: <>default-trust floor over <code>bun.lock</code></>, status: 'partial', note: 'Inert over bun.lock — no publish-time data, so only trustedDependencies builds.' },
   ]}
 />
 
@@ -145,4 +144,3 @@ Unreadable or invalid TOML is ignored rather than failing the install.
   A scoped credential whose registry URL matches the default registry keeps its scoped route, but Nub does not widen it into registry-wide auth.
 
 - **No `bun.lockb`.** The binary lockfile is rejected, not migrated — run `bun install --save-text-lockfile` to produce a `bun.lock` first.
-- **Default-trust floor inert over `bun.lock`.** No publish-time data means curated packages aren't auto-trusted; only `trustedDependencies` builds.

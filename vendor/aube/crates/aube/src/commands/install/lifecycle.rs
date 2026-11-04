@@ -730,14 +730,7 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         // allowlist/denylist by name+version+source. We keep nub's
         // `defaultTrust` floor as a belt-and-suspenders arm that only
         // fires on `Unspecified`, so explicit entries always win.
-        let source_key = pkg.source_approval_key();
-        let git_repository_key = pkg.git_repository_approval_key();
-        match policy.decide_package_with_git_repository(
-            pkg.registry_name(),
-            &pkg.version,
-            source_key.as_deref(),
-            git_repository_key.as_deref(),
-        ) {
+        match super::default_trust::decide_package_build(policy, pkg) {
             aube_scripts::AllowDecision::Allow => {}
             aube_scripts::AllowDecision::Unspecified if floor.trusts(pkg, &graph.times) => {
                 via_floor = true;
