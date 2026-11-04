@@ -113,7 +113,8 @@ pub(super) fn load_node_extra_ca_certs() -> Vec<reqwest::Certificate> {
 /// *open*, so the `MAL-*` gate silently stops running on a host that
 /// is configured correctly and online.
 pub(crate) fn probe_client_builder() -> reqwest::ClientBuilder {
-    let mut builder = aube_util::http::with_webpki_root_fallback(reqwest::Client::builder());
+    let mut builder = aube_util::http::with_webpki_root_fallback(reqwest::Client::builder())
+        .dns_resolver(aube_util::http::dns::shared());
     for cert in load_node_extra_ca_certs() {
         builder = builder.add_root_certificate(cert);
     }
@@ -230,20 +231,10 @@ fn build_http_client_inner(
     } else {
         builder = builder.http1_only();
     }
-    // In-process DNS caching via hickory-dns. The system resolver
-    // does not cache and uses a thread pool for `getaddrinfo`,
-    // which serializes the first cold lookup per origin. hickory
-    // resolves async + caches for the process lifetime. Feature-gated
-    // so embedders that keep their host binary on getaddrinfo (reqwest's
-    // hickory-dns cargo feature flips the default for every client in
-    // the binary) can opt out; default features keep it on for aube.
-    // Not on Android even when the feature is on: hickory reads the OS
-    // DNS config through JNI and aborts without a JVM (Termux/CLI
-    // builds), so the getaddrinfo resolver stays in place there.
-    #[cfg(feature = "hickory-dns")]
-    {
-        builder = builder.hickory_dns(cfg!(not(target_os = "android")));
-    }
+    // System resolver with a process-wide cache: getaddrinfo keeps VPN
+    // interface scopes and split DNS, the cache keeps one query per host
+    // (see `aube_util::http::dns`).
+    builder = builder.dns_resolver(aube_util::http::dns::shared());
     builder = builder
         .tcp_keepalive(std::time::Duration::from_secs(60))
         // `strict-ssl=false` disables cert validation entirely. This

@@ -235,6 +235,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # 1.95.0 # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
         with:
           toolchain: 1.95.0
+      - name: Check platform DNS feature selection
+        run: bash scripts/check-dns-features.sh
       # --profile fast, matching the dev loop and `make verify`. The analysis
       # gates emit no artifact a later step references by path, so they can share
       # ONE profile with local iteration instead of maintaining a second full
