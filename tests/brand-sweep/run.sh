@@ -217,6 +217,9 @@ cat > "$PROJ3/package.json" <<'EOF'
   }
 }
 EOF
+# The warning channel is what this fixture checks; the default
+# `strictDepBuilds` would report core-js as an error instead.
+echo 'strict-dep-builds=false' > "$PROJ3/.npmrc"
 cd "$PROJ3"
 out3="$SANDBOX/install-output3.txt"
 if ! "$NUB" install >"$out3" 2>&1; then
