@@ -639,12 +639,14 @@ fn npm_link_only_project(work: &Path) -> PathBuf {
     let proj = work.join("proj");
     std::fs::create_dir_all(proj.join("local-dep")).unwrap();
     // A root postinstall that records whether it ran, and with which
-    // NODE_ENV — the probe for npm's script semantics under routing.
+    // NODE_ENV — the probe for npm's script semantics under routing — and a
+    // root prepare, which npm runs whether or not dev dependencies are omitted.
     std::fs::write(
         proj.join("package.json"),
         r#"{ "name": "proj", "version": "1.0.0", "dependencies": { "local-dep": "file:local-dep" },
   "optionalDependencies": { "opt-dep": "file:opt-dep" },
-  "scripts": { "postinstall": "node -e \"require('fs').writeFileSync('postinstall.txt', String(process.env.NODE_ENV))\"" } }"#,
+  "scripts": { "postinstall": "node -e \"require('fs').writeFileSync('postinstall.txt', String(process.env.NODE_ENV))\"",
+    "prepare": "node -e \"require('fs').writeFileSync('root-prepared.txt', '1')\"" } }"#,
     )
     .unwrap();
     // The link target's `prepare`: npm runs it in the target directory
@@ -804,9 +806,15 @@ fn routed_npm_ci_runs_on_the_engine_and_everything_else_reaches_the_real_npm() {
     // npm's dependency axis: an effective omit=dev hands lifecycle scripts
     // NODE_ENV=production; --include=dev takes both back.
     std::fs::remove_file(&postinstall).unwrap();
+    let root_prepared = proj.join("root-prepared.txt");
+    std::fs::remove_file(&root_prepared).unwrap();
     let (_, stderr, code) = run(&npm, &["ci", "--omit=dev"], &proj, &env);
     assert_eq!(code, 0, "stderr:\n{stderr}");
     assert_eq!(std::fs::read_to_string(&postinstall).unwrap(), "production");
+    assert!(
+        root_prepared.is_file(),
+        "npm runs the root prepare with dev dependencies omitted (pnpm's --prod does not)"
+    );
     std::fs::remove_file(&postinstall).unwrap();
     let (_, stderr, code) = run(&npm, &["ci", "--omit=dev", "--include=dev"], &proj, &env);
     assert_eq!(code, 0, "stderr:\n{stderr}");

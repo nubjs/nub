@@ -375,6 +375,8 @@ pub async fn run(
             build_policy_override: None,
             workspace_filter: aube_workspace::selector::EffectiveFilter::default(),
             skip_root_lifecycle: false,
+            lifecycle_importers: None,
+            npm_project_lifecycle: false,
             run_dev_preinstall: true,
             script_command: "install",
             // Deploys are lockfile-driven by definition. Don't

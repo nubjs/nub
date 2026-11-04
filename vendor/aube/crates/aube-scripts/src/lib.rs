@@ -1312,15 +1312,20 @@ fn apply_jail_env(
     }
 }
 
-/// Lifecycle hooks that `aube install` runs against the root package's
-/// `scripts` field, in this order: `preinstall` → (dependencies link) →
-/// `install` → `postinstall` → `prepare`. Matches pnpm / npm.
+/// A lifecycle script a package manager runs on its own, outside `run`.
+/// A project's install-time hooks and the stage lists below are pnpm's
+/// (`exec/lifecycle`'s `PROJECT_LIFECYCLE_STAGES` and friends).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleHook {
     PreInstall,
     Install,
     PostInstall,
+    PrePrepare,
     Prepare,
+    PostPrepare,
+    PreUninstall,
+    Uninstall,
+    PostUninstall,
 }
 
 impl LifecycleHook {
@@ -1329,7 +1334,12 @@ impl LifecycleHook {
             Self::PreInstall => "preinstall",
             Self::Install => "install",
             Self::PostInstall => "postinstall",
+            Self::PrePrepare => "preprepare",
             Self::Prepare => "prepare",
+            Self::PostPrepare => "postprepare",
+            Self::PreUninstall => "preuninstall",
+            Self::Uninstall => "uninstall",
+            Self::PostUninstall => "postuninstall",
         }
     }
 }
@@ -1342,6 +1352,29 @@ pub const DEP_LIFECYCLE_HOOKS: [LifecycleHook; 3] = [
     LifecycleHook::Install,
     LifecycleHook::PostInstall,
 ];
+
+/// What a full install runs for each project (the root and every
+/// workspace member), in order, once its dependencies are linked.
+pub const PROJECT_LIFECYCLE_HOOKS: [LifecycleHook; 6] = [
+    LifecycleHook::PreInstall,
+    LifecycleHook::Install,
+    LifecycleHook::PostInstall,
+    LifecycleHook::PrePrepare,
+    LifecycleHook::Prepare,
+    LifecycleHook::PostPrepare,
+];
+
+/// The project stages of an install that leaves devDependencies out
+/// (`--prod`): the `prepare` family is a development step, so it is dropped.
+pub const PROJECT_INSTALL_HOOKS: [LifecycleHook; 3] = DEP_LIFECYCLE_HOOKS;
+
+/// What `remove` runs in each project losing a dependency, before anything
+/// is unlinked.
+pub const PRE_UNINSTALL_HOOKS: [LifecycleHook; 2] =
+    [LifecycleHook::PreUninstall, LifecycleHook::Uninstall];
+
+/// What `remove` runs in each project losing a dependency, after unlinking.
+pub const POST_UNINSTALL_HOOKS: [LifecycleHook; 1] = [LifecycleHook::PostUninstall];
 
 /// Holds the real stderr fd saved before `aube` redirects fd 2 to
 /// `/dev/null` under `--silent`. Child processes spawned through

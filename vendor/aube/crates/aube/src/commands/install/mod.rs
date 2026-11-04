@@ -61,12 +61,13 @@ pub use frozen::{FrozenMode, FrozenOverride, GlobalVirtualStoreFlags};
 pub(crate) use gvs::detect_existing_global_virtual_store;
 pub(crate) use lifecycle::{
     JailBuildPolicy, build_policy_from_manifest_sources, build_policy_from_sources,
-    run_dep_lifecycle_scripts,
+    run_dep_lifecycle_scripts, run_importer_lifecycle,
 };
 use lifecycle::{
-    resolve_link_strategy, run_import_on_blocking, run_importer_lifecycle,
-    run_root_lifecycle_script, validate_required_scripts,
+    resolve_link_strategy, run_import_on_blocking, run_root_lifecycle_script,
+    validate_required_scripts,
 };
+pub(crate) use workspace::order_lifecycle_manifests;
 
 pub(crate) fn resolve_active_lockfile_dir(
     cwd: &std::path::Path,
@@ -107,7 +108,7 @@ use startup::{
 use summary::print_already_up_to_date;
 use workspace::{
     discover_workspace_plan, filter_graph_to_importers, filter_graph_to_workspace_selection,
-    importer_project_dir, merge_member_lockfile_graphs, per_project_write_selection,
+    merge_member_lockfile_graphs, per_project_write_selection, project_hook_importers,
     write_per_project_lockfiles,
 };
 
@@ -615,7 +616,12 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     let fast_path_settings_ctx =
         files.ctx(&fast_path_workspace, &opts.env_snapshot, &opts.cli_flags);
 
-    let fast_path_total = if opts.dry_run || pre_resolution_hook_declared {
+    // An argumentless `update` that runs the projects' hooks is a full
+    // install to pnpm, which runs them even when nothing changed.
+    let update_runs_project_hooks = opts.script_command == "update" && !opts.skip_root_lifecycle;
+    let decline_fast_path =
+        opts.dry_run || pre_resolution_hook_declared || update_runs_project_hooks;
+    let fast_path_total = if decline_fast_path {
         None
     } else {
         let global_virtual_store =
@@ -862,8 +868,9 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     // `preinstall` lifecycle below, this runs exactly once from the
     // lockfile/workspace root and never fans out to member manifests.
     // The warm fast path returned above, so an already-current repeat
-    // install naturally skips it.
-    if opts.run_dev_preinstall {
+    // install naturally skips it. An install that leaves devDependencies
+    // out skips it too (pnpm's `installRunsDevPreinstall`).
+    if opts.run_dev_preinstall && !opts.dep_selection.prod_only() {
         run_dev_preinstall(
             &cwd,
             opts.ignore_scripts,
@@ -874,29 +881,38 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         .await?;
     }
 
-    // 1b. Project `preinstall` lifecycle hooks.
-    //     Workspace installs run the hook for every physical importer
-    //     that will be linked, matching pnpm's recursive install
-    //     behavior. Runs before the progress UI starts so script output
-    //     cannot collide with the progress display.
-    if !opts.dry_run
-        && !opts.ignore_scripts
-        && !lockfile_only_effective
-        && !opts.skip_root_lifecycle
-    {
+    // 1b. The root project's `preinstall`, before anything is resolved or
+    //     linked, so a guard such as `npx only-allow pnpm` can still stop
+    //     the install. Every other project stage — a workspace member's
+    //     `preinstall` included — runs after linking (finalize step 7b),
+    //     which is where pnpm runs them.
+    let project_hook_importers = project_hook_importers(
+        &lifecycle_manifests,
+        opts.lifecycle_importers.as_ref(),
+        per_project_write_selection.as_ref(),
+    );
+    let early_root = project_hook_importers
+        .iter()
+        .find(|(importer_path, _)| importer_path == ".")
+        .filter(|_| {
+            !opts.dry_run
+                && !opts.ignore_scripts
+                && !lockfile_only_effective
+                && !opts.skip_root_lifecycle
+                && !aube_settings::resolved::virtual_store_only(&settings_ctx)
+        });
+    let root_preinstall_ran_early = early_root.is_some();
+    if let Some((_, root_manifest)) = early_root {
         let phase_start = std::time::Instant::now();
-        for (importer_path, importer_manifest) in &lifecycle_manifests {
-            let project_dir = importer_project_dir(&cwd, importer_path);
-            run_importer_lifecycle(
-                &cwd,
-                &project_dir,
-                importer_path,
-                &modules_dir_name,
-                importer_manifest,
-                aube_scripts::LifecycleHook::PreInstall,
-            )
-            .await?;
-        }
+        run_importer_lifecycle(
+            &cwd,
+            &cwd,
+            ".",
+            &modules_dir_name,
+            root_manifest,
+            aube_scripts::LifecycleHook::PreInstall,
+        )
+        .await?;
         phase_timings.record("root_preinstall", phase_start.elapsed());
     }
     // Progress UI. `None` on non-TTY stderr, in text mode (e.g. `-v`), or
@@ -3065,6 +3081,9 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         manifests: &manifests,
         manifest: &manifest,
         lifecycle_manifests: &lifecycle_manifests,
+        project_hook_importers: &project_hook_importers,
+        root_preinstall_ran_early,
+        npm_project_lifecycle: opts.npm_project_lifecycle,
         direct_dep_info: &direct_dep_info,
         deprecations: &deprecations,
         build_policy: &build_policy,
