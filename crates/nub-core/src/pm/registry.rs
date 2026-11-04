@@ -641,14 +641,25 @@ fn parse_integrity(dist: &Value) -> Option<Integrity> {
 pub(crate) fn bin_subpath(meta: &Value) -> Option<PathBuf> {
     let bin = meta.get("bin")?;
     if let Some(path) = bin.as_str() {
-        return safe_bin_subpath(path);
+        return node_bin_subpath(meta, path);
     }
     let map = bin.as_object()?;
     let name = meta.get("name").and_then(Value::as_str);
     let chosen = name
         .and_then(|n| map.get(n))
         .or_else(|| (map.len() == 1).then(|| map.values().next()).flatten())?;
-    safe_bin_subpath(chosen.as_str()?)
+    node_bin_subpath(meta, chosen.as_str()?)
+}
+
+fn node_bin_subpath(meta: &Value, path: &str) -> Option<PathBuf> {
+    // pnpm 12's bin map points at a native placeholder and shell wrappers.
+    // Provisioning skips preinstall; its Corepack launchers bootstrap the binary.
+    let path = match (meta.get("name").and_then(Value::as_str), path) {
+        (Some("pnpm"), "pnpm" | "./pnpm") => "bin/pnpm.mjs",
+        (Some("pnpm"), "pnpx" | "./pnpx") => "bin/pnpx.mjs",
+        _ => path,
+    };
+    safe_bin_subpath(path)
 }
 
 /// Defense-in-depth gate on a registry-declared bin path before it becomes an
@@ -686,9 +697,9 @@ pub(crate) fn named_bin_subpath(meta: &Value, entry: &str) -> Option<PathBuf> {
         if meta.get("name").and_then(Value::as_str) != Some(entry) {
             return None;
         }
-        return safe_bin_subpath(path);
+        return node_bin_subpath(meta, path);
     }
-    safe_bin_subpath(bin.as_object()?.get(entry)?.as_str()?)
+    node_bin_subpath(meta, bin.as_object()?.get(entry)?.as_str()?)
 }
 
 /// npm's abbreviated ("corgi") packument media type. Same `dist-tags` /
@@ -1007,6 +1018,55 @@ mod tests {
         // 8.0.0's bin map has two entries; the one keyed by the package name wins.
         let dist = resolve_dist(&packument(), "8.0.0").unwrap();
         assert_eq!(dist.bin_subpath, PathBuf::from("bin/pnpm.cjs"));
+    }
+
+    #[test]
+    fn pnpm_native_placeholders_resolve_to_node_launchers() {
+        for prefix in ["", "./"] {
+            let meta = serde_json::json!({
+                "name": "pnpm",
+                "version": "12.0.0",
+                "bin": {
+                    "pnpm": format!("{prefix}pnpm"),
+                    "pnpx": format!("{prefix}pnpx")
+                },
+                "dist": {
+                    "tarball": "https://registry.npmjs.org/pnpm/-/pnpm-12.0.0.tgz",
+                    "integrity": "sha512-deadbeef"
+                }
+            });
+            let dist = resolve_dist_from_version_manifest(&meta).unwrap();
+            assert_eq!(dist.bin_subpath, PathBuf::from("bin/pnpm.mjs"));
+            for entry in ["pnpm", "pnpx"] {
+                assert_eq!(
+                    named_bin_subpath(&meta, entry),
+                    Some(PathBuf::from(format!("bin/{entry}.mjs"))),
+                    "{entry} must use the Node launcher, not the native placeholder"
+                );
+            }
+            assert_eq!(named_bin_subpath(&meta, "missing"), None);
+
+            let single = serde_json::json!({
+                "name": "pnpm",
+                "bin": format!("{prefix}pnpm")
+            });
+            assert_eq!(bin_subpath(&single), Some(PathBuf::from("bin/pnpm.mjs")));
+            assert_eq!(
+                named_bin_subpath(&single, "pnpm"),
+                Some(PathBuf::from("bin/pnpm.mjs"))
+            );
+            assert_eq!(named_bin_subpath(&single, "pnpx"), None);
+        }
+
+        let other = serde_json::json!({
+            "name": "other",
+            "bin": { "other": "pnpm", "pnpx": "pnpx" }
+        });
+        assert_eq!(bin_subpath(&other), Some(PathBuf::from("pnpm")));
+        assert_eq!(
+            named_bin_subpath(&other, "pnpx"),
+            Some(PathBuf::from("pnpx"))
+        );
     }
 
     #[test]

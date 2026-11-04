@@ -528,6 +528,60 @@ fn pinned_name_match_runs_the_cached_pm_under_the_project_node() {
 }
 
 #[test]
+fn pnpm_12_cached_shims_run_the_node_launchers() {
+    let work = tmp("pnpm12");
+    let proj = work.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(
+        proj.join("package.json"),
+        r#"{"packageManager":"pnpm@12.0.0"}"#,
+    )
+    .unwrap();
+
+    let cache = work.join("cache");
+    let nub_cache = cache.join("nub");
+    let pkg = nub_cache.join("pm/pnpm/12.0.0/package");
+    std::fs::create_dir_all(pkg.join("bin")).unwrap();
+    std::fs::write(
+        pkg.join("package.json"),
+        r#"{"name":"pnpm","version":"12.0.0","bin":{"pn":"pn","pnx":"pnx","pnpm":"pnpm","pnpx":"pnpx"}}"#,
+    )
+    .unwrap();
+    // pnpm 12's root bins are placeholders that its `preinstall` overwrites
+    // with the native binary; Node cannot parse them.
+    for placeholder in ["pn", "pnx", "pnpm", "pnpx"] {
+        std::fs::write(
+            pkg.join(placeholder),
+            "# pnpm's native binary replaces this file\n",
+        )
+        .unwrap();
+    }
+    std::fs::write(nub_cache.join(".npmrc"), "registry=http://127.0.0.1:1/\n").unwrap();
+    let path = std::env::var("PATH").unwrap();
+    for entry in ["pnpm", "pnpx"] {
+        std::fs::write(
+            pkg.join(format!("bin/{entry}.mjs")),
+            format!("console.log('{entry} ' + process.argv.slice(2).join(' '))\n"),
+        )
+        .unwrap();
+        let link = shim_link(&work, entry);
+        let (stdout, stderr, code) = run(
+            &link,
+            &["--version"],
+            &proj,
+            &[
+                ("PATH", path.as_str()),
+                ("HOME", work.to_str().unwrap()),
+                ("XDG_CONFIG_HOME", work.to_str().unwrap()),
+                ("XDG_CACHE_HOME", cache.to_str().unwrap()),
+            ],
+        );
+        assert_eq!(code, 0, "the cached {entry} launcher must run: {stderr}");
+        assert_eq!(stdout, format!("{entry} --version\n"));
+    }
+}
+
+#[test]
 fn unpinned_path_miss_provisions_a_dynamic_default_within_the_lockfile_family() {
     let work = tmp("dyndefault");
     let proj = work.join("proj");

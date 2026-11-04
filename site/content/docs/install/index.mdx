@@ -790,8 +790,8 @@ Some packages and tools break when a dependency's real path is outside the proje
 |---|---|---|
 | A package importing a backend it never declares | `@hookform/resolvers/zod` reaching your `zod` | Materializes the adapter into the project |
 | A package writing generated code beside itself | Prisma's postinstall running `prisma generate` | Materializes the package so `generate` stays project-local |
-| A bundler or asset server that resolves by real path | Next.js; Metro, in bare React Native and Expo before SDK 56; Remix 3 | Gives the project a self-contained store |
-| A dev server that gates real-path access by allow-list | Vite | Writes `node_modules/.modules.yaml`, which Vite reads — no `vite.config` change |
+| A bundler or asset server that resolves by real path | Next.js; Metro, in bare React Native and Expo before SDK 56 | Gives the project a self-contained store |
+| A dev server that gates real-path access by allow-list | Vite; Remix 3's asset server | Writes `node_modules/.modules.yaml`, which both read — no config change |
 
 Detection scans each package's published code rather than a curated list. Add a bundler of your own in `.npmrc`:
 

@@ -179,7 +179,7 @@ run = "bash benchmarks/pgo.bash"
 [tasks."build:aubr-lean"]
 dir = "{{config_root}}"
 env = { CARGO_TARGET_DIR = "{{config_root}}/target/aubr-lean" }
-run = "cargo build --release --locked -p aube --bin aubr --no-default-features --features mimalloc,rustls,hickory-dns"
+run = "cargo build --release --locked -p aube --bin aubr --no-default-features --features mimalloc,rustls"
 
 [tasks.render]
 depends = ["build"]

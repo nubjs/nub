@@ -10,6 +10,7 @@
 //! named in the doc comment of the function reading it so cargo doc
 //! enumerates them.
 
+pub mod dns;
 pub mod prewarm;
 pub mod priority;
 pub mod race;
@@ -24,11 +25,9 @@ pub mod ticket_cache;
 /// the OS trust store through JNI and aborts without a JVM (`ndk-context:
 /// android context was not initialized`) — the Termux/CLI case, where no
 /// app context exists — so there the webpki roots become the ONLY trust
-/// roots (`tls_certs_only`), bypassing the verifier entirely. Hickory DNS
-/// is disabled on Android for the same reason: reqwest's `hickory-dns`
-/// feature defaults the resolver on for every client, and hickory reads
-/// Android's DNS config through the same JNI surface. On other targets,
-/// leave the builder alone so client construction does not fail at runtime.
+/// roots (`tls_certs_only`), bypassing the verifier entirely. On other
+/// targets, leave the builder alone so client construction does not fail at
+/// runtime.
 ///
 /// Compiled to a no-op when the `rustls` feature is not enabled — reqwest's
 /// `Certificate`/`tls_certs_merge` APIs only exist with a TLS backend, and
@@ -70,7 +69,7 @@ pub fn with_webpki_root_fallback(builder: reqwest::ClientBuilder) -> reqwest::Cl
 
     #[cfg(all(feature = "rustls", target_os = "android"))]
     {
-        builder.tls_certs_only(certs).no_hickory_dns()
+        builder.tls_certs_only(certs)
     }
 
     #[cfg(not(all(feature = "rustls", any(unix, target_os = "windows"))))]

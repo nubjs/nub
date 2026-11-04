@@ -1904,6 +1904,124 @@ fn an_unreadable_tsconfig_stops_the_run() {
     );
 }
 
+/// #1032: the entry's tsconfig check reads the config the run will use. A
+/// dependency's own published tsconfig is not the project's and never stops a run;
+/// a workspace member reached through its `node_modules` link runs from its real
+/// directory, so its relative `extends` resolves from there.
+#[test]
+fn the_entry_tsconfig_check_follows_the_real_path_and_skips_dependencies() {
+    let dir = unique_test_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+    let write = |rel: &str, body: &str| {
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    };
+    let run_with = |args: &[&str], env: &[(&str, &str)]| {
+        let out = Command::new(nub_binary())
+            .args(args)
+            .envs(env.iter().copied())
+            .current_dir(&dir)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .env_remove("NODE_COMPAT")
+            .output()
+            .expect("failed to spawn nub");
+        (
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+            out.status.code(),
+        )
+    };
+    let run = |entry: &str| run_with(&[entry], &[]);
+    write(
+        "package.json",
+        r#"{"name":"root","workspaces":["packages/*"]}"#,
+    );
+    write("node_modules/dep/package.json", r#"{"name":"dep"}"#);
+    write(
+        "node_modules/dep/tsconfig.json",
+        r#"{"extends":"../../unpublished.json"}"#,
+    );
+    write("node_modules/dep/bin.cjs", "console.log('dependency-ok')");
+
+    let (stdout, stderr, code) = run("node_modules/dep/bin.cjs");
+    assert_eq!(
+        code,
+        Some(0),
+        "a dependency's own tsconfig must not stop the run: {stderr}"
+    );
+    assert!(stdout.contains("dependency-ok"), "{stdout}");
+
+    #[cfg(unix)]
+    {
+        write(
+            "tsconfig.base.json",
+            r#"{"compilerOptions":{"strict":true}}"#,
+        );
+        write(
+            "packages/cli/tsconfig.json",
+            r#"{"extends":"../../tsconfig.base.json"}"#,
+        );
+        write("packages/cli/bin.cjs", "console.log('linked-ok')");
+        write(
+            "packages/broken/tsconfig.json",
+            r#"{"extends":"./missing.json"}"#,
+        );
+        write("packages/broken/bin.cjs", "console.log('broken-ran')");
+        std::fs::create_dir_all(dir.join("node_modules/@repro")).unwrap();
+        for member in ["cli", "broken"] {
+            std::os::unix::fs::symlink(
+                format!("../../packages/{member}"),
+                dir.join("node_modules/@repro").join(member),
+            )
+            .unwrap();
+        }
+
+        let (stdout, stderr, code) = run("node_modules/@repro/cli/bin.cjs");
+        assert_eq!(
+            code,
+            Some(0),
+            "a linked workspace member must run: {stderr}"
+        );
+        assert!(stdout.contains("linked-ok"), "{stdout}");
+
+        // The link is followed, not exempted: a workspace member whose real config
+        // is broken still refuses, exactly as when run by its real path.
+        let (_stdout, stderr, code) = run("node_modules/@repro/broken/bin.cjs");
+        assert_ne!(
+            code,
+            Some(0),
+            "a broken workspace config must still stop the run"
+        );
+        assert!(stderr.contains("missing.json"), "{stderr}");
+
+        // `--preserve-symlinks-main` keeps Node on the link path, so the check reads
+        // the link directory's config, whose `extends` does not resolve from there.
+        // Node accepts `_` for `-` in option names, from argv and NODE_OPTIONS alike.
+        let entry = "node_modules/@repro/cli/bin.cjs";
+        for (args, env) in [
+            (vec!["--preserve-symlinks-main", entry], vec![]),
+            (vec!["--preserve_symlinks_main", entry], vec![]),
+            (
+                vec![entry],
+                vec![("NODE_OPTIONS", "--preserve_symlinks_main")],
+            ),
+        ] {
+            let (_stdout, stderr, code) = run_with(&args, &env);
+            assert_ne!(
+                code,
+                Some(0),
+                "{args:?} {env:?} must check the link's config"
+            );
+            assert!(
+                stderr.contains("@repro/cli/tsconfig.json"),
+                "{args:?} {env:?}: {stderr}"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ── Project-source plain JS (.js/.mjs/.cjs) transpile ───────────────
 // nub transpiles PROJECT plain JS through the same pipeline as `.ts`, so
 // transformable syntax (`using`/`await using`, `v`-flag RegExp, decorators) lowers

@@ -393,9 +393,12 @@ impl Store {
             ));
         };
         std::fs::create_dir_all(parent).map_err(|e| Error::Io(parent.to_path_buf(), e))?;
+        // Readable: a shared lock on Linux NFS is a byte-range read lock,
+        // which a write-only descriptor cannot take (EBADF).
         std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
+            .read(true)
             .write(true)
             .open(&path)
             .map_err(|e| Error::Io(path, e))
@@ -500,9 +503,11 @@ impl Store {
     fn gc_lock_file(&self) -> Option<std::fs::File> {
         let dir = self.store_v1_dir();
         std::fs::create_dir_all(&dir).ok()?;
+        // Readable, for the same NFS reason as `open_maintenance_lock`.
         std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
+            .read(true)
             .write(true)
             .open(dir.join(".gc.lock"))
             .ok()
@@ -903,6 +908,26 @@ mod tests {
         rx.recv_timeout(std::time::Duration::from_secs(2))
             .expect("maintenance should proceed after the writer exits");
         handle.join().unwrap();
+    }
+
+    /// Linux NFS emulates flock() with byte-range locks, and a shared lock
+    /// is a read lock, which a write-only descriptor cannot take (EBADF).
+    /// Local flock ignores the access mode, so this asserts on the
+    /// descriptors rather than on a successful lock.
+    #[test]
+    fn shared_lock_files_open_readable() {
+        use std::io::Read;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::with_dirs(tmp.path().join("store/v1/files"), tmp.path().join("cache"));
+        for (name, file) in [
+            (".maintenance.lock", store.open_maintenance_lock().ok()),
+            (".gc.lock", store.gc_lock_file()),
+        ] {
+            let mut file = file.unwrap_or_else(|| panic!("{name} should open"));
+            if let Err(e) = file.read_to_end(&mut Vec::new()) {
+                panic!("{name} must be opened readable: {e}");
+            }
+        }
     }
 
     #[test]

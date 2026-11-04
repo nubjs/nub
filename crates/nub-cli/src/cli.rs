@@ -4210,14 +4210,48 @@ fn tsconfig_reported_env() -> Option<(String, String)> {
     (!reported.is_empty()).then(|| (nub_tsconfig::REPORTED_ENV.to_string(), reported.join("\n")))
 }
 
-/// Directory of the entry file for a `nub <file>` run, resolved against `cwd`.
+/// The directory whose tsconfig governs the entry of a `nub <file>` run, resolved
+/// against `cwd`. The first non-flag argument is the entry; with none (a bare
+/// `--flag`) this is `None` and the CWD-anchored check stands alone.
 ///
-/// The first non-flag argument is the entry; anything else (a bare `--flag`) leaves
-/// this `None` and the CWD-anchored check stands alone.
-fn entry_file_dir(args: &[String], cwd: &Path) -> Option<PathBuf> {
-    let entry = args.iter().find(|a| !a.starts_with('-'))?;
-    let joined = cwd.join(entry);
-    joined.parent().map(Path::to_path_buf)
+/// Mirrors the config the run itself reads (#1032). Node loads the main entry from
+/// its REAL path unless `--preserve-symlinks-main` (`NODE_PRESERVE_SYMLINKS` does
+/// not reach the main entry), and the addon reads the tsconfig of the importer's
+/// directory, so a workspace member reached through its `node_modules` link runs
+/// under its real directory's config, whose relative `extends` resolves from there.
+/// An entry whose real path is inside `node_modules` is a dependency: the runtime
+/// neither transpiles it nor applies `paths` for it, so its published tsconfig —
+/// often extending a file that was never published — governs nothing and is
+/// skipped outright rather than warned about.
+fn entry_tsconfig_dir(args: &[String], cwd: &Path, node_options: &[String]) -> Option<PathBuf> {
+    let at = args.iter().position(|a| !a.starts_with('-'))?;
+    let joined = cwd.join(&args[at]);
+    let real = std::fs::canonicalize(&joined)
+        .map(|p| PathBuf::from(strip_windows_verbatim_prefix(&p.to_string_lossy())))
+        .unwrap_or_else(|_| joined.clone());
+    if real.components().any(|c| c.as_os_str() == "node_modules") {
+        return None;
+    }
+    let inherited = env::var("NODE_OPTIONS").unwrap_or_default();
+    let preserve_main = args[..at]
+        .iter()
+        .chain(node_options)
+        .map(String::as_str)
+        .chain(
+            nub_core::node::spawn::split_node_options(&inherited)
+                .iter()
+                .map(String::as_str),
+        )
+        .any(is_preserve_symlinks_main);
+    let entry = if preserve_main { joined } else { real };
+    entry.parent().map(Path::to_path_buf)
+}
+
+/// Node treats `_` and `-` as the same character in an option name, so
+/// `--preserve_symlinks_main` is the same flag.
+fn is_preserve_symlinks_main(flag: &str) -> bool {
+    flag.strip_prefix("--")
+        .is_some_and(|name| name.replace('_', "-") == "preserve-symlinks-main")
 }
 
 /// Refuse the run when the tsconfig governing `dir` will not parse.
@@ -4828,7 +4862,7 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
         // config the addon will actually transform against, so it gets the same
         // refusal. Without this, the identical project fails from inside `sub/` and
         // merely warned from above it.
-        if let Some(entry_dir) = entry_file_dir(args, cwd)
+        if let Some(entry_dir) = entry_tsconfig_dir(args, cwd, &options)
             && TsconfigGate::for_program() == TsconfigGate::Required
         {
             ensure_tsconfig_parses(&entry_dir.to_string_lossy(), runtime.tsconfig.as_deref())?;
