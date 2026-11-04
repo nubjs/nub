@@ -1667,11 +1667,26 @@ fn pnpm_incumbent_major_is_v11_plus() -> bool {
 /// and [`pnpm_npmrc_key_policy`], matching
 /// `store_config_family::project_scalar_home`.
 fn declared_pnpm_major() -> Option<u64> {
-    std::env::current_dir()
-        .ok()
-        .and_then(|cwd| nub_core::pm::resolve::declared_pm_raw(&cwd))
+    declared_pnpm_major_in(&std::env::current_dir().ok()?)
+}
+
+/// [`declared_pnpm_major`] for the project at `dir`.
+fn declared_pnpm_major_in(dir: &Path) -> Option<u64> {
+    nub_core::pm::resolve::declared_pm_raw(dir)
         .and_then(|(name, version)| (name == "pnpm").then_some(version).flatten())
         .and_then(|v| parse_major_minor(&v).0)
+}
+
+/// Hand nub-core this crate's incumbent detection, so its own `.npmrc` readers
+/// and pnpm-named-file gates ask the same functions the engine posture is built
+/// from rather than a second detector. Called once from `main`; set-once.
+pub(crate) fn register_incumbent_probe() {
+    nub_core::incumbent::register(nub_core::incumbent::IncumbentProbe {
+        declared_pm_name: |dir| aube_lockfile::declared_package_manager(dir).map(|d| d.name),
+        member_npmrc: |dir| {
+            workspace_npmrc_model(&resolve_config_surface(dir), declared_pnpm_major_in(dir))
+        },
+    });
 }
 
 /// How a detected pnpm major reads project/user `.npmrc` for *settings*. pnpm
@@ -2367,14 +2382,11 @@ pub(crate) fn engine_brand_preflight() {
             pnpm_npmrc_key_policy(declared_pnpm_major()),
             NpmrcKeyPolicy::Pnpm11Allowlist
         );
-    // Whether a member's own `.npmrc` layers over the workspace root's: decided by
-    // the same nub-core detector its own `.npmrc` readers use, so PM provisioning,
-    // `ignore-scripts` and the engine never disagree on which files apply.
-    let workspace_npmrc = match cwd.as_deref().map(nub_core::workspace::npmrc::member_npmrc) {
-        Some(nub_core::workspace::npmrc::MemberNpmrc::Ignored) => {
-            aube_util::WorkspaceNpmrc::RootOnly
+    let workspace_npmrc = match workspace_npmrc_model(&surface, declared_pnpm_major()) {
+        nub_core::workspace::npmrc::MemberNpmrc::Ignored => aube_util::WorkspaceNpmrc::RootOnly,
+        nub_core::workspace::npmrc::MemberNpmrc::Layered => {
+            aube_util::WorkspaceNpmrc::RootBeneathMember
         }
-        _ => aube_util::WorkspaceNpmrc::RootBeneathMember,
     };
     let read_yarn_config = read_yarn_config_for_surface(&surface);
     // Classic Yarn (v1) reads `.yarnrc`; Yarn Berry (v2+) abandoned it for
@@ -2726,6 +2738,31 @@ fn read_yarn_config_for_surface(surface: &ConfigSurface) -> bool {
 /// `BUN_CONFIG_TOKEN` environment variables — true only under a Bun incumbent.
 /// Under any other surface those Bun-named env vars are another tool's state
 /// (name-based policy, mirroring [`read_yarn_config_for_surface`]).
+/// Whether a command run from a workspace member reads that member's `.npmrc`
+/// on top of the workspace root's, or the root's alone, mirroring the
+/// incumbent (each measured from a member dir with the registry set in one
+/// file or the other). pnpm reversed this at v11 (`workspaceDir ?? localPrefix`
+/// in its npmrc loader), so an undeclared pnpm major takes the dominant v10
+/// model. Yarn 1 layers them; Yarn Berry reads no `.npmrc` at all and keeps the
+/// layered default, as does a nub-identity project.
+fn workspace_npmrc_model(
+    surface: &ConfigSurface,
+    pnpm_major: Option<u64>,
+) -> nub_core::workspace::npmrc::MemberNpmrc {
+    use nub_core::workspace::npmrc::MemberNpmrc::{Ignored, Layered};
+    match surface {
+        ConfigSurface::NonPnpmCompat {
+            role: "npm" | "bun",
+            ..
+        } => Ignored,
+        ConfigSurface::PnpmOrFresh => match pnpm_npmrc_key_policy(pnpm_major) {
+            NpmrcKeyPolicy::Pnpm11Allowlist => Ignored,
+            NpmrcKeyPolicy::Open => Layered,
+        },
+        ConfigSurface::NonPnpmCompat { .. } | ConfigSurface::NubIdentity(_) => Layered,
+    }
+}
+
 fn read_bun_config_for_surface(surface: &ConfigSurface) -> bool {
     matches!(surface, ConfigSurface::NonPnpmCompat { role: "bun", .. })
 }
@@ -4148,6 +4185,104 @@ mod tests {
             NpmrcKeyPolicy::Pnpm11Allowlist
         ));
         assert!(matches!(pnpm_npmrc_key_policy(None), NpmrcKeyPolicy::Open));
+    }
+
+    /// A one-member workspace whose root manifest carries `root_fields`, with
+    /// `lockfile` (if any) beside it; returns the tempdir and the member dir.
+    fn npmrc_model_workspace(
+        root_fields: &str,
+        lockfile: Option<&str>,
+    ) -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("package.json"),
+            format!(r#"{{"name":"root","workspaces":["packages/*"],{root_fields}}}"#),
+        )
+        .unwrap();
+        if let Some(lockfile) = lockfile {
+            std::fs::write(root.path().join(lockfile), "").unwrap();
+        }
+        let member = root.path().join("packages").join("a");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(member.join("package.json"), r#"{"name":"a"}"#).unwrap();
+        (root, member)
+    }
+
+    #[test]
+    fn member_npmrc_model_mirrors_each_incumbent() {
+        use nub_core::workspace::npmrc::MemberNpmrc::{Ignored, Layered};
+        let cases = [
+            (r#""packageManager":"pnpm@10.34.9""#, None, Layered),
+            (r#""packageManager":"pnpm@11.28.10""#, None, Ignored),
+            // A range in `devEngines` still names pnpm 11.
+            (
+                r#""devEngines":{"packageManager":{"name":"pnpm","version":"^11.0.0"}}"#,
+                None,
+                Ignored,
+            ),
+            (
+                r#""devEngines":{"packageManager":{"name":"pnpm","version":"~11.28.0"}}"#,
+                None,
+                Ignored,
+            ),
+            // Several tools in a `devEngines` array are no single pin, in either
+            // order: the lockfile decides, as it does for the engine.
+            (
+                r#""devEngines":{"packageManager":[{"name":"pnpm"},{"name":"npm"}]}"#,
+                Some("pnpm-lock.yaml"),
+                Layered,
+            ),
+            (
+                r#""devEngines":{"packageManager":[{"name":"npm"},{"name":"pnpm"}]}"#,
+                Some("pnpm-lock.yaml"),
+                Layered,
+            ),
+            (r#""packageManager":"npm@11.20.0""#, None, Ignored),
+            (r#""packageManager":"bun@1.4.3""#, None, Ignored),
+            (r#""packageManager":"yarn@1.22.22""#, None, Layered),
+            (r#""private":true"#, Some("package-lock.json"), Ignored),
+            (r#""private":true"#, Some("bun.lock"), Ignored),
+            (r#""private":true"#, Some("yarn.lock"), Layered),
+            (r#""private":true"#, None, Layered),
+        ];
+        // Asked the way nub-core's own `.npmrc` readers ask, through the probe
+        // `main` registers, so they and the engine posture cannot disagree.
+        register_incumbent_probe();
+        for (fields, lockfile, expected) in cases {
+            let (_root, member) = npmrc_model_workspace(fields, lockfile);
+            let model = nub_core::workspace::npmrc::member_npmrc(&member);
+            assert_eq!(model, expected, "{fields} + {lockfile:?}");
+        }
+    }
+
+    #[test]
+    fn a_declared_pnpm_pin_marks_the_workspace_root_before_its_lockfile() {
+        // nub-core's pnpm-named-file gate reads the declaration through the probe
+        // `main` registers; registering here is that production configuration.
+        register_incumbent_probe();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"name":"root","packageManager":"pnpm@11.28.10"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - 'packages/*'\n",
+        )
+        .unwrap();
+        let member = root.path().join("packages").join("a");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(member.join("package.json"), r#"{"name":"a"}"#).unwrap();
+
+        let found =
+            nub_core::workspace::detect::detect_project(&member).and_then(|p| p.workspace_root);
+        assert_eq!(
+            found.map(|p| p.canonicalize().unwrap()),
+            Some(root.path().canonicalize().unwrap()),
+            "workspace root seen from the member"
+        );
+        assert_eq!(declared_pnpm_major_in(&member), Some(11));
     }
 
     #[test]

@@ -7,7 +7,8 @@
 //! member's file when invoked from elsewhere. pnpm 10 and Yarn 1 also layer the
 //! `.npmrc` of the package the command was run from on top; pnpm 11, npm and Bun
 //! do not. The engine's own loader applies the same rule (`aube_util::WorkspaceNpmrc`),
-//! with its model chosen through [`member_npmrc`], so both sides agree.
+//! and both take the per-incumbent model from the CLI's one detector, registered
+//! through [`crate::incumbent`].
 
 use std::path::{Path, PathBuf};
 
@@ -23,41 +24,11 @@ pub enum MemberNpmrc {
     Ignored,
 }
 
-/// The incumbent's [`MemberNpmrc`] model for the project at `dir`, read from the
-/// workspace root: the declared `packageManager` / `devEngines.packageManager`
-/// first, else the lockfile beside it (a `pnpm-lock.yaml` outranks a foreign one,
-/// as in the CLI's config-surface walk). pnpm reversed this at v11 (its loader
-/// reads `workspaceDir ?? localPrefix`), so only a declared major ≥ 11 drops the
-/// member layer; an unknown major takes the dominant v10 model.
+/// The incumbent's [`MemberNpmrc`] model for the project at `dir`, as the
+/// embedder's incumbent detection decides it ([`crate::incumbent`]). Unregistered
+/// (a unit test, a binary that never registers) it is the dominant v10 model.
 pub fn member_npmrc(dir: &Path) -> MemberNpmrc {
-    if let Some((name, version)) = crate::pm::resolve::declared_pm_raw(dir) {
-        let major = version
-            .as_deref()
-            .and_then(|v| v.split('.').next())
-            .and_then(|m| m.trim_start_matches('v').parse::<u64>().ok());
-        return match (name.as_str(), major) {
-            ("npm" | "bun", _) => MemberNpmrc::Ignored,
-            ("pnpm", Some(m)) if m >= 11 => MemberNpmrc::Ignored,
-            _ => MemberNpmrc::Layered,
-        };
-    }
-    let root = detect_project(dir)
-        .map(|p| p.workspace_root.unwrap_or(p.root))
-        .unwrap_or_else(|| dir.to_path_buf());
-    if root.join("pnpm-lock.yaml").is_file() {
-        return MemberNpmrc::Layered;
-    }
-    let foreign_root_only = [
-        "package-lock.json",
-        "npm-shrinkwrap.json",
-        "bun.lock",
-        "bun.lockb",
-    ];
-    if foreign_root_only.iter().any(|f| root.join(f).is_file()) {
-        MemberNpmrc::Ignored
-    } else {
-        MemberNpmrc::Layered
-    }
+    crate::incumbent::member_npmrc(dir)
 }
 
 /// The project-scope `.npmrc` paths for `project_root`, LOWEST precedence first.
@@ -177,64 +148,5 @@ mod tests {
             project_npmrc_paths_from(single.path(), Some(single.path()), MemberNpmrc::Layered),
             vec![single.path().join(".npmrc")]
         );
-    }
-
-    #[test]
-    fn member_npmrc_mirrors_each_incumbent() {
-        let cases = [
-            (
-                r#""packageManager":"pnpm@10.34.9""#,
-                None,
-                MemberNpmrc::Layered,
-            ),
-            (
-                r#""packageManager":"pnpm@11.28.10""#,
-                None,
-                MemberNpmrc::Ignored,
-            ),
-            (
-                r#""packageManager":"npm@11.20.0""#,
-                None,
-                MemberNpmrc::Ignored,
-            ),
-            (
-                r#""packageManager":"bun@1.4.3""#,
-                None,
-                MemberNpmrc::Ignored,
-            ),
-            (
-                r#""packageManager":"yarn@1.22.22""#,
-                None,
-                MemberNpmrc::Layered,
-            ),
-            (
-                r#""packageManager":"nub@0.9.6""#,
-                None,
-                MemberNpmrc::Layered,
-            ),
-            (
-                r#""private":true"#,
-                Some("package-lock.json"),
-                MemberNpmrc::Ignored,
-            ),
-            (r#""private":true"#, Some("bun.lock"), MemberNpmrc::Ignored),
-            (
-                r#""private":true"#,
-                Some("pnpm-lock.yaml"),
-                MemberNpmrc::Layered,
-            ),
-            (r#""private":true"#, Some("yarn.lock"), MemberNpmrc::Layered),
-            (r#""private":true"#, None, MemberNpmrc::Layered),
-        ];
-        for (field, lockfile, expected) in cases {
-            let ws = workspace(&format!(
-                r#"{{"name":"root","workspaces":["packages/*"],{field}}}"#
-            ));
-            if let Some(lockfile) = lockfile {
-                std::fs::write(ws.path().join(lockfile), "").unwrap();
-            }
-            let member = ws.path().join("packages").join("a");
-            assert_eq!(member_npmrc(&member), expected, "{field} + {lockfile:?}");
-        }
     }
 }

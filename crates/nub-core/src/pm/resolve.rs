@@ -513,14 +513,6 @@ pub fn project_pm_identity(cwd: &Path) -> Option<PmIdentity> {
     Some(PmIdentity { name, berry })
 }
 
-/// The package manager NAME `dir/package.json` itself declares (`packageManager`,
-/// else `devEngines.packageManager`), with no walk and no usability check.
-pub(crate) fn declared_pm_name_in(dir: &Path) -> Option<String> {
-    let content = std::fs::read_to_string(dir.join("package.json")).ok()?;
-    let manifest: serde_json::Value = serde_json::from_str(crate::strip_utf8_bom(&content)).ok()?;
-    raw_pin_name_version(&manifest).map(|(name, _)| name)
-}
-
 /// The raw `(name, version)` a manifest's pin fields state, with NO usability
 /// check — `packageManager` first, then `devEngines.packageManager` (object or
 /// array; an array yields its LAST named entry, the one the spec's

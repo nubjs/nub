@@ -403,13 +403,14 @@ fn collect_package_dirs(
 /// guards every read of a pnpm-NAMED path. Two signals prove it: a committed
 /// `pnpm-lock.yaml` (it only exists if pnpm has run here), or the root manifest
 /// declaring pnpm in `packageManager` / `devEngines.packageManager`, which covers
-/// a fresh pnpm workspace before its first install. Both are detection, not
+/// a fresh pnpm workspace before its first install (read through the CLI's own
+/// declaration reader, [`crate::incumbent`]). Both are detection, not
 /// config-consumption, so the brand hard gate permits them. A lone
 /// `pnpm-workspace.yaml` with neither stays unread. Checked at the workspace root
 /// only — the lockfile and the pin live beside `pnpm-workspace.yaml`.
 pub(crate) fn pnpm_is_incumbent(workspace_root: &Path) -> bool {
     workspace_root.join("pnpm-lock.yaml").is_file()
-        || crate::pm::resolve::declared_pm_name_in(workspace_root).as_deref() == Some("pnpm")
+        || crate::incumbent::declared_pm_name(workspace_root).as_deref() == Some("pnpm")
 }
 
 fn read_pnpm_workspace(workspace_root: &Path) -> Option<Vec<String>> {
@@ -1427,32 +1428,6 @@ mod tests {
             members.is_empty(),
             "pnpm-workspace.yaml must be ignored without pnpm-lock.yaml; got members: {:?}",
             members.iter().map(|m| &m.name).collect::<Vec<_>>()
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn pnpm_workspace_yaml_read_when_the_root_declares_pnpm() {
-        // A fresh pnpm workspace has no `pnpm-lock.yaml` until its first install;
-        // the `packageManager` pin alone proves the incumbent.
-        let dir = ws_fixture("declared");
-        std::fs::write(
-            dir.join("package.json"),
-            r#"{"name":"root","packageManager":"pnpm@11.28.10"}"#,
-        )
-        .unwrap();
-
-        let names: Vec<String> = discover_members(&dir).into_iter().map(|m| m.name).collect();
-        assert!(
-            names.iter().any(|n| n == "@x/a"),
-            "a declared pnpm pin must make pnpm-workspace.yaml readable; got {names:?}"
-        );
-        let found = crate::workspace::detect::detect_project(&dir.join("pkgs/a"))
-            .and_then(|p| p.workspace_root);
-        assert_eq!(
-            found,
-            Some(dir.clone()),
-            "workspace root seen from the member"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
