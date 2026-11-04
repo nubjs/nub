@@ -1,8 +1,9 @@
 // The vendored runtime dependency set is written out in four places, and nothing but this
 // file makes them agree.
 //
-// `crates/nub-core/build.rs` REQUIRES a set under the `embed-runtime` feature; the release
-// workflow, the Nix flake and the local npm build each STAGE one. A producer that stages too
+// `crates/nub-core/build.rs` REQUIRES a set under the `embed-runtime` feature, named in
+// `crates/nub-core/src/node/vendored_runtime.rs`; the release workflow, the Nix flake and the
+// local npm build each STAGE one. A producer that stages too
 // FEW is caught the moment it builds — that is what the gate in build.rs is for. The direction
 // nothing catches is the gate falling BEHIND: add a sixth package to the release vendoring and
 // forget build.rs, and every nub build still passes, because every nub build stages it. Only a
@@ -17,12 +18,16 @@ import test from 'node:test'
 
 const read = (p) => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8')
 
-// The `[...]` array literal feeding the `missing` filter in build.rs's gate.
+// The list feeding the `missing` filter in build.rs's gate.
 function gateRequires() {
-  const src = read('crates/nub-core/build.rs')
-  const from = src.indexOf('let missing: Vec<&str> = [')
-  assert.ok(from > 0, 'could not find the vendored-package gate in crates/nub-core/build.rs')
-  const body = src.slice(from, src.indexOf(']', from))
+  assert.ok(
+    read('crates/nub-core/build.rs').includes('let missing: Vec<&str> = vendored_runtime::VENDORED_RUNTIME_PACKAGES'),
+    'the vendored-package gate in crates/nub-core/build.rs no longer reads VENDORED_RUNTIME_PACKAGES',
+  )
+  const src = read('crates/nub-core/src/node/vendored_runtime.rs')
+  const from = src.indexOf('VENDORED_RUNTIME_PACKAGES: &[&str] = &[')
+  assert.ok(from > 0, 'could not find VENDORED_RUNTIME_PACKAGES in vendored_runtime.rs')
+  const body = src.slice(from, src.indexOf('];', from))
   return [...body.matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort()
 }
 
