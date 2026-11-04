@@ -204,16 +204,16 @@ Detection is a set of heuristics over the installed tree. A package is ejected w
 
 A few packages defeat every rule, because nothing in their manifest marks them. A pure-JS package that hands a worker a path built at run time is one. The compiler knows those by name: `jsdom`, `pdfkit`, `geoip-lite`, `sql.js`, `pino` and its transports, `keyv`, and `config` all compile and run out of the box. For any other package, `--unbundled <name>` ejects it by hand.
 
-An ejected package ships verbatim, but its dependencies do not inherit that. Nub classifies each of them by the same rules, and a dependency that comes back clean is bundled: every module the ejected package requires from it becomes one chunk, written inside a stub of that dependency at the path Node resolves, with a `package.json` whose `exports` map points at the chunk. The ejected package itself is not rewritten, because it still finds the dependency where it always did.
+An ejected package ships verbatim, but its dependencies do not inherit that. Nub classifies each of them by the same rules, and a dependency that comes back clean is bundled: every module the ejected package requires from it becomes one chunk, written inside a stub of that dependency at the path Node resolves, with a `package.json` whose `exports` map points at the chunk. The ejected package itself is not rewritten, because it still finds the dependency where it always did. For jsdom 25.0.1:
 
 | Package | Files installed | Files in the binary |
 | --- | --- | --- |
 | jsdom, ejected | 480 | 480 |
 | parse5 | 64 | 2 |
-| cssstyle | 116 | 2 |
+| cssstyle | 86 | 2 |
 | tough-cookie | 41 | 2 |
 | entities, reached only through parse5 | 86 | 0, inlined into parse5's chunk |
-| the whole tree | 1,513 | 537 |
+| the whole tree | 1,512 | 535 |
 
 Fewer files make a smaller executable and a faster first run, which is when they are extracted.
 
