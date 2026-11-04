@@ -522,6 +522,50 @@ async fn mode_change_keeps_a_symlinked_store_in_node_modules() {
     );
 }
 
+/// The mirror image: `storeDir` names a link outside `node_modules` whose
+/// target is a directory inside it.
+#[cfg(unix)]
+#[tokio::test]
+async fn mode_change_keeps_a_store_aliased_into_node_modules() {
+    initialize_test_host();
+    let project = tempfile::tempdir().unwrap();
+    let host_cache = project.path().join("host-cache");
+    let real_store = project.path().join("node_modules/.cache/store");
+    let store_alias = project.path().join("store-alias");
+    std::fs::create_dir_all(&real_store).unwrap();
+    std::os::unix::fs::symlink(&real_store, &store_alias).unwrap();
+    seed_cached_registry_package(&host_cache, &store_alias);
+    std::fs::write(project.path().join(".npmrc"), "hoist=false\n").unwrap();
+    std::fs::write(
+        project.path().join("package.json"),
+        r#"{"dependencies":{"cached-only":"1.0.0"}}
+"#,
+    )
+    .unwrap();
+    let install = |gvs: bool| {
+        let mut options = InstallOptions::new(project.path());
+        options.ignore_scripts = true;
+        options.network_mode = aube::embed::NetworkMode::Offline;
+        options.control = InstallControl::silent();
+        aube::embed::install_with_overrides(
+            options,
+            aube::embed::EmbedderInstallOverrides {
+                use_global_virtual_store: Some(gvs),
+                cache_dir: Some(host_cache.clone()),
+                store_dir: Some(store_alias.clone()),
+            },
+        )
+    };
+    install(true).await.unwrap();
+
+    install(false).await.unwrap();
+    assert_cached_package_is_project_local(project.path(), project.path());
+    assert!(
+        real_store.join("v1/files").is_dir(),
+        "the mode reset deleted the store its alias points into"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn facade_install_preserves_non_utf8_storage_paths() {

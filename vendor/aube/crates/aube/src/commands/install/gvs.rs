@@ -709,10 +709,12 @@ impl PendingModeReset {
     /// `storeDir` is configured under `node_modules`. Before the reset was
     /// deferred it ran ahead of the fetch, which repopulated such a store.
     ///
-    /// Containment is lexical, on the paths the fetched indices were written
-    /// under. Canonicalizing would lose a store reached through a symlink
-    /// inside `node_modules`: its target lies outside, so nothing would look
-    /// kept, and the link the indices name would be deleted.
+    /// A kept path can reach the tree through a symlink either way: spelled
+    /// through a link inside `node_modules` that points elsewhere (the indices
+    /// name files through the link, so the link itself must stay), or spelled
+    /// outside through a link that points into it. So each is matched both
+    /// as written, against the walked path, and canonicalized, against the
+    /// walked path's real location.
     pub(super) fn reset(self, keep: &[PathBuf]) -> miette::Result<()> {
         let from = if self.existing { "enabled" } else { "disabled" };
         let to = if self.planned { "enabled" } else { "disabled" };
@@ -722,14 +724,21 @@ impl PendingModeReset {
             "global virtual store {from} → {to}; removing {} and reinstalling from scratch",
             modules_dir_path.display()
         );
-        remove_dir_all_except(&modules_dir_path, keep).map_err(|e| {
+        let keep = KeepPaths {
+            written: keep.to_vec(),
+            real: keep
+                .iter()
+                .filter_map(|path| std::fs::canonicalize(path).ok())
+                .collect(),
+        };
+        remove_dir_all_except(&modules_dir_path, &keep).map_err(|e| {
             miette!(
                 "global virtual store transition: failed to remove {}: {e}",
                 modules_dir_path.display()
             )
         })?;
         if !self.aube_dir.starts_with(&modules_dir_path) {
-            remove_dir_all_except(&self.aube_dir, keep).map_err(|e| {
+            remove_dir_all_except(&self.aube_dir, &keep).map_err(|e| {
                 miette!(
                     "global virtual store transition: failed to remove {}: {e}",
                     self.aube_dir.display()
@@ -742,28 +751,52 @@ impl PendingModeReset {
     }
 }
 
-/// [`remove_dir_all_if_exists`], sparing every path in `keep` and the
-/// entries leading down to it. A symlink on the way to a kept path is kept
-/// as is rather than followed.
-fn remove_dir_all_except(path: &Path, keep: &[PathBuf]) -> std::io::Result<()> {
-    if keep.iter().any(|k| k == path) {
-        return Ok(());
+struct KeepPaths {
+    written: Vec<PathBuf>,
+    real: Vec<PathBuf>,
+}
+
+impl KeepPaths {
+    /// Whether the entry at `written` (real location `real`) is kept or leads
+    /// to something kept.
+    fn covers(&self, written: &Path, real: &Path) -> bool {
+        self.written.iter().any(|k| k.starts_with(written))
+            || self.real.iter().any(|k| k.starts_with(real))
     }
-    if !keep.iter().any(|k| k.starts_with(path)) {
-        return remove_dir_all_if_exists(path);
+
+    fn is_kept(&self, written: &Path, real: &Path) -> bool {
+        self.written.iter().any(|k| k == written) || self.real.iter().any(|k| k == real)
     }
-    let entries = match std::fs::read_dir(path) {
-        Ok(entries) => entries,
+}
+
+/// [`remove_dir_all_if_exists`], sparing every kept path and the entries
+/// leading down to it. A symlink on the way to a kept path is kept as is
+/// rather than followed.
+fn remove_dir_all_except(path: &Path, keep: &KeepPaths) -> std::io::Result<()> {
+    let real = match std::fs::canonicalize(path) {
+        Ok(real) => real,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e),
     };
-    for entry in entries {
+    remove_children_except(path, &real, keep)
+}
+
+fn remove_children_except(written: &Path, real: &Path, keep: &KeepPaths) -> std::io::Result<()> {
+    if keep.is_kept(written, real) {
+        return Ok(());
+    }
+    if !keep.covers(written, real) {
+        return remove_dir_all_if_exists(written);
+    }
+    for entry in std::fs::read_dir(written)? {
         let entry = entry?;
-        let child = entry.path();
+        let (child, child_real) = (entry.path(), real.join(entry.file_name()));
         let kind = entry.file_type()?;
-        if keep.iter().any(|k| k.starts_with(&child)) {
+        if keep.covers(&child, &child_real) {
+            // A real directory's location is its parent's plus its name; a
+            // symlink is not followed, so that holds for every recursion.
             if kind.is_dir() {
-                remove_dir_all_except(&child, keep)?;
+                remove_children_except(&child, &child_real, keep)?;
             }
         } else if kind.is_dir() {
             std::fs::remove_dir_all(&child)?;
