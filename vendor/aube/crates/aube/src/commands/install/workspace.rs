@@ -187,6 +187,20 @@ pub(super) fn per_project_write_selection(
     Ok(Some(keys))
 }
 
+/// The importers a `--filter` install links: the root and the selection
+/// ([`filter_graph_to_workspace_selection`]), recorded in the install
+/// state as [`crate::state::InstallState::workspace_selection`]. `None`
+/// for an unfiltered install.
+pub(super) fn linked_workspace_selection(
+    per_project_write_selection: Option<&std::collections::BTreeSet<String>>,
+) -> Option<std::collections::BTreeSet<String>> {
+    per_project_write_selection.map(|selected| {
+        let mut linked = selected.clone();
+        linked.insert(".".to_string());
+        linked
+    })
+}
+
 pub(super) fn importer_project_dir(
     workspace_root: &std::path::Path,
     importer_path: &str,

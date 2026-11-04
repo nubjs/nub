@@ -354,7 +354,19 @@ async fn run_filtered(
     filter: &aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<()> {
     let cwd = crate::dirs::cwd()?;
-    let (_root, matched) = super::select_workspace_packages(&cwd, filter, "remove")?;
+    // A recursive `remove` keeps the workspace root in a selection that
+    // names no project (pnpm drops it only for `run`, `exec`, `add` and
+    // `test`), so `-r` takes the dependency out of the root's manifest too.
+    let mut filter = filter.clone();
+    if filter
+        .filters
+        .iter()
+        .chain(&filter.filter_prods)
+        .all(|selector| selector == "*" || selector.starts_with('!'))
+    {
+        filter.include_workspace_root = true;
+    }
+    let (_root, matched) = super::select_workspace_packages(&cwd, &filter, "remove")?;
     let result = async {
         for pkg in matched {
             // Match pnpm's recursive-remove semantics: silently skip
