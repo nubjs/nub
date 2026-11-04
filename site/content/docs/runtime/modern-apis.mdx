@@ -6,7 +6,7 @@ description: Reference for the JavaScript, web-platform, and Node.js APIs that N
 Nub fills in modern JavaScript, web-platform, and Node APIs that your Node version lacks. Each entry gives the Node versions where the API is available and how Nub delivers it.
 
 <TypesSetup>
-Nub's types package declares the proposal APIs that TypeScript's libraries do not include yet, plus `Temporal`, the browser-style `Worker` global, and `reportError`. Other standard APIs use TypeScript's bundled libraries and `@types/node`.
+Nub's types package declares the proposal APIs that TypeScript's libraries do not include yet, plus `Temporal`, the browser-style `Worker` global, `reportError`, and the `node:util` rate helpers. Other standard APIs use TypeScript's bundled libraries and `@types/node`.
 </TypesSetup>
 
 ## JavaScript APIs
@@ -445,7 +445,19 @@ channel.port1.onmessage = (event) => {
 
 ## Node.js APIs and module loading
 
-These entries turn on features that a given Node release already contains. Nub does not emulate them on a Node that lacks them.
+Most of these entries turn on features that a given Node release already contains, and Nub does not emulate those on a Node that lacks them. The `node:util` rate helpers are plain JavaScript, so Nub polyfills them.
+
+### `util.debounce()` and `util.throttle()`
+
+[`util.debounce()`](https://nodejs.org/api/util.html#utildebouncefn-wait-options) delays a call until activity stops, and [`util.throttle()`](https://nodejs.org/api/util.html#utilthrottlefn-limit-interval-options) limits calls within an interval and queues the excess. Both return promises and expose cancellation, pending-call state, and timer controls. Native on Node 24.22–24.x and 26.10+; on other versions Nub polyfills both, including named `node:util` imports and compiled artifacts.
+
+```ts
+import { debounce, throttle } from "node:util";
+
+const save = debounce((value: string) => value, 100);
+const send = throttle((value: string) => value, 2, 1000);
+await Promise.all([save("draft"), send("event")]);
+```
 
 ### `vm.Module`
 

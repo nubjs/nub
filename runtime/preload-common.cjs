@@ -646,11 +646,14 @@ function restoreSchemeOnlyBuiltinURL(result) {
 function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsyncLoaderFlagPresent()) {
   installUserHookDetector();
   installUserAsyncLoaderDetector();
+  const { resolveUtilRateFacade } = require("./util/rate.cjs");
 
   function resolve(specifier, context, nextResolve) {
     // The fetch-handler pass tells the entry's own load from a preload's import of
     // the same file by Node resolving it first as the main, with no parent.
     noteEntryResolve(specifier, context);
+    const utilFacade = resolveUtilRateFacade(specifier, context, !!process.versions.nub);
+    if (utilFacade) return utilFacade;
     // Unlike `module.register` hooks, these also run for `require()`. Node passes
     // `importAttributes` for every import (static, dynamic, `import.meta.resolve`)
     // and leaves it undefined for `require()` and `createRequire()`. The conditions
