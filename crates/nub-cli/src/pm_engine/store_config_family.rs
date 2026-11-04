@@ -541,8 +541,7 @@ fn project_scalar_home(pnpm_incumbent: bool) -> config_model::ScalarHome {
     // (name `None`) — resolves to major `None` → the `.npmrc` model.
     let major = std::env::current_dir()
         .ok()
-        .and_then(|cwd| nub_core::pm::resolve::declared_pm_raw(&cwd))
-        .and_then(|(name, version)| (name == "pnpm").then_some(version).flatten())
+        .and_then(|cwd| nub_core::pm::resolve::declared_pm_version(&cwd, "pnpm"))
         .and_then(|v| super::parse_major_minor(&v).0);
     config_model::pnpm_scalar_home(major)
 }

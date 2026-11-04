@@ -1166,3 +1166,33 @@ async fn packument_under_the_stall_bound_is_not_aborted() {
         .await
         .expect("a slow but progressing response must not be cut off");
 }
+
+#[tokio::test]
+async fn offline_uncached_full_packument_fetch_sends_no_request() {
+    // `fetch_packument_with_time` is the publish-time fallback for callers
+    // with no full-packument disk cache; under `--offline` it must refuse
+    // like every cached path does instead of reaching the registry.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/demo"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(make_packument_json()))
+        .mount(&server)
+        .await;
+
+    let client =
+        client_with(&server, FetchPolicy::default()).with_network_mode(crate::NetworkMode::Offline);
+    let err = client
+        .fetch_packument_with_time("demo")
+        .await
+        .expect_err("an offline uncached fetch must fail");
+    assert!(
+        matches!(err, Error::Offline(_)),
+        "unexpected error: {err:?}"
+    );
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert!(
+        requests.is_empty(),
+        "offline fetch reached the registry: {} request(s)",
+        requests.len()
+    );
+}
