@@ -1,20 +1,43 @@
 "use strict";
 
 const util = require("node:util");
-const needsFacade = typeof util.debounce !== "function" || typeof util.throttle !== "function";
+// `in`, not a read: where Node ships these they are lazy getters, and reading
+// one would load Node's implementation at every start.
+const needsFacade = !("debounce" in util && "throttle" in util);
 const facadeURL = `data:text/javascript,${encodeURIComponent(
   'import util from "node:util"; export * from "node:util"; export default util; export const debounce = util.debounce; export const throttle = util.throttle;',
 )}`;
 
+// The same shape Node gives them in lib/util.js: enumerable getters with no
+// setter, each loading its implementation on first read.
 function installUtilRateShims() {
-  if (typeof util.debounce !== "function") util.debounce = require("./debounce.cjs");
-  if (typeof util.throttle !== "function") util.throttle = require("./throttle.cjs");
+  if (!needsFacade) return;
+  require("./internals.cjs");
+  if (typeof util.debounce !== "function") {
+    Object.defineProperty(util, "debounce", {
+      __proto__: null,
+      configurable: true,
+      enumerable: true,
+      get() { return require("./debounce.cjs"); },
+    });
+  }
+  if (typeof util.throttle !== "function") {
+    Object.defineProperty(util, "throttle", {
+      __proto__: null,
+      configurable: true,
+      enumerable: true,
+      get() { return require("./throttle.cjs"); },
+    });
+  }
 }
 
+// Only ESM imports, which always pass `conditions` as an array; a CommonJS
+// require gets a Set on 22.15's `registerHooks` and reads the singleton anyway.
 function resolveUtilRateFacade(specifier, context, enabled) {
   if (!enabled || !needsFacade || context.parentURL === facadeURL) return null;
   if (specifier !== "util" && specifier !== "node:util") return null;
-  if (!context.conditions?.includes("import") || context.conditions.includes("require")) return null;
+  const { conditions } = context;
+  if (!Array.isArray(conditions) || !conditions.includes("import") || conditions.includes("require")) return null;
   return { url: facadeURL, shortCircuit: true };
 }
 

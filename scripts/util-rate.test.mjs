@@ -1,48 +1,79 @@
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
+import Module, { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
-const { installUtilRateShims, resolveUtilRateFacade } = require("../runtime/util/rate.cjs");
-installUtilRateShims();
 const util = require("node:util");
+const rate = fileURLToPath(new URL("../runtime/util/rate.cjs", import.meta.url));
+const debounceFile = fileURLToPath(new URL("../runtime/util/debounce.cjs", import.meta.url));
+// Node 24.22+ and 26.10+ ship both helpers. Set them aside so every test runs the
+// backfill on whatever Node runs the suite; the native pair, when present, is the
+// oracle the backfill's errors are compared against.
+const native = "debounce" in util ? { debounce: util.debounce, throttle: util.throttle } : null;
+delete util.debounce;
+delete util.throttle;
+const hideNative = 'const util = require("node:util"); delete util.debounce; delete util.throttle;';
+const { installUtilRateShims, resolveUtilRateFacade } = require(rate);
+installUtilRateShims();
+
+test("installs lazy getters shaped like Node's, loading nothing until read", () => {
+  for (const name of ["debounce", "throttle"]) {
+    const descriptor = Object.getOwnPropertyDescriptor(util, name);
+    assert.equal(typeof descriptor.get, "function", `${name} is a getter`);
+    assert.equal(descriptor.set, undefined, `${name} has no setter`);
+    assert.equal(descriptor.enumerable, true);
+    assert.equal(descriptor.configurable, true);
+  }
+  assert.equal(require.cache[debounceFile], undefined, "debounce.cjs loaded before its first read");
+  assert.equal(typeof util.debounce, "function");
+  assert.equal(util.debounce, util.debounce);
+  assert.equal(util, require("util"));
+});
+
+test("routes ESM imports of util through a facade that re-exports the singleton", async () => {
+  const facade = resolveUtilRateFacade("node:util", { conditions: ["node", "import"] }, true);
+  assert.equal(facade.url, resolveUtilRateFacade("util", { conditions: ["import"] }, true).url);
+  assert.equal(resolveUtilRateFacade("node:util", { conditions: ["import"], parentURL: facade.url }, true), null);
+  assert.equal(resolveUtilRateFacade("node:util", { conditions: ["node", "require"] }, true), null);
+  // Node 22.15's registerHooks passes a CommonJS require's conditions as a Set.
+  assert.equal(resolveUtilRateFacade("util", { conditions: new Set(["require", "node"]) }, true), null);
+  assert.equal(resolveUtilRateFacade("node:util", { conditions: ["import"] }, false), null);
+  const namespace = await import(facade.url);
+  assert.equal(namespace.default, util);
+  assert.equal(namespace.debounce, util.debounce);
+  assert.equal(namespace.throttle, util.throttle);
+  assert.equal(namespace.promisify, util.promisify);
+});
 
 test("preload exposes named ESM imports on both loader tiers", () => {
+  const dir = mkdtempSync(join(tmpdir(), "util-rate-"));
+  const hide = join(dir, "hide-native.cjs");
+  writeFileSync(hide, hideNative);
   const preload = fileURLToPath(new URL("../runtime/preload.cjs", import.meta.url));
-  const source = 'import { debounce, throttle, promisify } from "node:util"; if ([debounce, throttle, promisify].some((value) => typeof value !== "function")) process.exit(1)';
-  for (const flags of [[], ["--no-experimental-require-module"]]) {
+  const source = `
+    import { debounce, throttle, promisify } from "node:util";
+    import { createRequire } from "node:module";
+    const require = createRequire(import.meta.url);
+    const backfilled = require("node:util").debounce === debounce && ${JSON.stringify(debounceFile)} in require.cache;
+    if (!backfilled || [throttle, promisify].some((value) => typeof value !== "function")) process.exit(1);
+  `;
+  // Without sync `registerHooks` (before 22.15) the async tier is the only one,
+  // and the flag that forces it elsewhere may not exist.
+  const tiers = typeof Module.registerHooks === "function" ? [[], ["--no-experimental-require-module"]] : [[]];
+  for (const flags of tiers) {
     const result = spawnSync(process.execPath, [
-      ...flags, "--require", preload, "--input-type=module", "-e", source,
+      ...flags, "--require", hide, "--require", preload, "--input-type=module", "-e", source,
     ], {
       env: { ...process.env, __NUB_VERSION: "0.1.0" },
       encoding: "utf8",
     });
     assert.equal(result.status, 0, result.stderr);
-  }
-});
-
-test("installs both shims on the native util singleton", async () => {
-  assert.equal(util, require("util"));
-  assert.equal(typeof util.debounce, "function");
-  assert.equal(typeof util.throttle, "function");
-  const original = util.debounce;
-  installUtilRateShims();
-  assert.equal(util.debounce, original);
-
-  const facade = resolveUtilRateFacade("node:util", { conditions: ["node", "import"] }, true);
-  if (facade) {
-    assert.equal(facade.url, resolveUtilRateFacade("util", { conditions: ["import"] }, true).url);
-    assert.equal(resolveUtilRateFacade("node:util", { conditions: ["import"], parentURL: facade.url }, true), null);
-    assert.equal(resolveUtilRateFacade("node:util", { conditions: ["node", "require"] }, true), null);
-    assert.equal(resolveUtilRateFacade("node:util", { conditions: ["import"] }, false), null);
-    const namespace = await import(facade.url);
-    assert.equal(namespace.default, util);
-    assert.equal(namespace.debounce, util.debounce);
-    assert.equal(namespace.throttle, util.throttle);
-    assert.equal(namespace.promisify, util.promisify);
   }
 });
 
@@ -143,12 +174,55 @@ test("throttle handles overflow, cancellation, strict windows, and signal", asyn
   await assert.rejects(signaled(3), { code: "ABORT_ERR" });
 });
 
-test("Node argument error codes are preserved", () => {
-  assert.throws(() => util.debounce(null, 1), { code: "ERR_INVALID_ARG_TYPE" });
-  assert.throws(() => util.debounce(() => {}, -1), { code: "ERR_OUT_OF_RANGE" });
-  assert.throws(() => util.debounce(() => {}, 1, []), { code: "ERR_INVALID_ARG_TYPE" });
-  assert.throws(() => util.throttle(() => {}, 0, 1), { code: "ERR_OUT_OF_RANGE" });
-  assert.throws(() => util.throttle(() => {}, 1, 1, { overflow: "other" }), { code: "ERR_INVALID_ARG_VALUE" });
+test("errors carry Node's codes, messages, and shape", async () => {
+  const misuse = [
+    (impl) => impl.debounce(null, 1),
+    (impl) => impl.debounce(() => {}, 1.5),
+    (impl) => impl.debounce(() => {}, 2 ** 31),
+    (impl) => impl.debounce(() => {}, 1, []),
+    (impl) => impl.debounce(() => {}, 1, { signal: null }),
+    (impl) => impl.throttle(() => {}, 0, 1),
+    (impl) => impl.throttle(() => {}, 1, 1, { overflow: "other" }),
+    (impl) => impl.throttle(() => {}, 1, 1, { strict: 1 }),
+  ];
+  const describe = (error) => ({
+    constructor: error.constructor,
+    name: error.name,
+    code: error.code,
+    message: error.message,
+    string: String(error),
+    header: error.stack.split("\n")[0],
+    keys: Object.keys(error),
+  });
+  const thrown = (impl, call) => {
+    try { call(impl); } catch (error) { return describe(error); }
+    assert.fail("expected a throw");
+  };
+  const dropped = async (impl) => {
+    const fn = impl.throttle(() => {}, 1, 100, { overflow: "drop" });
+    fn();
+    const error = await fn().then(() => assert.fail("expected a drop"), (e) => e);
+    return { ...describe(error), header: undefined };
+  };
+
+  assert.deepEqual(thrown(util, misuse[0]), {
+    constructor: TypeError,
+    name: "TypeError",
+    code: "ERR_INVALID_ARG_TYPE",
+    message: 'The "fn" argument must be of type function. Received null',
+    string: 'TypeError [ERR_INVALID_ARG_TYPE]: The "fn" argument must be of type function. Received null',
+    header: 'TypeError [ERR_INVALID_ARG_TYPE]: The "fn" argument must be of type function. Received null',
+    keys: ["code"],
+  });
+  assert.equal(thrown(util, misuse[5]).message,
+    'The value of "limit" is out of range. It must be >= 1 && <= 9007199254740991. Received 0');
+  assert.equal(thrown(util, misuse[6]).message,
+    "The property 'options.overflow' must be one of: 'queue', 'drop'. Received 'other'");
+  assert.equal((await dropped(util)).string, "Error [ERR_THROTTLED]: The call was dropped by the throttled function");
+  if (native) {
+    for (const call of misuse) assert.deepEqual(thrown(util, call), thrown(native, call), call.toString());
+    assert.deepEqual(await dropped(util), await dropped(native));
+  }
 });
 
 test("abort cannot be suppressed by an earlier signal listener", async () => {
@@ -171,9 +245,8 @@ test("abort cannot be suppressed by an earlier signal listener", async () => {
 });
 
 test("shim operations retain captured intrinsics after global mutation", () => {
-  const rate = fileURLToPath(new URL("../runtime/util/rate.cjs", import.meta.url));
   const source = `
-    const util = require("node:util");
+    ${hideNative}
     require(${JSON.stringify(rate)}).installUtilRateShims();
     const NativeThen = Promise.prototype.then;
     Array.prototype.push = () => { throw new Error("mutated push"); };
@@ -182,7 +255,7 @@ test("shim operations retain captured intrinsics after global mutation", () => {
     Promise.reject = () => { throw new Error("mutated reject"); };
     Number.isInteger = () => false;
     globalThis.Promise = class {};
-    globalThis.performance = { now: () => { throw new Error("mutated clock"); } };
+    process.hrtime = () => { throw new Error("mutated clock"); };
     const debounced = util.debounce(value => value, 1);
     const throttled = util.throttle(value => value, 1, 1);
     const values = [];
