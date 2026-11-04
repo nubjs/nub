@@ -33,7 +33,8 @@ pub fn member_npmrc(dir: &Path) -> MemberNpmrc {
 
 /// The project-scope `.npmrc` paths for `project_root`, LOWEST precedence first.
 /// Outside a workspace this is `<project_root>/.npmrc` alone. The invoking
-/// package is the nearest `package.json` at or above the process cwd.
+/// package is the nearest `package.json` at or above the process cwd, or
+/// `project_root` itself when the cwd is outside the workspace (the engine's rule).
 pub fn project_npmrc_paths(project_root: &Path) -> Vec<PathBuf> {
     let invocation = std::env::current_dir().ok();
     project_npmrc_paths_from(
@@ -53,24 +54,31 @@ fn project_npmrc_paths_from(
     };
     let invoked_from = match model {
         MemberNpmrc::Ignored => None,
-        MemberNpmrc::Layered => invocation_dir.and_then(|dir| package_dir_below_root(dir, &root)),
+        MemberNpmrc::Layered => match invocation_dir.and_then(|dir| within(dir, &root)) {
+            Some((dir, root)) => package_dir_below_root(&dir, &root),
+            None => within(project_root, &root)
+                .filter(|(dir, root)| dir != root)
+                .map(|_| project_root.to_path_buf()),
+        },
     };
     let mut paths = vec![root.join(".npmrc")];
     paths.extend(invoked_from.map(|dir| dir.join(".npmrc")));
     paths
 }
 
-/// The nearest directory at or above `dir` holding a `package.json`, when it sits
-/// strictly inside the workspace `root` (pnpm's "local prefix").
-fn package_dir_below_root(dir: &Path, root: &Path) -> Option<PathBuf> {
+/// `dir` and `root` in one spelling, when `dir` is `root` or inside it.
+fn within(dir: &Path, root: &Path) -> Option<(PathBuf, PathBuf)> {
     let (dir, root) = if dir.starts_with(root) {
         (dir.to_path_buf(), root.to_path_buf())
     } else {
         (dir.canonicalize().ok()?, root.canonicalize().ok()?)
     };
-    if !dir.starts_with(&root) {
-        return None;
-    }
+    dir.starts_with(&root).then_some((dir, root))
+}
+
+/// The nearest directory at or above `dir` holding a `package.json`, strictly
+/// inside the workspace `root` (pnpm's "local prefix"). Both come from [`within`].
+fn package_dir_below_root(dir: &Path, root: &Path) -> Option<PathBuf> {
     dir.ancestors()
         .take_while(|d| *d != root)
         .find(|d| d.join("package.json").is_file())
@@ -135,6 +143,13 @@ mod tests {
         assert_eq!(
             project_npmrc_paths_from(&member, Some(root), MemberNpmrc::Layered),
             vec![root_rc.clone()]
+        );
+        // Invoked from outside the workspace with the member as the target
+        // (`-C packages/a`): the member is the invoking package.
+        let elsewhere = Scratch::new();
+        assert_eq!(
+            project_npmrc_paths_from(&member, Some(elsewhere.path()), MemberNpmrc::Layered),
+            vec![root_rc.clone(), member_rc.clone()]
         );
         // pnpm 11 / npm / Bun never read the member's file.
         assert_eq!(

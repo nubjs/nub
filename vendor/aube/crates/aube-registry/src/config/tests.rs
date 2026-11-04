@@ -3924,6 +3924,9 @@ fn workspace_member_reads_the_workspace_root_npmrc() {
     std::fs::write(member.join("package.json"), r#"{"name":"a"}"#).unwrap();
     std::fs::write(member.join(".npmrc"), "registry=https://member.example/\n").unwrap();
 
+    // A caller outside the workspace that hands the engine the member path
+    // (`-C packages/a` from elsewhere) makes the member the invoking package.
+    let elsewhere = tempfile::tempdir().unwrap();
     let saved = aube_util::engine_context();
     let cases = [
         (
@@ -3932,6 +3935,12 @@ fn workspace_member_reads_the_workspace_root_npmrc() {
             "https://member.example/",
         ),
         (RootBeneathMember, root.path(), "https://root.example/"),
+        (
+            RootBeneathMember,
+            elsewhere.path(),
+            "https://member.example/",
+        ),
+        (RootOnly, elsewhere.path(), "https://root.example/"),
         (RootOnly, member.as_path(), "https://root.example/"),
     ];
     for (model, invoked_from, expected) in cases {

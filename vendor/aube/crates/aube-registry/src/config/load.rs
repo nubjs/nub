@@ -719,8 +719,11 @@ fn load_project_npmrc_entries_tagged(
 /// reads a member's file when invoked from elsewhere (`--filter`, `-r`).
 /// pnpm 10 and Yarn 1 additionally layer the `.npmrc` of the package the
 /// command was run from on top; pnpm 11, npm and Bun do not. The embedder
-/// picks that per incumbent ([`aube_util::WorkspaceNpmrc`]). Outside a
-/// workspace this is just `project_dir`.
+/// picks that per incumbent ([`aube_util::WorkspaceNpmrc`]). A caller that
+/// hands the engine a member path with no invocation inside the workspace
+/// (no recorded invocation dir, and a process cwd elsewhere) gets the target
+/// itself as the invoking package, the way `pnpm -C <dir>` makes `<dir>` the
+/// local prefix. Outside a workspace this is just `project_dir`.
 fn project_npmrc_dirs(project_dir: &Path) -> Vec<PathBuf> {
     let Some(root) = aube_manifest::workspace::find_workspace_root(project_dir) else {
         return vec![project_dir.to_path_buf()];
@@ -729,7 +732,12 @@ fn project_npmrc_dirs(project_dir: &Path) -> Vec<PathBuf> {
     let invoked_from = match ctx.workspace_npmrc {
         aube_util::WorkspaceNpmrc::RootOnly => None,
         aube_util::WorkspaceNpmrc::RootBeneathMember => {
-            invocation_dir(&ctx).and_then(|dir| package_dir_below_root(&dir, &root))
+            match invocation_dir(&ctx).and_then(|dir| within(&dir, &root)) {
+                Some((dir, root)) => package_dir_below_root(&dir, &root),
+                None => within(project_dir, &root)
+                    .filter(|(dir, root)| dir != root)
+                    .map(|_| project_dir.to_path_buf()),
+            }
         }
     };
     let mut dirs = vec![root];
@@ -743,17 +751,19 @@ fn invocation_dir(ctx: &aube_util::EngineContext) -> Option<PathBuf> {
         .or_else(|| std::env::current_dir().ok())
 }
 
-/// The nearest directory at or above `dir` holding a `package.json`, when it
-/// sits strictly inside the workspace `root` (pnpm's "local prefix").
-fn package_dir_below_root(dir: &Path, root: &Path) -> Option<PathBuf> {
+/// `dir` and `root` in one spelling, when `dir` is `root` or inside it.
+fn within(dir: &Path, root: &Path) -> Option<(PathBuf, PathBuf)> {
     let (dir, root) = if dir.starts_with(root) {
         (dir.to_path_buf(), root.to_path_buf())
     } else {
         (dir.canonicalize().ok()?, root.canonicalize().ok()?)
     };
-    if !dir.starts_with(&root) {
-        return None;
-    }
+    dir.starts_with(&root).then_some((dir, root))
+}
+
+/// The nearest directory at or above `dir` holding a `package.json`, strictly
+/// inside the workspace `root` (pnpm's "local prefix"). Both come from [`within`].
+fn package_dir_below_root(dir: &Path, root: &Path) -> Option<PathBuf> {
     dir.ancestors()
         .take_while(|d| *d != root)
         .find(|d| d.join("package.json").is_file())
