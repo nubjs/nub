@@ -29,9 +29,10 @@
 //!   could rename the private base away and plant its own. Windows applies the same
 //!   rule through each ancestor's DACL, with one exception: the user's own profile
 //!   directory (`FOLDERID_Profile`, not the spoofable `%USERPROFILE%`) is trusted,
-//!   because an account that can write it already controls the user, and the
-//!   directories between it and the base are judged only by the grants set on them
-//!   directly, not those inherited from the profile. That is where Codex's Windows
+//!   because an account that can write it already controls the user. Between the
+//!   profile and the base, a write-class grant to another account is accepted only
+//!   when that account holds the same right on the profile itself, so a grant that
+//!   exists only below the profile is still refused. That is where Codex's Windows
 //!   sandbox grants a foreign SID full control, which used to disable the runtime on
 //!   every command (#908). The base itself is validated as on Unix; an existing one carrying
 //!   inherited grants is hardened to a protected private DACL rather than declined,
@@ -574,11 +575,15 @@ fn is_safe_dir(path: &Path) -> bool {
 ///   already controls this user (the Startup folder, PowerShell profiles), so its
 ///   DACL is not checked. That is where Codex's Windows sandbox puts a foreign SID
 ///   with full control of `C:\Users\<user>` (#908).
-/// - **Directories between the profile and the base** are judged by the grants set
-///   on them directly: an inherited ACE came from the profile or from a parent
-///   already judged, while an explicit grant there can rename the base without any
-///   control of the profile. A reparse point among them is followed, and the path
-///   it resolves to is validated in full, as if it were outside the profile.
+/// - **Directories between the profile and the base** may grant a write-class right
+///   to another account only when that account holds the same right on the profile
+///   itself (from an ACE that is not inherit-only), whether the grant below is
+///   explicit or inherited. Such an account gains nothing it did not already have.
+///   A grant that exists only below the profile, set there or materialized from an
+///   inherit-only template on the profile, could rename the base away without any
+///   control of the profile, so it is refused. A reparse point among them is
+///   followed, and the path it resolves to is validated in full, as if it were
+///   outside the profile.
 /// - `C:\Users`, the volume root, and every parent of a base outside the profile get
 ///   the full check.
 #[cfg(windows)]
@@ -647,11 +652,13 @@ fn walk_windows_base_under(
     let (base, parents) = chain
         .split_last()
         .ok_or_else(|| std::io::Error::other("the cache directory has no path"))?;
+    let mut profile_grants = None;
     for (index, &parent) in parents.iter().enumerate() {
         create(parent)?;
         let in_profile = profile.is_some_and(|profile| is_within_profile(parent, profile));
         let is_profile = in_profile && profile.is_some_and(|p| is_within_profile(p, parent));
         if is_profile {
+            profile_grants = Some(crate::windows_security::ProfileGrants::read(parent)?);
             continue;
         }
         let metadata = fs::symlink_metadata(parent)?;
@@ -671,10 +678,11 @@ fn walk_windows_base_under(
         if !metadata.is_dir() {
             return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory));
         }
-        let stable = if in_profile {
-            crate::windows_security::directory_is_stable_below_trusted(parent)?
-        } else {
-            crate::windows_security::directory_is_stable(parent, false, index == 0)?
+        let stable = match profile_grants.as_ref() {
+            Some(grants) if in_profile => {
+                crate::windows_security::directory_is_stable_below_profile(parent, grants)?
+            }
+            _ => crate::windows_security::directory_is_stable(parent, false, index == 0)?,
         };
         if !stable {
             return Err(std::io::Error::new(
@@ -1557,16 +1565,20 @@ mod tests {
         fs::remove_dir_all(&created).unwrap();
     }
 
-    /// #908 and its limits, with a throwaway directory standing in for the profile so
-    /// the test never edits the real one. Codex's sandbox sets a foreign SID's full
-    /// control on the profile itself, and `.cache` below it receives that grant only
-    /// by inheritance: trusted, so the base is used. The same grant set directly on a
-    /// directory inside the profile, or on a parent outside it, lets that account
-    /// rename the base away without controlling the profile: refused.
+    /// #908 and its limits, with throwaway directories standing in for the profile so
+    /// the test never edits the real one. Codex's sandbox gives a foreign SID full
+    /// control of the profile itself, and `.cache` inherits it: that account already
+    /// controls everything below, so the base is used. A grant that exists only
+    /// below the profile gives its holder something new, and is refused whether it
+    /// was set on the directory or materialized from an inherit-only template.
     #[cfg(windows)]
     #[test]
-    fn windows_runtime_cache_trusts_the_profile_but_not_a_grant_below_or_outside_it() {
-        use crate::windows_security::{create_shared_directory, directory_is_stable};
+    fn windows_runtime_cache_trusts_the_profile_but_not_a_grant_only_below_or_outside_it() {
+        use crate::windows_security::{
+            create_directory_with_dacl, create_private_directory, create_shared_directory,
+            directory_is_stable,
+        };
+        const OWNER_ONLY: &str = "(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
 
         assert!(is_within_profile(
             Path::new(r"\\?\C:\Users\Ann\.cache\nub"),
@@ -1578,48 +1590,89 @@ mod tests {
         ));
 
         let root = ensure_safe_base(&tmp_base("nub-rtc-profile")).unwrap();
-        let profile = root.join("profile");
-        create_shared_directory(&profile).unwrap();
-        let cache = profile.join(".cache");
+        let refused = |base: &Path, profile: &Path, why: &str| {
+            let refusal = walk_windows_base_under(base, true, Some(profile)).expect_err(why);
+            assert!(
+                refusal.to_string().contains("lets another account replace"),
+                "{why}: {refusal}"
+            );
+        };
+
+        // #908: Everyone holds full control on the profile and `.cache` inherits it.
+        let shared_profile = root.join("shared-profile");
+        create_shared_directory(&shared_profile).unwrap();
+        let cache = shared_profile.join(".cache");
         fs::create_dir(&cache).unwrap();
         assert!(
             !directory_is_stable(&cache, false, false).unwrap(),
             "control: `.cache` inherits the profile's Everyone grant"
         );
-
         let inside = cache.join("nub");
-        walk_windows_base_under(&inside, true, Some(&profile))
-            .expect("a base below an inherited profile grant is used");
+        walk_windows_base_under(&inside, true, Some(&shared_profile))
+            .expect("a base below a grant the profile already carries is used");
         assert!(
             directory_is_stable(&inside, true, false).unwrap(),
             "the base is created with the private DACL"
         );
-
-        let tools = profile.join("tools");
+        let tools = shared_profile.join("tools");
         create_shared_directory(&tools).unwrap();
-        let refusal = walk_windows_base_under(&tools.join("nub"), true, Some(&profile))
-            .expect_err("a base below an explicit grant inside the profile is refused");
-        assert!(
-            refusal.to_string().contains("lets another account replace"),
-            "{refusal}"
+        walk_windows_base_under(&tools.join("nub"), true, Some(&shared_profile))
+            .expect("an explicit grant to an account that controls the profile adds nothing");
+
+        // An inherit-only template on the profile grants nothing there, everything below.
+        let template_profile = root.join("template-profile");
+        create_directory_with_dacl(
+            &template_profile,
+            &format!("D:P(A;OICIIO;FA;;;WD){OWNER_ONLY}"),
+        )
+        .unwrap();
+        fs::create_dir(template_profile.join(".cache")).unwrap();
+        refused(
+            &template_profile.join(".cache").join("nub"),
+            &template_profile,
+            "a grant materialized from an inherit-only template is refused",
+        );
+
+        // Guests hold full control on the profile but are denied it there.
+        let denied_profile = root.join("denied-profile");
+        create_directory_with_dacl(
+            &denied_profile,
+            &format!("D:P(D;;FA;;;BG)(A;OICI;FA;;;BG){OWNER_ONLY}"),
+        )
+        .unwrap();
+        fs::create_dir(denied_profile.join(".cache")).unwrap();
+        refused(
+            &denied_profile.join(".cache").join("nub"),
+            &denied_profile,
+            "a grant the profile denies is not held there",
+        );
+
+        // A private profile with an explicit grant on a directory inside it.
+        let private_profile = root.join("private-profile");
+        create_private_directory(&private_profile).unwrap();
+        let shared_inside = private_profile.join("tools");
+        create_shared_directory(&shared_inside).unwrap();
+        refused(
+            &shared_inside.join("nub"),
+            &private_profile,
+            "an explicit grant only below the profile is refused",
         );
 
         let shared = root.join("shared");
         create_shared_directory(&shared).unwrap();
-        let refusal = walk_windows_base_under(&shared.join("nub"), true, Some(&profile))
-            .expect_err("a base under a shared parent outside the profile is refused");
-        assert!(
-            refusal.to_string().contains("lets another account replace"),
-            "{refusal}"
+        refused(
+            &shared.join("nub"),
+            &private_profile,
+            "a base under a shared parent outside the profile is refused",
         );
 
         let inherited = cache.join("inherited");
         fs::create_dir(&inherited).unwrap();
         assert!(
-            walk_windows_base_under(&inherited, false, Some(&profile)).is_err(),
+            walk_windows_base_under(&inherited, false, Some(&shared_profile)).is_err(),
             "a base that inherited the grant is refused as-is"
         );
-        walk_windows_base_under(&inherited, true, Some(&profile))
+        walk_windows_base_under(&inherited, true, Some(&shared_profile))
             .expect("a base we own is hardened on adoption");
         assert!(directory_is_stable(&inherited, true, false).unwrap());
 
