@@ -26,9 +26,10 @@ pub enum Value {
     /// means.
     Date(String),
     Array(Vec<Value>),
-    /// Entries in document order. A YAML key may be any node, so keys are values;
-    /// a non-string key is emitted as a computed key and JavaScript stringifies
-    /// it, which is the conversion a JavaScript YAML parser applies.
+    /// Entries in document order. A YAML key may be a scalar of any type, so
+    /// keys are values: a number or boolean is emitted as a computed key, whose
+    /// `String()` conversion is the one `yaml` applies. Collection keys arrive
+    /// already flattened to their YAML flow text by the YAML builder.
     Object(Vec<(Value, Value)>),
 }
 
@@ -86,11 +87,14 @@ impl Value {
                         Value::String(s) => write_string(s, out),
                         // `yaml` keys a null to "", where String(null) is "null".
                         Value::Null => out.push_str("\"\""),
-                        key => {
+                        Value::Number(_) | Value::Bool(_) => {
                             out.push('[');
                             key.write_js(out);
                             out.push(']');
                         }
+                        // Never computed: coercing an object key runs its
+                        // `toString`, which can collide or throw.
+                        key => write_string(&key.to_js(), out),
                     }
                     out.push(':');
                     value.write_js(out);

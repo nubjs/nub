@@ -334,6 +334,10 @@ impl yaml_rust2::parser::MarkedEventReceiver for YamlBuilder {
             )) => match key.take() {
                 None => *key = Some(node),
                 Some(k) => {
+                    let k = match k {
+                        Value::Array(_) | Value::Object(_) => Value::String(yaml_flow_key(&k)),
+                        k => k,
+                    };
                     let duplicate = match &k {
                         Value::String(s) => !string_keys.insert(s.clone()),
                         other => entries.iter().any(|(e, _)| e == other),
@@ -350,6 +354,67 @@ impl yaml_rust2::parser::MarkedEventReceiver for YamlBuilder {
             },
         }
     }
+}
+
+/// A collection key as flow YAML, the string `yaml` keys it by: `[ a, b ]`,
+/// `{ a: 1 }`, `[]`. `yaml` re-emits each scalar in its source style; this
+/// tree no longer holds that, so it departs in three places: a string needing
+/// quotes is double-quoted (`yaml` keeps `'single'`), a number prints its value
+/// (`-0`, not `-0.0`; `31`, not `0x1f`), and a nested collection key stays on
+/// one line. Quoting any string that is not plain-safe keeps distinct keys
+/// distinct.
+fn yaml_flow_key(value: &Value) -> String {
+    fn plain_safe(s: &str) -> bool {
+        !s.is_empty()
+            && core_scalar(s).is_none()
+            && s.trim() == s
+            && !s.starts_with([
+                '-', '?', ':', '!', '&', '*', '|', '>', '%', '@', '`', '\'', '"',
+            ])
+            && !s.contains(['#', ',', '[', ']', '{', '}', '"', '\'', '\n', '\r', '\t'])
+            && !s.contains(": ")
+            && !s.ends_with(':')
+    }
+    fn write(value: &Value, out: &mut String) {
+        match value {
+            Value::String(s) if plain_safe(s) => out.push_str(s),
+            Value::Number(n) if n.is_nan() => out.push_str(".nan"),
+            Value::Number(n) if n.is_infinite() => {
+                out.push_str(if *n > 0.0 { ".inf" } else { "-.inf" })
+            }
+            Value::Number(n) => out.push_str(&n.to_string()),
+            Value::Array(items) if items.is_empty() => out.push_str("[]"),
+            Value::Object(entries) if entries.is_empty() => out.push_str("{}"),
+            Value::Array(items) => {
+                out.push_str("[ ");
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    write(item, out);
+                }
+                out.push_str(" ]");
+            }
+            Value::Object(entries) => {
+                out.push_str("{ ");
+                for (i, (k, v)) in entries.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    write(k, out);
+                    out.push_str(": ");
+                    write(v, out);
+                }
+                out.push_str(" }");
+            }
+            // Strings needing quotes, null and booleans: their JavaScript
+            // literal is also valid double-quoted or plain YAML.
+            other => out.push_str(&other.to_js()),
+        }
+    }
+    let mut out = String::new();
+    write(value, &mut out);
+    out
 }
 
 /// Resolve a scalar the way the YAML 1.2 core schema does: an untagged plain
@@ -392,19 +457,10 @@ fn core_scalar(text: &str) -> Option<Value> {
 /// `[-+]?[0-9]+`, `0o[0-7]+` or `0x[0-9a-fA-F]+`, as a number: past 2^53 it
 /// rounds, as `yaml` and every other JavaScript YAML parser does by default.
 fn core_int(text: &str) -> Option<Value> {
-    let radix = |digits: &str, radix: u32| {
-        if digits.is_empty() {
-            return None;
-        }
-        digits.chars().try_fold(0_f64, |n, c| {
-            c.to_digit(radix)
-                .map(|d| n * f64::from(radix) + f64::from(d))
-        })
-    };
     let n = if let Some(hex) = text.strip_prefix("0x") {
-        radix(hex, 16)?
+        radix_to_f64(hex, 16)?
     } else if let Some(octal) = text.strip_prefix("0o") {
-        radix(octal, 8)?
+        radix_to_f64(octal, 8)?
     } else {
         let digits = text.strip_prefix(['-', '+']).unwrap_or(text);
         if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
@@ -414,6 +470,28 @@ fn core_int(text: &str) -> Option<Value> {
         text.parse().ok()?
     };
     Some(Value::Number(n))
+}
+
+/// Hex or octal digits as the nearest double, rounded once over the whole
+/// integer as `Number(BigInt(text))` is. Digits accumulate exactly in a `u128`;
+/// past 128 bits the rest only shift the exponent and set a sticky bit, which is
+/// enough for round-to-nearest-even because 124+ bits remain above it.
+fn radix_to_f64(digits: &str, radix: u32) -> Option<f64> {
+    let width = radix.trailing_zeros();
+    let (mut top, mut shift, mut sticky) = (0_u128, 0_i32, false);
+    if digits.is_empty() {
+        return None;
+    }
+    for c in digits.chars() {
+        let d = c.to_digit(radix)?;
+        if top.leading_zeros() >= width {
+            top = (top << width) | u128::from(d);
+        } else {
+            shift = shift.saturating_add(width as i32);
+            sticky |= d != 0;
+        }
+    }
+    Some((top | u128::from(sticky)) as f64 * 2_f64.powi(shift))
 }
 
 /// `[-+]?(\.[0-9]+|[0-9]+(\.[0-9]*)?)([eE][-+]?[0-9]+)?`
@@ -591,6 +669,45 @@ mod tests {
         assert_eq!(
             parse_yaml("a: &x [1]\nb: *x\n---\nc: 1\n").unwrap().to_js(),
             r#"{"a":[1.0],"b":[1.0]}"#
+        );
+    }
+
+    /// A collection key becomes `yaml`'s flow text as a plain string key, never
+    /// a computed one: JavaScript's coercion would merge every map key into
+    /// "[object Object]" and throw on a `toString` key.
+    #[test]
+    fn yaml_collection_keys_become_their_flow_text() {
+        let doc = "? {a: 1}\n: first\n? {b: 2}\n: second\n? {toString: 1}\n: t\n\
+                   ? [a, b]\n: seq\n? [[1, 'x,y'], {}]\n: nested\n";
+        assert_eq!(
+            parse_yaml(doc).unwrap().to_js(),
+            concat!(
+                r#"{"{ a: 1 }":"first","{ b: 2 }":"second","{ toString: 1 }":"t","#,
+                r#""[ a, b ]":"seq","[ [ 1, \"x,y\" ], {} ]":"nested"}"#
+            )
+        );
+    }
+
+    /// Hex and octal integers round once, to the nearest double, as
+    /// `Number(BigInt(text))` does; per-digit accumulation rounded at every step.
+    #[test]
+    fn yaml_radix_integers_round_once() {
+        let n = |doc: &str| match parse_yaml(doc).unwrap() {
+            Value::Object(entries) => entries[0].1.clone(),
+            other => other,
+        };
+        assert_eq!(
+            n("x: 0x2000000000000101"),
+            Value::Number(2305843009213694464.0)
+        );
+        // Past u128: 2^160 - 1 rounds up to 2^160.
+        assert_eq!(
+            n(&format!("x: 0x{}", "f".repeat(40))),
+            Value::Number(2_f64.powi(160))
+        );
+        assert_eq!(
+            n(&format!("x: 0o{}", "7".repeat(400))),
+            Value::Number(f64::INFINITY)
         );
     }
 
