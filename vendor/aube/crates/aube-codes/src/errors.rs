@@ -93,6 +93,7 @@ pub const ERR_AUBE_SCRIPT_NON_ZERO_EXIT: &str = "ERR_AUBE_SCRIPT_NON_ZERO_EXIT";
 #[rustfmt::skip] pub const ERR_AUBE_BUILD_POLICY_WILDCARD_WITH_VERSION: &str = "ERR_AUBE_BUILD_POLICY_WILDCARD_WITH_VERSION";
 #[rustfmt::skip] pub const ERR_AUBE_BUILD_POLICY_WILDCARD_APPROVAL: &str = "ERR_AUBE_BUILD_POLICY_WILDCARD_APPROVAL";
 pub const ERR_AUBE_IGNORED_BUILDS: &str = "ERR_AUBE_IGNORED_BUILDS";
+#[rustfmt::skip] pub const ERR_AUBE_GIT_DEP_PREPARE_NOT_ALLOWED: &str = "ERR_AUBE_GIT_DEP_PREPARE_NOT_ALLOWED";
 
 // ── workspace / filter ──────────────────────────────────────────────
 pub const ERR_AUBE_WORKSPACE_PARSE: &str = "ERR_AUBE_WORKSPACE_PARSE";
@@ -529,6 +530,12 @@ pub const ALL: &[CodeMeta] = &[
         name: ERR_AUBE_BUILD_POLICY_WILDCARD_APPROVAL,
         category: category::SCRIPTS,
         description: "A build-allowlist entry approved packages by wildcard (`\"*\": true`, `\"@scope/*\": true`). Approvals must name each package, matching pnpm's exact-name `allowBuilds`, so the entry approves nothing; a wildcard still works as a `false` denial.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: ERR_AUBE_GIT_DEP_PREPARE_NOT_ALLOWED,
+        category: category::SCRIPTS,
+        description: "A git dependency has to be built before it is installed (a `prepare` script, or a `prepack`-style script with its `main` missing), and the build allowlist neither allows nor denies it. Allow it by its exact source key or its repository key; a bare package name does not approve a git checkout.",
         exit_code: None,
     },
     // Linker

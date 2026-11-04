@@ -188,6 +188,36 @@ impl LocalSource {
             .unwrap_or_default()
     }
 
+    /// The exact `allowBuilds` keys that name this source for package
+    /// `name`, the lockfile's own spelling first. A git clone is also
+    /// accepted under pnpm's `<name>@git+<url>#<commit>` spelling, the key
+    /// pnpm prints and writes, so a project's existing pnpm approval
+    /// matches here too.
+    pub fn source_approval_keys(&self, name: &str) -> Vec<String> {
+        let specifier = self.specifier();
+        let mut keys = vec![format!("{name}@{specifier}")];
+        if matches!(self, LocalSource::Git(_)) && !specifier.starts_with("git+") {
+            keys.push(format!("{name}@git+{specifier}"));
+        }
+        keys
+    }
+
+    /// The commit-free `<name>@git+<repository>` key that approves every
+    /// commit of one repository. A hosted-git archive keys as the
+    /// repository it was cut from, so one rule covers the dependency
+    /// whether it was cloned or downloaded, as pnpm's does.
+    pub fn git_repository_approval_key(&self, name: &str) -> Option<String> {
+        let url = match self {
+            LocalSource::Git(g) => g.url.clone(),
+            LocalSource::RemoteTarball(t) => t.as_hosted_git_source()?.url,
+            _ => return None,
+        };
+        Some(format!(
+            "{name}@git+{}",
+            url.strip_prefix("git+").unwrap_or(&url)
+        ))
+    }
+
     /// Canonical specifier string as pnpm writes it in the `packages:`
     /// and `snapshots:` keys (post-`<name>@` part). For `file:` /
     /// `link:` this is `file:./vendor/foo` / `link:../sibling`. For

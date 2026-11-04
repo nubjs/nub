@@ -173,7 +173,7 @@ Read the [full docs](https://pnpm.io/catalogs) on pnpm.io. The `catalog:` syntax
 
 ### `allowScripts`
 
-Which dependencies may run install scripts — see [lifecycle scripts](#lifecycle-scripts) for the deny-by-default rules around it. A registry dependency is keyed by name, anything else by its full specifier, and an explicit `false` beats any allow in the map.
+Which dependencies may run install scripts — see [lifecycle scripts](#lifecycle-scripts) for the deny-by-default rules around it. A registry dependency is keyed by name, anything else by its full specifier (a git dependency also by its repository, see [git dependencies](#git-dependencies)), and an explicit `false` beats any allow in the map.
 
 ```json title="package.json"
 {
@@ -556,6 +556,20 @@ ERR_NUB_IGNORED_BUILDS
 Approve the package with `nub approve-builds`, or deny it to keep it skipped: `nub approve-builds '!<pkg>'` and `nub add --allow-build='!<pkg>'` both record `false`. `--allow-build` will not approve a package the project already denies; change that entry instead. To skip unapproved builds with a warning rather than fail, set `strictDepBuilds=false` in `.npmrc`. Global installs and `nubx` never fail on one.
 
 `nub rebuild <pkg>` re-runs an approved package's build. Naming a package there does not approve it.
+
+### Git dependencies
+
+A dependency installed from git is source, not a published build. When it has a `prepare` script, Nub builds it before linking it: it installs the checkout's own dependencies, runs `prepare`, and links what the package would publish. That build runs only when `allowScripts` names the dependency's source, as in pnpm:
+
+```json title="package.json"
+{
+  "allowScripts": {
+    "rimraf@git+https://github.com/isaacs/rimraf.git": true
+  }
+}
+```
+
+A `<name>@git+<repository>` key approves every commit of that repository, and a key ending in `#<commit>` approves that commit alone. A bare package name never approves a git dependency. A git dependency that needs building and is not listed fails the install with `ERR_NUB_GIT_DEP_PREPARE_NOT_ALLOWED`, which prints the key to add. One set to `false` installs unbuilt, as every git dependency does under `--ignore-scripts`.
 
 ### Your project's own hooks
 
