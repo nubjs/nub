@@ -1,5 +1,0 @@
-{
-  "title": "Runner",
-  "defaultOpen": false,
-  "pages": ["index", "run", "exec", "dlx"]
-}

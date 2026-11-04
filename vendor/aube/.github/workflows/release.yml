@@ -27,6 +27,12 @@ on:
         required: true
       CERTIFICATES_P12_PASS:
         required: true
+      APPLE_API_KEY_P8:
+        required: true
+      APPLE_API_KEY_ID:
+        required: true
+      APPLE_API_ISSUER_ID:
+        required: true
   workflow_dispatch:
     inputs:
       tag:
@@ -45,6 +51,7 @@ on:
         default: false
 
 env:
+  MBX_DISABLE: "1"
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   AUBE_PRIMER_TOP: "2000"
@@ -75,7 +82,7 @@ jobs:
 
   generate-primer:
     needs: validate-inputs
-    runs-on: namespace-profile-endev-linux-amd64
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
@@ -88,6 +95,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
+          package-manager-cache: false
       - name: Generate metadata primer
         id: primer
         shell: bash
@@ -214,7 +222,7 @@ jobs:
           path: ${{ steps.archive.outputs.path }}
       - name: Attest release archive
         if: ${{ !fromJSON(inputs.dry_run || 'false') }}
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: ${{ steps.archive.outputs.path }}
 
@@ -228,7 +236,8 @@ jobs:
   # musl).
   upload-assets-musl-arm64:
     needs: generate-primer
-    runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=aube-rust-linux
+    # Release builds must never restore or save persistent caches.
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: read
@@ -286,34 +295,175 @@ jobs:
           path: ${{ steps.archive.outputs.path }}
       - name: Attest release archive
         if: ${{ !fromJSON(inputs.dry_run || 'false') }}
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.archive.outputs.path }}
+
+  # Native aarch64 GNU release. Build inside a cached Ubuntu 20.04 image so
+  # the linked artifact has a natural glibc 2.31 baseline while retaining
+  # native ARM64 execution for both Rust PGO and BOLT instrumentation training.
+  upload-assets-pgo-arm64-linux:
+    needs: generate-primer
+    # The instrumented fat-LTO link can exceed the 16 GB available on
+    # standard GitHub-hosted runners, so this release-only job needs 32 GB.
+    runs-on: namespace-profile-endev-linux-arm64-large;overrides.cache-tag=aube-rust-linux-arm64
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      TARGET: aarch64-unknown-linux-gnu
+      LLVM_VERSION: "20"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref != '' && fromJSON(inputs.dry_run || 'false') && inputs.ref || format('refs/tags/{0}', inputs.tag) }}
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: metadata-primer
+          path: crates/aube-resolver/data
+      # BuildKit reuses unchanged dependency/toolchain layers from the GHA
+      # cache; changing the Containerfile or mise.toml invalidates only the
+      # layers after that change.
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Build cached ARM64 PGO environment
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .github/containers/release-arm64
+          file: .github/containers/release-arm64/Containerfile
+          platforms: linux/arm64
+          load: true
+          tags: aube-release-arm64:local
+          build-args: |
+            LLVM_VERSION=${{ env.LLVM_VERSION }}
+          cache-from: type=gha,scope=aube-release-arm64
+          # Only trusted release refs may write the shared cache. Dry runs
+          # can restore it but must not let an arbitrary ref poison it.
+          cache-to: ${{ !fromJSON(inputs.dry_run || 'false') && inputs.ref == '' && github.ref == 'refs/heads/main' && 'type=gha,mode=max,scope=aube-release-arm64' || '' }}
+
+      - name: Smoke-test ARM64 PGO environment
+        shell: bash
+        run: |
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --env HOME=/tmp \
+            --env MISE_CACHE_DIR=/tmp/mise-cache \
+            aube-release-arm64:local \
+            mise -C /mise exec -- bash -euo pipefail -c '
+              node --version
+              rustc --version
+              cargo --version
+            '
+
+      - name: PGO build (Focal + LLD + BOLT)
+        shell: bash
+        env:
+          AUBE_PGO_NO_LOCK: "1"
+          AUBE_PGO_BUILD_TOOL: cargo
+          AUBE_PGO_BOLT: "1"
+          AUBE_PGO_USE_LLD: "1"
+          AUBE_PGO_LLVM_VERSION: ${{ env.LLVM_VERSION }}
+        run: |
+          container_home="$RUNNER_TEMP/aube-home"
+          # Docker creates missing bind-mount sources as root. Create target as
+          # the runner user so the non-root container can write PGO artifacts.
+          mkdir -p "$GITHUB_WORKSPACE/target" "$container_home/.cargo" "$HOME/.cargo/registry" "$HOME/.cargo/git"
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --volume "$GITHUB_WORKSPACE/target:/workspace/target" \
+            --volume "$container_home:/tmp/aube-home" \
+            --volume "$HOME/.cargo/registry:/tmp/aube-home/.cargo/registry" \
+            --volume "$HOME/.cargo/git:/tmp/aube-home/.cargo/git" \
+            --workdir /workspace \
+            --env AUBE_PGO_NO_LOCK \
+            --env AUBE_PGO_BUILD_TOOL \
+            --env AUBE_PGO_BOLT \
+            --env AUBE_PGO_USE_LLD \
+            --env AUBE_PGO_LLVM_VERSION \
+            --env HOME=/tmp/aube-home \
+            --env CARGO_HOME=/tmp/aube-home/.cargo \
+            --env MISE_CACHE_DIR=/tmp/mise-cache \
+            aube-release-arm64:local \
+            mise -C /mise exec -- bash -euo pipefail -c '
+              cd /workspace
+              test -w target
+              # sed consumes the full stream; head can make ldd exit with
+              # SIGPIPE (141), which pipefail incorrectly treats as a build failure.
+              ldd --version | sed -n "1p"
+              bash benchmarks/pgo.bash
+            '
+
+      - name: Validate glibc baseline
+        shell: bash
+        run: |
+          bin=target/release-pgo/aube
+          max_glibc=$(
+            readelf --version-info "$bin" \
+              | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)*' \
+              | sort -Vu \
+              | tail -1
+          )
+          echo "Maximum required glibc symbol version: ${max_glibc:-none}"
+          if [ -n "$max_glibc" ] && \
+             [ "$(printf '%s\n' GLIBC_2.31 "$max_glibc" | sort -V | tail -1)" != "GLIBC_2.31" ]; then
+            echo "::error::ARM64 release requires $max_glibc, newer than GLIBC_2.31"
+            exit 1
+          fi
+          "$bin" --version
+
+      - name: Archive PGO binaries
+        id: archive
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          archive="aube-${TAG}-${TARGET}.tar.gz"
+          BIN_DIR="target/release-pgo"
+          ln -sf aube "$BIN_DIR/aubr"
+          ln -sf aube "$BIN_DIR/aubx"
+          tar -czf "$archive" -C "$BIN_DIR" aube aubr aubx
+          echo "path=$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Upload archive to release
+        if: ${{ !fromJSON(inputs.dry_run || 'false') }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.AUBE_GH_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          ARCHIVE: ${{ steps.archive.outputs.path }}
+        run: gh release upload "$TAG" "$ARCHIVE" --clobber
+
+      - name: Upload archive as workflow artifact (dry run)
+        if: ${{ fromJSON(inputs.dry_run || 'false') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: aube-${{ inputs.tag }}-aarch64-unknown-linux-gnu
+          path: ${{ steps.archive.outputs.path }}
+
+      - name: Attest release archive
+        if: ${{ !fromJSON(inputs.dry_run || 'false') }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: ${{ steps.archive.outputs.path }}
 
   # PGO-optimized targets: x86_64 Linux GNU/musl (cross-built on amd64)
-  # plus native aarch64 Linux GNU and native macOS arm64. Each builds
-  # via benchmarks/pgo.bash — instrument under release-pgo, train against
-  # the hermetic Verdaccio registry, rebuild with -Cprofile-use. The
-  # x86_64 Linux targets use build-tool=cross so the resulting binary
-  # preserves the current glibc baseline; the cross-built instrumented
-  # binary runs on the host for training (cross's older glibc is
-  # forward-compatible with the runner's). Cross.toml passes RUSTFLAGS
-  # through to the container so phase 1 / 3b RUSTFLAGS reach cargo
-  # inside cross. The aarch64 Linux row runs natively on
-  # `namespace-profile-endev-linux-arm64-large` (32 GB) so the same
-  # fat-LTO + profile-generate headroom argument from
-  # acdf415 applies, and we don't need QEMU to train. macOS arm64 is
-  # on the `-large` (12×28) variant because the previous instrumented
-  # binary segfaulted during training on the 6×14 base profile — fork
-  # pressure from `aube install` may have been racing under resource
-  # contention. Revisit moving back to base if `-large` proves stable
-  # across a few release cycles.
+  # plus native macOS arm64. The aarch64 GNU release is isolated above
+  # so its entire build runs inside Focal. Each remaining target builds via
+  # benchmarks/pgo.bash — instrument under release-pgo, train against the
+  # committed offline registry, and rebuild with -Cprofile-use. The x86_64
+  # Linux targets use build-tool=cross so the resulting binaries preserve
+  # their current libc baselines. macOS arm64 remains native on its existing
+  # hosted runner.
   upload-assets-pgo:
     needs: generate-primer
     runs-on: ${{ matrix.runner }}
     # 180 to cover macos-latest (3 vCPU) which needs ~80 min for two
-    # fat-LTO compiles. Linux PGO on -large runners completes in well
-    # under 75, so the extra headroom is dead slack for them.
+    # fat-LTO compiles. The Linux rows use 32 GB release-only runners because
+    # the instrumented link has exceeded standard-runner memory in the past.
     timeout-minutes: 180
     permissions:
       contents: read
@@ -338,30 +488,16 @@ jobs:
           # not in tree.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            runner: namespace-profile-endev-linux-amd64-large;overrides.cache-tag=aube-rust-linux
+            runner: namespace-profile-endev-linux-amd64-large
             build-tool: cross
             bolt: true
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            runner: namespace-profile-endev-linux-amd64-large;overrides.cache-tag=aube-rust-linux
+            runner: namespace-profile-endev-linux-amd64-large
             build-tool: cross
             bolt: false
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            runner: namespace-profile-endev-linux-arm64-large;overrides.cache-tag=aube-rust-linux-arm64
-            build-tool: cargo
-            bolt: true
           - target: aarch64-apple-darwin
             os: macos-latest
-            # Trying GitHub's standard Apple Silicon runner — the
-            # namespace `macos-arm64-large` image segfaulted the
-            # PGO-instrumented binary on both rustc 1.94 and 1.95
-            # (#589's rustup bump fired but training still SIGSEGV'd,
-            # so the toolchain isn't the variable). Switch to GH's
-            # hosted runner to test whether the crash is image- or
-            # hardware-specific to the namespace fleet (older Apple
-            # silicon, custom kernel/Xcode bundle, sandbox quirks)
-            # before dropping macOS arm64 from the PGO matrix entirely.
             runner: macos-latest
             build-tool: cargo
             bolt: false
@@ -378,6 +514,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
+          package-manager-cache: false
       # rustc 1.94.0 on aarch64-apple-darwin miscompiles the
       # PGO-instrumented binary — the resulting `aube install` SIGSEGVs
       # on its first invocation during phase 2 training. Verified
@@ -409,8 +546,8 @@ jobs:
           # GH macos-latest-large defaults to an x86_64-apple-darwin
           # host rustc (Rosetta) — `--target=aarch64-apple-darwin`
           # from pgo.bash then triggers a cross-compile that needs the
-          # arm64 std lib explicitly installed. Idempotent on namespace
-          # runners where the target is already present.
+          # arm64 std lib explicitly installed. The command is idempotent when
+          # the target is already present.
           rustup target add aarch64-apple-darwin
           rustup show
       - name: Install rustup llvm-tools-preview
@@ -444,9 +581,8 @@ jobs:
           echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
           /usr/lib/llvm-18/bin/llvm-bolt --version | head -2
           /usr/lib/llvm-18/bin/merge-fdata --help | head -2 || true
-      # verdaccio is installed lazily by hermetic.bash's
-      # _hermetic_ensure_verdaccio (called from pgo.bash via hermetic_start),
-      # so no explicit install step is needed here.
+      # PGO training is served from test/registry/storage by a dependency-free
+      # local Node server. Release builds never contact npmjs.org.
       - name: Import codesign certs
         if: startsWith(matrix.os, 'macos')
         uses: apple-actions/import-codesign-certs@5142e029c445c10ffc7149d172e540235a065466 # v7.0.0
@@ -460,6 +596,7 @@ jobs:
           AUBE_PGO_BUILD_TOOL: ${{ matrix.build-tool }}
           AUBE_PGO_TARGET: ${{ matrix.target }}
           AUBE_PGO_BOLT: ${{ matrix.bolt && '1' || '' }}
+          AUBE_PGO_LLVM_VERSION: ${{ matrix.bolt && '18' || '' }}
         run: bash benchmarks/pgo.bash
       - name: Codesign macOS binaries
         if: startsWith(matrix.os, 'macos')
@@ -474,6 +611,86 @@ jobs:
           # name only matters for argv[0] dispatch inside the binary.
           codesign --sign "$IDENTITY" --options runtime --timestamp \
             --prefix dev.jdx. "$BIN_DIR/aube"
+      # Signing settles who built the binary; notarization is what Gatekeeper
+      # demands once an archive carries the quarantine bit, which is to say
+      # whenever someone downloads it in a browser rather than with curl.
+      # Without a ticket it is blocked behind a "cannot be verified" dialog that
+      # only a deliberate override gets past.
+      #
+      # The ticket lives on Apple's side and is keyed to the binary's cdhash, so
+      # nothing here rewrites what was already built or uploaded -- stapling
+      # would, but `stapler` only writes into bundles, disk images, and
+      # installer packages, and this is a bare Mach-O in an archive. Gatekeeper
+      # resolves the ticket online instead.
+      - name: Notarize macOS binary
+        if: startsWith(matrix.os, 'macos') && !fromJSON(inputs.dry_run || 'false')
+        shell: bash
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          BINARIES: target/${{ matrix.target }}/release-pgo/aube
+        run: |
+          set -euo pipefail
+
+          if [ -z "$APPLE_API_KEY_P8" ] || [ -z "$APPLE_API_KEY_ID" ] || [ -z "$APPLE_API_ISSUER_ID" ]; then
+            echo "::error title=Notarization credentials missing::App Store Connect credentials are required for macOS releases."
+            exit 1
+          fi
+
+          # Outside the workspace, so no later step can sweep the key into an
+          # artifact, and removed even when notarization fails.
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$work/key.p8"
+
+          # notarytool takes a container, never a bare executable. Copies are
+          # fine: a Mach-O carries its signature inline, so the cdhash the
+          # ticket is keyed to is the one already shipped.
+          mkdir "$work/stage"
+          for binary in $BINARIES; do
+            cp "$binary" "$work/stage/"
+          done
+          # Apple rejects a binary without the hardened runtime or a secure
+          # timestamp. Naming a missing one here turns an opaque Invalid verdict
+          # into a diagnosis; Apple stays the authority on whether to accept.
+          for binary in $BINARIES; do
+            details="$(codesign --display --verbose=4 "$binary" 2>&1 || true)"
+            case "$details" in
+              *runtime*) ;;
+              *) echo "::warning title=No hardened runtime::$binary is signed without --options runtime, which Apple requires; expect an Invalid verdict below." ;;
+            esac
+            case "$details" in
+              *Timestamp=*) ;;
+              *) echo "::warning title=No secure timestamp::$binary carries no secure timestamp, which Apple requires; expect an Invalid verdict below." ;;
+            esac
+          done
+
+          ditto -c -k --norsrc --noextattr "$work/stage" "$work/submission.zip"
+
+          # `--wait` is not a gate on its own: it can return zero on an Invalid
+          # submission, so the reported status is what decides. plutil reads
+          # JSON and ships with macOS, which keeps this off jq.
+          result="$(xcrun notarytool submit "$work/submission.zip" \
+            --key "$work/key.p8" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" \
+            --output-format json \
+            --timeout 30m \
+            --wait)"
+          echo "$result"
+
+          status="$(printf '%s' "$result" | plutil -extract status raw -o - -)"
+          id="$(printf '%s' "$result" | plutil -extract id raw -o - -)"
+          if [ "$status" != "Accepted" ]; then
+            echo "::error::notarization returned $status for submission $id"
+            xcrun notarytool log "$id" \
+              --key "$work/key.p8" \
+              --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_ISSUER_ID" || true
+            exit 1
+          fi
+          echo "notarized: submission $id"
       - name: Archive PGO binaries
         id: archive
         shell: bash
@@ -512,6 +729,6 @@ jobs:
           path: ${{ steps.archive.outputs.path }}
       - name: Attest release archive
         if: ${{ !fromJSON(inputs.dry_run || 'false') }}
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: ${{ steps.archive.outputs.path }}

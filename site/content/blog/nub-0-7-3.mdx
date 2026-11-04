@@ -1,0 +1,64 @@
+---
+title: "Nub 0.7.3"
+description: Running scripts on Windows works again after a launcher optimization moved the binary away from its shell, plus native TypeScript transform configuration.
+author: The Nub Team
+date: 2026-08-08
+---
+
+Nub 0.7.3 is a patch release about a fast path that moved a file out from under the thing that needed it.
+
+## Running scripts on Windows
+
+Script bodies run through a POSIX `sh` on every platform, so one script behaves the same everywhere. Windows has no POSIX shell, so Nub ships a small one and finds it next to its own binary.
+
+In 0.7.0 the launcher started placing a real `nub.exe` alongside npm's generated shims, so the command prompt reaches the binary directly instead of booting Node first. That took the dispatch from 95.6 ms to 35.8 ms. It also moved the binary out of the directory holding the shell, and nothing moved the shell with it:
+
+```console
+$ nub run test
+Error: nub's bundled POSIX shell (busybox.exe) was not found next to the nub
+executable at \\?\C:\Users\you\AppData\Roaming\npm\busybox.exe.
+```
+
+The shape of the failure is what made it confusing to hit. Installing places the binary, and the first `nub` call after an install is the one that creates the fast-path copy — so that call works, and every call after it fails. Reinstalling appears to fix it, once.
+
+The launcher now carries the shell along with the binary it relocates. It goes in a subdirectory rather than beside the executable, because that directory is on `PATH`: dropping a file named `busybox.exe` there would shadow a busybox you installed yourself.
+
+Upgrading is the whole fix — there is nothing to clean up by hand.
+
+```console
+$ npm install -g @nubjs/nub
+```
+
+## TypeScript transform options in nub.jsonc
+
+Project configuration gains six fields that map onto the native transform, so JSX and decorator behavior no longer has to be inferred from `tsconfig.json` alone:
+
+```jsonc
+{
+  "jsx": "react-jsx",
+  "jsxImportSource": "preact",
+  "emitDecoratorMetadata": true
+}
+```
+
+`jsxFactory`, `jsxFragmentFactory`, and `decorators` round out the set.
+
+## Importing a file as text on Node 24
+
+Reading a file's contents through an import attribute works on every Node version Nub supports, but which layer provides it depends on the runtime:
+
+```ts
+import banner from "./banner.txt" with { type: "text" };
+```
+
+Node gained native support behind a flag in 26.5.0, then backported it to the 24.x LTS line in 24.19.0. Nub steps aside to the native implementation whenever the running binary knows the flag, and supplies its own otherwise. The backport meant a Node existed that knew the flag but was not being given it, which landed those imports in Node's default loader and failed them with `ERR_UNKNOWN_FILE_EXTENSION`. Node 24.19.0 and later now get the flag.
+
+## Environment files and Varlock
+
+When Varlock owns the environment, passing an explicit env file is now refused rather than quietly layered on top, and `.env.schema` ownership is decided by which loader actually resolves it — a missing schema is an error instead of a silent downgrade.
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.7.3) list every change in this release.
+
+## Get started
+
+<GetStarted />

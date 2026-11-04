@@ -2,18 +2,16 @@
 
 mod check;
 
-use clap::{Args, Subcommand};
-
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct TrustArgs {
-    #[command(subcommand)]
+    #[usage(subcommand)]
     command: TrustCommand,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, usage_rs::Subcommands)]
 enum TrustCommand {
     /// Check one package version for a publishing-trust downgrade
-    #[command(after_long_help = check::AFTER_LONG_HELP)]
+    #[usage(after_long_help = check::AFTER_LONG_HELP)]
     Check(check::CheckArgs),
 }
 

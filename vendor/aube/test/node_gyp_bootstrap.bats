@@ -73,6 +73,50 @@ JSON
 	assert_file_exists "$XDG_CACHE_HOME/aube/tools/node-gyp/v12/node_modules/.bin/node-gyp"
 }
 
+@test "bootstrap repairs a cached node-gyp whose virtual store was deleted" {
+	if [ -z "${AUBE_TEST_REGISTRY:-}" ]; then
+		skip "AUBE_TEST_REGISTRY not set (Verdaccio not running)"
+	fi
+
+	run aube __node-gyp-bootstrap "$PWD"
+	assert_success
+	assert_file_exists "$output"
+
+	# Isolated installs write a regular .bin wrapper. Deleting its target
+	# used to leave the wrapper looking healthy to the bootstrap fast path.
+	rm -rf "$XDG_CACHE_HOME/aube/virtual-store"
+	run aube __node-gyp-bootstrap "$PWD"
+	assert_success
+	assert_file_exists "$output"
+	run "$output" --help
+	assert_success
+}
+
+@test "dep lifecycle does not bootstrap node-gyp unless invoked" {
+	if [ -z "${AUBE_TEST_REGISTRY:-}" ]; then
+		skip "AUBE_TEST_REGISTRY not set (Verdaccio not running)"
+	fi
+	cat >package.json <<'JSON'
+{
+  "name": "node-gyp-lazy-dep-test",
+  "version": "1.0.0",
+  "dependencies": {
+    "aube-test-builds-marker": "^1.0.0"
+  },
+  "pnpm": {
+    "allowBuilds": {
+      "aube-test-builds-marker": true
+    }
+  }
+}
+JSON
+
+	run aube install
+	assert_success
+	assert_file_exists aube-builds-marker.txt
+	assert_dir_not_exists "$XDG_CACHE_HOME/aube/tools/node-gyp/v12"
+}
+
 @test "aube test adds bootstrapped node-gyp to PATH" {
 	# Ported from pnpm/test/install/lifecycleScripts.ts:128
 	# ('node-gyp is in the PATH'). The setup scrubbed ambient node-gyp,
@@ -116,6 +160,47 @@ JSON
 	run aube test
 	assert_success
 	assert_file_exists plain-ok
+	assert_dir_not_exists "$XDG_CACHE_HOME/aube/tools/node-gyp/v12"
+}
+
+@test "install does not bootstrap node-gyp for unrelated build scripts" {
+	# The install twin of the case above. The build fan-out used to
+	# bootstrap node-gyp up front for *any* approved build, so a cold cache
+	# plus an unreachable registry aborted an install whose graph wanted
+	# nothing from node-gyp. A local dep keeps this network-free, and
+	# INIT_CWD (the project root, which aube exports for build tooling)
+	# gives the script a stable place to prove it ran.
+	mkdir -p plainbuild
+	cat >plainbuild/package.json <<'JSON'
+{
+  "name": "plainbuild",
+  "version": "1.0.0",
+  "scripts": {
+    "postinstall": "node -e 'require(\"fs\").writeFileSync(process.env.INIT_CWD + \"/built-ok\", \"ok\")'"
+  }
+}
+JSON
+	cat >.npmrc <<'EOF'
+registry=http://127.0.0.1:9/
+EOF
+	cat >package.json <<'JSON'
+{
+  "name": "install-unrelated-build-test",
+  "version": "1.0.0",
+  "dependencies": {
+    "plainbuild": "file:./plainbuild"
+  },
+  "pnpm": {
+    "allowBuilds": {
+      "plainbuild@file:./plainbuild": true
+    }
+  }
+}
+JSON
+
+	run aube install
+	assert_success
+	assert_file_exists built-ok
 	assert_dir_not_exists "$XDG_CACHE_HOME/aube/tools/node-gyp/v12"
 }
 

@@ -588,6 +588,539 @@ fn test_write_emits_file_dir_dep_as_link_pair() {
     assert_eq!(packages["node_modules/local-utils"]["link"], true);
 }
 
+/// A `link:` dep to a plain directory gets the SAME pair. npm has no
+/// separate encoding for it — a `file:` directory dep is already written
+/// as a link record — so the two differ only inside aube, where `Link`
+/// skips the virtual store.
+///
+/// Emitting nothing (the prior behavior) did not merely lose bytes: the
+/// importer parsed back with zero direct deps, so nub's own freshness
+/// check read the manifest's dep as newly added and failed every later
+/// `--frozen-lockfile` with `manifest adds local-utils@link:./local-pkg`
+/// — on a project nub itself had just installed. Reproduce with
+/// `nub add ./dep && nub install --frozen-lockfile`.
+#[test]
+fn test_write_emits_link_dir_dep_as_link_pair() {
+    let local = LocalSource::Link(PathBuf::from("./local-pkg"));
+    let dep_path = local.dep_path("local-utils");
+    let mut graph = LockfileGraph::default();
+    graph.packages.insert(
+        dep_path.clone(),
+        LockedPackage {
+            name: "local-utils".to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: dep_path.clone(),
+            local_source: Some(local),
+            ..Default::default()
+        },
+    );
+    graph.importers.insert(
+        ".".to_string(),
+        vec![DirectDep {
+            name: "local-utils".to_string(),
+            dep_path,
+            dep_type: DepType::Production,
+            specifier: Some("link:./local-pkg".to_string()),
+        }],
+    );
+
+    let manifest = aube_manifest::PackageJson {
+        name: Some("test".to_string()),
+        version: Some("1.0.0".to_string()),
+        dependencies: [("local-utils".to_string(), "link:./local-pkg".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let out = tempfile::NamedTempFile::new().unwrap();
+    write(out.path(), &graph, &manifest).unwrap();
+
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.path()).unwrap()).unwrap();
+    let packages = &doc["packages"];
+
+    assert_eq!(packages["local-pkg"]["version"], "1.0.0");
+    assert_eq!(
+        packages["node_modules/local-utils"]["resolved"],
+        "local-pkg"
+    );
+    assert_eq!(packages["node_modules/local-utils"]["link"], true);
+}
+
+/// A workspace MEMBER is also reached as a `link:` — its target is an
+/// importer — so widening the link emitter must not change what a member
+/// serializes to. This pins that shape.
+///
+/// Honest about what it does NOT prove: the emitter's workspace guard is
+/// belt-and-braces rather than load-bearing. `emit_file_dep_links` runs
+/// BEFORE the workspace pass, which rewrites the same two keys and so
+/// wins regardless — with the guard deleted, this test and all 579 others
+/// in the crate still pass (measured). The guard states which pass owns a
+/// member instead of leaving it to that ordering, and this test gives a
+/// future reordering something to fail against.
+#[test]
+fn test_write_leaves_workspace_member_links_to_the_workspace_pass() {
+    let local = LocalSource::Link(PathBuf::from("packages/a"));
+    let dep_path = local.dep_path("@w/a");
+    let mut graph = LockfileGraph::default();
+    graph.packages.insert(
+        dep_path.clone(),
+        LockedPackage {
+            name: "@w/a".to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: dep_path.clone(),
+            local_source: Some(local),
+            ..Default::default()
+        },
+    );
+    graph.importers.insert(
+        ".".to_string(),
+        vec![DirectDep {
+            name: "@w/a".to_string(),
+            dep_path,
+            dep_type: DepType::Production,
+            specifier: Some("*".to_string()),
+        }],
+    );
+    graph.importers.insert("packages/a".to_string(), vec![]);
+
+    let manifest = aube_manifest::PackageJson {
+        name: Some("root".to_string()),
+        version: Some("1.0.0".to_string()),
+        dependencies: [("@w/a".to_string(), "*".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let out = tempfile::NamedTempFile::new().unwrap();
+    write(out.path(), &graph, &manifest).unwrap();
+
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.path()).unwrap()).unwrap();
+    let packages = &doc["packages"];
+
+    // The member keeps the workspace pass's spelling — keyed by importer
+    // path — rather than a second, competing entry from the link emitter.
+    assert_eq!(packages["packages/a"]["name"], "@w/a");
+    assert_eq!(packages["node_modules/@w/a"]["resolved"], "packages/a");
+    assert_eq!(packages["node_modules/@w/a"]["link"], true);
+}
+
+/// A NON-root importer's local dep is keyed in the project-root frame,
+/// not the importer's. `LocalSource` paths arrive project-root-relative
+/// (`rebase_local`) and npm's keys are project-root-relative, so the two
+/// already agree — prepending the importer produced
+/// `packages/app/vendor/local-pkg`, a path matching nothing on disk,
+/// where npm 11.19.0 writes `vendor/local-pkg` (measured).
+#[test]
+fn test_write_keys_a_member_local_dep_in_the_project_root_frame() {
+    let local = LocalSource::Directory(PathBuf::from("vendor/local-pkg"));
+    let dep_path = local.dep_path("local-utils");
+    let mut graph = LockfileGraph::default();
+    graph.packages.insert(
+        dep_path.clone(),
+        LockedPackage {
+            name: "local-utils".to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: dep_path.clone(),
+            local_source: Some(local),
+            ..Default::default()
+        },
+    );
+    graph.importers.insert(".".to_string(), vec![]);
+    graph.importers.insert(
+        "packages/app".to_string(),
+        vec![DirectDep {
+            name: "local-utils".to_string(),
+            dep_path,
+            dep_type: DepType::Production,
+            specifier: Some("file:../../vendor/local-pkg".to_string()),
+        }],
+    );
+
+    let manifest = aube_manifest::PackageJson {
+        name: Some("root".to_string()),
+        version: Some("1.0.0".to_string()),
+        ..Default::default()
+    };
+    // `write` recovers a member's identity from its `package.json` on
+    // disk, so the importer needs to exist for the member pass to run.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("packages/app")).unwrap();
+    std::fs::write(
+        dir.path().join("packages/app/package.json"),
+        r#"{"name":"@w/app","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let out = dir.path().join("package-lock.json");
+    write(&out, &graph, &manifest).unwrap();
+
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    let packages = &doc["packages"];
+
+    assert_eq!(packages["vendor/local-pkg"]["version"], "1.0.0");
+    assert!(
+        packages.get("packages/app/vendor/local-pkg").is_none(),
+        "the importer prefix must not be prepended to an already-root-relative \
+         path, got {packages}"
+    );
+    assert_eq!(
+        packages["node_modules/local-utils"]["resolved"],
+        "vendor/local-pkg"
+    );
+}
+
+/// Two members depending on the same NAME at different paths: npm hoists
+/// the first to the root and NESTS the conflicting one under the importer
+/// that wants it. Measured, npm 11.19.0 — `node_modules/shared` →
+/// `vendor/one`, `packages/b/node_modules/shared` → `vendor/two`.
+///
+/// Keying every link at the root made the last writer win, so the first
+/// member silently resolved to the other's package: no error, a wrong
+/// module. That is the failure this pins.
+#[test]
+fn test_write_nests_a_conflicting_member_local_dep() {
+    let one = LocalSource::Directory(PathBuf::from("vendor/one"));
+    let two = LocalSource::Directory(PathBuf::from("vendor/two"));
+    let (one_path, two_path) = (one.dep_path("shared"), two.dep_path("shared"));
+    let mut graph = LockfileGraph::default();
+    for (dp, src, ver) in [(&one_path, one, "1.0.0"), (&two_path, two, "2.0.0")] {
+        graph.packages.insert(
+            dp.clone(),
+            LockedPackage {
+                name: "shared".to_string(),
+                version: ver.to_string(),
+                dep_path: dp.clone(),
+                local_source: Some(src),
+                ..Default::default()
+            },
+        );
+    }
+    graph.importers.insert(".".to_string(), vec![]);
+    for (importer, dp, spec) in [
+        ("packages/a", &one_path, "file:../../vendor/one"),
+        ("packages/b", &two_path, "file:../../vendor/two"),
+    ] {
+        graph.importers.insert(
+            importer.to_string(),
+            vec![DirectDep {
+                name: "shared".to_string(),
+                dep_path: dp.clone(),
+                dep_type: DepType::Production,
+                specifier: Some(spec.to_string()),
+            }],
+        );
+    }
+
+    let manifest = aube_manifest::PackageJson {
+        name: Some("root".to_string()),
+        version: Some("1.0.0".to_string()),
+        ..Default::default()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    for (d, n) in [("packages/a", "@w/a"), ("packages/b", "@w/b")] {
+        std::fs::create_dir_all(dir.path().join(d)).unwrap();
+        std::fs::write(
+            dir.path().join(d).join("package.json"),
+            format!(r#"{{"name":"{n}","version":"1.0.0"}}"#),
+        )
+        .unwrap();
+    }
+    let out = dir.path().join("package-lock.json");
+    write(&out, &graph, &manifest).unwrap();
+
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    let packages = &doc["packages"];
+
+    assert_eq!(packages["node_modules/shared"]["resolved"], "vendor/one");
+    assert_eq!(
+        packages["packages/b/node_modules/shared"]["resolved"], "vendor/two",
+        "the conflicting target nests under its own importer rather than \
+         overwriting the root slot, got {packages}"
+    );
+}
+
+/// A root dep and a member-local dep sharing an ALIAS. The root one wins
+/// `node_modules/<alias>` and the member's link nests, exactly as with two
+/// local targets — but the occupant here is written by a LATER pass, so
+/// the partially-built `packages` map cannot see it.
+///
+/// That is what `root_claimed` exists for. Without it the link was written
+/// to root while the slot still looked free, the hoist pass overwrote it,
+/// and the member's link vanished from the lockfile entirely — leaving the
+/// member resolving to the registry package. Measured, npm 11.19.0, root
+/// `shared = npm:is-number@7.0.0` + member `shared = file:../../vendor/local`:
+///
+///     "node_modules/shared":              <the registry package>
+///     "packages/app/node_modules/shared": { resolved: "vendor/local", link: true }
+#[test]
+fn test_write_nests_a_member_local_dep_under_a_root_registry_alias() {
+    let local = LocalSource::Directory(PathBuf::from("vendor/local"));
+    let local_dp = local.dep_path("shared");
+    let mut graph = LockfileGraph::default();
+    graph.packages.insert(
+        local_dp.clone(),
+        LockedPackage {
+            name: "shared".to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: local_dp.clone(),
+            local_source: Some(local),
+            ..Default::default()
+        },
+    );
+    graph.packages.insert(
+        "shared@7.0.0".to_string(),
+        LockedPackage {
+            name: "shared".to_string(),
+            version: "7.0.0".to_string(),
+            dep_path: "shared@7.0.0".to_string(),
+            ..Default::default()
+        },
+    );
+    graph.importers.insert(
+        ".".to_string(),
+        vec![DirectDep {
+            name: "shared".to_string(),
+            dep_path: "shared@7.0.0".to_string(),
+            dep_type: DepType::Production,
+            specifier: Some("^7.0.0".to_string()),
+        }],
+    );
+    graph.importers.insert(
+        "packages/app".to_string(),
+        vec![DirectDep {
+            name: "shared".to_string(),
+            dep_path: local_dp,
+            dep_type: DepType::Production,
+            specifier: Some("file:../../vendor/local".to_string()),
+        }],
+    );
+
+    let manifest = aube_manifest::PackageJson {
+        name: Some("root".to_string()),
+        version: Some("1.0.0".to_string()),
+        dependencies: [("shared".to_string(), "^7.0.0".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("packages/app")).unwrap();
+    std::fs::write(
+        dir.path().join("packages/app/package.json"),
+        r#"{"name":"@w/app","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let out = dir.path().join("package-lock.json");
+    write(&out, &graph, &manifest).unwrap();
+
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    let packages = &doc["packages"];
+
+    assert_eq!(
+        packages["node_modules/shared"]["version"], "7.0.0",
+        "the root dep keeps the root alias, got {packages}"
+    );
+    assert_eq!(
+        packages["packages/app/node_modules/shared"]["resolved"], "vendor/local",
+        "the member's local link must survive the later hoist pass, nested \
+         under its own importer, got {packages}"
+    );
+}
+
+/// The root occupant reached the alias TRANSITIVELY — nothing in the root
+/// importer's own dependency list is named `shared`, but a dep of a dep
+/// hoists there.
+///
+/// Sibling of the test above and a distinct hole: predicting the root's
+/// occupants from the root importer's DIRECT deps missed every hoisted
+/// transitive, so the member's link went to root and the hoist pass
+/// erased it. The set is read off the hoist tree instead, which answers
+/// the question by construction. Measured, npm 11.19.0, root
+/// `fill-range@7.1.1` (which pulls `to-regex-range`) + member
+/// `to-regex-range = file:../../vendor/local`:
+///
+///     "node_modules/to-regex-range":              <the registry package>
+///     "packages/app/node_modules/to-regex-range": { resolved: "vendor/local", link: true }
+#[test]
+fn test_write_nests_a_member_local_dep_under_a_transitive_hoist() {
+    let local = LocalSource::Directory(PathBuf::from("vendor/local"));
+    let local_dp = local.dep_path("shared");
+    let mut graph = LockfileGraph::default();
+    graph.packages.insert(
+        local_dp.clone(),
+        LockedPackage {
+            name: "shared".to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: local_dp.clone(),
+            local_source: Some(local),
+            ..Default::default()
+        },
+    );
+    // `outer` is the root's only direct dep; `shared@2.0.0` rides in
+    // underneath it and hoists to the root alongside it.
+    graph.packages.insert(
+        "outer@1.0.0".to_string(),
+        LockedPackage {
+            name: "outer".to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: "outer@1.0.0".to_string(),
+            dependencies: [("shared".to_string(), "shared@2.0.0".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        },
+    );
+    graph.packages.insert(
+        "shared@2.0.0".to_string(),
+        LockedPackage {
+            name: "shared".to_string(),
+            version: "2.0.0".to_string(),
+            dep_path: "shared@2.0.0".to_string(),
+            ..Default::default()
+        },
+    );
+    graph.importers.insert(
+        ".".to_string(),
+        vec![DirectDep {
+            name: "outer".to_string(),
+            dep_path: "outer@1.0.0".to_string(),
+            dep_type: DepType::Production,
+            specifier: Some("^1.0.0".to_string()),
+        }],
+    );
+    graph.importers.insert(
+        "packages/app".to_string(),
+        vec![DirectDep {
+            name: "shared".to_string(),
+            dep_path: local_dp,
+            dep_type: DepType::Production,
+            specifier: Some("file:../../vendor/local".to_string()),
+        }],
+    );
+
+    let manifest = aube_manifest::PackageJson {
+        name: Some("root".to_string()),
+        version: Some("1.0.0".to_string()),
+        dependencies: [("outer".to_string(), "^1.0.0".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("packages/app")).unwrap();
+    std::fs::write(
+        dir.path().join("packages/app/package.json"),
+        r#"{"name":"@w/app","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let out = dir.path().join("package-lock.json");
+    write(&out, &graph, &manifest).unwrap();
+
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    let packages = &doc["packages"];
+
+    assert_eq!(
+        packages["node_modules/shared"]["version"], "2.0.0",
+        "the hoisted transitive keeps the root alias, got {packages}"
+    );
+    assert_eq!(
+        packages["packages/app/node_modules/shared"]["resolved"], "vendor/local",
+        "a transitive hoist claims the root slot just as a direct dep does, \
+         so the member's link nests rather than being erased, got {packages}"
+    );
+}
+
+/// The root occupant is a workspace MEMBER's own name, on a graph that was
+/// freshly resolved rather than read back from a lockfile.
+///
+/// Third shape of the same collision, and the one that survived the first
+/// two fixes. A member is linked at `node_modules/<its name>`, so its name
+/// claims the root — but the roster was built from
+/// `workspace_package_for_importer`, which only answers on a graph READ
+/// from an npm lockfile (it looks for the synthesized `link: true`
+/// package). On a fresh resolve every member was invisible to it, so a
+/// sibling's local link took the root slot and the member pass erased it.
+/// The roster now falls back to the on-disk manifests, exactly as the
+/// member pass itself does.
+///
+/// Ordering matters to the reproduction: `packages/a` (the local dep) must
+/// serialize BEFORE `packages/z` (the name), or the member entry is
+/// already in the map and the plain occupancy check catches it.
+///
+/// Measured, npm 11.19.0, member `packages/z` named `shared` + member
+/// `packages/a` with `shared = file:../../vendor/local`:
+///
+///     "node_modules/shared":            { resolved: "packages/z",  link: true }
+///     "packages/a/node_modules/shared": { resolved: "vendor/local", link: true }
+#[test]
+fn test_write_nests_a_member_local_dep_under_a_sibling_member_name() {
+    let local = LocalSource::Directory(PathBuf::from("vendor/local"));
+    let local_dp = local.dep_path("shared");
+    let mut graph = LockfileGraph::default();
+    graph.packages.insert(
+        local_dp.clone(),
+        LockedPackage {
+            name: "shared".to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: local_dp.clone(),
+            local_source: Some(local),
+            ..Default::default()
+        },
+    );
+    graph.importers.insert(".".to_string(), vec![]);
+    graph.importers.insert(
+        "packages/a".to_string(),
+        vec![DirectDep {
+            name: "shared".to_string(),
+            dep_path: local_dp,
+            dep_type: DepType::Production,
+            specifier: Some("file:../../vendor/local".to_string()),
+        }],
+    );
+    // No `LocalSource::Link` package for either member: this is what a
+    // fresh resolve from package.json looks like.
+    graph.importers.insert("packages/z".to_string(), vec![]);
+
+    let manifest = aube_manifest::PackageJson {
+        name: Some("root".to_string()),
+        version: Some("1.0.0".to_string()),
+        ..Default::default()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    for (d, n, v) in [
+        ("packages/a", "@w/a", "1.0.0"),
+        ("packages/z", "shared", "2.0.0"),
+    ] {
+        std::fs::create_dir_all(dir.path().join(d)).unwrap();
+        std::fs::write(
+            dir.path().join(d).join("package.json"),
+            format!(r#"{{"name":"{n}","version":"{v}"}}"#),
+        )
+        .unwrap();
+    }
+    let out = dir.path().join("package-lock.json");
+    write(&out, &graph, &manifest).unwrap();
+
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    let packages = &doc["packages"];
+
+    assert_eq!(
+        packages["node_modules/shared"]["resolved"], "packages/z",
+        "the member named `shared` keeps the root alias, got {packages}"
+    );
+    assert_eq!(
+        packages["packages/a/node_modules/shared"]["resolved"], "vendor/local",
+        "a member name claims the root slot even when only the on-disk \
+         manifest knows it, so the sibling's link nests, got {packages}"
+    );
+}
+
 #[test]
 fn test_parse_file_resolved_without_link() {
     // npm writes `resolved: "file:..."` without `link: true` for
@@ -660,6 +1193,83 @@ fn test_parse_file_resolved_without_link() {
 }
 
 #[test]
+fn test_parse_remote_tarball_from_declared_url() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let url = "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz";
+    let content = format!(
+        r#"{{
+            "lockfileVersion": 3,
+            "packages": {{
+                "": {{
+                    "dependencies": {{
+                        "xlsx": "{url}",
+                        "semver": "^7.7.0"
+                    }}
+                }},
+                "node_modules/xlsx": {{
+                    "version": "0.20.3",
+                    "resolved": "{url}",
+                    "integrity": "sha512-sheetjs"
+                }},
+                "node_modules/semver": {{
+                    "version": "7.7.2",
+                    "resolved": "https://registry.npmjs.org/semver/-/semver-7.7.2.tgz",
+                    "integrity": "sha512-semver"
+                }}
+            }}
+        }}"#
+    );
+    std::fs::write(tmp.path(), content).unwrap();
+
+    let graph = parse(tmp.path()).unwrap();
+    let direct = graph.importers["."]
+        .iter()
+        .find(|dep| dep.name == "xlsx")
+        .unwrap();
+    let pkg = &graph.packages[&direct.dep_path];
+
+    assert_eq!(pkg.version, "0.20.3");
+    assert!(pkg.tarball_url.is_none());
+    let Some(LocalSource::RemoteTarball(source)) = &pkg.local_source else {
+        panic!("expected remote tarball source, got {:?}", pkg.local_source);
+    };
+    assert_eq!(source.url, url);
+    assert_eq!(source.integrity, "sha512-sheetjs");
+    let registry_pkg = graph
+        .packages
+        .values()
+        .find(|pkg| pkg.name == "semver")
+        .unwrap();
+    assert!(registry_pkg.local_source.is_none());
+
+    let manifest = aube_manifest::PackageJson {
+        dependencies: [
+            ("xlsx".to_string(), url.to_string()),
+            ("semver".to_string(), "^7.7.0".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    let out = tempfile::NamedTempFile::new().unwrap();
+    write(out.path(), &graph, &manifest).unwrap();
+    let reparsed = parse(out.path()).unwrap();
+    let reparsed_direct = reparsed.importers["."]
+        .iter()
+        .find(|dep| dep.name == "xlsx")
+        .unwrap();
+    let reparsed_pkg = &reparsed.packages[&reparsed_direct.dep_path];
+    let Some(LocalSource::RemoteTarball(reparsed_source)) = &reparsed_pkg.local_source else {
+        panic!(
+            "expected remote tarball source, got {:?}",
+            reparsed_pkg.local_source
+        );
+    };
+    assert_eq!(reparsed_source.url, url);
+    assert_eq!(reparsed_source.integrity, "sha512-sheetjs");
+}
+
+#[test]
 fn test_parse_scoped_package() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let content = r#"{
@@ -729,6 +1339,69 @@ fn test_parse_multi_version_nested() {
     let root = graph.importers.get(".").unwrap();
     let root_bar = root.iter().find(|d| d.name == "bar").unwrap();
     assert_eq!(root_bar.dep_path, "bar@2.0.0");
+}
+
+#[test]
+fn test_write_preserves_reachable_existing_root_version() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let content = r#"{
+        "lockfileVersion": 3,
+        "packages": {
+            "": { "dependencies": { "app": "1.0.0" } },
+            "node_modules/app": {
+                "version": "1.0.0",
+                "dependencies": { "a-newer": "1.0.0", "z-older": "1.0.0" }
+            },
+            "node_modules/a-newer": {
+                "version": "1.0.0",
+                "dependencies": { "shared": "^2.0.0" }
+            },
+            "node_modules/a-newer/node_modules/shared": { "version": "2.0.0" },
+            "node_modules/shared": { "version": "1.0.0" },
+            "node_modules/z-older": {
+                "version": "1.0.0",
+                "dependencies": { "shared": "^1.0.0" }
+            }
+        }
+    }"#;
+    std::fs::write(tmp.path(), content).unwrap();
+
+    let mut graph = parse(tmp.path()).unwrap();
+    let manifest = aube_manifest::PackageJson {
+        dependencies: [("app".to_string(), "1.0.0".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    write(tmp.path(), &graph, &manifest).unwrap();
+
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(tmp.path()).unwrap()).unwrap();
+    assert_eq!(json["packages"]["node_modules/shared"]["version"], "1.0.0");
+    assert_eq!(
+        json["packages"]["node_modules/a-newer/node_modules/shared"]["version"],
+        "2.0.0"
+    );
+
+    // Once the last edge to the preferred version disappears, it must not be
+    // kept merely because the previous lockfile had hoisted it.
+    graph
+        .packages
+        .get_mut("app@1.0.0")
+        .unwrap()
+        .dependencies
+        .remove("z-older");
+    graph.packages.remove("z-older@1.0.0");
+    write(tmp.path(), &graph, &manifest).unwrap();
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(tmp.path()).unwrap()).unwrap();
+    assert_eq!(json["packages"]["node_modules/shared"]["version"], "2.0.0");
+    assert!(
+        json["packages"]
+            .get("node_modules/a-newer/node_modules/shared")
+            .is_none(),
+        "the stale preferred root must be replaced instead of nested"
+    );
 }
 
 /// Regression: a package reachable from both a dev root and
@@ -1717,6 +2390,282 @@ fn test_parse_peer_dependencies() {
     );
 }
 
+/// npm records the copy of a peer each dependent sees — hoisted to the
+/// root when it satisfies, nested beside the dependent when the root's
+/// copy does not — and never through a regular dependency edge. The
+/// reader carries that placement as a dependency edge: `react-dom`,
+/// reached only through a transitive package's peer, stays reachable, and
+/// the peer pass takes the nested `eslint` 9 instead of the root's 10.
+#[test]
+fn test_parse_records_peer_placement_as_dependency_edge() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let content = r#"{
+            "name": "peer-placement",
+            "version": "1.0.0",
+            "lockfileVersion": 3,
+            "packages": {
+                "": {
+                    "name": "peer-placement",
+                    "version": "1.0.0",
+                    "dependencies": { "tcompare": "^15.0.0", "eslint": "^10.0.0", "plugin": "^1.0.0" }
+                },
+                "node_modules/tcompare": {
+                    "version": "15.0.0",
+                    "dependencies": { "react-element-to-jsx-string": "^15.0.0" }
+                },
+                "node_modules/react-element-to-jsx-string": {
+                    "version": "15.0.0",
+                    "peerDependencies": { "react": "^18.0.0", "react-dom": "^18.0.0", "absent": "*", "extra": "*" },
+                    "peerDependenciesMeta": { "extra": { "optional": true } }
+                },
+                "node_modules/extra": { "version": "1.0.0", "peer": true },
+                "node_modules/react": { "version": "18.3.1", "peer": true },
+                "node_modules/react-dom": {
+                    "version": "18.3.1",
+                    "peer": true,
+                    "peerDependencies": { "react": "^18.3.1" }
+                },
+                "node_modules/eslint": { "version": "10.0.0" },
+                "node_modules/plugin": {
+                    "version": "1.0.0",
+                    "peerDependencies": { "eslint": "^9.0.0" }
+                },
+                "node_modules/plugin/node_modules/eslint": { "version": "9.0.0", "peer": true }
+            }
+        }"#;
+    std::fs::write(tmp.path(), content).unwrap();
+
+    let graph = parse(tmp.path()).unwrap();
+    let jsx = &graph.packages["react-element-to-jsx-string@15.0.0"];
+    assert_eq!(
+        jsx.dependencies,
+        [
+            ("extra".to_string(), "1.0.0".to_string()),
+            ("react".to_string(), "18.3.1".to_string()),
+            ("react-dom".to_string(), "18.3.1".to_string()),
+        ]
+        .into_iter()
+        .collect::<BTreeMap<_, _>>(),
+        "hoisted peers are recorded by placement; an unplaced one is not invented"
+    );
+    assert_eq!(
+        jsx.optional_dependencies,
+        [("extra".to_string(), "1.0.0".to_string())]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>(),
+        "an optional peer is an optional edge"
+    );
+    assert!(
+        jsx.declared_dependencies.is_empty(),
+        "a placed peer carries no declared range"
+    );
+    assert_eq!(
+        graph.packages["plugin@1.0.0"]
+            .dependencies
+            .get("eslint")
+            .map(String::as_str),
+        Some("9.0.0"),
+        "the nested copy beside the dependent wins over the root's"
+    );
+
+    // The placement is a graph edge, not a declared dependency: the
+    // re-emitted entry lists the peer under `peerDependencies` only.
+    let out = tempfile::NamedTempFile::new().unwrap();
+    let manifest = aube_manifest::PackageJson {
+        name: Some("peer-placement".to_string()),
+        version: Some("1.0.0".to_string()),
+        dependencies: [
+            ("tcompare".to_string(), "^15.0.0".to_string()),
+            ("eslint".to_string(), "^10.0.0".to_string()),
+            ("plugin".to_string(), "^1.0.0".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    write(out.path(), &graph, &manifest).unwrap();
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.path()).unwrap()).unwrap();
+    let entry = &written["packages"]["node_modules/react-element-to-jsx-string"];
+    assert!(
+        entry.get("dependencies").is_none() && entry.get("optionalDependencies").is_none(),
+        "a placed peer must not be re-emitted as a dependency; got {entry}"
+    );
+    assert_eq!(entry["peerDependencies"]["react-dom"], "^18.0.0");
+    // npm flags a package every path reaches through a peer edge; a root
+    // dependency and a package below it are not flagged.
+    for key in [
+        "node_modules/react",
+        "node_modules/react-dom",
+        "node_modules/extra",
+    ] {
+        assert_eq!(written["packages"][key]["peer"], true, "{key} is peer-only");
+    }
+    for key in [
+        "node_modules/eslint",
+        "node_modules/tcompare",
+        "node_modules/react-element-to-jsx-string",
+    ] {
+        assert!(
+            written["packages"][key].get("peer").is_none(),
+            "{key} is not peer-only"
+        );
+    }
+    assert_eq!(
+        written["packages"]["node_modules/plugin/node_modules/eslint"]["peer"],
+        true
+    );
+}
+
+/// A lockfile real npm wrote for a project whose only peer (`react`,
+/// under `react-dom` and `react-redux`) npm auto-installed and flagged
+/// `peer: true` must come back byte-identical: the flag is recomputed
+/// from reachability, and the peer edge the reader records stays out of
+/// every `dependencies` section.
+#[test]
+fn test_write_byte_identical_to_native_npm_with_peer_flags() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/npm-native-peer.json");
+    let original = std::fs::read_to_string(&fixture)
+        .unwrap()
+        .replace("\r\n", "\n");
+    let graph = parse(&fixture).unwrap();
+    let manifest = aube_manifest::PackageJson {
+        name: Some("aube-lockfile-peer-flags".to_string()),
+        version: Some("1.0.0".to_string()),
+        dependencies: [("react-dom".to_string(), "18.3.1".to_string())]
+            .into_iter()
+            .collect(),
+        dev_dependencies: [("react-redux".to_string(), "9.2.0".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    write(tmp.path(), &graph, &manifest).unwrap();
+    let written = std::fs::read_to_string(tmp.path()).unwrap();
+    if written != original {
+        panic!(
+            "npm writer drifted from native npm output.\n\n--- expected ---\n{original}\n--- got ---\n{written}"
+        );
+    }
+}
+
+/// The root's own declared peer, and a workspace member's, are entered
+/// on their importers as production direct deps — the shape the resolver
+/// seeds under auto-install-peers — but real npm flags the providers
+/// `peer: true`, because no dependency edge reaches them. Lockfile from
+/// npm 11.19.0 for a root with `peerDependencies: { react }` and a member
+/// with `peerDependencies: { react-dom }`, and nothing else declared: every
+/// package in it carries the flag, and the round trip keeps each one.
+#[test]
+fn test_write_byte_identical_to_native_npm_with_importer_peers() {
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/npm-native-root-peer.json");
+    let original = std::fs::read_to_string(&fixture)
+        .unwrap()
+        .replace("\r\n", "\n");
+    let graph = parse(&fixture).unwrap();
+    let manifest: aube_manifest::PackageJson = serde_json::from_str(
+        r#"{
+            "name": "root-peer",
+            "version": "1.0.0",
+            "workspaces": ["packages/*"],
+            "peerDependencies": { "react": "18.3.1" }
+        }"#,
+    )
+    .unwrap();
+    // Rewritten in place, as an install rewrites the project's lockfile:
+    // the writer keeps the existing file's root placements.
+    let dir = tempfile::tempdir().unwrap();
+    let lock = dir.path().join("package-lock.json");
+    std::fs::copy(&fixture, &lock).unwrap();
+    write(&lock, &graph, &manifest).unwrap();
+    let written = std::fs::read_to_string(&lock).unwrap();
+    if written != original {
+        panic!(
+            "npm writer drifted from native npm output.\n\n--- expected ---\n{original}\n--- got ---\n{written}"
+        );
+    }
+}
+
+/// npm can record a package linked to itself one level down —
+/// puppeteer's lockfile carries `…/browserslist/node_modules/browserslist`
+/// as a `link` back to `…/browserslist`. The registry package must still
+/// be registered as such, with its dependency resolved to it, rather than
+/// be taken for a local source.
+#[test]
+fn test_parse_self_link_under_a_registry_package() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let content = r#"{
+            "name": "self-link",
+            "version": "1.0.0",
+            "lockfileVersion": 3,
+            "packages": {
+                "": {
+                    "name": "self-link",
+                    "version": "1.0.0",
+                    "dependencies": { "a": "^1.0.0" }
+                },
+                "node_modules/a": {
+                    "version": "1.0.0",
+                    "resolved": "https://registry.npmjs.org/a/-/a-1.0.0.tgz",
+                    "integrity": "sha512-a",
+                    "dependencies": { "b": "^4.0.0" }
+                },
+                "node_modules/a/node_modules/b": {
+                    "version": "4.28.8",
+                    "resolved": "https://registry.npmjs.org/b/-/b-4.28.8.tgz",
+                    "integrity": "sha512-b"
+                },
+                "node_modules/a/node_modules/b/node_modules/b": {
+                    "resolved": "node_modules/a/node_modules/b",
+                    "link": true
+                },
+                "node_modules/a/node_modules/b/node_modules/c": {
+                    "version": "1.0.0",
+                    "resolved": "https://registry.npmjs.org/c/-/c-1.0.0.tgz",
+                    "integrity": "sha512-c",
+                    "peerDependencies": { "b": ">=4.0.0" }
+                }
+            }
+        }"#;
+    std::fs::write(tmp.path(), content).unwrap();
+
+    let graph = parse(tmp.path()).unwrap();
+    let b = graph.packages.get("b@4.28.8").unwrap_or_else(|| {
+        panic!(
+            "b@4.28.8 missing; packages: {:?}",
+            graph.packages.keys().collect::<Vec<_>>()
+        )
+    });
+    assert!(
+        b.local_source.is_none(),
+        "b is a registry package: {:?}",
+        b.local_source
+    );
+    assert_eq!(b.integrity.as_deref(), Some("sha512-b"));
+    assert_eq!(
+        graph.packages["a@1.0.0"]
+            .dependencies
+            .get("b")
+            .map(String::as_str),
+        Some("4.28.8")
+    );
+    // The link is what a nested dependent's peer resolves through.
+    assert_eq!(
+        graph.packages["c@1.0.0"]
+            .dependencies
+            .get("b")
+            .map(String::as_str),
+        Some("4.28.8")
+    );
+    assert!(
+        !graph.packages.keys().any(|k| k.starts_with("b@link")),
+        "no local package is synthesized for the pointer: {:?}",
+        graph.packages.keys().collect::<Vec<_>>()
+    );
+}
+
 /// Packages without peer fields keep both maps empty — guard
 /// against accidental defaulting to `optional: true` or spurious
 /// keys showing up in the LockedPackage from serde leak paths.
@@ -1884,6 +2833,80 @@ fn test_parse_npm_workspace_importers() {
             && dep.dep_type == DepType::Dev
             && dep.specifier.as_deref() == Some("^7.3.2")
     }));
+}
+
+/// A local directory dependency's target is NOT a workspace importer,
+/// even though npm records it with the same shape as one.
+///
+/// npm keys both a member (`packages/app`) and a `file:` target
+/// (`vendor/local`) as a bare path carrying `name`/`version`, and gives
+/// both a `link: true` record. Taking every link target as an importer
+/// registered `vendor/local` as a phantom workspace member, and the
+/// freshness check then rejected the lockfile — `workspace importer
+/// vendor/local is in the lockfile but not in the workspace` — on every
+/// `--frozen-lockfile`, INCLUDING against lockfiles npm itself wrote.
+///
+/// The root entry's own `workspaces` patterns are what separate them, so
+/// the fixture below is shaped exactly as npm writes it: a braced pattern
+/// and a negation, to pin that the reader shares the discovery walk's
+/// matching rather than doing something simpler.
+#[test]
+fn test_parse_npm_local_dep_target_is_not_a_workspace_importer() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let content = r#"{
+            "name": "root",
+            "version": "1.0.0",
+            "lockfileVersion": 3,
+            "packages": {
+                "": {
+                    "name": "root",
+                    "version": "1.0.0",
+                    "workspaces": ["packages/*", "tools/{a,b}", "!packages/skipped"]
+                },
+                "node_modules/@w/app": { "resolved": "packages/app", "link": true },
+                "node_modules/@w/tool": { "resolved": "tools/b", "link": true },
+                "node_modules/@w/skipped": { "resolved": "packages/skipped", "link": true },
+                "packages/app": {
+                    "name": "@w/app",
+                    "version": "1.0.0",
+                    "dependencies": { "shared": "file:../../vendor/local" }
+                },
+                "packages/skipped": { "name": "@w/skipped", "version": "1.0.0" },
+                "tools/b": { "name": "@w/tool", "version": "1.0.0" },
+                "vendor/local": { "name": "shared", "version": "1.0.0" },
+                "packages/app/node_modules/shared": {
+                    "resolved": "vendor/local",
+                    "link": true
+                }
+            }
+        }"#;
+    std::fs::write(tmp.path(), content).unwrap();
+
+    let graph = parse(tmp.path()).unwrap();
+
+    assert!(
+        graph.importers.contains_key("packages/app"),
+        "a globbed member stays an importer, got {:?}",
+        graph.importers.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        graph.importers.contains_key("tools/b"),
+        "a BRACED member stays an importer -- excluding one breaks its \
+         install, which is the expensive direction, got {:?}",
+        graph.importers.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !graph.importers.contains_key("vendor/local"),
+        "a local dep target must not be registered as a workspace \
+         importer, got {:?}",
+        graph.importers.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !graph.importers.contains_key("packages/skipped"),
+        "a negated pattern excludes the member, matching the discovery \
+         walk, got {:?}",
+        graph.importers.keys().collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -2379,7 +3402,7 @@ fn test_parse_funding_all_shapes() {
 /// object / array-of-objects shapes for `license:` (npm copies
 /// whatever's in the package's `package.json` verbatim, and older
 /// packages like `tv4` still ship the deprecated forms). Regression
-/// guard for https://github.com/jdx/aube/discussions/510.
+/// guard for https://github.com/aubepkg/aube/discussions/510.
 #[test]
 fn test_parse_license_all_shapes() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -3166,4 +4189,407 @@ fn legacy_flat_hoisted_transitive_flagged_as_unreferenced() {
         read::legacy_unreferenced_top_level(&with_requires, &lifted.packages, &manifest).is_empty(),
         "a recorded `requires` edge means nothing is orphaned"
     );
+}
+
+/// npm copies the root project's own `license`, `bin` and `engines` into the
+/// `""` importer entry, normalizing an object `license` to its `type` and a
+/// string `bin` to `{ <name-without-scope>: <path> }`. Expectations captured
+/// from npm 11.17 on the same manifest.
+#[test]
+fn test_write_npm_root_entry_mirrors_manifest_metadata() {
+    let manifest: aube_manifest::PackageJson = serde_json::from_str(
+        r#"{
+            "name": "@scope/fx",
+            "version": "1.2.3",
+            "license": { "type": "MIT" },
+            "bin": "cli.js",
+            "engines": { "node": ">=22.15.0" }
+        }"#,
+    )
+    .unwrap();
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    write(tmp.path(), &LockfileGraph::default(), &manifest).unwrap();
+    let written = std::fs::read_to_string(tmp.path()).unwrap();
+
+    let root: serde_json::Value = serde_json::from_str(&written).unwrap();
+    let root = &root["packages"][""];
+    assert_eq!(
+        root["license"], "MIT",
+        "object license collapses to its type"
+    );
+    assert_eq!(
+        root["bin"],
+        serde_json::json!({ "fx": "cli.js" }),
+        "string bin expands under the scope-stripped package name"
+    );
+    assert_eq!(root["engines"], serde_json::json!({ "node": ">=22.15.0" }));
+
+    // npm orders package-entry keys non-objects-then-objects, so `license`
+    // lands before `bin` and `engines`. Byte-parity with npm depends on it.
+    let key_at = |key: &str| written.find(key).unwrap_or_else(|| panic!("missing {key}"));
+    assert!(
+        key_at("\"license\"") < key_at("\"bin\"") && key_at("\"bin\"") < key_at("\"engines\""),
+        "root entry key order drifted from npm's:\n{written}"
+    );
+}
+
+/// npm mirrors the root manifest's `workspaces` into `packages[""]` too, and
+/// copies it VERBATIM — so the key's BUCKET follows the value's runtime type,
+/// which is the only field in the entry that moves. `json-stringify-nice`
+/// sorts non-objects first, and a JSON array counts as a non-object, so the
+/// ordinary array form lands last among the scalars while bun's object form
+/// lands last among the objects. Both measured, npm 11.19.0, on these exact
+/// manifests:
+///
+///     array  → name, version, license, workspaces, dependencies
+///     object → name, version, license, dependencies, engines, workspaces
+///
+/// Omitting the field entirely was the only divergence left between nub's
+/// root entry and npm's, so a workspace project churned its lockfile on every
+/// alternating install.
+#[test]
+fn test_write_npm_root_entry_mirrors_workspaces_in_npms_key_order() {
+    let write_root = |manifest_json: &str| {
+        let manifest: aube_manifest::PackageJson = serde_json::from_str(manifest_json).unwrap();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        write(tmp.path(), &LockfileGraph::default(), &manifest).unwrap();
+        std::fs::read_to_string(tmp.path()).unwrap()
+    };
+
+    let array = write_root(
+        r#"{
+            "name": "root", "version": "1.0.0", "license": "MIT",
+            "workspaces": ["packages/*"],
+            "dependencies": { "is-number": "7.0.0" }
+        }"#,
+    );
+    let doc: serde_json::Value = serde_json::from_str(&array).unwrap();
+    assert_eq!(
+        doc["packages"][""]["workspaces"],
+        serde_json::json!(["packages/*"]),
+        "the array form is copied through unchanged, got {array}"
+    );
+    let at = |hay: &str, key: &str| hay.find(key).unwrap_or_else(|| panic!("missing {key}"));
+    assert!(
+        at(&array, "\"license\"") < at(&array, "\"workspaces\"")
+            && at(&array, "\"workspaces\"") < at(&array, "\"dependencies\""),
+        "an array `workspaces` sorts with the scalars, before every object key:\n{array}"
+    );
+
+    // Bun's object form: same field, other bucket. npm accepts this manifest
+    // and writes the object back as authored — including NOT inventing a
+    // `nohoist` key, which is why the manifest type skips an empty one.
+    let object = write_root(
+        r#"{
+            "name": "root", "version": "1.0.0", "license": "MIT",
+            "workspaces": { "packages": ["packages/*"] },
+            "dependencies": { "is-number": "7.0.0" },
+            "engines": { "node": ">=18" }
+        }"#,
+    );
+    assert!(
+        !object.contains("nohoist"),
+        "an object form authored without `nohoist` must not grow one:\n{object}"
+    );
+    assert!(
+        at(&object, "\"engines\"") < at(&object, "\"workspaces\""),
+        "an object `workspaces` sorts with the objects, last:\n{object}"
+    );
+
+    // The other half of verbatim: npm distinguishes a field that was never
+    // authored from one authored EMPTY, and keeps the empty one. Measured,
+    // npm 11.19.0 — `{"packages":[…],"nohoist":[]}` round-trips with the
+    // empty list intact, as do `catalog: {}` and `catalogs: {}`. Skipping
+    // them on emptiness reproduces the absent case and silently drops this
+    // one, which churns the key out of the lockfile on every alternating
+    // install; hence the presence-aware `Option`s on the manifest type.
+    let explicit_empties = write_root(
+        r#"{
+            "name": "root", "version": "1.0.0",
+            "workspaces": {
+                "packages": ["packages/*"],
+                "nohoist": [], "catalog": {}, "catalogs": {}
+            }
+        }"#,
+    );
+    let doc: serde_json::Value = serde_json::from_str(&explicit_empties).unwrap();
+    assert_eq!(
+        doc["packages"][""]["workspaces"],
+        serde_json::json!({
+            "packages": ["packages/*"],
+            "nohoist": [], "catalog": {}, "catalogs": {}
+        }),
+        "an authored-empty field is kept, not collapsed into absence, got {explicit_empties}"
+    );
+}
+
+/// npm strips the leading `./` off every bin path — and strips it repeatedly,
+/// so `././d.js` lands as `d.js`. Leaving the prefix on churns the lockfile
+/// against npm's own output on every alternating install. Expectations
+/// captured from npm 11.17 on this exact `bin` map.
+#[test]
+fn test_write_npm_root_bin_paths_shed_leading_dot_slash() {
+    let manifest: aube_manifest::PackageJson = serde_json::from_str(
+        r#"{
+            "name": "binforms",
+            "version": "1.0.0",
+            "bin": { "a": "./a.js", "b": "b.js", "c": "./nested/c.js", "d": "././d.js" }
+        }"#,
+    )
+    .unwrap();
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    write(tmp.path(), &LockfileGraph::default(), &manifest).unwrap();
+    let root: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(tmp.path()).unwrap()).unwrap();
+
+    assert_eq!(
+        root["packages"][""]["bin"],
+        serde_json::json!({ "a": "a.js", "b": "b.js", "c": "nested/c.js", "d": "d.js" }),
+        "only the leading ./ segments are shed; the rest of the path is kept"
+    );
+}
+
+/// A workspace member's required peer is recorded on its importer with
+/// the peer range as the specifier — the same shape the resolver seeds
+/// under `auto_install_peers`, and the one the freshness check compares
+/// the manifest's peers against. Two providers, both real: a hoisted
+/// registry copy at the root (apollo-server's `graphql`) and a root
+/// link to a sibling member (socket.io's `socket.io-adapter`). An
+/// optional peer stays out, and a peer the member also declares as a
+/// dependency is not recorded twice.
+#[test]
+fn test_parse_npm_workspace_importer_records_required_peers() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let content = r#"{
+            "name": "root",
+            "version": "1.0.0",
+            "lockfileVersion": 3,
+            "packages": {
+                "": {
+                    "name": "root",
+                    "version": "1.0.0",
+                    "workspaces": ["packages/*"]
+                },
+                "node_modules/@scope/adapter": { "resolved": "packages/adapter", "link": true },
+                "node_modules/@scope/plugin": { "resolved": "packages/plugin", "link": true },
+                "node_modules/graphql": { "version": "16.11.0" },
+                "node_modules/react": { "version": "19.2.0" },
+                "packages/adapter": { "version": "2.5.8" },
+                "packages/plugin": {
+                    "name": "@scope/plugin",
+                    "version": "0.3.0",
+                    "dependencies": { "react": "^19" },
+                    "peerDependencies": {
+                        "@scope/adapter": "~2.5.5",
+                        "graphql": "14.x || 15.x || 16.x",
+                        "react": ">=18",
+                        "vue": "^3"
+                    },
+                    "peerDependenciesMeta": { "vue": { "optional": true } }
+                }
+            }
+        }"#;
+    std::fs::write(tmp.path(), content).unwrap();
+
+    let graph = parse(tmp.path()).unwrap();
+    let plugin = graph
+        .importers
+        .get("packages/plugin")
+        .expect("plugin importer");
+    let mut recorded: Vec<(&str, &str, DepType)> = plugin
+        .iter()
+        .map(|d| (d.name.as_str(), d.specifier.as_deref().unwrap(), d.dep_type))
+        .collect();
+    recorded.sort_by(|a, b| a.0.cmp(b.0));
+    assert_eq!(
+        recorded,
+        vec![
+            ("@scope/adapter", "~2.5.5", DepType::Production),
+            ("graphql", "14.x || 15.x || 16.x", DepType::Production),
+            ("react", "^19", DepType::Production),
+        ],
+        "required peers ride the importer as Production deps with the peer range; \
+         the optional `vue` and a second `react` row do not"
+    );
+    let adapter = plugin.iter().find(|d| d.name == "@scope/adapter").unwrap();
+    assert!(
+        matches!(
+            graph.packages[&adapter.dep_path].local_source,
+            Some(LocalSource::Link(ref p)) if p == Path::new("packages/adapter")
+        ),
+        "a peer satisfied by a root link resolves to the linked member"
+    );
+}
+
+/// The root importer gets the same treatment: a required peer the root
+/// manifest does not also list as a dependency is recorded from
+/// `node_modules/<peer>`.
+#[test]
+fn test_parse_npm_root_importer_records_required_peer() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let content = r#"{
+            "name": "lib",
+            "version": "1.0.0",
+            "lockfileVersion": 3,
+            "packages": {
+                "": {
+                    "name": "lib",
+                    "version": "1.0.0",
+                    "peerDependencies": { "react": ">=18" }
+                },
+                "node_modules/react": { "version": "19.2.0", "peer": true }
+            }
+        }"#;
+    std::fs::write(tmp.path(), content).unwrap();
+
+    let graph = parse(tmp.path()).unwrap();
+    let root = graph.importers.get(".").expect("root importer");
+    assert_eq!(root.len(), 1);
+    assert_eq!(root[0].name, "react");
+    assert_eq!(root[0].specifier.as_deref(), Some(">=18"));
+    assert_eq!(root[0].dep_type, DepType::Production);
+}
+
+/// A member nested inside another member resolves through the parent
+/// member's own `node_modules` before the root, the way Node's upward
+/// walk does from `test/installation/`. puppeteer's lockfile keeps
+/// `diff@9` at `test/node_modules/diff` for both `test` and
+/// `test/installation`; jumping from the member straight to the root
+/// found the wrong copy (or none) and the frozen check refused the file.
+#[test]
+fn test_parse_npm_nested_member_resolves_through_parent_members_node_modules() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let content = r#"{
+            "name": "root",
+            "version": "1.0.0",
+            "lockfileVersion": 3,
+            "packages": {
+                "": {
+                    "name": "root",
+                    "version": "1.0.0",
+                    "workspaces": ["test", "test/installation"]
+                },
+                "node_modules/@t/test": { "resolved": "test", "link": true },
+                "node_modules/@t/installation": { "resolved": "test/installation", "link": true },
+                "node_modules/diff": { "version": "7.0.0" },
+                "node_modules/glob": { "version": "13.0.6" },
+                "test": {
+                    "name": "@t/test",
+                    "version": "1.0.0",
+                    "dependencies": { "diff": "9.0.0" }
+                },
+                "test/node_modules/diff": { "version": "9.0.0" },
+                "test/installation": {
+                    "name": "@t/installation",
+                    "version": "1.0.0",
+                    "dependencies": { "diff": "^9.0.0" },
+                    "devDependencies": { "glob": "13.0.6" }
+                }
+            }
+        }"#;
+    std::fs::write(tmp.path(), content).unwrap();
+
+    let graph = parse(tmp.path()).unwrap();
+    let installation = graph
+        .importers
+        .get("test/installation")
+        .expect("nested member importer");
+    let diff = installation.iter().find(|d| d.name == "diff").unwrap();
+    assert_eq!(
+        graph.packages[&diff.dep_path].version, "9.0.0",
+        "the parent member's copy wins over the root's"
+    );
+    let glob = installation.iter().find(|d| d.name == "glob").unwrap();
+    assert_eq!(
+        graph.packages[&glob.dep_path].version, "13.0.6",
+        "a dep absent from every ancestor still falls back to the root"
+    );
+}
+
+/// npm writes no `version` on a local package whose manifest has none.
+/// mocha links a test fixture that way (`file:test/compiler-fixtures/...`
+/// with a name-only package.json). The reader takes the resolver's own
+/// `0.0.0` default rather than refusing the lockfile.
+#[test]
+fn test_parse_npm_link_target_without_version() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let content = r#"{
+            "name": "mocha",
+            "version": "11.0.0",
+            "lockfileVersion": 3,
+            "packages": {
+                "": {
+                    "name": "mocha",
+                    "version": "11.0.0",
+                    "devDependencies": { "@test/esm-only-loader": "./test/fixtures/esm-only-loader" }
+                },
+                "node_modules/@test/esm-only-loader": {
+                    "resolved": "test/fixtures/esm-only-loader",
+                    "link": true
+                },
+                "test/fixtures/esm-only-loader": { "name": "@test/esm-only-loader", "dev": true }
+            }
+        }"#;
+    std::fs::write(tmp.path(), content).unwrap();
+
+    let graph = parse(tmp.path()).unwrap();
+    let root = graph.importers.get(".").expect("root importer");
+    assert_eq!(root.len(), 1);
+    assert_eq!(root[0].name, "@test/esm-only-loader");
+    assert_eq!(root[0].dep_type, DepType::Dev);
+    let pkg = &graph.packages[&root[0].dep_path];
+    assert_eq!(pkg.version, "0.0.0");
+    assert!(matches!(
+        pkg.local_source,
+        Some(LocalSource::Link(ref p)) if p == Path::new("test/fixtures/esm-only-loader")
+    ));
+}
+
+/// A package listed under two manifest sections is one importer row,
+/// classified by the resolver's section priority. promptfoo declares
+/// `@anthropic-ai/claude-agent-sdk` as both a dev and an optional dep;
+/// npm mirrors both onto the root entry, and a second `Optional` row
+/// tripped the section-drift check on every frozen install.
+#[test]
+fn test_parse_npm_dep_in_two_sections_is_one_importer_row() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let content = r#"{
+            "name": "root",
+            "version": "1.0.0",
+            "lockfileVersion": 3,
+            "packages": {
+                "": {
+                    "name": "root",
+                    "version": "1.0.0",
+                    "workspaces": ["packages/*"],
+                    "devDependencies": { "sdk": "0.3.250" },
+                    "optionalDependencies": { "sdk": "0.3.250" }
+                },
+                "node_modules/@scope/app": { "resolved": "packages/app", "link": true },
+                "node_modules/sdk": { "version": "0.3.250", "devOptional": true },
+                "packages/app": {
+                    "name": "@scope/app",
+                    "version": "1.0.0",
+                    "dependencies": { "sdk": "0.3.250" },
+                    "optionalDependencies": { "sdk": "0.3.250" }
+                }
+            }
+        }"#;
+    std::fs::write(tmp.path(), content).unwrap();
+
+    let graph = parse(tmp.path()).unwrap();
+    let root: Vec<_> = graph.importers[&".".to_string()]
+        .iter()
+        .filter(|d| d.name == "sdk")
+        .collect();
+    assert_eq!(root.len(), 1, "one row for the root, not one per section");
+    assert_eq!(root[0].dep_type, DepType::Dev);
+    let app: Vec<_> = graph.importers["packages/app"]
+        .iter()
+        .filter(|d| d.name == "sdk")
+        .collect();
+    assert_eq!(app.len(), 1, "one row for the member, not one per section");
+    assert_eq!(app[0].dep_type, DepType::Production);
 }

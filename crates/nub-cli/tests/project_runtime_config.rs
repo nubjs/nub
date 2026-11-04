@@ -9,7 +9,7 @@
 //! different path with its own coverage) and the mode bit that makes it
 //! executable.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -65,13 +65,15 @@ fn probe_json_after_progress(label: &str, command: Command) -> serde_json::Value
 }
 
 /// The observations every route shares: the config's `envFile`, its `loader`
-/// map, its `tsconfig` paths and JSX factory, and its `conditions` all reached
+/// map, its `tsconfig` paths and JSX factory, and both condition sources — the
+/// `nub.jsonc` `conditions` list AND the tsconfig's `customConditions` — all reached
 /// the child.
 fn assert_config_applied(label: &str, value: &serde_json::Value) {
     assert_eq!(value["env"], "from-config", "{label}: {value}");
     assert_eq!(value["text"], "loaded-text", "{label}: {value}");
     assert_eq!(value["alias"], "aliased", "{label}: {value}");
     assert_eq!(value["condition"], "condition", "{label}: {value}");
+    assert_eq!(value["tsCondition"], "ts-condition", "{label}: {value}");
     assert_eq!(value["jsxMode"], "classic", "{label}: {value}");
 }
 
@@ -132,6 +134,7 @@ impl Fixture {
         };
         std::fs::create_dir_all(project.join("node_modules/.bin")).unwrap();
         std::fs::create_dir_all(project.join("node_modules/conditional-pkg")).unwrap();
+        std::fs::create_dir_all(project.join("node_modules/ts-condition-pkg")).unwrap();
 
         std::fs::write(
             project.join("nub.jsonc"),
@@ -139,7 +142,7 @@ impl Fixture {
               "preload": ["./preload.mjs"],
               "nodeOptions": ["--stack-trace-limit=23"],
               "v8Flags": ["--max-old-space-size=256"],
-              "envFile": "./runtime.env",
+              "envFile": ["./runtime.env"],
               "loader": { ".blob": "text", ".view": "jsx" },
               "conditions": ["runtime-config"],
               "tsconfig": "./tsconfig.runtime.jsonc"
@@ -159,7 +162,7 @@ impl Fixture {
         .unwrap();
         std::fs::write(
             project.join("tsconfig.runtime.jsonc"),
-            r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "runtime-alias": ["./alias.ts"] }, "jsx": "react", "jsxFactory": "make" } }"#,
+            r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "runtime-alias": ["./alias.ts"] }, "jsx": "react", "jsxFactory": "make", "customConditions": ["ts-declared"] } }"#,
         )
         .unwrap();
         std::fs::write(project.join("message.blob"), "loaded-text").unwrap();
@@ -183,16 +186,36 @@ impl Fixture {
             "export default 'default';\n",
         )
         .unwrap();
+        // A SECOND conditional package, keyed on the condition the tsconfig declares
+        // rather than the one nub.jsonc does. Separate from `conditional-pkg` because
+        // one `exports` map can only prove whichever key it lists first — two packages
+        // let each source be observed on its own.
+        std::fs::write(
+            project.join("node_modules/ts-condition-pkg/package.json"),
+            r#"{ "type": "module", "exports": { ".": { "ts-declared": "./custom.js", "default": "./default.js" } } }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("node_modules/ts-condition-pkg/custom.js"),
+            "export default 'ts-condition';\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("node_modules/ts-condition-pkg/default.js"),
+            "export default 'default';\n",
+        )
+        .unwrap();
         std::fs::write(
             project.join("main.ts"),
             r#"import text from './message.blob';
 import { alias } from 'runtime-alias';
 import condition from 'conditional-pkg';
+import tsCondition from 'ts-condition-pkg';
 import component from './component.view';
 console.log(JSON.stringify({
   env: process.env.RUNTIME_ENV,
   preload: globalThis.__runtimePreload,
-  text, alias, condition,
+  text, alias, condition, tsCondition,
   jsxMode: component.mode,
   stack: Error.stackTraceLimit,
   execArgv: process.execArgv,
@@ -300,6 +323,353 @@ fn runtime_snapshot_reaches_the_file_run_and_script_entrypoints() {
     fixture.assert_probe(&["run", "probe"]);
 }
 
+/// The layout the feature exists for, and the one the `Fixture` above cannot cover
+/// because it names its tsconfig explicitly in `nub.jsonc`: no nub config at all, a
+/// leaf `tsconfig.json` found by walking up, and the `customConditions` declared in
+/// the shared base it `extends`.
+///
+/// `--node` is the control, and it is what makes this a test rather than a
+/// coincidence: compat mode contributes no config-derived flags, so the SAME fixture
+/// must fall through to `default`. Without it a passing assertion could just mean the
+/// condition matched for some reason of Node's own.
+#[test]
+fn tsconfig_custom_conditions_reach_node_through_the_extends_chain() {
+    let fixture = ConditionFixture::new("repo-source", "./src.js");
+    // Both targets are `.js` here: this test is about which branch of the `exports` map
+    // Node picks, and pointing the condition at TypeScript would fold in a second
+    // question (see the symlinked-workspace test below).
+    std::fs::write(fixture.pkg.join("src.js"), "export default 'source';\n").unwrap();
+
+    assert_eq!(
+        fixture.run(&["main.mjs"]),
+        "source",
+        "the base config's customConditions must reach Node's resolver"
+    );
+    assert_eq!(
+        fixture.run(&["--node", "main.mjs"]),
+        "dist",
+        "compat mode contributes no config-derived conditions"
+    );
+}
+
+/// The motivating layout end to end: the condition points at TypeScript SOURCE in a
+/// workspace package, so nothing is built before running.
+///
+/// The symlink is load-bearing, not incidental scaffolding. Node resolves a module to
+/// its REALPATH, and a workspace package is linked into `node_modules` rather than
+/// copied — so the `.ts` file nub transpiles lives at its real location outside
+/// `node_modules`. A package that is a genuine directory under `node_modules` instead
+/// dies in Node's own type stripping with `ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`
+/// (observed while writing this test), which is nub's existing transpile scope and not
+/// something conditions change.
+///
+/// Unix-only for the symlink: Windows needs a privilege or developer mode to create
+/// one, and the condition plumbing itself is covered on both platforms above.
+#[cfg(unix)]
+#[test]
+fn a_custom_condition_can_point_at_typescript_source_in_a_linked_workspace_package() {
+    let fixture = ConditionFixture::new("repo-source", "./src.ts");
+    let real = fixture.temp.path().join("packages/live-pkg");
+    std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+    std::fs::rename(&fixture.pkg, &real).unwrap();
+    std::os::unix::fs::symlink(&real, &fixture.pkg).unwrap();
+    std::fs::write(
+        real.join("src.ts"),
+        "const which: string = 'source';\nexport default which;\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        fixture.run(&["main.mjs"]),
+        "source",
+        "nub must transpile the TypeScript the condition selected"
+    );
+}
+
+/// Two dependencies: one branching on `nub`, which nub sets itself, and one branching
+/// on a condition only the project's own config can supply. Both carry a `default`, so
+/// each package reports which branch answered.
+fn nub_condition_fixture() -> (tempfile::TempDir, PathBuf) {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    for (name, condition) in [("nub-pkg", "nub"), ("user-pkg", "user-declared")] {
+        let pkg = project.join("node_modules").join(name);
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            format!(
+                r#"{{ "type": "module", "exports": {{ ".": {{ "{condition}": "./selected.js", "default": "./default.js" }} }} }}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(pkg.join("selected.js"), "export default 'selected';\n").unwrap();
+        std::fs::write(pkg.join("default.js"), "export default 'default';\n").unwrap();
+    }
+    std::fs::write(
+        project.join("package.json"),
+        r#"{ "dependencies": { "nub-pkg": "*", "user-pkg": "*" } }"#,
+    )
+    .unwrap();
+    // A `.mjs` entry so the `--node` control runs under vanilla Node on every version
+    // in the support band, rather than measuring native type stripping.
+    std::fs::write(
+        project.join("main.mjs"),
+        "import nub from 'nub-pkg';\nimport user from 'user-pkg';\n\
+         console.log(JSON.stringify({ nub, user }));\n",
+    )
+    .unwrap();
+    (temp, project)
+}
+
+fn nub_condition_probe(
+    temp: &tempfile::TempDir,
+    project: &Path,
+    args: &[&str],
+) -> serde_json::Value {
+    let mut command = Command::new(nub_binary());
+    command
+        .current_dir(project)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .env("XDG_CACHE_HOME", temp.path().join("cache"))
+        .args(args);
+    probe_json(&format!("nub {}", args.join(" ")), command)
+}
+
+/// The `nub` export condition reaches Node's resolver on an augmented run, so a package
+/// can ship a `nub` branch the way it ships `bun` or `deno` ones.
+///
+/// `--node` is the control and it is what makes this a test rather than a coincidence:
+/// compat mode is zero augmentation, so the same fixture must fall through to
+/// `default`. The second package proves the condition ADDS to the project's own conditions
+/// instead of replacing them.
+#[test]
+fn the_nub_condition_rides_augmented_runs_and_not_compat_mode() {
+    let (temp, project) = nub_condition_fixture();
+
+    let augmented = nub_condition_probe(&temp, &project, &["main.mjs"]);
+    assert_eq!(
+        augmented["nub"], "selected",
+        "an augmented run must select the `nub` branch: {augmented}"
+    );
+    assert_eq!(
+        augmented["user"], "default",
+        "nothing declares `user-declared` yet: {augmented}"
+    );
+
+    let compat = nub_condition_probe(&temp, &project, &["--node", "main.mjs"]);
+    assert_eq!(
+        compat["nub"], "default",
+        "compat mode must contribute no conditions of nub's own: {compat}"
+    );
+
+    std::fs::write(
+        project.join("nub.jsonc"),
+        r#"{ "conditions": ["user-declared"] }"#,
+    )
+    .unwrap();
+    let composed = nub_condition_probe(&temp, &project, &["main.mjs"]);
+    assert_eq!(
+        composed["user"], "selected",
+        "a configured condition must still reach the resolver: {composed}"
+    );
+    assert_eq!(
+        composed["nub"], "selected",
+        "and it must not displace the `nub` condition: {composed}"
+    );
+}
+
+/// A project whose `customConditions` live in a base config it `extends`, plus one
+/// dependency whose `exports` map has that condition and a `default`.
+struct ConditionFixture {
+    temp: tempfile::TempDir,
+    project: PathBuf,
+    pkg: PathBuf,
+}
+
+impl ConditionFixture {
+    /// `target` is what the condition resolves to; `default` is always `./dist.js`, and
+    /// the caller writes whatever `target` names.
+    fn new(condition: &str, target: &str) -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let pkg = project.join("node_modules/live-pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+
+        std::fs::write(
+            project.join("tsconfig.base.json"),
+            format!(r#"{{ "compilerOptions": {{ "customConditions": ["{condition}"] }} }}"#),
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("tsconfig.json"),
+            r#"{ "extends": "./tsconfig.base.json" }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            format!(
+                r#"{{ "type": "module", "exports": {{ ".": {{ "{condition}": "{target}", "default": "./dist.js" }} }} }}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(pkg.join("dist.js"), "export default 'dist';\n").unwrap();
+        std::fs::write(
+            project.join("package.json"),
+            r#"{ "dependencies": { "live-pkg": "*" } }"#,
+        )
+        .unwrap();
+        // A `.mjs` entry, not `.ts`: the `--node` control has to run under vanilla Node
+        // on every version in the support band, and a `.ts` entry would instead be
+        // measuring whether that Node happens to strip types natively.
+        std::fs::write(
+            project.join("main.mjs"),
+            "import which from 'live-pkg';\nconsole.log(which);\n",
+        )
+        .unwrap();
+
+        Self { temp, project, pkg }
+    }
+
+    fn run(&self, args: &[&str]) -> String {
+        let mut command = Command::new(nub_binary());
+        command
+            .current_dir(&self.project)
+            .env("XDG_CONFIG_HOME", self.temp.path().join("config"))
+            .env("XDG_CACHE_HOME", self.temp.path().join("cache"))
+            .args(args);
+        let output = probe_output(&format!("nub {}", args.join(" ")), command);
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+}
+
+#[test]
+fn top_level_typescript_options_override_the_selected_tsconfig() {
+    let fixture = Fixture::new();
+    // Keep the entry files in ESM format so this config-surface test does not
+    // conflate decorator behavior with the documented compat-tier limitation
+    // for CommonJS entries that need external transform helpers.
+    std::fs::write(
+        fixture.project.join("package.json"),
+        r#"{ "type": "module" }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.project.join("tsconfig.runtime.jsonc"),
+        r#"{ "compilerOptions": {
+          "jsx": "react-jsx",
+          "jsxImportSource": "./missing-runtime",
+          "experimentalDecorators": false,
+          "emitDecoratorMetadata": false
+        } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.project.join("classic.tsx"),
+        r#"function make(tag: unknown, props: unknown, ...children: unknown[]) {
+  return { tag, props, children };
+}
+const Fragment = "fragment";
+console.log(JSON.stringify(<><widget /></>));
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.project.join("nub.jsonc"),
+        r#"{
+          "tsconfig": "./tsconfig.runtime.jsonc",
+          "jsx": "react",
+          "jsxFactory": "make",
+          "jsxFragmentFactory": "Fragment"
+        }"#,
+    )
+    .unwrap();
+
+    let mut classic = fixture.command();
+    classic.arg("classic.tsx");
+    let classic = probe_json("top-level classic JSX options", classic);
+    assert_eq!(classic["tag"], "fragment", "{classic}");
+    assert_eq!(classic["children"][0]["tag"], "widget", "{classic}");
+
+    std::fs::create_dir_all(fixture.project.join("runtime")).unwrap();
+    std::fs::write(
+        fixture.project.join("runtime/jsx-dev-runtime.js"),
+        r#"export const Fragment = "fragment";
+export function jsxDEV(tag, props) { return { mode: "development", tag, props }; }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.project.join("automatic.tsx"),
+        r#"console.log(JSON.stringify({
+  element: <widget answer={42} />,
+  snapshot: JSON.parse(process.env.__NUB_RUNTIME_CONFIG ?? "{}"),
+}));
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.project.join("nub.jsonc"),
+        r#"{
+          "tsconfig": "./tsconfig.runtime.jsonc",
+          "jsx": "react-jsxdev",
+          "jsxImportSource": "./runtime",
+          "decorators": "legacy",
+          "emitDecoratorMetadata": true
+        }"#,
+    )
+    .unwrap();
+
+    let mut automatic = fixture.command();
+    automatic.arg("automatic.tsx");
+    let automatic = probe_json("top-level automatic JSX and decorator options", automatic);
+    assert_eq!(automatic["element"]["mode"], "development", "{automatic}");
+    assert_eq!(automatic["element"]["tag"], "widget", "{automatic}");
+    assert_eq!(automatic["snapshot"]["jsx"], "react-jsxdev", "{automatic}");
+    assert_eq!(
+        automatic["snapshot"]["jsxImportSource"], "./runtime",
+        "{automatic}"
+    );
+    assert_eq!(
+        automatic["snapshot"]["experimentalDecorators"], true,
+        "{automatic}"
+    );
+    assert_eq!(
+        automatic["snapshot"]["emitDecoratorMetadata"], true,
+        "{automatic}"
+    );
+
+    std::fs::write(
+        fixture.project.join("decorated.ts"),
+        r#"const parameterTypes: string[][] = [];
+Reflect.metadata = (key: string, value: unknown[]) => () => {
+  if (key === "design:paramtypes") parameterTypes.push(value.map(type => type.name));
+};
+function marked<T>(value: T): T { return value; }
+@marked class Dependency {}
+@marked class Service { constructor(_dependency: Dependency) {} }
+console.log(JSON.stringify(parameterTypes));
+"#,
+    )
+    .unwrap();
+    let mut typescript = fixture.command();
+    typescript.arg("decorated.ts");
+    let typescript = probe_json("top-level legacy decorators and metadata", typescript);
+    assert_eq!(typescript, serde_json::json!([["Dependency"]]));
+
+    std::fs::write(
+        fixture.project.join("decorated.js"),
+        r#"function marked(_target, _key, descriptor) { return descriptor; }
+class Example { @marked greet() { return "hello"; } }
+console.log(new Example().greet());
+"#,
+    )
+    .unwrap();
+    let mut javascript = fixture.command();
+    javascript.arg("decorated.js");
+    let output = probe_output("top-level legacy decorators in JavaScript", javascript);
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
+}
+
 /// The `node_modules/.bin` routes, split out because they ride a
 /// `#!/usr/bin/env node` shim. Windows resolves local bins through `.cmd`
 /// shims instead — a different path this fixture does not build — so gating
@@ -321,7 +691,8 @@ fn runtime_snapshot_reaches_the_local_bin_routes() {
 /// outside the project forces that path with no network involved. The fetched
 /// bin's `#!/usr/bin/env node` shebang re-enters nub as a PATH shim rather than
 /// reading `--node` from argv, so augmentation is disabled by `dlx_child_env`
-/// stamping `NODE_COMPAT` for the child — a genuinely different mechanism.
+/// stamping the compat-launch marker for the child — a genuinely different
+/// mechanism.
 #[cfg(unix)]
 #[test]
 fn nubx_node_flag_reaches_the_dlx_fallback_fetch_path() {
@@ -1012,8 +1383,817 @@ fn unsupported_runtime_option_fails_before_node_startup() {
     let output = fixture.command().arg("main.ts").output().unwrap();
     assert!(!output.status.success());
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("not supported by Node"),
+        String::from_utf8_lossy(&output.stderr).contains("not accepted in NODE_OPTIONS"),
         "{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The refusal above fires on two populations, and only one of them is a typo.
+/// `--stack-size` is a REAL flag the installed Node supports — it is simply
+/// command-line-only, and `v8Flags` is the field that delivers it. Naming Node's
+/// support as the problem sent that author to check their Node version.
+#[test]
+fn a_command_line_only_v8_flag_is_refused_by_naming_the_field_that_takes_it() {
+    let fixture = Fixture::new();
+    // Its own entry, not the shared `main.ts`: that one imports `./message.blob`
+    // and so only runs under the fixture's `loader` map, which the single-key
+    // documents below deliberately replace.
+    std::fs::write(fixture.project.join("v8probe.js"), "console.log('ran');\n").unwrap();
+
+    std::fs::write(
+        fixture.project.join("nub.jsonc"),
+        r#"{ "nodeOptions": ["--stack-size=2000"] }"#,
+    )
+    .unwrap();
+    let output = fixture.command().arg("v8probe.js").output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("not accepted in NODE_OPTIONS") && stderr.contains("`v8Flags`"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("not supported by Node"),
+        "the installed Node does support this flag: {stderr}"
+    );
+
+    // Positive control: the same flag through `v8Flags` reaches Node on its
+    // command line and runs, so the refusal above is about the DELIVERY channel
+    // rather than the flag.
+    std::fs::write(
+        fixture.project.join("nub.jsonc"),
+        r#"{ "v8Flags": ["--stack-size=2000"] }"#,
+    )
+    .unwrap();
+    let output = fixture.command().arg("v8probe.js").output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// npm/pnpm parity for the `node-options` npmrc field on `nub run`, plus the two
+/// places it is easy to get wrong. npm and pnpm ASSIGN `NODE_OPTIONS` from this
+/// field and destroy the ambient value; nub appends, so its own augmentation
+/// preload has to survive alongside. And because `compute_augmentation_env`
+/// re-quotes every option individually, a multi-flag value must arrive already
+/// split — pushed whole it would emit the single broken token `"--a --b"`.
+#[test]
+fn npmrc_node_options_reach_nub_run_without_displacing_augmentation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"npmrc-node-options","version":"1.0.0","scripts":{"show":"node -e \"console.log(process.env.NODE_OPTIONS ?? '')\""}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join(".npmrc"),
+        "node-options=--max-old-space-size=8192 --trace-warnings\n",
+    )
+    .unwrap();
+
+    let show = || -> String {
+        let mut command = Command::new(nub_binary());
+        command
+            .current_dir(root)
+            .args(["run", "show"])
+            .stdin(Stdio::null());
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "nub run show exited {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // `nub run` echoes the command line first; NODE_OPTIONS is the last line.
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .last()
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    let options = show();
+    assert!(
+        options.contains("--max-old-space-size=8192"),
+        "the npmrc `node-options` field must reach the script (pnpm applies it): {options}"
+    );
+    assert!(
+        options.contains("--trace-warnings"),
+        "a multi-flag value must split into separate tokens, not one quoted blob: {options}"
+    );
+    assert!(
+        options.contains("runtime/preload"),
+        "nub's own preload must survive alongside it — nub appends where npm assigns: {options}"
+    );
+
+    // nub.jsonc is nub's OWN surface and outranks the generic `.npmrc` one, which
+    // under Node's last-wins rule means its token must come after npmrc's.
+    std::fs::write(
+        root.join("nub.jsonc"),
+        "{ \"nodeOptions\": [\"--max-old-space-size=4096\"] }\n",
+    )
+    .unwrap();
+    let options = show();
+    // rfind, not find: a nested nub run can carry more than one augmentation block,
+    // and the token Node actually applies is the LAST one of each.
+    let from_npmrc = options
+        .rfind("--max-old-space-size=8192")
+        .unwrap_or_else(|| panic!("npmrc value missing once nub.jsonc is present: {options}"));
+    let from_nub_jsonc = options
+        .rfind("--max-old-space-size=4096")
+        .unwrap_or_else(|| panic!("nub.jsonc value missing: {options}"));
+    assert!(
+        from_npmrc < from_nub_jsonc,
+        "nub.jsonc `nodeOptions` must come last so it wins the conflict: {options}"
+    );
+}
+
+/// The contract the synthesized preload chainer exists to hold: however many
+/// `nub.jsonc` `preload` entries a project declares, nub emits AT MOST ONE
+/// `--require` and AT MOST ONE `--import` into NODE_OPTIONS.
+///
+/// One token per entry is destroyed by any consumer that re-parses NODE_OPTIONS —
+/// Next.js keys it by option name and reformats it for every forked worker, so a
+/// repeated flag collapses to its last value and silently drops nub's OWN preload
+/// (vercel/next.js#96582). The `.cjs`-only case is the sharp one: nub's preload is
+/// also a `--require`, so before the chainer it was the entry that got dropped.
+///
+/// Bare specifiers are the reason the chainer is written INSIDE the project: they
+/// resolve through that project's node_modules walk-up from the chainer's own
+/// directory, which is what Node does for a `--require` token and what nub cannot
+/// do itself (its resolver is additive-only and returns null for every bare name).
+#[test]
+fn preload_entries_collapse_to_one_token_per_flag_name() {
+    for entries in [
+        r#"["./one.cjs"]"#,
+        r#"["./one.cjs", "./two.cjs"]"#,
+        r#"["./a.mjs", "./b.mjs"]"#,
+        r#"["./a.mjs", "./one.cjs", "./b.mjs"]"#,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"chain","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        for name in ["one.cjs", "two.cjs"] {
+            std::fs::write(root.join(name), "").unwrap();
+        }
+        for name in ["a.mjs", "b.mjs"] {
+            std::fs::write(root.join(name), "").unwrap();
+        }
+        std::fs::write(
+            root.join("nub.jsonc"),
+            format!("{{ \"preload\": {entries} }}\n"),
+        )
+        .unwrap();
+
+        let mut command = Command::new(nub_binary());
+        command
+            .current_dir(root)
+            .args(["-e", "process.stdout.write(process.env.NODE_OPTIONS ?? '')"])
+            .stdin(Stdio::null());
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "nub -e failed for {entries}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let options = String::from_utf8_lossy(&output.stdout);
+        let requires = options.matches("--require=").count();
+        let imports = options.matches("--import=").count();
+        assert!(
+            requires <= 1 && imports <= 1,
+            "preload {entries} emitted {requires} --require and {imports} --import; \
+             a repeated flag name is destroyed by NODE_OPTIONS re-parsers: {options}"
+        );
+        // Windows emits `runtime\preload.cjs`; compare on a normalized copy so the
+        // assertion is about the TOKEN, not the platform's separator.
+        let normalized = options.replace('\\', "/");
+        assert!(
+            normalized.contains("runtime/preload."),
+            "nub's own preload token must always be present for {entries}: {options}"
+        );
+    }
+}
+
+/// A BARE `nub.jsonc` `preload` entry resolves from the CURRENT WORKING DIRECTORY,
+/// the way Node resolves a bare `--require`/`--import` specifier.
+///
+/// The anchor is easy to get wrong and fails silently. nub loads preload entries
+/// through a generated chainer module, and a bare `import "foo"` inside that file
+/// would otherwise resolve from the FILE's directory — so in a workspace where a
+/// member shadows a root dependency, running from the member would load the ROOT
+/// copy while plain Node loads the member's. Same specifier, different module, no
+/// error. nub resolves bare entries itself to keep the CWD anchor.
+#[test]
+fn a_bare_preload_entry_resolves_from_the_cwd_like_node_does() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"anchor","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(root.join("nub.jsonc"), "{ \"preload\": [\"shadowed\"] }\n").unwrap();
+
+    // Two copies of the same dependency name: one at the root, one shadowing it in
+    // a member directory.
+    for (dir, marker) in [
+        (root.to_path_buf(), "ROOT"),
+        (root.join("member"), "MEMBER"),
+    ] {
+        let pkg = dir.join("node_modules").join("shadowed");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            r#"{"name":"shadowed","version":"1.0.0","main":"i.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(pkg.join("i.js"), format!("console.log(\"{marker}\");")).unwrap();
+    }
+    let member = root.join("member");
+    std::fs::write(member.join("app.js"), "console.log(\"entry\");").unwrap();
+
+    let mut command = Command::new(nub_binary());
+    command
+        .current_dir(&member)
+        .arg("app.js")
+        .stdin(Stdio::null());
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "nub app.js failed from the member dir: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("MEMBER"),
+        "a bare preload must resolve from the CWD (the member's own copy), \
+         not from wherever nub wrote its chainer: {stdout}"
+    );
+    assert!(
+        !stdout.contains("ROOT"),
+        "the root copy must not shadow the member's: {stdout}"
+    );
+}
+
+/// Preload flags arriving through an INHERITED `NODE_OPTIONS` are folded into nub's
+/// chainers rather than forwarded as extra tokens.
+///
+/// Without the fold, an ambient `--require` (what every APM injector sets) lands as a
+/// second token of a name nub already emits. A consumer that keys `NODE_OPTIONS` by
+/// flag name then keeps one — and since nub appends the inherited value last, the one
+/// it dropped was nub's own preload, taking the whole augmentation layer with it.
+///
+/// Both preloads must still RUN, and in the same order as before the fold.
+#[test]
+fn inherited_node_options_preloads_fold_into_the_chainer() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"fold","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(root.join("nub.jsonc"), "{ \"preload\": [\"./cfg.cjs\"] }\n").unwrap();
+    let log = root.join("order.log");
+    for (file, marker) in [("cfg.cjs", "CFG"), ("amb.cjs", "AMB")] {
+        std::fs::write(
+            root.join(file),
+            format!(
+                "require(\"node:fs\").appendFileSync(process.env.FOLD_LOG, {:?});",
+                format!("{marker}\n")
+            ),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        root.join("app.js"),
+        "require(\"node:fs\").appendFileSync(process.env.FOLD_LOG, \"ENTRY\\n\");\n\
+         console.log(process.env.NODE_OPTIONS ?? \"\");",
+    )
+    .unwrap();
+
+    let mut command = Command::new(nub_binary());
+    command
+        .current_dir(root)
+        .arg("app.js")
+        .env("FOLD_LOG", &log)
+        .env(
+            "NODE_OPTIONS",
+            format!("--require {}", root.join("amb.cjs").display()),
+        )
+        .stdin(Stdio::null());
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "nub app.js failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let options = String::from_utf8_lossy(&output.stdout);
+    let requires = options.matches("--require").count();
+    let imports = options.matches("--import").count();
+    assert!(
+        requires <= 1 && imports <= 1,
+        "an inherited preload must be folded, not forwarded as a second token; \
+         got {requires} --require and {imports} --import: {options}"
+    );
+    let normalized = options.replace('\\', "/");
+    assert!(
+        normalized.contains("runtime/preload."),
+        "nub's own preload token must survive the fold: {options}"
+    );
+
+    let order = std::fs::read_to_string(&log).unwrap_or_default();
+    let order: Vec<&str> = order.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(
+        order,
+        vec!["CFG", "AMB", "ENTRY"],
+        "both preloads must run, config before inherited, both before the entry"
+    );
+}
+
+/// A project's `preload` runs ahead of the entry, a relative path and a bare
+/// specifier in declared order, for an ESM entry and a TypeScript one, under
+/// `nub <file>` and `nub watch`.
+///
+/// Each file run is repeated beneath a plain `node` from the persistent shim,
+/// which is how a tool started with `npx` launches its children. Through 0.9.6
+/// that `node` exported `NODE_COMPAT=1` to its subtree, so every `nub` below it
+/// ran in compat mode and the preloads silently stopped while `nub config get
+/// preload` still listed them (#1005).
+#[test]
+fn project_preloads_run_before_the_entry_even_beneath_a_compat_launch() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("project");
+    let bare = root.join("node_modules").join("bare-preload");
+    std::fs::create_dir_all(&bare).unwrap();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"preloads","type":"module"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("nub.jsonc"),
+        r#"{ "preload": ["./relative.mjs", "bare-preload"] }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("relative.mjs"),
+        "(globalThis.__order ??= []).push('relative');\n",
+    )
+    .unwrap();
+    std::fs::write(
+        bare.join("package.json"),
+        r#"{"name":"bare-preload","type":"module","exports":"./register.js"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        bare.join("register.js"),
+        "(globalThis.__order ??= []).push('bare');\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("main.mjs"),
+        "console.log([...(globalThis.__order ?? []), 'entry'].join(','));\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("main.ts"),
+        "const order: string[] = (globalThis as any).__order ?? [];\n\
+         console.log([...order, 'entry'].join(','));\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("launcher.cjs"),
+        r#"const { spawnSync } = require('node:child_process');
+const [command, ...args] = process.argv.slice(2);
+const child = spawnSync(command, args, { stdio: 'inherit' });
+if (child.error) throw child.error;
+process.exit(child.status ?? 1);
+"#,
+    )
+    .unwrap();
+
+    // Recognized by its `nub/node-shim` directory shape. A hard link, not a
+    // symlink: Linux reads `current_exe` from `/proc/self/exe`, which follows a
+    // symlink back to the `nub` binary.
+    let shim_dir = temp.path().join("nub").join("node-shim");
+    std::fs::create_dir_all(&shim_dir).unwrap();
+    let shim_node = shim_dir.join(format!("node{}", std::env::consts::EXE_SUFFIX));
+    if std::fs::hard_link(nub_binary(), &shim_node).is_err() {
+        std::fs::copy(nub_binary(), &shim_node).unwrap();
+    }
+
+    let command = |program: &Path| {
+        let mut command = Command::new(program);
+        command
+            .current_dir(&root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .env("XDG_CACHE_HOME", temp.path().join("cache"))
+            .env_remove("NODE_COMPAT")
+            .stdin(Stdio::null());
+        command
+    };
+    let nub = nub_binary();
+    for entry in ["main.mjs", "main.ts"] {
+        let mut direct = command(&nub);
+        direct.arg(entry);
+        let mut beneath = command(&shim_node);
+        beneath.arg("launcher.cjs").arg(&nub).arg(entry);
+        for (label, command) in [
+            (format!("nub {entry}"), direct),
+            (format!("nub {entry} beneath the shim's node"), beneath),
+        ] {
+            let output = probe_output(&label, command);
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout).trim_end(),
+                "relative,bare,entry",
+                "{label}: both preloads must run, in order, before the entry"
+            );
+        }
+    }
+
+    let mut watch = command(&nub);
+    watch.args(["watch", "main.ts"]);
+    assert_eq!(
+        watch_first_line(watch),
+        "relative,bare,entry",
+        "nub watch main.ts: both preloads must run, in order, before the entry"
+    );
+}
+
+/// A `nodeExecutable` project fixture with an UNSATISFIABLE pin beside it, so no
+/// assertion below can pass by accident: without the field, discovery has no
+/// binary to reach and `nub node which` fails.
+struct NodeExecutableFixture {
+    temp: tempfile::TempDir,
+    project: PathBuf,
+    /// The `node` the field is pointed at — this box's PATH node, learned by
+    /// asking nub for it before the pin exists.
+    node: String,
+}
+
+impl NodeExecutableFixture {
+    fn new() -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        // Every path assertion below compares against one nub PRINTED, and nub
+        // anchors to `env::current_dir()`. macOS hands `tempfile` a
+        // `/var/folders/...` that is a symlink to `/private/var/...`, so the raw
+        // spelling never matches there — and no pull-request leg runs macOS.
+        //
+        // Unix only. On Windows `fs::canonicalize` returns a VERBATIM `\\?\C:\...`
+        // path, a spelling nothing else in the process produces, so canonicalizing
+        // there would trade the macOS mismatch for a Windows one. Windows needs no
+        // fixup: it hands back the same path it was given.
+        #[cfg(not(windows))]
+        let project = std::fs::canonicalize(&project).unwrap();
+        let fixture = Self {
+            temp,
+            project,
+            node: String::new(),
+        };
+        let baseline = fixture.which();
+        assert!(
+            baseline.status.success(),
+            "no node on PATH to point the field at: {}",
+            String::from_utf8_lossy(&baseline.stderr)
+        );
+        let node = String::from_utf8_lossy(&baseline.stdout).trim().to_string();
+        // A version nobody has published, so no PATH node, no store entry, and no
+        // nvm install can quietly rescue the pin on a developer's own machine.
+        std::fs::write(fixture.project.join(".node-version"), "999.0.0\n").unwrap();
+        let control = fixture.which();
+        assert!(
+            !control.status.success(),
+            "the control pin must be unreachable, else every assertion below is vacuous: {}",
+            String::from_utf8_lossy(&control.stdout)
+        );
+        Self { node, ..fixture }
+    }
+
+    fn command_in(&self, cwd: &Path) -> Command {
+        let mut command = Command::new(nub_binary());
+        command
+            .current_dir(cwd)
+            .env("XDG_CONFIG_HOME", self.temp.path().join("config"))
+            .env("XDG_CACHE_HOME", self.temp.path().join("cache"))
+            .env_remove("NODE_EXECUTABLE");
+        command
+    }
+
+    fn which(&self) -> std::process::Output {
+        self.which_in(&self.project)
+    }
+
+    fn which_in(&self, cwd: &Path) -> std::process::Output {
+        self.command_in(cwd)
+            .args(["node", "which"])
+            .output()
+            .unwrap()
+    }
+
+    fn write_config(&self, spec: &str) {
+        std::fs::write(
+            self.project.join("nub.jsonc"),
+            format!(r#"{{ "nodeExecutable": {} }}"#, serde_json::json!(spec)),
+        )
+        .unwrap();
+    }
+
+    /// A shell command printing `text` and exiting 0, spelled for the shell the
+    /// running platform's substitution uses.
+    fn print_command(text: &str) -> String {
+        if cfg!(windows) {
+            format!("$(echo {text})")
+        } else {
+            format!("$(printf %s '{text}')")
+        }
+    }
+}
+
+/// Both spellings of the field select the binary, and the resolution is reported
+/// as the field rather than as the pin chain it bypassed.
+#[test]
+fn node_executable_config_selects_the_binary_in_both_forms() {
+    let fixture = NodeExecutableFixture::new();
+
+    for spec in [
+        fixture.node.clone(),
+        NodeExecutableFixture::print_command(&fixture.node),
+    ] {
+        fixture.write_config(&spec);
+        let output = fixture.which();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{spec}: {stderr}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            fixture.node,
+            "{spec} must resolve to the binary it names"
+        );
+        assert!(
+            stderr.contains("nub.jsonc#nodeExecutable"),
+            "{spec} must report itself as the source, not the pin it bypassed: {stderr}"
+        );
+    }
+
+    // NODE_EXECUTABLE outranks the file: same binary, different reported source.
+    let stderr = String::from_utf8_lossy(
+        &fixture
+            .command_in(&fixture.project)
+            .args(["node", "which"])
+            .env("NODE_EXECUTABLE", &fixture.node)
+            .output()
+            .unwrap()
+            .stderr,
+    )
+    .into_owned();
+    assert!(
+        stderr.contains("resolved from NODE_EXECUTABLE"),
+        "the environment must outrank the file: {stderr}"
+    );
+}
+
+/// Naming a `node` that is really nub is refused, not resolved. Nub-as-node
+/// re-enters discovery and reads this same setting, so resolving through it
+/// recurses until something kills the process — a hang with no output, the one
+/// failure no error text can be read out of. `$(which node)` is the spelling
+/// that reaches it, because a user's `which` does not share the skip list nub
+/// applies to its own PATH scan.
+///
+/// Laid out as `.nub/node-shim/node`, the SHAPE of the installed global shim:
+/// the real directory moves with `XDG_DATA_HOME`, so it cannot be matched by
+/// path alone.
+#[test]
+fn a_node_executable_that_is_really_nub_is_refused() {
+    let fixture = NodeExecutableFixture::new();
+    let shim_dir = fixture.project.join(".nub").join("node-shim");
+    std::fs::create_dir_all(&shim_dir).unwrap();
+    let as_node = shim_dir.join(format!("node{}", std::env::consts::EXE_SUFFIX));
+    std::fs::write(&as_node, "").unwrap();
+    fixture.write_config(&as_node.to_string_lossy());
+
+    let output = fixture.which();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("ERR_NUB_NODE_EXECUTABLE_SELF"),
+        "the refusal must name the self-reference: {stderr}"
+    );
+}
+
+/// The PATH recipe survives nub's own `node` shim sitting first on PATH — the
+/// layout `nub node shim` creates, and so the configuration of exactly the users
+/// most likely to reach for `$(which node)`. The shim is taken off the PATH the
+/// command runs with, so `which` answers with the first REAL Node instead of nub:
+/// neither the recursion nor the refusal is the right answer to a question the
+/// user asked in good faith.
+///
+/// POSIX-only because the PATH and shell spelling are written in `sh`; the guard
+/// itself is platform-independent.
+#[cfg(unix)]
+#[test]
+fn the_path_recipe_looks_past_nubs_own_node_shim() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = NodeExecutableFixture::new();
+    // A shim in the shape nub installs, and one that would fail loudly if it were
+    // ever chosen — so a regression cannot pass by quietly running the wrong file.
+    let shim_dir = fixture.project.join(".nub").join("node-shim");
+    std::fs::create_dir_all(&shim_dir).unwrap();
+    let shim_node = shim_dir.join("node");
+    std::fs::write(&shim_node, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&shim_node, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let real_dir = fixture.project.join("realbin");
+    std::fs::create_dir_all(&real_dir).unwrap();
+    let real_node = real_dir.join("node");
+    std::os::unix::fs::symlink(&fixture.node, &real_node).unwrap();
+
+    fixture.write_config("$(which node)");
+    // The shim FIRST, the real Node second, then the system dirs `sh` and `which`
+    // themselves live in.
+    let output = fixture
+        .command_in(&fixture.project)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}:/usr/bin:/bin",
+                shim_dir.display(),
+                real_dir.display()
+            ),
+        )
+        .args(["node", "which"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        real_node.to_string_lossy(),
+        "the shim must be skipped and the real Node named: {stderr}"
+    );
+}
+
+/// A relative path is anchored to the file that declared it, not to wherever the
+/// user happened to stand — one committed value has to mean one binary.
+///
+/// Deliberately spelled `./tools/node` with no extension, which is the spelling
+/// a mixed-platform team can commit: on Windows that must still resolve to the
+/// real `node.exe`, separators and all, or the reported path and the version
+/// cache disagree with the binary that actually runs.
+#[test]
+fn a_relative_node_executable_anchors_to_its_config_file() {
+    let fixture = NodeExecutableFixture::new();
+    let tools = fixture.project.join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let linked = tools.join(format!("node{}", std::env::consts::EXE_SUFFIX));
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&fixture.node, &linked).unwrap();
+    #[cfg(windows)]
+    if std::fs::hard_link(&fixture.node, &linked).is_err() {
+        std::fs::copy(&fixture.node, &linked).unwrap();
+    }
+    fixture.write_config("./tools/node");
+
+    // One component per `join`: `join("src/deep")` would embed a literal `/` in
+    // an otherwise `\`-separated Windows path, and the expected string below has
+    // to match the canonical cwd the binary reports, not this file's spelling.
+    let nested = fixture.project.join("src").join("deep");
+    std::fs::create_dir_all(&nested).unwrap();
+    let output = fixture.which_in(&nested);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        linked.to_string_lossy(),
+        "a relative spec must resolve against the nub.jsonc, not the cwd: {stderr}"
+    );
+
+    // A `$(command)` takes the OTHER anchor — the cwd — because a toolchain
+    // manager answers per directory, and the answer wanted is the one for where
+    // the user is. Discriminating: the same relative token names a binary that
+    // exists only in the nested directory.
+    let nested_node = nested.join(format!("node{}", std::env::consts::EXE_SUFFIX));
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&fixture.node, &nested_node).unwrap();
+    #[cfg(windows)]
+    if std::fs::hard_link(&fixture.node, &nested_node).is_err() {
+        std::fs::copy(&fixture.node, &nested_node).unwrap();
+    }
+    fixture.write_config(&NodeExecutableFixture::print_command(&format!(
+        "./node{}",
+        std::env::consts::EXE_SUFFIX
+    )));
+    let output = fixture.which_in(&nested);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        nested_node.to_string_lossy(),
+        "a command's output must anchor where the command ran: {stderr}"
+    );
+}
+
+/// A `$(command)` that fails stops the run and hands back the tool's own error.
+/// Falling through to the pin chain would be the silent substitution the field
+/// exists to prevent — here that fallback is an unsatisfiable pin, so a regression
+/// shows up as the wrong error rather than as a pass.
+///
+/// The RUN is the contract's own subject, so it is the first thing asserted; a
+/// `which` that refuses is the report of that same resolution, not a substitute
+/// for it. The last leg pins the boundary: `nub node ls` manages nub's own store
+/// and runs no user code, so a toolchain that cannot answer leaves it reporting
+/// the store rather than refusing. That asymmetry is deliberate — `manage.rs`'s
+/// `resolved_version` carries the reasoning — and reads as an oversight without
+/// a test that fails when someone "fixes" it.
+#[test]
+fn a_failing_node_executable_command_stops_the_run() {
+    let fixture = NodeExecutableFixture::new();
+    let spec = if cfg!(windows) {
+        "$(echo mise: command not found 1>&2& exit /b 127)"
+    } else {
+        "$(echo 'mise: command not found' >&2; exit 127)"
+    };
+    fixture.write_config(spec);
+
+    let refuses = |output: std::process::Output, what: &str| {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        assert!(!output.status.success(), "{what} must fail: {stderr}");
+        assert!(
+            stderr.contains("ERR_NUB_NODE_EXECUTABLE_FAILED")
+                && stderr.contains("mise: command not found"),
+            "{what} must carry the tool's own error: {stderr}"
+        );
+    };
+
+    std::fs::write(fixture.project.join("app.js"), "console.log('ran')\n").unwrap();
+    refuses(
+        fixture
+            .command_in(&fixture.project)
+            .arg("app.js")
+            .output()
+            .unwrap(),
+        "a file run",
+    );
+    refuses(fixture.which(), "nub node which");
+
+    let ls = fixture
+        .command_in(&fixture.project)
+        .args(["node", "ls"])
+        .output()
+        .unwrap();
+    assert!(
+        ls.status.success(),
+        "listing nub's own cache must not depend on the project's toolchain: {}",
+        String::from_utf8_lossy(&ls.stderr)
+    );
+}
+
+/// The override is the one winner that can contradict every declared pin at once,
+/// so it is warned about against the whole chain — not only `engines.node`.
+#[test]
+fn an_overriding_binary_is_warned_about_against_the_pin_it_contradicts() {
+    let fixture = NodeExecutableFixture::new();
+    fixture.write_config(&fixture.node);
+    // The control pin (999.0.0) is what the resolved binary contradicts.
+    std::fs::write(fixture.project.join("main.js"), "console.log('ran');\n").unwrap();
+
+    let output = fixture
+        .command_in(&fixture.project)
+        .arg("main.js")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "the warning is non-fatal: {stderr}"
+    );
+    assert!(
+        stderr.contains("nub.jsonc#nodeExecutable") && stderr.contains(".node-version"),
+        "the warning must name both the winner and the pin it bypassed: {stderr}"
+    );
+
+    // Agreeing sources are silent, which is what proves the warning is about the
+    // disagreement rather than about the override existing.
+    std::fs::remove_file(fixture.project.join(".node-version")).unwrap();
+    let output = fixture
+        .command_in(&fixture.project)
+        .arg("main.js")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("nub.jsonc#nodeExecutable"),
+        "no declared pin, nothing to disagree with: {stderr}"
     );
 }

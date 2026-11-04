@@ -7,7 +7,7 @@ description: >-
   incremental builds, the cross-worktree artifact-contamination hazard that
   sharing creates (the phantom `E0063: missing field` on correct source), and the
   wrapper (`scripts/rust-build.sh`) that shares by default and auto-isolates the
-  moment a worktree diverges a depended-on crate. Auto-triggers on a spurious
+  moment a worktree diverges a depended-on crate or `runtime/`. Auto-triggers on a spurious
   cargo compile error that names a field/symbol absent from your checkout, on
   "worktree build contamination", and on setting CARGO_TARGET_DIR for a worktree.
 metadata:
@@ -25,15 +25,17 @@ Drop-in for `cargo`, from any worktree (or the main tree):
 ```sh
 scripts/rust-build.sh build -p nub-cli --profile fast
 scripts/rust-build.sh test  -p nub-cli --test integration
-scripts/rust-build.sh clippy --all-targets --all-features -- -D warnings
+NUB_ALLOW_INCOMPLETE_RUNTIME=1 scripts/rust-build.sh clippy --all-targets --all-features -- -D warnings
 ```
+
+That third line needs a staged `runtime/` first, and opts out of the vendored-deps half because a lint ships nothing. The "`--all-features` needs a staged addon AND the vendored runtime deps" section below has the placeholder recipe and the two failure modes.
 
 It prints which target dir it chose and why, then execs `cargo` with `CARGO_TARGET_DIR` set. Two default-on contention controls ride along:
 
 - **QoS clamp (darwin only):** cargo runs under `taskpolicy -c utility`, so interactive work preempts fleet builds; an uncontended build still gets all cores. `NUB_BUILD_FG=1` opts out.
 - **Job cap on big hosts (>8 cores):** `CARGO_BUILD_JOBS = ncpu-4` unless the caller already chose (pre-set `CARGO_BUILD_JOBS`, `NUB_BUILD_JOBS`, or an explicit `-j`/`--jobs` — cargo's flag outranks the env var).
 
-These cover builds going THROUGH the wrapper (or make). Direct `cargo` invocations are clamped by a machine-global control: `make qos-global` installs `scripts/rustc-qos.sh` as the cargo `rustc-wrapper` in `~/.cargo/config.toml`, so every rustc on the host compiles at utility QoS (`install-dev` re-runs it, so it self-heals). Same `NUB_BUILD_FG=1` opt-out; toggling it does not invalidate fingerprints.
+These cover builds going THROUGH the wrapper (or make). Direct `cargo` invocations are clamped by a machine-global control: `make qos-global` installs `scripts/rustc-qos.sh` as the cargo `rustc-wrapper` in `~/.cargo/config.toml`, so every rustc on the host compiles at utility QoS, at most TWO builds compile at a time (the rest queue first-come-first-served; `make build-status` shows the holders and the queue), and the compiling builds share `NUB_RUSTC_LIMIT` (default 6) rustc tokens (`install-dev` re-runs it, so it self-heals). `NUB_BUILD_FG=1` opts a HUMAN's foreground build out of the clamp and the queue (and, through this wrapper, out of the tokens too) — never set it from an agent; `NUB_BUILD_SLOTS=0` in a build's environment disables only the slot layer for that build. Toggling any of these does not invalidate fingerprints. Details: the `rust-build-hygiene` skill.
 
 ## Why one shared target dir
 
@@ -55,12 +57,12 @@ error[E0063]: missing field `lockfile_legacy_basenames` in initializer of `aube_
 
 Sharers are grouped by the **content** of their depended-on crates, hashed into the bucket name (`shared-target-<hash>`):
 
-- **Depended-on crate sources unmodified → share** that content's bucket. Everyone in it agrees by construction. The common case: feature work in `nub-cli`, integration tests, docs, non-Rust files.
-- **Diverged a depended-on crate → isolate** to a private per-worktree `target/` (removed with the worktree), CoW-seeded from the matching bucket so you rebuild only what differs.
+- **Depended-on crate sources and `runtime/` unmodified → share** that content's bucket. Everyone in it agrees by construction. The common case: feature work in `nub-cli`, integration tests, docs.
+- **Diverged a depended-on crate or `runtime/` → isolate** to a private per-worktree `target/` (removed with the worktree), CoW-seeded from the matching bucket so you rebuild only what differs. `runtime/` is hashed for a different reason than the crates: a dev binary resolves `runtime/*.cjs` from the tree that compiled `nub-core` (baked `CARGO_MANIFEST_DIR`), so a shared-bucket binary loads whichever sharer compiled last — a worktree with edited runtime files would silently test a sibling's copy.
 
 **Content, not merge-base:** a merge-base proves only that *this* worktree made no local changes against *its own* base, so two worktrees whose bases straddle a `nub-core`/`aube` commit both pass while disagreeing on content. The key hashes the git **index**, which only matters on the shared branch (no local changes by definition), so it moves on rebase, never mid-edit.
 
-Depended-on crates = every workspace/vendored crate **except leaf artifacts nothing links**: `crates/nub-cli` (bin), `crates/nub-native` (cdylib, own workspace), `crates/nub-phantom` (bin, own workspace). So: `crates/nub-core`, `crates/nub-cache-key`, `crates/nub-phantom-core`, `crates/nub-phantom-scan`, and all of `vendor/aube`. `nub-phantom-core`/`nub-phantom-scan` are **not** leaves — `nub-cli` depends on both — and the pathspec `:(exclude)crates/nub-phantom` matches only that directory, not those siblings.
+The hashed set = every workspace/vendored crate **except leaf artifacts nothing links** — `crates/nub-cli` (bin), `crates/nub-native` (cdylib, own workspace), `crates/nub-phantom` (bin, own workspace) — **plus `runtime/`**. So: `crates/nub-core`, `crates/nub-cache-key`, `crates/nub-phantom-core`, `crates/nub-phantom-scan`, all of `vendor/aube`, and `runtime/`. `nub-phantom-core`/`nub-phantom-scan` are **not** leaves — `nub-cli` depends on both — and the pathspec `:(exclude)crates/nub-phantom` matches only that directory, not those siblings.
 
 ## Letting the wrapper choose IS the caching strategy
 
@@ -120,6 +122,50 @@ So `fmt` + `clippy` + `test` can all be green while `target/fast/nub` is hours s
 
 **Bind the artifact to the source before trusting a fixture result.** An mtime newer than your last edit is necessary and not sufficient — a concurrent build can overwrite the path mid-run. Prove it positively by exercising a behavior only your change produces, and re-hash afterwards (or copy the binary aside and probe the copy).
 
+## Long cargo runs go in a BACKGROUND shell — never poll for them
+
+A cold build, `--all-targets` clippy or a full `cargo test` outlives the foreground timeout. Start
+it with the harness's background mechanism and let the completion notification wake you. **Do not
+write a wait loop**, and do not sleep on it: the harness already tracks it, so a poller is pure
+waste and it can be WRONG in both directions.
+
+Measured cost of getting this wrong: a loop polling `pgrep -f "cargo|rustc"` reported "still
+building" for ten minutes AFTER the build had finished — `pgrep -f` matches the full command line
+INCLUDING the environment, so every process with `.cargo/bin` in its `PATH` matched. If you must
+ask whether a compiler is running, match the executable name exactly:
+
+```sh
+ps -Ao comm= | grep -cE '^(rustc|cargo)$'      # 0 = idle
+```
+
+## ANY cargo command REWRITES that profile's binary — with ITS features, not yours
+
+`cargo build -p nub-cli --profile fast --features nub-cli/build-jail-catalog-override` then
+`cargo test -p nub-cli --profile fast <filter>` leaves `target/fast/nub` built **without** the
+feature. `test` rebuilt the bin under the default feature set and clobbered it. Nothing warns;
+the binary just quietly becomes a different one.
+
+**So re-arm the binary after ANY bare cargo invocation on the same profile**, before running a
+harness or a fixture against it:
+
+```sh
+cargo test -p nub-cli --profile fast <filter>          # clobbers target/fast/nub
+scripts/rust-build.sh build -p nub-cli --profile fast \
+  --features nub-cli/build-jail-catalog-override        # re-arm before probing
+```
+
+Cost when missed: a build-jail catalog probe reported `BROKEN-EVEN-WITH-EVERYTHING` for a package
+that installs fine, because the featureless binary refused the override. It was diagnosable only
+because nub fails LOUD there (*"NUB_BUILD_JAIL_CATALOG is set, but this binary was not built with
+the build-jail-catalog-override feature… Refusing rather than running the compiled-in catalog
+under an override's name"*). A feature that degrades silently would have cost far more.
+
+Related and distinct: `--features nub-sandbox/build-jail-catalog-override` enables it on the
+sandbox crate ONLY, so anything gated inside nub-cli compiles out while the sandbox-side banner
+still prints — the override looks live and half of it is absent. `nub-cli` forwards the feature
+(`crates/nub-cli/Cargo.toml`), so the bare name and `nub-cli/…` are equivalent; the `nub-sandbox/…`
+form is the wrong one.
+
 ## The gate's exit status must be CARGO's — three ways it silently isn't
 
 - **A pipe.** `cargo … | tail` gives you the PIPE's status.
@@ -128,15 +174,23 @@ So `fmt` + `clippy` + `test` can all be green while `target/fast/nub` is hours s
 
 The habit that holds: redirect to a file, capture `RC=$?` immediately, and **end the command with `exit $RC`** so the shell's status IS cargo's. Read the log with `Read`/`grep`, never `tail` in the same command whose status you care about. Confirm the recorded `RC=` line before believing a gate passed.
 
-## `--all-features` needs a staged addon
+## `--all-features` needs a staged addon AND the vendored runtime deps
 
-`--all-features` turns on `embed-runtime`, whose `build.rs` bakes an integrity digest of `runtime/addons/nub-native.node` — gitignored, so absent in a fresh worktree. Without it the gate fails with `cannot read entrypoint … for integrity hashing` and the lint never runs. Stage a placeholder as CI does:
+`--all-features` turns on `embed-runtime`, whose `build.rs` demands a complete runtime stage. Two separate pieces are absent in a fresh worktree, and each fails differently:
+
+| Missing | Failure |
+| --- | --- |
+| `runtime/addons/nub-native.node` (gitignored) | `cannot read entrypoint … for integrity hashing` |
+| `runtime/node_modules/` (the five vendored packages) | `missing vendored runtime packages: …` |
+
+The vendored packages exist so a shipped binary can resolve its transpile helpers, which a lint never does. So for a lint, stage a placeholder addon and grant the opt-out rather than vendoring npm packages into your worktree — what CI's clippy job, `make verify` and `scripts/remote-build.ts` all do:
 
 ```sh
 mkdir -p runtime/addons && printf 'placeholder-addon' > runtime/addons/nub-native.node
+NUB_ALLOW_INCOMPLETE_RUNTIME=1 scripts/rust-build.sh clippy --all-targets --all-features -- -D warnings
 ```
 
-The digest only needs bytes to hash — a real addon is not required to lint.
+The digest only needs bytes to hash — a real addon is not required to lint. Never set `NUB_ALLOW_INCOMPLETE_RUNTIME` for a build whose binary you intend to run, install or ship: that is the case the check exists to stop.
 
 ## Two crates are their OWN workspaces — `-p` from the root cannot see them
 

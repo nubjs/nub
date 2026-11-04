@@ -177,7 +177,7 @@ fn declared_lockfile_kind(name: &str) -> Option<LockfileKind> {
 /// The PM family a lockfile kind belongs to, for the ambiguity check.
 /// Kinds owned by the same tool (npm's shrinkwrap + package-lock,
 /// yarn classic + berry) never make a project ambiguous together.
-fn family(kind: LockfileKind) -> &'static str {
+pub(crate) fn family(kind: LockfileKind) -> &'static str {
     match kind {
         LockfileKind::Aube => "aube",
         LockfileKind::Pnpm => "pnpm",

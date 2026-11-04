@@ -8,9 +8,9 @@ This is separate from the global content store:
 - The **global content store** (`$XDG_DATA_HOME/aube/store/v1/`) stores
   package files by BLAKE3 hash. Every install uses it.
 - The **global virtual store**
-  (`<cacheDir>/virtual-store/`, defaulting to
-  `$XDG_CACHE_HOME/aube/virtual-store/`, then
-  `~/.cache/aube/virtual-store/`) stores package directory trees keyed by
+  (`<cacheDir>/virtual-store/v1/`, defaulting to
+  `$XDG_CACHE_HOME/aube/virtual-store/v1/`, then
+  `~/.cache/aube/virtual-store/v1/`) stores package directory trees keyed by
   dependency graph. Project `node_modules` entries symlink into it.
 
 ## Default behavior
@@ -45,16 +45,25 @@ shared cache. Each project points directly at that shared tree:
 ```text
 project-a/
   node_modules/
-    react -> <cacheDir>/virtual-store/react@18.2.0/<graph-hash>/node_modules/react
+    react -> <cacheDir>/virtual-store/v1/react@18.2.0/<graph-hash>/node_modules/react
 
 project-b/
   node_modules/
-    react -> <cacheDir>/virtual-store/react@18.2.0/<graph-hash>/node_modules/react
+    react -> <cacheDir>/virtual-store/v1/react@18.2.0/<graph-hash>/node_modules/react
 ```
 
 The global virtual store still imports package files from the global content
 store. The win is that aube avoids rebuilding the same package directory tree in
 every checkout.
+
+## Cleanup
+
+Run `aube store prune` to remove graph entries that are not referenced by any registered project.
+Each global-virtual-store install registers its project, and pruning removes
+records for projects that no longer exist before sweeping unreachable entries.
+On upgrade, entries that predate the project registry are preserved because
+they may still belong to checkouts that have not run a newer aube version yet.
+Use `aube store prune --dry-run` to report what would be removed.
 
 ## Package identity
 
@@ -153,15 +162,23 @@ aube automatically falls back to per-project materialization when an importer
 depends on a package with a known global-virtual-store incompatibility. The
 default trigger list is:
 
-- `next`
-- `nuxt`
-- `parcel`
+- `next` — track the upstream Turbopack compatibility bug in
+  [vercel/next.js#93556](https://github.com/vercel/next.js/issues/93556)
+- `expo`, `react-native`, and `metro` — track the merged Metro file-map support
+  in [expo/expo#45460](https://github.com/expo/expo/pull/45460). aube keeps the
+  fallback for now because the compatible behavior is not yet available across
+  the framework and Metro versions these package names can select.
 
 When that happens, install still succeeds and aube prints a warning. Repeat
 installs of that project just won't share materialized package directories
 across projects.
 
-Vite 8.1 and newer supports shared virtual stores. aube writes the effective
+Nuxt and Parcel work with the shared layout because aube records each
+package's complete sibling dependency links inside the global virtual store.
+This keeps Node resolution inside the installed dependency graph even after a
+tool follows a package symlink to its physical location.
+
+Vite 8.1 and newer support shared virtual stores. aube writes the effective
 store location to `node_modules/.modules.yaml`, including in linked workspace
 importers, so Vite can add the directory to its development-server filesystem
 allow-list. The file is pnpm-compatible integration metadata; aube continues to

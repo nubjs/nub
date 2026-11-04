@@ -1,5 +1,6 @@
 use super::body::{check_body_cap, is_retriable_status, retry_after_from};
 use super::cache::*;
+use super::retry_policy::{self, RetryCause, RetryPolicy};
 use super::{
     PACKUMENT_ACCEPT, PACKUMENT_FULL_ACCEPT, RegistryClient, force_full_packument,
     parse_full_response,
@@ -201,7 +202,12 @@ impl RegistryClient {
         // a caching bug.
         let cached_ref = cached.as_ref();
         let label = format!("packument {name}");
-        let max_attempts = self.fetch_policy.retries.saturating_add(1);
+        // Marks this fetch as in flight for the whole retry loop, so the
+        // "still waiting" ticker can name it while the user is blocked
+        // on it. Dropped on every exit path with the loop's scope.
+        let _in_flight = crate::slow_metadata::begin(&label, self.fetch_policy.warn_timeout_ms);
+        let mut retry = RetryPolicy::new(&self.fetch_policy, &label);
+        let max_attempts = retry.max_attempts();
         for attempt in 0..max_attempts {
             let is_last = attempt + 1 >= max_attempts;
             match {
@@ -232,16 +238,14 @@ impl RegistryClient {
             .await
             {
                 Ok(resp) if is_retriable_status(resp.status()) && !is_last => {
+                    let status = resp.status().as_u16();
                     let wait = retry_after_from(&resp)
                         .unwrap_or_else(|| self.fetch_policy.backoff_for_attempt(attempt + 1));
-                    tracing::warn!(
-                        attempt = attempt + 1,
-                        max_attempts,
-                        backoff_ms = wait.as_millis() as u64,
-                        status = resp.status().as_u16(),
-                        label,
-                        code = aube_codes::warnings::WARN_AUBE_HTTP_RETRY_TRANSIENT,
-                        "retrying HTTP request after transient failure",
+                    retry.warn_retry(
+                        RetryCause::Status(status),
+                        &format_args!("HTTP {status}"),
+                        attempt,
+                        wait,
                     );
                     drop(sf_guard.take());
                     tokio::time::sleep(wait).await;
@@ -299,33 +303,29 @@ impl RegistryClient {
                             return Ok(packument);
                         }
                         Err(err) if !is_last => {
-                            let wait = self.fetch_policy.backoff_for_attempt(attempt + 1);
-                            tracing::warn!(
-                                    attempt = attempt + 1,
-                                    max_attempts,
-                                    backoff_ms = wait.as_millis() as u64,
-                                    error = %err,
-                                    label,
-                                    code = aube_codes::warnings::WARN_AUBE_HTTP_RETRY_BODY_DECODE,
-                            "retrying HTTP request after response body decode error",
+                            let is_timeout = retry_policy::is_timeout_body_error(&err);
+                            let Some(wait) = retry.next_backoff(is_timeout, attempt) else {
+                                retry.warn_giving_up(
+                                    RetryCause::BodyDecode,
+                                    &err,
+                                    started.elapsed(),
                                 );
+                                return Err(err);
+                            };
+                            retry.warn_retry(RetryCause::BodyDecode, &err, attempt, wait);
                             drop(sf_guard.take());
                             tokio::time::sleep(wait).await;
                         }
                         Err(err) => return Err(err),
                     }
                 }
-                Err(err) if !is_last => {
-                    let wait = self.fetch_policy.backoff_for_attempt(attempt + 1);
-                    tracing::warn!(
-                        attempt = attempt + 1,
-                        max_attempts,
-                        backoff_ms = wait.as_millis() as u64,
-                        error = %err,
-                        label,
-                        code = aube_codes::warnings::WARN_AUBE_HTTP_RETRY_TRANSPORT,
-                        "retrying HTTP request after transport error",
-                    );
+                Err(err) if !is_last && !aube_util::agent_sandbox::is_hard_network_deny(&err) => {
+                    let is_timeout = retry_policy::is_timeout_error(&err);
+                    let Some(wait) = retry.next_backoff(is_timeout, attempt) else {
+                        retry.warn_giving_up(RetryCause::Transport, &err, started.elapsed());
+                        return Err(err.into());
+                    };
+                    retry.warn_retry(RetryCause::Transport, &err, attempt, wait);
                     drop(sf_guard.take());
                     tokio::time::sleep(wait).await;
                 }
@@ -405,6 +405,170 @@ impl RegistryClient {
         }
     }
 
+    /// Fetch the compact trust history (`time` map plus per-version trust
+    /// evidence) for a package, backed by its own small on-disk cache.
+    ///
+    /// The lockfile trust-policy validator calls this once per package
+    /// *name* in the locked graph. It hits the same full-packument
+    /// endpoint as [`Self::fetch_packument_with_time_cached`], but
+    /// decodes only the fields the no-downgrade check reads and caches
+    /// that compact shape instead of the multi-megabyte raw document —
+    /// cold validations skip the `serde_json::Value` round-trip and the
+    /// full-packument cache write, warm revalidations re-read kilobytes
+    /// instead of megabytes per name.
+    pub async fn fetch_trust_history_cached(
+        &self,
+        name: &str,
+        cache_dir: &Path,
+    ) -> Result<crate::PackumentTrustHistory, Error> {
+        let cache_registry_url = self.config.registry_for(name).to_string();
+        // Same per-origin/name file layout as the packument caches;
+        // only the cache root differs (`trust-history-v1/`).
+        let cache_path = packument_full_cache_path(cache_dir, name, &cache_registry_url)
+            .ok_or_else(|| Error::InvalidName(name.to_string()))?;
+        let force_cache = self.force_cache();
+        let cached = read_cached_trust_history(&cache_path);
+        if let Some(c) = &cached
+            && (force_cache || cached_is_fresh(c.fetched_at, c.max_age_secs))
+        {
+            return Ok(c.history.clone());
+        }
+        if self.network_mode == NetworkMode::Offline {
+            // A stale entry beats failing outright: offline installs
+            // can't revalidate anything, and the caller already decided
+            // offline installs may proceed.
+            if let Some(c) = cached {
+                return Ok(c.history);
+            }
+            return Err(Error::Offline(format!("trust history for {name}")));
+        }
+
+        let (url, registry_url) = self.packument_url(name);
+        let etag = cached.as_ref().and_then(|c| c.etag.clone());
+        let last_modified = cached.as_ref().and_then(|c| c.last_modified.clone());
+        let label = format!("trust history {name}");
+        let started = std::time::Instant::now();
+        // Single attempt loop covering send *and* body decode, matching
+        // `fetch_packument_full_cached`: a truncated or malformed body on
+        // an otherwise-successful response is retriable, and letting it
+        // through would abort trust validation for the whole install.
+        let max_attempts = self.fetch_policy.retries.saturating_add(1);
+        for attempt in 0..max_attempts {
+            let is_last = attempt + 1 >= max_attempts;
+            let resp = match {
+                let mut req = self
+                    .authed_get_for_package(&url, &registry_url, name)
+                    .header("Accept", PACKUMENT_FULL_ACCEPT);
+                if let Some(ref etag) = etag {
+                    req = req.header("If-None-Match", etag);
+                }
+                if let Some(ref lm) = last_modified {
+                    req = req.header("If-Modified-Since", lm);
+                }
+                req
+            }
+            .send()
+            .await
+            {
+                Ok(resp) if is_retriable_status(resp.status()) && !is_last => {
+                    let wait = retry_after_from(&resp)
+                        .unwrap_or_else(|| self.fetch_policy.backoff_for_attempt(attempt + 1));
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max_attempts,
+                        backoff_ms = wait.as_millis() as u64,
+                        status = resp.status().as_u16(),
+                        label,
+                        code = aube_codes::warnings::WARN_AUBE_HTTP_RETRY_TRANSIENT,
+                        "retrying HTTP request after transient failure",
+                    );
+                    tokio::time::sleep(wait).await;
+                    continue;
+                }
+                Ok(resp) => resp,
+                Err(_) if !is_last => {
+                    let wait = self.fetch_policy.backoff_for_attempt(attempt + 1);
+                    tokio::time::sleep(wait).await;
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
+
+            if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                self.maybe_record_slow_metadata(&label, started);
+                return Err(Error::NotFound(name.to_string()));
+            }
+            if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
+                if let Some(mut c) = cached {
+                    c.max_age_secs = parse_cache_control_max_age(&resp).or(c.max_age_secs);
+                    c.fetched_at = now_secs();
+                    if let Err(e) = write_cached_trust_history(&cache_path, &c) {
+                        tracing::warn!(
+                            code = aube_codes::warnings::WARN_AUBE_PACKUMENT_CACHE_WRITE,
+                            "failed to write trust-history cache {}: {e}",
+                            cache_path.display()
+                        );
+                    }
+                    self.maybe_record_slow_metadata(&label, started);
+                    return Ok(c.history);
+                }
+                // 304 without a cached entry means we never sent
+                // conditional headers — a misbehaving registry. Treat as
+                // a hard error rather than parsing the empty body.
+                return Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "registry returned 304 for unconditional trust-history request: {name}"
+                    ),
+                )));
+            }
+
+            let resp = resp.error_for_status()?;
+            check_body_cap(
+                &resp,
+                self.fetch_policy.packument_max_bytes,
+                "packument-trust-history",
+            )?;
+            let (etag, last_modified) = extract_cache_headers(&resp);
+            let max_age_secs = parse_cache_control_max_age(&resp);
+            match parse_full_response::<crate::PackumentTrustHistory>(resp, &label).await {
+                Ok(history) => {
+                    let to_cache = CachedTrustHistory {
+                        etag,
+                        last_modified,
+                        fetched_at: now_secs(),
+                        max_age_secs,
+                        history,
+                    };
+                    if let Err(e) = write_cached_trust_history(&cache_path, &to_cache) {
+                        tracing::warn!(
+                            code = aube_codes::warnings::WARN_AUBE_PACKUMENT_CACHE_WRITE,
+                            "failed to write trust-history cache {}: {e}",
+                            cache_path.display()
+                        );
+                    }
+                    self.maybe_record_slow_metadata(&label, started);
+                    return Ok(to_cache.history);
+                }
+                Err(err) if !is_last => {
+                    let wait = self.fetch_policy.backoff_for_attempt(attempt + 1);
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max_attempts,
+                        backoff_ms = wait.as_millis() as u64,
+                        label,
+                        error = %err,
+                        code = aube_codes::warnings::WARN_AUBE_HTTP_RETRY_TRANSIENT,
+                        "retrying HTTP request after body read failure",
+                    );
+                    tokio::time::sleep(wait).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        unreachable!("retry loop exited without returning; max_attempts was {max_attempts}")
+    }
+
     pub(super) async fn revalidate_full_packument_typed(
         &self,
         name: &str,
@@ -438,7 +602,11 @@ impl RegistryClient {
 
         let label = format!("packument {name}");
         let started = std::time::Instant::now();
-        let max_attempts = self.fetch_policy.retries.saturating_add(1);
+        // See `fetch_packument_full_cached` for why the in-flight guard
+        // wraps the whole retry loop rather than a single attempt.
+        let _in_flight = crate::slow_metadata::begin(&label, self.fetch_policy.warn_timeout_ms);
+        let mut retry = RetryPolicy::new(&self.fetch_policy, &label);
+        let max_attempts = retry.max_attempts();
 
         for attempt in 0..max_attempts {
             let is_last = attempt + 1 >= max_attempts;
@@ -458,16 +626,14 @@ impl RegistryClient {
             .await
             {
                 Ok(resp) if is_retriable_status(resp.status()) && !is_last => {
+                    let status = resp.status().as_u16();
                     let wait = retry_after_from(&resp)
                         .unwrap_or_else(|| self.fetch_policy.backoff_for_attempt(attempt + 1));
-                    tracing::warn!(
-                        attempt = attempt + 1,
-                        max_attempts,
-                        backoff_ms = wait.as_millis() as u64,
-                        status = resp.status().as_u16(),
-                        label,
-                        code = aube_codes::warnings::WARN_AUBE_HTTP_RETRY_TRANSIENT,
-                        "retrying HTTP request after transient failure",
+                    retry.warn_retry(
+                        RetryCause::Status(status),
+                        &format_args!("HTTP {status}"),
+                        attempt,
+                        wait,
                     );
                     drop(sf_guard.take());
                     tokio::time::sleep(wait).await;
@@ -536,33 +702,29 @@ impl RegistryClient {
                             return Ok(packument);
                         }
                         Err(err) if !is_last => {
-                            let wait = self.fetch_policy.backoff_for_attempt(attempt + 1);
-                            tracing::warn!(
-                                    attempt = attempt + 1,
-                                    max_attempts,
-                                    backoff_ms = wait.as_millis() as u64,
-                                    error = %err,
-                                    label,
-                                    code = aube_codes::warnings::WARN_AUBE_HTTP_RETRY_BODY_DECODE,
-                            "retrying HTTP request after response body decode error",
+                            let is_timeout = retry_policy::is_timeout_body_error(&err);
+                            let Some(wait) = retry.next_backoff(is_timeout, attempt) else {
+                                retry.warn_giving_up(
+                                    RetryCause::BodyDecode,
+                                    &err,
+                                    started.elapsed(),
                                 );
+                                return Err(err);
+                            };
+                            retry.warn_retry(RetryCause::BodyDecode, &err, attempt, wait);
                             drop(sf_guard.take());
                             tokio::time::sleep(wait).await;
                         }
                         Err(err) => return Err(err),
                     }
                 }
-                Err(err) if !is_last => {
-                    let wait = self.fetch_policy.backoff_for_attempt(attempt + 1);
-                    tracing::warn!(
-                        attempt = attempt + 1,
-                        max_attempts,
-                        backoff_ms = wait.as_millis() as u64,
-                        error = %err,
-                        label,
-                        code = aube_codes::warnings::WARN_AUBE_HTTP_RETRY_TRANSPORT,
-                        "retrying HTTP request after transport error",
-                    );
+                Err(err) if !is_last && !aube_util::agent_sandbox::is_hard_network_deny(&err) => {
+                    let is_timeout = retry_policy::is_timeout_error(&err);
+                    let Some(wait) = retry.next_backoff(is_timeout, attempt) else {
+                        retry.warn_giving_up(RetryCause::Transport, &err, started.elapsed());
+                        return Err(err.into());
+                    };
+                    retry.warn_retry(RetryCause::Transport, &err, attempt, wait);
                     drop(sf_guard.take());
                     tokio::time::sleep(wait).await;
                 }
@@ -582,7 +744,11 @@ impl RegistryClient {
         let _diag_full =
             aube_util::diag::Span::new(aube_util::diag::Category::Registry, "fetch_packument")
                 .with_meta_fn(|| format!(r#"{{"name":{}}}"#, aube_util::diag::jstr(name)));
-        let max_attempts = self.fetch_policy.retries.saturating_add(1);
+        // See `fetch_packument_full_cached` for why the in-flight guard
+        // wraps the whole retry loop rather than a single attempt.
+        let _in_flight = crate::slow_metadata::begin(&label, self.fetch_policy.warn_timeout_ms);
+        let mut retry = RetryPolicy::new(&self.fetch_policy, &label);
+        let max_attempts = retry.max_attempts();
         let started = std::time::Instant::now();
         for attempt in 0..max_attempts {
             let is_last = attempt + 1 >= max_attempts;
@@ -622,16 +788,14 @@ impl RegistryClient {
             .await
             {
                 Ok(resp) if is_retriable_status(resp.status()) && !is_last => {
+                    let status = resp.status().as_u16();
                     let wait = retry_after_from(&resp)
                         .unwrap_or_else(|| self.fetch_policy.backoff_for_attempt(attempt + 1));
-                    tracing::warn!(
-                        attempt = attempt + 1,
-                        max_attempts,
-                        backoff_ms = wait.as_millis() as u64,
-                        status = resp.status().as_u16(),
-                        label,
-                        code = aube_codes::warnings::WARN_AUBE_HTTP_RETRY_TRANSIENT,
-                        "retrying HTTP request after transient failure",
+                    retry.warn_retry(
+                        RetryCause::Status(status),
+                        &format_args!("HTTP {status}"),
+                        attempt,
+                        wait,
                     );
                     tokio::time::sleep(wait).await;
                 }
@@ -666,32 +830,28 @@ impl RegistryClient {
                             return Ok(packument);
                         }
                         Err(err) if !is_last => {
-                            let wait = self.fetch_policy.backoff_for_attempt(attempt + 1);
-                            tracing::warn!(
-                                    attempt = attempt + 1,
-                                    max_attempts,
-                                    backoff_ms = wait.as_millis() as u64,
-                                    error = %err,
-                                    label,
-                                    code = aube_codes::warnings::WARN_AUBE_HTTP_RETRY_BODY_DECODE,
-                            "retrying HTTP request after response body decode error",
+                            let is_timeout = retry_policy::is_timeout_body_error(&err);
+                            let Some(wait) = retry.next_backoff(is_timeout, attempt) else {
+                                retry.warn_giving_up(
+                                    RetryCause::BodyDecode,
+                                    &err,
+                                    started.elapsed(),
                                 );
+                                return Err(err);
+                            };
+                            retry.warn_retry(RetryCause::BodyDecode, &err, attempt, wait);
                             tokio::time::sleep(wait).await;
                         }
                         Err(err) => return Err(err),
                     }
                 }
-                Err(err) if !is_last => {
-                    let wait = self.fetch_policy.backoff_for_attempt(attempt + 1);
-                    tracing::warn!(
-                        attempt = attempt + 1,
-                        max_attempts,
-                        backoff_ms = wait.as_millis() as u64,
-                        error = %err,
-                        label,
-                        code = aube_codes::warnings::WARN_AUBE_HTTP_RETRY_TRANSPORT,
-                        "retrying HTTP request after transport error",
-                    );
+                Err(err) if !is_last && !aube_util::agent_sandbox::is_hard_network_deny(&err) => {
+                    let is_timeout = retry_policy::is_timeout_error(&err);
+                    let Some(wait) = retry.next_backoff(is_timeout, attempt) else {
+                        retry.warn_giving_up(RetryCause::Transport, &err, started.elapsed());
+                        return Err(err.into());
+                    };
+                    retry.warn_retry(RetryCause::Transport, &err, attempt, wait);
                     tokio::time::sleep(wait).await;
                 }
                 Err(err) => return Err(err.into()),
@@ -794,7 +954,12 @@ impl RegistryClient {
         // without silently stripping cache hints.
         let cached_ref = cached.as_ref();
         let label = format!("packument {name}");
-        let max_attempts = self.fetch_policy.retries.saturating_add(1);
+        // Marks this fetch as in flight for the whole retry loop, so the
+        // "still waiting" ticker can name it while the user is blocked
+        // on it. Dropped on every exit path with the loop's scope.
+        let _in_flight = crate::slow_metadata::begin(&label, self.fetch_policy.warn_timeout_ms);
+        let mut retry = RetryPolicy::new(&self.fetch_policy, &label);
+        let max_attempts = retry.max_attempts();
         let started = std::time::Instant::now();
         for attempt in 0..max_attempts {
             let is_last = attempt + 1 >= max_attempts;
@@ -825,16 +990,14 @@ impl RegistryClient {
             .await
             {
                 Ok(resp) if is_retriable_status(resp.status()) && !is_last => {
+                    let status = resp.status().as_u16();
                     let wait = retry_after_from(&resp)
                         .unwrap_or_else(|| self.fetch_policy.backoff_for_attempt(attempt + 1));
-                    tracing::warn!(
-                        attempt = attempt + 1,
-                        max_attempts,
-                        backoff_ms = wait.as_millis() as u64,
-                        status = resp.status().as_u16(),
-                        label,
-                        code = aube_codes::warnings::WARN_AUBE_HTTP_RETRY_TRANSIENT,
-                        "retrying HTTP request after transient failure",
+                    retry.warn_retry(
+                        RetryCause::Status(status),
+                        &format_args!("HTTP {status}"),
+                        attempt,
+                        wait,
                     );
                     drop(sf_guard.take());
                     tokio::time::sleep(wait).await;
@@ -891,33 +1054,29 @@ impl RegistryClient {
                             return Ok(packument);
                         }
                         Err(err) if !is_last => {
-                            let wait = self.fetch_policy.backoff_for_attempt(attempt + 1);
-                            tracing::warn!(
-                                    attempt = attempt + 1,
-                                    max_attempts,
-                                    backoff_ms = wait.as_millis() as u64,
-                                    error = %err,
-                                    label,
-                                    code = aube_codes::warnings::WARN_AUBE_HTTP_RETRY_BODY_DECODE,
-                            "retrying HTTP request after response body decode error",
+                            let is_timeout = retry_policy::is_timeout_body_error(&err);
+                            let Some(wait) = retry.next_backoff(is_timeout, attempt) else {
+                                retry.warn_giving_up(
+                                    RetryCause::BodyDecode,
+                                    &err,
+                                    started.elapsed(),
                                 );
+                                return Err(err);
+                            };
+                            retry.warn_retry(RetryCause::BodyDecode, &err, attempt, wait);
                             drop(sf_guard.take());
                             tokio::time::sleep(wait).await;
                         }
                         Err(err) => return Err(err),
                     }
                 }
-                Err(err) if !is_last => {
-                    let wait = self.fetch_policy.backoff_for_attempt(attempt + 1);
-                    tracing::warn!(
-                        attempt = attempt + 1,
-                        max_attempts,
-                        backoff_ms = wait.as_millis() as u64,
-                        error = %err,
-                        label,
-                        code = aube_codes::warnings::WARN_AUBE_HTTP_RETRY_TRANSPORT,
-                        "retrying HTTP request after transport error",
-                    );
+                Err(err) if !is_last && !aube_util::agent_sandbox::is_hard_network_deny(&err) => {
+                    let is_timeout = retry_policy::is_timeout_error(&err);
+                    let Some(wait) = retry.next_backoff(is_timeout, attempt) else {
+                        retry.warn_giving_up(RetryCause::Transport, &err, started.elapsed());
+                        return Err(err.into());
+                    };
+                    retry.warn_retry(RetryCause::Transport, &err, attempt, wait);
                     drop(sf_guard.take());
                     tokio::time::sleep(wait).await;
                 }

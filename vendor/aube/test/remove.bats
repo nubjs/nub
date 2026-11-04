@@ -38,6 +38,132 @@ EOF
 	assert_file_exists node_modules/is-even/index.js
 }
 
+@test "aube remove: prunes a single-project lockfile without resolution" {
+	cat >package.json <<'EOF'
+{
+  "name": "test-remove-offline",
+  "version": "0.0.0",
+  "dependencies": {
+    "is-odd": "3.0.1",
+    "is-even": "1.0.0"
+  }
+}
+EOF
+
+	run aube install
+	assert_success
+	run aube remove --registry http://127.0.0.1:9 --fetch-retries 0 --fetch-timeout 50 is-odd
+	assert_success
+	assert_output --partial "Pruned lockfile"
+	refute_output --partial "Resolved"
+	run test -e node_modules/is-odd
+	assert_failure
+	assert_file_exists node_modules/is-even/index.js
+}
+
+@test "aube remove: pruned relink fetches a missing retained artifact" {
+	cat >package.json <<'EOF'
+{
+  "name": "test-remove-refetch",
+  "version": "0.0.0",
+  "dependencies": {
+    "is-odd": "3.0.1",
+    "is-even": "1.0.0"
+  }
+}
+EOF
+
+	run aube install
+	assert_success
+	store_v1="$(aube store path)"
+	[ -d "$store_v1/files" ]
+	rm -rf "$store_v1/files" node_modules
+	run aube remove is-odd
+	assert_success
+	assert_output --partial "Pruned lockfile"
+	assert_file_exists node_modules/is-even/index.js
+}
+
+@test "aube remove: stale retained dependency falls back to resolution" {
+	cat >package.json <<'EOF'
+{
+  "name": "test-remove-stale-retained",
+  "version": "0.0.0",
+  "dependencies": {
+    "is-odd": "3.0.1",
+    "is-even": "1.0.0"
+  }
+}
+EOF
+
+	run aube install
+	assert_success
+	cat >package.json <<'EOF'
+{
+  "name": "test-remove-stale-retained",
+  "version": "0.0.0",
+  "dependencies": {
+    "is-odd": "3.0.1",
+    "is-even": "^1.0.0"
+  }
+}
+EOF
+
+	run aube remove is-odd
+	assert_success
+	assert_output --partial "Resolved"
+	refute_output --partial "Pruned lockfile"
+}
+
+@test "aube remove: retained local dependency keeps the prune relink offline" {
+	mkdir local-pkg
+	cat >local-pkg/package.json <<'EOF'
+{"name":"local-pkg","version":"1.0.0","main":"index.js"}
+EOF
+	echo 'module.exports = 42' >local-pkg/index.js
+	cat >package.json <<'EOF'
+{
+  "name": "test-remove-local-retained",
+  "version": "0.0.0",
+  "dependencies": {
+    "is-odd": "3.0.1",
+    "local-pkg": "file:./local-pkg"
+  }
+}
+EOF
+
+	run aube install
+	assert_success
+	rm -rf node_modules
+	run aube remove --registry http://127.0.0.1:9 --fetch-retries 0 --fetch-timeout 50 is-odd
+	assert_success
+	assert_output --partial "Pruned lockfile"
+	assert_file_exists node_modules/local-pkg/index.js
+}
+
+@test "aube remove: removed override falls back to resolution" {
+	cat >package.json <<'EOF'
+{
+  "name": "test-remove-override",
+  "version": "0.0.0",
+  "dependencies": {
+    "is-odd": "3.0.1",
+    "is-even": "1.0.0"
+  },
+  "pnpm": {
+    "overrides": { "is-odd": "3.0.1" }
+  }
+}
+EOF
+
+	run aube install
+	assert_success
+	run aube remove is-odd
+	assert_success
+	assert_output --partial "Resolved"
+	refute_output --partial "Pruned lockfile"
+}
+
 @test "aube remove: preserves package.json top-level key order" {
 	cat >package.json <<'EOF'
 {
@@ -81,6 +207,27 @@ EOF
 	assert_output --partial "not a dependency"
 }
 
+@test "aube remove: invalid packageExtensions leave package.json unchanged" {
+	cat >package.json <<'EOF'
+{
+  "name": "test-remove-invalid-extensions",
+  "version": "0.0.0",
+  "dependencies": {
+    "is-odd": "^3.0.1"
+  },
+  "packageExtensions": []
+}
+EOF
+	before="$(cat package.json)"
+
+	run aube remove is-odd
+	assert_failure
+	assert_output --partial "ERR_AUBE_INVALID_PACKAGE_EXTENSION"
+	refute_output --partial "  - is-odd"
+	after="$(cat package.json)"
+	[ "$before" = "$after" ]
+}
+
 @test "aube remove: removes dev dependency" {
 	cat >package.json <<'EOF'
 {
@@ -121,6 +268,53 @@ EOF
 	assert_success
 
 	run node -e 'const p=require("./package.json"); if (!p.dependencies["is-odd"]) process.exit(1); if (p.devDependencies && p.devDependencies["is-odd"]) process.exit(2)'
+	assert_success
+}
+
+@test "aube remove --save-dev retains an overlapping optional dependency" {
+	cat >package.json <<'EOF'
+{
+  "name": "test-remove-overlap",
+  "version": "0.0.0",
+  "devDependencies": {
+    "is-number": "7.0.0"
+  },
+  "optionalDependencies": {
+    "is-number": "7.0.0"
+  }
+}
+EOF
+
+	run aube install
+	assert_success
+	run aube remove --save-dev is-number
+	assert_success
+	assert_output --partial "Pruned lockfile"
+	assert_file_exists node_modules/is-number/index.js
+	run grep -F 'optionalDependencies:' aube-lock.yaml
+	assert_success
+}
+
+@test "aube remove --save-dev resolves an incompatible overlapping dependency" {
+	cat >package.json <<'EOF'
+{
+  "name": "test-remove-incompatible-overlap",
+  "version": "0.0.0",
+  "devDependencies": {
+    "is-number": "6.0.0"
+  },
+  "optionalDependencies": {
+    "is-number": "7.0.0"
+  }
+}
+EOF
+
+	run aube install
+	assert_success
+	run aube remove --save-dev is-number
+	assert_success
+	assert_output --partial "Resolved"
+	run jq -e '.version == "7.0.0"' node_modules/is-number/package.json
 	assert_success
 }
 

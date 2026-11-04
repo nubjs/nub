@@ -17,6 +17,21 @@
 //!   the flag does not exist is a hard "bad option" / "not allowed in
 //!   NODE_OPTIONS" startup abort — so the bands are tuned to the exact range
 //!   where the flag both exists and is needed.)
+//! - **`UnflagArgv(flag)`** — the same idea for a **V8** flag that Node accepts
+//!   ONLY on the command line. These are absent from
+//!   `process.allowedNodeEnvironmentFlags` and Node aborts on them in
+//!   `NODE_OPTIONS`, so they must never enter the NODE_OPTIONS-bound inject set.
+//!   [`unflag_flags_for`] deliberately does not match this variant;
+//!   [`argv_unflag_flags_for`] serves the argv-bearing call sites instead.
+//! - **`RuntimeV8Flag(flag)`** — a **V8** flag the preload turns on from INSIDE the
+//!   process with `v8.setFlagsFromString`, the first time it loads a module whose
+//!   source uses the syntax the flag gates. Sound only for a flag V8 consults per
+//!   parse; for such a flag it is equivalent to argv, and it leaves V8's flags at
+//!   their defaults for every program that never uses the syntax — a V8 flag that
+//!   is non-default at startup makes Node reject its embedded builtin code cache
+//!   for every internal compiled afterwards. Never enters argv or `NODE_OPTIONS`;
+//!   [`runtime_v8_flags_for`] serves the spawn sites, which hand the set to the
+//!   preload through `super::flags::RUNTIME_V8_FLAGS_ENV`.
 //! - **`StorageFile`** — webstorage-specific: the global is native (or unflagged)
 //!   but still needs a runtime-computed `--localstorage-file=<path>` to
 //!   materialize. The path is workspace-keyed, so it lives in `spawn.rs`; this
@@ -89,6 +104,18 @@ pub enum Mitigation {
     Native,
     /// nub injects this experimental flag (it exists here and is still required).
     Unflag(&'static str),
+    /// nub injects this V8 flag as ARGV ONLY. Distinct from [`Mitigation::Unflag`]
+    /// because Node refuses these in `NODE_OPTIONS` — they are absent from
+    /// `process.allowedNodeEnvironmentFlags`, so both the NODE_OPTIONS-bound
+    /// script-runner path and `compute_inject_flags`' accepted-flag intersection
+    /// would mishandle them. See [`argv_unflag_flags_for`].
+    UnflagArgv(&'static str),
+    /// The preload turns this V8 flag on from inside the process, the first time it
+    /// loads a module whose source uses the syntax the flag gates. Only sound for a
+    /// flag V8 reads per parse (a `v8_flags.<x>` check in the parser, no
+    /// isolate-creation state) — see the `import-defer` row for the proof shape.
+    /// Never enters argv or `NODE_OPTIONS`. See [`runtime_v8_flags_for`].
+    RuntimeV8Flag(&'static str),
     /// Webstorage: the global is native/unflagged but still needs a
     /// runtime-computed `--localstorage-file=<path>` (handled in spawn.rs).
     StorageFile,
@@ -139,6 +166,7 @@ const fn band(lo: (u32, u32, u32), hi: Option<(u32, u32, u32)>) -> VersionBand {
 /// feature with its per-version mitigation and changelog evidence. Everything
 /// version-keyed in [`super::flags`] and the webstorage predicates is derived
 /// from this — do not add a parallel table elsewhere.
+// @lat: [[architecture#Architecture#Feature support across Node versions]]
 static FEATURES: &[Feature] = &[
     // ── vm.Module / vm.SourceTextModule ────────────────────────────────────
     // Flag added in Node 9.6.0 (#14253) and NEVER unflagged through Node 26 —
@@ -173,7 +201,7 @@ static FEATURES: &[Feature] = &[
     // are safe to auto-unflag. The cost of NOT injecting: `globalThis.ShadowRealm`
     // (TC39 Stage 3) is no longer auto-provided — deferred until Node ships it
     // default-on, at which point no flag is needed and the snapshot hazard is gone.
-    // Full rationale + evidence: wiki/runtime/harmony-flag-policy.md.
+    // Full rationale + evidence: internal/runtime/harmony-flag-policy.md.
     //
     // ── EventSource global ──────────────────────────────────────────────────
     // #51575 ("add EventSource Client"). Landed on the 22.x line at 22.3.0 and was
@@ -270,28 +298,110 @@ static FEATURES: &[Feature] = &[
     // ── import-text (importing source as text via import attributes) ─────────
     // `import txt from './x.txt' with { type: 'text' }` — the module's default export
     // is the file's string contents. Node gained this behind `--experimental-import-text`
-    // on the 26.x line at 26.5.0 (SEMVER-MINOR, #62300); the flag does not exist below
-    // 26.5.0, where injecting it is a "bad option" startup abort, and is still flag-gated
-    // (never default-on) through Node 27 nightly — so this open-ended Unflag band injects
-    // it on [26.5.0, ∞).
+    // on the 26.x line at 26.5.0 (SEMVER-MINOR, #62300), then backported it to the 24.x
+    // LTS line at 24.19.0 (24.18.1 does not have it). Where the flag does not exist —
+    // below 24.19.0, and the whole 25.x line, which ended at 25.9.0 before the backport —
+    // injecting it is a "bad option" startup abort, so those are holes. It is still
+    // flag-gated (never default-on) through Node 27 nightly, hence the open-ended upper
+    // band: [24.19.0, 25.0.0) ∪ [26.5.0, ∞).
     //
     // This row is ONLY the native side. nub ALSO provides import-text on EVERY version
     // that can parse the `with` syntax (Node 18.20+) via a loader polyfill —
     // `loadTextImport` in runtime/transform-core.mjs, dispatched by the load hooks on
     // `importAttributes.type === "text"`. Per the additive contract, the fast-tier hook
     // (preload-common.cjs) feature-detects native support (`--experimental-import-text`
-    // in `process.allowedNodeEnvironmentFlags`, i.e. Node 26.5+) and STEPS ASIDE to
-    // Node's own textStrategy there — this injected flag is what makes that native path
-    // work; below 26.5 the polyfill owns it. The polyfill is a load-hook, not a
-    // typeof-global, so it does not fit the `Polyfill` mitigation shape and lives in the
-    // runtime rather than as a band here.
+    // in `process.allowedNodeEnvironmentFlags`) and STEPS ASIDE to Node's own
+    // textStrategy there; elsewhere the polyfill owns it. That detection asks whether the
+    // running binary KNOWS the flag, so these bands must cover every release that knows
+    // it — a version nub steps aside on but does not inject for lands in Node's default
+    // loader and dies with ERR_UNKNOWN_FILE_EXTENSION (#688, the 24.19.0 backport). The
+    // polyfill is a load-hook, not a typeof-global, so it does not fit the `Polyfill`
+    // mitigation shape and lives in the runtime rather than as a band here.
     Feature {
         name: "import-text",
+        mitigations: &[
+            (
+                band((24, 19, 0), Some((25, 0, 0))),
+                Mitigation::Unflag("--experimental-import-text"),
+            ),
+            (
+                band((26, 5, 0), None),
+                Mitigation::Unflag("--experimental-import-text"),
+            ),
+        ],
+        evidence: "flag added Node 26.5.0 (#62300), backported to 24.19.0; absent on 24.18.1 and the whole 25.x line; still flag-gated through Node 27 nightly; nub loader-polyfills below via runtime/transform-core.mjs loadTextImport",
+    },
+    // ── Deferred module evaluation (`import defer`) ──────────────────────────
+    // TC39 proposal-defer-import-eval: `import defer * as ns from "m"` resolves and
+    // LINKS `m` but does not EVALUATE it until the first property access on `ns`.
+    // The enabling flag is V8's `--js-defer-import-eval` (V8's
+    // JAVASCRIPT_INPROGRESS_FEATURES_BASE), not a Node `--experimental-*` flag. Node
+    // REFUSES it in NODE_OPTIONS in BOTH polarities ("--js-defer-import-eval is not
+    // allowed in NODE_OPTIONS") and omits it from `process.allowedNodeEnvironmentFlags`,
+    // so a plain `Unflag` row would be silently dropped by `compute_inject_flags`'
+    // Stage-4 accepted-flag intersection whenever that probe succeeds, and would abort
+    // the script-runner child (which must send every flag through NODE_OPTIONS)
+    // whenever it does not.
+    //
+    // The only `RuntimeV8Flag` row: the preload turns the flag on with
+    // `v8.setFlagsFromString` the first time it loads a module whose source uses the
+    // syntax (runtime/transform-core.mjs `noteRuntimeV8FlagSource`), instead of nub
+    // putting it on argv at launch. Sound because V8 consults
+    // `v8_flags.js_defer_import_eval` only in the parser (parser.cc
+    // ParseImportDeclaration and parser-base.h ParseImportExpressions, with an empty
+    // bootstrapper hook), Node runs V8 with `--no-freeze-flags-after-init`, and the
+    // load hook returns the source BEFORE Node compiles it, so the module that needs
+    // the flag is parsed with it on. Verified on 26.4.0 and 26.7.0: a hook-time flip
+    // defers identically to the argv flag.
+    //
+    // Why not argv: a V8 flag that is non-default at startup enters V8's flag hash
+    // (`ComputeFlagListHash` skips only defaults plus a short exclusion list), and the
+    // code cache Node embeds for its own internals is keyed on that hash — every
+    // builtin compiled AFTER startup (`node:http`, `crypto`, `zlib`, …) is rejected
+    // with kFlagsMismatch and rebuilt from source. Measured on 26.7.0 through
+    // `internalBinding('builtins').getCacheUsage()`: 104 builtins from cache and 0
+    // without under default flags, 0 and 104 with the flag on argv; a program loading
+    // http, crypto, zlib, stream/web and worker_threads goes 44.8 → 66.0 ms (min of
+    // 80 runs). The bare bootstrap is unaffected (30.5 vs 30.4 ms), so the cost is the
+    // builtin code cache, not the startup snapshot. With the flip, a program that never
+    // uses the syntax pays nothing, and one that does pays only for the internals
+    // loaded after the flip. It also keeps the flag out of `process.execArgv`
+    // entirely, where forwarding it into a Worker once killed a Next.js 16 + Turbopack
+    // build (ERR_WORKER_INVALID_EXEC_ARGV).
+    //
+    // The 26.4.0 floor is a NODE floor, not a V8-flag floor: V8 has carried the flag
+    // since Node 26.0, but Node only wired the defer phase through in #63712 (landed
+    // 2026-06-16, first released in 26.4.0). Verified against real Node — 25.9.0
+    // rejects the flag outright ("bad option"); 26.0/26.1/26.2/26.3 accept it and then
+    // abort in `to_phase_constant` (module_wrap.cc:561) the moment a deferred import is
+    // evaluated; 26.4.0 and 26.5.0 defer correctly. The argv probe that guards a future
+    // removal of the flag (`accepts_argv_flag`) gates this row too: a flag V8 no longer
+    // knows is an "Error: unrecognized flag" on stderr from `setFlagsFromString`.
+    //
+    // Snapshot safety, since this is a V8 flag and #246 is the cautionary tale: the flag
+    // never rides NODE_OPTIONS (Node refuses it there) and no longer rides argv, so a
+    // downstream Electron binary can never meet it at startup. The env var that carries
+    // the row to the preload is stamped with the Node version it was computed for, and
+    // the preload ignores it under any other Node.
+    //
+    // ADDITIVITY, stated plainly. The STATIC form is genuinely additive: previously a
+    // `SyntaxError`, now valid, and the flag turns on only for a program that writes
+    // it. The dynamic form `import.defer(spec)` is deliberately NOT part of the
+    // detection: it aborts the process on every 26.x measured (26.4–26.7, V8 fatal
+    // "unreachable code", exit 133), so a program that uses only the dynamic form keeps
+    // bare Node's catchable `SyntaxError`. What remains: once a program has used the
+    // static form, the flag is on for the whole process, and a later `import.defer()`
+    // in that program dies on the fatal instead of the SyntaxError — bounded to
+    // programs already opted in by their own syntax. Source V8 parses without passing
+    // through the load hook (`vm.SourceTextModule`) does not trigger the flip; an
+    // `-e`/`--print` string does, because the preload scans `process.execArgv`.
+    Feature {
+        name: "import-defer",
         mitigations: &[(
-            band((26, 5, 0), None),
-            Mitigation::Unflag("--experimental-import-text"),
+            band((26, 4, 0), None),
+            Mitigation::RuntimeV8Flag("--js-defer-import-eval"),
         )],
-        evidence: "flag added Node 26.5.0 (#62300); still flag-gated through Node 27 nightly; nub loader-polyfills below via runtime/transform-core.mjs loadTextImport",
+        evidence: "V8 js_defer_import_eval (JAVASCRIPT_INPROGRESS_FEATURES_BASE); Node wiring #63712 landed 2026-06-16, first released 26.4.0; verified 25.9 rejects, 26.0-26.3 abort in to_phase_constant, 26.4/26.5 defer correctly",
     },
     // ── Module syntax detection (ambiguous ESM `.js`) ────────────────────────
     // `--experimental-detect-module` makes Node parse an ambiguous file — ES-module
@@ -366,6 +476,45 @@ static FEATURES: &[Feature] = &[
             Mitigation::Unflag("--experimental-stream-iter"),
         )],
         evidence: "node:stream/iter added Node 25.9.0 (#62066); absent 25.8.1; default-off through Node 27 nightly",
+    },
+    // ── AsyncLocalStorage on AsyncContextFrame ───────────────────────────────
+    // A PERFORMANCE unflag, the only one in the table: `AsyncLocalStorage` rebuilt
+    // on V8's continuation-preserved embedder data instead of async_hooks (#48528,
+    // landed 22.7.0 behind `--experimental-async-context-frame`; Node 24.0.0 made it
+    // the default via #55552 and renamed the switch `--no-async-context-frame`, so
+    // the `--experimental-` spelling is a "bad option" abort on 24+). Every request
+    // hop that reads the store — OpenTelemetry, Sentry, request-context plugins,
+    // Next.js — pays roughly half the propagation cost: measured 2× on a
+    // request-shaped store/await loop on 22.11 and 22.23, and Node 24's default
+    // shows the same 2× against its own `--no-async-context-frame`.
+    //
+    // Floor is 22.9.0, not the 22.7.0 landing: 22.7 and 22.8 throw
+    // `TypeError: Method Map.prototype.set called on incompatible receiver` under the
+    // flag (#54503, fixed by #54510 in 22.9.0). From 22.16.0 the implementation file
+    // is byte-identical to 24.0's default apart from the option name, so this band
+    // ships the Node 24 behavior to the 22 LTS line. A user `--no-experimental-
+    // async-context-frame` in argv or NODE_OPTIONS opts out through the ordinary
+    // negation subtraction. Rides argv like every other gated flag, so an embedded
+    // Electron below the tree never sees it (Electron keeps the async_hooks model
+    // because Chromium uses the same V8 embedder-data slot — the reason the old path
+    // survives, per the `--no-async-context-frame` docs).
+    //
+    // Not a memory regression on the 22 line, measured by store liveness (a WeakRef per
+    // store, the issue's request shape, counted after GC): with the flag an idle HTTP
+    // parser keeps the last request's store until it is reused (#61882, fixed on 24.15
+    // by #61995, no 22 backport), so 22.23.2 holds 50 stores at concurrency 50, 1 at
+    // concurrency 1, and 5 with `http.setMaxIdleHTTPParsers(5)`. Without the flag the
+    // legacy async_hooks path holds 52 and 3 on the same runs, through a different
+    // pooled resource (the parser cap does not move it). Both are flat from 500 to
+    // 5000 requests and bounded by peak concurrency; only the fixed 24 line reaches 0.
+    // Injecting the flag moves the retainer, not the amount retained.
+    Feature {
+        name: "async-context-frame",
+        mitigations: &[(
+            band((22, 9, 0), Some((24, 0, 0))),
+            Mitigation::Unflag("--experimental-async-context-frame"),
+        )],
+        evidence: "rewrite #48528 landed 22.7.0; #54503 TypeError fixed 22.9.0 (#54510); default + renamed --no-async-context-frame at 24.0.0 (#55552); verified 22.6 rejects, 22.7/22.11/22.23.2/23.0 accept, 24.0 rejects",
     },
     // ── WebSocket global ────────────────────────────────────────────────────
     // Flag-gated on [20.10.0, 22.0.0) — the global exists on 20.10+ and all of the
@@ -597,7 +746,7 @@ static FEATURES: &[Feature] = &[
         )],
         evidence: "Stage 4 (joint-iteration); absent on every Node through 26.5",
     },
-    // Anchor for the Stage 3 prototype additions: chunks/windows (iterator-chunking),
+    // Anchor for the Stage 4 prototype additions: chunks/windows (iterator-chunking),
     // includes (iterator-includes) and join (iterator-join). These install even where
     // the ES2025 helpers above are already native.
     Feature {
@@ -609,7 +758,7 @@ static FEATURES: &[Feature] = &[
                 global: "Iterator.prototype.chunks",
             },
         )],
-        evidence: "Stage 3 (iterator-chunking/includes/join); absent on every Node through 26.5",
+        evidence: "Stage 4 (iterator-chunking/includes/join, 2026-09); absent on every Node through 26.10 (V8 14.6)",
     },
     Feature {
         name: "Math.sumPrecise",
@@ -803,7 +952,7 @@ static FEATURES: &[Feature] = &[
     // ── Float16Array ────────────────────────────────────────────────────────
     // TC39 Stage 4; native on Node 24+, absent on the 22.x floor, polyfilled from
     // the vendored `@petamoriken/float16` package. See
-    // wiki/runtime/float16array-polyfill.md.
+    // internal/runtime/float16array-polyfill.md.
     Feature {
         name: "Float16Array",
         mitigations: &[
@@ -963,7 +1112,7 @@ static FEATURES: &[Feature] = &[
 
 /// V8 *harmony* / startup-snapshot-affecting flags that must NEVER appear in the
 /// auto-unflag set (the harmony-flag policy — see the ShadowRealm note in
-/// [`FEATURES`] and wiki/runtime/harmony-flag-policy.md). These imply a V8
+/// [`FEATURES`] and internal/runtime/harmony-flag-policy.md). These imply a V8
 /// `--harmony-*` staging flag that changes the isolate's V8-flag hash; injected
 /// into the tree-wide NODE_OPTIONS they crash any embedded Node that boots from a
 /// V8 context snapshot (Electron) in `Context::FromSnapshot` → `CreateEnvironment`,
@@ -995,6 +1144,40 @@ pub(crate) fn unflag_flags_for(node_version: &NodeVersion) -> Vec<&'static str> 
         .iter()
         .filter_map(|f| match f.mitigation_for(node_version) {
             Some(Mitigation::Unflag(flag)) => Some(flag),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every ARGV-ONLY V8 flag nub should inject for `node_version` — the
+/// [`Mitigation::UnflagArgv`] counterpart of [`unflag_flags_for`].
+///
+/// These deliberately sit OUTSIDE `compute_inject_flags`: that function's Stage-4
+/// intersection is against `process.allowedNodeEnvironmentFlags`, which describes
+/// NODE_OPTIONS eligibility and therefore excludes every flag in this set, and its
+/// output feeds the NODE_OPTIONS-bound script-runner path where these flags abort
+/// startup. Argv-bearing call sites own the injection instead, exactly as they do
+/// for `--experimental-webstorage` and user `v8Flags`.
+pub(crate) fn argv_unflag_flags_for(node_version: &NodeVersion) -> Vec<&'static str> {
+    FEATURES
+        .iter()
+        .filter_map(|f| match f.mitigation_for(node_version) {
+            Some(Mitigation::UnflagArgv(flag)) => Some(flag),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every V8 flag the PRELOAD should turn on from inside the process for
+/// `node_version` — the [`Mitigation::RuntimeV8Flag`] counterpart of
+/// [`argv_unflag_flags_for`], kept outside `compute_inject_flags` for the same
+/// reason. The spawn sites hand the set to the preload through
+/// `super::flags::RUNTIME_V8_FLAGS_ENV`; nothing here ever reaches argv.
+pub(crate) fn runtime_v8_flags_for(node_version: &NodeVersion) -> Vec<&'static str> {
+    FEATURES
+        .iter()
+        .filter_map(|f| match f.mitigation_for(node_version) {
+            Some(Mitigation::RuntimeV8Flag(flag)) => Some(flag),
             _ => None,
         })
         .collect()
@@ -1097,7 +1280,10 @@ mod tests {
     fn every_unflag_flag_starts_with_double_dash() {
         for f in FEATURES {
             for (_, m) in f.mitigations {
-                if let Mitigation::Unflag(flag) = m {
+                if let Mitigation::Unflag(flag)
+                | Mitigation::UnflagArgv(flag)
+                | Mitigation::RuntimeV8Flag(flag) = m
+                {
                     assert!(
                         flag.starts_with("--"),
                         "feature {:?}: unflag string {:?} must start with '--'",
@@ -1204,12 +1390,16 @@ mod tests {
         assert!(unflag_flags_for(&v(22, 4, 0)).contains(&"--experimental-webstorage"));
         assert!(unflag_flags_for(&v(24, 99, 0)).contains(&"--experimental-webstorage"));
         assert!(!unflag_flags_for(&v(25, 0, 0)).contains(&"--experimental-webstorage"));
-        // import-text: open-ended [26.5.0, ∞); the flag doesn't exist below 26.5.0.
+        // import-text: [24.19.0, 25.0.0) ∪ [26.5.0, ∞). The flag arrived at 26.5.0 and
+        // was backported to 24.19.0; it exists on neither 24.18.1 nor any 25.x release.
         let it = "--experimental-import-text";
+        assert!(!unflag_flags_for(&v(24, 18, 1)).contains(&it));
+        assert!(unflag_flags_for(&v(24, 19, 0)).contains(&it));
+        assert!(!unflag_flags_for(&v(25, 9, 0)).contains(&it)); // flag absent (hole)
         assert!(!unflag_flags_for(&v(26, 4, 0)).contains(&it));
         assert!(unflag_flags_for(&v(26, 5, 0)).contains(&it));
         assert!(unflag_flags_for(&v(27, 0, 0)).contains(&it));
-        assert_eq!(unflag_floor(it), Some(v(26, 5, 0)));
+        assert_eq!(unflag_floor(it), Some(v(24, 19, 0)));
         // detect-module: [20.10.0, 20.19.0) ∪ [21.1.0, 22.7.0). Below the backport
         // floor and at each default-on cutover it is excluded; the 21.0.0 release
         // predates the flag (injecting it is a "bad option" crash — the eventsource hole).
@@ -1244,6 +1434,77 @@ mod tests {
         assert_eq!(unflag_floor(si), Some(v(25, 9, 0)));
     }
 
+    /// The `import defer` band, pinned to the four Node behaviors measured on real
+    /// binaries. The 26.4.0 floor is a NODE floor, not a V8-flag one: 26.0–26.3 carry
+    /// the flag but abort in `to_phase_constant` when a deferred import evaluates, so
+    /// arming the preload there would turn a clean SyntaxError into a process abort.
+    ///
+    /// The row is a runtime flip, never argv: the second loop pins that too, because a
+    /// row silently moved back to `UnflagArgv` would re-enable the flag for every
+    /// program and re-open the builtin-code-cache cost the flip exists to avoid.
+    #[test]
+    fn import_defer_band_starts_at_the_node_that_works() {
+        let flag = "--js-defer-import-eval";
+        for below in [v(24, 19, 0), v(25, 9, 0), v(26, 0, 0), v(26, 3, 0)] {
+            assert!(
+                !runtime_v8_flags_for(&below).contains(&flag),
+                "{flag} must not be armed at Node {below:?}: \
+                 <=25.x rejects it as a bad option, and 26.0-26.3 abort in to_phase_constant"
+            );
+        }
+        for at_or_above in [v(26, 4, 0), v(26, 5, 0), v(27, 0, 0)] {
+            assert!(
+                runtime_v8_flags_for(&at_or_above).contains(&flag),
+                "{flag} must be armed for the preload at Node {at_or_above:?}"
+            );
+            assert!(
+                !argv_unflag_flags_for(&at_or_above).contains(&flag),
+                "{flag} must never ride argv at Node {at_or_above:?}: a non-default V8 \
+                 flag at startup invalidates Node's embedded builtin code cache"
+            );
+        }
+    }
+
+    /// The invariant that makes `UnflagArgv` safe: such a flag must NEVER reach the
+    /// NODE_OPTIONS payload. Node rejects these in NODE_OPTIONS, so a leak aborts the
+    /// script-runner child at startup on every affected version.
+    ///
+    /// Asserts against `compute_inject_flags` — the function whose output actually
+    /// BECOMES that payload — rather than against `unflag_flags_for`. Comparing the two
+    /// matrix accessors would be near-vacuous, since they match disjoint `Mitigation`
+    /// variants and could only collide if one flag string were entered in both shapes.
+    /// Going through `compute_inject_flags` also covers the routes that bypass the
+    /// matrix entirely, `ALWAYS_INJECT` above all.
+    #[test]
+    fn argv_only_flags_never_enter_the_node_options_payload() {
+        for ver in [
+            v(18, 19, 0),
+            v(22, 15, 0),
+            v(24, 17, 0),
+            v(26, 4, 0),
+            v(26, 5, 0),
+            v(27, 0, 0),
+        ] {
+            // `None` accepted-flags: the widest possible inject set, so nothing is
+            // masked by the Stage-4 intersection.
+            let payload =
+                super::super::flags::compute_inject_flags(ver.clone(), &[], None, true, None);
+            // The runtime rows are held to the same line: they reach the preload
+            // through an env var, and a leak into this payload would abort the same
+            // script-runner child.
+            for off_channel in argv_unflag_flags_for(&ver)
+                .into_iter()
+                .chain(runtime_v8_flags_for(&ver))
+            {
+                assert!(
+                    !payload.contains(&off_channel),
+                    "{off_channel:?} is an UnflagArgv/RuntimeV8Flag flag but reached the \
+                     NODE_OPTIONS payload at Node {ver:?} — Node refuses it there and will abort"
+                );
+            }
+        }
+    }
+
     #[test]
     fn no_v8_harmony_flag_in_unflag_set() {
         // The harmony-flag policy, enforced (not just documented): no flag in
@@ -1269,7 +1530,7 @@ mod tests {
                     !set.contains(&banned),
                     "harmony-flag policy violated: {banned:?} is auto-unflagged at Node {ver:?} \
                      — it crashes embedded Node (Electron) via a snapshot-flag-hash mismatch (#246). \
-                     See the ShadowRealm note in FEATURES + wiki/runtime/harmony-flag-policy.md."
+                     See the ShadowRealm note in FEATURES + internal/runtime/harmony-flag-policy.md."
                 );
             }
         }

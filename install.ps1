@@ -19,9 +19,9 @@ switch ($Arch) {
 # --- Version ---
 $Version = if ($args.Count -gt 0) { $args[0] } else { "latest" }
 if ($Version -eq "canary") {
-    # The rolling canary prerelease — rebuilt from every commit to main and
-    # published under the un-versioned `canary` tag, so there is no version to
-    # resolve. May be broken; `nub upgrade --stable` returns to a release.
+    # The rolling canary prerelease — rebuilt nightly from main and published
+    # under the un-versioned `canary` tag, so there is no version to resolve.
+    # May be broken; `nub upgrade --stable` returns to a release.
     $ReleaseTag = "canary"
     $DisplayVersion = "canary"
 } else {
@@ -93,7 +93,7 @@ try {
         if (Test-Path $BinDir) { Remove-Item -Recurse -Force $BinDir }
         if (Test-Path "$InstallDir\runtime") { Remove-Item -Recurse -Force "$InstallDir\runtime" }
     } else {
-        Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath "$BinDir\nub.exe", "$BinDir\nubx.exe"
+        Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath "$BinDir\nub.exe", "$BinDir\nubx.exe", "$BinDir\nubr.exe"
     }
     Expand-Archive -Path $TmpZip -DestinationPath $InstallDir -Force
 } catch {
@@ -110,13 +110,108 @@ if (-not (Test-Path $Exe)) {
     exit 1
 }
 
-# `nubx` is the same binary as `nub`, dispatched on argv[0] (cli.rs reads
-# args_os()[0].file_stem(): "nubx" -> exec). The release archive ships only
-# bin\nub.exe, so create the nubx alias. On Windows we COPY rather than symlink:
-# symlinks require admin/Developer Mode, and a copy reliably yields argv[0]
-# "nubx.exe". Re-extract on upgrade wipes bin\, so this is recreated each run.
-$Exex = "$BinDir\nubx.exe"
-Copy-Item -Path $Exe -Destination $Exex -Force
+# `nubx` and `nubr` are the same binary as `nub`, dispatched on argv[0] (cli.rs
+# reads args_os()[0].file_stem(): "nubx" -> exec, "nubr" -> the unified runner).
+# The release zip carries each alias as a small stub (crates/nub-alias) that runs
+# the sibling nub.exe with the verb, so normally there is nothing to create. An
+# archive from before the stubs shipped has only bin\nub.exe; for that one, COPY
+# the binary under each name — a symlink needs admin/Developer Mode, and a copy
+# reliably yields argv[0] "nubx.exe".
+foreach ($alias in @("nubx", "nubr")) {
+    if (-not (Test-Path "$BinDir\$alias.exe")) {
+        Copy-Item -Path $Exe -Destination "$BinDir\$alias.exe" -Force
+    }
+}
+
+# `nub pm shim` HARDLINKS %USERPROFILE%\.nub\shims\{npm,npx,…}.exe at the nub
+# binary, so the re-extract above left every one of them pinned to the previous
+# version's inode. That fails silently — `npm --version` keeps reporting the old
+# nub, with no error and no warning — which is worse than any loud breakage.
+# `nub upgrade` re-links after its swap and so does the npm postinstall; this
+# installer did not, so the irm channel was the one upgrade path that stranded them.
+#
+# Mirrors refreshShims in npm/nub/postinstall.js: refresh-only (never CREATE a shim
+# the user did not opt into via `nub pm shim`), best-effort, and yields to a live
+# `nub pm shim` rather than interleaving with it. Independent of NUB_INSTALL_DIR.
+#
+# Windows resolution, matching resolve_shim_dir() in crates/nub-core/src/pm/shim.rs:
+#   1. $env:XDG_DATA_HOME\nub\shims  — an explicitly-set XDG variable wins HERE TOO,
+#      the same way pnpm's getDataDir and corepack read theirs above their platform
+#      branch, and the same way nub's own cache_dir does
+#   2. $env:LOCALAPPDATA\nub\shims   — the Windows default
+#
+# `%USERPROFILE%\.nub\shims` is the PRE-MOVE location, refreshed only so an install
+# that predates the move keeps working until the user's next `nub pm shim` migrates
+# it. Missing a live dir is SILENT staleness, so the transitional entry stays until
+# the move is old news.
+function Update-NubPmShims {
+    param([string] $NubExe)
+
+    $roots = @()
+    if ($env:XDG_DATA_HOME) { $roots += "$env:XDG_DATA_HOME\nub\shims" }
+    if ($env:LOCALAPPDATA)  { $roots += "$env:LOCALAPPDATA\nub\shims" }
+    $roots += "$env:USERPROFILE\.nub\shims"
+
+    foreach ($dir in $roots) { Update-NubPmShimsIn -NubExe $NubExe -ShimDir $dir }
+}
+
+function Update-NubPmShimsIn {
+    param([string] $NubExe, [string] $ShimDir)
+
+    $shimDir = $ShimDir
+    # Sibling lockfile, matching ShimLock::acquire's <parent>\<name>.lock — which
+    # for a dir path is exactly "<dir>.lock". It must sit beside THIS dir or the
+    # protocol stops serializing against a concurrent `nub pm shim`.
+    $lock = "$ShimDir.lock"
+    if (-not (Test-Path -LiteralPath $shimDir -PathType Container)) { return }
+
+    # shim.rs's lock protocol: create exclusively, steal one whose holder died
+    # (mtime older than 30s), and skip entirely while a live `nub pm shim` holds it.
+    $handle = $null
+    try {
+        $handle = [System.IO.File]::Open($lock, 'CreateNew', 'Write')
+    } catch {
+        $stale = $true  # an unreadable mtime counts as stale, as in postinstall.js
+        try {
+            $stale = ((Get-Date) - (Get-Item -LiteralPath $lock).LastWriteTime).TotalSeconds -gt 30
+        } catch {}
+        if (-not $stale) { return }
+        try {
+            Remove-Item -Force -LiteralPath $lock
+            $handle = [System.IO.File]::Open($lock, 'CreateNew', 'Write')
+        } catch { return }
+    }
+
+    $refreshed = 0
+    try {
+        foreach ($name in @('npm', 'npx', 'pnpm', 'pnpx', 'yarn', 'yarnpkg')) {
+            $target = "$shimDir\$name.exe"
+            if (-not (Test-Path -LiteralPath $target)) { continue }
+            try {
+                # A hardlink costs no disk; a shim dir on another volume cannot be
+                # linked, so fall back to a copy. `-Value` rather than `-Target`:
+                # Windows PowerShell 5.1 has no -Target on New-Item.
+                Remove-Item -Force -LiteralPath $target
+                try {
+                    New-Item -ItemType HardLink -Path $target -Value $NubExe -Force | Out-Null
+                } catch {
+                    Copy-Item -LiteralPath $NubExe -Destination $target -Force
+                }
+                $refreshed++
+            } catch {
+                # A running shim holds its own file open — degraded, not broken.
+            }
+        }
+    } finally {
+        if ($handle) { $handle.Close() }
+        Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $lock
+    }
+
+    if ($refreshed -gt 0) {
+        Write-Host "Refreshed $refreshed nub shim(s) in $shimDir"
+    }
+}
+Update-NubPmShims -NubExe $Exe
 
 # Install receipt: marks this dir as a nub self-managed install so `nub upgrade`
 # recognizes it as in-place-upgradeable even when NUB_INSTALL_DIR relocated it out
@@ -128,7 +223,7 @@ $Receipt = @'
 '@
 Set-Content -LiteralPath "$InstallDir\.nub-receipt" -Value $Receipt
 
-Write-Host "Installed nub (with nubx) to $Exe" -ForegroundColor Green
+Write-Host "Installed nub (with nubx and nubr) to $Exe" -ForegroundColor Green
 
 # --- PATH setup ---
 # Honor NUB_NO_MODIFY_PATH: skip the User PATH edit and just print the dir to add

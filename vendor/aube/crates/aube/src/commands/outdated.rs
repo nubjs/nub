@@ -1,17 +1,22 @@
 //! `aube outdated` — compare installed versions against the registry.
 //!
 //! Reads the root importer's direct deps from the lockfile, fetches each
-//! package's packument (via the disk-backed cache), and prints the ones
-//! whose current resolved version lags behind the `latest` dist-tag or
-//! behind the highest version that still satisfies the range in
-//! `package.json`. Mirrors `pnpm outdated`'s default table layout.
+//! package's packument, and prints the ones whose current resolved version
+//! lags behind what an install would land on. Mirrors `pnpm outdated`'s
+//! default table layout.
+//!
+//! Both version columns run through the resolver's own picker, so a
+//! `minimumReleaseAge` window moves them exactly as it moves an install and
+//! the report cannot offer an upgrade `nub update` would refuse (#722). A
+//! window in effect also moves the fetch from the abbreviated packument to the
+//! full one, the only source of the per-version publish times the window is
+//! checked against. Both tiers are disk-cached.
 //!
 //! Pure read: no state changes, no `node_modules/` writes, no project lock.
 
-use super::{DepFilter, make_client, packument_cache_dir};
+use super::{DepFilter, make_client, packument_cache_dir, packument_full_cache_dir};
 use aube_lockfile::{DepType, DirectDep, dep_type_label};
 use aube_registry::Packument;
-use clap::Args;
 use miette::{Context, IntoDiagnostic};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -53,34 +58,29 @@ Examples:
   All dependencies up to date.
 ";
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct OutdatedArgs {
     /// Optional package name (prefix match) to filter the report
     pub pattern: Option<String>,
 
     /// Show only devDependencies
-    #[arg(short = 'D', long, conflicts_with = "prod")]
+    #[usage(short = 'D', long, conflicts = "--prod")]
     pub dev: bool,
 
     /// Check globally-installed packages instead of the current project.
-    #[arg(short = 'g', long, conflicts_with = "workspace_root")]
+    #[usage(short = 'g', long, conflicts = "--workspace-root")]
     pub global: bool,
 
     /// Emit a JSON object keyed by package name instead of the default table
-    #[arg(long)]
+    #[usage(long)]
     pub json: bool,
 
     /// Also show deps whose `wanted` version matches the installed version
-    #[arg(long)]
+    #[usage(long)]
     pub long: bool,
 
     /// Show only production dependencies (skip devDependencies)
-    #[arg(
-        short = 'P',
-        long,
-        conflicts_with = "dev",
-        visible_alias = "production"
-    )]
+    #[usage(short = 'P', long, long = "production", conflicts = "--dev")]
     pub prod: bool,
     /// Operate on the workspace root regardless of cwd.
     ///
@@ -88,13 +88,13 @@ pub struct OutdatedArgs {
     /// `aube outdated -w` reports the root manifest's deps instead
     /// of the sub-package's. No-op when paired with `-r` / `--filter`
     /// (those already drive workspace selection from the root).
-    #[arg(short = 'w', long = "workspace-root", visible_alias = "workspace")]
+    #[usage(short = 'w', long = "workspace-root", long = "workspace")]
     pub workspace_root: bool,
-    #[command(flatten)]
+    #[usage(flatten)]
     pub network: crate::cli_args::NetworkArgs,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct Row {
     // Skipped on serialize — the outer `render_json` map is keyed by
     // name, so duplicating it inside each entry would diverge from
@@ -106,15 +106,165 @@ struct Row {
     latest: String,
     #[serde(rename = "dependencyType", serialize_with = "serialize_dep_type")]
     dep_type: DepType,
-    // Whether the packument carried a `latest` dist-tag. When false,
-    // `latest` is the human-facing "(unknown)" sentinel and the drift
-    // check ignores it so a missing tag doesn't flip exit code 1.
+    // Whether a `latest` is being reported at all. False when the packument
+    // carried no `latest` dist-tag, and also when the window admits no version
+    // for that column — in both cases `latest` is the human-facing "(unknown)"
+    // sentinel (visible only under `--long`, since a row with no drift is
+    // otherwise not printed) and the drift check ignores it, so neither case
+    // flips exit code 1.
     #[serde(skip)]
     latest_known: bool,
     #[serde(skip)]
     specifier: Option<String>,
     #[serde(skip)]
     importer: Option<String>,
+}
+
+/// Resolve the project's effective `minimumReleaseAge` configuration.
+///
+/// `outdated` is a pure read and builds no resolver, so it goes to the same
+/// settings accessor `install`/`add` use rather than standing up a
+/// [`aube_resolver::Resolver`] it would never resolve with. `None` means no
+/// window is in effect and every pick below stays on today's ungated path.
+pub(super) fn age_gate_for(cwd: &Path) -> Option<aube_resolver::MinimumReleaseAge> {
+    let files = super::FileSources::load(cwd);
+    let raw_workspace = aube_manifest::workspace::load_raw(cwd).unwrap_or_default();
+    let ctx = files.ctx(&raw_workspace, aube_settings::values::process_env(), &[]);
+    super::install::resolve_minimum_release_age(&ctx, None)
+}
+
+/// The `Latest` column: the newest version the window admits, bounded by the
+/// `latest` dist-tag.
+///
+/// A packument with no `latest` tag yields `None` and the column stays
+/// unknown, which keeps it out of the drift decision exactly as it was before
+/// any window existed. That guard is load-bearing rather than defensive:
+/// `pick_version` answers a literal `latest` range it cannot resolve by falling
+/// back to `highest_stable_version`, which reads version keys and never
+/// consults a dist-tag — so passing an absent tag through would SYNTHESIZE one
+/// and start flipping the exit code for registries that publish no `latest`.
+/// Nub pins the window on for every project, so that would be the default path.
+pub(super) fn latest_pick(
+    packument: &Packument,
+    registry_name: &str,
+    gate: Option<&aube_resolver::MinimumReleaseAge>,
+    current: &str,
+) -> Option<String> {
+    let tagged = packument.dist_tags.get("latest").cloned();
+    tagged.as_ref()?;
+    // Ranged on the tag rather than on `*`: `pick_version` bounds a gated
+    // `latest` at the tagged version (#681), so the fallback can never surface
+    // a higher major the publisher had already untagged.
+    // The undeterminable flag is deliberately dropped: it describes the
+    // `latest` tag's own candidate set, which no message keys on. See the
+    // warning's rationale in `collect_rows`.
+    let picked = gated_pick(packument, registry_name, "latest", gate, tagged).0?;
+
+    // Never offer a DOWNGRADE. That same widening walks DOWNWARD looking for a
+    // release old enough to clear the window, so a window wider than the
+    // installed version's own age lands below `current` — and the column then
+    // advertises an older version as the one to move to, counts as drift, and
+    // pins the exit code at 1 with nothing worth installing on offer. That is
+    // the dead end #722 was about, reached by a different route.
+    //
+    // "worth installing" rather than "installable": the lower release IS
+    // reachable — `update --latest` passes the literal `latest` range through
+    // the same widening (`update.rs:634`) and resolves to it.
+    //
+    // A pick at or below `current` reports `current` instead of dropping to
+    // unknown: there genuinely is no upgrade, and saying so is both truer and
+    // what lets the command exit 0.
+    //
+    // Accepted cost: a publisher who ROLLS BACK the tag — ships 3.0.0, retracts
+    // it, re-tags 2.9.1 — no longer surfaces here to someone already on 3.0.0.
+    // That signal was never dependable in this column, since it appears only
+    // when the installed version happens to sit above the tag, and a retraction
+    // reaches the user through deprecation metadata instead.
+    let (Ok(new), Ok(cur)) = (
+        node_semver::Version::parse(&picked),
+        node_semver::Version::parse(current),
+    ) else {
+        // Either side unparseable means the two are not ordered at all, so leave
+        // the pick alone rather than guess a direction. Two known ways `current`
+        // gets there: the `(missing)` sentinel for a dep absent from the graph,
+        // and a git dep read from an npm v1 lockfile, whose `version` the legacy
+        // lifter carries through verbatim (`aube-lockfile/src/npm/read.rs`).
+        // Not exhaustive — nub reads six lockfile formats and only pnpm's is
+        // known to normalize a local dep to a parseable `0.0.0`.
+        return Some(picked);
+    };
+    Some(if new < cur {
+        current.to_string()
+    } else {
+        picked
+    })
+}
+
+/// The version a column should show: what an install would actually land on.
+///
+/// `ungated` is what the column shows with no window in effect. The gated pick
+/// runs through [`aube_resolver::pick_version_for_add`] — the exact entry point
+/// `add` uses — so a column can never advertise a version `install`/`update`
+/// would then decline (#722).
+///
+/// The window is applied SILENTLY, with no marker and no note. It is the
+/// project's own configured policy and `install`/`update` honor it without
+/// remark; a report that editorialized about it on every run would be noise,
+/// and under nub's 24-hour default that is most runs. A version held back is
+/// simply not offered.
+///
+/// Returns the version to show, plus whether the window's refusal was
+/// `Undeterminable` — the two `AgeGated` causes are NOT interchangeable here.
+///
+/// `TooNew` is the policy working: the version ages out within the window and
+/// the report stays silent, so nothing is offered and no row appears.
+///
+/// `Undeterminable` is a metadata failure, not a policy outcome. The registry
+/// served no publish time, so the gate fails closed and `install`/`update`
+/// hard-error with a DIFFERENT error and disjoint remedies (`Error::
+/// ReleaseAgeMissingTime`, #581). Staying silent there would print `All
+/// dependencies up to date.` for a project where every install refuses — the
+/// report disagreeing with the installer, which is the whole of #722. The
+/// `wanted` caller warns instead — and only that one, since only the manifest
+/// range predicts plain `update` — on stderr beside the existing
+/// packument-fetch warning; stdout stays data.
+pub(super) fn gated_pick(
+    packument: &Packument,
+    registry_name: &str,
+    range: &str,
+    gate: Option<&aube_resolver::MinimumReleaseAge>,
+    ungated: Option<String>,
+) -> (Option<String>, bool) {
+    let Some(gate) = gate else {
+        return (ungated, false);
+    };
+    match aube_resolver::pick_version_for_add(packument, registry_name, range, Some(gate)) {
+        aube_resolver::PickResult::Found(meta) => (Some(meta.version.clone()), false),
+        aube_resolver::PickResult::AgeGated(aube_resolver::AgeGateCause::Undeterminable) => {
+            (None, true)
+        }
+        aube_resolver::PickResult::AgeGated(_) => (None, false),
+        // The range itself matches nothing (`workspace:`/`file:`, a git URL).
+        // Not an age verdict; leave today's fallback in place.
+        aube_resolver::PickResult::NoMatch => (ungated, false),
+    }
+}
+
+/// Announce that a package's registry served no publish times at all, so the
+/// window can admit no version of it and an install hard-errors.
+///
+/// Shared with the interactive pickers, which drop a cell on the same verdict.
+/// Dropping it silently would leave those commands reporting no work on a
+/// package every install refuses — #722's report-versus-installer disagreement,
+/// one surface over — so each caller that discards an `Undeterminable` says so
+/// here instead. Stderr, so stdout stays data.
+pub(super) fn warn_undatable(registry_name: &str) {
+    eprintln!(
+        "warn: {registry_name} has no registry publish times, so \
+         minimumReleaseAge cannot admit any version; \
+         `{}` will fail for it",
+        aube_util::cmd("update")
+    );
 }
 
 /// Serialize `DepType` using pnpm's `package.json` field names so
@@ -216,8 +366,8 @@ async fn run_filtered(
         }
         let ctx = files.ctx(&raw_workspace, env, &[]);
         let ignored = super::update::ignored_update_dependencies_from_ctx(&ctx, &pkg.manifest);
-        let selected_roots: Vec<DirectDep> = roots
-            .iter()
+        let selected_roots: Vec<DirectDep> = direct_manifest_deps(roots, &pkg.manifest)
+            .into_iter()
             .filter(|dep| !ignored.contains(&dep.name))
             .cloned()
             .collect();
@@ -228,12 +378,16 @@ async fn run_filtered(
         if printed_table && !args.json {
             println!();
         }
+        // Per-importer, matching the settings context built above: a
+        // workspace package may carry its own `.npmrc` window.
+        let gate = super::install::resolve_minimum_release_age(&ctx, None);
         let drifted = run_graph(
             &root,
             args.clone_for_fanout(),
             &graph,
             &selected_roots,
             Some(importer),
+            gate.as_ref(),
         )
         .await?;
         printed_table = true;
@@ -316,8 +470,15 @@ async fn run_global(args: OutdatedArgs) -> miette::Result<Option<i32>> {
         } else {
             graph.root_deps()
         };
-        let (mut package_rows, matched) =
-            collect_rows(&info.install_dir, collect_args, &graph, roots).await?;
+        let gate = age_gate_for(&info.install_dir);
+        let (mut package_rows, matched) = collect_rows(
+            &info.install_dir,
+            collect_args,
+            &graph,
+            roots,
+            gate.as_ref(),
+        )
+        .await?;
         if matched {
             matched_any = true;
         }
@@ -361,13 +522,27 @@ async fn run_one(cwd: &Path, args: OutdatedArgs, importer: Option<String>) -> mi
         Err(e) => return Err(miette::Report::new(e)).wrap_err("failed to parse lockfile"),
     };
 
-    let roots: Vec<DirectDep> = graph
-        .root_deps()
-        .iter()
+    let roots: Vec<DirectDep> = direct_manifest_deps(graph.root_deps(), &manifest)
+        .into_iter()
         .filter(|dep| !ignored.contains(&dep.name))
         .cloned()
         .collect();
-    run_graph(cwd, args, &graph, &roots, importer).await
+    let gate = age_gate_for(cwd);
+    run_graph(cwd, args, &graph, &roots, importer, gate.as_ref()).await
+}
+
+fn direct_manifest_deps<'a>(
+    roots: &'a [DirectDep],
+    manifest: &aube_manifest::PackageJson,
+) -> Vec<&'a DirectDep> {
+    roots
+        .iter()
+        .filter(|dep| {
+            manifest.dependencies.contains_key(&dep.name)
+                || manifest.dev_dependencies.contains_key(&dep.name)
+                || manifest.optional_dependencies.contains_key(&dep.name)
+        })
+        .collect()
 }
 
 async fn run_graph(
@@ -376,8 +551,10 @@ async fn run_graph(
     graph: &aube_lockfile::LockfileGraph,
     roots: &[DirectDep],
     importer: Option<String>,
+    gate: Option<&aube_resolver::MinimumReleaseAge>,
 ) -> miette::Result<bool> {
-    let (mut rows, matched_any) = collect_rows(cwd, args.clone_for_fanout(), graph, roots).await?;
+    let (mut rows, matched_any) =
+        collect_rows(cwd, args.clone_for_fanout(), graph, roots, gate).await?;
     rows.sort_by(|a, b| a.name.cmp(&b.name));
     let has_drift = has_drift(&rows);
     for row in &mut rows {
@@ -405,6 +582,7 @@ async fn collect_rows(
     args: OutdatedArgs,
     graph: &aube_lockfile::LockfileGraph,
     roots: &[DirectDep],
+    gate: Option<&aube_resolver::MinimumReleaseAge>,
 ) -> miette::Result<(Vec<Row>, bool)> {
     let filter = DepFilter::from_flags(args.prod, args.dev);
     let roots: Vec<&DirectDep> = roots
@@ -433,6 +611,28 @@ async fn collect_rows(
 
     let client = std::sync::Arc::new(make_client(cwd));
     let cache_dir = packument_cache_dir();
+    // The age gate needs per-version publish times, and npmjs's abbreviated
+    // (corgi) packument carries none — its document-level `modified` only
+    // proves maturity for a package that has published NOTHING recently,
+    // which is never true of the packages this report is about. So a window
+    // in effect switches the fetch to the full document. Measured cost is
+    // +17-30% on the wire, not the ~2x the uncompressed sizes suggest — the
+    // `time` map is repetitive ISO text and gzips hard.
+    //
+    // Cached, unlike `build_resolver`'s `cache_full_packuments: false`. That
+    // opt-out is for the MUTATING verbs, which write a lockfile off the pick
+    // and so must see a dist-tag bump the instant it lands; a report is not
+    // load-bearing that way, and nub pins the window on for every project, so
+    // an uncached fetch here would mean a full uncached GET per direct
+    // dependency on the default path of a read-only command. The cache's TTL
+    // and ETag revalidation are the same freshness terms the ungated path
+    // already runs on.
+    //
+    // `registrySupportsTimeField` opts a registry that DOES serve `time` in
+    // the abbreviated document out of the heavier fetch.
+    let needs_time = gate.is_some()
+        && !super::with_settings_ctx(cwd, aube_settings::resolved::registry_supports_time_field);
+    let full_cache_dir = packument_full_cache_dir();
 
     // An `npm:` alias carries the alias as `DirectDep.name`, which the
     // registry has never heard of — fetching by it produced a bogus
@@ -460,8 +660,15 @@ async fn collect_rows(
         }
         let client = client.clone();
         let cache_dir = cache_dir.clone();
+        let full_cache_dir = full_cache_dir.clone();
         set.spawn(async move {
-            let result = client.fetch_packument_cached(&name, &cache_dir).await;
+            let result = if needs_time {
+                client
+                    .fetch_packument_with_time_cached(&name, &full_cache_dir)
+                    .await
+            } else {
+                client.fetch_packument_cached(&name, &cache_dir).await
+            };
             (name, result)
         });
     }
@@ -473,6 +680,7 @@ async fn collect_rows(
     }
 
     let mut rows: Vec<Row> = Vec::new();
+    let mut blocked_updates = BTreeMap::new();
     // Several deps can share one registry name, and the lookup below reads
     // the shared entry rather than consuming it, so a failed fetch would
     // otherwise warn once per dep.
@@ -481,10 +689,10 @@ async fn collect_rows(
         let registry_name = registry_name_for(dep);
         // `get`, not `remove`: several deps can share one registry name.
         let packument = packuments.get(&registry_name);
-        let current = match graph.get_package(&dep.dep_path) {
-            Some(p) => p.version.clone(),
-            None => "(missing)".to_string(),
-        };
+        // `None` (dep absent from the graph) rather than the `(missing)`
+        // sentinel: the sentinel is unparseable as semver, and the
+        // never-downgrade clamp below would then pin the column to it.
+        let current = graph.get_package(&dep.dep_path).map(|p| p.version.clone());
         let packument = match packument {
             Some(Ok(p)) => p,
             Some(Err(e)) => {
@@ -495,19 +703,64 @@ async fn collect_rows(
             }
             None => continue,
         };
+        // Both columns run through the resolver's own picker so the report
+        // cannot advertise a version `install`/`update` would then decline —
+        // the promise `wanted_version`'s doc comment already makes, which
+        // went unkept for `latest` and for any window in effect (#722).
+        //
         // `latest` is optional so a registry that never publishes a
         // `latest` dist-tag (common on private registries) doesn't get
         // silently flagged as outdated. Drift detection treats an
         // unknown latest the same as "matches current".
-        let latest: Option<String> = packument.dist_tags.get("latest").cloned();
+        let latest_info = super::policy_version_info(
+            packument,
+            &registry_name,
+            "latest",
+            gate,
+            current.as_deref(),
+        );
+        if let Some(blocked) = latest_info.blocked {
+            super::record_age_gated_update(&mut blocked_updates, dep.name.clone(), blocked);
+        }
+        let latest = latest_info.selected;
 
-        // Wanted = highest version in the packument that still satisfies the
-        // manifest range. Fall back to `current` when the range is unparseable
-        // (workspace:/file: specifiers, git URLs, etc.) so we don't lie.
-        let wanted = dep
-            .specifier
-            .as_deref()
-            .and_then(|spec| super::wanted_version(packument, spec))
+        // Wanted = the version an update would resolve inside the manifest
+        // range after applying the release-age window. Falls back to `current`
+        // when the range is unparseable (workspace:/file: specifiers, git
+        // URLs) so we don't lie.
+        let spec = dep.specifier.as_deref();
+        let wanted_info = spec.map(|spec| {
+            super::policy_version_info(packument, &registry_name, spec, gate, current.as_deref())
+        });
+        if let Some(blocked) = wanted_info.as_ref().and_then(|info| info.blocked.as_ref()) {
+            super::record_age_gated_update(&mut blocked_updates, dep.name.clone(), blocked.clone());
+        }
+
+        // The registry dated no version in the MANIFEST's range, so the gate
+        // admits none of them and an install of this package hard-errors.
+        // Reporting it as up to date would put this command at odds with the
+        // installer, which is the disagreement #722 is about. Warn once per
+        // package, on stderr beside the fetch warning above, so stdout stays
+        // data.
+        //
+        // Keyed on the `wanted` column ALONE. The `latest` column answers a
+        // different question: it resolves the literal `latest` range, which a
+        // gated pick widens to `<=dist-tags.latest` — a candidate set bounded
+        // by the tag and disjoint from the manifest range. Plain `update`
+        // resolves the manifest range, so a refusal in the `latest` column is
+        // no evidence about it. A stale or rolled-back `latest` tag reaches
+        // that state routinely, and folding it in here told the user an update
+        // would fail on a package where it succeeds.
+        if let Some(spec) = spec {
+            let (_, wanted_undated) = gated_pick(packument, &registry_name, spec, gate, None);
+            if wanted_undated && warned.insert(registry_name.clone()) {
+                warn_undatable(&registry_name);
+            }
+        }
+
+        let current = current.unwrap_or_else(|| "(missing)".to_string());
+        let wanted = wanted_info
+            .and_then(|info| info.selected)
             .unwrap_or_else(|| current.clone());
 
         let latest_known = latest.is_some();
@@ -527,6 +780,7 @@ async fn collect_rows(
             });
         }
     }
+    super::warn_age_gated_updates(&blocked_updates);
 
     Ok((rows, true))
 }
@@ -537,6 +791,9 @@ fn has_drift(rows: &[Row]) -> bool {
     // A row only counts as drift when its latest is known AND differs from
     // current, or its wanted version diverges from current — a missing
     // `latest` dist-tag must never flip the exit code.
+    //
+    // A window that admits nothing needs no special case here: both columns
+    // fall back to `current`, so the row reports no drift on its own (#722).
     rows.iter()
         .any(|r| (r.latest_known && r.current != r.latest) || r.current != r.wanted)
 }
@@ -664,6 +921,25 @@ fn render_table(rows: &[Row], long: bool) {
         return;
     }
 
+    let rows: Vec<Row> = rows
+        .iter()
+        .cloned()
+        .map(|mut row| {
+            row.name = aube_util::terminal::sanitize_inline(&row.name).into_owned();
+            row.current = aube_util::terminal::sanitize_inline(&row.current).into_owned();
+            row.wanted = aube_util::terminal::sanitize_inline(&row.wanted).into_owned();
+            row.latest = aube_util::terminal::sanitize_inline(&row.latest).into_owned();
+            row.specifier = row
+                .specifier
+                .map(|value| aube_util::terminal::sanitize_inline(&value).into_owned());
+            row.importer = row
+                .importer
+                .map(|value| aube_util::terminal::sanitize_inline(&value).into_owned());
+            row
+        })
+        .collect();
+    let rows = rows.as_slice();
+
     // Compute column widths.
     let name_w = rows.iter().map(|r| r.name.len()).max().unwrap_or(7).max(7);
     let cur_w = rows
@@ -783,8 +1059,8 @@ fn render_no_checkable_global_json() -> miette::Result<()> {
 
 #[cfg(test)]
 mod colorize_tests {
-    use super::{Row, colorize_diff};
-    use aube_lockfile::DepType;
+    use super::{Row, colorize_diff, direct_manifest_deps};
+    use aube_lockfile::{DepType, DirectDep};
 
     fn strip_ansi(s: &str) -> String {
         // Strip CSI sequences for assertion purposes — the renderer
@@ -804,6 +1080,33 @@ mod colorize_tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn direct_manifest_deps_excludes_auto_installed_peers() {
+        let mut manifest = aube_manifest::PackageJson::default();
+        manifest
+            .dependencies
+            .insert("vite".to_string(), "^8.0.0".to_string());
+        let roots = vec![
+            DirectDep {
+                name: "vite".to_string(),
+                dep_path: "vite@8.0.0".to_string(),
+                dep_type: DepType::Production,
+                specifier: Some("^8.0.0".to_string()),
+            },
+            DirectDep {
+                name: "esbuild".to_string(),
+                dep_path: "esbuild@0.28.1".to_string(),
+                dep_type: DepType::Production,
+                specifier: Some("^0.28.0".to_string()),
+            },
+        ];
+
+        let selected = direct_manifest_deps(&roots, &manifest);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].name, "vite");
     }
 
     #[test]
@@ -896,5 +1199,312 @@ mod colorize_tests {
         }
 
         assert_eq!(map["same"].as_array().unwrap().len(), 2);
+    }
+}
+
+/// The release-age window's effect on the report (#722).
+///
+/// The window is applied silently — no marker, no note. These pin the two
+/// things that must hold for that silence to be honest: the columns name what
+/// an install would land on, and a window that admits nothing produces no
+/// actionable row rather than an unreachable upgrade.
+#[cfg(test)]
+mod age_gate_tests {
+    use super::*;
+    use aube_lockfile::DepType;
+
+    /// `2.0.1` published inside any recent window; `2.0.0` in 2020, so it
+    /// clears every window a test would set.
+    fn packument() -> Packument {
+        serde_json::from_value(serde_json::json!({
+            "name": "pkg",
+            "dist-tags": { "latest": "2.0.1" },
+            "versions": {
+                "2.0.0": { "name": "pkg", "version": "2.0.0" },
+                "2.0.1": { "name": "pkg", "version": "2.0.1" },
+            },
+            "time": {
+                "2.0.0": "2020-01-01T00:00:00.000Z",
+                "2.0.1": "2099-01-01T00:00:00.000Z",
+            },
+        }))
+        .expect("test packument parses")
+    }
+
+    fn gate(strict: bool) -> aube_resolver::MinimumReleaseAge {
+        aube_resolver::MinimumReleaseAge {
+            minutes: 1440,
+            exclude: aube_resolver::PackageVersionPolicy::empty(),
+            strict,
+        }
+    }
+
+    fn row(current: &str, wanted: &str, latest: Option<&str>) -> Row {
+        Row {
+            name: "pkg".to_string(),
+            current: current.to_string(),
+            wanted: wanted.to_string(),
+            latest: latest.unwrap_or("(unknown)").to_string(),
+            dep_type: DepType::Production,
+            latest_known: latest.is_some(),
+            specifier: Some("^2.0.0".to_string()),
+            importer: None,
+        }
+    }
+
+    #[test]
+    fn no_window_leaves_both_columns_on_the_ungated_pick() {
+        let p = packument();
+        assert_eq!(
+            gated_pick(&p, "pkg", "^2.0.0", None, Some("2.0.1".into()))
+                .0
+                .as_deref(),
+            Some("2.0.1")
+        );
+        assert_eq!(
+            latest_pick(&p, "pkg", None, "2.0.0").as_deref(),
+            Some("2.0.1")
+        );
+    }
+
+    #[test]
+    fn the_window_lowers_the_pick_to_what_an_install_would_land_on() {
+        // The whole point of #722: the column must not name 2.0.1, which the
+        // resolver would decline.
+        let p = packument();
+        let g = gate(true);
+        assert_eq!(
+            gated_pick(&p, "pkg", "^2.0.0", Some(&g), Some("2.0.1".into()))
+                .0
+                .as_deref(),
+            Some("2.0.0")
+        );
+        assert_eq!(
+            latest_pick(&p, "pkg", Some(&g), "2.0.0").as_deref(),
+            Some("2.0.0")
+        );
+    }
+
+    /// A dist-tag SPECIFIER is gated like any other range.
+    ///
+    /// `"pkg": "beta"` in a manifest does not parse as a range, so the pickers
+    /// keep a dist-tag lookup as the fallback for it. That fallback is the raw
+    /// tag, and it has to stay INSIDE this call: applied to the result instead,
+    /// it hands back the exact version the window just declined, and the
+    /// picker's own screen cannot catch it — that screen compares against the
+    /// installed version, not against the policy.
+    #[test]
+    fn a_dist_tag_specifier_is_gated_and_the_raw_tag_does_not_come_back() {
+        let p: Packument = serde_json::from_value(serde_json::json!({
+            "name": "pkg",
+            "dist-tags": { "latest": "2.0.0", "beta": "2.0.1" },
+            "versions": {
+                "2.0.0": { "name": "pkg", "version": "2.0.0" },
+                "2.0.1": { "name": "pkg", "version": "2.0.1" },
+            },
+            "time": {
+                "2.0.0": "2020-01-01T00:00:00.000Z",
+                "2.0.1": "2099-01-01T00:00:00.000Z",
+            },
+        }))
+        .expect("test packument parses");
+        // Guard the premise: only `latest` widens to `<=<tag>`, so a `beta`
+        // the window blocks refuses outright rather than scanning down to
+        // 2.0.0. Without that this case would be testing the widening.
+        assert!(matches!(
+            aube_resolver::pick_version_for_add(&p, "pkg", "beta", Some(&gate(true))),
+            aube_resolver::PickResult::AgeGated(_)
+        ));
+        assert_eq!(
+            gated_pick(&p, "pkg", "beta", Some(&gate(true)), Some("2.0.1".into())).0,
+            None,
+            "the tag fallback is what the window declined, so it must not survive it"
+        );
+    }
+
+    #[test]
+    fn exclude_exempts_a_package_from_the_window() {
+        let mut g = gate(true);
+        g.exclude = aube_resolver::PackageVersionPolicy::parse_lossy(vec!["pkg".to_string()]).0;
+        assert_eq!(
+            gated_pick(
+                &packument(),
+                "pkg",
+                "^2.0.0",
+                Some(&g),
+                Some("2.0.1".into())
+            )
+            .0
+            .as_deref(),
+            Some("2.0.1"),
+            "minimumReleaseAgeExclude must reach the report, not just the install"
+        );
+    }
+
+    #[test]
+    fn a_window_that_admits_nothing_yields_no_version_rather_than_an_error() {
+        // `install` fails closed here; a report has no such duty. `None` makes
+        // the caller fall back to the locked version, so the row reports no
+        // drift and never appears — there is genuinely nothing to act on.
+        let p = packument();
+        let (picked, undated) =
+            gated_pick(&p, "pkg", "2.0.1", Some(&gate(true)), Some("2.0.1".into()));
+        assert_eq!(picked, None);
+        assert!(
+            !undated,
+            "2.0.1 IS dated — this refusal is TooNew, which stays silent"
+        );
+        let r = row("2.0.0", "2.0.0", None);
+        assert!(
+            !has_drift(std::slice::from_ref(&r)),
+            "an upgrade the window refuses must not flip the exit code"
+        );
+    }
+
+    /// A registry that publishes no `latest` dist-tag (common on private
+    /// registries) stays exempt from the drift check. `pick_version` answers a
+    /// literal `latest` range with `highest_stable_version`, which reads
+    /// version keys and never looks at a dist-tag — so feeding it an absent tag
+    /// invents one and starts failing the exit code for those registries, on
+    /// the default path, since nub pins the window on.
+    #[test]
+    fn a_registry_without_a_latest_tag_keeps_latest_unknown() {
+        let p: Packument = serde_json::from_value(serde_json::json!({
+            "name": "pkg",
+            "dist-tags": {},
+            "versions": { "2.0.0": { "name": "pkg", "version": "2.0.0" } },
+            "time": { "2.0.0": "2020-01-01T00:00:00.000Z" },
+        }))
+        .unwrap();
+        assert_eq!(latest_pick(&p, "pkg", Some(&gate(true)), "1.0.0"), None);
+        assert_eq!(latest_pick(&p, "pkg", None, "1.0.0"), None);
+        // Guard the mechanism, so a resolver change cannot quietly reintroduce
+        // the synthesis the call-site guard exists to stop.
+        assert!(
+            matches!(
+                aube_resolver::pick_version_for_add(&p, "pkg", "latest", None),
+                aube_resolver::PickResult::Found(_)
+            ),
+            "the picker still synthesizes a tag; the guard is what stops it"
+        );
+    }
+
+    #[test]
+    fn a_real_upgrade_still_counts_as_drift() {
+        // The window must not mask an upgrade that IS installable.
+        assert!(has_drift(&[row("2.0.0", "2.0.0", Some("2.1.0"))]));
+        assert!(has_drift(&[row("2.0.0", "2.1.0", Some("2.1.0"))]));
+    }
+
+    /// A registry that dates no version cannot be gated at all, and
+    /// `install`/`update` hard-error on it with a distinct error (#581). The
+    /// report must not silently call that "up to date" — the two refusals are
+    /// not interchangeable.
+    #[test]
+    fn an_undatable_registry_is_reported_as_such_not_as_silence() {
+        let p: Packument = serde_json::from_value(serde_json::json!({
+            "name": "pkg",
+            "dist-tags": { "latest": "2.0.0" },
+            "modified": "2099-01-01T00:00:00.000Z",
+            "versions": {
+                "1.0.0": { "name": "pkg", "version": "1.0.0" },
+                "2.0.0": { "name": "pkg", "version": "2.0.0" },
+            },
+        }))
+        .unwrap();
+        let (picked, undated) =
+            gated_pick(&p, "pkg", "^1.0.0", Some(&gate(true)), Some("2.0.0".into()));
+        assert_eq!(picked, None, "nothing is installable");
+        assert!(
+            undated,
+            "and the caller must be told WHY, so it warns instead of printing \
+             `All dependencies up to date.`"
+        );
+    }
+
+    /// A stale or rolled-back `latest` tag routinely leaves the tag undated
+    /// while the manifest's own range resolves fine. The warning names plain
+    /// `update`, which resolves the MANIFEST range, so it must key on that
+    /// column alone — keying on `latest` too claimed a failure that does not
+    /// happen.
+    #[test]
+    fn an_undated_latest_tag_does_not_predict_a_failure_of_the_manifest_range() {
+        let p: Packument = serde_json::from_value(serde_json::json!({
+            "name": "pkg",
+            "dist-tags": { "latest": "2.0.0" },
+            "versions": {
+                "2.0.0": { "name": "pkg", "version": "2.0.0" },
+                "3.0.0": { "name": "pkg", "version": "3.0.0" },
+            },
+            // 2.0.0 — the tagged latest — is undated; 3.0.0 is dated and old.
+            "time": { "3.0.0": "2020-01-01T00:00:00.000Z" },
+        }))
+        .unwrap();
+        let g = gate(true);
+        assert_eq!(
+            latest_pick(&p, "pkg", Some(&g), "3.0.0"),
+            None,
+            "the `latest` column genuinely admits nothing here"
+        );
+        // Guard the premise: `None` alone cannot tell an undated refusal from
+        // a too-new one, and undated-ness is what this case is about.
+        assert!(matches!(
+            aube_resolver::pick_version_for_add(&p, "pkg", "latest", Some(&g)),
+            aube_resolver::PickResult::AgeGated(aube_resolver::AgeGateCause::Undeterminable)
+        ));
+        let (picked, undated) = gated_pick(&p, "pkg", "^3.0.0", Some(&g), Some("3.0.0".into()));
+        assert_eq!(
+            picked.as_deref(),
+            Some("3.0.0"),
+            "the manifest range resolves"
+        );
+        assert!(
+            !undated,
+            "so the warning must NOT fire — `nub update` succeeds on this package"
+        );
+    }
+
+    /// The `Latest` column must never point BACKWARDS.
+    ///
+    /// A window wider than the installed version's own age sends the widened
+    /// `<=dist-tags.latest` scan down PAST `current` to the newest release old
+    /// enough to clear. Reporting that advertises a DOWNGRADE, counts as drift,
+    /// and holds the exit code at 1 with nothing installable — #722's dead end
+    /// reached by another route.
+    #[test]
+    fn a_window_wider_than_the_installed_version_offers_no_downgrade() {
+        let p: Packument = serde_json::from_value(serde_json::json!({
+            "name": "pkg",
+            "dist-tags": { "latest": "2.0.0" },
+            "versions": {
+                "1.0.0": { "name": "pkg", "version": "1.0.0" },
+                "2.0.0": { "name": "pkg", "version": "2.0.0" },
+            },
+            // 2.0.0 is what is installed, and it is too new for the window;
+            // 1.0.0 is the newest release the window does admit.
+            "time": {
+                "1.0.0": "2020-01-01T00:00:00.000Z",
+                "2.0.0": "2099-01-01T00:00:00.000Z",
+            },
+        }))
+        .unwrap();
+        let g = gate(true);
+        // Guard the premise: without the clamp the column would say 1.0.0, so
+        // this case genuinely exercises the backwards pick rather than a refusal.
+        assert!(matches!(
+            aube_resolver::pick_version_for_add(&p, "pkg", "latest", Some(&g)),
+            aube_resolver::PickResult::Found(m) if m.version == "1.0.0"
+        ));
+        assert_eq!(
+            latest_pick(&p, "pkg", Some(&g), "2.0.0").as_deref(),
+            Some("2.0.0"),
+            "the newest admitted release is OLDER than what is installed, so \
+             there is no upgrade and the column reports current"
+        );
+        let r = row("2.0.0", "2.0.0", Some("2.0.0"));
+        assert!(
+            !has_drift(std::slice::from_ref(&r)),
+            "and with no upgrade on offer the command must exit 0"
+        );
     }
 }

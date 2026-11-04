@@ -35,9 +35,300 @@
 # core.hooksPath is .githooks, so this is active in every worktree with no
 # per-clone setup step.
 
+SKILLS_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+
+# ---------------------------------------------------------------------------
+# Skill-tree integrity. Runs FIRST, unconditionally, and never touches stdin.
+#
+# WHY THIS EXISTS: skills are the repo's agent tooling, and every way they break
+# is SILENT — no error, no missing-file message, just an agent that quietly no
+# longer knows how to do something. Three real failures motivate the checks:
+#
+#   1. A duplicate tree under .agents/skills drifted for weeks against
+#      .claude/skills, so agents reading it followed a model-tiering policy that
+#      had been reversed, and two skills existed there that Claude never saw.
+#   2. A directory symlink was considered as the anti-drift fix and rejected: git
+#      on Windows without core.symlinks writes it out as a text file, which turns
+#      "one shared tree" into "zero skills" with nothing on stderr.
+#   3. A per-skill entry in .git/info/exclude makes `git add` silently REFUSE a
+#      canonical skill, so it vanishes from the repo while still sitting on disk.
+#
+# Deliberately NOT gated on the pushed range: a bad tree usually arrives via a
+# merge or a checkout, not via your own edit. It costs a few milliseconds.
+#
+# Unlike the site gate below, this one has no infrastructure to fail on — it is
+# file tests and greps — so a failure here is always a real defect.
+#
+# Bypass: git push --no-verify
+# ---------------------------------------------------------------------------
+if [ -n "$SKILLS_ROOT" ] && [ -e "$SKILLS_ROOT/.claude/skills" ]; then
+  skills_bad=0
+
+  # A symlink here is the Windows-degradation trap; a non-directory is worse.
+  if [ -L "$SKILLS_ROOT/.claude/skills" ] || [ ! -d "$SKILLS_ROOT/.claude/skills" ]; then
+    echo "pre-push: .claude/skills must be a real directory, not a symlink or file." >&2
+    echo "          A symlink degrades to a plain text file on a Windows clone," >&2
+    echo "          silently leaving every agent with zero skills." >&2
+    skills_bad=1
+  fi
+
+  # No rival AGENT-PLAYBOOK tree. .claude/skills is the single source of truth.
+  # NOT checked: the repo-root skills/ directory, which is the published
+  # user-facing nub skill served at nubjs.com/skill.md — a different artifact
+  # with a different audience, not an agent playbook.
+  for rival in "$SKILLS_ROOT/.agents/skills" "$SKILLS_ROOT/.opencode/skills"; do
+    [ -d "$rival" ] || continue
+    if find "$rival" -name SKILL.md 2>/dev/null | grep -q .; then
+      echo "pre-push: a second agent-skill tree exists at ${rival#"$SKILLS_ROOT"/} — playbooks" >&2
+      echo "          must live only in .claude/skills. Two trees drift silently; that is" >&2
+      echo "          the bug this check exists to prevent. Move them in, delete the copy." >&2
+      skills_bad=1
+    fi
+  done
+
+  # Every skill directory needs a SKILL.md carrying name + description, or the
+  # harness will not register it — again, with no error shown to anyone.
+  for d in "$SKILLS_ROOT"/.claude/skills/*/; do
+    [ -d "$d" ] || continue
+    name=$(basename "$d")
+    if [ ! -f "$d/SKILL.md" ]; then
+      echo "pre-push: .claude/skills/$name has no SKILL.md — it will never register." >&2
+      skills_bad=1
+      continue
+    fi
+    for field in name description; do
+      if ! head -20 "$d/SKILL.md" | grep -q "^${field}:"; then
+        echo "pre-push: .claude/skills/$name/SKILL.md has no frontmatter \`${field}:\`" >&2
+        echo "          — without it the skill is invisible to every agent." >&2
+        skills_bad=1
+      fi
+    done
+  done
+
+  # A canonical skill that git refuses to track is the .git/info/exclude trap.
+  for d in "$SKILLS_ROOT"/.claude/skills/*/; do
+    [ -f "$d/SKILL.md" ] || continue
+    name=$(basename "$d")
+    case "$name" in nub|sandbox-pentest) continue ;; esac  # deliberately local-only
+    if git -C "$SKILLS_ROOT" check-ignore -q ".claude/skills/$name/SKILL.md" 2>/dev/null; then
+      echo "pre-push: .claude/skills/$name is git-IGNORED, so \`git add\` silently skips it." >&2
+      echo "          Remove its entry from .gitignore or .git/info/exclude." >&2
+      skills_bad=1
+    fi
+  done
+
+  # The gh-comment-guard exists once per agent (.claude/ for Claude Code, .codex/
+  # for Codex) because the two read different config files — there is no shared
+  # hook location. The SCRIPT, though, is agent-neutral: both runners pass a JSON
+  # payload with tool_input.command on stdin. Two copies with no sync is exactly
+  # how the skills tree drifted, so require them byte-identical.
+  claude_guard="$SKILLS_ROOT/.claude/hooks/gh-comment-guard.mjs"
+  codex_guard="$SKILLS_ROOT/.codex/hooks/gh-comment-guard.mjs"
+  if [ -f "$claude_guard" ] && [ -f "$codex_guard" ] && ! cmp -s "$claude_guard" "$codex_guard"; then
+    echo "pre-push: .claude/hooks/gh-comment-guard.mjs and .codex/hooks/gh-comment-guard.mjs" >&2
+    echo "          have DRIFTED. They are per-agent copies of one script and must match;" >&2
+    echo "          copy whichever is correct over the other." >&2
+    skills_bad=1
+  fi
+
+  # A hook command carrying someone's home directory works on exactly one machine
+  # and in no worktree. Codex sets NO project-dir env var (verified: the binary
+  # has neither CLAUDE_PROJECT_DIR nor CODEX_PROJECT_DIR), so the portable form
+  # is a command substitution — $(git rev-parse --show-toplevel).
+  if [ -f "$SKILLS_ROOT/.codex/hooks.json" ] && grep -q '"command".*/Users/\|"command".*/home/' "$SKILLS_ROOT/.codex/hooks.json"; then
+    echo "pre-push: .codex/hooks.json hardcodes an absolute home path — it will break in" >&2
+    echo "          every worktree and on every other machine. Use:" >&2
+    echo "          node \"\$(git rev-parse --show-toplevel)/.codex/hooks/gh-comment-guard.mjs\"" >&2
+    skills_bad=1
+  fi
+
+  if [ "$skills_bad" = 1 ]; then
+    echo >&2
+    echo "pre-push: AGENT TOOLING INTEGRITY CHECK FAILED — fix the above, or bypass" >&2
+    echo "          with: git push --no-verify" >&2
+    exit 1
+  fi
+fi
+
+# ── Knowledge-graph gate ────────────────────────────────────────────────
+#
+# WHY THIS EXISTS: `lat check` validates the wiki/ graph AND the `@lat:`
+# backlinks in Rust source, so a rename in crates/ can break it just as a doc
+# edit can. Without this, a broken graph is only caught by the lat-check job
+# after the push. lat-check.yml does run on pull requests to main, so the gap it
+# leaves is narrower than "nothing": a branch pushed with no PR open yet, and a
+# stacked PR based on another branch, which the workflow's own header names.
+#
+# Runs unconditionally rather than on a path filter, because the failure mode is
+# cross-cutting: the source half of the graph is exactly what a path filter for
+# wiki/** would miss. ~5s warm.
+#
+# NEVER BLOCKS ON INFRASTRUCTURE, matching the site gate below: only a genuine
+# "errors found" from the checker exits non-zero. An npx that cannot reach the
+# registry, a missing Node — all warn and pass. A hook that hard-fails on setup
+# gets bypassed permanently, which protects nothing.
+#
+# Bypass: NUB_SKIP_LAT_CHECK=1 git push   ·   git push --no-verify
+# Not covered by the bypass above: this one is free, so there is nothing to skip.
+#
+# ⛔ RESOLVED BESIDE THIS HOOK, NOT UNDER $SKILLS_ROOT — same reason as pre-commit's copy.
+# `core.hooksPath` is an absolute path into the SHARED tree, so this hook runs for every worktree
+# while $SKILLS_ROOT is the WORKTREE's toplevel; a branch predating the helper has no file there and
+# the hook hard-failed, blocking pushes from an otherwise-consistent branch. The philosophy stated
+# just above — infrastructure absence WARNS, it does not block — applies to the helper's own
+# absence too, and CI's lat-check mirrors the assert regardless.
+HOOK_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || HOOK_DIR="$SKILLS_ROOT/.githooks"
+if [ -f "$HOOK_DIR/agents-symlink-check.sh" ]; then
+  sh "$HOOK_DIR/agents-symlink-check.sh" || exit 1
+else
+  echo "pre-push: agents-symlink-check.sh not found beside this hook; skipping (CI still gates it)." >&2
+fi
+
+if [ -z "${NUB_SKIP_LAT_CHECK:-}" ] && [ -n "$SKILLS_ROOT" ] && [ -d "$SKILLS_ROOT/wiki" ]; then
+  # CANNOT-RUN IS NOT A VIOLATION, and conflating the two broke every push from a branch that
+  # predates this linter. `core.hooksPath` here is an ABSOLUTE path into the main checkout, so a
+  # worktree on any branch runs MAIN's hooks against ITS OWN tree — and a branch without the script
+  # died MODULE_NOT_FOUND under a banner reading WIKI PUBLIC LINT FAILED. Agents then pushed with
+  # the bypass the banner prints, which switches the gate off for real violations too. The `lat`
+  # gate below already separates the two cases; this one now does the same.
+  if [ ! -f "$SKILLS_ROOT/scripts/wiki-public-lint.mjs" ]; then
+    echo "pre-push: wiki-public-lint.mjs is not in this worktree — skipping the wiki gate (CI still gates it)." >&2
+  else
+  lint_out=$(cd "$SKILLS_ROOT" && node scripts/wiki-public-lint.mjs 2>&1) || {
+    printf '%s\n' "$lint_out" | head -20 >&2
+    echo "pre-push: WIKI PUBLIC LINT FAILED — see scripts/wiki-public-lint.mjs. Bypass: NUB_SKIP_LAT_CHECK=1" >&2
+    exit 1
+  }
+  fi
+  lat_out=$(cd "$SKILLS_ROOT" && npm run --silent lat:check 2>&1)
+  lat_rc=$?
+  if printf '%s' "$lat_out" | grep -qE "[0-9]+ errors? found"; then
+    printf '%s\n' "$lat_out" | grep "^- " | head -20 >&2
+    cat >&2 <<'MSG'
+
+pre-push: LAT CHECK FAILED — the knowledge graph has broken links or refs.
+          Fix them, or bypass with:  git push --no-verify
+MSG
+    exit 1
+  elif [ "$lat_rc" -ne 0 ]; then
+    echo "pre-push: could not run lat check — skipping the graph gate." >&2
+    printf '%s\n' "$lat_out" | tail -3 | sed -e 's/^/          /' >&2
+  fi
+fi
+
+# ── Cross-runtime results-table gate ────────────────────────────────────────
+# WHY THIS EXISTS: the figures in tests/cross-runtime/README.md are generated
+# from results.json by readme-table.mjs, and a retyped or stale table reached
+# review three rounds running before the generator existed. `--check` is ~50ms
+# and runs only when the pushed range touches tests/cross-runtime/**. Like the
+# site gate, an undecidable range runs the check rather than skipping it.
+#
+# The push refs on stdin are read ONCE here and replayed to every gate below.
+# Bypass: NUB_SKIP_README_TABLE_CHECK=1 git push   ·   git push --no-verify
+PUSH_REFS=$(cat)
+if [ -z "${NUB_SKIP_README_TABLE_CHECK:-}" ] && [ -n "$SKILLS_ROOT" ] && [ -f "$SKILLS_ROOT/tests/cross-runtime/readme-table.mjs" ]; then
+  table_touched=0
+  while read -r _local_ref local_sha _remote_ref remote_sha; do
+    case "$local_sha" in *[!0]*) ;; *) continue ;; esac
+    case "$remote_sha" in
+      *[!0]*) base="$remote_sha" ;;
+      *) base=$(git merge-base "$local_sha" origin/main 2>/dev/null) ;;
+    esac
+    [ -n "$base" ] || { table_touched=1; continue; }
+    # The checker also validates figures hand-copied into the site and the
+    # wiki, so a push touching only those surfaces must run it too.
+    changed=$(git diff --name-only "$base" "$local_sha" -- tests/cross-runtime/ "site/src/app/(home)/page.tsx" site/content/blog/introducing-nub.mdx wiki/research/node-test-suite-leverage.md 2>/dev/null) || table_touched=1
+    [ -n "$changed" ] && table_touched=1
+  done <<PUSHREFS
+$PUSH_REFS
+PUSHREFS
+  # Only the checker's drift verdict (exit 1) blocks. Anything else — no node
+  # on a GUI client's PATH (127), markers missing (2), an unreadable
+  # results.json — is infrastructure, and warns like the other gates. The check
+  # reads the WORKING TREE while the range names the pushed commits, so a dirty
+  # tree can fail a push whose commits are clean (the site gate's caveat too).
+  if [ "$table_touched" = 1 ]; then
+    (cd "$SKILLS_ROOT" && node tests/cross-runtime/readme-table.mjs --check) >&2
+    table_rc=$?
+    if [ "$table_rc" = 1 ]; then
+      echo "pre-push: tests/cross-runtime/README.md's results table does not match results.json." >&2
+      echo "          Regenerate it:  node tests/cross-runtime/readme-table.mjs --write" >&2
+      exit 1
+    elif [ "$table_rc" != 0 ]; then
+      echo "pre-push: results-table check could not run (exit $table_rc); skipping." >&2
+    fi
+  fi
+fi
+
+# A change to the machine-global rustc governor must bump its version stamp, or
+# build-status can no longer tell a stale installed copy from a current one.
+# The base is the MERGE-BASE with trunk, not the branch's previous push — the
+# stamp names a version of the protocol, so CI's build-slots job wants one bump
+# per pull request and this gate must want the same, not one per push.
+# Bypass: NUB_SKIP_QOS_VERSION_CHECK=1 git push
+#
+if [ -z "${NUB_SKIP_QOS_VERSION_CHECK:-}" ] && [ -n "$SKILLS_ROOT" ] \
+  && [ -x "$SKILLS_ROOT/scripts/rustc-qos-version-check.sh" ]; then
+  while read -r _local_ref local_sha _remote_ref remote_sha; do
+    case "$local_sha" in *[!0]*) ;; *) continue ;; esac
+    base=$(git merge-base "$local_sha" origin/main 2>/dev/null) || base=""
+    [ -n "$base" ] || continue
+    (cd "$SKILLS_ROOT" && scripts/rustc-qos-version-check.sh "$base" "$local_sha") || exit 1
+  done <<PUSHREFS
+$PUSH_REFS
+PUSHREFS
+fi
+
+# Every tracked Cargo.lock must still satisfy its manifest. ~1.4s warm, and only
+# when the pushed range touches a Cargo.toml or Cargo.lock.
+#
+# WHY THIS EXISTS: this repo has five tracked locks across four workspaces plus a
+# path dependency, and the local build steps all omit `--locked` and silently
+# re-resolve — so a stale lock produces no local signal at all and the first thing
+# that fails is a `--locked` step in CI, ~20 minutes after the push. A lock with no
+# CI gate is worse still: `crates/nub-phantom` had none until 2026-09-02 and its
+# lock named a crate the manifest no longer selected while every check stayed green.
+#
+# Only a genuine staleness verdict (exit 1) blocks. The checker deliberately
+# reports "unverified" and exits 0 when neither the crate cache nor the network can
+# answer, so a fresh worktree or an offline push warns instead of inventing a
+# dependency problem — the failure mode of the recipe this replaced.
+# Bypass: NUB_SKIP_LOCKFILE_CHECK=1 git push   ·   git push --no-verify
+if [ -z "${NUB_SKIP_LOCKFILE_CHECK:-}" ] && [ -n "$SKILLS_ROOT" ] \
+  && [ -x "$SKILLS_ROOT/scripts/check-lockfiles.sh" ]; then
+  locks_touched=0
+  while read -r _local_ref local_sha _remote_ref remote_sha; do
+    case "$local_sha" in *[!0]*) ;; *) continue ;; esac
+    case "$remote_sha" in
+      *[!0]*) base="$remote_sha" ;;
+      *) base=$(git merge-base "$local_sha" origin/main 2>/dev/null) ;;
+    esac
+    # An undecidable range runs the check rather than skipping it, matching the
+    # other gates: skipping costs a red CI round trip, running costs a second.
+    [ -n "$base" ] || { locks_touched=1; continue; }
+    changed=$(git diff --name-only "$base" "$local_sha" -- '*Cargo.toml' '*Cargo.lock' 2>/dev/null) || locks_touched=1
+    [ -n "$changed" ] && locks_touched=1
+  done <<PUSHREFS
+$PUSH_REFS
+PUSHREFS
+  if [ "$locks_touched" = 1 ]; then
+    (cd "$SKILLS_ROOT" && scripts/check-lockfiles.sh) >&2
+    lock_rc=$?
+    if [ "$lock_rc" = 1 ]; then
+      echo "pre-push: a Cargo.lock does not satisfy its manifest (see above)." >&2
+      echo "          Fix:  scripts/check-lockfiles.sh --fix   then commit the lock." >&2
+      echo "          Bypass: NUB_SKIP_LOCKFILE_CHECK=1" >&2
+      exit 1
+    elif [ "$lock_rc" != 0 ]; then
+      echo "pre-push: lockfile check could not run (exit $lock_rc); skipping." >&2
+    fi
+  fi
+fi
+
 [ "${NUB_SKIP_SITE_CHECK:-}" = "1" ] && exit 0
 
-ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+ROOT="$SKILLS_ROOT"
+[ -n "$ROOT" ] || exit 0
 [ -d "$ROOT/site" ] || exit 0
 
 # Decide whether the pushed range touches site/**. FAIL SAFE, matching the
@@ -61,9 +352,28 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
   fi
   changed=$(git diff --name-only "$base" "$local_sha" -- site/ 2>/dev/null) || undecidable=1
   [ -n "$changed" ] && site_touched=1
-done
+done <<PUSHREFS
+$PUSH_REFS
+PUSHREFS
 
 [ "$site_touched" = 1 ] || [ "$undecidable" = 1 ] || exit 0
+
+# Code-block width, before the build. An over-long fenced line gives the docs a
+# horizontal scrollbar, which `next build` is perfectly happy about — so nothing
+# else catches it. Pure Node with no dependencies, so it runs even in a worktree
+# whose site deps are absent, and it costs milliseconds.
+if [ -f "$ROOT/site/scripts/lint-code-line-length.mjs" ]; then
+  if ! (cd "$ROOT/site" && node scripts/lint-code-line-length.mjs) >&2; then
+    cat >&2 <<'MSG'
+
+pre-push: CODE LINE-LENGTH FAILED — those lines scroll sideways in the docs.
+          Shorten the line, move a trailing comment above it, or mark a
+          verbatim transcript with a `wide` token on its fence.
+          Bypass: git push --no-verify
+MSG
+    exit 1
+  fi
+fi
 
 if [ ! -x "$ROOT/site/node_modules/.bin/next" ]; then
   if ! command -v pnpm >/dev/null 2>&1; then

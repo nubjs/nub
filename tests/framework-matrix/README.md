@@ -41,7 +41,7 @@ tests/framework-matrix/matrix.sh -b target/fast/nub --isolate-store    # fresh p
 
 `frameworks.sh list` prints the known names. Each scaffolder is pinned via a
 `*_CREATE` env var (`VITE_CREATE`, `ASTRO_CREATE`, `SVELTE_CREATE`, `NUXT_CREATE`,
-`NEXT_CREATE`) — pin a major (e.g. `VITE_CREATE=vite@7`) to freeze the emitted
+`NEXT_CREATE`; `NEXT_GVS_VERSION` pins the Next release the `next-gvs` arm installs) — pin a major (e.g. `VITE_CREATE=vite@7`) to freeze the emitted
 framework/bundler version. `run.sh` records the exact resolved versions and
 layout in each row, so any generator drift is visible, not silent.
 
@@ -54,6 +54,7 @@ layout in each row, so any generator drift is visible, not silent.
 | `sveltekit` | `sv create` (SvelteKit CLI) | `npx sv@latest create <dir> --template minimal --types ts --no-add-ons` |
 | `nuxt` | `nuxi init` | `npx nuxi@latest init <dir> --template minimal --no-install --packageManager npm --gitInit false` |
 | `next` | create-next-app | `npx create-next-app@latest <dir> --ts --no-eslint --no-tailwind --no-src-dir --app --no-turbopack --import-alias '@/*' --use-npm --skip-install` |
+| `next-gvs` | create-next-app | the same scaffold with `--turbopack`, `next` pinned to `NEXT_GVS_VERSION` (default `16.4.0-canary.37`), plus a `next.config.ts` that sets `experimental.turbopackAdditionalRoots` to nub's store and an `.npmrc` lifting the release-age floor |
 
 Generator CLIs change flags often; treat these as the verified starting point and
 adjust per release. Adding a framework is one `case` arm in `frameworks.sh` (its
@@ -96,6 +97,23 @@ project-local), asserts they build/serve, and asserts the layout is
 `--force-gvs` never applies to a `GVS=exclude` framework. For these the
 `INJECTED` column is `n/a` (the whole tree is project-local — GVS isn't engaged).
 
+## Next on the shared store (`next-gvs`, expected `gvs-store`)
+
+Next.js 16.4 adds `experimental.turbopackAdditionalRoots`
+([vercel/next.js#98003](https://github.com/vercel/next.js/pull/98003)): a
+configured root that Turbopack may follow symlinks into. Pointed at nub's store
+(`~/.cache/nub/pm/store`, or `$XDG_CACHE_HOME`/`NUB_CACHE_DIR` equivalents),
+it lifts the realpath-locality break that puts `next` on the trigger above. The
+`next-gvs` arm is the same create-next-app scaffold with that config written in,
+`next` pinned to a release that has the option, and `GVS=require`: the store is
+forced on regardless of `--force-gvs`, and the row PASSes only with the
+`gvs-store` layout. Under that install `next` itself lands project-local (it is
+phantom-ejected), while React and the rest link into the store — which is exactly
+what the root must make reachable. Build, dev, start, and a relocated
+`output: "standalone"` all pass on 16.4.0-canary.37. Bump `NEXT_GVS_VERSION`
+to the first stable that carries the option once 16.4.0 ships, and drop the
+`.npmrc` release-age override with it.
+
 ## Known issue flagged (not a matrix regression)
 
 - **Nuxt under GVS** — a scule-phantom bug (a transitive undeclared import the
@@ -107,5 +125,5 @@ project-local), asserts they build/serve, and asserts the layout is
 
 A framework PASSes when install, dev-serve (HTTP 200 + a clean server log),
 production build, and build-serve (HTTP 200) all succeed. A `GVS=exclude`
-framework additionally must land `project-local`. `matrix.sh` exits non-zero on
-any non-excluded FAIL.
+framework additionally must land `project-local`, and a `GVS=require` framework
+must land `gvs-store`. `matrix.sh` exits non-zero on any non-excluded FAIL.

@@ -23,7 +23,8 @@ use cas::copy_dir_recursive;
 pub(crate) use cas::parse_compress_store_gate;
 #[cfg(test)]
 use git::{
-    codeload_cache_paths, extract_codeload_tarball_at, git_commit_matches, validate_git_positional,
+    codeload_cache_paths, extract_codeload_tarball_at, git_command, git_commit_matches,
+    validate_git_positional,
 };
 pub use index::{PackageIndex, StoredFile, index_content_fingerprint};
 pub use integrity::{
@@ -47,10 +48,10 @@ use sha1::Sha1;
 #[cfg(test)]
 use sha2::{Digest as _, Sha256, Sha384, Sha512};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub const CACHE_DIR_NAME: &str = "aube-cache";
 pub const INDEX_SUBDIR: &str = "index";
@@ -58,8 +59,79 @@ pub const INDEX_SUBDIR: &str = "index";
 /// single-`clonefile(2)` clone sources for the macOS whole-dir linker
 /// fast path. See [`Store::trees_dir`].
 pub const TREES_SUBDIR: &str = "trees";
+
+/// Separator between a tree key's coordinate and its content digest.
+/// `dep_path_to_filename` never emits `=` for a real dep path (npm names,
+/// semver versions and the hashed local/git/url forms cannot contain it),
+/// so the split in [`tree_key_coordinate`] is unambiguous.
+const TREE_KEY_CONTENT_SEPARATOR: char = '=';
+const TREE_KEY_CONTENT_HEX_LEN: usize = 32;
+
+/// Key of the extracted tree holding `index`, for the package whose
+/// virtual-store subdir name is `coordinate`.
+///
+/// The tree is cloned verbatim into every later materialization with the
+/// same key, so the key must determine the bytes. A coordinate alone does
+/// not: a `file:` tarball's dep path hashes its relative PATH, so two
+/// projects with `file:../p.tgz` — or one project whose tarball was
+/// rebuilt — share a coordinate while their contents differ, and keying by
+/// coordinate alone cloned the first tarball's files into every later
+/// install. The index content fingerprint is appended so a tree is only
+/// ever reused for byte-identical content. The coordinate stays as the
+/// prefix so `store prune` can match a tree to the live virtual-store
+/// entries that use it.
+pub fn tree_key(coordinate: &str, index: &PackageIndex) -> String {
+    let digest = index_content_fingerprint(index);
+    format!(
+        "{coordinate}{TREE_KEY_CONTENT_SEPARATOR}{}",
+        &digest[..TREE_KEY_CONTENT_HEX_LEN]
+    )
+}
+
+/// The coordinate part of a tree directory name — the inverse of
+/// [`tree_key`]. A name without a content digest (a tree written before
+/// trees were content-keyed) is returned unchanged.
+pub fn tree_key_coordinate(name: &str) -> &str {
+    match name.rsplit_once(TREE_KEY_CONTENT_SEPARATOR) {
+        Some((coordinate, digest))
+            if digest.len() == TREE_KEY_CONTENT_HEX_LEN
+                && digest.bytes().all(|b| b.is_ascii_hexdigit()) =>
+        {
+            coordinate
+        }
+        _ => name,
+    }
+}
+/// Registry of projects that have installed against the global virtual
+/// store, kept INSIDE it as `<virtual-store>/.projects/<hash>.json` records.
+/// A leading dot cannot collide with a store entry: entry names come from
+/// `dep_path_to_filename`, and an npm package name may not begin with a
+/// dot. Living inside the store keeps one delete/backup unit for the whole
+/// tier, matching pnpm's `<store>/projects/`. The record format and every
+/// read/write of it belong to the `aube` crate's project registry; this
+/// crate only names the directory.
+pub const PROJECTS_SUBDIR: &str = ".projects";
 pub const PACKUMENT_CACHE_SUBDIR: &str = "packuments-v1";
 pub const PACKUMENT_FULL_CACHE_SUBDIR: &str = "packuments-full-v1";
+pub const MAINTENANCE_LOCK_FILE: &str = ".maintenance.lock";
+
+#[derive(Default)]
+struct MaintenanceState {
+    shared: Mutex<Option<std::fs::File>>,
+}
+
+/// Exclusive store-maintenance lease held by `aube store prune`.
+///
+/// Every CAS/index writer takes the corresponding shared lease through
+/// [`Store::prepare_for_write`], so holding this guard freezes one complete
+/// prune snapshot across the GVS, cached indexes, and CAS files.
+pub struct StoreMaintenanceGuard(std::fs::File);
+
+impl Drop for StoreMaintenanceGuard {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
 
 /// The global content-addressable store, owned by aube.
 ///
@@ -81,6 +153,12 @@ pub const PACKUMENT_FULL_CACHE_SUBDIR: &str = "packuments-full-v1";
 #[derive(Clone)]
 pub struct Store {
     root: PathBuf,
+    /// A second CAS root consulted, read-only, when `root` lacks a file or
+    /// package index. Set when `root` is a project-local fallback standing
+    /// in for a global store this process may read but not write (a coding
+    /// agent's sandbox), so a warm global store still serves the install
+    /// and only NEW content lands in the fallback.
+    read_fallback: Option<PathBuf>,
     cache_dir: PathBuf,
     /// Root of the global virtual store. Defaults to
     /// `<cache_dir>/virtual-store` and is overridden wholesale by the
@@ -88,13 +166,16 @@ pub struct Store {
     /// `storeDir` volume so materialized packages can be hardlinked
     /// out of the CAS.
     virtual_store_dir: PathBuf,
+    maintenance: Arc<MaintenanceState>,
+    migration_done: Arc<OnceLock<()>>,
     /// When set, `create_cas_file` writes directly to the final
-    /// content-addressed path on non-Linux platforms instead of the
-    /// tempfile-then-rename dance. Caller must guarantee no concurrent
-    /// installer is writing into this store — typically via an exclusive
-    /// file lock taken at install start. Linux is unaffected because the
-    /// O_TMPFILE+linkat path is already atomic-by-construction.
+    /// content-addressed path on Linux/macOS instead of using atomic
+    /// publication. The paired lock file remains owned by every clone of
+    /// this state, so detached blocking imports cannot outlive the exclusive
+    /// store lock that makes direct writes safe.
     fast_path: Arc<AtomicBool>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fast_path_lock: Arc<Mutex<Option<std::fs::File>>>,
 }
 
 impl Store {
@@ -135,14 +216,17 @@ impl Store {
     /// pipeline can honor a configured `storeDir` in an environment with no
     /// HOME (a stripped test env, a minimal container).
     pub fn with_dirs(root: PathBuf, cache_dir: PathBuf) -> Self {
-        let store = Self {
+        Self {
             root,
+            read_fallback: None,
             virtual_store_dir: cache_dir.join(aube_util::embedder().virtual_store_subdir),
             cache_dir,
+            maintenance: Arc::new(MaintenanceState::default()),
+            migration_done: Arc::new(OnceLock::new()),
             fast_path: Arc::new(AtomicBool::new(false)),
-        };
-        store.migrate_legacy_index_dir();
-        store
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            fast_path_lock: Arc::new(Mutex::new(None)),
+        }
     }
 
     /// Point the global virtual store somewhere other than
@@ -154,6 +238,35 @@ impl Store {
         self
     }
 
+    /// Read through to a second CAS root (`<store>/v1/files`) when this
+    /// store lacks a file or index. Nothing is ever written there.
+    #[must_use]
+    pub fn with_read_fallback(mut self, root: PathBuf) -> Self {
+        self.read_fallback = Some(root);
+        self
+    }
+
+    /// Prefer `primary` if it exists; else the same relative location under
+    /// the read fallback if THAT exists; else `primary`, so a miss writes to
+    /// this store. `rel` is the path relative to the CAS root's parent
+    /// (`v1/`), which covers both `files/<shard>/<rest>` and `index/...`.
+    fn read_through(&self, primary: PathBuf, rel: &Path) -> PathBuf {
+        if primary.exists() {
+            return primary;
+        }
+        match &self.read_fallback {
+            Some(fallback) => {
+                let candidate = fallback.parent().unwrap_or(fallback).join(rel);
+                if candidate.exists() {
+                    candidate
+                } else {
+                    primary
+                }
+            }
+            None => primary,
+        }
+    }
+
     /// Open the store at a specific path (cache dir derived from store root).
     /// Used by tests that need a fully isolated layout; production code
     /// should prefer `with_dirs`.
@@ -161,29 +274,32 @@ impl Store {
         let cache_dir = root.parent().unwrap_or(&root).join(CACHE_DIR_NAME);
         Self {
             root,
+            read_fallback: None,
             virtual_store_dir: cache_dir.join(aube_util::embedder().virtual_store_subdir),
             cache_dir,
+            maintenance: Arc::new(MaintenanceState::default()),
+            migration_done: Arc::new(OnceLock::new()),
             fast_path: Arc::new(AtomicBool::new(false)),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            fast_path_lock: Arc::new(Mutex::new(None)),
         }
     }
 
-    /// Enable the macOS direct-write fast path for CAS imports. Bypasses
+    /// Enable the Linux/macOS direct-write fast path for CAS imports. Bypasses
     /// the tempfile + persist_noclobber pattern and writes straight to
     /// the final content-addressed path, saving ~80µs/file on APFS. The
-    /// caller MUST hold an exclusive lock against the store for the
-    /// duration any thread might invoke `import_bytes`; otherwise a
-    /// concurrent installer can observe a partial file and the
-    /// `AlreadyExisted` recovery dance can clobber an in-flight write.
+    /// `lock` MUST already hold the store's exclusive install lock. The
+    /// store takes ownership so the lock remains held until all clones used
+    /// by blocking imports are dropped.
     ///
-    /// macOS-gated rather than just declared inert on other platforms.
-    /// On Linux the `O_TMPFILE+linkat` path has no inline length-check
-    /// recovery — that recovery only lives inside the macOS fast-path
-    /// branch — so the outer skip in `import_bytes` (also macOS-gated
-    /// via `cfg!`) must never see the flag set on Linux. Removing the
-    /// method on non-macOS platforms makes that mismatch a build error
-    /// rather than a silent acceptance of torn CAS files.
-    #[cfg(target_os = "macos")]
-    pub fn enable_fast_path(&self) {
+    /// Unix-gated because the implementation relies on `OpenOptionsExt`.
+    /// Windows retains the named-tempfile publication path.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn enable_fast_path(&self, lock: std::fs::File) {
+        *self
+            .fast_path_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(lock);
         self.fast_path.store(true, Ordering::Release);
     }
 
@@ -220,12 +336,18 @@ impl Store {
     /// aube wrote cached package indexes before they were moved next
     /// to the CAS files. Used only by [`migrate_legacy_index_dir`]; new
     /// code should always go through [`index_dir`].
-    fn legacy_index_dir(&self) -> PathBuf {
+    pub fn legacy_index_dir(&self) -> PathBuf {
         self.cache_dir.join(INDEX_SUBDIR)
     }
 
+    /// Whether opening this store for writes would migrate the legacy index.
+    pub fn legacy_index_migration_needed(&self) -> bool {
+        self.legacy_index_dir().exists() && !self.index_dir().exists()
+    }
+
     /// One-shot migration from the legacy XDG-cache index location to
-    /// the in-store `v1/index/` directory. Runs at `Store::open`-time.
+    /// the in-store `v1/index/` directory. Runs when the store first prepares
+    /// for a write, after its shared maintenance lease is acquired.
     ///
     /// The legacy location was a footgun under Docker BuildKit cache
     /// mounts: users would mount the CAS files dir, the indexes would
@@ -298,6 +420,92 @@ impl Store {
         }
     }
 
+    pub fn maintenance_lock_path(&self) -> PathBuf {
+        self.store_v1_dir().join(MAINTENANCE_LOCK_FILE)
+    }
+
+    fn open_maintenance_lock(&self) -> Result<std::fs::File, Error> {
+        let path = self.maintenance_lock_path();
+        let Some(parent) = path.parent() else {
+            return Err(Error::Io(
+                path,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "store maintenance lock has no parent",
+                ),
+            ));
+        };
+        std::fs::create_dir_all(parent).map_err(|e| Error::Io(parent.to_path_buf(), e))?;
+        // Readable: a shared lock on Linux NFS is a byte-range read lock,
+        // which a write-only descriptor cannot take (EBADF).
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|e| Error::Io(path, e))
+    }
+
+    /// Acquire the shared writer lease and perform any pending legacy-index
+    /// migration. The lease is retained by this `Store` and all of its clones.
+    pub fn prepare_for_write(&self) -> Result<(), Error> {
+        // `migration_done` is set only after the shared lease has been stored
+        // in `maintenance.shared` and migration has completed. Once visible,
+        // the Arc-owned lease remains live for every Store clone, so hot CAS
+        // and index writes can skip the maintenance mutex entirely.
+        if self.migration_done.get().is_some() {
+            return Ok(());
+        }
+        let mut shared = self.maintenance.shared.lock().map_err(|_| {
+            Error::Io(
+                self.maintenance_lock_path(),
+                std::io::Error::other("store maintenance lock state is poisoned"),
+            )
+        })?;
+        if shared.is_none() {
+            let file = self.open_maintenance_lock()?;
+            file.lock_shared()
+                .map_err(|e| Error::Io(self.maintenance_lock_path(), e))?;
+            *shared = Some(file);
+        }
+        drop(shared);
+        self.migration_done.get_or_init(|| {
+            self.migrate_legacy_index_dir();
+        });
+        Ok(())
+    }
+
+    /// Acquire an exclusive lease for a complete prune plan/apply operation.
+    pub fn lock_for_maintenance(&self) -> Result<StoreMaintenanceGuard, Error> {
+        let shared = self.maintenance.shared.lock().map_err(|_| {
+            Error::Io(
+                self.maintenance_lock_path(),
+                std::io::Error::other("store maintenance lock state is poisoned"),
+            )
+        })?;
+        if shared.is_some() {
+            return Err(Error::Io(
+                self.maintenance_lock_path(),
+                std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "this Store already holds a writer lease",
+                ),
+            ));
+        }
+        let file = self.open_maintenance_lock()?;
+        file.lock()
+            .map_err(|e| Error::Io(self.maintenance_lock_path(), e))?;
+        Ok(StoreMaintenanceGuard(file))
+    }
+
+    /// Apply the legacy-index migration while an exclusive maintenance lease
+    /// is held. Used by real prune after its candidate plan is complete.
+    pub fn migrate_legacy_index_for_maintenance(&self, _guard: &StoreMaintenanceGuard) {
+        self.migrate_legacy_index_dir();
+    }
+
+    /// Directory for the global virtual store (materialized packages).
     /// `<cacheDir>/<leaf>/` unless `globalVirtualStoreDir` moved it, so it
     /// follows `cacheDir` by default.
     ///
@@ -310,10 +518,81 @@ impl Store {
         self.virtual_store_dir.clone()
     }
 
+    /// Registry of projects installed against the global virtual store.
+    /// See [`PROJECTS_SUBDIR`] for why it lives inside the store.
+    pub fn projects_dir(&self) -> PathBuf {
+        self.virtual_store_dir.join(PROJECTS_SUBDIR)
+    }
+
+    /// Advisory lock serializing a store sweep against in-flight installs.
+    ///
+    /// The linker publishes a virtual-store entry under its FINAL name in
+    /// its step 1 (`place_materialized_entry` renames off a `.tmp-` name)
+    /// and only creates the project symlinks pointing at it in step 2. In
+    /// that window the entry is reachable from nothing, so an unsynchronized
+    /// sweep would delete a directory the running install is about to link —
+    /// and the install would then symlink at nothing and still exit 0.
+    ///
+    /// **No exclusive taker remains.** `store prune` now excludes installs
+    /// through [`Self::lock_for_maintenance`] and `.maintenance.lock`, which
+    /// every store writer takes shared via [`Self::prepare_for_write`], so
+    /// `.gc.lock` has shared holders only and the acquisitions below always
+    /// succeed immediately.
+    ///
+    /// Distinct from the existing `.install.lock`, which cannot serve here:
+    /// it is macOS-only and a `try_lock` whose failure path deliberately
+    /// continues, because it gates a CAS write optimization rather than
+    /// correctness.
+    fn gc_lock_file(&self) -> Option<std::fs::File> {
+        let dir = self.store_v1_dir();
+        std::fs::create_dir_all(&dir).ok()?;
+        // Readable, for the same NFS reason as `open_maintenance_lock`.
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(dir.join(".gc.lock"))
+            .ok()
+    }
+
+    /// Take the sweep lock SHARED for the duration of a link phase. Nothing
+    /// takes `.gc.lock` exclusively any more, so the wait path below is
+    /// currently unreachable.
+    ///
+    /// `on_wait` runs if the lock is not immediately available, before the
+    /// blocking acquire. Without it an install just stalls with no output and
+    /// then reports the waiting time as its own work — measured at 24 s of
+    /// silence against a held lock, ending in `✓ resolved 2 · reused 2 in
+    /// 24.0s`.
+    ///
+    /// Returns the guard; drop it to release. `None` means the lock could
+    /// not be taken at all (a filesystem without advisory locks), in which
+    /// case the caller proceeds unsynchronized — the same posture
+    /// `.install.lock` already takes, and the alternative is failing an
+    /// install over a lock file.
+    pub fn lock_for_link_with(&self, on_wait: impl FnOnce()) -> Option<std::fs::File> {
+        let file = self.gc_lock_file()?;
+        match file.try_lock_shared() {
+            Ok(()) => return Some(file),
+            Err(std::fs::TryLockError::WouldBlock) => on_wait(),
+            Err(std::fs::TryLockError::Error(_)) => return None,
+        }
+        file.lock_shared().ok()?;
+        Some(file)
+    }
+
+    /// [`Self::lock_for_link_with`] with no wait notice. For callers whose
+    /// critical section is a single file write, where a wait is imperceptible.
+    pub fn lock_for_link(&self) -> Option<std::fs::File> {
+        self.lock_for_link_with(|| {})
+    }
+
     /// Root of the per-package *extracted-tree* tier, a sibling of the
     /// CAS `files/` dir at `<v1_dir>/trees/`. Each entry is a real,
     /// fully-materialized package directory (every file reflinked from
-    /// the CAS) keyed by the linker's virtual-store subdir name. It
+    /// the CAS) keyed by [`tree_key`] — the linker's virtual-store subdir
+    /// name plus a digest of the package's file content. It
     /// exists solely as a single-`clonefile(2)` clone *source* for the
     /// macOS whole-dir materialization fast path: the kernel clones the
     /// whole tree in one syscall instead of the linker reflinking each
@@ -326,9 +605,8 @@ impl Store {
         self.store_v1_dir().join(TREES_SUBDIR)
     }
 
-    /// On-disk path of the extracted tree for `tree_key` (the linker's
-    /// virtual-store subdir name — already filesystem-safe, with `/`
-    /// flattened to `+`, so it's a single path component). The tree
+    /// On-disk path of the extracted tree for `tree_key` (see
+    /// [`tree_key`] — a single filesystem-safe path component). The tree
     /// root *is* the package root: files sit at the same relative
     /// layout they'd have under `<entry>/node_modules/<name>/`.
     pub fn tree_path(&self, tree_key: &str) -> PathBuf {
@@ -363,10 +641,55 @@ impl Store {
         Some(self.file_path_from_hex(&hex_hash))
     }
 
-    /// Get the path to a file in the store by its hex hash.
+    /// Get the path to a file in the store by its hex hash. A READ path: it
+    /// resolves to the read fallback when only that holds the file. Writers
+    /// use [`Self::write_path_from_hex`], which never leaves this store.
     pub fn file_path_from_hex(&self, hex_hash: &str) -> PathBuf {
+        let primary = self.write_path_from_hex(hex_hash);
+        if self.read_fallback.is_none() {
+            return primary;
+        }
+        let (shard, rest) = hex_hash.split_at(2);
+        let files_leaf = self.root.file_name().map(PathBuf::from).unwrap_or_default();
+        self.read_through(primary, &files_leaf.join(shard).join(rest))
+    }
+
+    /// Where a NEW CAS entry for `hex_hash` is created: always under this
+    /// store's own root. The read fallback is a store this process may not
+    /// write, so no create, temp file, or marker may ever be aimed at it.
+    pub(crate) fn write_path_from_hex(&self, hex_hash: &str) -> PathBuf {
         let (shard, rest) = hex_hash.split_at(2);
         self.root.join(shard).join(rest)
+    }
+
+    /// The read fallback's copy of `hex_hash` when it holds exactly `len`
+    /// bytes, so an import can share it instead of duplicating the bytes
+    /// into this store. `None` without a fallback or on a miss.
+    pub(crate) fn fallback_file_with_len(&self, hex_hash: &str, len: u64) -> Option<PathBuf> {
+        let fallback = self.read_fallback.as_ref()?;
+        let (shard, rest) = hex_hash.split_at(2);
+        let candidate = fallback.join(shard).join(rest);
+        cas::cas_file_matches_len(&candidate, len).then_some(candidate)
+    }
+}
+
+/// `Error::Io`'s message. A permission denial on a store path is almost
+/// always the store location, not the file — a sandbox or a store on a
+/// read-only mount — so it names the remedy (`store-dir`) and, when a coding
+/// agent's sandbox is detected, the sandbox; a bare "Operation not permitted"
+/// on a CAS temp path sent users hunting in the wrong place.
+fn io_error_message(path: &Path, e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem => {
+            let sandbox = aube_util::agent_sandbox::detect()
+                .map(|s| format!(", or rerun the command outside the {} sandbox", s.label()))
+                .unwrap_or_default();
+            format!(
+                "store is not writable at {}: {e} — set `store-dir` in .npmrc to a writable location{sandbox}",
+                path.display()
+            )
+        }
+        _ => format!("I/O error at {}: {e}", path.display()),
     }
 }
 
@@ -376,7 +699,7 @@ pub enum Error {
     #[error("HOME environment variable not set")]
     #[diagnostic(code(ERR_AUBE_NO_HOME))]
     NoHome,
-    #[error("I/O error at {0}: {1}")]
+    #[error("{}", io_error_message(.0, .1))]
     Io(PathBuf, std::io::Error),
     #[error("file error: {0}")]
     Xx(String),
@@ -406,10 +729,105 @@ mod tests {
     fn store_for_migration_test(root: PathBuf, cache_dir: PathBuf) -> Store {
         Store {
             root,
+            read_fallback: None,
             virtual_store_dir: cache_dir.join(aube_util::embedder().virtual_store_subdir),
             cache_dir,
+            maintenance: Arc::new(MaintenanceState::default()),
+            migration_done: Arc::new(OnceLock::new()),
             fast_path: Arc::new(AtomicBool::new(false)),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            fast_path_lock: Arc::new(Mutex::new(None)),
         }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn fast_path_lock_lives_until_last_store_clone_drops() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("v1/files");
+        std::fs::create_dir_all(&root).unwrap();
+        let lock_path = tmp.path().join("v1/.install.lock");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        lock.try_lock().unwrap();
+
+        let store = Store::at(root);
+        store.enable_fast_path(lock);
+        let blocking_import_store = store.clone();
+        drop(store);
+
+        let contender = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        assert!(matches!(
+            contender.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+
+        drop(blocking_import_store);
+        contender.try_lock().unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn unlocked_import_waits_for_direct_writer_before_recovery() {
+        use std::io::Write;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("v1/files");
+        let store = Store::at(root);
+        store.ensure_shards_exist().unwrap();
+
+        let content = b"a direct writer may still be filling this CAS object";
+        let hex_hash = blake3_hex(content);
+        let store_path = store.file_path_from_hex(&hex_hash);
+        let lock_path = tmp.path().join("v1/.install.lock");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        lock.try_lock().unwrap();
+
+        let mut partial = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&store_path)
+            .unwrap();
+        partial.write_all(&content[..1]).unwrap();
+        partial.flush().unwrap();
+
+        let import_store = store.clone();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let importer = std::thread::spawn(move || {
+            let result = import_store.import_bytes(content, false);
+            finished_tx.send(()).unwrap();
+            result
+        });
+
+        assert!(matches!(
+            finished_rx.recv_timeout(Duration::from_millis(200)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+
+        partial.write_all(&content[1..]).unwrap();
+        partial.flush().unwrap();
+        drop(partial);
+        drop(lock);
+
+        finished_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let stored = importer.join().unwrap().unwrap();
+        assert_eq!(std::fs::read(stored.store_path).unwrap(), content);
     }
 
     #[test]
@@ -510,6 +928,52 @@ mod tests {
     }
 
     #[test]
+    fn maintenance_lock_waits_for_writer_lease() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("store/v1/files");
+        let cache = tmp.path().join("cache");
+        let writer = Store::with_dirs(root.clone(), cache.clone());
+        writer.prepare_for_write().unwrap();
+
+        let maintenance = Store::with_dirs(root, cache);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let guard = maintenance.lock_for_maintenance().unwrap();
+            tx.send(()).unwrap();
+            drop(guard);
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "maintenance must wait while a writer lease is live"
+        );
+        drop(writer);
+        rx.recv_timeout(std::time::Duration::from_secs(2))
+            .expect("maintenance should proceed after the writer exits");
+        handle.join().unwrap();
+    }
+
+    /// Linux NFS emulates flock() with byte-range locks, and a shared lock
+    /// is a read lock, which a write-only descriptor cannot take (EBADF).
+    /// Local flock ignores the access mode, so this asserts on the
+    /// descriptors rather than on a successful lock.
+    #[test]
+    fn shared_lock_files_open_readable() {
+        use std::io::Read;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::with_dirs(tmp.path().join("store/v1/files"), tmp.path().join("cache"));
+        for (name, file) in [
+            (".maintenance.lock", store.open_maintenance_lock().ok()),
+            (".gc.lock", store.gc_lock_file()),
+        ] {
+            let mut file = file.unwrap_or_else(|| panic!("{name} should open"));
+            if let Err(e) = file.read_to_end(&mut Vec::new()) {
+                panic!("{name} must be opened readable: {e}");
+            }
+        }
+    }
+
+    #[test]
     fn store_v1_dir_is_parent_of_files() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("data/aube/store/v1/files");
@@ -564,6 +1028,135 @@ mod tests {
     fn test_integrity_to_hex_sha256() {
         let hex = integrity_to_hex("sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=").unwrap();
         assert_eq!(hex.len(), 64);
+    }
+
+    #[test]
+    fn read_fallback_serves_files_and_indexes_the_primary_lacks() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global/v1/files");
+        let local = dir.path().join("local/v1/files");
+        let hex = "abcdef1234567890abcdef1234567890";
+        let (shard, rest) = hex.split_at(2);
+        std::fs::create_dir_all(global.join(shard)).unwrap();
+        std::fs::write(global.join(shard).join(rest), b"warm").unwrap();
+        let index_rel = PathBuf::from(INDEX_SUBDIR).join("dep@1.0.0.json");
+        std::fs::create_dir_all(global.parent().unwrap().join(INDEX_SUBDIR)).unwrap();
+        std::fs::write(global.parent().unwrap().join(&index_rel), b"{}").unwrap();
+
+        let store = Store::at(local.clone()).with_read_fallback(global.clone());
+        // A file only the fallback holds resolves there; a miss everywhere
+        // resolves to the primary, so a write lands in the local store.
+        assert_eq!(store.file_path_from_hex(hex), global.join(shard).join(rest));
+        assert!(store.file_path_from_hex("ffff0000").starts_with(&local));
+        assert_eq!(
+            store.index_path("dep", "1.0.0", None).unwrap(),
+            global.parent().unwrap().join(&index_rel)
+        );
+        // Once the primary has its own copy, it wins.
+        std::fs::create_dir_all(local.join(shard)).unwrap();
+        std::fs::write(local.join(shard).join(rest), b"new").unwrap();
+        assert_eq!(store.file_path_from_hex(hex), local.join(shard).join(rest));
+    }
+
+    #[test]
+    fn import_shares_fallback_content_and_never_writes_toward_the_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global/v1/files");
+        let local = dir.path().join("local/v1/files");
+        let warm = b"bytes the global store already holds";
+        let seeded = Store::at(global.clone()).import_bytes(warm, false).unwrap();
+        let shard_dir = seeded.store_path.parent().unwrap().to_path_buf();
+        // Lock the global shard the way a sandbox would: any create, temp
+        // file, or marker aimed at it fails, so a write there cannot hide.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&shard_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
+
+        let store = Store::at(local.clone()).with_read_fallback(global.clone());
+        let shared = store.import_bytes(warm, false).unwrap();
+        assert_eq!(
+            shared.store_path, seeded.store_path,
+            "warm content is shared, not copied"
+        );
+        assert!(
+            !store.write_path_from_hex(&shared.hex_hash).exists(),
+            "no duplicate lands in the local store"
+        );
+        // An executable import of the same content still shares it; the
+        // `-exec` marker is a prune hint, never written toward the fallback.
+        let shared_exec = store.import_bytes(warm, true).unwrap();
+        assert_eq!(shared_exec.store_path, seeded.store_path);
+        assert!(shared_exec.executable);
+        assert!(!local.exists(), "sharing writes nothing at all locally");
+        // New executable content lands in the local store, marker beside it.
+        let fresh = store.import_bytes(b"fresh executable", true).unwrap();
+        assert!(
+            fresh.store_path.starts_with(&local),
+            "{}",
+            fresh.store_path.display()
+        );
+        assert!(PathBuf::from(format!("{}-exec", fresh.store_path.display())).exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&shard_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
+    fn stale_fallback_index_is_a_miss_left_in_place_and_shadowed_by_a_fresh_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global/v1/files");
+        let local = dir.path().join("local/v1/files");
+        let global_store = Store::at(global.clone());
+        // A global index whose CAS file is gone.
+        let mut stale = PackageIndex::default();
+        stale.insert(
+            "index.js".to_string(),
+            StoredFile {
+                hex_hash: "00ff".to_string(),
+                store_path: global.join("00").join("ff"),
+                executable: false,
+                size: Some(3),
+            },
+        );
+        global_store
+            .save_index("dep", "1.0.0", None, &stale)
+            .unwrap();
+        let global_index = global_store.index_dir().join("dep@1.0.0.json");
+        assert!(global_index.exists());
+
+        let store = Store::at(local.clone()).with_read_fallback(global.clone());
+        assert!(
+            store.load_index("dep", "1.0.0", None).is_none(),
+            "stale entry is a miss"
+        );
+        assert!(
+            global_index.exists(),
+            "a fallback entry is never deleted on staleness"
+        );
+        assert!(!store.invalidate_cached_index("dep", "1.0.0", None).unwrap());
+        assert!(
+            global_index.exists(),
+            "invalidation touches only the primary"
+        );
+
+        // The re-fetch this miss triggers saves into the local store, which
+        // then shadows the stale copy on every later read.
+        let fresh_file = store.import_bytes(b"abc", false).unwrap();
+        let mut fresh = PackageIndex::default();
+        fresh.insert("index.js".to_string(), fresh_file);
+        store.save_index("dep", "1.0.0", None, &fresh).unwrap();
+        assert!(store.index_dir().join("dep@1.0.0.json").exists());
+        let loaded = store
+            .load_index("dep", "1.0.0", None)
+            .expect("fresh index served");
+        assert!(loaded["index.js"].store_path.starts_with(&local));
+        assert!(store.invalidate_cached_index("dep", "1.0.0", None).unwrap());
+        assert!(global_index.exists());
     }
 
     #[test]
@@ -1629,6 +2222,16 @@ mod tests {
     }
 
     #[test]
+    fn test_git_commands_disable_terminal_prompts() {
+        let command = git_command();
+        let prompt = command
+            .get_envs()
+            .find(|(name, _)| *name == "GIT_TERMINAL_PROMPT")
+            .and_then(|(_, value)| value);
+        assert_eq!(prompt, Some(std::ffi::OsStr::new("0")));
+    }
+
+    #[test]
     fn test_git_resolve_ref_full_sha_is_offline() {
         // 40-char hex committish short-circuits `ls-remote`. Confirm
         // by handing a non-existent URL — if the fast path regressed
@@ -1929,6 +2532,31 @@ mod tests {
         let index = store.import_tarball(&tarball).unwrap();
         assert_eq!(index.len(), 1);
         assert!(index.contains_key("index.js"));
+    }
+
+    #[test]
+    fn test_import_tarball_streams_large_entry_into_cas() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path().join("files"));
+        store.ensure_shards_exist().unwrap();
+        let content: Vec<u8> = (0..(256 << 10)).map(|i| (i % 251) as u8).collect();
+        let tarball = build_tarball("package/bin/native", &content);
+
+        let index = store.import_tarball(&tarball).unwrap();
+        let stored = &index["bin/native"];
+
+        assert_eq!(stored.hex_hash, blake3_hex(&content));
+        assert_eq!(stored.size, Some(content.len() as u64));
+        assert_eq!(std::fs::read(&stored.store_path).unwrap(), content);
+        assert!(
+            std::fs::read_dir(dir.path().join("files"))
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".aube-stream-"))
+        );
     }
 
     #[cfg(not(windows))]

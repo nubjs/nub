@@ -1,14 +1,13 @@
-//! Layout config follows the incumbent package manager and its major version.
-//! Pnpm 10 and below use `.npmrc`; pnpm 11 and later use
-//! `pnpm-workspace.yaml`. Yarn and Bun layout keys remain unsupported, with the
-//! neutral `.npmrc` spelling available instead.
+//! Nub chooses the `node_modules` layout from `nub.jsonc`, `.npmrc`, or the
+//! command line under every incumbent. Branded manager files remain usable for
+//! resolution settings but not layout.
 //!
-//! Yarn PnP is deliberately not retested here — refusing to build a tree nub
+//! Yarn PnP is deliberately not retested here — refusing to build a tree Nub
 //! cannot produce is not the same as honoring a layout preference, and
 //! `abort_eagerly.rs` covers that the refusal still fires.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 fn nub_binary() -> PathBuf {
     let mut path = std::env::current_exe().unwrap();
@@ -34,13 +33,13 @@ fn project(tag: &str, files: &[(&str, &str)]) -> PathBuf {
     dir
 }
 
-/// `nub config get <key>`, run against a scratch HOME/XDG so the developer's
-/// own global config cannot supply or mask any of these settings.
-fn config_get(dir: &Path, key: &str) -> String {
+/// Run Nub against a scratch HOME/XDG so the developer's own global config
+/// cannot supply or mask any setting.
+fn run(dir: &Path, args: &[&str]) -> Output {
     let home = dir.join("home");
     std::fs::create_dir_all(&home).unwrap();
-    let out = Command::new(nub_binary())
-        .args(["config", "get", key])
+    Command::new(nub_binary())
+        .args(args)
         .current_dir(dir)
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -50,7 +49,11 @@ fn config_get(dir: &Path, key: &str) -> String {
         .env("XDG_DATA_HOME", dir.join("xdg-data"))
         .env("XDG_CACHE_HOME", dir.join("xdg-cache"))
         .output()
-        .expect("failed to spawn nub");
+        .expect("failed to spawn nub")
+}
+
+fn config_get(dir: &Path, key: &str) -> String {
+    let out = run(dir, &["config", "get", key]);
     assert!(
         out.status.success(),
         "config get {key} failed: {}",
@@ -102,26 +105,93 @@ fn a_pnpm_workspace_yaml_supplies_resolution_config_but_not_layout() {
     assert_eq!(config_get(&neutral, "shamefullyHoist"), "true");
 }
 
-/// Pnpm 11 reads behavior and layout settings from workspace YAML rather than
-/// `.npmrc`; Nub mirrors the same source.
+/// Pnpm 11 takes resolution settings from workspace YAML. Nub keeps layout in
+/// `nub.jsonc`, `.npmrc`, or the command line under every pnpm major.
 #[test]
-fn a_pnpm_11_project_reads_layout_from_workspace_yaml() {
+fn a_pnpm_11_project_takes_resolution_from_workspace_yaml_but_never_layout() {
     let files = [
         (
             "package.json",
             r#"{"name":"app","version":"1.0.0","packageManager":"pnpm@11.3.0"}"#,
         ),
         ("pnpm-lock.yaml", PNPM_LOCK),
-        ("pnpm-workspace.yaml", "nodeLinker: hoisted\n"),
-        (".npmrc", "nodeLinker=isolated\nauto-install-peers=false\n"),
+        (
+            "pnpm-workspace.yaml",
+            "nodeLinker: hoisted\nshamefullyHoist: true\nautoInstallPeers: false\n",
+        ),
     ];
 
     let dir = project("pnpm11", &files);
-    assert_eq!(config_get(&dir, "nodeLinker"), "hoisted");
     assert_eq!(
         config_get(&dir, "autoInstallPeers"),
+        "false",
+        "resolution config from pnpm-workspace.yaml must still be mirrored"
+    );
+    assert_eq!(
+        config_get(&dir, "nodeLinker"),
+        "isolated",
+        "the file's layout key must not displace Nub's default linker"
+    );
+    assert_eq!(
+        config_get(&dir, "shamefullyHoist"),
         "undefined",
-        "resolution config in .npmrc still follows pnpm 11, which ignores it there"
+        "nor any other layout key in it"
+    );
+
+    // The paired half: refusing the YAML as a layout source is what keeps
+    // `.npmrc` layout keys readable under pnpm 11's otherwise auth-only allowlist.
+    let neutral = project("pnpm11-npmrc", &files);
+    std::fs::write(
+        neutral.join(".npmrc"),
+        "nodeLinker=hoisted\nshamefully-hoist=true\n",
+    )
+    .unwrap();
+    assert_eq!(config_get(&neutral, "nodeLinker"), "hoisted");
+    assert_eq!(config_get(&neutral, "shamefullyHoist"), "true");
+}
+
+#[test]
+fn a_pnpm_11_global_config_reports_ignored_layout_but_keeps_resolution() {
+    let files = [
+        (
+            "package.json",
+            r#"{"name":"app","version":"1.0.0","packageManager":"pnpm@11.3.0"}"#,
+        ),
+        ("pnpm-lock.yaml", PNPM_LOCK),
+    ];
+    let dir = project("pnpm11-global", &files);
+    let global = dir.join("xdg-config/pnpm");
+    std::fs::create_dir_all(&global).unwrap();
+    std::fs::write(
+        global.join("config.yaml"),
+        "nodeLinker: hoisted\npublicHoistPattern:\n  - '*'\nautoInstallPeers: false\n",
+    )
+    .unwrap();
+
+    assert_eq!(config_get(&dir, "nodeLinker"), "isolated");
+    assert_eq!(config_get(&dir, "publicHoistPattern"), "undefined");
+    assert_eq!(
+        config_get(&dir, "autoInstallPeers"),
+        "false",
+        "non-layout settings in pnpm's global config must remain readable"
+    );
+
+    let out = run(&dir, &["install", "--offline", "--ignore-scripts"]);
+    let report = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "install failed:\n{report}");
+    assert!(
+        report.contains(
+            "configurable via nub.jsonc install.linker, .npmrc node-linker, or --node-linker"
+        ),
+        "the install report must disclose the ignored global layout setting:\n{report}"
+    );
+    assert!(
+        report.contains("auto-install-peers=false (pnpm global config.yaml)"),
+        "the report must still attribute the readable global resolution setting:\n{report}"
     );
 }
 

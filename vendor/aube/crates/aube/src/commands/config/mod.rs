@@ -2,10 +2,11 @@
 //!
 //! The command's known setting surface is derived from
 //! [`aube_settings::meta::SETTINGS`], generated at build time from
-//! `settings.toml`. Known aube-owned user/global settings are written
-//! to `~/.config/aube/config.toml`; unknown and registry/auth keys are
-//! still accepted verbatim because `.npmrc` is free-form and includes
-//! auth-token entries such as `//registry.npmjs.org/:_authToken`.
+//! `settings.toml`. Writes use project scope by default; `--global` selects
+//! `~/.config/aube/config.toml` for aube-owned settings and `~/.npmrc` for
+//! shared settings. Unknown and registry/auth keys are still accepted verbatim
+//! because `.npmrc` is free-form and includes auth-token entries such as
+//! `//registry.npmjs.org/:_authToken`.
 
 mod aube_config;
 mod delete;
@@ -21,34 +22,33 @@ mod tui;
 
 use crate::commands::npmrc::{NpmrcEdit, user_npmrc_path};
 use aube_settings::meta as settings_meta;
-use clap::{Args, Subcommand, ValueEnum};
 use miette::miette;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct ConfigArgs {
-    #[command(flatten)]
+    #[usage(flatten)]
     pub list: list::ListArgs,
 
-    #[command(subcommand)]
+    #[usage(subcommand)]
     pub command: Option<ConfigCommand>,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, usage_rs::Subcommands)]
 pub enum ConfigCommand {
     /// Delete a key from aube config or the selected `.npmrc` file
-    #[command(visible_aliases = ["rm", "remove", "unset"])]
+    #[usage(alias("rm", "remove", "unset"))]
     Delete(delete::DeleteArgs),
     /// Explain a known setting, including defaults and supported config sources
     Explain(explain::ExplainArgs),
     /// Search known settings by name, source key, or description
-    #[command(visible_alias = "search")]
+    #[usage(alias = "search")]
     Find(find::FindArgs),
     /// Print the effective value of a key
     Get(GetArgs),
     /// Print every key/value from aube config and selected `.npmrc` file(s)
-    #[command(visible_alias = "ls")]
+    #[usage(alias = "ls")]
     List(list::ListArgs),
     /// Write a key=value pair to aube config or the selected `.npmrc` file
     Set(SetArgs),
@@ -56,7 +56,7 @@ pub enum ConfigCommand {
     Tui,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct KeyArgs {
     /// The setting key.
     ///
@@ -64,53 +64,36 @@ pub struct KeyArgs {
     /// or an `.npmrc` alias (e.g. `auto-install-peers`).
     pub key: String,
 
-    /// Shortcut for `--location project`.
-    #[arg(long, conflicts_with = "location")]
-    pub local: bool,
+    /// Use the user configuration instead of the project configuration.
+    #[usage(short = 'g', long, conflicts = "--local")]
+    pub global: bool,
 
-    /// Which config location to act on.
-    ///
-    /// Defaults to `user`. Delete sweeps both aube's own config
-    /// (`~/.config/aube/config.toml` at user-scope,
-    /// `<cwd>/.config/aube/config.toml` at project-scope) and the
-    /// matching `.npmrc`, so the call works regardless of which file
-    /// the value was originally written to.
-    #[arg(long, value_enum, default_value_t = Location::User)]
-    pub location: Location,
+    /// Use the project configuration (the default).
+    #[usage(long, conflicts = "--global")]
+    pub local: bool,
 }
 
 impl KeyArgs {
     pub(super) fn effective_location(&self) -> Location {
-        if self.local {
-            Location::Project
+        if self.global {
+            Location::User
         } else {
-            self.location
+            Location::Project
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy)]
 pub enum Location {
-    /// User config (`~/.config/aube/config.toml` for known aube
-    /// settings, `~/.npmrc` for registry/auth and unknown keys)
     User,
-    /// `<cwd>/.npmrc`
     Project,
-    /// Alias for `user` — aube has no separate global config file.
-    Global,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy)]
 pub enum ListLocation {
-    /// Merge every runtime settings source, last-write-wins (same
-    /// precedence install uses).
     Merged,
-    /// User/global config sources.
     User,
-    /// Project config sources.
     Project,
-    /// Alias for `user`.
-    Global,
 }
 
 pub(crate) use aube_config::{
@@ -118,14 +101,17 @@ pub(crate) use aube_config::{
     load_project_entries as load_project_aube_config_entries,
     load_user_entries as load_user_aube_config_entries,
 };
-pub(crate) use get_cmd::GetArgs;
-pub(crate) use set_cmd::SetArgs;
+// `pub`, not `pub(crate)`: an embedder composing its own `config` command
+// tree from these arg types (nub does) needs every type a `pub` field names.
+pub use get_cmd::GetArgs;
+pub use list::ListArgs;
+pub use set_cmd::SetArgs;
 pub use set_cmd::set_project_scalar_to_workspace_yaml;
 
 impl Location {
     pub(super) fn path(self) -> miette::Result<PathBuf> {
         match self {
-            Location::User | Location::Global => user_npmrc_path(),
+            Location::User => user_npmrc_path(),
             Location::Project => Ok(crate::dirs::project_root_or_cwd()?.join(".npmrc")),
         }
     }
@@ -277,7 +263,7 @@ const PROTECTED_NAMES: &[&str] = &[
 ///
 /// This is the security floor that keeps `config get`/`config list`
 /// from echoing registry tokens, in parity with `npm config get`.
-pub(super) fn is_protected_key(key: &str) -> bool {
+pub fn is_protected_key(key: &str) -> bool {
     if let Some(stripped) = key.strip_prefix("//") {
         if stripped.contains(":_") {
             return true;
@@ -294,7 +280,7 @@ pub(super) fn is_protected_key(key: &str) -> bool {
 
 pub(super) fn setting_for_key(key: &str) -> Option<&'static settings_meta::SettingMeta> {
     settings_meta::find(key).or_else(|| {
-        settings_meta::all().iter().find(|meta| {
+        settings_meta::all().find(|meta| {
             meta.npmrc_keys.iter().any(|candidate| candidate == &key)
                 || meta
                     .workspace_yaml_keys
@@ -331,7 +317,12 @@ pub(super) fn setting_default_value(meta: &settings_meta::SettingMeta) -> Option
     if meta.default == "undefined" || meta.default == "null" {
         return None;
     }
-    let doc = format!("value = {}", meta.default);
+    // Render before parsing, not after: this returns a VALUE (the `config get`
+    // fallback and the managed-policy input), so a tokenized default that is
+    // also valid TOML would otherwise hand back the literal `{cache_namespace}`.
+    // Neither tokenized default parses today; this keeps that from becoming a
+    // silent wrong answer the day one does.
+    let doc = format!("value = {}", meta.rendered_default());
     let value = toml::from_str::<toml::Table>(&doc).ok()?.remove("value")?;
     match value {
         toml::Value::String(s) => Some(s),
@@ -390,10 +381,16 @@ fn search_text_matches(haystack: &str, term: &str) -> bool {
 }
 
 /// Walk every config source in low-to-high precedence order so a later
-/// duplicate wins. Mirrors the default file-source chain generated for
+/// duplicate wins. Mirrors the default source chain generated for
 /// install/runtime settings in [`aube_settings::resolved`]:
 /// `embedderDefaults < userNpmrc < userAubeConfig < projectNpmrc <
-/// projectAubeConfig < globalConfigYaml < workspaceYaml`.
+/// projectAubeConfig < globalConfigYaml < workspaceYaml < env`.
+///
+/// The env tier is last because it is highest: `resolved` puts `env` above
+/// every file, and every reader here takes the LAST match. Omitting it made
+/// `config get`/`config list` deny values the install was already acting on —
+/// an env-set `cache-dir` moved the cache while `config get cache-dir` printed
+/// `undefined` (#654). npm and pnpm both surface env-set values.
 pub(super) fn read_merged(cwd: &Path) -> miette::Result<Vec<(String, String)>> {
     let files = crate::commands::FileSources::load(cwd);
     let workspace_yaml = read_workspace_yaml_raw(cwd);
@@ -405,7 +402,62 @@ pub(super) fn read_merged(cwd: &Path) -> miette::Result<Vec<(String, String)>> {
     out.extend(files.project_aube_config);
     out.extend(read_yaml_flat(&files.global_config_yaml));
     out.extend(read_yaml_flat(&workspace_yaml));
+    out.extend(read_env_entries());
     Ok(out)
+}
+
+/// Settings the environment currently supplies, rendered as `.npmrc`-style
+/// entries so `get`/`list`/`tui` read them exactly the way they read a file
+/// entry. Scoped reads (`--global`/`--local`) get none of this: env is not a
+/// file scope, and a scope selector asks about a file.
+///
+/// Only *config-carrying* variables are surfaced. A setting may also be fed by
+/// a bare ambient variable — `CI`, `HTTP_PROXY`, `NODE_OPTIONS` — and those are
+/// the environment a run happens in rather than configuration anyone authored;
+/// see [`aube_util::env::is_config_env_alias`]. When an ambient variable is
+/// the one supplying the value, the setting is omitted rather than reported
+/// under a lower-priority alias: the row would then disagree with the value
+/// the resolver hands the install.
+fn read_env_entries() -> Vec<(String, String)> {
+    let env = aube_settings::values::process_env();
+    let mut out = Vec::new();
+    for meta in settings_meta::all() {
+        let Some((alias, value)) = aube_settings::values::env_source(meta.name, env) else {
+            continue;
+        };
+        if !aube_util::env::is_config_env_alias(alias) {
+            continue;
+        }
+        out.push((primary_entry_key(meta), value.to_string()));
+    }
+    // `cacheDir` is the one setting whose env surface is wider than its
+    // `sources.env` list: `resolved_cache_dir` also honors the host's
+    // first-class `config_env("CACHE_DIR")` knob (`NUB_CACHE_DIR` under nub),
+    // which is deliberately absent from the shared settings table so an
+    // embedder gains its brand for exactly this knob and not for aube's whole
+    // branded-alias surface. Reporting it here keeps `config get cache-dir`
+    // honest about the value the install will use. It is a single-member
+    // special case on purpose — the other two config-env knobs
+    // (`CONCURRENCY`, `PRIMER_TTL`) are not settings-table settings, so a
+    // general mapping would be machinery for a set of one.
+    if let Some(raw) = aube_util::env::config_env("CACHE_DIR")
+        && let Some(raw) = raw.to_str()
+        && !raw.is_empty()
+        && let Some(meta) = settings_meta::find("cacheDir")
+    {
+        out.push((primary_entry_key(meta), raw.to_string()));
+    }
+    out
+}
+
+/// The `.npmrc` alias an entry for `meta` should be keyed by — its first
+/// literal alias, falling back to the canonical name for a setting with no
+/// `.npmrc` surface (which is what [`resolve_aliases`] looks for anyway).
+pub(super) fn primary_entry_key(meta: &settings_meta::SettingMeta) -> String {
+    literal_aliases(meta.npmrc_keys)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| meta.name.to_string())
 }
 
 pub(super) fn read_user_entries(cwd: &Path) -> miette::Result<Vec<(String, String)>> {

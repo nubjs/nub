@@ -29,6 +29,28 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::{OnceLock, RwLock};
 
+/// Command-line platform selection, one entry per axis.
+///
+/// `None` means the axis was not named on the command line and keeps whatever
+/// the config sources resolved. `Some(list)` REPLACES that axis outright —
+/// naming `--os` does not disturb `--cpu`. A list may carry `current` (the
+/// host's own value) and `*` (accept any value on this axis); both are
+/// interpreted downstream by `aube_resolver::platform`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CliSupportedArchitectures {
+    pub os: Option<Vec<String>>,
+    pub cpu: Option<Vec<String>>,
+    pub libc: Option<Vec<String>>,
+}
+
+impl CliSupportedArchitectures {
+    /// Whether any axis was named. Call sites use this to skip the override
+    /// entirely rather than reasoning about three `None`s.
+    pub fn is_empty(&self) -> bool {
+        self.os.is_none() && self.cpu.is_none() && self.libc.is_none()
+    }
+}
+
 /// Per-invocation values an embedder computes and hands to aube.
 ///
 /// Every field defaults to aube's upstream behavior, so an unset context is
@@ -242,6 +264,20 @@ pub struct EngineContext {
     /// and global sources. Empty by default, preserving standalone behavior.
     pub project_config_settings: Vec<(String, String)>,
 
+    /// Per-axis platform selection supplied on the command line
+    /// (`--os` / `--cpu` / `--libc`). An axis set here REPLACES whatever the
+    /// config sources resolved for that axis; an axis left `None` keeps the
+    /// config value. This is an override rather than another source in the
+    /// union because the two answer different questions: the config homes say
+    /// what a project supports, the flags say what THIS invocation should
+    /// fetch — and a union can only ever widen. Never written back to a config
+    /// file; a flagged install leaves the project's files untouched. Reaches
+    /// every filter site through
+    /// `commands::install::settings::effective_supported_architectures`, which
+    /// is the single funnel they all share. Default-empty preserves standalone
+    /// behavior.
+    pub cli_supported_architectures: CliSupportedArchitectures,
+
     /// PATH entries prepended (in order, ahead of the existing PATH) to every
     /// lifecycle spawn. An embedder places a runtime shim dir first so a bare
     /// `node` in a build script resolves to the augmented runtime. Default
@@ -361,6 +397,27 @@ pub struct EngineContext {
     /// [`embedder_overrides`]: Self::embedder_overrides
     pub embedder_package_extensions: Option<BTreeMap<String, serde_json::Value>>,
 
+    /// Bundled ecosystem `packageExtensions` defaults an embedder supplies,
+    /// applied as the LOWEST-precedence layer on top of the user/project
+    /// extensions. Additive only — `apply_package_extensions` uses
+    /// `extend_missing`, so a dependency a package already declares is never
+    /// overwritten, and user extensions (parsed first in
+    /// `resolve_dependency_policy`) win per-key over bundled ones.
+    ///
+    /// Deliberately SEPARATE from [`embedder_package_extensions`]: that seam
+    /// is a *replacement* source that also feeds the lockfile
+    /// `packageExtensionsChecksum` (via `effective_package_extensions`). Routing
+    /// bundled defaults through it would make every bundled-list bump change
+    /// the checksum, drift every existing lockfile, and abort
+    /// `--frozen-lockfile` under `enforce_package_extensions_checksum`. This
+    /// field is read ONLY by `resolve_dependency_policy`, never by the checksum
+    /// path — so a bundled-list update is a no-op for existing lockfiles (it
+    /// only affects freshly-resolved packages). Same shape as the replacement
+    /// seam (`selector -> body`, npm/yarn camelCase bodies).
+    ///
+    /// [`embedder_package_extensions`]: Self::embedder_package_extensions
+    pub bundled_package_extensions: Option<BTreeMap<String, serde_json::Value>>,
+
     /// Whether the embedder treats `packageExtensions` as a checksummed,
     /// drift-enforced config like pnpm does. `false` (default) preserves
     /// upstream behavior: aube stamps `packageExtensionsChecksum` only onto
@@ -376,6 +433,34 @@ pub struct EngineContext {
     /// kinds that carry no checksum (npm/yarn/bun): stored and computed both
     /// resolve to `None`, so the check is a no-op.
     pub enforce_package_extensions_checksum: bool,
+
+    /// Replacement DEFAULT shell for every lifecycle-script spawn, used only
+    /// when the user configured no `script-shell` (which still wins). `None`
+    /// (default) keeps aube's platform default — `sh -c` on Unix, `cmd.exe
+    /// /d /s /c` on Windows.
+    ///
+    /// Exists for the Windows default specifically: an embedder that runs the
+    /// same POSIX script bodies through its own surfaces wants ONE shell, and
+    /// a POSIX shell is the more robust choice under an OS sandbox because it
+    /// needs no filesystem-ancestor repair to behave correctly. aube itself
+    /// takes no position — it consumes whatever the embedder resolved.
+    pub default_script_shell: Option<ScriptShell>,
+}
+
+/// A shell invocation: the program plus the leading args that precede the
+/// script body. Two args are needed because a multi-call binary dispatches on
+/// an applet name — busybox is spawned as `busybox.exe sh -c <body>`, where a
+/// plain shell takes `<shell> -c <body>`.
+#[derive(Clone, Debug)]
+pub struct ScriptShell {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    /// The shell up-cases environment names when it loads the Windows
+    /// environment, as busybox-w32 does, so a body would see `NPM_PACKAGE_NAME`
+    /// and `$npm_package_name` would expand to nothing. When set, the spawn
+    /// re-binds the lowercase names it set at the head of the body
+    /// (`aube_scripts::lowercase_env_prologue`).
+    pub restore_env_casing: bool,
 }
 
 impl Default for EngineContext {
@@ -398,6 +483,7 @@ impl Default for EngineContext {
             synthetic_user_npmrc_entries: Vec::new(),
             synthetic_project_npmrc_entries: Vec::new(),
             project_config_settings: Vec::new(),
+            cli_supported_architectures: CliSupportedArchitectures::default(),
             path_prepends: Vec::new(),
             env_overlay: Vec::new(),
             runtime_node_dir: None,
@@ -407,7 +493,9 @@ impl Default for EngineContext {
             npm_save_prefix_on_bare_exact: false,
             named_registries_enabled: false,
             embedder_package_extensions: None,
+            bundled_package_extensions: None,
             enforce_package_extensions_checksum: false,
+            default_script_shell: None,
         }
     }
 }
@@ -479,6 +567,7 @@ mod tests {
         assert!(!ctx.npm_save_prefix_on_bare_exact);
         assert!(!ctx.named_registries_enabled);
         assert_eq!(ctx.embedder_package_extensions, None);
+        assert_eq!(ctx.bundled_package_extensions, None);
         assert!(!ctx.enforce_package_extensions_checksum);
     }
 }

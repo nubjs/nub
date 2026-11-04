@@ -82,6 +82,24 @@ fn specs() -> Vec<KeySpec> {
             is_empty: Some(|c| c.node_compat == Some(false)),
         },
         KeySpec {
+            key: ConfigKey::NodeExecutable,
+            name: "nodeExecutable",
+            set: |c, t| c.node_executable = Some(format!("./node-{t}")),
+            matches: |c, t| c.node_executable.as_deref() == Some(format!("./node-{t}").as_str()),
+            // A non-empty path string has no false/empty form.
+            set_empty: None,
+            is_empty: None,
+        },
+        KeySpec {
+            key: ConfigKey::Prefix,
+            name: "prefix",
+            set: |c, t| c.prefix = Some(strings(t)),
+            matches: |c, t| c.prefix == Some(strings(t)),
+            // An empty command names no program, so the parser refuses it.
+            set_empty: None,
+            is_empty: None,
+        },
+        KeySpec {
             key: ConfigKey::Preload,
             name: "preload",
             set: |c, t| c.preload = Some(strings(t)),
@@ -138,6 +156,72 @@ fn specs() -> Vec<KeySpec> {
             // A string path has no meaningful false/empty form.
             set_empty: None,
             is_empty: None,
+        },
+        KeySpec {
+            key: ConfigKey::Jsx,
+            name: "jsx",
+            set: |c, t| {
+                c.jsx = Some(
+                    if t.is_multiple_of(2) {
+                        "react"
+                    } else {
+                        "react-jsx"
+                    }
+                    .into(),
+                )
+            },
+            matches: |c, t| {
+                c.jsx.as_deref()
+                    == Some(if t.is_multiple_of(2) {
+                        "react"
+                    } else {
+                        "react-jsx"
+                    })
+            },
+            set_empty: None,
+            is_empty: None,
+        },
+        KeySpec {
+            key: ConfigKey::JsxFactory,
+            name: "jsxFactory",
+            set: |c, t| c.jsx_factory = Some(format!("factory{t}")),
+            matches: |c, t| c.jsx_factory.as_deref() == Some(format!("factory{t}").as_str()),
+            set_empty: None,
+            is_empty: None,
+        },
+        KeySpec {
+            key: ConfigKey::JsxFragmentFactory,
+            name: "jsxFragmentFactory",
+            set: |c, t| c.jsx_fragment_factory = Some(format!("fragment{t}")),
+            matches: |c, t| {
+                c.jsx_fragment_factory.as_deref() == Some(format!("fragment{t}").as_str())
+            },
+            set_empty: None,
+            is_empty: None,
+        },
+        KeySpec {
+            key: ConfigKey::JsxImportSource,
+            name: "jsxImportSource",
+            set: |c, t| c.jsx_import_source = Some(format!("runtime-{t}")),
+            matches: |c, t| c.jsx_import_source.as_deref() == Some(format!("runtime-{t}").as_str()),
+            set_empty: None,
+            is_empty: None,
+        },
+        KeySpec {
+            key: ConfigKey::Decorators,
+            name: "decorators",
+            set: |c, _| c.decorators = Some(crate::project_config::DecoratorMode::Legacy),
+            matches: |c, _| c.decorators == Some(crate::project_config::DecoratorMode::Legacy),
+            set_empty: None,
+            is_empty: None,
+        },
+        KeySpec {
+            key: ConfigKey::EmitDecoratorMetadata,
+            name: "emitDecoratorMetadata",
+            set: |c, t| c.emit_decorator_metadata = Some(t.is_multiple_of(2)),
+            matches: |c, t| c.emit_decorator_metadata == Some(t.is_multiple_of(2)),
+            set_empty: Some(|c| c.emit_decorator_metadata = Some(false)),
+            is_empty: Some(|c| c.emit_decorator_metadata == Some(false)),
         },
         KeySpec {
             key: ConfigKey::VerifyDeps,
@@ -209,26 +293,34 @@ fn specs() -> Vec<KeySpec> {
 }
 
 /// One per `ConfigKey` variant; [`ordinal`] is what keeps it honest.
-const KEY_COUNT: usize = 14;
+const KEY_COUNT: usize = 22;
 
 /// Exhaustive by construction: adding a `ConfigKey` variant breaks this match,
 /// forcing the new key into the spec table.
 fn ordinal(key: ConfigKey) -> usize {
     match key {
         ConfigKey::NodeCompat => 0,
-        ConfigKey::Preload => 1,
-        ConfigKey::NodeOptions => 2,
-        ConfigKey::V8Flags => 3,
-        ConfigKey::EnvFile => 4,
-        ConfigKey::Loader => 5,
-        ConfigKey::Conditions => 6,
-        ConfigKey::Tsconfig => 7,
-        ConfigKey::VerifyDeps => 8,
-        ConfigKey::InstallLinker => 9,
-        ConfigKey::InstallPublicHoist => 10,
-        ConfigKey::InstallMinimumReleaseAge => 11,
-        ConfigKey::InstallMinimumReleaseAgeExclude => 12,
-        ConfigKey::DlxConsent => 13,
+        ConfigKey::NodeExecutable => 1,
+        ConfigKey::Preload => 2,
+        ConfigKey::NodeOptions => 3,
+        ConfigKey::V8Flags => 4,
+        ConfigKey::EnvFile => 5,
+        ConfigKey::Loader => 6,
+        ConfigKey::Conditions => 7,
+        ConfigKey::Tsconfig => 8,
+        ConfigKey::Jsx => 9,
+        ConfigKey::JsxFactory => 10,
+        ConfigKey::JsxFragmentFactory => 11,
+        ConfigKey::JsxImportSource => 12,
+        ConfigKey::Decorators => 13,
+        ConfigKey::EmitDecoratorMetadata => 14,
+        ConfigKey::VerifyDeps => 15,
+        ConfigKey::InstallLinker => 16,
+        ConfigKey::InstallPublicHoist => 17,
+        ConfigKey::InstallMinimumReleaseAge => 18,
+        ConfigKey::InstallMinimumReleaseAgeExclude => 19,
+        ConfigKey::DlxConsent => 20,
+        ConfigKey::Prefix => 21,
     }
 }
 

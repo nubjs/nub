@@ -130,21 +130,28 @@ function Chip({ code, ok, partial, note }: PmItem) {
 
 export function PmSupport({ rows }: { rows: PmRow[] }) {
   return (
-    <div className="my-6 overflow-hidden rounded-lg border border-fd-border [&_table]:my-0">
+    // No `overflow-hidden` on the wrapper, and `overflow-visible` forced onto the
+    // table: a clip on either one swallows the chip tooltips of the LAST row,
+    // which drop below the table's own bottom edge. The rounded corners the clip
+    // used to buy are recovered by rounding the header and final-row cells
+    // directly, so nothing paints outside the border radius.
+    <div className="my-6 rounded-lg border border-fd-border [&_table]:my-0 [&_table]:overflow-visible">
       <table className="w-full border-collapse text-left text-sm">
         <thead>
           <tr className="border-b border-fd-border bg-fd-muted/40">
-            <th className="w-px whitespace-nowrap px-4 py-2.5 font-medium text-fd-muted-foreground">
+            <th className="w-px whitespace-nowrap rounded-tl-lg px-4 py-2.5 font-medium text-fd-muted-foreground">
               Package manager
             </th>
-            <th className="px-4 py-2.5 font-medium text-fd-muted-foreground">Config it reads</th>
+            <th className="rounded-tr-lg px-4 py-2.5 font-medium text-fd-muted-foreground">
+              Config it reads
+            </th>
           </tr>
         </thead>
         <tbody>
           {rows.map((r, i) => (
             <tr
               key={i}
-              className={`border-b border-fd-border/60 align-top last:border-0 ${
+              className={`border-b border-fd-border/60 align-top last:border-0 [&:last-child>td:first-child]:rounded-bl-lg [&:last-child>td:last-child]:rounded-br-lg ${
                 r.highlight ? 'bg-pink/[0.04]' : ''
               }`}
             >

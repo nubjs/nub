@@ -249,7 +249,7 @@ impl Store {
         &self,
         compressed_reader: R,
     ) -> Result<PackageIndex, Error> {
-        use std::io::Read;
+        use std::io::{Read, Write};
 
         let _diag =
             aube_util::diag::Span::new(aube_util::diag::Category::Store, "import_tarball_reader");
@@ -291,6 +291,7 @@ impl Store {
         let mut staged: Vec<(String, Vec<u8>, bool)> = Vec::new();
         let mut entries_seen: usize = 0;
         let mut total_uncompressed: u64 = 0;
+        let mut max_entry_bytes: u64 = 0;
         let mut decode_ns: u128 = 0;
         let mut cas_ns: u128 = 0;
         let mut index = PackageIndex::default();
@@ -413,6 +414,59 @@ impl Store {
                 continue;
             };
 
+            let mode = entry.header().mode().unwrap_or(0o644);
+            let executable = mode & 0o111 != 0;
+
+            // Store compression may unwrap napi hybrids before hashing, which
+            // inherently needs the complete entry. Keep that opt-in path on
+            // the byte-buffered importer.
+            if declared >= LARGE_ENTRY_STREAM_THRESHOLD
+                && crate::cas::store_compression_gate().is_none()
+            {
+                // Keep small files on the staged/rayon path, but never retain
+                // an existing chunk while decoding a large entry. Large files
+                // are written once into a same-filesystem CAS tempfile and
+                // hashed during decompression, then atomically published.
+                if !staged.is_empty() {
+                    let chunk = std::mem::take(&mut staged);
+                    flush_chunk(chunk, &mut index, &mut cas_ns)?;
+                }
+
+                std::fs::create_dir_all(&self.root).map_err(|e| Error::Io(self.root.clone(), e))?;
+                let mut temp = tempfile::Builder::new()
+                    .prefix(&format!(".{}-stream-", aube_util::prog()))
+                    .tempfile_in(&self.root)
+                    .map_err(|e| Error::Io(self.root.clone(), e))?;
+                let mut hasher = blake3::Hasher::new();
+                let mut limited = (&mut entry).take(MAX_TARBALL_ENTRY_BYTES);
+                let mut buffer = [0u8; STREAM_COPY_BUFFER_SIZE];
+                let read_t0 = std::time::Instant::now();
+                let mut actual_len = 0u64;
+                loop {
+                    let n = limited
+                        .read(&mut buffer)
+                        .map_err(|e| Error::Tar(e.to_string()))?;
+                    if n == 0 {
+                        break;
+                    }
+                    temp.write_all(&buffer[..n])
+                        .map_err(|e| Error::Io(self.root.clone(), e))?;
+                    hasher.update(&buffer[..n]);
+                    actual_len = actual_len.saturating_add(n as u64);
+                }
+                decode_ns += read_t0.elapsed().as_nanos();
+
+                let hex_hash = hasher.finalize().to_hex().to_string();
+                let cas_t0 = std::time::Instant::now();
+                let stored = self.import_hashed_tempfile(temp, hex_hash, actual_len, executable)?;
+                cas_ns += cas_t0.elapsed().as_nanos();
+                total_uncompressed = total_uncompressed.saturating_add(actual_len);
+                max_entry_bytes = max_entry_bytes.max(actual_len);
+                staged_count += 1;
+                index.insert(rel_path, stored);
+                continue;
+            }
+
             // Clamp upfront alloc so a lying header can't force a 512
             // MiB reservation before any byte has been read. read_to_end
             // grows the Vec for the rare entry that really is huge.
@@ -435,9 +489,8 @@ impl Store {
                 )));
             }
 
-            let mode = entry.header().mode().unwrap_or(0o644);
-            let executable = mode & 0o111 != 0;
             total_uncompressed = total_uncompressed.saturating_add(content.len() as u64);
+            max_entry_bytes = max_entry_bytes.max(content.len() as u64);
             staged.push((rel_path, content, executable));
             staged_count += 1;
 
@@ -451,7 +504,11 @@ impl Store {
             aube_util::diag::Category::Store,
             "tar_extract_complete",
             extract_t0.elapsed(),
-            || format!(r#"{{"entries":{staged_count},"bytes_uncompressed":{total_uncompressed}}}"#),
+            || {
+                format!(
+                    r#"{{"entries":{staged_count},"bytes_uncompressed":{total_uncompressed},"max_entry_bytes":{max_entry_bytes}}}"#
+                )
+            },
         );
         if aube_util::diag::enabled() {
             aube_util::diag::event_lazy(
@@ -691,6 +748,16 @@ fn is_windows_reserved_name(name: &str) -> bool {
 /// header size, which an attacker controls. `read_to_end` grows
 /// past this ceiling when a legitimate larger file warrants it.
 const VEC_PREALLOC_CEILING: usize = 64 * 1024;
+
+/// Entries at least this large stream through a CAS tempfile instead of
+/// occupying a full growable `Vec`. Eight MiB keeps the hot path for normal
+/// npm files while bounding concurrent native-binary extraction memory.
+#[cfg(not(test))]
+const LARGE_ENTRY_STREAM_THRESHOLD: u64 = 8 << 20;
+#[cfg(test)]
+const LARGE_ENTRY_STREAM_THRESHOLD: u64 = 128 << 10;
+
+const STREAM_COPY_BUFFER_SIZE: usize = 256 * 1024;
 
 /// A `Read` wrapper that refuses to deliver more than `remaining`
 /// bytes. Unlike `std::io::Read::take`, exhaustion produces an

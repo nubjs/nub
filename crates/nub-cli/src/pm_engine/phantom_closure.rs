@@ -460,9 +460,9 @@ fn plan_from_flags(
 /// `(dep_path, name, undeclared-target-names)`.
 ///
 /// Reads the SAME store handle + sidecar dir the producer wrote, via the shared
-/// [`crate::dynamic_phantom`] path helpers, so the two cannot drift. Best-effort:
-/// a package absent from the default store (a `store-dir` override moves the CAS),
-/// or a failed on-demand scan degrades to "not flagged" — a scan miss never
+/// [`crate::dynamic_phantom`] path helpers (which follow a `store-dir`
+/// override), so the two cannot drift. Best-effort: a package absent from the
+/// store, or a failed on-demand scan degrades to "not flagged" — a scan miss never
 /// itself forces materialization. Fans out across rayon. A warm sidecar is a
 /// cached-JSON index load + a blake3 fingerprint + a small sidecar read; a
 /// missing, torn, corrupt, or not-yet-written sidecar is scanned here and cached
@@ -476,15 +476,19 @@ fn dynamic_phantom_flags(graph: &LockfileGraph) -> Vec<FlaggedImporter> {
     if !enabled() {
         return Vec::new();
     }
-    let (Some(store_v1), Some(sidecar_dir)) = (
-        crate::dynamic_phantom::store_v1_dir(),
-        crate::dynamic_phantom::phantom_cache_dir(),
-    ) else {
+    let Some(dirs) = crate::dynamic_phantom::store_v1_dirs() else {
         return Vec::new();
     };
-    // `Store::at` takes the CAS `files/` root; `store_v1` is its parent — the same
+    let sidecar_dir = dirs.primary.join("phantom");
+    let fallback_sidecar_dir = dirs.read_fallback.as_ref().map(|v1| v1.join("phantom"));
+    // `Store::at` takes the CAS `files/` root; `primary` is its parent — the same
     // derivation the extract-time producer uses, so both key the index identically.
-    let store = aube_store::Store::at(store_v1.join("files"));
+    // The global store is attached read-only, as the install's own handle has it,
+    // so a warm package whose index lives only there still reaches this decision.
+    let mut store = aube_store::Store::at(dirs.primary.join("files"));
+    if let Some(global_v1) = &dirs.read_fallback {
+        store = store.with_read_fallback(global_v1.join("files"));
+    }
     // BTreeMap has no rayon bridge; collect the resolved set first.
     let packages: Vec<(&String, &LockedPackage)> = graph.packages.iter().collect();
     packages
@@ -502,7 +506,11 @@ fn dynamic_phantom_flags(graph: &LockfileGraph) -> Vec<FlaggedImporter> {
             // eject (leaving it symlinked, its phantom 404'ing).
             // `cached_or_scan_verdict` scans + caches here so the decision is
             // correct at the point the resolved graph + CAS index are both in hand.
-            let result = crate::dynamic_phantom::cached_or_scan_verdict(&sidecar_dir, &index)?;
+            let result = crate::dynamic_phantom::cached_or_scan_verdict(
+                &sidecar_dir,
+                fallback_sidecar_dir.as_deref(),
+                &index,
+            )?;
             // A package flags for EITHER an undeclared phantom (`targets`) OR a
             // `.d.ts` peer-type coupling (`type_coupled_peers`, nub#450). react-pdf
             // has NO undeclared phantom — only the react peer typed in its `.d.ts` —

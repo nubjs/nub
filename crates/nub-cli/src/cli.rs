@@ -4,10 +4,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand, ValueEnum};
 
 /// Stable, branded error codes for nub-cli's own (non-engine) failure paths.
 /// The engine's `ERR_AUBE_*` codes are rewritten to `ERR_NUB_*` at presentation
@@ -37,9 +36,22 @@ static SILENT: AtomicBool = AtomicBool::new(false);
 static REPORTER_NDJSON: AtomicBool = AtomicBool::new(false);
 /// `--reporter-hide-prefix`: drop the `<dir> <script>:` lead from each streamed
 /// output line so CI annotation matchers (e.g. GitHub Actions, which parse
-/// `error: file:line`) see the child's raw output. Affects the per-line prefix
-/// only; the `$ <cmd>` echo is left intact.
+/// `error: file:line`) see the child's raw output. Affects the CHILD's per-line
+/// prefix only — Nub's own framing (the `$ <cmd>` echo and the trailing
+/// `Done`/`exit`/`error` status) keeps its label, matching pnpm. Stripping the
+/// status line too left a run emitting several unattributable bare `Done`s.
 static HIDE_STREAM_PREFIX: AtomicBool = AtomicBool::new(false);
+
+/// The resolved `--color` / `--no-color` choice, as a [`ColorWhen`] discriminant.
+/// Set once at startup from the flag; read by [`color_enabled`] at every ANSI
+/// decision and by the script launcher when it exports `FORCE_COLOR` to a child.
+/// A process-global (rather than a threaded-through parameter) because the same
+/// answer has to reach Nub's own output, the PM engine's warnings, and the
+/// per-child environment, and it is decided before any of them run.
+static COLOR_MODE: AtomicU8 = AtomicU8::new(COLOR_AUTO);
+const COLOR_AUTO: u8 = 0;
+const COLOR_ALWAYS: u8 = 1;
+const COLOR_NEVER: u8 = 2;
 
 /// `nubx`-only: turn on the `npx`/`pnpm dlx` fallback in [`run_exec`]. Set once
 /// in [`run_nubx`] before it desugars to the `exec` dispatch; read in `run_exec`
@@ -69,10 +81,35 @@ pub struct NubxDlxFlags {
     pub yes: bool,
 }
 
+/// Print a response the parser produced instead of a parse, on the stream and
+/// with the status the standalone process would have used: help and version to
+/// stdout at 0, a usage error to stderr at 2.
+fn print_parser_response(exit: &usage_rs::embedded::Exit) {
+    if exit.stderr {
+        eprintln!("{}", exit.text.trim_end());
+    } else {
+        println!("{}", exit.text.trim_end());
+    }
+}
+
+/// Parse an argv whose first word is the program name. A help/version request
+/// or a usage error prints the rendered response and exits with its status.
+fn parse_cli_or_exit(argv: &[String]) -> Cli {
+    let words: Vec<std::ffi::OsString> =
+        argv.iter().skip(1).map(std::ffi::OsString::from).collect();
+    match Cli::embedded_outcome(&words) {
+        usage_rs::embedded::Outcome::Parsed(cli) => cli,
+        usage_rs::embedded::Outcome::Exit(exit) => {
+            print_parser_response(&exit);
+            std::process::exit(exit.code)
+        }
+    }
+}
+
 /// `--reporter <MODE>` for `nub run`. `default` is the existing prefixed /
 /// streamed / aggregated human output; `silent` is `-s`; `ndjson` is machine
 /// output (see [`emit_ndjson`]).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, usage_rs::ValueEnum)]
 pub enum ReporterMode {
     Default,
     Silent,
@@ -155,12 +192,15 @@ fn emit_ndjson_summary(passed: usize, failed: usize) {
 /// dependency spun up a thread during init (A19). Set once; never mutated after.
 static ENV_FILE_VARS: OnceLock<HashMap<String, String>> = OnceLock::new();
 
-/// Raw (unexpanded, un-stripped) merge of the explicit `--env-file` contents —
-/// the values Node's own `--env-file` parser delivers. The watch path forwards
-/// the explicit files to the watched Node (#479) and compares [`ENV_FILE_VARS`]
-/// against this map to inject only keys whose `${VAR}` expansion changed the
-/// raw value (see [`watch_inject_vars`]); every plain var is left to Node's
-/// re-read so it live-reloads across restarts.
+/// Un-stripped merge of the explicit `--env-file` contents — the values Node's
+/// own `--env-file` parser delivers. The watch path forwards the explicit files
+/// to the watched Node (#479) and diffs [`ENV_FILE_VARS`] against this map (see
+/// [`watch_inject_vars`]) so a var Node already delivers is left to Node's
+/// re-read and live-reloads across restarts. The two maps now differ only by the
+/// denied-key strip, since `--env-file` values are no longer expanded; keeping
+/// them separate is what preserves that strip (a denied key must stay out of
+/// [`ENV_FILE_VARS`] but stay IN the forwarded set, so the guard can neutralize
+/// it rather than let a startup consumer act on it).
 static ENV_FILE_VARS_RAW: OnceLock<HashMap<String, String>> = OnceLock::new();
 
 /// Explicit `--env-file` / `--env-file-if-exists` paths in command-line order
@@ -218,7 +258,7 @@ fn overlay_env_file_vars(env_map: &mut HashMap<String, String>) {
     }
     if let Some(vars) = ENV_FILE_VARS.get() {
         for (k, v) in vars {
-            if env::var_os(k).is_none() {
+            if nub_core::workspace::env::env_file_may_set(k) {
                 env_map.insert(k.clone(), v.clone());
             }
         }
@@ -260,7 +300,7 @@ fn merge_child_env(
     // Overlay the explicit vars: shell env still wins; `--env-file` overrides any
     // `.env` value that survives (only relevant when no flag was passed).
     for (k, v) in explicit_vars {
-        if env::var_os(k).is_none() {
+        if nub_core::workspace::env::env_file_may_set(k) {
             env_map.insert(k.clone(), v.clone());
         }
     }
@@ -272,10 +312,14 @@ fn merge_child_env(
 /// `.env*` files as `--env-file` args, which Node re-reads on every restart — so
 /// injecting a var Node already delivers identically would FREEZE it at the `nub
 /// watch` startup value (Node's `--env-file` never overrides an already-present
-/// env var). Inject a key iff nub's `${VAR}` expansion changed it from the raw
-/// value Node actually delivers — `forwarded_raw` is the unexpanded merge of the
-/// files that really reach Node as `--env-file` args; every plain var is left to
-/// Node's `--env-file` and live-reloads on restart. A key absent from
+/// env var). Inject a key iff nub's value differs from the raw value Node
+/// actually delivers — `forwarded_raw` is the unexpanded merge of the files that
+/// really reach Node as `--env-file` args; every var Node delivers identically is
+/// left to Node's `--env-file` and live-reloads on restart. In practice the
+/// difference comes from `${VAR}` expansion, which only the auto-discovered and
+/// `nub.jsonc`-sourced families get: an explicit `--env-file` is delivered
+/// verbatim (Node's own semantics), so it never diverges and is always left to
+/// Node once forwarded. A key absent from
 /// `forwarded_raw` is injected, because injection is then its only delivery
 /// channel: that covers the explicit `--env-file` case (auto-discovery is
 /// suppressed) and every source below Node's 20.6.0 `--env-file` floor, where
@@ -441,6 +485,16 @@ fn strip_windows_verbatim_prefix(path: &str) -> String {
     }
 }
 
+/// A path spelled for a HUMAN to read. `current_nub_binary` canonicalizes, and
+/// Windows canonicalization returns the extended-length `\\?\C:\…` form, so any
+/// path derived from it lands in output with a prefix no user typed and no shell
+/// echoes back (#704). Strip it at the print site only: the `PathBuf` itself
+/// stays verbatim so filesystem operations keep the `MAX_PATH` exemption a deep
+/// install dir depends on.
+fn display_path(path: &Path) -> String {
+    strip_windows_verbatim_prefix(&path.to_string_lossy())
+}
+
 /// The keys the watch guard strips from a forwarded env file's values.
 ///
 /// The runtime-control denylist is unconditional. `NODE_ENV` joins it only when
@@ -518,11 +572,22 @@ fn apply_env_file_vars(cmd: &mut std::process::Command) {
     }
     if let Some(vars) = ENV_FILE_VARS.get() {
         for (k, v) in vars {
-            if env::var_os(k).is_none() {
+            if nub_core::workspace::env::env_file_may_set(k) {
                 cmd.env(k, v);
             }
         }
     }
+}
+
+/// Whether the explicit `--env-file` layer sets `key` for the child. A launcher
+/// that installs nub's threadpool default checks this first: the file's value is
+/// the user's, and the default must not land on top of it.
+fn env_file_sets(key: &str) -> bool {
+    !no_env_file()
+        && ENV_FILE_VARS.get().is_some_and(|vars| {
+            vars.keys()
+                .any(|k| nub_core::workspace::env::env_keys_equal(k, key))
+        })
 }
 
 /// Build the fetched tool's env overlay. The engine spawns the tool itself, so
@@ -536,18 +601,21 @@ fn apply_env_file_vars(cmd: &mut std::process::Command) {
 /// compat from its OWN inherited environment, not from this process's argv.
 /// An ambient `NODE_COMPAT` already survives the hop for free (real env vars
 /// inherit); a bare `--node` flag does not, since it never became an env var.
-/// Stamping `NODE_COMPAT=1` here is what makes `--node` reach the re-entrant
-/// child the same way the persistent env var already does.
+/// Stamping the compat-launch marker here is what makes `--node` reach the
+/// re-entrant child.
 pub(crate) fn dlx_child_env(compat_mode: bool) -> BTreeMap<String, String> {
     let mut values = BTreeMap::new();
     if compat_mode {
-        values.insert("NODE_COMPAT".to_string(), "1".to_string());
+        values.insert(
+            nub_core::node::spawn::COMPAT_LAUNCH_ENV.to_string(),
+            "1".to_string(),
+        );
     }
     if no_env_file() {
         return values;
     }
     for (key, value) in ENV_FILE_VARS.get().into_iter().flatten() {
-        if env::var_os(key).is_none() {
+        if nub_core::workspace::env::env_file_may_set(key) {
             values.insert(key.clone(), value.clone());
         }
     }
@@ -561,16 +629,63 @@ pub enum Argv0 {
     Nub,
     /// Invoked as `nubx` — enter `exec` directly.
     Nubx,
+    /// Invoked as `nubr` — the unified runner (`runtime/nubr.mjs`), see [`run_nubr`].
+    Nubr,
     /// Invoked as `node` via the PATH shim — augmented top-level execution.
     Node,
     /// Invoked as `npm`/`npx`/`pnpm`/`pnpx`/`yarn`/`yarnpkg` via a
     /// `~/.nub/shims` hardlink (`nub pm shim`) — the PM-shim dispatch
-    /// ([`run_pm_shim`]). Spec: wiki/research/package-manager-shims.md.
+    /// ([`run_pm_shim`]). Spec: `package-manager-shims` (no such document).
     PmShim(nub_core::pm::shim::ShimName),
+}
+
+/// The verb the launcher told us to be, captured out of `__NUB_ARGV0` once at
+/// startup and then erased from the environment (see [`capture_argv0_override`]).
+static ARGV0_OVERRIDE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// Read `__NUB_ARGV0` into [`ARGV0_OVERRIDE`] and REMOVE it from the environment.
+///
+/// The platform packages ship ONE binary. `nub`, `nubx` and `nubr` are the same file,
+/// and the verb normally comes from argv[0]'s basename — but the launcher's healed sh
+/// trampoline `exec`s that file by its real path, and POSIX `sh` has no portable way
+/// to set argv[0] (`exec -a` is a bash/zsh-ism; dash, which is `/bin/sh` on Debian
+/// and Ubuntu, rejects it). So the launcher passes the verb in this variable instead.
+/// argv[0] remains the fallback and still carries every direct invocation — the
+/// installer's `~/.nub/bin/nubx` symlink, `nub pm shim` hardlinks, `nubx-dev`.
+///
+/// ERASING IT IS LOAD-BEARING, not hygiene: nub spawns Node, and a script under that
+/// Node may invoke `nub` again. An inherited `__NUB_ARGV0=nubx` would silently put
+/// that grandchild in exec mode. Removing it here means the variable survives exactly
+/// one process — the one the launcher aimed it at.
+///
+/// Captured into a `OnceLock` rather than re-read, because `Argv0::detect` runs more
+/// than once per process (invocation-boundary normalization, then dispatch) and the
+/// value is gone from the environment after this call.
+///
+/// # Safety
+///
+/// Mutates the process environment, which is sound only while nub is single-threaded.
+/// `main` calls this through [`normalize_invocation_environment`] as its first action.
+pub unsafe fn capture_argv0_override() {
+    ARGV0_OVERRIDE.get_or_init(|| {
+        let verb = env::var("__NUB_ARGV0").ok().filter(|v| !v.is_empty());
+        if verb.is_some() {
+            // SAFETY: upheld by this function's caller — no other thread exists yet.
+            unsafe { env::remove_var("__NUB_ARGV0") };
+        }
+        verb
+    });
 }
 
 impl Argv0 {
     pub fn detect() -> Self {
+        // The launcher-supplied verb wins over argv[0]: on the healed fast path the
+        // binary is exec'd by its real name (`bin/nub`) for BOTH verbs, so argv[0]
+        // cannot distinguish them. Absent the override — every direct invocation —
+        // argv[0]'s basename is still the signal.
+        if let Some(verb) = ARGV0_OVERRIDE.get().and_then(Option::as_deref) {
+            return Self::classify(verb);
+        }
         let argv0 = env::args_os().next().unwrap_or_default();
         let basename = PathBuf::from(&argv0)
             .file_stem()
@@ -590,6 +705,7 @@ impl Argv0 {
         let name = basename.strip_suffix("-dev").unwrap_or(basename);
         match name {
             "nubx" => Self::Nubx,
+            "nubr" => Self::Nubr,
             "node" => Self::Node,
             // `file_stem` already stripped any `.exe`, so the same parse serves
             // the Windows shim names.
@@ -608,6 +724,16 @@ impl Argv0 {
 /// environment back. A hidden internal re-entry belongs to its parent and is
 /// exempt for the same reason `node` is.
 pub fn normalize_invocation_environment() {
+    // UNCONDITIONALLY FIRST, before the early returns below: this both establishes the
+    // verb every later `Argv0::detect()` sees and erases `__NUB_ARGV0` so no child
+    // inherits it. Gating it behind the returns would leak the variable into the whole
+    // `node`-shim and internal-reentry subtree, and would leave the OnceLock unset on
+    // exactly the paths that re-enter nub.
+    //
+    // SAFETY: `main` calls this as its first action, before logging, config
+    // initialization, or any thread-capable subsystem. No other thread exists yet.
+    unsafe { capture_argv0_override() };
+
     let internal_reentry = env::args_os().nth(1).is_some_and(|arg| {
         (cfg!(unix) && arg == "__pdeath-watch") || arg == "__node-gyp-bootstrap"
     });
@@ -628,51 +754,78 @@ pub fn normalize_invocation_environment() {
 /// auto-flag injection, .env loading, and more. Drop-in replacement
 /// for `node` — anything `node <args>` accepts, `nub <args>` also
 /// accepts, plus subcommands.
-#[derive(Parser, Debug)]
-#[command(
+#[derive(usage_rs::Cli, Debug)]
+#[usage(
     name = "nub",
     about = "The all-in-one Node.js toolkit",
-    long_about = None,
-    disable_help_subcommand = true,
-    disable_version_flag = true,
-    args_conflicts_with_subcommands = true,
+    disable_help_subcommand,
+    disable_version_flag,
+    unknown_flags = "error",
+    args_override_self = false
 )]
 pub struct Cli {
     /// Print version.
-    #[arg(short = 'v', short_alias = 'V', long)]
+    #[usage(short = 'v', short = 'V', long)]
     pub version: bool,
 
-    #[command(subcommand)]
+    #[usage(subcommand)]
     pub command: Option<Command>,
 
     /// Run as if started in <DIR>.
-    #[arg(long, global = true, value_name = "DIR")]
+    #[usage(long, global, value_name = "DIR")]
     pub cwd: Option<PathBuf>,
 
     /// Suppress Nub's non-error output.
-    #[arg(short = 's', long, global = true)]
+    #[usage(short = 's', long, global)]
     pub silent: bool,
 
     /// Increase Nub's log verbosity (repeatable).
-    #[arg(long, global = true, action = clap::ArgAction::Count)]
+    #[usage(long, global, count)]
     pub verbose: u8,
 
     /// Color mode for Nub's output.
-    #[arg(long, global = true, default_value = "auto", default_missing_value = "always", num_args = 0..=1, require_equals = true)]
+    #[usage(
+        long,
+        global,
+        value_enum,
+        default = "auto",
+        default_missing = "always",
+        require_equals
+    )]
     pub color: ColorWhen,
 
+    // Declared to the parser as well as caught by the pre-subcommand argv scan, because
+    // pnpm accepts it in BOTH positions and the scan only sees tokens before the
+    // verb: without this, `nub run -r --no-color build` was refused by the parser
+    // while the pre-verb spelling worked.
+    //
+    // Kept as a plain comment, NOT a doc comment: the parser renders a doc comment into
+    // `--help`, and a `global` arg's text lands in EVERY subcommand's help — where
+    // `cli_grammar_parity` greps for the parser's rejection wording to decide
+    // whether a form was refused. Quoting that wording here made every probe in
+    // that suite read as a rejection.
+    /// Disable color. The pnpm-compatible spelling of `--color=never`.
+    #[usage(long = "no-color", global, conflicts("--color"))]
+    pub no_color: bool,
+
     /// Enable watch mode (alias for `nub watch`).
-    #[arg(long)]
+    #[usage(long)]
     pub watch: bool,
 
     /// File to execute, or `-` for stdin. When no subcommand matches,
     /// the first positional is treated as a file path and everything
     /// after it passes through to Node.
-    #[arg(trailing_var_arg = true)]
+    #[usage(arg, double_dash = "automatic")]
     pub args: Vec<String>,
 }
 
-#[derive(Subcommand, Debug)]
+// One of these is built once per process, straight from argv, and matched
+// immediately — it is never held in a collection, moved in a hot loop, or sent
+// across a channel, so the size gap between the largest variant and the rest buys
+// nothing to fix. Boxing a `Subcommands` variant would also put an indirection
+// in front of every field the parser writes and every match arm reads.
+#[allow(clippy::large_enum_variant)]
+#[derive(usage_rs::Subcommands, Debug)]
 pub enum Command {
     /// Run a package.json script (workspace-aware).
     Run {
@@ -680,109 +833,109 @@ pub enum Command {
         script: Option<String>,
 
         /// Disable Nub's runtime augmentation for this invocation.
-        #[arg(long)]
+        #[usage(long)]
         node: bool,
 
         /// Run in all workspace packages. `--workspaces` is the npm-style alias.
-        #[arg(short = 'r', long = "recursive", visible_alias = "workspaces")]
+        #[usage(short = 'r', long = "recursive", visible_alias = "workspaces")]
         recursive: bool,
 
         /// Filter workspace packages by name or glob. Repeatable: multiple
         /// `--filter`s union; `!`-prefixed filters subtract. `-F` is the alias.
-        #[arg(short = 'F', long)]
+        #[usage(short = 'F', long)]
         filter: Vec<String>,
 
         /// npm-style member selection: alias for `--filter <name>`. Long-only
         /// (the short `-w` is pnpm's `--workspace-root`). Repeatable.
-        #[arg(long = "workspace", value_name = "NAME")]
+        #[usage(long = "workspace", value_name = "NAME")]
         workspace: Vec<String>,
 
         /// Run from the workspace root regardless of cwd.
-        #[arg(short = 'w', long)]
+        #[usage(short = 'w', long)]
         workspace_root: bool,
 
         /// Add the workspace root package to the recursive set (npm-style;
         /// distinct from `--workspace-root`, which targets *only* the root).
-        #[arg(long)]
+        #[usage(long)]
         include_workspace_root: bool,
 
         /// Error if the filter selects zero packages. (Nub also errors on a
         /// zero-match filter by default; this is the explicit form.)
-        #[arg(long)]
+        #[usage(long)]
         fail_if_no_match: bool,
 
         /// Skip `pre<x>` / `post<x>` lifecycle hooks for every script run.
-        #[arg(long)]
+        #[usage(long)]
         ignore_scripts: bool,
 
         /// Override the shell used to invoke the script command.
-        #[arg(long, value_name = "PATH")]
+        #[usage(long, value_name = "PATH")]
         script_shell: Option<String>,
 
         /// Buffer each package's output and flush it on completion (no
         /// interleaving). Default on CI / non-TTY.
-        #[arg(long)]
+        #[usage(long)]
         aggregate_output: bool,
 
         /// Skip topological predecessors of <pkg> (CI restart-after-failure).
-        #[arg(long, value_name = "PKG")]
+        #[usage(long, value_name = "PKG")]
         resume_from: Option<String>,
 
         /// Max concurrent packages per topological chunk.
-        #[arg(long, value_name = "N")]
+        #[usage(long, value_name = "N")]
         workspace_concurrency: Option<i32>,
 
         /// Run all packages concurrently with no topological ordering.
-        #[arg(long)]
+        #[usage(long)]
         parallel: bool,
 
         /// Stop the run on first failure. This is the default; the flag is
         /// accepted for explicitness/muscle-memory and is a no-op on its own.
-        #[arg(long)]
+        #[usage(long)]
         bail: bool,
 
         /// Don't stop on first failure; collect all results.
-        #[arg(long = "no-bail")]
+        #[usage(long = "no-bail")]
         no_bail: bool,
 
         /// Reverse topological order (dependents before dependencies).
-        #[arg(long)]
+        #[usage(long)]
         reverse: bool,
 
         /// Skip topological sort; treat all packages as one flat set.
-        #[arg(long = "no-sort")]
+        #[usage(long = "no-sort")]
         no_sort: bool,
 
         /// Run packages strictly one at a time, ignoring topological order
         /// (equivalent to `--no-sort --workspace-concurrency 1`).
-        #[arg(long, conflicts_with = "parallel")]
+        #[usage(long, conflicts("--parallel"))]
         sequential: bool,
 
         /// Stream output with package-name prefix.
-        #[arg(long)]
+        #[usage(long)]
         stream: bool,
 
         /// Output reporter: `default` (prefixed/aggregated), `silent` (= `-s`),
         /// or `ndjson` (one JSON object per line for CI parsing).
-        #[arg(long, value_enum, value_name = "MODE")]
+        #[usage(long, value_enum, value_name = "MODE")]
         reporter: Option<ReporterMode>,
 
         /// Drop the `<dir> <script>:` prefix from each streamed output line so CI
         /// annotation matchers see the child's raw output. Pairs with `--stream`.
-        #[arg(long = "reporter-hide-prefix")]
+        #[usage(long = "reporter-hide-prefix")]
         reporter_hide_prefix: bool,
 
         /// Skip packages that don't have the named script.
-        #[arg(long)]
+        #[usage(long)]
         if_present: bool,
 
         /// Skip the pre-run dependency-freshness check for this invocation
         /// (`--no-install` is the alias).
-        #[arg(long = "no-check", visible_alias = "no-install")]
+        #[usage(long = "no-check", visible_alias = "no-install")]
         no_check: bool,
 
         /// Remaining arguments forwarded to the script.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        #[usage(arg, double_dash = "automatic")]
         args: Vec<String>,
     },
 
@@ -792,7 +945,7 @@ pub enum Command {
         file: String,
 
         /// Remaining arguments forwarded to the script.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        #[usage(arg, double_dash = "automatic")]
         args: Vec<String>,
     },
 
@@ -802,53 +955,53 @@ pub enum Command {
         bin: String,
 
         /// Disable Nub's runtime augmentation for this invocation.
-        #[arg(long)]
+        #[usage(long)]
         node: bool,
 
         /// Run the bin in every workspace package. `--workspaces` is the npm-style alias.
-        #[arg(short = 'r', long = "recursive", visible_alias = "workspaces")]
+        #[usage(short = 'r', long = "recursive", visible_alias = "workspaces")]
         recursive: bool,
 
         /// Filter workspace packages by name or glob. Repeatable: multiple
         /// `--filter`s union; `!`-prefixed filters subtract. `-F` is the alias.
-        #[arg(short = 'F', long)]
+        #[usage(short = 'F', long)]
         filter: Vec<String>,
 
         /// npm-style member selection: alias for `--filter <name>`. Long-only
         /// (the short `-w` is pnpm's `--workspace-root`). Repeatable.
-        #[arg(long = "workspace", value_name = "NAME")]
+        #[usage(long = "workspace", value_name = "NAME")]
         workspace: Vec<String>,
 
         /// Run from the workspace root regardless of cwd.
-        #[arg(short = 'w', long)]
+        #[usage(short = 'w', long)]
         workspace_root: bool,
 
         /// Add the workspace root package to the recursive set (npm-style;
         /// distinct from `--workspace-root`, which targets *only* the root).
-        #[arg(long)]
+        #[usage(long)]
         include_workspace_root: bool,
 
         /// Error if the filter selects zero packages. (Nub also errors on a
         /// zero-match filter by default; this is the explicit form.)
-        #[arg(long)]
+        #[usage(long)]
         fail_if_no_match: bool,
 
         /// Max concurrent packages per topological chunk.
-        #[arg(long, value_name = "N")]
+        #[usage(long, value_name = "N")]
         workspace_concurrency: Option<i32>,
 
         /// Run the bin in all packages concurrently with no topological ordering.
-        #[arg(long)]
+        #[usage(long)]
         parallel: bool,
 
         /// Skip the pre-run dependency-freshness check for this invocation.
         /// (Spelled `--no-check` — `--no-install` is reserved for the npx
         /// fetch semantics on `nubx`, so `nub exec` does not accept it.)
-        #[arg(long = "no-check")]
+        #[usage(long = "no-check")]
         no_check: bool,
 
         /// Remaining arguments forwarded to the binary.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        #[usage(arg, double_dash = "automatic")]
         args: Vec<String>,
     },
 
@@ -858,148 +1011,385 @@ pub enum Command {
     /// fetch-path flags (`-p`, `--no-install`, `-q`, …) that only make sense
     /// when a tool may be fetched. Hidden from `nub`'s own subcommand list —
     /// it is reachable only as the `nubx` argv0.
-    #[command(hide = true)]
+    #[usage(hide)]
     Nubx {
         /// Binary (or package, with `-p`) name to execute.
         bin: String,
 
         /// Disable Nub's runtime augmentation for this invocation.
-        #[arg(long)]
+        #[usage(long)]
         node: bool,
 
         // ── workspace fan-out flags (preserved from `nub exec`) ──
         /// Run the bin in every workspace package. `--workspaces` is the npm-style alias.
-        #[arg(short = 'r', long = "recursive", visible_alias = "workspaces")]
+        #[usage(short = 'r', long = "recursive", visible_alias = "workspaces")]
         recursive: bool,
 
         /// Filter workspace packages by name or glob. Repeatable: multiple
         /// `--filter`s union; `!`-prefixed filters subtract. `-F` is the alias.
-        #[arg(short = 'F', long)]
+        #[usage(short = 'F', long)]
         filter: Vec<String>,
 
         /// npm-style member selection: alias for `--filter <name>`. Long-only
         /// (the short `-w` is pnpm's `--workspace-root`). Repeatable.
-        #[arg(long = "workspace", value_name = "NAME")]
+        #[usage(long = "workspace", value_name = "NAME")]
         workspace: Vec<String>,
 
         /// Run from the workspace root regardless of cwd.
-        #[arg(short = 'w', long)]
+        #[usage(short = 'w', long)]
         workspace_root: bool,
 
         /// Add the workspace root package to the recursive set (npm-style;
         /// distinct from `--workspace-root`, which targets *only* the root).
-        #[arg(long)]
+        #[usage(long)]
         include_workspace_root: bool,
 
         /// Error if the filter selects zero packages.
-        #[arg(long)]
+        #[usage(long)]
         fail_if_no_match: bool,
 
         /// Max concurrent packages per topological chunk.
-        #[arg(long, value_name = "N")]
+        #[usage(long, value_name = "N")]
         workspace_concurrency: Option<i32>,
 
         /// Run the bin in all packages concurrently with no topological ordering.
-        #[arg(long)]
+        #[usage(long)]
         parallel: bool,
 
         // ── npx fetch-path flags ──
         /// Fetch package SPEC and run a bin from it (the bin name may differ
         /// from the package). Repeatable. Forces the fetch path; `npx -p`.
-        #[arg(short = 'p', long = "package", value_name = "SPEC")]
+        #[usage(short = 'p', long = "package", value_name = "SPEC")]
         package: Vec<String>,
 
         /// Never fetch: if the tool isn't installed locally, error instead of
         /// fetching it (`npx --no-install` / `--yes=false`).
-        #[arg(long = "no-install")]
+        #[usage(long = "no-install")]
         no_install: bool,
 
         /// Alias of `--no-install`: refuse to fetch a missing tool (`npx --no`).
-        #[arg(long = "no")]
+        #[usage(long = "no")]
         no_fetch: bool,
 
         /// Suppress the fetch progress output (`npx -q`/`--quiet`).
-        #[arg(short = 'q', long)]
+        #[usage(short = 'q', long)]
         quiet: bool,
 
         /// Consent up-front to the implicit registry fetch (`npx -y`): skips the
         /// first-fetch prompt and is the escape hatch out of the CI / non-TTY
         /// fail-closed default.
-        #[arg(short = 'y', long)]
+        #[usage(short = 'y', long)]
         yes: bool,
 
         /// Accepted for `npx` parity. Removed from npm v9+; nubx warns and ignores it.
-        #[arg(long = "ignore-existing")]
+        #[usage(long = "ignore-existing")]
         ignore_existing: bool,
 
         /// Skip the pre-run dependency-freshness check for this invocation.
         /// (Spelled `--no-check` here — `--no-install` already means "don't
         /// fetch a missing tool" on this surface.)
-        #[arg(long = "no-check")]
+        #[usage(long = "no-check")]
         no_check: bool,
 
+        /// Per-invocation `minimumReleaseAge` overrides for the fetch path.
+        /// `nubx <just-published-tool>` is the common way to hit the age gate,
+        /// so the escape hatch belongs on this surface.
+        #[usage(flatten)]
+        age_gate: crate::pm_engine::AgeGateFlags,
+
+        /// Which platforms' optional dependencies to install
+        /// (`--os`/`--cpu`/`--libc`), overriding host detection for this
+        /// run only. Mirrors pnpm's flags of the same names.
+        #[usage(flatten)]
+        platform: crate::pm_engine::PlatformFlags,
+
         /// Remaining arguments forwarded to the binary.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        #[usage(arg, double_dash = "automatic")]
         args: Vec<String>,
     },
 
     // nub's own project init, not the engine's npm-style manifest write —
     // deliberately excluded from ENGINE_VERBS; design record in
-    // wiki/commands/init.md. (The doc comment below is user-facing `--help`
+    // internal/commands/init.md. (The doc comment below is user-facing `--help`
     // text: no internal references.)
+    /// Compile a file to a standalone executable.
+    ///
+    /// Bundles the entry (Rolldown, in-process), embeds a Node for the target
+    /// (default shape), and emits one self-contained binary. `--smol` embeds no
+    /// Node — it discovers or provisions one at first run.
+    ///
+    /// Gated behind the `compile` cargo feature: release builds enable it, while
+    /// feature-off development builds expose no `compile` verb rather than one
+    /// that can only error.
+    #[cfg(feature = "compile")]
+    Compile {
+        /// Entry file (TS/JS) to bundle and compile.
+        entry: String,
+
+        /// Output path. Default: ./<entry-stem> (plus `.exe` for a Windows target).
+        #[usage(long, value_name = "PATH")]
+        out: Option<String>,
+
+        /// No embedded Node: discover or provision one at runtime.
+        #[usage(long)]
+        smol: bool,
+
+        /// Node version to target (overrides the project's pin chain). Accepts a
+        /// concrete version, a major, a range, or an alias (`lts`/`latest`).
+        /// Omitted → inferred from `.node-version` / `engines.node` / etc.
+        #[usage(long, value_name = "VERSION")]
+        target: Option<String>,
+
+        /// Target platform. Default: the host. One of `darwin-arm64`,
+        /// `darwin-x64`, `linux-arm64`, `linux-arm64-musl`, `linux-x64`,
+        /// `linux-x64-musl`, `win32-arm64`, `win32-x64`. A foreign platform's
+        /// launcher is fetched from this release and cached.
+        #[usage(long, value_name = "PLATFORM")]
+        platform: Option<String>,
+
+        /// Disable minification (default: minify on).
+        #[usage(long = "no-minify")]
+        no_minify: bool,
+
+        /// Languages to keep in the embedded Node's ICU data, comma-separated:
+        /// `--icu=en,de,fr`. Default is every locale, which formats exactly like
+        /// the user's own `node`. Written `--icu=<LOCALES>`; bare `--icu` is
+        /// `full`. A region is accepted and narrows nothing (`en-US` keeps `en`),
+        /// and `root` is always retained. Dropped languages fall back silently,
+        /// so name every one the app formats for. No effect under `--smol`.
+        #[usage(long, value_name = "LOCALES", require_equals, default_missing = "full")]
+        icu: Option<String>,
+
+        /// Where the source map goes: `none` (default), `linked`, `inline`, or
+        /// `external`. Written `--sourcemap=<MODE>`; bare `--sourcemap` is inline.
+        #[usage(
+            long,
+            value_name = "MODE",
+            value_enum,
+            require_equals,
+            default_missing = "inline"
+        )]
+        sourcemap: Option<SourcemapArg>,
+
+        /// Replace an expression at build time, repeatable. Values are JavaScript
+        /// expressions, so a string needs its own quotes:
+        /// `--define 'API="https://example.com"'`.
+        #[usage(long, value_name = "KEY=VALUE")]
+        define: Vec<String>,
+
+        /// Replace an expression at build time with a file's contents, repeatable.
+        /// The file holds the JavaScript expression `--define` would take, for a
+        /// value too big for a command line:
+        /// `--define-file MODELS=./models.json`.
+        #[usage(long = "define-file", value_name = "KEY=PATH")]
+        define_file: Vec<String>,
+
+        /// Embed a file or directory in the executable, byte for byte, repeatable.
+        /// Accepts globs. Embedded files are extracted beside the compiled entry,
+        /// keeping the layout they had in your source tree, so the app reads them
+        /// through the same relative paths it always did.
+        #[usage(long, value_name = "PATH")]
+        include: Vec<String>,
+
+        /// Leave a path out of what `--include` embeds, repeatable. Accepts globs.
+        /// A pattern that matches nothing is ignored.
+        #[usage(long, value_name = "PATH")]
+        exclude: Vec<String>,
+
+        /// Start the binary's Node with these options, spelled like the
+        /// `NODE_OPTIONS` environment variable and repeatable. For a program
+        /// that only works behind a flag, which the person running your binary
+        /// cannot supply for you:
+        /// `--node-options "--experimental-vm-modules --max-old-space-size=4096"`.
+        /// Whoever runs the binary can still set `NODE_OPTIONS` themselves; the
+        /// two are additive.
+        #[usage(long = "node-options", value_name = "OPTIONS", allow_hyphen_values)]
+        node_options: Vec<String>,
+
+        /// Icon to show on a Windows executable, as a `.ico` file. Works when
+        /// cross-compiling, so a Windows binary built on macOS or Linux gets its
+        /// icon too. Windows carries the icon inside the executable; macOS and
+        /// Linux read one from a bundle or desktop entry, so the flag is refused
+        /// for those targets rather than silently ignored.
+        #[usage(long = "icon", value_name = "FILE")]
+        icon: Option<PathBuf>,
+
+        /// Windows version-resource field, as `Key=value`; repeatable. These are
+        /// the fields Explorer's Details tab shows. Defaults come from
+        /// `package.json` (name, version, description, author), so most builds
+        /// need no flag; `Key=` drops a defaulted field. Known keys: Comments,
+        /// CompanyName, FileDescription, FileVersion, InternalName,
+        /// LegalCopyright, LegalTrademarks, OriginalFilename, PrivateBuild,
+        /// ProductName, ProductVersion, SpecialBuild. Works when cross-compiling,
+        /// and is refused for a non-Windows target rather than ignored.
+        #[usage(long = "metadata", value_name = "KEY=VALUE")]
+        metadata: Vec<String>,
+
+        /// Start a Windows executable without a console window, for a GUI app, a
+        /// tray icon, or a file-association handler. Launched from a terminal the
+        /// binary still writes to it; launched from Explorer it shows nothing.
+        /// Works when cross-compiling, and is refused for a non-Windows target
+        /// rather than ignored.
+        #[usage(long = "hide-console")]
+        hide_console: bool,
+
+        /// Custom message the compiled binary shows on a terminal while it sets
+        /// itself up on first run. Default: `Initializing...`.
+        #[usage(long, value_name = "TEXT")]
+        install_message: Option<String>,
+
+        /// Remove a category of call at build time, repeatable:
+        /// `--drop console --drop debugger`. A dropped call is not evaluated, so
+        /// an argument with a side effect goes with it. Needs minification, which
+        /// is on by default.
+        #[usage(long, value_name = "NAME", value_enum)]
+        drop: Vec<DropArg>,
+
+        /// Write a build report to this path, in esbuild's metafile JSON schema:
+        /// every module the bundler read, every file it emitted, and what each
+        /// module contributed to each. Reads in esbuild's `analyzeMetafile`,
+        /// esbuild-visualizer, and bundle-buddy.
+        #[usage(long, value_name = "PATH")]
+        metafile: Option<String>,
+
+        // Everything below is `nub compile`'s power set. Grouping it under its
+        // own `--help` heading (the shape esbuild uses) is what keeps the common
+        // six flags readable while the bundler knobs stay discoverable. The
+        // heading is spelled per field rather than hoisted to a constant because
+        // `help_heading` takes a literal — it travels in the portable spec.
+        /// Let minification rename functions and classes. Names are preserved by
+        /// default: minified class names break frameworks that key on them
+        /// (dependency injection, ORM entities, class registries).
+        #[usage(long = "no-keep-names", help_heading = "Advanced options")]
+        no_keep_names: bool,
+
+        /// Keep every module's side effects, for a dependency that declares
+        /// itself pure and is not. Tree-shaking is on by default.
+        #[usage(long = "no-treeshake", help_heading = "Advanced options")]
+        no_treeshake: bool,
+
+        /// Ignore `/*@__PURE__*/` annotations while tree-shaking.
+        #[usage(long = "ignore-annotations", help_heading = "Advanced options")]
+        ignore_annotations: bool,
+
+        /// Resolve one specifier as another, repeatable: `--alias lodash=lodash-es`.
+        #[usage(long, value_name = "FROM=TO", help_heading = "Advanced options")]
+        alias: Vec<String>,
+
+        /// Choose what importing a file extension evaluates to, repeatable:
+        /// `--loader .html=file`. Types: `file` (embeds the file and yields its
+        /// path), `text`, `json`, `base64`, `dataurl`, `binary`, `empty`.
+        #[usage(long, value_name = "EXT=TYPE", help_heading = "Advanced options")]
+        loader: Vec<String>,
+
+        /// Extra `exports` condition to honor, repeatable. Added to the
+        /// defaults rather than replacing them.
+        #[usage(long, value_name = "NAME", help_heading = "Advanced options")]
+        conditions: Vec<String>,
+
+        /// Leave a package out of the bundle and resolve it at run time from the
+        /// directory the binary is run in, repeatable. Covers the package and
+        /// its subpaths. The package must be installed on the target machine.
+        #[usage(long, value_name = "PKG", help_heading = "Advanced options")]
+        external: Vec<String>,
+
+        /// Ship a package unbundled INSIDE the binary, in its own installed
+        /// layout, repeatable. For a package that loads a file by a path it
+        /// computes at run time — a worker script, a data file, an addon that
+        /// detection did not recognise.
+        ///
+        /// Distinct from `--external`, which leaves the package OUT of the binary
+        /// to be resolved on the target machine. This one still carries it.
+        #[usage(long, value_name = "PKG", help_heading = "Advanced options")]
+        unbundled: Vec<String>,
+
+        /// Bundle a package that would otherwise ship unbundled, repeatable.
+        ///
+        /// The escape hatch for detection firing on a package that does not need
+        /// it — a false positive costs that package its tree-shaking, and waiting
+        /// on a nub release to correct it is worse than a flag.
+        #[usage(long, value_name = "PKG", help_heading = "Advanced options")]
+        bundled: Vec<String>,
+
+        /// Keep a dynamic `import()` whose specifier the program computes at run
+        /// time — a plugin loader, a config module. Such an import is refused by
+        /// default: the binary resolves it from the directory it is run in, so
+        /// what it loads depends on the machine you ship to.
+        ///
+        /// Takes an optional glob scoping the permission to the files the imports
+        /// are written in, so one plugin directory can be excused without excusing
+        /// the whole program: `--allow-dynamic-import 'src/plugins/**'`.
+        /// Repeatable. Bare, it allows every one.
+        #[usage(
+            long = "allow-dynamic-import",
+            value_name = "GLOB",
+            default_missing = "",
+            help_heading = "Advanced options"
+        )]
+        allow_dynamic_import: Vec<String>,
+
+        /// Use this tsconfig.json instead of the one discovered from the entry.
+        #[usage(long, value_name = "PATH", help_heading = "Advanced options")]
+        tsconfig: Option<String>,
+
+        /// Exclude the original source text from the source map.
+        #[usage(long = "sourcemap-exclude-sources", help_heading = "Advanced options")]
+        sourcemap_exclude_sources: bool,
+    },
+
     /// Scaffold a new TypeScript-first project.
     Init {
         /// Non-interactive: skip all prompts and take the defaults.
-        #[arg(short = 'y', long)]
+        #[usage(short = 'y', long)]
         yes: bool,
 
         /// JavaScript variant: `index.js`, no tsconfig.json, no type devDeps.
-        #[arg(long)]
+        #[usage(long)]
         js: bool,
 
         /// Project name (default: the directory name, sanitized).
-        #[arg(long, value_name = "NAME")]
+        #[usage(long, value_name = "NAME")]
         name: Option<String>,
 
         /// Skip `git init`.
-        #[arg(long = "no-git")]
+        #[usage(long = "no-git")]
         no_git: bool,
 
         /// Skip the `nub install` step.
-        #[arg(long = "no-install")]
+        #[usage(long = "no-install")]
         no_install: bool,
 
         /// Overwrite existing files (default: refuse and list conflicts).
-        #[arg(long)]
+        #[usage(long)]
         force: bool,
 
         /// Rejected with a `nubx create-<template>` hint — `init` takes no
         /// positionals (pnpm parity).
-        #[arg(trailing_var_arg = true, hide = true)]
+        #[usage(arg, double_dash = "automatic", hide)]
         args: Vec<String>,
     },
 
     /// Upgrade Nub to the latest version.
     Upgrade {
         /// Target version (default: latest).
-        #[arg(long, conflicts_with_all = ["canary", "stable"])]
+        #[usage(long, conflicts("--canary", "--stable"))]
         version: Option<String>,
 
-        /// Upgrade to the latest canary build (rebuilt from every commit).
-        #[arg(long, conflicts_with = "stable")]
+        /// Upgrade to the latest canary build (rebuilt nightly from main).
+        #[usage(long, conflicts("--stable"))]
         canary: bool,
 
         /// Upgrade to the latest stable release — the default on stable
         /// builds; on a canary build this opts back out of the canary channel.
-        #[arg(long)]
+        #[usage(long)]
         stable: bool,
 
         /// Show what would happen without performing the upgrade.
-        #[arg(long)]
+        #[usage(long)]
         dry_run: bool,
 
-        /// Skip confirmation prompt.
-        #[arg(long, short)]
+        /// Accepted for scripted use; `nub upgrade` never prompts.
+        #[usage(long, short)]
         yes: bool,
     },
 
@@ -1013,8 +1403,12 @@ pub enum Command {
     ///
     /// `nub node <file>` is NOT a passthrough — to run a file use `nub <file>`.
     /// The `--node` compat flag lives only on `run` / `nubx`, never here.
+    // The verb is routed by the hand-written matcher in `run_node` before
+    // the parser sees it; this variant exists for `nub node --help` and the
+    // grammar only, so nothing reads its fields.
     Node {
-        #[command(subcommand)]
+        #[usage(subcommand)]
+        #[allow(dead_code)]
         command: NodeCommand,
     },
 
@@ -1023,142 +1417,180 @@ pub enum Command {
     /// Respects the project's existing lockfile (pnpm-lock.yaml,
     /// package-lock.json, …) for both resolution and layout; see
     /// src/pm_engine/ for the layout policy and the yarn write gate.
-    #[command(visible_alias = "i")]
+    #[usage(visible_alias = "i")]
     Install {
         /// Hard-fail if the lockfile is out of date (default in CI).
-        #[arg(long)]
+        #[usage(long)]
         frozen_lockfile: bool,
 
         /// Re-resolve and rewrite the lockfile even when it's stale.
-        #[arg(long, conflicts_with = "frozen_lockfile")]
+        #[usage(long, conflicts("--frozen-lockfile"))]
         no_frozen_lockfile: bool,
 
         /// Use the lockfile when fresh, re-resolve when stale (default outside CI).
-        #[arg(
-            long,
-            conflicts_with_all = ["frozen_lockfile", "no_frozen_lockfile"]
-        )]
+        #[usage(long, conflicts("--frozen-lockfile", "--no-frozen-lockfile"))]
         prefer_frozen_lockfile: bool,
 
         /// Skip devDependencies; install only production deps.
-        #[arg(short = 'P', long, visible_alias = "production")]
+        #[usage(short = 'P', long, visible_alias = "production")]
         prod: bool,
 
         /// Install only devDependencies.
-        #[arg(short = 'D', long, conflicts_with = "prod")]
+        #[usage(short = 'D', long, conflicts("--prod"))]
         dev: bool,
 
         /// Skip all lifecycle scripts (root and dependency).
-        #[arg(long)]
+        #[usage(long)]
         ignore_scripts: bool,
 
+        /// Run this pnpmfile instead of the project's own one. Relative
+        /// paths resolve against the project root. Naming a path this way
+        /// is what loads hooks in a project whose incumbent is not pnpm.
+        #[usage(long, value_name = "PATH", conflicts("--ignore-pnpmfile"))]
+        pnpmfile: Option<PathBuf>,
+
+        /// Run this pnpmfile before the project's own one.
+        #[usage(long, value_name = "PATH", conflicts("--ignore-pnpmfile"))]
+        global_pnpmfile: Option<PathBuf>,
+
+        /// Skip `.pnpmfile.cjs` / `.pnpmfile.mjs` hooks for this install.
+        #[usage(long)]
+        ignore_pnpmfile: bool,
+
         /// Skip optionalDependencies.
-        #[arg(long)]
+        #[usage(long)]
         no_optional: bool,
 
         /// Never hit the network; fail if a package isn't cached.
-        #[arg(long)]
+        #[usage(long)]
         offline: bool,
 
         /// Use cached packages when available, network otherwise.
-        #[arg(long, conflicts_with = "offline")]
+        #[usage(long, conflicts("--offline"))]
         prefer_offline: bool,
 
         /// Resolve and write the lockfile, but skip linking node_modules.
-        #[arg(long)]
+        #[usage(long)]
         lockfile_only: bool,
 
         /// Re-resolve and relink even when the install state says up-to-date.
-        #[arg(long)]
+        #[usage(long)]
         force: bool,
 
         /// node_modules layout: `isolated` (pnpm-style) or `hoisted` (npm-style).
         /// Overrides the lockfile-derived default.
-        #[arg(long, value_name = "MODE")]
+        #[usage(long, value_name = "MODE")]
         node_linker: Option<String>,
 
         /// Registry URL for this invocation (metadata, tarballs, audit).
         /// Overrides `registry` from `.npmrc`.
-        #[arg(long, value_name = "URL")]
+        #[usage(long, value_name = "URL")]
         registry: Option<String>,
 
         /// Run as if started in <DIR> (the pnpm spelling of `--cwd`).
-        #[arg(short = 'C', long = "dir", value_name = "DIR")]
+        #[usage(short = 'C', long = "dir", value_name = "DIR")]
         dir: Option<PathBuf>,
 
         /// Scope to workspace packages matching PATTERN (repeatable). `-F` alias.
-        #[arg(short = 'F', long, value_name = "PATTERN")]
+        #[usage(short = 'F', long, value_name = "PATTERN")]
         filter: Vec<String>,
 
         /// Production-only variant of `--filter`.
-        #[arg(long, value_name = "PATTERN")]
+        #[usage(long, value_name = "PATTERN")]
         filter_prod: Vec<String>,
 
         /// Run across every workspace package (same as `--filter=*`).
-        #[arg(short = 'r', long)]
+        #[usage(short = 'r', long)]
         recursive: bool,
 
         /// Error when a workspace selector matches no packages.
-        #[arg(long)]
+        #[usage(long)]
         fail_if_no_match: bool,
 
         /// Include the workspace root in recursive operations.
-        #[arg(long)]
+        #[usage(long)]
         include_workspace_root: bool,
 
-        #[command(flatten)]
+        #[usage(flatten)]
         output: crate::pm_engine::OutputFlags,
+
+        #[usage(flatten)]
+        age_gate: crate::pm_engine::AgeGateFlags,
+
+        /// Which platforms' optional dependencies to install
+        /// (`--os`/`--cpu`/`--libc`), overriding host detection for this
+        /// run only. Mirrors pnpm's flags of the same names.
+        #[usage(flatten)]
+        platform: crate::pm_engine::PlatformFlags,
     },
 
     /// Clean install for CI: delete node_modules, install strictly from the
     /// lockfile (drift or a missing lockfile is a hard error).
     Ci {
+        /// Skip devDependencies; install only production deps.
+        #[usage(short = 'P', long, visible_alias = "production")]
+        prod: bool,
+
+        /// Install only devDependencies.
+        #[usage(short = 'D', long, conflicts("--prod"))]
+        dev: bool,
+
         /// Skip all lifecycle scripts (root and dependency).
-        #[arg(long)]
+        #[usage(long)]
         ignore_scripts: bool,
 
         /// Skip optionalDependencies.
-        #[arg(long)]
+        #[usage(long)]
         no_optional: bool,
 
         /// Registry URL for this invocation (metadata, tarballs, audit).
         /// Overrides `registry` from `.npmrc`.
-        #[arg(long, value_name = "URL")]
+        #[usage(long, value_name = "URL")]
         registry: Option<String>,
 
         /// Run as if started in <DIR> (the pnpm spelling of `--cwd`).
-        #[arg(short = 'C', long = "dir", value_name = "DIR")]
+        #[usage(short = 'C', long = "dir", value_name = "DIR")]
         dir: Option<PathBuf>,
 
         /// Scope to workspace packages matching PATTERN (repeatable). `-F` alias.
-        #[arg(short = 'F', long, value_name = "PATTERN")]
+        #[usage(short = 'F', long, value_name = "PATTERN")]
         filter: Vec<String>,
 
         /// Production-only variant of `--filter`.
-        #[arg(long, value_name = "PATTERN")]
+        #[usage(long, value_name = "PATTERN")]
         filter_prod: Vec<String>,
 
         /// Run across every workspace package (same as `--filter=*`).
-        #[arg(short = 'r', long)]
+        #[usage(short = 'r', long)]
         recursive: bool,
 
         /// Error when a workspace selector matches no packages.
-        #[arg(long)]
+        #[usage(long)]
         fail_if_no_match: bool,
 
         /// Include the workspace root in recursive operations.
-        #[arg(long)]
+        #[usage(long)]
         include_workspace_root: bool,
 
-        #[command(flatten)]
+        #[usage(flatten)]
         output: crate::pm_engine::OutputFlags,
+
+        #[usage(flatten)]
+        age_gate: crate::pm_engine::AgeGateFlags,
+
+        /// Which platforms' optional dependencies to install
+        /// (`--os`/`--cpu`/`--libc`), overriding host detection for this
+        /// run only. Mirrors pnpm's flags of the same names.
+        #[usage(flatten)]
+        platform: crate::pm_engine::PlatformFlags,
     },
 }
 
-/// The `nub node` version-management verbs. Spec: `wiki/commands/node-versions.md`.
+/// The `nub node` version-management verbs. Spec: `internal/commands/node-versions.md`.
 /// Every verb wraps existing `nub-core` machinery (resolver / cache / downloader)
 /// — no new runtime engine.
-#[derive(Subcommand, Debug)]
+#[derive(usage_rs::Subcommands, Debug)]
+#[allow(dead_code)]
 pub enum NodeCommand {
     /// Provision one or more versions into nub's cache. Bare form reads the
     /// project pin. A version already on PATH (system/nvm) is reported + skipped.
@@ -1181,32 +1613,138 @@ pub enum NodeCommand {
     },
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, usage_rs::ValueEnum)]
 pub enum ColorWhen {
     Auto,
     Always,
     Never,
 }
 
+/// Record the resolved `--color` choice. Called from the pre-subcommand argv scan
+/// and again from the parsed `Cli`, so either spelling position takes effect.
+pub(crate) fn set_color_mode(when: ColorWhen) {
+    let raw = match when {
+        ColorWhen::Auto => COLOR_AUTO,
+        ColorWhen::Always => COLOR_ALWAYS,
+        ColorWhen::Never => COLOR_NEVER,
+    };
+    COLOR_MODE.store(raw, Ordering::Relaxed);
+}
+
+pub(crate) fn color_mode() -> ColorWhen {
+    match COLOR_MODE.load(Ordering::Relaxed) {
+        COLOR_ALWAYS => ColorWhen::Always,
+        COLOR_NEVER => ColorWhen::Never,
+        _ => ColorWhen::Auto,
+    }
+}
+
+/// The one place Nub decides whether to emit ANSI to a stream. Precedence, highest
+/// first: an explicit `--color`/`--no-color`, then `NO_COLOR`, then `FORCE_COLOR`,
+/// then whether the stream is really a terminal.
+///
+/// It replaces an open-coded `is_terminal() || var_os("FORCE_COLOR").is_some()`,
+/// which never consulted `NO_COLOR` on the stream-prefix path (so `NO_COLOR=1`
+/// still produced a colored prefix, despite `--help` promising otherwise) and read
+/// a mere presence as ON (so `FORCE_COLOR=0` switched color on).
+///
+/// One deliberate divergence from Node: when `FORCE_COLOR` and `NO_COLOR` are BOTH
+/// set, Node lets `FORCE_COLOR` win and warns; Nub lets `NO_COLOR` win. That keeps
+/// the promise `--help` prints and matches what the engine's own warning path
+/// already did. Either way an explicit flag outranks both, which is the case a user
+/// actually hits.
+///
+/// That divergence would otherwise split a run against itself — Nub's label plain,
+/// the child's lines colored, because the child applies Node's order to the same two
+/// variables. The script launcher closes it by exporting `FORCE_COLOR=0` for exactly
+/// that contradictory pair; see the `ColorWhen::Auto` arm in `build_script_command`.
+pub(crate) fn color_enabled(stream_is_tty: bool) -> bool {
+    match color_mode() {
+        ColorWhen::Always => return true,
+        ColorWhen::Never => return false,
+        ColorWhen::Auto => {}
+    }
+    // The NO_COLOR convention is "present and non-empty", so an empty value is
+    // explicitly NOT an opt-out. Node spells the same check in `getColorDepth`.
+    if std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
+        return false;
+    }
+    if let Some(v) = std::env::var_os("FORCE_COLOR") {
+        return force_color_enables(&v);
+    }
+    stream_is_tty
+}
+
+/// Whether a `FORCE_COLOR` value turns color ON, per Node's `getColorDepth` table
+/// (lib/internal/tty.js): only '', '1', 'true', '2' and '3' enable — every other
+/// value, '0' and 'false' included, falls through to its 2-color monochrome branch.
+/// An EMPTY value is Node's shortest spelling of ON, which is why it cannot be
+/// lumped in with '0'.
+///
+/// Shared by [`color_enabled`] and the script launcher so the two can never drift:
+/// Nub hands this variable to the children whose output it prefixes, and a value
+/// Nub read as ON while Node read it as OFF would split the two apart.
+fn force_color_enables(v: &std::ffi::OsStr) -> bool {
+    matches!(
+        v.to_str(),
+        Some("") | Some("1") | Some("true") | Some("2") | Some("3")
+    )
+}
+
+#[cfg(feature = "compile")]
+#[derive(Debug, Clone, Copy, usage_rs::ValueEnum)]
+pub enum SourcemapArg {
+    /// A `.map` shipped inside the executable, referenced by the bundle.
+    Linked,
+    /// A base64 data URI in the bundle itself.
+    Inline,
+    /// A `.map` written beside the executable and not shipped.
+    External,
+    None,
+}
+
+/// What `--drop` accepts. A closed set rather than a free string: the two are
+/// what the bundler's compress pass can remove, and an unrecognised name would
+/// otherwise be a build that silently drops nothing.
+#[cfg(feature = "compile")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, usage_rs::ValueEnum)]
+pub enum DropArg {
+    /// Every `console.*()` call.
+    Console,
+    /// Every `debugger` statement. Minification already removes these, so this
+    /// pins the guarantee rather than changing what is emitted.
+    Debugger,
+}
+
 /// Top-level entry point. Returns the process exit code.
 pub fn run() -> Result<i32> {
-    // The macOS parent-death watcher (#480) re-invokes `current_exe()` with this
-    // hidden verb — and `current_exe()` is whatever NAME nub is running under,
-    // which for any workload spawned through nub's own PATH shim is `node`, not
-    // `nub`. Dispatching it here, BEFORE `Argv0::detect()`, is what makes the
-    // verb argv0-independent. Routing it through the argv0 match instead let
-    // `Argv0::Node` treat `__pdeath-watch` as a SCRIPT to run, which spawned a
-    // workload — and therefore another watcher — per level, an unbounded
-    // self-replicating chain that exhausted the process table (regression from #504).
+    // The macOS parent-death watcher (#480) re-invokes `current_exe()` under
+    // the private launcher mode, with its `<child-pgid> <read-fd>` payload as
+    // ordinary arguments. `current_exe()` is whatever NAME nub is running
+    // under — `node` for workloads spawned through nub's PATH shim — so this
+    // must dispatch before `Argv0::detect()`. Otherwise `Argv0::Node` would
+    // treat the payload as an application script, spawning another watcher per
+    // level (regression from #504).
     //
+    // The legacy `__pdeath-watch` hidden token remains accepted for already
+    // built callers, but new watchers select the mode through the internal env
+    // channel so no application argument is reserved. Both forms require the
+    // exact two-item watcher payload before they bypass normal CLI dispatch.
     // Landing above the guards below is also deliberate: the watcher must not
     // reclaim or reap PATH shim dirs, which belong to the nub that spawned it.
     #[cfg(unix)]
     {
-        let mut args = env::args().skip(1);
-        if args.next().as_deref() == Some("__pdeath-watch") {
-            let rest: Vec<String> = args.collect();
-            return Ok(nub_core::node::spawn::run_pdeath_watch(&rest));
+        let args: Vec<String> = env::args().skip(1).collect();
+        let env_mode = env::var("__NUB_COMPILED_LAUNCHER_MODE").ok();
+        let pdeath_args = if env_mode.as_deref() == Some("pdeath-watch") && args.len() == 2 {
+            Some(args.as_slice())
+        } else if args.first().map(String::as_str) == Some("__pdeath-watch") && args.len() == 3 {
+            Some(&args[1..])
+        } else {
+            None
+        };
+        if let Some(pdeath_args) = pdeath_args {
+            return Ok(nub_core::node::spawn::run_pdeath_watch(pdeath_args));
         }
     }
 
@@ -1251,6 +1789,7 @@ pub fn run() -> Result<i32> {
 
     match argv0 {
         Argv0::Nubx => run_nubx(),
+        Argv0::Nubr => run_nubr(),
         Argv0::Node => run_as_node(),
         Argv0::PmShim(name) => {
             // The PM owns its argv — no nub flag parsing, everything after
@@ -1273,7 +1812,11 @@ pub fn run() -> Result<i32> {
     }
 }
 
-/// Workspace execution options extracted from clap flags.
+/// Workspace execution options extracted from the parsed flags. The field set is
+/// pnpm's recursive-execution surface, not a nub invention — selector parsing,
+/// graph traversal, topological chunking and the flag interactions between
+/// `--parallel` / `--no-sort` / `--workspace-concurrency` all mirror it.
+// @lat: [[research/pnpm-filter-grammar]]
 struct WorkspaceOpts {
     recursive: bool,
     /// Union of `--filter`/`-F` selectors and the `--workspace <name>` aliases
@@ -1315,17 +1858,33 @@ struct ScriptExecOpts<'a> {
     script_shell: Option<&'a str>,
 }
 
-/// Known subcommand names that clap should handle. `install`/`i`/`ci` route
+/// Known subcommand names the parser should handle. `install`/`i`/`ci` route
 /// to the embedded aube install engine (src/pm_engine/).
 const SUBCOMMANDS: &[&str] = &[
-    "run", "watch", "exec", "upgrade", "help", "node", "pm", "agent", "install", "i", "ci", "init",
+    "run",
+    "watch",
+    "exec",
+    "upgrade",
+    "help",
+    "node",
+    "pm",
+    "agent",
+    "global",
+    "install",
+    "i",
+    "ci",
+    "init",
+    // Only a real verb in a `--features compile` build; the variant and handler
+    // are gated the same way so feature-off development builds reject it cleanly.
+    #[cfg(feature = "compile")]
+    "compile",
 ];
 
 /// `pnpm install <pkg>` (and the `i` alias) is the add-to-dependencies form —
 /// pnpm routes `install` with a package positional (or `-g`) through its `add`
-/// command. Nub's argumentless `install` is a native clap command (no
+/// command. Nub's argumentless `install` is a native parser command (no
 /// positionals), and the global form `install -g <pkg>` is an add too, so detect
-/// that compatibility shape before clap rejects the package positional / `-g` /
+/// that compatibility shape before the parser rejects the package positional / `-g` /
 /// save flags as unknown and translate it into an engine `add` invocation.
 ///
 /// nub's CLI frontend targets pnpm compatibility ONLY (not npm), so this routing
@@ -1374,11 +1933,28 @@ fn install_to_add_args(rest: &[String]) -> Option<Vec<String>> {
             "--node-linker",
             // Output-control flags: their space-separated value would otherwise
             // be read as a package positional and trigger a wrong route to `add`.
-            // (`--loglevel silent` is the canonical misroute case.) The install
-            // clap variant accepts them via the flattened `OutputFlags`; listing
-            // them here prevents the space-separated value from looking like a pkg.
+            // (`--loglevel silent` is the canonical misroute case.) The native
+            // install variant accepts them via the flattened `OutputFlags`;
+            // listing them here prevents the space-separated value from looking
+            // like a pkg.
             "--loglevel",
             "--reporter",
+            // Same shape: `nub install --minimum-release-age 0` would otherwise
+            // read `0` as a package and route the whole command to `add`.
+            "--minimum-release-age",
+            "--minimum-release-age-exclude",
+            // Platform selection, same shape: `nub install --os linux` would
+            // otherwise read `linux` as a package spec and route the whole
+            // command to `add`. The `--os=linux` form never had the problem,
+            // which is what makes omitting these easy to ship unnoticed.
+            "--os",
+            "--cpu",
+            "--libc",
+            // Same shape again: `nub install --pnpmfile hooks.cjs` would read
+            // the path as a package spec. Caught by `cli_grammar_parity` the
+            // day these two landed, exactly as the note above predicts.
+            "--pnpmfile",
+            "--global-pnpmfile",
         ];
         let mut i = 0;
         while i < body.len() {
@@ -1431,7 +2007,7 @@ fn install_to_add_args(rest: &[String]) -> Option<Vec<String>> {
 
 /// PM-management verbs nub recognizes only to redirect. The pure-passthrough
 /// frontend (A2) was disabled 2026-06-09 in favor of the normalized standard
-/// surface (wiki/research/package-manager-normalized-surface.md):
+/// surface (`package-manager-normalized-surface` (no such document)):
 /// `install`/`i`/`ci` graduated into SUBCOMMANDS (live engine dispatch), and
 /// the rest of the aube verb surface graduated into the engine verb registry
 /// (`pm_engine::ENGINE_VERBS` — stubs today, family fill-ins next). What's
@@ -1462,7 +2038,7 @@ const PM_VERBS: &[&str] = &[
 /// workspace flag, or the two surfaces disagree (the install family worked only
 /// because it was hand-listed here; the info family crashed purely because it
 /// was absent). Verbs that don't actually accept `-r`/`--filter` are still safe
-/// to reorder — clap (or the engine) rejects the unsupported flag downstream
+/// to reorder — the parser (or the engine) rejects the unsupported flag downstream
 /// with a proper non-zero error, exactly as pnpm does.
 fn is_normalizable_leading_flag_verb(verb: &str) -> bool {
     SUBCOMMANDS.contains(&verb) || crate::pm_engine::lookup_verb(verb).is_some()
@@ -1547,8 +2123,8 @@ fn run_nub() -> Result<i32> {
     // Accept pnpm's `nub -r run build` order (run-flags before the subcommand).
     let raw_args = normalize_leading_run_flags(&raw_args).unwrap_or(raw_args);
 
-    // Pre-parse: extract nub-owned flags before clap sees them.
-    // Everything clap doesn't own passes through to Node verbatim.
+    // Pre-parse: extract nub-owned flags before the parser sees them.
+    // Everything the parser doesn't own passes through to Node verbatim.
     let mut cwd: Option<PathBuf> = None;
     let mut version = false;
     let mut watch = false;
@@ -1558,6 +2134,7 @@ fn run_nub() -> Result<i32> {
     let mut help_verbose = false;
     let mut show_warnings = false;
     let mut silent = false;
+    let mut color_when: Option<ColorWhen> = None;
     // Pre-verb PM output flags (`nub --reporter=silent install`,
     // `nub --loglevel=error add foo`): captured here and recorded as process
     // defaults below so the per-verb `OutputFlags` resolution can fall back to
@@ -1568,13 +2145,13 @@ fn run_nub() -> Result<i32> {
     let mut loglevel_val: Option<String> = None;
     // Top-level `--node`: provision the project's Node (version management stays
     // on) but run with zero augmentation — the compat escape hatch. Routed to
-    // `run_file_with_compat(_, true)`. See wiki/commands/node.md.
+    // `run_file_with_compat(_, true)`. See internal/commands/node.md.
     let mut compat = false;
     let mut rest: Vec<String> = Vec::new();
     let mut subcommand_found = false;
     let mut env_file_vars: std::collections::HashMap<String, String> = Default::default();
-    // Parallel raw (pre-expansion) merge + the flag paths themselves, retained
-    // for the watch path's --env-file forwarding (#479). See ENV_FILE_VARS_RAW /
+    // Parallel pre-strip merge + the flag paths themselves, retained for the
+    // watch path's --env-file forwarding (#479). See ENV_FILE_VARS_RAW /
     // ENV_FILE_PATHS.
     let mut env_file_raw_vars: std::collections::HashMap<String, String> = Default::default();
     let mut env_file_paths: Vec<(PathBuf, bool)> = Vec::new();
@@ -1592,11 +2169,12 @@ fn run_nub() -> Result<i32> {
         let arg = &raw_args[i];
         // Once a subcommand (`run`/`exec`/`watch`/…) has been seen, stop matching
         // Nub's own flags: everything after it is that subcommand's argv and is
-        // handed to clap verbatim, whose `trailing_var_arg` forwards post-
-        // positional flags to the script/bin. Without this, `nub exec tsc
+        // handed to the parser verbatim, whose `double_dash = "automatic"`
+        // trailing positional forwards post-positional flags to the script/bin.
+        // Without this, `nub exec tsc
         // --version` would print Nub's version instead of tsc's, and
         // `nub run build --watch` would steal `--watch` from the script (the
-        // three-position rule — see wiki/commands/run.md).
+        // three-position rule — see internal/commands/run.md).
         if subcommand_found {
             rest.push(arg.clone());
             i += 1;
@@ -1630,12 +2208,32 @@ fn run_nub() -> Result<i32> {
                     cwd = Some(PathBuf::from(&raw_args[i]));
                 }
             }
+            // `--color` (bare = always), `--color=<when>`, `--no-color`: consumed
+            // here so they never reach Node as unknown flags, and RECORDED so the
+            // choice actually takes effect. Dropping the value on the floor left
+            // `--color=always` a documented no-op (#685): it is listed in
+            // `nub --help`, and the only test covering it drove the parser directly, which
+            // never sees these tokens because this scan strips them first.
             s if s == "--color" || s.starts_with("--color=") || s == "--no-color" => {
-                // --color (no value), --color=always, --no-color: all consumed, not forwarded
+                color_when = Some(if s == "--no-color" {
+                    ColorWhen::Never
+                } else {
+                    match s.split_once('=').map(|(_, v)| v) {
+                        // Bare `--color` means always, matching the parser's
+                        // `default_missing` for the same flag.
+                        None | Some("always") => ColorWhen::Always,
+                        Some("never") => ColorWhen::Never,
+                        // `auto`, and anything unrecognized: fall back to the
+                        // default rather than failing. This scan runs before the
+                        // command is even known and has no error channel, and the
+                        // post-verb spelling still gets the parser's value validation.
+                        _ => ColorWhen::Auto,
+                    }
+                });
             }
             // Pre-verb PM output flags. `--reporter`/`--loglevel` only appear
             // here BEFORE a subcommand (after the verb they belong to the
-            // verb's own clap surface and never reach this scan). Captured, not
+            // verb's own parser surface and never reach this scan). Captured, not
             // forwarded to Node; recorded as process defaults below. The value
             // is validated where it's recorded (clean usage error on a bad
             // spelling) — a separate concern from grabbing the token here.
@@ -1816,10 +2414,13 @@ fn run_nub() -> Result<i32> {
         return delegate_to_self(&version);
     }
 
-    // Expand ${VAR} references in --env-file values now that all files have been
-    // parsed (multiple --env-file flags may cross-reference each other), matching
-    // the expansion load_env_files applies on the non-watch run path.
-    nub_core::workspace::env::expand_env_map(&mut env_file_vars);
+    // No `${VAR}` expansion here, deliberately: `--env-file` is the Node-compat
+    // flag and Node's own parser delivers every value verbatim. Auto-discovered
+    // `.env*` DO expand (load_env_files) — the asymmetry is the recorded decision
+    // in wiki/research/env-file-loading.md, "expand in defaults, don't expand in
+    // `--env-file=`". Expanding was a real compat bug: it silently truncated any
+    // value holding a literal `$` (`PASSWORD=foo$bar` → `foo`) and failed Node's
+    // own test/parallel/test-dotenv.js.
 
     // Env hygiene (Deno parity): ignore runtime-control vars (NODE_OPTIONS et al.)
     // from the explicit `--env-file` map too, so no env-file-sourced value silently
@@ -1849,13 +2450,16 @@ fn run_nub() -> Result<i32> {
 
     SHOW_WARNINGS.store(show_warnings, Ordering::Relaxed);
     SILENT.store(silent, Ordering::Relaxed);
+    if let Some(when) = color_when {
+        set_color_mode(when);
+    }
 
     // Record the pre-verb PM output flags as process defaults so a PM verb
     // dispatched below (`nub --silent install`, `nub --reporter=silent add foo`)
-    // honors them — the per-verb clap flag still wins. A `run`/file-run path
+    // honors them — the per-verb flag still wins. A `run`/file-run path
     // simply doesn't read these defaults (run carries its own `--reporter`), so
     // they're inert there. Invalid `--reporter`/`--loglevel` values get the same
-    // clean usage error clap gives for the per-verb form.
+    // clean usage error the parser gives for the per-verb form.
     if silent {
         crate::pm_engine::output::set_global_silent();
     }
@@ -1934,7 +2538,7 @@ fn run_nub() -> Result<i32> {
         return run_watch(&file, &rest[1..]);
     }
 
-    // If a subcommand was found, delegate to clap for structured parsing.
+    // If a subcommand was found, delegate to the parser for structured parsing.
     if subcommand_found {
         return dispatch_subcommand(rest);
     }
@@ -2027,7 +2631,7 @@ fn run_nub() -> Result<i32> {
             // External-subcommand fallthrough (git `git-foo` / cargo `cargo-foo`):
             // an unknown bareword that isn't a built-in, a redirected PM/init verb,
             // or a likely script resolves to an executable named `nub-<verb>` and
-            // runs it with the remaining argv forwarded verbatim (no clap, so every
+            // runs it with the remaining argv forwarded verbatim (no parsing, so every
             // flag passes through). Built-ins always win — they match in the
             // pre-verb scan above, so a plugin can never shadow one. We probe ONLY
             // the prefixed name (never the bare `first`), so a verb typo can't exec
@@ -2073,7 +2677,7 @@ fn run_nub() -> Result<i32> {
 /// is recognized as the filter's value, not the script. Flags that only take an
 /// attached value (`--color=never`, via `require_equals`) are NOT listed here —
 /// they never swallow the next token. Globals (`--cwd`) appear under every
-/// subcommand because clap accepts them anywhere before the positional.
+/// subcommand because the parser accepts them anywhere before the positional.
 ///
 /// Every separate-token value flag on `run` is listed here. The run-flag set
 /// adds `--workspace <name>`, `--resume-from <pkg>`, `--script-shell <path>`,
@@ -2108,6 +2712,10 @@ fn value_consuming_flags(subcommand: &str) -> &'static [&'static str] {
         // (repeatable, takes the package spec as a following token). They must be
         // listed so `nubx -p left-pad cowsay` binds `left-pad` to the package, not
         // the bin positional.
+        // The age-gate value flags take a following token, so `nubx
+        // --minimum-release-age 1d cowsay` must bind `1d` to the flag rather
+        // than read it as the bin. Both age-gate flags are value-taking; there
+        // is no boolean sibling, since nub ships no strictness flag.
         "nubx" => &[
             "--filter",
             "-F",
@@ -2116,21 +2724,30 @@ fn value_consuming_flags(subcommand: &str) -> &'static [&'static str] {
             "--package",
             "-p",
             "--cwd",
+            "--minimum-release-age",
+            "--minimum-release-age-exclude",
+            // Platform selection is value-taking too, and the sibling list in
+            // `install_to_add_args` needed the same three. `nubx --os linux -p
+            // left-pad pad` would otherwise split at `linux`, pushing `-p
+            // left-pad` into the forwarded suffix instead of binding it.
+            "--os",
+            "--cpu",
+            "--libc",
         ],
         "watch" => &["--cwd"],
         _ => &[],
     }
 }
 
-/// Split a subcommand's argv into the clap-parseable *prefix* (subcommand name +
+/// Split a subcommand's argv into the parseable *prefix* (subcommand name +
 /// position-1/2 Nub flags + the positional) and the *verbatim suffix* (position 3
 /// — everything after the positional, forwarded to the script/bin unchanged).
 ///
-/// This is the load-bearing fix for clap leading-flag theft: clap's global args
+/// This is the load-bearing fix for leading-flag theft: the parser's global args
 /// and auto-`--help` match anywhere in argv, so re-parsing the whole remainder
 /// let `nub exec eslint --help` print Nub's help and `nub run build --node`
 /// enable compat (both wrong — the flag is in position 3, the script's). By
-/// finding the positional boundary ourselves and feeding clap only the prefix
+/// finding the positional boundary ourselves and feeding the parser only the prefix
 /// (which has nothing *after* the positional to steal), every post-positional
 /// token reaches the script/bin verbatim. Mirrors `run_nubx`'s manual split,
 /// generalized to all three forwarding subcommands.
@@ -2139,7 +2756,7 @@ fn value_consuming_flags(subcommand: &str) -> &'static [&'static str] {
 /// flag (`-…`) nor the value of a preceding value-consuming flag. `--` (the
 /// explicit separator) forces it: the token after `--` is the positional. If no
 /// positional is present (`nub run`, `nub exec --help` with no bin), the suffix
-/// is empty and the prefix is the whole input — clap then handles the help /
+/// is empty and the prefix is the whole input — the parser then handles the help /
 /// no-script cases as before.
 fn split_subcommand_argv(rest: Vec<String>) -> (Vec<String>, Vec<String>) {
     let subcommand = rest[0].as_str();
@@ -2150,7 +2767,7 @@ fn split_subcommand_argv(rest: Vec<String>) -> (Vec<String>, Vec<String>) {
         let arg = &rest[i];
         if arg == "--" {
             // Explicit separator: the next token is the positional; everything
-            // after that is the verbatim suffix. Keep `--` in the prefix so clap
+            // after that is the verbatim suffix. Keep `--` in the prefix so the parser
             // still binds the positional, and forward from the token after it.
             // (`nub run -- build --flag` → script `build`, args `["--flag"]`.)
             let positional_idx = i + 1;
@@ -2184,22 +2801,62 @@ fn split_subcommand_argv(rest: Vec<String>) -> (Vec<String>, Vec<String>) {
         return (prefix, suffix);
     }
     // No positional found (e.g. `nub run`, `nub exec --help`): hand the whole
-    // input to clap, which lists scripts / shows help as appropriate.
+    // input to the parser, which lists scripts / shows help as appropriate.
     (rest, Vec::new())
 }
 
 /// Parse a forwarding subcommand (`run`/`exec`/`watch`) by splitting off the
-/// verbatim position-3 suffix first, clap-parsing only the prefix, then
+/// verbatim position-3 suffix first, parsing only the prefix, then
 /// appending the suffix to the parsed `args`. `upgrade`/`help` have no
-/// positional-forwarding semantics and go straight to clap.
+/// positional-forwarding semantics and go straight to the parser.
+fn run_global(rest: &[String]) -> Result<i32> {
+    const USAGE: &str = "Usage: nub global config <COMMAND> [OPTIONS]\n\n\
+Commands:\n\
+  get      Print a user setting\n\
+  set      Write a user setting\n\
+  delete   Remove a user setting\n\
+  list     List user settings\n\
+  init     Create the user nub.jsonc\n\
+  path     Print the user nub.jsonc path\n";
+
+    let Some(command) = rest.first() else {
+        eprint!("nub global: expected `config`\n\n{USAGE}");
+        return Ok(2);
+    };
+    if matches!(command.as_str(), "-h" | "--help" | "help") {
+        print!("{USAGE}");
+        return Ok(0);
+    }
+    if !matches!(command.as_str(), "config" | "c") {
+        eprint!("nub global: unknown command `{command}`\n\n{USAGE}");
+        return Ok(2);
+    }
+
+    let Some(spec) = crate::pm_engine::lookup_verb("config") else {
+        unreachable!("config is a registered engine verb")
+    };
+    let mut args = rest[1..].to_vec();
+    // Put the selector immediately after the config subcommand. Besides
+    // matching the documented spelling, this leaves Nub-owned `init`/`path`
+    // in argv[0], where the config dispatcher claims them before the engine
+    // parser. Bare `global config` has no subcommand, so the flag stands alone.
+    if args.is_empty() {
+        args.push("--global".to_string());
+    } else {
+        args.insert(1, "--global".to_string());
+    }
+    let pm = suggest_package_manager(&env::current_dir()?);
+    crate::pm_engine::dispatch_verb(spec, "global config", &args, &pm)
+}
+
 fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     let subcommand = rest[0].clone();
 
     // `node` is a non-forwarding command group with bespoke bare-usage + invalid-
-    // positional messages (spec: wiki/commands/node-versions.md). Handle it with a
-    // manual sub-verb match rather than clap's generic "invalid subcommand" error,
+    // positional messages (spec: internal/commands/node-versions.md). Handle it with a
+    // manual sub-verb match rather than the parser's generic "invalid subcommand" error,
     // so `nub node script.ts` yields the exact "use 'nub <file>'" guidance and bare
-    // `nub node` prints the verb list instead of a clap usage error.
+    // `nub node` prints the verb list instead of a parser usage error.
     // No snapshot here, and none for `pm` below: neither group reads project
     // config, and the sub-verbs that need an engine session build one
     // themselves. Initializing would let a malformed `nub.jsonc` in any
@@ -2211,8 +2868,8 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
 
     // `pm` is the package-manager management group (`which`/`switch`/`update`/
     // `cache`). Like `node`, it's a non-forwarding manual sub-verb match rather
-    // than a clap `Command` variant, so its bare-usage / invalid-verb messages
-    // read like `nub node`'s and it never reaches clap dispatch.
+    // than a `Command` variant, so its bare-usage / invalid-verb messages
+    // read like `nub node`'s and it never reaches parser dispatch.
     if subcommand == "pm" {
         return run_pm(&rest[1..]);
     }
@@ -2221,15 +2878,23 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     // offline fallbacks for the homepage prompt's fetch of start.md/skill.md).
     // Like `node`/`pm`, it's a non-forwarding manual sub-verb match — its
     // bare-usage and invalid-verb messages read consistently and it never reaches
-    // clap dispatch. Spec: .fray/ai-friendliness.md. Print-only, so it reads no
+    // parser dispatch. Spec: .fray/ai-friendliness.md. Print-only, so it reads no
     // project config and never initializes the snapshot — a malformed `nub.jsonc`
     // in some ancestor must not silence the offline docs.
     if subcommand == "agent" {
         return crate::agent::run(&rest[1..]);
     }
 
+    // `global config ...` is Nub's prefix spelling for the same user-config
+    // scope as `config ... --global`. Keep one implementation by injecting the
+    // selector and routing to the existing config family; no second config
+    // parser or storage semantics can drift from it.
+    if subcommand == "global" {
+        return run_global(&rest[1..]);
+    }
+
     // The engine's lazy node-gyp shims re-invoke `current_exe()` (= nub)
-    // with this hidden verb mid-lifecycle-script; intercept it before clap
+    // with this hidden verb mid-lifecycle-script; intercept it before the parser
     // (it's internal plumbing, not a documented verb) and dispatch straight
     // to the engine's bootstrap entry point.
     if subcommand == "__node-gyp-bootstrap" {
@@ -2240,7 +2905,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     // Compatibility alias: npm and pnpm treat `install <pkg>` / `i <pkg>` (and
     // the global form `install -g <pkg>`) as a package add. Route that shape
     // through the engine's `add` implementation, translating npm save/spec/
-    // workspace spellings, before the native argumentless-install clap variant
+    // workspace spellings, before the native argumentless-install variant
     // rejects the positional / `-g` / unknown save flags. Plain `nub install`
     // and `nub install <native-flags>` stay on the native install path.
     if let Some(add_argv) = install_to_add_args(&rest)
@@ -2255,10 +2920,10 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
 
     // Verbs registered to the embedded PM engine (the aube verb surface minus
     // nub-reserved and tool-identity verbs — see pm_engine::ENGINE_VERBS).
-    // Dispatched before clap: these aren't clap variants; each family module
+    // Dispatched before the parser: these aren't parser variants; each family module
     // owns its own args parsing (today: stubs that error with the user's
     // real-PM fallback). `install`/`i`/`ci` are NOT in the registry — they
-    // are live clap verbs handled below.
+    // are live parser verbs handled below.
     if let Some(spec) = crate::pm_engine::lookup_verb(&subcommand) {
         // The PM hint is only consumed by the unwired-verb stub fallback
         // (`{pm} {verb}`); use the nub-identity-aware suggestion so a fresh /
@@ -2277,9 +2942,9 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
         (rest, Vec::new())
     };
 
-    let mut clap_args = vec!["nub".to_string()];
-    clap_args.extend(prefix);
-    let cli = Cli::parse_from(&clap_args);
+    let mut parser_argv = vec!["nub".to_string()];
+    parser_argv.extend(prefix);
+    let cli = parse_cli_or_exit(&parser_argv);
 
     // Position-2 global flags (e.g. `nub run --silent build`) parse into the top-
     // level `Cli` fields; apply the ones with observable effects. `--cwd` is
@@ -2289,6 +2954,13 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     }
     if cli.verbose > 0 {
         SHOW_WARNINGS.store(true, Ordering::Relaxed);
+    }
+    // Only a non-default value, so `nub --color=never run build` (recorded by the
+    // position-1 scan) isn't reset to Auto by the parser's default on this second pass.
+    if cli.no_color {
+        set_color_mode(ColorWhen::Never);
+    } else if cli.color != ColorWhen::Auto {
+        set_color_mode(cli.color);
     }
     if let Some(ref dir) = cli.cwd {
         env::set_current_dir(dir)?;
@@ -2491,12 +3163,19 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             yes,
             ignore_existing,
             no_check,
+            age_gate,
+            platform,
             mut args,
         }) => {
             args.extend(suffix);
             if no_check {
                 crate::verify_deps::disable();
             }
+            // Only the DLX fallback below resolves from the registry, but the
+            // bag is inert on the local-bin path, so publish unconditionally
+            // rather than duplicating the call into each branch.
+            age_gate.apply();
+            platform.apply();
             filter.extend(workspace);
             let recursive = recursive || parallel || include_workspace_root;
             let workspace_run = recursive || !filter.is_empty() || parallel;
@@ -2558,6 +3237,108 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 run_exec_with_dlx(&bin, node, &args, Some(&dlx_flags))
             }
         }
+        #[cfg(feature = "compile")]
+        Some(Command::Compile {
+            entry,
+            out,
+            smol,
+            target,
+            platform,
+            no_minify,
+            icu,
+            sourcemap,
+            define,
+            define_file,
+            include,
+            exclude,
+            install_message,
+            drop,
+            metafile,
+            node_options,
+            icon,
+            metadata,
+            hide_console,
+            no_keep_names,
+            no_treeshake,
+            ignore_annotations,
+            alias,
+            loader,
+            conditions,
+            external,
+            unbundled,
+            bundled,
+            allow_dynamic_import,
+            tsconfig,
+            sourcemap_exclude_sources,
+        }) => crate::compile::run(crate::compile::CompileOptions {
+            entry,
+            out,
+            smol,
+            target,
+            platform,
+            include,
+            exclude,
+            install_message,
+            define_file,
+            node_options,
+            icon,
+            metadata,
+            hide_console,
+            icu: match icu.as_deref() {
+                Some(value) => crate::compile::parse_icu_locales(value)?,
+                None => None,
+            },
+            metafile: metafile.as_deref().map(PathBuf::from),
+            bundle: crate::compile::BundleOptions {
+                module_mirror: Default::default(),
+                minify: !no_minify,
+                keep_names: !no_keep_names,
+                // Off by default: a compiled artifact is something you SHIP, and a
+                // map is source. Inline was the old default and cost 81% of the
+                // bundle's bytes (1.04 MB of 1.29 MB on a hello world); `linked`
+                // removed the load-time parse but still shipped 780 KB of map into
+                // every binary. Neither belongs in a distributed executable unless
+                // the publisher asks for it.
+                //
+                // The tradeoff, stated plainly because it is real: with no map an
+                // uncaught error in a compiled TypeScript program points into
+                // minified JS. `--sourcemap=linked` restores exact original-source
+                // traces (verified: a throwing fixture reports `throw.ts:2` with the
+                // TypeScript source line) at ~0 startup cost, so it is the setting to
+                // reach for when debugging a shipped binary matters.
+                sourcemap: match sourcemap.unwrap_or(SourcemapArg::None) {
+                    SourcemapArg::Linked => crate::compile::SourcemapMode::Linked,
+                    SourcemapArg::Inline => crate::compile::SourcemapMode::Inline,
+                    SourcemapArg::External => crate::compile::SourcemapMode::External,
+                    SourcemapArg::None => crate::compile::SourcemapMode::None,
+                },
+                sources_content: !sourcemap_exclude_sources,
+                define,
+                auto_define: Vec::new(),
+                tree_shake: !no_treeshake,
+                ignore_annotations,
+                alias,
+                conditions,
+                external,
+                unbundled,
+                bundled,
+                allow_dynamic_import,
+                tsconfig: tsconfig.map(PathBuf::from),
+                loaders: loader,
+                native_target: None,
+                drop_console: drop.contains(&DropArg::Console),
+                drop_debugger: drop.contains(&DropArg::Debugger),
+                metafile: metafile.is_some(),
+                // Filled in by `compile()` once the pin chain resolves the exact
+                // target Node; the CLI layer does not know it yet.
+                target_node: None,
+                eager_startup: false,
+            },
+        })
+        // A failed compile reports itself, in the same shape as the `warn` tier
+        // it already draws, instead of escaping to `Termination`'s unstyled
+        // `Error:` — which frames a bad `--platform` exactly like a panic.
+        .or_else(|err| Ok(crate::compile::report_error(&err))),
         Some(Command::Init {
             yes,
             js,
@@ -2596,6 +3377,9 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             prod,
             dev,
             ignore_scripts,
+            pnpmfile,
+            global_pnpmfile,
+            ignore_pnpmfile,
             no_optional,
             offline,
             prefer_offline,
@@ -2610,33 +3394,46 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             fail_if_no_match,
             include_workspace_root,
             output,
-        }) => crate::pm_engine::run_install(crate::pm_engine::InstallFlags {
-            frozen_lockfile,
-            no_frozen_lockfile,
-            prefer_frozen_lockfile,
+            age_gate,
+            platform,
+        }) => {
+            age_gate.apply();
+            platform.apply();
+            crate::pm_engine::run_install(crate::pm_engine::InstallFlags {
+                frozen_lockfile,
+                no_frozen_lockfile,
+                prefer_frozen_lockfile,
+                prod,
+                dev,
+                ignore_scripts,
+                pnpmfile,
+                global_pnpmfile,
+                ignore_pnpmfile,
+                no_optional,
+                offline,
+                prefer_offline,
+                lockfile_only,
+                force,
+                node_linker,
+                registry,
+                dir,
+                allow_all_builds: false,
+                npm_lifecycle: false,
+                filter: crate::pm_engine::WorkspaceFilterFlags {
+                    filter,
+                    filter_prod,
+                    recursive,
+                    fail_if_no_match,
+                    include_workspace_root,
+                },
+                output,
+            })
+        }
+        Some(Command::Ci {
             prod,
             dev,
             ignore_scripts,
             no_optional,
-            offline,
-            prefer_offline,
-            lockfile_only,
-            force,
-            node_linker,
-            registry,
-            dir,
-            filter: crate::pm_engine::WorkspaceFilterFlags {
-                filter,
-                filter_prod,
-                recursive,
-                fail_if_no_match,
-                include_workspace_root,
-            },
-            output,
-        }),
-        Some(Command::Ci {
-            ignore_scripts,
-            no_optional,
             registry,
             dir,
             filter,
@@ -2645,25 +3442,69 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             fail_if_no_match,
             include_workspace_root,
             output,
-        }) => crate::pm_engine::run_ci(crate::pm_engine::CiFlags {
-            ignore_scripts,
-            no_optional,
-            registry,
-            dir,
-            filter: crate::pm_engine::WorkspaceFilterFlags {
-                filter,
-                filter_prod,
-                recursive,
-                fail_if_no_match,
-                include_workspace_root,
-            },
-            output,
-        }),
+            age_gate,
+            platform,
+        }) => {
+            age_gate.apply();
+            platform.apply();
+            crate::pm_engine::run_ci(crate::pm_engine::CiFlags {
+                prod,
+                dev,
+                ignore_scripts,
+                no_optional,
+                registry,
+                dir,
+                allow_all_builds: false,
+                npm_lifecycle: false,
+                filter: crate::pm_engine::WorkspaceFilterFlags {
+                    filter,
+                    filter_prod,
+                    recursive,
+                    fail_if_no_match,
+                    include_workspace_root,
+                },
+                output,
+            })
+        }
         // `node` is intercepted at the top of `dispatch_subcommand` (manual
-        // sub-verb match in `run_node`) and never reaches clap here.
-        Some(Command::Node { .. }) => unreachable!("`node` is handled before clap dispatch"),
+        // sub-verb match in `run_node`) and never reaches the parser here.
+        Some(Command::Node { .. }) => unreachable!("`node` is handled before parser dispatch"),
         None => unreachable!(),
     }
+}
+
+/// `nubr` — the unified runner: a file, a `package.json` script, or an installed
+/// bin, resolved most-specific-first under one name. It is the command
+/// `@nubjs/runner` ships, and this arm runs the SAME `runtime/nubr.mjs` out of the
+/// embedded runtime on the resolved Node, so the binary alias and the npm package
+/// behave identically by construction; nothing about resolution or the spawn is
+/// reimplemented here. The full CLI keeps its three verbs (`nub <file>`, `nub
+/// run`, `nubx`) — this is the one-bin shape, not a change to them.
+fn run_nubr() -> Result<i32> {
+    let args: Vec<String> = env::args().skip(1).collect();
+    // `nubr.mjs` reads its version from the package.json beside it, which the
+    // extracted runtime does not carry; the binary knows its own version. Same
+    // spelling as the package (bare, no `v`), same first-argument-only rule.
+    if matches!(args.first().map(String::as_str), Some("-v" | "--version")) {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        return Ok(0);
+    }
+    let cwd = env::current_dir().context("could not determine the current directory")?;
+    let node = nub_core::node::discovery::discover_or_provision_node(&cwd)?;
+    nub_core::node::discovery::check_min_version(&node)?;
+    let nub_binary = nub_core::node::spawn::current_nub_binary()?;
+    let runtime = nub_core::node::spawn::find_runtime_dir(&nub_binary)
+        .context("nubr: the nub runtime could not be located")?;
+    let mut cmd = std::process::Command::new(node.path.as_str());
+    nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
+    cmd.arg(runtime.join("nubr.mjs"))
+        .args(&args)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+    let status = nub_core::node::spawn::status_forwarding_signals(&mut cmd)
+        .with_context(|| format!("nubr: failed to spawn {}", node.path))?;
+    Ok(nub_core::node::spawn::exit_code_from_status(&status))
 }
 
 fn run_nubx() -> Result<i32> {
@@ -2700,8 +3541,8 @@ fn run_nubx() -> Result<i32> {
         }
     }
 
-    // `--no-env-file` in the LEADING region. The `Nubx` clap grammar carries no
-    // env-file flags, so this family has to be consumed here or clap rejects it as
+    // `--no-env-file` in the LEADING region. The `Nubx` grammar carries no
+    // env-file flags, so this family has to be consumed here or the parser rejects it as
     // unknown. `--no-env-file` WINS over `--env-file`, so the whole `--env-file*`
     // family is stripped alongside it. Both scans account for the space-form value
     // token so a flag's value is never mistaken for the bin; the leading-only scope
@@ -2782,8 +3623,19 @@ fn run_as_node() -> Result<i32> {
     // respect node semantics — version resolution/provisioning is the shim's
     // job, augmentation belongs to `nub`/`nubx`. The per-invocation hijack
     // (temp-dir shim, inside a `nub …` subtree the user opted into) keeps
-    // augment-by-default. `--node`/`NODE_COMPAT` force vanilla in either case.
-    let compat = compat_flag || nub_core::node::shim::invoked_as_persistent_node_shim();
+    // augment-by-default. `--node`/`NODE_COMPAT` force vanilla in either case,
+    // and so does descending from a compat launch: this `node` continues that
+    // invocation rather than starting one. A falsy `NODE_COMPAT` set for this
+    // one command still opts it back in, as it did when the launch was carried
+    // by that variable.
+    let continues_compat =
+        nub_core::node::spawn::inherits_compat_launch() && node_compat_env_setting() != Some(false);
+    let compat =
+        compat_flag || nub_core::node::shim::invoked_as_persistent_node_shim() || continues_compat;
+    // The hijack resolves a version; it does not add a launch wrapper. The
+    // configured `prefix` belongs to the `nub` entrypoints (see `crate::prefix`),
+    // and this is the one flag `run_file_in_dir` has to tell the two apart.
+    NODE_HIJACK.store(true, Ordering::Relaxed);
     initialize_runtime_config_snapshot(compat, false)?;
     if compat {
         run_file_with_compat(&forwarded, true)
@@ -2791,6 +3643,9 @@ fn run_as_node() -> Result<i32> {
         run_file(&forwarded)
     }
 }
+
+/// Set when this process is the `node` PATH hijack rather than a `nub` verb.
+static NODE_HIJACK: AtomicBool = AtomicBool::new(false);
 
 /// Leading-only `--node` scan for the `node` PATH-hijack. Real `node` reads
 /// options until the ENTRY POINT — the script file, `-`/stdin, an `-e`/`--eval`
@@ -2958,6 +3813,11 @@ fn config_overlays(cli_node: bool, cli_no_check: bool) -> crate::project_config:
         },
         environment: ProjectConfig {
             node_compat: node_compat_env_setting(),
+            // The field's pre-existing environment surface. Modelled here so the
+            // snapshot reports the value that will actually win; discovery reads
+            // the variable itself rather than trusting this layer (see
+            // `project_config::publish_node_executable`).
+            node_executable: env::var("NODE_EXECUTABLE").ok().filter(|v| !v.is_empty()),
             verify_deps: verify_deps_env_setting(),
             ..ProjectConfig::default()
         },
@@ -2965,12 +3825,34 @@ fn config_overlays(cli_node: bool, cli_no_check: bool) -> crate::project_config:
     }
 }
 
+/// The `nodeExecutable` alone, for the `nub node` group. Every verb here resolves
+/// a Node — `which` and bare status to REPORT which one governs, `ls` to mark the
+/// active entry, `install` and `uninstall` to skip or guard one — so the field
+/// reaches all of them and the group cannot disagree with itself about which
+/// binary is current. `nub node which` printing one binary while `nub app.ts`
+/// runs another is the drift `resolution_source` exists to prevent, and `ls`
+/// marking a different version would be the same drift one verb over.
+///
+/// Not a snapshot, though: [`dispatch_subcommand`] explains why this group
+/// initializes none (a malformed `nub.jsonc` in some ancestor must never block
+/// `nub node install`), and best-effort keeps that intact — a file that will not
+/// load simply contributes nothing, and a `$(command)` that fails is swallowed by
+/// every verb except `which`, where the failure IS the answer.
+fn publish_node_executable_best_effort(cwd: &Path) {
+    if let Ok(config) =
+        crate::project_config::load_effective_config(cwd, config_overlays(false, false))
+    {
+        crate::project_config::publish_node_executable(&config);
+    }
+}
+
 pub(crate) fn initialize_config_snapshot(cli_node: bool, cli_no_check: bool) -> Result<()> {
     let cwd = env::current_dir()?;
-    crate::project_config::initialize_effective_config(
+    let effective = crate::project_config::initialize_effective_config(
         &cwd,
         config_overlays(cli_node, cli_no_check),
     )?;
+    crate::project_config::publish_node_executable(effective);
     debug_assert!(crate::project_config::effective_config().is_some());
     Ok(())
 }
@@ -2996,7 +3878,7 @@ fn initialize_runtime_config_snapshot(cli_node: bool, cli_no_check: bool) -> Res
     let overlays = config_overlays(cli_node, cli_no_check);
     let forced_compat = cli_node || overlays.environment.node_compat == Some(true);
     match crate::project_config::initialize_effective_config(&cwd, overlays.clone()) {
-        Ok(_) => {}
+        Ok(effective) => crate::project_config::publish_node_executable(effective),
         // The error names the offending file by absolute path, which is what
         // makes a degrade visible when the file sits above the cwd.
         Err(error) if forced_compat => {
@@ -3004,7 +3886,9 @@ fn initialize_runtime_config_snapshot(cli_node: bool, cli_no_check: bool) -> Res
                 "nub: {error}\n\x20\x20ignored — compat mode (--node / NODE_COMPAT) runs with \
                  no project config"
             );
-            crate::project_config::initialize_effective_config_without_project(&cwd, overlays);
+            crate::project_config::publish_node_executable(
+                crate::project_config::initialize_effective_config_without_project(&cwd, overlays),
+            );
         }
         Err(error) => return Err(error.into()),
     }
@@ -3044,9 +3928,440 @@ fn is_node_option_token(value: &str) -> bool {
     value.starts_with('-') && !value.contains('\0') && !value.chars().any(char::is_whitespace)
 }
 
-pub(crate) fn runtime_node_options(
-    runtime: &crate::project_config::RuntimeConfig,
+/// Synthesize the preload chainer and decide how it reaches Node.
+///
+/// nub used to emit one `NODE_OPTIONS` token per `nub.jsonc` `preload` entry. That
+/// breaks under any consumer that re-parses `NODE_OPTIONS`: Next.js parses it into a
+/// `Record` keyed by option name and reformats it for every forked worker, so
+/// `--require=a --require=b` collapses to `--require=b` — silently dropping whichever
+/// came first, which is nub's OWN preload and with it the entire augmentation layer.
+/// Measured end-to-end on a real `next build`; filed as vercel/next.js#96582.
+///
+/// The fix is to emit at most ONE token per flag name by writing a single module that
+/// loads the user's entries in declared order. Two properties make it work:
+///
+/// - **It lives INSIDE the project** (`<preload_root>/node_modules/.nub/`), so a BARE
+///   entry such as `dotenv/config` resolves through that project's `node_modules`
+///   walk-up exactly as Node resolves the same specifier on a `--require` token. The
+///   identical file outside the project dies with ERR_MODULE_NOT_FOUND (measured,
+///   with a passing in-project control). nub does NOT resolve these itself — its own
+///   resolver is additive-only and returns null for every bare specifier, because
+///   `node_modules` and `exports` are deliberately Node's (the compat boundary).
+/// - **It loads AFTER nub's hooks are installed**, so the entries get the full
+///   augmentation: measured, a `.ts` preload transpiles and its tsconfig `paths`
+///   alias resolves, identically to the old per-entry token.
+///
+/// Channel, mirroring the tier rules the per-entry router used to encode:
+/// - Fast tier, every entry a `.cjs`: a `.cjs` chainer loaded by nub's own preload,
+///   so no second token exists and `--require`'s synchronous entry semantics (R1)
+///   survive.
+/// - Fast tier with any non-`.cjs` entry: a `.mjs` chainer on its own `--import`,
+///   because nub's `--require` preload cannot await one. Top-level await keeps
+///   working, which `require()` could not offer (ERR_REQUIRE_ASYNC_MODULE).
+/// - Compat tier: a `.mjs` chainer loaded by nub's own `--import` preload.
+fn prepare_preload_chain(
+    runtime: &mut crate::project_config::RuntimeConfig,
     node: &nub_core::node::discovery::ResolvedNode,
+    fold: FoldInherited,
+) -> Result<Option<nub_core::node::spawn::PreloadInjection>> {
+    let Some(root) = runtime.preload_root.clone() else {
+        return Ok(None);
+    };
+    // Preload entries reaching nub through an INHERITED NODE_OPTIONS are folded into
+    // the same chainers as the config's, so the child ends up with at most one
+    // `--require` and one `--import` no matter how many arrive. Without this an
+    // ambient `--require` (what every APM injector sets) adds a second token, and a
+    // consumer that keys NODE_OPTIONS by flag name drops one of them — which, since
+    // nub appends the inherited value last, was nub's own preload.
+    let inherited = match fold {
+        FoldInherited::Yes => std::env::var("NODE_OPTIONS").unwrap_or_default(),
+        FoldInherited::No => String::new(),
+    };
+    let (_, inherited_requires, inherited_imports) =
+        nub_core::node::spawn::split_inherited_preloads(&inherited);
+    if runtime.preload.is_empty() && inherited_requires.is_empty() && inherited_imports.is_empty() {
+        return Ok(None);
+    }
+
+    // Which channel the CONFIG entries ride. Unchanged from the per-entry router it
+    // replaced: a `.cjs`-only list keeps `--require`'s synchronous entry semantics,
+    // anything else needs the async channel (and the compat tier is always async).
+    // Folding an inherited `--import` makes nub force the async loader-worker tier on
+    // the broken-compose band (see the folded-import marker in spawn.rs) — and Node
+    // RE-RUNS every `--require` preload inside that worker's realm. So whenever a
+    // loader worker is coming, everything rides the ESM chain, which loader workers
+    // skip. Same rule the compat tier already needs, for the same reason.
+    let async_tier_coming = !inherited_imports.is_empty()
+        && nub_core::node::spawn::force_async_tier_env(&node.version, ["--import"]).is_some();
+    let config_is_esm = !node.version.supports_augmentation()
+        || async_tier_coming
+        || runtime.preload.iter().any(|spec| {
+            !std::path::Path::new(spec)
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("cjs"))
+        });
+
+    // Config entries first, then inherited — which reproduces the ordering nub had
+    // before the fold in every measured combination, because Node's phase rule
+    // (every `--require` before any `--import`) still separates the two channels.
+    let mut cjs: Vec<String> = Vec::new();
+    let mut esm: Vec<String> = Vec::new();
+    if config_is_esm {
+        esm.extend(runtime.preload.iter().cloned());
+    } else {
+        cjs.extend(runtime.preload.iter().cloned());
+    }
+    // Inherited `--require` values ride the CJS chain only on the fast tier, where
+    // nub's own preload carries it and no loader worker exists. On the compat tier
+    // nub registers a `module.register` loader worker, and Node RE-RUNS every
+    // `--require` preload inside that worker's realm — so a `--require` token there
+    // would run the entry twice. The original per-entry router made the same trade
+    // for config `.cjs` entries: moving them to the async channel costs ordering
+    // (they land in the import phase) and buys running exactly once.
+    if node.version.supports_augmentation() && !async_tier_coming {
+        cjs.extend(inherited_requires);
+    } else {
+        esm.extend(inherited_requires);
+    }
+    esm.extend(inherited_imports);
+
+    let dir = root.join("node_modules").join(".nub");
+    if !cjs.is_empty() || !esm.is_empty() {
+        std::fs::create_dir_all(&dir).with_context(|| {
+            format!("could not create the preload chainer dir {}", dir.display())
+        })?;
+    }
+    let cjs_path = write_preload_chain(&dir, false, &cjs)?;
+    let esm_path = write_preload_chain(&dir, true, &esm)?;
+
+    // nub's own preload carries whichever chainer matches its channel, so that one
+    // costs no token at all; the other gets the single token of its name.
+    let (carried, tokened) = if node.version.supports_augmentation() {
+        (cjs_path, esm_path.map(|p| ("--import", p)))
+    } else {
+        // Compat tier: everything is on the ESM chain (see the routing above), which
+        // nub's own `--import` preload carries — so no extra token at all.
+        debug_assert!(cjs_path.is_none());
+        (esm_path, None)
+    };
+    runtime.preload_chain = carried;
+    Ok(
+        tokened.map(|(flag, path)| nub_core::node::spawn::PreloadInjection {
+            flag,
+            value: if flag == "--import" {
+                nub_core::node::spawn::file_url_for(&path.to_string_lossy())
+            } else {
+                path.to_string_lossy().into_owned()
+            },
+            sidecar: None,
+        }),
+    )
+}
+
+/// Write one chainer, or `Ok(None)` when it would be empty.
+///
+/// Entries are emitted as literal statements in order. A bare specifier stays bare so
+/// Node resolves it; an absolute path on the ESM side becomes a `file://` URL, because
+/// Windows rejects a raw `C:\...` as an ESM specifier (ERR_UNSUPPORTED_ESM_URL_SCHEME)
+/// where POSIX would have tolerated it.
+fn write_preload_chain(dir: &Path, esm: bool, entries: &[String]) -> Result<Option<PathBuf>> {
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let mut body = String::from(
+        "// Generated by nub from `nub.jsonc` `preload` and any inherited NODE_OPTIONS\n\
+         // preload flags. Regenerated every run; do not edit. One module instead of one\n\
+         // token per entry — see vercel/next.js#96582.\n",
+    );
+    let resolver = bare_preload_resolver(esm);
+    for spec in entries {
+        let spec = resolve_bare_preload(&resolver, spec);
+        let spec = if esm && Path::new(&spec).is_absolute() {
+            nub_core::node::spawn::file_url_for(&spec)
+        } else {
+            spec
+        };
+        // JSON string escaping is exactly JS string escaping for our purposes, and it
+        // is what makes a Windows path or a quote in a specifier safe to embed.
+        let literal = serde_json::to_string(&spec)?;
+        if esm {
+            // `await import(...)`, not a static `import` — Node awaits each `--import`
+            // entry before starting the next, but STATIC imports of sibling modules
+            // may interleave, so an entry with top-level await would let a later one
+            // land first. Sequential dynamic import reproduces the token ordering.
+            body.push_str(&format!("await import({literal});\n"));
+        } else {
+            body.push_str(&format!("require({literal});\n"));
+        }
+    }
+    let name = if esm {
+        "preload-chain.mjs"
+    } else {
+        "preload-chain.cjs"
+    };
+    let path = dir.join(name);
+    // Write via a sibling temp file so a concurrent nub in the same project can never
+    // observe a half-written chainer.
+    let tmp = dir.join(format!("{name}.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, body)
+        .with_context(|| format!("could not write the preload chainer {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("could not install the preload chainer {}", path.display()))?;
+    Ok(Some(path))
+}
+
+/// A resolver for BARE `nub.jsonc` `preload` entries, with the condition set the
+/// chainer's channel implies (`import` for the `.mjs` chainer, `require` for the
+/// `.cjs` one) — the same conditions Node itself would use for that flag. That set
+/// includes [`NUB_CONDITION`], because this resolves a specifier the child Node
+/// would otherwise resolve for itself, with the `nub` condition already on its argv.
+///
+fn bare_preload_resolver(esm: bool) -> oxc_resolver::Resolver {
+    oxc_resolver::Resolver::new(oxc_resolver::ResolveOptions {
+        condition_names: vec![
+            "node".to_string(),
+            NUB_CONDITION.to_string(),
+            if esm { "import" } else { "require" }.to_string(),
+        ],
+        extensions: vec![".js".into(), ".json".into(), ".node".into()],
+        // pnpm links dependencies as symlinks; Node reports the realpath, so a
+        // resolver that stopped at the link would disagree on module identity.
+        symlinks: true,
+        ..oxc_resolver::ResolveOptions::default()
+    })
+}
+
+/// Turn a BARE preload entry into an absolute path, anchored at the CWD.
+///
+/// The anchor is the whole point. Node resolves a bare `--require`/`--import`
+/// specifier **from the current working directory**, and nub did the same before the
+/// chainer existed, because it emitted the bare specifier as its own token and let
+/// Node resolve it. The chainer changed that by accident: a bare `import "foo"`
+/// inside a generated file resolves from THAT FILE's directory, so in a workspace
+/// where `packages/web/node_modules/foo` shadows the root copy, `cd packages/web &&
+/// nub app.js` silently loaded the ROOT copy where plain Node loads the local one.
+/// Resolving here restores the CWD anchor and makes it a decision rather than a
+/// side effect of where nub happened to write the file.
+///
+/// Path-like entries are already absolute (config resolution anchors them at the
+/// `nub.jsonc` that declared them, which is deliberate and unchanged). An
+/// unresolvable bare entry is passed through untouched so Node emits its own
+/// `ERR_MODULE_NOT_FOUND` naming the specifier the user actually wrote.
+fn resolve_bare_preload(resolver: &oxc_resolver::Resolver, spec: &str) -> String {
+    // Only an ABSOLUTE spec is already anchored. A relative one still needs the CWD:
+    // config entries arrive pre-absolutized, but an entry folded out of an inherited
+    // NODE_OPTIONS does not, and `./x.mjs` left verbatim would resolve against the
+    // CHAINER's directory instead of the CWD Node would have used.
+    if Path::new(spec).is_absolute() {
+        return spec.to_string();
+    }
+    // No readable cwd: leave the entry alone and let Node raise its own error.
+    let Ok(cwd) = std::env::current_dir() else {
+        return spec.to_string();
+    };
+    resolver
+        .resolve(&cwd, spec)
+        .map(|r| r.full_path().to_string_lossy().into_owned())
+        .unwrap_or_else(|_| spec.to_string())
+}
+
+/// npm/pnpm parity for the `node-options` npmrc field on SCRIPT execution.
+///
+/// npm and pnpm both apply it to `run` (measured: `.npmrc` `node-options=…` reaches
+/// the script's `NODE_OPTIONS` under both). Its dominant real use is raising the
+/// heap ceiling for a big build, so a project that needs it to build at all fails
+/// with an OOM under nub and succeeds under pnpm — a silent divergence.
+///
+/// Two deliberate departures from npm, both in nub's favour:
+///
+/// - npm and pnpm ASSIGN `NODE_OPTIONS` from this field, destroying whatever the
+///   ambient environment held (measured on npm 11.17.0). nub returns the tokens for
+///   `compute_augmentation_env` to APPEND, so nub's own augmentation survives.
+/// - Values land BEFORE nub.jsonc `nodeOptions` in the assembled list, so on a
+///   conflicting flag the tool-owned `nub.jsonc` value wins under Node's last-wins
+///   rule. The generic `.npmrc` surface should not override nub's own config.
+///
+/// The env form is npm's own `npm_config_node_options` and takes precedence over
+/// the file, matching npm's config precedence. Skipped in compat mode by the caller,
+/// consistent with nub.jsonc `nodeOptions` being skipped there.
+fn npmrc_script_node_options(project_root: &Path) -> Vec<String> {
+    env::var("NPM_CONFIG_NODE_OPTIONS")
+        .or_else(|_| env::var("npm_config_node_options"))
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            crate::pm_engine::unsupported_config::npmrc_scalar_value(
+                project_root,
+                "node-options",
+                true,
+            )
+            .filter(|value| !value.trim().is_empty())
+        })
+        .map(|value| nub_core::node::spawn::split_node_options(&value))
+        .unwrap_or_default()
+}
+
+/// The tsconfig warnings this process already wrote, ready to hand to the child.
+///
+/// Both the CLI and the addon parse the project's tsconfig, so without this the
+/// user reads the same warning twice — the exact problem that made tsx drop its
+/// warning entirely. Call it AFTER the node options are built, since that is what
+/// parses the config. A spawn path that skips this prints the warning twice rather
+/// than losing it, so missing one degrades the output instead of the behavior.
+fn tsconfig_reported_env() -> Option<(String, String)> {
+    let reported = nub_tsconfig::reported_config_paths();
+    (!reported.is_empty()).then(|| (nub_tsconfig::REPORTED_ENV.to_string(), reported.join("\n")))
+}
+
+/// The directory whose tsconfig governs the entry of a `nub <file>` run, resolved
+/// against `cwd`. The first non-flag argument is the entry; with none (a bare
+/// `--flag`) this is `None` and the CWD-anchored check stands alone.
+///
+/// Mirrors the config the run itself reads (#1032). Node loads the main entry from
+/// its REAL path unless `--preserve-symlinks-main` (`NODE_PRESERVE_SYMLINKS` does
+/// not reach the main entry), and the addon reads the tsconfig of the importer's
+/// directory, so a workspace member reached through its `node_modules` link runs
+/// under its real directory's config, whose relative `extends` resolves from there.
+/// An entry whose real path is inside `node_modules` is a dependency: the runtime
+/// neither transpiles it nor applies `paths` for it, so its published tsconfig —
+/// often extending a file that was never published — governs nothing and is
+/// skipped outright rather than warned about.
+fn entry_tsconfig_dir(args: &[String], cwd: &Path, node_options: &[String]) -> Option<PathBuf> {
+    let at = args.iter().position(|a| !a.starts_with('-'))?;
+    let joined = cwd.join(&args[at]);
+    let real = std::fs::canonicalize(&joined)
+        .map(|p| PathBuf::from(strip_windows_verbatim_prefix(&p.to_string_lossy())))
+        .unwrap_or_else(|_| joined.clone());
+    if real.components().any(|c| c.as_os_str() == "node_modules") {
+        return None;
+    }
+    let inherited = env::var("NODE_OPTIONS").unwrap_or_default();
+    let preserve_main = args[..at]
+        .iter()
+        .chain(node_options)
+        .map(String::as_str)
+        .chain(
+            nub_core::node::spawn::split_node_options(&inherited)
+                .iter()
+                .map(String::as_str),
+        )
+        .any(is_preserve_symlinks_main);
+    let entry = if preserve_main { joined } else { real };
+    entry.parent().map(Path::to_path_buf)
+}
+
+/// Node treats `_` and `-` as the same character in an option name, so
+/// `--preserve_symlinks_main` is the same flag.
+fn is_preserve_symlinks_main(flag: &str) -> bool {
+    flag.strip_prefix("--")
+        .is_some_and(|name| name.replace('_', "-") == "preserve-symlinks-main")
+}
+
+/// Refuse the run when the tsconfig governing `dir` will not parse.
+///
+/// The diagnostics themselves are already on stderr by the time this reads them
+/// (`nub_tsconfig` writes each one once per config path), so this adds the verdict
+/// and the way out rather than repeating the detail.
+fn ensure_tsconfig_parses(dir: &str, explicit: Option<&str>) -> Result<()> {
+    if nub_tsconfig::diagnostics(dir, explicit).is_empty() {
+        return Ok(());
+    }
+    // `--node` is named as the way past this, but NOT as a way to keep the program
+    // working: compat mode turns off every config-derived behavior, so a project
+    // that needed `paths` fails there too, just further downstream. Say what it
+    // costs, or the suggestion sends the reader somewhere worse than where they are.
+    bail!(
+        "the project's tsconfig.json could not be read in full (see above).\n\
+         Fix the config, or use --node to run without Nub's TypeScript features, \
+         path aliases included."
+    );
+}
+
+/// Nub's export condition, set on every run the CLI augments and honored by the
+/// compile bundler, which resolves `exports` ahead of time and so has to pick the
+/// same file.
+///
+/// Not a WinterTC runtime key. The registration
+/// (<https://github.com/WinterTC55/runtime-keys/pull/39>) was withdrawn after review:
+/// Nub runs the installed Node rather than being a runtime of its own.
+pub(crate) const NUB_CONDITION: &str = "nub";
+
+pub(crate) fn runtime_node_options(
+    runtime: &mut crate::project_config::RuntimeConfig,
+    node: &nub_core::node::discovery::ResolvedNode,
+) -> Result<Vec<String>> {
+    runtime_node_options_with(
+        runtime,
+        node,
+        FoldInherited::Yes,
+        TsconfigGate::for_program(),
+    )
+}
+
+/// The options a PM verb hands its lifecycle scripts. Same set as a run, except a
+/// tsconfig that will not read is tolerated: the install is what makes the
+/// `extends` target exist (ava's `"extends": "@sindresorhus/tsconfig"` is a
+/// devDependency), so refusing here left every fresh clone unable to install.
+pub(crate) fn lifecycle_node_options(
+    runtime: &mut crate::project_config::RuntimeConfig,
+    node: &nub_core::node::discovery::ResolvedNode,
+) -> Result<Vec<String>> {
+    runtime_node_options_with(runtime, node, FoldInherited::Yes, TsconfigGate::BestEffort)
+}
+
+/// Set on every process under a PM verb's lifecycle scripts (the overlay in
+/// `pm_engine::augmentation_to_lifecycle_overlay`). A script's `node` is nub's
+/// PATH shim and a `nub` inside it is a fresh invocation, so each re-derives its
+/// own options; the marker is how they keep the tolerant gate their parent chose.
+/// Without it the script that GENERATES the config's `extends` target — sveltekit's
+/// `prepare: svelte-kit sync` writing `./.svelte-kit/tsconfig.json` — died on the
+/// missing target before it could write it, and the install with it (#804).
+pub(crate) const LIFECYCLE_ENV: &str = "__NUB_LIFECYCLE";
+
+/// What an unreadable tsconfig does to the run whose options are being built.
+///
+/// `Required` is every path that executes the user's program (#731: running under
+/// options the author never wrote is the silent wrong answer). `BestEffort` is the
+/// lifecycle-script subtree of the PM verbs, where the config's `extends` target is
+/// routinely a package the verb is about to install or a file a script is about to
+/// generate: the run proceeds without the config-derived conditions and without a
+/// report — nothing is guessed at.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum TsconfigGate {
+    Required,
+    BestEffort,
+}
+
+impl TsconfigGate {
+    /// The gate for a path that executes a program: `Required`, unless this
+    /// process is itself inside a lifecycle subtree ([`LIFECYCLE_ENV`]).
+    fn for_program() -> Self {
+        if env::var_os(LIFECYCLE_ENV).is_some() {
+            Self::BestEffort
+        } else {
+            Self::Required
+        }
+    }
+}
+
+/// Whether inherited `NODE_OPTIONS` preloads may be folded into nub's chainer.
+///
+/// `No` for the watch path: `node --watch` runs a supervisor that is deliberately
+/// preload-free, and the chainer is only loaded by nub's own preload — so folding
+/// there would move the user's ambient preload out of the supervisor entirely. A
+/// user setting `NODE_OPTIONS=--require=<agent>` expects it in EVERY Node process,
+/// the supervisor included, so those entries stay on the inherited value verbatim.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum FoldInherited {
+    Yes,
+    No,
+}
+
+pub(crate) fn runtime_node_options_with(
+    runtime: &mut crate::project_config::RuntimeConfig,
+    node: &nub_core::node::discovery::ResolvedNode,
+    fold: FoldInherited,
+    tsconfig_gate: TsconfigGate,
 ) -> Result<Vec<String>> {
     let accepted = nub_core::node::discovery::accepted_env_flags(node.path.as_std_path());
     let mut options = Vec::new();
@@ -3056,34 +4371,91 @@ pub(crate) fn runtime_node_options(
         options.push(value.clone());
     }
 
+    let mut seen_conditions = std::collections::HashSet::new();
+    // Nub's export condition, in the slot the `bun` and `deno` conditions occupy. It rides
+    // every run the CLI augments so a package can point an `exports` branch at what
+    // nub adds — TypeScript source above all — and is absent under `--node`/
+    // `NODE_COMPAT`, which skip this function entirely and so run with Node's own
+    // condition set. Conditions are a SET: this only ever offers a branch a package
+    // opted into, and a package with no `nub` key resolves as it does under plain Node.
+    //
+    // Scoped to the CLI on purpose. The standalone `@nubjs/runner` installs the same
+    // transform hooks but deliberately does NOT add this, because its contract is that
+    // a file resolves identically under it, under tsx, and under plain Node — the brand
+    // stays in the outer invocation and out of the user's import graph.
+    seen_conditions.insert(NUB_CONDITION.to_string());
+    options.push(format!("--conditions={NUB_CONDITION}"));
     for condition in &runtime.conditions {
         if condition.is_empty() || condition.chars().any(char::is_whitespace) {
             bail!("nub.jsonc `conditions` entries must be non-empty and contain no whitespace");
         }
-        options.push(format!("--conditions={condition}"));
+        if seen_conditions.insert(condition.clone()) {
+            options.push(format!("--conditions={condition}"));
+        }
+    }
+    // tsconfig `compilerOptions.customConditions` joins the same set. TypeScript uses
+    // it to resolve TYPES out of a package's `exports`, so without this the checker and
+    // the runtime disagree about which file a specifier means — the "live types" layout
+    // (a `source` condition pointing at `.ts`) type-checks and then loads the built
+    // `dist` copy, or fails to resolve at all. Every other runner makes you declare the
+    // conditions a second time in its own config; nub reads the one that is already
+    // there. Union, not override: an explicit nub.jsonc `conditions` entry is not
+    // contradicted by this, since conditions are a SET and it is the order of keys
+    // inside `exports` that decides which one wins.
+    //
+    // Anchored at the CWD, which is where nub already discovers `nub.jsonc` from and
+    // where Node resolves a bare `--import`/`--require` specifier from — one rule, and
+    // it reaches a `customConditions` declared in the base config a leaf package
+    // `extends`. Skipped entirely in compat mode by the caller, like every other
+    // config-derived flag.
+    if let Ok(cwd) = std::env::current_dir() {
+        let cwd = cwd.to_string_lossy();
+        let explicit = runtime.tsconfig.as_deref();
+        // A tsconfig that will not parse is FATAL, not a warning (#731). Reporting it
+        // and carrying on still runs the program under options its author never
+        // wrote — the same silent-wrong-answer the issue reported, only quieter — and
+        // `tsc` likewise exits rather than guessing at the missing half. Nothing is
+        // salvageable enough to be worth guessing: `extends` is how a project factors
+        // out `strict`, `target` and `paths`, so the base is usually where the load
+        // lives. `--node` / `NODE_COMPAT` skip this whole function, so the escape
+        // hatch for a config nub cannot read is the one that already turns off every
+        // other config-derived behavior. The lifecycle path (`BestEffort`) is the one
+        // exception, and it takes the same "guess at nothing" line: no conditions at
+        // all from a config it cannot read.
+        let conditions = match tsconfig_gate {
+            TsconfigGate::Required => {
+                ensure_tsconfig_parses(&cwd, explicit)?;
+                nub_tsconfig::custom_conditions(&cwd, explicit)
+            }
+            TsconfigGate::BestEffort
+                if nub_tsconfig::probe_diagnostics(&cwd, explicit).is_empty() =>
+            {
+                nub_tsconfig::custom_conditions(&cwd, explicit)
+            }
+            TsconfigGate::BestEffort => Vec::new(),
+        };
+        for condition in conditions {
+            // A condition name with whitespace is a user error in THEIR tsconfig that
+            // `tsc` itself tolerates, so it cannot be fatal here the way a bad
+            // nub.jsonc entry is: skip it and leave the rest of the set intact.
+            if condition.is_empty() || condition.chars().any(char::is_whitespace) {
+                continue;
+            }
+            if seen_conditions.insert(condition.clone()) {
+                options.push(format!("--conditions={condition}"));
+            }
+        }
     }
 
     for preload in &runtime.preload {
         if preload.is_empty() || preload.contains('\0') {
             bail!("nub.jsonc `preload` entries must be non-empty paths or module specifiers");
         }
-        let path = Path::new(preload);
-        let is_cjs = path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("cjs"));
-        let value = if path.is_absolute() && !is_cjs {
-            nub_core::node::spawn::path_to_file_url(preload)
-        } else {
-            preload.clone()
-        };
-        options.push(
-            nub_core::node::spawn::PreloadInjection {
-                flag: if is_cjs { "--require" } else { "--import" },
-                value,
-            }
-            .node_options_token(),
-        );
+    }
+    // ONE synthesized chainer instead of a token per entry — see prepare_preload_chain
+    // for why (vercel/next.js#96582) and where the chainer has to live.
+    if let Some(injection) = prepare_preload_chain(runtime, node, fold)? {
+        options.push(injection.node_options_token());
     }
 
     if let Some(tsconfig) = runtime.tsconfig.as_deref()
@@ -3107,7 +4479,15 @@ fn validate_runtime_node_option(
     if let Some(accepted) = accepted
         && !accepted.contains(name)
     {
-        bail!("nub.jsonc `nodeOptions` option `{name}` is not supported by Node {node_version}");
+        // `accepted` is `allowedNodeEnvironmentFlags`, which is NARROWER than the
+        // flags Node supports — this field ships through NODE_OPTIONS, and Node
+        // keeps its V8 and test-runner flags command-line-only. The old "not
+        // supported by Node" wording sent a `--stack-size` author to check their
+        // Node version, past the `v8Flags` field that takes it.
+        bail!(
+            "nub.jsonc `nodeOptions` option `{name}` is not accepted in NODE_OPTIONS by Node {node_version}\n\
+             \x20\x20V8 flags that Node takes only on the command line go in `v8Flags`"
+        );
     }
     Ok(())
 }
@@ -3170,7 +4550,7 @@ fn load_runtime_env_sources_raw(paths: &[PathBuf]) -> Result<HashMap<String, Str
             )
         })?;
         for (key, value) in nub_core::workspace::env::parse_env(&content) {
-            if env::var_os(&key).is_some()
+            if !nub_core::workspace::env::env_file_may_set(&key)
                 || runtime_env_keys_equal(&key, "NODE_ENV", cfg!(windows))
             {
                 continue;
@@ -3199,19 +4579,31 @@ fn runtime_child_env(
     runtime: &crate::project_config::RuntimeConfig,
     project_root: Option<&Path>,
     compat_mode: bool,
+    env_owner: Option<&crate::env_owner::EnvOwner>,
 ) -> Result<HashMap<String, String>> {
     use crate::project_config::RuntimeEnvFile;
 
     if no_env_file() {
         return Ok(HashMap::new());
     }
+    // An owner that reaches here owns the DEFAULT cascade — nothing else can still
+    // be in play, because a declared `envFile` or `--env-file` displaces the
+    // hand-over before detection (see `env_file_displaces_owner`).
+    let owner = env_owner.filter(|owner| owner.suppresses_env_files());
     let base = if compat_mode {
         HashMap::new()
     } else {
         match &runtime.env_file {
-            RuntimeEnvFile::Default if !env_file_flag_present() => project_root
-                .map(nub_core::workspace::env::load_env_files)
-                .unwrap_or_default(),
+            RuntimeEnvFile::Default if !env_file_flag_present() => match owner {
+                // The loader owns the environment end to end — nub contributes
+                // nothing, and does not resolve anything on its behalf.
+                Some(_) => HashMap::new(),
+                None => project_root
+                    .map(nub_core::workspace::env::load_env_files)
+                    .unwrap_or_default(),
+            },
+            // Unlike the arm above, no `owner` gate: a declared source list
+            // displaces the hand-over outright, so the two cannot coexist here.
             RuntimeEnvFile::Sources(paths) => load_runtime_env_sources(paths)?,
             RuntimeEnvFile::Default | RuntimeEnvFile::Disabled => HashMap::new(),
         }
@@ -3230,6 +4622,96 @@ fn runtime_child_env(
     let mut result = base;
     overlay_env_file_vars(&mut result);
     Ok(result)
+}
+
+/// Whether a declared `envFile` instruction displaces a `.env.schema` hand-over.
+///
+/// A schema is INFERRED intent — the file is present, so a loader is presumed to
+/// own the environment. An `envFile` value is DECLARED intent, and declared beats
+/// inferred: the project named what it wants loaded, so nub loads that and the
+/// loader stays out of the spawn chain. This replaces a rule that refused the run
+/// and told the user to pick one, which left a project wanting a schema in CI and
+/// a plain `.env` locally unable to say so.
+///
+/// `--no-env-file` and `envFile: false` displace, and that IS the point of them.
+/// They used to be classified as non-conflicting on the grounds that standing
+/// down already loads nothing — which read the hand-over as the absence of
+/// loading rather than as its own answer, so both did nothing in a schema project
+/// and handed a fully resolved environment to someone who asked for none.
+///
+/// `"varlock"` is the one value that does not displace: it SELECTS the loader, so
+/// it lands here as a no-op. Treating it as a displacement would invert exactly
+/// what it asks for, and it is the spelling a project uses to override a
+/// machine-wide `envFile: false` — see [`declared_env_file_setting`], which is also
+/// where the "a schema is a DEFAULT" framing this rule rests on is written down.
+fn env_file_displaces_owner() -> bool {
+    if no_env_file() || env_file_flag_present() {
+        return true;
+    }
+    !matches!(
+        crate::project_config::declared_env_file_setting(),
+        None | Some(crate::project_config::EnvFileSetting::Varlock)
+    )
+}
+
+/// [`crate::env_owner::detect`], unless a declared `envFile` displaces it.
+///
+/// Suppressing DETECTION is what keeps the rule contained: every downstream site
+/// — the diagnostics, the child env, the spawn chain, the watch path — already
+/// treats `None` as "no schema here", so a displaced owner needs no new branch in
+/// any of them. Compat mode is vanilla Node: no augmentation, hence no adapter to
+/// load with, hence no detection.
+fn detect_env_owner(
+    project: Option<&nub_core::workspace::detect::Project>,
+    compat_mode: bool,
+) -> Option<crate::env_owner::EnvOwner> {
+    if compat_mode || env_file_displaces_owner() {
+        return None;
+    }
+    project.and_then(|project| {
+        crate::env_owner::detect(&project.root, project.workspace_root.as_deref())
+    })
+}
+
+/// Every env-owner diagnostic nub raises.
+///
+/// 1. `envFile: "varlock"` at a project with no schema for it to read.
+/// 2. A schema nub cannot act on. Always fatal.
+///
+/// Falling back to `.env*` is the wrong answer for the second case, not a softer
+/// one. A schema the project has not disclaimed (by declaring a rival claimant of
+/// the filename) says the environment is schema-resolved; running on nub's own
+/// cascade instead hands the program no defaults, no validation, no providers, and
+/// for a schema-only project with no committed `.env`, nothing at all — silently.
+/// Only launchers are gated, so `nub install` and `nub add` still fix it. A
+/// declared `envFile` is now also a fix: displacing the hand-over displaces this
+/// error with it, which is the one escape from a schema whose loader will not
+/// install that does not mean giving up augmentation entirely.
+///
+/// When the loader IS installed, nub says nothing at all: it stands down, puts the
+/// loader in front of Node, and the loader owns everything from there — including
+/// its own errors.
+fn check_schema_usable(
+    env_owner: Option<&crate::env_owner::EnvOwner>,
+    compat_mode: bool,
+) -> Result<()> {
+    // `"varlock"` never displaces, so a `None` owner beside it means there is no
+    // schema to hand over — the run would quietly get nub's own cascade under a
+    // name that asked for something else. Skipped in compat mode, where no
+    // runtime config applies at all.
+    if !compat_mode
+        && env_owner.is_none()
+        && matches!(
+            crate::project_config::declared_env_file_setting(),
+            Some(crate::project_config::EnvFileSetting::Varlock)
+        )
+    {
+        bail!(crate::env_owner::missing_schema_for_declared_loader());
+    }
+    let Some(problem) = env_owner.and_then(crate::env_owner::EnvOwner::schema_problem) else {
+        return Ok(());
+    };
+    bail!(problem.message());
 }
 
 fn run_file(args: &[String]) -> Result<i32> {
@@ -3252,7 +4734,7 @@ fn run_file_with_compat(args: &[String], compat_mode: bool) -> Result<i32> {
 /// child's cwd is set on `SpawnConfig` so the override reaches Node itself, not
 /// just nub's discovery (spawn_node otherwise inherits the parent's cwd).
 fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool) -> Result<i32> {
-    let runtime = runtime_config()?;
+    let mut runtime = runtime_config()?;
     let compat_mode = effective_compat_mode(compat_mode, &runtime);
     // Preflight the project manifest first: an EACCES/unparseable package.json
     // otherwise reads as "no project" through every Option-returning reader on
@@ -3279,17 +4761,58 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
         nub_core::node::discovery::check_min_version(&node)?;
     }
 
-    // .env loading: eager for all non-compat invocations per wiki/runtime/env-loading.md —
+    // .env loading: eager for all non-compat invocations per internal/runtime/env-loading.md —
     // UNLESS the user passed `--env-file`, which suppresses auto-discovery entirely
     // (only the named file(s) load; the maintainer, 2026-06-15), OR `--no-env-file`,
     // which suppresses everything. `merge_child_env` applies the gate. --env-file
     // vars apply even in compat mode (explicit user flag); --no-env-file wins.
     let project = nub_core::workspace::detect::detect_project(cwd);
-    let mut env_vars = runtime_child_env(
-        &runtime,
-        project.as_ref().map(|project| project.root.as_path()),
-        compat_mode,
-    )?;
+    let project_root = project.as_ref().map(|project| project.root.as_path());
+    // A `.env.schema` means an external loader owns env for this project, so nub
+    // stands down from its own cascade rather than resolving a file set the
+    // loader would resolve differently. Detection is a `stat` and runs before any
+    // loading, so nothing has to be undone.
+    let env_owner = detect_env_owner(project.as_ref(), compat_mode);
+    check_schema_usable(env_owner.as_ref(), compat_mode)?;
+    let mut env_vars = runtime_child_env(&runtime, project_root, compat_mode, env_owner.as_ref())?;
+    if let Some((_, schema_dir)) = env_owner
+        .as_ref()
+        .and_then(crate::env_owner::EnvOwner::spawn_target)
+    {
+        // Reaches the loader process AND the Node it spawns, so neither re-enters
+        // nub and wraps a second time. Carries the schema dir rather than a bare
+        // flag: a nested nub in a DIFFERENT schema-owned project must still wrap
+        // its own, instead of inheriting this project's environment silently.
+        env_vars.insert(
+            crate::env_owner::WRAPPED_ENV.to_string(),
+            crate::env_owner::wrapped_marker(schema_dir),
+        );
+    }
+    // The configured `prefix` wraps a `nub <file>` run only: a bin launched for
+    // `nubx` / `nub exec` (`exec_ua`) and the `node` hijack are outside its scope,
+    // and compat mode is plain Node — the escape hatch stays a bare spawn, as it
+    // does for the env-owner loader.
+    let prefix = if exec_ua || compat_mode || NODE_HIJACK.load(Ordering::Relaxed) {
+        None
+    } else {
+        crate::prefix::Prefix::resolve(
+            project_root.unwrap_or(cwd),
+            &project
+                .as_ref()
+                .map(|project| {
+                    nub_core::workspace::scripts::bin_dirs(
+                        &project.root,
+                        project.workspace_root.as_deref(),
+                    )
+                })
+                .unwrap_or_default(),
+        )?
+    };
+    let prefix_argv = prefix.as_ref().map(crate::prefix::Prefix::argv);
+    if let Some(prefix) = prefix.as_ref() {
+        let (key, value) = prefix.marker();
+        env_vars.insert(key.to_string(), value);
+    }
 
     // Bin-exec parity with `nub run`: when this spawn is nub LAUNCHING a resolved
     // node bin (a `nubx`/`nub exec` scaffolder — `exec_ua`), set the same role-
@@ -3302,6 +4825,20 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
         env_vars.insert(
             "npm_config_user_agent".to_string(),
             exec_user_agent(cwd, &node.version.to_string()),
+        );
+    }
+
+    // Default-export `fetch` handler: let the preload's deferred pass serve an entry
+    // whose default export is one. A plain `nub <file>` only — a bin launch
+    // (`exec_ua`) is running somebody else's tool, and the `node` hijack has to keep
+    // `node <file>` meaning what `node` means, so a script's `node server.js` never
+    // binds a port while `nub server.js` does. Carries the argv rather than a flag so
+    // the preload can tell the application from a wrapper nub puts in front of it —
+    // see `flags::SERVE_ENTRY_ENV`.
+    if !compat_mode && !exec_ua && !NODE_HIJACK.load(Ordering::Relaxed) {
+        env_vars.insert(
+            nub_core::node::flags::SERVE_ENTRY_ENV.to_string(),
+            nub_core::node::flags::serve_entry_marker(args.iter().map(String::as_str)),
         );
     }
 
@@ -3321,18 +4858,38 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     let (runtime_node_options, runtime_v8_flags) = if compat_mode {
         (Vec::new(), Vec::new())
     } else {
-        let options = runtime_node_options(&runtime, &node)?;
+        let options = runtime_node_options(&mut runtime, &node)?;
+        // `runtime_node_options` anchors its own check at the CWD, which is the config
+        // `nub.jsonc` and a bare preload specifier resolve against. The ENTRY can sit
+        // under a different one — `nub sub/main.ts` from the parent — and that is the
+        // config the addon will actually transform against, so it gets the same
+        // refusal. Without this, the identical project fails from inside `sub/` and
+        // merely warned from above it.
+        if let Some(entry_dir) = entry_tsconfig_dir(args, cwd, &options)
+            && TsconfigGate::for_program() == TsconfigGate::Required
+        {
+            ensure_tsconfig_parses(&entry_dir.to_string_lossy(), runtime.tsconfig.as_deref())?;
+        }
         let v8_flags = runtime_v8_flags(&runtime)?;
         env_vars.insert(
             crate::project_config::RUNTIME_CONFIG_ENV.to_string(),
             runtime_config_json(&runtime)?,
         );
+        if let Some((key, value)) = tsconfig_reported_env() {
+            env_vars.insert(key, value);
+        }
         (options, v8_flags)
     };
     // Yarn PnP: inject the user's own `.pnp.cjs` (spawn.rs gates this on
     // `!compat_mode`, so `--node` skips it regardless).
     let pnp_ctx = nub_core::pnp::detect(cwd);
     let config = nub_core::node::spawn::SpawnConfig {
+        runtime_has_preloads: !runtime.preload.is_empty(),
+        // Put the loader in front of Node when one owns this project.
+        env_owner: env_owner
+            .as_ref()
+            .and_then(crate::env_owner::EnvOwner::spawn_target),
+        prefix: prefix_argv.as_deref(),
         node: &node,
         user_args: args,
         compat_mode,
@@ -3366,7 +4923,7 @@ fn run_script(
     let project =
         nub_core::workspace::detect::detect_project(&cwd).ok_or_else(|| no_manifest_error(&cwd))?;
 
-    // No script name (`nub run`): list available scripts instead of a raw clap
+    // No script name (`nub run`): list available scripts instead of a raw parser
     // "required argument" error — same shape as the missing-named-script path.
     let Some(script) = script else {
         // `nub run` with no script name mirrors `pnpm run` with no args: it is
@@ -4139,19 +5696,25 @@ fn run_one_workspace_script(
             leaf.exec,
             leaf.aggregate,
         ) {
+            // Nub's own per-member status line KEEPS its label even under
+            // `--reporter-hide-prefix`, matching pnpm (measured on 10.15.1: it emits
+            // `packages/a hello: Done` with the flag set). The flag exists to hand a
+            // CI annotation matcher the child's raw output; these three lines are
+            // Nub's framing, not the child's, and stripping them turned a workspace
+            // run into a stack of identical unattributable `Done`s.
             Ok(0) => {
                 // pnpm prints a per-package "Done" suffix on success.
-                let done_prefix = format_stream_prefix(&prefix, script, leaf.color_idx);
+                let done_prefix = format_status_prefix(&prefix, script, leaf.color_idx);
                 eprintln!("{done_prefix}Done");
                 MemberOutcome::Ran(0)
             }
             Ok(code) => {
-                let err_prefix = format_stream_prefix(&prefix, script, leaf.color_idx);
+                let err_prefix = format_status_prefix(&prefix, script, leaf.color_idx);
                 eprintln!("{err_prefix}exit {code}");
                 MemberOutcome::Ran(code)
             }
             Err(e) => {
-                let err_prefix = format_stream_prefix(&prefix, script, leaf.color_idx);
+                let err_prefix = format_status_prefix(&prefix, script, leaf.color_idx);
                 eprintln!("{err_prefix}error: {e}");
                 MemberOutcome::Ran(1)
             }
@@ -4275,18 +5838,38 @@ enum StreamMode {
     Prefixed,
 }
 
-/// Resolve the bundled busybox-w32 POSIX-`sh` sidecar that backs `nub run` script
-/// bodies on Windows. The win32 package lays `busybox.exe` beside `nub.exe` in the
-/// package's `bin/` dir, so it resolves relative to the running executable
-/// (canonicalized, matching `current_nub_binary`). `__NUB_BUSYBOX_EXE` overrides
-/// the location — an internal test/CI seam that lets the Rust suite and the
-/// branch-scoped Windows probe supply a busybox without the release-packaging step;
-/// it is NOT a documented user knob (`--script-shell` is the user-facing override).
+/// The nub-owned subdirectory the npm launcher carries the bundled shell into when it
+/// relocates `nub.exe`. Must match `SHELL_SUBDIR` in `npm/nub/bin/launch.js`.
+const NUB_SHELL_SUBDIR: &str = "nub-sh";
+
+/// Resolve the bundled busybox-w32 POSIX-`sh` sidecar that backs every script body
+/// nub runs on Windows — `nub run` here, and dependency lifecycle scripts through the
+/// engine-context default `pm_engine` installs (`apply_lifecycle_script_shell`).
+/// `__NUB_BUSYBOX_EXE` overrides the location — an internal
+/// test/CI seam that lets the Rust suite and the branch-scoped Windows probe supply a
+/// busybox without the release-packaging step; it is NOT a documented user knob
+/// (`--script-shell` is the user-facing override).
+///
+/// Otherwise it resolves relative to the running executable (canonicalized, matching
+/// `current_nub_binary`), checking TWO layouts in order:
+///
+///   * `<exe dir>/busybox.exe` — how the win32 npm package, the release `.zip` behind
+///     `install.ps1`, and `nub upgrade`'s self-owned `~/.nub/bin` all lay it out.
+///   * `<exe dir>/nub-sh/busybox.exe` — where the npm launcher stages it after
+///     hardlinking `nub.exe` into npm's global bin dir for the PATHEXT fast path
+///     (`healWindowsBinDir`). That directory is on PATH, so the shell goes in a
+///     subdirectory rather than beside the binary: a bare `busybox.exe` on PATH would
+///     shadow a busybox the user installed themselves.
+///
+/// The second layout is what #687 needed. 0.7.0 began relocating the binary and this
+/// resolution had no way to follow it, so every `nub run` on a Windows npm install
+/// failed from the second invocation onward.
+///
 /// A missing sidecar is a clean error, never a panic and never a silent cmd.exe
 /// fallback — that would resurrect the non-POSIX script semantics busybox replaces.
 /// Only reached on Windows (the `cfg!(windows)` default arm); cross-platform std so
 /// it compiles everywhere.
-fn resolve_bundled_busybox() -> Result<String> {
+pub(crate) fn resolve_bundled_busybox() -> Result<String> {
     let to_utf8 = |p: PathBuf| -> Result<String> {
         p.to_str()
             .map(str::to_string)
@@ -4307,20 +5890,35 @@ fn resolve_bundled_busybox() -> Result<String> {
     let dir = exe
         .parent()
         .ok_or_else(|| anyhow::anyhow!("nub binary has no parent directory"))?;
-    let busybox = dir.join("busybox.exe");
-    if !busybox.is_file() {
-        bail!(
-            "nub's bundled POSIX shell (busybox.exe) was not found next to the nub \
-             executable at {}. Reinstall nub, or set `script-shell` in .npmrc to a \
-             POSIX shell on PATH.",
-            busybox.display()
-        );
+    let [beside, staged] = busybox_candidates(dir);
+    if beside.is_file() {
+        return to_utf8(beside);
     }
-    to_utf8(busybox)
+    if staged.is_file() {
+        return to_utf8(staged);
+    }
+    bail!(
+        "nub's bundled POSIX shell (busybox.exe) was not found next to the nub \
+         executable — looked at {} and {}. Reinstall nub, or set `script-shell` in \
+         .npmrc to a POSIX shell on PATH.",
+        display_path(&beside),
+        display_path(&staged)
+    );
+}
+
+/// The two busybox layouts, in resolution order, for an executable directory.
+/// Split out from [`resolve_bundled_busybox`] so the ORDER is unit-testable without
+/// having to relocate the test binary's own `current_exe()`.
+fn busybox_candidates(dir: &Path) -> [PathBuf; 2] {
+    [
+        dir.join("busybox.exe"),
+        dir.join(NUB_SHELL_SUBDIR).join("busybox.exe"),
+    ]
 }
 
 /// Build the shell `Command` for a package script with Nub's augmentation
-/// applied exactly once: `NODE_OPTIONS` (injected flags + preload + webstorage),
+/// applied exactly once: `NODE_OPTIONS` (source maps + preload + webstorage; the
+/// version-gated feature flags ride argv instead — see `compute_augmentation_env`),
 /// the PATH shim prepended to the `node_modules/.bin` walk-up chain, `.env`
 /// files, and the `npm_*` lifecycle vars.
 ///
@@ -4339,7 +5937,7 @@ fn build_script_command(
 ) -> Result<(std::process::Command, String)> {
     use std::process::Command as StdCommand;
 
-    let runtime = runtime_config()?;
+    let mut runtime = runtime_config()?;
     let compat_mode = effective_compat_mode(compat_mode, &runtime);
 
     // `.env` is NODE-SCOPED, not process-scoped (security + correctness, decided
@@ -4353,7 +5951,7 @@ fn build_script_command(
     // right `.env.[NODE_ENV]` after an inline `NODE_ENV=…` is set, instead of the
     // outer load freezing the wrong file's values into the process. The explicit
     // `--env-file` FLAG is a distinct, user-set surface and still flows process-
-    // wide (overlay below) — it's not auto-discovery. See wiki/runtime/env-loading.md.
+    // wide (overlay below) — it's not auto-discovery. See internal/runtime/env-loading.md.
     let mut env_vars: HashMap<String, String> = HashMap::new();
     // The explicit `--env-file` FLAG (a user-set surface, captured at startup)
     // still flows process-wide — it is not auto-`.env` discovery and applies in
@@ -4369,10 +5967,21 @@ fn build_script_command(
     let cwd = std::env::current_dir().unwrap_or_else(|_| project.root.clone());
     let node = nub_core::node::discovery::discover_node(&cwd)
         .unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
+    // Values stay node-scoped per the note above — each inner `node` resolves the
+    // environment at its own startup. What must flow from here is the env-owner
+    // MARKERS and preload tokens, so that inner node (and any node a script
+    // spawns) loads through the same owner instead of falling back to nub's
+    // cascade.
+    let env_owner = detect_env_owner(Some(project), compat_mode);
+    check_schema_usable(env_owner.as_ref(), compat_mode)?;
     let runtime_node_options = if compat_mode {
         Vec::new()
     } else {
-        runtime_node_options(&runtime, &node)?
+        // npmrc first so nub.jsonc `nodeOptions` wins a conflicting flag under
+        // Node's last-wins rule. See npmrc_script_node_options.
+        let mut options = npmrc_script_node_options(&project.root);
+        options.extend(runtime_node_options(&mut runtime, &node)?);
+        options
     };
     let runtime_json = if compat_mode {
         None
@@ -4404,6 +6013,9 @@ fn build_script_command(
     // can confine it (an in-process interpreter could do neither). This replaces
     // the former implicit `cmd.exe` default. busybox is a multi-call binary, so
     // its `sh` applet name precedes `-c`; every other shell here takes plain `-c`.
+    // The engine's dependency-lifecycle spawn resolves the same sidecar the same
+    // way (`pm_engine::apply_lifecycle_script_shell`), so one POSIX script body
+    // behaves identically whether `nub run` or a `postinstall` runs it.
     let custom_shell = script_shell_override
         .map(str::to_string)
         .or_else(|| nub_core::workspace::scripts::script_shell(&project.root));
@@ -4412,6 +6024,9 @@ fn build_script_command(
         None if cfg!(windows) => (resolve_bundled_busybox()?, vec!["sh", "-c"]),
         None => ("sh".to_string(), vec!["-c"]),
     };
+    // Only the bundled busybox needs the casing prologue below: a `--script-shell`
+    // the user chose is theirs, and an explicit `cmd` is case-insensitive.
+    let uses_bundled_busybox = cfg!(windows) && custom_shell.is_none();
 
     // Append the user's extra args the way npm does (@npmcli/promise-spawn):
     // each arg is escaped for the target shell and spliced onto the UNescaped
@@ -4439,7 +6054,6 @@ fn build_script_command(
     );
     let aug = nub_core::node::spawn::compute_augmentation_env(
         &nub_binary,
-        node.path.as_std_path(),
         node.version,
         compat_mode,
         pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),
@@ -4452,8 +6066,31 @@ fn build_script_command(
     // former implicit Windows `cmd` default — the sole `windowsVerbatimArguments`
     // consumer — is gone; an explicit `script-shell=cmd` still takes this path
     // with cmd-escaped args (unchanged), it was never the verbatim default.
-    let mut command = StdCommand::new(&shell);
-    command.args(&shell_args).arg(&full_cmd);
+    // A configured `prefix` wraps the SHELL, so a body that never starts Node
+    // still runs behind it; the marker it carries stops a `nub run` inside the
+    // body from wrapping the same project again. Not in compat mode, which is a
+    // bare spawn on every surface.
+    let prefix = if compat_mode {
+        None
+    } else {
+        crate::prefix::Prefix::resolve(
+            &project.root,
+            &nub_core::workspace::scripts::bin_dirs(
+                &project.root,
+                project.workspace_root.as_deref(),
+            ),
+        )?
+    };
+    let mut command = match prefix.as_ref() {
+        Some(prefix) => {
+            let mut command = prefix.command();
+            command.args(nub_core::node::spawn::cmd_shim_for(Path::new(&shell)));
+            command.arg(&shell);
+            command
+        }
+        None => StdCommand::new(&shell),
+    };
+    command.args(&shell_args);
     command.current_dir(&project.root);
 
     // PATH: shim dir (when augmenting) → `.bin` walk-up chain → system PATH.
@@ -4541,6 +6178,9 @@ fn build_script_command(
     if let Some(node_path) = aug.as_ref().and_then(|a| a.node_path.as_ref()) {
         command.env("NODE_PATH", node_path);
     }
+    if let Some((key, value)) = tsconfig_reported_env() {
+        command.env(key, value);
+    }
     // localStorage-neutralize signal for the script subtree's node children (webstorage
     // flag-needed band, no user --localstorage-file): the preload reads + deletes it.
     if let Some(aug) = aug.as_ref() {
@@ -4561,6 +6201,13 @@ fn build_script_command(
         aug.apply_localstorage_env(|k, v| {
             command.env(k, v);
         });
+        // An explicit `--env-file` pool size (in `env_vars`, applied below) is
+        // the user's; nub's default and its ownership marker stand down.
+        if !env_file_sets(nub_core::node::spawn::THREADPOOL_SIZE_ENV) {
+            aug.apply_threadpool_size(|k, v| {
+                command.env(k, v);
+            });
+        }
     }
     if let Some(runtime_json) = runtime_json {
         command.env(crate::project_config::RUNTIME_CONFIG_ENV, runtime_json);
@@ -4612,19 +6259,66 @@ fn build_script_command(
     for (k, v) in &npm_env {
         command.env(k, v);
     }
-    // Compat is tree-wide, not only a choice made by this one launcher. An
-    // inherited PATH can already contain a Nub node shim from an outer logical
-    // invocation; stamping the neutral public opt-out makes any such bare
-    // `node` descendant stay vanilla. Apply it last so an explicit `--node` (or
-    // resolved `nodeCompat`) cannot be undone by a forwarded env file.
+    // Compat covers the script's bare `node` descendants too. An inherited PATH
+    // can already contain a Nub node shim from an outer logical invocation; the
+    // marker keeps a `node` that reaches it vanilla. A `nub` the script names is
+    // its own invocation and is not opted out (`COMPAT_LAUNCH_ENV`). Applied
+    // last so a forwarded env file cannot undo it.
     if compat_mode {
-        command.env("NODE_COMPAT", "1");
+        command.env(nub_core::node::spawn::COMPAT_LAUNCH_ENV, "1");
+    }
+
+    // An explicit `--color` has to reach the CHILD, not just Nub's own framing —
+    // that is the whole point of asking for it. A workspace run pipes child stdio
+    // to prefix each line, which hides the TTY from the child, so tools that
+    // autodetect (tsc, vite, vitest, …) turn their own color off; `FORCE_COLOR` is
+    // the switch they already honor. Measured against pnpm 10.15.1, which resolves
+    // the flag exactly this way: `--color=always` gives the child `FORCE_COLOR=1`
+    // and `--no-color` gives it `FORCE_COLOR=0`. Default `auto` sets nothing, so
+    // the deliberate refusal to force color unasked (see aube's run_output.rs) is
+    // preserved — this is the opt-in escape hatch, not a new default.
+    match color_mode() {
+        ColorWhen::Always => {
+            command.env("FORCE_COLOR", "1");
+        }
+        ColorWhen::Never => {
+            command.env("FORCE_COLOR", "0");
+        }
+        // `auto` forces nothing — with one exception, scoped to the prefixed path
+        // alone. Nub resolves NO_COLOR over FORCE_COLOR; Node resolves them the other
+        // way, so with BOTH set Nub's label went plain while the child still
+        // colorized (measured: the child's `getColorDepth` returned 4 under
+        // `NO_COLOR=1 FORCE_COLOR=1`) and a run emitted colored text inside uncolored
+        // labels. Pinning the child to Nub's answer repairs that.
+        //
+        // ONLY under `StreamMode::Prefixed`, because only there does Nub pipe the
+        // child and wrap its lines — an inherited-stdio run puts nothing around the
+        // child's output, so there is no contradiction to repair and overriding the
+        // pair would just diverge from everyone else: on plain `nub run <script>`,
+        // pnpm, npm and a bare shell all hand the script `FORCE_COLOR=1` here.
+        ColorWhen::Auto if matches!(stream, StreamMode::Prefixed) => {
+            let child_would_color =
+                std::env::var_os("FORCE_COLOR").is_some_and(|v| force_color_enables(&v));
+            if child_would_color && !color_enabled(true) {
+                command.env("FORCE_COLOR", "0");
+            }
+        }
+        ColorWhen::Auto => {}
     }
 
     if let StreamMode::Prefixed = stream {
         command.stdout(std::process::Stdio::piped());
         command.stderr(std::process::Stdio::piped());
     }
+
+    // The script body goes on LAST, because on Windows its prologue is derived
+    // from every `command.env` call above.
+    let prologue = if uses_bundled_busybox {
+        aube_scripts::lowercase_env_prologue(&command)
+    } else {
+        String::new()
+    };
+    command.arg(format!("{prologue}{full_cmd}"));
 
     Ok((command, full_cmd))
 }
@@ -4701,7 +6395,7 @@ fn run_single_script_prefixed(
         if let Some(pre_cmd) =
             nub_core::workspace::scripts::resolve_script(&project.manifest, &pre_name)
         {
-            let (code, _) = spawn_script_prefixed(
+            let code = spawn_script_prefixed(
                 &pre_cmd,
                 project,
                 compat_mode,
@@ -4718,7 +6412,7 @@ fn run_single_script_prefixed(
         }
     }
 
-    let (code, _) = spawn_script_prefixed(
+    let code = spawn_script_prefixed(
         cmd,
         project,
         compat_mode,
@@ -4739,7 +6433,7 @@ fn run_single_script_prefixed(
         if let Some(post_cmd) =
             nub_core::workspace::scripts::resolve_script(&project.manifest, &post_name)
         {
-            let (post_code, _) = spawn_script_prefixed(
+            let post_code = spawn_script_prefixed(
                 &post_cmd,
                 project,
                 compat_mode,
@@ -4781,7 +6475,8 @@ struct DrainPolicy {
 }
 
 impl DrainPolicy {
-    /// Emit one raw line per this policy, returning the prefixed form to collect.
+    /// Emit one raw line per this policy, returning the prefixed form to collect —
+    /// `None` whenever nothing downstream will read it back.
     fn emit(&self, line: &str) -> Option<String> {
         if self.ndjson {
             let level = if self.is_stderr { "error" } else { "info" };
@@ -4795,24 +6490,87 @@ impl DrainPolicy {
             } else {
                 println!("{prefixed}");
             }
+            // STREAMING: the line has already reached the user's terminal and
+            // nothing reads it back, so retaining a copy is pure growth. The
+            // collected `Vec` lives for the child's whole life, which for a
+            // script that never exits — `nub run -r dev`, the standard monorepo
+            // workflow — means the supervisor grows 1:1 with child output until
+            // it is killed or OOMs. Collect ONLY for the aggregate flush, the
+            // one consumer that genuinely replays these lines.
+            return None;
         }
         Some(prefixed)
     }
 
     /// Drain `stream` to EOF on the CURRENT thread, returning the collected lines.
+    /// Aggregate mode holds at most [`AGGREGATE_MAX_HELD_BYTES`] before flushing
+    /// early, so a child that never exits cannot grow this without bound.
     fn run<R: std::io::Read>(&self, stream: R) -> Vec<String> {
+        self.run_capped(stream, AGGREGATE_MAX_HELD_BYTES)
+    }
+
+    /// `run` with an explicit hold ceiling, so a test can exercise the early
+    /// flush without pushing the shipped 8 MiB through the harness's capture.
+    fn run_capped<R: std::io::Read>(&self, stream: R, max_held: usize) -> Vec<String> {
         use std::io::BufRead as _;
         let mut lines = Vec::new();
+        let mut held = 0usize;
         for line in std::io::BufReader::new(stream)
             .lines()
             .map_while(Result::ok)
         {
             if let Some(prefixed) = self.emit(&line) {
+                held += prefixed.len() + 1;
                 lines.push(prefixed);
+                if held >= max_held {
+                    flush_aggregated(&mut lines, self.is_stderr);
+                    held = 0;
+                }
             }
         }
         lines
     }
+}
+
+/// Ceiling on the output one stream holds for the deferred aggregate flush.
+///
+/// Aggregate mode buffers a child's whole output so each package prints as ONE
+/// contiguous block — which quietly assumes the script COMPLETES. It does not
+/// only apply to `--aggregate-output`: a non-TTY stdout selects it too (see the
+/// `aggregate` binding in the workspace run path), so `nub run -r dev` in CI, or
+/// piped to a file, takes this path with a dev server that never exits. The
+/// buffer then grew for the life of the run — measured at 46 → 555 MB in 80 s.
+///
+/// Past the cap the held lines are flushed early and buffering resumes. An
+/// ordinary script still prints as one block; only a runaway producer is split
+/// into several, and no output is dropped. That is the right trade against a
+/// supervisor that OOMs after long enough.
+const AGGREGATE_MAX_HELD_BYTES: usize = 8 * 1024 * 1024;
+
+/// Write buffered aggregate lines and clear the buffer, under the shared flush
+/// lock so concurrent workers never tear each other's output.
+fn flush_aggregated(lines: &mut Vec<String>, is_stderr: bool) {
+    use std::io::Write as _;
+    if lines.is_empty() {
+        return;
+    }
+    let _guard = AGGREGATE_FLUSH_LOCK.lock();
+    if is_stderr {
+        let stderr = std::io::stderr();
+        let mut se = stderr.lock();
+        for line in lines.iter() {
+            let _ = writeln!(se, "{line}");
+        }
+        let _ = se.flush();
+    } else {
+        let stdout = std::io::stdout();
+        let mut so = stdout.lock();
+        for line in lines.iter() {
+            let _ = writeln!(so, "{line}");
+        }
+        let _ = so.flush();
+    }
+    lines.clear();
 }
 
 /// Both of a script child's output pipes plus their per-stream policies, drained
@@ -4922,6 +6680,7 @@ impl PipeReaders {
 /// Non-Unix has no `poll` here; it falls back to sequential draining, accepting
 /// the rare large-output deadlock window (the abort this replaces was Linux-only,
 /// and Windows never exhibited the thread-exhaustion bug).
+#[cfg(unix)]
 fn drain_both_inline(
     out: std::process::ChildStdout,
     out_policy: DrainPolicy,
@@ -5118,7 +6877,7 @@ fn spawn_script_prefixed(
     color_idx: usize,
     exec: &ScriptExecOpts,
     aggregate: bool,
-) -> Result<(i32, String)> {
+) -> Result<i32> {
     use std::io::Write;
 
     let (mut command, display_cmd) = build_script_command(
@@ -5160,12 +6919,14 @@ fn spawn_script_prefixed(
     let mut child = nub_core::node::spawn::spawn_with_eagain_retry(&mut command)?;
     // Relay docker stop / Ctrl-C to the streamed child's whole process group too
     // (workspace `-r` runs) — the `sh -c` won't pass a forwarded signal to node.
-    nub_core::node::spawn::track_child_group(child.id());
+    // This is the ONLY multi-child caller: `-r` runs members on concurrent worker
+    // threads, so several groups are tracked at once and each unregisters its own.
+    let child_pid = child.id();
+    nub_core::node::spawn::track_child_group(child_pid);
     // SIGKILL-on-the-leader backstop (#480) — macOS-only inside; held across
     // the wait below, dropped (disarmed) on return.
     #[cfg(unix)]
-    let _reaper = nub_core::node::spawn::spawn_group_reaper(child.id());
-    let mut output_buf = String::new();
+    let _reaper = nub_core::node::spawn::spawn_group_reaper(child_pid);
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -5205,7 +6966,7 @@ fn spawn_script_prefixed(
     .drain();
 
     let status = child.wait()?;
-    nub_core::node::spawn::untrack_child();
+    nub_core::node::spawn::untrack_child(child_pid);
     let exit_code = nub_core::node::spawn::exit_code_from_status(&status);
     if ndjson {
         emit_ndjson(
@@ -5236,12 +6997,7 @@ fn spawn_script_prefixed(
         let _ = se.flush();
     }
 
-    for line in &out_lines {
-        output_buf.push_str(line);
-        output_buf.push('\n');
-    }
-
-    Ok((exit_code, output_buf))
+    Ok(exit_code)
 }
 
 /// The per-package label that leads each prefixed output line: the member's
@@ -5276,10 +7032,18 @@ fn format_stream_prefix(dir: &str, script: &str, idx: usize) -> String {
     format_stream_prefix_sep(dir, script, idx, ": ")
 }
 
+/// Prefix for Nub's OWN per-member status line (`Done` / `exit N` / `error: …`).
+/// Unlike [`format_stream_prefix`] this ignores `--reporter-hide-prefix`: that flag
+/// hides the label on the CHILD's output so a CI matcher sees raw lines, and pnpm
+/// likewise keeps the label on its own status line. Without the label a workspace
+/// run ends in N identical bare `Done`s that name no package.
+fn format_status_prefix(dir: &str, script: &str, idx: usize) -> String {
+    format_stream_prefix_sep(dir, script, idx, ": ")
+}
+
 fn format_stream_prefix_sep(dir: &str, script: &str, idx: usize, sep: &str) -> String {
     const DIR_COLORS: &[u8] = &[36, 35, 34, 33, 32, 31];
-    let use_color = std::io::IsTerminal::is_terminal(&std::io::stderr())
-        || std::env::var_os("FORCE_COLOR").is_some();
+    let use_color = color_enabled(std::io::IsTerminal::is_terminal(&std::io::stderr()));
     if use_color {
         let c = DIR_COLORS[idx % DIR_COLORS.len()];
         format!("\x1b[{c}m{dir}\x1b[39m \x1b[96m{script}\x1b[39m{sep}")
@@ -5303,7 +7067,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     use crate::project_config::RuntimeEnvFile;
 
     let cwd = env::current_dir()?;
-    let runtime = runtime_config()?;
+    let mut runtime = runtime_config()?;
     let compat_mode = effective_compat_mode(false, &runtime);
     let env_file_present = env_file_flag_present();
     let no_env_file = no_env_file();
@@ -5313,15 +7077,28 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     {
         return Ok(code);
     }
+    // Same stand-down as the run path: with an external owner, watch must not
+    // hand Node the `.env*` cascade as `--env-file` args either, or the watched
+    // process would re-acquire exactly the file set the owner displaces.
+    let env_owner = detect_env_owner(project.as_ref(), compat_mode);
+    check_schema_usable(env_owner.as_ref(), compat_mode)?;
+    let env_owner_suppresses = env_owner
+        .as_ref()
+        .is_some_and(crate::env_owner::EnvOwner::suppresses_env_files);
     let config_env_sources = matches!(&runtime.env_file, RuntimeEnvFile::Sources(_));
     let env_file_paths = if no_env_file || compat_mode {
         Vec::new()
     } else {
         match &runtime.env_file {
+            RuntimeEnvFile::Default if !env_file_present && env_owner_suppresses => Vec::new(),
             RuntimeEnvFile::Default if !env_file_present => project
                 .as_ref()
                 .map(|p| nub_core::workspace::env::discover_env_files(&p.root))
                 .unwrap_or_default(),
+            // No owner gate here, unlike the `Default` arm above: a declared source
+            // list DISPLACES a hand-over, so an owner and a `Sources` cannot both be
+            // in play. Being inside a wrap does not change that — the declaration is
+            // still the project's, and it still wins.
             RuntimeEnvFile::Sources(paths) => paths.clone(),
             RuntimeEnvFile::Default | RuntimeEnvFile::Disabled => Vec::new(),
         }
@@ -5363,6 +7140,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         node_args.push(file.to_string());
         node_args.extend(args.iter().cloned());
         let mut cmd = std::process::Command::new(node.path.as_str());
+        nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
         cmd.args(&node_args)
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
@@ -5373,7 +7151,12 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         let status = nub_core::node::spawn::status_forwarding_signals(&mut cmd)?;
         return Ok(nub_core::node::spawn::exit_code_from_status(&status));
     }
-    let runtime_node_options = runtime_node_options(&runtime, &node)?;
+    let runtime_node_options = runtime_node_options_with(
+        &mut runtime,
+        &node,
+        FoldInherited::No,
+        TsconfigGate::for_program(),
+    )?;
     let runtime_v8_flags = runtime_v8_flags(&runtime)?;
     let runtime_json = runtime_config_json(&runtime)?;
 
@@ -5437,10 +7220,17 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         HashMap::new()
     } else {
         match &runtime.env_file {
+            // Same gate the `--env-file` list above uses, and for the same reason:
+            // the loader owns this environment end to end. Reading the cascade here
+            // would put nub's own values back on the loader's command through the
+            // inject loop below, which is exactly what `runtime_child_env` refuses
+            // to do on the file-run path.
+            RuntimeEnvFile::Default if !env_file_present && env_owner_suppresses => HashMap::new(),
             RuntimeEnvFile::Default if !env_file_present => project
                 .as_ref()
                 .map(|p| nub_core::workspace::env::load_env_files_raw_warning(&p.root))
                 .unwrap_or_default(),
+            RuntimeEnvFile::Sources(_) if env_owner_suppresses => HashMap::new(),
             RuntimeEnvFile::Sources(paths) => load_runtime_env_sources_raw(paths)?,
             RuntimeEnvFile::Default | RuntimeEnvFile::Disabled => HashMap::new(),
         }
@@ -5473,8 +7263,12 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // observable preload order — and BEFORE the project-config preloads, so
     // those load with nub's hooks already active. Both `NODE_OPTIONS` assemblies
     // below place the token accordingly, matching the non-watch spawn order.
+    // Every token the injection carries (the compat tier's threadpool sidecar rides
+    // ahead of the preload), joined as one part; the parts are space-joined below.
     let nub_preload_token = preload_path.as_deref().map(|preload| {
-        nub_core::node::spawn::preload_injection(preload, &node.version).node_options_token()
+        nub_core::node::spawn::preload_injection(preload, &node.version)
+            .node_options_tokens()
+            .join(" ")
     });
 
     let mut node_args = vec!["--watch".to_string(), "--watch-preserve-output".to_string()];
@@ -5492,9 +7286,25 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     for flag in &inject {
         node_args.push(flag.to_string());
     }
-    // `v8Flags` ride argv here for the same reason they do in `spawn_node`:
-    // `NODE_OPTIONS` refuses most V8-only flags. Node's watch supervisor re-execs
-    // the child with this same argv, so they survive every restart.
+    // `v8Flags` and the matrix's ARGV-only V8 unflags ride argv here for the same
+    // reason they do in `spawn_node`: `NODE_OPTIONS` refuses most V8-only flags.
+    // Node's watch supervisor re-execs the child with this same argv, so they
+    // survive every restart.
+    let argv_only_flags = nub_core::node::flags::argv_inject_flags(
+        Some(node.path.as_std_path()),
+        &node.version,
+        args,
+    );
+    for flag in &argv_only_flags {
+        node_args.push(flag.to_string());
+    }
+    // The matrix's runtime V8 flags reach the preload through an env var (below),
+    // never argv — see `flags::RUNTIME_V8_FLAGS_ENV`.
+    let matrix_runtime_v8_flags = nub_core::node::flags::runtime_inject_flags(
+        Some(node.path.as_std_path()),
+        &node.version,
+        args,
+    );
     node_args.extend(runtime_v8_flags.iter().cloned());
     let sanitized_node_options = node_options.map(|existing| {
         nub_core::node::flags::strip_unsupported_node_options(existing, &node.version)
@@ -5527,12 +7337,115 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     node_args.push(file.to_string());
     node_args.extend(args.iter().cloned());
 
-    let mut cmd = std::process::Command::new(node.path.as_str());
+    // Watch assembles its own command instead of going through `spawn_node`, so
+    // it must put the loader in front of Node itself. Detection above has already
+    // stood nub's own cascade down; without this the watched process gets no
+    // environment at all, silently — measured, every variable `undefined`.
+    //
+    // The loader resolves once, at watcher startup, and Node's `--watch`
+    // supervisor re-execs the child inside it. Values therefore freeze across
+    // restarts, which is the trade-off this path already makes for every
+    // expansion-dependent var it injects.
+    //
+    // The configured `prefix` goes in front of all of that, the loader included,
+    // exactly as `spawn_node` orders it — and, like the loader, not in compat mode.
+    let prefix = if compat_mode {
+        None
+    } else {
+        crate::prefix::Prefix::resolve(
+            project
+                .as_ref()
+                .map_or(cwd.as_path(), |project| project.root.as_path()),
+            &project
+                .as_ref()
+                .map(|project| {
+                    nub_core::workspace::scripts::bin_dirs(
+                        &project.root,
+                        project.workspace_root.as_deref(),
+                    )
+                })
+                .unwrap_or_default(),
+        )?
+    };
+    let owner_target = env_owner
+        .as_ref()
+        .and_then(crate::env_owner::EnvOwner::spawn_target);
+    let spawns_node = prefix.is_none() && owner_target.is_none();
+    let mut cmd = match (prefix.as_ref(), owner_target) {
+        (Some(prefix), owner) => {
+            let mut cmd = prefix.command();
+            if let Some((loader, schema_dir)) = owner {
+                cmd.args(nub_core::node::spawn::cmd_shim_for(loader));
+                cmd.arg(loader)
+                    .arg("run")
+                    .arg("--path")
+                    .arg(schema_dir)
+                    .arg("--");
+            }
+            cmd.arg(node.path.as_str());
+            cmd
+        }
+        (None, Some((loader, schema_dir))) => {
+            let mut cmd = nub_core::node::spawn::loader_command(loader);
+            cmd.arg("run")
+                .arg("--path")
+                .arg(schema_dir)
+                .arg("--")
+                .arg(node.path.as_str());
+            cmd
+        }
+        (None, None) => std::process::Command::new(node.path.as_str()),
+    };
+    if let Some((_, schema_dir)) = owner_target {
+        cmd.env(
+            crate::env_owner::WRAPPED_ENV,
+            crate::env_owner::wrapped_marker(schema_dir),
+        );
+    }
+    if spawns_node {
+        nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
+    } else {
+        nub_core::node::discovery::unmark_node_launch(&mut cmd);
+    }
     cmd.args(&node_args)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
     cmd.env(crate::project_config::RUNTIME_CONFIG_ENV, runtime_json);
+    // Default-export `fetch` handler, same signal the direct-spawn path sets. Node's
+    // watch supervisor re-execs the child with this environment, so a restart rebinds
+    // the listener — which is the whole point of watching a server. `nub watch` has no
+    // `--node` form to exclude (it refuses compat outright), so the resolved
+    // `nodeCompat` from the project config is the only opt-out to honor.
+    if !compat_mode {
+        cmd.env(
+            nub_core::node::flags::SERVE_ENTRY_ENV,
+            nub_core::node::flags::serve_entry_marker(
+                std::iter::once(file).chain(args.iter().map(String::as_str)),
+            ),
+        );
+    }
+    // Tell the preload to hide nub's argv-only V8 flags from `process.execArgv`, the same
+    // signal the direct-spawn path sets. Node's watch supervisor re-execs the child with
+    // this environment, so it survives every restart.
+    if !argv_only_flags.is_empty() {
+        cmd.env(
+            nub_core::node::flags::ARGV_ONLY_FLAGS_ENV,
+            argv_only_flags.join(" "),
+        );
+    }
+    // Set or removed, never inherited from an ancestor — see `flags::RUNTIME_V8_FLAGS_ENV`.
+    if matrix_runtime_v8_flags.is_empty() {
+        cmd.env_remove(nub_core::node::flags::RUNTIME_V8_FLAGS_ENV);
+    } else {
+        cmd.env(
+            nub_core::node::flags::RUNTIME_V8_FLAGS_ENV,
+            nub_core::node::flags::runtime_v8_flags_env_value(
+                &node.version,
+                &matrix_runtime_v8_flags,
+            ),
+        );
+    }
     let mut launcher_owned_env_keys = vec![crate::project_config::RUNTIME_CONFIG_ENV.to_string()];
     if nub_preload_token.is_some() {
         // Watch assembles NODE_OPTIONS directly instead of using AugmentationEnv,
@@ -5567,6 +7480,44 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
                 launcher_owned_env_keys.push(key.to_string());
             },
         );
+        // libuv threadpool sizing, the same install every other augmented launcher
+        // makes (spawn.rs THREADPOOL_SIZE_ENV); watch's supervisor re-execs the
+        // child with this environment, so it survives every restart. An env-file
+        // value is the user's: a forwarded file reaches Node as `--env-file`,
+        // which never overrides a value already in the command environment, so
+        // the install stands down — and an inherited nub default (a `nub run`
+        // script running `nub watch`) is removed so the file's value can land.
+        {
+            use nub_core::node::spawn::THREADPOOL_SIZE_ENV;
+            let file_sets_pool = env_vars
+                .keys()
+                .any(|k| nub_core::workspace::env::env_keys_equal(k, THREADPOOL_SIZE_ENV));
+            let nub_default = nub_core::node::spawn::threadpool_size_is_nub_default();
+            let expected = if file_sets_pool {
+                if nub_default {
+                    cmd.env_remove(THREADPOOL_SIZE_ENV);
+                }
+                None
+            } else if env::var_os(THREADPOOL_SIZE_ENV).is_none() {
+                Some(nub_core::node::spawn::threadpool_size().to_string())
+            } else {
+                None
+            };
+            if let Some(size) = &expected {
+                cmd.env(THREADPOOL_SIZE_ENV, size);
+                launcher_owned_env_keys.push(THREADPOOL_SIZE_ENV.to_string());
+            }
+            if file_sets_pool || expected.is_some() {
+                nub_core::node::spawn::apply_expected_augmentation_marker(
+                    THREADPOOL_SIZE_ENV,
+                    expected.as_deref().map(std::ffi::OsStr::new),
+                    |key, value| {
+                        cmd.env(key, value);
+                        launcher_owned_env_keys.push(key.to_string());
+                    },
+                );
+            }
+        }
     }
     // Node's Windows watch supervisor first registers the long-spelled env-file
     // directory, then registers module paths reported by the watched child. If
@@ -5620,6 +7571,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         let token = nub_core::node::spawn::PreloadInjection {
             flag: "--require",
             value: cleanup_preload.to_string(),
+            sidecar: None,
         }
         .node_options_token();
 
@@ -5959,6 +7911,7 @@ fn bin_launcher(path: &Path, args: &[String]) -> std::process::Command {
 /// hardcoded format. `nub/<v> npm/? …` under nub identity / fresh, incumbent-
 /// first (`pnpm/<pin> nub/<v> …`) in a compat project. `node_version` is the
 /// caller's already-resolved Node so this does not re-discover it.
+// @lat: [[research/npm-config-user-agent#Nub — code + empirical#The exec surface — three routes, not one]]
 fn exec_user_agent(cwd: &Path, node_version: &str) -> String {
     let product = crate::pm_engine::run_lifecycle_ua_product(cwd, node_version);
     nub_core::workspace::scripts::user_agent_string(&product)
@@ -5969,7 +7922,7 @@ fn exec_user_agent(cwd: &Path, node_version: &str) -> String {
 /// enabled — the same env `nub run` gives a script. No-op if augmentation can't
 /// be set up (e.g. preload not found).
 fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Result<()> {
-    let runtime = runtime_config()?;
+    let mut runtime = runtime_config()?;
     if runtime.node_compat {
         return Ok(());
     }
@@ -5978,7 +7931,7 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Resul
     };
     let node = nub_core::node::discovery::discover_node(cwd)
         .unwrap_or_else(|_| nub_core::node::discovery::ResolvedNode::fallback());
-    let runtime_node_options = runtime_node_options(&runtime, &node)?;
+    let runtime_node_options = runtime_node_options(&mut runtime, &node)?;
     let runtime_json = runtime_config_json(&runtime)?;
     // Force-async-tier decision for a foreign async loader (`nubx tsx …`) on a
     // broken-compose Node — captured now, before `node.version` is moved into
@@ -6005,7 +7958,6 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Resul
     let pnp_ctx = nub_core::pnp::detect(cwd);
     let Some(aug) = nub_core::node::spawn::compute_augmentation_env(
         &nub_binary,
-        node.path.as_std_path(),
         node.version,
         false,
         pnp_ctx.as_ref().map(|c| c.pnp_cjs.as_path()),
@@ -6029,7 +7981,16 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Resul
     aug.apply_localstorage_env(|k, v| {
         cmd.env(k, v);
     });
+    // `apply_env_file_vars` staged the explicit `--env-file` values before this
+    // augmentation, and a pool size among them is the user's: nub's default must
+    // not overwrite it (the other augmentation vars deliberately do, A19).
+    if !env_file_sets(nub_core::node::spawn::THREADPOOL_SIZE_ENV) {
+        aug.apply_threadpool_size(|k, v| {
+            cmd.env(k, v);
+        });
+    }
     cmd.env(crate::project_config::RUNTIME_CONFIG_ENV, runtime_json);
+    // Stamp the env-owner markers wherever the adapter is injected — without them
     if let Some((k, val)) = force_async_tier {
         cmd.env(k, val);
     }
@@ -6144,11 +8105,11 @@ const RELEASE_DOWNLOAD_BASE_ENV: &str = "NUB_RELEASE_BASE_URL";
 const RELEASE_LATEST_API_ENV: &str = "NUB_RELEASE_LATEST_URL";
 
 /// The rolling release tag the canary channel publishes under — release.yml's
-/// canary-release job recreates it at every built main commit, so the archive
+/// canary-release job recreates it at each nightly build, so the archive
 /// lives at `<base>/canary/nub-<target>.<ext>` with no `v` prefix (bun's exact
 /// layout). npm carries the same builds under the `canary` dist-tag; Homebrew
 /// and winget carry only stable releases.
-const CANARY_TAG: &str = "canary";
+pub(crate) const CANARY_TAG: &str = "canary";
 
 /// Internal, test-only override for the canary release-by-tag endpoint
 /// (default: GitHub's `…/releases/tags/canary`). Serves the JSON whose `name`
@@ -6158,8 +8119,10 @@ const RELEASE_CANARY_API_ENV: &str = "NUB_RELEASE_CANARY_URL";
 
 /// The releases-download base URL — the test seam's override if set, else the
 /// canonical github.com path. Centralized so the override is read in exactly one
-/// place and the default is the single source of truth.
-fn release_download_base() -> String {
+/// place and the default is the single source of truth. Shared with
+/// `compile::launcher`, which pulls per-target launcher templates from the same
+/// release, so one seam redirects both channels.
+pub(crate) fn release_download_base() -> String {
     std::env::var(RELEASE_DOWNLOAD_BASE_ENV)
         .unwrap_or_else(|_| format!("https://github.com/{RELEASE_REPO}/releases/download"))
 }
@@ -6184,7 +8147,7 @@ fn release_canary_api() -> String {
 /// set-version.mjs step), so the marker rides CARGO_PKG_VERSION. bun-mirror: a
 /// canary build's bare `nub upgrade` stays on the canary channel (see
 /// [`choose_release_channel`]).
-fn is_canary_build() -> bool {
+pub(crate) fn is_canary_build() -> bool {
     env!("CARGO_PKG_VERSION").contains("-canary.")
 }
 
@@ -6431,7 +8394,7 @@ fn run_upgrade(
     _yes: bool,
 ) -> Result<i32> {
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
-    let bin_str = nub_binary.to_string_lossy().into_owned();
+    let bin_str = display_path(&nub_binary);
     let channel = detect_channel(&nub_binary);
     let release_channel =
         choose_release_channel(canary, stable, version.is_some(), is_canary_build());
@@ -6481,7 +8444,7 @@ fn run_upgrade(
                 };
                 println!(
                     "would upgrade to {channel_word} via self-owned ({})",
-                    install_dir.display()
+                    display_path(install_dir)
                 );
                 match platform_target() {
                     Some(plat) => {
@@ -6508,13 +8471,17 @@ fn run_upgrade(
                                 if resolved.is_err() && target == "latest" {
                                     println!("  (could not resolve `latest`; showing literal)");
                                 }
+                                if stable_upgrade_is_current(ver, env!("CARGO_PKG_VERSION"), target)
+                                {
+                                    println!("  (already on v{ver}; a real run would do nothing)");
+                                }
                                 format!("v{ver}")
                             }
                         };
                         println!("  platform: {plat}");
                         println!("  archive:  {}", archive_url_for_tag(&tag, plat));
                         println!("  sha256:   {}", checksum_url_for_tag(&tag, plat));
-                        println!("  install:  {}", install_dir.display());
+                        println!("  install:  {}", display_path(install_dir));
                     }
                     None => println!(
                         "  (no published archive for this platform: {}/{})",
@@ -6711,6 +8678,22 @@ fn resolve_version(spec: &str) -> Result<String> {
     Ok(tag.trim_start_matches('v').to_string())
 }
 
+/// Whether a resolved stable release is the one already running, so the upgrade
+/// can report "already on the latest" instead of re-downloading identical bytes
+/// (#664). Generalizes the arm the canary channel has always had.
+///
+/// Two cases deliberately do NOT short-circuit, because in both the versions
+/// matching does not mean the install is what the user asked for:
+///
+/// - An explicit `--version X` is a re-install request. Matching the running
+///   version is exactly when a user repairs a damaged install, so honor it.
+/// - A canary build carries the version it was cut from, so a canary at
+///   `0.7.4-canary.…` can resolve `latest` to a stable `0.7.4` it is NOT
+///   running. `--stable` off a canary is a channel switch and must download.
+fn stable_upgrade_is_current(resolved: &str, running: &str, version_spec: &str) -> bool {
+    version_spec == "latest" && !running.contains("-canary.") && resolved == running
+}
+
 /// Download + SHA-256-verify + atomic-swap a release archive into a self-owned
 /// `~/.nub` install. Mirrors install.sh's layout exactly: the archive contains
 /// `bin/` + `runtime/`, extracted into `<install_dir>` after replacing the prior
@@ -6748,6 +8731,13 @@ fn perform_selfowned_upgrade(
     let (tag, label) = match release_channel {
         ReleaseChannel::Stable => {
             let version = resolve_version(version_spec)?;
+            if stable_upgrade_is_current(&version, env!("CARGO_PKG_VERSION"), version_spec) {
+                // The resolve above is the same API call the download path
+                // needed anyway, so the check costs nothing and saves the whole
+                // archive fetch in the no-op case.
+                println!("already on the latest release (v{version})");
+                return Ok(());
+            }
             (format!("v{version}"), format!("v{version}"))
         }
         ReleaseChannel::Canary => match resolve_canary_version() {
@@ -6769,7 +8759,13 @@ fn perform_selfowned_upgrade(
     let url = archive_url_for_tag(&tag, target);
     let sha_url = checksum_url_for_tag(&tag, target);
 
-    println!("upgrading to {label} ({target})");
+    // Name the version being left as well as the one arriving: an upgrade that
+    // prints only its destination gives no way to tell a real move from a
+    // re-install (#664).
+    println!(
+        "upgrading from v{} to {label} ({target})",
+        env!("CARGO_PKG_VERSION")
+    );
 
     // Stage downloads + extraction in a sibling temp dir on the same filesystem
     // as the install so the final swap is a same-filesystem rename (atomic).
@@ -6826,7 +8822,8 @@ fn perform_selfowned_upgrade(
     swap_dir(install_dir, "bin", &new_bin)?;
     let _ = std::fs::remove_dir_all(install_dir.join("runtime"));
 
-    // The release tarball ships `bin/nub` (and `bin/nubx`) at mode 0644 — the
+    // The release tarball ships one binary, `bin/nub`, plus `bin/nubx` and
+    // `bin/nubr` as symlinks to it. The binary arrives at mode 0644 — the
     // upload-artifact → download-artifact round-trip in CI strips the executable
     // bit, so the published archive is non-executable. install.sh heals fresh
     // installs with its own `chmod +x`; the self-owned upgrade path must do the
@@ -6837,27 +8834,30 @@ fn perform_selfowned_upgrade(
     #[cfg(not(windows))]
     ensure_bin_executable(&install_dir.join("bin").join(NUB_EXE))?;
 
-    // Recreate the `nubx` alias install.sh creates (relative symlink → nub; the CLI
+    // Recreate the `nubx` / `nubr` aliases (relative symlinks → nub; the CLI
     // dispatches on argv[0], so only the alias NAME matters — see Argv0::detect).
+    // The archive carries them and the bin/ swap above brought them along; an
+    // archive from before they shipped has none, so recreate them regardless.
     // BEST-EFFORT per the resilience contract above: the binary is already swapped
-    // and executable, so `nub` works regardless. nubx is a derived convenience —
-    // its recreation failing (an exotic FS, a permissions quirk) must NOT abort an
-    // otherwise-successful upgrade; warn and continue rather than bail. POSIX-only:
-    // on Windows the nubx COPY is refreshed inside `swap_bin_files_windows`.
+    // and executable, so `nub` works either way. The aliases are a derived
+    // convenience — their recreation failing (an exotic FS, a permissions quirk)
+    // must NOT abort an otherwise-successful upgrade; warn and continue rather
+    // than bail. POSIX-only: on Windows the alias stubs are moved into place
+    // inside `swap_bin_files_windows`.
     #[cfg(unix)]
-    {
-        let nubx = install_dir.join("bin").join("nubx");
-        let _ = std::fs::remove_file(&nubx);
-        if let Err(e) = std::os::unix::fs::symlink("nub", &nubx) {
+    for alias in ["nubx", "nubr"] {
+        let link = install_dir.join("bin").join(alias);
+        let _ = std::fs::remove_file(&link);
+        if let Err(e) = std::os::unix::fs::symlink("nub", &link) {
             eprintln!(
-                "nub upgrade: warning: could not recreate the nubx alias at {} ({e}); \
-                 `nub` is upgraded and usable. Re-run the installer to restore nubx.",
-                nubx.display()
+                "nub upgrade: warning: could not recreate the {alias} alias at {} ({e}); \
+                 `nub` is upgraded and usable. Re-run the installer to restore {alias}.",
+                link.display()
             );
         }
     }
 
-    println!("installed {label} to {}", install_dir.display());
+    println!("installed {label} to {}", display_path(install_dir));
     Ok(())
 }
 
@@ -6869,7 +8869,9 @@ fn perform_selfowned_upgrade(
 /// entirely. So: move the live `nub.exe` aside to `nub.exe.old` (succeeds even
 /// mid-run; rustup and uv ride the same fact), rename the staged binary into
 /// place, then refresh the `nubx.exe` COPY from it (install.ps1 ships nubx as a
-/// copy — symlinks need admin/Developer Mode).
+/// copy — symlinks need admin/Developer Mode), then install the `busybox.exe`
+/// sidecar and overwrite the remaining bin/ sidecars so none can go stale
+/// against the new binary.
 ///
 /// All-or-nothing (the upgrade.md#atomicity contract, per-file form): if the
 /// first rename fails the install is untouched; if the second fails the old
@@ -6885,14 +8887,17 @@ fn perform_selfowned_upgrade(
 fn swap_bin_files_windows(install_dir: &Path, staged_bin: &Path) -> Result<()> {
     let bin_dir = install_dir.join("bin");
     std::fs::create_dir_all(&bin_dir)
-        .with_context(|| format!("could not create {}", bin_dir.display()))?;
+        .with_context(|| format!("could not create {}", display_path(&bin_dir)))?;
     let nub = bin_dir.join("nub.exe");
     let nub_old = bin_dir.join("nub.exe.old");
-    let nubx = bin_dir.join("nubx.exe");
-    let nubx_old = bin_dir.join("nubx.exe.old");
+    let busybox = bin_dir.join("busybox.exe");
+    let busybox_old = bin_dir.join("busybox.exe.old");
 
     let _ = std::fs::remove_file(&nub_old);
-    let _ = std::fs::remove_file(&nubx_old);
+    for alias in ["nubx", "nubr"] {
+        let _ = std::fs::remove_file(bin_dir.join(format!("{alias}.exe.old")));
+    }
+    let _ = std::fs::remove_file(&busybox_old);
 
     if nub.exists() {
         std::fs::rename(&nub, &nub_old).with_context(|| {
@@ -6900,28 +8905,107 @@ fn swap_bin_files_windows(install_dir: &Path, staged_bin: &Path) -> Result<()> {
                 "nub upgrade: could not move the running {} aside. If a stale \
                  nub.exe.old is held open by another running nub process, close \
                  it and retry; the install has not been modified.",
-                nub.display()
+                display_path(&nub)
             )
         })?;
     }
     if let Err(e) = std::fs::rename(staged_bin.join("nub.exe"), &nub) {
         // Roll the old binary back so the install keeps working.
         let _ = std::fs::rename(&nub_old, &nub);
-        return Err(e).with_context(|| format!("nub upgrade: could not install {}", nub.display()));
+        return Err(e)
+            .with_context(|| format!("nub upgrade: could not install {}", display_path(&nub)));
     }
 
-    // nubx refresh is BEST-EFFORT per the resilience contract: `nub` is already
-    // swapped and authoritative. A running nubx.exe blocks the delete but not
-    // the rename-aside; if even that fails, warn and leave the stale copy.
-    if nubx.exists() && std::fs::remove_file(&nubx).is_err() {
-        let _ = std::fs::rename(&nubx, &nubx_old);
+    // The nubx / nubr alias refresh is BEST-EFFORT per the resilience contract:
+    // `nub` is already swapped and authoritative. A running alias .exe blocks the
+    // delete but not the rename-aside; if even that fails, warn and leave the
+    // stale copy. The archive carries each alias as the nub-alias stub (a small
+    // exe that runs the sibling nub.exe with the verb), so it is moved into place
+    // from the staged bin/; an archive from before the stubs shipped has no such
+    // file, and the alias falls back to a copy of nub.exe under that name.
+    for alias in ["nubx", "nubr"] {
+        let exe = bin_dir.join(format!("{alias}.exe"));
+        if exe.exists() && std::fs::remove_file(&exe).is_err() {
+            let _ = std::fs::rename(&exe, bin_dir.join(format!("{alias}.exe.old")));
+        }
+        let staged = staged_bin.join(format!("{alias}.exe"));
+        let installed = if staged.is_file() {
+            std::fs::rename(&staged, &exe)
+        } else {
+            std::fs::copy(&nub, &exe).map(|_| ())
+        };
+        if let Err(e) = installed {
+            eprintln!(
+                "nub upgrade: warning: could not refresh the {alias} alias at {} ({e}); \
+                 `nub` is upgraded and usable. Re-run the installer to restore {alias}.",
+                display_path(&exe)
+            );
+        }
     }
-    if let Err(e) = std::fs::copy(&nub, &nubx) {
-        eprintln!(
-            "nub upgrade: warning: could not refresh the nubx alias at {} ({e}); \
-             `nub` is upgraded and usable. Re-run the installer to restore nubx.",
-            nubx.display()
-        );
+
+    // busybox.exe is nub's bundled POSIX shell for `nub run`, and unlike nubx it
+    // is NOT derivable from nub.exe — it has to come out of the archive. Archives
+    // before v0.6.0 carried no busybox at all, so an upgrade from one of those
+    // used to install nub.exe and leave `nub run` hard-erroring with "nub's
+    // bundled POSIX shell (busybox.exe) was not found" (resolve_bundled_busybox
+    // has no fallback, by design). Copy whatever the archive staged.
+    //
+    // Guarded on the staged file EXISTING, not on the destination: an archive
+    // that stops shipping busybox must not abort the upgrade, per the resilience
+    // contract above. Best-effort for the same reason nubx is. It gets the
+    // rename-aside dance rather than the generic refresh below because busybox
+    // can be RUNNING (it is the shell `nub run` spawns), and a rename over a
+    // running image fails on Windows.
+    let staged_busybox = staged_bin.join("busybox.exe");
+    if staged_busybox.is_file() {
+        if busybox.exists() && std::fs::remove_file(&busybox).is_err() {
+            let _ = std::fs::rename(&busybox, &busybox_old);
+        }
+        if let Err(e) = std::fs::rename(&staged_busybox, &busybox) {
+            eprintln!(
+                "nub upgrade: warning: could not install the bundled shell at {} ({e}); \
+                 `nub` is upgraded and usable, but `nub run` may fail until you re-run \
+                 the installer.",
+                display_path(&busybox)
+            );
+        }
+    }
+
+    // Everything ELSE the archive ships in bin/ — the `nub compile` launcher
+    // template above all — must travel with the binary, or an upgraded install
+    // silently keeps the PREVIOUS release's copies. The POSIX path gets that free
+    // by swapping the whole directory. Here `nub.exe` was renamed OUT of the
+    // staging dir above, nubx is refreshed from it, and busybox is installed by
+    // the block just above, so all three are skipped and everything remaining is
+    // refreshed. Best-effort per the resilience contract: nub is already swapped
+    // and authoritative.
+    //
+    // Staged as temp-then-rename rather than remove-then-copy: a remove that
+    // succeeds followed by a copy that fails (AV lock, full disk) would leave the
+    // install with NO copy of the file at all — strictly worse than the
+    // stale-but-working one the failure started from.
+    if let Ok(entries) = std::fs::read_dir(staged_bin) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name == "nubx.exe"
+                || name == "busybox.exe"
+                || !entry.file_type().is_ok_and(|t| t.is_file())
+            {
+                continue;
+            }
+            let dest = bin_dir.join(&name);
+            let tmp = bin_dir.join(format!("{}.new", name.to_string_lossy()));
+            let staged =
+                std::fs::copy(entry.path(), &tmp).and_then(|_| std::fs::rename(&tmp, &dest));
+            if let Err(e) = staged {
+                let _ = std::fs::remove_file(&tmp);
+                eprintln!(
+                    "nub upgrade: warning: could not refresh {} ({e}); the previous \
+                     copy is left in place and `nub` is upgraded and usable.",
+                    dest.display()
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -7029,7 +9113,10 @@ fn extract_release_archive(archive: &Path, target: &str, dest: &Path) -> Result<
 
 /// Download `url` to `dest` via curl (the same tool install.sh uses — keeps Nub
 /// free of a bundled HTTP/TLS stack and inherits the user's CA + proxy config).
-fn curl_download(url: &str, dest: &Path) -> Result<()> {
+/// Shared with `compile::launcher`, which pulls launcher templates from the same
+/// release: one transport for every release asset, so the `file://` test seam
+/// works for both.
+pub(crate) fn curl_download(url: &str, dest: &Path) -> Result<()> {
     let status = std::process::Command::new("curl")
         .args([
             "--fail",
@@ -7050,7 +9137,7 @@ fn curl_download(url: &str, dest: &Path) -> Result<()> {
 
 /// Fetch the `.sha256` sidecar and parse out the hex digest. The sidecar is the
 /// `shasum`/`sha256sum` format: `<hex>␠␠<filename>`; we take the first field.
-fn fetch_expected_sha256(sha_url: &str) -> Result<String> {
+pub(crate) fn fetch_expected_sha256(sha_url: &str) -> Result<String> {
     let out = std::process::Command::new("curl")
         .args(["--fail", "--silent", "--show-error", "--location", sha_url])
         .output()
@@ -7067,7 +9154,7 @@ fn fetch_expected_sha256(sha_url: &str) -> Result<String> {
 }
 
 /// Lowercase hex SHA-256 of `bytes`.
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(bytes);
     let mut s = String::with_capacity(64);
@@ -7285,26 +9372,60 @@ fn print_version() {
     }
 }
 
-/// Native clap subcommands whose `--help` is rendered by clap directly.
+/// Native subcommands whose `--help` the parser renders directly.
 const CLAP_HELP_COMMANDS: &[&str] = &[
-    "run", "watch", "exec", "nubx", "upgrade", "install", "i", "ci", "init",
+    "run",
+    "watch",
+    "exec",
+    "nubx",
+    "upgrade",
+    "install",
+    "i",
+    "ci",
+    "init",
+    #[cfg(feature = "compile")]
+    "compile",
 ];
 
 /// True for any word `nub <word> -h` / `nub help <word>` can route to a real help
-/// page: a native clap command, the `node`/`pm`/`agent` groups, or an engine verb
+/// page: a native subcommand, the `node`/`pm`/`agent` groups, or an engine verb
 /// (canonical or alias). Unknown words fall through to the top-level page instead
 /// of exiting silently — the routing inconsistency the help-router fix addresses.
 fn is_help_routable(word: &str) -> bool {
     CLAP_HELP_COMMANDS.contains(&word)
-        || matches!(word, "node" | "pm" | "agent")
+        || matches!(word, "node" | "pm" | "agent" | "global")
         || crate::pm_engine::lookup_verb(word).is_some()
+}
+
+/// True when a non-forwarding command group was asked for its help. The three
+/// are `nub pm`, `nub node` and `nub agent` — the groups that bypass the parser for a
+/// manual sub-verb match, so each has to recognize its own help.
+///
+/// A help FLAG counts ANYWHERE in the group's argv, not just at argv[0]: the
+/// top-level scan stops matching nub's own flags once a subcommand is seen (the
+/// three-position rule, so `nub run build --watch` reaches the script), which is
+/// right for the forwarding commands but leaves these groups to parse their own
+/// help. Without the flag-anywhere rule each group's help GUARD inspected argv[0]
+/// alone, and past it the flag met whatever the verb does with its arguments — so
+/// the same defect surfaced three ways. A verb taking no arguments ignored the
+/// flag and RAN: `nub pm shim --help` installs the shims and `nub pm unshim
+/// --help` removes them, both editing shell startup files a user was only asking
+/// about (#653). A verb taking a value consumed it as a bad one (`no published
+/// Node version matches "--help"`). And `nub agent docs` rejected it outright
+/// (`unexpected argument '--help'`).
+///
+/// Safe as a blanket scan because no group forwards argv to a child process:
+/// their only argument consumers take a package-manager name, a version, or a
+/// `/docs/...` slug, and no help flag is a valid value for any of them.
+pub(crate) fn group_help_requested(args: &[String]) -> bool {
+    args.first().is_some_and(|a| a == "help") || args.iter().any(|a| a == "--help" || a == "-h")
 }
 
 /// The help router. `command = None` prints the top-level page (`-h` curated,
 /// `--help` verbose); a command routes to its own help, consistently across the
 /// `nub <cmd> -h`, `nub help <cmd>`, and leaf forms. Engine verbs dispatch their
 /// real `--help` through the embedded engine; `node`/`pm`/`agent` use their
-/// bespoke usage; native verbs render clap's help.
+/// bespoke usage; native verbs render the parser's help.
 fn run_help(command: Option<&str>, verbose: bool) {
     let Some(cmd) = command else {
         print!(
@@ -7318,7 +9439,7 @@ fn run_help(command: Option<&str>, verbose: bool) {
         return;
     };
 
-    // `node` / `pm` / `agent`: bespoke usage (their own help guards print the
+    // `node` / `pm` / `agent` / `global`: bespoke usage (their own help guards print the
     // verb listing). Route through the same entry points the live commands use so
     // `nub help node` and `nub node --help` agree.
     match cmd {
@@ -7332,6 +9453,10 @@ fn run_help(command: Option<&str>, verbose: bool) {
         }
         "agent" => {
             let _ = crate::agent::run(&["--help".to_string()]);
+            return;
+        }
+        "global" => {
+            let _ = run_global(&["--help".to_string()]);
             return;
         }
         _ => {}
@@ -7349,22 +9474,24 @@ fn run_help(command: Option<&str>, verbose: bool) {
         return;
     }
 
-    // Native clap commands (and any other word): clap renders the help. For a word
-    // clap doesn't recognize this still falls back to the top-level help via the
-    // `is_help_routable` gate at the call sites, so this only sees real commands.
-    let result = Cli::try_parse_from(["nub", cmd, "--help"]);
-    if let Err(e) = result {
-        let _ = e.print();
+    // Native subcommands (and any other word): the parser renders the help. For a
+    // word it doesn't recognize this still falls back to the top-level help via
+    // the `is_help_routable` gate at the call sites, so this only sees real
+    // commands.
+    let words = [
+        std::ffi::OsString::from(cmd),
+        std::ffi::OsString::from("--help"),
+    ];
+    if let usage_rs::embedded::Outcome::Exit(exit) = Cli::embedded_outcome(&words) {
+        print_parser_response(&exit);
     }
 }
 
-/// Bold a header for the help pages when stdout is a TTY (or FORCE_COLOR is set)
-/// and NO_COLOR is unset. Plain text otherwise — same predicate family as the
-/// stream-prefix coloring, so piped/redirected help stays clean.
+/// Bold a header for the help pages when color is on for stdout. Plain text
+/// otherwise, so piped/redirected help stays clean. Shares [`color_enabled`] with
+/// the stream-prefix coloring so one `--color` answers for every surface.
 fn help_bold(s: &str) -> String {
-    let color = (std::io::IsTerminal::is_terminal(&std::io::stdout())
-        || std::env::var_os("FORCE_COLOR").is_some())
-        && std::env::var_os("NO_COLOR").is_none();
+    let color = color_enabled(std::io::IsTerminal::is_terminal(&std::io::stdout()));
     if color {
         format!("\x1b[1m{s}\x1b[0m")
     } else {
@@ -7394,7 +9521,7 @@ nub {v} — the all-in-one Node.js toolkit
   watch <file>                run a file and restart on changes
   nubx <pkg>                  fetch and run a package binary
   init                        scaffold a new project
-
+{compileverb}
 {runtime}
   -                           read script from stdin
   --                          end of nub options; the rest is the script's argv
@@ -7447,6 +9574,7 @@ nub {v} — the all-in-one Node.js toolkit
     store / cache             inspect and maintain the content-addressable store
     cat-file / cat-index / find-hash
     config, c / get / set / pkg / set-script
+    global config             manage user configuration
 
 {toolchain}
   node                        manage Node versions (install / ls / uninstall / pin)
@@ -7458,6 +9586,7 @@ nub {v} — the all-in-one Node.js toolkit
         v = v,
         usage = help_bold("Usage:"),
         headline = help_bold("Headline commands:"),
+        compileverb = COMPILE_HELP_LINE,
         runtime = help_bold("Runtime options (passed through to Node):"),
         pm = help_bold("Package manager commands:"),
         toolchain = help_bold("Manage the toolchain:"),
@@ -7466,6 +9595,23 @@ nub {v} — the all-in-one Node.js toolkit
         )
     )
 }
+
+/// The `compile` entry for the two help surfaces, or nothing when the verb is not
+/// in this build. Release binaries pass `--features compile`, so users see it; a
+/// feature-off dev build must not advertise a verb it would reject. Each surface
+/// gets its own spelling because their indentation and grouping differ, and the
+/// verbose one carries its section heading so the heading disappears with it
+/// rather than leaving an empty group.
+#[cfg(feature = "compile")]
+const COMPILE_HELP_LINE: &str = "  compile <file>              build a standalone executable\n";
+#[cfg(not(feature = "compile"))]
+const COMPILE_HELP_LINE: &str = "";
+
+#[cfg(feature = "compile")]
+const COMPILE_HELP_SECTION: &str =
+    "  Build:\n    compile                  build a file into a standalone executable\n\n";
+#[cfg(not(feature = "compile"))]
+const COMPILE_HELP_SECTION: &str = "";
 
 /// `nub --help` — the verbose reference: nub's command surface plus a fuller
 /// Node runtime flag and environment-variable reference. The power-user / agent
@@ -7516,7 +9662,7 @@ nub {v} — the all-in-one Node.js toolkit
     publish / pack / version / dist-tag
     login / logout / whoami / owner / token
 
-  Manage the toolchain:
+{compileverb}  Manage the toolchain:
     node                     manage Node versions (install / ls / uninstall / pin)
     pm                       manage the project's package manager
     upgrade                  upgrade nub itself
@@ -7530,6 +9676,7 @@ nub {v} — the all-in-one Node.js toolkit
   -s, --silent         suppress nub's non-error output
   --verbose            increase nub's log verbosity (repeatable)
   --color[=<when>]     color mode: auto (default), always, never
+  --no-color           disable color (same as --color=never)
   --env-file <file>    load environment variables from <file>
   --env-file-if-exists <file>  like --env-file, but skip silently if <file> is absent
   --no-env-file        load no env files: no `.env*` auto-discovery, no --env-file
@@ -7600,6 +9747,7 @@ nub {v} — the all-in-one Node.js toolkit
         v = v,
         usage = help_bold("Usage:"),
         commands = help_bold("Commands:"),
+        compileverb = COMPILE_HELP_SECTION,
         nubopts = help_bold("Nub options:"),
         noderun = help_bold("Common Node runtime flags (passed through to Node):"),
         nodeenv = help_bold("Common environment variables:"),
@@ -7634,9 +9782,10 @@ fn discover_node_for_status(cwd: &Path) -> Result<nub_core::node::discovery::Res
 /// `nub node …` — the version-management command group (install / ls / uninstall
 /// / pin). Non-forwarding; manual sub-verb match so the bare-usage and the
 /// `nub node <file>` error read exactly as the spec specifies.
-/// Spec: `wiki/commands/node-versions.md`.
+/// Spec: `internal/commands/node-versions.md`.
 fn run_node(args: &[String]) -> Result<i32> {
     let cwd = env::current_dir()?;
+    publish_node_executable_best_effort(&cwd);
     let store = nub_core::node::discovery::node_store_dir().ok_or_else(|| {
         anyhow::anyhow!("could not locate nub's cache directory (no $HOME / $XDG_CACHE_HOME)")
     })?;
@@ -7654,9 +9803,10 @@ fn run_node(args: &[String]) -> Result<i32> {
          \x20 shim                     make `node` on PATH resolve through nub (re-run after `nub upgrade`)\n\
          \x20 unshim                   remove the `node` shim and its PATH block";
 
-    // `nub node --help`/`-h`/`help`: short usage listing the verbs.
+    // A help request — `help` at argv[0], or `--help`/`-h` at any position,
+    // including after the verb: the short usage listing the verbs.
     let verb = args.first().map(String::as_str);
-    if matches!(verb, Some("--help") | Some("-h") | Some("help")) {
+    if group_help_requested(args) {
         println!("{NODE_HELP}");
         return Ok(0);
     }
@@ -7668,7 +9818,7 @@ fn run_node(args: &[String]) -> Result<i32> {
         if let Ok(node) = discover_node_for_status(&cwd) {
             println!("node {}", node.version);
             println!("  path      {}", node.path);
-            println!("  resolved  {}", resolution_source(&cwd));
+            println!("  resolved  {}", resolution_source(&cwd, &node));
             println!();
         }
         println!("{NODE_HELP}");
@@ -7686,7 +9836,7 @@ fn run_node(args: &[String]) -> Result<i32> {
             println!("{}", node.path);
             use std::io::Write as _;
             std::io::stdout().flush().ok();
-            eprintln!("» resolved from {}", resolution_source(&cwd));
+            eprintln!("» resolved from {}", resolution_source(&cwd, &node));
             Ok(0)
         }
         "install" => {
@@ -7896,7 +10046,7 @@ fn provision_pm_humanized(
 /// (`use` / `update`) write, both through the shared resolve → provision →
 /// write-the-declaration flow ([`resolve_provision_declare`]). Eager
 /// auto-pinning is deliberately NOT wired anywhere: explicit `use`/`update` IS
-/// the v0 policy (wiki/commands/pm/identity-policy.md, Axiom 3).
+/// the v0 policy (`identity-policy` (no such document), Axiom 3).
 fn run_pm(args: &[String]) -> Result<i32> {
     use nub_core::pm::Pm;
     use nub_core::pm::resolve::{self, PmTarget};
@@ -7905,7 +10055,7 @@ fn run_pm(args: &[String]) -> Result<i32> {
     let cwd = env::current_dir()?;
 
     let verb = args.first().map(String::as_str);
-    if matches!(verb, None | Some("help") | Some("--help") | Some("-h")) {
+    if verb.is_none() || group_help_requested(args) {
         println!(
             "nub pm — manage the project's package manager\n\n\
              Usage: nub pm <command>\n\n\
@@ -7917,7 +10067,9 @@ fn run_pm(args: &[String]) -> Result<i32> {
              \x20 pin [<version>]    lock this project to an exact nub version (default: the running nub)\n\
              \x20 update             re-resolve within the pinned range and bump the pin (alias: up)\n\
              \x20 cache [clear]      list cached package managers (or clear the cache)\n\
-             \x20 shim               link npm/pnpm/yarn shims into ~/.nub/shims (re-run after `nub upgrade`)\n\
+             \x20 shim               link npm/pnpm/yarn shims onto PATH (re-run after `nub upgrade`);\n\
+             \x20                    --route-installs runs `npm ci` / `npm install` on nub's engine\n\
+             \x20                    (--no-route-installs turns that back off)\n\
              \x20 unshim             remove the shims and their PATH block"
         );
         return Ok(0);
@@ -7937,7 +10089,7 @@ fn run_pm(args: &[String]) -> Result<i32> {
             if resolve::project_pm_identity(&cwd).is_some_and(|id| id.name == "nub") {
                 let exe = nub_core::node::spawn::current_nub_binary()
                     .unwrap_or_else(|_| PathBuf::from("nub"));
-                println!("{}", exe.display());
+                println!("{}", display_path(&exe));
                 std::io::stdout().flush().ok();
                 // Name the field the nub identity actually resolved from — the
                 // virgin/bare-`use` path pins via `devEngines.packageManager`
@@ -8007,7 +10159,7 @@ fn run_pm(args: &[String]) -> Result<i32> {
             Ok(0)
         }
         // `nub pm use <pm>[@<spec>]` — THE identity-setting verb (spec:
-        // wiki/commands/pm/identity-policy.md §`nub pm use`). Declarative
+        // `identity-policy` (no such document) §`nub pm use`). Declarative
         // contract: after it runs, the project's identity is <pm> and the
         // artifacts agree — `packageManager` written (the field's only
         // sanctioned writer), `devEngines.packageManager` maintained beside
@@ -8131,8 +10283,8 @@ fn run_pm(args: &[String]) -> Result<i32> {
         // pnpm-workspace.yaml, settings) is `use nub`'s job. Symmetric with
         // `nub node pin <version>`.
         "pin" => run_pm_pin(args.get(1).map(String::as_str), &cwd),
-        // Install / remove the PM shims (spec: wiki/research/package-manager-shims.md).
-        "shim" => run_pm_shim_install(),
+        // Install / remove the PM shims (spec: `package-manager-shims` (no such document)).
+        "shim" => run_pm_shim_install(&args[1..]),
         "unshim" => run_pm_unshim(),
         // `switch` (the old cross-PM, declaration-only verb) was replaced by
         // `use` (2026-06-10, identity-policy ratification) — name the successor
@@ -8164,7 +10316,7 @@ fn berry_no_yarn_path_msg() -> String {
 /// they already did — instead, point at `yarn set version`, the tool that
 /// actually manages the committed release nub defers to. The refusal itself
 /// stands in both cases: nub doesn't provision Berry, so it can't compute an
-/// honest `+sha512` for the pin (wiki/research/package-manager-provisioning.md
+/// honest `+sha512` for the pin (`package-manager-provisioning` (no such document)
 /// §What pin writes).
 fn berry_pin_refusal(cwd: &Path) -> String {
     match nub_core::pm::resolve::committed_yarn_path(cwd) {
@@ -8224,7 +10376,7 @@ fn split_pm_arg(arg: &str) -> Result<(&str, Option<&str>)> {
 
 /// The shared resolve → provision → write-the-declaration body of `use` /
 /// `update` (the ratified pin flow, 2026-06-09, re-ratified under the identity
-/// policy 2026-06-10 — wiki/commands/pm/identity-policy.md §`nub pm use`):
+/// policy 2026-06-10 — `identity-policy` (no such document) §`nub pm use`):
 ///
 ///   1. resolve the raw spec (exact / range / dist-tag) against the registry to
 ///      a concrete version — never a range into `packageManager`;
@@ -8516,8 +10668,9 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
 
     // `use pnpm` regenerates pnpm-workspace.yaml from the nub-mode package.json
     // homes (workspaces + catalogs, top-level overrides/patchedDependencies/
-    // allowBuilds/auditConfig) — the exact reverse of `use nub`'s migration.
-    // No-op on a project that never carried them.
+    // allowScripts) — the reverse of `use nub`'s migration, plus a legacy
+    // `auditConfig` a pre-drop conversion may have left behind. No-op on a
+    // project that never carried them.
     if name == "pnpm" {
         for line in crate::pm_engine::use_nub::regenerate_workspace_yaml(&root)? {
             println!("  {line}");
@@ -8587,7 +10740,7 @@ fn run_pm_pin(arg: Option<&str>, cwd: &Path) -> Result<i32> {
     println!("pinned nub@{version}");
     println!("  package.json: packageManager = nub@{version}");
     println!(
-        "  package.json: devEngines.packageManager = {{ name: \"nub\", version: \"^{version}\", onFail: \"warn\" }}"
+        "  package.json: devEngines.packageManager = {{ name: \"nub\", version: \"^{version}\", onFail: \"ignore\" }}"
     );
     // A pin at a version other than the running nub is honored by the self-shim,
     // not eagerly: say what happens next, download nothing now.
@@ -8731,7 +10884,7 @@ fn list_pm_cache(pm_cache: &Path) -> Vec<String> {
 
 // ── PM shims (`nub pm shim` / `unshim` + the argv0 dispatch) ──────────
 //
-// Spec: wiki/research/package-manager-shims.md (mechanism + strict-by-default
+// Spec: `package-manager-shims` (no such document) (mechanism + strict-by-default
 // agreement check, ratified 2026-06-09). The library core — shim dir, profile
 // block, decision matrix, PATH scan — lives in `nub_core::pm::shim`; this
 // section owns argv handling, the messages, and the final exec.
@@ -8740,14 +10893,44 @@ fn list_pm_cache(pm_cache: &Path) -> Vec<String> {
 /// in `~/.nub/shims`, write the marked PATH block into the shell profile
 /// (install.sh's mechanism), and verify reachability. Idempotent — re-running
 /// re-links, which is also how shims are refreshed after `nub upgrade`.
-fn run_pm_shim_install() -> Result<i32> {
+fn run_pm_shim_install(args: &[String]) -> Result<i32> {
     use nub_core::pm::shim::{self, ProfileOutcome, ShimAction};
+
+    // `--route-installs` / `--no-route-installs` set or clear the marker; a
+    // re-run without either leaves the current choice alone, so re-linking
+    // after `nub upgrade` never silently switches routing off.
+    let mut route_installs: Option<bool> = None;
+    for arg in args {
+        match arg.as_str() {
+            "--route-installs" => route_installs = Some(true),
+            "--no-route-installs" => route_installs = Some(false),
+            other => bail!(
+                "nub pm shim: unexpected argument {other:?} (accepted: --route-installs, --no-route-installs)"
+            ),
+        }
+    }
 
     // Canonicalized, so a symlinked `nub` on PATH links the real bytes (the
     // same posture as every other `current_nub_binary` call site).
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
     let dir = shim::shim_dir()?;
+
+    // The shim dir moved out of `~/.nub`. Clear a pre-move install FIRST, along
+    // with its PATH block, or the profile ends up carrying two blocks and the
+    // stale dir — still holding the pre-upgrade binary — keeps shadowing
+    // npm/pnpm/yarn from earlier in PATH.
+    let migrated = dirs_next::home_dir()
+        .map(|home| shim::migrate_legacy_shim_dir(&home, shim::SHIMS_LEAF_PUBLIC))
+        .transpose()?
+        .flatten();
+    if migrated.is_some() {
+        shim::remove_path_block()?;
+    }
+
     let report = shim::install_shims(&nub_binary)?;
+    if let Some(on) = route_installs {
+        shim::set_route_installs(&dir, on)?;
+    }
 
     let count = |action: ShimAction| report.iter().filter(|s| s.action == action).count();
     let (created, relinked, current) = (
@@ -8765,12 +10948,22 @@ fn run_pm_shim_install() -> Result<i32> {
     if current > 0 {
         parts.push(format!("{current} already current"));
     }
+    // Name the move: the user's shims were somewhere else a moment ago, and a
+    // silent relocation of something that shadows `npm` deserves a line.
+    if let Some(old) = &migrated {
+        println!("moved the shims out of {}", old.display());
+    }
     println!(
         "{} entries in {} ({})",
         report.len(),
         dir.display(),
         parts.join(", ")
     );
+    if shim::route_installs_enabled(&dir) {
+        println!(
+            "  npm ci and npm install run on nub's engine (--no-route-installs turns this off)"
+        );
+    }
     if report.iter().any(|s| s.copied) {
         println!(
             "  note: {} is on a different filesystem than the nub binary — \
@@ -8815,6 +11008,21 @@ fn run_pm_shim_install() -> Result<i32> {
         ProfileOutcome::AlreadyPresent(profile) => {
             println!("  PATH: already present in {}", profile.display())
         }
+        // Reached on upgrade. The directory is a compile-time constant within
+        // one build, but the CONSTANT ITSELF moved under XDG in #752, so a
+        // profile written by an older nub still names `$HOME/.nub/shims` beneath
+        // this marker and the line is rewritten in place. Only when that legacy
+        // directory is already GONE — the migration above strips the block
+        // outright while it still exists — so the live shell carries a
+        // directory on PATH that holds no shims, which is why the re-source
+        // hint matters more here than on a fresh add.
+        ProfileOutcome::Rewritten(profile) => println!(
+            "  PATH: updated the entry in {} to point at {}\n  \
+             restart your shell, or run: source {}",
+            profile.display(),
+            dir.display(),
+            profile.display()
+        ),
         // No writable profile for this shell: print the line and exit 0 (the
         // spec's manual fallback — the shims themselves are installed).
         ProfileOutcome::Manual { line } => println!(
@@ -8857,19 +11065,34 @@ fn run_pm_shim_install() -> Result<i32> {
 fn run_pm_unshim() -> Result<i32> {
     use nub_core::pm::shim;
 
-    let dir = shim::shim_dir()?;
-    let existed = shim::remove_shims()?;
+    // Every candidate dir is swept, not just the one that resolves now — an XDG
+    // install unshimmed from a shell without XDG_DATA_HOME would otherwise leave
+    // its shim binaries behind while the PATH line was stripped.
+    let removed = shim::remove_shims()?;
     let changed = shim::remove_path_block()?;
-    if existed {
-        println!("removed {}", dir.display());
+    if removed.is_empty() {
+        println!("{} was already gone", shim::shim_dir()?.display());
     } else {
-        println!("{} was already gone", dir.display());
+        for dir in &removed {
+            println!("removed {}", dir.display());
+        }
     }
     for profile in &changed {
         println!("  PATH: removed the shims block from {}", profile.display());
     }
     if changed.is_empty() {
         println!("  PATH: no profile carried the shims block");
+    }
+    // A stripped PATH block with nothing removed means the shims were installed
+    // somewhere this process cannot name — a custom XDG_DATA_HOME that is unset
+    // now. Say so rather than reporting a clean removal: the binaries are still
+    // on disk, and re-running with the variable set is what clears them.
+    if removed.is_empty() && !changed.is_empty() {
+        eprintln!(
+            "warning: a shims PATH block was removed but no shims directory was found. \
+             If they were installed with XDG_DATA_HOME set, re-run with that variable set \
+             to remove them."
+        );
     }
     Ok(0)
 }
@@ -8885,7 +11108,21 @@ fn run_node_shim_install() -> Result<i32> {
 
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
     let dir = shim::node_shim_dir()?;
+
+    // Same migration as the PM shims: clear the pre-move `~/.nub/node-shim` and
+    // its PATH block, or a stale `node` keeps shadowing from earlier in PATH.
+    let migrated = dirs_next::home_dir()
+        .map(|home| nub_core::pm::shim::migrate_legacy_shim_dir(&home, shim::NODE_SHIM_LEAF_PUBLIC))
+        .transpose()?
+        .flatten();
+    if migrated.is_some() {
+        shim::remove_node_path_block()?;
+    }
+
     let entry = shim::install_node_shim(&nub_binary)?;
+    if let Some(old) = &migrated {
+        println!("moved the node shim out of {}", old.display());
+    }
 
     let state = match entry.action {
         ShimAction::Created => "created",
@@ -8933,6 +11170,21 @@ fn run_node_shim_install() -> Result<i32> {
         ProfileOutcome::AlreadyPresent(profile) => {
             println!("  PATH: already present in {}", profile.display())
         }
+        // Reached on upgrade. The directory is a compile-time constant within
+        // one build, but the CONSTANT ITSELF moved under XDG in #752, so a
+        // profile written by an older nub still names `$HOME/.nub/node-shim` beneath
+        // this marker and the line is rewritten in place. Only when that legacy
+        // directory is already GONE — the migration above strips the block
+        // outright while it still exists — so the live shell carries a
+        // directory on PATH that holds no shims, which is why the re-source
+        // hint matters more here than on a fresh add.
+        ProfileOutcome::Rewritten(profile) => println!(
+            "  PATH: updated the entry in {} to point at {}\n  \
+             restart your shell, or run: source {}",
+            profile.display(),
+            dir.display(),
+            profile.display()
+        ),
         ProfileOutcome::Manual { line } => println!(
             "  PATH: no known shell profile to edit — add this line to your shell config:\n    {line}"
         ),
@@ -8968,12 +11220,16 @@ fn run_node_shim_install() -> Result<i32> {
 fn run_node_unshim() -> Result<i32> {
     use nub_core::node::shim;
 
-    let dir = shim::node_shim_dir()?;
-    let (existed, changed) = shim::remove_node_shim()?;
-    if existed {
-        println!("removed {}", dir.display());
+    // Name the dirs the sweep actually cleared, not the one resolving now — the
+    // two differ whenever the shim was installed under a different root, and
+    // printing the resolved path would name somewhere nothing happened.
+    let (removed, changed) = shim::remove_node_shim()?;
+    if removed.is_empty() {
+        println!("{} was already gone", shim::node_shim_dir()?.display());
     } else {
-        println!("{} was already gone", dir.display());
+        for dir in &removed {
+            println!("removed {}", dir.display());
+        }
     }
     for profile in &changed {
         println!(
@@ -8983,6 +11239,16 @@ fn run_node_unshim() -> Result<i32> {
     }
     if changed.is_empty() {
         println!("  PATH: no profile carried the node-shim block");
+    }
+    // Same honesty as `run_pm_unshim`: a stripped block with nothing removed
+    // means the shim lives somewhere this process cannot name (a custom
+    // XDG_DATA_HOME that is unset now), so the hardlink is still on disk.
+    if removed.is_empty() && !changed.is_empty() {
+        eprintln!(
+            "warning: a node-shim PATH block was removed but no shim directory was found. \
+             If it was installed with XDG_DATA_HOME set, re-run with that variable set \
+             to remove it."
+        );
     }
     Ok(0)
 }
@@ -9014,6 +11280,15 @@ enum ShimPlan {
     },
     /// The strict agreement check refused: print `message` on stderr, exit 1.
     Refuse { message: String },
+    /// `npm ci` / `npm install` under `nub pm shim --route-installs`: run the
+    /// install on nub's engine, in this process (`nub ci` / `nub install
+    /// --no-frozen-lockfile` with npm's flags translated, every lifecycle
+    /// script allowed as npm allows them). `ignore_scripts` is npm's
+    /// effective value: the command line, else its config.
+    EngineInstall {
+        route: nub_core::pm::shim::NpmEngineInstall,
+        ignore_scripts: bool,
+    },
 }
 
 /// The corepack-style "which PM am I running" notice for the shim-dispatch
@@ -9050,6 +11325,60 @@ fn run_pm_shim(invoked: nub_core::pm::shim::ShimName, args: &[String]) -> Result
             Ok(1)
         }
         ShimPlan::Exec { program, args, env } => exec_program(&program, &args, &env),
+        ShimPlan::EngineInstall {
+            route,
+            ignore_scripts,
+        } => run_shim_engine_install(route, ignore_scripts),
+    }
+}
+
+/// The routed install: the corepack-style notice names what runs in place of
+/// npm, then the engine runs in-process exactly as `nub ci` / `nub install`
+/// would from this cwd.
+fn run_shim_engine_install(
+    route: nub_core::pm::shim::NpmEngineInstall,
+    ignore_scripts: bool,
+) -> Result<i32> {
+    use nub_core::pm::shim::NpmInstallVerb;
+    // npm hands every lifecycle script `NODE_ENV=production` exactly when
+    // dev dependencies are effectively omitted (`buildOmitList` in npm's
+    // config definitions). Per child through the engine's overlay, never the
+    // process environment (A19).
+    if route.prod {
+        crate::pm_engine::set_lifecycle_env(vec![("NODE_ENV".into(), "production".into())]);
+    }
+    // npm runs the scripts with the `node` on PATH, whatever the project pins;
+    // so does its install on the engine. A pin the machine lacks would
+    // otherwise provision a Node mid-install and compile addons against it.
+    crate::pm_engine::set_lifecycle_node_from_path();
+    let (from, to) = match route.verb {
+        NpmInstallVerb::Ci => ("npm ci", "nub ci"),
+        NpmInstallVerb::Install => ("npm install", "nub install"),
+    };
+    let line = format!("{from} → {to} (via nub shim)");
+    if crate::pm_engine::scope_warning_uses_dim() {
+        eprintln!("\x1b[2m{line}\x1b[0m");
+    } else {
+        eprintln!("{line}");
+    }
+    match route.verb {
+        NpmInstallVerb::Ci => crate::pm_engine::run_ci(crate::pm_engine::CiFlags {
+            prod: route.prod,
+            ignore_scripts,
+            no_optional: route.no_optional,
+            allow_all_builds: true,
+            npm_lifecycle: true,
+            ..Default::default()
+        }),
+        NpmInstallVerb::Install => crate::pm_engine::run_install(crate::pm_engine::InstallFlags {
+            no_frozen_lockfile: true,
+            prod: route.prod,
+            ignore_scripts,
+            no_optional: route.no_optional,
+            allow_all_builds: true,
+            npm_lifecycle: true,
+            ..Default::default()
+        }),
     }
 }
 
@@ -9062,9 +11391,22 @@ fn shim_plan(
     args: &[String],
     cwd: &Path,
 ) -> Result<ShimPlan> {
+    let route_installs =
+        nub_core::pm::shim::route_installs_enabled(&nub_core::pm::shim::shim_dir()?);
+    shim_plan_with(invoked, args, cwd, route_installs)
+}
+
+/// [`shim_plan`] with the `--route-installs` opt-in passed in, so the routing
+/// branch is unit-testable without a real shim dir.
+fn shim_plan_with(
+    invoked: nub_core::pm::shim::ShimName,
+    args: &[String],
+    cwd: &Path,
+    route_installs: bool,
+) -> Result<ShimPlan> {
     use nub_core::pm::Pm;
     use nub_core::pm::resolve::{self, PmTarget};
-    use nub_core::pm::shim::{self, Nesting, ShimDecision};
+    use nub_core::pm::shim::{self, Nesting, ShimDecision, ShimName};
 
     let target = resolve::resolve_target(cwd);
     let pin_state = shim_pin_state(cwd, target.as_ref());
@@ -9079,17 +11421,52 @@ fn shim_plan(
     let nesting = Nesting::from_env(|k| env::var(k).ok());
 
     // A GLOBAL op (`npm install -g`, `yarn global add`, `npm ls -g`) writes the
-    // user's global prefix, never this project's lockfile/node_modules, so the
-    // cross-PM project-pin refusal does not apply — `decide` lets it fall through.
+    // user's global prefix, and a registry verb (`npm login`, `npm view`) the
+    // registry — never this project's lockfile/node_modules, so the cross-PM
+    // project-pin refusal does not apply and `decide` lets either fall through.
     let global = shim::is_global_invocation(invoked, args);
+    let outside_project = global || shim::is_registry_invocation(invoked, args);
 
-    match shim::decide(
+    let decision = shim::decide(
         invoked,
         &pin_state,
         args.first().map(String::as_str),
         nesting,
-        global,
-    ) {
+        outside_project,
+    );
+
+    // `nub pm shim --route-installs`: a top-level `npm ci` / bare `npm
+    // install` in a project whose lockfile is npm's runs on nub's engine. Only
+    // where npm itself would have run (the matrix did not refuse), only at top
+    // level (a lifecycle script's nested `npm install` keeps the real npm —
+    // the engine is already running one layer up), never for a global op, and
+    // only for an argv the engine honors verbatim ([`shim::npm_install_route`]).
+    // Without an npm lockfile there is nothing frozen to install from, so the
+    // real npm keeps that case too.
+    if route_installs
+        && invoked == ShimName::Npm
+        && nesting == Nesting::TopLevel
+        && !global
+        && matches!(
+            decision,
+            ShimDecision::RunPinned { pm: Pm::Npm, .. } | ShimDecision::FallThrough { .. }
+        )
+        && let Some(route) = shim::npm_install_route(args, node_env_is_production())
+    {
+        let root = shim_lockfile_root(cwd);
+        if root.join("package-lock.json").is_file() || root.join("npm-shrinkwrap.json").is_file() {
+            // The command line outranks npm's config, as it does for npm.
+            let ignore_scripts = route
+                .ignore_scripts
+                .unwrap_or_else(|| shim::npm_ignore_scripts_configured(&root));
+            return Ok(ShimPlan::EngineInstall {
+                route,
+                ignore_scripts,
+            });
+        }
+    }
+
+    match decision {
         ShimDecision::Refuse {
             pinned_pm,
             provenance,
@@ -9185,6 +11562,11 @@ fn shim_plan(
             exec_under_project_node(cwd, bin, args)
         }
     }
+}
+
+/// npm reads `NODE_ENV=production` as `--omit=dev`; the routed install does too.
+fn node_env_is_production() -> bool {
+    env::var("NODE_ENV").is_ok_and(|v| v == "production")
 }
 
 /// Derive the decision core's [`PinState`] from the resolved [`PmTarget`].
@@ -9493,7 +11875,17 @@ fn relink_shims_after_selfowned(install_dir: &Path) {
 /// re-printed here (the `discover_node` call that precedes every caller already
 /// printed them); a chain refusal can't reach here for the same reason, but is
 /// named honestly rather than misreported as PATH.
-fn resolution_source(cwd: &Path) -> String {
+///
+/// `node` is the resolution being explained, and an explicit-binary override
+/// (`NODE_EXECUTABLE`, `nub.jsonc#nodeExecutable`) reports ITSELF: it never
+/// consulted the chain, so crediting a pin source there would name a file that
+/// had no say in the path printed on the line above.
+fn resolution_source(cwd: &Path, node: &nub_core::node::discovery::ResolvedNode) -> String {
+    if let Some(source) = node.pin_source.as_deref()
+        && nub_core::node::discovery::is_explicit_binary_source(source)
+    {
+        return source.to_string();
+    }
     match nub_core::node::discovery::resolve_pin_chain(cwd) {
         Ok(chain) => match chain.pin {
             Some((raw, _pin, source)) => format!("{source} ({raw})"),
@@ -9507,8 +11899,91 @@ fn resolution_source(cwd: &Path) -> String {
 mod tests {
     use super::*;
 
-    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
-        Cli::try_parse_from(args)
+    fn parse<'a>(args: &[&'a str]) -> Result<Cli, usage_rs::Error<'static, 'a>> {
+        let v: Vec<&'a std::ffi::OsStr> = args.iter().map(|s| std::ffi::OsStr::new(*s)).collect();
+        Cli::try_parse_from(&v)
+    }
+
+    /// The text a process would print for `args` (help page or failure).
+    fn rendered(args: &[&str]) -> String {
+        let words: Vec<std::ffi::OsString> =
+            args.iter().skip(1).map(std::ffi::OsString::from).collect();
+        match Cli::embedded_outcome(&words) {
+            usage_rs::embedded::Outcome::Parsed(_) => {
+                panic!("{args:?} parsed; expected a response")
+            }
+            usage_rs::embedded::Outcome::Exit(exit) => exit.text,
+        }
+    }
+
+    fn parse_owned(args: Vec<String>) -> Cli {
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        parse(&refs).unwrap_or_else(|e| panic!("{args:?}: {e:?}"))
+    }
+
+    // A streaming drain must retain NOTHING. The collected `Vec` lives as long as
+    // the child, so for a script that never exits (`nub run -r dev`) anything kept
+    // here grows the supervisor 1:1 with child output until it OOMs — while in
+    // streaming mode the line has already gone to the terminal and nothing ever
+    // reads the copy back. Only the aggregate flush genuinely replays these lines.
+    #[test]
+    fn drain_retains_lines_only_for_the_aggregate_flush() {
+        let policy = |aggregate: bool| DrainPolicy {
+            ndjson: false,
+            aggregate,
+            is_stderr: false,
+            prefix: "pkg | ".to_string(),
+            name: "pkg".to_string(),
+            script: "dev".to_string(),
+        };
+
+        let streamed = policy(false).run(&b"one\ntwo\nthree\n"[..]);
+        assert!(
+            streamed.is_empty(),
+            "streaming drain retained {} line(s); it must retain none",
+            streamed.len(),
+        );
+
+        let aggregated = policy(true).run(&b"one\ntwo\n"[..]);
+        assert_eq!(
+            aggregated,
+            vec!["pkg | one".to_string(), "pkg | two".to_string()],
+            "aggregate drain must keep every line, prefixed, for the deferred flush",
+        );
+    }
+
+    // Aggregate mode buffers so each package prints as one block, which assumes
+    // the script exits. A non-TTY stdout selects aggregate too, so `nub run -r dev`
+    // in CI took this path with a server that never exits and the buffer grew for
+    // the life of the run. Past the ceiling it must flush early and keep going.
+    #[test]
+    fn aggregate_drain_flushes_early_instead_of_growing_without_bound() {
+        let policy = DrainPolicy {
+            ndjson: false,
+            aggregate: true,
+            is_stderr: false,
+            prefix: String::new(),
+            name: "pkg".to_string(),
+            script: "dev".to_string(),
+        };
+
+        const CAP: usize = 2 * 1024;
+        // ~16 KiB of input — eight times the ceiling, small enough that the early
+        // flushes this deliberately triggers stay out of the suite's output.
+        let mut input = Vec::new();
+        for _ in 0..200 {
+            input.extend_from_slice(&b"z".repeat(79));
+            input.push(b'\n');
+        }
+        let total = input.len();
+
+        let held = policy.run_capped(&input[..], CAP);
+        let held_bytes: usize = held.iter().map(|l| l.len() + 1).sum();
+        assert!(
+            held_bytes < CAP,
+            "drain held {held_bytes} B of {total} B after the early flush; \
+             it must stay under the {CAP} B ceiling",
+        );
     }
 
     // `--env-file` opts the run out of eager `.env*` auto-discovery: with the flag
@@ -9760,6 +12235,24 @@ mod tests {
             strip_windows_verbatim_prefix(r"D:\project\.env"),
             r"D:\project\.env"
         );
+    }
+
+    // #704: the upgrade path derives its install dir from the canonicalized
+    // binary, so on Windows every path it prints arrives carrying `\\?\`.
+    // `display_path` is the single place that spelling is dropped, and only for
+    // display — the PathBuf the swap operates on keeps the verbatim form.
+    #[test]
+    fn display_path_drops_the_windows_verbatim_prefix_a_user_never_typed() {
+        assert_eq!(
+            display_path(Path::new(r"\\?\C:\Users\u\.nub")),
+            r"C:\Users\u\.nub"
+        );
+        assert_eq!(
+            display_path(Path::new(r"\\?\UNC\server\share\.nub")),
+            r"\\server\share\.nub"
+        );
+        // POSIX paths, and an already-ordinary Windows path, pass through whole.
+        assert_eq!(display_path(Path::new("/home/u/.nub")), "/home/u/.nub");
     }
 
     #[cfg(windows)]
@@ -10185,6 +12678,18 @@ mod tests {
             None,
             "nub install --loglevel=silent stays on the native install path (equals form)"
         );
+        // `--minimum-release-age` has the same shape: its MINUTES value in the
+        // space form would read as a package spec and misroute the install.
+        assert_eq!(
+            install_to_add_args(&args(&["install", "--minimum-release-age", "0"])),
+            None,
+            "nub install --minimum-release-age 0 stays on the native install path"
+        );
+        assert_eq!(
+            install_to_add_args(&args(&["install", "--minimum-release-age", "0", "react"])),
+            Some(args(&["add", "--minimum-release-age", "0", "react"])),
+            "--minimum-release-age 0 with a package routes to add, minutes not mis-forwarded"
+        );
         // Output-control flags combined with a real package still route to add,
         // with the flag consumed as a flag (value NOT forwarded as a package).
         assert_eq!(
@@ -10192,12 +12697,36 @@ mod tests {
             Some(args(&["add", "--loglevel", "silent", "react"])),
             "--loglevel silent with a package routes to add, value is not mis-forwarded"
         );
+        // Platform selection, same shape again. Only the SPACE form can
+        // misroute — `--os=linux` carries its value inside the token — so a
+        // test that checks just the `=` spelling proves nothing here.
+        for flag in ["--os", "--cpu", "--libc"] {
+            assert_eq!(
+                install_to_add_args(&args(&["install", flag, "linux"])),
+                None,
+                "nub install {flag} linux stays on the native install path"
+            );
+        }
+        assert_eq!(
+            install_to_add_args(&args(&["install", "--os", "linux", "react"])),
+            Some(args(&["add", "--os", "linux", "react"])),
+            "--os linux with a package routes to add, the os value is not mis-forwarded"
+        );
+        // The pnpmfile path flags are the same shape once more, and shipped
+        // with exactly this bug: `--pnpmfile=h.cjs` parsed while
+        // `--pnpmfile h.cjs` read the path as a package spec.
+        for flag in ["--pnpmfile", "--global-pnpmfile"] {
+            assert_eq!(
+                install_to_add_args(&args(&["install", flag, "hooks.cjs"])),
+                None,
+                "nub install {flag} hooks.cjs stays on the native install path"
+            );
+        }
     }
 
     #[test]
     fn install_help_does_not_advertise_unapproved_gvs_flags() {
-        let err = parse(&["nub", "install", "--help"]).expect_err("--help exits through clap");
-        let help = err.render().to_string();
+        let help = rendered(&["nub", "install", "--help"]);
         assert!(
             help.contains("--node-linker") && help.contains("--registry"),
             "sanity-check install help rendered: {help}"
@@ -10221,7 +12750,7 @@ mod tests {
 
     #[test]
     fn subcommand_run_without_script_parses_to_none() {
-        // `nub run` (no script) must parse — not a clap "required arg" error —
+        // `nub run` (no script) must parse — not a parser "required arg" error —
         // so run_script can list available scripts (A46).
         let cli = parse(&["nub", "run"]).unwrap();
         assert!(matches!(
@@ -10262,7 +12791,7 @@ mod tests {
 
     #[test]
     fn subcommand_run_collects_repeated_filters() {
-        // Each `--filter` appends; clap must not let the last one win (A29).
+        // Each `--filter` appends; the parser must not let the last one win (A29).
         let cli = parse(&["nub", "run", "--filter", "a", "--filter", "!b", "build"]).unwrap();
         match cli.command {
             Some(Command::Run {
@@ -10328,7 +12857,7 @@ mod tests {
         // prefix ends at the positional (`build`); `--extra` forwards verbatim.
         assert_eq!(prefix, ["run", "--workspace", "foo", "build"]);
         assert_eq!(suffix, ["--extra"]);
-        let cli = Cli::parse_from(std::iter::once("nub".to_string()).chain(prefix)).command;
+        let cli = parse_owned(std::iter::once("nub".to_string()).chain(prefix).collect()).command;
         match cli {
             Some(Command::Run {
                 script, workspace, ..
@@ -10558,6 +13087,29 @@ mod tests {
             detect_channel(Path::new("/some/random/place/nub")),
             UpgradeChannel::Unknown
         );
+    }
+
+    // #664: `nub upgrade` on an up-to-date install must report that instead of
+    // re-downloading the archive it is already running. The two non-short-circuit
+    // cases are the point of the test — each is a request the version match does
+    // not actually satisfy.
+    #[test]
+    fn stable_upgrade_skips_the_download_only_for_an_unpinned_matching_stable() {
+        assert!(stable_upgrade_is_current("0.7.4", "0.7.4", "latest"));
+        assert!(!stable_upgrade_is_current("0.7.5", "0.7.4", "latest"));
+
+        // An explicit `--version` is a re-install request — matching the running
+        // version is exactly when a user repairs a damaged install.
+        assert!(!stable_upgrade_is_current("0.7.4", "0.7.4", "0.7.4"));
+
+        // A canary carries the version it was cut from, so `--stable` off a
+        // canary can resolve to a stable release it is NOT running. Downloading
+        // is what performs the channel switch.
+        assert!(!stable_upgrade_is_current(
+            "0.7.4",
+            "0.7.4-canary.20260809.1",
+            "latest"
+        ));
     }
 
     // Receipt-based self-owned detection: a relocated NUB_INSTALL_DIR (not named
@@ -10858,12 +13410,14 @@ mod tests {
             0,
             "upgraded bin/nub must be executable (the 0644-from-CI bug fix)"
         );
-        let nubx = install.join("bin").join("nubx");
-        assert_eq!(
-            std::fs::read_link(&nubx).unwrap(),
-            Path::new("nub"),
-            "self-owned upgrade must recreate the nubx → nub alias"
-        );
+        for alias in ["nubx", "nubr"] {
+            let link = install.join("bin").join(alias);
+            assert_eq!(
+                std::fs::read_link(&link).unwrap(),
+                Path::new("nub"),
+                "self-owned upgrade must recreate the {alias} → nub alias"
+            );
+        }
         assert!(
             !install.join("runtime").exists(),
             "single-binary upgrade must remove a stale pre-single-binary runtime/ sidecar"
@@ -11111,7 +13665,7 @@ mod tests {
     #[test]
     fn global_color_flag() {
         // `--color` uses the optional-value idiom (require_equals + a
-        // default_missing_value of "always"), so a value must be attached with
+        // default_missing of "always"), so a value must be attached with
         // `=`; bare `--color` means "always". Space-separated `--color never`
         // would parse `never` as a positional, not the flag's value.
         let cli = parse(&["nub", "--color=never", "run", "dev"]).unwrap();
@@ -11167,7 +13721,7 @@ mod tests {
     #[test]
     fn help_flag_short_circuits() {
         let err = parse(&["nub", "--help"]).unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        assert!(matches!(err, usage_rs::Error::Help { .. }), "{err:?}");
     }
 
     #[test]
@@ -11206,6 +13760,55 @@ mod tests {
     }
 
     #[test]
+    fn group_help_is_recognized_after_the_verb() {
+        // #653: `nub pm shim --help` installed the shims and edited the user's
+        // shell profiles, because the group's help guard only ever looked at
+        // argv[0]. The flag has to count at ANY position — the top-level scan
+        // hands it through untouched once `pm`/`node` is seen.
+        //
+        // Asserted on the predicate rather than by calling `run_pm`, on purpose:
+        // a test that drove the real verb would install shims into the test
+        // runner's own HOME the moment this regressed, and the suite has no
+        // HOME-isolation helper.
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        for args in [
+            &["shim", "--help"][..],
+            &["shim", "-h"][..],
+            &["unshim", "--help"][..],
+            &["unshim", "-h"][..],
+            &["install", "22.13.0", "--help"][..],
+            // `nub agent` is the third group on this guard.
+            &["docs", "--help"][..],
+            &["skill", "-h"][..],
+        ] {
+            assert!(
+                group_help_requested(&argv(args)),
+                "`{}` is a help request, not a command to run",
+                args.join(" ")
+            );
+        }
+        // The pre-existing argv[0] forms keep working.
+        for args in [&["--help"][..], &["-h"][..], &["help"][..]] {
+            assert!(group_help_requested(&argv(args)));
+        }
+        // A real verb with a real argument is untouched — no help flag, no match.
+        for args in [
+            &["shim"][..],
+            &["use", "pnpm"][..],
+            &["cache", "clear"][..],
+            &["install", "22.13.0"][..],
+            &["docs", "--page", "/docs/runtime/jsx"][..],
+        ] {
+            assert!(
+                !group_help_requested(&argv(args)),
+                "`{}` must still run",
+                args.join(" ")
+            );
+        }
+    }
+
+    #[test]
     fn argv0_detection() {
         assert_eq!(Argv0::detect(), Argv0::Nub);
     }
@@ -11215,11 +13818,13 @@ mod tests {
         // Release names dispatch to their mode…
         assert_eq!(Argv0::classify("nub"), Argv0::Nub);
         assert_eq!(Argv0::classify("nubx"), Argv0::Nubx);
+        assert_eq!(Argv0::classify("nubr"), Argv0::Nubr);
         assert_eq!(Argv0::classify("node"), Argv0::Node);
         // …and the `-dev` symlinks `make install-dev` creates map identically
         // (the bug this guards: `nubx-dev` used to fall through to plain Nub).
         assert_eq!(Argv0::classify("nub-dev"), Argv0::Nub);
         assert_eq!(Argv0::classify("nubx-dev"), Argv0::Nubx);
+        assert_eq!(Argv0::classify("nubr-dev"), Argv0::Nubr);
         assert_eq!(Argv0::classify("node-dev"), Argv0::Node);
         // A PM-shim name still classifies as a shim, dev-suffixed or not.
         assert!(matches!(Argv0::classify("pnpm"), Argv0::PmShim(_)));
@@ -11329,14 +13934,15 @@ mod tests {
 
     #[test]
     fn pm_verbs_and_reserved_verbs_stay_disjoint() {
-        // Three verb sets, three dispatch paths: SUBCOMMANDS (clap natives),
+        // Three verb sets, three dispatch paths: SUBCOMMANDS (parser natives),
         // the engine verb registry (pm_engine::ENGINE_VERBS, family
         // dispatch), and PM_VERBS (redirect-only rump). Any overlap makes a
         // later arm unreachable. `install`/`i`/`ci` graduated from PM_VERBS
         // to native verbs (the embedded aube engine, src/pm_engine/) — they
         // must stay native and out of the registry.
         for verb in [
-            "run", "exec", "node", "pm", "watch", "upgrade", "help", "install", "i", "ci", "init",
+            "run", "exec", "node", "pm", "global", "watch", "upgrade", "help", "install", "i",
+            "ci", "init",
         ] {
             assert!(
                 SUBCOMMANDS.contains(&verb),
@@ -11405,7 +14011,7 @@ mod tests {
 
     // `init`: the engine-registry exclusion is asserted in
     // pm_engine::tests::verb_registry_excludes_reserved_and_tool_identity_verbs;
-    // the command itself (src/init.rs, a clap subcommand since it shipped) is
+    // the command itself (src/init.rs, a parser subcommand since it shipped) is
     // covered through the spawned binary in tests/init_cmd.rs and
     // tests/pm_verbs.rs.
 
@@ -11831,7 +14437,10 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join(".node-version"), "20.11.0\n").unwrap();
-        let source = resolution_source(&dir);
+        // A stand-in resolution: `resolution_source` reads only `pin_source`, and
+        // `None` is the ordinary case that consults the chain.
+        let chain_resolved = nub_core::node::discovery::ResolvedNode::fallback();
+        let source = resolution_source(&dir, &chain_resolved);
         assert!(
             source.contains("devEngines.runtime") && source.contains(">=22"),
             "the governing source must be reported with its raw spec, got: {source}"
@@ -11840,7 +14449,17 @@ mod tests {
         // No source at all → PATH, named as such.
         let bare = pm_tmpdir("res-src-bare");
         std::fs::write(bare.join("package.json"), r#"{"name":"app"}"#).unwrap();
-        assert_eq!(resolution_source(&bare), "node on PATH");
+        assert_eq!(resolution_source(&bare, &chain_resolved), "node on PATH");
+
+        // An explicit-binary override reports itself: the pin chain named above
+        // had no say in which binary ran, so crediting it would be a lie the user
+        // acts on.
+        let mut overridden = nub_core::node::discovery::ResolvedNode::fallback();
+        overridden.pin_source = Some("nub.jsonc#nodeExecutable".to_string());
+        assert_eq!(
+            resolution_source(&dir, &overridden),
+            "nub.jsonc#nodeExecutable"
+        );
     }
 
     #[test]
@@ -11890,6 +14509,52 @@ mod tests {
         assert!(
             v.ends_with("v8-compile-cache"),
             "the cache dir is nub-owned, got {v}"
+        );
+    }
+
+    #[test]
+    fn busybox_resolves_beside_the_binary_before_the_relocated_shell_dir() {
+        // #687: 0.7.0 began hardlinking nub.exe into npm's global bin dir, away from
+        // the `busybox.exe` this resolution had always assumed was its sibling, and
+        // every `nub run` on a Windows npm install broke. The launcher now carries the
+        // shell into a `nub-sh/` subdir beside the relocated binary, so BOTH layouts
+        // must resolve — and the sibling must win, because that is the untouched
+        // packaged layout (win32 package, install.ps1's .zip, `nub upgrade`'s
+        // ~/.nub/bin) and a stale staged copy must never shadow it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let beside = root.join("busybox.exe");
+        let staged = root.join(NUB_SHELL_SUBDIR).join("busybox.exe");
+
+        assert_eq!(
+            busybox_candidates(root),
+            [beside.clone(), staged.clone()],
+            "the sibling sidecar must be probed before the relocated nub-sh/ copy"
+        );
+
+        // Neither present: the caller bails. Asserting on the candidate list rather
+        // than resolve_bundled_busybox() because that reads the TEST binary's
+        // current_exe(), which no fixture can relocate.
+        assert!(
+            !busybox_candidates(root).iter().any(|p| p.is_file()),
+            "an empty dir must offer no resolvable candidate"
+        );
+
+        // Only the relocated copy: found. This is the case that was broken.
+        std::fs::create_dir_all(staged.parent().unwrap()).expect("mkdir nub-sh");
+        std::fs::write(&staged, b"stub").expect("write staged busybox");
+        assert_eq!(
+            busybox_candidates(root).into_iter().find(|p| p.is_file()),
+            Some(staged.clone()),
+            "a binary relocated away from its sidecar must resolve nub-sh/busybox.exe"
+        );
+
+        // Both present: the sibling wins.
+        std::fs::write(&beside, b"stub").expect("write sibling busybox");
+        assert_eq!(
+            busybox_candidates(root).into_iter().find(|p| p.is_file()),
+            Some(beside),
+            "the packaged sibling layout must take precedence over the staged copy"
         );
     }
 
@@ -11946,6 +14611,91 @@ mod tests {
             ),
             other => panic!("pnpm in a yarnPath project must refuse, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn shim_plan_routes_npm_installs_only_when_opted_in_with_an_npm_lockfile() {
+        use nub_core::pm::shim::{NpmInstallVerb, ShimName};
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"p","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        let ci = vec!["ci".to_string()];
+        // No npm lockfile: nothing frozen to install from, so npm keeps it.
+        assert!(
+            !matches!(
+                shim_plan_with(ShimName::Npm, &ci, &dir, true).unwrap(),
+                ShimPlan::EngineInstall { .. }
+            ),
+            "without package-lock.json the real npm runs"
+        );
+        std::fs::write(
+            dir.join("package-lock.json"),
+            r#"{"lockfileVersion":3,"packages":{}}"#,
+        )
+        .unwrap();
+        match shim_plan_with(ShimName::Npm, &ci, &dir, true).unwrap() {
+            ShimPlan::EngineInstall {
+                route,
+                ignore_scripts,
+            } => {
+                assert_eq!(route.verb, NpmInstallVerb::Ci);
+                assert!(!ignore_scripts, "no config and no flag: scripts run");
+            }
+            other => {
+                panic!("an opted-in npm ci with an npm lockfile runs on the engine, got {other:?}")
+            }
+        }
+        assert!(
+            !matches!(
+                shim_plan_with(ShimName::Npm, &ci, &dir, false).unwrap(),
+                ShimPlan::EngineInstall { .. }
+            ),
+            "without the opt-in the real npm runs"
+        );
+        // npm's config decides when the command line is silent, and the
+        // command line wins when it is not.
+        std::fs::write(dir.join(".npmrc"), "ignore-scripts=true\n").unwrap();
+        assert!(matches!(
+            shim_plan_with(ShimName::Npm, &ci, &dir, true).unwrap(),
+            ShimPlan::EngineInstall {
+                ignore_scripts: true,
+                ..
+            }
+        ));
+        let explicit = vec!["ci".to_string(), "--ignore-scripts=false".to_string()];
+        assert!(matches!(
+            shim_plan_with(ShimName::Npm, &explicit, &dir, true).unwrap(),
+            ShimPlan::EngineInstall {
+                ignore_scripts: false,
+                ..
+            }
+        ));
+        std::fs::remove_file(dir.join(".npmrc")).unwrap();
+        // A pinned npm still routes the install; the pin governs npm's other verbs.
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"p","version":"1.0.0","packageManager":"npm@11.0.0"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            shim_plan_with(ShimName::Npm, &ci, &dir, true).unwrap(),
+            ShimPlan::EngineInstall { .. }
+        ));
+        // A project pinned to another PM refuses as before — routing never
+        // overrides the matrix.
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"p","version":"1.0.0","packageManager":"pnpm@9.0.0"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            shim_plan_with(ShimName::Npm, &ci, &dir, true).unwrap(),
+            ShimPlan::Refuse { .. }
+        ));
     }
 
     #[test]
@@ -12245,14 +14995,14 @@ mod tests {
     // ── nubx argv0 dispatch ─────────────────────────────────────────
 
     /// Parse a `nubx <args...>` invocation exactly as `run_nubx` does: prepend
-    /// the `nubx` subcommand, split off the verbatim post-bin suffix, clap-parse
+    /// the `nubx` subcommand, split off the verbatim post-bin suffix, parse
     /// the prefix, then fold the suffix back into `args`. Returns the settled
     /// `Command::Nubx { .. }` for assertions.
     fn parse_nubx(args: &[&str]) -> Command {
         let mut rest = vec!["nubx".to_string()];
         rest.extend(args.iter().map(|s| s.to_string()));
         let (prefix, suffix) = split_subcommand_argv(rest);
-        let cmd = Cli::parse_from(std::iter::once("nub".to_string()).chain(prefix)).command;
+        let cmd = parse_owned(std::iter::once("nub".to_string()).chain(prefix).collect()).command;
         match cmd {
             Some(mut nubx @ Command::Nubx { .. }) => {
                 if let Command::Nubx { args, .. } = &mut nubx {
@@ -12301,6 +15051,34 @@ mod tests {
         );
         assert_eq!(bin, "tanstack", "the positional is the bin to run");
         assert_eq!(args, vec!["--help".to_string()], "post-bin args forward");
+    }
+
+    /// `value_consuming_flags("nubx")` and `install_to_add_args`'s `VALUE_FLAGS`
+    /// are two hand-maintained lists carrying the same contract, so a flag added
+    /// to one is easy to forget in the other. The miss is silent in the worst
+    /// way here: `nubx --os linux cowsay` alone comes out right, and only a
+    /// SECOND nubx-owned flag after the value exposes the bad split.
+    #[test]
+    fn nubx_platform_flag_values_do_not_steal_the_positional() {
+        for flag in ["--os", "--cpu", "--libc"] {
+            let Command::Nubx {
+                package, bin, args, ..
+            } = parse_nubx(&[flag, "linux", "-p", "left-pad", "pad", "--wrap"])
+            else {
+                unreachable!()
+            };
+            assert_eq!(
+                package,
+                vec!["left-pad".to_string()],
+                "{flag}'s value must not be read as the bin, which leaves -p to forward"
+            );
+            assert_eq!(bin, "pad", "the positional is still the bin: {flag}");
+            assert_eq!(
+                args,
+                vec!["--wrap".to_string()],
+                "only post-bin args forward: {flag}"
+            );
+        }
     }
 
     #[test]

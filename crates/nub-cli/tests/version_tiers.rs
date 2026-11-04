@@ -1,6 +1,6 @@
 //! End-to-end tier behavior: exercise `nub` against specific Node binaries
 //! discovered via PATH, asserting the contract from
-//! `wiki/research/supported-node-versions.md`:
+//! `internal/research/supported-node-versions.md`:
 //!
 //! - **Compat tier (18.19 – 22.14):** runs silently, full feature surface
 //!   works (TS executes, stdout is clean, stderr stays empty — no
@@ -15,8 +15,10 @@
 //! `actions/setup-node`, so the gating only hides them on developer
 //! machines that don't have the full nvm matrix.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 fn nub_binary() -> PathBuf {
     let mut path = std::env::current_exe().unwrap();
@@ -125,11 +127,150 @@ fn run_nub_against_node(
     Some((stdout, stderr, code))
 }
 
+/// `run_nub_against_node` for an invocation with Node flags ahead of the file, and
+/// bounded by a deadline: the failure this exists to catch is a process that never
+/// exits, which `Output` alone would wait on forever. The exit code is `None` when
+/// the deadline killed it.
+fn run_nub_args_against_node(
+    want: (u32, u32, u32),
+    fixture: &str,
+    args: &[&str],
+    deadline: Duration,
+) -> Option<(String, String, Option<i32>)> {
+    let bin_dir = find_node_bin_dir(want)?;
+    let fixture_path = fixtures_dir().join(fixture);
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![bin_dir];
+    paths.extend(std::env::split_paths(&existing));
+    let new_path = std::env::join_paths(paths).expect("join PATH");
+
+    // `PORT=0`, as for a server: when the defect under test is a run that serves where
+    // it should exit, the listener takes a free port rather than a shared default.
+    let mut child = Command::new(nub_binary())
+        .args(args)
+        .current_dir(&fixture_path)
+        .env("PATH", new_path)
+        .env("PORT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn nub");
+    // Both pipes drain on their own threads, so a chatty child can neither block
+    // nor be blocked by the wait below.
+    let stdout = slurp(child.stdout.take().unwrap());
+    let stderr = slurp(child.stderr.take().unwrap());
+    let started = Instant::now();
+    let code = loop {
+        if let Some(status) = child.try_wait().expect("wait on nub") {
+            break status.code();
+        }
+        if started.elapsed() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    Some((stdout.join().unwrap(), stderr.join().unwrap(), code))
+}
+
+/// Like `run_nub_args_against_node` for a process that is not expected to exit — a
+/// server. Waits for a stderr line containing `needle` (or the deadline), hands that
+/// line to `ready` while the process is still up, kills it, and returns what `ready`
+/// made of it (`None` when the line never came) beside everything stdout said.
+fn run_nub_args_until<T>(
+    want: (u32, u32, u32),
+    fixture: &str,
+    args: &[&str],
+    needle: &str,
+    deadline: Duration,
+    ready: impl FnOnce(&str) -> T,
+) -> Option<(Option<T>, String)> {
+    let bin_dir = find_node_bin_dir(want)?;
+    let fixture_path = fixtures_dir().join(fixture);
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![bin_dir];
+    paths.extend(std::env::split_paths(&existing));
+    let new_path = std::env::join_paths(paths).expect("join PATH");
+
+    let mut child = Command::new(nub_binary())
+        .args(args)
+        .current_dir(&fixture_path)
+        .env("PATH", new_path)
+        .env("PORT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn nub");
+    let stdout = slurp(child.stdout.take().unwrap());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stderr = child.stderr.take().unwrap();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::BufReader::new(stderr)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if tx.send(line).is_err() {
+                return;
+            }
+        }
+    });
+    let started = Instant::now();
+    let seen = loop {
+        let left = deadline.saturating_sub(started.elapsed());
+        match rx.recv_timeout(left) {
+            Ok(line) if line.contains(needle) => break Some(ready(&line)),
+            Ok(_) => continue,
+            Err(_) => break None,
+        }
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    Some((seen, stdout.join().unwrap()))
+}
+
+/// One `GET /` against the server a `Listening on http://<host>:<port>` line
+/// announced, as a body. Raw sockets, like the fetch-handler suite: no client crate.
+fn get_root(listening: &str) -> String {
+    use std::io::{Read as _, Write as _};
+    let authority = listening
+        .trim()
+        .strip_prefix("Listening on http://")
+        .unwrap_or_else(|| panic!("not a listening line: {listening:?}"));
+    let (host, port) = authority.rsplit_once(':').unwrap();
+    let host = host.trim_matches(|c| c == '[' || c == ']');
+    let mut stream = std::net::TcpStream::connect((host, port.parse::<u16>().unwrap())).unwrap();
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).unwrap();
+    let raw = String::from_utf8_lossy(&raw);
+    let (_, body) = raw.split_once("\r\n\r\n").unwrap();
+    // A short body arrives chunked from node:http; strip the one chunk's framing.
+    let body = body.trim_end_matches("0\r\n\r\n").trim_end();
+    match body.split_once("\r\n") {
+        Some((size, rest)) if usize::from_str_radix(size, 16).is_ok() => rest.to_string(),
+        _ => body.to_string(),
+    }
+}
+
+fn slurp<R: Read + Send + 'static>(mut pipe: R) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = pipe.read_to_end(&mut buf);
+        String::from_utf8_lossy(&buf).into_owned()
+    })
+}
+
 /// Node 22.13.0 is the compat-tier representative: above the 18.19 floor,
 /// below the 22.15 fast-path floor. The contract: TS still transpiles and
 /// runs to completion *silently* — no compat-mode notice on stderr. The
 /// two augmentation tiers are an internal mechanism distinction with no
-/// user-visible difference. See wiki/research/supported-node-versions.md
+/// user-visible difference. See internal/research/supported-node-versions.md
 /// for the rationale on dropping the notice.
 #[test]
 fn compat_tier_runs_ts_silently() {
@@ -339,14 +480,15 @@ fn data_handlers_do_not_join_extensionless_resolution() {
     }
 }
 
-/// Import Text on the FAST tier BELOW 26.5 (Node 24.x): sync `module.registerHooks`,
-/// but native `--experimental-import-text` does not exist yet, so nub serves text imports
-/// via its own `loadTextImport` short-circuit (the `NATIVE_IMPORT_TEXT=false` arm of the
-/// makeHooks load hook). Pins the 24.x fast-tier path deterministically — the host-Node
-/// `integration.rs` cases silently migrate to the native-defer path once the host reaches
-/// >= 26.5 (AGENTS.md "latest major"), leaving [22.15, 26.5) otherwise uncovered.
+/// Import Text on the FAST tier where the flag does NOT exist (Node 24.4.0): sync
+/// `module.registerHooks`, but native `--experimental-import-text` is absent — it landed
+/// at 26.5.0 and was backported no lower than 24.19.0 — so nub serves text imports via
+/// its own `loadTextImport` short-circuit (the `nativeImportText() === false` arm of the
+/// makeHooks load hook). Pins the polyfill path deterministically — the host-Node
+/// `integration.rs` cases migrate to the native-defer path on any host that knows the
+/// flag, leaving the polyfill band otherwise uncovered.
 #[test]
-fn import_text_works_on_fast_tier_below_26_5() {
+fn import_text_works_on_fast_tier_without_native_flag() {
     let Some((stdout, stderr, code)) = run_nub_against_node((24, 4, 0), "import-text", "main.ts")
     else {
         eprintln!("skipping: Node 24.4.0 not installed (set TEST_NODE_BIN_24_4_0 or nvm install)");
@@ -354,21 +496,21 @@ fn import_text_works_on_fast_tier_below_26_5() {
     };
     assert_eq!(
         code, 0,
-        "fast-tier (<26.5) import-text must succeed via nub's short-circuit: stderr={stderr}"
+        "fast-tier polyfill import-text must succeed via nub's short-circuit: stderr={stderr}"
     );
     assert!(
         stdout.contains(r##"md:"# Release notes\n\n- first\n- second\n""##),
-        "fast tier <26.5: .md read as text via nub's loadTextImport: stdout={stdout:?}"
+        "fast-tier polyfill: .md read as text via nub's loadTextImport: stdout={stdout:?}"
     );
     assert!(
         stdout.contains("yaml-is-string:true") && stdout.contains("json-is-string:true"),
-        "fast tier <26.5: the attribute wins over data-loader parsing: stdout={stdout:?}"
+        "fast-tier polyfill: the attribute wins over data-loader parsing: stdout={stdout:?}"
     );
 }
 
 /// Import Text on the NATIVE tier (Node >= 26.5.0). There nub injects
 /// `--experimental-import-text` and its preload DEFERS `with { type: "text" }` to
-/// Node's native text translator (feature-detected via the `NATIVE_IMPORT_TEXT` const
+/// Node's native text translator (feature-detected via the `nativeImportText()` probe
 /// in preload-common.cjs, `process.allowedNodeEnvironmentFlags`) instead of
 /// serving it with nub's own `loadTextImport`. The user-visible result must be
 /// byte-identical to the compat/host tiers — SAME fixture, SAME assertions — proving
@@ -420,7 +562,7 @@ fn unsupported_tier_refuses_with_canonical_text() {
     assert_ne!(code, 0, "must refuse with non-zero exit, got {code}");
 
     // The canonical refusal text from
-    // `wiki/research/supported-node-versions.md`. Pinning the exact
+    // `internal/research/supported-node-versions.md`. Pinning the exact
     // sentence is deliberate — paraphrasing is the failure mode the
     // research doc warned about.
     assert!(
@@ -706,4 +848,520 @@ fn module_enabler_flags_make_ffi_vfs_stream_iter_importable() {
         stdout.contains("module-enablers:true,true,true"),
         "all three enabler modules must load once nub injects their flags: stdout={stdout:?}"
     );
+}
+
+/// `import defer` must actually DEFER under nub on Node 26.4+, with no flag and no
+/// configuration from the user.
+///
+/// This exercises the WIRING rather than the table: the spawn layer arming the flag
+/// for the preload, and the load hook turning it on before Node compiles the entry.
+/// The matrix unit tests assert that `runtime_v8_flags_for` returns the flag; they
+/// would all still pass if every `runtime_inject_flags` call site were deleted and the
+/// feature silently did nothing. This one fails in that case, because the entry does
+/// not even parse without the flag.
+///
+/// The assertion is ORDERING, not merely a successful run: `dep.ts` prints at top
+/// level, so a non-deferring implementation would print it BEFORE the entry's
+/// "before-access" marker. Entry and dependency are both `.ts`, which also covers the
+/// transpiler path the docs page advertises.
+#[test]
+fn import_defer_actually_defers_evaluation() {
+    let Some((stdout, stderr, code)) = run_nub_against_node((26, 5, 0), "import-defer", "entry.ts")
+    else {
+        eprintln!("skipping: Node 26.5.0 not installed (set TEST_NODE_BIN_26_5_0 or nvm install)");
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "`import defer` must run under nub on Node 26.5 without a user flag \
+         (bare Node rejects the syntax): stderr={stderr}"
+    );
+
+    let before = stdout
+        .find("import-defer:before-access")
+        .unwrap_or_else(|| panic!("entry never ran: stdout={stdout:?} stderr={stderr}"));
+    let evaluated = stdout
+        .find("import-defer:dep-evaluated")
+        .unwrap_or_else(|| panic!("deferred module never evaluated: stdout={stdout:?}"));
+
+    assert!(
+        before < evaluated,
+        "the deferred module must not evaluate until first property access, but its \
+         side effect ran first — evaluation was not deferred: stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("import-defer:value=42"),
+        "the namespace must still resolve on access: stdout={stdout:?}"
+    );
+}
+
+/// The flag must stay OFF for a program that never writes `import defer`.
+///
+/// This is what the runtime flip buys: V8 at its default flags keeps Node's embedded
+/// builtin code cache valid, so the ~6–20 ms the flag used to cost every program on
+/// 26.4+ is paid only by programs that use the syntax. The observable is the dynamic
+/// form. With the flag off, Node raises a catchable `SyntaxError` for `import.defer()`;
+/// with it on, the same file aborts the process (a V8 fatal in Node's phase wiring,
+/// exit 133). The fixture never uses the static form, so a nub that armed the flag for
+/// every program would fail this with a dead process instead of the marker.
+#[test]
+fn import_defer_flag_stays_off_for_a_program_that_never_uses_it() {
+    let Some((stdout, stderr, code)) =
+        run_nub_against_node((26, 5, 0), "import-defer", "dynamic-only.mjs")
+    else {
+        eprintln!("skipping: Node 26.5.0 not installed (set TEST_NODE_BIN_26_5_0 or nvm install)");
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "a program without the static form must not have the V8 flag on — with it on, \
+         `import.defer()` is a fatal abort instead of a SyntaxError: stdout={stdout:?} \
+         stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("import-defer:dynamic-error=SyntaxError"),
+        "with the flag off, the dynamic form must fail with bare Node's catchable \
+         SyntaxError: stdout={stdout:?}"
+    );
+}
+
+/// A child that opts out on its own argv must not be re-armed by the signal it inherits.
+///
+/// The parent runs on 26.5 with the flag armed for its preload and spawns
+/// `--no-js-defer-import-eval nested-child.mjs` twice: as `node` through the PATH it
+/// was started with, and by `process.execPath`. Each path has its own guard. The PATH
+/// child re-enters nub, whose launch decision must replace or remove the inherited
+/// signal rather than leave it in place; the absolute-path child makes no nub launch
+/// decision and inherits the env verbatim, so the preload itself must skip a flag
+/// whose polarity already sits on its own `process.execArgv`. Either gap turns the
+/// user's opt-out into a working `import defer`.
+#[test]
+fn import_defer_user_negation_survives_an_inherited_signal() {
+    let Some((stdout, stderr, code)) =
+        run_nub_against_node((26, 5, 0), "import-defer", "nested-negation.mjs")
+    else {
+        eprintln!("skipping: Node 26.5.0 not installed (set TEST_NODE_BIN_26_5_0 or nvm install)");
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "the parent must run: stdout={stdout:?} stderr={stderr}"
+    );
+    for path in ["path", "abs"] {
+        assert!(
+            stdout.contains(&format!("{path}:nested:error=SyntaxError")),
+            "a child ({path}) negating the flag on its own argv must keep bare Node's \
+             SyntaxError, not inherit the parent's armed signal: stdout={stdout:?} \
+             stderr={stderr}"
+        );
+        assert!(
+            !stdout.contains(&format!("{path}:nested:deferred")),
+            "the inherited signal re-armed the flag over the child's ({path}) explicit \
+             opt-out: stdout={stdout:?}"
+        );
+    }
+}
+
+/// Deferral must work inside a Worker that received the parent's `process.execArgv`,
+/// and nothing nub leaves in that array may be a flag Node refuses back.
+///
+/// Regression guard for a real break: a Next.js 16 + Turbopack build died under nub with
+/// `ERR_WORKER_INVALID_EXEC_ARGV` — "`--js-defer-import-eval` is not allowed in
+/// NODE_OPTIONS" — because the flag then rode argv and tooling forwards `execArgv` into
+/// Workers. The flag no longer touches argv at all; this pins that, and pins the half
+/// that makes it worth anything: the worker inherits nub's preload and the runtime-flag
+/// signal, so its own load hook turns the flag on and `import defer` works there.
+#[test]
+fn import_defer_works_inside_a_worker_fed_exec_argv() {
+    let Some((stdout, stderr, code)) =
+        run_nub_against_node((26, 5, 0), "import-defer", "execargv.mjs")
+    else {
+        eprintln!("skipping: Node 26.5.0 not installed (set TEST_NODE_BIN_26_5_0 or nvm install)");
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "forwarding process.execArgv to a Worker must not fail under nub: \
+         stdout={stdout:?} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("execargv:rejected=[]"),
+        "every flag left in process.execArgv must be one Node accepts in NODE_OPTIONS, \
+         or tools that forward it break: stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("execargv:worker-error"),
+        "the worker must start: stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("execargv:worker-value=42"),
+        "keeping the flag off execArgv must NOT disable the feature — the worker's own \
+         load hook has to turn it on, so deferral still works there: stdout={stdout:?}"
+    );
+}
+
+/// The same contract one level down: a worker thread's OWN `execArgv` has to be clean too.
+///
+/// The guard above hands its Worker an EXPLICIT `execArgv`, so Node uses that
+/// already-filtered list and the thread never meets the problem. The DEFAULT shape is what
+/// broke: given no `execArgv`, Node starts the thread from the process's REAL exec argv, so
+/// nub's argv-only flags arrive there whatever the main thread filtered. The worker runs
+/// nub's preload again and can filter them again — but while the signal saying WHICH flags
+/// to filter was consumed on first use, the worker's copy of the environment no longer
+/// carried it. `--js-defer-import-eval` reappeared in the worker's `execArgv`, and a worker
+/// forwarding that onward died with `ERR_WORKER_INVALID_EXEC_ARGV`: the identical Turbopack
+/// break, relocated into precisely the worker pools most likely to forward `execArgv` in
+/// the first place.
+///
+/// Two env shapes, because they reach the thread by different channels. A DEFAULT worker
+/// gets a copy of `process.env`; one given an explicit `env` gets only what the caller
+/// passed, so nothing in `process.env` arrives and the signal has to travel as worker
+/// environment data instead. `{ ...process.env, POOL_ID }` is the common pool shape and is
+/// exactly what an env-only signal fails silently.
+///
+/// `env: {}` is deliberately not covered: wiping the environment drops NODE_OPTIONS, so
+/// nub's preload never runs in that thread and no signal can reach code that does not
+/// execute. Such a worker has no nub augmentation at all.
+///
+/// The nested worker resolves an `import defer` namespace, which keeps this honest in the
+/// other direction — filtering a flag out of `execArgv` must not turn the feature off,
+/// because V8 parsed it at process start.
+#[test]
+fn injected_argv_only_flags_are_hidden_inside_an_inherited_worker() {
+    let Some((stdout, stderr, code)) =
+        run_nub_against_node((26, 5, 0), "import-defer", "execargv-inherited.mjs")
+    else {
+        eprintln!("skipping: Node 26.5.0 not installed (set TEST_NODE_BIN_26_5_0 or nvm install)");
+        return;
+    };
+    assert_eq!(
+        code, 0,
+        "the inherited-execArgv worker chain must run clean: stdout={stdout:?} stderr={stderr}"
+    );
+    for tag in ["default", "explicitenv"] {
+        assert!(
+            stdout.contains(&format!("execargv:worker-rejected-{tag}=[]")),
+            "a worker's own execArgv must carry no flag Node would refuse back, or every \
+             worker pool that forwards it breaks ({tag}): stdout={stdout:?}"
+        );
+        assert!(
+            !stdout.contains(&format!("execargv:nested-error-{tag}")),
+            "a worker forwarding its own execArgv to a nested Worker must not be rejected \
+             ({tag}): stdout={stdout:?}"
+        );
+    }
+    assert!(
+        stdout.contains("execargv:worker-value=42"),
+        "filtering the worker's execArgv must NOT disable deferral — V8 parsed the flag at \
+         process start: stdout={stdout:?}"
+    );
+}
+
+/// A `.cjs` entry in `nub.jsonc` `preload` must behave identically on both tiers:
+/// it runs exactly ONCE, and only after nub's hooks are live.
+///
+/// It regressed on the compat tier because a `.cjs` preload was injected as
+/// `--require`, and Node (a) runs every `--require` preload before any `--import`
+/// preload whatever the token order — and `--import` is how nub's own compat
+/// preload arrives — and (b) re-runs `--require` preloads inside the
+/// `module.register()` loader worker the compat tier always spawns. So the user's
+/// preload beat nub's hooks into the process AND ran a second time in the worker
+/// realm. See `user_preload_injection` in nub-core's spawn module.
+///
+/// The fixture's preload `require()`s a TypeScript sibling, so "hooks not yet
+/// installed" surfaces as a hard SyntaxError instead of a silent difference.
+#[test]
+fn cjs_preload_runs_once_after_hooks_on_both_tiers() {
+    // 22.13.0 is the compat-tier representative (the regression), 22.15.0 the
+    // first fast-tier version (the control that was always correct).
+    for want in [(22, 13, 0), (22, 15, 0)] {
+        let (maj, min, pat) = want;
+        let Some((stdout, stderr, code)) = run_nub_against_node(want, "cjs-preload", "main.js")
+        else {
+            eprintln!(
+                "skipping: Node {maj}.{min}.{pat} not installed \
+                 (set TEST_NODE_BIN_{maj}_{min}_{pat} or nvm install)"
+            );
+            continue;
+        };
+
+        assert_eq!(
+            code, 0,
+            "Node {maj}.{min}.{pat}: a .cjs preload must run without aborting: stderr={stderr}"
+        );
+        assert_eq!(
+            stdout.matches("preload:").count(),
+            1,
+            "Node {maj}.{min}.{pat}: a .cjs preload must run exactly once \
+             (a second line means the loader worker re-ran it): stdout={stdout:?}"
+        );
+        assert!(
+            stdout.contains("preload:hooked:marked"),
+            "Node {maj}.{min}.{pat}: the preload must see nub's hooks and version marker \
+             already installed: stdout={stdout:?}"
+        );
+        assert!(
+            stdout.find("preload:") < stdout.find("main:done"),
+            "Node {maj}.{min}.{pat}: the preload must run before the entry: stdout={stdout:?}"
+        );
+    }
+}
+
+/// A configured ESM preload whose top-level `await` crosses an event-loop turn
+/// still finishes before the entry starts, on both tiers.
+///
+/// The tiers carry it differently, and each is its own way for something armed in
+/// nub's preload to slip between the user's `await` and the entry: the compat
+/// tier's `--import` preload awaits the chain itself, while the fast tier hands the
+/// chain its own `--import` token behind nub's `--require`. The fetch-handler
+/// detection pass did exactly that on the compat tier when it was armed ahead of the
+/// awaited chain — its `setImmediate` landed in the turn the preload's timer yielded,
+/// and its `import()` ran the entry there.
+#[test]
+fn esm_preload_awaits_a_macrotask_before_the_entry_on_both_tiers() {
+    for want in [(22, 13, 0), (22, 15, 0)] {
+        let (maj, min, pat) = want;
+        let Some((stdout, stderr, code)) =
+            run_nub_against_node(want, "esm-preload-await", "main.mjs")
+        else {
+            eprintln!(
+                "skipping: Node {maj}.{min}.{pat} not installed \
+                 (set TEST_NODE_BIN_{maj}_{min}_{pat} or nvm install)"
+            );
+            continue;
+        };
+
+        assert_eq!(
+            code, 0,
+            "Node {maj}.{min}.{pat}: an awaiting .mjs preload must run without aborting: stderr={stderr}"
+        );
+        assert_eq!(
+            stdout, "preload:start\npreload:done\nmain:done\n",
+            "Node {maj}.{min}.{pat}: the entry must not start until the preload's await settles"
+        );
+    }
+}
+
+/// A foreign resolve hook that rewrites the entry's URL — a cache-busting query, the
+/// shape a hot-reload loader adds — must neither hold the process open nor run the
+/// entry twice, on the tiers whose hooks run in a loader worker. Both happened once:
+/// the port that worker announces the entry on was referenced while the pass waited
+/// for an announcement that never came, so a finished plain script never exited; and
+/// the pass then imported the entry by its plain file URL, which the hook — keyed on
+/// the entry having no parent — left alone, so the file evaluated a second time as
+/// a different module. The exact stdout is what catches the second one.
+#[test]
+fn a_foreign_hook_rewriting_the_entry_url_does_not_hold_the_process() {
+    for want in [(22, 13, 0), (20, 11, 0)] {
+        let (maj, min, pat) = want;
+        let Some((stdout, stderr, code)) = run_nub_args_against_node(
+            want,
+            "entry-url-rewrite",
+            &["--import", "./rewrite.mjs", "plain.mjs"],
+            Duration::from_secs(60),
+        ) else {
+            eprintln!(
+                "skipping: Node {maj}.{min}.{pat} not installed \
+                 (set TEST_NODE_BIN_{maj}_{min}_{pat} or nvm install)"
+            );
+            continue;
+        };
+
+        assert_eq!(
+            code,
+            Some(0),
+            "Node {maj}.{min}.{pat}: a plain script behind a URL-rewriting hook must exit \
+             rather than hang: stdout={stdout:?} stderr={stderr:?}"
+        );
+        // The rewrite has to have taken, or the run proved nothing about it — and it
+        // has to have run the entry exactly once.
+        assert_eq!(
+            stdout, "plain:?v=1\n",
+            "Node {maj}.{min}.{pat}: the hook must have rewritten the entry's URL, and the entry must evaluate once"
+        );
+    }
+}
+
+/// A file Node does not run as the program is never evaluated to look for a handler.
+/// Three modes still load nub's preload with the file in `argv[1]`: the test runner,
+/// which runs it in a child of its own; a syntax check, which only parses it; and `-e`
+/// code, after which it is a plain argument. The detection pass imported it in each,
+/// and with no evaluation of Node's own to join, that import ran it: 0.9.5 and 0.9.6
+/// ran every `nub --test` file twice on the fast tier, and the compat tier executed a
+/// file `--check` only parses and an argument after `-e`. The other cases are Node's
+/// own reading of its flags: `--check=<value>` is a syntax check whatever the value,
+/// `--no-print` still evaluates its code, and `--no_interactive` (Node reads `_` as
+/// `-`) takes back the `-i` that would make the file the program. The plain run is
+/// the control: it proves the body's line marks each evaluation.
+#[test]
+fn a_file_node_does_not_run_as_the_program_is_not_evaluated_on_both_tiers() {
+    for want in [(22, 13, 0), (26, 5, 0)] {
+        let (maj, min, pat) = want;
+        for (args, evaluations) in [
+            (&["counts.test.mjs"][..], 1),
+            (&["--test", "counts.test.mjs"][..], 1),
+            (&["--check", "counts.test.mjs"][..], 0),
+            (&["--check=true", "counts.test.mjs"][..], 0),
+            (&["--check=false", "counts.test.mjs"][..], 0),
+            (&["-e", "0", "counts.test.mjs"][..], 0),
+            (&["--no-print", "0", "counts.test.mjs"][..], 0),
+            (
+                &["-e", "0", "-i", "--no_interactive", "counts.test.mjs"][..],
+                0,
+            ),
+        ] {
+            let Some((stdout, stderr, code)) =
+                run_nub_args_against_node(want, "non-program-modes", args, Duration::from_secs(60))
+            else {
+                eprintln!(
+                    "skipping: Node {maj}.{min}.{pat} not installed \
+                     (set TEST_NODE_BIN_{maj}_{min}_{pat} or nvm install)"
+                );
+                break;
+            };
+            assert_eq!(
+                code,
+                Some(0),
+                "Node {maj}.{min}.{pat} {args:?}: must exit cleanly: stdout={stdout:?} stderr={stderr:?}"
+            );
+            assert_eq!(
+                stdout.matches("BODY-RAN").count(),
+                evaluations,
+                "Node {maj}.{min}.{pat} {args:?}: the file must evaluate {evaluations} time(s), as under plain Node: stdout={stdout:?}"
+            );
+        }
+    }
+}
+
+/// A file whose default export is a handler is served exactly when Node runs it as
+/// the program. Under `--test` it runs as a test and exits: on the compat tier the
+/// runner never consumes the launch's marker, so the test child inherited it, matched
+/// the launch's argv and served the file, and the run never ended; 0.9.5's fast tier
+/// served it from the runner itself. A mode the flags cancel (`--test --no-test`,
+/// `--check --no_check`) or an eval that `-i` outranks leaves Node running the file as
+/// the program, so it is served; a check that read those flags by presence refused it.
+/// (`--no-check` itself never reaches Node, because nub takes it as its own
+/// dependency-check opt-out; `--no_check` does, and Node reads it as `--no-check`.)
+/// The plain run is the control: it proves the export is served.
+#[test]
+fn a_handler_file_is_served_exactly_when_node_runs_it_as_the_program_on_both_tiers() {
+    'tiers: for want in [(22, 13, 0), (26, 5, 0)] {
+        let (maj, min, pat) = want;
+        for args in [
+            &["serves.test.mjs"][..],
+            &["--test", "--no-test", "serves.test.mjs"][..],
+            &["--check", "--no_check", "serves.test.mjs"][..],
+            &["-e", "0", "-i", "serves.test.mjs"][..],
+        ] {
+            let Some((listening, _)) = run_nub_args_until(
+                want,
+                "non-program-modes",
+                args,
+                "Listening on",
+                Duration::from_secs(60),
+                |_| (),
+            ) else {
+                eprintln!(
+                    "skipping: Node {maj}.{min}.{pat} not installed \
+                     (set TEST_NODE_BIN_{maj}_{min}_{pat} or nvm install)"
+                );
+                continue 'tiers;
+            };
+            assert!(
+                listening.is_some(),
+                "Node {maj}.{min}.{pat} {args:?}: run as the program, the file must be served"
+            );
+        }
+        let (stdout, stderr, code) = run_nub_args_against_node(
+            want,
+            "non-program-modes",
+            &["--test", "serves.test.mjs"],
+            Duration::from_secs(60),
+        )
+        .expect("this Node was found above");
+        assert_eq!(
+            code,
+            Some(0),
+            "Node {maj}.{min}.{pat}: under --test the file must run as a test and exit: stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert!(
+            !stdout.contains("Listening on") && !stderr.contains("Listening on"),
+            "Node {maj}.{min}.{pat}: under --test nothing may bind a listener: stdout={stdout:?} stderr={stderr:?}"
+        );
+    }
+}
+
+/// The same hook in front of a handler whose module holds the loop: the pass cannot
+/// wait for idleness, so it has to recognize the entry's load under the rewritten
+/// URL — matched without its query — and then import THAT URL, which is the job
+/// Node already made. Matched exactly, the announcement never came and the handler
+/// stayed unbound.
+#[test]
+fn a_rewritten_entry_that_holds_the_loop_is_still_served_once() {
+    for want in [(22, 13, 0), (20, 11, 0)] {
+        let (maj, min, pat) = want;
+        let Some((listening, stdout)) = run_nub_args_until(
+            want,
+            "entry-url-rewrite",
+            &["--import", "./rewrite.mjs", "holds.mjs"],
+            "Listening on",
+            Duration::from_secs(60),
+            |_| (),
+        ) else {
+            eprintln!(
+                "skipping: Node {maj}.{min}.{pat} not installed \
+                 (set TEST_NODE_BIN_{maj}_{min}_{pat} or nvm install)"
+            );
+            continue;
+        };
+        assert!(
+            listening.is_some(),
+            "Node {maj}.{min}.{pat}: a handler behind a URL-rewriting hook must still bind: stdout={stdout:?}"
+        );
+        assert_eq!(
+            stdout, "holds:?v=1\n",
+            "Node {maj}.{min}.{pat}: the entry must evaluate exactly once, under the rewritten URL"
+        );
+    }
+}
+
+/// A preload that imports the entry ahead of the program under a query of its own
+/// is a second module, not the entry: the load hooks may only take Node's own load
+/// of the entry for it — the one after Node resolved it as the main, with no parent.
+/// Matched on pathname alone, the preload's import was taken for the entry and its
+/// handler served while Node went on to evaluate the real one.
+#[test]
+fn a_preload_import_of_the_entry_is_not_served_in_its_place() {
+    for want in [(22, 13, 0), (20, 11, 0)] {
+        let (maj, min, pat) = want;
+        let Some((body, stdout)) = run_nub_args_until(
+            want,
+            "entry-url-rewrite",
+            &[
+                "--import",
+                "./rewrite.mjs",
+                "--import",
+                "./warm.mjs",
+                "holds.mjs",
+            ],
+            "Listening on",
+            Duration::from_secs(60),
+            get_root,
+        ) else {
+            eprintln!(
+                "skipping: Node {maj}.{min}.{pat} not installed \
+                 (set TEST_NODE_BIN_{maj}_{min}_{pat} or nvm install)"
+            );
+            continue;
+        };
+        assert_eq!(
+            body.as_deref(),
+            Some("held:?v=1"),
+            "Node {maj}.{min}.{pat}: the served handler must be the entry Node loaded, not the preload's copy: stdout={stdout:?}"
+        );
+        assert_eq!(
+            stdout, "holds:?warm\nholds:?v=1\n",
+            "Node {maj}.{min}.{pat}: the preload's copy first, the entry once, and nothing more"
+        );
+    }
 }

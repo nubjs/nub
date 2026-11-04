@@ -99,10 +99,12 @@ for fw in "${SEL[@]}"; do
   dev="${dev//\$PORT/$dport}"; dev="${dev//\$PPORT/$pport}"
   preview="${preview//\$PPORT/$pport}"; preview="${preview//\$PORT/$dport}"
 
-  # GVS policy. Excluded frameworks run default (trigger → project-local); the
-  # rest optionally force GVS on to prove the shared store specifically.
+  # GVS policy. Excluded frameworks run default (trigger → project-local); a
+  # GVS=require fixture always forces the store on (its config is what makes the
+  # framework store-aware); the rest optionally force GVS on via --force-gvs to
+  # prove the shared store specifically.
   env_prefix=()
-  if [ "$gvs" != "exclude" ] && [ "$FORCE_GVS" -eq 1 ]; then
+  if [ "$gvs" = "require" ] || { [ "$gvs" != "exclude" ] && [ "$FORCE_GVS" -eq 1 ]; }; then
     env_prefix=(env NPM_CONFIG_ENABLE_GLOBAL_VIRTUAL_STORE=true)
   fi
   if [ "$ISOLATE" -eq 1 ]; then
@@ -128,6 +130,15 @@ for fw in "${SEL[@]}"; do
       [ "${VERDICT[$fw]}" != "PASS" ] && fail=1
     fi
     INJECTED[$fw]="n/a (GVS-excluded → project-local)"
+  elif [ "$gvs" = "require" ]; then
+    # Required-GVS fixtures: success = builds/serves AND the store layout is in
+    # use — a project-local majority here means the store was silently bypassed.
+    if [ "${VERDICT[$fw]}" = "PASS" ] && [ "${LAYOUT[$fw]}" = "gvs-store" ]; then
+      echo "  → $fw PASS (shared store, as required)"
+    else
+      echo "  → $fw check: verdict=${VERDICT[$fw]} layout=${LAYOUT[$fw]} (expected PASS+gvs-store)"
+      fail=1
+    fi
   else
     [ "${VERDICT[$fw]}" != "PASS" ] && fail=1
   fi

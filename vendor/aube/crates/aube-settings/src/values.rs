@@ -511,6 +511,17 @@ pub fn workspace_yaml_value<'a>(
 }
 
 fn raw_from_env<'a>(meta: &meta::SettingMeta, env: &'a [(String, String)]) -> Option<&'a str> {
+    env_alias_hit(meta, env).map(|(_, raw)| raw)
+}
+
+/// Which declared `sources.env` alias supplies `meta`'s value, and the raw
+/// value it carries. The typed accessors want only the value; provenance
+/// reporters ([`env_source`]) want the alias as well, so both read the answer
+/// off this one walk rather than each keeping their own idea of the order.
+fn env_alias_hit<'a>(
+    meta: &meta::SettingMeta,
+    env: &'a [(String, String)],
+) -> Option<(&'static str, &'a str)> {
     for alias in meta.env_vars.iter().rev() {
         // Gate the tool-branded alias (`AUBE_<NAME>`) on the active embedder's
         // `env_prefix`: standalone aube (`Some("AUBE")`) reads it as before, an
@@ -523,11 +534,25 @@ fn raw_from_env<'a>(meta: &meta::SettingMeta, env: &'a [(String, String)]) -> Op
         }
         for (key, raw) in env.iter().rev() {
             if key == alias {
-                return Some(raw);
+                return Some((alias, raw));
             }
         }
     }
     None
+}
+
+/// The env alias currently supplying `setting`'s value, and that value.
+///
+/// Walks the declared aliases in the same order and under the same brand gate
+/// as the typed accessors, so a caller reporting where a value came from
+/// cannot disagree with the resolver about which variable won. `None` means
+/// the environment does not set this setting at all — an unknown setting name
+/// answers the same way.
+pub fn env_source<'a>(
+    setting: &str,
+    env: &'a [(String, String)],
+) -> Option<(&'static str, &'a str)> {
+    env_alias_hit(meta::find(setting)?, env)
 }
 
 /// Resolve a `bool` setting from a captured environment snapshot,

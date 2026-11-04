@@ -26,10 +26,10 @@
 // loaded only via the compat-tier entries OFF any user chain) the createRequire
 // THREADED IN through `setBootstrapCreateRequire` below.
 //
-// BRAND BOUNDARY — the floor's `createRequire` is threaded through MODULE SCOPE, never
-// parked on `globalThis` (a `globalThis.__nub*` sentinel is the same brand leak as a
-// NUB_* env var — enumerable in user code AND worker realms — so it is forbidden). On
-// the floor this module is loaded ONLY via the compat-tier main-thread preload
+// Keep the floor's `createRequire` in module scope rather than adding mutable
+// cross-realm state to `globalThis`. Internal `__nub*` sentinels and NUB_* plumbing
+// are permitted by the brand boundary, but neither is needed for this same-module
+// handoff. On the floor this module is loaded ONLY via the compat-tier main-thread preload
 // (preload.mjs), which imports floor-builtin first, then — AFTER importing this module
 // — calls `setBootstrapCreateRequire(createRequire)` and `installWorkerPolyfill()`. So
 // the install work is deferred (this module does NOT auto-run on the floor): its body
@@ -38,8 +38,22 @@
 // — see the auto-install at the bottom — so the existing side-effect-`require` call
 // sites (preload.cjs, polyfills.cjs) are unchanged.
 let _bootstrapCreateRequire = null;
+// Compiled global Workers must carry their fixed-root bootstrap exactly once.
+let _compiledBootstrapRequireArg = null;
+// The blob-URL registry, supplied by an importer that already holds it. Set only
+// by the compile preamble: a compiled bundle has no sibling files to
+// `createRequire` (see the load below), and it is the ONE importer for which the
+// shared-instance argument does not apply, because nothing else in a compiled
+// artifact ever reaches worker-blob-url.cjs.
+let _blobUrlModule = null;
 export function setBootstrapCreateRequire(fn) {
   _bootstrapCreateRequire = fn;
+}
+export function setCompiledBootstrapRequireArg(requireArg) {
+  _compiledBootstrapRequireArg = requireArg;
+}
+export function setBlobUrlModule(mod) {
+  _blobUrlModule = mod;
 }
 function __getBuiltin(id) {
   if (typeof process.getBuiltinModule === "function") return process.getBuiltinModule(id);
@@ -52,7 +66,7 @@ function __getBuiltin(id) {
 // that throws. Resolve the constructor lazily and memoize on first use: use the
 // native global when present, otherwise a minimal Event subclass carrying the
 // standard ErrorEvent fields (message/error/filename/lineno/colno).
-// See wiki/research/worker-polyfill.md.
+// See internal/research/worker-polyfill.md.
 //
 // LAZY (not resolved at module load) on purpose: reading `globalThis.ErrorEvent`
 // at top level trips Node's lazy `ErrorEvent` getter, which eagerly realizes
@@ -90,12 +104,14 @@ export function installWorkerPolyfill() {
   // blob: worker source registry, shared with the eager main-thread preload that
   // wraps URL.createObjectURL (worker-blob-url.cjs). Loaded via createRequire so
   // both this lazily-loaded ESM module and the eager CJS preload reference the SAME
-  // module instance (Node dedupes by resolved path) — i.e. the SAME blobUrlSources.
-  const { blobUrlSources, installBlobUrlSupport } = (
-    typeof process.getBuiltinModule === "function"
-      ? __getBuiltin("node:module").createRequire(import.meta.url)
-      : _bootstrapCreateRequire(import.meta.url)
-  )("./worker-blob-url.cjs");
+  // module instance (Node dedupes by resolved path) — i.e. the SAME registry.
+  const { blobUrlSource, installBlobUrlSupport } =
+    _blobUrlModule ??
+    (
+      typeof process.getBuiltinModule === "function"
+        ? __getBuiltin("node:module").createRequire(import.meta.url)
+        : _bootstrapCreateRequire(import.meta.url)
+    )("./worker-blob-url.cjs");
 
   // Resolve a worker-error stack frame to {filename,lineno,colno} so the
   // ErrorEvent carries real source location, per WHATWG §10.2.6 (the spec
@@ -182,12 +198,15 @@ export function installWorkerPolyfill() {
           // A `blob:` worker (WHATWG inline mechanism). Node cannot open a blob:
           // URL as a worker entry, and the Blob's bytes are only readable
           // ASYNCHRONOUSLY (Blob.text/arrayBuffer) while this constructor is sync.
-          // We close that gap by snapshotting the source SYNCHRONOUSLY at
+          // We close that gap by capturing the Blob SYNCHRONOUSLY at
           // `URL.createObjectURL(blob)` time (see installBlobUrlSupport) into a
           // module-scope registry keyed by URL, then spawn the source as a `data:`
           // URL — a real module load (a proper worker entry that receives nub's
           // preload, so `self`/`postMessage` are present) on every supported tier.
-          const source = blobUrlSources.get(asUrlString);
+          // The UTF-8 decode happens HERE rather than at createObjectURL time, so
+          // the object URLs that never become a Worker — nearly all of them — pay
+          // nothing for this feature.
+          const source = blobUrlSource(asUrlString);
           if (source === undefined) {
             throw new TypeError(
               `Worker constructor: blob URL '${asUrlString}' is not a known object URL`
@@ -231,11 +250,19 @@ export function installWorkerPolyfill() {
       // worker inherits nub's transpile augmentation), but if the user supplied
       // their own execArgv, MERGE rather than clobber — parent flags first, user
       // flags appended so the user's win on conflict.
-      const execArgv = stripHarmony(
-        Array.isArray(options.execArgv)
-          ? [...process.execArgv, ...options.execArgv]
-          : process.execArgv
-      );
+      const combinedExecArgv = Array.isArray(options.execArgv)
+        ? [...process.execArgv, ...options.execArgv]
+        : process.execArgv;
+      // Public execArgv truthfully retains the launcher's bootstrap token. Move
+      // every exact duplicate to one index-zero copy while retaining every other
+      // token's byte content and relative order.
+      const normalizedExecArgv = _compiledBootstrapRequireArg
+        ? [
+            _compiledBootstrapRequireArg,
+            ...combinedExecArgv.filter(arg => arg !== _compiledBootstrapRequireArg),
+          ]
+        : combinedExecArgv;
+      const execArgv = stripHarmony(normalizedExecArgv);
 
       const nodeOptions = {
         ...options,
@@ -452,7 +479,7 @@ export function installWorkerPolyfill() {
 // events. Node's worker global is not an EventTarget and exposes none of these
 // (verified), so the polyfill provides the whole surface. Without the inbound
 // wiring, `self.onmessage` / `self.addEventListener("message", …)` never fire
-// and a parent→worker round-trip hangs — see wiki/research/worker-polyfill.md.
+// and a parent→worker round-trip hangs — see internal/research/worker-polyfill.md.
 if (!isMainThread && parentPort) {
   const scope = globalThis;
   // All of nub's worker-scope global injections below (self, addEventListener,
@@ -554,7 +581,7 @@ if (!isMainThread && parentPort) {
   // and Bun); a worker listening via `self.onmessage` / `addEventListener` refs
   // it → stays alive. (Earlier this block eagerly held a `parentPort.on("message")`
   // forwarder that kept EVERY worker's loop alive → pure `parentPort` workers that
-  // should exit hung forever. See wiki/research/worker-polyfill.md §4.)
+  // should exit hung forever. See internal/research/worker-polyfill.md §4.)
   //
   // DISPATCH THROUGH A REAL EventTarget (`inbound`), not a hand-invoked callback:
   // an inbound event MUST have `event.target === self` and `event.currentTarget
@@ -706,4 +733,16 @@ if (!isMainThread && parentPort) {
 // on-`require` contract the fast-tier call sites (preload.cjs, polyfills.cjs) rely on.
 // On the FLOOR (getBuiltinModule absent) this is skipped; the compat main-thread
 // preload calls setBootstrapCreateRequire(...) + installWorkerPolyfill() explicitly.
-if (typeof process.getBuiltinModule === "function") installWorkerPolyfill();
+//
+// Skipped inside a COMPILED artifact for the same reason as the floor: its preamble
+// hands this module the blob-URL registry through `setBlobUrlModule` — a compiled
+// bundle has no sibling file to `createRequire` — and a setter cannot run before an
+// auto-install at module eval. So the compile preamble owns the call, exactly as the
+// compat preload does. The bootstrap record is published before any ESM in the
+// process runs, which makes it a sound signal at module-eval time.
+if (
+  typeof process.getBuiltinModule === "function" &&
+  process[Symbol.for("nub.compile.bootstrap")] === undefined
+) {
+  installWorkerPolyfill();
+}

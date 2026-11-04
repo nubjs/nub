@@ -3,7 +3,7 @@ use super::dep_path::{
     version_to_dep_path,
 };
 use super::format::reformat_for_pnpm_parity;
-use crate::{DepType, Error, LocalSource, LockfileGraph};
+use crate::{DepType, Error, LocalSource, LockfileGraph, link_from_importer};
 use aube_manifest::PackageJson;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -65,6 +65,48 @@ mod tests {
 
 /// Write a LockfileGraph as pnpm-lock.yaml v9 format.
 pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Result<(), Error> {
+    let Built { lockfile, .. } = build(path, graph, manifest)?;
+    let yaml = yaml_serde::to_string(&lockfile).map_err(|e| Error::parse(path, e.to_string()))?;
+    let yaml = reformat_for_pnpm_parity(&yaml);
+    // Atomic via tempfile + persist. Crash, Ctrl+C, or AV
+    // quarantine during the write used to leave the user with a
+    // truncated pnpm-lock.yaml on disk, next install failed to
+    // parse and the user thought their lockfile was gone. See
+    // atomic_write_lockfile for full rationale.
+    crate::atomic_write_lockfile(path, yaml.as_bytes())?;
+    Ok(())
+}
+
+/// Project a `LockfileGraph` onto pnpm's v9 lockfile schema without
+/// serializing it. Split out of [`write`] so the pnpmfile hook view
+/// ([`super::hook_view`]) hands hooks the exact same projection the
+/// writer puts on disk — dep-path translation, patch-hash suffixes,
+/// alias recovery and all — instead of a second, drifting one.
+/// `path` decides `pnpm-lock.yaml`-only behavior (native alias
+/// encoding) and roots the workspace-member manifest reads.
+/// [`build`]'s output: the projection, plus the key correspondence a
+/// pnpmfile hook round-trip needs.
+pub(super) struct Built {
+    pub lockfile: WritablePnpmLockfile,
+    /// `snapshots:` key -> the graph `dep_path` it was derived from.
+    ///
+    /// The two spellings diverge for anything that is not a plain
+    /// registry dep: pnpm keys on the resolved specifier
+    /// (`is-obj@https://codeload…/tar.gz/<sha>`) while the graph keys on
+    /// an FS-safe hashed dep_path (`is-obj@url+f5ca9b17a622e185`). A
+    /// hook is handed the pnpm spelling, so an edit it makes to
+    /// `packages[<pnpm key>]` cannot be applied back to the graph
+    /// without this map. Derived in the snapshot loop below, where both
+    /// spellings are in hand, rather than re-computed by a second copy
+    /// of the key rules that could drift from it.
+    pub snapshot_keys: BTreeMap<String, String>,
+}
+
+pub(super) fn build(
+    path: &Path,
+    graph: &LockfileGraph,
+    manifest: &PackageJson,
+) -> Result<Built, Error> {
     let native_pnpm_aliases = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -445,22 +487,25 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
             let deps = pkg.peer_dependencies_with_meta_defaults();
             if deps.is_empty() { None } else { Some(deps) }
         };
-        let peer_meta = if pkg.peer_dependencies_meta.is_empty() {
+        // Only `optional: true` peers are recorded. pnpm's resolver
+        // drops a non-optional `peerDependenciesMeta` entry outright
+        // (`peerDependenciesWithoutOwn` skips `peerMeta.optional !== true`),
+        // so its lockfile type is `{ optional: true }` and every entry
+        // carries the field. pnpm 12's reader models that as a required
+        // `bool` and fails the whole file with ERR_PNPM_BROKEN_LOCKFILE
+        // on an empty mapping, which is what emitting the non-optional
+        // entries with the false flag skipped used to produce (real case:
+        // vitest declaring `vite: { optional: false }`).
+        let peer_meta: BTreeMap<String, WritablePeerDepMeta> = pkg
+            .peer_dependencies_meta
+            .iter()
+            .filter(|(_, v)| v.optional)
+            .map(|(k, _)| (k.clone(), WritablePeerDepMeta { optional: true }))
+            .collect();
+        let peer_meta = if peer_meta.is_empty() {
             None
         } else {
-            Some(
-                pkg.peer_dependencies_meta
-                    .iter()
-                    .map(|(k, v)| {
-                        (
-                            k.clone(),
-                            WritablePeerDepMeta {
-                                optional: v.optional,
-                            },
-                        )
-                    })
-                    .collect(),
-            )
+            Some(peer_meta)
         };
         // Always render the path through `path_posix()` so the
         // lockfile uses forward slashes regardless of the host OS —
@@ -765,6 +810,7 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
             .collect()
     };
     let mut snapshots = BTreeMap::new();
+    let mut snapshot_keys = BTreeMap::new();
     for (dep_path, pkg) in &graph.packages {
         // `link:` deps are omitted from snapshots (pnpm parity). `exec:`
         // is omitted for the same reason it is omitted from packages:
@@ -786,6 +832,7 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
             }
         };
         key = decorate_patch_hash(&key, Some(pkg));
+        snapshot_keys.insert(key.clone(), dep_path.clone());
         let pkg_deps = rewrite_local_deps(pkg.dependencies.clone());
         let pkg_opt_deps = rewrite_local_deps(pkg.optional_dependencies.clone());
         snapshots.insert(
@@ -950,47 +997,10 @@ pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Resu
         snapshots,
     };
 
-    let yaml = yaml_serde::to_string(&lockfile).map_err(|e| Error::parse(path, e.to_string()))?;
-    let yaml = reformat_for_pnpm_parity(&yaml);
-    // Atomic via tempfile + persist. Crash, Ctrl+C, or AV
-    // quarantine during the write used to leave the user with a
-    // truncated pnpm-lock.yaml on disk, next install failed to
-    // parse and the user thought their lockfile was gone. See
-    // atomic_write_lockfile for full rationale.
-    crate::atomic_write_lockfile(path, yaml.as_bytes())?;
-    Ok(())
-}
-
-/// Render a project-root-relative directory as a `link:` target
-/// relative to the consuming importer, the way pnpm writes importer
-/// `version:` values (`packages/app` → `packages/core` renders as
-/// `../core`; the root importer keeps `packages/core` as-is). Pure
-/// lexical computation over `/`-separated components — both inputs are
-/// normalized root-relative paths, so no filesystem access is needed.
-fn link_from_importer(importer_path: &str, target_posix: &str) -> String {
-    if importer_path == "." {
-        return target_posix.to_string();
-    }
-    let from: Vec<&str> = importer_path
-        .split('/')
-        .filter(|c| !c.is_empty() && *c != ".")
-        .collect();
-    let to: Vec<&str> = target_posix
-        .split('/')
-        .filter(|c| !c.is_empty() && *c != ".")
-        .collect();
-    let common = from
-        .iter()
-        .zip(to.iter())
-        .take_while(|(a, b)| a == b)
-        .count();
-    let mut parts: Vec<&str> = vec![".."; from.len() - common];
-    parts.extend(&to[common..]);
-    if parts.is_empty() {
-        ".".to_string()
-    } else {
-        parts.join("/")
-    }
+    Ok(Built {
+        lockfile,
+        snapshot_keys,
+    })
 }
 
 fn registry_tarball_url_is_not_derivable(
@@ -1065,7 +1075,7 @@ fn pruned_time_entries(
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct WritablePnpmLockfile {
+pub(super) struct WritablePnpmLockfile {
     lockfile_version: String,
     settings: WritableSettings,
     /// pnpm v9 emits a top-level `catalogs:` map immediately after
@@ -1247,11 +1257,9 @@ struct WritableRuntimeTarget {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WritablePeerDepMeta {
-    // pnpm v9 omits `optional: false` entirely; only the truthy form
-    // shows up in real-world lockfiles. Skip the default so we stay
-    // byte-identical for the rare case where a packument explicitly
-    // marks a peer as non-optional.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    // Always `true` — the writer filters non-optional peers out of the
+    // map rather than emitting them with the field skipped, because an
+    // empty mapping is not a valid `peerDependenciesMeta` value.
     optional: bool,
 }
 

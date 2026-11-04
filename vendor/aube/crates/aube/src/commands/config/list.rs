@@ -1,67 +1,57 @@
 use super::{
-    ListLocation, literal_aliases, read_merged, read_project_entries, read_user_entries,
-    setting_default_value, setting_for_key, settings_meta,
+    ListLocation, literal_aliases, primary_entry_key, read_merged, read_project_entries,
+    read_user_entries, setting_default_value, setting_for_key, settings_meta,
 };
-use aube_settings::meta::SettingMeta;
-use clap::Args;
 use miette::miette;
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct ListArgs {
     /// Also list settings that have no value set.
     ///
     /// Renders one row per setting in `settings.toml`, with the
     /// default and description shown for unset entries.
     ///
-    /// Only valid with `--location merged` (the default), since a
-    /// per-file view can't distinguish "not set anywhere" from "set in
-    /// the other file" and would render misleading defaults.
-    #[arg(long)]
+    /// Not valid with `--local` or `--global`, since a single-file view cannot
+    /// distinguish "not set anywhere" from "set in the other file".
+    #[usage(long)]
     pub all: bool,
+
+    /// List only the user configuration.
+    #[usage(short = 'g', long, conflicts("--local", "--all"))]
+    pub global: bool,
 
     /// Emit all entries as a JSON object keyed by setting name.
     ///
-    /// Matches `pnpm config list --json`. Honors `--all` and
-    /// `--location` the same way the default text output does.
-    #[arg(long)]
+    /// Matches `pnpm config list --json`. Honors the selected scope.
+    #[usage(long)]
     pub json: bool,
 
-    /// Shortcut for `--location project`.
-    ///
-    /// Conflicts with `--all` since `--all` only makes sense against
-    /// the merged view — see the `--all` docs for why.
-    #[arg(long, conflicts_with_all = ["location", "all"])]
+    /// List only the project configuration.
+    #[usage(long, conflicts("--global", "--all"))]
     pub local: bool,
-
-    /// Which config location(s) to list.
-    ///
-    /// `merged` (default) walks the same file-source precedence install
-    /// uses, with last-write-wins merging.
-    #[arg(long, value_enum)]
-    pub location: Option<ListLocation>,
 }
 
 impl ListArgs {
     fn effective_location(&self) -> ListLocation {
-        if self.local {
+        if self.global {
+            ListLocation::User
+        } else if self.local {
             ListLocation::Project
         } else {
-            self.location.unwrap_or(ListLocation::Merged)
+            ListLocation::Merged
         }
     }
 
     pub(super) fn has_parent_overrides(&self) -> bool {
-        self.all || self.json || self.local || self.location.is_some()
+        self.all || self.json || self.local || self.global
     }
 
     pub(super) fn apply_parent(&mut self, parent: Self) {
         self.all |= parent.all;
         self.json |= parent.json;
-        if self.location.is_none() && !self.local {
+        if !self.local && !self.global {
             self.local = parent.local;
-        }
-        if self.location.is_none() {
-            self.location = parent.location;
+            self.global = parent.global;
         }
     }
 }
@@ -69,14 +59,12 @@ impl ListArgs {
 pub fn run(args: ListArgs) -> miette::Result<()> {
     let location = args.effective_location();
     if args.all && !matches!(location, ListLocation::Merged) {
-        return Err(miette!(
-            "--all is only supported with --location merged (the default)"
-        ));
+        return Err(miette!("--all cannot be combined with --local or --global"));
     }
     let cwd = crate::dirs::project_root_or_cwd()?;
     let entries: Vec<(String, String)> = match location {
         ListLocation::Merged => read_merged(&cwd)?,
-        ListLocation::User | ListLocation::Global => read_user_entries(&cwd)?,
+        ListLocation::User => read_user_entries(&cwd)?,
         ListLocation::Project => read_project_entries(&cwd)?,
     };
 
@@ -88,7 +76,7 @@ pub fn run(args: ListArgs) -> miette::Result<()> {
                 if meta.managed_policy.is_empty() {
                     continue;
                 }
-                let primary = primary_list_key(meta);
+                let primary = primary_entry_key(meta);
                 let local = seen
                     .get(&primary)
                     .cloned()
@@ -110,7 +98,7 @@ pub fn run(args: ListArgs) -> miette::Result<()> {
                 continue;
             };
             if !literals.iter().any(|k| seen.contains_key(k)) {
-                seen.insert(primary.clone(), meta.default.to_string());
+                seen.insert(primary.clone(), meta.rendered_default().into_owned());
                 defaults.insert(primary);
             }
         }
@@ -154,14 +142,7 @@ pub fn run(args: ListArgs) -> miette::Result<()> {
 }
 
 pub(super) fn canonical_list_key(key: &str) -> String {
-    setting_for_key(key).map_or_else(|| key.to_string(), primary_list_key)
-}
-
-fn primary_list_key(meta: &SettingMeta) -> String {
-    literal_aliases(meta.npmrc_keys)
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| meta.name.to_string())
+    setting_for_key(key).map_or_else(|| key.to_string(), primary_entry_key)
 }
 
 pub(super) fn collect_seen(

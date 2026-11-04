@@ -112,7 +112,17 @@ pass "esbuild postinstall ran: binary present"
 # gracefully on dev boxes where the toolchain can't compile node-gyp addons;
 # the esbuild check is authoritative on every platform.
 # Run from within $PROJ_ALLOW so require() resolves against that node_modules.
-LOAD_OUT="$(cd "$PROJ_ALLOW" && node ./verify-load.cjs 2>&1)"
+#
+# Capture the status separately instead of letting `set -e` kill the script on the
+# assignment. A native addon that aborts (SIGABRT/139/134) rather than throwing takes
+# the whole node process down, and under `set -e` the failing command substitution
+# ended run.sh with only the raw exit code — no output, because everything node wrote
+# went into the variable the failed assignment discarded. That is how an abort here
+# reads as an unexplained "exit code 134" with no diagnostics at all.
+LOAD_RC=0
+LOAD_OUT="$(cd "$PROJ_ALLOW" && node ./verify-load.cjs 2>&1)" || LOAD_RC=$?
+[ "$LOAD_RC" -eq 0 ] \
+  || fail "verify-load.cjs exited $LOAD_RC (a signal death is 128+n, so 134=SIGABRT in a native addon). Output: $LOAD_OUT"
 echo "$LOAD_OUT" | grep -q "NATIVE-DEPS-OK" \
   || fail "native modules not loadable after install. verify-load output: $LOAD_OUT"
 pass "native modules loadable: $LOAD_OUT"

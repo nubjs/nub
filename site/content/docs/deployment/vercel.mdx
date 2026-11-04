@@ -1,11 +1,11 @@
 ---
 title: Vercel
-description: Vercel ships no preinstalled Nub, but the install command is yours to replace — so one line puts the CLI on PATH for the rest of the build. The devDependency pattern works too.
+description: Vercel ships no preinstalled Nub, but the install command is yours to replace — so one line puts the CLI on PATH for the rest of the build.
 ---
 
 import { Steps, Step } from 'fumadocs-ui/components/steps';
 
-[Vercel](https://vercel.com) doesn't ship Nub in its build image, but it lets you replace the install command — which is all it takes.
+[Vercel](https://vercel.com) doesn't ship Nub in its build image, but it lets you replace the install command.
 
 <Steps>
 
@@ -15,13 +15,17 @@ import { Steps, Step } from 'fumadocs-ui/components/steps';
 
 Add both commands to `vercel.json`. The installer fetches a static binary, then Nub installs the dependencies and runs the build:
 
-```json title="vercel.json"
+```json title="vercel.json" wide
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "installCommand": "curl -fsSL https://nubjs.com/install.sh | bash && export PATH=$HOME/.nub/bin:$PATH && nub ci",
   "buildCommand": "export PATH=$HOME/.nub/bin:$PATH && nub run build"
 }
 ```
+
+<Callout>
+Read the [full docs](https://vercel.com/docs/builds/configure-a-build) on vercel.com.
+</Callout>
 
 The clean install requires a committed lockfile that matches the manifest. It recreates `node_modules` on every deployment.
 
@@ -100,9 +104,9 @@ The fixture's build output records the Node version. Nub augments the Node the b
 
 ## The devDependency alternative
 
-Overriding the install command isn't required. Adding the CLI as a devDependency also works and leaves `vercel.json` empty:
+Adding the CLI as a devDependency also works, and leaves `vercel.json` empty:
 
-```json
+```json title="package.json"
 {
   "devDependencies": {
     "@nubjs/nub": "^{{NUB_VERSION}}"
@@ -113,7 +117,7 @@ Overriding the install command isn't required. Adding the CLI as a devDependency
 }
 ```
 
-Vercel's auto-detected install links `nub` and `nubx` onto `node_modules/.bin`, and your scripts resolve them. Reach for it when you'd rather pin the version in the manifest than in build settings; see [Managed builders](/docs/deployment#managed-builders) for the full pattern.
+Vercel's auto-detected install links `nub` and `nubx` onto `node_modules/.bin`, and your scripts resolve them. Use it to pin the version in the manifest instead of build settings; see [Managed builders](/docs/deployment#managed-builders) for the full pattern.
 
 <Callout>
   Excluding development dependencies from the install drops the CLI along with them. Override the install command instead when a project builds without devDependencies.
@@ -133,3 +137,7 @@ Vercel selects the Node version and Nub adopts it, so pin it on Vercel's side:
 - `package.json` → `engines.node`
 
 Nub reads `engines.node` too, so that spelling keeps both in agreement from one place.
+
+<Callout>
+Read the [full docs](https://vercel.com/docs/functions/runtimes/node-js) on vercel.com.
+</Callout>

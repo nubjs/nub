@@ -32,8 +32,7 @@ jobs:
     name: Publish to npm
     # github-hosted runner: npm Trusted Publishing (--provenance) rejects
     # self-hosted runner identities ("Unsupported GitHub Actions runner
-    # environment: self-hosted"). The publish job is light enough that
-    # the namespace runner saves nothing.
+    # environment: self-hosted").
     runs-on: ubuntu-latest
     permissions:
       contents: read

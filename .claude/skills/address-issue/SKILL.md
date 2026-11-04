@@ -22,7 +22,7 @@ Taking a GitHub issue from "reported" to "shipped and the reporter told." The hy
 
 ## Guardrails
 
-- **Tone is factual, neutral, professional** — never braggy, competitive, or over-promising. See [`PROSE.md`](../../../PROSE.md).
+- **Tone is factual, neutral, professional** — never braggy, competitive, or over-promising. Invoke the `prose-writing` skill.
 - **A fix lands via the PR-from-a-worktree flow**, not directly on the shared `main` tree. Trivial doc/typo fixes are the documented exception.
 - **Verify end-to-end before pushing** — run the pre-push local-verification loop. A green suite with a stubbed fix is worse than an unchecked one.
 - **Don't autonomously land a change to a default / security posture / product behavior / API-config-env surface.** Those are recommend-only until the maintainer signs off. A mechanical, clearly-a-bug fix may land; a behavior decision routes back as a question.
@@ -64,7 +64,7 @@ gh issue comment <n> --repo nubjs/nub --body "Investigating."
 
 No "thanks for the report," no timeline, no preview of your hypothesis — a longer ack leaks half-formed theories and reads as noise. Internal/self-filed issues don't need this.
 
-**Every substantive comment is terse + factual per PROSE.md.** State what you found and what you did, in the fewest words that carry the facts. Never write "previous comments were wrong" or similar meta-commentary — prior comments are often a bot's. The `gh-comment-guard` PreToolUse hook blocks an over-long `gh issue/pr comment` / `gh pr create` body; trim it, or set `NUB_ALLOW_LONG_COMMENT=1` only for a genuinely-needed longer body.
+**Every substantive comment is terse + factual per the `prose-writing` skill.** State what you found and what you did, in the fewest words that carry the facts. Never write "previous comments were wrong" or similar meta-commentary — prior comments are often a bot's. The `gh-comment-guard` PreToolUse hook blocks an over-long `gh issue/pr comment` / `gh pr create` body; trim it, or set `NUB_ALLOW_LONG_COMMENT=1` only for a genuinely-needed longer body.
 
 If triage shows it's not a bug, say so factually with the reason and close it per Step 6.
 
@@ -72,7 +72,7 @@ If triage shows it's not a bug, say so factually with the reason and close it pe
 
 - **Small fix (most issues):** write it. The pre-push loop is the verification; your own read of your diff is the review. Don't dispatch anything.
 - **Real change:** one implementation agent, or yourself. One reviewer if the logic isn't self-evident.
-- **Big:** the **fray methodology** earns its keep (load the `fray` skill by name) — you orchestrate, dispatch model-tiered sub-agents, and the fix gets a multi-lens self-review scaled to blast radius.
+- **Big:** the orchestration methodology earns its keep (load the `orchestrator` skill by name) — you hold the goal set, dispatch model-tiered sub-agents, and the fix gets a multi-lens self-review scaled to blast radius.
 
 Tier every agent you do dispatch by the judgment its task needs. A repro, a harvest, a doc update, or a CI watch is Sonnet or Haiku work; Opus is for the fix that lands.
 
@@ -87,7 +87,7 @@ cd /tmp/nub-fix-<n>
 scripts/rust-build.sh build -p nub-cli --profile fast
 ```
 
-Before pushing, run the pre-push local-verification loop: incremental build → the exact CI gates (`cargo clippy --all-targets --all-features -- -D warnings`, `cargo fmt --check`, scoped `cargo test`) → an e2e tmp-fixture run of the specific behavior → Docker for anything touching the global cache/config → promote a regression test for this bug into the suite. Get it green locally and push ONCE.
+Before pushing, run the pre-push local-verification loop: incremental build → the exact CI gates (`NUB_ALLOW_INCOMPLETE_RUNTIME=1 cargo clippy --all-targets --all-features -- -D warnings`, `cargo fmt --check`, scoped `cargo test`) → an e2e tmp-fixture run of the specific behavior → Docker for anything touching the global cache/config → promote a regression test for this bug into the suite. Get it green locally and push ONCE.
 
 ## Step 3b — Update docs if the fix changes user-facing behavior
 
@@ -115,28 +115,35 @@ EOF
 
 Report the PR URL. Do NOT merge your own PR.
 
-## Step 5 — On merge, comment the resolution
+PR CI is opt-in, so opening the pull request starts nothing. When the head is final, request the run and watch it:
 
-`Closes #N` auto-closes the issue silently, so add a brief factual comment:
-
-```bash
-gh issue comment <n> --repo nubjs/nub --body "Fixed in #<pr> (merged to main). Will ship in the next release."
+```sh
+gh pr edit <n> --add-label ci
+nub scripts/ci-watch.ts --pr <n> --required "CI gate" --timeout 90
 ```
 
-If it did NOT auto-close (no closing keyword, or a non-fix resolution), close it explicitly with a comment — never silently:
+## Step 5 — On merge, comment the resolution
+
+`Closes #N` auto-closes the issue silently, so add a brief factual comment. Extremely concise — don't re-explain what was done or the process of doing it; the PR carries that. Thank an external reporter:
 
 ```bash
-gh issue close <n> --repo nubjs/nub --comment "<what fixed it, or why no code fix is needed>"
+gh issue comment <n> --repo nubjs/nub --body "Fixed in #<pr>, ships in the next release. Thanks for the report."
+```
+
+(Drop the thanks on an internal/self-filed issue.) If it did NOT auto-close (no closing keyword, or a non-fix resolution), close it explicitly with a comment — never silently:
+
+```bash
+gh issue close <n> --repo nubjs/nub --comment "<one line: what resolved it, or why no code fix is needed>"
 ```
 
 ## Step 6 — On release, comment the version + release link (mandatory)
 
-A fix merged is not a fix shipped.
+A fix merged is not a fix shipped. Keep it to the version + link; on an external contributor's PR, add a brief thanks:
 
 ```bash
 REL="https://github.com/nubjs/nub/releases/tag/v<ver>"
 gh issue comment <n> --repo nubjs/nub --body "Shipped in v<ver>: $REL"
-gh pr comment   <pr> --repo nubjs/nub --body "Shipped in v<ver>: $REL"
+gh pr comment   <pr> --repo nubjs/nub --body "Shipped in v<ver>: $REL — thanks for the contribution."
 ```
 
 In practice the `release` skill's Step 5 executes this in bulk across the whole changeset; this documents the contract for a single issue.
@@ -148,7 +155,7 @@ In practice the `release` skill's Step 5 executes this in bulk across the whole 
 | Step | Action |
 | --- | --- |
 | Triage | `gh issue view <n> --comments` · read the thread · reproduce it yourself with a differential fixture |
-| Size | Answer it · Small fix (default — just fix it, no sub-agents) · Real change (≤1 agent + ≤1 reviewer) · Big (full fray shape) |
+| Size | Answer it · Small fix (default — just fix it, no sub-agents) · Real change (≤1 agent + ≤1 reviewer) · Big (full orchestrator shape) |
 | Acknowledge | `gh issue comment <n> --body "Investigating."` — exactly that, nothing more (external only) |
 | Fix | in a worktree off `origin/main`; machinery scaled to the size; pre-push loop green; add a regression test |
 | Docs | Update `site/content/docs/` if behavior changed — same PR as the fix |

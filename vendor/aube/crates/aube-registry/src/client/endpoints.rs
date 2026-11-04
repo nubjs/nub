@@ -3,8 +3,9 @@ use super::cache::packument_full_cache_path;
 use super::{
     AUDIT_BODY_CAP, PACKUMENT_FULL_ACCEPT, RegistryClient, check_dist_tag_status,
     dist_tag_root_url, dist_tag_url, forbidden_with_body, map_dist_tag_error, parse_full_response,
+    parse_full_response_seed,
 };
-use crate::Error;
+use crate::{Error, NetworkMode};
 use serde::Deserialize;
 use std::borrow::Cow;
 use std::path::Path;
@@ -138,6 +139,11 @@ impl RegistryClient {
         name: &str,
         version: &str,
     ) -> Result<crate::VersionMetadata, Error> {
+        if self.network_mode == NetworkMode::Offline {
+            return Err(Error::Offline(format!(
+                "version metadata for {name}@{version}"
+            )));
+        }
         let (packument_url, registry_url) = self.packument_url(name);
         let url = format!("{packument_url}/{version}");
         let resp = self
@@ -156,6 +162,36 @@ impl RegistryClient {
             "version-metadata",
         )?;
         parse_full_response(resp, &format!("version metadata {name}@{version}")).await
+    }
+
+    /// Fetch one exact release plus compact publish-time/trust history from a
+    /// single full-packument response. Historical dependency and distribution
+    /// metadata is discarded during deserialization.
+    pub async fn fetch_exact_version_packument(
+        &self,
+        name: &str,
+        version: &str,
+    ) -> Result<crate::ExactVersionPackument, Error> {
+        if self.network_mode == NetworkMode::Offline {
+            return Err(Error::Offline(format!("trust history for {name}")));
+        }
+        let (url, registry_url) = self.packument_url(name);
+        let resp = self
+            .send_metadata_with_retry(&format!("trust history {name}"), || {
+                self.authed_get_for_package(&url, &registry_url, name)
+                    .header("Accept", PACKUMENT_FULL_ACCEPT)
+            })
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(Error::NotFound(name.to_string()));
+        }
+        let resp = resp.error_for_status()?;
+        check_body_cap(
+            &resp,
+            self.fetch_policy.packument_max_bytes,
+            "packument-trust-history",
+        )?;
+        parse_full_response_seed(resp, crate::ExactVersionPackumentSeed { version }).await
     }
 
     /// Fetch the *full* (non-corgi) packument as raw JSON, bypassing the

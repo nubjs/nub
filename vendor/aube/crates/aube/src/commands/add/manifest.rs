@@ -26,6 +26,8 @@ pub(super) struct AddManifestOptions {
     /// forces a registry-style spec even when `linkWorkspacePackages`
     /// matched a sibling.
     pub(super) workspace_protocol_override: Option<bool>,
+    /// Highest-precedence settings supplied by an embedding host.
+    pub(super) setting_overrides: Vec<(String, String)>,
 }
 
 impl AddManifestOptions {
@@ -47,8 +49,30 @@ impl AddManifestOptions {
                 args.save_workspace_protocol,
                 args.no_save_workspace_protocol,
             ),
+            setting_overrides: Vec::new(),
         }
     }
+}
+
+fn package_not_found_error_for_registry(
+    client: &aube_registry::client::RegistryClient,
+    name: String,
+) -> miette::Report {
+    let corpus = aube_resolver::popular_package_names_are_ranked()
+        .then(aube_resolver::popular_package_names);
+    package_not_found_error_for_registry_with_corpus(client, name, corpus)
+}
+
+fn package_not_found_error_for_registry_with_corpus(
+    client: &aube_registry::client::RegistryClient,
+    name: String,
+    public_npm_corpus: Option<&str>,
+) -> miette::Report {
+    let corpus = client
+        .uses_default_npm_registry_for(&name)
+        .then_some(public_npm_corpus)
+        .flatten();
+    crate::commands::add_supply_chain::package_not_found_error_with_corpus(name, corpus)
 }
 
 /// Map the paired `--save-workspace-protocol` / `--no-save-workspace-protocol`
@@ -132,47 +156,54 @@ pub(super) async fn update_manifest_for_add(
     // own dir so a sub-project's `.npmrc` still wins — switching the
     // entire context to the workspace root would silently drop those
     // overrides, since `load_npmrc_entries` doesn't walk up.
-    let (default_tag, default_prefix, catalog_mode, minimum_release_age, registry_supports_time) =
-        crate::commands::with_settings_ctx(cwd, |ctx| {
-            let tag = aube_settings::resolved::tag(ctx);
-            // `--save-exact` (CLI) OR a resolved `.npmrc`/env `save-exact=true`
-            // both pin to the exact version (empty prefix). npm and pnpm both
-            // honor the `save-exact` config knob, so reading it here is the
-            // npm/pnpm-compatible behavior, not nub-specific.
-            let prefix = if opts.save_exact || aube_settings::resolved::save_exact(ctx) {
-                String::new()
-            } else {
-                let raw = aube_settings::resolved::save_prefix(ctx);
-                // Validate: only ^, ~, or empty are valid prefixes.
-                match raw.as_str() {
-                    "^" | "~" | "" => raw,
-                    _ => {
-                        tracing::warn!(
-                            code = aube_codes::warnings::WARN_AUBE_INVALID_SAVE_PREFIX,
-                            "ignoring invalid save-prefix={raw:?}, falling back to ^"
-                        );
-                        "^".to_string()
-                    }
+    let (
+        default_tag,
+        default_prefix,
+        catalog_mode,
+        minimum_release_age,
+        registry_supports_time,
+        cache_dir,
+    ) = crate::commands::with_settings_ctx_and_cli(cwd, &opts.setting_overrides, |ctx| {
+        let tag = aube_settings::resolved::tag(ctx);
+        // `--save-exact` (CLI) OR a resolved `.npmrc`/env `save-exact=true`
+        // both pin to the exact version (empty prefix). npm and pnpm both
+        // honor the `save-exact` config knob, so reading it here is the
+        // npm/pnpm-compatible behavior, not nub-specific.
+        let prefix = if opts.save_exact || aube_settings::resolved::save_exact(ctx) {
+            String::new()
+        } else {
+            let raw = aube_settings::resolved::save_prefix(ctx);
+            // Validate: only ^, ~, or empty are valid prefixes.
+            match raw.as_str() {
+                "^" | "~" | "" => raw,
+                _ => {
+                    tracing::warn!(
+                        code = aube_codes::warnings::WARN_AUBE_INVALID_SAVE_PREFIX,
+                        "ignoring invalid save-prefix={raw:?}, falling back to ^"
+                    );
+                    "^".to_string()
                 }
-            };
-            let catalog_mode = aube_settings::resolved::catalog_mode(ctx);
-            // The version this function writes into the manifest must
-            // honor `minimumReleaseAge` the same way full resolution
-            // does: dist-tag adds and `--save-exact` pin a concrete
-            // version here, and a pinned fresh version would sail past
-            // the resolver's gate via its lenient exact-range fallback.
-            let minimum_release_age =
-                crate::commands::install::resolve_minimum_release_age(ctx, None);
-            let registry_supports_time_field =
-                aube_settings::resolved::registry_supports_time_field(ctx);
-            (
-                tag,
-                prefix,
-                catalog_mode,
-                minimum_release_age,
-                registry_supports_time_field,
-            )
-        });
+            }
+        };
+        let catalog_mode = aube_settings::resolved::catalog_mode(ctx);
+        // The version this function writes into the manifest must
+        // honor `minimumReleaseAge` the same way full resolution
+        // does: dist-tag adds and `--save-exact` pin a concrete
+        // version here, and a pinned fresh version would sail past
+        // the resolver's gate via its lenient exact-range fallback.
+        let minimum_release_age = crate::commands::install::resolve_minimum_release_age(ctx, None);
+        let registry_supports_time_field =
+            aube_settings::resolved::registry_supports_time_field(ctx);
+        let cache_dir = crate::commands::resolved_cache_dir_with_ctx(cwd, ctx);
+        (
+            tag,
+            prefix,
+            catalog_mode,
+            minimum_release_age,
+            registry_supports_time_field,
+            cache_dir,
+        )
+    });
     let workspace_settings_cwd = crate::dirs::find_workspace_yaml_root(cwd)
         .or_else(|| crate::dirs::find_workspace_root(cwd))
         .unwrap_or_else(|| cwd.to_path_buf());
@@ -294,8 +325,8 @@ pub(super) async fn update_manifest_for_add(
     // `registrySupportsTimeField` keeps the cheaper abbreviated path hot
     // when the registry inlines `time` in corgi payloads.
     let needs_time = minimum_release_age.is_some() && !registry_supports_time;
-    let corgi_cache_dir = crate::commands::packument_cache_dir_for_cwd(cwd);
-    let full_cache_dir = crate::commands::packument_full_cache_dir_for_cwd(cwd);
+    let corgi_cache_dir = cache_dir.join("packuments-v1");
+    let full_cache_dir = cache_dir.join("packuments-full-v1");
     let offline = opts.network_mode == aube_registry::NetworkMode::Offline;
     for spec in &parsed {
         if aube_util::pkg::is_workspace_spec(&spec.range)
@@ -349,7 +380,12 @@ pub(super) async fn update_manifest_for_add(
                 }
                 Err(primary_err) => Err(primary_err),
             }
-            .map_err(|e| miette!("failed to fetch {name}: {e}"))?;
+            .map_err(|e| match e {
+                aube_registry::Error::NotFound(missing) => {
+                    package_not_found_error_for_registry(&client, missing)
+                }
+                error => miette!("failed to fetch {name}: {error}"),
+            })?;
             Ok::<_, miette::Report>((name, packument))
         });
     }
@@ -436,10 +472,12 @@ pub(super) async fn update_manifest_for_add(
         // Resolve non-`latest` dist-tags to their tagged version: like
         // exact pins, they're a deliberate user override (strict mode
         // still refuses a gated one below). `latest` passes through
-        // verbatim — `pick_version_for_add` normalizes it at the API
-        // boundary, steering a gated `latest` to the newest version
-        // clearing the minimumReleaseAge cutoff while keeping the plain
-        // dist-tag preference for a mature one.
+        // verbatim so `pick_version` can widen it (#681): a gated
+        // `latest` steers to the newest release clearing the
+        // minimumReleaseAge cutoff at or below the tag, and a mature one
+        // keeps the plain dist-tag preference. A `latest` pointing at a
+        // prerelease is refused rather than widened, like any other
+        // channel tag.
         let effective_range = if spec.range == "latest" {
             spec.range.clone()
         } else if let Some(tagged_version) = packument.dist_tags.get(&spec.range) {
@@ -488,7 +526,8 @@ pub(super) async fn update_manifest_for_add(
                          to proceed: unset `registry-supports-time-field` if it is on (it \
                          suppresses the full-packument fetch that carries `time`), check the \
                          registry config in .npmrc, add `{}` to `minimumReleaseAgeExclude`, or \
-                         set `minimumReleaseAge=0` to turn the window off for this project",
+                         set `minimumReleaseAge=0` to turn the window off for this project \
+                         (`--minimum-release-age=0` for this run alone)",
                         spec.name
                     ),
                     "cannot check the publish age of {}@{effective_range} — the registry served no publish time for any matching version",
@@ -502,8 +541,24 @@ pub(super) async fn update_manifest_for_add(
                 let (minutes, strict) = minimum_release_age
                     .as_ref()
                     .map_or((0, false), |m| (m.minutes, m.strict));
+                // Same remedies the resolver's `format_age_gate_help` offers on
+                // the install path — `add` used to send the user away with no
+                // way out at all.
                 return Err(miette!(
                     code = aube_codes::errors::ERR_AUBE_NO_MATURE_MATCHING_VERSION,
+                    // `spec.name` is already the REGISTRY identity here — an
+                    // aliased add carries the user-facing key in `spec.alias`
+                    // and writes `npm:{spec.name}@…` to the manifest — so it is
+                    // the right thing to name in an exclude remedy, unlike the
+                    // resolver's `task.name` (see `AgeGateDetails::registry_name`).
+                    help = format!(
+                        "to bypass for this run: `--minimum-release-age=<duration>` to shorten \
+                         the window (`0` turns it off), or \
+                         `--minimum-release-age-exclude={0}` to exempt just this package\n\
+                         to bypass persistently: shorten `minimumReleaseAge` in .npmrc (`0` \
+                         turns it off), or add `{0}` to `minimumReleaseAgeExclude`",
+                        spec.name
+                    ),
                     "no version of {} matching {effective_range} is older than {minutes} minute(s){}",
                     spec.name,
                     if strict {
@@ -1014,6 +1069,7 @@ mod tests {
     fn opts(save_dev: bool, save_optional: bool, save_peer: bool) -> AddManifestOptions {
         AddManifestOptions {
             save_dev,
+            setting_overrides: Vec::new(),
             save_exact: false,
             save_optional,
             save_peer,
@@ -1097,6 +1153,30 @@ mod tests {
         assert!(m.dev_dependencies.contains_key("is-odd"));
     }
 
+    #[test]
+    fn missing_package_hints_use_only_the_registry_the_name_routes_through() {
+        let corpus = Some("react\nlodash\nexpress\n");
+        let public = aube_registry::client::RegistryClient::new("https://registry.npmjs.org");
+        let private = aube_registry::client::RegistryClient::new("https://packages.example.test");
+
+        let public_error = package_not_found_error_for_registry_with_corpus(
+            &public,
+            "lodaszh".to_string(),
+            corpus,
+        );
+        assert_eq!(
+            public_error.to_string(),
+            "package not found: lodaszh; did you mean lodash?"
+        );
+
+        let private_error = package_not_found_error_for_registry_with_corpus(
+            &private,
+            "lodaszh".to_string(),
+            corpus,
+        );
+        assert_eq!(private_error.to_string(), "package not found: lodaszh");
+    }
+
     #[tokio::test]
     async fn offline_add_resolves_from_packument_cache() {
         let project = tempfile::tempdir().unwrap();
@@ -1140,6 +1220,7 @@ mod tests {
                 network_mode: aube_registry::NetworkMode::Offline,
                 save_catalog: None,
                 workspace_protocol_override: None,
+                setting_overrides: Vec::new(),
             },
             false,
         )
@@ -1198,6 +1279,7 @@ mod tests {
                 network_mode: aube_registry::NetworkMode::Offline,
                 save_catalog: None,
                 workspace_protocol_override: None,
+                setting_overrides: Vec::new(),
             },
             false,
         )

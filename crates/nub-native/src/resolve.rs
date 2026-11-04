@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use napi_derive::napi;
 
-use crate::tsconfig;
+use nub_tsconfig as tsconfig;
 
 const TS_PARENT_EXTS: [&str; 4] = [".ts", ".tsx", ".mts", ".cts"];
 

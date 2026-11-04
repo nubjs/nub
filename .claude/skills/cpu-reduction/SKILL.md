@@ -37,7 +37,7 @@ df -h ~/.cache                            # disk — worktree target/ dirs live 
 ps -Ao pid,ppid,pgid,%cpu,%mem,rss,etime,state,comm -r | head -40
 ```
 
-Load well above `hw.ncpu` with nothing building → §3. A build stuck on a lock, or `~/.cache` near full → §2.
+Load well above `hw.ncpu` with nothing building → §3. A build stuck on a lock, or `~/.cache` near full → §2. Start with `make build-status`: it prints which builds hold the machine-wide compile slots, who is queued behind them and for how long, token occupancy, and any build running outside the cap — a build sitting at `Compiling` with no CPU is queued behind the governor, not hung.
 
 ## 2. Old Rust builds — locks, orphans, disk
 
@@ -161,8 +161,8 @@ v8::internal::Isolate::CaptureAndSetErrorStack
 
 Standing instruction: kill anything not doing productive work, but have high confidence it is not in fact productive. **Never kill:**
 
-- Anything holding a listening socket — `lsof -nP -iTCP -sTCP:LISTEN | awk 'NR>1{print $2}' | sort -u`, intersect with candidates (dev servers, `fray-ui`, `agent-browser`).
-- `tmux` sessions (they host live `claude`/fray workers).
+- Anything holding a listening socket — `lsof -nP -iTCP -sTCP:LISTEN | awk 'NR>1{print $2}' | sort -u`, intersect with candidates (dev servers, the agent harness's own board/UI process, `agent-browser`).
+- `tmux` sessions (they host live `claude` / dispatched workers).
 - `claude` processes and anything whose PPID chains to one.
 - `node --inspect-brk` (a debugger may be attached).
 - Any `cargo`/`rustc` in a LIVE build tree (check the `ppid` chain).

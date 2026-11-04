@@ -58,13 +58,14 @@ impl<'a> PickResult<'a> {
 /// `minimum_release_age` to get today's ungated pick (dist-tag preference,
 /// then highest satisfying).
 ///
-/// A gated `latest` range is normalized to `*` here, at the API boundary,
-/// so no caller can reintroduce the bypass: [`pick_version`]'s internal
-/// dist-tag fallback turns `latest` into the tagged version's exact range,
-/// whose lenient fallback would admit a fresh publish — the very thing the
-/// gate exists to block. `*` keeps the dist-tag preference for a mature
-/// `latest`, steers a gated one to the newest version clearing the cutoff,
-/// and (unlike the tag) still resolves when `dist-tags.latest` is missing.
+/// A gated `latest` is steered to the newest version clearing the cutoff by
+/// [`pick_version`] itself, so `add` and full resolution get that behavior
+/// from one place. `add` used to normalize the range to `*` here at the API
+/// boundary instead; the widening moved down into `pick_version` (#681) both
+/// so the install path gets it — `dlx` synthesizes a literal `latest` range
+/// and had no fallback at all — and because `pick_version` bounds the
+/// fallback at the tagged version, where `*` could reach a HIGHER major the
+/// publisher had already untagged.
 pub fn pick_version_for_add<'a>(
     packument: &'a Packument,
     registry_name: &str,
@@ -72,11 +73,7 @@ pub fn pick_version_for_add<'a>(
     minimum_release_age: Option<&crate::MinimumReleaseAge>,
 ) -> PickResult<'a> {
     let cutoff = minimum_release_age.and_then(|m| m.cutoff());
-    let range = if range == "latest" && cutoff.is_some() {
-        "*"
-    } else {
-        range
-    };
+    let range = registry_alias_range(range);
     let strict = minimum_release_age.is_some_and(|m| m.strict);
     let exclude = minimum_release_age.map(|m| &m.exclude);
     let is_age_exempt = |ver: &str, parsed: Option<&node_semver::Version>| {
@@ -98,6 +95,20 @@ pub fn pick_version_for_add<'a>(
         strict,
         is_age_exempt,
     )
+}
+
+/// Return the version tail from an `npm:` alias spec. Resolution preprocesses
+/// this protocol before picking; report-only callers use this entry point
+/// directly, so normalize it here as well.
+fn registry_alias_range(range: &str) -> &str {
+    if let Some(rest) = range.strip_prefix("npm:") {
+        match rest.rfind('@') {
+            Some(at) if at > 0 => &rest[at + 1..],
+            _ => "latest",
+        }
+    } else {
+        range
+    }
 }
 
 /// Does `ver` clear `effective`, the publish-age cutoff that applies to it?
@@ -225,6 +236,25 @@ pub(crate) fn pick_version<'a>(
     strict: bool,
     is_age_exempt: impl Fn(&str, Option<&node_semver::Version>) -> bool,
 ) -> PickResult<'a> {
+    let passes_effective_cutoff = |ver: &str, effective: Option<&str>| {
+        version_clears_cutoff(packument, ver, effective, strict)
+    };
+
+    // A version's effective cutoff: exempt versions answer to the
+    // time-based wall (`exempt_cutoff`) only; everyone else answers to
+    // the merged `cutoff`.
+    let classify_cutoff = |ver: &str, parsed: Option<&node_semver::Version>| -> AgeVerdict {
+        let effective = if is_age_exempt(ver, parsed) {
+            exempt_cutoff
+        } else {
+            cutoff
+        };
+        classify_version_age(packument, ver, effective, strict)
+    };
+    let passes_cutoff = |ver: &str, parsed: Option<&node_semver::Version>| -> bool {
+        matches!(classify_cutoff(ver, parsed), AgeVerdict::Clears)
+    };
+
     // Handle dist-tag references. If the requested range is a tag
     // name and the packument has that tag, use the tagged version
     // as the effective range. Special case `latest`: some registries
@@ -260,30 +290,67 @@ pub(crate) fn pick_version<'a>(
             } else {
                 return PickResult::NoMatch;
             };
+            // A `latest` the cutoff blocks widens from the tagged version's
+            // exact range to everything at or below it, so the scan below can
+            // reach the newest release that *does* clear the cutoff (#681).
+            // Without this the tag narrows to a one-version range and the two
+            // modes fail in opposite directions: strict errors out with a
+            // mature release sitting right there, and lenient re-picks the
+            // very publish the gate blocked — it is the only candidate, so
+            // `fallback_lowest` is it — which is a silent bypass.
+            //
+            // pnpm 11 reaches the same outcome by a different route:
+            // `filterPkgMetadataByPublishDate` strips too-new versions from the
+            // packument and REPOPULATES each dist-tag to the highest surviving
+            // version before the tag lookup runs
+            // (`resolving/registry/pkg-metadata-filter/src/index.ts`). Two
+            // deliberate divergences from it:
+            //
+            // - **Bounded at the tagged version.** pnpm's repopulation scans
+            //   every surviving version for `latest`, so it can land ABOVE the
+            //   tag. `latest` is a pointer the publisher can move backwards —
+            //   ship 3.0.0, find it broken, tag a fresh 2.9.1 as `latest` — and
+            //   there the unbounded scan answers with the 3.0.0 they retracted.
+            //   `<=` keeps the fallback on the line they currently bless.
+            // - **`latest` only, and only when it points at a stable release.**
+            //   pnpm repopulates every tag, constrained to the same major and
+            //   the same prerelease-ness so a channel cannot leak into a stable
+            //   release. Expressing that pair of constraints as a semver range
+            //   is awkward, and the reported case is the unversioned request,
+            //   which is always `latest`. A blocked `foo@next` still fails.
+            //
+            // The remaining conditions are load-bearing:
+            //
+            // - A `latest` that points at a PRERELEASE is a channel pointer
+            //   too, and `<=` leaks straight through it: `<=3.0.0-beta.2`
+            //   admits a stable `2.9.0`, because npm's prerelease rule only
+            //   constrains prerelease CANDIDATES. That drops a full major onto
+            //   a line the publisher has moved off, so only a provably-stable
+            //   tag widens.
+            // - A tag that CLEARS the cutoff keeps the exact pin, so the
+            //   `locked` and dist-tag-preference branches below still see the
+            //   one-version range they always did. Widening unconditionally
+            //   would let a lockfile pin far below `latest` satisfy the range
+            //   and freeze the dep there.
+            // - `pick_lowest` (`resolution-mode=time-based`) is excluded: it
+            //   deliberately takes the FLOOR of the range, so a widened
+            //   `latest` would resolve to the oldest release ever published.
+            let effective_range = if range_str == "latest"
+                && !pick_lowest
+                && cutoff.is_some()
+                && !passes_cutoff(&effective_range, None)
+                && node_semver::Version::parse(&effective_range)
+                    .is_ok_and(|v| v.pre_release.is_empty())
+            {
+                format!("<={effective_range}")
+            } else {
+                effective_range
+            };
             match node_semver::Range::parse(normalize_range(&effective_range)) {
                 Ok(r) => r,
                 Err(_) => return PickResult::NoMatch,
             }
         }
-    };
-
-    let passes_effective_cutoff = |ver: &str, effective: Option<&str>| {
-        version_clears_cutoff(packument, ver, effective, strict)
-    };
-
-    // A version's effective cutoff: exempt versions answer to the
-    // time-based wall (`exempt_cutoff`) only; everyone else answers to
-    // the merged `cutoff`.
-    let classify_cutoff = |ver: &str, parsed: Option<&node_semver::Version>| -> AgeVerdict {
-        let effective = if is_age_exempt(ver, parsed) {
-            exempt_cutoff
-        } else {
-            cutoff
-        };
-        classify_version_age(packument, ver, effective, strict)
-    };
-    let passes_cutoff = |ver: &str, parsed: Option<&node_semver::Version>| -> bool {
-        matches!(classify_cutoff(ver, parsed), AgeVerdict::Clears)
     };
 
     // Prefer locked version if it satisfies and clears the cutoff.
@@ -448,6 +515,107 @@ pub(crate) fn range_resolves_via_dist_tag(packument: &Packument, range_str: &str
     packument.dist_tags.contains_key(range_str) || range_str == "latest"
 }
 
+/// Could a version the primer's age prune DROPPED be what the full
+/// packument picks for `range_str`? `packument` is the sparse seed and
+/// `picked_version` what `pick_version` chose from it.
+///
+/// The prune (`scripts/generate-primer.mjs`, `--prune-age-days`) keeps the
+/// highest version of every `major.minor` line (prereleases on their own
+/// line) and every dist-tag target, and drops other old versions. So a
+/// dropped version lies below the highest held version of a line the
+/// seed still holds, and a `^x` / `~x.y` pick, which lands on a line's
+/// highest, has nothing dropped above it. A range with an explicit upper
+/// bound (`<4.17.21` against lodash: 4.17.20 dropped, 4.16.6 held) can,
+/// and refetches.
+///
+/// Conservative wherever the seed cannot prove the pick: `pick_lowest`
+/// (the floor of a range is exactly what was dropped), a locked version
+/// the seed does not hold, and a deprecated pick (`outranks` prefers any
+/// live version, so a dropped live one anywhere in the range beats it)
+/// refetch outright, so does anything unparseable, and
+/// `Range::allows_any` overlaps bounds without npm's prerelease rule.
+pub(crate) fn sparse_pick_needs_refetch(
+    packument: &Packument,
+    picked_version: &str,
+    range_str: &str,
+    pick_lowest: bool,
+    locked: Option<&str>,
+) -> bool {
+    if pick_lowest || locked.is_some_and(|v| !packument.versions.contains_key(v)) {
+        return true;
+    }
+    let Ok(picked) = node_semver::Version::parse(picked_version) else {
+        return true;
+    };
+    // An exact pin the seed holds is the full packument's pick too.
+    if node_semver::Version::parse(range_str.trim().trim_start_matches(['=', 'v']))
+        .is_ok_and(|pinned| pinned == picked)
+    {
+        return false;
+    }
+    if packument
+        .versions
+        .get(picked_version)
+        .is_some_and(|meta| meta.deprecated.is_some())
+    {
+        return true;
+    }
+    let Ok(range) = node_semver::Range::parse(normalize_range(range_str)) else {
+        return true;
+    };
+    // Highest held version per line, keyed `(major, minor, prerelease)`.
+    let mut lines: std::collections::BTreeMap<(u64, u64, bool), node_semver::Version> =
+        std::collections::BTreeMap::new();
+    for v in packument
+        .versions
+        .keys()
+        .filter_map(|v| node_semver::Version::parse(v).ok())
+    {
+        let slot = lines
+            .entry((v.major, v.minor, !v.pre_release.is_empty()))
+            .or_insert_with(|| v.clone());
+        if v > *slot {
+            *slot = v;
+        }
+    }
+    let picked_line = (picked.major, picked.minor, !picked.pre_release.is_empty());
+    for (&(major, minor, pre), highest) in &lines {
+        if *highest <= picked {
+            continue;
+        }
+        // Where a dropped version of this line could sit above the pick.
+        // `allows_any` compares bounds only, so a prerelease line is
+        // consulted just when the range names a prerelease of that
+        // `major.minor` — npm's rule for admitting one at all.
+        let gap = if (major, minor, pre) == picked_line {
+            format!(">{picked} <{highest}")
+        } else if pre {
+            if !range_names_prerelease_of(range_str, major, minor) {
+                continue;
+            }
+            format!(">={major}.{minor}.0-0 <{highest}")
+        } else if highest.patch == 0 {
+            continue;
+        } else {
+            format!(">={major}.{minor}.0 <{highest}")
+        };
+        match node_semver::Range::parse(&gap) {
+            Ok(gap) if range.allows_any(&gap) => return true,
+            Ok(_) => {}
+            Err(_) => return true,
+        }
+    }
+    false
+}
+
+fn range_names_prerelease_of(range_str: &str, major: u64, minor: u64) -> bool {
+    range_str
+        .split(|c: char| c.is_whitespace() || c == '|')
+        .map(|token| token.trim_start_matches(['<', '>', '=', '~', '^', 'v']))
+        .filter_map(|token| node_semver::Version::parse(token).ok())
+        .any(|v| !v.pre_release.is_empty() && v.major == major && v.minor == minor)
+}
+
 /// Walk the packument's versions and return the highest non
 /// prerelease version string. Used as the `latest` tag fallback
 /// when the registry response lacks `dist-tags.latest`. Some
@@ -610,6 +778,18 @@ pub(crate) fn version_satisfies(version: &str, range_str: &str) -> bool {
             None => false,
         })
     })
+}
+
+/// Whether `range_str` parses as a semver range at all.
+///
+/// Distinct from [`version_satisfies`], which folds "does not parse"
+/// and "parses but does not match" into one `false`. Callers that must
+/// tell a RANGE from some other kind of tail — a `workspace:` locator
+/// naming a member directory, say — need the two apart. Shares the
+/// parse cache, so asking is as cheap as matching.
+#[inline]
+pub(crate) fn is_semver_range(range_str: &str) -> bool {
+    with_cached_range(normalize_range(range_str), |r| r.is_some())
 }
 
 /// npm / pnpm / yarn all treat an empty or whitespace-only version

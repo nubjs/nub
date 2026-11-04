@@ -1,10 +1,10 @@
 use super::{
     Location, NpmrcEdit, aube_config, is_npm_shared_key, resolve_aliases, setting_for_key,
 };
-use clap::Args;
+use aube_settings::meta as settings_meta;
 use miette::miette;
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct SetArgs {
     /// Setting key (canonical name or `.npmrc` alias).
     pub key: String,
@@ -12,39 +12,21 @@ pub struct SetArgs {
     /// Value to write. Stored verbatim after `key=`.
     pub value: String,
 
-    /// Shortcut for `--location project`.
-    #[arg(long, conflicts_with = "location")]
-    pub local: bool,
+    /// Use the user configuration instead of the project configuration.
+    #[usage(short = 'g', long, conflicts = "--local")]
+    pub global: bool,
 
-    /// Which config location to write to.
-    ///
-    /// Defaults to `user`. Writes land in `.npmrc` for the npm-shared
-    /// surface — per-host auth/cert templates, scoped registries, and
-    /// settings tagged `npmShared = true` in the settings registry
-    /// (`registry`, `proxy` / `https-proxy`, `engine-strict`,
-    /// `ignore-scripts`, etc.) — so npm and yarn read the same value.
-    /// Aube-only and pnpm-only settings, plus unknown keys, land in
-    /// aube's own config (`~/.config/aube/config.toml` at user scope,
-    /// `<cwd>/.config/aube/config.toml` at project scope) where
-    /// sibling tools don't see them.
-    ///
-    /// Dotted writes for aube map settings (`allowBuilds.<pkg>`,
-    /// `overrides.<pkg>`, …) edit one entry at a time. At project
-    /// scope (`--local`) they land in
-    /// `pnpm-workspace.yaml#<map>.<entry>` or
-    /// `package.json#aube.<map>.<entry>` if no workspace yaml exists,
-    /// the same place install reads from. User-scope dotted writes
-    /// for these maps error: aube only reads them per project.
-    #[arg(long, value_enum, default_value_t = Location::User)]
-    pub location: Location,
+    /// Use the project configuration (the default).
+    #[usage(long, conflicts = "--global")]
+    pub local: bool,
 }
 
 impl SetArgs {
     fn effective_location(&self) -> Location {
-        if self.local {
-            Location::Project
+        if self.global {
+            Location::User
         } else {
-            self.location
+            Location::Project
         }
     }
 }
@@ -80,6 +62,12 @@ pub fn set_project_scalar_to_workspace_yaml(
     key: &str,
     value: &str,
 ) -> miette::Result<Option<std::path::PathBuf>> {
+    // The same refusal [`set_value`] opens with. This seam is a SECOND entry to
+    // the write path, taken instead of that one under a pnpm incumbent, so a
+    // guard on only one of them leaves the key writable through the other.
+    if let Some(meta) = settings_meta::unsupported_for_key(key) {
+        return Err(reject_unsupported_setting(key, meta));
+    }
     // Object-typed (map) settings can't be written as a single scalar.
     if let Some(meta) = setting_for_key(key)
         && meta.type_ == "object"
@@ -104,6 +92,17 @@ pub(super) fn set_value(
     location: Location,
     report: bool,
 ) -> miette::Result<()> {
+    // 0. A setting the active embedder declares it does not consume. This has
+    //    to run FIRST and as its own step, because every route below would
+    //    otherwise write the key: `setting_for_key` no longer resolves it (the
+    //    embedder filter makes it absent), so it falls all the way through to
+    //    the free-form-unknown write at step 6 and lands verbatim in the user's
+    //    config — silently inert, and for a brand-named setting that means this
+    //    tool put the ENGINE's brand in their file.
+    if let Some(meta) = settings_meta::unsupported_for_key(key) {
+        return Err(reject_unsupported_setting(key, meta));
+    }
+
     // 1. Genuinely npm-shared keys (auth tokens, registries, npm
     //    scalars) keep their old `.npmrc` routing so npm/pnpm/yarn see
     //    the value. Everything else falls through to aube's own config.
@@ -258,7 +257,11 @@ fn write_npmrc(key: &str, value: &str, location: Location, report: bool) -> miet
     edit.set(&write_key, value);
     edit.save(&path)?;
     if report {
-        eprintln!("set {}={} ({})", write_key, value, path.display());
+        if super::is_protected_key(&write_key) {
+            eprintln!("set {}=(protected) ({})", write_key, path.display());
+        } else {
+            eprintln!("set {}={} ({})", write_key, value, path.display());
+        }
     }
     sweep_stale_aube_config(key, &aliases, location)?;
     Ok(())
@@ -280,7 +283,7 @@ fn sweep_stale_aube_config(
         return Ok(());
     };
     let config_path = match location {
-        Location::User | Location::Global => aube_config::user_aube_config_path()?,
+        Location::User => aube_config::user_aube_config_path()?,
         Location::Project => {
             aube_config::project_aube_config_path(&crate::dirs::project_root_or_cwd()?)
         }
@@ -298,6 +301,23 @@ fn sweep_stale_aube_config(
         edit.save(&config_path)?;
     }
     Ok(())
+}
+
+/// The refusal for a setting this embedder declares inert. The message echoes
+/// the spelling the user TYPED while the advice is looked up by canonical name,
+/// so an alias write is answered in the user's own words and still gets the
+/// host's pointer.
+fn reject_unsupported_setting(
+    key: &str,
+    meta: &aube_settings::meta::SettingMeta,
+) -> miette::Report {
+    let help = aube_settings::meta::unsupported_advice(meta.name).unwrap_or_default();
+    miette!(
+        code = aube_codes::errors::ERR_AUBE_CONFIG_SETTING_UNSUPPORTED,
+        help = help.to_string(),
+        "`{key}` is not a {} setting.",
+        aube_util::prog(),
+    )
 }
 
 fn reject_aube_map_key(key: &str, meta: &aube_settings::meta::SettingMeta) -> miette::Report {
@@ -318,7 +338,7 @@ fn reject_aube_map_key(key: &str, meta: &aube_settings::meta::SettingMeta) -> mi
 /// random scalars into a file other tools read.
 fn unknown_aube_config_target(location: Location) -> miette::Result<std::path::PathBuf> {
     match location {
-        Location::User | Location::Global => aube_config::user_config_write_path(),
+        Location::User => aube_config::user_config_write_path(),
         Location::Project => {
             aube_config::project_config_write_path(&crate::dirs::project_root_or_cwd()?)
         }
@@ -336,7 +356,7 @@ fn aube_config_target(
     meta: &aube_settings::meta::SettingMeta,
 ) -> miette::Result<std::path::PathBuf> {
     match location {
-        Location::User | Location::Global => aube_config::user_config_write_path(),
+        Location::User => aube_config::user_config_write_path(),
         Location::Project => {
             let cwd = crate::dirs::project_root_or_cwd()?;
             // Errors when the profile has no branded config file (e.g. nub);

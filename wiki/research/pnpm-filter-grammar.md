@@ -1,8 +1,8 @@
 # pnpm `--filter` grammar and resolution algorithm
 
-Research for implementing workspace `--filter` support in Nub's script runner. Source material is pnpm's actual TypeScript implementation read directly from `github.com/pnpm/pnpm` (commit on `main`, 2026-05-26).
+Research for implementing workspace `--filter` support in Nub's script runner. Source material is pnpm's TypeScript implementation, read directly from `github.com/pnpm/pnpm` (commit on `main`, 2026-05-26).
 
-Key source files read:
+Source files read:
 - `workspace/projects-filter/src/parseProjectSelector.ts` — the parser
 - `workspace/projects-filter/src/index.ts` — the resolution and graph-walk engine
 - `workspace/projects-filter/src/getChangedProjects.ts` — git-diff based selection
@@ -37,6 +37,8 @@ traversal_xdep ::= "^..."      (suffix variant: exclude the matched package itse
 
 ### All documented selector forms
 
+Every form pnpm's own help text documents: a bare or globbed package name, a path, a `{dir}` block, a `[ref]` diff block, the traversal prefixes and suffixes, and the `!` negation.
+
 | Syntax | Meaning |
 |--------|---------|
 | `foo` | Exact package name `foo` |
@@ -48,7 +50,7 @@ traversal_xdep ::= "^..."      (suffix variant: exclude the matched package itse
 | `..` | Package at parent directory |
 | `../foo` | Package at sibling directory |
 | `{./packages}` | All packages whose `rootDir` is a subdirectory of `./packages` (exact prefix match by default) |
-| `{./packages/*}` | Same but via glob match (only when `useGlobDirFiltering` is true — see §5) |
+| `{./packages/*}` | Same but via glob match (only when `useGlobDirFiltering` is true — see §4) |
 | `[origin/main]` | All packages with changed files since `origin/main` |
 | `[HEAD~2]` | All packages with changed files since 2 commits ago |
 | `foo...` | `foo` plus all its direct+transitive dependencies |
@@ -120,13 +122,13 @@ Name matching uses `@pnpm/config.matcher` (`createMatcher`), which compiles patt
 
 There are two modes, controlled by `useGlobDirFiltering`:
 
-**Default (exact prefix match):** Uses `isSubdir(pathStartsWith, parentDir)` — selects all packages whose `rootDir` is a subdirectory of (or equal to) the specified path. Treats `{./packages}` as a prefix, not a glob. This means `{./packages}` matches `packages/foo` and `packages/bar` but NOT `packages/foo/subpkg` unless `subpkg` is also a workspace member.
+**Default (exact prefix match):** Uses `isSubdir(pathStartsWith, parentDir)` — selects all packages whose `rootDir` is a subdirectory of (or equal to) the specified path, treating `{./packages}` as a prefix rather than a glob. So `{./packages}` matches `packages/foo` and `packages/bar` but NOT `packages/foo/subpkg` unless `subpkg` is also a workspace member.
 
-**Glob mode (`useGlobDirFiltering: true`):** Uses `micromatch.isMatch(parentDir, formattedFilter, { format: str => str.replace(/\/$/, '') })`. The filter is normalized: backslashes to forward-slashes, trailing slash removed. This is what enables `{./packages/*}` and `{./packages/**}` patterns. In glob mode, `{./packages}` (no glob) matches only the exact path (not subdirs), so `{./packages/*}` is needed to match direct children.
+**Glob mode (`useGlobDirFiltering: true`):** Uses `micromatch.isMatch(parentDir, formattedFilter, { format: str => str.replace(/\/$/, '') })`, with the filter normalized (backslashes to forward-slashes, trailing slash removed). This enables `{./packages/*}` and `{./packages/**}`. In glob mode `{./packages}` matches only the exact path, so `{./packages/*}` is needed to match direct children.
 
-**Which mode pnpm uses:** The `legacyDirFiltering` config option (deprecated) maps to `useGlobDirFiltering = !legacyDirFiltering`. In current pnpm the glob mode is the default. From the integration test `'select by parentDir using glob'` you can see `{./packages/*}` with glob enabled → selects `project-0` and `project-1`; but `{/project-5}` without glob → matches `project-5` and `project-5/packages/project-6` (prefix walk); with glob AND `{/project-5/**}` → same result.
+**Which mode pnpm uses:** The deprecated `legacyDirFiltering` config option maps to `useGlobDirFiltering = !legacyDirFiltering`; glob mode is the current default. From the integration test `'select by parentDir using glob'`: `{./packages/*}` with glob enabled selects `project-0` and `project-1`; `{/project-5}` without glob matches `project-5` and `project-5/packages/project-6` (prefix walk); with glob and `{/project-5/**}`, same result.
 
-**Implementation recommendation for Nub:** use glob mode (micromatch) by default; it's the current pnpm default and more powerful.
+**Recommendation for Nub:** use glob mode (micromatch) by default — the current pnpm default, and more powerful.
 
 ---
 
@@ -278,50 +280,53 @@ Identical to `--filter` but uses a dependency graph built with `ignoreDevDeps: t
 For a Nub implementation:
 
 **Parsing (one selector string → `ProjectSelector`):**
-- [ ] Strip leading `!` → `exclude`
-- [ ] Strip trailing `...` → `includeDependencies`; strip trailing `^` before `...` → `excludeSelf`
-- [ ] Strip leading `...` → `includeDependents`; strip leading `^` after `...` → `excludeSelf`
-- [ ] Regex parse remaining: `name{dir}[diff]` structure
-- [ ] `.` / `..` / `./x` / `../x` → path selector (no regex match needed)
+- Strip leading `!` → `exclude`
+- Strip trailing `...` → `includeDependencies`; strip trailing `^` before `...` → `excludeSelf`
+- Strip leading `...` → `includeDependents`; strip leading `^` after `...` → `excludeSelf`
+- Regex parse remaining: `name{dir}[diff]` structure
+- `.` / `..` / `./x` / `../x` → path selector (no regex match needed)
 
 **Name matching:**
-- [ ] Compile `*`-glob to regexp (`^pattern$` with `*` → `.*`)
-- [ ] Exact string → identity compare
-- [ ] Scope-elision: retry `@*/<pattern>` if unscoped pattern matches zero packages; select only if exactly one scoped match
+- Compile `*`-glob to regexp (`^pattern$` with `*` → `.*`)
+- Exact string → identity compare
+- Scope-elision: retry `@*/<pattern>` if unscoped pattern matches zero packages; select only if exactly one scoped match
 
 **Dir matching:**
-- [ ] Default: `isSubdir(filterPath, packageRootDir)` — all packages under the path
-- [ ] Glob mode: `micromatch.isMatch(packageRootDir, filterPath)` — normalize slashes, strip trailing `/`
+- Default: `isSubdir(filterPath, packageRootDir)` — all packages under the path
+- Glob mode: `micromatch.isMatch(packageRootDir, filterPath)` — normalize slashes, strip trailing `/`
 
 **Dependency graph:**
-- [ ] Build from workspace `package.json` manifests (deps + devDeps + optionalDeps + peerDeps)
-- [ ] Resolve `workspace:` specs by name within workspace
-- [ ] Resolve directory specs by absolute path
+- Build from workspace `package.json` manifests (deps + devDeps + optionalDeps + peerDeps)
+- Resolve `workspace:` specs by name within workspace
+- Resolve directory specs by absolute path
 
 **Traversal:**
-- [ ] `includeDependencies` → BFS forward (A→B = A depends on B, follow B's edges too)
-- [ ] `includeDependents` → BFS on reversed graph
-- [ ] Both → also BFS-forward from all collected dependents (adds their deps)
-- [ ] `excludeSelf` → don't include the entry package itself
-- [ ] Multiple include selectors → union
-- [ ] Exclude selectors → subtract from include union (if no include selectors, base = all packages)
+- `includeDependencies` → BFS forward (A→B = A depends on B, follow B's edges too)
+- `includeDependents` → BFS on reversed graph
+- Both → also BFS-forward from all collected dependents (adds their deps)
+- `excludeSelf` → don't include the entry package itself
+- Multiple include selectors → union
+- Exclude selectors → subtract from include union (if no include selectors, base = all packages)
 
 **Execution:**
-- [ ] Topological sort (Kahn's) → `T[][]` chunks
-- [ ] Run chunks sequentially, packages within chunk in parallel up to `--workspace-concurrency`
-- [ ] `--no-sort` → single alphabetical chunk (full parallel)
-- [ ] `--parallel` → same as `--no-sort --workspace-concurrency=Infinity`
-- [ ] `--reverse` → reverse chunk order
-- [ ] `--bail` (default true) → abort on first failure
-- [ ] `--if-present` → skip packages missing the script
+- Topological sort (Kahn's) → `T[][]` chunks
+- Run chunks sequentially, packages within chunk in parallel up to `--workspace-concurrency`
+- `--no-sort` → single alphabetical chunk (full parallel)
+- `--parallel` → same as `--no-sort --workspace-concurrency=Infinity`
+- `--reverse` → reverse chunk order
+- `--bail` (default true) → abort on first failure
+- `--if-present` → skip packages missing the script
 
 **Git diff:**
-- [ ] `git diff --name-only <ref> -- <workspaceDir>`, walk file paths up to project roots
-- [ ] `--test-pattern` globs classify files as test-only changes (exclude from triggering dependent selection)
-- [ ] `--changed-files-ignore-pattern` globs exclude files from change detection entirely
+- `git diff --name-only <ref> -- <workspaceDir>`, walk file paths up to project roots
+- `--test-pattern` globs classify files as test-only changes (exclude from triggering dependent selection)
+- `--changed-files-ignore-pattern` globs exclude files from change detection entirely
 
 ---
 
 ## Changelog
 
+Revision history, naming the pnpm source revision each pass was read against.
+
 - 2026-05-26 — Initial write-up. Source: pnpm/pnpm `main` branch, read directly via GitHub API.
+- 2026-08-28 — Converted the implementation checklist to plain bullets; the grammar is implemented in `crates/nub-core/src/workspace/filter.rs`.

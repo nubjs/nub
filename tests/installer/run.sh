@@ -109,6 +109,8 @@ test_install() {
         || throw 'file does not exist' "$dir/bin/nub"
     test -f "$dir/bin/nubx" \
         || throw 'file does not exist' "$dir/bin/nubx"
+    test -f "$dir/bin/nubr" \
+        || throw 'file does not exist' "$dir/bin/nubr"
     test -f "$dir/.nub-receipt" \
         || throw 'install receipt not written' "$dir/.nub-receipt"
 }
@@ -236,6 +238,104 @@ test_begin 'install for Fish with a custom dir containing a space (quoted PATH l
     # The dir must be quoted or fish word-splits the space into two PATH entries.
     grep -q -F "set -gx PATH \"$NUB_INSTALL_DIR/bin\" \$PATH" "$conf" \
         || throw 'fish PATH line not quoted for a spaced dir' "$conf"
+)
+test_end $?
+
+# Every case above installs into an EMPTY sandbox, which is why this whole class of
+# upgrade-over-an-existing-install defect was invisible here. `nub pm shim` hardlinks
+# the shim dir's <pm> at bin/nub; re-running the installer replaces bin/nub with a
+# new inode, so without a refresh those links keep serving the PREVIOUS version —
+# no error, no version warning.
+#
+# This case covers the PRE-MOVE location (`~/.nub/shims`). The shim dir moved to
+# ${XDG_DATA_HOME:-$HOME/.local/share}/nub/shims, and install.sh still refreshes
+# the old one so an install predating the move keeps working until the user's next
+# `nub pm shim` migrates it.
+test_begin 'reinstall re-links PRE-MOVE PM shims and creates no new ones'
+(
+    set -e
+    export SHELL=/bin/bash
+    export HOME=$(mksandboxdir)
+    # CONTAINMENT, not tidiness. refresh_pm_shims sweeps
+    # ${XDG_DATA_HOME:-$HOME/.local/share}/nub/shims, expanded at run time — so if
+    # the invoking shell exports XDG_DATA_HOME to a real path outside this
+    # sandbox, the case would `ln -f` the DEVELOPER'S live npm/yarn shims onto the
+    # throwaway binary installed below, which `trap clean EXIT` then deletes.
+    # Pinning it inside $HOME keeps every write in the sandbox.
+    export XDG_DATA_HOME="$HOME/.local/share"
+
+    touch "$HOME/.bashrc"
+    test_install "$HOME/.nub"
+
+    # Stands in for `nub pm shim`, which cannot run here — it would need the binary
+    # on PATH and writes to the real ~/.nub. Only two of the six names, so the
+    # refresh-only contract is testable: the other four must NOT appear afterwards.
+    mkdir -p "$HOME/.nub/shims"
+    ln "$HOME/.nub/bin/nub" "$HOME/.nub/shims/npm"
+    ln "$HOME/.nub/bin/nub" "$HOME/.nub/shims/yarn"
+
+    "$Dir/../../install.sh" \
+        || throw 'reinstall failed' "$HOME/.nub"
+
+    # `-ef` is same-device-and-inode, which is exactly the property the refresh has
+    # to restore. A size or mtime comparison would pass on a stale link to an
+    # identically-sized old binary.
+    test "$HOME/.nub/shims/npm" -ef "$HOME/.nub/bin/nub" \
+        || throw 'shim still points at the pre-upgrade binary' "$HOME/.nub/shims/npm"
+    test "$HOME/.nub/shims/yarn" -ef "$HOME/.nub/bin/nub" \
+        || throw 'shim still points at the pre-upgrade binary' "$HOME/.nub/shims/yarn"
+
+    for absent in npx pnpm pnpx yarnpkg; do
+        ! test -e "$HOME/.nub/shims/$absent" \
+            || throw 'installer created a shim the user never opted into' "$HOME/.nub/shims/$absent"
+    done
+
+    ! test -e "$HOME/.nub/shims.lock" \
+        || throw 'shim lock left behind' "$HOME/.nub/shims.lock"
+)
+test_end $?
+
+# The LIVE location. `nub pm shim` puts the dir under $XDG_DATA_HOME (or its
+# ~/.local/share default) — resolve_shim_dir's one rule — and a refresher that
+# misses it is SILENT: the shims keep executing the pre-upgrade inode with no
+# error at all, which is the failure this whole leg exists to prevent.
+test_begin 'reinstall re-links PM shims at the live XDG location'
+(
+    set -e
+    export SHELL=/bin/bash
+    export HOME=$(mksandboxdir)
+    export XDG_DATA_HOME="$HOME/xdg-data"
+
+    touch "$HOME/.bashrc"
+    test_install "$HOME/.nub"
+
+    # No ~/.nub/shims here: this is the fresh-install shape, where the shims live
+    # under XDG alone. Two of six names again, so refresh-only stays testable.
+    mkdir -p "$XDG_DATA_HOME/nub/shims"
+    ln "$HOME/.nub/bin/nub" "$XDG_DATA_HOME/nub/shims/npm"
+    ln "$HOME/.nub/bin/nub" "$XDG_DATA_HOME/nub/shims/yarn"
+
+    "$Dir/../../install.sh" \
+        || throw 'reinstall failed' "$HOME/.nub"
+
+    test "$XDG_DATA_HOME/nub/shims/npm" -ef "$HOME/.nub/bin/nub" \
+        || throw 'XDG shim still points at the pre-upgrade binary' "$XDG_DATA_HOME/nub/shims/npm"
+    test "$XDG_DATA_HOME/nub/shims/yarn" -ef "$HOME/.nub/bin/nub" \
+        || throw 'XDG shim still points at the pre-upgrade binary' "$XDG_DATA_HOME/nub/shims/yarn"
+
+    for absent in npx pnpm pnpx yarnpkg; do
+        ! test -e "$XDG_DATA_HOME/nub/shims/$absent" \
+            || throw 'installer created a shim the user never opted into' "$XDG_DATA_HOME/nub/shims/$absent"
+    done
+
+    # The lock sits beside the dir it guards (ShimLock::acquire), so the XDG leg's
+    # lock is under XDG — not $HOME/.nub — and must be cleaned up there.
+    ! test -e "$XDG_DATA_HOME/nub/shims.lock" \
+        || throw 'shim lock left behind' "$XDG_DATA_HOME/nub/shims.lock"
+
+    # The legacy dir must not be conjured into existence by the sweep.
+    ! test -e "$HOME/.nub/shims" \
+        || throw 'installer created a legacy shim dir the user never opted into' "$HOME/.nub/shims"
 )
 test_end $?
 

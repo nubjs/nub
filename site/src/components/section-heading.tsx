@@ -12,10 +12,10 @@ import { buttonVariants } from 'fumadocs-ui/components/ui/button';
 
    The query param is what makes a shared heading link render its own OG card:
    a `#fragment` never reaches the server, so `generateMetadata` can't see it,
-   but `?section=` does — see `docs/[[...slug]]/page.tsx`. The visible text
-   anchor stays a plain `#<slug>` for pure in-page scroll; only the copy action
-   emits the section URL, so navigating the page never triggers the dynamic
-   metadata path. Icons are inline SVG per the site's no-icon-dependency
+   but `?section=` does — `next.config.mjs` rewrites such a request to the
+   on-demand `docs/section/[[...slug]]` route, which reads it; the plain docs
+   route stays fully static. The visible text anchor stays a plain `#<slug>`
+   for pure in-page scroll; only the copy action emits the section URL. Icons are inline SVG per the site's no-icon-dependency
    convention (matching GitHubIcon/InfoGlyph elsewhere). */
 
 function cn(...parts: (string | undefined | false)[]): string {

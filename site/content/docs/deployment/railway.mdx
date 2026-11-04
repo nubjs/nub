@@ -48,7 +48,7 @@ Railway deploys the container on every push to the connected branch. A service d
 
 ## CLI deployment
 
-Install and authenticate the [Railway CLI](https://docs.railway.com/guides/cli), then upload the local source:
+Install and authenticate the [Railway CLI](https://docs.railway.com/cli), then upload the local source:
 
 ```bash
 railway login
@@ -72,8 +72,16 @@ curl --fail "$DOMAIN/alive"
 
 Railway supplies `PORT` when the project has not set one. The application must listen on `0.0.0.0:$PORT`; listening on localhost keeps it unreachable from the proxy.
 
-Add a health-check path in the service settings when the application has one. The container already runs as the non-root `node` user and forwards termination signals through Nub to Node.
+Add a health-check path in the service settings when the application has one. The container runs as the non-root `node` user and forwards termination signals through Nub to Node.
+
+<Callout>
+Read the [full docs](https://docs.railway.com/deployments/healthchecks) on docs.railway.com.
+</Callout>
 
 ## Prebuilt images
 
 Railway can also run an application image published by [GitHub Actions](/docs/deployment#github-actions-and-registries). Point the service at that image instead of the repository when builds need to happen once in CI rather than again on Railway.
+
+<Callout>
+Read the [full docs](https://docs.railway.com/services#deploying-a-public-docker-image) on docs.railway.com.
+</Callout>

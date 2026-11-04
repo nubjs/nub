@@ -32,6 +32,8 @@ on:
       - "tests/aube-bats/**"
       - "tests/aube-conformance/**"
   pull_request:
+    # PR CI is opt-in — request a run with `gh pr edit <n> --add-label ci`. Rationale: ci.yml.
+    types: [labeled]
     branches: [main]
     paths:
       - "vendor/aube/**"
@@ -46,8 +48,12 @@ on:
     # the path filters above and exercise the full workflow.
     - cron: "30 6 * * *"
 
+# The event name is part of the group so a trunk push cannot cancel the nightly
+# schedule run. rust-cache saves in a post-step that a cancelled job never reaches,
+# and 34 of the last 39 push:main runs were cancelled by the next push — so the
+# nightly is the one run guaranteed to refresh every trunk-scoped cache key.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions: {}
@@ -58,6 +64,7 @@ env:
 jobs:
   aube-parity:
     name: aube cargo test (ubuntu)
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     # ubuntu-latest only for now; macOS legs come later (10×-billed runners,
     # same budgeting rationale as release.yml's linux_only debug mode).
     runs-on: ubuntu-latest
@@ -73,9 +80,11 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      # Trunk writes, pull requests read — see the note in daily-driver.yml.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           workspaces: vendor/aube
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run aube's own test suite
         working-directory: vendor/aube
         run: cargo test --workspace
@@ -87,6 +96,7 @@ jobs:
 
   aube-parity-windows:
     name: aube cargo test (windows)
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     # UNLIKE the conformance Windows leg below, this one DOES gate pull
     # requests. The linker's Windows arm is a genuinely separate
     # implementation — NTFS junctions instead of symlinks, reparse-point
@@ -112,15 +122,18 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      # Trunk writes, pull requests read — see the note in daily-driver.yml.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           workspaces: vendor/aube
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run aube's own test suite
         working-directory: vendor/aube
         run: cargo test --workspace
 
   aube-bats-nub:
     name: aube bats, nub-adapted (ubuntu)
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     # Runs the curated install-family subset of aube's own bats e2e suite
     # against NUB's PM surface (tests/aube-bats/run.sh: an `aube` shim that
     # exec's nub, the offline Verdaccio registry, and the two skip lists —
@@ -136,7 +149,10 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      # Trunk writes, pull requests read — see the note in daily-driver.yml.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "24"
@@ -147,6 +163,7 @@ jobs:
 
   aube-conformance:
     name: lockfile conformance, real PMs (ubuntu)
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     # nub writes each foreign lockfile format in a hermetic sandbox and the
     # REAL pinned package manager judges it (tests/aube-conformance/run.sh):
     # pnpm/npm frozen-accept + zero-churn rewrite, bun frozen-accept, and the
@@ -164,7 +181,10 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      # Trunk writes, pull requests read — see the note in daily-driver.yml.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "24"
@@ -181,7 +201,7 @@ jobs:
     # Gated off pull_request to keep Windows runners off the PR hot path; runs on
     # push (main / aube-integration, on a vendor/aube bump) and the nightly
     # schedule. The Linux conformance legs above still gate every PR.
-    if: github.event_name != 'pull_request'
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (github.event_name != 'pull_request')
     # Windows leg of the conformance matrix (the maintainer 2026-06-10). Budgeted
     # subset: the pnpm + npm judge legs over the simple, peer-heavy, and
     # workspace fixtures — the signal is lockfile semantics crossed with
@@ -204,7 +224,10 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      # Trunk writes, pull requests read — see the note in daily-driver.yml.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
           node-version: "24"

@@ -1,6 +1,6 @@
 use crate::{Error, GitSource, LocalSource, RemoteTarballSource};
 use aube_util::path::normalize_lexical;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 
 /// Extract the alias name bun uses as the hoist key. bun's `packages`
@@ -33,11 +33,16 @@ pub(super) fn bun_key_to_alias_name(key: &str) -> String {
 /// The alias name wins as `LockedPackage.name` whenever it differs
 /// from the ident's name (npm-alias case). `alias_of` records the
 /// registry-side name only then.
+///
+/// `workspace_dirs` is the lockfile's own `workspaces` map keyed by
+/// member directory — the authoritative answer to "is this
+/// `workspace:` tail a directory?", which no lexical test can give.
 pub(super) fn classify_bun_ident(
     alias_name: &str,
     raw_name: &str,
     raw_version: &str,
     integrity: Option<&str>,
+    workspace_dirs: &BTreeSet<&str>,
 ) -> Result<(String, String, Option<LocalSource>, Option<String>), Error> {
     // npm-alias tail: bun writes the registry identity into the ident,
     // so the raw name is the real registry name and the alias key is
@@ -55,13 +60,20 @@ pub(super) fn classify_bun_ident(
         // `workspace:*` / `workspace:^` / `workspace:~` are version-
         // range selectors, not directory paths — a `PathBuf::from("*")`
         // would silently become `{project_root}/*` under any caller
-        // that does `project_root.join(link.path())`. Bun's `packages`
-        // entries for workspace members use root-relative paths like
-        // `workspace:packages/lib`, so keep slash-bearing tails as paths.
-        // Otherwise fall back to `.` so range selectors point at the
-        // workspace root and the caller resolves the actual location
-        // from the graph's workspace map.
-        let is_path = rel.starts_with('.') || rel.starts_with('/') || rel.contains('/');
+        // that does `project_root.join(link.path())`. A selector falls
+        // back to `.` so it points at the workspace root and the caller
+        // resolves the actual location from the graph's workspace map;
+        // a directory tail is kept verbatim.
+        //
+        // Ask the lockfile's own `workspaces` map first — a member at a
+        // TOP-LEVEL directory has no separator in its tail
+        // (`workspace:plugin`), so the lexical shape alone reads it as a
+        // selector and links the member to the workspace ROOT, an
+        // install that exits 0 having resolved the wrong package.
+        let is_path = workspace_dirs.contains(rel)
+            || rel.starts_with('.')
+            || rel.starts_with('/')
+            || rel.contains('/');
         let path_buf = std::path::PathBuf::from(if rel.is_empty() || !is_path { "." } else { rel });
         return Ok((
             name,
@@ -148,27 +160,6 @@ pub(super) fn classify_bun_ident(
     }
     // Plain registry pin.
     Ok((name, raw_version.to_string(), None, alias_of))
-}
-
-/// The protocol token of a version tail that reached
-/// [`classify_bun_ident`]'s registry-pin fall-through while carrying a
-/// `<token>:` protocol prefix — i.e. a source the classifier has no
-/// branch for (an unknown/future bun protocol, or a malformed spec like
-/// a `git+…` tail `parse_git_spec` rejected). A genuine registry pin is
-/// an exact semver version, which can never contain `:`, so a
-/// protocol-shaped tail here means "unresolvable from this lockfile",
-/// not "registry". Consulted only under `strict_unsupported_source`;
-/// the lenient default keeps the historical reclassify-to-registry
-/// behavior without ever calling this.
-pub(super) fn unrecognized_protocol(raw_version: &str) -> Option<&str> {
-    let token = &raw_version[..raw_version.find(':')?];
-    let mut chars = token.chars();
-    if !chars.next()?.is_ascii_alphabetic() {
-        return None;
-    }
-    chars
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
-        .then_some(token)
 }
 
 pub(super) fn rebase_workspace_scoped_local_source(

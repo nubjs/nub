@@ -42,7 +42,7 @@ import { fileURLToPath } from "node:url";
 // The #327 ghost-carve-out classifier is shared with scripts/ci-watch.ts — one
 // source of truth for "is this check a ghost / are the required checks green,
 // ignoring ghosts" so the merger and the watcher never diverge on merge-safety.
-import { classifyRollup, verdictForBuckets } from "./lib/ci-rollup.ts";
+import { CI_GATE_CHECK, classifyRollup, verdictForBuckets } from "./lib/ci-rollup.ts";
 import type { RollupItem } from "./lib/ci-rollup.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -170,7 +170,7 @@ function prState(pr: number): { state: string; mergeable: string; rollup: Rollup
 // or a non-required check like the workflow_dispatch-only Pullfrog leg, is never
 // one of these names, so it lands in the non-blocking ghost bucket). Merging
 // before the gate is present + green would merge a PR whose heavy matrix never ran.
-const REQUIRED_GATE = "CI gate";
+const REQUIRED_GATE = CI_GATE_CHECK;
 const REQUIRED_CHECKS = new Set([REQUIRED_GATE]);
 
 // THE single source of truth for "may this PR be merged right now?" — used by

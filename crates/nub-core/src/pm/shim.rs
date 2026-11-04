@@ -1,6 +1,6 @@
 //! The PM-shim library core: everything `nub pm shim` / `nub pm unshim` and the
 //! argv0 shim dispatch need, short of argv parsing and the final exec (the CLI
-//! owns those). Spec: `wiki/research/package-manager-shims.md` (mechanism +
+//! owns those). Spec: `package-manager-shims` (no such document) (mechanism +
 //! strict-by-default agreement check, both ratified 2026-06-09).
 //!
 //! Five concerns live here:
@@ -16,6 +16,7 @@
 //! under `$XDG_CACHE_HOME/nub`: a shim is an installation the user opted into,
 //! and wiping a cache must never silently remove entries their PATH points at.
 
+use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::fmt;
 use std::io::Write as _;
@@ -99,6 +100,265 @@ impl ShimName {
 /// Matched against the FIRST argv token verbatim; a flag before the verb
 /// (`npm --yes create x`) is not recognized — strictness errs toward refusing.
 const TRANSPARENT_VERBS: [&str; 4] = ["init", "create", "dlx", "exec"];
+
+/// npm's registry and account verbs, aliases included: they talk to the
+/// registry or the user's credentials and never touch the project's lockfile or
+/// node_modules. Absent: `publish`/`pack`, which pack THIS project — npm leaves
+/// pnpm's `workspace:` and `catalog:` specs unrewritten, so a cross-PM publish
+/// ships a broken manifest — `version`/`pkg`, which write package.json, and
+/// `star`, which npm 11 dropped: npm expands a unique prefix, so `npm star` is
+/// now `npm start`. npm never runs a project script for an unknown name, so a
+/// verb missing from an older npm (`trust`) only errors.
+const NPM_REGISTRY_VERBS: [&str; 32] = [
+    "access",
+    "adduser",
+    "author",
+    "bugs",
+    "deprecate",
+    "dist-tag",
+    "dist-tags",
+    "docs",
+    "find",
+    "home",
+    "info",
+    "issues",
+    "login",
+    "logout",
+    "ogr",
+    "org",
+    "owner",
+    "ping",
+    "profile",
+    "repo",
+    "s",
+    "se",
+    "search",
+    "show",
+    "team",
+    "token",
+    "trust",
+    "undeprecate",
+    "unpublish",
+    "v",
+    "view",
+    "whoami",
+];
+
+/// The subset pnpm 8 through 11 all treat as builtins: 8–10 forward them to npm
+/// (`pnpm/src/pnpm.ts`'s passthrough switch) and 11 implements them or rejects
+/// them as not implemented. Unlike npm, pnpm runs a same-named package.json
+/// script for a name it does not know, so a verb any of those majors lacks
+/// (`author`, `find`, `org`) would run project code and stays strict.
+const PNPM_REGISTRY_VERBS: [&str; 23] = [
+    "access",
+    "adduser",
+    "bugs",
+    "deprecate",
+    "dist-tag",
+    "docs",
+    "info",
+    "login",
+    "logout",
+    "owner",
+    "ping",
+    "profile",
+    "repo",
+    "s",
+    "se",
+    "search",
+    "show",
+    "team",
+    "token",
+    "unpublish",
+    "v",
+    "view",
+    "whoami",
+];
+
+/// The opt-in marker `nub pm shim --route-installs` leaves in the shim dir.
+/// While it is present, the `npm` shim runs the install verbs on nub's
+/// engine ([`npm_install_route`]); every other invocation keeps the ratified
+/// matrix above. A file rather than config so the opt-in lives and dies with
+/// the shims: `nub pm unshim` removes the dir and the routing with it, and a
+/// project checkout carries nothing.
+pub const ROUTE_INSTALLS_MARKER: &str = ".route-installs";
+
+/// Whether the shim dir carries the [`ROUTE_INSTALLS_MARKER`].
+pub fn route_installs_enabled(shim_dir: &Path) -> bool {
+    shim_dir.join(ROUTE_INSTALLS_MARKER).is_file()
+}
+
+/// Write or remove the [`ROUTE_INSTALLS_MARKER`]. Idempotent either way.
+pub fn set_route_installs(shim_dir: &Path, on: bool) -> Result<()> {
+    let marker = shim_dir.join(ROUTE_INSTALLS_MARKER);
+    if on {
+        std::fs::create_dir_all(shim_dir)
+            .with_context(|| format!("creating shim dir {}", shim_dir.display()))?;
+        std::fs::write(&marker, "").with_context(|| format!("writing {}", marker.display()))?;
+    } else if marker.is_file() {
+        std::fs::remove_file(&marker).with_context(|| format!("removing {}", marker.display()))?;
+    }
+    Ok(())
+}
+
+/// Which npm install verb the shim is routing: `ci` (frozen, node_modules
+/// removed first — `nub ci`) or a bare `install` (the lockfile is updated on
+/// drift — `nub install --no-frozen-lockfile`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NpmInstallVerb {
+    Ci,
+    Install,
+}
+
+/// An `npm ci` / `npm install` the shim runs on nub's engine, with npm's
+/// flags translated to the engine's knobs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NpmEngineInstall {
+    pub verb: NpmInstallVerb,
+    /// `--ignore-scripts[=bool]` as given on the command line; `None` when
+    /// absent, so the caller can fall back to npm's config
+    /// ([`npm_ignore_scripts_configured`]) — the command line outranks it.
+    pub ignore_scripts: Option<bool>,
+    /// Dev dependencies effectively omitted: `--omit=dev`, `--production`,
+    /// `--only=prod`, or `NODE_ENV=production`, unless `--include=dev` or
+    /// `--production=false` takes them back. npm also hands lifecycle
+    /// scripts `NODE_ENV=production` exactly then.
+    pub prod: bool,
+    /// Optional dependencies effectively omitted: `--omit=optional`,
+    /// `--no-optional`, `--optional=false`, unless `--include=optional`.
+    pub no_optional: bool,
+}
+
+/// npm's boolean spellings: a bare flag is `true`, `=true`/`=1` and
+/// `=false`/`=0` are explicit; anything else is not a boolean npm accepts
+/// here, and the caller falls through.
+fn npm_bool(value: Option<&str>) -> Option<bool> {
+    match value {
+        None | Some("true") | Some("1") => Some(true),
+        Some("false") | Some("0") => Some(false),
+        _ => None,
+    }
+}
+
+/// Classify an `npm` argv for install routing. Pure over the argv, like
+/// [`decide`]. `Some` only for the install verbs with no positional and no
+/// flag outside the translated set below; anything else — `npm install
+/// react`, `--legacy-peer-deps`, `--workspace`, `--prefix`, an unknown flag
+/// or an unknown value — is `None`, and the caller hands the argv to the real
+/// npm as it always did. Falling through on an unmapped flag costs the
+/// speedup, never the result.
+///
+/// The dependency axis follows npm's own contract: `--omit` and
+/// `--include` accumulate, `include` wins over `omit` whatever the order,
+/// `NODE_ENV=production` is an ambient `omit=dev` that `--include=dev` or
+/// `--production=false` overrides, and `omit=peer` is not something the
+/// engine does, so it falls through. Ignored, because they shape npm's
+/// output or its own cache rather than the tree: `--audit`, `--fund`,
+/// `--prefer-offline`, `--loglevel`, `--silent`, `--quiet`, `-s`, `-q`,
+/// `-d`/`-dd`/`-ddd`, `--progress`, `--color`, `--foreground-scripts`.
+pub fn npm_install_route(args: &[String], node_env_production: bool) -> Option<NpmEngineInstall> {
+    let mut verb: Option<NpmInstallVerb> = None;
+    let mut ignore_scripts: Option<bool> = None;
+    let (mut omit_dev, mut include_dev) = (node_env_production, false);
+    let (mut omit_optional, mut include_optional) = (false, false);
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        let (flag, value) = match arg.split_once('=') {
+            Some((f, v)) => (f, Some(v)),
+            None => (arg, None),
+        };
+        // `--omit dev` and `--loglevel warn`: the value as the next token
+        // when it was not attached.
+        let take_value = |i: &mut usize| -> Option<String> {
+            match value {
+                Some(v) => Some(v.to_string()),
+                None => {
+                    *i += 1;
+                    args.get(*i).cloned()
+                }
+            }
+        };
+        match flag {
+            "--ignore-scripts" => ignore_scripts = Some(npm_bool(value)?),
+            "--production" | "--prod" => {
+                if npm_bool(value)? {
+                    omit_dev = true;
+                } else {
+                    include_dev = true;
+                }
+            }
+            "--only" => match take_value(&mut i)?.as_str() {
+                "prod" | "production" => omit_dev = true,
+                _ => return None,
+            },
+            "--omit" => match take_value(&mut i)?.as_str() {
+                "dev" => omit_dev = true,
+                "optional" => omit_optional = true,
+                _ => return None,
+            },
+            "--include" => match take_value(&mut i)?.as_str() {
+                "dev" => include_dev = true,
+                "optional" => include_optional = true,
+                "prod" => {}
+                _ => return None,
+            },
+            "--no-optional" => omit_optional = true,
+            "--optional" => {
+                if npm_bool(value)? {
+                    include_optional = true;
+                } else {
+                    omit_optional = true;
+                }
+            }
+            "--audit" | "--fund" | "--prefer-offline" | "--progress" | "--foreground-scripts" => {
+                npm_bool(value)?;
+            }
+            "--loglevel" => {
+                take_value(&mut i)?;
+            }
+            "--no-audit" | "--no-fund" | "--silent" | "--quiet" | "-s" | "-q" | "-d" | "-dd"
+            | "-ddd" | "--no-progress" | "--color" | "--no-color" => {}
+            _ if flag.starts_with('-') => return None,
+            // npm's own alias table for the two verbs, `lib/utils/cmd-list.js`
+            // (npm 12.0.2) — the misspellings are npm's, not ours.
+            "ci" | "clean-install" | "ic" | "install-clean" | "isntall-clean" if verb.is_none() => {
+                verb = Some(NpmInstallVerb::Ci);
+            }
+            "install" | "add" | "i" | "in" | "ins" | "inst" | "insta" | "instal" | "isnt"
+            | "isnta" | "isntal" | "isntall"
+                if verb.is_none() =>
+            {
+                verb = Some(NpmInstallVerb::Install)
+            }
+            // A second positional is a package spec (`npm install react`) or
+            // a verb that is not an install.
+            _ => return None,
+        }
+        i += 1;
+    }
+    Some(NpmEngineInstall {
+        verb: verb?,
+        ignore_scripts,
+        prod: omit_dev && !include_dev,
+        no_optional: omit_optional && !include_optional,
+    })
+}
+
+/// npm's effective `ignore-scripts` outside the command line: the
+/// environment (`npm_config_ignore_scripts`, any letter case, as npm reads
+/// it) outranks the project `.npmrc`, which outranks the user's. A routed
+/// install honors it because npm would have, and the routed path otherwise
+/// runs every build script.
+pub fn npm_ignore_scripts_configured(project_root: &Path) -> bool {
+    if let Some((_, v)) =
+        std::env::vars().find(|(k, _)| k.eq_ignore_ascii_case("npm_config_ignore_scripts"))
+    {
+        return matches!(v.trim(), "true" | "1");
+    }
+    crate::workspace::scripts::npmrc_value(project_root, "ignore-scripts")
+        .is_some_and(|v| matches!(v.as_str(), "true" | "1"))
+}
 
 /// Whether this shim invocation was spawned by an already-running package
 /// manager (a nested call), versus typed by the user at a shell (a top-level
@@ -235,22 +495,27 @@ pub enum ShimDecision {
 ///     user's global prefix and never the project's lockfile/node_modules, so the
 ///     refusal's whole rationale ("a competing lockfile and node_modules here")
 ///     does not apply. The project pin is project-scoped; a global op is not.
-///     `global` is computed from the argv by [`is_global_invocation`].
+///     `global` is computed from the argv by [`is_global_invocation`];
+///   - pinned + name mismatch + a registry or account verb (`npm login`,
+///     `npm whoami`, `npm view`) → fall through (2026-10-21), for the same
+///     reason: it talks to the registry, never to this project's dependency
+///     tree. The caller folds [`is_registry_invocation`] into `outside_project`
+///     alongside `global`.
 pub fn decide(
     invoked: ShimName,
     pin: &PinState,
     first_arg: Option<&str>,
     nesting: Nesting,
-    global: bool,
+    outside_project: bool,
 ) -> ShimDecision {
     // A nub-pinned project: nub is the manager. Foreign-PM shims refuse and
-    // redirect to nub, with the same transparent/nested/global escapes a
-    // sibling-PM mismatch gets (a `npm create vite`, a nested lifecycle call, or
-    // a global install still flows to the system PM rather than breaking).
+    // redirect to nub, with the same transparent/nested/outside-project escapes
+    // a sibling-PM mismatch gets (a `npm create vite`, a nested lifecycle call,
+    // a global install or an `npm login` still reaches the system PM).
     if let PinState::NubPinned { provenance } = pin {
         let transparent = invoked.always_transparent()
             || first_arg.is_some_and(|verb| TRANSPARENT_VERBS.contains(&verb));
-        return if transparent || nesting == Nesting::Nested || global {
+        return if transparent || nesting == Nesting::Nested || outside_project {
             ShimDecision::FallThrough { invoked }
         } else {
             ShimDecision::RefuseNubPinned {
@@ -274,12 +539,13 @@ pub fn decide(
     // A name mismatch: transparent verbs always escape; a NESTED invocation
     // (spawned by a running PM, e.g. a pnpm postinstall calling `npm`) escapes
     // too — refusing there breaks an install the user issued at one layer up,
-    // never typed `npm` for, and can't fix from the failing command; a GLOBAL op
-    // escapes too — it writes the global prefix, not this project. Only a
-    // top-level, non-transparent, project-scoped mismatch stays strict.
+    // never typed `npm` for, and can't fix from the failing command; an op
+    // OUTSIDE the project escapes too — a global op writes the global prefix, a
+    // registry verb the registry. Only a top-level, non-transparent,
+    // project-scoped mismatch stays strict.
     let transparent = invoked.always_transparent()
         || first_arg.is_some_and(|verb| TRANSPARENT_VERBS.contains(&verb));
-    if transparent || nesting == Nesting::Nested || global {
+    if transparent || nesting == Nesting::Nested || outside_project {
         ShimDecision::FallThrough { invoked }
     } else {
         ShimDecision::Refuse {
@@ -316,6 +582,29 @@ pub fn is_global_invocation(invoked: ShimName, args: &[String]) -> bool {
         // add`); it has no `-g` flag, and Berry dropped global entirely. Only
         // the FIRST token counts — a later `global` is an operand.
         ShimName::Yarn | ShimName::Yarnpkg => args.first().is_some_and(|a| a == "global"),
+    }
+}
+
+/// Whether this shim invocation is a registry or account command — `npm login`,
+/// `npm whoami`, `pnpm view react` — which reads and writes the registry and
+/// the user's credentials, never this project's lockfile or node_modules. Like
+/// [`is_global_invocation`], it lets a mismatch fall through: refusing
+/// `npm login` in a pnpm project only to suggest `pnpm login`, which pnpm 10
+/// hands straight back to npm, guards nothing. Matched on the first argv token
+/// verbatim, as [`TRANSPARENT_VERBS`] is, so a flag before the verb or an
+/// abbreviation npm would expand (`npm whoa`) still refuses. yarn is never a
+/// registry invocation: classic and Berry each run a project script for the
+/// other's registry syntax (`yarn login` vs `yarn npm login`), and the shim
+/// cannot tell which one the system yarn is.
+pub fn is_registry_invocation(invoked: ShimName, args: &[String]) -> bool {
+    let Some(verb) = args.first().map(String::as_str) else {
+        return false;
+    };
+    match invoked {
+        ShimName::Npm => NPM_REGISTRY_VERBS.contains(&verb),
+        ShimName::Pnpm => PNPM_REGISTRY_VERBS.contains(&verb),
+        // The runner binaries are transparent already.
+        ShimName::Npx | ShimName::Pnpx | ShimName::Yarn | ShimName::Yarnpkg => false,
     }
 }
 
@@ -382,11 +671,139 @@ const PM_SHIM_NAMES: [&str; 6] = ["npm", "npx", "pnpm", "pnpx", "yarn", "yarnpkg
 /// while the reachability path reads as "the PM set"; they are now identical.
 pub const SHIM_NAMES: [&str; 6] = PM_SHIM_NAMES;
 
-/// `~/.nub/shims` — sibling of `install.sh`'s `~/.nub/bin`.
+/// `$XDG_DATA_HOME/nub/shims`, else `%LOCALAPPDATA%\nub\shims` on Windows, else
+/// `~/.local/share/nub/shims` — see [`resolve_shim_dir`] for the one rule.
 pub fn shim_dir() -> Result<PathBuf> {
-    dirs_next::home_dir()
-        .map(|h| h.join(".nub").join("shims"))
-        .context("cannot locate the home directory for ~/.nub/shims")
+    let home = dirs_next::home_dir()
+        .context("cannot locate the home directory for the package-manager shims")?;
+    Ok(resolve_shim_dir(
+        &home,
+        xdg_data_home().as_deref(),
+        local_app_data().as_deref(),
+        SHIMS_LEAF,
+    ))
+}
+
+/// Every directory an `unshim` must clear, not just the one [`resolve_shim_dir`]
+/// picks right now.
+///
+/// Removal cannot use the resolution rule. Resolution answers "where do shims go
+/// for THIS process", and it depends on `XDG_DATA_HOME` — so a user who installed
+/// with the variable set and unshimmed from a shell without it got "already gone"
+/// and kept six orphaned shim binaries on disk, with the PATH line stripped so
+/// nothing pointed at them any more. Sweeping every candidate makes the removal
+/// idempotent under either root, and under a change of root between the two runs.
+///
+/// The one case this still cannot cover is a CUSTOM `XDG_DATA_HOME` that is unset
+/// by the time unshim runs: that path is unknowable, so the XDG default is
+/// included as the best available guess. In practice the variable is exported
+/// from the user's own profile and is set in both runs.
+pub fn shim_dirs_for_removal(
+    home: &Path,
+    xdg_data: Option<&Path>,
+    local_app_data: Option<&Path>,
+    leaf: &str,
+) -> Vec<PathBuf> {
+    let mut dirs = vec![resolve_shim_dir(home, xdg_data, local_app_data, leaf)];
+    for candidate in [
+        // The PRE-MOVE location. An unshim has to clean up an install made before
+        // the shim dir moved, or those binaries stay on disk forever with their
+        // PATH line stripped.
+        legacy_shim_dir(home, leaf),
+        // The XDG default, for a custom XDG_DATA_HOME that was set at install and
+        // is unset now — the resolution above cannot name that path.
+        home.join(".local").join("share").join("nub").join(leaf),
+    ] {
+        if !dirs.contains(&candidate) {
+            dirs.push(candidate);
+        }
+    }
+    dirs
+}
+
+/// [`shim_dirs_for_removal`] for the PM shims, with the environment read.
+pub fn pm_shim_dirs_for_removal() -> Result<Vec<PathBuf>> {
+    let home = dirs_next::home_dir()
+        .context("cannot locate the home directory for the package-manager shims")?;
+    Ok(shim_dirs_for_removal(
+        &home,
+        xdg_data_home().as_deref(),
+        local_app_data().as_deref(),
+        SHIMS_LEAF,
+    ))
+}
+
+/// The `<leaf>` basename for each shim family.
+pub(crate) const SHIMS_LEAF: &str = "shims";
+
+/// [`SHIMS_LEAF`] for callers outside this crate (the CLI's migration path).
+pub const SHIMS_LEAF_PUBLIC: &str = SHIMS_LEAF;
+
+/// `$XDG_DATA_HOME`, ignoring an empty value the way every other XDG read here
+/// does (an exported-but-empty variable means "unset", not "the root").
+///
+/// Read on EVERY platform, deliberately. An explicitly-set `XDG_DATA_HOME` wins
+/// on Windows too, matching `node::discovery::cache_dir` ("an explicit
+/// `XDG_CACHE_HOME` still wins everywhere"), `pm_engine::nub_data_dir_from`, and
+/// the tools nub sits beside — pnpm's `getDataDir` reads it above its
+/// darwin/win32 switch, and corepack reads `XDG_CACHE_HOME` above `LOCALAPPDATA`.
+/// The platform only ever supplies the FALLBACK default.
+pub(crate) fn xdg_data_home() -> Option<PathBuf> {
+    std::env::var_os("XDG_DATA_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+/// `%LOCALAPPDATA%`, the Windows fallback default when no XDG variable is set.
+pub(crate) fn local_app_data() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Where a shim family lives, with the environment made explicit (the testable
+/// body of [`shim_dir`] / [`crate::node::shim::node_shim_dir`]).
+///
+/// ONE rule, in the shape every comparable tool uses — explicit XDG first, then
+/// the platform default:
+///
+/// 1. `$XDG_DATA_HOME/nub/<leaf>` when that variable is set, on any platform
+/// 2. `%LOCALAPPDATA%\nub\<leaf>` on Windows
+/// 3. `~/.local/share/nub/<leaf>` everywhere else
+///
+/// There is deliberately NO "keep an existing `~/.nub/<leaf>` if you find one"
+/// branch. That rule bought migration-freedom and cost a permanent second
+/// location every consumer had to know about — two PATH-block variants, a
+/// widened strip marker, multi-candidate removal, and a dual sweep in three
+/// installers. nub is pre-1.0 and takes breaking changes between minor versions,
+/// so the shim dir MOVES once and the install path migrates it
+/// ([`legacy_shim_dir`]) instead of the codebase carrying both forever.
+///
+/// macOS gets `~/.local/share`, not `~/Library`: nub already puts its cache in
+/// `~/.cache/nub` and its config in `~/.config/nub` on every unix, and uv and
+/// mise do the same. pnpm is the outlier here, not us.
+pub(crate) fn resolve_shim_dir(
+    home: &Path,
+    xdg_data: Option<&Path>,
+    local_app_data: Option<&Path>,
+    leaf: &str,
+) -> PathBuf {
+    if let Some(xdg) = xdg_data {
+        return xdg.join("nub").join(leaf);
+    }
+    if cfg!(windows)
+        && let Some(local) = local_app_data
+    {
+        return local.join("nub").join(leaf);
+    }
+    home.join(".local").join("share").join("nub").join(leaf)
+}
+
+/// The pre-move `~/.nub/<leaf>` location. Retained ONLY so the install path can
+/// migrate it and the removal sweep can still clean it up; nothing resolves here
+/// any more.
+pub(crate) fn legacy_shim_dir(home: &Path, leaf: &str) -> PathBuf {
+    home.join(".nub").join(leaf)
 }
 
 /// What happened to one shim entry during [`install_shims`].
@@ -506,6 +923,26 @@ pub fn install_shims(nub_binary: &Path) -> Result<Vec<InstalledShim>> {
     install_shims_into(&shim_dir()?, nub_binary)
 }
 
+/// Clear a pre-move `~/.nub/<leaf>` install, if one is there.
+///
+/// The shim dir moved out of `~/.nub` (see [`resolve_shim_dir`]). Installing
+/// without clearing the old one leaves TWO shim dirs on PATH: the stale one
+/// still shadows `npm`/`pnpm`/`yarn`, still points at the pre-upgrade binary,
+/// and — because it sits earlier in PATH for anyone whose profile carries both
+/// blocks — wins. Removing it is what makes the move a migration rather than a
+/// silent duplicate.
+///
+/// Returns the dir if it removed one, so the CLI can tell the user their shims
+/// moved. Best-effort on the profile block: the dir is what shadows commands.
+pub fn migrate_legacy_shim_dir(home: &Path, leaf: &str) -> Result<Option<PathBuf>> {
+    let legacy = legacy_shim_dir(home, leaf);
+    if !legacy.exists() {
+        return Ok(None);
+    }
+    remove_shims_from(&legacy)?;
+    Ok(Some(legacy))
+}
+
 /// [`install_shims`] with an explicit target dir (the testable body).
 ///
 /// Replacement is remove-then-link, NOT atomic: between the two syscalls a
@@ -586,15 +1023,41 @@ pub(crate) fn install_named_shims(
     Ok(report)
 }
 
-/// Delete the shim dir. Returns whether it existed (false = already clean).
-/// Removing the dir that holds the RUNNING nub hardlink is fine on Unix — the
-/// inode outlives its last name for as long as the process runs.
-pub fn remove_shims() -> Result<bool> {
-    remove_shims_from(&shim_dir()?)
+/// Delete the shim dirs. Removing the dir that holds the RUNNING nub hardlink is
+/// fine on Unix — the inode outlives its last name for as long as the process
+/// runs.
+///
+/// Returns the directories actually removed (empty = already clean), so the CLI
+/// can name them (an XDG
+/// install unshimmed from a shell without the variable would otherwise be
+/// reported as "already gone" while its binaries stayed on disk — see
+/// [`shim_dirs_for_removal`]).
+pub fn remove_shims() -> Result<Vec<PathBuf>> {
+    let mut removed = Vec::new();
+    for dir in pm_shim_dirs_for_removal()? {
+        // An absent candidate is a no-op that creates nothing — `remove_shims_from`
+        // returns before taking the lock, which is what stops the sweep
+        // materializing a root the user never installed into.
+        if remove_shims_from(&dir)? {
+            removed.push(dir);
+        }
+    }
+    Ok(removed)
 }
 
-/// [`remove_shims`] with an explicit dir (the testable body).
+/// Remove one shim dir. The testable seam under [`remove_shims`], which sweeps
+/// several candidate roots through this.
 pub(crate) fn remove_shims_from(dir: &Path) -> Result<bool> {
+    // An absent dir returns BEFORE the lock, and that ordering is the whole
+    // point: `ShimLock::acquire` does `create_dir_all(parent)`, so locking a
+    // candidate root the user never installed into would MATERIALIZE it — an
+    // unshim on a clean home used to leave `~/.local/share/nub/` behind. The
+    // check lives here rather than in the two sweeps that call this, so they
+    // cannot drift apart on it. Semantics are unchanged: `remove_dir_all`
+    // already mapped NotFound to `Ok(false)`.
+    if !dir.exists() {
+        return Ok(false);
+    }
     // Same writer-serializing lock as [`install_shims_into`]: an `unshim`
     // racing a re-link must not remove the dir mid-link. Held until return.
     let _lock = ShimLock::acquire(dir);
@@ -695,10 +1158,25 @@ pub fn dir_is_noexec(_dir: &Path) -> bool {
 // Shell-profile PATH block (the install.sh mechanism, ported)
 // ---------------------------------------------------------------------------
 
-/// The PATH lines, exactly install.sh's shape (`$HOME`-relative so the profile
-/// stays portable across machines), pointing at the SHIMS dir.
-const SHIMS_POSIX_PATH_LINE: &str = r#"export PATH="$HOME/.nub/shims:$PATH""#;
-const SHIMS_FISH_PATH_LINE: &str = "set -gx PATH $HOME/.nub/shims $PATH";
+/// The PATH lines. ONE pair, matching [`resolve_shim_dir`]'s single rule, and
+/// still environment-relative rather than absolute so the profile stays portable
+/// across machines the way install.sh's own block is.
+///
+/// Both spell the XDG default inline rather than using a bare `$XDG_DATA_HOME`,
+/// so a profile sourced in a shell where the variable happens to be unset still
+/// puts a real directory on PATH instead of `/nub/shims`. Windows never reaches
+/// these — profile editing is skipped there, and the CLI prints the dir instead.
+const SHIMS_POSIX_PATH_LINE: &str =
+    r#"export PATH="${XDG_DATA_HOME:-$HOME/.local/share}/nub/shims:$PATH""#;
+/// `test -n`, not fish's `set -q`: `set -q` is true for a variable that is DEFINED
+/// but empty, which would take the `and` branch, substitute nothing, and leave
+/// `/nub/shims` on PATH — the exact outcome spelling the default inline exists to
+/// prevent. The quotes are load-bearing too: unquoted, an unset variable expands
+/// to no argument at all and `test -n` then tests the literal `-n`.
+const SHIMS_FISH_PATH_LINE: &str = concat!(
+    "set -gx PATH (test -n \"$XDG_DATA_HOME\"; and echo $XDG_DATA_HOME; ",
+    "or echo $HOME/.local/share)/nub/shims $PATH"
+);
 
 /// The block's marker comment. install.sh writes `# nub` above its `~/.nub/bin`
 /// line; this is deliberately DISTINCT so `nub pm unshim` strips exactly the
@@ -711,25 +1189,97 @@ const BLOCK_MARKER: &str = "# nub shims";
 /// persistent `node` shim (`crate::node::shim`) without duplicating it. Each
 /// family carries a DISTINCT marker so an unshim strips exactly its own block —
 /// never a sibling's, never install.sh's `# nub` block.
+///
+/// Fields are [`Cow`] because not every family's directory is known at compile
+/// time: the global-bin block's path is RESOLVED AT RUNTIME (it follows
+/// `XDG_BIN_HOME` and friends), so its lines cannot be `&'static str` the way
+/// the two fixed `~/.nub/…` families' can.
 pub(crate) struct ShimBlock {
     /// The marker comment written on its own line above the PATH line.
-    pub(crate) marker: &'static str,
+    pub(crate) marker: Cow<'static, str>,
     /// The POSIX (bash/zsh) `export PATH="…:$PATH"` line.
-    pub(crate) posix_line: &'static str,
+    pub(crate) posix_line: Cow<'static, str>,
     /// The fish `set -gx PATH … $PATH` line.
-    pub(crate) fish_line: &'static str,
+    pub(crate) fish_line: Cow<'static, str>,
     /// A substring the PATH line must contain for [`strip_block`]'s defensive
-    /// "is this really our line" guard — the `$HOME`-relative dir (`.nub/shims`).
-    pub(crate) dir_marker: &'static str,
+    /// "is this really our line" guard.
+    ///
+    /// Deliberately `nub/shims`, not `.nub/shims`: it has to match a legacy
+    /// block (`$HOME/.nub/shims`, which contains it) AND an XDG one
+    /// (`…/nub/shims`). Without that, an unshim run in the other mode would
+    /// leave the PATH line behind pointing at a directory it had just deleted.
+    /// The guard is only a defensive check on a line already identified by its
+    /// own `marker` comment, so matching one character less costs nothing.
+    pub(crate) dir_marker: Cow<'static, str>,
 }
 
-/// The PM shims' block (`~/.nub/shims`, `# nub shims`).
+/// The PM shims' block (`# nub shims`). One descriptor: the resolution rule has
+/// one branch, so the written line does too. `dir_marker` stays `nub/shims`
+/// rather than `.nub/shims` so a `strip_block` still recognizes a PRE-MOVE line
+/// (`$HOME/.nub/shims`, which contains it) and an unshim can clean up an install
+/// that predates the move.
 pub(crate) const PM_SHIM_BLOCK: ShimBlock = ShimBlock {
-    marker: BLOCK_MARKER,
-    posix_line: SHIMS_POSIX_PATH_LINE,
-    fish_line: SHIMS_FISH_PATH_LINE,
-    dir_marker: ".nub/shims",
+    marker: Cow::Borrowed(BLOCK_MARKER),
+    posix_line: Cow::Borrowed(SHIMS_POSIX_PATH_LINE),
+    fish_line: Cow::Borrowed(SHIMS_FISH_PATH_LINE),
+    dir_marker: Cow::Borrowed("nub/shims"),
 };
+
+/// Build the global-bin family's block for a directory resolved at runtime.
+///
+/// Unlike the two fixed families this one cannot be a `const`: the directory
+/// follows `XDG_BIN_HOME` and the user's settings, so it is only known once the
+/// engine has resolved it. The marker is distinct from both `# nub shims` and
+/// install.sh's `# nub`, so each family adds and strips exactly its own block.
+///
+/// The emitted line stays `$HOME`-relative when the directory is under the home
+/// directory, matching install.sh, so a profile synced between machines keeps
+/// working. Both dialects quote the path so a directory containing a space
+/// survives fish's word splitting.
+pub fn global_bin_block(dir: &Path, home: &Path) -> ShimBlockSpec {
+    let shown = match dir.strip_prefix(home) {
+        Ok(rel) => format!("$HOME/{}", rel.display()),
+        Err(_) => dir.display().to_string(),
+    };
+    ShimBlockSpec {
+        inner: ShimBlock {
+            marker: Cow::Borrowed(GLOBAL_BIN_MARKER),
+            posix_line: Cow::Owned(format!(r#"export PATH="{shown}:$PATH""#)),
+            fish_line: Cow::Owned(format!(r#"set -gx PATH "{shown}" $PATH"#)),
+            dir_marker: Cow::Owned(shown),
+        },
+    }
+}
+
+/// The global-bin family's marker. Distinct from `# nub shims` and from
+/// install.sh's `# nub` so the three never strip or rewrite each other.
+const GLOBAL_BIN_MARKER: &str = "# nub global bin";
+
+/// Opaque wrapper so [`ShimBlock`] stays crate-private while callers outside
+/// this module can still name a block they built.
+pub struct ShimBlockSpec {
+    inner: ShimBlock,
+}
+
+/// Wire `dir` into every profile the current shell reads, idempotently.
+///
+/// Adds the block when absent, REWRITES the line when our marker is there with
+/// a different directory beneath it, and does nothing when it already matches.
+/// A profile is never given a second copy of this block.
+pub fn add_global_bin_path_block(dir: &Path) -> Result<ProfileOutcome> {
+    let home = dirs_next::home_dir().context("cannot locate the home directory")?;
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    let shell = Path::new(&shell)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "bash".to_string());
+    let xdg = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let spec = global_bin_block(dir, &home);
+    add_path_block_for(&shell, &home, xdg.as_deref(), &spec.inner)
+}
 
 /// Outcome of [`add_path_block`], for the CLI's "what changed" report.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -738,9 +1288,15 @@ pub enum ProfileOutcome {
     Added(PathBuf),
     /// The profile already carries the PATH line — adding twice is a no-op.
     AlreadyPresent(PathBuf),
+    /// The profile carried our marker with a DIFFERENT line beneath it, and the
+    /// line was rewritten in place; appending instead is what would accumulate a
+    /// stale block per relocation. Reached both by a family whose directory is
+    /// resolved at runtime and by a FIXED one across an upgrade that moved its
+    /// constant — #752 moving the shims under `XDG_DATA_HOME` is the latter.
+    Rewritten(PathBuf),
     /// No known profile exists / is writable for this shell — the CLI prints
     /// `line` as "add this to your shell config yourself" and exits 0.
-    Manual { line: &'static str },
+    Manual { line: String },
 }
 
 /// Append the marked PATH block to ALL of the current shell's profile files —
@@ -796,15 +1352,19 @@ pub(crate) fn add_path_block_for(
     let targets = shell_profiles(shell, home, xdg_config, block);
     if targets.is_empty() {
         return Ok(ProfileOutcome::Manual {
-            line: block.posix_line,
+            line: block.posix_line.to_string(),
         });
     }
     let mut first_added: Option<PathBuf> = None;
+    let mut first_rewritten: Option<PathBuf> = None;
     let mut first_present: Option<PathBuf> = None;
     for target in &targets {
-        match append_block(target, block.marker)? {
+        match append_block(target, &block.marker)? {
             ProfileOutcome::Added(p) => {
                 first_added.get_or_insert(p);
+            }
+            ProfileOutcome::Rewritten(p) => {
+                first_rewritten.get_or_insert(p);
             }
             ProfileOutcome::AlreadyPresent(p) => {
                 first_present.get_or_insert(p);
@@ -815,11 +1375,12 @@ pub(crate) fn add_path_block_for(
             ProfileOutcome::Manual { .. } => {}
         }
     }
-    Ok(match (first_added, first_present) {
-        (Some(p), _) => ProfileOutcome::Added(p),
-        (None, Some(p)) => ProfileOutcome::AlreadyPresent(p),
-        (None, None) => ProfileOutcome::Manual {
-            line: block.posix_line,
+    Ok(match (first_added, first_rewritten, first_present) {
+        (Some(p), _, _) => ProfileOutcome::Added(p),
+        (None, Some(p), _) => ProfileOutcome::Rewritten(p),
+        (None, None, Some(p)) => ProfileOutcome::AlreadyPresent(p),
+        (None, None, None) => ProfileOutcome::Manual {
+            line: block.posix_line.to_string(),
         },
     })
 }
@@ -828,7 +1389,7 @@ pub(crate) fn add_path_block_for(
 /// missing file may be created.
 struct ProfileTarget {
     path: PathBuf,
-    line: &'static str,
+    line: String,
     may_create: bool,
 }
 
@@ -844,7 +1405,7 @@ fn shell_profiles(
 ) -> Vec<ProfileTarget> {
     let posix = |path: PathBuf, may_create: bool| ProfileTarget {
         path,
-        line: block.posix_line,
+        line: block.posix_line.to_string(),
         may_create,
     };
     match shell {
@@ -885,7 +1446,7 @@ fn shell_profiles(
                 .unwrap_or_else(|| home.join(".config"));
             vec![ProfileTarget {
                 path: base.join("fish").join("config.fish"),
-                line: block.fish_line,
+                line: block.fish_line.to_string(),
                 may_create: true,
             }]
         }
@@ -898,6 +1459,36 @@ fn appendable(path: &Path) -> bool {
     std::fs::OpenOptions::new().append(true).open(path).is_ok()
 }
 
+/// Replace a profile's whole contents without ever truncating it.
+///
+/// `std::fs::write` is create + TRUNCATE + `write_all`, so a crash, SIGKILL or
+/// ENOSPC between those steps leaves the user's `.zshrc` empty or holding a
+/// partial prefix — and everything else in it goes too. This is not a file nub
+/// owns, so write beside it and rename, which is atomic.
+///
+/// The rename targets the CANONICALIZED path — a `~/.zshrc` that is a symlink
+/// into a dotfiles repo must stay a symlink, with the edit landing in the
+/// linked-to file; renaming onto the symlink path would replace the link with a
+/// regular file and orphan the dotfiles copy. Permissions are copied over so a
+/// 600 profile stays 600.
+fn replace_profile_atomically(path: &Path, contents: &str, tag: &str) -> Result<()> {
+    let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let tmp = target.with_file_name(format!(
+        "{}.nub-{tag}-{}",
+        target.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
+    ));
+    std::fs::write(&tmp, contents).with_context(|| format!("writing {}", tmp.display()))?;
+    if let Ok(meta) = std::fs::metadata(&target) {
+        let _ = std::fs::set_permissions(&tmp, meta.permissions());
+    }
+    if let Err(e) = std::fs::rename(&tmp, &target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("replacing {}", target.display()));
+    }
+    Ok(())
+}
+
 /// Append `\n# nub shims\n<line>\n` — byte-for-byte what install.sh's three
 /// `echo`s produce for its own block. Idempotency keys on the PATH line itself
 /// (trimmed line equality), so a hand-added identical line also counts as
@@ -907,17 +1498,31 @@ fn append_block(target: &ProfileTarget, marker: &str) -> Result<ProfileOutcome> 
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if !target.may_create {
-                return Ok(ProfileOutcome::Manual { line: target.line });
+                return Ok(ProfileOutcome::Manual {
+                    line: target.line.clone(),
+                });
             }
             String::new()
         }
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            return Ok(ProfileOutcome::Manual { line: target.line });
+            return Ok(ProfileOutcome::Manual {
+                line: target.line.clone(),
+            });
         }
         Err(e) => return Err(e).with_context(|| format!("reading {}", target.path.display())),
     };
     if existing.lines().any(|l| l.trim() == target.line) {
         return Ok(ProfileOutcome::AlreadyPresent(target.path.clone()));
+    }
+    // Our marker is here but the line under it differs, so the directory moved
+    // between runs (a resolved-at-runtime family: `XDG_BIN_HOME` changed, the
+    // setting changed, a different HOME). Replace that line rather than append
+    // a second block — appending is what silently accumulates one stale PATH
+    // entry per relocation, and the user never sees it because a shell only
+    // reports the winning entry.
+    if let Some(rewritten) = rewrite_marked_line(&existing, marker, &target.line) {
+        replace_profile_atomically(&target.path, &rewritten, "shim")?;
+        return Ok(ProfileOutcome::Rewritten(target.path.clone()));
     }
     if target.may_create {
         if let Some(parent) = target.path.parent() {
@@ -932,13 +1537,43 @@ fn append_block(target: &ProfileTarget, marker: &str) -> Result<ProfileOutcome> 
     {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            return Ok(ProfileOutcome::Manual { line: target.line });
+            return Ok(ProfileOutcome::Manual {
+                line: target.line.clone(),
+            });
         }
         Err(e) => return Err(e).with_context(|| format!("opening {}", target.path.display())),
     };
     write!(file, "\n{marker}\n{}\n", target.line)
         .with_context(|| format!("appending to {}", target.path.display()))?;
     Ok(ProfileOutcome::Added(target.path.clone()))
+}
+
+/// Replace the line directly beneath `marker` with `line`, returning the new
+/// file contents — or `None` when the marker is absent, or is present but is
+/// the last line, or already carries `line`.
+///
+/// Anchoring on the MARKER rather than on the line text is the whole point: a
+/// runtime-resolved directory spells differently between runs (`$HOME`-relative
+/// against absolute, a different `HOME` under `sudo`, a relocated
+/// `XDG_BIN_HOME`), so line-equality misses and appends a duplicate. The marker
+/// is the stable identity.
+///
+/// Only the FIRST occurrence is rewritten; a file that somehow carries two of
+/// our blocks keeps the second, which a later run then reports as already
+/// present rather than silently deleting a line we may not have written.
+fn rewrite_marked_line(existing: &str, marker: &str, line: &str) -> Option<String> {
+    let mut lines: Vec<&str> = existing.lines().collect();
+    let at = lines.iter().position(|l| l.trim() == marker)?;
+    let target = lines.get(at + 1)?;
+    if target.trim() == line {
+        return None;
+    }
+    lines[at + 1] = line;
+    let mut out = lines.join("\n");
+    if existing.ends_with('\n') {
+        out.push('\n');
+    }
+    Some(out)
 }
 
 /// Strip the marked block from EVERY profile [`add_path_block`] may have
@@ -953,6 +1588,10 @@ pub fn remove_path_block() -> Result<Vec<PathBuf>> {
     let xdg = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from);
+    // Either block is stripped by this one descriptor: `strip_block` reads only
+    // `marker` and `dir_marker`, and the legacy and XDG blocks share both. So an
+    // unshim removes whichever line is present without having to work out which
+    // mode installed it — including after the user set or unset XDG_DATA_HOME.
     remove_path_block_from_profiles(&home, xdg.as_deref(), &PM_SHIM_BLOCK)
 }
 
@@ -984,26 +1623,7 @@ pub(crate) fn remove_path_block_from_profiles(
         let Some(stripped) = strip_block(&content, block) else {
             continue;
         };
-        // Temp + rename: a torn write must never truncate a shell profile.
-        // The rename targets the CANONICALIZED path — a `~/.zshrc` that is a
-        // symlink into a dotfiles repo must stay a symlink, with the edit
-        // landing in the linked-to file; renaming onto the symlink path would
-        // replace the link with a regular file and orphan the dotfiles copy.
-        // Permissions are copied over so a 600 profile stays 600.
-        let target = path.canonicalize().unwrap_or_else(|_| path.clone());
-        let tmp = target.with_file_name(format!(
-            "{}.nub-unshim-{}",
-            target.file_name().unwrap_or_default().to_string_lossy(),
-            std::process::id()
-        ));
-        std::fs::write(&tmp, &stripped).with_context(|| format!("writing {}", tmp.display()))?;
-        if let Ok(meta) = std::fs::metadata(&target) {
-            let _ = std::fs::set_permissions(&tmp, meta.permissions());
-        }
-        if let Err(e) = std::fs::rename(&tmp, &target) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e).with_context(|| format!("replacing {}", target.display()));
-        }
+        replace_profile_atomically(&path, &stripped, "unshim")?;
         changed.push(path);
     }
     Ok(changed)
@@ -1021,7 +1641,7 @@ pub(crate) fn remove_path_block_from_profiles(
 /// after the path line; we excise that whole span, so whatever surrounded it —
 /// including "the file ended right here, no newline" — is restored verbatim.
 fn strip_block(content: &str, block: &ShimBlock) -> Option<String> {
-    let marker = block.marker;
+    let marker: &str = &block.marker;
     // The marker as it sits on its own line: find a line whose trimmed text is
     // exactly the block's marker. We scan line starts so an in-prose mention of
     // the string can't be mistaken for the marker.
@@ -1056,7 +1676,7 @@ fn strip_block(content: &str, block: &ShimBlock) -> Option<String> {
             .find('\n')
             .map(|n| block_end + n + 1)
             .unwrap_or(content.len());
-        if content[block_end..path_line_end].contains(block.dir_marker) {
+        if content[block_end..path_line_end].contains(&*block.dir_marker) {
             block_end = path_line_end; // our PATH line + its newline
         }
     }
@@ -1130,7 +1750,8 @@ fn shim_reachability_in(shim_dir: &Path, name: &'static str, path_var: &OsStr) -
 /// The unpinned/transparent fall-through: the first executable `invoked` on
 /// PATH, SKIPPING the shim dir itself — the recursion guard (mirrors
 /// `discovery::which_node`'s skip of nub's own shim dirs, but by canonical
-/// path equality since `~/.nub/shims` is a fixed, possibly-symlinked dir).
+/// path equality — the caller passes the resolved dir, so this needs no shape
+/// fallback even though the path is no longer fixed once XDG moves it).
 /// `None` = a true PATH miss; the caller provisions a dynamic default.
 pub fn find_system_pm(invoked: &str, shim_dir: &Path) -> Option<PathBuf> {
     find_system_pm_in(
@@ -1211,14 +1832,31 @@ fn scan_path(
 /// point exec'ing, and exec'ing self would loop).
 pub fn nub_passthrough_target() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let dir = shim_dir().ok()?;
-    let canon_dir = dir.canonicalize().ok()?;
-    if exe.parent()?.canonicalize().ok()? != canon_dir {
+    let parent = exe.parent()?.canonicalize().ok()?;
+    // Recognize the PRE-MOVE dir as well as the resolved one. A user midway
+    // through the migration still has `~/.nub/shims/nub` on PATH, and if that
+    // copy stops deferring it runs its own stale bytes — the precise failure
+    // this passthrough exists to prevent, aimed at the people most likely to be
+    // upgrading right now.
+    let home = dirs_next::home_dir();
+    let is_a_shim_dir = [
+        shim_dir().ok(),
+        home.as_ref().map(|h| legacy_shim_dir(h, SHIMS_LEAF)),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|d| d.canonicalize().is_ok_and(|d| d == parent));
+    if !is_a_shim_dir {
         return None;
     }
-    // The official self-owned binary is the sibling of the shim dir: the shim dir
-    // is `<install>/shims`, so `<install>/bin/nub` is the binary the shims track.
-    let official = dir.parent()?.join("bin").join(nub_exe_name());
+    // The official self-owned binary lives in the INSTALL root's `bin`, which is
+    // no longer the shim dir's parent — the shims moved to the XDG data root while
+    // the install stayed at `~/.nub` (or $NUB_INSTALL_DIR). Deriving it from
+    // `dir.parent()` used to work only because the two shared a parent; after the
+    // move that yielded `<xdg>/nub/bin/nub`, which does not exist, so the shim-dir
+    // `nub` silently ran ITS OWN stale bytes instead of deferring — the exact
+    // staleness this passthrough exists to prevent.
+    let official = nub_install_bin_dir()?.join(nub_exe_name());
     if !is_executable(&official) {
         return None;
     }
@@ -1228,6 +1866,17 @@ pub fn nub_passthrough_target() -> Option<PathBuf> {
         return None;
     }
     Some(official)
+}
+
+/// The install root's `bin`, where the official self-owned binary lives:
+/// `$NUB_INSTALL_DIR/bin` when set, else `~/.nub/bin` (install.sh's default).
+/// Independent of the shim dir, which now resolves to the XDG data root.
+fn nub_install_bin_dir() -> Option<PathBuf> {
+    let root = std::env::var_os("NUB_INSTALL_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs_next::home_dir().map(|h| h.join(".nub")))?;
+    Some(root.join("bin"))
 }
 
 /// The on-disk file name of the `nub` executable for this platform — `nub` on
@@ -1335,6 +1984,101 @@ mod tests {
     /// cleaned, PIDs recycle, and a recycled-PID run re-entering a stale
     /// sibling finds last run's links/files (the tests/pm_shim.rs `tmp` flake
     /// — see its doc for the full post-mortem).
+    fn route(args: &[&str]) -> Option<NpmEngineInstall> {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        npm_install_route(&args, false)
+    }
+
+    #[test]
+    fn npm_install_route_translates_the_install_verbs_and_falls_through_on_the_rest() {
+        let ci = route(&["ci"]).unwrap();
+        assert_eq!(ci.verb, NpmInstallVerb::Ci);
+        assert!(ci.ignore_scripts.is_none() && !ci.prod && !ci.no_optional);
+        for alias in ["clean-install", "ic", "install-clean", "isntall-clean"] {
+            assert_eq!(route(&[alias]).unwrap().verb, NpmInstallVerb::Ci, "{alias}");
+        }
+        for alias in ["i", "add", "in", "instal", "isntall"] {
+            assert_eq!(
+                route(&[alias]).unwrap().verb,
+                NpmInstallVerb::Install,
+                "{alias}"
+            );
+        }
+
+        // The flags CI workflows carry, translated or ignored.
+        let ava = route(&["install", "--no-audit", "--ignore-scripts"]).unwrap();
+        assert_eq!(ava.verb, NpmInstallVerb::Install);
+        assert_eq!(ava.ignore_scripts, Some(true));
+        assert_eq!(
+            route(&["ci", "--ignore-scripts=false"])
+                .unwrap()
+                .ignore_scripts,
+            Some(false)
+        );
+        assert!(route(&["ci", "--omit=dev"]).unwrap().prod);
+        assert!(route(&["ci", "--omit", "dev"]).unwrap().prod);
+        assert!(route(&["ci", "--production"]).unwrap().prod);
+        assert!(route(&["ci", "--only=prod"]).unwrap().prod);
+        assert!(route(&["ci", "--omit=optional"]).unwrap().no_optional);
+        assert!(route(&["ci", "--optional=false"]).unwrap().no_optional);
+        let ignored = route(&[
+            "ci",
+            "--no-fund",
+            "--audit=false",
+            "--prefer-offline",
+            "--loglevel",
+            "error",
+            "--loglevel=warn",
+        ])
+        .unwrap();
+        assert!(!ignored.prod && !ignored.no_optional && ignored.ignore_scripts.is_none());
+
+        // include wins over omit in either order, and over the ambient
+        // NODE_ENV=production; an explicit false is false.
+        assert!(!route(&["ci", "--omit=dev", "--include=dev"]).unwrap().prod);
+        assert!(!route(&["ci", "--include=dev", "--omit=dev"]).unwrap().prod);
+        assert!(
+            !route(&["ci", "--omit=optional", "--include=optional"])
+                .unwrap()
+                .no_optional
+        );
+        let env_prod = |argv: &[&str]| {
+            let args: Vec<String> = argv.iter().map(|a| a.to_string()).collect();
+            npm_install_route(&args, true).unwrap().prod
+        };
+        assert!(env_prod(&["ci"]), "NODE_ENV=production is npm's --omit=dev");
+        assert!(
+            !env_prod(&["install", "--production=false"]),
+            "--production=false restores dev"
+        );
+        assert!(!env_prod(&["ci", "--include=dev"]));
+
+        // Anything the engine cannot honor verbatim runs on the real npm.
+        for argv in [
+            vec!["install", "react"],
+            vec!["ci", "--legacy-peer-deps"],
+            vec!["ci", "--workspace=a"],
+            vec!["ci", "-w", "a"],
+            vec!["install", "--no-package-lock"],
+            vec!["ci", "--prefix", "sub"],
+            vec!["ci", "--omit=peer"],
+            vec!["ci", "--include=peer"],
+            vec!["ci", "--production=maybe"],
+            vec!["ci", "--ignore-scripts=yes"],
+            vec!["ci", "--only=dev"],
+            vec!["ci", "--loglevel"],
+            vec!["install", "-g", "npm"],
+            vec!["--version"],
+            vec!["run", "build"],
+            vec![],
+        ] {
+            assert!(
+                route(&argv).is_none(),
+                "{argv:?} must fall through to the real npm"
+            );
+        }
+    }
+
     fn tmpdir(tag: &str) -> PathBuf {
         static N: AtomicU64 = AtomicU64::new(0);
         static STARTED_NANOS: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
@@ -1723,6 +2467,49 @@ mod tests {
     }
 
     #[test]
+    fn is_registry_invocation_admits_registry_verbs_and_keeps_project_verbs_strict() {
+        use ShimName::*;
+        let v = |args: &[&str]| args.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+
+        // Account and registry builtins, aliases included.
+        assert!(is_registry_invocation(
+            Npm,
+            &v(&["login", "--auth-type=web"])
+        ));
+        assert!(is_registry_invocation(Npm, &v(&["whoami"])));
+        assert!(is_registry_invocation(
+            Npm,
+            &v(&["info", "react", "version"])
+        ));
+        assert!(is_registry_invocation(Npm, &v(&["author", "ls"])));
+        assert!(is_registry_invocation(Pnpm, &v(&["login"])));
+        assert!(is_registry_invocation(Pnpm, &v(&["dist-tag", "ls", "x"])));
+
+        // Commands that read or write THIS project stay strict: publishing packs
+        // it (npm would ship pnpm's `workspace:` specs unrewritten) and `version`
+        // writes package.json.
+        assert!(!is_registry_invocation(Npm, &v(&["publish"])));
+        assert!(!is_registry_invocation(Npm, &v(&["version", "patch"])));
+        assert!(!is_registry_invocation(Npm, &v(&["install"])));
+        // A name a manager does not know can run project code instead: npm 11+
+        // expands `star` to `start`, pnpm runs a package.json script for an
+        // unknown name (pnpm 10 has no `author`), and yarn classic and Berry
+        // each fall back to a script for the other's registry syntax.
+        assert!(!is_registry_invocation(Npm, &v(&["star", "react"])));
+        assert!(!is_registry_invocation(Pnpm, &v(&["author", "ls"])));
+        assert!(!is_registry_invocation(Yarn, &v(&["login"])));
+        assert!(!is_registry_invocation(Yarnpkg, &v(&["npm", "whoami"])));
+        // The verb must come first, as for the transparent verbs: a flag ahead
+        // of it, or a registry word as an operand, is not a registry command.
+        assert!(!is_registry_invocation(
+            Npm,
+            &v(&["--registry", "x", "login"])
+        ));
+        assert!(!is_registry_invocation(Npm, &v(&["install", "login"])));
+        assert!(!is_registry_invocation(Npm, &v(&[])));
+    }
+
+    #[test]
     fn matched_global_runs_the_pin_not_fallthrough() {
         use ShimDecision::*;
         use ShimName::*;
@@ -2006,10 +2793,10 @@ mod tests {
     // so the test asserts the ENGINE's block-independence without depending on
     // `node::shim`'s constant (this is the pm layer's own test).
     const TEST_NODE_BLOCK: ShimBlock = ShimBlock {
-        marker: "# nub node shim",
-        posix_line: r#"export PATH="$HOME/.nub/node-shim:$PATH""#,
-        fish_line: "set -gx PATH $HOME/.nub/node-shim $PATH",
-        dir_marker: ".nub/node-shim",
+        marker: Cow::Borrowed("# nub node shim"),
+        posix_line: Cow::Borrowed(r#"export PATH="$HOME/.nub/node-shim:$PATH""#),
+        fish_line: Cow::Borrowed("set -gx PATH $HOME/.nub/node-shim $PATH"),
+        dir_marker: Cow::Borrowed(".nub/node-shim"),
     };
 
     #[test]
@@ -2080,7 +2867,7 @@ mod tests {
         assert_eq!(
             add_path_block_for("tcsh", &home, None, &PM_SHIM_BLOCK).unwrap(),
             ProfileOutcome::Manual {
-                line: SHIMS_POSIX_PATH_LINE
+                line: SHIMS_POSIX_PATH_LINE.to_string()
             }
         );
     }
@@ -2202,6 +2989,118 @@ mod tests {
             std::fs::read_to_string(&zshrc).unwrap(),
             original,
             "the no-trailing-newline state must survive shim+unshim byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn the_shim_dir_follows_one_rule_with_no_legacy_branch() {
+        // XDG first on EVERY platform, then the platform default — the shape
+        // pnpm's getDataDir and corepack both use, and the one nub's own
+        // cache_dir already had. There is deliberately no "keep an existing
+        // ~/.nub/<leaf>" branch: that second location is what forced two PATH
+        // blocks, a widened strip marker and a dual sweep in three installers.
+        let home = tmpdir("xdg-resolve");
+        let xdg = home.join("xdg-data");
+        let local = home.join("AppData").join("Local");
+
+        assert_eq!(
+            resolve_shim_dir(&home, Some(&xdg), Some(&local), SHIMS_LEAF),
+            xdg.join("nub").join("shims"),
+            "an explicitly-set XDG_DATA_HOME wins, platform default or not"
+        );
+        assert_eq!(
+            resolve_shim_dir(&home, None, None, SHIMS_LEAF),
+            home.join(".local").join("share").join("nub").join("shims"),
+            "no XDG variable falls back to the ~/.local/share default"
+        );
+
+        // An existing pre-move dir changes NOTHING — the branch is gone, and the
+        // install path migrates that dir instead of resolving to it.
+        std::fs::create_dir_all(legacy_shim_dir(&home, SHIMS_LEAF)).unwrap();
+        assert_eq!(
+            resolve_shim_dir(&home, Some(&xdg), None, SHIMS_LEAF),
+            xdg.join("nub").join("shims"),
+            "a pre-move dir on disk must not drag resolution back to ~/.nub"
+        );
+    }
+
+    #[test]
+    fn migrating_moves_a_pre_move_install_out_of_the_way() {
+        // The breaking change is a MOVE, not a second supported location: the
+        // pre-move dir has to go, or it keeps shadowing npm/pnpm/yarn from
+        // earlier in PATH while holding the pre-upgrade binary.
+        let home = tmpdir("xdg-migrate");
+        let legacy = legacy_shim_dir(&home, SHIMS_LEAF);
+
+        assert!(
+            migrate_legacy_shim_dir(&home, SHIMS_LEAF)
+                .unwrap()
+                .is_none(),
+            "nothing to migrate when no pre-move install exists"
+        );
+
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("npm"), b"stale").unwrap();
+        assert_eq!(
+            migrate_legacy_shim_dir(&home, SHIMS_LEAF).unwrap().as_ref(),
+            Some(&legacy),
+            "an existing pre-move install is reported so the CLI can name it"
+        );
+        assert!(!legacy.exists(), "and it is actually gone");
+    }
+
+    #[test]
+    fn removing_shims_never_creates_a_root_that_was_not_there() {
+        // `ShimLock::acquire` does `create_dir_all(parent)`, so sweeping every
+        // candidate would make `nub pm unshim` MATERIALIZE `~/.local/share/nub/`
+        // on a machine that never installed there. A remove-only command must
+        // leave no directories behind.
+        let home = tmpdir("unshim-litter");
+        let xdg = home.join("xdg-data");
+
+        // Called UNCONDITIONALLY — no existence check here, or the test would be
+        // re-implementing the guard it is meant to prove. Deleting the early
+        // return from `remove_shims_from` must turn this red.
+        for dir in shim_dirs_for_removal(&home, Some(&xdg), None, SHIMS_LEAF) {
+            assert!(
+                !remove_shims_from(&dir).unwrap(),
+                "an absent dir reports nothing removed: {}",
+                dir.display()
+            );
+        }
+
+        for root in [xdg, home.join(".local"), home.join(".nub")] {
+            assert!(
+                !root.exists(),
+                "a removal sweep must not create {}",
+                root.display()
+            );
+        }
+    }
+
+    #[test]
+    fn unshim_strips_an_xdg_block_using_the_one_descriptor() {
+        // `dir_marker` is `nub/shims`, not `.nub/shims`, precisely so a single
+        // descriptor strips EITHER line. Without that, a user who installed
+        // under XDG and then unshimmed would keep a PATH entry naming the
+        // directory the same command had just deleted.
+        let home = tmpdir("xdg-strip");
+        let zshrc = home.join(".zshrc");
+        std::fs::write(
+            &zshrc,
+            format!("# mine\n\n# nub shims\n{SHIMS_POSIX_PATH_LINE}\n"),
+        )
+        .unwrap();
+
+        let changed = remove_path_block_from_profiles(&home, None, &PM_SHIM_BLOCK).unwrap();
+        assert!(
+            changed.contains(&zshrc),
+            "the XDG block must be found and stripped by the legacy descriptor"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&zshrc).unwrap(),
+            "# mine\n",
+            "stripping an XDG block must be byte-exact, same as a legacy one"
         );
     }
 
@@ -2348,6 +3247,61 @@ mod tests {
         );
     }
 
+    /// What temp + rename BUYS on this path is torn-write safety, and what it
+    /// COSTS is this: `rename` onto a symlinked `~/.zshrc` replaces the link
+    /// with a regular file and orphans the dotfiles copy, where the plain
+    /// `std::fs::write` it replaces followed the link. Canonicalizing first is
+    /// what keeps the old behaviour, and this test is what holds it — dropping
+    /// the `canonicalize` in `replace_profile_atomically` turns it red, as it
+    /// does the strip-path test above.
+    ///
+    /// The torn write itself has no unit test: it needs the process to die
+    /// between truncate and `write_all`. The atomicity is argued from `rename`,
+    /// not measured here.
+    #[cfg(unix)]
+    #[test]
+    fn rewriting_edits_through_a_symlinked_profile_without_replacing_the_link() {
+        let home = tmpdir("symlink-rewrite");
+        let home = home.as_path();
+        let dotfiles = home.join("dotfiles");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        let real = dotfiles.join("zshrc");
+        // The pre-#752 line, so wiring the current block rewrites rather than appends.
+        std::fs::write(
+            &real,
+            format!("export EDITOR=vi\n\n{BLOCK_MARKER}\nexport PATH=\"$HOME/.nub/shims:$PATH\"\n"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&real, home.join(".zshrc")).unwrap();
+        // The sibling zsh profile carries the same old line, as a pre-#752 nub
+        // wrote it. An empty one would be an `Added`, which outranks
+        // `Rewritten` in the fold and would hide the case under test.
+        std::fs::write(
+            home.join(".zshenv"),
+            format!("{BLOCK_MARKER}\nexport PATH=\"$HOME/.nub/shims:$PATH\"\n"),
+        )
+        .unwrap();
+
+        let outcome = add_path_block_for("zsh", home, None, &PM_SHIM_BLOCK).unwrap();
+        assert!(
+            matches!(outcome, ProfileOutcome::Rewritten(_)),
+            "expected a rewrite, got {outcome:?}"
+        );
+        assert!(
+            home.join(".zshrc").symlink_metadata().unwrap().is_symlink(),
+            "the profile must still be a symlink — replacing it orphans the dotfiles copy"
+        );
+        let after = std::fs::read_to_string(&real).unwrap();
+        assert!(
+            after.starts_with("export EDITOR=vi\n"),
+            "the rest of the profile must survive the rewrite:\n{after}"
+        );
+        assert!(
+            after.contains("XDG_DATA_HOME") && !after.contains(".nub/shims"),
+            "the line under the marker must be the new one:\n{after}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn reachability_reports_the_first_hit_and_flags_shadowing() {
@@ -2423,5 +3377,120 @@ mod tests {
             err.contains("ghost.cjs") && err.contains("does not exist"),
             "a dangling bin entry must name the missing file, got: {err}"
         );
+    }
+
+    /// The global-bin block's directory is resolved at runtime, so it is the one
+    /// family whose line can legitimately CHANGE between runs. Wiring it twice
+    /// must leave one block, and wiring a different directory must REPLACE the
+    /// line rather than add a second — a profile that accumulates PATH entries
+    /// is invisible to the user, because a shell only ever reports the winner.
+    #[test]
+    fn global_bin_block_is_written_once_and_rewritten_in_place() {
+        let home = tmpdir("global-bin-idem");
+        let home = home.as_path();
+        let first = home.join(".local/bin");
+        let block = global_bin_block(&first, home);
+
+        let added = add_path_block_for("zsh", home, None, &block.inner).unwrap();
+        assert!(matches!(added, ProfileOutcome::Added(_)), "got {added:?}");
+
+        let again = add_path_block_for("zsh", home, None, &block.inner).unwrap();
+        assert!(
+            matches!(again, ProfileOutcome::AlreadyPresent(_)),
+            "a second identical wiring must be a no-op, got {again:?}"
+        );
+
+        let zshrc = std::fs::read_to_string(home.join(".zshrc")).unwrap();
+        assert_eq!(
+            zshrc.matches(GLOBAL_BIN_MARKER).count(),
+            1,
+            "two wirings must leave exactly one block:\n{zshrc}"
+        );
+
+        // Relocate: same marker, different directory.
+        let moved = home.join("elsewhere/bin");
+        let moved_block = global_bin_block(&moved, home);
+        let rewritten = add_path_block_for("zsh", home, None, &moved_block.inner).unwrap();
+        assert!(
+            matches!(rewritten, ProfileOutcome::Rewritten(_)),
+            "a changed directory must rewrite, got {rewritten:?}"
+        );
+
+        let zshrc = std::fs::read_to_string(home.join(".zshrc")).unwrap();
+        assert_eq!(
+            zshrc.matches(GLOBAL_BIN_MARKER).count(),
+            1,
+            "relocating must not add a second block:\n{zshrc}"
+        );
+        assert!(
+            zshrc.contains("elsewhere/bin"),
+            "the new directory must be present:\n{zshrc}"
+        );
+        assert!(
+            !zshrc.contains("$HOME/.local/bin"),
+            "the stale directory must be gone, not merely outranked:\n{zshrc}"
+        );
+    }
+
+    /// `Rewritten` is reachable for a FIXED-directory family too, which is why
+    /// cli.rs handles it rather than treating it as dead. The directory is a
+    /// compile-time constant within one build, but the CONSTANT ITSELF changed
+    /// between releases (#752 moved the shims under `XDG_DATA_HOME`), so a
+    /// profile written by an older nub carries a different line under the same
+    /// marker. cli.rs strips the block instead only when the legacy DIRECTORY
+    /// still exists, so a synced dotfile on a machine that never had
+    /// `~/.nub/shims` lands here — with the live shell still pointing at the
+    /// old directory, which is why that arm prints the re-source hint.
+    #[test]
+    fn an_upgraded_profile_rewrites_the_pre_xdg_shims_line() {
+        let home = tmpdir("shims-upgrade");
+        let home = home.as_path();
+        // What a pre-#752 nub wrote: BOTH zsh profiles, since `Added` on any one
+        // target outranks `Rewritten` in the fold and would mask this.
+        let legacy = format!("{BLOCK_MARKER}\nexport PATH=\"$HOME/.nub/shims:$PATH\"\n");
+        std::fs::write(home.join(".zshrc"), &legacy).unwrap();
+        std::fs::write(home.join(".zshenv"), &legacy).unwrap();
+
+        let outcome = add_path_block_for("zsh", home, None, &PM_SHIM_BLOCK).unwrap();
+        assert!(
+            matches!(outcome, ProfileOutcome::Rewritten(_)),
+            "a profile carrying the pre-XDG line must be rewritten, got {outcome:?}"
+        );
+
+        let zshrc = std::fs::read_to_string(home.join(".zshrc")).unwrap();
+        assert!(
+            !zshrc.contains(".nub/shims"),
+            "the pre-XDG directory must be gone, not merely outranked:\n{zshrc}"
+        );
+        assert!(
+            zshrc.contains("XDG_DATA_HOME"),
+            "the XDG line must replace it:\n{zshrc}"
+        );
+        assert_eq!(
+            zshrc.matches(BLOCK_MARKER).count(),
+            1,
+            "an upgrade must not add a second block:\n{zshrc}"
+        );
+    }
+
+    /// A directory under the home dir is emitted `$HOME`-relative so a profile
+    /// synced between machines keeps working, and both dialects quote it so a
+    /// path containing a space survives fish's word splitting.
+    #[test]
+    fn global_bin_block_lines_are_home_relative_and_quoted() {
+        let home = Path::new("/home/u");
+        let block = global_bin_block(&home.join(".local/bin"), home);
+        assert_eq!(
+            &*block.inner.posix_line,
+            r#"export PATH="$HOME/.local/bin:$PATH""#
+        );
+        assert_eq!(
+            &*block.inner.fish_line,
+            r#"set -gx PATH "$HOME/.local/bin" $PATH"#
+        );
+
+        // Outside the home dir there is nothing to relativize against.
+        let block = global_bin_block(Path::new("/opt/bin"), home);
+        assert_eq!(&*block.inner.posix_line, r#"export PATH="/opt/bin:$PATH""#);
     }
 }

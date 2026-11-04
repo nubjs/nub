@@ -2,9 +2,8 @@
 //!
 //! Mirrors `pnpm prefix`. Without flags, prints the current project root
 //! (or cwd when no project root is found). With `--global` / `-g`, prints
-//! the global prefix directory used for PATH-visible global bins.
-
-use clap::Args;
+//! the root holding global package installs. That is NOT the bin directory:
+//! bins link into the shared user-binary dir on PATH, which `bin -g` prints.
 
 pub const AFTER_LONG_HELP: &str = "\
 Examples:
@@ -13,13 +12,13 @@ Examples:
   /home/user/project
 
   $ aube prefix -g
-  /home/user/.local/share/pnpm
+  /home/user/.local/share/aube
 ";
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct PrefixArgs {
     /// Print the global prefix directory instead of the project's root
-    #[arg(short, long)]
+    #[usage(short, long)]
     pub global: bool,
 }
 

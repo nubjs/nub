@@ -10,6 +10,7 @@
 //! named in the doc comment of the function reading it so cargo doc
 //! enumerates them.
 
+pub mod dns;
 pub mod prewarm;
 pub mod priority;
 pub mod race;
@@ -24,11 +25,9 @@ pub mod ticket_cache;
 /// the OS trust store through JNI and aborts without a JVM (`ndk-context:
 /// android context was not initialized`) — the Termux/CLI case, where no
 /// app context exists — so there the webpki roots become the ONLY trust
-/// roots (`tls_certs_only`), bypassing the verifier entirely. Hickory DNS
-/// is disabled on Android for the same reason: reqwest's `hickory-dns`
-/// feature defaults the resolver on for every client, and hickory reads
-/// Android's DNS config through the same JNI surface. On other targets,
-/// leave the builder alone so client construction does not fail at runtime.
+/// roots (`tls_certs_only`), bypassing the verifier entirely. On other
+/// targets, leave the builder alone so client construction does not fail at
+/// runtime.
 ///
 /// Compiled to a no-op when the `rustls` feature is not enabled — reqwest's
 /// `Certificate`/`tls_certs_merge` APIs only exist with a TLS backend, and
@@ -50,12 +49,27 @@ pub fn with_webpki_root_fallback(builder: reqwest::ClientBuilder) -> reqwest::Cl
         any(all(unix, not(target_os = "android")), target_os = "windows")
     ))]
     {
+        // Claude Code's macOS sandbox (`srt`) seals off the trust daemon the
+        // platform verifier evaluates against, so every handshake fails with
+        // `invalid peer certificate: OSStatus -26276` even though the
+        // sandbox's proxy has allowlisted the host (measured with srt
+        // 0.0.75; Codex's Seatbelt profile does not block it). There the
+        // bundled roots are the only usable trust store. Roots a caller adds
+        // afterwards — `NODE_EXTRA_CA_CERTS`, `ca`, `cafile` — still merge
+        // in, which is how srt hands over its interception CA when it
+        // terminates TLS.
+        if cfg!(target_os = "macos")
+            && crate::agent_sandbox::detect()
+                == Some(crate::agent_sandbox::AgentSandbox::ClaudeCode)
+        {
+            return builder.tls_certs_only(certs);
+        }
         builder.tls_certs_merge(certs)
     }
 
     #[cfg(all(feature = "rustls", target_os = "android"))]
     {
-        builder.tls_certs_only(certs).no_hickory_dns()
+        builder.tls_certs_only(certs)
     }
 
     #[cfg(not(all(feature = "rustls", any(unix, target_os = "windows"))))]

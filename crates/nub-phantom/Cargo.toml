@@ -9,7 +9,7 @@
 # is built explicitly on demand: `cargo build --manifest-path
 # crates/nub-phantom/Cargo.toml --release`.
 #
-# The oxc pin is byte-identical to the main workspace / nub-native pin (=0.132.0)
+# The oxc pin is byte-identical to the main workspace / nub-native pin (=0.140.0)
 # so the parse semantics match nub's own transpile/detect pipeline exactly.
 [workspace]
 members = ["."]
@@ -19,7 +19,7 @@ resolver = "3"
 name = "nub-phantom"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.93"
+rust-version = "1.95"
 license = "MIT"
 repository = "https://github.com/nubjs/nub"
 publish = false
@@ -44,7 +44,9 @@ serde_json = "1"
 # HTTP fetch of registry metadata + tarballs. Mirrors the main workspace's
 # reqwest feature set (blocking, rustls). gzip decodes the tarball transport.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "rustls-tls-native-roots"] }
-flate2 = { version = "1", default-features = false, features = ["zlib-ng"] }
+# Matches nub-core's backend — see the note there. A C/CMake gzip backend cannot
+# link against the static MSVC CRT the Windows builds require.
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 tar = "0.4"
 
 [profile.release]

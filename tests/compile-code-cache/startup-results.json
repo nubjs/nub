@@ -1,0 +1,457 @@
+{
+  "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "identities": {
+    "before": {
+      "path": "opencode-base",
+      "bytes": 48362898,
+      "sha256": "c4b68bd69f9ccffbf0e8f754736163567a71ce5c52a68bfb36a4adf6b29e8429"
+    },
+    "after": {
+      "path": "opencode-compressed",
+      "bytes": 65601426,
+      "sha256": "9252fb2facc74da6954f6fc469927d05deed1259ae3fce718ef0052d8d1ff89f"
+    }
+  },
+  "argument": "--version",
+  "warmups": 2,
+  "rounds": 21,
+  "load_before": [
+    4.83447265625,
+    4.8154296875,
+    9.24609375
+  ],
+  "rows": [
+    {
+      "arm": "after",
+      "round": 0,
+      "wall_ms": 159.2029999010265,
+      "user_ms": 176.96500000000003,
+      "sys_ms": 44.256000000000014,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "before",
+      "round": 0,
+      "wall_ms": 194.06195799820125,
+      "user_ms": 206.26199999999994,
+      "sys_ms": 43.889999999999986,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "before",
+      "round": 1,
+      "wall_ms": 187.753124977462,
+      "user_ms": 202.35400000000016,
+      "sys_ms": 42.63,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "after",
+      "round": 1,
+      "wall_ms": 156.57845803070813,
+      "user_ms": 172.03400000000002,
+      "sys_ms": 44.318999999999996,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "after",
+      "round": 2,
+      "wall_ms": 160.9823750331998,
+      "user_ms": 177.3339999999999,
+      "sys_ms": 45.002000000000045,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "before",
+      "round": 2,
+      "wall_ms": 191.09833298716694,
+      "user_ms": 205.01999999999998,
+      "sys_ms": 42.73199999999999,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "before",
+      "round": 3,
+      "wall_ms": 184.38483297359198,
+      "user_ms": 197.29900000000012,
+      "sys_ms": 42.064999999999905,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "after",
+      "round": 3,
+      "wall_ms": 156.7336249863729,
+      "user_ms": 173.4,
+      "sys_ms": 45.02000000000006,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "before",
+      "round": 4,
+      "wall_ms": 194.84320795163512,
+      "user_ms": 211.17300000000006,
+      "sys_ms": 42.725000000000016,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "after",
+      "round": 4,
+      "wall_ms": 155.67437501158565,
+      "user_ms": 168.96699999999987,
+      "sys_ms": 41.628,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "after",
+      "round": 5,
+      "wall_ms": 155.1715839887038,
+      "user_ms": 174.27200000000022,
+      "sys_ms": 45.94199999999993,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "before",
+      "round": 5,
+      "wall_ms": 190.67695795092732,
+      "user_ms": 206.0649999999997,
+      "sys_ms": 43.19700000000004,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "after",
+      "round": 6,
+      "wall_ms": 164.60224997717887,
+      "user_ms": 182.31900000000013,
+      "sys_ms": 46.892999999999965,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "before",
+      "round": 6,
+      "wall_ms": 193.1310840882361,
+      "user_ms": 205.31599999999983,
+      "sys_ms": 44.35300000000009,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "before",
+      "round": 7,
+      "wall_ms": 186.0232090111822,
+      "user_ms": 199.33200000000005,
+      "sys_ms": 41.437999999999974,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "after",
+      "round": 7,
+      "wall_ms": 159.25404208246619,
+      "user_ms": 178.12399999999994,
+      "sys_ms": 43.96599999999995,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "after",
+      "round": 8,
+      "wall_ms": 157.5909999664873,
+      "user_ms": 175.2020000000005,
+      "sys_ms": 45.30500000000015,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "before",
+      "round": 8,
+      "wall_ms": 187.52916692756116,
+      "user_ms": 198.1299999999999,
+      "sys_ms": 42.94500000000001,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "after",
+      "round": 9,
+      "wall_ms": 155.76254099141806,
+      "user_ms": 172.6749999999999,
+      "sys_ms": 42.600999999999885,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "before",
+      "round": 9,
+      "wall_ms": 194.93458303622901,
+      "user_ms": 208.21999999999986,
+      "sys_ms": 43.67399999999999,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "before",
+      "round": 10,
+      "wall_ms": 194.5812919875607,
+      "user_ms": 201.34299999999962,
+      "sys_ms": 45.92400000000008,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "after",
+      "round": 10,
+      "wall_ms": 159.53712502960116,
+      "user_ms": 172.8460000000007,
+      "sys_ms": 46.74899999999993,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "after",
+      "round": 11,
+      "wall_ms": 158.69670803658664,
+      "user_ms": 173.98999999999987,
+      "sys_ms": 44.10500000000006,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "before",
+      "round": 11,
+      "wall_ms": 186.83308293111622,
+      "user_ms": 201.8519999999997,
+      "sys_ms": 43.26600000000003,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "before",
+      "round": 12,
+      "wall_ms": 187.5238340580836,
+      "user_ms": 198.925,
+      "sys_ms": 43.61199999999998,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "after",
+      "round": 12,
+      "wall_ms": 157.93008299078792,
+      "user_ms": 173.02499999999998,
+      "sys_ms": 45.19600000000001,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "before",
+      "round": 13,
+      "wall_ms": 185.74025004636496,
+      "user_ms": 201.0240000000003,
+      "sys_ms": 41.540999999999826,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "after",
+      "round": 13,
+      "wall_ms": 159.50641699600965,
+      "user_ms": 175.9239999999993,
+      "sys_ms": 44.466000000000115,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "after",
+      "round": 14,
+      "wall_ms": 157.80587494373322,
+      "user_ms": 177.42199999999997,
+      "sys_ms": 43.077999999999946,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "before",
+      "round": 14,
+      "wall_ms": 188.53137490805238,
+      "user_ms": 204.0330000000008,
+      "sys_ms": 42.2229999999999,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "after",
+      "round": 15,
+      "wall_ms": 157.8517910093069,
+      "user_ms": 177.80799999999974,
+      "sys_ms": 45.03600000000007,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "before",
+      "round": 15,
+      "wall_ms": 187.8215839387849,
+      "user_ms": 203.38299999999964,
+      "sys_ms": 45.878000000000085,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "after",
+      "round": 16,
+      "wall_ms": 157.31141704600304,
+      "user_ms": 176.21900000000056,
+      "sys_ms": 44.43599999999992,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "before",
+      "round": 16,
+      "wall_ms": 188.990541966632,
+      "user_ms": 201.2299999999998,
+      "sys_ms": 45.08500000000004,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "before",
+      "round": 17,
+      "wall_ms": 191.15558394696563,
+      "user_ms": 203.7199999999997,
+      "sys_ms": 41.13900000000004,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "after",
+      "round": 17,
+      "wall_ms": 157.28124999441206,
+      "user_ms": 173.73599999999988,
+      "sys_ms": 46.54499999999984,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "after",
+      "round": 18,
+      "wall_ms": 157.17362496070564,
+      "user_ms": 174.57300000000055,
+      "sys_ms": 43.3340000000002,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "before",
+      "round": 18,
+      "wall_ms": 185.97904103808105,
+      "user_ms": 202.62400000000014,
+      "sys_ms": 41.55999999999982,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "before",
+      "round": 19,
+      "wall_ms": 185.83020800724626,
+      "user_ms": 201.45899999999983,
+      "sys_ms": 41.993000000000166,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "after",
+      "round": 19,
+      "wall_ms": 157.00641693547368,
+      "user_ms": 173.73300000000035,
+      "sys_ms": 45.67599999999983,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "after",
+      "round": 20,
+      "wall_ms": 166.99866706039757,
+      "user_ms": 185.44299999999936,
+      "sys_ms": 45.81699999999999,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    },
+    {
+      "arm": "before",
+      "round": 20,
+      "wall_ms": 189.71487507224083,
+      "user_ms": 205.91600000000022,
+      "sys_ms": 42.61399999999993,
+      "rc": 0,
+      "stdout": "opencode vlocal\n",
+      "stderr": ""
+    }
+  ],
+  "load_after": [
+    5.087890625,
+    4.8681640625,
+    9.23876953125
+  ],
+  "source": "https://github.com/nubjs/nopencode/tree/ae208df84f25d3530c8c00ae98c25f313de885e7",
+  "node": "26.6.0",
+  "before_compiler": "250372c9dd9f84ef50b27ab0e26276cbd86003aa",
+  "after_compiler": "a06cd043fc33330d909fb1dfd21263376264620a",
+  "cpu": "Apple M1 Max",
+  "source_hidden": true,
+  "method": "Same source, dependency tree and release launcher; local channel/version; web UI omitted in both builds; source worktree hidden; foreign working directory; separate Node caches; artifact paths made relative, timing samples unmodified."
+}

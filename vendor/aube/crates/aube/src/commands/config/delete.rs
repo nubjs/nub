@@ -41,7 +41,7 @@ pub fn run(args: DeleteArgs) -> miette::Result<()> {
     // canonical-name catch covers older configs that stored the key
     // under its `meta.name` even when the user typed an alias.
     let config_path = match location {
-        Location::User | Location::Global => aube_config::user_aube_config_path()?,
+        Location::User => aube_config::user_aube_config_path()?,
         Location::Project => {
             aube_config::project_aube_config_path(&crate::dirs::project_root_or_cwd()?)
         }
@@ -65,14 +65,13 @@ pub fn run(args: DeleteArgs) -> miette::Result<()> {
         }
     }
 
-    // `.npmrc`: sweep when the key is npm-shared (the canonical home
-    // for those) or when it's a free-form / unknown key (which may
-    // legitimately live in `.npmrc`). Aube-only settings
-    // (`autoInstallPeers`, `minimumReleaseAge`, …) are intentionally
-    // not swept — `.npmrc` is shared with npm/pnpm/yarn and an
-    // aube-known entry there is typically a hand-edit the user wants
-    // to control.
-    let should_sweep_npmrc = key_is_npm_shared || meta.is_none();
+    // `.npmrc`: sweep when the key is npm-shared (the canonical home),
+    // free-form / unknown, or a layout setting. Embedders can route known
+    // layout settings there even when other known settings live in workspace
+    // YAML, so deletion must follow that write route. Other Aube-only settings
+    // (`autoInstallPeers`, `minimumReleaseAge`, …) remain untouched.
+    let should_sweep_npmrc =
+        key_is_npm_shared || meta.is_none() || meta.is_some_and(|meta| meta.layout);
     let npmrc_path = location.path()?;
     if should_sweep_npmrc && npmrc_path.exists() {
         let mut edit = NpmrcEdit::load(&npmrc_path)?;
@@ -92,13 +91,14 @@ pub fn run(args: DeleteArgs) -> miette::Result<()> {
     }
 
     if removed_paths.is_empty() {
-        // For aube-only settings (not in the npm-shared allowlist) we
-        // intentionally skipped the `.npmrc` sweep — surface a stale
-        // entry there so the user knows what's still shadowing the
-        // delete. npm-shared and free-form keys fall through to the
-        // simpler "not set anywhere" message.
+        // For aube-only settings whose write route does not include `.npmrc`,
+        // surface a stale entry there so the user knows what still shadows the
+        // delete. npm-shared, free-form, and layout keys fall through to the
+        // simpler "not set anywhere" message because their `.npmrc` route was
+        // already swept above.
         if let Some(_meta) = meta
             && !key_is_npm_shared
+            && !should_sweep_npmrc
         {
             return Err(missing_aube_key_error(
                 &args.key,

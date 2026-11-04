@@ -314,6 +314,32 @@ EOF
 	refute_output --partial 'WARN_AUBE_GVS_MODE_CHANGED'
 }
 
+@test "aube add --filter --ignore-scripts skips root pnpm:devPreinstall" {
+	cat >pnpm-workspace.yaml <<-'EOF'
+		packages:
+		  - packages/*
+	EOF
+	cat >package.json <<-'EOF'
+		{
+		  "name": "root",
+		  "version": "0.0.0",
+		  "private": true,
+		  "scripts": {
+		    "pnpm:devPreinstall": "node -e 'require(\"fs\").writeFileSync(\"dev-preinstall.marker\", \"ran\")'"
+		  }
+		}
+	EOF
+	mkdir -p packages/dashboard
+	cat >packages/dashboard/package.json <<-'EOF'
+		{"name": "dashboard", "version": "0.0.0", "private": true}
+	EOF
+
+	run aube add is-odd --filter=dashboard --ignore-scripts
+	assert_success
+	assert_file_exists packages/dashboard/node_modules/is-odd/index.js
+	assert_file_not_exists dev-preinstall.marker
+}
+
 @test "aube add -D: moves dep from dependencies to devDependencies" {
 	cat >package.json <<'EOF'
 {
@@ -336,9 +362,10 @@ EOF
 	refute_output --partial '"dependencies"'
 }
 
-@test "aube add --save-peer writes only peerDependencies and does not install" {
-	# `--save-peer` alone is a metadata-only declaration. pnpm treats
-	# this as "consumers need X" and does not install it locally.
+@test "aube add --save-peer writes only peerDependencies and auto-installs the peer" {
+	# `--save-peer` keeps the declaration in peerDependencies only. With
+	# auto-install-peers enabled, the required importer peer is still linked
+	# locally so the package can use it during development.
 	cat >package.json <<'EOF'
 {
   "name": "test-save-peer-only",
@@ -356,9 +383,9 @@ EOF
 	refute_output --partial '"dependencies"'
 	refute_output --partial '"devDependencies"'
 
-	# And no top-level node_modules entry — the peer isn't installed.
-	run test -e node_modules/is-odd
-	assert_failure
+	# The required importer peer is auto-installed without adding a second
+	# manifest declaration.
+	assert_file_exists node_modules/is-odd/index.js
 }
 
 @test "aube add --save-peer --save-dev writes to both sections and installs" {

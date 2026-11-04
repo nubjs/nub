@@ -7,6 +7,132 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.8](https://github.com/aubepkg/aube/compare/aube-codes-v2.2.7...aube-codes-v2.2.8) - 2026-09-04
+
+### Other
+
+- update Cargo.lock dependencies
+
+## [2.2.5](https://github.com/aubepkg/aube/compare/aube-codes-v2.2.4...aube-codes-v2.2.5) - 2026-09-03
+
+### Fixed
+
+- *(lockfile)* reject pre-v9 pnpm lockfiles instead of installing nothing ([#1456](https://github.com/aubepkg/aube/pull/1456))
+
+### Other
+
+- move routine workflows to GitHub-hosted runners ([#1469](https://github.com/aubepkg/aube/pull/1469))
+- move project to aubepkg and aube.sh ([#1460](https://github.com/aubepkg/aube/pull/1460))
+- fix prose and content in docs and cli help ([#1455](https://github.com/aubepkg/aube/pull/1455))
+- refresh benchmarks for v2.2.4 ([#1434](https://github.com/aubepkg/aube/pull/1434))
+
+## [2.2.4](https://github.com/jdx/aube/compare/aube-codes-v2.2.3...aube-codes-v2.2.4) - 2026-08-31
+
+### Other
+
+- refresh benchmarks for v2.2.3 ([#1417](https://github.com/jdx/aube/pull/1417))
+
+## [2.2.1](https://github.com/jdx/aube/compare/aube-codes-v2.2.0...aube-codes-v2.2.1) - 2026-08-29
+
+### Other
+
+- refresh benchmarks for v2.2.0 ([#1384](https://github.com/jdx/aube/pull/1384))
+- *(sponsors)* replace 37signals with omacom foundation ([#1380](https://github.com/jdx/aube/pull/1380))
+
+## [2.2.0](https://github.com/jdx/aube/compare/aube-codes-v2.1.0...aube-codes-v2.2.0) - 2026-08-25
+
+### Fixed
+
+- *(install)* bundle curated package extensions ([#1369](https://github.com/jdx/aube/pull/1369))
+
+### Other
+
+- refresh benchmarks for v2.1.0 ([#1372](https://github.com/jdx/aube/pull/1372))
+
+## [2.1.0](https://github.com/jdx/aube/compare/aube-codes-v2.0.1...aube-codes-v2.1.0) - 2026-08-23
+
+### Other
+
+- refresh benchmarks for v2.0.1 ([#1350](https://github.com/jdx/aube/pull/1350))
+
+## [2.0.1](https://github.com/jdx/aube/compare/aube-codes-v2.0.0...aube-codes-v2.0.1) - 2026-08-23
+
+### Added
+
+- *(resolver)* [**breaking**] expose lowest-direct resolution mode ([#1345](https://github.com/jdx/aube/pull/1345))
+- *(global)* [**breaking**] keep aube's global dirs under its own data root ([#1231](https://github.com/jdx/aube/pull/1231))
+
+## [1.41.0](https://github.com/jdx/aube/compare/aube-codes-v1.40.0...aube-codes-v1.41.0) - 2026-08-16
+
+### Fixed
+
+- *(settings)* validate package extensions ([#1304](https://github.com/jdx/aube/pull/1304))
+
+### Other
+
+- refresh benchmarks for v1.40.0 ([#1290](https://github.com/jdx/aube/pull/1290))
+
+## [1.40.0](https://github.com/jdx/aube/compare/aube-codes-v1.39.0...aube-codes-v1.40.0) - 2026-08-13
+
+### Other
+
+- refresh benchmarks for v1.39.0 ([#1285](https://github.com/jdx/aube/pull/1285))
+- Update Star History chart links with sealed tokens
+
+## [1.39.0](https://github.com/jdx/aube/compare/aube-codes-v1.38.1...aube-codes-v1.39.0) - 2026-08-12
+
+### Fixed
+
+- *(store)* prune unused global virtual store entries ([#1273](https://github.com/jdx/aube/pull/1273))
+
+### Other
+
+- refresh benchmarks for v1.38.1 ([#1257](https://github.com/jdx/aube/pull/1257))
+
+## [1.38.1](https://github.com/jdx/aube/compare/aube-codes-v1.38.0...aube-codes-v1.38.1) - 2026-08-10
+
+### Fixed
+
+- *(linker)* protect project root from modules cleanup ([#1246](https://github.com/jdx/aube/pull/1246))
+
+### Other
+
+- refresh benchmarks for v1.38.0 ([#1244](https://github.com/jdx/aube/pull/1244))
+
+## [1.38.0](https://github.com/jdx/aube/compare/aube-codes-v1.37.0...aube-codes-v1.38.0) - 2026-08-07
+
+### Fixed
+
+- *(store)* fail closed on incomplete index scans ([#1237](https://github.com/jdx/aube/pull/1237))
+- *(install)* route deprecation warnings through embedder output ([#1236](https://github.com/jdx/aube/pull/1236))
+- *(lockfile)* reject unsupported named registry identities ([#1215](https://github.com/jdx/aube/pull/1215))
+
+### Other
+
+- refresh benchmarks for v1.37.0 ([#1211](https://github.com/jdx/aube/pull/1211))
+- refresh benchmarks for v1.37.0 ([#1206](https://github.com/jdx/aube/pull/1206))
+
+## [1.37.0](https://github.com/jdx/aube/compare/aube-codes-v1.36.0...aube-codes-v1.37.0) - 2026-07-31
+
+### Added
+
+- *(scripts)* use pnpm trusted dependency list ([#1199](https://github.com/jdx/aube/pull/1199))
+
+### Fixed
+
+- *(patch)* preserve existing patches and refresh hashes ([#1196](https://github.com/jdx/aube/pull/1196))
+- *(update)* warn when release age hides upgrades ([#1193](https://github.com/jdx/aube/pull/1193))
+
+### Other
+
+- refresh benchmarks for v1.36.0 ([#1185](https://github.com/jdx/aube/pull/1185))
+
+## [1.36.0](https://github.com/jdx/aube/compare/aube-codes-v1.35.0...aube-codes-v1.36.0) - 2026-07-29
+
+### Other
+
+- refresh benchmarks for v1.35.0 ([#1172](https://github.com/jdx/aube/pull/1172))
+
 ## [1.35.0](https://github.com/jdx/aube/compare/aube-codes-v1.34.0...aube-codes-v1.35.0) - 2026-07-28
 
 ### Added

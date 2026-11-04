@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 
 /// One resolved patch entry. `key` is the VERBATIM declared
 /// `patchedDependencies` key — exact (`ms@2.1.3`), range (`ms@>=2`),
-/// wildcard (`ms@*`), or bare name (`ms`) — and is the string the
+/// wildcard (`ms@*`), bare name (`ms`), or a source identity
+/// (`pkg@github:owner/repo#sha`) — and is the string the
 /// lockfile's `patchedDependencies:` block records unresolved, matching
 /// pnpm. `path` is the absolute path on disk, `content` is the raw
 /// patch text the linker applies. Mapping a concrete resolved
@@ -54,7 +55,7 @@ impl ResolvedPatch {
 /// prefixes, NUL bytes, and any `..` component. Used as a read-side
 /// guard so a hostile manifest cannot point the patch loader at
 /// arbitrary files (e.g. `/etc/passwd` or `\\server\share\secret`).
-fn is_safe_patch_rel(rel: &str) -> bool {
+pub(crate) fn is_safe_patch_rel(rel: &str) -> bool {
     if rel.is_empty() || rel.contains('\0') {
         return false;
     }
@@ -77,13 +78,36 @@ fn is_safe_patch_rel(rel: &str) -> bool {
 }
 
 /// Validate a `patchedDependencies` key's shape, rejecting only a
-/// non-`*` selector that isn't a valid semver range (pnpm's
-/// `PATCH_NON_SEMVER_RANGE`). Every other shape — exact, range, `*`,
-/// bare name — is accepted; mapping the key to concrete resolved
-/// versions is [`aube_lockfile::patch_groups`]'s job. Kept a thin
-/// wrapper so the invalid-range error carries the branded code.
+/// non-`*` selector that is neither a valid semver range nor a
+/// `<protocol>:` source identity (pnpm's `PATCH_NON_SEMVER_RANGE`).
+/// Every other shape — exact, range, `*`, bare name, and a bun-style
+/// `name@github:owner/repo#sha` — is accepted; mapping the key to
+/// concrete resolved versions is [`aube_lockfile::patch_groups`]'s job.
+/// Kept a thin wrapper so the invalid-range error carries the branded
+/// code.
 fn validate_patch_key(key: &str) -> Result<()> {
     aube_lockfile::patch_groups::classify_patch_key(key).map_err(|e| {
+        miette!(
+            code = aube_codes::errors::ERR_AUBE_PATCH_NON_SEMVER_RANGE,
+            "{}",
+            e.message()
+        )
+    })?;
+    Ok(())
+}
+
+/// The same gate under **pnpm's grammar only**, for a key that did not
+/// come from bun's field — the branded `pnpm.*` object and this tool's
+/// own namespace (`pnpm_patched_dependencies`), plus the workspace yaml.
+///
+/// `load_declared_patch_paths` merges all of those with bun's into one
+/// map and the origin is gone after that, so the check happens here, as
+/// each is read. Otherwise bun's source-identity key shape would
+/// silently become legal in a pnpm project, which pnpm itself refuses:
+/// `groupPatchedDependencies` runs `validRange` on the selector and
+/// throws `PATCH_NON_SEMVER_RANGE`.
+fn validate_pnpm_patch_key(key: &str) -> Result<()> {
+    aube_lockfile::patch_groups::classify_pnpm_patch_key(key).map_err(|e| {
         miette!(
             code = aube_codes::errors::ERR_AUBE_PATCH_NON_SEMVER_RANGE,
             "{}",
@@ -97,11 +121,14 @@ fn validate_patch_key(key: &str) -> Result<()> {
 /// keyed by the CONCRETE resolved `name@version` those stages apply
 /// patches by: a `(name@version, content)` content map and a
 /// `(name@version, content_hash)` fold map. The declared keys may be
-/// exact (`ms@2.1.3`), a range (`ms@>=2`), a wildcard (`ms@*`), or a
-/// bare name (`ms`); each graph package resolves to at most one patch
-/// by pnpm's `getPatchInfo` priority (exact > range > all). An
-/// all-exact project resolves each key to its own `name@version`, so
-/// the maps are byte-identical to the pre-resolution behavior.
+/// exact (`ms@2.1.3`), a range (`ms@>=2`), a wildcard (`ms@*`), a bare
+/// name (`ms`), or a source identity (`pkg@github:owner/repo#sha`, which
+/// matches through the exact branch because that string is what the
+/// lockfile records as such a package's version); each graph package
+/// resolves to at most one patch by pnpm's `getPatchInfo` priority
+/// (exact > range > all). An all-exact project resolves each key to its
+/// own `name@version`, so the maps are byte-identical to the
+/// pre-resolution behavior.
 ///
 /// Two ranges matching one version → [`aube_codes::errors::ERR_AUBE_PATCH_KEY_CONFLICT`];
 /// an invalid non-`*` range → [`aube_codes::errors::ERR_AUBE_PATCH_NON_SEMVER_RANGE`].
@@ -195,6 +222,41 @@ fn map_patch_resolve_err(e: aube_lockfile::patch_groups::PatchResolveError) -> m
     }
 }
 
+/// Read patch declarations from the project manifest and workspace config
+/// without touching their files. Deploy filters this map to each selected
+/// importer's closure before validating paths and loading content.
+pub(crate) fn load_declared_patch_paths(cwd: &Path) -> Result<BTreeMap<String, String>> {
+    let mut entries = BTreeMap::new();
+    let manifest_path = cwd.join("package.json");
+    if manifest_path.exists() {
+        let manifest = aube_manifest::PackageJson::from_path(&manifest_path)
+            .map_err(miette::Report::new)
+            .wrap_err("failed to read package.json")?;
+        entries.extend(manifest.bun_patched_dependencies());
+        let pnpm_declared = manifest.pnpm_patched_dependencies();
+        for key in pnpm_declared.keys() {
+            validate_pnpm_patch_key(key)?;
+        }
+        entries.extend(pnpm_declared);
+    }
+
+    let ws_config = aube_manifest::workspace::WorkspaceConfig::load(cwd)
+        .map_err(miette::Report::new)
+        .wrap_err("failed to read pnpm-workspace.yaml")?;
+    for key in ws_config.patched_dependencies.keys() {
+        validate_pnpm_patch_key(key)?;
+    }
+    entries.extend(ws_config.patched_dependencies);
+    Ok(entries)
+}
+
+pub(crate) fn resolve_declared_patches(
+    cwd: &Path,
+    entries: BTreeMap<String, String>,
+) -> Result<BTreeMap<String, ResolvedPatch>> {
+    resolve_patch_entries(cwd, entries)
+}
+
 #[cfg(test)]
 fn load_patches(cwd: &Path) -> Result<BTreeMap<String, ResolvedPatch>> {
     load_patches_with_lockfile_entries(cwd, &BTreeMap::new())
@@ -204,23 +266,16 @@ fn load_patches_with_lockfile_entries(
     cwd: &Path,
     lockfile_patched_dependencies: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, ResolvedPatch>> {
-    let mut entries: BTreeMap<String, String> = BTreeMap::new();
+    let mut entries = BTreeMap::new();
     entries.extend(lockfile_patched_dependencies.clone());
+    entries.extend(load_declared_patch_paths(cwd)?);
+    resolve_patch_entries(cwd, entries)
+}
 
-    let manifest_path = cwd.join("package.json");
-    if manifest_path.exists() {
-        let manifest = aube_manifest::PackageJson::from_path(&manifest_path)
-            .map_err(miette::Report::new)
-            .wrap_err("failed to read package.json")?;
-        entries.extend(manifest.bun_patched_dependencies());
-        entries.extend(manifest.pnpm_patched_dependencies());
-    }
-
-    let ws_config = aube_manifest::workspace::WorkspaceConfig::load(cwd)
-        .map_err(miette::Report::new)
-        .wrap_err("failed to read pnpm-workspace.yaml")?;
-    entries.extend(ws_config.patched_dependencies);
-
+fn resolve_patch_entries(
+    cwd: &Path,
+    entries: BTreeMap<String, String>,
+) -> Result<BTreeMap<String, ResolvedPatch>> {
     let mut out = BTreeMap::new();
     for (key, rel) in entries {
         validate_patch_key(&key)?;
@@ -513,6 +568,7 @@ fn upsert_manifest_patched_dependency(
     let raw = std::fs::read_to_string(&path)
         .into_diagnostic()
         .map_err(|e| miette!("failed to read {}: {e}", path.display()))?;
+    let style = aube_manifest::detect_json_style(&raw);
     let mut value =
         aube_manifest::parse_json::<serde_json::Value>(&path, raw).map_err(miette::Report::new)?;
     let mut obj = value
@@ -535,10 +591,9 @@ fn upsert_manifest_patched_dependency(
         key.to_string(),
         serde_json::Value::String(rel_patch_path.to_string()),
     );
-    let mut out = serde_json::to_string_pretty(&value)
+    let out = aube_manifest::serialize_json_with_style(&value, &style)
         .into_diagnostic()
         .map_err(|e| miette!("failed to serialize {}: {e}", path.display()))?;
-    out.push('\n');
     std::fs::write(&path, out)
         .into_diagnostic()
         .map_err(|e| miette!("failed to write {}: {e}", path.display()))?;
@@ -553,6 +608,7 @@ fn remove_bun_patched_dependency(cwd: &Path, key: &str) -> Result<bool> {
     let raw = std::fs::read_to_string(&path)
         .into_diagnostic()
         .map_err(|e| miette!("failed to read {}: {e}", path.display()))?;
+    let style = aube_manifest::detect_json_style(&raw);
     let mut value =
         aube_manifest::parse_json::<serde_json::Value>(&path, raw).map_err(miette::Report::new)?;
     let obj = value
@@ -580,10 +636,9 @@ fn remove_bun_patched_dependency(cwd: &Path, key: &str) -> Result<bool> {
         return Ok(removed);
     }
 
-    let mut out = serde_json::to_string_pretty(&value)
+    let out = aube_manifest::serialize_json_with_style(&value, &style)
         .into_diagnostic()
         .map_err(|e| miette!("failed to serialize {}: {e}", path.display()))?;
-    out.push('\n');
     std::fs::write(&path, out)
         .into_diagnostic()
         .map_err(|e| miette!("failed to write {}: {e}", path.display()))?;
@@ -658,15 +713,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validate_accepts_all_pnpm_key_shapes() {
+    fn validate_accepts_every_supported_key_shape() {
         // The parse-time gate now rejects ONLY a non-`*` invalid range;
-        // exact, range, `*`, and bare-name keys all pass.
+        // exact, range, `*`, and bare-name keys all pass. A bun-style
+        // source identity passes too — the last two entries are the shape
+        // that used to refuse opencode's whole install with
+        // ERR_AUBE_PATCH_NON_SEMVER_RANGE.
         for key in [
             "is-positive@3.1.0",
             "@babel/core@7.0.0",
             "sonda",
             "sonda@*",
             "sonda@>=1",
+            "ghostty-web@github:anomalyco/ghostty-web#83c0a07",
+            "pkg@file:./vendor/pkg",
         ] {
             assert!(validate_patch_key(key).is_ok(), "should accept {key:?}");
         }
@@ -702,6 +762,41 @@ mod tests {
             patch_with_content("hello\r\n").content_hash(),
             patch_with_content("hello\n").content_hash(),
         );
+    }
+
+    /// Bun's source-identity key shape is bun's alone. A key read from
+    /// `pnpm.patchedDependencies` goes through the same merged map and
+    /// the same permissive classifier, so without a check at the READ
+    /// site a pnpm project would silently gain a key shape pnpm itself
+    /// refuses (`groupPatchedDependencies` runs `validRange` and throws
+    /// `PATCH_NON_SEMVER_RANGE`).
+    #[test]
+    fn a_pnpm_declared_source_identity_is_refused_where_bun_s_is_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("patches")).unwrap();
+        std::fs::write(dir.path().join("patches/p.patch"), "").unwrap();
+
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"pnpm":{"patchedDependencies":{"is-positive@file:./vendor":"patches/p.patch"}}}"#,
+        )
+        .unwrap();
+        let err = load_declared_patch_paths(dir.path())
+            .expect_err("a pnpm-declared source identity must be refused");
+        assert_eq!(
+            err.code().map(|c| c.to_string()).as_deref(),
+            Some(aube_codes::errors::ERR_AUBE_PATCH_NON_SEMVER_RANGE),
+        );
+
+        // The identical key under bun's own field is accepted.
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"patchedDependencies":{"is-positive@file:./vendor":"patches/p.patch"}}"#,
+        )
+        .unwrap();
+        let entries =
+            load_declared_patch_paths(dir.path()).expect("bun's field carries bun's grammar");
+        assert!(entries.contains_key("is-positive@file:./vendor"));
     }
 
     /// pnpm's `verifyPatches` contract: a declared key that matches no
@@ -815,6 +910,46 @@ mod tests {
                 .map(|p| p.path.strip_prefix(dir.path()).unwrap()),
             Some(Path::new("patches/is-number.patch"))
         );
+    }
+
+    #[test]
+    fn bun_patch_writers_preserve_the_manifest_style() {
+        // The `bun.lock` is what selects the two writers under test:
+        // `upsert_manifest_patched_dependency` and
+        // `remove_bun_patched_dependency`. Without a lockfile the upsert
+        // takes the `config_write_target` → `edit_setting_map` path instead,
+        // which `edits.rs` already covers.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("bun.lock"), "{}").unwrap();
+        let manifest = dir.path().join("package.json");
+        std::fs::write(&manifest, "{\r\n\t\"name\": \"x\"\r\n}").unwrap();
+
+        upsert_patched_dependency(dir.path(), "a@1.0.0", "patches/a@1.0.0.patch").unwrap();
+        let raw = std::fs::read_to_string(&manifest).unwrap();
+        // The bun arm writes the un-branded top-level field — proof the
+        // routing reached the writer under test, not `edit_setting_map`.
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            parsed["patchedDependencies"]["a@1.0.0"],
+            "patches/a@1.0.0.patch"
+        );
+        assert!(raw.starts_with("{\r\n\t\"name\""), "style lost:\n{raw:?}");
+        assert!(
+            !raw.contains("\n  \""),
+            "reindented to two spaces:\n{raw:?}"
+        );
+        assert!(raw.ends_with('}'), "trailing newline added:\n{raw:?}");
+
+        remove_patched_dependency(dir.path(), "a@1.0.0").unwrap();
+        let raw = std::fs::read_to_string(&manifest).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(parsed["patchedDependencies"].is_null());
+        assert!(raw.starts_with("{\r\n\t\"name\""), "style lost:\n{raw:?}");
+        assert!(
+            !raw.contains("\n  \""),
+            "reindented to two spaces:\n{raw:?}"
+        );
+        assert!(raw.ends_with('}'), "trailing newline added:\n{raw:?}");
     }
 
     #[test]

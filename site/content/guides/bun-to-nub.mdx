@@ -34,7 +34,7 @@ Nub's package-manager surface mirrors pnpm's command grammar:
 bun install                   # → nub install   (alias: nub i)
 bun add <pkg>                 # → nub add <pkg>
 bun remove <pkg>              # → nub remove <pkg>
-bunx <pkg>                    # → nubx <pkg>     (always fetch: nub dlx <pkg>)
+bunx <pkg>                    # → nubx <pkg>     (fetch: nub dlx <pkg>)
 ```
 
 Nub is **lockfile-compatible** with what your project already uses — it round-trips npm, pnpm, and bun lockfiles and reads yarn's — so you do not have to convert your lockfile to adopt Nub. The CLI grammar is pnpm's, but lockfile support is not limited to pnpm's format. If you want Nub to own resolution as a Nub-identity project (consuming only neutral, cross-tool config), drop the bun-branded `bunfig.toml` and let Nub write a neutral `.npmrc`; if you keep an incumbent PM, Nub mirrors that PM faithfully.
@@ -79,7 +79,7 @@ nub --env-file=.env.production src/index.ts
 Behavior to know:
 
 - Passing any `--env-file` flag **suppresses** Nub's automatic `.env*` discovery — only the file(s) you name load, matching the "explicit means explicit" contract. This mirrors how an explicit file opts out of the auto cascade.
-- Nub expands `${VAR}` cross-references in env-file values (the auto-load path and the explicit-flag path both expand). Plain Node's `--env-file` parser does not expand; Nub closes that gap.
+- Nub expands `${VAR}` cross-references in the automatic `.env*` files. Files named with `--env-file` arrive verbatim, matching Node. Bun expands explicit files too, so a value that leaned on expansion in a `--env-file` file needs the real value under Nub. There is no exact equivalent of one explicit file that also expands; the two nearest options each differ in one way. Naming the file in [`nub.jsonc` `envFile`](/docs/config#envfile) keeps it explicit and expanding, but a source list loads on every run and every listed path must exist. Selecting a mode with `APP_ENV=production nub src/index.ts` is per-invocation and expanding, but loads the full cascade — `.env.production.local`, `.env.local`, `.env.production`, `.env`, in that precedence — so a `.env.local` value outranks the production file for any overlapping key.
 - The shell environment still wins over file values (a var already set in the environment is not overwritten).
 
 Two gaps to plan around:
@@ -129,7 +129,8 @@ Bun ships `Bun.sql`, a Postgres client modeled on [postgres.js](https://github.c
   ```ts
   import { Pool } from "pg";
   const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-  const { rows } = await pool.query("select * from users where id = $1", [id]);
+  const sql = "select * from users where id = $1";
+  const { rows } = await pool.query(sql, [id]);
   ```
 
 If you use Prisma, the migration is mostly about *raw* queries — your Prisma models are unaffected by the runtime swap. Pick one raw-query client and use it consistently.
@@ -306,6 +307,7 @@ If you are migrating a `bunfig.toml`, note the unit change: bunfig expresses `mi
 ## Gotchas worth pre-empting
 
 - **Peer dependencies are not auto-installed.** The biggest behavioral difference from Bun. Add missing peers explicitly; expect more than one to surface.
+- **A bunfig `[install].linker` value is not read.** Nub mirrors Bun's resolution, not its `node_modules` layout. Choose a layout with `install.linker` in `nub.jsonc`, `node-linker` in `.npmrc`, or the `--node-linker` flag — see [layout settings](/docs/install#layout-settings).
 - **`nub run a b` is not multi-script.** It runs `a` with `b` as an argument (same as pnpm and Bun's plain `run`). Use a `/regex/` selector or `npm-run-all2` for real fan-out.
 - **`--env-file` suppresses auto-discovery.** Once you pass an explicit file, the automatic `.env*` cascade is off for that run — pass every file you need, or rely on auto-discovery instead.
 - **`--env-file-if-exists` is not a first-class Nub flag yet.** Use `--env-file` with files you know exist, or auto-discovery (which already tolerates missing files).

@@ -1,5 +1,5 @@
 //! The PM identity decision table, behaviorally, through the binary
-//! (spec: wiki/commands/pm/identity-policy.md). Identity resolution is the
+//! (spec: `identity-policy` (no such document)). Identity resolution is the
 //! engine's declaration-aware policy (pin-over-inference, Axiom 1), wired
 //! into nub's engine preflight; the contradiction/ambiguity rows render
 //! nub-side with the rewritten stable codes and the `nub pm use` remedy.
@@ -115,7 +115,7 @@ fn fresh_projects_write_the_identity_format_declared_first_else_nub() {
         Some(&serde_json::json!({
             "name": "nub",
             "version": concat!("^", env!("CARGO_PKG_VERSION")),
-            "onFail": "warn"
+            "onFail": "ignore"
         })),
         "a virgin install stamps a devEngines.packageManager caret range: {manifest}"
     );
@@ -627,14 +627,7 @@ fn nub_profile_reads_no_branded_user_or_project_config_file() {
     // branded plants are left byte-for-byte untouched.
     std::fs::create_dir_all(dir.join("home")).unwrap();
     let set = Command::new(nub_binary())
-        .args([
-            "config",
-            "set",
-            "--location",
-            "user",
-            "minimumReleaseAge",
-            "1000",
-        ])
+        .args(["config", "set", "--global", "minimumReleaseAge", "1000"])
         .current_dir(&dir)
         .env("HOME", dir.join("home"))
         .env("USERPROFILE", dir.join("home"))

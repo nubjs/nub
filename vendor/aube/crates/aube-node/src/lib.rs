@@ -129,7 +129,7 @@ pub fn configure(env: &Env, input: Option<ConfigureInput>) -> NodeResult<()> {
                 code: aube_codes::errors::ERR_AUBE_EMBED_INVALID_SETTING.to_string(),
                 message: format!("unknown setting {key:?}"),
                 diagnostic: format!(
-                    "{key:?} is not a canonical aube setting name; see https://aube.jdx.dev/settings"
+                    "{key:?} is not a canonical aube setting name; see https://aube.sh/settings"
                 ),
             },
         )

@@ -124,6 +124,58 @@ teardown() {
 	refute_output --partial 'no lockfile found'
 }
 
+@test "defaultLockfileFormat=pnpm creates and recreates pnpm-lock.yaml" {
+	cat >package.json <<-'EOF'
+		{
+		  "name": "test-default-pnpm-lockfile",
+		  "version": "1.0.0",
+		  "dependencies": { "is-odd": "3.0.1" }
+		}
+	EOF
+	cat >>.npmrc <<-'EOF'
+
+		default-lockfile-format=pnpm
+	EOF
+
+	run aube install --no-frozen-lockfile
+	assert_success
+	assert_file_exists pnpm-lock.yaml
+	assert_file_not_exists aube-lock.yaml
+
+	run aube clean --lockfile
+	assert_success
+	assert_file_not_exists pnpm-lock.yaml
+
+	run aube install --no-frozen-lockfile
+	assert_success
+	assert_file_exists pnpm-lock.yaml
+	assert_file_not_exists aube-lock.yaml
+}
+
+@test "an existing lockfile wins over defaultLockfileFormat" {
+	cat >package.json <<-'EOF'
+		{
+		  "name": "test-existing-lockfile-wins",
+		  "version": "1.0.0",
+		  "dependencies": { "is-odd": "3.0.1" }
+		}
+	EOF
+	cat >>.npmrc <<-'EOF'
+
+		default-lockfile-format=pnpm
+	EOF
+
+	run env AUBE_DEFAULT_LOCKFILE_FORMAT=aube aube install --no-frozen-lockfile
+	assert_success
+	assert_file_exists aube-lock.yaml
+	assert_file_not_exists pnpm-lock.yaml
+
+	run aube install --no-frozen-lockfile
+	assert_success
+	assert_file_exists aube-lock.yaml
+	assert_file_not_exists pnpm-lock.yaml
+}
+
 # `lockfileIncludeTarballUrl=true` records each registry package's full
 # tarball URL in the lockfile's `resolution.tarball:` field.
 

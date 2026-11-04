@@ -15,7 +15,7 @@ use super::version::NodeVersion;
 /// Flags Nub injects on EVERY supported Node version where they are safe.
 /// `--enable-source-maps` has existed since Node 12.12, so it is structurally
 /// available across the whole 18.19+ range — BUT it is gated out of the
-/// `source_maps_safe`-false band (Node 26.2.x; see that predicate).
+/// `source_maps_safe`-false band (Node 26.0.0–26.7.x; see that predicate).
 /// (`--disable-warning` is NOT here — it doesn't exist on Node 18.x / 20.0–20.10
 /// and is gated below; injecting it there is a hard "bad option" / "not allowed
 /// in NODE_OPTIONS" error, which broke the compat tier on those versions.)
@@ -23,19 +23,36 @@ const ALWAYS_INJECT: &[&str] = &["--enable-source-maps"];
 
 /// Whether nub may inject `--enable-source-maps` on this Node version.
 ///
-/// Node **26.2.x specifically** has a regression where, with source maps enabled,
-/// a no-message `assert.ok(false)` / `assert(false)` rethrows as a `TypeError`
-/// instead of the expected `AssertionError` (the source-map remapping path
-/// mis-constructs the error for the no-message form). Empirically isolated to the
-/// 26.2 patch band: Node 18.19 / 20 / 22 / 24 / 25 and 26.1 are all clean, and a
-/// future 26.3 is expected clean too. So nub withholds the injection ONLY on
-/// 26.2.x — source maps are unavailable there (a cosmetic loss: stack traces are
-/// not remapped), which is far better than corrupting the type of a thrown
-/// AssertionError. Verified on real Node 26.2.0:
+/// The whole **Node 26.x** line released so far regresses (nodejs/node#63169):
+/// with source maps enabled and no source map for the file, the remapping path's
+/// `getErrorSourceLocation` returns `undefined`, so a no-message
+/// `assert(false)` / `assert.ok(false)` / `assert.strict(false)` throws
+/// `TypeError [ERR_INVALID_ARG_TYPE]` ("The \"message\" argument …") instead of
+/// the expected `AssertionError`. Verified on real 26.0.0 / 26.3.0 / 26.5.1 /
+/// 26.7.0; 25.x is clean (25.9.0 yields an `AssertionError` with a degraded
+/// message, which is the right TYPE). This band was previously — and wrongly —
+/// documented as 26.2-only.
+///
+/// Fixed on Node `main` by b5d37cd4 (nodejs/node#63215, 2026-08-20) in
+/// `lib/internal/errors/error_source.js`, and the band was predicted to close at
+/// 26.8.0 as the first release that could carry it.
+///
+/// RE-VERIFIED 2026-09-01, now that the release exists — the boundary below is
+/// measured rather than predicted, so this is no longer a stopgap. Running
 /// `node --enable-source-maps -e 'try{require("assert").ok(false)}catch(e){console.log(e.constructor.name)}'`
-/// prints `TypeError`; without the flag it prints `AssertionError`.
+/// on real binaries gives `TypeError` on 26.7.0 and `AssertionError` on 26.8.1.
+///
+/// The artifact published as v26.8.0 also gives `AssertionError`, with one caveat
+/// worth stating rather than rounding off: that build self-reports
+/// `v26.8.0-alpha.0.0.0`, which sorts BELOW `26.8.0` and so lands inside the band
+/// this constant withholds on. So the clean measurement is 26.7.0 broken / 26.8.1
+/// fixed, and 26.8.0 is bounded by the fix landing upstream before it was cut.
+///
+/// The trade-off is unchanged: withholding costs only stack-trace remapping (a
+/// cosmetic loss), while injecting corrupts the TYPE of a thrown AssertionError,
+/// which breaks `node:test` assertions outright.
 fn source_maps_safe(node_version: &NodeVersion) -> bool {
-    !(node_version.major() == 26 && node_version.minor() == 2)
+    !(node_version.major() == 26 && *node_version < NodeVersion::new(26, 8, 0))
 }
 
 /// `--disable-warning=ExperimentalWarning` (suppresses Node's experimental-feature
@@ -74,15 +91,339 @@ fn webstorage_supported(node_version: &NodeVersion) -> bool {
 /// records a `StorageFile` band (the flag defaults on, PR nodejs/node#57666), so
 /// only `--localstorage-file` is needed there.
 ///
-/// The spawn path (`spawn.rs`) consumes this to decide where to ALWAYS inject
-/// `--experimental-webstorage` (the maintainer, 2026-06-15): on the flag-needed band the
-/// flag is unconditionally injected so `sessionStorage` works out of the box; below
-/// the band it's a "bad option" and on 25+ it's unnecessary (native).
+/// The ordinary spawn path and compiled launcher share this version-only half of
+/// the decision. Use [`should_inject_experimental_webstorage`] at an argv-bearing
+/// call site so an explicit user positive or negative is never duplicated or
+/// overridden.
 pub(crate) fn webstorage_flag_needed(node_version: &NodeVersion) -> bool {
     matches!(
         feature_matrix::feature("webstorage").mitigation_for(node_version),
         Some(Mitigation::Unflag(_))
     )
+}
+
+/// Whether this invocation should add `--experimental-webstorage` itself.
+///
+/// This is deliberately a narrow public predicate shared with `nub-launcher`:
+/// it is true only in the feature matrix's `Unflag` band (Node 22.4 through
+/// before 25) and only when neither argv nor `NODE_OPTIONS` already contains the
+/// flag in either polarity. It says nothing about `--localstorage-file`; callers
+/// must forward a user-supplied file normally and must never synthesize one.
+pub fn should_inject_experimental_webstorage(
+    node_version: &NodeVersion,
+    user_argv: &[String],
+    node_options: Option<&str>,
+) -> bool {
+    webstorage_flag_needed(node_version) && !user_supplied_webstorage_flag(user_argv, node_options)
+}
+
+/// The subset of nub's injected flags that is safe on the INHERITED `NODE_OPTIONS`
+/// channel — the ones that cannot abort a descendant running an older Node.
+///
+/// `NODE_OPTIONS` reaches the whole process subtree, so a flag whose floor sits above
+/// nub's 18.19 support floor can kill a descendant outright (Node rejects an unknown
+/// flag there). Today exactly one injected flag clears that bar: `--enable-source-maps`,
+/// which has existed since Node 12.12. Everything else is banded higher and stays on
+/// argv — the `feature_matrix` unflags obviously, but ALSO
+/// `--disable-warning=ExperimentalWarning`, whose 20.11 floor is above 18.19, so a
+/// descendant on 18.x or 20.10 would abort on it. Losing it there costs only warning
+/// suppression; keeping it would reintroduce the very hazard this channel split closes.
+///
+/// Derived by filtering [`compute_inject_flags`] against [`ALWAYS_INJECT`] rather than
+/// listing flags again, so the source-map version carve-outs stay in one place.
+pub fn node_options_safe_inject_flags(
+    node_version: &NodeVersion,
+    user_argv: &[String],
+    node_options: Option<&str>,
+) -> Vec<&'static str> {
+    compute_inject_flags(node_version.clone(), user_argv, node_options, true, None)
+        .into_iter()
+        .filter(|flag| ALWAYS_INJECT.contains(flag))
+        .collect()
+}
+
+/// Every ARGV-ONLY V8 flag nub should inject for this invocation, derived from the
+/// feature matrix's [`super::feature_matrix::Mitigation::UnflagArgv`] rows.
+///
+/// Kept separate from [`compute_inject_flags`] on purpose. That function's output is
+/// also the NODE_OPTIONS payload for the script-runner path, and its Stage-4
+/// intersection is against `process.allowedNodeEnvironmentFlags` — a set that
+/// describes NODE_OPTIONS eligibility and so excludes every flag returned here. Put
+/// one of these through it and it is either dropped (probe available) or sent into a
+/// NODE_OPTIONS that aborts on it (probe unavailable).
+///
+/// A flag the user already supplied on argv in EITHER polarity is skipped: nub never
+/// double-adds, and never re-enables over a user negation. `NODE_OPTIONS` is
+/// deliberately not consulted — Node rejects these flags there in both polarities, so
+/// it is not a channel through which a user can express an opinion about them.
+///
+/// Each surviving flag is then confirmed against the actual binary via
+/// [`super::discovery::accepts_argv_flag`]. That is this shape's equivalent of
+/// `compute_inject_flags`' Stage-4 intersection: an open-ended band would otherwise
+/// keep injecting a flag V8 has since removed, and an unknown `--js-*` is a hard
+/// `node: bad option` startup abort on every augmented invocation.
+pub fn argv_inject_flags(
+    node_path: Option<&std::path::Path>,
+    node_version: &NodeVersion,
+    user_argv: &[String],
+) -> Vec<&'static str> {
+    probed_v8_flags(
+        feature_matrix::argv_unflag_flags_for(node_version),
+        node_path,
+        user_argv,
+    )
+}
+
+/// Every V8 flag the PRELOAD should turn on from inside the process for this
+/// invocation, derived from the feature matrix's
+/// [`super::feature_matrix::Mitigation::RuntimeV8Flag`] rows. Never placed on argv:
+/// the caller hands the set to the preload in [`RUNTIME_V8_FLAGS_ENV`], and the
+/// preload calls `v8.setFlagsFromString` the first time it loads a module whose
+/// source uses the syntax — keeping V8's flags at their defaults, and Node's embedded
+/// builtin code cache valid, for every program that never does.
+///
+/// Same filters as [`argv_inject_flags`]: a user polarity on argv wins (V8 already
+/// has the flag, or the user negated it), and the binary is probed for the flag,
+/// because one V8 no longer knows is an "Error: unrecognized flag" on stderr from
+/// `setFlagsFromString` just as it is a "bad option" abort on argv.
+pub fn runtime_inject_flags(
+    node_path: Option<&std::path::Path>,
+    node_version: &NodeVersion,
+    user_argv: &[String],
+) -> Vec<&'static str> {
+    probed_v8_flags(
+        feature_matrix::runtime_v8_flags_for(node_version),
+        node_path,
+        user_argv,
+    )
+}
+
+fn probed_v8_flags(
+    banded: Vec<&'static str>,
+    node_path: Option<&std::path::Path>,
+    user_argv: &[String],
+) -> Vec<&'static str> {
+    // Below every floor there is nothing to probe, so an out-of-band Node pays no
+    // extra spawn at all.
+    if banded.is_empty() {
+        return Vec::new();
+    }
+    banded
+        .into_iter()
+        .filter(|flag| !user_supplied_either_polarity(user_argv, flag))
+        // The removal backstop. `accepted_env_flags` cannot serve here (a
+        // command-line-only V8 flag is absent from `allowedNodeEnvironmentFlags` by
+        // construction), so this is its argv analog: drop a flag the running Node no
+        // longer accepts instead of aborting it at startup. `None` — probe could not
+        // run — preserves pure version-band behavior, matching Stage 4's contract.
+        .filter(|flag| match node_path {
+            // `None` — a Node nub itself provisioned or embedded, whose accepted flags
+            // follow from its version — skips the probe and trusts the band, mirroring
+            // why `accepted_env_flags` is skipped for a managed Node.
+            None => true,
+            Some(path) => super::discovery::accepts_argv_flag(path, flag).unwrap_or(true),
+        })
+        .collect()
+}
+
+/// Whether `user_argv` already carries `flag` as `--x` or as its `--no-x` negation.
+fn user_supplied_either_polarity(user_argv: &[String], flag: &str) -> bool {
+    let negated = format!("--no-{}", flag.trim_start_matches("--"));
+    user_argv.iter().any(|arg| arg == flag || *arg == negated)
+}
+
+/// Whether the caller that injects experimental Web Storage must also tell its
+/// preload to remove Node 22.4–24's throwing `localStorage` getter. This follows
+/// the ordinary spawn contract: only an injected flag can create that getter, and
+/// a user-supplied `--localstorage-file` leaves it usable instead.
+///
+/// Callers that place application arguments after the Node entry (such as the
+/// compiled launcher) must pass an empty `user_argv`: those are not Node flags.
+/// Such callers still pass inherited `NODE_OPTIONS`, where Node actually reads a
+/// user-provided storage-file option.
+pub fn should_neutralize_experimental_webstorage_localstorage(
+    node_version: &NodeVersion,
+    user_argv: &[String],
+    node_options: Option<&str>,
+) -> bool {
+    should_inject_experimental_webstorage(node_version, user_argv, node_options)
+        && !user_supplied_localstorage_file(user_argv, node_options)
+}
+
+/// Internal child-process signal consumed by the preload to neutralize Node's
+/// throwing experimental-webstorage `localStorage` getter. This is plumbing, not
+/// a user-facing environment option.
+pub const NEUTRALIZE_LOCALSTORAGE_ENV: &str = "__NUB_NEUTRALIZE_LOCALSTORAGE";
+
+/// Internal child-process signal listing the ARGV-only V8 flags nub injected on this
+/// invocation, space-separated, so the preload can hide them from `process.execArgv`.
+///
+/// Necessary because these flags are exactly the ones Node REFUSES in `NODE_OPTIONS`,
+/// and a great deal of real tooling forwards `process.execArgv` into a Worker or into a
+/// child's `NODE_OPTIONS`. Node then rejects nub's own flag with
+/// `ERR_WORKER_INVALID_EXEC_ARGV` and the build dies — which is exactly how a Next.js
+/// 16 + Turbopack build broke. V8 parses these at startup, so removing them from
+/// `execArgv` afterwards keeps the feature ON while restoring the `execArgv` a
+/// plain-Node user would have seen. Plumbing, not a user-facing option.
+pub const ARGV_ONLY_FLAGS_ENV: &str = "__NUB_ARGV_ONLY_FLAGS";
+
+/// Internal child-process signal marking a spawn as a TOP-LEVEL file run, so the
+/// preload's deferred pass may serve an entry whose default export is a `fetch`
+/// handler (`installServeEntry`, preload-common.cjs). Plumbing, not a user-facing
+/// option: the feature's real gate is the shape of the user's own default export.
+///
+/// Set only by the two launchers a user reaches by typing `nub` — the plain
+/// `nub <file>` run and `nub watch <file>`. Deliberately NOT set for a bin launch
+/// (`nubx`, `nub exec`), for `--node`/`NODE_COMPAT`, or for the `node` PATH hijack:
+/// binding a port is a visible behavior change, and `node <file>` has to keep
+/// meaning what `node` means even inside a subtree the user opted into. A script that
+/// runs `node server.js` therefore gets Node's behavior, while `nub server.js` gets
+/// the listener.
+///
+/// The value is the launcher's own argv — every token handed to Node after nub's
+/// injected flags, as a JSON array ([`serve_entry_marker`]) — and not a bare `1`,
+/// because the process nub spawns is not always the application. An env-owner
+/// loader or a configured `prefix` sits in FRONT of Node, and a Node-based one
+/// (`varlock` is a `#!/usr/bin/env node` script) inherits nub's `NODE_OPTIONS` and
+/// so runs this preload itself. A bare flag was consumed there, by the wrapper, and
+/// the application it then launched never saw it. Carrying the argv lets the
+/// preload tell which process it is in: the application is the one whose own argv
+/// IS this list from the entry on — Node has already `path.resolve`d `argv[1]` by
+/// the time a preload runs, and everything after the entry reaches `process.argv`
+/// verbatim — and every other process leaves the marker in place for its child.
+/// Rust names no token as THE entry — `nub --require x server.mjs` puts `x` first —
+/// because Node is the one that knows which one it picked; the preload matches the
+/// whole tail rather than any one token, so an argument that happens to name the
+/// wrapper's own bin cannot make the wrapper claim it.
+///
+/// The application's preload DELETES it before user code runs, which is what keeps
+/// one listener per launch: a `child_process` spawn or a `Worker` copies
+/// `process.env` after the delete, so a server that forks a worker pool does not
+/// give every worker its own port.
+pub const SERVE_ENTRY_ENV: &str = "__NUB_SERVE_ENTRY";
+
+/// The compiled-artifact counterpart of [`SERVE_ENTRY_ENV`], set by the launcher —
+/// or, in a single executable, by the blob's own main (`compile-sea-loader.cjs`) —
+/// and consumed by the compile preamble (`serveCompiledEntry`). A bare `1`: the
+/// program root is the entry by construction, so nothing has to be told apart. Its
+/// own variable rather than the same one because an artifact launched from inside a
+/// nub-augmented process inherits nub's `NODE_OPTIONS` preload, whose claim would
+/// read a bare value as unaddressed and, with no `argv[1]` in the inline shape,
+/// delete it before the preamble looked. Only a top-level launch is marked, never a
+/// re-exec of the artifact by its own program.
+pub const COMPILED_SERVE_ENTRY_ENV: &str = "__NUB_COMPILED_SERVE_ENTRY";
+
+/// The [`SERVE_ENTRY_ENV`] value for a launch whose Node argv (after nub's own
+/// flags) is `tokens`: a JSON array of them. An argument may hold any byte but NUL,
+/// so no separator is safe to reserve — ASCII unit separator was, and Node hands it
+/// through `process.argv` unchanged, where it split one argument into two and moved
+/// the entry off its position.
+pub fn serve_entry_marker<'a>(tokens: impl IntoIterator<Item = &'a str>) -> String {
+    serde_json::to_string(&tokens.into_iter().collect::<Vec<_>>())
+        .expect("a list of strings serializes")
+}
+
+/// Internal child-process signal carrying the matrix's runtime V8 flags — the
+/// [`super::feature_matrix::Mitigation::RuntimeV8Flag`] rows — for the preload to turn
+/// on with `v8.setFlagsFromString` the first time it loads a module that needs one.
+/// Value shape: `<node-version> <flag> [<flag>…]`, built by
+/// [`runtime_v8_flags_env_value`].
+///
+/// Every Nub launch decision SETS or REMOVES it, never leaves an ancestor's value in
+/// place: a child that re-enters Nub carries exactly its own decision, so a `--no-…`
+/// polarity on its argv empties the set instead of being overridden by the parent's
+/// signal. The preload does not delete it either (unlike [`ARGV_ONLY_FLAGS_ENV`]), so
+/// a process that makes no Nub launch decision inherits it — a `Worker`, the
+/// `module.register` loader worker, a child spawned by absolute path — and gets the
+/// feature; the preload skips a flag whose polarity already sits on its own
+/// `process.execArgv`. The version stamp covers the remaining case: a descendant on a
+/// different Node — an inherited-`NODE_OPTIONS` grandchild running an older binary —
+/// ignores a set computed for another one and keeps that Node's bare behavior.
+/// Plumbing, not a user-facing option.
+pub const RUNTIME_V8_FLAGS_ENV: &str = "__NUB_RUNTIME_V8_FLAGS";
+
+/// The [`RUNTIME_V8_FLAGS_ENV`] value for `flags` computed against `node_version`.
+pub fn runtime_v8_flags_env_value(node_version: &NodeVersion, flags: &[&str]) -> String {
+    let mut value = node_version.to_string();
+    for flag in flags {
+        value.push(' ');
+        value.push_str(flag);
+    }
+    value
+}
+
+fn user_supplied_webstorage_flag(user_argv: &[String], node_options: Option<&str>) -> bool {
+    let is_webstorage_flag = |token: &str| {
+        matches!(
+            token,
+            "--experimental-webstorage" | "--no-experimental-webstorage"
+        )
+    };
+    user_argv.iter().any(|arg| is_webstorage_flag(arg))
+        || node_options.is_some_and(|options| {
+            node_options_tokens(options)
+                .iter()
+                .any(|token| is_webstorage_flag(token))
+        })
+}
+
+fn user_supplied_localstorage_file(user_argv: &[String], node_options: Option<&str>) -> bool {
+    let is_localstorage_file =
+        |token: &str| token == "--localstorage-file" || token.starts_with("--localstorage-file=");
+    user_argv.iter().any(|arg| is_localstorage_file(arg))
+        || node_options.is_some_and(|options| {
+            node_options_tokens(options)
+                .iter()
+                .any(|token| is_localstorage_file(token))
+        })
+}
+
+/// Split the small NODE_OPTIONS subset these webstorage gates inspect. Node accepts
+/// quoted options, so `split_whitespace` misses a quoted `--no-…` token and splits
+/// quoted storage paths. Keep this deliberately narrow: quotes and backslash
+/// escapes are unwrapped only for recognition; the original NODE_OPTIONS string is
+/// still forwarded to Node unchanged.
+fn node_options_tokens(options: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+
+    for ch in options.chars() {
+        if escaped {
+            token.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if ch == delimiter {
+                quote = None;
+            } else {
+                token.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            ch if ch.is_whitespace() => {
+                if !token.is_empty() {
+                    tokens.push(std::mem::take(&mut token));
+                }
+            }
+            _ => token.push(ch),
+        }
+    }
+    if escaped {
+        token.push('\\');
+    }
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+    tokens
 }
 
 /// `--test-coverage-exclude=<glob>` landed in Node 22.5.0. Below it the flag does
@@ -99,6 +440,31 @@ const MIN_TEST_COVERAGE_EXCLUDE: NodeVersion = NodeVersion::new(22, 5, 0);
 /// Whether the target Node supports `--test-coverage-exclude` (argv or NODE_OPTIONS).
 pub(crate) fn test_coverage_exclude_supported(node_version: &NodeVersion) -> bool {
     *node_version >= MIN_TEST_COVERAGE_EXCLUDE
+}
+
+/// Node started excluding the user's own test files from an
+/// `--experimental-test-coverage` report by default in **23.5.0** — commit
+/// `ea9a675f56`, "test_runner: exclude test files from coverage by default"
+/// (nodejs/node#56060), which added the `coverageExcludeGlobs.length === 0`
+/// fallback to `kDefaultPattern` in `lib/internal/test_runner/utils.js`.
+///
+/// It was **never backported to 22.x**, so this floor does NOT coincide with
+/// `MIN_TEST_COVERAGE_EXCLUDE` (22.5.0): on 22.5–22.x and 23.0–23.4 the flag
+/// exists while the default exclusion does not. That gap is the whole reason this
+/// is a separate gate. nub pairs Node's default pattern with its own runtime
+/// exclude to stop the exclude from switching that default off — so on a Node that
+/// has no such default, injecting the pattern would EXCLUDE test files stock Node
+/// includes, breaking parity in the opposite direction.
+///
+/// Verified empirically on the logic.js/logic.test.js fixture: 18.19.0, 22.15.0,
+/// 22.16.0, 22.23.1, 22.23.2, 23.0.0, 23.3.0 and 23.4.0 all report the test file;
+/// 23.5.0, 23.6.0, 23.11.0, 24.0.0, 24.17.0, 25.9.0, 26.3.0 and 26.7.0 all exclude
+/// it. 22.23.2 is the newest 22.x published, which is what rules out a backport.
+const MIN_TEST_COVERAGE_DEFAULT_EXCLUSION: NodeVersion = NodeVersion::new(23, 5, 0);
+
+/// Whether the target Node applies its own default test-file coverage exclusion.
+pub(crate) fn test_coverage_default_exclusion_applied(node_version: &NodeVersion) -> bool {
+    *node_version >= MIN_TEST_COVERAGE_DEFAULT_EXCLUSION
 }
 
 /// Compute the flags Nub should inject for the given Node version,
@@ -128,9 +494,9 @@ pub(crate) fn test_coverage_exclude_supported(node_version: &NodeVersion) -> boo
 /// | `--test-coverage-exclude`)        |                                           |                              |                              |
 /// | below-floor flags (18.19)         | `--experimental-webstorage`, `--disable-warning`, `--test-coverage-exclude` | **exit 9 "bad option"** | band-gated OUT (never injected there) |
 ///
-/// (Webstorage's `--experimental-webstorage` is injected in `spawn.rs`, not here —
-/// always-injected on the `webstorage_flag_needed` band, suppressed only when the
-/// user already supplied the flag in either polarity; see there.)
+/// (Webstorage's `--experimental-webstorage` stays outside this static set because
+/// argv-bearing callers use [`should_inject_experimental_webstorage`] to respect
+/// an explicit user positive or negative without creating duplicates.)
 /// `accepted_env_flags`: the running Node binary's actual
 /// `process.allowedNodeEnvironmentFlags` set (probed + cached in
 /// [`super::discovery::accepted_env_flags`]). When `Some`, the computed inject set
@@ -149,8 +515,9 @@ pub fn compute_inject_flags(
     let mut flags: Vec<&str> = Vec::new();
 
     for &flag in ALWAYS_INJECT {
-        // --enable-source-maps is withheld on Node 26.2.x (see `source_maps_safe`):
-        // there it turns a no-message AssertionError into a TypeError.
+        // --enable-source-maps is withheld below Node 26.8 on the 26.x line (see
+        // `source_maps_safe`): there it turns a no-message AssertionError into a
+        // TypeError.
         if flag == "--enable-source-maps" && !source_maps_safe(&node_version) {
             continue;
         }
@@ -173,11 +540,10 @@ pub fn compute_inject_flags(
     // runtime-computed `--localstorage-file` path — but its bands live in the same
     // matrix, read via `webstorage_flag_needed` / `webstorage_supported`.)
     for flag in feature_matrix::unflag_flags_for(&node_version) {
-        // Skip the webstorage flag here: spawn.rs owns its injection (paired with
-        // the workspace-keyed --localstorage-file), gated on the same matrix bands
-        // via `webstorage_flag_needed`. Injecting it in this static set too would
-        // emit it without the file (the global never materializes) and bypass the
-        // user-override suppression spawn.rs applies.
+        // Skip the webstorage flag here: argv-bearing callers own its injection
+        // through `should_inject_experimental_webstorage`, gated on the same
+        // matrix band and suppressed when the user already supplied either
+        // polarity. Putting it in this static set would bypass that suppression.
         if flag == "--experimental-webstorage" {
             continue;
         }
@@ -404,6 +770,22 @@ mod tests {
     }
 
     #[test]
+    fn async_context_frame_injected_only_where_flag_exists_and_is_required() {
+        // AsyncLocalStorage on AsyncContextFrame: flag landed 22.7.0 but throws on
+        // 22.7–22.8 (#54503), so the floor is 22.9.0; default-on and renamed at 24.0.0,
+        // where the `--experimental-` spelling is a "bad option" abort.
+        let acf = "--experimental-async-context-frame";
+        assert!(!compute_inject_flags(v(22, 8, 0), &[], None, false, None).contains(&acf)); // flag throws
+        assert!(compute_inject_flags(v(22, 9, 0), &[], None, false, None).contains(&acf)); // floor
+        assert!(compute_inject_flags(v(22, 23, 2), &[], None, false, None).contains(&acf)); // 22 LTS
+        assert!(compute_inject_flags(v(23, 11, 0), &[], None, false, None).contains(&acf)); // 23.x
+        assert!(!compute_inject_flags(v(24, 0, 0), &[], None, false, None).contains(&acf)); // default-on, flag renamed
+        // The Node-standard negation opts out.
+        let argv = vec!["--no-experimental-async-context-frame".to_string()];
+        assert!(!compute_inject_flags(v(22, 23, 2), &argv, None, false, None).contains(&acf));
+    }
+
+    #[test]
     fn websocket_injected_only_on_flag_gated_band() {
         // WebSocket global is flag-gated on [20.10.0, 22.0.0): exists on 20.10+ and all
         // 21.x, default-on from 22.0.0. Below 20.10 the flag doesn't exist ("bad option").
@@ -432,12 +814,15 @@ mod tests {
     }
 
     #[test]
-    fn import_text_injected_from_26_5_open_ended() {
-        // `--experimental-import-text` was added in Node 26.5.0 (#62300) and is not
-        // default-on through Node 27 — inject from 26.5.0 upward, never below (the
-        // flag is a "bad option" there). Also verify it snips out of an inherited
-        // NODE_OPTIONS on a child below the 26.5.0 floor.
+    fn import_text_injected_on_both_flag_bearing_lines() {
+        // `--experimental-import-text` was added in Node 26.5.0 (#62300) and backported
+        // to 24.19.0; it is not default-on through Node 27. Inject on both bands, never
+        // on a release that lacks the flag (there it is a "bad option" abort): below
+        // 24.19.0, and the whole 25.x line, which ended before the backport. Also verify
+        // it snips out of an inherited NODE_OPTIONS on a child below the floor.
         let it = "--experimental-import-text";
+        assert!(!compute_inject_flags(v(24, 18, 1), &[], None, false, None).contains(&it));
+        assert!(compute_inject_flags(v(24, 19, 0), &[], None, false, None).contains(&it));
         assert!(!compute_inject_flags(v(26, 4, 0), &[], None, false, None).contains(&it));
         assert!(compute_inject_flags(v(26, 5, 0), &[], None, false, None).contains(&it));
         assert!(compute_inject_flags(v(27, 0, 0), &[], None, false, None).contains(&it));
@@ -445,14 +830,15 @@ mod tests {
         let argv = vec!["--no-experimental-import-text".to_string()];
         assert!(!compute_inject_flags(v(26, 5, 0), &argv, None, false, None).contains(&it));
         // Inherited NODE_OPTIONS: stripped below the floor, kept at/above it.
-        assert_eq!(strip_unsupported_node_options(it, &v(26, 4, 0)), "");
+        assert_eq!(strip_unsupported_node_options(it, &v(24, 18, 1)), "");
+        assert_eq!(strip_unsupported_node_options(it, &v(24, 19, 0)), it);
         assert_eq!(strip_unsupported_node_options(it, &v(26, 5, 0)), it);
     }
 
     #[test]
     fn accepted_env_flags_intersection_guards_removed_flags() {
-        // The Stage-4 guard: an open-ended `Unflag` band (import-text is `[26.5, ∞)`)
-        // would keep injecting a flag Node later HARD-REMOVES (as it did with
+        // The Stage-4 guard: an open-ended `Unflag` band (import-text's upper band is
+        // `[26.5, ∞)`) would keep injecting a flag Node later HARD-REMOVES (as it did with
         // `--experimental-permission` → `--permission` at 24.0), aborting startup with
         // "bad option". Intersecting with the binary's probed accepted-flag set drops
         // exactly that flag. Model a future Node that removed import-text but still
@@ -529,6 +915,67 @@ mod tests {
                 .iter()
                 .filter(|f| !with.contains(*f))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// The CONVERSE invariant, for `--experimental-import-text` specifically: if the host
+    /// Node KNOWS the flag, nub must inject it at that version. The preload's step-aside
+    /// (`nativeImportText()` in preload-common.cjs) keys off exactly this accepted-flag
+    /// set, so a release that knows the flag but sits outside the feature-matrix band
+    /// hands `with { type: "text" }` to Node's default loader with the feature off —
+    /// ERR_UNKNOWN_FILE_EXTENSION. That is #688: Node backported the flag to 24.19.0 while
+    /// the band still started at 26.5.0. This guard turns the next backport into a red
+    /// test instead of a red trunk. Skips when no `node` is discoverable.
+    #[test]
+    fn host_node_that_knows_import_text_gets_it_injected() {
+        let it = "--experimental-import-text";
+        let Ok(node) = crate::node::discovery::discover_node(std::path::Path::new(".")) else {
+            eprintln!("skipping: no node discoverable");
+            return;
+        };
+        let Some(accepted) = crate::node::discovery::accepted_env_flags(node.path.as_std_path())
+        else {
+            eprintln!("skipping: could not probe {}", node.path);
+            return;
+        };
+        if !accepted.contains(it) {
+            // This Node has no native text imports, so the preload never steps aside
+            // and nub's polyfill owns them — nothing to guard.
+            eprintln!("skipping: host Node v{} does not know {it}", node.version);
+            return;
+        }
+        assert!(
+            compute_inject_flags(node.version.clone(), &[], None, false, Some(&accepted))
+                .contains(&it),
+            "host Node v{} accepts {it} — so the preload steps aside to Node's native text \
+             translator — but the feature-matrix import-text bands do not inject it there, \
+             leaving text imports broken. Widen the bands to cover this release.",
+            node.version
+        );
+    }
+
+    /// The runtime V8 set travels to the preload as `<node-version> <flag>…`, and a
+    /// user polarity on argv — either sign — keeps a flag out of it, exactly as for the
+    /// argv-only set. `node_path: None` skips the binary probe.
+    #[test]
+    fn runtime_v8_flags_honor_user_polarity_and_stamp_the_version() {
+        let ver = v(26, 5, 0);
+        let flag = "--js-defer-import-eval";
+        let armed = runtime_inject_flags(None, &ver, &[]);
+        assert_eq!(armed, vec![flag]);
+        assert_eq!(
+            runtime_v8_flags_env_value(&ver, &armed),
+            "26.5.0 --js-defer-import-eval"
+        );
+        for supplied in [flag, "--no-js-defer-import-eval"] {
+            assert!(
+                runtime_inject_flags(None, &ver, &[supplied.to_string()]).is_empty(),
+                "a user-supplied {supplied} must keep the preload from re-arming the flag"
+            );
+        }
+        assert!(
+            runtime_inject_flags(None, &v(26, 3, 0), &[]).is_empty(),
+            "below the band floor nothing is armed"
         );
     }
 
@@ -697,6 +1144,118 @@ mod tests {
     }
 
     #[test]
+    fn shared_webstorage_injection_predicate_honors_bands_and_user_intent() {
+        // Below the matrix floor the flag is invalid; from 25 it is native, so
+        // neither band may add it. The closed 22.4–<25 Unflag band alone does.
+        for version in [v(18, 19, 0), v(22, 3, 0), v(25, 0, 0), v(26, 2, 0)] {
+            assert!(
+                !should_inject_experimental_webstorage(&version, &[], None),
+                "must not inject on {version:?}"
+            );
+        }
+        for version in [v(22, 4, 0), v(22, 15, 0), v(24, 99, 0)] {
+            assert!(
+                should_inject_experimental_webstorage(&version, &[], None),
+                "must inject on {version:?}"
+            );
+        }
+
+        let version = v(22, 15, 0);
+        for (argv, node_options) in [
+            (vec!["--experimental-webstorage".to_string()], None),
+            (vec!["--no-experimental-webstorage".to_string()], None),
+            (vec![], Some("--experimental-webstorage")),
+            (vec![], Some("--no-experimental-webstorage")),
+        ] {
+            assert!(
+                !should_inject_experimental_webstorage(&version, &argv, node_options),
+                "an explicit user polarity must suppress launcher injection"
+            );
+        }
+        assert!(should_inject_experimental_webstorage(
+            &version,
+            &["--experimental-webstorage-extra".to_string()],
+            None,
+        ));
+    }
+
+    #[test]
+    fn webstorage_node_options_recognizes_quoted_flags_and_storage_files() {
+        let version = v(22, 15, 0);
+        for options in [
+            "'--experimental-webstorage'",
+            "\"--experimental-webstorage\"",
+            "'--no-experimental-webstorage'",
+            "\"--no-experimental-webstorage\"",
+        ] {
+            assert!(
+                !should_inject_experimental_webstorage(&version, &[], Some(options)),
+                "a quoted user flag must suppress injection: {options}"
+            );
+        }
+
+        for options in [
+            "--localstorage-file='/tmp/nub storage'",
+            "--localstorage-file=\"/tmp/nub storage\"",
+        ] {
+            assert!(
+                should_inject_experimental_webstorage(&version, &[], Some(options)),
+                "a storage file keeps sessionStorage injection enabled: {options}"
+            );
+            assert!(
+                !should_neutralize_experimental_webstorage_localstorage(
+                    &version,
+                    &[],
+                    Some(options),
+                ),
+                "a quoted storage path must keep localStorage usable: {options}"
+            );
+        }
+    }
+
+    #[test]
+    fn webstorage_neutralization_only_follows_an_injected_flag_without_a_file() {
+        let version = v(22, 15, 0);
+        assert!(
+            should_neutralize_experimental_webstorage_localstorage(&version, &[], None),
+            "the flag-needed band without a file has Node's throwing getter"
+        );
+        assert!(should_inject_experimental_webstorage(
+            &version,
+            &[],
+            Some("--localstorage-file=/tmp/store")
+        ));
+        assert!(
+            !should_neutralize_experimental_webstorage_localstorage(
+                &version,
+                &[],
+                Some("--localstorage-file=/tmp/store"),
+            ),
+            "a real NODE_OPTIONS file makes localStorage usable"
+        );
+        assert!(
+            !should_neutralize_experimental_webstorage_localstorage(
+                &version,
+                &["--localstorage-file".to_string(), "/tmp/store".to_string()],
+                None,
+            ),
+            "ordinary spawn argv preserves its space-separated file support"
+        );
+        assert!(
+            !should_neutralize_experimental_webstorage_localstorage(
+                &version,
+                &[],
+                Some("--no-experimental-webstorage"),
+            ),
+            "a user disable means this call did not inject the flag"
+        );
+        assert!(
+            !should_neutralize_experimental_webstorage_localstorage(&v(25, 0, 0), &[], None),
+            "native Web Storage has no injected throwing getter"
+        );
+    }
+
+    #[test]
     fn test_coverage_exclude_gated_to_22_5() {
         // `--test-coverage-exclude` was added in Node 22.5.0. Below it the flag is
         // rejected in NODE_OPTIONS ("not allowed in NODE_OPTIONS") — and because nub
@@ -709,6 +1268,31 @@ mod tests {
         assert!(test_coverage_exclude_supported(&v(22, 5, 0)));
         assert!(test_coverage_exclude_supported(&v(22, 15, 0)));
         assert!(test_coverage_exclude_supported(&v(24, 0, 0)));
+    }
+
+    #[test]
+    fn test_coverage_default_exclusion_gated_to_23_5_and_never_backported_to_22() {
+        // The two coverage gates do NOT share a floor, and treating them as one is
+        // what breaks parity on 22.x: there the flag exists but Node has no default
+        // test-file exclusion, so pairing nub's runtime exclude with Node's default
+        // pattern would hide test files stock Node reports. 22.23.2 is the newest
+        // 22.x published and still has no default — the line never got the backport.
+        assert!(!test_coverage_default_exclusion_applied(&v(18, 19, 0)));
+        assert!(!test_coverage_default_exclusion_applied(&v(22, 15, 0)));
+        assert!(!test_coverage_default_exclusion_applied(&v(22, 23, 2)));
+        assert!(!test_coverage_default_exclusion_applied(&v(23, 4, 0)));
+        assert!(test_coverage_default_exclusion_applied(&v(23, 5, 0)));
+        assert!(test_coverage_default_exclusion_applied(&v(24, 0, 0)));
+        assert!(test_coverage_default_exclusion_applied(&v(26, 7, 0)));
+
+        // The whole band between the two floors has the flag and not the default.
+        for version in [v(22, 5, 0), v(22, 23, 2), v(23, 4, 0)] {
+            assert!(
+                test_coverage_exclude_supported(&version)
+                    && !test_coverage_default_exclusion_applied(&version),
+                "{version:?} must be inside the flag-without-default band"
+            );
+        }
     }
 
     #[test]
@@ -769,12 +1353,13 @@ mod tests {
     }
 
     #[test]
-    fn source_maps_withheld_only_on_26_2_band() {
-        // Node 26.2.x regresses: with --enable-source-maps, a no-message
-        // assert.ok(false) rethrows as TypeError instead of AssertionError. nub
-        // withholds the injection there and ONLY there — 24 / 25 / 26.1 and a
-        // future 26.3 are clean. (Verified empirically on real Node 26.2.0.)
-        for ver in [v(24, 0, 0), v(25, 8, 0), v(26, 1, 0), v(26, 3, 0)] {
+    fn source_maps_withheld_across_the_whole_26_x_regression_band() {
+        // Every Node 26.x below 26.8 regresses (nodejs/node#63169): with
+        // --enable-source-maps, a no-message assert.ok(false) throws TypeError
+        // [ERR_INVALID_ARG_TYPE] instead of AssertionError. The band's EDGES are
+        // what this pins — 25.9.0 below it, 26.8.0 (first release that can carry
+        // the upstream fix b5d37cd4) and 27.0.0 above it.
+        for ver in [v(24, 0, 0), v(25, 9, 0), v(26, 8, 0), v(27, 0, 0)] {
             assert!(
                 source_maps_safe(&ver),
                 "source maps must be safe to inject on {ver:?}"
@@ -785,8 +1370,8 @@ mod tests {
                 "--enable-source-maps must inject on {ver:?}"
             );
         }
-        // The affected band: every 26.2.x patch is gated out.
-        for ver in [v(26, 2, 0), v(26, 2, 5)] {
+        // The affected band: 26.0.0 through 26.7.x, inclusive.
+        for ver in [v(26, 0, 0), v(26, 2, 0), v(26, 7, 0)] {
             assert!(
                 !source_maps_safe(&ver),
                 "source maps must be withheld on {ver:?}"

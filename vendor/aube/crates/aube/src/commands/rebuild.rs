@@ -1,35 +1,30 @@
 use super::run::load_manifest;
-use aube_scripts::LifecycleHook;
-use clap::Args;
 use miette::{Context, IntoDiagnostic, miette};
 use std::collections::HashSet;
 
-/// `aube rebuild [<pkg>...]` — without args, re-run the root package's
-/// preinstall hook, then install / postinstall work for dependency
-/// packages allowed by the active `allowBuilds` /
-/// `onlyBuiltDependencies` policy, then the root package's install /
-/// postinstall / prepare lifecycle hooks.
+/// `aube rebuild [<pkg>...]` — without args, re-run install / postinstall
+/// work for dependency packages allowed by the active `allowBuilds` /
+/// `onlyBuiltDependencies` policy. The projects' own lifecycle hooks do not
+/// run: pnpm 12's `rebuild` builds dependencies only.
 ///
 /// With one or more package names, run lifecycle scripts only for the
-/// named deps and skip the root hooks. Match is by graph `name`, which
-/// is the in-tree alias when one is configured (so `aube rebuild
-/// my-alias` works for a manifest entry like
-/// `"my-alias": "npm:real-pkg@1.0"`, matching pnpm).
+/// named deps. Match is by graph `name`, which is the in-tree alias when
+/// one is configured (so `aube rebuild my-alias` works for a manifest
+/// entry like `"my-alias": "npm:real-pkg@1.0"`, matching pnpm).
 ///
 /// Unlike the other lifecycle shortcuts, `rebuild` intentionally does not
-/// auto-install: `aube install` already runs these same four hooks after
+/// auto-install: `aube install` already runs these same scripts after
 /// linking, so triggering an install here would double-run every script
 /// on a stale tree. Users who actually want a fresh install should run
 /// `aube install`.
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct RebuildArgs {
     /// Optional package names. When supplied, only matching deps'
-    /// scripts run; the root lifecycle hooks (preinstall, install,
-    /// postinstall, prepare) are skipped. Match is by graph `name`,
+    /// scripts run. Match is by graph `name`,
     /// not by `dep_path`. The active `allowBuilds` /
     /// `onlyBuiltDependencies` policy is bypassed for the named
     /// deps — naming the package is the explicit opt-in.
-    #[arg(value_name = "PACKAGE")]
+    #[usage(arg, name = "PACKAGE")]
     pub packages: Vec<String>,
 }
 
@@ -76,17 +71,6 @@ pub async fn run(
 
     let modules_dir_name = aube_settings::resolved::modules_dir(&settings_ctx);
     let aube_dir = super::resolve_virtual_store_dir(&settings_ctx, &cwd);
-    if selected.is_none() {
-        aube_scripts::run_root_hook(
-            &cwd,
-            &modules_dir_name,
-            &manifest,
-            LifecycleHook::PreInstall,
-        )
-        .await
-        .map_err(|e| miette!("{}", e))?;
-    }
-
     if let Some(graph) = graph {
         if let Some(selected) = selected.as_ref() {
             let known: HashSet<&str> = graph.packages.values().map(|p| p.name.as_str()).collect();
@@ -134,12 +118,15 @@ pub async fn run(
                     ));
                 }
                 aube_settings::resolved::NodeLinker::Hoisted => {
-                    Some(aube_linker::HoistedPlacements::from_graph(
-                        &cwd,
-                        &graph,
-                        &modules_dir_name,
-                        hoisting_limits,
-                    )?)
+                    Some(match crate::state::read_hoisted_placements(&cwd) {
+                        Some(placements) => placements,
+                        None => aube_linker::HoistedPlacements::from_graph(
+                            &cwd,
+                            &graph,
+                            &modules_dir_name,
+                            hoisting_limits,
+                        )?,
+                    })
                 }
                 aube_settings::resolved::NodeLinker::Isolated => None,
             };
@@ -160,6 +147,15 @@ pub async fn run(
                 node_linker_setting,
                 aube_settings::resolved::NodeLinker::Hoisted
             );
+            let canonicalize_package_dir = cfg!(windows)
+                && isolated
+                && super::install::detect_existing_global_virtual_store(
+                    &cwd,
+                    &aube_dir,
+                    &modules_dir_name,
+                    &super::global_virtual_store_dir(&cwd),
+                )
+                .unwrap_or(false);
             let prefer_symlinked_executables =
                 aube_settings::resolved::prefer_symlinked_executables(&settings_ctx)
                     .or(isolated.then_some(false));
@@ -170,14 +166,19 @@ pub async fn run(
                 hidden_modules_dir: isolated.then_some(hidden_modules_dir.as_path()),
             };
             let mut pkg_json_cache = super::install::PkgJsonCache::new();
-            super::install::link_dep_bins(
-                &aube_dir,
-                &graph,
-                super::resolve_virtual_store_dir_max_length(&settings_ctx),
-                hoisted_placements.as_ref(),
+            let mut managed_bin_links = super::install::ManagedBinLinks::capturing();
+            super::install::link_dep_bins(super::install::LinkDepBinsInput {
+                aube_dir: &aube_dir,
+                graph: &graph,
+                virtual_store_dir_max_length: super::resolve_virtual_store_dir_max_length(
+                    &settings_ctx,
+                ),
+                placements: hoisted_placements.as_ref(),
                 shim_opts,
-                &mut pkg_json_cache,
-            )?;
+                cache: &mut pkg_json_cache,
+                managed: &mut managed_bin_links,
+                preserved: None,
+            })?;
             super::install::run_dep_lifecycle_scripts(
                 &cwd,
                 &modules_dir_name,
@@ -189,6 +190,7 @@ pub async fn run(
                 // bypasses the policy for explicitly named packages.
                 &super::install::DefaultTrustFloor::disabled(),
                 super::resolve_virtual_store_dir_max_length(&settings_ctx),
+                canonicalize_package_dir,
                 child_concurrency,
                 hoisted_placements.as_ref(),
                 side_effects_cache_root
@@ -214,18 +216,26 @@ pub async fn run(
                 selected.as_ref(),
             )
             .await?;
-        }
-    }
-
-    if selected.is_none() {
-        for hook in [
-            LifecycleHook::Install,
-            LifecycleHook::PostInstall,
-            LifecycleHook::Prepare,
-        ] {
-            aube_scripts::run_root_hook(&cwd, &modules_dir_name, &manifest, hook)
-                .await
-                .map_err(|e| miette!("{}", e))?;
+            let preserved = super::install::remove_managed_bin_links(&managed_bin_links)?;
+            let mut refreshed_pkg_json_cache = super::install::PkgJsonCache::new();
+            let mut refreshed_bin_links = super::install::ManagedBinLinks::default();
+            super::install::link_dep_bins(super::install::LinkDepBinsInput {
+                aube_dir: &aube_dir,
+                graph: &graph,
+                virtual_store_dir_max_length: super::resolve_virtual_store_dir_max_length(
+                    &settings_ctx,
+                ),
+                placements: hoisted_placements.as_ref(),
+                shim_opts,
+                cache: &mut refreshed_pkg_json_cache,
+                managed: &mut refreshed_bin_links,
+                preserved: Some(&preserved),
+            })?;
+            super::install::remove_unclaimed_preserved_bin_links(
+                &managed_bin_links,
+                &preserved,
+                &refreshed_bin_links,
+            )?;
         }
     }
 

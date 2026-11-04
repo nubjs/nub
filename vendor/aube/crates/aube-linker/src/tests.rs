@@ -44,6 +44,124 @@ fn package_index(store: &Store, package_json: &str, index_js: &str) -> PackageIn
     index
 }
 
+#[test]
+fn refuses_modules_dir_at_or_outside_project() {
+    for modules_dir in [".", "nested/..", "..", "../.."] {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path().join("project");
+        std::fs::create_dir_all(project_dir.join("nested")).unwrap();
+        let marker = project_dir.join("package.json");
+        std::fs::write(&marker, b"{}").unwrap();
+        let store = Store::at(dir.path().join("store/files"));
+        let linker = Linker::new(&store, LinkStrategy::Copy).with_modules_dir_name(modules_dir);
+
+        let err = linker
+            .link_all(&project_dir, &LockfileGraph::default(), &BTreeMap::new())
+            .unwrap_err();
+
+        assert!(matches!(err, Error::UnsafeModulesDir(_)));
+        assert_eq!(std::fs::read(&marker).unwrap(), b"{}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn refuses_modules_dir_symlink_to_project_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::os::unix::fs::symlink(&project_dir, project_dir.join("modules")).unwrap();
+    let marker = project_dir.join("package.json");
+    std::fs::write(&marker, b"{}").unwrap();
+    let store = Store::at(dir.path().join("store/files"));
+    let linker = Linker::new(&store, LinkStrategy::Copy).with_modules_dir_name("modules");
+
+    let err = linker
+        .link_all(&project_dir, &LockfileGraph::default(), &BTreeMap::new())
+        .unwrap_err();
+
+    assert!(matches!(err, Error::UnsafeModulesDir(_)));
+    assert_eq!(std::fs::read(&marker).unwrap(), b"{}");
+}
+
+#[cfg(unix)]
+#[test]
+fn refuses_modules_dir_through_symlink_outside_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    let outside_dir = dir.path().join("outside");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::create_dir_all(&outside_dir).unwrap();
+    std::os::unix::fs::symlink(&outside_dir, project_dir.join("modules")).unwrap();
+    let marker = outside_dir.join("marker");
+    std::fs::write(&marker, b"keep").unwrap();
+    let store = Store::at(dir.path().join("store/files"));
+    let linker =
+        Linker::new(&store, LinkStrategy::Copy).with_modules_dir_name("modules/not-created");
+
+    let err = linker
+        .link_all(&project_dir, &LockfileGraph::default(), &BTreeMap::new())
+        .unwrap_err();
+
+    assert!(matches!(err, Error::UnsafeModulesDir(_)));
+    assert_eq!(std::fs::read(&marker).unwrap(), b"keep");
+}
+
+#[test]
+fn workspace_modes_refuse_modules_dir_at_or_outside_root() {
+    for node_linker in [NodeLinker::Isolated, NodeLinker::Hoisted] {
+        for modules_dir in [".", "nested/..", "..", "../.."] {
+            let dir = tempfile::tempdir().unwrap();
+            let project_dir = dir.path().join("project");
+            std::fs::create_dir_all(project_dir.join("nested")).unwrap();
+            let marker = project_dir.join("package.json");
+            std::fs::write(&marker, b"{}").unwrap();
+            let store = Store::at(dir.path().join("store/files"));
+            let linker = Linker::new(&store, LinkStrategy::Copy)
+                .with_node_linker(node_linker)
+                .with_modules_dir_name(modules_dir);
+            let mut graph = LockfileGraph::default();
+            graph.importers.insert(".".to_string(), Vec::new());
+
+            let err = linker
+                .link_workspace(&project_dir, &graph, &BTreeMap::new(), &BTreeMap::new())
+                .unwrap_err();
+
+            assert!(matches!(err, Error::UnsafeModulesDir(_)));
+            assert_eq!(std::fs::read(&marker).unwrap(), b"{}");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_modes_refuse_importer_modules_dir_symlink_to_importer() {
+    for node_linker in [NodeLinker::Isolated, NodeLinker::Hoisted] {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path().join("project");
+        let importer_dir = project_dir.join("packages/app");
+        std::fs::create_dir_all(&importer_dir).unwrap();
+        std::os::unix::fs::symlink(&importer_dir, importer_dir.join("modules")).unwrap();
+        let marker = importer_dir.join("package.json");
+        std::fs::write(&marker, b"{}").unwrap();
+        let store = Store::at(dir.path().join("store/files"));
+        let linker = Linker::new(&store, LinkStrategy::Copy)
+            .with_node_linker(node_linker)
+            .with_modules_dir_name("modules");
+        let mut graph = LockfileGraph::default();
+        graph
+            .importers
+            .insert("packages/app".to_string(), Vec::new());
+
+        let err = linker
+            .link_workspace(&project_dir, &graph, &BTreeMap::new(), &BTreeMap::new())
+            .unwrap_err();
+
+        assert!(matches!(err, Error::UnsafeModulesDir(_)));
+        assert_eq!(std::fs::read(&marker).unwrap(), b"{}");
+    }
+}
+
 fn make_graph() -> LockfileGraph {
     let mut packages = BTreeMap::new();
 
@@ -531,6 +649,66 @@ fn disk_materialize_makes_only_listed_package_a_real_dir_under_gvs() {
     );
 }
 
+// The workspace twin of the test above, and the second time this exact
+// duplication has cost a release: `link_all` and `link_workspace` carried
+// near-duplicate step-1 GVS-populate loops, so a fix landing in one silently
+// skipped the other. nub#566/#576 was the `EntryState::Stale` arm; nub#711 is
+// the disk-materialize branch, which existed ONLY in `link_all` — so resolving
+// a single workspace member disabled the disk-materialize eject classes at once
+// (type-phantom nub#450/#452, undeclared-phantom, project-context nub#457).
+// Legacy-vite (nub#315) rides `project_local_dep_paths`, which the workspace
+// loop already honored. Both loops now share one `gvs_populate_entry` body;
+// this test is what holds the workspace half to it.
+#[test]
+fn disk_materialize_ejects_under_gvs_in_a_workspace_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let root_dir = dir.path().join("workspace");
+    std::fs::create_dir_all(&root_dir).unwrap();
+
+    let (store, indices) = setup_store_with_files(dir.path());
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true)
+        .with_hoist(false)
+        .with_disk_materialize(&["foo".to_string()]);
+
+    // One resolved member is the whole trigger: `has_workspace` flips true, the
+    // install routes to `link_workspace`, and pre-fix the eject stopped happening.
+    let mut graph = make_graph();
+    let root_deps = graph.importers.get(".").cloned().unwrap_or_default();
+    graph.importers.insert("packages/a".to_string(), root_deps);
+
+    linker
+        .link_workspace(&root_dir, &graph, &indices, &BTreeMap::new())
+        .unwrap();
+
+    // foo is on the list: a real project-local dir, so its realpath stays inside
+    // the project and TypeScript's/Node's upward walk re-enters it.
+    let aube_foo = root_dir.join("node_modules/.aube/foo@1.0.0");
+    assert!(
+        !aube_foo
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "disk-materialized foo must be a real dir in a workspace too, not a global-store symlink"
+    );
+    assert_eq!(
+        std::fs::read_to_string(aube_foo.join("node_modules/foo/index.js")).unwrap(),
+        "module.exports = 'foo';"
+    );
+
+    // The bound still holds: an unlisted package stays symlinked, so the eject
+    // is per-package and GVS sharing survives for everything else.
+    assert!(
+        root_dir
+            .join("node_modules/.aube/bar@2.0.0")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "an unlisted package must stay a global-virtual-store symlink"
+    );
+}
+
 #[test]
 fn disk_materialize_keeps_store_copy_so_store_resident_dependents_dont_orphan() {
     // Orphan-safety regression (the shipped @storybook/builder-webpack5 ←
@@ -847,7 +1025,7 @@ fn workspace_selected_package_materializes_locally_while_dependencies_use_gvs() 
 
 #[test]
 fn test_link_file_fresh_reports_missing_cas_shard_and_invalidates_cache() {
-    // Reproduces jdx/aube#393: a partially corrupt CAS leaves the
+    // Reproduces aubepkg/aube#393: a partially corrupt CAS leaves the
     // cached package index pointing at a missing shard. Materialize
     // must distinguish "source CAS file missing" from a generic ENOENT
     // and drop the stale index JSON so the next install re-imports
@@ -963,7 +1141,7 @@ fn test_link_file_fresh_hardlink_short_circuits_when_source_missing() {
 
     let linker = Linker::new_with_gvs(&store, LinkStrategy::Hardlink, true);
     let err = linker
-        .link_file_fresh(&stored, "hello.txt", &dst)
+        .link_file_fresh(&stored, "hello.txt", &dst, None)
         .expect_err("source missing must fail");
     assert!(
         matches!(
@@ -1036,7 +1214,7 @@ fn realized_inode_matches_source_on_reflink_failure(strategy: LinkStrategy) -> b
         // Hold the guard across the materialize so a sibling test can't flip
         // the global flag mid-call; the flag is restored on drop, panic-safe.
         let _forced = ForcedReflinkFailure::engage();
-        linker.link_file_fresh(&stored, "payload.bin", &dst)
+        linker.link_file_fresh(&stored, "payload.bin", &dst, None)
     };
     result.expect("a reflink strategy must still materialize the file via its fallback");
 
@@ -1420,6 +1598,61 @@ fn test_global_virtual_store_is_populated() {
 }
 
 #[test]
+fn warm_link_repairs_stale_global_virtual_store_dependency_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    let (store, indices) = setup_store_with_files(dir.path());
+    let virtual_store = store.virtual_store_dir();
+    // A default hoist vetoes the shared store here (the project-local
+    // hidden tree wins), so opt out of it to exercise the global entry.
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true).with_hoist(false);
+    let graph = make_graph();
+    linker.link_all(&project_dir, &graph, &indices).unwrap();
+
+    let nested_bar = virtual_store.join("foo@1.0.0/node_modules/bar");
+    let stale_bar = virtual_store.join("bar@2.0.0-stale/node_modules/bar");
+    std::fs::create_dir_all(&stale_bar).unwrap();
+    crate::sweep::try_remove_entry(&nested_bar);
+    crate::sys::create_dir_link(&stale_bar, &nested_bar).unwrap();
+    assert_eq!(
+        std::fs::canonicalize(&nested_bar).unwrap(),
+        std::fs::canonicalize(&stale_bar).unwrap()
+    );
+
+    linker.link_all(&project_dir, &graph, &indices).unwrap();
+
+    let expected_bar = virtual_store.join("bar@2.0.0/node_modules/bar");
+    assert_eq!(
+        std::fs::canonicalize(&nested_bar).unwrap(),
+        std::fs::canonicalize(&expected_bar).unwrap(),
+        "a cached parent entry must reconcile its nested dependency identity"
+    );
+}
+
+#[test]
+fn cached_entry_repair_rejects_dependency_path_escape() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = setup_store_with_files(dir.path());
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true);
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let sentinel = outside.join("sentinel");
+    std::fs::write(&sentinel, "keep").unwrap();
+    let mut pkg = make_graph().packages.remove("foo@1.0.0").unwrap();
+    pkg.dependencies =
+        BTreeMap::from([(outside.to_string_lossy().into_owned(), "1.0.0".to_string())]);
+
+    assert!(
+        linker
+            .reconcile_virtual_store_entry("foo@1.0.0", &pkg, None)
+            .is_err()
+    );
+    assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "keep");
+}
+
+#[test]
 fn test_hidden_hoist_prefers_root_direct_dep_over_transitive_version() {
     let dir = tempfile::tempdir().unwrap();
     let project_dir = dir.path().join("project");
@@ -1529,7 +1762,18 @@ fn test_hidden_hoist_prefers_root_direct_dep_over_transitive_version() {
         ..Default::default()
     };
 
-    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true);
+    // Reaching the collective tree takes BOTH of these, and each one alone
+    // leaves the test asserting nothing. Without `with_hoist(false)`, `link_all`
+    // returns `self.without_global_virtual_store().link_all(..)` and the GVS
+    // path is never entered. Without a non-empty disk-materialize set, the
+    // collective branch is skipped and `link_hidden_hoist_at` returns early on
+    // `!self.hoist`, so no tree is built at all — see
+    // `no_collective_hidden_hoist_when_ejected_set_empty_under_gvs`, which
+    // asserts exactly that. Ejecting the resolver is also what this test's own
+    // "realpaths project-local" assertion requires.
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true)
+        .with_hoist(false)
+        .with_disk_materialize(&["@hookform/resolvers".to_string()]);
     linker.link_all(&project_dir, &graph, &indices).unwrap();
 
     let resolver_real =
@@ -1553,6 +1797,147 @@ fn test_hidden_hoist_prefers_root_direct_dep_over_transitive_version() {
             .symlink_metadata()
             .is_err(),
         "global virtual store must not expose an unversioned zod alias"
+    );
+}
+
+#[test]
+fn test_hidden_hoist_claims_by_depth_then_dep_path() {
+    // Both keys of the comparator, in one graph. Neither contested name has a
+    // root-direct-dep copy, so pass 1 decides neither.
+    //
+    // DEPTH: `shallow` brings ms@2.1.2 at depth 1; `deep` → `mid` brings
+    // ms@2.0.0 at depth 2. Claiming in dep_path order instead picks ms@2.0.0,
+    // since "ms@2.0.0" sorts first while being the deeper copy — the inversion
+    // this guards.
+    //
+    // TIE: `tie@1.0.0` and `tie@2.0.0` are both depth 1, so dep_path decides
+    // and the lower version wins. That is not a preference for old versions —
+    // it is the tie-break being deterministic.
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    let store = Store::at(dir.path().join("store/files"));
+    let mut indices = BTreeMap::new();
+    for (dep_path, manifest, body) in [
+        (
+            "shallow@1.0.0",
+            r#"{"name":"shallow","version":"1.0.0"}"#,
+            "module.exports = 'shallow';",
+        ),
+        (
+            "deep@1.0.0",
+            r#"{"name":"deep","version":"1.0.0"}"#,
+            "module.exports = 'deep';",
+        ),
+        (
+            "mid@1.0.0",
+            r#"{"name":"mid","version":"1.0.0"}"#,
+            "module.exports = 'mid';",
+        ),
+        (
+            "ms@2.1.2",
+            r#"{"name":"ms","version":"2.1.2"}"#,
+            "module.exports = 'ms-2.1.2';",
+        ),
+        (
+            "ms@2.0.0",
+            r#"{"name":"ms","version":"2.0.0"}"#,
+            "module.exports = 'ms-2.0.0';",
+        ),
+        (
+            "tie@1.0.0",
+            r#"{"name":"tie","version":"1.0.0"}"#,
+            "module.exports = 'tie-1.0.0';",
+        ),
+        (
+            "tie@2.0.0",
+            r#"{"name":"tie","version":"2.0.0"}"#,
+            "module.exports = 'tie-2.0.0';",
+        ),
+    ] {
+        indices.insert(dep_path.to_string(), package_index(&store, manifest, body));
+    }
+
+    let mut packages = BTreeMap::new();
+    for (dep_path, name, version, deps) in [
+        (
+            "shallow@1.0.0",
+            "shallow",
+            "1.0.0",
+            vec![("ms", "2.1.2"), ("tie", "1.0.0")],
+        ),
+        (
+            "deep@1.0.0",
+            "deep",
+            "1.0.0",
+            vec![("mid", "1.0.0"), ("tie", "2.0.0")],
+        ),
+        ("mid@1.0.0", "mid", "1.0.0", vec![("ms", "2.0.0")]),
+        ("ms@2.1.2", "ms", "2.1.2", vec![]),
+        ("ms@2.0.0", "ms", "2.0.0", vec![]),
+        ("tie@1.0.0", "tie", "1.0.0", vec![]),
+        ("tie@2.0.0", "tie", "2.0.0", vec![]),
+    ] {
+        packages.insert(
+            dep_path.to_string(),
+            LockedPackage {
+                name: name.to_string(),
+                version: version.to_string(),
+                dep_path: dep_path.to_string(),
+                dependencies: deps
+                    .into_iter()
+                    .map(|(n, t)| (n.to_string(), t.to_string()))
+                    .collect(),
+                ..Default::default()
+            },
+        );
+    }
+
+    let mut importers = BTreeMap::new();
+    importers.insert(
+        ".".to_string(),
+        ["shallow@1.0.0", "deep@1.0.0"]
+            .into_iter()
+            .map(|dep_path| DirectDep {
+                name: dep_path.split('@').next().unwrap().to_string(),
+                dep_path: dep_path.to_string(),
+                dep_type: DepType::Production,
+                specifier: None,
+            })
+            .collect(),
+    );
+    let graph = LockfileGraph {
+        importers,
+        packages,
+        ..Default::default()
+    };
+
+    // Both settings are required to build the collective tree — see the note in
+    // `test_hidden_hoist_prefers_root_direct_dep_over_transitive_version`. The
+    // ejected package only has to make the set non-empty; this test asserts on
+    // the tree's contents, not on resolution through it.
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true)
+        .with_hoist(false)
+        .with_disk_materialize(&["deep".to_string()]);
+    linker.link_all(&project_dir, &graph, &indices).unwrap();
+
+    let hidden_ms = project_dir.join("node_modules/.aube/node_modules/ms");
+    assert!(
+        hidden_ms.symlink_metadata().unwrap().is_symlink(),
+        "the hidden hoist tree must carry an `ms` alias"
+    );
+    assert_eq!(
+        std::fs::read_to_string(hidden_ms.join("index.js")).unwrap(),
+        "module.exports = 'ms-2.1.2';",
+        "the shallower ms@2.1.2 must win the alias over the deeper ms@2.0.0"
+    );
+
+    let hidden_tie = project_dir.join("node_modules/.aube/node_modules/tie");
+    assert_eq!(
+        std::fs::read_to_string(hidden_tie.join("index.js")).unwrap(),
+        "module.exports = 'tie-1.0.0';",
+        "at equal depth the lower dep_path must win, deterministically"
     );
 }
 
@@ -1813,6 +2198,89 @@ fn gvs_off_relinks_scoped_git_source_without_eexist() {
     linker
         .link_all(&project_dir, &graph, &indices)
         .expect("relinking an existing scoped git source entry must not fail with EEXIST");
+}
+
+#[test]
+fn warm_link_repairs_stale_shared_source_dependency_link() {
+    use aube_lockfile::{GitSource, LocalSource};
+
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let (store, mut indices) = setup_store_with_files(dir.path());
+    let git = LocalSource::Git(GitSource {
+        url: "https://github.com/example/source-parent.git".to_string(),
+        committish: None,
+        resolved: "0123456789abcdef0123456789abcdef01234567".to_string(),
+        integrity: None,
+        subpath: None,
+    });
+    let parent_dep_path = git.dep_path("source-parent");
+    let parent_file = store
+        .import_bytes(b"module.exports = 'parent';", false)
+        .unwrap();
+    let mut parent_index = PackageIndex::default();
+    parent_index.insert("index.js".to_string(), parent_file);
+    indices.insert(parent_dep_path.clone(), parent_index);
+
+    let graph = LockfileGraph {
+        importers: BTreeMap::from([(
+            ".".to_string(),
+            vec![DirectDep {
+                name: "source-parent".to_string(),
+                dep_path: parent_dep_path.clone(),
+                dep_type: DepType::Production,
+                specifier: None,
+            }],
+        )]),
+        packages: BTreeMap::from([
+            (
+                parent_dep_path.clone(),
+                LockedPackage {
+                    name: "source-parent".to_string(),
+                    version: "1.0.0".to_string(),
+                    dependencies: BTreeMap::from([("bar".to_string(), "2.0.0".to_string())]),
+                    dep_path: parent_dep_path.clone(),
+                    local_source: Some(git),
+                    ..Default::default()
+                },
+            ),
+            (
+                "bar@2.0.0".to_string(),
+                LockedPackage {
+                    name: "bar".to_string(),
+                    version: "2.0.0".to_string(),
+                    dep_path: "bar@2.0.0".to_string(),
+                    ..Default::default()
+                },
+            ),
+        ]),
+        ..Default::default()
+    };
+    // Same as the registry variant above: no default hoist, so the shared
+    // store is exercised.
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true).with_hoist(false);
+    linker.link_all(&project_dir, &graph, &indices).unwrap();
+
+    let parent_entry = store.virtual_store_dir().join(dep_path_to_filename(
+        &parent_dep_path,
+        DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH,
+    ));
+    let nested_bar = parent_entry.join("node_modules/bar");
+    let stale_bar = store
+        .virtual_store_dir()
+        .join("bar@2.0.0-stale/node_modules/bar");
+    std::fs::create_dir_all(&stale_bar).unwrap();
+    crate::sweep::try_remove_entry(&nested_bar);
+    crate::sys::create_dir_link(&stale_bar, &nested_bar).unwrap();
+
+    linker.link_all(&project_dir, &graph, &indices).unwrap();
+
+    assert_eq!(
+        std::fs::canonicalize(&nested_bar).unwrap(),
+        std::fs::canonicalize(store.virtual_store_dir().join("bar@2.0.0/node_modules/bar"))
+            .unwrap()
+    );
 }
 
 /// Regression: a version bump keeps the same top-level name
@@ -2133,7 +2601,7 @@ fn validate_index_key_rejects_windows_drive() {
 /// Recursively compare two trees for byte-identical content, identical
 /// symlink targets, identical +x bits, and identical directory shape.
 /// Returns a human-readable mismatch description, or `None` on match.
-#[cfg(all(unix, test))]
+#[cfg(target_os = "macos")]
 fn diff_trees(a: &Path, b: &Path) -> Option<String> {
     use std::collections::BTreeSet;
     use std::os::unix::fs::PermissionsExt;
@@ -2339,7 +2807,10 @@ fn clonedir_materialize_matches_per_file_byte_for_byte() {
     // Confirm the tree tier was actually built and the clone path taken
     // (otherwise this test would silently degrade to comparing per-file
     // against per-file and prove nothing).
-    let tree = store.tree_path(&linker.virtual_store_subdir("pkg@1.2.3"));
+    let tree = store.tree_path(&aube_store::tree_key(
+        &linker.virtual_store_subdir("pkg@1.2.3"),
+        &index,
+    ));
     assert!(
         tree.exists(),
         "tree tier must have been built (clonedir path not exercised?)"
@@ -2352,7 +2823,7 @@ fn clonedir_materialize_matches_per_file_byte_for_byte() {
         let stored = &index[rel];
         let target = baseline.join(rel);
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-        linker.link_file_fresh(stored, rel, &target).unwrap();
+        linker.link_file_fresh(stored, rel, &target, None).unwrap();
         if stored.executable {
             xx::file::make_executable(&target).unwrap();
         }
@@ -2376,6 +2847,146 @@ fn clonedir_materialize_matches_per_file_byte_for_byte() {
     );
     // Stats parity: the clone counts every index entry as linked.
     assert_eq!(stats.files_linked, index.len());
+}
+
+/// Two packages with the same dep path but different files — two projects
+/// each depending on their own `file:../p.tgz`, or one tarball rebuilt in
+/// place — must each materialize their OWN files. The whole-dir clone
+/// copies a shared store tree verbatim, so a tree keyed by dep path alone
+/// handed the second project the first tarball's bytes with no error.
+/// The tree is named after the per-project entry, not the graph-hashed
+/// shared-store name, so `store prune` can find it from the project.
+#[cfg(target_os = "macos")]
+#[test]
+fn clonedir_never_reuses_a_tree_across_different_content_at_one_dep_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::at(dir.path().join("store/files"));
+    let dep_path = "probe@file+3697c86abcf40c0a";
+    let pkg = LockedPackage {
+        name: "probe".to_string(),
+        version: "1.0.0".to_string(),
+        dep_path: dep_path.to_string(),
+        ..Default::default()
+    };
+    // A `file:` package in shared-store mode: its dep path carries a graph
+    // hash, but it is materialized into the project's own `.aube/`.
+    let linker =
+        Linker::new_with_gvs(&store, LinkStrategy::Reflink, false).with_graph_hashes(GraphHashes {
+            node_hash: [(dep_path.to_string(), "d5a626a38a6be695".to_string())].into(),
+        });
+    assert_ne!(
+        linker.virtual_store_subdir(dep_path),
+        linker.aube_dir_entry_name(dep_path)
+    );
+
+    for (project, body) in [("a", "AAA"), ("b", "BBB")] {
+        let mut index = PackageIndex::default();
+        index.insert(
+            "index.js".to_string(),
+            store
+                .import_bytes(format!("module.exports='{body}'\n").as_bytes(), false)
+                .unwrap(),
+        );
+        let aube_dir = dir.path().join(project).join("node_modules/.aube");
+        std::fs::create_dir_all(&aube_dir).unwrap();
+        let mut stats = LinkStats::default();
+        linker
+            .ensure_in_aube_dir(
+                &aube_dir,
+                dep_path,
+                &aube_lockfile::LockfileGraph::default(),
+                &pkg,
+                &index,
+                &mut stats,
+                None,
+            )
+            .expect("materialize");
+        assert!(
+            store
+                .tree_path(&aube_store::tree_key(
+                    &linker.aube_dir_entry_name(dep_path),
+                    &index
+                ))
+                .exists(),
+            "the clonedir path must have run for project {project}"
+        );
+        let installed = aube_dir
+            .join(linker.aube_dir_entry_name(dep_path))
+            .join("node_modules/probe/index.js");
+        assert_eq!(
+            std::fs::read_to_string(&installed).unwrap(),
+            format!("module.exports='{body}'\n"),
+            "project {project} must get its own file content"
+        );
+    }
+}
+
+/// A tree's mtime is its last-use stamp for `store prune`, which ages out
+/// every variant of a live coordinate but the most recently used. So cloning
+/// from an existing tree must reuse it as-is and refresh a day-old stamp;
+/// otherwise a variant one project still clones from daily would age out
+/// beside a newer one and cost that project a rebuild.
+#[cfg(target_os = "macos")]
+#[test]
+fn clonedir_reuse_refreshes_a_stale_tree_use_stamp() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::at(dir.path().join("store/files"));
+    let dep_path = "probe@1.0.0";
+    let pkg = LockedPackage {
+        name: "probe".to_string(),
+        version: "1.0.0".to_string(),
+        dep_path: dep_path.to_string(),
+        ..Default::default()
+    };
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Reflink, false);
+    let mut index = PackageIndex::default();
+    index.insert(
+        "index.js".to_string(),
+        store.import_bytes(b"module.exports=1\n", false).unwrap(),
+    );
+    let tree = store.tree_path(&aube_store::tree_key(
+        &linker.virtual_store_subdir(dep_path),
+        &index,
+    ));
+    let materialize = |project: &str| {
+        let aube_dir = dir.path().join(project).join("node_modules/.aube");
+        std::fs::create_dir_all(&aube_dir).unwrap();
+        linker
+            .ensure_in_aube_dir(
+                &aube_dir,
+                dep_path,
+                &aube_lockfile::LockfileGraph::default(),
+                &pkg,
+                &index,
+                &mut LinkStats::default(),
+                None,
+            )
+            .expect("materialize");
+    };
+
+    materialize("a");
+    let built = std::fs::metadata(&tree).expect("tree tier must have been built");
+    let two_days_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
+    std::fs::File::open(&tree)
+        .and_then(|f| f.set_modified(two_days_ago))
+        .unwrap();
+
+    materialize("b");
+    let reused = std::fs::metadata(&tree).unwrap();
+    assert_eq!(
+        reused.ino(),
+        built.ino(),
+        "the existing tree must be reused, not rebuilt"
+    );
+    let age = std::time::SystemTime::now()
+        .duration_since(reused.modified().unwrap())
+        .unwrap_or_default();
+    assert!(
+        age.as_secs() < 3600,
+        "reusing the tree must refresh its use stamp, but it is {}s old",
+        age.as_secs()
+    );
 }
 
 // nub#566 / nub#576: a POPULATED real directory sitting in a

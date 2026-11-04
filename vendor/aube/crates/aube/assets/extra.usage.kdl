@@ -1,14 +1,6 @@
-// `{run} <TAB>` offers the scripts from the package.json nearest the
-// shell's cwd.
-//
-// The command is fixed, so a `-C` on the line being completed is not
-// forwarded and `aube -C packages/api run <TAB>` still offers the outer
-// project's scripts. usage's only channel for the typed words is tera
-// interpolation into a `sh -c` string, with no shell-quoting filter, so
-// forwarding it would mean pasting user input into a shell command. The
-// helper itself honors `-C` for direct invocation, ready for a safer
-// channel upstream.
-complete "script" run="{run} --complete" descriptions=#true
+// Route external usage consumers to the compiled completer used by the
+// built-in scripts. The complete argv is preserved, including `-C`.
+complete "script" run="{bin} __complete_word__ --candidates script --line={{ words | shell_join | shell_quote }}"
 
 // Keep value completers in a shared fragment so `aube usage`, `aubr`, and
 // `aubx` are generated from the same candidate protocol.

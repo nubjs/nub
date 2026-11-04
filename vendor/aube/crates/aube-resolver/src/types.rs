@@ -248,6 +248,7 @@ impl ResolvedPackage {
 /// Which version-picking strategy the resolver uses for a workspace.
 /// Mirrors pnpm's `resolution-mode` setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum ResolutionMode {
     /// Classic pnpm behavior: every dep resolves to the highest version
     /// satisfying its range.
@@ -258,4 +259,8 @@ pub enum ResolutionMode {
     /// before a cutoff date derived from the max publish time of
     /// already-locked packages. Matches pnpm's `time-based` mode.
     TimeBased,
+    /// Pick the lowest version that satisfies each direct-dependency range,
+    /// while resolving transitive dependencies normally. Unlike `TimeBased`,
+    /// this mode does not apply a publish-date cutoff.
+    LowestDirect,
 }

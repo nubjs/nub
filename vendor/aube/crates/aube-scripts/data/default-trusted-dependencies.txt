@@ -5,6 +5,14 @@
 #   path:   src/install/default-trusted-dependencies.txt
 #   commit: 5c59842f78880a8b5d9c2eb99c8928fc2ec50a2d (2026-03-31)
 #
+# Plus the names pnpm's trusted-dependencies allowlist carries that
+# Bun's does not, each marked inline with a `# pnpm-only` comment:
+#   file:       crates/aube/assets/trusted-dependencies.json
+#   provenance: crates/aube/assets/trusted-dependencies.source.json
+# At the vendored snapshot that list was Bun's 367 names plus exactly
+# one (@parcel/watcher), so the merge is that single entry. Re-diff the
+# two files on every aube bump — a pnpm refresh can add more.
+#
 # Consumed by the opt-in `defaultTrust` build-policy floor (see
 # aube-scripts/src/default_trust.rs). Names here never override an
 # explicit `allowBuilds` entry, and the floor additionally gates every
@@ -12,9 +20,10 @@
 # and the `minimumReleaseAge` cooling window before trusting it.
 #
 # Refresh by re-fetching the file from the bun repo and updating the
-# commit line above; keep the entries byte-identical to upstream so
-# the provenance claim stays auditable. Lines starting with `#` and
-# blank lines are ignored by the loader.
+# commit line above, then re-applying the marked pnpm-only entries;
+# keep every other entry byte-identical to its upstream so the
+# provenance claims stay auditable. Lines starting with `#` and blank
+# lines are ignored by the loader.
 @airbnb/node-memwatch
 @anthropic-ai/claude-code
 @apollo/protobufjs
@@ -78,6 +87,8 @@
 @opensearch-project/oui
 @pact-foundation/pact-node
 @paloaltonetworks/postman-code-generators
+# pnpm-only
+@parcel/watcher
 @pdftron/pdfnet-node
 @percy/core
 @pnpm/exe

@@ -1,0 +1,19 @@
+{
+  "name": "aube-pgo-training",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@testing-library/react": "14.0.0",
+    "chalk": "4.1.2",
+    "is-odd": "3.0.1",
+    "node-gyp": "12.3.0",
+    "react": "18.2.0",
+    "react-dom": "18.2.0",
+    "semver": "7.7.4",
+    "tinyglobby": "0.2.16",
+    "undici": "6.25.0"
+  },
+  "scripts": {
+    "check-version": "semver 1.2.3"
+  }
+}

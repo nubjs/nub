@@ -1,5 +1,6 @@
 pub mod adaptive;
 pub mod age_gate;
+pub mod agent_sandbox;
 pub mod buf;
 pub mod cache;
 pub mod collections;
@@ -13,10 +14,11 @@ pub mod env;
 // reference `aube_util::DiagConfig` instead of `aube_util::diag::DiagConfig`.
 pub use diag::{DiagConfig, Slot, Span, jstr};
 
-// Convenience re-exports for the age-gate fallback sink (the embedder seam the
-// resolver records immature loose-mode picks into).
+// Convenience re-exports for the age-gate sinks (the embedder seam the resolver
+// records immature loose-mode picks, and gate-steered `latest` downgrades, into).
 pub use age_gate::{
-    arm_age_gated_fallback_pick_collection, record_age_gated_fallback_pick,
+    AgeGateDowngrade, arm_age_gate_downgrade_collection, arm_age_gated_fallback_pick_collection,
+    record_age_gate_downgrade, record_age_gated_fallback_pick, take_age_gate_downgrades,
     take_age_gated_fallback_picks,
 };
 pub mod fs;
@@ -35,11 +37,13 @@ pub use identity::{
 // Convenience re-exports for the runtime embedder seam (the per-invocation
 // counterpart to `Embedder`).
 pub use engine_context::{
-    EngineContext, engine_context, set_engine_context, update_engine_context,
+    CliSupportedArchitectures, EngineContext, ScriptShell, engine_context, set_engine_context,
+    update_engine_context,
 };
 pub mod path;
 pub mod pkg;
 pub mod snapshot;
+pub mod terminal;
 pub mod url;
 
 use serde::{Deserialize, Deserializer};

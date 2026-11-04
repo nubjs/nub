@@ -15,6 +15,23 @@
       "default": false,
       "description": "Run with plain Node behavior while keeping Nub's Node version selection."
     },
+    "nodeExecutable": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The Node binary to run: a path, or a $(command) whose output is the path."
+    },
+    "prefix": {
+      "oneOf": [
+        { "type": "string", "pattern": "^[^\\\\]*[^\\\\\\s][^\\\\]*$" },
+        {
+          "type": "array",
+          "minItems": 1,
+          "prefixItems": [{ "type": "string", "minLength": 1 }],
+          "items": { "type": "string" }
+        }
+      ],
+      "description": "A command put in front of every file run, script, and watch — a string split like a shell, or an array of arguments taken as written. A backslash is a shell escape, so a Windows path goes in the array form."
+    },
     "preload": {
       "$ref": "#/$defs/stringArray",
       "description": "Modules loaded before the entry file."
@@ -83,6 +100,39 @@
     "tsconfig": {
       "type": "string",
       "description": "Path to the tsconfig used by Nub's runtime."
+    },
+    "jsx": {
+      "enum": [
+        "react",
+        "react-jsx",
+        "react-jsxdev"
+      ],
+      "description": "JSX runtime mode. Overrides compilerOptions.jsx from the selected tsconfig."
+    },
+    "jsxFactory": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Classic JSX factory. Overrides compilerOptions.jsxFactory from the selected tsconfig."
+    },
+    "jsxFragmentFactory": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Classic JSX fragment factory. Overrides compilerOptions.jsxFragmentFactory from the selected tsconfig."
+    },
+    "jsxImportSource": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Automatic JSX runtime package. Overrides compilerOptions.jsxImportSource from the selected tsconfig."
+    },
+    "decorators": {
+      "enum": [
+        "legacy"
+      ],
+      "description": "Decorator semantics to transform. Legacy maps to compilerOptions.experimentalDecorators."
+    },
+    "emitDecoratorMetadata": {
+      "type": "boolean",
+      "description": "Emit design-type metadata for legacy decorators. Requires decorators to be legacy."
     },
     "verifyDeps": {
       "oneOf": [
@@ -278,7 +328,11 @@
           "type": "boolean"
         },
         {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "varlock"
+          ],
+          "description": "Hand the environment to Varlock. A file path goes in an array."
         },
         {
           "$ref": "#/$defs/stringArray"

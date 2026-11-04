@@ -26,8 +26,8 @@ const ENV_FILE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 /// - `NODE_EXTRA_CA_CERTS` — adds a trusted CA to the process.
 /// - `NODE_REPL_EXTERNAL_MODULE` — auto-loads a module at start-up.
 /// - `__NUB_RUNTIME_CONFIG` — nub's own resolved `nub.jsonc` snapshot, handed to
-///   the child as JSON. It carries `preload`, `loader`, and `tsconfig`, so a
-///   `.env` that sets it would rewrite the code nub transpiles. The watch path
+///   the child as JSON. It carries runtime loaders and TypeScript transforms,
+///   so a `.env` that sets it would rewrite the code nub transpiles. The watch path
 ///   in particular applies its injected `.env` values AFTER stamping this var,
 ///   so without the denylist a repo-supplied `.env` wins.
 /// - `__NUB_COMPAT_*` / `__NUB_AUGMENTED_*` — the parent-captured ambient
@@ -50,17 +50,21 @@ const ENV_FILE_DENYLIST: &[&str] = &[
     "__NUB_COMPAT_NODE",
     "__NUB_COMPAT_NODE_COMPILE_CACHE",
     "__NUB_COMPAT_PATH",
+    "__NUB_COMPAT_UV_THREADPOOL_SIZE",
     "__NUB_COMPAT_PRESENT",
     "__NUB_AUGMENTED_NODE_OPTIONS",
     "__NUB_AUGMENTED_NODE_PATH",
     "__NUB_AUGMENTED_NODE",
     "__NUB_AUGMENTED_NODE_COMPILE_CACHE",
     "__NUB_AUGMENTED_PATH",
+    "__NUB_AUGMENTED_UV_THREADPOOL_SIZE",
     "__NUB_AUGMENTED_NODE_OPTIONS_PRESENT",
     "__NUB_AUGMENTED_NODE_PATH_PRESENT",
     "__NUB_AUGMENTED_NODE_PRESENT",
     "__NUB_AUGMENTED_NODE_COMPILE_CACHE_PRESENT",
     "__NUB_AUGMENTED_PATH_PRESENT",
+    "__NUB_AUGMENTED_UV_THREADPOOL_SIZE_PRESENT",
+    "__NUB_UV_THREADPOOL_SIZE_TAKEN",
 ];
 
 /// The runtime-control keys Nub refuses to source from env files.
@@ -144,9 +148,11 @@ const CLAMPED_NODE_ENV_MODES: &[&str] = &["development", "production", "test"];
 
 /// The `.env*` filenames Nub loads, in descending priority order (the file
 /// listed first wins a key over later ones). Driven by the resolved *mode*. The
-/// `.env` / `.env.local` / `.env.{mode}` cascade mirrors the dotenv-flow / Next /
-/// Vite ecosystem convention — NOT Node core, which has no mode cascade (its
-/// `--env-file` loads named files only). Shared by [`load_env_files`]
+/// four-file taxonomy is ecosystem-wide, but the ecosystem SPLITS on where
+/// `.env.local` sits: Next.js and Bun rank it above `.env.{mode}`, Vite and
+/// dotenv-flow below. Nub follows Next.js / Bun, so `next build` under Nub sees
+/// the environment `@next/env` would have computed. Node core has no mode cascade
+/// at all (its `--env-file` loads named files only). Shared by [`load_env_files`]
 /// (first-writer-wins merge) and [`discover_env_files`] (the watch path's
 /// `--env-file` args), so this one function governs mode selection on both paths.
 ///
@@ -174,6 +180,7 @@ fn resolve_env_mode() -> String {
 /// even when `NODE_ENV` is also set. Otherwise `NODE_ENV` is a clamped fallback:
 /// it yields a mode only when it is one of [`CLAMPED_NODE_ENV_MODES`]; any other
 /// value (`staging`, empty) — or both being unset — resolves to no mode.
+// @lat: [[research/env-file-loading#Research: eager  file loading#Synthesis]]
 fn resolve_mode(app_env: Option<String>, node_env: Option<String>) -> String {
     if let Some(app_env) = app_env.filter(|v| !v.is_empty()) {
         return app_env;
@@ -187,6 +194,7 @@ fn resolve_mode(app_env: Option<String>, node_env: Option<String>) -> String {
 /// `.env.local`, matching dotenv/Next; an empty mode yields only `.env.local` +
 /// `.env`. Pure in `mode`, so callers pass any resolution and the ordering is
 /// tested without touching process env.
+// @lat: [[research/env-expansion-and-test-skip#Research:  expansion semantics + the -in-test convention#What Nub does# in test]]
 fn env_file_names_for_mode(mode: &str) -> Vec<String> {
     // The mode is interpolated raw into `.env.{mode}` / `.env.{mode}.local` joined
     // to the project root, so a value carrying a path separator (`APP_ENV=x/../y`)
@@ -254,6 +262,7 @@ const MAX_EXPANDED_VALUE: usize = 128 * 1024;
 /// `B=${A}_world`, `C=${B}_!`. Undefined references resolve to the empty string
 /// (consistent with [`load_env_files`]). Mutates `map` in-place and returns it
 /// for easy chaining.
+// @lat: [[research/env-expansion-and-test-skip#Research:  expansion semantics + the -in-test convention#What Nub does#Expansion ruleset]]
 pub fn expand_env_map(map: &mut HashMap<String, String>) -> &mut HashMap<String, String> {
     for _ in 0..10 {
         let snapshot = map.clone();
@@ -331,7 +340,7 @@ fn load_env_files_raw_reporting(
                 // (development/production/test), selects `.env.<NODE_ENV>` files above
                 // as the clamped fallback — only a `.env`-FILE `NODE_ENV` is dropped
                 // below.
-                if std::env::var_os(&key).is_some() {
+                if !env_file_may_set(&key) {
                     continue;
                 }
                 // dotenv / @next/env / Vite parity: a `.env` FILE never sets
@@ -383,10 +392,32 @@ fn warn_node_env_from_dotenv_ignored() {
     });
 }
 
+/// Whether an env file may set `key`. The shell wins: a key already in this
+/// process's environment is left alone. The one exception is nub's own automatic
+/// threadpool size, which is a default rather than a user value (see
+/// [`crate::node::spawn::threadpool_size_is_nub_default`]); every env-file
+/// consumer routes its shell-wins check through here so the exception holds on
+/// each launch path.
+pub fn env_file_may_set(key: &str) -> bool {
+    std::env::var_os(key).is_none()
+        || (env_keys_equal(key, crate::node::spawn::THREADPOOL_SIZE_ENV)
+            && crate::node::spawn::threadpool_size_is_nub_default())
+}
+
+/// Environment-key equality on this platform: Windows collapses ASCII case,
+/// Unix keeps `FOO` and `foo` distinct.
+pub fn env_keys_equal(left: &str, right: &str) -> bool {
+    if cfg!(windows) {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
 /// Load .env* files from the project root, returning the key-value
 /// pairs to inject into the child process environment. Shell env
 /// (from the parent process) always wins — values already set in
-/// the process environment are not overridden.
+/// the process environment are not overridden ([`env_file_may_set`]).
 pub fn load_env_files(project_root: &Path) -> HashMap<String, String> {
     let (mut result, node_env_ignored, denied_keys) = load_env_files_raw_reporting(project_root);
 
@@ -1239,8 +1270,9 @@ mod tests {
         }
     }
 
-    /// `expand_env_map` (used by the `--env-file` flag path) must apply the same
-    /// multi-pass expansion as `load_env_files`.
+    /// `expand_env_map` (used by the `nub.jsonc` `envFile` source path) must
+    /// apply the same multi-pass expansion as `load_env_files`. It is NOT used
+    /// by the `--env-file` flag, which delivers values verbatim like Node.
     #[test]
     fn expand_env_map_expands_var_references() {
         let mut map = HashMap::new();

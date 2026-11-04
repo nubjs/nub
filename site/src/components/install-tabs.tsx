@@ -2,24 +2,49 @@
 
 import { useEffect, useState } from 'react';
 
-type TabId = 'unix' | 'windows' | 'brew' | 'npm';
+type TabId = 'unix' | 'windows' | 'brew' | 'mise' | 'npm';
 
-const TABS: { id: TabId; label: string; command: string }[] = [
-  { id: 'unix', label: 'macOS / Linux', command: 'curl -fsSL https://nubjs.com/install.sh | bash' },
-  { id: 'windows', label: 'Windows', command: 'powershell -c "irm https://nubjs.com/install.ps1 | iex"' },
-  { id: 'brew', label: 'Homebrew', command: 'brew install nubjs/tap/nub' },
+type Tab = { id: TabId; label: string; command: string };
+
+// The install script and Homebrew are the only platform-bound rows, so each
+// visitor sees one script tab named after the tool they'd actually run, and
+// Windows drops Homebrew entirely. mise and npm work everywhere.
+const UNIX_TABS: Tab[] = [
+  { id: 'unix', label: 'curl', command: 'curl -fsSL https://nubjs.com/install.sh | bash' },
+  { id: 'brew', label: 'Homebrew', command: 'brew install nub' },
   { id: 'npm', label: 'npm', command: 'npm install -g @nubjs/nub' },
+  { id: 'mise', label: 'mise', command: 'mise use -g nub' },
 ];
 
-export function InstallTabs({ className = '' }: { className?: string }) {
+const WINDOWS_TABS: Tab[] = [
+  { id: 'windows', label: 'PowerShell', command: 'powershell -c "irm https://nubjs.com/install.ps1 | iex"' },
+  { id: 'npm', label: 'npm', command: 'npm install -g @nubjs/nub' },
+  { id: 'mise', label: 'mise', command: 'mise use -g nub' },
+];
+
+export function InstallTabs({
+  className = '',
+  wide = false,
+}: {
+  className?: string;
+  /** Fill the container instead of capping at `max-w-xl` (the blog's prose column). */
+  wide?: boolean;
+}) {
+  // Server-render the Unix set; the Windows swap happens on mount, since the
+  // platform isn't knowable until there's a navigator to read.
+  const [isWindows, setIsWindows] = useState(false);
   const [active, setActive] = useState<TabId>('unix');
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    if (/Windows/i.test(navigator.userAgent)) setActive('windows');
+    if (/Windows/i.test(navigator.userAgent)) {
+      setIsWindows(true);
+      setActive('windows');
+    }
   }, []);
 
-  const command = TABS.find((t) => t.id === active)!.command;
+  const tabs = isWindows ? WINDOWS_TABS : UNIX_TABS;
+  const command = (tabs.find((t) => t.id === active) ?? tabs[0]).command;
 
   async function copy() {
     try {
@@ -32,7 +57,7 @@ export function InstallTabs({ className = '' }: { className?: string }) {
   }
 
   return (
-    <div className={`w-full max-w-xl text-left ${className}`}>
+    <div className={`w-full ${wide ? '' : 'max-w-xl'} text-left ${className}`}>
       {/* Tab strip + command box form one connected panel (shared border, no
           seam). Symmetric padding keeps the labels vertically centered. */}
       <div
@@ -40,7 +65,7 @@ export function InstallTabs({ className = '' }: { className?: string }) {
         aria-label="Install method"
         className="flex items-center gap-1 rounded-t-lg border-x border-t border-fd-border bg-fd-card/60 p-1.5"
       >
-        {TABS.map((t) => (
+        {tabs.map((t) => (
           <button
             key={t.id}
             type="button"

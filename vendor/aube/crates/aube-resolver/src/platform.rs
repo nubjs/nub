@@ -169,8 +169,15 @@ fn detect_linux_libc() -> &'static str {
 /// Apply npm's `os`/`cpu`/`libc` rules to a single (pkg_field, host)
 /// pair. An empty pkg array is unconstrained; negations reject; at
 /// least one positive entry means one must match.
+///
+/// `host` is the value being selected FOR — the host's own triple, or an
+/// entry the caller configured. The literal `*` there accepts any package
+/// value on this axis, which is what `--os='*'` selects. pnpm has no such
+/// spelling (it silently installs nothing), so this is additive: no config
+/// that works under pnpm changes meaning, and the shape users reach for
+/// first now does what it looks like.
 fn field_matches(pkg_field: &[String], host: &str) -> bool {
-    if pkg_field.is_empty() {
+    if pkg_field.is_empty() || host == "*" {
         return true;
     }
     let mut has_positive = false;
@@ -334,7 +341,13 @@ pub fn filter_graph(
             continue;
         }
         if let Some(pkg) = graph.packages.get(&dep_path) {
-            for (name, tail) in &pkg.dependencies {
+            // pnpm mirrors active optional edges into `dependencies`, but
+            // Yarn Berry records them only in `optional_dependencies`.
+            for (name, tail) in pkg
+                .dependencies
+                .iter()
+                .chain(pkg.optional_dependencies.iter())
+            {
                 // Resolve the edge through every reader convention,
                 // including the git/remote-tarball `name@url+<hash>` form
                 // — otherwise a canonically-keyed git/tarball child (and
@@ -357,16 +370,35 @@ pub fn filter_graph(
 /// `optionalDependencies`). pnpm derives this during resolution; aube
 /// recomputes it as a post-resolve pass so freshly resolved lockfiles
 /// carry the same markers pnpm writes instead of an empty `{}` snapshot.
-///
-/// Algorithm: seed a `required` set from every non-optional direct
-/// dependency of every importer, then walk each required package's
-/// *non-optional* edges. A package's non-optional edges are its
-/// `dependencies` minus its `optional_dependencies`, because the pnpm
-/// parser mirrors active optional edges into `dependencies`. Any package
-/// not reached this way is optional. A single fully-required path keeps a
-/// package required even when other paths to it are optional, matching
-/// pnpm.
 pub fn mark_optional_packages(graph: &mut aube_lockfile::LockfileGraph) {
+    let optional = optional_only_packages(graph);
+    for (dep_path, pkg) in graph.packages.iter_mut() {
+        pkg.optional = optional.contains(dep_path);
+    }
+}
+
+/// The dep_paths [`mark_optional_packages`] would mark `optional: true`,
+/// derived from the graph's own edges without mutating it.
+///
+/// Exists because `LockedPackage::optional` is only populated on two paths —
+/// the pnpm reader and the fresh-resolve pass above — so a frozen install off
+/// an npm / bun / yarn lockfile carries `optional: false` on every package even
+/// though the graph still describes the optional edges. A consumer whose
+/// behavior must not silently vary by incumbent lockfile format asks here
+/// instead of reading the field.
+///
+/// Algorithm: seed a `required` set from every non-optional direct dependency of
+/// every importer, then walk each required package's *non-optional* edges. A
+/// package's non-optional edges are its `dependencies` minus its
+/// `optional_dependencies`, because the pnpm parser mirrors active optional
+/// edges into `dependencies`. Any package not reached this way is optional. A
+/// single fully-required path keeps a package required even when other paths to
+/// it are optional, matching pnpm and npm (whose `calcDepFlags` states the same
+/// invariant: "a node still flagged optional must only be reachable via optional
+/// edges").
+pub fn optional_only_packages(
+    graph: &aube_lockfile::LockfileGraph,
+) -> aube_util::collections::FxSet<String> {
     use crate::FxHashSet;
     use aube_lockfile::DepType;
 
@@ -403,9 +435,12 @@ pub fn mark_optional_packages(graph: &mut aube_lockfile::LockfileGraph) {
             }
         }
     }
-    for (dep_path, pkg) in graph.packages.iter_mut() {
-        pkg.optional = !required.contains(dep_path);
-    }
+    graph
+        .packages
+        .keys()
+        .filter(|dep_path| !required.contains(*dep_path))
+        .cloned()
+        .collect()
 }
 
 /// Populate each package's `transitive_peer_dependencies` the way pnpm
@@ -667,6 +702,52 @@ mod tests {
         assert!(!graph.packages.contains_key("native-linux@1.0.0"));
     }
 
+    #[test]
+    fn filter_graph_keeps_supported_yarn_berry_optional_children() {
+        let supported = SupportedArchitectures {
+            os: s(&["darwin"]),
+            cpu: s(&["arm64"]),
+            ..Default::default()
+        };
+        let mut graph = aube_lockfile::LockfileGraph::default();
+        graph.importers.insert(
+            ".".to_string(),
+            vec![aube_lockfile::DirectDep {
+                name: "host".to_string(),
+                dep_path: "host@1.0.0".to_string(),
+                dep_type: aube_lockfile::DepType::Production,
+                specifier: Some("1.0.0".to_string()),
+            }],
+        );
+        graph.packages.insert(
+            "host@1.0.0".to_string(),
+            aube_lockfile::LockedPackage {
+                name: "host".to_string(),
+                version: "1.0.0".to_string(),
+                dep_path: "host@1.0.0".to_string(),
+                // Yarn Berry does not mirror optional edges here.
+                dependencies: Default::default(),
+                optional_dependencies: [("native-darwin".to_string(), "1.0.0".to_string())].into(),
+                ..Default::default()
+            },
+        );
+        graph.packages.insert(
+            "native-darwin@1.0.0".to_string(),
+            aube_lockfile::LockedPackage {
+                name: "native-darwin".to_string(),
+                version: "1.0.0".to_string(),
+                dep_path: "native-darwin@1.0.0".to_string(),
+                os: s(&["darwin"]).into(),
+                cpu: s(&["arm64"]).into(),
+                ..Default::default()
+            },
+        );
+
+        filter_graph(&mut graph, &supported, &Default::default());
+
+        assert!(graph.packages.contains_key("native-darwin@1.0.0"));
+    }
+
     fn dep(name: &str, dep_type: aube_lockfile::DepType) -> aube_lockfile::DirectDep {
         aube_lockfile::DirectDep {
             name: name.to_string(),
@@ -741,6 +822,48 @@ mod tests {
         assert!(is_opt("native-linux@1.0.0"));
         // Direct optional importer dep with no required path → optional.
         assert!(is_opt("opt-root@1.0.0"));
+    }
+
+    // The install's build-failure classification reads this set directly rather
+    // than `LockedPackage::optional`, so the graph — not the stamped field — has
+    // to be what decides. Every package here is left `optional: false` (the
+    // state a frozen install off an npm / bun / yarn lockfile arrives in): if
+    // the classification ever regressed to reading the field, this test would
+    // find nothing optional at all.
+    #[test]
+    fn optional_only_packages_reads_edges_not_the_stamped_flag() {
+        use aube_lockfile::DepType;
+        let mut graph = aube_lockfile::LockfileGraph::default();
+        graph.importers.insert(
+            ".".to_string(),
+            vec![
+                dep("host", DepType::Production),
+                dep("also-required", DepType::Production),
+            ],
+        );
+        graph.packages.extend([
+            pkg("host", &["native", "dual"], &["native", "dual"]),
+            pkg("also-required", &["dual"], &[]),
+            pkg("native", &["native-child"], &[]),
+            pkg("native-child", &[], &[]),
+            pkg("dual", &[], &[]),
+        ]);
+        assert!(
+            graph.packages.values().all(|p| !p.optional),
+            "fixture must leave the stamped flag unset"
+        );
+
+        let optional = optional_only_packages(&graph);
+
+        // Reachable only under `host`'s optional edge — and so is its own child.
+        assert!(optional.contains("native@1.0.0"));
+        assert!(optional.contains("native-child@1.0.0"));
+        // The control that proves this can't swallow a required package's build
+        // failure: `dual` hangs off an optional edge from `host` AND a required
+        // edge from `also-required`, so one fully-required path keeps it required.
+        assert!(!optional.contains("dual@1.0.0"));
+        assert!(!optional.contains("host@1.0.0"));
+        assert!(!optional.contains("also-required@1.0.0"));
     }
 
     fn pkg_with_peers(
@@ -872,6 +995,142 @@ mod tests {
         let host = &graph.packages[&host_dep_path];
         assert!(!host.dependencies.contains_key("native-win"));
         assert!(!host.optional_dependencies.contains_key("native-win"));
+    }
+
+    /// The Linux side of a darwin-only optional peer: `consumer` is required
+    /// and peers optionally on `fsevents`, which only the importer's
+    /// `optionalDependencies` provides. The peer edge must be optional,
+    /// so `fsevents` stays optional-only and a Linux filter drops it,
+    /// as pnpm does.
+    fn assert_darwin_only_optional_peer_is_dropped_on_linux(
+        mut graph: aube_lockfile::LockfileGraph,
+        consumer_key: &str,
+    ) {
+        let consumer = &graph.packages[consumer_key];
+        assert_eq!(
+            consumer.dependencies.get("fsevents").map(String::as_str),
+            Some("2.3.3"),
+            "the optional peer is linked"
+        );
+        assert!(
+            consumer.optional_dependencies.contains_key("fsevents"),
+            "an optional peer's edge is an optional edge"
+        );
+        assert!(
+            optional_only_packages(&graph).contains("fsevents@2.3.3"),
+            "a provider reached only through optional edges stays optional"
+        );
+
+        let linux = SupportedArchitectures {
+            os: s(&["linux"]),
+            cpu: s(&["x64"]),
+            ..Default::default()
+        };
+        filter_graph(&mut graph, &linux, &Default::default());
+        assert!(!graph.packages.contains_key("fsevents@2.3.3"));
+        assert!(
+            !graph.packages[consumer_key]
+                .dependencies
+                .contains_key("fsevents")
+        );
+    }
+
+    #[test]
+    fn optional_peer_edge_keeps_its_optional_provider_platform_filterable() {
+        use aube_lockfile::{DepType, DirectDep, LockedPackage, PeerDepMeta};
+        let mut graph = aube_lockfile::LockfileGraph::default();
+        graph.importers.insert(
+            ".".to_string(),
+            vec![
+                DirectDep {
+                    name: "consumer".to_string(),
+                    dep_path: "consumer@1.0.0".to_string(),
+                    dep_type: DepType::Production,
+                    specifier: Some("1.0.0".to_string()),
+                },
+                DirectDep {
+                    name: "fsevents".to_string(),
+                    dep_path: "fsevents@2.3.3".to_string(),
+                    dep_type: DepType::Optional,
+                    specifier: Some("2.3.3".to_string()),
+                },
+            ],
+        );
+        let mut consumer = LockedPackage {
+            name: "consumer".to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: "consumer@1.0.0".to_string(),
+            ..Default::default()
+        };
+        consumer
+            .peer_dependencies
+            .insert("fsevents".to_string(), "^2.0.0".to_string());
+        consumer
+            .peer_dependencies_meta
+            .insert("fsevents".to_string(), PeerDepMeta { optional: true });
+        let fsevents = LockedPackage {
+            name: "fsevents".to_string(),
+            version: "2.3.3".to_string(),
+            dep_path: "fsevents@2.3.3".to_string(),
+            os: ["darwin".to_string()].into_iter().collect(),
+            ..Default::default()
+        };
+        for pkg in [consumer, fsevents] {
+            graph.packages.insert(pkg.dep_path.clone(), pkg);
+        }
+
+        let graph = crate::apply_peer_contexts(graph, &Default::default()).expect("peer pass");
+        assert_darwin_only_optional_peer_is_dropped_on_linux(
+            graph,
+            "consumer@1.0.0(fsevents@2.3.3)",
+        );
+    }
+
+    /// The same shape read from a lockfile whose snapshot names the peer in
+    /// its key but omits the edge: the reader restores it as optional.
+    #[test]
+    fn restored_optional_peer_edge_keeps_its_provider_platform_filterable() {
+        let content = r#"
+lockfileVersion: '9.0'
+
+importers:
+  .:
+    dependencies:
+      consumer:
+        specifier: 1.0.0
+        version: 1.0.0(fsevents@2.3.3)
+    optionalDependencies:
+      fsevents:
+        specifier: 2.3.3
+        version: 2.3.3
+
+packages:
+  consumer@1.0.0:
+    resolution: {integrity: sha512-consumer}
+    peerDependencies:
+      fsevents: ^2.0.0
+    peerDependenciesMeta:
+      fsevents:
+        optional: true
+
+  fsevents@2.3.3:
+    resolution: {integrity: sha512-fsevents}
+    os: [darwin]
+
+snapshots:
+  consumer@1.0.0(fsevents@2.3.3): {}
+
+  fsevents@2.3.3:
+    optional: true
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pnpm-lock.yaml");
+        std::fs::write(&path, content).unwrap();
+        let graph = aube_lockfile::pnpm::parse(&path).unwrap();
+        assert_darwin_only_optional_peer_is_dropped_on_linux(
+            graph,
+            "consumer@1.0.0(fsevents@2.3.3)",
+        );
     }
 
     /// `bundleDependencies` are transitive: the parent's tarball ships

@@ -61,6 +61,47 @@ _write_pkg_with_files() {
 	refute_line "package/NOPE.md"
 }
 
+@test "aube pack resolves catalog dependencies in the packed manifest" {
+	mkdir -p packages/app artifacts
+	cat >pnpm-workspace.yaml <<-'EOF'
+		packages:
+		  - packages/*
+		catalog:
+		  regular: ^1.2.3
+		  development: 4.5.6
+		catalogs:
+		  tools:
+		    optional: ~7.8.9
+		  peers:
+		    peer: '>=10'
+	EOF
+	cat >packages/app/package.json <<-'EOF'
+		{
+		  "name": "catalog-pack",
+		  "version": "1.0.0",
+		  "dependencies": {"regular": "catalog:"},
+		  "devDependencies": {"development": "catalog:"},
+		  "optionalDependencies": {"optional": "catalog:tools"},
+		  "peerDependencies": {"peer": "catalog:peers"}
+		}
+	EOF
+
+	run aube --dir packages/app pack --pack-destination "$TEST_TEMP_DIR/artifacts"
+	assert_success
+	assert_file_exists artifacts/catalog-pack-1.0.0.tgz
+
+	run tar -xOzf artifacts/catalog-pack-1.0.0.tgz package/package.json
+	assert_success
+	assert_output --partial '"regular": "^1.2.3"'
+	assert_output --partial '"development": "4.5.6"'
+	assert_output --partial '"optional": "~7.8.9"'
+	assert_output --partial '"peer": ">=10"'
+	refute_output --partial 'catalog:'
+
+	run grep -F '"regular": "catalog:"' packages/app/package.json
+	assert_success
+}
+
 @test "aube pack --json emits a machine-readable report" {
 	_write_pkg_with_files
 

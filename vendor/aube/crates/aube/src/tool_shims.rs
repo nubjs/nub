@@ -28,6 +28,21 @@ pub(crate) fn shim_dir() -> Option<PathBuf> {
     Some(data_home.join(ns).join("shims"))
 }
 
+pub(crate) fn activated_shim_dir() -> Option<PathBuf> {
+    std::env::var_os(SHIM_DIR_ENV)
+        .filter(|value| !value.is_empty())
+        .and_then(single_path_entry)
+}
+
+fn single_path_entry(value: OsString) -> Option<PathBuf> {
+    let path = PathBuf::from(&value);
+    let mut entries = std::env::split_paths(&value);
+    if entries.next().as_deref() != Some(path.as_path()) || entries.next().is_some() {
+        return None;
+    }
+    Some(path)
+}
+
 pub(crate) fn sanitize_process_path() {
     let Some(path) = path_without_shim_dir(std::env::var_os("PATH")) else {
         return;
@@ -40,8 +55,8 @@ pub(crate) fn sanitize_process_path() {
 }
 
 fn path_without_shim_dir(path: Option<OsString>) -> Option<OsString> {
-    let shim_dir = std::env::var_os(SHIM_DIR_ENV).filter(|v| !v.is_empty())?;
-    strip_path_entry(path?, Path::new(&shim_dir))
+    let shim_dir = activated_shim_dir()?;
+    strip_path_entry(path?, &shim_dir)
 }
 
 fn strip_path_entry(path: OsString, entry_to_remove: &Path) -> Option<OsString> {
@@ -129,5 +144,12 @@ mod tests {
         } else {
             assert_eq!(node, "node");
         }
+    }
+
+    #[test]
+    fn rejects_multiple_entries_as_a_shim_dir() {
+        let value = std::env::join_paths([Path::new("first"), Path::new("second")])
+            .expect("test paths should join");
+        assert_eq!(single_path_entry(value), None);
     }
 }

@@ -21,7 +21,7 @@ symlink .repos
 
 # Internal design corpus (plans, command/runtime specs, research). Gitignored so
 # absent in a fresh worktree — symlinked so an impl agent can read the canonical
-# spec a .fray thread points to (e.g. wiki/commands/init.md).
+# spec a frizz thread points to (e.g. wiki/commands/init.md).
 symlink wiki
 
 # fray orchestration control surface. Symlinked so a worktree-isolated sub-agent
@@ -32,15 +32,34 @@ symlink wiki
 # (the sandbox check is path-prefix based and doesn't resolve symlinks).
 # NOTE: this covers SCRIPTED worktrees (new-worktree.ts). HARNESS-created
 # isolation:worktree worktrees do NOT run new-worktree.ts — those rely on the
-# dispatch-prompt step-0 `ln -s <abs-shared-root>/.fray .fray`.
+# dispatch-prompt step-0 `ln -s <abs-shared-root>/.frizz .frizz`.
+# Both names: the tool was renamed fray -> frizz, and only the old name was
+# listed, so a scripted worktree silently got NO orchestration surface
+# ("source missing, skipping '.fray'").
+symlink .frizz
 symlink .fray
 
 # The prebuilt N-API addon. `--all-features` turns on `embed-runtime`, whose
 # build script hashes every runtime entrypoint and PANICS when this file is
 # absent — so `cargo clippy --all-targets --all-features`, the pre-push gate
-# AGENTS.md prescribes, cannot run at all in a fresh worktree without it.
+# AGENTS.md prescribes, cannot run at all in a fresh worktree without it. The
+# addon is necessary but not sufficient: that same build script also requires the
+# vendored runtime/node_modules, which a lint grants past with
+# NUB_ALLOW_INCOMPLETE_RUNTIME=1 instead of vendoring (see the `rust-build` skill).
 # COPIED, never symlinked: `make addon-fast` writes this exact path, and a
 # symlink would send a worktree's addon build through into the shared tree,
 # clobbering it for every sibling. A missing source is skipped, so a tree that
 # has never built the addon still creates worktrees fine.
 copy runtime/addons/nub-native.node
+
+# The vendored polyfill packages the compile preamble imports (urlpattern,
+# Temporal, Float16Array). Without them 49 compile bundle tests fail in a fresh
+# worktree with `Cannot find module 'urlpattern-polyfill/urlpattern'` — a
+# confusing failure that looks like a code defect. CI never hits it because a
+# Node 26 target strips those polyfill regions before they are resolved.
+# COPIED, not symlinked, and 5 MB: a symlink resolves into the SHARED tree, which
+# puts the packages outside the worktree's own runtime directory. The compile
+# preamble's builtin-usage scan classifies anything outside that directory as
+# APPLICATION code, so a symlink would make it read nub's own polyfills as app
+# usage and keep eager builtin loads no payload asked for.
+copy runtime/node_modules

@@ -1,0 +1,31 @@
+# nub-alias — `bin/nubx.exe` and `bin/nubr.exe` in the Windows release zip.
+#
+# nub is one binary that takes its verb from argv[0]. The Unix archives carry the
+# aliases as symlinks to bin/nub; Windows has no symlink a plain user can create,
+# and three copies of a 50 MB binary is not an archive anyone should download, so
+# each Windows alias is this stub: it runs the sibling nub.exe with the verb in
+# `__NUB_ARGV0`, the same channel the npm launcher uses (npm/nub/bin/launch.js,
+# Argv0::capture_argv0_override). std only — no dependencies, so the lockfile is
+# trivial and the stub stays around 200 KB.
+#
+# Its OWN workspace, excluded at the root Cargo.toml like nub-launcher, so its
+# size-first release profile and its static-CRT link flag (.cargo/config.toml)
+# reach nothing else.
+[package]
+name = "nub-alias"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "nub-alias"
+path = "src/main.rs"
+
+[workspace]
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"

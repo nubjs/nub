@@ -3,9 +3,10 @@ use super::raw::{BunEntry, RawBunLockfile};
 use super::source::{
     bin_value_to_map, bun_key_to_alias_name, classify_bun_ident,
     rebase_workspace_scoped_local_source, resolve_nested_bun, resolve_workspace_dep, split_ident,
-    unrecognized_protocol,
 };
-use crate::{DepType, DirectDep, Error, LockedPackage, LockfileGraph, PeerDepMeta};
+use crate::{
+    DepType, DirectDep, Error, LockedPackage, LockfileGraph, PeerDepMeta, version_protocol,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -60,6 +61,16 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
         })
         .collect();
     workspace_scopes.sort_by_key(|(name, _)| std::cmp::Reverse(name.len()));
+    // Member directories, verbatim. `classify_bun_ident` needs this to
+    // tell `workspace:<dir>` from `workspace:<selector>` — the tail of
+    // a top-level member carries no separator, so its shape alone is
+    // indistinguishable from a selector.
+    let workspace_dirs: BTreeSet<&str> = raw
+        .workspaces
+        .keys()
+        .filter(|ws_path| !ws_path.is_empty())
+        .map(String::as_str)
+        .collect();
 
     // First pass: parse (name, version) for each entry. bun.lock keys look
     // like the package name ("foo") for the hoisted version, or a nested
@@ -103,14 +114,18 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
             &raw_name,
             &raw_version,
             entry.integrity.as_deref(),
+            &workspace_dirs,
         )?;
         // A protocol-shaped tail that fell through the classifier means a
-        // source this reader can't resolve. Withhold the entry so the edge
-        // sites below fatal / warn+skip instead of resolving to a bogus
-        // registry pin.
+        // source this reader can't resolve — an unknown or future bun
+        // protocol, or a malformed spec like a `git+…` tail
+        // `parse_git_spec` rejected. Withhold the entry so the edge sites
+        // below fatal / warn+skip instead of resolving to a bogus registry
+        // pin. Consulted only under `strict_unsupported_source`; the
+        // lenient default keeps the historical reclassify behavior.
         if strict
             && local_source.is_none()
-            && let Some(protocol) = unrecognized_protocol(&raw_version)
+            && let Some(protocol) = version_protocol(&raw_version)
         {
             unsupported.insert(
                 key.clone(),
@@ -217,6 +232,7 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
                 // registry on the next resolve. Empty/default → None.
                 tarball_url: entry.registry_url.clone(),
                 declared_dependencies: declared,
+                declared_dependencies_known: true,
                 bin: bin_map,
                 extra_meta,
                 ..Default::default()
@@ -266,6 +282,28 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
                     let optional = !entry.meta.dependencies.contains_key(dep_name);
                     crate::unsupported_edge(u, optional, path)?;
                 }
+            }
+        }
+        // bun writes no edge for a peer: the package finds it by node
+        // resolution from where it sits, which is this same walk. Without
+        // the edge, a required provider nothing else depends on (goober's
+        // peer `csstype` under react-hot-toast) is pruned before peer
+        // resolution runs. Optional peers are left to peer resolution, which
+        // binds them as a fresh resolve does; binding every placed one here
+        // would bind more than pnpm or a fresh install.
+        for peer in entry.meta.peer_dependencies.keys() {
+            if resolved.contains_key(peer) || entry.meta.optional_peers.contains(peer) {
+                continue;
+            }
+            if let Some(target_key) = resolve_nested_bun(key, peer, |k| key_info.contains_key(k))
+                && target_key != *key
+                && let Some((pname, pver)) = key_info.get(&target_key)
+            {
+                let target_dep_path = format!("{pname}@{pver}");
+                resolved.insert(
+                    peer.clone(),
+                    crate::npm::dep_path_tail(pname, &target_dep_path).to_string(),
+                );
             }
         }
         resolved_by_dep_path.insert(dep_path, resolved);

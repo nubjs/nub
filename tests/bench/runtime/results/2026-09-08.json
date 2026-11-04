@@ -1,0 +1,101 @@
+{
+  "recorded": "2026-09-08",
+  "machine": "GCE c3-standard-8 spot VM (8 vCPU, Linux x64), idle, one benchmark at a time; autocannon on the same box",
+  "node": "v26.8.1",
+  "notes": [
+    "threadpool: five interleaved rounds per route and pool size, values listed per round; plain node with UV_THREADPOOL_SIZE set by hand.",
+    "async-context-frame control on this Node: als-loop node 92/92/91 ms vs nub 91/90/88 ms; fastify-otel node 20659/20624/20058 vs nub 19947/20253/20211 req/s. Equal within noise: the frame is Node 24+'s default and nub injects nothing, so the 2026-09-07 Node 22 run is the figure for that augmentation."
+  ],
+  "threadpool": {
+    "cores": 8,
+    "routes": {
+      "unit": "req/s",
+      "/hash": {
+        "4": [
+          10027,
+          10400,
+          10263,
+          10113,
+          10129
+        ],
+        "8": [
+          13449,
+          13449,
+          13244,
+          13444,
+          13433
+        ],
+        "label": "pbkdf2, 2000 iterations"
+      },
+      "/gzip": {
+        "4": [
+          4092,
+          4244,
+          3881,
+          3973,
+          3970
+        ],
+        "8": [
+          3822,
+          3917,
+          3756,
+          3871,
+          3781
+        ],
+        "label": "gzip a 55 KB JSON"
+      },
+      "/file": {
+        "4": [
+          3640,
+          4266,
+          3170,
+          4725,
+          4735
+        ],
+        "8": [
+          4064,
+          4948,
+          5197,
+          3600,
+          4457
+        ],
+        "label": "read a 270 KB file"
+      },
+      "/stat": {
+        "4": [
+          45464,
+          45212,
+          44632,
+          45032,
+          43424
+        ],
+        "8": [
+          46168,
+          46152,
+          45556,
+          45696,
+          46408
+        ],
+        "label": "stat a file"
+      }
+    },
+    "dns": {
+      "4": [
+        88,
+        56,
+        56,
+        57,
+        63
+      ],
+      "8": [
+        45,
+        45,
+        44,
+        43,
+        45
+      ],
+      "unit": "ms",
+      "label": "400 dns.lookup, concurrency 100"
+    }
+  }
+}

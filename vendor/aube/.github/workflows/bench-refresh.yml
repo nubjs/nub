@@ -24,7 +24,11 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  MBX_DISABLE: "1"
   CARGO_INCREMENTAL: "0"
+  # Rust 1.97.1 is part of the digest-pinned benchmark image.
+  MISE_DISABLE_TOOLS: rust
+  RUSTUP_TOOLCHAIN: 1.97.1
 
 jobs:
   # Gate: only run bench if `benchmarks/results.json` is pinned to an older
@@ -34,7 +38,7 @@ jobs:
   # a rewrite when benchmark methodology changes but the version does not.
   check:
     name: Check version drift
-    runs-on: namespace-profile-endev-linux-amd64
+    runs-on: ubuntu-latest
     outputs:
       drift: ${{ steps.drift.outputs.drift }}
       workspace: ${{ steps.drift.outputs.workspace }}
@@ -72,36 +76,62 @@ jobs:
     name: Refresh benchmarks
     needs: check
     if: needs.check.outputs.drift == 'true'
-    runs-on: namespace-profile-endev-linux-amd64;overrides.cache-tag=aube-rust-linux
+    outputs:
+      artifact_name: ${{ steps.dirty.outputs.artifact_name }}
+      dirty: ${{ steps.dirty.outputs.dirty }}
+    runs-on: [self-hosted, jdx-perf-v1]
+    container:
+      image: ghcr.io/jdx/perf-runner@sha256:5263c143b12ce2234e7b0b21d3d6501c2ed05837b42937d0eaeaa191cd5c8e68
+      options: --cpuset-cpus 0-7
+    timeout-minutes: 60
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          token: ${{ secrets.AUBE_GH_TOKEN }}
           submodules: recursive
           persist-credentials: false
-      - uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1.6.1
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
-          cache: rust
-      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+          cache: false
         env:
           MISE_LOCKED: "1"
-      - name: Restore hermetic bench registry cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/aube-bench/registry
-          key: aube-bench-registry-${{ runner.os }}-v1
-      - name: Configure git identity
+      - name: Download released aube binary
+        id: released_aube
+        env:
+          VERSION: ${{ needs.check.outputs.workspace }}
         run: |
-          git config user.name "release-plz[bot]"
-          git config user.email "release-plz+bot@users.noreply.github.com"
+          case "$(uname -m)" in
+            x86_64) TARGET=x86_64-unknown-linux-gnu ;;
+            aarch64|arm64) TARGET=aarch64-unknown-linux-gnu ;;
+            *)
+              echo "::error::Unsupported benchmark runner architecture: $(uname -m)"
+              exit 1
+              ;;
+          esac
+          ARCHIVE="aube-v${VERSION}-${TARGET}.tar.gz"
+          DESTINATION="$RUNNER_TEMP/aube-release"
+          mkdir -p "$DESTINATION"
+          curl --fail --location --retry 3 \
+            --output "$DESTINATION/$ARCHIVE" \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/${ARCHIVE}"
+          tar -xzf "$DESTINATION/$ARCHIVE" -C "$DESTINATION" aube
+          chmod +x "$DESTINATION/aube"
+          ACTUAL_VERSION=$("$DESTINATION/aube" --version | grep -Eo \
+            '[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?' | head -n1)
+          if [ "$ACTUAL_VERSION" != "$VERSION" ]; then
+            echo "::error::Downloaded aube $ACTUAL_VERSION, expected $VERSION"
+            exit 1
+          fi
+          echo "Benchmarking released aube $ACTUAL_VERSION from $ARCHIVE"
+          echo "bin=$DESTINATION/aube" >> "$GITHUB_OUTPUT"
       - name: Snapshot previous benchmarks
         run: cp benchmarks/results.json /tmp/bench-results-before.json
       - name: Refresh benchmarks
         run: mise run bench:bump
+        env:
+          AUBE_BIN: ${{ steps.released_aube.outputs.bin }}
       - name: Validate benchmark claims
         run: node benchmarks/validate-results.mts
       - name: Summarize benchmark changes
@@ -112,36 +142,99 @@ jobs:
       - name: Check for diff
         id: dirty
         run: |
-          if git diff --quiet && [ -z "$(git status --porcelain)" ]; then
+          echo "artifact_name=bench-refresh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          git add -A
+          changed=$(git diff --cached --name-only)
+          unexpected=$(printf '%s\n' "$changed" \
+            | grep -Ev '^(README\.md|benchmarks/results\.json)$' || true)
+          if [ -n "$unexpected" ]; then
+            echo "::error::bench:bump changed files outside the publication allowlist"
+            printf '%s\n' "$unexpected"
+            exit 1
+          fi
+          if git diff --cached --quiet; then
             echo "bench:bump produced no diff; skipping PR update."
             echo "dirty=false" >> "$GITHUB_OUTPUT"
           else
             echo "dirty=true" >> "$GITHUB_OUTPUT"
           fi
+          git reset --quiet
 
-      # Reuse the single `bench-refresh` branch across runs so the PR
-      # number is preserved. Always force-push — the previous bench commit
-      # is superseded by the new one, never additive.
-      - name: Force-push bench-refresh branch
+      - name: Package refreshed benchmarks
         if: steps.dirty.outputs.dirty == 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/bench-refresh/benchmarks"
+          cp README.md "$RUNNER_TEMP/bench-refresh/README.md"
+          cp benchmarks/results.json "$RUNNER_TEMP/bench-refresh/benchmarks/results.json"
+          cp /tmp/bench_summary.md "$RUNNER_TEMP/bench-refresh/summary.md"
+      - name: Upload refreshed benchmarks
+        if: steps.dirty.outputs.dirty == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.dirty.outputs.artifact_name }}
+          path: ${{ runner.temp }}/bench-refresh
+          if-no-files-found: error
+          retention-days: 1
+
+  propose:
+    name: Propose refreshed benchmarks
+    needs: [check, refresh]
+    if: needs.refresh.outputs.dirty == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.refresh.outputs.artifact_name }}
+          path: ${{ runner.temp }}/bench-refresh
+      - name: Validate and stage refreshed benchmarks
+        env:
+          WORKSPACE: ${{ needs.check.outputs.workspace }}
+        run: |
+          cd "$RUNNER_TEMP/bench-refresh"
+          if find . -type l -print -quit | grep -q .; then
+            echo "::error::Refusing an artifact containing symbolic links"
+            exit 1
+          fi
+          actual=$(find . -type f -printf '%P\n' | sort)
+          expected=$(printf '%s\n' README.md benchmarks/results.json summary.md | sort)
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::Refusing an artifact outside the publication allowlist"
+            printf 'Expected:\n%s\nActual:\n%s\n' "$expected" "$actual"
+            exit 1
+          fi
+          jq -e --arg workspace "$WORKSPACE" \
+            '.versions.aube == $workspace' benchmarks/results.json >/dev/null
+          test "$(grep -c '<!-- BENCH_RATIOS:START -->' README.md)" -eq 1
+          test "$(grep -c '<!-- BENCH_RATIOS:END -->' README.md)" -eq 1
+
+          cd "$GITHUB_WORKSPACE"
+          git config core.hooksPath /dev/null
+          cp "$RUNNER_TEMP/bench-refresh/README.md" README.md
+          cp "$RUNNER_TEMP/bench-refresh/benchmarks/results.json" benchmarks/results.json
+      # Reuse one branch so the PR number is preserved. The previous benchmark
+      # commit is superseded by the new one, never additive.
+      - name: Force-push bench-refresh branch
         env:
           GITHUB_TOKEN: ${{ secrets.AUBE_GH_TOKEN }}
           REPOSITORY: ${{ github.repository }}
         run: |
+          git config user.name "release-plz[bot]"
+          git config user.email "release-plz+bot@users.noreply.github.com"
           git checkout -B bench-refresh
-          git add -A
+          git add README.md benchmarks/results.json
           git commit -m "chore: refresh benchmarks"
-          # persist-credentials: false on checkout means we need to auth
-          # the push explicitly. Re-point origin (rather than pushing to
-          # a one-shot URL) so --force-with-lease has a remote-tracking
-          # ref to compare against; pushing to an unnamed URL leaves no
-          # tracking ref and git rejects every push with "stale info".
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPOSITORY}.git"
           git fetch origin bench-refresh || true
           git push --force-with-lease -u origin HEAD:refs/heads/bench-refresh
-
       - name: Create or update PR
-        if: steps.dirty.outputs.dirty == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.AUBE_GH_TOKEN }}
           WORKSPACE: ${{ needs.check.outputs.workspace }}
@@ -153,9 +246,9 @@ jobs:
           cat > /tmp/bench_body.md <<EOF
           ## 🤖 Refreshed benchmarks
 
-          \`benchmarks/results.json\` was pinned to aube \`${BENCH:-<unset>}\`; the workspace is now \`${WORKSPACE}\`. Re-ran \`mise run bench:bump\` on the hermetic Verdaccio registry (500mbit / 50ms per the mise task) and regenerated \`benchmarks/results.json\` plus the README \`BENCH_RATIOS\` block. The benchmark matrix pins aube's GVS mode via \`npm_config_enable_global_virtual_store=true|false\` (the auto-synthesized env alias for the \`enableGlobalVirtualStore\` setting), so GitHub Actions' inherited \`CI=true\` environment does not change whether aube runs with GVS enabled or disabled.
+          \`benchmarks/results.json\` was pinned to aube \`${BENCH:-<unset>}\`; the workspace is now \`${WORKSPACE}\`. Downloaded the published aube \`v${WORKSPACE}\` archive, then re-ran \`mise run bench:bump\` on the hermetic Verdaccio registry (500mbit / 50ms per the mise task) and regenerated \`benchmarks/results.json\` plus the README \`BENCH_RATIOS\` block. The benchmark matrix pins aube's GVS mode via \`npm_config_enable_global_virtual_store=true|false\` (the auto-synthesized env alias for the \`enableGlobalVirtualStore\` setting), so GitHub Actions' inherited \`CI=true\` environment does not change whether aube runs with GVS enabled or disabled.
 
-          $(cat /tmp/bench_summary.md)
+          $(cat "$RUNNER_TEMP/bench-refresh/summary.md")
 
           **Review the numbers** before merging — if anything looks wildly off vs. the previous release, investigate before landing. Hermetic proxy jitter or an npmjs uplink hiccup can occasionally skew results.
 
@@ -163,6 +256,8 @@ jobs:
 
           ---
           Generated by the \`bench-refresh\` workflow.
+
+          *AI-assisted — Tool: Codex; model: unavailable; version: unavailable.*
           EOF
           if [ -n "$EXISTING" ]; then
             gh pr edit "$EXISTING" --title "$TITLE" --body-file /tmp/bench_body.md

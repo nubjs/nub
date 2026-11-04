@@ -1,8 +1,10 @@
 # Clobber-candidate runtime-perf comparison (native vs userland)
 
-**Date:** 2026-05-24. Companion to [`userland-package-clobbering-audit.md`](userland-package-clobbering-audit.md). Question: per candidate, is there a runtime-perf win — beyond install-size — from serving Nub's native equivalent?
+**Date:** 2026-05-24. Companion to [[research/userland-package-clobbering-audit]]. Question: per candidate, is there a runtime-perf win — beyond install-size — from serving Nub's native equivalent?
 
 ## TL;DR
+
+Temporal is the only candidate with a large runtime win. Node's `fetch`, `WebSocket`, and `EventSource` are themselves JS over undici, so they tie with their userland equivalents, which cuts the perf-driven clobber list to three packages.
 
 - **Temporal is the only candidate with a clear, large runtime-perf win.** The polyfill is ~125 KB unpacked / ~52 KB gzipped and ships its own software BigInt (JSBI) because it must run in ancient targets; native V8 Temporal is C++ on native `bigint`. No head-to-head bench is published, but the architectural delta is decisive and the cold-start parse cost saved (~1.25 ms/process at the Cloudflare-workers ~10 µs/KB ballpark) is real on every invocation. URLPattern is a distant second by parse-cost alone (~10–15 KB saved).
 - **The surprising losers are `node-fetch` and `ws`.** Both are essentially tied with their native equivalents on published benches — `node-fetch` 5945 req/s vs undici-fetch 5904 req/s on Node 22.11.0; `ws` 100.69 MiB/s vs Node's undici-backed WebSocket 102.46 MiB/s. The "JS wrapper vs C++" intuition is wrong here: Node's `fetch` is itself a Web-Streams-wrapped JS layer over undici's C++ HTTP/1.1 parser, and `ws` does the same WebSocket framing in JS that undici's `WebSocket` does. No throughput win from clobbering.
@@ -10,6 +12,8 @@
 - **Re-rank for perf-magnitude clobber priority:** (1) `@js-temporal/polyfill`, (2) `urlpattern-polyfill`, (3) `abort-controller` — and nothing else clears the bar. `node-fetch`, `ws`, and `eventsource` should be removed from any perf-driven clobber list; their case is install-size or freshness, not speed. The audit's earlier "opt-in only for Temporal + URLPattern" recommendation survives this perf review and gains a third candidate.
 
 ## Per-candidate perf table
+
+Two independent axes per package: the cold-start parse cost saved by not shipping the polyfill, derived from unpacked size, and the hot-path delta from a published head-to-head bench. Pairs with no published bench are marked unverified.
 
 | Package | Native equivalent | Cold-start parse saved (≈10 µs/KB unpacked) | Hot-path delta (native vs userland) | Source |
 |---|---|---|---|---|
@@ -28,6 +32,8 @@ Cold-start figure derived from Cloudflare Workers parse-cost data (~5 ms per 500
 
 ## Per-candidate brief
 
+The evidence behind each table row: package size, the bench or issue thread that measured the pair, and the verdict that evidence supports.
+
 **`@js-temporal/polyfill`.** 125.9 KB CJS, 51.9 KB gzipped, one dep (JSBI). JSBI is a software BigInt shim retained for pre-2018-V8 targets — a permanent ~2x tax on every BigInt op even on modern Node. No head-to-head bench vs V8-native Temporal is published yet (Temporal landed in V8 13.0, Chrome/Firefox 137 in 2025; Node 26+ is the first stable carrier). Bryntum's 2026 [Temporal-in-2026 piece](https://bryntum.com/blog/javascript-temporal-is-it-finally-here/) benches native Temporal vs `Date` and finds rough parity; native vs JSBI-polyfill should exceed that delta comfortably. **Verdict: strict perf win, large.** The ~1.25 ms cold-start parse saved per invocation is alone the biggest single number in this audit.
 
 **`urlpattern-polyfill`.** [@b9g/match-pattern bench](https://www.npmjs.com/package/@b9g/match-pattern) (M1, Bun 1.3.3): native `test()` 2.32 µs vs polyfill 3.02 µs (~30 %); construction tied. Both compile to RegExp via a multi-stage lexer→parser→generator; the spec is the bottleneck. Cold-start parse saved ~0.15 ms. **Verdict: minor perf win, mostly install-size.**
@@ -44,15 +50,19 @@ Cold-start figure derived from Cloudflare Workers parse-cost data (~5 ms per 500
 
 ## Re-ranked clobber priority by perf magnitude
 
+Ranked by measured runtime magnitude, largest first.
+
 1. **`@js-temporal/polyfill`** — strict perf win. ~1.25 ms cold-start saved plus a C++/native-bigint hot-path advantage of unknown but architecturally substantial size. Largest install-size delta *and* largest single-feature runtime delta in the audit.
 2. **`urlpattern-polyfill`** — minor perf win. ~30 % faster `test()`; ~0.15 ms cold-start saved. Install-size dominates.
-3. **`abort-controller`** — negligible runtime delta, ~1 KB cold-start saving. Include only if the v0.x clobber-table machinery already exists for free.
+3. **`abort-controller`** — negligible runtime delta, ~1 KB cold-start saving. Worth including only where the clobber table already exists and the entry is free.
 4. **`cross-fetch` / `isomorphic-fetch`** — negligible. Already no-ops on Node ≥18 or trivially small. Install-size hygiene only.
 5. **`node-fetch`, `ws` (client), `eventsource`** — **remove from any perf-driven clobber list.** Userland and native are tied or userland-favored on the published benches.
 
-The earlier audit baseline (`@js-temporal/polyfill`, `urlpattern-polyfill`, plus in-flight followups `node-fetch`/`ws`/`eventsource`) re-ranks under perf to: Temporal first, URLPattern second, `abort-controller` distant third, three followups eliminated.
+The earlier audit baseline was `@js-temporal/polyfill` and `urlpattern-polyfill`, with `node-fetch`, `ws`, and `eventsource` left open; under perf those three are eliminated and `abort-controller` enters as a distant third. Those three are the clobber table Nub ships today.
 
 ## Sources
+
+Published benchmarks, the Node and undici issue threads behind each verdict, npm package metadata for the size figures, and the V8 and Cloudflare Workers data behind the cold-start estimate.
 
 - MacroscopeBenchmark, node-fetch vs undici-fetch on Node 22.11.0 — https://github.com/MacroscopeBenchmark/undici
 - nodejs/undici #1203 "fetch() performance parity" — https://github.com/nodejs/undici/issues/1203
@@ -72,8 +82,11 @@ The earlier audit baseline (`@js-temporal/polyfill`, `urlpattern-polyfill`, plus
 - V8 blog "Blazingly fast parsing, part 2" — https://v8.dev/blog/preparser
 - V8 blog "The cost of JavaScript in 2019" — https://v8.dev/blog/cost-of-javascript-2019
 - Cloudflare Workers cold-start parse-cost — https://towardsaws.com/aws-lambda-vs-google-cloud-run-vs-cloudflare-workers-cold-starts-and-costs-89674e69208e
-- Companion: [`userland-package-clobbering-audit.md`](userland-package-clobbering-audit.md), [`polyfill-demand-audit.md`](polyfill-demand-audit.md)
+- Companion: [[research/userland-package-clobbering-audit]]
 
 ## Changelog
 
-- 2026-07-30 — Migrated from the internal research corpus.
+Every revision to this document, with the date and what changed.
+
+- 2026-07-30 — Initial publication.
+- 2026-08-28 — Trimmed to the measured findings and current behavior.

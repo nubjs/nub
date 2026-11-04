@@ -17,7 +17,6 @@ use aube_lockfile::DepType;
 use aube_lockfile::dep_path_filename::{
     DEFAULT_VIRTUAL_STORE_DIR_MAX_LENGTH, dep_path_to_filename,
 };
-use clap::Args;
 use miette::{Context, IntoDiagnostic};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -26,14 +25,14 @@ pub const AFTER_LONG_HELP: &str = "\
 Global store cleanup: use `aube store prune` to clean unreferenced files from the global
 content-addressable store.";
 
-#[derive(Debug, Args)]
+#[derive(Debug, usage_rs::Args)]
 pub struct PruneArgs {
     /// Remove devDependencies from node_modules
-    #[arg(long, short = 'P', visible_alias = "production")]
+    #[usage(long, long = "production", short = 'P')]
     pub prod: bool,
 
     /// Also remove optionalDependencies
-    #[arg(long)]
+    #[usage(long)]
     pub no_optional: bool,
 }
 

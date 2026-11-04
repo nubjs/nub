@@ -35,6 +35,8 @@ pub(crate) const FILE_NAME: &str = "nub.jsonc";
 pub(crate) const ROOT_KEYS: &[&str] = &[
     "$schema",
     "nodeCompat",
+    "nodeExecutable",
+    "prefix",
     "preload",
     "nodeOptions",
     "v8Flags",
@@ -42,6 +44,12 @@ pub(crate) const ROOT_KEYS: &[&str] = &[
     "loader",
     "conditions",
     "tsconfig",
+    "jsx",
+    "jsxFactory",
+    "jsxFragmentFactory",
+    "jsxImportSource",
+    "decorators",
+    "emitDecoratorMetadata",
     "verifyDeps",
     "install",
     "dlx",
@@ -65,6 +73,16 @@ pub(crate) const LOADERS: &[&str] = &["text", "jsonc", "json5", "toml", "yaml", 
 /// loader on them could not take effect and is refused. Their schema enums are
 /// therefore [`LOADERS`] minus `ts`.
 pub(crate) const JSX_PINNED_EXTS: &[&str] = &[".tsx", ".jsx"];
+
+/// The `compilerOptions.jsx` modes that produce executable JavaScript in Nub's
+/// per-file runtime transform. TypeScript's `preserve` / `react-native` modes
+/// intentionally leave JSX syntax in the output, so the native runtime surface
+/// refuses them rather than accepting a setting it cannot apply as written.
+pub(crate) const JSX_VALUES: &[&str] = &["react", "react-jsx", "react-jsxdev"];
+
+/// Decorator semantics Nub can currently lower. Standard ECMAScript decorators
+/// will join this vocabulary once the native transform can emit them.
+pub(crate) const DECORATOR_VALUES: &[&str] = &["legacy"];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Error type — fail-loud, with a JSON path so a bad file self-describes.
@@ -189,6 +207,15 @@ type Result<T> = std::result::Result<T, ConfigError>;
 pub struct ProjectConfig {
     // ── runtime top-levels (bunfig-style flat) ──
     pub node_compat: Option<bool>,
+    /// The `nodeExecutable` spec exactly as authored — a path, or a `$(command)`
+    /// whose stdout is the path. Stored RAW: both forms are resolved by
+    /// `nub_core::node::discovery`, lazily, so a command runs only on an
+    /// invocation that really needs a Node (see [`publish_node_executable`]).
+    pub node_executable: Option<String>,
+    /// The `prefix` command as argv: a string form is split like a shell word
+    /// list at parse time, an array form is taken as written. Never empty. The
+    /// program word is resolved by [`crate::prefix`] at launch, not here.
+    pub prefix: Option<Vec<String>>,
     pub preload: Option<Vec<String>>,
     pub node_options: Option<Vec<String>>,
     pub v8_flags: Option<Vec<String>>,
@@ -196,6 +223,12 @@ pub struct ProjectConfig {
     pub loader: Option<BTreeMap<String, String>>,
     pub conditions: Option<Vec<String>>,
     pub tsconfig: Option<String>,
+    pub jsx: Option<String>,
+    pub jsx_factory: Option<String>,
+    pub jsx_fragment_factory: Option<String>,
+    pub jsx_import_source: Option<String>,
+    pub decorators: Option<DecoratorMode>,
+    pub emit_decorator_metadata: Option<bool>,
     pub verify_deps: Option<VerifyDeps>,
 
     // ── install phase ──
@@ -209,7 +242,7 @@ impl ProjectConfig {
     pub fn builtin_defaults() -> Self {
         Self {
             node_compat: Some(false),
-            env_file: Some(EnvFileSetting::Default),
+            env_file: Some(EnvFileSetting::Enabled),
             verify_deps: Some(VerifyDeps::Warn),
             dlx: DlxConfig {
                 consent: Some(ImplicitDlx::Prompt),
@@ -219,22 +252,44 @@ impl ProjectConfig {
     }
 }
 
-/// The `envFile` field's tri-state (the spec's separate `env` + `envFile` knobs
-/// collapsed into one): `true` = today's default discovery, `false` = disable all
-/// env-file loading, string / string[] = an exclusive source list. The `env` name
-/// is reserved for the future per-VARIABLE allowlist grammar, so this file-
-/// selection knob owns `envFile` alone.
-/// Source strings are stored RAW; `${VAR}`/`$VAR` expansion is applied at the
-/// wiring boundary (it references the process env, which the parser must not).
+/// The `envFile` field (the spec's separate `env` + `envFile` knobs collapsed
+/// into one). The `env` name is reserved for the future per-VARIABLE allowlist
+/// grammar, so this file-selection knob owns `envFile` alone.
+///
+/// A STRING is a mode name, never a path — matching `verifyDeps` and
+/// `install.linker`, the file's other string-valued fields. Paths live in an
+/// array, matching `preload` / `nodeOptions` / `conditions` / `publicHoist`,
+/// which take an array of one rather than a bare string. `envFile` used to be
+/// the sole field where a bare string was DATA, and the exception cost a real
+/// diagnostic: `nub config set envFile .env,.env.local` was accepted and wrote
+/// one path named `.env,.env.local`, failing much later at file resolution,
+/// where the same input against `preload` is refused on the spot. Freeing the
+/// string slot is also what lets [`Self::Varlock`] be spelled without a sigil —
+/// `$varlock` was not available, because source strings run through
+/// `${VAR}`/`$VAR` expansion (see [`expand_runtime_path`]).
+///
+/// Source strings are stored RAW; expansion is applied at the wiring boundary
+/// (it references the process env, which the parser must not).
 #[derive(Debug, Clone, PartialEq)]
 pub enum EnvFileSetting {
-    /// `true` — default `.env*` discovery.
-    Default,
-    /// `false` — disable all env-file loading.
+    /// `true` — nub's own `.env*` discovery.
+    Enabled,
+    /// `false` — no environment files at all, and no hand-over.
     Disabled,
-    /// A string / string[] exclusive source list.
+    /// `"varlock"` — hand the environment to the external loader.
+    ///
+    /// The one value that SELECTS the hand-over rather than displacing it, which
+    /// is what makes it load-bearing rather than decorative: a global `envFile`
+    /// displaces a schema like any other declaration (see
+    /// [`declared_env_file_setting`]), so this is how a project that wants the
+    /// loader overrides a machine-wide `envFile: false`.
+    Varlock,
+    /// `string[]` — an exclusive source list.
     Sources(Vec<String>),
 }
+
+/// The `envFile` mode name that selects the external loader.
+pub(crate) const ENV_FILE_VARLOCK: &str = "varlock";
 
 /// `verifyDeps` — nub's own field name, carrying a SUBSET of pnpm's value space.
 /// The name is deliberately NOT pnpm's `verifyDepsBeforeRun`: that spelling is
@@ -254,6 +309,13 @@ pub enum VerifyDeps {
     Enabled(bool),
     Warn,
     Error,
+}
+
+/// The decorator transform selected by Nub's native config surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecoratorMode {
+    /// TypeScript's pre-Stage-3 decorator calling and emit semantics.
+    Legacy,
 }
 
 /// The `install` block, consumed by the native PM through its aube settings
@@ -366,6 +428,8 @@ pub struct LoadedConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ConfigKey {
     NodeCompat,
+    NodeExecutable,
+    Prefix,
     Preload,
     NodeOptions,
     V8Flags,
@@ -373,6 +437,12 @@ pub enum ConfigKey {
     Loader,
     Conditions,
     Tsconfig,
+    Jsx,
+    JsxFactory,
+    JsxFragmentFactory,
+    JsxImportSource,
+    Decorators,
+    EmitDecoratorMetadata,
     VerifyDeps,
     InstallLinker,
     InstallPublicHoist,
@@ -417,12 +487,30 @@ pub(crate) const RUNTIME_CONFIG_ENV: &str = nub_core::node::spawn::RUNTIME_CONFI
 pub(crate) struct RuntimeConfig {
     pub node_compat: bool,
     pub preload: Vec<String>,
+    /// The directory `preload` entries were resolved against — the project that owns
+    /// them. nub synthesizes its preload chainer INSIDE this directory so a BARE
+    /// entry (`dotenv/config`) resolves through that project's `node_modules`
+    /// walk-up, exactly as Node resolves the same specifier on a `--require` token.
+    /// A chainer anywhere else resolves against nub's own install dir and dies with
+    /// ERR_MODULE_NOT_FOUND (measured, with an in-project control that passes).
+    /// `None` when `preload` is empty.
+    pub preload_root: Option<PathBuf>,
+    /// The synthesized chainer nub's OWN preload must load, set by the spawn path
+    /// (never by config resolution). `Some` only when the chainer rides nub's
+    /// preload rather than its own `NODE_OPTIONS` token — see prepare_preload_chain.
+    pub preload_chain: Option<PathBuf>,
     pub node_options: Vec<String>,
     pub v8_flags: Vec<String>,
     pub env_file: RuntimeEnvFile,
     pub loader: BTreeMap<String, String>,
     pub conditions: Vec<String>,
     pub tsconfig: Option<String>,
+    pub jsx: Option<String>,
+    pub jsx_factory: Option<String>,
+    pub jsx_fragment_factory: Option<String>,
+    pub jsx_import_source: Option<String>,
+    pub experimental_decorators: Option<bool>,
+    pub emit_decorator_metadata: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -618,6 +706,106 @@ pub fn effective_config() -> Option<&'static EffectiveConfig> {
     EFFECTIVE_CONFIG.get()
 }
 
+/// The `envFile` setting, but only when a user WROTE it — at any scope.
+///
+/// The value cannot answer that on its own: `builtin_defaults` always seeds this
+/// key, so after precedence resolution `values.env_file` is `Some` whether or not
+/// anyone wrote it. Only the winning SOURCE separates a declared instruction from
+/// nub's own default, which is why this reads `sources` rather than the value.
+///
+/// So a `.env.schema` behaves as a DEFAULT: it decides the environment exactly
+/// when nobody said otherwise, and any declared `envFile` outranks it. That is
+/// the whole rule, and it leaves `CLI > environment > project > global > defaults`
+/// running unchanged.
+///
+/// The GLOBAL layer used to be excluded here, so that a personal `nub config set
+/// --global envFile false` could not empty a schema project's environment. That
+/// was wrong twice over. It put a non-config signal at a novel position INSIDE
+/// the precedence chain — beating `global`, losing to `project` — which no other
+/// key does and which cannot be stated without describing the wedge. And it
+/// silently ignored an explicit instruction, which is the exact failure this
+/// field's precedence rule exists to prevent: `envFile: false` meaning "load
+/// nothing" is not worth much if one layer quietly exempts itself. A global
+/// `false` now empties a schema project too, and `envFile: "varlock"` in the
+/// project file is how that project opts back in.
+pub(crate) fn declared_env_file_setting() -> Option<EnvFileSetting> {
+    let effective = effective_config()?;
+    let source = effective.sources.get(&ConfigKey::EnvFile)?;
+    (source.kind != ConfigSourceKind::Defaults)
+        .then(|| effective.values.env_file.clone())
+        .flatten()
+}
+
+/// The `prefix` command as argv, with a path-form program anchored to the file
+/// that declared it — `./tools/wrap` in a project file is that project's, and
+/// `~/bin/wrap` in the global file expands the same way `preload` does. A bare
+/// name stays bare for [`crate::prefix`] to look up at launch.
+pub(crate) fn effective_prefix() -> Option<Vec<String>> {
+    let effective = effective_config()?;
+    let words = effective.values.prefix.as_ref()?;
+    let (program, args) = words.split_first()?;
+    let program = if is_path_like(program) {
+        effective
+            .resolve_path(ConfigKey::Prefix, program)
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        program.clone()
+    };
+    Some(
+        std::iter::once(program)
+            .chain(args.iter().cloned())
+            .collect(),
+    )
+}
+
+/// Where the winning `prefix` came from, for a diagnostic: the file's path when
+/// a file set it, else the scope name.
+pub(crate) fn prefix_source_label() -> String {
+    effective_config()
+        .and_then(|effective| effective.sources.get(&ConfigKey::Prefix))
+        .map(|source| match &source.path {
+            Some(path) => path.display().to_string(),
+            None => format!("{:?}", source.kind).to_lowercase(),
+        })
+        .unwrap_or_else(|| "nub.jsonc".to_string())
+}
+
+/// Hand the resolved `nodeExecutable` to discovery, which owns both of its forms
+/// (a path, or a `$(command)` it runs) and every route that resolves a Node —
+/// including the ones inside `nub-core` that no CLI parameter reaches.
+///
+/// Only a FILE-backed win is published. `NODE_EXECUTABLE` outranks the field and
+/// discovery reads that variable itself, so publishing an environment win would
+/// be a second copy of a precedence rule rather than a use of one — and the copy
+/// would lose the variable's non-UTF-8 paths, which cannot survive the overlay.
+///
+/// Nothing is resolved here: a `$(command)` runs on first use, so `nub config set
+/// nodeExecutable …` still works on the machine whose toolchain is what broke.
+pub(crate) fn publish_node_executable(effective: &EffectiveConfig) {
+    let Some(spec) = effective.values.node_executable.as_deref() else {
+        return;
+    };
+    let Some(source) = effective.sources.get(&ConfigKey::NodeExecutable) else {
+        return;
+    };
+    if !matches!(
+        source.kind,
+        ConfigSourceKind::Project | ConfigSourceKind::Global
+    ) {
+        return;
+    }
+    let Some(file) = source.path.clone() else {
+        return;
+    };
+    nub_core::node::discovery::set_node_executable(nub_core::node::discovery::NodeExecutable {
+        spec: spec.to_string(),
+        root: source.root.clone(),
+        cwd: effective.cwd.clone(),
+        file,
+    });
+}
+
 /// The resolved implicit-registry policy. A non-default snapshot value wins;
 /// falling back to the legacy reader preserves `exec.implicitDlx` even when an
 /// otherwise malformed global file could not become a typed layer.
@@ -710,11 +898,24 @@ impl EffectiveConfig {
                     value.clone()
                 }
             })
-            .collect();
+            .collect::<Vec<String>>();
+        // Anchor the chainer to the same root the entries resolved against, so a
+        // bare entry resolves through THAT project's node_modules. Set even with no
+        // `preload` entries: an INHERITED NODE_OPTIONS can carry preload flags of its
+        // own that nub folds into the same chainers, and those need a directory too.
+        let preload_root = Some(self.source_root(ConfigKey::Preload).to_path_buf());
 
-        let env_file = match values.env_file.as_ref().unwrap_or(&EnvFileSetting::Default) {
-            EnvFileSetting::Default => RuntimeEnvFile::Default,
-            EnvFileSetting::Disabled => RuntimeEnvFile::Disabled,
+        let env_file = match values.env_file.as_ref().unwrap_or(&EnvFileSetting::Enabled) {
+            EnvFileSetting::Enabled => RuntimeEnvFile::Default,
+            // Deliberately NOT its own wire variant. `RuntimeEnvFile` crosses a
+            // version boundary (a nub of one version hands the snapshot to a nub
+            // of another mid-upgrade), and an unknown tag fails the whole
+            // deserialize — so a new variant would abort the run on the far side.
+            // The child's behavior is identical either way: under the loader it
+            // loads nothing, which is what `Disabled` already says. Selecting the
+            // loader is an OUTER-process decision, read from the parsed setting
+            // via `declared_env_file_setting`, and never travels on this wire.
+            EnvFileSetting::Varlock | EnvFileSetting::Disabled => RuntimeEnvFile::Disabled,
             EnvFileSetting::Sources(sources) => RuntimeEnvFile::Sources(
                 sources
                     .iter()
@@ -755,12 +956,25 @@ impl EffectiveConfig {
         Ok(RuntimeConfig {
             node_compat,
             preload,
+            preload_root,
+            preload_chain: None,
             node_options: values.node_options.clone().unwrap_or_default(),
             v8_flags: values.v8_flags.clone().unwrap_or_default(),
             env_file,
             loader: values.loader.clone().unwrap_or_default(),
             conditions: values.conditions.clone().unwrap_or_default(),
             tsconfig,
+            jsx: values.jsx.clone(),
+            jsx_factory: values.jsx_factory.clone(),
+            jsx_fragment_factory: values.jsx_fragment_factory.clone(),
+            jsx_import_source: values.jsx_import_source.clone(),
+            // Keep the established TypeScript spelling in the internal wire
+            // format so an older child Nub can still consume a newer parent's
+            // resolved project config during a version handoff.
+            experimental_decorators: values
+                .decorators
+                .map(|mode| matches!(mode, DecoratorMode::Legacy)),
+            emit_decorator_metadata: values.emit_decorator_metadata,
         })
     }
 }
@@ -844,7 +1058,7 @@ fn merge_layer(
 ) {
     // `merge!(install.linker, ConfigKey::InstallLinker)` — the field path is the
     // same on both sides, so naming it once keeps this a readable table of
-    // field ↔ key rather than fourteen near-identical `if let`s.
+    // field ↔ key rather than twenty near-identical `if let`s.
     macro_rules! merge {
         ($($field:ident).+, $key:expr) => {
             if let Some(value) = layer.$($field).+.as_ref() {
@@ -855,6 +1069,8 @@ fn merge_layer(
     }
 
     merge!(node_compat, ConfigKey::NodeCompat);
+    merge!(node_executable, ConfigKey::NodeExecutable);
+    merge!(prefix, ConfigKey::Prefix);
     merge!(preload, ConfigKey::Preload);
     merge!(node_options, ConfigKey::NodeOptions);
     merge!(v8_flags, ConfigKey::V8Flags);
@@ -862,6 +1078,12 @@ fn merge_layer(
     merge!(loader, ConfigKey::Loader);
     merge!(conditions, ConfigKey::Conditions);
     merge!(tsconfig, ConfigKey::Tsconfig);
+    merge!(jsx, ConfigKey::Jsx);
+    merge!(jsx_factory, ConfigKey::JsxFactory);
+    merge!(jsx_fragment_factory, ConfigKey::JsxFragmentFactory);
+    merge!(jsx_import_source, ConfigKey::JsxImportSource);
+    merge!(decorators, ConfigKey::Decorators);
+    merge!(emit_decorator_metadata, ConfigKey::EmitDecoratorMetadata);
     merge!(verify_deps, ConfigKey::VerifyDeps);
 
     merge!(install.linker, ConfigKey::InstallLinker);
@@ -924,6 +1146,17 @@ fn as_str<'a>(v: &'a Value, path: &str) -> Result<&'a str> {
     })
 }
 
+fn as_nonempty_str<'a>(v: &'a Value, path: &str) -> Result<&'a str> {
+    let value = as_str(v, path)?;
+    if value.is_empty() {
+        return Err(ConfigError::Value {
+            path: path.into(),
+            message: "must not be empty".into(),
+        });
+    }
+    Ok(value)
+}
+
 /// A `string[]` field — every element must be a string.
 fn as_string_array(v: &Value, path: &str) -> Result<Vec<String>> {
     let arr = v.as_array().ok_or_else(|| ConfigError::Type {
@@ -933,6 +1166,51 @@ fn as_string_array(v: &Value, path: &str) -> Result<Vec<String>> {
     arr.iter()
         .map(|e| as_str(e, path).map(str::to_string))
         .collect()
+}
+
+/// A command line (`prefix`): a string split like a POSIX shell word list, or an
+/// array of arguments taken as written. Refused when it names no program — an
+/// empty string, an unbalanced quote, an empty array — because the field's whole
+/// job is to put something in front of the command, and refused when the string
+/// form carries a backslash, which the lexer would silently eat.
+fn as_command_words(v: &Value, path: &str) -> Result<Vec<String>> {
+    let words = match v {
+        Value::String(s) => {
+            // A backslash is an ESCAPE to the lexer, which drops it and keeps the
+            // next character, so `C:\tools\wrap.exe` would launch `C:toolswrap.exe`.
+            // As a program that surfaces as a puzzling not-found; as an ARGUMENT it
+            // is a silent wrong answer, because the wrapper starts and receives a
+            // mangled path. The lexer cannot switch on the host — a config file is
+            // committed and read on every platform — so refuse the character and
+            // point at the array form, which takes arguments as written.
+            if s.contains('\\') {
+                return Err(ConfigError::Value {
+                    path: path.into(),
+                    message: "a backslash is a shell escape in the string form — \
+                              use the array form, which takes arguments as written"
+                        .into(),
+                });
+            }
+            shlex::split(s).ok_or_else(|| ConfigError::Value {
+                path: path.into(),
+                message: "unbalanced quotes in the command".into(),
+            })?
+        }
+        Value::Array(_) => as_string_array(v, path)?,
+        _ => {
+            return Err(ConfigError::Type {
+                path: path.into(),
+                expected: "a command string or an array of arguments",
+            });
+        }
+    };
+    if words.first().is_none_or(String::is_empty) {
+        return Err(ConfigError::Value {
+            path: path.into(),
+            message: "must name a program".into(),
+        });
+    }
+    Ok(words)
 }
 
 /// A `{ string: string }` map (`loader`) — every value must be a string.
@@ -1068,6 +1346,12 @@ fn validate_root(
     if let Some(v) = obj.get("nodeCompat") {
         cfg.node_compat = Some(as_bool(v, "nodeCompat")?);
     }
+    if let Some(v) = obj.get("nodeExecutable") {
+        cfg.node_executable = Some(as_nonempty_str(v, "nodeExecutable")?.to_string());
+    }
+    if let Some(v) = obj.get("prefix") {
+        cfg.prefix = Some(as_command_words(v, "prefix")?);
+    }
     if let Some(v) = obj.get("preload") {
         cfg.preload = Some(as_string_array(v, "preload")?);
     }
@@ -1089,6 +1373,54 @@ fn validate_root(
     if let Some(v) = obj.get("tsconfig") {
         cfg.tsconfig = Some(as_str(v, "tsconfig")?.to_string());
     }
+    if let Some(v) = obj.get("jsx") {
+        let value = as_str(v, "jsx")?;
+        if !JSX_VALUES.contains(&value) {
+            return Err(ConfigError::Value {
+                path: "jsx".into(),
+                message: format!(
+                    "must be one of {}",
+                    JSX_VALUES
+                        .iter()
+                        .map(|value| format!("`{value}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            });
+        }
+        cfg.jsx = Some(value.to_string());
+    }
+    if let Some(v) = obj.get("jsxFactory") {
+        cfg.jsx_factory = Some(as_nonempty_str(v, "jsxFactory")?.to_string());
+    }
+    if let Some(v) = obj.get("jsxFragmentFactory") {
+        cfg.jsx_fragment_factory = Some(as_nonempty_str(v, "jsxFragmentFactory")?.to_string());
+    }
+    if let Some(v) = obj.get("jsxImportSource") {
+        cfg.jsx_import_source = Some(as_nonempty_str(v, "jsxImportSource")?.to_string());
+    }
+    if let Some(v) = obj.get("decorators") {
+        let value = as_nonempty_str(v, "decorators")?;
+        cfg.decorators = Some(match value {
+            "legacy" => DecoratorMode::Legacy,
+            _ => {
+                return Err(ConfigError::Value {
+                    path: "decorators".into(),
+                    message: format!(
+                        "must be one of {}",
+                        DECORATOR_VALUES
+                            .iter()
+                            .map(|value| format!("`{value}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                });
+            }
+        });
+    }
+    if let Some(v) = obj.get("emitDecoratorMetadata") {
+        cfg.emit_decorator_metadata = Some(as_bool(v, "emitDecoratorMetadata")?);
+    }
     if let Some(v) = obj.get("verifyDeps") {
         cfg.verify_deps = Some(validate_verify_deps(v, "verifyDeps")?);
     }
@@ -1102,16 +1434,27 @@ fn validate_root(
     Ok(cfg)
 }
 
-/// `envFile`: `true` | `false` | string | string[].
+/// `envFile`: `true` | `false` | `"varlock"` | string[].
+///
+/// A bare string that is not a mode name is almost always a path someone forgot
+/// to bracket, so the error names BOTH readings rather than only the one the
+/// match arm was looking for.
 fn validate_env_file_setting(v: &Value, path: &str) -> Result<EnvFileSetting> {
     match v {
-        Value::Bool(true) => Ok(EnvFileSetting::Default),
+        Value::Bool(true) => Ok(EnvFileSetting::Enabled),
         Value::Bool(false) => Ok(EnvFileSetting::Disabled),
-        Value::String(s) => Ok(EnvFileSetting::Sources(vec![s.clone()])),
+        Value::String(s) if s == ENV_FILE_VARLOCK => Ok(EnvFileSetting::Varlock),
+        Value::String(other) => Err(ConfigError::Value {
+            path: path.into(),
+            message: format!(
+                "unknown value `{other}` (expected \"{ENV_FILE_VARLOCK}\" or a boolean; \
+                 for a file path use an array, for example [\"{other}\"])"
+            ),
+        }),
         Value::Array(_) => Ok(EnvFileSetting::Sources(as_string_array(v, path)?)),
         _ => Err(ConfigError::Type {
             path: path.into(),
-            expected: "a boolean, string, or array of strings",
+            expected: "a boolean, \"varlock\", or an array of strings",
         }),
     }
 }
@@ -1298,7 +1641,14 @@ fn validate_dlx(v: &Value, path: &str) -> Result<DlxConfig> {
 /// units `s|m|h|d|w` ONLY (no months/years — calendar ambiguity; `m` is
 /// unambiguously minutes). A bare unit-less number is REJECTED (the npm-days vs
 /// pnpm-minutes trap, made unrepresentable).
-fn parse_duration(s: &str, path: &str) -> Result<Duration> {
+///
+/// Shared with the `--minimum-release-age` CLI flag
+/// ([`crate::pm_engine::min_release_age`]) so the file and the flag cannot drift
+/// to two different grammars. The flag layers ONE relaxation on top: a bare
+/// number there means MINUTES, because that is pnpm's CLI contract and the CLI
+/// mirrors pnpm. The file keeps the rejection — it is nub's own surface, with no
+/// incumbent grammar to match and nothing to disambiguate it.
+pub(crate) fn parse_duration(s: &str, path: &str) -> Result<Duration> {
     let invalid = |msg: &str| ConfigError::Value {
         path: path.into(),
         message: format!("invalid duration `{s}` — {msg}"),
@@ -1418,6 +1768,12 @@ mod tests {
               "loader": { ".svg": "text" },
               "conditions": ["worker"],
               "tsconfig": "./tsconfig.runtime.json",
+              "jsx": "react",
+              "jsxFactory": "createElement",
+              "jsxFragmentFactory": "Fragment",
+              "jsxImportSource": "preact",
+              "decorators": "legacy",
+              "emitDecoratorMetadata": false,
             }"#,
         );
         assert_eq!(cfg.node_compat, Some(true));
@@ -1436,6 +1792,138 @@ mod tests {
         );
         assert_eq!(cfg.conditions, Some(vec!["worker".into()]));
         assert_eq!(cfg.tsconfig.as_deref(), Some("./tsconfig.runtime.json"));
+        assert_eq!(cfg.jsx.as_deref(), Some("react"));
+        assert_eq!(cfg.jsx_factory.as_deref(), Some("createElement"));
+        assert_eq!(cfg.jsx_fragment_factory.as_deref(), Some("Fragment"));
+        assert_eq!(cfg.jsx_import_source.as_deref(), Some("preact"));
+        assert_eq!(cfg.decorators, Some(DecoratorMode::Legacy));
+        assert_eq!(cfg.emit_decorator_metadata, Some(false));
+    }
+
+    #[test]
+    fn jsx_accepts_only_executable_runtime_modes() {
+        for value in JSX_VALUES {
+            parse_project_config(&format!(r#"{{ "jsx": "{value}" }}"#)).unwrap();
+        }
+        let err = parse_project_config(r#"{ "jsx": "solid" }"#).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Value { ref path, .. } if path == "jsx"),
+            "{err}"
+        );
+
+        for key in ["jsxFactory", "jsxFragmentFactory", "jsxImportSource"] {
+            let err = parse_project_config(&format!(r#"{{ "{key}": "" }}"#)).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::Value { ref path, .. } if path == key),
+                "{key}: {err}"
+            );
+        }
+    }
+
+    /// The field is stored RAW — both of its forms are one string to the parser,
+    /// which is what keeps the `$(command)` decision (and the shell it needs) out
+    /// of a reader that must never spawn anything.
+    #[test]
+    fn node_executable_is_a_non_empty_string_kept_verbatim() {
+        for spec in ["$(mise which node)", "/usr/local/bin/node", "./tools/node"] {
+            let cfg = parse_project_config(&format!(
+                r#"{{ "nodeExecutable": {} }}"#,
+                serde_json::json!(spec)
+            ))
+            .unwrap();
+            assert_eq!(cfg.node_executable.as_deref(), Some(spec));
+        }
+        // An empty value names no binary, so it is refused where it was written
+        // rather than at the point discovery cannot resolve it.
+        let err = parse_project_config(r#"{ "nodeExecutable": "" }"#).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Value { ref path, .. } if path == "nodeExecutable"),
+            "{err}"
+        );
+        let err = parse_project_config(r#"{ "nodeExecutable": ["/bin/node"] }"#).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Type { ref path, .. } if path == "nodeExecutable"),
+            "{err}"
+        );
+    }
+
+    /// Both spellings reach the same argv. The string form is split like a
+    /// shell so a quoted argument survives as one word; the array form is the
+    /// spelling for an argument that would otherwise need escaping.
+    #[test]
+    fn prefix_is_a_command_string_or_an_argv_array_and_never_empty() {
+        let cfg =
+            parse_project_config(r#"{ "prefix": "dotenvx run -f '.env local' --" }"#).unwrap();
+        assert_eq!(
+            cfg.prefix.as_deref(),
+            Some(&["dotenvx", "run", "-f", ".env local", "--"].map(String::from)[..])
+        );
+        let cfg = parse_project_config(r#"{ "prefix": ["nice", "-n", "10"] }"#).unwrap();
+        assert_eq!(
+            cfg.prefix.as_deref(),
+            Some(&["nice", "-n", "10"].map(String::from)[..])
+        );
+        for raw in [r#""""#, r#""  ""#, "[]", r#"[""]"#, r#""dotenvx 'run""#] {
+            let err = parse_project_config(&format!(r#"{{ "prefix": {raw} }}"#)).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::Value { ref path, .. } if path == "prefix"),
+                "{raw} must be refused as a value: {err}"
+            );
+        }
+        let err = parse_project_config(r#"{ "prefix": true }"#).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Type { ref path, .. } if path == "prefix"),
+            "{err}"
+        );
+    }
+
+    /// A Windows path in the string form is the case the shell lexer silently
+    /// corrupts: it eats each backslash and joins the segments. Refusing the
+    /// character is what turns that into an error, and the array form — the
+    /// spelling the error names — has to carry the same path untouched.
+    #[test]
+    fn prefix_refuses_a_backslash_in_the_string_form() {
+        for raw in [
+            r#""C:\\tools\\wrap.exe --""#,
+            r#""wrap -f C:\\dir\\.env""#,
+            r#""wrap C:\\""#,
+        ] {
+            let err = parse_project_config(&format!(r#"{{ "prefix": {raw} }}"#)).unwrap_err();
+            let ConfigError::Value { path, message } = &err else {
+                panic!("{raw} must be refused as a value, got {err}");
+            };
+            assert_eq!(path, "prefix");
+            assert!(
+                message.contains("array form"),
+                "{raw} must be refused with the spelling that works: {message}"
+            );
+        }
+
+        let cfg =
+            parse_project_config(r#"{ "prefix": ["C:\\tools\\wrap.exe", "-f", "C:\\dir\\.env"] }"#)
+                .unwrap();
+        assert_eq!(
+            cfg.prefix.as_deref(),
+            Some(&[r"C:\tools\wrap.exe", "-f", r"C:\dir\.env"].map(String::from)[..])
+        );
+    }
+
+    #[test]
+    fn decorators_accepts_only_implemented_semantics() {
+        let cfg = parse_project_config(r#"{ "decorators": "legacy" }"#).unwrap();
+        assert_eq!(cfg.decorators, Some(DecoratorMode::Legacy));
+
+        for document in [
+            r#"{ "decorators": "standard" }"#,
+            r#"{ "decorators": "experimental" }"#,
+            r#"{ "decorators": true }"#,
+        ] {
+            let err = parse_project_config(document).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::Type { ref path, .. } | ConfigError::Value { ref path, .. } if path == "decorators"),
+                "{err}"
+            );
+        }
     }
 
     #[test]
@@ -1585,18 +2073,18 @@ mod tests {
     }
 
     #[test]
-    fn env_file_tristate_covers_all_arms() {
+    fn env_file_covers_all_arms() {
         assert_eq!(
             parse(r#"{ "envFile": true }"#).env_file,
-            Some(EnvFileSetting::Default)
+            Some(EnvFileSetting::Enabled)
         );
         assert_eq!(
             parse(r#"{ "envFile": false }"#).env_file,
             Some(EnvFileSetting::Disabled)
         );
         assert_eq!(
-            parse(r#"{ "envFile": ".env.local" }"#).env_file,
-            Some(EnvFileSetting::Sources(vec![".env.local".into()]))
+            parse(r#"{ "envFile": "varlock" }"#).env_file,
+            Some(EnvFileSetting::Varlock)
         );
         assert_eq!(
             parse(r#"{ "envFile": [".env", ".env.local"] }"#).env_file,
@@ -1604,6 +2092,22 @@ mod tests {
                 ".env".into(),
                 ".env.local".into()
             ]))
+        );
+    }
+
+    /// A bare path is the mistake this field's grammar most invites, so the error
+    /// has to name the array form rather than only listing the modes.
+    #[test]
+    fn a_bare_path_names_the_array_form() {
+        let err = parse_project_config(r#"{ "envFile": ".env.local" }"#).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains(r#"[".env.local"]"#),
+            "the error must show the path bracketed, so the fix is copyable: {message}"
+        );
+        assert!(
+            message.contains("varlock"),
+            "the error must also list the mode the field does accept: {message}"
         );
     }
 
@@ -1926,9 +2430,22 @@ mod tests {
             values.iter().map(|value| (*value).to_string()).collect()
         }
 
-        let schema: Value =
-            serde_json::from_str(include_str!("../../../site/public/schema/latest.json"))
-                .expect("the published nub.json schema must be valid JSON");
+        // Read at RUNTIME, not via include_str!. The schema is a PUBLISHED site
+        // artifact, and the site withdraws it whenever the config reference is
+        // hidden pending ship (3539b65db1) — a compile-time include turns that
+        // ordinary content decision into a build failure for the whole crate's test
+        // target. Absent schema means there is nothing published to be out of step
+        // with, so skip; the assertions return with the file.
+        let published = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../site/public/schema/latest.json"
+        );
+        let Ok(source) = std::fs::read_to_string(published) else {
+            eprintln!("skipping: {published} is not published right now");
+            return;
+        };
+        let schema: Value = serde_json::from_str(&source)
+            .expect("the published nub.json schema must be valid JSON");
         assert_eq!(keys(&schema, "/properties"), expected(ROOT_KEYS));
         assert_eq!(
             keys(&schema, "/properties/install/properties"),
@@ -1963,8 +2480,45 @@ mod tests {
             "verifyDeps: nub rejects the values it never implemented, so the schema must not offer them"
         );
         assert_eq!(
+            enum_values(&schema, "/$defs/envFileSetting/oneOf/1/enum"),
+            expected(&[ENV_FILE_VARLOCK]),
+            "envFile: the string branch is a closed mode list, not a path — an editor \
+             offering a free string invites exactly the bare path the parser rejects"
+        );
+        assert_eq!(
+            enum_values(&schema, "/properties/jsx/enum"),
+            expected(JSX_VALUES),
+            "jsx must offer exactly the TypeScript modes the parser accepts"
+        );
+        for key in ["jsxFactory", "jsxFragmentFactory", "jsxImportSource"] {
+            assert_eq!(
+                schema
+                    .pointer(&format!("/properties/{key}/minLength"))
+                    .and_then(Value::as_u64),
+                Some(1),
+                "{key}: the schema must reject the empty string like the parser"
+            );
+        }
+        assert_eq!(
             enum_values(&schema, "/properties/dlx/properties/consent/enum"),
             expected(&["prompt", "never"])
+        );
+
+        // `prefix`'s string branch is the one field whose validity is a PATTERN
+        // rather than a key or an enum, so neither check above reaches it. The
+        // pattern must reject what `as_command_words` rejects: a backslash, which
+        // the shell splitting would eat, and a value with no program in it. Pinned
+        // as a literal because nub-cli takes no regex dependency and adding one to
+        // run the cases here would move the root lockfile for a single assertion —
+        // `prefix_refuses_a_backslash_in_the_string_form` covers the parser side,
+        // so the two together fail whichever half drifts.
+        assert_eq!(
+            schema
+                .pointer("/properties/prefix/oneOf/0/pattern")
+                .and_then(Value::as_str),
+            Some(r"^[^\\]*[^\\\s][^\\]*$"),
+            "prefix: the schema must refuse a backslash in the string form, or an \
+             editor blesses a Windows path the parser rejects"
         );
 
         // `loader` spells its vocabulary three times: the open map, plus a
@@ -2238,6 +2792,12 @@ mod tests {
           "loader": {},
           "conditions": [],
           "tsconfig": "./tsconfig.json",
+          "jsx": "react-jsx",
+          "jsxFactory": "createElement",
+          "jsxFragmentFactory": "Fragment",
+          "jsxImportSource": "preact",
+          "decorators": "legacy",
+          "emitDecoratorMetadata": true,
           "verifyDeps": false,
           "install": {
             "linker": { "strategy": "isolated", "hoist": false },

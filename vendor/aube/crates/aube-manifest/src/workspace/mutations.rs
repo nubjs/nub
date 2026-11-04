@@ -23,10 +23,12 @@ use std::path::{Path, PathBuf};
 ///
 /// Manifest-root embedder routing: an embedder whose `manifest_namespace`
 /// is `""` writes the setting at the *top level* of `package.json` via
-/// [`edit_setting_map`]. The read side honors that top-level (neutral,
-/// un-branded) key on *every* surface, so under nub identity AND under an
-/// npm/bun/yarn incumbent (`read_branded_pnpm_config` off) the approval takes
-/// effect — `approve-builds` heals on those surfaces.
+/// [`edit_setting_map`], under [`crate::ROOT_ALLOW_SCRIPTS_KEY`]. The read side
+/// honors that top-level (neutral, un-branded) key on *every* surface, so under
+/// nub identity AND under an npm/bun/yarn incumbent (`read_branded_pnpm_config`
+/// off) the approval takes effect — `approve-builds` heals on those surfaces.
+/// Under an npm incumbent it heals npm as well, since npm 12 gates its own
+/// install scripts on that same top-level map.
 ///
 /// The one surface where a bare top-level write is NOT the right target is the
 /// embedder's *pnpm-compat* surface (`read_branded_pnpm_config` on): there the
@@ -62,7 +64,7 @@ pub fn set_allow_builds(
             Ok(project_dir.join("package.json"))
         }
         ConfigWriteTarget::PackageJson => {
-            edit_setting_map(project_dir, "allowBuilds", |map| {
+            edit_setting_map(project_dir, crate::allow_scripts_field_name(), |map| {
                 for name in names {
                     map.insert(name.clone(), serde_json::Value::Bool(allow));
                 }

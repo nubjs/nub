@@ -3,12 +3,15 @@ on:
   push:
     branches: [main]
   pull_request:
+    # PR CI is opt-in — request a run with `gh pr edit <n> --add-label ci`. Rationale: ci.yml.
+    types: [labeled]
     paths: ['.github/workflows/**']
 
 permissions: {}
 
 jobs:
   zizmor:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
     runs-on: ubuntu-latest
     permissions:
       contents: read

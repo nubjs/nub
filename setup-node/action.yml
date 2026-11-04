@@ -1,0 +1,614 @@
+name: "Setup Node.js, with nub"
+description: "actions/setup-node with nub installed: Node resolved from the project's own pin when no version is given, the package manager pinned in package.json provisioned on demand, and nub's store cached across runs."
+author: "nubjs"
+
+branding:
+  icon: "package"
+  color: "purple"
+
+inputs:
+  nub-version:
+    description: "Version of nub to install — any semver range npm understands (0.0.47, ^0.1.0, latest). Default: latest."
+    required: false
+    default: "latest"
+  node-version:
+    description: "Provision this Node version and front its bin dir on PATH for the rest of the job, as actions/setup-node does. Any range npm understands, or an nvm alias (lts/*, lts/<codename>, node). Default: the project's own pin (package.json#devEngines.runtime, .node-version, .nvmrc, .tool-versions, package.json#engines.node); the runner's Node stays when it satisfies the pin or the project has none. nub itself still runs the project's pin at its own invocation; the action warns if the two differ."
+    required: false
+  node-version-file:
+    description: "Read a Node version from this file (.node-version, .nvmrc, package.json), provision it, and front it on PATH. An explicit alternative to node-version; the file must exist."
+    required: false
+  cache:
+    description: "Cache nub's global store and provisioned Node toolchains across runs. A boolean (true/false); for setup-node drop-in compatibility a PM name (npm/yarn/pnpm/bun) is also accepted and treated as truthy. Leave UNSET to auto-enable when a lockfile or a package.json packageManager/devEngines field is present (mirrors setup-node). Set false to disable."
+    required: false
+    default: ""
+  package-manager-cache:
+    description: "Set to false to disable automatic caching. By default (true), caching is enabled when a lockfile or a package.json packageManager/devEngines field is present. Mirrors setup-node's input of the same name. An explicit cache value still wins."
+    required: false
+    default: "true"
+  cache-dependency-path:
+    description: "Lockfile path(s) whose hash keys the cache. Supports globs / newline-delimited lists. Default: auto-detect the project's lockfile."
+    required: false
+  cache-key-prefix:
+    description: "Prefix injected into the cache key (nub-<os>-<arch>-<prefix>-<hash>), letting you scope or bust caches independently of the lockfile. Default: none."
+    required: false
+  working-directory:
+    description: "Directory to resolve the project's Node pin and lockfile from. Default: the checkout root. Use for monorepos where package.json/.node-version live in a subdirectory."
+    required: false
+  registry-url:
+    description: "Registry to set up for auth. Writes a temporary user-level .npmrc (via NPM_CONFIG_USERCONFIG; the neutral file nub's PM reads) and wires auth to env.NODE_AUTH_TOKEN."
+    required: false
+  scope:
+    description: "Scope for a scoped registry. Falls back to the repository owner for GitHub Packages (npm.pkg.github.com)."
+    required: false
+  always-auth:
+    description: "Write always-auth=true into the temporary user-level .npmrc."
+    required: false
+    default: "false"
+  token:
+    description: "Token for GitHub-API rate-limit relief when resolving nub's version range (and Node downloads on GHES). Defaults to github.token on github.com."
+    required: false
+    default: ${{ github.server_url == 'https://github.com' && github.token || '' }}
+  provision-node:
+    description: "Set to false to leave Node alone: nothing installed, nothing fronted on PATH, and the node-version output empty. For a job where actions/setup-node already put the wanted Node on PATH. nub still resolves the project's pin at its own invocation. Default: true."
+    required: false
+    default: "true"
+  shim:
+    description: "Put nub's package-manager shims first on PATH: npm/npx/pnpm/pnpx/yarn/yarnpkg in later steps run the version the project pins in packageManager or devEngines, provisioned on demand, as corepack does. An unpinned project falls through to the runner's own tool (the fronted Node's npm), and the shims never route a command into nub's own installer. Set false to leave the runner's tools alone. Default: true."
+    required: false
+    default: "true"
+  # Accepted-and-ignored for setup-node drop-in compatibility (never errors on a recognized input).
+  check-latest:
+    description: "Accepted for setup-node compatibility; ignored. nub's resolver already resolves the latest matching version on first run."
+    required: false
+  architecture:
+    description: "Accepted for setup-node compatibility; ignored. nub selects the runner's native architecture automatically."
+    required: false
+  mirror:
+    description: "Accepted for setup-node compatibility; ignored in v1."
+    required: false
+  mirror-token:
+    description: "Accepted for setup-node compatibility; ignored in v1."
+    required: false
+
+outputs:
+  nub-version:
+    description: "The installed nub version (nub --version, a bare v<semver>)."
+    value: ${{ steps.install.outputs.nub-version || steps.install-win.outputs.nub-version }}
+  node-version:
+    description: "The Node version on PATH after this action, as node --version prints it (v20.19.0) and as actions/setup-node reports it. Empty with provision-node: false."
+    value: ${{ steps.provision.outputs.node-version }}
+  cache-hit:
+    description: "Whether an exact nub-store cache match was restored. 'true' on an exact key hit, 'false' on a restore-keys partial hit, empty on a full miss (e.g. the first run) — mirrors actions/cache. Use caching-enabled to tell whether caching is active."
+    value: ${{ steps.cache.outputs.cache-hit }}
+  caching-enabled:
+    description: "Whether caching is active for this run ('true'/'false'). Reflects the resolved cache/package-manager-cache/auto-detect decision, independent of whether a cache was hit."
+    value: ${{ steps.cacheflag.outputs.enabled }}
+
+runs:
+  using: "composite"
+  steps:
+    # 1. Resolve the requested nub version to one release, then install that
+    #    release's per-platform archive into the runner tool cache with nub's own
+    #    installer (vendored under scripts/; sha256-verified against the release
+    #    sidecar). This replaces `npm install -g @nubjs/nub`, which spent 4–9 s per
+    #    job on ubuntu-latest where the archive install measures ~1 s. npm stays
+    #    as the fallback if the archive path fails, so an odd runner still works.
+    - name: Resolve nub version
+      id: resolve
+      shell: bash
+      env:
+        NUB_VERSION: ${{ inputs.nub-version }}
+      run: |
+        set -euo pipefail
+        spec="${NUB_VERSION#v}"
+        if [ "$spec" = latest ] || [ "$spec" = canary ]; then
+          # The installer resolves these itself (releases/latest, or the rolling canary tag).
+          resolved="$spec"
+        elif [[ "$spec" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+          resolved="$spec"
+        else
+          # A semver range or dist-tag: ask the npm registry which versions match
+          # (metadata only, no install) and take the highest. npm ships on every
+          # hosted runner; a self-hosted runner without it passes an exact version.
+          if ! command -v npm >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
+            echo "::error::Resolving the nub-version range '${spec}' needs npm and node on PATH; this runner has neither. Pass an exact version (for example 0.8.3) or 'latest'."
+            exit 1
+          fi
+          resolved="$(npm view "@nubjs/nub@${spec}" version --json 2>/dev/null | node -e '
+            let d = ""; process.stdin.on("data", c => d += c).on("end", () => {
+              let v = JSON.parse(d || "null"); if (!Array.isArray(v)) v = v ? [v] : [];
+              const key = s => s.split(/[.-]/).map(x => /^\d+$/.test(x) ? +x : x);
+              v.sort((x, y) => { const A = key(x), B = key(y);
+                for (let i = 0; i < Math.max(A.length, B.length); i++) {
+                  if (A[i] === B[i]) continue;
+                  if (A[i] === undefined) return typeof B[i] === "string" ? 1 : -1;
+                  if (B[i] === undefined) return typeof A[i] === "string" ? -1 : 1;
+                  if (typeof A[i] !== typeof B[i]) return typeof A[i] === "number" ? -1 : 1;
+                  return A[i] < B[i] ? -1 : 1; }
+                return 0; });
+              process.stdout.write(v[v.length - 1] || ""); });' || true)"
+          if [ -z "$resolved" ]; then
+            echo "::error::nub-version '${spec}' matches no published @nubjs/nub version (or the npm registry was unreachable); pass an exact version such as 0.8.3."
+            exit 1
+          fi
+        fi
+        echo "Resolved nub-version '${spec}' -> ${resolved}"
+        {
+          echo "spec=${spec}"
+          echo "version=${resolved}"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Install nub
+      id: install
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        VERSION: ${{ steps.resolve.outputs.version }}
+        SPEC: ${{ steps.resolve.outputs.spec }}
+        GITHUB_TOKEN: ${{ inputs.token }}
+      run: |
+        set -euo pipefail
+        root="${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}/nub/${VERSION}/${RUNNER_ARCH}"
+        # An exact version already in the tool cache (a persistent self-hosted
+        # runner) is reused as-is; latest/canary always re-resolve.
+        if [ -x "$root/bin/nub" ] && [ "$VERSION" != latest ] && [ "$VERSION" != canary ]; then
+          echo "nub ${VERSION} found in the tool cache at ${root}"
+        else
+          rm -rf "$root" && mkdir -p "$root"
+          if ! NUB_INSTALL_DIR="$root" NUB_NO_MODIFY_PATH=1 bash "${GITHUB_ACTION_PATH}/scripts/install.sh" "$VERSION"; then
+            echo "::warning::Installing nub ${VERSION} from its release archive failed; falling back to npm install -g."
+            rm -rf "$root"
+            root=""
+            npm install -g "@nubjs/nub@${SPEC}"
+          fi
+        fi
+        if [ -n "$root" ]; then
+          echo "${root}/bin" >> "$GITHUB_PATH"
+          export PATH="${root}/bin:${PATH}"
+        fi
+        # nub --version prints a bare v<semver> on stdout; the resolved Node rides
+        # on stderr, so 2>/dev/null keeps the captured value a clean version string.
+        installed="$(nub --version 2>/dev/null)"
+        echo "Installed nub ${installed}"
+        echo "nub-version=${installed}" >> "$GITHUB_OUTPUT"
+
+    - name: Install nub (Windows)
+      id: install-win
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        VERSION: ${{ steps.resolve.outputs.version }}
+        SPEC: ${{ steps.resolve.outputs.spec }}
+        GITHUB_TOKEN: ${{ inputs.token }}
+      run: |
+        $ErrorActionPreference = "Stop"
+        $cacheRoot = if ($env:RUNNER_TOOL_CACHE) { $env:RUNNER_TOOL_CACHE } else { $env:RUNNER_TEMP }
+        $root = Join-Path $cacheRoot "nub\$env:VERSION\$env:RUNNER_ARCH"
+        $exe = Join-Path $root "bin\nub.exe"
+        $ok = $false
+        if ((Test-Path $exe) -and $env:VERSION -ne "latest" -and $env:VERSION -ne "canary") {
+          Write-Host "nub $env:VERSION found in the tool cache at $root"
+          $ok = $true
+        } else {
+          try {
+            if (Test-Path $root) { Remove-Item -Recurse -Force $root }
+            New-Item -ItemType Directory -Force -Path $root | Out-Null
+            $env:NUB_INSTALL_DIR = $root
+            $env:NUB_NO_MODIFY_PATH = "1"
+            & "$env:GITHUB_ACTION_PATH\scripts\install.ps1" $env:VERSION
+            if ($LASTEXITCODE -ne 0) { throw "installer exited $LASTEXITCODE" }
+            $ok = Test-Path $exe
+          } catch {
+            Write-Host "::warning::Installing nub $env:VERSION from its release archive failed ($_); falling back to npm install -g."
+            $ok = $false
+          }
+        }
+        if ($ok) {
+          $bin = Join-Path $root "bin"
+          Add-Content -Path $env:GITHUB_PATH -Value $bin
+          $env:PATH = "$bin;$env:PATH"
+        } else {
+          if (Test-Path $root) { Remove-Item -Recurse -Force $root }
+          npm install -g "@nubjs/nub@$env:SPEC"
+          if ($LASTEXITCODE -ne 0) { throw "npm install -g exited $LASTEXITCODE" }
+        }
+        $installed = (& nub --version 2>$null | Select-Object -First 1)
+        Write-Host "Installed nub $installed"
+        Add-Content -Path $env:GITHUB_OUTPUT -Value "nub-version=$installed"
+
+    # 1a. Register the same problem matchers setup-node ships (tsc + eslint-stylish
+    #     + eslint-compact) so tsc/eslint output in later steps surfaces as inline
+    #     annotations in the Checks UI. The matcher JSONs live beside this action;
+    #     GITHUB_ACTION_PATH resolves to the action's checkout dir on the runner.
+    - name: Register problem matchers
+      shell: bash
+      run: |
+        set -euo pipefail
+        for m in tsc eslint-stylish eslint-compact; do
+          echo "::add-matcher::${GITHUB_ACTION_PATH}/.github/${m}.json"
+        done
+
+    # 1b. Decide whether caching is active, mirroring setup-node's model:
+    #     caching is ON BY DEFAULT and auto-enables when the project looks
+    #     installable (a lockfile, or a package.json packageManager/devEngines
+    #     field). The `cache` input is an explicit override; `package-manager-cache:
+    #     false` is the disable knob. Precedence:
+    #       1. explicit `cache` value  -> wins (false disables; any other value
+    #          enables; a PM name like `npm`/`pnpm` is accepted for setup-node
+    #          drop-in compat and treated as truthy — nub has one store regardless).
+    #       2. `package-manager-cache: false` -> disables.
+    #       3. otherwise -> AUTO: enable iff a lockfile or a
+    #          packageManager/devEngines signal is present.
+    - name: Resolve caching state
+      id: cacheflag
+      shell: bash
+      env:
+        CACHE_IN: ${{ inputs.cache }}
+        PMC_IN: ${{ inputs.package-manager-cache }}
+        WORKDIR: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        raw="$CACHE_IN"
+        lc="$(echo "$raw" | tr '[:upper:]' '[:lower:]')"
+        pmc="$(echo "${PMC_IN:-true}" | tr '[:upper:]' '[:lower:]')"
+        dir="${WORKDIR:-.}"
+
+        if [ -n "$lc" ]; then
+          # 1. explicit `cache` value wins.
+          case "$lc" in
+            false|"0"|no|off) enabled=false ;;
+            *)                enabled=true  ;;
+          esac
+        elif [ "$pmc" = "false" ] || [ "$pmc" = "0" ] || [ "$pmc" = "no" ] || [ "$pmc" = "off" ]; then
+          # 2. caching explicitly disabled.
+          enabled=false
+        else
+          # 3. AUTO (mirrors setup-node default-on): enable when the project looks
+          #    installable. A lockfile is the strongest signal; otherwise a
+          #    package.json that declares a packageManager or devEngines also opts
+          #    in (setup-node enables when packageManager/devEngines is present).
+          enabled=false
+          for f in pnpm-lock.yaml package-lock.json bun.lock bun.lockb yarn.lock; do
+            [ -f "$dir/$f" ] && enabled=true && break
+          done
+          if [ "$enabled" = "false" ] && [ -f "$dir/package.json" ]; then
+            # require() treats a bare path as a module lookup, so pass an absolute
+            # path to read the package.json reliably for any working-directory.
+            pj="$(cd "$dir" && pwd)/package.json"
+            if node -e "const p=require(process.argv[1]);process.exit((p.packageManager||p.devEngines)?0:1)" "$pj" 2>/dev/null; then
+              enabled=true
+            fi
+          fi
+          [ "$enabled" = "true" ] && echo "Caching auto-enabled (lockfile or packageManager/devEngines present). Disable with package-manager-cache: false."
+        fi
+        echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
+
+    # 2. Resolve the cache paths from nub itself (never hardcode XDG layout).
+    #    `nub store path` prints the resolved CAS store dir on stdout. The Node
+    #    toolchain dir is <cache>/node; derive <cache> from XDG with the ~/.cache
+    #    fallback that nub uses. The PM packument cache is best-effort (small +
+    #    re-fetchable; a wrong path is a cheap miss, not breakage).
+    - name: Resolve cache paths
+      id: cachepaths
+      if: steps.cacheflag.outputs.enabled == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        store="$(nub store path 2>/dev/null)"
+        cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/nub"
+        {
+          echo "store=$store"
+          echo "node-cache=$cache_root/node"
+          echo "pm-cache=$cache_root/pm"
+        } >> "$GITHUB_OUTPUT"
+
+    # 3. Compute the cache key from the lockfile (cache-dependency-path overrides
+    #    the auto-detected lockfile glob). The lockfile glob is resolved relative
+    #    to working-directory so monorepo subdirs are detected; cache-dependency-path
+    #    is honored verbatim (it may already be a repo-relative path / glob).
+    - name: Compute cache key
+      id: cachekey
+      if: steps.cacheflag.outputs.enabled == 'true'
+      shell: bash
+      env:
+        DEP_PATH: ${{ inputs.cache-dependency-path }}
+        WORKDIR: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        dir="${WORKDIR:-.}"
+        prefix=""
+        [ "$dir" != "." ] && prefix="${dir%/}/"
+        if [ -n "$DEP_PATH" ]; then
+          dep_glob="$DEP_PATH"
+        else
+          # auto-detect: first present lockfile (pnpm > npm > bun > yarn) under
+          # the working directory. Emit a workspace-relative path so hashFiles()
+          # resolves it (hashFiles is rooted at GITHUB_WORKSPACE).
+          dep_glob=""
+          for f in pnpm-lock.yaml package-lock.json bun.lock bun.lockb yarn.lock; do
+            [ -f "$dir/$f" ] && dep_glob="${prefix}${f}" && break
+          done
+          dep_glob="${dep_glob:-${prefix}package.json}"
+        fi
+        # A newline-delimited list needs the heredoc form, as pin-glob below.
+        {
+          echo "dep-glob<<DEPEOF"
+          printf '%s\n' "$dep_glob"
+          echo "DEPEOF"
+        } >> "$GITHUB_OUTPUT"
+
+        # Fold the project's Node pin into the cache key so a Node-version bump
+        # invalidates the toolchain cache (setup-node#1171). We hash the pin SOURCE
+        # files rather than the installed version (provision runs later); any pin
+        # change busts the key, identical pins reuse it. Emitted as a newline-
+        # delimited glob list for hashFiles() (multiline GITHUB_OUTPUT value).
+        {
+          echo "pin-glob<<PINEOF"
+          for f in .node-version .nvmrc; do
+            [ -f "$dir/$f" ] && echo "${prefix}${f}"
+          done
+          echo "PINEOF"
+        } >> "$GITHUB_OUTPUT"
+
+    # 4. Restore/save nub's store + Node toolchains. The restore-keys ladder gives
+    #    a partial warm hit even on a fresh lockfile (huge over cold).
+    - name: Cache nub store
+      id: cache
+      if: steps.cacheflag.outputs.enabled == 'true'
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+      with:
+        path: |
+          ${{ steps.cachepaths.outputs.store }}
+          ${{ steps.cachepaths.outputs.node-cache }}
+          ${{ steps.cachepaths.outputs.pm-cache }}
+        key: nub-${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key-prefix }}-${{ hashFiles(steps.cachekey.outputs.pin-glob) }}-${{ hashFiles(steps.cachekey.outputs.dep-glob) }}
+        restore-keys: |
+          nub-${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key-prefix }}-${{ hashFiles(steps.cachekey.outputs.pin-glob) }}-
+          nub-${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key-prefix }}-
+
+    # 5. Write a NEUTRAL project .npmrc for registry auth — functionally
+    #    equivalent to the setup-node authutil contract (registry, <scope>:registry,
+    #    _authToken bound to NODE_AUTH_TOKEN, optional always-auth), then point npm
+    #    config at it via NPM_CONFIG_USERCONFIG. nub's PM reads this standard file.
+    #    Like setup-node, an existing file keeps every line except the registry
+    #    line this call replaces (authutil.ts writeRegistryToFile) — and any
+    #    always-auth line, which the input below decides.
+    - name: Configure registry auth
+      if: inputs.registry-url != ''
+      shell: bash
+      env:
+        REGISTRY_URL: ${{ inputs.registry-url }}
+        SCOPE: ${{ inputs.scope }}
+        ALWAYS_AUTH: ${{ inputs.always-auth }}
+        OWNER: ${{ github.repository_owner }}
+        # Surfaces a caller-provided NODE_AUTH_TOKEN into this step so it can be
+        # re-exported to later steps (mirrors setup-node). Absent unless the caller
+        # set it; never fabricated.
+        NODE_AUTH_TOKEN: ${{ env.NODE_AUTH_TOKEN }}
+      run: |
+        set -euo pipefail
+        npmrc="${RUNNER_TEMP}/.npmrc"
+        # normalize the registry URL to a trailing slash (authutil.ts:12-14).
+        url="${REGISTRY_URL%/}/"
+        scope="$SCOPE"
+        # GitHub Packages: default the scope to the repo owner (authutil.ts:21-23).
+        host_only="${url#*://}"; host_only="${host_only%%/*}"
+        if [ -z "$scope" ] && [ "$host_only" = "npm.pkg.github.com" ]; then
+          scope="$OWNER"
+        fi
+        # Normalize the scope exactly like setup-node (authutil.ts:24-29):
+        # prepend a leading @ if missing, then lowercase the WHOLE scope.
+        if [ -n "$scope" ]; then
+          case "$scope" in
+            @*) ;;
+            *) scope="@${scope}" ;;
+          esac
+          scope="$(echo "$scope" | tr '[:upper:]' '[:lower:]')"
+        fi
+        # The auth-token line prefix strips ONLY the scheme and keeps the full
+        # path (authutil.ts:43-44: registryUrl.replace(/(^\w+:|^)/, '')), so a
+        # path-bearing private registry keeps its path in the //host/path/ key.
+        auth_prefix="${url#*://}"
+        keep=""
+        if [ -f "$npmrc" ]; then
+          keep="$(grep -iv -e "^${scope:+${scope}:}registry" -e '^always-auth=' "$npmrc" || true)"
+        fi
+        {
+          [ -n "$keep" ] && printf '%s\n' "$keep"
+          if [ -n "$scope" ]; then
+            echo "${scope}:registry=${url}"
+          else
+            echo "registry=${url}"
+          fi
+          echo "//${auth_prefix}:_authToken=\${NODE_AUTH_TOKEN}"
+          [ "$ALWAYS_AUTH" = "true" ] && echo "always-auth=true"
+        } > "$npmrc"
+        echo "NPM_CONFIG_USERCONFIG=${npmrc}" >> "$GITHUB_ENV"
+        # Re-export NODE_AUTH_TOKEN so it survives into later steps if the caller
+        # set it on THIS step's env (setup-node authutil.ts:49-51). Only when
+        # already present — never invents a token. Heredoc form so a token with
+        # special chars / newlines can't corrupt $GITHUB_ENV; mask it from logs.
+        if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+          echo "::add-mask::${NODE_AUTH_TOKEN}"
+          {
+            echo "NODE_AUTH_TOKEN<<NUBEOF"
+            printf '%s\n' "${NODE_AUTH_TOKEN}"
+            echo "NUBEOF"
+          } >> "$GITHUB_ENV"
+        fi
+        echo "Wrote registry auth to ${npmrc}"
+
+    # 6. Node. Resolve first; download only when nothing on disk satisfies. An
+    #    explicit node-version / node-version-file is the pin; otherwise nub reads
+    #    the project's own pin chain from the working directory
+    #    (package.json#devEngines.runtime, .node-version, .nvmrc, .tool-versions,
+    #    package.json#engines.node). The runner's Node satisfies the pin: it
+    #    stays, nothing is fetched. No pin: it stays. Otherwise nub installs the
+    #    pinned version and fronts its bin dir on PATH for the rest of the job,
+    #    with a notice naming the pin, since the job now runs on a Node the
+    #    runner did not ship. The node-version output is the version on PATH
+    #    afterwards, as with actions/setup-node.
+    #
+    #    Reads the pin files off disk, so actions/checkout must run first.
+    - name: Provision Node
+      id: provision
+      if: inputs.provision-node != 'false'
+      shell: bash
+      env:
+        NODE_VERSION: ${{ inputs.node-version }}
+        NODE_VERSION_FILE: ${{ inputs.node-version-file }}
+        WORKDIR: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+
+        if [ -n "${WORKDIR:-}" ]; then
+          if [ -d "$WORKDIR" ]; then
+            cd "$WORKDIR"
+          else
+            echo "::warning::working-directory '${WORKDIR}' does not exist; resolving the Node pin from the checkout root instead."
+          fi
+        fi
+
+        # The runner's Node before anything is fronted: what the job would run
+        # on under actions/setup-node with no version input.
+        runner_ver="$(node --version 2>/dev/null | tr -d 'v\r' || true)"
+
+        want="$NODE_VERSION"
+        if [ -z "$want" ] && [ -n "$NODE_VERSION_FILE" ]; then
+          if [ ! -f "$NODE_VERSION_FILE" ]; then
+            echo "::error::node-version-file '${NODE_VERSION_FILE}' not found. Did actions/checkout run before this action?"
+            exit 1
+          fi
+          case "$NODE_VERSION_FILE" in
+            # devEngines.runtime.version first (nub's primary signal), then engines.node.
+            *.json) want="$(node -p "try{const p=require('./'+process.argv[1]);const r=p.devEngines&&p.devEngines.runtime;(r&&r.version)||(p.engines&&p.engines.node)||''}catch(e){''}" "$NODE_VERSION_FILE" 2>/dev/null || true)" ;;
+            *)      want="$(head -n1 "$NODE_VERSION_FILE" | tr -d 'v[:space:]')" ;;
+          esac
+        fi
+        # nvm-style aliases, as setup-node reads them: lts/*, lts/<codename>, node,
+        # latest and current resolve through the dist index to a version nub pins.
+        # The index is newest-first and every entry carries its lts field, so
+        # curl, grep and awk pick the release: no Node is on PATH yet on a
+        # runner that ships none, which is what this action is there to fix.
+        alias_spec="$(printf '%s' "$want" | tr '[:upper:]' '[:lower:]')"
+        case "$alias_spec" in
+          lts/*|node|latest|current)
+            index="${NODEJS_ORG_MIRROR:-https://nodejs.org/dist}/index.json"
+            want="$(curl -fsSL --retry 3 "$index" \
+              | grep -oE '"version":"v[0-9]+\.[0-9]+\.[0-9]+"|"lts":("[A-Za-z]+"|false)' \
+              | awk -v spec="$alias_spec" '
+                  # No early exit: under pipefail a closed pipe would fail grep and erase the match.
+                  /^"version"/ { v = $0; sub(/^"version":"v/, "", v); sub(/"$/, "", v); next }
+                  found == "" {
+                    lts = ""
+                    if ($0 ~ /"lts":"/) { lts = tolower($0); sub(/^"lts":"/, "", lts); sub(/"$/, "", lts) }
+                    if (spec == "node" || spec == "latest" || spec == "current") found = v
+                    else if (lts != "" && (spec == "lts/*" || spec == "lts/" lts)) found = v }
+                  END { if (found != "") print found }')" || want=""
+            [ -n "$want" ] || { echo "::error::node-version '${alias_spec}' matches no release in the Node dist index at ${index}."; exit 1; }
+            echo "${alias_spec} is Node ${want}" ;;
+        esac
+
+        # `nub node which` prints the Node the pin resolves to on stdout and the
+        # reason on stderr, exits non-zero when nothing on disk satisfies the
+        # pin, and never downloads. An explicit version resolves from a
+        # throwaway dir pinning exactly that, so the input governs PATH (as
+        # with setup-node) even when the project pins something else.
+        pin_dir="."
+        if [ -n "$want" ]; then
+          pin_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/nub-pin.XXXXXX")"
+          printf '%s\n' "$want" > "$pin_dir/.node-version"
+        fi
+        why="${RUNNER_TEMP:-/tmp}/nub-why.$$"
+        resolve() {
+          resolved="$( (cd "$pin_dir" && nub node which) 2>"$why" )" || resolved=""
+          reason="$(tr -d '\r' < "$why" 2>/dev/null || true)"
+          # Windows prints backslashes and CRLF.
+          resolved="$(printf '%s' "$resolved" | tr -d '\r')"
+          resolved="${resolved//\\//}"
+        }
+        resolve
+        if [ -z "$resolved" ]; then
+          if [ -n "$want" ]; then
+            echo "Installing Node ${want}"
+            nub node install "$want" || { echo "::error::nub node install ${want} failed"; exit 1; }
+          else
+            echo "Installing the project's pinned Node"
+            nub node install || { echo "::error::The project's Node pin could not be provisioned. Set provision-node: false to run on the runner's Node ${runner_ver:-(none)} instead."; exit 1; }
+          fi
+          resolve
+        fi
+        rm -f "$why"
+        if [ "$pin_dir" != "." ]; then rm -rf "$pin_dir"; fi
+
+        resolved_ver=""
+        if [ -n "$resolved" ]; then
+          resolved_ver="$("$resolved" --version 2>/dev/null | tr -d 'v\r' || true)"
+        fi
+        src="${reason#*resolved from }"
+        on_path="$runner_ver"
+        case "$reason" in
+          *"from node on PATH"*)
+            echo "No Node pin in this project; the runner's Node ${runner_ver} stays on PATH." ;;
+          *)
+            if [ -z "$resolved_ver" ]; then
+              echo "::error::No Node satisfies this project's pin after provisioning: ${reason}"
+              exit 1
+            elif [ "$resolved_ver" = "$runner_ver" ]; then
+              echo "The runner's Node ${runner_ver} satisfies the pin (${src}); nothing installed or fronted."
+            else
+              dirname "$resolved" >> "$GITHUB_PATH"
+              on_path="$resolved_ver"
+              if [ -n "$want" ]; then
+                echo "Node ${resolved_ver} on PATH (${src}); the runner's is ${runner_ver:-(none)}."
+              else
+                echo "::notice::Node ${resolved_ver} is on PATH for the rest of the job, from the project's ${src}; the runner shipped ${runner_ver:-no Node}. Set provision-node: false to keep the runner's Node."
+              fi
+            fi ;;
+        esac
+
+        # An explicit input governs PATH, but `nub` runs the project's own pin
+        # when invoked; say so when the two disagree.
+        if [ -n "$want" ]; then
+          proj="$(nub node which 2>"$why" || true)"
+          proj_why="$(tr -d '\r' < "$why" 2>/dev/null || true)"; rm -f "$why"
+          proj="$(printf '%s' "$proj" | tr -d '\r')"; proj="${proj//\\//}"
+          proj_ver=""
+          case "$proj_why" in
+            *"from node on PATH"*) ;;
+            *) if [ -n "$proj" ]; then proj_ver="$("$proj" --version 2>/dev/null | tr -d 'v\r' || true)"; fi ;;
+          esac
+          if [ -n "$proj_ver" ] && [ "$proj_ver" != "$on_path" ]; then
+            echo "::warning::node-version (${want}) put Node ${on_path} on PATH, but the project pins ${proj_ver}; nub runs the project's pin when invoked."
+          fi
+        fi
+        echo "node-version=${on_path:+v$on_path}" >> "$GITHUB_OUTPUT"
+
+    # 7. Package-manager shims (on by default). `nub pm shim` hardlinks npm/npx/pnpm/
+    #    pnpx/yarn/yarnpkg entries at the nub binary; each runs the package manager
+    #    the project pins, provisioned on demand, and falls through to the runner's
+    #    own tool when nothing is pinned. Added to PATH last so the shim dir fronts
+    #    the Node bin dir the previous step exported — otherwise Node's bundled npm
+    #    would shadow the shim.
+    - name: Link package-manager shims
+      if: inputs.shim != 'false'
+      shell: bash
+      run: |
+        set -euo pipefail
+        out="$(nub pm shim)"
+        printf '%s\n' "$out"
+        dir="$(printf '%s\n' "$out" | sed -n 's/^[0-9][0-9]* entries in \(.*\) (.*$/\1/p' | head -n1)"
+        if [ -z "$dir" ]; then
+          # Mirror nub's own resolution: XDG_DATA_HOME first on every OS, then
+          # LOCALAPPDATA on Windows, then ~/.local/share.
+          if [ -n "${XDG_DATA_HOME:-}" ]; then
+            dir="${XDG_DATA_HOME}/nub/shims"
+          elif [ "$RUNNER_OS" = Windows ] && [ -n "${LOCALAPPDATA:-}" ]; then
+            dir="${LOCALAPPDATA}/nub/shims"
+          else
+            dir="$HOME/.local/share/nub/shims"
+          fi
+        fi
+        [ -d "$dir" ] || { echo "::error::nub pm shim reported no shim directory (looked for ${dir})"; exit 1; }
+        echo "$dir" >> "$GITHUB_PATH"
+        echo "Shims on PATH from ${dir}"

@@ -15,7 +15,7 @@ An **audit**'s deliverable is a CLEAN, COMPLETE, VERIFIED list of real gaps betw
 
 1. **Pin the reference target surgically.** State the EXACT major (e.g. pnpm 10) and VERIFY every reference checkout's version before reading it (`git -C .repos/<tool> describe --tags`, its `package.json` `version`, the installed tool's `--version`). Wrong-major reference is the #1 garbage source. **When the audit target is a branch/SHA of THIS repo**, `git fetch origin` FIRST and pin `origin/<branch>@<sha>` — never a local worktree/branch checkout, which routinely lags origin. Verify reachability (`git merge-base --is-ancestor <sha> origin/<branch>`) before reading a byte.
 2. **Empirical over source.** A candidate is not a finding until a differential fixture reproduces it by RUNNING the real pinned tool + nub on identical input and diffing. Source and `--help` reading yield leads only.
-3. **Cross-check the decision record.** Deprecated/removed flags, npm-isms nub rejects, the deliberate pnpm-compat divergences, and already-decided/already-built work are NOT findings. Filter against AGENTS.md "Core design positions", `wiki/` decision docs, and prior `.fray/` threads.
+3. **Cross-check the decision record.** Deprecated/removed flags, npm-isms nub rejects, the deliberate pnpm-compat divergences, and already-decided/already-built work are NOT findings. Filter against AGENTS.md "Core design positions", `wiki/` decision docs, and prior thread notes.
 4. **Mandatory adversarial self-refutation.** Fresh-context reviewer(s) try to REFUTE each surfaced finding by re-pinning, re-reproducing, and re-checking the decision record. They must also challenge any claim that a gap is *irreducible* by exhausting the mechanism's documented alternatives and testing plausible closures. Default to refuted when uncertain. Surface only survivors, each with reproduction evidence; never forward the raw breadth-pass output.
 5. **Tier + deliverable.** Opus at high+ effort for judgment AND refutation (a cheap tier may harvest breadth, but every item is Opus-verified). Thoroughness is two-dimensional: COVERAGE (enumerate the FULL surface from the pinned reference's own authoritative source) AND PRECISION (every item verified). Catalog → `wiki/research/<topic>.md` with all buckets explicit (real gaps / confirmed-OK / intentional-divergence); each finding records reproduction + decision-record cross-check + severity + confidence.
 
@@ -23,7 +23,7 @@ An **audit**'s deliverable is a CLEAN, COMPLETE, VERIFIED list of real gaps betw
 
 Enumerate the full surface (coverage) → harvest candidate gaps → cross-check the decision record → reproduce each against the pinned real tool → adversarially refute in fresh context → surface ONLY survivors, with evidence.
 
-Run it as a fray thread with individually-dispatched agents — not a blind parallel Workflow fan-out that buries the gates.
+Run it with individually-dispatched agents — not a blind parallel Workflow fan-out that buries the gates.
 
 **Only a top-level session dispatches those agents.** If you are yourself a dispatched sub-agent, the repo-wide depth cap in `AGENTS.local.md` applies: run the gates INLINE and return. Gate 4's "fresh context" is then a fresh PASS, not a fresh agent — re-pin, re-run the fixture, and re-check the decision record yourself, defaulting to refuted when uncertain. An audit prong that cannot be refuted inline returns saying so rather than spawning a refuter.
 
@@ -48,7 +48,7 @@ GATE 2 — EMPIRICAL: A gap is NOT a finding until you reproduce it by RUNNING <
   Build a minimal differential fixture per candidate; capture both commands + both outputs.
 GATE 3 — DECISION RECORD: Drop any candidate that is a deprecated/removed flag in <REFERENCE> <MAJOR>,
   an npm-ism nub deliberately rejects, one of nub's intentional pnpm-compat divergences, or already
-  decided/built. Cross-check AGENTS.md "Core design positions", wiki/ decision docs, and .fray/ threads.
+  decided/built. Cross-check AGENTS.md "Core design positions", wiki/ decision docs, and prior thread notes.
   Deeply evaluate what has ALREADY been discussed — surfacing a settled call is as bad as a false positive.
 GATE 4 — REFUTE: After harvesting, re-verify every surviving candidate adversarially (try to REFUTE it:
   re-pin, re-reproduce, re-check the record). Treat "irreducible" or "cannot close" as claims that also
