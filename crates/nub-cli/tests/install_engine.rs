@@ -1081,16 +1081,26 @@ fn install_records_a_missing_pnpm_pin_then_stays_up_to_date() {
     const PIN: &str = r#""packageManager":"pnpm@12.16.1",
         "devEngines":{"packageManager":{"name":"pnpm","version":"^12.16.1","onFail":"warn"}}"#;
     const DEPS: &str = r#""dependencies":{"is-number":"7.0.0"}"#;
-    for layout in ["project", "workspace member"] {
+    // "settings-only yaml": pnpm 11+'s usual layout, a single project whose
+    // `pnpm-workspace.yaml` carries settings and no `packages:`. It is not a
+    // workspace, so `sharedWorkspaceLockfile: false` must not waive the pin.
+    for layout in ["project", "settings-only yaml", "workspace member"] {
         let root = pm_tmpdir("pnpm-pin");
         let store = pm_tmpdir("pnpm-pin-store");
         let cache = pm_tmpdir("pnpm-pin-cache");
-        let dir = if layout == "project" {
+        let dir = if layout != "workspace member" {
             std::fs::write(
                 root.join("package.json"),
                 format!(r#"{{"name":"pin",{DEPS},{PIN}}}"#),
             )
             .unwrap();
+            if layout == "settings-only yaml" {
+                std::fs::write(
+                    root.join("pnpm-workspace.yaml"),
+                    "sharedWorkspaceLockfile: false\n",
+                )
+                .unwrap();
+            }
             root.clone()
         } else {
             // The pin sits in the root manifest, the install runs in a member.

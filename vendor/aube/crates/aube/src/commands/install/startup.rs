@@ -97,7 +97,7 @@ fn install_fast_path_eligible(
         && !crate::package_manager_pin::env_document_is_current(
             workspace_root.as_deref().unwrap_or(cwd),
         )
-        && pin_sync_writes_lockfile(cwd, opts, workspace_root.is_some())
+        && pin_sync_writes_lockfile(cwd, opts)
     {
         tracing::debug!(
             "install warm path skipped: pnpm-lock.yaml does not record the pinned pnpm"
@@ -117,14 +117,19 @@ fn install_fast_path_eligible(
     }
 }
 
-/// The settings half of the install tail's pin-sync gate: a lockfile is
-/// written, and it is the shared one at the workspace root.
-fn pin_sync_writes_lockfile(cwd: &Path, opts: &InstallOptions, in_workspace: bool) -> bool {
+/// The install tail's pin-sync gate, asked from the warm path: a lockfile
+/// is written, and it is the shared one or there are no workspace members.
+/// "Workspace" is the pipeline's own predicate (discovered member packages,
+/// `discover_workspace_plan`), not a marker file: a settings-only
+/// `pnpm-workspace.yaml` is a single project. Member discovery runs only
+/// when `sharedWorkspaceLockfile` is off, and a failed one demands the pin.
+fn pin_sync_writes_lockfile(cwd: &Path, opts: &InstallOptions) -> bool {
     let files = super::super::FileSources::load(cwd);
     let raw_workspace = aube_manifest::workspace::load_raw(cwd).unwrap_or_default();
     let ctx = files.ctx(&raw_workspace, &opts.env_snapshot, &opts.cli_flags);
     aube_settings::resolved::lockfile(&ctx)
-        && (!in_workspace || aube_settings::resolved::shared_workspace_lockfile(&ctx))
+        && (aube_settings::resolved::shared_workspace_lockfile(&ctx)
+            || aube_workspace::find_workspace_packages(cwd).map_or(true, |p| p.is_empty()))
 }
 
 fn compatibility_metadata_is_current(cwd: &Path, opts: &InstallOptions) -> bool {
