@@ -2351,3 +2351,49 @@ fn optional_dependency_that_is_also_a_peer_survives_a_pnpm_round_trip() {
         consumer.dependencies
     );
 }
+
+/// bun writes no edge for a peer; the reader rebuilds it by the nesting
+/// walk node resolution would take from the package's position, so a
+/// provider nothing depends on survives pruning. An optional peer binds
+/// only when bun placed a provider, and its edge is optional.
+#[test]
+fn parse_rebuilds_peer_edges_from_placement() {
+    let dir = tempfile::tempdir().unwrap();
+    let lock = dir.path().join("bun.lock");
+    let content = r#"{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": {
+      "dependencies": { "parent": "1.0.0" }
+    }
+  },
+  "packages": {
+    "maybe": ["maybe@1.0.0", "", {}, "SRI_M"],
+    "parent": ["parent@1.0.0", "", { "dependencies": { "consumer": "1.0.0" } }, "SRI_P"],
+    "provider": ["provider@1.0.0", "", {}, "SRI_A"],
+    "parent/consumer": ["consumer@1.0.0", "", { "peerDependencies": { "absent": "^1.0.0", "maybe": "^1.0.0", "provider": "^2.0.0" }, "optionalPeers": ["absent", "maybe"] }, "SRI_C"],
+    "parent/provider": ["provider@2.0.0", "", {}, "SRI_B"]
+  }
+}"#
+    .replace("SRI_M", &fake_sri('m'))
+    .replace("SRI_P", &fake_sri('p'))
+    .replace("SRI_A", &fake_sri('a'))
+    .replace("SRI_C", &fake_sri('c'))
+    .replace("SRI_B", &fake_sri('b'));
+    std::fs::write(&lock, content).unwrap();
+
+    let consumer = &parse(&lock).unwrap().packages["consumer@1.0.0"];
+    assert_eq!(
+        consumer.dependencies,
+        BTreeMap::from([
+            ("maybe".to_string(), "1.0.0".to_string()),
+            ("provider".to_string(), "2.0.0".to_string()),
+        ]),
+        "peers bind to the nearest placed provider, and an absent optional peer stays unbound"
+    );
+    assert_eq!(
+        consumer.optional_dependencies.keys().collect::<Vec<_>>(),
+        ["maybe"],
+        "only the optional peer's edge is optional"
+    );
+}
