@@ -475,12 +475,15 @@ pub struct NativeAddons {
     unbundled: Mutex<BTreeMap<PathBuf, String>>,
     /// Names the user forced unbundled, beyond what the manifest rules find.
     forced_unbundled: Vec<String>,
-    /// Which of those the resolver actually reached. A `--unbundled` name is only
-    /// consulted when something in the graph resolves it, so one that is never
-    /// reached does nothing at all — see [`Self::unreached_forced_unbundled`].
+    /// Which of those are shipped: reached by the resolver or inside a closure, or
+    /// resolved from the entry when nothing reached them — see
+    /// [`Self::unreferenced_roots`] and [`Self::unreached_forced_unbundled`].
     forced_seen: Mutex<BTreeSet<String>>,
     /// Names the user forced into the bundle, overriding the manifest rules.
     forced_bundled: Vec<String>,
+    /// String-literal pino transport targets in bundled code, with the module
+    /// that named each — see [`transport_targets`].
+    transport_targets: Mutex<BTreeSet<(String, String)>>,
 }
 
 impl NativeAddons {
@@ -499,6 +502,7 @@ impl NativeAddons {
             forced_seen: Mutex::new(BTreeSet::new()),
             forced_unbundled,
             forced_bundled,
+            transport_targets: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -753,9 +757,80 @@ impl NativeAddons {
         Ok(())
     }
 
+    fn materialise_root(
+        &self,
+        root: &Path,
+        files: &mut BTreeMap<String, (Vec<u8>, bool)>,
+        closure: &mut super::closure::Plan,
+    ) -> Result<()> {
+        // NOT canonicalized, and that is deliberate. Under an isolated install
+        // this is the SYMLINK path — `node_modules/sharp` — which is where the
+        // bundle's own `require("sharp")` looks. Resolving it to the real
+        // `.store/sharp@<v>/node_modules/sharp` makes the package land there
+        // instead, and the artifact then cannot find it at all. Measured:
+        // canonicalizing here shipped sharp into `.store` and the native-islands
+        // gate failed with `Cannot find module 'sharp'`.
+        //
+        // So the root keeps the path Node resolves it by, while dependencies are
+        // canonicalized during the walk to find what they really are. The two
+        // forms differing is what `placement_for` is for.
+        match install_tree_root(root) {
+            Some(anchor) => self.materialise_unbundled(root, &anchor, files, closure),
+            None => Ok(()),
+        }
+    }
+
+    /// Packages that have to ship although nothing in the graph imports them, with
+    /// the line that reports each.
+    ///
+    /// Two kinds. A `--unbundled` name nothing reached is resolved from the entry,
+    /// as a top-level import of it would be. A pino transport target is resolved
+    /// from the module that named it, which is where pino's own
+    /// `createRequire(caller).resolve(target)` looks — and only when pino itself
+    /// ships, since nothing else reads the string.
+    fn unreferenced_roots(&self, entry: &Path, roots: &[PathBuf]) -> Vec<(PathBuf, String)> {
+        let mut found = Vec::new();
+        if let Ok(mut seen) = self.forced_seen.lock() {
+            for name in &self.forced_unbundled {
+                if seen.contains(name) {
+                    continue;
+                }
+                if let Some(root) = resolve_package_root(entry, name) {
+                    seen.insert(name.clone());
+                    let reason = crate::compile::unbundlable::Reason::Forced.describe();
+                    found.push((root, format!("{name} — {reason}")));
+                }
+            }
+        }
+        let pino_ships = roots.iter().any(|root| {
+            std::fs::read_to_string(root.join("package.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                .is_some_and(|manifest| manifest["name"] == "pino")
+        });
+        let targets = match self.transport_targets.lock() {
+            Ok(targets) if pino_ships => targets.clone(),
+            _ => BTreeSet::new(),
+        };
+        for (importer, target) in targets {
+            let name = super::closure::package_of(&target);
+            if self.forced_bundled.iter().any(|n| n == name) {
+                continue;
+            }
+            if let Some(root) = resolve_package_root(Path::new(&importer), name) {
+                found.push((
+                    root,
+                    format!("{name} — it is named as a pino transport target"),
+                ));
+            }
+        }
+        found
+    }
+
     pub fn plan_survivors(
         &self,
         chunks: &mut [super::bundle::BundledFile],
+        entry: &Path,
     ) -> Result<PlannedNative> {
         let seeds = self
             .seeds
@@ -769,22 +844,25 @@ impl NativeAddons {
         // second copy inside a chunk would be a different module object reading a
         // different `__dirname`.
         let mut closure = super::closure::Plan::default();
-        for root in self.unbundled_roots() {
-            // NOT canonicalized, and that is deliberate. Under an isolated
-            // install this is the SYMLINK path — `node_modules/sharp` — which is
-            // where the bundle's own `require("sharp")` looks. Resolving it to
-            // the real `.store/sharp@<v>/node_modules/sharp` makes the package
-            // land there instead, and the artifact then cannot find it at all.
-            // Measured: canonicalizing here shipped sharp into `.store` and the
-            // native-islands gate failed with `Cannot find module 'sharp'`.
-            //
-            // So the root keeps the path Node resolves it by, while dependencies
-            // are canonicalized during the walk to find what they really are.
-            // The two forms differing is what `placement_for` is for.
-            let Some(anchor) = install_tree_root(&root) else {
+        let roots = self.unbundled_roots();
+        for root in &roots {
+            self.materialise_root(root, &mut files, &mut closure)?;
+        }
+        // Only after every closure has been walked: a `--unbundled` name is marked
+        // reached when it turns up INSIDE a closure, so not until then does
+        // "unreached" mean that nothing in the build names it.
+        let mut shipped: BTreeSet<PathBuf> = roots
+            .iter()
+            .map(|root| std::fs::canonicalize(root).unwrap_or_else(|_| root.clone()))
+            .collect();
+        for (root, summary) in self.unreferenced_roots(entry, &roots) {
+            if !shipped.insert(std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone())) {
                 continue;
-            };
-            self.materialise_unbundled(&root, &anchor, &mut files, &mut closure)?;
+            }
+            if let Ok(mut unbundled) = self.unbundled.lock() {
+                unbundled.insert(root.clone(), summary);
+            }
+            self.materialise_root(&root, &mut files, &mut closure)?;
         }
 
         for seed in seeds.values() {
@@ -926,14 +1004,11 @@ impl NativeAddons {
             || crate::compile::unbundlable::classify(dir, manifest).is_some()
     }
 
-    /// `--unbundled` names the resolver never reached.
+    /// `--unbundled` names that shipped nothing: nothing in the build reached
+    /// them, and the entry cannot resolve them either.
     ///
-    /// The flag ships a package that is IN the graph without flattening it, so a
-    /// name nothing imports is not merely redundant — it is a request the build
-    /// cannot carry out, and the usual reason to write one is a package the app
-    /// loads through a specifier built at run time, which is exactly the case
-    /// `--unbundled` cannot see either. Silently doing nothing there produces a
-    /// binary that fails on the user's machine with the build reporting success.
+    /// Silently doing nothing there produces a binary that fails on the user's
+    /// machine with the build reporting success.
     pub fn unreached_forced_unbundled(&self) -> Vec<String> {
         let seen = match self.forced_seen.lock() {
             Ok(seen) => seen,
@@ -1074,9 +1149,12 @@ fn plan_closure(
             }
             let entry = super::closure::Entry {
                 // Names no real file. The bundler needs only its DIRECTORY, so the
-                // specifier resolves from the package that wrote it.
-                importer: members[importer]
-                    .dir
+                // specifier resolves from the package that wrote it — from its REAL
+                // directory, as Node resolves from a module's realpath. The root's
+                // `dir` is the `node_modules/<name>` symlink under an isolated
+                // install, and none of its `.store/` siblings is reachable from
+                // there: every jsdom entry resolved to nothing.
+                importer: super::bundle::canonicalize_for_bundler(&members[importer].dir)
                     .join(format!("__nub_closure_{}.js", entries.len())),
                 chunk: super::closure::chunk_path(&member.rel, entries.len(), esm),
                 specifier: specifier.clone(),
@@ -1278,10 +1356,20 @@ impl Plugin for NativeAddons {
         // a necessary condition for any match (the assignment's value must be a
         // `createRequire` call), and it holds for a handful of modules in a graph
         // of thousands — so almost nothing pays for the extra parse.
-        let scannable = matches!(
+        let code_module = matches!(
             args.module_type,
             ModuleType::Js | ModuleType::Jsx | ModuleType::Ts | ModuleType::Tsx
-        ) && args.code.contains("createRequire");
+        );
+        if code_module && args.code.contains("transport") {
+            let named = transport_targets(args.code);
+            if !named.is_empty() {
+                if let Ok(mut seen) = self.transport_targets.lock() {
+                    let importer = clean_url(args.id).to_string();
+                    seen.extend(named.into_iter().map(|target| (importer.clone(), target)));
+                }
+            }
+        }
+        let scannable = code_module && args.code.contains("createRequire");
         let spans = if scannable {
             require_rebindings(args.id, args.code)
         } else {
@@ -1303,6 +1391,46 @@ impl Plugin for NativeAddons {
             }))
         }
     }
+}
+
+/// The bare specifiers a module passes as a `target` property's string literal.
+///
+/// pino names a transport by string — `transport: { target: "pino-pretty" }`,
+/// `pino.transport({ targets: [{ target: … }] })`, the same objects inside a
+/// `pipeline` — and resolves it inside a worker, so no import ever reaches the
+/// package and the binary ships without it. Each of those shapes is a `target`
+/// property, so that is the whole pattern; the caller only looks in modules that
+/// say `transport` at all. It over-reports in the safe direction: a stray
+/// `target: "_blank"` names no installed package and is dropped when it fails to
+/// resolve. A path target is pino's to resolve and stays out.
+fn transport_targets(code: &str) -> Vec<String> {
+    use super::closure::{is_word_byte, literal, skip_spaces};
+    let bytes = code.as_bytes();
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(offset) = code[from..].find("target") {
+        let start = from + offset;
+        from = start + "target".len();
+        if start > 0 && is_word_byte(bytes[start - 1]) {
+            continue;
+        }
+        // `"target": …` as well as `target: …`, but never `targets`.
+        let mut i = from + usize::from(matches!(bytes.get(from), Some(b'"' | b'\'')));
+        if bytes.get(i).is_some_and(|b| is_word_byte(*b)) {
+            continue;
+        }
+        i = skip_spaces(bytes, i);
+        if bytes.get(i) != Some(&b':') {
+            continue;
+        }
+        let Some((value, _)) = literal(code, skip_spaces(bytes, i + 1)) else {
+            continue;
+        };
+        if !value.is_empty() && !value.starts_with(['.', '/', '\\', '#']) && !value.contains(':') {
+            found.push(value.to_string());
+        }
+    }
+    found
 }
 
 // ---- the `require = createRequire(…)` rebinding -------------------------------
@@ -2691,6 +2819,23 @@ mod tests {
             !parsed.panicked && parsed.diagnostics.is_empty(),
             "the generated module must parse: {:?}",
             parsed.diagnostics
+        );
+    }
+
+    /// Every shape pino accepts a transport in is a `target` property, and only a
+    /// literal naming a package is shipped — a path is pino's to resolve, and a
+    /// value the scan cannot read as a constant is not guessed at.
+    #[test]
+    fn a_transport_target_is_read_from_a_target_propertys_string_literal() {
+        let code = r#"
+            pino({ transport: { target: "pino-pretty", options: {} } });
+            pino.transport({ targets: [{ target: '@scope/pino-x' }, { "target": "pino-roll" }] });
+            pino.transport({ pipeline: [{ target: "./local.mjs" }, { target: "/abs/t.js" }] });
+            const not = { target: name, targets: "x", retarget: "y", t: { target: "file:///t.js" } };
+        "#;
+        assert_eq!(
+            transport_targets(code),
+            ["pino-pretty", "@scope/pino-x", "pino-roll"]
         );
     }
 }

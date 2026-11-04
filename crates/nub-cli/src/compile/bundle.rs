@@ -712,7 +712,7 @@ fn bundle_inner(
     // copying starts here, after tree-shaking: a foreign optional variant whose
     // wrapper disappeared cannot affect this target's payload or fail the build.
     let planned_native = if let Some(plugin) = &native_plugin {
-        plugin.plan_survivors(&mut files)?
+        plugin.plan_survivors(&mut files, entry_abs)?
     } else {
         native::PlannedNative {
             files: Vec::new(),
@@ -2577,7 +2577,7 @@ pub fn strip_verbatim_prefix(path: PathBuf, windows: bool) -> PathBuf {
 /// denotes the same file and both Rolldown and Node accept it, so strip the
 /// prefix at the point the path stops being a filesystem handle and becomes a
 /// specifier.
-fn canonicalize_for_bundler(path: &Path) -> PathBuf {
+pub(super) fn canonicalize_for_bundler(path: &Path) -> PathBuf {
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     strip_verbatim_prefix(canonical, cfg!(windows))
 }
@@ -5964,15 +5964,16 @@ fn specifier_names_native_addon(snippet: &str) -> bool {
         .any(|part| part.ends_with(".node"))
 }
 
-/// Refuse a `--unbundled` name nothing in the graph resolves.
+/// Refuse a `--unbundled` name that shipped nothing: nothing in the graph reached
+/// it, and the entry cannot resolve it either.
 ///
-/// The flag ships a package that IS in the bundle's graph without flattening it.
-/// A name nothing imports cannot be carried out, and doing nothing quietly is
-/// the worst available answer: the build reports success and the binary fails on
-/// the user's machine. Compiling opencode hit exactly this — the platform
-/// package holding OpenTUI's native library lives in the package manager's
-/// isolated store, unreachable from the entry, and `--unbundled` shipped nothing
-/// while reporting nothing.
+/// A name nothing imports still ships when the entry can resolve it — that is how
+/// a pino transport named only as a string travels. One the entry cannot resolve
+/// cannot be carried out, and doing nothing quietly is the worst available
+/// answer: the build reports success and the binary fails on the user's machine.
+/// Compiling opencode hit exactly this — the platform package holding OpenTUI's
+/// native library lives in the package manager's isolated store, unreachable
+/// from the entry, and `--unbundled` shipped nothing while reporting nothing.
 fn refuse_unreached_unbundled(names: &[String]) -> Result<()> {
     let Some(first) = names.first() else {
         return Ok(());
@@ -5983,11 +5984,11 @@ fn refuse_unreached_unbundled(names: &[String]) -> Result<()> {
         .collect::<Vec<_>>()
         .join("\n");
     bail!(
-        "--unbundled named {} package{} nothing in the build resolves:\n{list}\n\
-         \x20\x20The flag ships a package the bundle already reaches, in its own installed\n\
-         \x20\x20layout. Check the spelling, and check it is installed where the entry can\n\
-         \x20\x20resolve it — a package reached only through a specifier built at run time\n\
-         \x20\x20is invisible here too, and needs --include to travel.\n\
+        "--unbundled named {} package{} the entry cannot resolve:\n{list}\n\
+         \x20\x20The flag ships an installed package in its own layout, found the way an\n\
+         \x20\x20import in the entry would find it. Check the spelling, and check it is\n\
+         \x20\x20installed where the entry can resolve it — a package that only sits inside\n\
+         \x20\x20another package's store directory is not, and needs --include to travel.\n\
          \x20\x20For example: --include node_modules/{first}",
         names.len(),
         if names.len() == 1 { "" } else { "s" }
@@ -8359,9 +8360,9 @@ mod tests {
     /// Every module wrapper reaches the output as a hoisted function declaration,
     /// so a chunk re-entered through an import cycle finds it callable rather than
     /// an unassigned `var`. `require` gets the same treatment for the same reason.
-    /// `--unbundled` ships a package the graph already reaches. A name nothing
-    /// resolves cannot be carried out, and doing nothing quietly produced a
-    /// successful build whose binary failed on the user's machine.
+    /// A `--unbundled` name neither the graph nor the entry resolves cannot be
+    /// carried out, and doing nothing quietly produced a successful build whose
+    /// binary failed on the user's machine.
     #[test]
     fn an_unbundled_name_nothing_resolves_fails_the_build() {
         let err = refuse_unreached_unbundled(&["@opentui/core-darwin-arm64".to_string()])

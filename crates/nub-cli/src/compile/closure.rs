@@ -33,7 +33,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use rolldown::plugin::__inner::SharedPluginable;
 use rolldown::plugin::{
     HookLoadArgs, HookLoadOutput, HookLoadReturn, HookResolveIdArgs, HookResolveIdOutput,
@@ -43,6 +43,7 @@ use rolldown::{BundlerBuilder, BundlerOptions, InputItem};
 use rolldown_common::{
     IsExternal, ModuleType, Output, OutputFormat, Platform, RawMinifyOptions, ResolveOptions,
 };
+use rolldown_error::{BuildDiagnostic, DiagnosticOptions, EventKind};
 
 use super::native_layout::IslandFile;
 
@@ -299,6 +300,7 @@ fn build(
             .await
             .map_err(|e| anyhow!("bundling the eject closure failed: {e:?}"))
     })?;
+    reject_unresolved_entries(plan, &output.warnings)?;
     Ok(output
         .assets
         .iter()
@@ -311,6 +313,41 @@ fn build(
             Output::Asset(_) => None,
         })
         .collect())
+}
+
+/// Fail the build when an entry's own specifier resolved to nothing.
+///
+/// Every entry names a package the closure walk found installed, so this is never
+/// the package's fault. And the outcome is never a working binary: Rolldown leaves
+/// an unresolved bare specifier external, so the chunk becomes a `require` of the
+/// very stub it is written into, and Node's cycle handling gives every caller an
+/// empty object. That is how every jsdom chunk shipped under an isolated install,
+/// failing at run time with `SymbolTree is not a constructor`.
+///
+/// Matched on the rendered message because [`BuildDiagnostic`] offers no
+/// structured importer, and the synthetic importer's file name is nub's own.
+fn reject_unresolved_entries(plan: &[&Entry], warnings: &[BuildDiagnostic]) -> Result<()> {
+    let importers: Vec<String> = plan
+        .iter()
+        .filter_map(|entry| entry.importer.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect();
+    let opts = DiagnosticOptions::default();
+    let unresolved: Vec<String> = warnings
+        .iter()
+        .filter(|w| matches!(w.kind(), EventKind::UnresolvedImport))
+        .map(|w| w.to_message_with(&opts))
+        .filter(|message| importers.iter().any(|name| message.contains(name.as_str())))
+        .collect();
+    if unresolved.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "nub could not bundle the dependencies of an unbundled package:\n  {}\n\
+         \x20 This is a bug in nub. Passing --unbundled <package> for each package named\n\
+         \x20 above ships it as installed instead, which avoids it.",
+        unresolved.join("\n  ")
+    )
 }
 
 /// Supplies each entry: a one-line CommonJS module whose whole body is the
@@ -494,11 +531,11 @@ fn skip_noncode(bytes: &[u8], i: usize) -> Option<usize> {
     }
 }
 
-fn is_word_byte(byte: u8) -> bool {
+pub(super) fn is_word_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
 }
 
-fn skip_spaces(bytes: &[u8], mut i: usize) -> usize {
+pub(super) fn skip_spaces(bytes: &[u8], mut i: usize) -> usize {
     while matches!(bytes.get(i), Some(b' ' | b'\t' | b'\n' | b'\r')) {
         i += 1;
     }
@@ -511,7 +548,7 @@ fn skip_spaces(bytes: &[u8], mut i: usize) -> usize {
 /// constant any parser would fold, but a scanner that accepted the backtick would
 /// then have to decide whether a `${` follows — and reading a substitution as a
 /// constant is the one mistake here that ships a broken binary.
-fn literal(text: &str, i: usize) -> Option<(&str, usize)> {
+pub(super) fn literal(text: &str, i: usize) -> Option<(&str, usize)> {
     let bytes = text.as_bytes();
     let quote = *bytes.get(i)?;
     if quote != b'\'' && quote != b'"' {

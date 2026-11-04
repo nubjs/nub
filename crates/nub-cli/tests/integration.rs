@@ -773,6 +773,224 @@ fn compile_resolves_commonjs_requires_of_esm() {
     );
 }
 
+/// A package that ships unbundled still has its dependencies bundled: each one
+/// becomes a chunk inside a stub of that package, and the stub has to answer with
+/// what the real package exports. A class exported as `module.exports` shows a
+/// wrong answer at once — jsdom's `new SymbolTree()` threw "is not a constructor"
+/// when every chunk resolved its specifier to nothing and required its own stub.
+///
+/// Both layouts, because only one broke: under an isolated install the unbundled
+/// package is a symlink into `.store/`, and its dependencies are reachable only
+/// from its real directory. A CommonJS host and an ESM host, because each format
+/// is a separate bundle.
+#[cfg(all(feature = "compile", unix))]
+#[test]
+fn an_unbundled_packages_dependencies_are_bundled_with_their_exports_intact() {
+    let runtime = compile_test_runtime();
+    let packages = [
+        (
+            "cjs-host",
+            r#","dependencies":{"tree":"1.0.0"}"#,
+            "const Tree = require(\"tree\");\nmodule.exports = () => new Tree(\"cjs\").name;\n",
+        ),
+        (
+            "tree",
+            "",
+            "module.exports = class Tree { constructor(name) { this.name = name; } };\n",
+        ),
+        (
+            "esm-host",
+            r#","type":"module","dependencies":{"hooks":"1.0.0"}"#,
+            "import { Hooks } from \"hooks\";\nexport const label = () => new Hooks(\"esm\").name;\n",
+        ),
+        (
+            "hooks",
+            r#","type":"module""#,
+            "export class Hooks { constructor(name) { this.name = name; } }\n",
+        ),
+    ];
+    for isolated in [false, true] {
+        let layout = if isolated { "isolated" } else { "hoisted" };
+        let work = unique_test_cache();
+        let modules = work.join("node_modules");
+        for (name, extra, body) in packages {
+            let dir = if isolated {
+                modules.join(format!(".store/{name}@1.0.0/node_modules/{name}"))
+            } else {
+                modules.join(name)
+            };
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("package.json"),
+                format!(r#"{{"name":"{name}","version":"1.0.0","main":"index.js"{extra}}}"#),
+            )
+            .unwrap();
+            std::fs::write(dir.join("index.js"), body).unwrap();
+        }
+        if isolated {
+            for (host, dep) in [("cjs-host", "tree"), ("esm-host", "hooks")] {
+                let store = format!(".store/{host}@1.0.0/node_modules");
+                std::os::unix::fs::symlink(format!("{store}/{host}"), modules.join(host)).unwrap();
+                std::os::unix::fs::symlink(
+                    format!("../../{dep}@1.0.0/node_modules/{dep}"),
+                    modules.join(format!("{store}/{dep}")),
+                )
+                .unwrap();
+            }
+        }
+        let entry = work.join("app.mjs");
+        std::fs::write(
+            &entry,
+            "import label from \"cjs-host\";\nimport { label as esm } from \"esm-host\";\nconsole.log(label(), esm());\n",
+        )
+        .unwrap();
+        let artifact = work.join("app");
+        let compiled = Command::new(nub_binary())
+            .args(["compile", "--smol", "--target", &runtime.node_target])
+            .args([
+                "--unbundled",
+                "cjs-host",
+                "--unbundled",
+                "esm-host",
+                "--out",
+            ])
+            .arg(&artifact)
+            .arg(&entry)
+            .current_dir(&work)
+            .env("XDG_CACHE_HOME", work.join("cache"))
+            .env("__NUB_LAUNCHER_TEMPLATE", &runtime.launcher)
+            .output()
+            .expect("spawn nub compile");
+        assert!(
+            compiled.status.success(),
+            "{layout}: compile failed: {}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        // Hidden, so nothing the artifact loads can come from the source tree.
+        std::fs::remove_dir_all(&modules).unwrap();
+        let extracted = work.join("run-cache");
+        let mut run = Command::new(&artifact);
+        run.current_dir(&work).env("XDG_CACHE_HOME", &extracted);
+        let ran =
+            run_compiled_artifact_command_with_timeout(run, std::time::Duration::from_secs(10));
+        let mut shipped = Vec::new();
+        let mut dirs = vec![extracted.clone()];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else {
+                    shipped.push(path.to_string_lossy().into_owned());
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&work);
+        assert!(
+            ran.status.success() && String::from_utf8_lossy(&ran.stdout).trim() == "cjs esm",
+            "{layout}: the artifact must print `cjs esm`\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&ran.stdout),
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        // The control that makes the line above mean something: the dependencies
+        // really were answered by stubs. A closure that fell back to shipping them
+        // as files would pass it without running the code that broke.
+        for dep in ["tree", "hooks"] {
+            assert!(
+                shipped
+                    .iter()
+                    .any(|p| p.contains(&format!("/{dep}/__nub/")))
+                    && !shipped
+                        .iter()
+                        .any(|p| p.ends_with(&format!("/{dep}/index.js"))),
+                "{layout}: {dep} must ship as a stub chunk, not its own files: {shipped:#?}"
+            );
+        }
+    }
+}
+
+/// A pino transport is named by a string and resolved by pino at run time, so no
+/// import reaches it and the bundle alone ships without it. It travels two ways:
+/// named with `--unbundled`, which resolves it from the entry, or found as a
+/// literal `target` beside a pino that ships. The stand-in `pino` resolves the
+/// target the way the real one does, `createRequire(caller).resolve(target)`, and
+/// is left unbundled by name, like the real one.
+#[cfg(feature = "compile")]
+#[test]
+fn a_transport_named_only_as_a_string_ships_with_the_binary() {
+    let runtime = compile_test_runtime();
+    let pino = "const { createRequire } = require(\"node:module\");\n\
+                module.exports = (opts, caller) =>\n\
+                \x20 require(createRequire(caller).resolve(opts.transport.target))();\n";
+    for (case, target, flags) in [
+        (
+            "--unbundled",
+            r#"["fake", "transport"].join("-")"#,
+            &["--unbundled", "fake-transport"][..],
+        ),
+        ("a literal target", r#""fake-transport""#, &[][..]),
+    ] {
+        let work = unique_test_cache();
+        let modules = work.join("node_modules");
+        for (name, body) in [
+            ("pino", pino),
+            (
+                "fake-transport",
+                "module.exports = () => \"transport loaded\";\n",
+            ),
+        ] {
+            let dir = modules.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("package.json"),
+                format!(r#"{{"name":"{name}","version":"1.0.0","main":"index.js"}}"#),
+            )
+            .unwrap();
+            std::fs::write(dir.join("index.js"), body).unwrap();
+        }
+        let entry = work.join("app.mjs");
+        std::fs::write(
+            &entry,
+            format!(
+                "import pino from \"pino\";\n\
+                 console.log(pino({{ transport: {{ target: {target} }} }}, import.meta.url));\n"
+            ),
+        )
+        .unwrap();
+        let artifact = work.join("app");
+        let compiled = Command::new(nub_binary())
+            .args(["compile", "--smol", "--target", &runtime.node_target])
+            .args(flags)
+            .arg("--out")
+            .arg(&artifact)
+            .arg(&entry)
+            .current_dir(&work)
+            .env("XDG_CACHE_HOME", work.join("cache"))
+            .env("__NUB_LAUNCHER_TEMPLATE", &runtime.launcher)
+            .output()
+            .expect("spawn nub compile");
+        assert!(
+            compiled.status.success(),
+            "{case}: compile failed: {}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        std::fs::remove_dir_all(&modules).unwrap();
+        let mut run = Command::new(&artifact);
+        run.current_dir(&work)
+            .env("XDG_CACHE_HOME", work.join("run-cache"));
+        let ran =
+            run_compiled_artifact_command_with_timeout(run, std::time::Duration::from_secs(10));
+        let _ = std::fs::remove_dir_all(&work);
+        assert!(
+            ran.status.success()
+                && String::from_utf8_lossy(&ran.stdout).trim() == "transport loaded",
+            "{case}: the transport must ship and load\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&ran.stdout),
+            String::from_utf8_lossy(&ran.stderr)
+        );
+    }
+}
+
 #[cfg(feature = "compile")]
 fn compiled_json_string_array(value: &serde_json::Value) -> Vec<String> {
     value
