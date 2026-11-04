@@ -114,7 +114,7 @@ export async function resolve(specifier, context, nextResolve) {
   ) {
     entryLoad.mainResolved = true;
   }
-  const r = resolveSpec(specifier, context.parentURL);
+  const r = resolveSpec(specifier, context.parentURL, context.conditions);
   if (r) return r;
   // Yarn PnP: resolve deps through PnP's own resolver — identical to the fast tier,
   // via the shared helper (resolveRequest with the import conditions + format

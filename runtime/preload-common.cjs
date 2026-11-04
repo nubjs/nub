@@ -651,7 +651,7 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
     // The fetch-handler pass tells the entry's own load from a preload's import of
     // the same file by Node resolving it first as the main, with no parent.
     noteEntryResolve(specifier, context);
-    const r = core.resolveSpec(specifier, context.parentURL);
+    const r = core.resolveSpec(specifier, context.parentURL, context.conditions);
     if (r) return r;
     // Yarn PnP (ESM): PnP doesn't patch the ESM loader, so `import` of a PnP dep must
     // be resolved explicitly — through `pnpapi.resolveRequest`, passing Node's
