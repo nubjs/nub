@@ -1382,7 +1382,23 @@ function installTemporalValue(polyfill) {
       enumerable: false,
     });
   }
-  const T = polyfill.Temporal;
+  // The library exports a frozen module namespace; the global needs the
+  // ordinary Temporal object's built-in property attributes and prototype.
+  const T = {};
+  for (const name of Object.getOwnPropertyNames(polyfill.Temporal)) {
+    Object.defineProperty(T, name, {
+      value: polyfill.Temporal[name],
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+  Object.defineProperty(T, Symbol.toStringTag, {
+    value: "Temporal",
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
   defineTemporal(T);
   return T;
 }
