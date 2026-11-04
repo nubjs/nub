@@ -389,7 +389,7 @@ fn a_custom_condition_can_point_at_typescript_source_in_a_linked_workspace_packa
 /// Two dependencies: one branching on `nub`, which nub sets itself, and one branching
 /// on a condition only the project's own config can supply. Both carry a `default`, so
 /// each package reports which branch answered.
-fn runtime_key_fixture() -> (tempfile::TempDir, PathBuf) {
+fn nub_condition_fixture() -> (tempfile::TempDir, PathBuf) {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
     for (name, condition) in [("nub-pkg", "nub"), ("user-pkg", "user-declared")] {
@@ -421,7 +421,11 @@ fn runtime_key_fixture() -> (tempfile::TempDir, PathBuf) {
     (temp, project)
 }
 
-fn runtime_key_probe(temp: &tempfile::TempDir, project: &Path, args: &[&str]) -> serde_json::Value {
+fn nub_condition_probe(
+    temp: &tempfile::TempDir,
+    project: &Path,
+    args: &[&str],
+) -> serde_json::Value {
     let mut command = Command::new(nub_binary());
     command
         .current_dir(project)
@@ -431,18 +435,18 @@ fn runtime_key_probe(temp: &tempfile::TempDir, project: &Path, args: &[&str]) ->
     probe_json(&format!("nub {}", args.join(" ")), command)
 }
 
-/// Nub's WinterTC runtime key reaches Node's resolver on an augmented run, so a package
+/// The `nub` export condition reaches Node's resolver on an augmented run, so a package
 /// can ship a `nub` branch the way it ships `bun` or `deno` ones.
 ///
 /// `--node` is the control and it is what makes this a test rather than a coincidence:
 /// compat mode is zero augmentation, so the same fixture must fall through to
-/// `default`. The second package proves the key ADDS to the project's own conditions
+/// `default`. The second package proves the condition ADDS to the project's own conditions
 /// instead of replacing them.
 #[test]
-fn the_nub_runtime_key_rides_augmented_runs_and_not_compat_mode() {
-    let (temp, project) = runtime_key_fixture();
+fn the_nub_condition_rides_augmented_runs_and_not_compat_mode() {
+    let (temp, project) = nub_condition_fixture();
 
-    let augmented = runtime_key_probe(&temp, &project, &["main.mjs"]);
+    let augmented = nub_condition_probe(&temp, &project, &["main.mjs"]);
     assert_eq!(
         augmented["nub"], "selected",
         "an augmented run must select the `nub` branch: {augmented}"
@@ -452,7 +456,7 @@ fn the_nub_runtime_key_rides_augmented_runs_and_not_compat_mode() {
         "nothing declares `user-declared` yet: {augmented}"
     );
 
-    let compat = runtime_key_probe(&temp, &project, &["--node", "main.mjs"]);
+    let compat = nub_condition_probe(&temp, &project, &["--node", "main.mjs"]);
     assert_eq!(
         compat["nub"], "default",
         "compat mode must contribute no conditions of nub's own: {compat}"
@@ -463,14 +467,14 @@ fn the_nub_runtime_key_rides_augmented_runs_and_not_compat_mode() {
         r#"{ "conditions": ["user-declared"] }"#,
     )
     .unwrap();
-    let composed = runtime_key_probe(&temp, &project, &["main.mjs"]);
+    let composed = nub_condition_probe(&temp, &project, &["main.mjs"]);
     assert_eq!(
         composed["user"], "selected",
         "a configured condition must still reach the resolver: {composed}"
     );
     assert_eq!(
         composed["nub"], "selected",
-        "and it must not displace the runtime key: {composed}"
+        "and it must not displace the `nub` condition: {composed}"
     );
 }
 
