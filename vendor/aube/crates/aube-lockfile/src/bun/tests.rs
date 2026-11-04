@@ -2353,12 +2353,12 @@ fn optional_dependency_that_is_also_a_peer_survives_a_pnpm_round_trip() {
     );
 }
 
-/// bun writes no edge for a peer; the reader rebuilds it by the nesting
-/// walk node resolution would take from the package's position, so a
-/// provider nothing depends on survives pruning. An optional peer binds
-/// only when bun placed a provider, and its edge is optional.
+/// bun writes no edge for a peer; the reader rebuilds a required one by
+/// the nesting walk node resolution would take from the package's
+/// position, so a provider nothing depends on survives pruning. Optional
+/// peers are left to peer resolution.
 #[test]
-fn parse_rebuilds_peer_edges_from_placement() {
+fn parse_rebuilds_required_peer_edges_from_placement() {
     let dir = tempfile::tempdir().unwrap();
     let lock = dir.path().join("bun.lock");
     let content = r#"{
@@ -2372,7 +2372,7 @@ fn parse_rebuilds_peer_edges_from_placement() {
     "maybe": ["maybe@1.0.0", "", {}, "SRI_M"],
     "parent": ["parent@1.0.0", "", { "dependencies": { "consumer": "1.0.0" } }, "SRI_P"],
     "provider": ["provider@1.0.0", "", {}, "SRI_A"],
-    "parent/consumer": ["consumer@1.0.0", "", { "peerDependencies": { "absent": "^1.0.0", "maybe": "^1.0.0", "provider": "^2.0.0" }, "optionalPeers": ["absent", "maybe"] }, "SRI_C"],
+    "parent/consumer": ["consumer@1.0.0", "", { "peerDependencies": { "maybe": "^1.0.0", "provider": "^2.0.0" }, "optionalPeers": ["maybe"] }, "SRI_C"],
     "parent/provider": ["provider@2.0.0", "", {}, "SRI_B"]
   }
 }"#
@@ -2386,15 +2386,7 @@ fn parse_rebuilds_peer_edges_from_placement() {
     let consumer = &parse(&lock).unwrap().packages["consumer@1.0.0"];
     assert_eq!(
         consumer.dependencies,
-        BTreeMap::from([
-            ("maybe".to_string(), "1.0.0".to_string()),
-            ("provider".to_string(), "2.0.0".to_string()),
-        ]),
-        "peers bind to the nearest placed provider, and an absent optional peer stays unbound"
-    );
-    assert_eq!(
-        consumer.optional_dependencies.keys().collect::<Vec<_>>(),
-        ["maybe"],
-        "only the optional peer's edge is optional"
+        BTreeMap::from([("provider".to_string(), "2.0.0".to_string())]),
+        "a required peer binds to the nearest placed provider; an optional one is not rebuilt"
     );
 }

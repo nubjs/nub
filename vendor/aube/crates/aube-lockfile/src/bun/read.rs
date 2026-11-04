@@ -286,11 +286,13 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
         }
         // bun writes no edge for a peer: the package finds it by node
         // resolution from where it sits, which is this same walk. Without
-        // the edge, a provider nothing else depends on (goober's peer
-        // `csstype` under react-hot-toast) is pruned before peer resolution
-        // runs. An optional peer binds only when bun placed a provider.
+        // the edge, a required provider nothing else depends on (goober's
+        // peer `csstype` under react-hot-toast) is pruned before peer
+        // resolution runs. Optional peers are left to peer resolution, which
+        // binds them as a fresh resolve does; binding every placed one here
+        // would bind more than pnpm or a fresh install.
         for peer in entry.meta.peer_dependencies.keys() {
-            if resolved.contains_key(peer) {
+            if resolved.contains_key(peer) || entry.meta.optional_peers.contains(peer) {
                 continue;
             }
             if let Some(target_key) = resolve_nested_bun(key, peer, |k| key_info.contains_key(k))
@@ -314,16 +316,14 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
             // pnpm parser's split so every downstream consumer
             // (linker, writer, drift detection) sees the same shape
             // regardless of source format.
-            // A rebuilt optional peer edge is optional too, unless the
-            // package also declares the name as a regular dependency.
             let mut opts = BTreeMap::new();
-            for (name, resolved) in &deps {
-                let optional_peer = !pkg.declared_dependencies.contains_key(name)
-                    && pkg
-                        .peer_dependencies_meta
-                        .get(name)
-                        .is_some_and(|m| m.optional);
-                if pkg.optional_dependencies.contains_key(name) || optional_peer {
+            for name in pkg
+                .optional_dependencies
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+            {
+                if let Some(resolved) = deps.get(&name) {
                     opts.insert(name.clone(), resolved.clone());
                 }
             }
