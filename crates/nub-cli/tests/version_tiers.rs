@@ -144,10 +144,13 @@ fn run_nub_args_against_node(
     paths.extend(std::env::split_paths(&existing));
     let new_path = std::env::join_paths(paths).expect("join PATH");
 
+    // `PORT=0`, as for a server: when the defect under test is a run that serves where
+    // it should exit, the listener takes a free port rather than a shared default.
     let mut child = Command::new(nub_binary())
         .args(args)
         .current_dir(&fixture_path)
         .env("PATH", new_path)
+        .env("PORT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1175,6 +1178,115 @@ fn a_foreign_hook_rewriting_the_entry_url_does_not_hold_the_process() {
         assert_eq!(
             stdout, "plain:?v=1\n",
             "Node {maj}.{min}.{pat}: the hook must have rewritten the entry's URL, and the entry must evaluate once"
+        );
+    }
+}
+
+/// A file Node does not run as the program is never evaluated to look for a handler.
+/// Three modes still load nub's preload with the file in `argv[1]`: the test runner,
+/// which runs it in a child of its own; a syntax check, which only parses it; and `-e`
+/// code, after which it is a plain argument. The detection pass imported it in each,
+/// and with no evaluation of Node's own to join, that import ran it: 0.9.5 and 0.9.6
+/// ran every `nub --test` file twice on the fast tier, and the compat tier executed a
+/// file `--check` only parses and an argument after `-e`. The other cases are Node's
+/// own reading of its flags: `--check=<value>` is a syntax check whatever the value,
+/// `--no-print` still evaluates its code, and `--no_interactive` (Node reads `_` as
+/// `-`) takes back the `-i` that would make the file the program. The plain run is
+/// the control: it proves the body's line marks each evaluation.
+#[test]
+fn a_file_node_does_not_run_as_the_program_is_not_evaluated_on_both_tiers() {
+    for want in [(22, 13, 0), (26, 5, 0)] {
+        let (maj, min, pat) = want;
+        for (args, evaluations) in [
+            (&["counts.test.mjs"][..], 1),
+            (&["--test", "counts.test.mjs"][..], 1),
+            (&["--check", "counts.test.mjs"][..], 0),
+            (&["--check=true", "counts.test.mjs"][..], 0),
+            (&["--check=false", "counts.test.mjs"][..], 0),
+            (&["-e", "0", "counts.test.mjs"][..], 0),
+            (&["--no-print", "0", "counts.test.mjs"][..], 0),
+            (
+                &["-e", "0", "-i", "--no_interactive", "counts.test.mjs"][..],
+                0,
+            ),
+        ] {
+            let Some((stdout, stderr, code)) =
+                run_nub_args_against_node(want, "non-program-modes", args, Duration::from_secs(60))
+            else {
+                eprintln!(
+                    "skipping: Node {maj}.{min}.{pat} not installed \
+                     (set TEST_NODE_BIN_{maj}_{min}_{pat} or nvm install)"
+                );
+                break;
+            };
+            assert_eq!(
+                code,
+                Some(0),
+                "Node {maj}.{min}.{pat} {args:?}: must exit cleanly: stdout={stdout:?} stderr={stderr:?}"
+            );
+            assert_eq!(
+                stdout.matches("BODY-RAN").count(),
+                evaluations,
+                "Node {maj}.{min}.{pat} {args:?}: the file must evaluate {evaluations} time(s), as under plain Node: stdout={stdout:?}"
+            );
+        }
+    }
+}
+
+/// A file whose default export is a handler is served exactly when Node runs it as
+/// the program. Under `--test` it runs as a test and exits: on the compat tier the
+/// runner never consumes the launch's marker, so the test child inherited it, matched
+/// the launch's argv and served the file, and the run never ended; 0.9.5's fast tier
+/// served it from the runner itself. A mode the flags cancel (`--test --no-test`,
+/// `--check --no_check`) or an eval that `-i` outranks leaves Node running the file as
+/// the program, so it is served; a check that read those flags by presence refused it.
+/// (`--no-check` itself never reaches Node, because nub takes it as its own
+/// dependency-check opt-out; `--no_check` does, and Node reads it as `--no-check`.)
+/// The plain run is the control: it proves the export is served.
+#[test]
+fn a_handler_file_is_served_exactly_when_node_runs_it_as_the_program_on_both_tiers() {
+    'tiers: for want in [(22, 13, 0), (26, 5, 0)] {
+        let (maj, min, pat) = want;
+        for args in [
+            &["serves.test.mjs"][..],
+            &["--test", "--no-test", "serves.test.mjs"][..],
+            &["--check", "--no_check", "serves.test.mjs"][..],
+            &["-e", "0", "-i", "serves.test.mjs"][..],
+        ] {
+            let Some((listening, _)) = run_nub_args_until(
+                want,
+                "non-program-modes",
+                args,
+                "Listening on",
+                Duration::from_secs(60),
+                |_| (),
+            ) else {
+                eprintln!(
+                    "skipping: Node {maj}.{min}.{pat} not installed \
+                     (set TEST_NODE_BIN_{maj}_{min}_{pat} or nvm install)"
+                );
+                continue 'tiers;
+            };
+            assert!(
+                listening.is_some(),
+                "Node {maj}.{min}.{pat} {args:?}: run as the program, the file must be served"
+            );
+        }
+        let (stdout, stderr, code) = run_nub_args_against_node(
+            want,
+            "non-program-modes",
+            &["--test", "serves.test.mjs"],
+            Duration::from_secs(60),
+        )
+        .expect("this Node was found above");
+        assert_eq!(
+            code,
+            Some(0),
+            "Node {maj}.{min}.{pat}: under --test the file must run as a test and exit: stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert!(
+            !stdout.contains("Listening on") && !stderr.contains("Listening on"),
+            "Node {maj}.{min}.{pat}: under --test nothing may bind a listener: stdout={stdout:?} stderr={stderr:?}"
         );
     }
 }

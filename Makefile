@@ -75,9 +75,10 @@ install-dev: addon-fast qos-global
 	  NUB_BUILD_TARGET_OUT=$$tf scripts/rust-build.sh build --profile fast || { rm -f $$tf; exit 1; }; \
 	  t=$$(cat $$tf); rm -f $$tf; \
 	  test -x $$t/fast/nub || { echo "install-dev: no binary at $$t/fast/nub" >&2; exit 1; }; \
-	  ln -sf $$t/fast/nub $(BIN_DIR)/nub-dev; \
-	  ln -sf $$t/fast/nub $(BIN_DIR)/nubx-dev; \
-	  ln -sf $$t/fast/nub $(BIN_DIR)/nubr-dev; \
+	  ln -sf $$t/fast/nub $(BIN_DIR)/nub-dev && \
+	  ln -sf $$t/fast/nub $(BIN_DIR)/nubx-dev && \
+	  ln -sf $$t/fast/nub $(BIN_DIR)/nubr-dev || \
+	  { echo "install-dev: cannot link into $(BIN_DIR); pass a writable BIN_DIR=<dir> on PATH" >&2; exit 1; }; \
 	  echo "Installed: $(BIN_DIR)/nub-dev -> $$t/fast/nub"; \
 	  echo "Installed: $(BIN_DIR)/nubx-dev -> $$t/fast/nub"; \
 	  echo "Installed: $(BIN_DIR)/nubr-dev -> $$t/fast/nub"

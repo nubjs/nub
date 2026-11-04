@@ -746,7 +746,7 @@ static FEATURES: &[Feature] = &[
         )],
         evidence: "Stage 4 (joint-iteration); absent on every Node through 26.5",
     },
-    // Anchor for the Stage 3 prototype additions: chunks/windows (iterator-chunking),
+    // Anchor for the Stage 4 prototype additions: chunks/windows (iterator-chunking),
     // includes (iterator-includes) and join (iterator-join). These install even where
     // the ES2025 helpers above are already native.
     Feature {
@@ -758,7 +758,7 @@ static FEATURES: &[Feature] = &[
                 global: "Iterator.prototype.chunks",
             },
         )],
-        evidence: "Stage 3 (iterator-chunking/includes/join); absent on every Node through 26.5",
+        evidence: "Stage 4 (iterator-chunking/includes/join, 2026-09); absent on every Node through 26.10 (V8 14.6)",
     },
     Feature {
         name: "Math.sumPrecise",

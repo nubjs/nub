@@ -60,14 +60,18 @@ if (settledDict.ok.status === "fulfilled") {
   void okValue;
 }
 
-// Stage 3 iterator additions. Exercise both the global constructor and a built-in
+// Stage 4 iterator additions. Exercise both the global constructor and a built-in
 // iterator, which is typed through IteratorObject even at an ES2024 target.
 const chunked = Iterator.from([1, 2, 3]).chunks(2);
 const firstChunk: number[] | undefined = chunked.next().value;
 const firstWindow: number[] | undefined = [1, 2, 3].values().windows(2).next().value;
+const partialWindow: number[] | undefined = [1, 2, 3].values().windows(5, "allow-partial").next().value;
+// @ts-expect-error `undersized` is one of two literal modes.
+[1, 2, 3].values().windows(2, "partial");
 const hasTwo: boolean = [1, 2, 3].values().includes(2);
+const hasTwoAfterSkip: boolean = [1, 2, 3].values().includes(2, 1);
 const joined: string = [1, 2, 3].values().join("-");
-void [firstChunk, firstWindow, hasTwo, joined];
+void [firstChunk, firstWindow, partialWindow, hasTwo, hasTwoAfterSkip, joined];
 
 const precise: number = Math.sumPrecise([1e20, 0.1, -1e20]);
 const metadataKey: symbol = Symbol.metadata;

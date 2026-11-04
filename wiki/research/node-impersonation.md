@@ -154,7 +154,7 @@ Four details worth copying: the shim survives a `which node` round-trip, error m
 Nub takes the inverse of Bun's default: the hijack is on whenever the entry point was `nub`, and there is no opt-in flag to enable it.
 
 - **One binary, dispatched by argv0.** `nub` and the shimmed `node` are the same executable; the PATH shim is a link in a per-invocation temp directory, and Nub's main detects `basename(argv[0])` ending in `node` / `node.exe`. Every child that spawns `node` inside a Nub-run script tree resolves to it.
-- **The shimmed `node` is version resolution, not augmentation.** It resolves and provisions the pinned Node and runs stock Node unchanged: no TypeScript, no injected globals, no automatic `.env`. Augmentation belongs to the `nub` and `nubx` entry points; `--node` / `NODE_COMPAT` turn it off for a whole tree.
+- **The shimmed `node` is version resolution, not augmentation.** It resolves and provisions the pinned Node and runs stock Node unchanged: no TypeScript, no injected globals, no automatic `.env`. Augmentation belongs to the `nub` and `nubx` entry points; `--node` turns it off for one invocation and `NODE_COMPAT` for a whole tree.
 - **No script-text rewrites.** `"start": "node server.js"` stays as written; the PATH shim handles it. Package authors' shebangs and `node_modules/.bin` entries are left alone.
 - **Env vars on spawn.** `NODE` and `npm_node_execpath` point at the shim, `npm_execpath` at the real `nub` binary; node-gyp and lifecycle scripts read these. No `NUB_FORCE_*` env var exists — `PATH` containing the shim is the only signal, which is also why the hijack propagates to children without a flag.
 - **The persistent variant is opt-in.** `nub node shim` installs a user-level `node` link so a machine with no Node can run `node` at all; it is reversible and carries the same no-augmentation contract.
@@ -165,3 +165,4 @@ Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Initial publication.
 - 2026-08-28 — Replaced the design-time implications and open questions with the shipped behavior.
+- 2026-10-10 — `--node` covers one invocation; only `NODE_COMPAT` reaches a nested `nub`.

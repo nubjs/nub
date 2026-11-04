@@ -81,6 +81,7 @@ pub async fn run(args: CiArgs) -> miette::Result<()> {
         // `ci` is an install in its own right, not a stage chained after
         // one — it runs the hook itself.
         pre_resolution_hook_already_ran: false,
+        root_preinstall_already_ran: false,
         ignore_scripts,
         dry_run: false,
         lockfile_only: false,
@@ -98,6 +99,8 @@ pub async fn run(args: CiArgs) -> miette::Result<()> {
         build_policy_override: None,
         workspace_filter: aube_workspace::selector::EffectiveFilter::default(),
         skip_root_lifecycle: false,
+        lifecycle_importers: None,
+        project_stages: install::ProjectStages::Install,
         run_dev_preinstall: true,
         script_command: "install",
         // `aube ci` is the canonical "lockfile is law" path —

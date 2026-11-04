@@ -34,6 +34,20 @@ fn rebase_importer_local(local: LocalSource, importer_path: &str) -> LocalSource
     }
 }
 
+/// Upstream aube writes a literal `link:` dep's `version:` relative to the
+/// lockfile root rather than the importer, so a lockfile it wrote must not be
+/// rebased again. That form is recognisable only when the specifier carries the
+/// path: the version then equals the spec resolved from the importer, and
+/// differs from the spec itself, which is what pnpm writes.
+fn is_root_relative_link(specifier: &str, version_path: &Path, importer_path: &str) -> bool {
+    let Some(spec_path) = specifier.strip_prefix("link:").map(Path::new) else {
+        return false;
+    };
+    let version_path = normalize_lexical(version_path);
+    normalize_lexical(spec_path) != version_path
+        && normalize_lexical(&Path::new(importer_path).join(spec_path)) == version_path
+}
+
 /// Lowest `lockfileVersion` this reader understands. pnpm v9 replaced
 /// the top-level `dependencies:` map and `/name@version` package keys
 /// with `importers:` + `snapshots:`; every pass below assumes that
@@ -297,22 +311,21 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
                 other => other,
             };
             let snapshot_key = format!("{name}@{}", local.specifier());
-            // pnpm writes a non-root importer's local `version:` path relative to
-            // that importer, so it must be rebased to root. This covers a literal
-            // `link:`/`file:` spec (`specifier == version`), the `workspace:`
-            // protocol, AND a plain semver range pnpm resolved to a workspace
-            // sibling — that last case carries a NON-`workspace:` specifier (e.g.
-            // `^0.0.18`) but still an importer-relative `version: link:../sibling`
-            // (real-world: dub's `@dub/embed-react` -> `@dub/embed-core`). The
-            // common thread is an importer-relative path, which pnpm always spells
-            // with a leading `..`; aube's own format is already root-relative and
-            // never escapes upward, so this never double-rebases (the
-            // `not_rebased_twice` invariant).
-            let importer_relative = local.path().is_some_and(|p| p.starts_with(".."));
+            // pnpm anchors the two local protocols differently: a `link:`
+            // version is relative to its importer, a `file:` version (directory
+            // or tarball) to the lockfile directory (`fromLocal` in pnpm's
+            // local-resolver). So only `link:` is rebased to root, whatever the
+            // specifier was — a literal `link:`, `workspace:`, or a plain semver
+            // range pnpm resolved to a workspace sibling (dub's
+            // `@dub/embed-react` -> `@dub/embed-core: ^0.0.18`). Nub's writer
+            // uses the same anchoring.
             let should_rebase = importer_path != "."
-                && (info.specifier == classify_version
-                    || info.specifier.starts_with("workspace:")
-                    || importer_relative);
+                && match &local {
+                    LocalSource::Link(version_path) => {
+                        !is_root_relative_link(&info.specifier, version_path, importer_path)
+                    }
+                    _ => false,
+                };
             let local = if should_rebase {
                 rebase_importer_local(local, importer_path)
             } else {
@@ -590,6 +603,38 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
                 && local_pkg.version == "0.0.0"
             {
                 local_pkg.version = ver.clone();
+            }
+            // The main package loop below skips these entries, so the
+            // metadata the writer persisted for them is restored here or
+            // nowhere. Platform arrays decide whether a direct URL optional
+            // survives `filter_graph` on this host; peers decide what the
+            // linker places beside it.
+            if let Some(pkg_info) = pkg_info {
+                local_pkg.os = pkg_info.os.iter().cloned().collect();
+                local_pkg.cpu = pkg_info.cpu.iter().cloned().collect();
+                local_pkg.libc = pkg_info.libc.iter().cloned().collect();
+                local_pkg.engines = pkg_info.engines.clone();
+                local_pkg.peer_dependencies =
+                    pkg_info.peer_dependencies.clone().unwrap_or_default();
+                local_pkg.peer_dependencies_meta = pkg_info
+                    .peer_dependencies_meta
+                    .clone()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(k, v)| {
+                        (
+                            k,
+                            PeerDepMeta {
+                                optional: v.optional,
+                            },
+                        )
+                    })
+                    .collect();
+            }
+            if let Some(snap) = snap
+                && let Some(bundled) = snap.bundled_dependencies.clone()
+            {
+                local_pkg.bundled_dependencies = bundled;
             }
             if let Some(pkg_info) = pkg_info
                 && let Some(ref res) = pkg_info.resolution
@@ -892,6 +937,7 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
                 // when re-emitting a pnpm-sourced graph into one of
                 // their formats.
                 declared_dependencies: BTreeMap::new(),
+                declared_dependencies_known: false,
                 // pnpm's format doesn't carry per-package license or
                 // funding metadata, so a pnpm → npm conversion
                 // degrades to empty rather than re-fetching each
@@ -1172,6 +1218,50 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
             for dep in deps {
                 dep.dep_path = rewrite_peer_suffix(&dep.dep_path, &spec_peer_to_hashed);
             }
+        }
+    }
+
+    // Link a peer the key claims but the snapshot never recorded. Earlier
+    // nub releases could write a package keyed with a peer it declares
+    // while leaving that peer out of the snapshot's `dependencies`
+    // (#937), and a lockfile read takes the snapshot as the whole truth,
+    // so the package stayed unable to import its peer on every later
+    // install. A peer named in a key is a peer resolved for that package
+    // (pnpm records each one as a snapshot edge), so the edge is
+    // recoverable from the key; for any lockfile pnpm wrote this is a
+    // no-op. Adding the edge also changes the package's virtual-store
+    // hash, so a broken global-store entry is not reused.
+    let mut missing_peer_edges: Vec<(String, String, String)> = Vec::new();
+    for (key, pkg) in &packages {
+        if pkg.peer_dependencies.is_empty() {
+            continue;
+        }
+        for peer_key in super::dep_path::peer_references(key) {
+            let Some((name, _)) = parse_dep_path(peer_key) else {
+                continue;
+            };
+            if pkg.peer_dependencies.contains_key(&name)
+                && !pkg.dependencies.contains_key(&name)
+                && packages.contains_key(peer_key)
+            {
+                let tail = dep_path_tail(peer_key, &name).to_string();
+                missing_peer_edges.push((key.clone(), name, tail));
+            }
+        }
+    }
+    for (key, name, tail) in missing_peer_edges {
+        if let Some(pkg) = packages.get_mut(&key) {
+            // An optional peer is an optional edge (pnpm's snapshot
+            // `optionalDependencies`), so platform filtering can still
+            // drop a provider that only an optional dependency brought in.
+            if pkg
+                .peer_dependencies_meta
+                .get(&name)
+                .is_some_and(|m| m.optional)
+            {
+                pkg.optional_dependencies.insert(name.clone(), tail.clone());
+            }
+            pkg.dependencies.insert(name, tail);
         }
     }
 
