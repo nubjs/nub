@@ -4991,17 +4991,18 @@ fn run_script(
         return Ok(0);
     };
 
+    // Workspace-wide execution: -r, --filter, or --parallel. It gates itself,
+    // once it knows the selection is not empty.
+    if ws.recursive || !ws.filter.is_empty() || !ws.filter_prod.is_empty() || ws.parallel {
+        return run_workspace_target(WorkspaceTarget::Script(script, args), compat_mode, ws);
+    }
+
     // Pre-run dependency-freshness gate (#252): warn (or, per policy, abort)
     // when node_modules looks stale, so a missing dep surfaces as a nub message
     // rather than a raw `foo: command not found`. Cheap and once-per-process;
     // skipped in compat mode and inside a running script (see `verify_deps`).
     if let Some(code) = crate::verify_deps::gate(&project.root, compat_mode) {
         return Ok(code);
-    }
-
-    // Workspace-wide execution: -r, --filter, or --parallel.
-    if ws.recursive || !ws.filter.is_empty() || !ws.filter_prod.is_empty() || ws.parallel {
-        return run_workspace_target(WorkspaceTarget::Script(script, args), compat_mode, ws);
     }
 
     // `-w` / `--workspace-root` alone: run the script in the workspace ROOT
@@ -5338,6 +5339,14 @@ fn run_workspace_target(
         }
         eprintln!("{notice}");
         return Ok(0);
+    }
+
+    // After the zero-match return: a run of nothing leaves a stale tree alone,
+    // as pnpm's does, where the freshness gate could reinstall it.
+    if matches!(target, WorkspaceTarget::Script(..))
+        && let Some(code) = crate::verify_deps::gate(&project.root, compat_mode)
+    {
+        return Ok(code);
     }
 
     // pnpm's "Scope:" header (reportScope.ts): how many workspace projects this

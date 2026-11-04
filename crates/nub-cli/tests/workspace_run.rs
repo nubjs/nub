@@ -52,6 +52,9 @@ fn run_nub(dir: &Path, args: &[&str]) -> (String, String, i32) {
         .current_dir(dir)
         .env("XDG_DATA_HOME", tmp_workspace("xdg-data"))
         .env("XDG_CACHE_HOME", tmp_workspace("xdg-cache"))
+        // Either one skips the pre-run freshness gate, whatever the shell has.
+        .env_remove("NODE_COMPAT")
+        .env_remove("npm_lifecycle_event")
         .output()
         .expect("failed to spawn nub");
     (
@@ -384,11 +387,34 @@ fn tree_snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     out
 }
 
+/// Panics naming every path added, removed or changed since `before`.
+fn assert_tree_unchanged(root: &Path, before: &[(PathBuf, Vec<u8>)], context: &str) {
+    let after = tree_snapshot(root);
+    if after == before {
+        return;
+    }
+    let old: std::collections::BTreeMap<_, _> = before.iter().cloned().collect();
+    let new: std::collections::BTreeMap<_, _> = after.into_iter().collect();
+    let mut diff = Vec::new();
+    for (path, bytes) in &new {
+        match old.get(path) {
+            None => diff.push(format!("added    {}", path.display())),
+            Some(prev) if prev != bytes => diff.push(format!("changed  {}", path.display())),
+            Some(_) => {}
+        }
+    }
+    for path in old.keys().filter(|path| !new.contains_key(*path)) {
+        diff.push(format!("removed  {}", path.display()));
+    }
+    panic!("{context}: the tree changed\n{}", diff.join("\n"));
+}
+
 /// A filter that selects no project changes nothing and exits 0, as in
 /// pnpm, since CI runs selectors like `...[origin/main]` that are empty on
 /// many commits: an installed tree, its state, the lockfile and the
 /// recorded engine stay byte-identical, so a Node major switch still gets
-/// its rebuild later. `--fail-if-no-match` makes it exit 1.
+/// its rebuild later, by the next run that selects something. A zero-match
+/// `run` must not repair it either. `--fail-if-no-match` makes it exit 1.
 #[test]
 fn a_filter_matching_no_project_changes_nothing_unless_told_to_fail() {
     let root = script_workspace("no-match-filter");
@@ -421,10 +447,7 @@ fn a_filter_matching_no_project_changes_nothing_unless_told_to_fail() {
     ] {
         let (_, stderr, code) = run_nub(&root, args);
         assert_eq!(code, 0, "nub {args:?}\n{stderr}");
-        assert!(
-            tree_snapshot(&root) == before,
-            "nub {args:?} selects nothing and changes nothing"
-        );
+        assert_tree_unchanged(&root, &before, &format!("nub {args:?}\n{stderr}"));
     }
     let (_, stderr, code) = run_nub(&root, &["install", "--filter", "nope"]);
     assert!(
@@ -443,7 +466,11 @@ fn a_filter_matching_no_project_changes_nothing_unless_told_to_fail() {
         assert_eq!(code, 1, "nub {args:?}\n{stderr}");
         assert!(stderr.contains(notice), "nub {args:?}\n{stderr}");
     }
-    assert!(tree_snapshot(&root) == before);
+    assert_tree_unchanged(
+        &root,
+        &before,
+        "the zero-match run and the failing selections",
+    );
 }
 
 /// A workspace whose `packages/*` matches no member yet still has the root
@@ -478,14 +505,11 @@ fn a_workspace_with_no_members_yet_selects_among_its_root() {
     ] {
         let (_, stderr, code) = run_nub(&root, args);
         assert_eq!(code, 0, "nub {args:?}\n{stderr}");
-        assert!(
-            tree_snapshot(&root) == before,
-            "nub {args:?} selects nothing, runs no hook and changes nothing\n{stderr}"
-        );
+        assert_tree_unchanged(&root, &before, &format!("nub {args:?}\n{stderr}"));
     }
     let (_, stderr, code) = run_nub(&root, &["run", "-F", "nope", "preinstall"]);
     assert_eq!(code, 0, "{stderr}");
-    assert!(tree_snapshot(&root) == before, "the run selects nothing");
+    assert_tree_unchanged(&root, &before, "the run selects nothing");
     let (_, stderr, code) = run_nub(
         &root,
         &["install", "--filter", "nope", "--fail-if-no-match"],
@@ -495,7 +519,7 @@ fn a_workspace_with_no_members_yet_selects_among_its_root() {
         stderr.contains("No projects matched the filters in"),
         "{stderr}"
     );
-    assert!(tree_snapshot(&root) == before, "the failure runs no hook");
+    assert_tree_unchanged(&root, &before, "the failure runs no hook");
 
     let (_, stderr, code) = run_nub(&root, &["install", "--filter", "ws-root"]);
     assert_eq!(code, 0, "{stderr}");
