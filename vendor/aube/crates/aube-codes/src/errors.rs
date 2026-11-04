@@ -91,6 +91,7 @@ pub const ERR_AUBE_SCRIPT_NON_ZERO_EXIT: &str = "ERR_AUBE_SCRIPT_NON_ZERO_EXIT";
 #[rustfmt::skip] pub const ERR_AUBE_BUILD_POLICY_UNSUPPORTED_VALUE: &str = "ERR_AUBE_BUILD_POLICY_UNSUPPORTED_VALUE";
 #[rustfmt::skip] pub const ERR_AUBE_BUILD_POLICY_INVALID_VERSION_UNION: &str = "ERR_AUBE_BUILD_POLICY_INVALID_VERSION_UNION";
 #[rustfmt::skip] pub const ERR_AUBE_BUILD_POLICY_WILDCARD_WITH_VERSION: &str = "ERR_AUBE_BUILD_POLICY_WILDCARD_WITH_VERSION";
+#[rustfmt::skip] pub const ERR_AUBE_GIT_DEP_PREPARE_NOT_ALLOWED: &str = "ERR_AUBE_GIT_DEP_PREPARE_NOT_ALLOWED";
 
 // ── workspace / filter ──────────────────────────────────────────────
 pub const ERR_AUBE_WORKSPACE_PARSE: &str = "ERR_AUBE_WORKSPACE_PARSE";
@@ -514,6 +515,12 @@ pub const ALL: &[CodeMeta] = &[
         name: ERR_AUBE_BUILD_POLICY_WILDCARD_WITH_VERSION,
         category: category::SCRIPTS,
         description: "A build-allowlist pattern combined a wildcard name with a version union.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: ERR_AUBE_GIT_DEP_PREPARE_NOT_ALLOWED,
+        category: category::SCRIPTS,
+        description: "A git dependency has to be built before it is installed (a `prepare` script, or a `prepack`-style script with its `main` missing), and the build allowlist neither allows nor denies it. Allow it by its exact source key or its repository key; a bare package name does not approve a git checkout.",
         exit_code: None,
     },
     // Linker

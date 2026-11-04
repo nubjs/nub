@@ -18,7 +18,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$work = Join-Path $env:RUNNER_TEMP 'nub-compile-native'
+# RUNNER_TEMP can have shared ancestors that the launcher rejects as a cache root.
+$work = Join-Path $env:USERPROFILE ('nub-compile-native-' + [Guid]::NewGuid().ToString('N'))
 if (Test-Path $work) { Remove-Item -Recurse -Force $work }
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 Push-Location $work

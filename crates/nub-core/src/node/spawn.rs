@@ -417,6 +417,14 @@ fn foreground_child(child_pid: u32) -> Option<ForegroundGuard> {
     // directly, so suppress nub's redundant SIGINT forward (#26 exactly-once).
     ctrl_c::set_suppress_sigint_forward(true);
 
+    // A fast child can already be SIGTTIN-stopped before tcsetpgrp runs.
+    // Foreground ownership does not resume it; continue the whole job after
+    // the handoff so shell descendants can read the terminal too.
+    // SAFETY: child_pid identifies the child's own process group.
+    unsafe {
+        libc::kill(-(child_pid as libc::pid_t), libc::SIGCONT);
+    }
+
     Some(ForegroundGuard { nub_pgrp })
 }
 
@@ -912,6 +920,11 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // process cwd (a no-op); the workspace-bin path threads a member dir so a
     // node bin executes IN that member rather than inheriting the parent's cwd.
     cmd.current_dir(config.cwd);
+    if config.env_owner.is_none() && config.prefix.is_none() {
+        super::discovery::mark_node_launch(&mut cmd, config.node.path.as_std_path());
+    } else {
+        super::discovery::unmark_node_launch(&mut cmd);
+    }
 
     // Permission model detection and auto-grant.
     let has_permission = config.user_args.iter().any(|a| is_permission_flag(a));
@@ -2662,6 +2675,13 @@ static RESTORABLE_VARS: [RestorableVar; 6] = [
 /// constrained box's ceiling.
 pub const THREADPOOL_SIZE_ENV: &str = "UV_THREADPOOL_SIZE";
 
+/// Set by the preload of a process whose pool is not built yet (preload-common.cjs
+/// `installThreadpoolPolicy`, which builds it at the first loop turn so the program
+/// can still choose its own size): a child spawned before then inherits nub's value
+/// beside this mark and deletes it, keeping Node's default. Every fresh invocation
+/// sheds it with the other markers, so a nested `nub` sizes its child again.
+const THREADPOOL_TAKEN_ENV: &str = "__NUB_UV_THREADPOOL_SIZE_TAKEN";
+
 /// The pool nub asks for on this box — see [`THREADPOOL_SIZE_ENV`].
 pub fn threadpool_size() -> usize {
     let cores = std::thread::available_parallelism()
@@ -3013,6 +3033,7 @@ fn augmentation_environment_restoration() -> Vec<(&'static str, Option<OsString>
         VERSION_ENV,
         flags::NEUTRALIZE_LOCALSTORAGE_ENV,
         FORCE_ASYNC_TIER_ENV,
+        THREADPOOL_TAKEN_ENV,
     ] {
         changes.push((marker, None));
     }
@@ -4928,7 +4949,7 @@ mod tests {
         // stdout/stderr go to /dev/null so the worker's own captured output stays
         // clean; stdin is inherited (our pty slave) — that's the terminal under test.
         let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg("read x; exit 0");
+        cmd.arg("-c").arg("read x");
         cmd.stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
@@ -4939,16 +4960,41 @@ mod tests {
         };
         let child_pid = child.id();
 
+        // Force the child-first ordering: tcsetpgrp alone cannot resume a child
+        // that already stopped on SIGTTIN before the parent ran the handoff.
+        let stop_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let stopped = loop {
+            let mut status: libc::c_int = 0;
+            // SAFETY: observe our live child without blocking past the deadline.
+            let r = unsafe {
+                libc::waitpid(
+                    child_pid as libc::pid_t,
+                    &mut status,
+                    libc::WNOHANG | libc::WUNTRACED,
+                )
+            };
+            if r == child_pid as libc::pid_t {
+                break libc::WIFSTOPPED(status) && libc::WSTOPSIG(status) == libc::SIGTTIN;
+            }
+            if r < 0 || std::time::Instant::now() >= stop_deadline {
+                break false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        if !stopped {
+            let _ = child.kill();
+            let _ = child.wait();
+            // SAFETY: close the live PTY master after reaping the child.
+            unsafe { libc::close(master) };
+            return 2;
+        }
+
         // Apply the fix under test (or not).
         let _fg = if apply_fix {
             foreground_child(child_pid)
         } else {
             None
         };
-
-        // Let the grandchild reach its blocking terminal read; if it's going to
-        // SIGTTIN-stop (no fix), it will have stopped by now.
-        std::thread::sleep(std::time::Duration::from_millis(300));
 
         // The "keystroke": a newline to the PTY master. With the fix the child is
         // foreground and reads it → exits 0; without it the child is stopped.
@@ -4961,6 +5007,9 @@ mod tests {
         // Observe the child with WUNTRACED so a SIGTTIN STOP is reported, polling ~2s.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let verdict = loop {
+            if !apply_fix {
+                break 1; // the observed SIGTTIN stop is the negative control
+            }
             let mut status: libc::c_int = 0;
             // SAFETY: waitpid on our child, non-blocking + report-stops.
             let r = unsafe {
@@ -4975,7 +5024,7 @@ mod tests {
                     break 1; // stopped (SIGTTIN) → the hang
                 }
                 if libc::WIFEXITED(status) {
-                    break 0; // read the keystroke and exited cleanly
+                    break if libc::WEXITSTATUS(status) == 0 { 0 } else { 2 };
                 }
             }
             if std::time::Instant::now() >= deadline {
@@ -6422,6 +6471,15 @@ mod tests {
                 addition.to_path_buf()
             ]
         );
+    }
+
+    /// A process spawned during a parent's startup inherits the threadpool mark
+    /// that tells its preload to discard nub's value. A fresh `nub` among them
+    /// must shed the mark, or its own child would keep Node's four. Only a host
+    /// with more than four cores reaches that path, which CI's runners do not.
+    #[test]
+    fn a_fresh_invocation_sheds_the_threadpool_taken_mark() {
+        assert!(augmentation_environment_restoration().contains(&(THREADPOOL_TAKEN_ENV, None)));
     }
 
     #[cfg(windows)]

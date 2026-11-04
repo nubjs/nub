@@ -592,11 +592,17 @@ pub struct LockedPackage {
     /// fall back to the resolved pin otherwise (e.g. when the source
     /// lockfile was pnpm, whose `snapshots:` only carries pins).
     ///
-    /// Empty means "unknown" — writers should fall back to pins.
-    /// Covers production *and* optional dependencies in one map since
-    /// a package can't declare the same name twice across those
-    /// sections.
+    /// A name missing here falls back to its pin. Covers production *and*
+    /// optional dependencies in one map since a package can't declare the
+    /// same name twice across those sections. Whether an empty map means
+    /// "declares nothing" or "unknown" is [`Self::declared_dependencies_known`].
     pub declared_dependencies: BTreeMap<String, String>,
+    /// Whether [`Self::declared_dependencies`] was filled from a source
+    /// that records declared ranges (a packument, or an npm / yarn / bun
+    /// lockfile). The pnpm and nub.lock readers leave it `false`. Writers
+    /// that drop a peer-only edge need it to tell a package that declares
+    /// no dependencies from one whose declarations were never recorded.
+    pub declared_dependencies_known: bool,
     /// Package's `license` field, collapsed to the simple string
     /// form. Round-tripped so npm's lockfile keeps its per-entry
     /// `"license": "MIT"` line; pnpm / yarn / bun don't record
@@ -710,14 +716,9 @@ impl LockedPackage {
     /// resolved commit. It is only used for an explicit `allowBuilds`
     /// `git+<repository>` rule, never for package-name approval.
     pub fn git_repository_approval_key(&self) -> Option<String> {
-        let LocalSource::Git(git) = self.local_source.as_ref()? else {
-            return None;
-        };
-        Some(format!(
-            "{}@git+{}",
-            self.registry_name(),
-            git.url.strip_prefix("git+").unwrap_or(&git.url)
-        ))
+        self.local_source
+            .as_ref()?
+            .git_repository_approval_key(self.registry_name())
     }
 
     /// Declared peer ranges with pnpm's meta-only peers folded in as `*`.
@@ -767,6 +768,7 @@ mod locked_package_tests {
             engines: BTreeMap::new(),
             bin: BTreeMap::new(),
             declared_dependencies: BTreeMap::new(),
+            declared_dependencies_known: false,
             license: None,
             funding_url: None,
             optional: false,
@@ -884,6 +886,46 @@ mod locked_package_tests {
         assert_eq!(
             pkg.git_repository_approval_key(),
             Some("pkg@git+https://github.com/acme/pkg.git".to_string())
+        );
+    }
+
+    #[test]
+    fn hosted_git_archive_keys_as_its_repository() {
+        let mut pkg = pkg();
+        pkg.local_source = Some(LocalSource::RemoteTarball(RemoteTarballSource {
+            url: "https://codeload.github.com/acme/pkg/tar.gz/0123456789012345678901234567890123456789"
+                .to_string(),
+            integrity: String::new(),
+            git_hosted: true,
+        }));
+        assert_eq!(
+            pkg.git_repository_approval_key(),
+            Some("pkg@git+https://github.com/acme/pkg.git".to_string())
+        );
+
+        pkg.local_source = Some(LocalSource::RemoteTarball(RemoteTarballSource {
+            url: "https://example.com/pkg-1.0.0.tgz".to_string(),
+            integrity: String::new(),
+            git_hosted: false,
+        }));
+        assert_eq!(pkg.git_repository_approval_key(), None);
+    }
+
+    #[test]
+    fn git_clone_is_approvable_under_pnpms_spelling_too() {
+        let source = LocalSource::Git(GitSource {
+            url: "https://github.com/acme/pkg.git".to_string(),
+            committish: None,
+            resolved: "0123456789012345678901234567890123456789".to_string(),
+            integrity: None,
+            subpath: None,
+        });
+        assert_eq!(
+            source.source_approval_keys("pkg"),
+            [
+                "pkg@https://github.com/acme/pkg.git#0123456789012345678901234567890123456789",
+                "pkg@git+https://github.com/acme/pkg.git#0123456789012345678901234567890123456789",
+            ]
         );
     }
 

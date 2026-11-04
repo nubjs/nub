@@ -67,15 +67,20 @@ pub(crate) fn apply<'a>(
     name: &str,
     spec: &str,
 ) -> Option<&'a str> {
+    // A `catalog:` dependency is matched the way resolution matches it, so a
+    // lockfile the resolver wrote reads fresh here.
+    let catalog_reference = aube_util::pkg::is_catalog_spec(spec);
     rules.iter().find_map(|rule| {
         if rule.name != name {
             return None;
         }
-        match rule.version_req.as_deref() {
-            None => Some(rule.replacement.as_str()),
-            Some(req) if range_could_satisfy(spec, req) => Some(rule.replacement.as_str()),
-            _ => None,
-        }
+        let req = rule.version_req.as_deref();
+        let applies = if catalog_reference {
+            aube_util::pkg::override_version_applies_to_catalog_reference(req, spec)
+        } else {
+            req.is_none_or(|req| range_could_satisfy(spec, req))
+        };
+        applies.then_some(rule.replacement.as_str())
     })
 }
 

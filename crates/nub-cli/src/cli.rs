@@ -3418,6 +3418,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 registry,
                 dir,
                 allow_all_builds: false,
+                npm_lifecycle: false,
                 filter: crate::pm_engine::WorkspaceFilterFlags {
                     filter,
                     filter_prod,
@@ -3454,6 +3455,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 registry,
                 dir,
                 allow_all_builds: false,
+                npm_lifecycle: false,
                 filter: crate::pm_engine::WorkspaceFilterFlags {
                     filter,
                     filter_prod,
@@ -3494,6 +3496,7 @@ fn run_nubr() -> Result<i32> {
     let runtime = nub_core::node::spawn::find_runtime_dir(&nub_binary)
         .context("nubr: the nub runtime could not be located")?;
     let mut cmd = std::process::Command::new(node.path.as_str());
+    nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
     cmd.arg(runtime.join("nubr.mjs"))
         .args(&args)
         .stdin(std::process::Stdio::inherit())
@@ -4111,7 +4114,7 @@ fn write_preload_chain(dir: &Path, esm: bool, entries: &[String]) -> Result<Opti
 /// chainer's channel implies (`import` for the `.mjs` chainer, `require` for the
 /// `.cjs` one) — the same conditions Node itself would use for that flag. That set
 /// includes [`NUB_CONDITION`], because this resolves a specifier the child Node
-/// would otherwise resolve for itself, with the runtime key already on its argv.
+/// would otherwise resolve for itself, with the `nub` condition already on its argv.
 ///
 fn bare_preload_resolver(esm: bool) -> oxc_resolver::Resolver {
     oxc_resolver::Resolver::new(oxc_resolver::ResolveOptions {
@@ -4210,14 +4213,48 @@ fn tsconfig_reported_env() -> Option<(String, String)> {
     (!reported.is_empty()).then(|| (nub_tsconfig::REPORTED_ENV.to_string(), reported.join("\n")))
 }
 
-/// Directory of the entry file for a `nub <file>` run, resolved against `cwd`.
+/// The directory whose tsconfig governs the entry of a `nub <file>` run, resolved
+/// against `cwd`. The first non-flag argument is the entry; with none (a bare
+/// `--flag`) this is `None` and the CWD-anchored check stands alone.
 ///
-/// The first non-flag argument is the entry; anything else (a bare `--flag`) leaves
-/// this `None` and the CWD-anchored check stands alone.
-fn entry_file_dir(args: &[String], cwd: &Path) -> Option<PathBuf> {
-    let entry = args.iter().find(|a| !a.starts_with('-'))?;
-    let joined = cwd.join(entry);
-    joined.parent().map(Path::to_path_buf)
+/// Mirrors the config the run itself reads (#1032). Node loads the main entry from
+/// its REAL path unless `--preserve-symlinks-main` (`NODE_PRESERVE_SYMLINKS` does
+/// not reach the main entry), and the addon reads the tsconfig of the importer's
+/// directory, so a workspace member reached through its `node_modules` link runs
+/// under its real directory's config, whose relative `extends` resolves from there.
+/// An entry whose real path is inside `node_modules` is a dependency: the runtime
+/// neither transpiles it nor applies `paths` for it, so its published tsconfig —
+/// often extending a file that was never published — governs nothing and is
+/// skipped outright rather than warned about.
+fn entry_tsconfig_dir(args: &[String], cwd: &Path, node_options: &[String]) -> Option<PathBuf> {
+    let at = args.iter().position(|a| !a.starts_with('-'))?;
+    let joined = cwd.join(&args[at]);
+    let real = std::fs::canonicalize(&joined)
+        .map(|p| PathBuf::from(strip_windows_verbatim_prefix(&p.to_string_lossy())))
+        .unwrap_or_else(|_| joined.clone());
+    if real.components().any(|c| c.as_os_str() == "node_modules") {
+        return None;
+    }
+    let inherited = env::var("NODE_OPTIONS").unwrap_or_default();
+    let preserve_main = args[..at]
+        .iter()
+        .chain(node_options)
+        .map(String::as_str)
+        .chain(
+            nub_core::node::spawn::split_node_options(&inherited)
+                .iter()
+                .map(String::as_str),
+        )
+        .any(is_preserve_symlinks_main);
+    let entry = if preserve_main { joined } else { real };
+    entry.parent().map(Path::to_path_buf)
+}
+
+/// Node treats `_` and `-` as the same character in an option name, so
+/// `--preserve_symlinks_main` is the same flag.
+fn is_preserve_symlinks_main(flag: &str) -> bool {
+    flag.strip_prefix("--")
+        .is_some_and(|name| name.replace('_', "-") == "preserve-symlinks-main")
 }
 
 /// Refuse the run when the tsconfig governing `dir` will not parse.
@@ -4240,13 +4277,13 @@ fn ensure_tsconfig_parses(dir: &str, explicit: Option<&str>) -> Result<()> {
     );
 }
 
-/// Nub's runtime key, set as an `exports`/`imports` condition on every run the CLI
-/// augments and honored by the compile bundler, which resolves `exports` ahead of
-/// time and so has to pick the same file.
+/// Nub's export condition, set on every run the CLI augments and honored by the
+/// compile bundler, which resolves `exports` ahead of time and so has to pick the
+/// same file.
 ///
-/// The key follows the WinterTC runtime-keys convention
-/// (<https://runtime-keys.proposal.wintertc.org/>); the registry entry is proposed
-/// separately and this does not wait on it.
+/// Not a WinterTC runtime key. The registration
+/// (<https://github.com/WinterTC55/runtime-keys/pull/39>) was withdrawn after review:
+/// Nub runs the installed Node rather than being a runtime of its own.
 pub(crate) const NUB_CONDITION: &str = "nub";
 
 pub(crate) fn runtime_node_options(
@@ -4335,7 +4372,7 @@ pub(crate) fn runtime_node_options_with(
     }
 
     let mut seen_conditions = std::collections::HashSet::new();
-    // Nub's runtime key, in the slot `bun`, `deno` and `workerd` occupy. It rides
+    // Nub's export condition, in the slot the `bun` and `deno` conditions occupy. It rides
     // every run the CLI augments so a package can point an `exports` branch at what
     // nub adds — TypeScript source above all — and is absent under `--node`/
     // `NODE_COMPAT`, which skip this function entirely and so run with Node's own
@@ -4828,7 +4865,7 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
         // config the addon will actually transform against, so it gets the same
         // refusal. Without this, the identical project fails from inside `sub/` and
         // merely warned from above it.
-        if let Some(entry_dir) = entry_file_dir(args, cwd)
+        if let Some(entry_dir) = entry_tsconfig_dir(args, cwd, &options)
             && TsconfigGate::for_program() == TsconfigGate::Required
         {
             ensure_tsconfig_parses(&entry_dir.to_string_lossy(), runtime.tsconfig.as_deref())?;
@@ -7103,6 +7140,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         node_args.push(file.to_string());
         node_args.extend(args.iter().cloned());
         let mut cmd = std::process::Command::new(node.path.as_str());
+        nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
         cmd.args(&node_args)
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
@@ -7332,6 +7370,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     let owner_target = env_owner
         .as_ref()
         .and_then(crate::env_owner::EnvOwner::spawn_target);
+    let spawns_node = prefix.is_none() && owner_target.is_none();
     let mut cmd = match (prefix.as_ref(), owner_target) {
         (Some(prefix), owner) => {
             let mut cmd = prefix.command();
@@ -7362,6 +7401,11 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
             crate::env_owner::WRAPPED_ENV,
             crate::env_owner::wrapped_marker(schema_dir),
         );
+    }
+    if spawns_node {
+        nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
+    } else {
+        nub_core::node::discovery::unmark_node_launch(&mut cmd);
     }
     cmd.args(&node_args)
         .stdin(std::process::Stdio::inherit())
@@ -11323,6 +11367,7 @@ fn run_shim_engine_install(
             ignore_scripts,
             no_optional: route.no_optional,
             allow_all_builds: true,
+            npm_lifecycle: true,
             ..Default::default()
         }),
         NpmInstallVerb::Install => crate::pm_engine::run_install(crate::pm_engine::InstallFlags {
@@ -11331,6 +11376,7 @@ fn run_shim_engine_install(
             ignore_scripts,
             no_optional: route.no_optional,
             allow_all_builds: true,
+            npm_lifecycle: true,
             ..Default::default()
         }),
     }
@@ -11375,16 +11421,18 @@ fn shim_plan_with(
     let nesting = Nesting::from_env(|k| env::var(k).ok());
 
     // A GLOBAL op (`npm install -g`, `yarn global add`, `npm ls -g`) writes the
-    // user's global prefix, never this project's lockfile/node_modules, so the
-    // cross-PM project-pin refusal does not apply — `decide` lets it fall through.
+    // user's global prefix, and a registry verb (`npm login`, `npm view`) the
+    // registry — never this project's lockfile/node_modules, so the cross-PM
+    // project-pin refusal does not apply and `decide` lets either fall through.
     let global = shim::is_global_invocation(invoked, args);
+    let outside_project = global || shim::is_registry_invocation(invoked, args);
 
     let decision = shim::decide(
         invoked,
         &pin_state,
         args.first().map(String::as_str),
         nesting,
-        global,
+        outside_project,
     );
 
     // `nub pm shim --route-installs`: a top-level `npm ci` / bare `npm
