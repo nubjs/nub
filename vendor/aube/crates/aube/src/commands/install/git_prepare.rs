@@ -330,38 +330,65 @@ pub(super) fn archive_has_path<V>(
 /// Whether the checkout's own package manager runs `pre<script>` and
 /// `post<script>` around a script. pnpm runs a publishing script raw for a
 /// pnpm checkout and as `<pm> run <script>` for any other, and of those only
-/// Yarn Berry skips the hooks. The package manager is the one
-/// `packageManager` names, else the one its lockfile belongs to, else npm,
-/// as pnpm detects it.
+/// Yarn Berry skips the hooks. The package manager is picked as pnpm's
+/// `detect_wanted_pm` picks it: the first known one `devEngines` or
+/// `packageManager` declares, else the one its lockfile belongs to, else
+/// npm. A Yarn without a version is Berry when its `yarn.lock` is.
 fn runs_pre_post_hooks(dir: &std::path::Path, manifest: &aube_manifest::PackageJson) -> bool {
-    let pinned = manifest
+    let package_manager = manifest
         .extra
         .get("packageManager")
         .and_then(|v| v.as_str())
-        .and_then(|spec| spec.split_once('@'));
-    if let Some((name, version)) = pinned {
-        let major = version
-            .split('.')
-            .next()
-            .and_then(|m| m.parse::<u32>().ok());
-        return match name {
-            "pnpm" => false,
-            "yarn" => major.is_some_and(|m| m < 2),
-            _ => true,
-        };
+        .map(|spec| match spec.split_once('@') {
+            Some((name, version)) => (name.to_string(), Some(version.to_string())),
+            None => (spec.to_string(), None),
+        });
+    let declared = manifest
+        .dev_engines
+        .iter()
+        .flat_map(|d| d.package_manager.iter())
+        .map(|d| (d.name.clone(), d.version.clone()))
+        .chain(package_manager)
+        .find(|(name, _)| ["pnpm", "npm", "yarn", "bun"].contains(&name.as_str()));
+    let (name, version) =
+        declared.unwrap_or_else(|| (lockfile_package_manager(dir).to_string(), None));
+    match name.as_str() {
+        "pnpm" => false,
+        "yarn" => match version.as_deref().and_then(spec_major) {
+            Some(major) => major < 2,
+            None => !aube_lockfile::yarn::is_berry_path(&dir.join("yarn.lock")),
+        },
+        _ => true,
     }
-    if dir.join("pnpm-lock.yaml").exists() {
-        false
-    } else if dir.join("yarn.lock").exists() {
-        !dir.join(".yarnrc.yml").exists()
-    } else if dir.join("package-lock.json").exists()
-        || dir.join("bun.lock").exists()
-        || dir.join("bun.lockb").exists()
-    {
-        true
+}
+
+/// pnpm's `detect_preferred_pm`: the package manager a checkout's lockfile
+/// or workspace file belongs to, npm when it has neither.
+fn lockfile_package_manager(dir: &std::path::Path) -> &'static str {
+    let has = |file: &str| dir.join(file).exists();
+    if has("pnpm-lock.yaml") {
+        "pnpm"
+    } else if has("yarn.lock") {
+        "yarn"
+    } else if has("package-lock.json") {
+        "npm"
+    } else if has("bun.lockb") || has("bun.lock") {
+        "bun"
+    } else if has("pnpm-workspace.yaml") {
+        "pnpm"
     } else {
-        !dir.join("pnpm-workspace.yaml").exists()
+        "npm"
     }
+}
+
+/// The first major version a version spec names: `4` for `4.9.2`, `^4`
+/// or `>=4.0.0`.
+fn spec_major(spec: &str) -> Option<u32> {
+    spec.trim_start_matches(|c: char| !c.is_ascii_digit())
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
 }
 
 /// Run the `prepublish`/`prepack`/`publish` scripts the checkout declares,
@@ -585,32 +612,34 @@ mod tests {
 
     #[test]
     fn publishing_scripts_run_with_hooks_unless_the_checkout_is_pnpm_or_yarn_berry() {
+        const BERRY_LOCK: &str = "__metadata:\n  version: 8\n";
         let dir = tempfile::tempdir().unwrap();
-        let hooks = |pm: Option<&str>, lockfiles: &[&str]| {
-            for f in [
-                "pnpm-lock.yaml",
-                "yarn.lock",
-                ".yarnrc.yml",
-                "package-lock.json",
-            ] {
+        let hooks = |manifest_json: &str, lockfiles: &[(&str, &str)]| {
+            for f in ["pnpm-lock.yaml", "yarn.lock", "package-lock.json"] {
                 let _ = std::fs::remove_file(dir.path().join(f));
             }
-            for f in lockfiles {
-                std::fs::write(dir.path().join(f), "").unwrap();
+            for (f, contents) in lockfiles {
+                std::fs::write(dir.path().join(f), contents).unwrap();
             }
-            let json = match pm {
-                Some(pm) => format!(r#"{{"packageManager":"{pm}"}}"#),
-                None => "{}".to_string(),
-            };
-            runs_pre_post_hooks(dir.path(), &manifest(&json))
+            runs_pre_post_hooks(dir.path(), &manifest(manifest_json))
         };
-        assert!(hooks(None, &[]), "npm by default");
-        assert!(hooks(Some("npm@11.0.0"), &[]));
-        assert!(hooks(Some("yarn@1.22.22"), &[]));
-        assert!(!hooks(Some("yarn@4.5.0"), &[]));
-        assert!(!hooks(Some("pnpm@10.0.0"), &[]));
-        assert!(!hooks(None, &["pnpm-lock.yaml"]));
-        assert!(hooks(None, &["yarn.lock"]));
-        assert!(!hooks(None, &["yarn.lock", ".yarnrc.yml"]));
+        assert!(hooks("{}", &[]), "npm by default");
+        assert!(hooks(r#"{"packageManager":"npm@11.0.0"}"#, &[]));
+        assert!(hooks(r#"{"packageManager":"yarn@1.22.22"}"#, &[]));
+        assert!(!hooks(r#"{"packageManager":"yarn@4.5.0"}"#, &[]));
+        assert!(!hooks(r#"{"packageManager":"pnpm@10.0.0"}"#, &[]));
+        assert!(!hooks("{}", &[("pnpm-lock.yaml", "")]));
+        assert!(hooks("{}", &[("yarn.lock", "# yarn lockfile v1\n")]));
+        assert!(
+            !hooks("{}", &[("yarn.lock", BERRY_LOCK)]),
+            "a Berry lockfile, no config"
+        );
+        assert!(
+            !hooks(
+                r#"{"packageManager":"yarn@1.22.22","devEngines":{"packageManager":{"name":"yarn","version":"4.9.2"}}}"#,
+                &[("yarn.lock", BERRY_LOCK)]
+            ),
+            "devEngines outranks packageManager"
+        );
     }
 }
