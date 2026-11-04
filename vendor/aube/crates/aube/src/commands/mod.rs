@@ -171,6 +171,7 @@ pub use settings_context::{
     StoreV1Dirs, load_global_config_yaml, resolved_project_store_dir,
     resolved_project_store_v1_dirs,
 };
+pub use workspace_helpers::empty_selection_noop;
 pub(crate) use workspace_helpers::{
     NoMatchReport, collect_dep_closure, find_workspace_root, finish_filtered_workspace, load_graph,
     no_projects_matched, prepare_resolved_graph_for_lockfile_write, retarget_cwd, select_projects,

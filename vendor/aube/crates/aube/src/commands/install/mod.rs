@@ -572,6 +572,12 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     aube_util::diag::instant(aube_util::diag::Category::Install, "begin", None);
     let _diag_install = aube_util::diag::Span::new(aube_util::diag::Category::Install, "total");
 
+    // A `--filter` that selects no project changes nothing, as in pnpm:
+    // settled before the `--force` reset, the branch-lockfile merge and
+    // every hook.
+    if super::empty_selection_noop(&cwd, &opts.workspace_filter, "install")? {
+        return Ok(());
+    }
     if !opts.dry_run {
         apply_force_state_reset(&cwd, &opts)?;
     }
@@ -837,18 +843,6 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     // the streaming-install write so both paths stay scoped identically.
     let per_project_write_selection =
         per_project_write_selection(&cwd, &workspace_packages, &opts.workspace_filter)?;
-    // A `--filter` that selects no project installs nothing and runs no
-    // hook, as in pnpm.
-    if per_project_write_selection
-        .as_ref()
-        .is_some_and(|selected| selected.is_empty())
-    {
-        return super::no_projects_matched(
-            &cwd,
-            &opts.workspace_filter,
-            super::NoMatchReport::Scope,
-        );
-    }
     let (build_policy, policy_warnings) =
         if let Some(override_policy) = opts.build_policy_override.as_deref() {
             (override_policy.clone(), Vec::new())

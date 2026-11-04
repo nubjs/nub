@@ -197,12 +197,6 @@ pub async fn run(
     // the project root for free.
     let cwd = crate::dirs::workspace_or_project_root()?;
 
-    // When a workspace filter is set, resolve workspace + selectors
-    // first so a no-match case exits before we try to read the
-    // lockfile: silently with 0, as pnpm 12 does, or with an error
-    // under `--fail-if-no-match`. The result is threaded into
-    // `run_filtered` so we don't re-walk the workspace on the match
-    // path.
     // The effective output format, from `--format` or the `--parseable` /
     // `--json` shortcut flags.
     let format = if args.json {
@@ -213,6 +207,20 @@ pub async fn run(
         args.format
     };
 
+    // Run inside a workspace member, a plain `list` lists that member, as
+    // pnpm does, out of the workspace lockfile at the root.
+    let filter = if filter.is_empty() && invoked_in_member(&cwd)? {
+        aube_workspace::selector::EffectiveFilter::from_filters(["."])
+    } else {
+        filter
+    };
+
+    // When a workspace filter is set, resolve workspace + selectors
+    // first so a no-match case exits before we try to read the
+    // lockfile: silently with 0, as pnpm 12 does, or with an error
+    // under `--fail-if-no-match`. The result is threaded into
+    // `run_filtered` so we don't re-walk the workspace on the match
+    // path.
     let selected = if !filter.is_empty() {
         let workspace_pkgs = aube_workspace::find_workspace_packages(&cwd)
             .map_err(|e| miette!("failed to discover workspace packages: {e}"))?;
@@ -308,6 +316,20 @@ pub async fn run(
 use super::DepFilter;
 
 #[allow(clippy::too_many_arguments)]
+/// Whether the command was invoked inside a workspace member of the
+/// workspace rooted at `workspace_root`, the nearest `package.json` at or
+/// above the cwd being one of its members.
+fn invoked_in_member(workspace_root: &std::path::Path) -> miette::Result<bool> {
+    let Some(project) = crate::dirs::find_project_root(&crate::dirs::cwd()?) else {
+        return Ok(false);
+    };
+    if project == workspace_root || !project.starts_with(workspace_root) {
+        return Ok(false);
+    }
+    Ok(aube_workspace::find_workspace_packages(workspace_root)
+        .is_ok_and(|members| members.contains(&project)))
+}
+
 fn run_filtered(
     root: &std::path::Path,
     root_manifest: &aube_manifest::PackageJson,

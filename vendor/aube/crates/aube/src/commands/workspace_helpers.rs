@@ -224,6 +224,38 @@ pub(crate) fn select_workspace_packages(
     Ok((root, matched))
 }
 
+/// Settle a `--filter` that selects no project before `command` touches
+/// anything: report it as pnpm does and return `true`, so the caller
+/// skips the command and every step after it, or fail under
+/// `--fail-if-no-match`. `false` when there is no filter, no workspace,
+/// or a selection to act on.
+pub fn empty_selection_noop(
+    cwd: &Path,
+    filter: &aube_workspace::selector::EffectiveFilter,
+    command: &str,
+) -> miette::Result<bool> {
+    if filter.is_empty() {
+        return Ok(false);
+    }
+    let root = crate::dirs::find_workspace_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+    let Ok(workspace_pkgs) = aube_workspace::find_workspace_packages(&root) else {
+        return Ok(false);
+    };
+    if workspace_pkgs.is_empty()
+        || !select_projects(&root, &workspace_pkgs, filter, command)?.is_empty()
+    {
+        return Ok(false);
+    }
+    let report = match command {
+        "install" | "remove" | "update" => NoMatchReport::Scope,
+        "run" => NoMatchReport::ScopeAndNotice,
+        "exec" => NoMatchReport::Notice,
+        _ => NoMatchReport::Quiet,
+    };
+    no_projects_matched(&root, filter, report)?;
+    Ok(true)
+}
+
 /// What pnpm prints for a `--filter` that selects no project when that is
 /// not an error. Commands differ: `install`, `remove` and `update` report
 /// the scope, `run` reports the scope and the notice, `exec` the notice

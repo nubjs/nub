@@ -455,6 +455,25 @@ fn finish_code(result: miette::Result<Option<i32>>) -> Result<i32> {
     }
 }
 
+/// pnpm settles a `--filter` that selects no project before the command does
+/// anything. `Some(code)` is that outcome, already reported: the caller skips
+/// the command and every post-install step (the engine stamp, the Vite compat
+/// writes, the `devEngines` stamp), since nothing was materialized.
+fn settled_empty_selection(
+    output: &super::output::OutputFlags,
+    session: &EngineSession,
+    filter: &EffectiveFilter,
+    command: &str,
+) -> Option<i32> {
+    match with_output(output, || {
+        aube::commands::empty_selection_noop(&session.cwd, filter, command)
+    }) {
+        Ok(false) => None,
+        Ok(true) => Some(0),
+        Err(report) => Some(present::emit_report(&report)),
+    }
+}
+
 // ───────────────────────── wired verbs ──────────────────────────
 
 /// Put the global bin directory on PATH after a successful global install.
@@ -544,6 +563,14 @@ fn run_add(typed: &str, args: &[String]) -> Result<i32> {
         super::note_explicit_pnpmfile_choice();
     }
     let session = super::engine_session(globals.dir.as_deref())?;
+    if let Some(code) = settled_empty_selection(
+        &globals.output,
+        &session,
+        &globals.effective_filter(),
+        "add",
+    ) {
+        return Ok(code);
+    }
     if !verb.global && yarn_detected(&session) {
         return Err(yarn_gate_error(
             typed,
@@ -577,6 +604,14 @@ fn run_add(typed: &str, args: &[String]) -> Result<i32> {
 fn run_remove(typed: &str, args: &[String]) -> Result<i32> {
     let (globals, verb) = parse_or_return!(RemoveCli, typed, args);
     let session = super::engine_session(globals.dir.as_deref())?;
+    if let Some(code) = settled_empty_selection(
+        &globals.output,
+        &session,
+        &globals.effective_filter(),
+        "remove",
+    ) {
+        return Ok(code);
+    }
     if !verb.global && yarn_detected(&session) {
         return Err(yarn_gate_error(
             typed,
@@ -610,6 +645,14 @@ fn run_update(typed: &str, args: &[String]) -> Result<i32> {
         super::note_explicit_pnpmfile_choice();
     }
     let session = super::engine_session(globals.dir.as_deref())?;
+    if let Some(code) = settled_empty_selection(
+        &globals.output,
+        &session,
+        &globals.effective_filter(),
+        "update",
+    ) {
+        return Ok(code);
+    }
     if !verb.global && yarn_detected(&session) {
         return Err(yarn_gate_error(
             typed,
@@ -1307,6 +1350,14 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     if let Some(err) = pnpm_lockfile_version_preflight(&session) {
         return Err(err);
     }
+    if let Some(code) = settled_empty_selection(
+        &flags.output,
+        &session,
+        &flags.filter.effective_filter(),
+        "install",
+    ) {
+        return Ok(code);
+    }
 
     // Config-derived install knobs (the IMPLEMENT wins): the active PM's
     // persistent config can pin a dep-axis (`omit`/`production`), request a
@@ -1611,6 +1662,16 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
         None => std::env::current_dir()?,
     };
     remove_node_modules(&root.join("node_modules"))?;
+    // pnpm's `ci` cleans before it selects, so a filter that selects no
+    // project still leaves the tree removed; nothing is installed after it.
+    if let Some(code) = settled_empty_selection(
+        &flags.output,
+        &session,
+        &flags.filter.effective_filter(),
+        "ci",
+    ) {
+        return Ok(code);
+    }
 
     // Config-derived knobs (ci is frozen by definition, so the dep-axis, the
     // yarn block-all-scripts opt-out, and the yarn `enableNetwork: false`

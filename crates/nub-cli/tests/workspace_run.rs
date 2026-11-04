@@ -355,31 +355,81 @@ fn a_stray_pnpm_workspace_yaml_leaves_an_npm_workspace_selection_alone() {
     );
 }
 
-/// A filter that selects no project is an exit-0 no-op for `install` and
-/// `run`, as in pnpm, since CI runs selectors like `...[origin/main]` that
-/// are empty on many commits. `--fail-if-no-match` makes it exit 1.
+/// Every file under `dir`, with its bytes, not following symlinks: the
+/// installed tree, its state and stamps, the lockfile and the manifests.
+fn tree_snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    fn walk(base: &Path, dir: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            let kind = entry.file_type().unwrap();
+            let rel = path.strip_prefix(base).unwrap().to_path_buf();
+            if kind.is_dir() {
+                walk(base, &path, out);
+            } else if kind.is_symlink() {
+                out.push((
+                    rel,
+                    std::fs::read_link(&path)
+                        .unwrap()
+                        .into_os_string()
+                        .into_encoded_bytes(),
+                ));
+            } else {
+                out.push((rel, std::fs::read(&path).unwrap()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out);
+    out.sort();
+    out
+}
+
+/// A filter that selects no project changes nothing and exits 0, as in
+/// pnpm, since CI runs selectors like `...[origin/main]` that are empty on
+/// many commits: an installed tree, its state, the lockfile and the
+/// recorded engine stay byte-identical, so a Node major switch still gets
+/// its rebuild later. `--fail-if-no-match` makes it exit 1.
 #[test]
-fn a_filter_matching_no_project_does_nothing_unless_told_to_fail() {
+fn a_filter_matching_no_project_changes_nothing_unless_told_to_fail() {
     let root = script_workspace("no-match-filter");
     write(
         &root.join("dep/package.json"),
         r#"{"name":"dep","version":"1.0.0"}"#,
     );
     write(
+        &root.join("dep2/package.json"),
+        r#"{"name":"dep2","version":"1.0.0"}"#,
+    );
+    write(
         &root.join("package.json"),
         r#"{"name":"e2e-root","private":true,"workspaces":["packages/*"],"dependencies":{"dep":"file:./dep"}}"#,
     );
+    let (stdout, stderr, code) = run_nub(&root, &["install"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let stamp = root.join("node_modules/.nub-engine");
+    assert!(stamp.is_file(), "the install records its engine");
+    std::fs::write(&stamp, "node-v1-darwin-arm64").unwrap();
+    let before = tree_snapshot(&root);
     let notice = "No projects matched the filters in";
 
+    for args in [
+        &["install", "--filter", "nope"][..],
+        &["install", "--force", "--filter", "nope"],
+        &["add", "file:./dep2", "--filter", "nope"],
+        &["remove", "dep", "--filter", "nope"],
+        &["update", "--filter", "nope"],
+    ] {
+        let (_, stderr, code) = run_nub(&root, args);
+        assert_eq!(code, 0, "nub {args:?}\n{stderr}");
+        assert!(
+            tree_snapshot(&root) == before,
+            "nub {args:?} selects nothing and changes nothing"
+        );
+    }
     let (_, stderr, code) = run_nub(&root, &["install", "--filter", "nope"]);
-    assert_eq!(code, 0, "{stderr}");
     assert!(
-        stderr.contains("Scope: 0 of 4 workspace projects"),
+        code == 0 && stderr.contains("Scope: 0 of 4 workspace projects"),
         "{stderr}"
-    );
-    assert!(
-        !root.join("node_modules").exists(),
-        "an install that selects nothing touches no project"
     );
     let (_, stderr, code) = run_nub(&root, &["run", "-F", "nope", "build"]);
     assert_eq!(code, 0, "{stderr}");
@@ -393,7 +443,18 @@ fn a_filter_matching_no_project_does_nothing_unless_told_to_fail() {
         assert_eq!(code, 1, "nub {args:?}\n{stderr}");
         assert!(stderr.contains(notice), "nub {args:?}\n{stderr}");
     }
-    assert!(!root.join("node_modules").exists());
+    assert!(tree_snapshot(&root) == before);
+}
+
+/// `nub ls` inside a workspace member lists that member, as pnpm does.
+#[test]
+fn list_inside_a_member_lists_the_member() {
+    let root = script_workspace("list-member");
+    let (stdout, stderr, code) = run_nub(&root, &["install"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let (stdout, stderr, code) = run_nub(&root.join("packages/web"), &["ls", "--depth=-1"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.starts_with("web@1.0.0 "), "{stdout}");
 }
 
 /// Offline guard for the network-backed remove test.
