@@ -365,18 +365,15 @@ pub fn find_bin(name: &str, cwd: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Read a single `key = value` setting from `.npmrc` (project-level, then
-/// user-level `~/.npmrc`), returning the first match's value with surrounding
-/// quotes stripped. The one `.npmrc` reader in the crate — `script_shell` and
-/// (P1) the PM registry lookup both go through it.
+/// Read a single `key = value` setting from `.npmrc` — the project-scope files
+/// ([`crate::workspace::npmrc::project_npmrc_paths`]: the workspace root's, and
+/// per incumbent the invoking member's on top), then the user `~/.npmrc` —
+/// returning the most specific file's value with surrounding quotes stripped.
+/// `script-shell`, `ignore-scripts` and `node-mirror:release` read through it.
 pub(crate) fn npmrc_value(project_root: &Path, key: &str) -> Option<String> {
-    // Check project .npmrc first, then ~/.npmrc
-    let candidates = [
-        project_root.join(".npmrc"),
-        dirs_next::home_dir()
-            .map(|h| h.join(".npmrc"))
-            .unwrap_or_default(),
-    ];
+    let mut candidates = crate::workspace::npmrc::project_npmrc_paths(project_root);
+    candidates.reverse();
+    candidates.extend(dirs_next::home_dir().map(|h| h.join(".npmrc")));
 
     for path in &candidates {
         if let Ok(content) = fs::read_to_string(path) {
@@ -512,6 +509,26 @@ mod tests {
             env.get("npm_package_bin").map(String::as_str),
             Some("./cli.js")
         );
+    }
+
+    #[test]
+    fn npmrc_value_reads_the_workspace_root_npmrc_from_a_member() {
+        // `ignore-scripts`, `script-shell` and `node-mirror:release` set once in a
+        // monorepo's root `.npmrc` apply to every member.
+        let root = std::env::temp_dir().join(format!("nub-npmrc-ws-{}", std::process::id()));
+        let member = root.join("packages").join("a");
+        fs::create_dir_all(&member).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"name":"root","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+        fs::write(member.join("package.json"), r#"{"name":"a"}"#).unwrap();
+        fs::write(root.join(".npmrc"), "ignore-scripts=true\n").unwrap();
+
+        let value = npmrc_value(&member, "ignore-scripts");
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(value.as_deref(), Some("true"));
     }
 
     #[test]

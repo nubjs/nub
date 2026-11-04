@@ -400,14 +400,17 @@ fn collect_package_dirs(
 }
 
 /// Whether pnpm is the project's incumbent PM at `workspace_root` — the gate that
-/// guards every read of a pnpm-NAMED path. A committed `pnpm-lock.yaml` is the
-/// signal: it can only exist if pnpm has run here, so its presence proves pnpm is
-/// incumbent. This is detection (file presence), not config-consumption, so the
-/// brand hard gate permits it; it mirrors the pnpm branch of the CLI's
-/// `detect_package_manager`. Checked at the workspace root only — the lockfile
-/// lives beside `pnpm-workspace.yaml`.
+/// guards every read of a pnpm-NAMED path. Two signals prove it: a committed
+/// `pnpm-lock.yaml` (it only exists if pnpm has run here), or the root manifest
+/// declaring pnpm in `packageManager` / `devEngines.packageManager`, which covers
+/// a fresh pnpm workspace before its first install (read through the CLI's own
+/// declaration reader, [`crate::incumbent`]). Both are detection, not
+/// config-consumption, so the brand hard gate permits them. A lone
+/// `pnpm-workspace.yaml` with neither stays unread. Checked at the workspace root
+/// only — the lockfile and the pin live beside `pnpm-workspace.yaml`.
 pub(crate) fn pnpm_is_incumbent(workspace_root: &Path) -> bool {
     workspace_root.join("pnpm-lock.yaml").is_file()
+        || crate::incumbent::declared_pm_name(workspace_root).as_deref() == Some("pnpm")
 }
 
 fn read_pnpm_workspace(workspace_root: &Path) -> Option<Vec<String>> {

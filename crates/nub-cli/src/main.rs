@@ -49,6 +49,9 @@ fn main() -> Result<()> {
     // than fixing one call site at a time; preflight still re-registers
     // (set-once, idempotent) so pm_engine stays self-contained under test.
     pm_engine::identity::register();
+    // nub-core's `.npmrc` readers and pnpm-named-file gates run on non-PM paths
+    // too (provisioning, `nub run`), so they get the incumbent detection here.
+    pm_engine::register_incumbent_probe();
 
     // Engine-aware subscriber: surfaces the embedded engine's warning
     // channel (brand-rewritten) by default; RUST_LOG still owns the

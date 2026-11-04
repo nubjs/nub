@@ -230,13 +230,11 @@ fn pnpm_incumbency(workspace_root: &Path) -> PnpmIncumbency {
     if role != Some(crate::pm_engine::config_scope::Role::Pnpm) {
         return PnpmIncumbency::NotPnpm;
     }
-    // Only trust the declared VERSION when the name is literally "pnpm" —
-    // `role_of` maps an unrecognized declared tool through the lockfile
-    // fallback too, and that tool's version string is not a pnpm major.
-    let major = declared
-        .as_ref()
-        .and_then(|(name, v)| (name == "pnpm").then_some(v.as_deref()).flatten())
-        .and_then(|v| crate::pm_engine::parse_major_minor(v).0);
+    // Only the version declared FOR pnpm counts — `role_of` maps an
+    // unrecognized declared tool through the lockfile fallback too, and that
+    // tool's version string is not a pnpm major.
+    let major = nub_core::pm::resolve::declared_pm_version(workspace_root, "pnpm")
+        .and_then(|v| crate::pm_engine::parse_major_minor(&v).0);
     match major {
         Some(m) => PnpmIncumbency::Major(m),
         None => PnpmIncumbency::UnknownVersion,

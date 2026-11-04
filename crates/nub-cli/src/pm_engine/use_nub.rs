@@ -843,8 +843,7 @@ pub(crate) fn merged_source(
 /// being migrated rather than cwd. Read before `apply_manifest_edits` flips
 /// the pin to `nub@`, while the incumbent `pnpm@x` is still present.
 fn pnpm_vocab_precedence(root: &Path) -> VocabPrecedence {
-    let major = nub_core::pm::resolve::declared_pm_raw(root)
-        .and_then(|(name, version)| (name == "pnpm").then_some(version).flatten())
+    let major = nub_core::pm::resolve::declared_pm_version(root, "pnpm")
         .and_then(|v| super::parse_major_minor(&v).0);
     if major.is_some_and(|m| m >= 11) {
         VocabPrecedence::YamlWins
