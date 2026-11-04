@@ -371,7 +371,7 @@ Read the [full docs](https://pnpm.io/catalogs) on pnpm.io. The `catalog:` syntax
 
 ### `allowScripts`
 
-Which dependencies may run install scripts — see [lifecycle scripts](#lifecycle-scripts). The field applies in every project, whichever tool owns it. A registry dependency is keyed by name and anything else by its full specifier, and a `false` beats any allow:
+Which dependencies may run install scripts — see [lifecycle scripts](#lifecycle-scripts). The field applies in every project, whichever tool owns it. A registry dependency is keyed by name and anything else by its full specifier, a git dependency also by its repository (see [git dependencies](#git-dependencies)), and a `false` beats any allow:
 
 ```json title="package.json"
 {
@@ -509,6 +509,20 @@ Permission comes from the [`allowScripts`](#allowscripts) field in any project. 
 - Bun: `trustedDependencies`
 
 A package with build scripts that is not allowed is skipped. The `WARN_NUB_IGNORED_BUILD_SCRIPTS` warning names it and suggests `nub approve-builds`.
+
+### Git dependencies
+
+A dependency installed from git is source, not a published build. When it has a `prepare` script, Nub builds it before linking it: it installs the checkout's own dependencies, runs `prepare`, and links what the package would publish. That build runs only when `allowScripts` names the dependency's source, as in pnpm:
+
+```json title="package.json"
+{
+  "allowScripts": {
+    "rimraf@git+https://github.com/isaacs/rimraf.git": true
+  }
+}
+```
+
+A `<name>@git+<repository>` key approves every commit of that repository, and a key ending in `#<commit>` approves that commit alone. A bare package name never approves a git dependency. A git dependency that needs building and is not listed fails the install with `ERR_NUB_GIT_DEP_PREPARE_NOT_ALLOWED`, which prints the key to add. One set to `false` installs unbuilt, as every git dependency does under `--ignore-scripts`.
 
 ### Your project's own hooks
 
