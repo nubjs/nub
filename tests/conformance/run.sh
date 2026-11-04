@@ -70,7 +70,11 @@ mkdir -p "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME"
 unset npm_config_default_lockfile_format NPM_CONFIG_DEFAULT_LOCKFILE_FORMAT 2>/dev/null || true
 
 # npm's audit report is a separate registry service with its own outages and no
-# bearing on the lockfile. Keep conformance independent of advisory service health.
+# bearing on the lockfile: a degraded advisory endpoint stalled every npm case
+# for 100-300 s (npm's fetch timeout) and timed the CI job out on every branch
+# for an evening (2026-09-03), while a bare `npm install --no-audit` of the same
+# fixture took 1 s. fund and the update notifier are the other two network side
+# trips with nothing to say about the result.
 export npm_config_audit=false npm_config_fund=false npm_config_update_notifier=false
 
 # Bypass inherited proxies for loopback when using the offline registry.

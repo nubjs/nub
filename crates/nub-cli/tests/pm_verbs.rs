@@ -4,10 +4,13 @@
 //! wiring under test lives in `src/pm_engine/install_family.rs`; `install` /
 //! `ci` have their own file (`install_engine.rs`).
 //!
-//! Network tests are `#[ignore]` per the provisioning-test convention — run
-//! via `cargo test -p nub-cli --test pm_verbs -- --ignored` — and self-skip
-//! when the registry is unreachable. Everything else is offline by
-//! construction (gate pre-flights, lockfile conversion, symlink plumbing).
+//! Registry tests whose packages are seeded in the offline test registry run
+//! against it and self-skip when `NUB_TEST_REGISTRY` is unset (`source
+//! tests/registry/start.bash`). The other network tests are `#[ignore]` per the
+//! provisioning-test convention — run via
+//! `cargo test -p nub-cli --test pm_verbs -- --ignored` — and self-skip when
+//! the registry is unreachable. Everything else is offline by construction
+//! (gate pre-flights, lockfile conversion, symlink plumbing).
 //!
 //! Brand guard: every test asserts no `aube` token in the combined output.
 //! Exception: `link`/`unlink -g` print the engine's global-links registry
@@ -120,10 +123,17 @@ fn run_nub(dir: &Path, args: &[&str]) -> Output {
     run_nub_with(dir, args, &pm_tmpdir("xdg-data"), &pm_tmpdir("xdg-cache"))
 }
 
-/// Offline guard for the `#[ignore]` network tests: true when the offline
-/// Verdaccio test registry is available (`NUB_TEST_REGISTRY` set).
+/// Offline guard for the `#[ignore]` network tests: true when the registry
+/// answers a TCP connect within 3s.
 fn registry_reachable() -> bool {
-    test_registry().is_some()
+    use std::net::{TcpStream, ToSocketAddrs};
+    "registry.npmjs.org:443"
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addrs| addrs.next())
+        .is_some_and(|addr| {
+            TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(3)).is_ok()
+        })
 }
 
 /// In-sync npm v3 lockfile for is-positive@3.1.0 (the integrity is the
@@ -218,8 +228,8 @@ const PEER_DEP_PACKAGE_LOCK: &str = r#"{
 /// remove strips the dep from the manifest again. Both outputs brand-clean.
 #[test]
 fn add_then_remove_round_trips_manifest_lockfile_and_node_modules() {
-    if !registry_reachable() {
-        eprintln!("skipping: registry.npmjs.org unreachable");
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY not set — run: source tests/registry/start.bash");
         return;
     }
     let dir = pm_tmpdir("addrm");
@@ -271,8 +281,8 @@ fn add_then_remove_round_trips_manifest_lockfile_and_node_modules() {
 /// content; `patch-remove` reverts all of it. All outputs brand-clean.
 #[test]
 fn patch_workflow_round_trips_through_commit_and_remove() {
-    if !registry_reachable() {
-        eprintln!("skipping: registry.npmjs.org unreachable");
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY not set — run: source tests/registry/start.bash");
         return;
     }
     let dir = pm_tmpdir("patchwf");
@@ -518,8 +528,8 @@ fn update_rejects_non_semver_specs_without_touching_the_manifest() {
 /// pre-fix `add` rejected outright (`unexpected argument '--lockfile-only'`).
 #[test]
 fn add_lockfile_only_writes_lockfile_without_linking_node_modules() {
-    if !registry_reachable() {
-        eprintln!("skipping: registry.npmjs.org unreachable");
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY not set — run: source tests/registry/start.bash");
         return;
     }
     let dir = pm_tmpdir("addlockonly");
@@ -745,8 +755,8 @@ fn dedupe_ignores_workspace_links_and_check_passes() {
 /// registry: dedupe's whole job is a fresh resolve.
 #[test]
 fn dedupe_ignores_npm_alias_targets_and_check_passes() {
-    if !registry_reachable() {
-        eprintln!("skipping: registry.npmjs.org unreachable");
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY not set — run: source tests/registry/start.bash");
         return;
     }
     let dir = pm_tmpdir("dedupe-alias");

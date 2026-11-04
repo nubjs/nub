@@ -1800,8 +1800,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                     // widening to every common platform doesn't happen
                     // just to be discarded.
                     target_lockfile_kind: lockfile_enabled.then_some(write_kind),
-                    dependency_policy: dependency_policy.clone(),
-
+                    dependency_policy: dependency_policy_for_resolver,
                     cache_full_packuments: true,
                     ignore_scripts: opts.ignore_scripts,
                 },

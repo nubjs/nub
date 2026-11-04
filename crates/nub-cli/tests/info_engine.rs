@@ -4,8 +4,10 @@
 //!
 //! The lockfile-reading verbs are offline-testable against a handcrafted
 //! `pnpm-lock.yaml` (the engine reads the graph straight from the lockfile).
-//! `outdated`/`audit` need registry data and follow the `#[ignore]` +
-//! self-skip convention from `install_engine.rs` — run via
+//! `outdated`/`audit` need registry data and follow the two conventions from
+//! `install_engine.rs`: a test whose packages are seeded in the offline test
+//! registry runs under `NUB_TEST_REGISTRY` (`source tests/registry/start.bash`),
+//! and the rest are `#[ignore]` + self-skip — run via
 //! `cargo test -p nub-cli --test info_engine -- --ignored`.
 
 use std::path::{Path, PathBuf};
@@ -83,10 +85,17 @@ fn run_nub(dir: &Path, args: &[&str]) -> (String, String, i32) {
     )
 }
 
-/// Offline guard for the `#[ignore]` network tests: true when the offline
-/// Verdaccio test registry is available (`NUB_TEST_REGISTRY` set).
+/// Offline guard for the `#[ignore]` network tests: true when the registry
+/// answers a TCP connect within 3s.
 fn registry_reachable() -> bool {
-    test_registry().is_some()
+    use std::net::{TcpStream, ToSocketAddrs};
+    "registry.npmjs.org:443"
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addrs| addrs.next())
+        .is_some_and(|addr| {
+            TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(3)).is_ok()
+        })
 }
 
 /// The output brand boundary: no engine name on either stream, ever.
@@ -480,8 +489,8 @@ fn audit_fix_update_refuses_to_touch_yarn_lock() {
 /// latest has been 3.1.0 for years — stable fixture data.
 #[test]
 fn outdated_reports_registry_drift_and_exits_one() {
-    if !registry_reachable() {
-        eprintln!("skipping: registry.npmjs.org unreachable");
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY not set — run: source tests/registry/start.bash");
         return;
     }
     let dir = lockfile_fixture(

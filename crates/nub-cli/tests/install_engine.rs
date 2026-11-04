@@ -3,11 +3,14 @@
 //! The layout policy and the yarn write gate live in
 //! `crates/nub-cli/src/pm_engine.rs`.
 //!
-//! The two installing tests are `#[ignore]` (network) following the
-//! provisioning-test convention — run them via
-//! `cargo test -p nub-cli --test install_engine -- --ignored`. They also
-//! self-skip when the npm registry is unreachable so an offline `--ignored`
-//! sweep doesn't report false failures.
+//! Installing tests whose packages are seeded in the offline test registry
+//! run against it and self-skip when `NUB_TEST_REGISTRY` is unset — run via
+//! `source tests/registry/start.bash` then
+//! `cargo test -p nub-cli --test install_engine`. The rest are `#[ignore]`
+//! (network) per the provisioning-test convention — run via
+//! `cargo test -p nub-cli --test install_engine -- --ignored` with
+//! `NUB_TEST_REGISTRY` unset — and self-skip when the npm registry is
+//! unreachable so an offline `--ignored` sweep doesn't report false failures.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -108,10 +111,17 @@ fn run_install_ci(dir: &Path, args: &[&str]) -> (String, String, i32) {
     )
 }
 
-/// Offline guard for the `#[ignore]` network tests: true when the offline
-/// Verdaccio test registry is available (`NUB_TEST_REGISTRY` set).
+/// Offline guard for the `#[ignore]` network tests: true when the registry
+/// answers a TCP connect within 3s.
 fn registry_reachable() -> bool {
-    test_registry().is_some()
+    use std::net::{TcpStream, ToSocketAddrs};
+    "registry.npmjs.org:443"
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addrs| addrs.next())
+        .is_some_and(|addr| {
+            TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(3)).is_ok()
+        })
 }
 
 #[test]
@@ -178,8 +188,8 @@ fn install_dir_initializes_one_project_snapshot_from_final_cwd() {
 /// is reserved for the explicit `nub pm use nub` command.
 #[test]
 fn install_truly_fresh_project_claims_nub_identity() {
-    if !registry_reachable() {
-        eprintln!("skipping: registry.npmjs.org unreachable");
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY not set — run: source tests/registry/start.bash");
         return;
     }
     let dir = pm_tmpdir("fresh");
@@ -268,8 +278,8 @@ fn install_truly_fresh_project_claims_nub_identity() {
 /// or one that fails to silence `--silent`, both fail.
 #[test]
 fn install_silent_flag_suppresses_all_nonerror_output() {
-    if !registry_reachable() {
-        eprintln!("skipping: registry.npmjs.org unreachable");
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY not set — run: source tests/registry/start.bash");
         return;
     }
     let manifest = r#"{"name":"q","version":"1.0.0","dependencies":{"is-positive":"3.1.0"}}"#;
@@ -320,8 +330,8 @@ fn install_silent_flag_suppresses_all_nonerror_output() {
 /// correctly failed the same pinned version under the hard age gate.
 #[test]
 fn release_age_policy_drift_bare_install_matches_force_validation() {
-    if !registry_reachable() {
-        eprintln!("skipping: registry.npmjs.org unreachable");
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY not set — run: source tests/registry/start.bash");
         return;
     }
 
@@ -470,8 +480,8 @@ fn per_verb_reporter_overrides_pre_verb_silent() {
 /// does NOT stamp the manifest.
 #[test]
 fn install_with_pnpm_workspace_stays_pnpm_shaped_no_stamp() {
-    if !registry_reachable() {
-        eprintln!("skipping: registry.npmjs.org unreachable");
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY not set — run: source tests/registry/start.bash");
         return;
     }
     let dir = pm_tmpdir("pnpm-ws");
@@ -1055,8 +1065,8 @@ fn run_install_in_store(dir: &Path, store: &Path, cache: &Path, args: &[&str]) -
 /// `cold_install_with_trust_downgrade_still_aborts`.
 #[test]
 fn warm_satisfied_install_short_circuits_under_no_downgrade() {
-    if !registry_reachable() {
-        eprintln!("skipping: registry.npmjs.org unreachable");
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY not set — run: source tests/registry/start.bash");
         return;
     }
     let dir = pm_tmpdir("warm-satisfied");

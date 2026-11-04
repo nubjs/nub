@@ -3,10 +3,10 @@
 // more conformance fixtures by running the real package managers against
 // registry.npmjs.org (network needed) and extracting every name@version pair
 // from the resulting lockfiles. The union across all PMs is printed as
-// newline-delimited `name@version` specs on stdout — pipe into seed.mts:
+// newline-delimited `name@version` specs on stdout — pass them to seed.mts:
 //
-//   node tests/registry/resolve-fixtures.mts simple scoped peers ... \
-//     | node tests/registry/seed.mts --from /dev/stdin
+//   node tests/registry/seed.mts \
+//     $(node tests/registry/resolve-fixtures.mts simple scoped peers ...)
 //
 // Or with no fixture args: resolves every tight-set fixture (the per-PR list
 // from .github/workflows/lockfile-roundtrip.yml, minus git-dep which resolves

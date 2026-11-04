@@ -275,15 +275,16 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
     // reuse for extension-targeted packages (forcing a fresh fetch + extension
     // application). Without this, an edited extension's injected dep silently
     // misses on a warm re-resolve that reuses the stale locked subgraph.
-    let dependency_policy_for_resolver = dependency_policy.clone().with_package_extensions_drifted(
-        match &parsed {
-            Ok((g, _)) => !matches!(
-                package_extensions_drift(*g, effective_package_extensions_checksum.as_deref()),
-                DriftStatus::Fresh
-            ),
-            Err(_) => false,
-        },
-    );
+    let dependency_policy_for_resolver =
+        dependency_policy
+            .clone()
+            .with_package_extensions_drifted(match &parsed {
+                Ok((g, _)) => !matches!(
+                    package_extensions_drift(*g, effective_package_extensions_checksum.as_deref()),
+                    DriftStatus::Fresh
+                ),
+                Err(_) => false,
+            });
     let mut resolver = configure_resolver(
         aube_resolver::Resolver::new(client.clone()),
         cwd,
@@ -300,8 +301,7 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
             // With lockfiles enabled, `write_kind` is either the existing
             // format or the configured creation default.
             target_lockfile_kind: lockfile_enabled.then_some(write_kind),
-            dependency_policy: dependency_policy.clone(),
-
+            dependency_policy: dependency_policy_for_resolver,
             cache_full_packuments: true,
             ignore_scripts,
         },

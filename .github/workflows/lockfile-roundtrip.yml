@@ -122,7 +122,7 @@ jobs:
           cd tests/registry
           npm ci
           npm test
-          node_modules/.bin/verdaccio --config config.yaml --listen "0.0.0.0:4874" > /tmp/nub-verdaccio.log 2>&1 &
+          node_modules/.bin/verdaccio --config config.yaml --listen "127.0.0.1:4874" > /tmp/nub-verdaccio.log 2>&1 &
           cd "$GITHUB_WORKSPACE"
           for _ in $(seq 1 50); do
             if curl --silent --fail http://localhost:4874/is-positive >/dev/null 2>&1; then break; fi

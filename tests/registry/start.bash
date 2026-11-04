@@ -87,7 +87,7 @@ fi
 # Absolute config path: verdaccio resolves a relative one against its own cwd,
 # so a caller that starts the registry from anywhere but this directory would
 # otherwise die with "cannot open config file".
-verdaccio --config "$CONFIG_FILE" --listen "0.0.0.0:${VERDACCIO_PORT}" \
+verdaccio --config "$CONFIG_FILE" --listen "127.0.0.1:${VERDACCIO_PORT}" \
 	> /tmp/nub-verdaccio.log 2>&1 &
 VERDACCIO_PID=$!
 
