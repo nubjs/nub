@@ -401,6 +401,18 @@ function safeRequireResolve(specifier) {
   try { return __require.resolve(specifier); } catch { return null; }
 }
 
+// Resolved URL per vendored specifier (`null` = unresolvable), kept for the life
+// of the realm. A vendored package lives in Nub's own distribution — the
+// checkout's node_modules in dev, the content-keyed extracted runtime dir in a
+// release — so its location cannot change under a running process, and `--watch`
+// restarts the process rather than re-resolving in place. The resolve is not
+// free: `__require` has a Nub-internal parent, so each call re-enters the resolve
+// hook and pays a `createRequire` plus a nested hook round trip. Transpiled
+// decorator output imports up to three helpers per decorated file, so unmemoized
+// that cost scaled with the number of decorated files instead of the handful of
+// distinct helpers (#795).
+const vendoredResolutions = new Map();
+
 export function barePkg(specifier) {
   return specifier.startsWith("@")
     ? specifier.split("/").slice(0, 2).join("/")
@@ -476,7 +488,8 @@ let resolvingInternal = false;
 // Resolve a specifier the way both hook tiers do. Returns `{ url, shortCircuit }`
 // to short-circuit Node's resolver, or `null` to fall through to `nextResolve`.
 // `parentURL` is the importer (a file: URL string), or "" for the entry.
-export function resolveSpec(specifier, parentURL) {
+// `fromRequire` is true when the fast tier's hook is resolving a `require()`.
+export function resolveSpec(specifier, parentURL, fromRequire = false) {
   // nub's own internal graph (importer inside nub's runtime dir OR a nub
   // dependency package): resolve natively and SHORT-CIRCUIT so nextResolve (the
   // user's loader chain) never observes nub's internals. This MUST run before the
@@ -530,12 +543,20 @@ export function resolveSpec(specifier, parentURL) {
   // 2. Vendored packages (e.g. @oxc-project/runtime).
   const bare = barePkg(specifier);
   if (VENDORED_PACKAGES.has(bare)) {
-    const resolved = safeRequireResolve(specifier);
-    if (resolved) return { url: pathToFileURL(resolved).href, shortCircuit: true };
+    let url = vendoredResolutions.get(specifier);
+    if (url === undefined) {
+      const resolved = safeRequireResolve(specifier);
+      url = resolved ? pathToFileURL(resolved).href : null;
+      vendoredResolutions.set(specifier, url);
+    }
+    if (url) return { url, shortCircuit: true };
   }
 
-  // 3. Package clobbering.
-  if (CLOBBER_MAP.has(bare) && !isDependency(parentURL || "")) {
+  // 3. Package clobbering, for `import` only. A `require()` loads the installed
+  // package as it would on plain Node: CommonJS reads a data: URL as a file path
+  // and fails with ENOENT, and a CommonJS caller expects the package's own export
+  // shape (`require("abort-controller")` is the constructor, not a namespace).
+  if (CLOBBER_MAP.has(bare) && !isDependency(parentURL || "") && !fromRequire) {
     return { url: `data:text/javascript,${encodeURIComponent(CLOBBER_MAP.get(bare)())}`, shortCircuit: true };
   }
 

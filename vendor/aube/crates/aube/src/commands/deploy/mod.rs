@@ -355,6 +355,7 @@ pub async fn run(
             // A fresh install into the deploy target, not a stage
             // chained after one — it runs the hook itself.
             pre_resolution_hook_already_ran: false,
+            root_preinstall_already_ran: false,
             ignore_scripts: false,
             dry_run: false,
             lockfile_only: false,
@@ -375,6 +376,8 @@ pub async fn run(
             build_policy_override: None,
             workspace_filter: aube_workspace::selector::EffectiveFilter::default(),
             skip_root_lifecycle: false,
+            lifecycle_importers: None,
+            project_stages: install::ProjectStages::Install,
             run_dev_preinstall: true,
             script_command: "install",
             // Deploys are lockfile-driven by definition. Don't

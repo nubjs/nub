@@ -416,7 +416,7 @@ EOF
 	mkdir -p app
 	cd app
 	cat >package.json <<EOF
-{"name":"app","version":"0.0.0","dependencies":{"gitprep":"git+file://$TEST_TEMP_DIR/git-prep.git"}}
+{"name":"app","version":"0.0.0","dependencies":{"gitprep":"git+file://$TEST_TEMP_DIR/git-prep.git"},"pnpm":{"allowBuilds":{"gitprep@git+file://$TEST_TEMP_DIR/git-prep.git":true}}}
 EOF
 
 	run aube install
@@ -457,7 +457,7 @@ EOF
 	mkdir -p app
 	cd app
 	cat >package.json <<EOF
-{"name":"app","version":"0.0.0","dependencies":{"gitprepregistry":"git+file://$TEST_TEMP_DIR/git-prep-registry.git"}}
+{"name":"app","version":"0.0.0","dependencies":{"gitprepregistry":"git+file://$TEST_TEMP_DIR/git-prep-registry.git"},"pnpm":{"allowBuilds":{"gitprepregistry@git+file://$TEST_TEMP_DIR/git-prep-registry.git":true}}}
 EOF
 
 	run aube --registry="$AUBE_TEST_REGISTRY" install
@@ -479,7 +479,8 @@ EOF
   },
   "pnpm": {
     "allowBuilds": {
-      "aube-test-builds-marker": true
+      "aube-test-builds-marker": true,
+      "gitprepallowbuilds@git+file://$TEST_TEMP_DIR/git-prep-allow-builds.git": true
     }
   }
 }
@@ -501,7 +502,7 @@ EOF
 	(
 		cd app1
 		cat >package.json <<EOF
-{"name":"app1","version":"0.0.0","dependencies":{"gitprepcontam":"git+file://$TEST_TEMP_DIR/git-prep-contam.git"}}
+{"name":"app1","version":"0.0.0","dependencies":{"gitprepcontam":"git+file://$TEST_TEMP_DIR/git-prep-contam.git"},"pnpm":{"allowBuilds":{"gitprepcontam@git+file://$TEST_TEMP_DIR/git-prep-contam.git":true}}}
 EOF
 		run aube install
 		assert_success

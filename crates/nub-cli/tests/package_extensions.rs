@@ -44,6 +44,19 @@ fn test_registry() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Offline guard for the `#[ignore]` network tests: true when the registry
+/// answers a TCP connect within 3s.
+fn registry_reachable() -> bool {
+    use std::net::{TcpStream, ToSocketAddrs};
+    "registry.npmjs.org:443"
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addrs| addrs.next())
+        .is_some_and(|addr| {
+            TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(3)).is_ok()
+        })
+}
+
 /// Run `nub <args>` in `dir` against a CALLER-OWNED store/cache so the second
 /// install warm-hits the first's node_modules + freshness state. A fresh store
 /// per call would re-resolve unconditionally and mask the freshness contract.

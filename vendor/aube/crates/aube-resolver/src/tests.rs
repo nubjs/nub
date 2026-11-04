@@ -6677,43 +6677,33 @@ async fn skipped_optional_override_keeps_raw_manifest_specifier() {
     );
 }
 
-// Catalog-aliased dep + selector override targeting the original
-// (alias) name with a bare-range replacement. Reproduces the
-// pnpm/pnpm `js-yaml: npm:@zkochan/js-yaml@0.0.11` + `js-yaml@<3.14.2:
-// ^3.14.2` shape: the catalog rewrites js-yaml to the @zkochan
-// package, then the override fires by user-facing name and
-// replaces the range with `^3.14.2`. Without clearing
-// `task.real_name` in the override path, the resolver kept fetching
-// `@zkochan/js-yaml`'s packument and bailed with "no version of
-// js-yaml matches range ^3.14.2".
+// Aliased dep + selector override targeting the user-facing (alias) name
+// with a bare-range replacement: the override fires by name and replaces the
+// range with `^3.14.2`. Without clearing `task.real_name` in the override
+// path, the resolver kept fetching `@zkochan/js-yaml`'s packument and bailed
+// with "no version of js-yaml matches range ^3.14.2".
 #[tokio::test]
-async fn override_with_bare_range_undoes_prior_catalog_alias() {
+async fn override_with_bare_range_undoes_prior_alias() {
     let real_js_yaml = make_packument("js-yaml", &["3.14.2"], "3.14.2");
     let aliased = make_packument("@zkochan/js-yaml", &["0.0.11"], "0.0.11");
 
     let client = Arc::new(aube_registry::client::RegistryClient::new(
         "http://127.0.0.1:0",
     ));
-    let mut catalogs: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-    catalogs.entry("default".to_string()).or_default().insert(
-        "js-yaml".to_string(),
-        "npm:@zkochan/js-yaml@0.0.11".to_string(),
-    );
     let mut overrides: BTreeMap<String, String> = BTreeMap::new();
     overrides.insert("js-yaml@<3.14.2".to_string(), "^3.14.2".to_string());
 
-    let mut resolver = Resolver::new(client)
-        .with_catalogs(catalogs)
-        .with_overrides(overrides);
+    let mut resolver = Resolver::new(client).with_overrides(overrides);
     resolver.cache.insert("js-yaml".to_string(), real_js_yaml);
     resolver
         .cache
         .insert("@zkochan/js-yaml".to_string(), aliased);
 
     let mut manifest = PackageJson::default();
-    manifest
-        .dependencies
-        .insert("js-yaml".to_string(), "catalog:".to_string());
+    manifest.dependencies.insert(
+        "js-yaml".to_string(),
+        "npm:@zkochan/js-yaml@0.0.11".to_string(),
+    );
 
     let graph = resolver
         .resolve(&manifest, None)
@@ -6737,6 +6727,104 @@ async fn override_with_bare_range_undoes_prior_catalog_alias() {
         graph.importers["."][0].specifier.as_deref(),
         Some("^3.14.2"),
         "version-keyed overrides rewrite direct importer specifiers"
+    );
+}
+
+// pnpm overrides a manifest before it resolves catalogs, so a `catalog:`
+// dependency meets each selector as the text `catalog:`. A range-keyed
+// selector never fires on it, whatever range the catalog holds, and the
+// importer keeps `specifier: 'catalog:'` (nubjs/nub#771: writing the
+// override value instead failed `pnpm install --frozen-lockfile`). pnpm's own
+// workspace has exactly this shape: catalog `js-yaml: npm:@zkochan/js-yaml@0.0.11`
+// beside the override `js-yaml@<3.14.2: ^3.14.2`, and its lockfile keeps the
+// aliased 0.0.11 under `catalog:`. A selector naming `catalog:` itself, or a
+// bare name, does fire.
+#[tokio::test]
+async fn overrides_match_a_catalog_dependency_by_its_catalog_reference() {
+    async fn resolve_with(override_key: &str) -> LockfileGraph {
+        let client = Arc::new(aube_registry::client::RegistryClient::new(
+            "http://127.0.0.1:0",
+        ));
+        let mut catalogs: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+        catalogs.entry("default".to_string()).or_default().insert(
+            "js-yaml".to_string(),
+            "npm:@zkochan/js-yaml@0.0.11".to_string(),
+        );
+        let mut overrides: BTreeMap<String, String> = BTreeMap::new();
+        overrides.insert(override_key.to_string(), "^3.14.2".to_string());
+        let mut resolver = Resolver::new(client)
+            .with_catalogs(catalogs)
+            .with_overrides(overrides);
+        resolver.cache.insert(
+            "js-yaml".to_string(),
+            make_packument("js-yaml", &["3.14.2"], "3.14.2"),
+        );
+        resolver.cache.insert(
+            "@zkochan/js-yaml".to_string(),
+            make_packument("@zkochan/js-yaml", &["0.0.11"], "0.0.11"),
+        );
+        let mut manifest = PackageJson::default();
+        manifest
+            .dependencies
+            .insert("js-yaml".to_string(), "catalog:".to_string());
+        resolver.resolve(&manifest, None).await.unwrap()
+    }
+
+    let graph = resolve_with("js-yaml@<3.14.2").await;
+    let direct = &graph.importers["."][0];
+    assert_eq!(direct.specifier.as_deref(), Some("catalog:"));
+    assert_eq!(direct.dep_path, "js-yaml@0.0.11");
+    assert_eq!(
+        graph.packages[&direct.dep_path].alias_of.as_deref(),
+        Some("@zkochan/js-yaml")
+    );
+
+    for key in ["js-yaml@catalog:", "js-yaml"] {
+        let graph = resolve_with(key).await;
+        let direct = &graph.importers["."][0];
+        assert_eq!(direct.specifier.as_deref(), Some("^3.14.2"), "{key}");
+        assert_eq!(direct.dep_path, "js-yaml@3.14.2", "{key}");
+    }
+}
+
+// The frozen-lockfile check must reach the same verdict as resolution on a
+// `catalog:` dependency. With a bare override and a range-keyed one, only the
+// bare one applies to the catalog reference, so the importer records 2.0.0;
+// a check that read `catalog:` as satisfying `>=3` expected 3.0.1 and rejected
+// the lockfile the resolver had just written.
+#[tokio::test]
+async fn frozen_check_accepts_what_resolution_wrote_for_a_catalog_dependency() {
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:0",
+    ));
+    let mut catalogs: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    catalogs
+        .entry("default".to_string())
+        .or_default()
+        .insert("is-odd".to_string(), "^3.0.0".to_string());
+    let overrides: BTreeMap<String, String> = [("is-odd", "2.0.0"), ("is-odd@>=3", "3.0.1")]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let mut resolver = Resolver::new(client)
+        .with_catalogs(catalogs.clone())
+        .with_overrides(overrides.clone());
+    resolver.cache.insert(
+        "is-odd".to_string(),
+        make_packument("is-odd", &["2.0.0", "3.0.1"], "3.0.1"),
+    );
+    let mut manifest = PackageJson::default();
+    manifest
+        .dependencies
+        .insert("is-odd".to_string(), "catalog:".to_string());
+
+    let graph = resolver.resolve(&manifest, None).await.unwrap();
+    let direct = &graph.importers["."][0];
+    assert_eq!(direct.specifier.as_deref(), Some("2.0.0"));
+    assert_eq!(direct.dep_path, "is-odd@2.0.0");
+    assert_eq!(
+        graph.check_drift(&manifest, &overrides, &[], &catalogs),
+        aube_lockfile::DriftStatus::Fresh
     );
 }
 

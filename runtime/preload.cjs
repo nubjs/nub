@@ -78,9 +78,11 @@ common.restoreCompileCacheEnv();
 // Publish process.versions.nub (self-identification marker) before user code runs.
 // Tier-independent — same call in the compat entry (preload.mjs).
 common.installVersionMarker();
-// Strip nub's own UV_THREADPOOL_SIZE so children get Node's default, and demote
-// the workers beyond Node's four on Linux. Tier-independent, like the marker.
-common.installThreadpoolPolicy();
+// Settle nub's own UV_THREADPOOL_SIZE at the first loop turn, so a program can still
+// set its own before it first uses the pool; then strip it so children get Node's
+// default, and demote the workers beyond Node's four on Linux. `true`: nothing has
+// used the pool yet on this tier (preload.mjs settles at once).
+common.installThreadpoolPolicy(true);
 // Consume the launcher's fetch-handler marker BEFORE any user code — the configured
 // preload chain below included — and note which entry it names. Arming the pass
 // itself waits for the end of this file (`installServeEntry`).

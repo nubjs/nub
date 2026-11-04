@@ -27,7 +27,7 @@ use crate::local_source::{
 use crate::locked_index::LockedIndex;
 use crate::package_ext::{
     apply_package_extensions, apply_package_extensions_to_deps, package_selector_matches,
-    pick_override_spec,
+    pick_catalog_override_spec, pick_override_spec,
 };
 use crate::semver_util::{
     AgeGateCause, PickResult, Regime, classify_regime, pick_version, range_resolves_via_dist_tag,
@@ -1808,6 +1808,7 @@ impl<'a> ResolveDriver<'a> {
                     }
                     m
                 },
+                declared_dependencies_known: true,
                 license: version_meta.license.clone(),
                 funding_url: version_meta.funding_url.clone(),
                 optional: false,
@@ -2346,6 +2347,7 @@ impl<'a> ResolveDriver<'a> {
                         v
                     },
                     declared_dependencies: declared,
+                    declared_dependencies_known: true,
                     ..Default::default()
                 },
             );
@@ -2548,11 +2550,26 @@ impl<'a> ResolveDriver<'a> {
         // loop, so overrides can still target a catalog dep by bare
         // name. The raw `catalog:...` text stays in `original_specifier`;
         // the separate lockfile field changes only if an override fires.
+        //
+        // The override, though, is decided against that raw text, never the
+        // catalog's range: pnpm overrides the manifest before it resolves
+        // catalogs. So a range-keyed selector (`foo@^1`) leaves a `catalog:`
+        // dependency alone, and once the reference stands no override is
+        // tried again on what it expanded to.
+        let mut catalog_override = None;
+        let mut catalog_reference_stands = false;
         if let Some((catalog_name, real_range)) = self
             .resolver
             .resolve_catalog_spec(&task.name, &task.range)?
         {
             tracing::trace!("catalog: {} {} -> {}", task.name, task.range, real_range);
+            catalog_override = pick_catalog_override_spec(
+                &self.resolver.override_rules,
+                &task.name,
+                &task.range,
+                &task.ancestors,
+            );
+            catalog_reference_stands = catalog_override.is_none();
             self.catalog_picks
                 .entry(catalog_name)
                 .or_default()
@@ -2562,12 +2579,17 @@ impl<'a> ResolveDriver<'a> {
 
         for _ in 0..2 {
             let mut changed = false;
-            if let Some(override_spec) = pick_override_spec(
-                &self.resolver.override_rules,
-                &task.name,
-                &task.range,
-                &task.ancestors,
-            ) {
+            let picked = match catalog_override.take() {
+                Some(spec) => Some(spec),
+                None if catalog_reference_stands => None,
+                None => pick_override_spec(
+                    &self.resolver.override_rules,
+                    &task.name,
+                    &task.range,
+                    &task.ancestors,
+                ),
+            };
+            if let Some(override_spec) = picked {
                 // pnpm's removal marker: an override value of `"-"`
                 // drops the dep edge entirely. Skip before
                 // catalog/alias rewrites so `-` never reaches the
@@ -3121,6 +3143,7 @@ impl<'a> ResolveDriver<'a> {
                     engines: locked_pkg.engines.clone(),
                     bin: locked_pkg.bin.clone(),
                     declared_dependencies: locked_pkg.declared_dependencies.clone(),
+                    declared_dependencies_known: locked_pkg.declared_dependencies_known,
                     license: locked_pkg.license.clone(),
                     funding_url: locked_pkg.funding_url.clone(),
                     extra_meta: locked_pkg.extra_meta.clone(),
