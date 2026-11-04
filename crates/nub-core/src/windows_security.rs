@@ -111,10 +111,14 @@ const TOKEN_USER_CLASS: i32 = 1;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 
 const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+const ACCESS_DENIED_ACE_TYPE: u8 = 1;
 const ACCESS_ALLOWED_COMPOUND_ACE_TYPE: u8 = 4;
 const ACCESS_ALLOWED_OBJECT_ACE_TYPE: u8 = 5;
+const ACCESS_DENIED_OBJECT_ACE_TYPE: u8 = 6;
 const ACCESS_ALLOWED_CALLBACK_ACE_TYPE: u8 = 9;
+const ACCESS_DENIED_CALLBACK_ACE_TYPE: u8 = 10;
 const ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE: u8 = 11;
+const ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE: u8 = 12;
 const ACE_OBJECT_TYPE_PRESENT: u32 = 0x1;
 const ACE_INHERITED_OBJECT_TYPE_PRESENT: u32 = 0x2;
 const INHERIT_ONLY_ACE: u8 = 0x08;
@@ -134,6 +138,14 @@ const FILE_ADD_SUBDIRECTORY: u32 = 0x0000_0004;
 const FILE_WRITE_EA: u32 = 0x0000_0010;
 const FILE_DELETE_CHILD: u32 = 0x0000_0040;
 const FILE_WRITE_ATTRIBUTES: u32 = 0x0000_0100;
+/// `FILE_ALL_ACCESS`, what `GENERIC_ALL` maps to on a file object.
+const FILE_ALL_ACCESS: u32 = 0x001F_01FF;
+/// The write-class rights `GENERIC_WRITE` maps to on a file object.
+const FILE_GENERIC_WRITE_RIGHTS: u32 =
+    FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES;
+/// Every right that lets a principal change a directory, its entries or its DACL.
+const WRITE_CLASS: u32 =
+    DELETE | WRITE_DAC | WRITE_OWNER | FILE_DELETE_CHILD | FILE_GENERIC_WRITE_RIGHTS;
 
 struct LocalAllocation(*mut c_void);
 impl Drop for LocalAllocation {
@@ -266,6 +278,11 @@ pub(crate) fn create_shared_directory(path: &Path) -> io::Result<()> {
     create_directory_with_sddl(path, "D:P(A;OICI;FA;;;WD)")
 }
 
+#[cfg(test)]
+pub(crate) fn create_directory_with_dacl(path: &Path, sddl: &str) -> io::Result<()> {
+    create_directory_with_sddl(path, sddl)
+}
+
 fn create_directory_with_sddl(path: &Path, sddl: &str) -> io::Result<()> {
     let sddl: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
     let mut descriptor = ptr::null_mut();
@@ -296,7 +313,148 @@ fn create_directory_with_sddl(path: &Path, sddl: &str) -> io::Result<()> {
 }
 
 pub fn directory_is_stable(path: &Path, leaf: bool, volume_root: bool) -> io::Result<bool> {
+    dacl_is_stable(path, leaf, volume_root, None)
+}
+
+/// The write-class rights each principal holds on the user's profile directory
+/// itself, read from its allow ACEs that are not inherit-only. A principal holding a
+/// right there already controls every directory below the profile, so the same
+/// right granted to it further down adds nothing.
+///
+/// Any deny ACE on the profile that covers a write-class right, for any SID,
+/// credits nobody. A deny to a group the principal belongs to takes the right away
+/// from it on the profile, and telling which principals a group covers needs their
+/// tokens, so the exception is dropped rather than modelled. Profiles rarely carry
+/// one, and the Codex sandbox grant of #908 is an allow.
+pub struct ProfileGrants {
+    _descriptor: LocalAllocation,
+    grants: Vec<(Sid, u32)>,
+}
+
+impl ProfileGrants {
+    pub fn read(profile: &Path) -> io::Result<Self> {
+        let (descriptor, _owner, dacl) = owner_and_dacl(profile)?;
+        let mut grants: Vec<(Sid, u32)> = Vec::new();
+        if !dacl.is_null() {
+            for ace in aces(dacl)? {
+                let Some(ace) = ace? else { continue };
+                let rights = specific_rights(ace.mask) & WRITE_CLASS;
+                if ace.kind == AceKind::Deny && rights != 0 {
+                    grants.clear();
+                    break;
+                }
+                if ace.kind != AceKind::Allow || ace.flags & INHERIT_ONLY_ACE != 0 {
+                    continue;
+                }
+                match grants
+                    .iter_mut()
+                    .find(|(sid, _)| unsafe { EqualSid(*sid, ace.sid) } != 0)
+                {
+                    Some((_, mask)) => *mask |= rights,
+                    None => grants.push((ace.sid, rights)),
+                }
+            }
+        }
+        Ok(Self {
+            _descriptor: descriptor,
+            grants,
+        })
+    }
+
+    fn holds(&self, sid: Sid, rights: u32) -> bool {
+        self.grants
+            .iter()
+            .any(|(granted, mask)| unsafe { EqualSid(*granted, sid) } != 0 && rights & !mask == 0)
+    }
+}
+
+/// [`directory_is_stable`] for a directory between the user's profile and a cache
+/// base. A write-class right held here by an untrusted principal is accepted only
+/// when that principal already holds the same right on the profile itself (see
+/// [`ProfileGrants`]), whether the ACE here is explicit or inherited. A grant that
+/// exists only below the profile, explicit or materialized from an inherit-only
+/// template on the profile, gives its holder control of the cache it would not
+/// otherwise have, so it is refused.
+pub fn directory_is_stable_below_profile(path: &Path, profile: &ProfileGrants) -> io::Result<bool> {
+    dacl_is_stable(path, false, false, Some(profile))
+}
+
+fn dacl_is_stable(
+    path: &Path,
+    leaf: bool,
+    volume_root: bool,
+    profile: Option<&ProfileGrants>,
+) -> io::Result<bool> {
     let current = current_user_sid()?;
+    let (_descriptor, owner, dacl) = owner_and_dacl(path)?;
+    // The volume root cannot itself be renamed. Its DACL still must prevent
+    // an untrusted principal from deleting/replacing the next component, but
+    // Windows installations may assign the root to TrustedInstaller rather
+    // than SYSTEM/Administrators.
+    if owner.is_null() || (!volume_root && !trusted_sid(owner, current.sid)) || dacl.is_null() {
+        return Ok(false);
+    }
+
+    let mut dangerous =
+        DELETE | WRITE_DAC | WRITE_OWNER | FILE_DELETE_CHILD | GENERIC_WRITE | GENERIC_ALL;
+    if leaf {
+        dangerous |= FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES;
+    }
+    for ace in aces(dacl)? {
+        let Some(ace) = ace? else {
+            // An allow ACE too malformed to read cannot be judged.
+            return Ok(false);
+        };
+        if ace.kind == AceKind::Deny {
+            continue;
+        }
+        // An INHERIT_ONLY ACE is a template, never consulted when checking access
+        // to the object carrying it — only when composing a child's DACL. On an
+        // ANCESTOR that makes it irrelevant here: the walk visits every component,
+        // so wherever the ACE actually propagates it is examined as an effective
+        // ACE there, and a component that blocks inheritance stops it outright.
+        // Counting it is what refused `C:\` on stock Windows, whose volume root
+        // always carries `Authenticated Users:(OI)(CI)(IO)(M)` — that rejected the
+        // first component of every chain, so no runtime-cache or compiled-artifact
+        // base was usable on any Windows machine. The LEAF still counts them: its
+        // children are the cache CONTENTS, which no later component validates, so
+        // an inherit-only grant there does reach the files we are protecting.
+        if !leaf && ace.flags & INHERIT_ONLY_ACE != 0 {
+            continue;
+        }
+        if ace.mask & dangerous == 0 {
+            continue;
+        }
+        // Compound allow ACEs have a different SID layout and are obsolete.
+        // A mutating one is not a cache-compatible ACL.
+        if ace.kind == AceKind::Compound {
+            return Ok(false);
+        }
+        if trusted_sid(ace.sid, current.sid) {
+            continue;
+        }
+        let rights = specific_rights(ace.mask) & WRITE_CLASS;
+        if profile.is_some_and(|profile| profile.holds(ace.sid, rights)) {
+            continue;
+        }
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// Map the generic bits of an access mask to the file-object rights they stand for.
+fn specific_rights(mask: u32) -> u32 {
+    let mut rights = mask & !(GENERIC_ALL | GENERIC_WRITE);
+    if mask & GENERIC_ALL != 0 {
+        rights |= FILE_ALL_ACCESS;
+    }
+    if mask & GENERIC_WRITE != 0 {
+        rights |= FILE_GENERIC_WRITE_RIGHTS;
+    }
+    rights
+}
+
+fn owner_and_dacl(path: &Path) -> io::Result<(LocalAllocation, Sid, *mut Acl)> {
     let path = wide_path(path);
     let mut owner = ptr::null_mut();
     let mut dacl = ptr::null_mut();
@@ -316,86 +474,79 @@ pub fn directory_is_stable(path: &Path, leaf: bool, volume_root: bool) -> io::Re
     if status != 0 {
         return Err(io::Error::from_raw_os_error(status as i32));
     }
-    let _descriptor = LocalAllocation(descriptor);
-    // The volume root cannot itself be renamed. Its DACL still must prevent
-    // an untrusted principal from deleting/replacing the next component, but
-    // Windows installations may assign the root to TrustedInstaller rather
-    // than SYSTEM/Administrators.
-    if owner.is_null() || (!volume_root && !trusted_sid(owner, current.sid)) || dacl.is_null() {
-        return Ok(false);
-    }
+    Ok((LocalAllocation(descriptor), owner, dacl))
+}
 
-    let acl = unsafe { &*dacl };
-    for index in 0..u32::from(acl.ace_count) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AceKind {
+    Allow,
+    Deny,
+    Compound,
+}
+
+/// One access ACE, borrowed from the security descriptor that owns its DACL.
+struct Ace {
+    kind: AceKind,
+    flags: u8,
+    mask: u32,
+    sid: Sid,
+}
+
+/// The access ACEs of `dacl`, skipping audit and other ACE types. `Ok(None)` is an
+/// access ACE too short to read, and a compound ACE carries no SID here.
+fn aces(dacl: *mut Acl) -> io::Result<impl Iterator<Item = io::Result<Option<Ace>>>> {
+    let count = u32::from(unsafe { &*dacl }.ace_count);
+    Ok((0..count).filter_map(move |index| {
         let mut raw_ace = ptr::null_mut();
         if unsafe { GetAce(dacl, index, &mut raw_ace) } == 0 || raw_ace.is_null() {
-            return Err(io::Error::last_os_error());
+            return Some(Err(io::Error::last_os_error()));
         }
         let header = unsafe { &*(raw_ace.cast::<AceHeader>()) };
-        let standard_allow = matches!(
-            header.ace_type,
-            ACCESS_ALLOWED_ACE_TYPE | ACCESS_ALLOWED_CALLBACK_ACE_TYPE
-        );
-        let object_allow = matches!(
-            header.ace_type,
-            ACCESS_ALLOWED_OBJECT_ACE_TYPE | ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE
-        );
-        if !standard_allow && !object_allow && header.ace_type != ACCESS_ALLOWED_COMPOUND_ACE_TYPE {
-            continue;
-        }
-        // An INHERIT_ONLY ACE is a template, never consulted when checking access
-        // to the object carrying it — only when composing a child's DACL. On an
-        // ANCESTOR that makes it irrelevant here: the walk visits every component,
-        // so wherever the ACE actually propagates it is examined as an effective
-        // ACE there, and a component that blocks inheritance stops it outright.
-        // Counting it is what refused `C:\` on stock Windows, whose volume root
-        // always carries `Authenticated Users:(OI)(CI)(IO)(M)` — that rejected the
-        // first component of every chain, so no runtime-cache or compiled-artifact
-        // base was usable on any Windows machine. The LEAF still counts them: its
-        // children are the cache CONTENTS, which no later component validates, so
-        // an inherit-only grant there does reach the files we are protecting.
-        if !leaf && header.ace_flags & INHERIT_ONLY_ACE != 0 {
-            continue;
-        }
-        if usize::from(header.ace_size) < 8 {
-            return Ok(false);
+        let (kind, object) = match header.ace_type {
+            ACCESS_ALLOWED_ACE_TYPE | ACCESS_ALLOWED_CALLBACK_ACE_TYPE => (AceKind::Allow, false),
+            ACCESS_ALLOWED_OBJECT_ACE_TYPE | ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE => {
+                (AceKind::Allow, true)
+            }
+            ACCESS_DENIED_ACE_TYPE | ACCESS_DENIED_CALLBACK_ACE_TYPE => (AceKind::Deny, false),
+            ACCESS_DENIED_OBJECT_ACE_TYPE | ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE => {
+                (AceKind::Deny, true)
+            }
+            ACCESS_ALLOWED_COMPOUND_ACE_TYPE => (AceKind::Compound, false),
+            _ => return None,
+        };
+        let size = usize::from(header.ace_size);
+        if size < 8 {
+            return Some(Ok(None));
         }
         let bytes = raw_ace.cast::<u8>();
         let mask = unsafe { ptr::read_unaligned(bytes.add(4).cast::<u32>()) };
-        let mut dangerous =
-            DELETE | WRITE_DAC | WRITE_OWNER | FILE_DELETE_CHILD | GENERIC_WRITE | GENERIC_ALL;
-        if leaf {
-            dangerous |=
-                FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES;
-        }
-        if mask & dangerous == 0 {
-            continue;
-        }
-        // Compound allow ACEs have a different SID layout and are obsolete.
-        // A mutating one is not a cache-compatible ACL.
-        if header.ace_type == ACCESS_ALLOWED_COMPOUND_ACE_TYPE {
-            return Ok(false);
-        }
-
-        let sid_offset = if standard_allow {
-            8
-        } else {
-            if usize::from(header.ace_size) < 12 {
-                return Ok(false);
+        let sid_offset = if kind == AceKind::Compound {
+            return Some(Ok(Some(Ace {
+                kind,
+                flags: header.ace_flags,
+                mask,
+                sid: ptr::null_mut(),
+            })));
+        } else if object {
+            if size < 12 {
+                return Some(Ok(None));
             }
             let flags = unsafe { ptr::read_unaligned(bytes.add(8).cast::<u32>()) };
             12 + usize::from(flags & ACE_OBJECT_TYPE_PRESENT != 0) * 16
                 + usize::from(flags & ACE_INHERITED_OBJECT_TYPE_PRESENT != 0) * 16
+        } else {
+            8
         };
-        if sid_offset >= usize::from(header.ace_size) {
-            return Ok(false);
+        if sid_offset >= size {
+            return Some(Ok(None));
         }
-        let sid = unsafe { bytes.add(sid_offset).cast::<c_void>() };
-        if !trusted_sid(sid, current.sid) {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+        Some(Ok(Some(Ace {
+            kind,
+            flags: header.ace_flags,
+            mask,
+            sid: unsafe { bytes.add(sid_offset).cast::<c_void>() },
+        })))
+    }))
 }
 
 fn current_user_sid() -> io::Result<CurrentUserSid> {

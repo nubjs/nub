@@ -62,13 +62,14 @@ using pnpm@11.5.3
     { name: "pnpm", version: "^11.5.3", onFail: "warn" }
   pnpm-lock.yaml: written (converted from package-lock.json)
   package-lock.json: removed (migrated)
+  pnpm-lock.yaml: packageManagerDependencies = pnpm@11.5.3 (+integrity)
 ```
 
 It writes three things, and rerunning it is a no-op:
 
 - **`package.json#/packageManager`** — the exact version plus a `+sha512` hash from the verified tarball, the field corepack, pnpm, and turbo read
 - **`package.json#/devEngines/packageManager`** — `{ name, version: "^<exact>", onFail: "warn" }`, the range-and-policy form npm and pnpm enforce
-- **The lockfile, in the new manager's format** — a lockfile in another format is converted with its resolution state and the old file removed; one already in the target format is left alone
+- **The lockfile, in the new manager's format** — a lockfile in another format is converted with its resolution state and the old file removed; one already in the target format is left alone. For pnpm 11 and later, the pinned pnpm is also recorded in the lockfile's `packageManagerDependencies`, which pnpm's frozen install requires
 
 The converted lockfile passes the new manager's frozen install, such as `pnpm install --frozen-lockfile`.
 

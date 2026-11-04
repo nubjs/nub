@@ -265,6 +265,25 @@ pub(super) fn spawn_gvs_prewarm(
     tokio::spawn(run_gvs_prewarm_materializer(inputs, rx))
 }
 
+/// [`spawn_gvs_prewarm`], or a consumer that only drains `rx` while a
+/// virtual-store mode reset is pending: the prewarm would write into the old
+/// tree the reset is about to delete (through its symlinks into the shared
+/// store, in the GVS-on → off direction). The link phase materializes
+/// serially instead and computes the graph hashes itself.
+pub(super) fn spawn_gvs_prewarm_unless_reset_pending(
+    reset_pending: bool,
+    inputs: GvsPrewarmInputs,
+    mut rx: tokio::sync::mpsc::Receiver<(String, aube_store::PackageIndex)>,
+) -> MaterializeJoinHandle {
+    if !reset_pending {
+        return spawn_gvs_prewarm(inputs, rx);
+    }
+    tokio::spawn(async move {
+        while rx.recv().await.is_some() {}
+        Ok((aube_linker::LinkStats::default(), None))
+    })
+}
+
 /// When the fetch task fails the surfaced error is often just
 /// "materializer task exited before fetch finished" — a symptom of the
 /// materializer dying first (its `rx` was dropped, fetch's `tx.send`

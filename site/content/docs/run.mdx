@@ -122,6 +122,8 @@ nub run --filter '!@org/legacy' build  # exclude a package
 nub run --filter @org/api --filter @org/web build  # union of both
 ```
 
+A path selector is a glob over package directories, resolved from the current directory: `./packages/*` selects every package directly under `packages`, `./packages/**` every package at any depth below it, and `./packages` only a package whose directory is `packages` itself.
+
 The `...` forms walk the dependency graph:
 
 ```bash

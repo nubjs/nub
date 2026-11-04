@@ -172,6 +172,158 @@ fn recursive_run_propagates_a_real_script_failure() {
     );
 }
 
+/// `run --filter` reads selectors as every PM verb does (pnpm's grammar): a
+/// directory selector is a glob over project directories, and the root is a
+/// candidate that a selection no inclusion selector pins leaves out.
+#[test]
+fn run_filter_selects_by_directory_glob_and_treats_the_root_as_pnpm_does() {
+    let root = script_workspace("dir-glob");
+    write(
+        &root.join("package.json"),
+        r#"{"name":"e2e-root","private":true,"workspaces":["packages/*"],"scripts":{"build":"echo BUILD:e2e-root"}}"#,
+    );
+    let built = |args: &[&str]| {
+        let (stdout, stderr, code) = run_nub(&root, args);
+        assert_eq!(code, 0, "nub {args:?} failed\n{stdout}{stderr}");
+        let mut names: Vec<String> = stdout
+            .lines()
+            .filter_map(|line| line.split("BUILD:").nth(1))
+            .map(|name| name.trim().to_string())
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(
+        built(&["run", "--filter", "./packages/*", "build"]),
+        ["api", "utils", "web"]
+    );
+    assert_eq!(
+        built(&["run", "--filter", "{packages/[aw]*}", "build"]),
+        ["api", "web"]
+    );
+    // No project sits at `packages` itself.
+    assert!(built(&["run", "--filter", "./packages", "build"]).is_empty());
+    assert_eq!(built(&["run", "-r", "build"]), ["api", "utils", "web"]);
+    assert_eq!(
+        built(&["run", "--filter", "!api", "build"]),
+        ["utils", "web"]
+    );
+    assert_eq!(
+        built(&["run", "--filter", "*", "build"]),
+        ["api", "e2e-root", "utils", "web"]
+    );
+    assert_eq!(built(&["run", "--filter", ".", "build"]), ["e2e-root"]);
+}
+
+/// The packages a `build` run in `dir` reached, sorted.
+fn built_in(dir: &Path, args: &[&str]) -> Vec<String> {
+    let (stdout, stderr, code) = run_nub(dir, args);
+    assert_eq!(code, 0, "nub {args:?} failed\n{stdout}{stderr}");
+    let mut names: Vec<String> = stdout
+        .lines()
+        .filter_map(|line| line.split("BUILD:").nth(1))
+        .map(|name| name.trim().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+/// pnpm's `[<since>]` compares against the working tree, so unstaged and
+/// staged edits count, and a `{dir}` part narrows the diff by glob.
+#[test]
+fn a_changed_since_selector_sees_uncommitted_edits_and_globs_its_directory() {
+    let root = script_workspace("changed-since");
+    write(
+        &root.join("package.json"),
+        r#"{"name":"e2e-root","private":true,"workspaces":["packages/*"],"scripts":{"build":"echo BUILD:e2e-root"}}"#,
+    );
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "init"]);
+    write(&root.join("packages/api/src.txt"), "unstaged");
+    git(&["add", "-N", "packages/api/src.txt"]);
+    write(&root.join("packages/utils/src.txt"), "staged");
+    git(&["add", "packages/utils/src.txt"]);
+    write(&root.join("notes.txt"), "root");
+    git(&["add", "notes.txt"]);
+
+    assert_eq!(
+        built_in(&root, &["run", "--filter", "[HEAD]", "build"]),
+        ["api", "e2e-root", "utils"]
+    );
+    assert_eq!(
+        built_in(&root, &["run", "--filter", "{./packages/*}[HEAD]", "build"]),
+        ["api", "utils"]
+    );
+}
+
+/// A directory selector resolves against the project the command runs in,
+/// the nearest `package.json` at or above the cwd, as pnpm's does, for the
+/// package-manager verbs as well as `run`.
+#[test]
+fn filter_paths_resolve_from_the_current_project() {
+    let root = script_workspace("from-member");
+    write(
+        &root.join("dep/package.json"),
+        r#"{"name":"dep","version":"1.0.0"}"#,
+    );
+    for member in ["api", "web"] {
+        write(
+            &root.join(format!("packages/{member}/package.json")),
+            &format!(
+                r#"{{"name":"{member}","version":"1.0.0","dependencies":{{"dep":"file:../../dep"}},"scripts":{{"build":"echo BUILD:{member}"}}}}"#
+            ),
+        );
+    }
+    let src = root.join("packages/api/src");
+    std::fs::create_dir_all(&src).unwrap();
+    assert_eq!(built_in(&src, &["run", "--filter", ".", "build"]), ["api"]);
+    assert!(built_in(&src, &["run", "--filter", "..", "build"]).is_empty());
+    let (stdout, stderr, code) = run_nub(&src, &["install", "--filter", "."]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(
+        root.join("packages/api/node_modules/dep").exists(),
+        "`.` names the member the install ran in"
+    );
+    assert!(!root.join("packages/web/node_modules/dep").exists());
+}
+
+/// `pnpm-workspace.yaml` is pnpm's, so a workspace another manager owns
+/// ignores one, here malformed, when it selects packages.
+#[test]
+fn a_stray_pnpm_workspace_yaml_leaves_an_npm_workspace_selection_alone() {
+    let root = script_workspace("stray-pnpm-yaml");
+    write(
+        &root.join("package-lock.json"),
+        r#"{"name":"e2e-root","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{}}"#,
+    );
+    write(&root.join("pnpm-workspace.yaml"), "packages: [\n");
+    assert_eq!(
+        built_in(&root, &["run", "-r", "build"]),
+        ["api", "utils", "web"]
+    );
+}
+
 #[test]
 fn filter_matching_no_package_is_a_clean_no_op() {
     let root = script_workspace("no-match-filter");

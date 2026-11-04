@@ -65,7 +65,7 @@ What the env gate DOES protect: **runner-side relocation flows** — node_module
 - *False positives dominate:* most backend/service repos carry a Dockerfile, but the installs that run are mostly NOT the image build — local dev installs and CI test-job installs on the runner. Presence-gating would turn GVS off for all of them, gutting the default exactly where it pays (local dev). Scoped to CI-only it is redundant with the existing `CI` gate.
 - *False negatives:* `Dockerfile.prod`, `docker/Dockerfile`, `-f`-specified names, compose-referenced files, image builds driven from another repo, and every non-Docker relocation flow (artifact tarballs, Lambda zips) that presence can't see.
 - *Category error:* the risk is "THIS tree is about to be relocated," which repo contents can't indicate — and the actual Docker-build install doesn't need the signal (it runs in a clean-env container where a Dockerfile-presence check inside the build context would fire, but `nub ci` is already the documented deterministic answer there).
-- *Spooky action:* GVS mode flips wipe `node_modules` and reinstall from scratch (`reset_on_mode_change`, `gvs.rs:201-239`, WARN_AUBE_GVS_MODE_CHANGED) — `git pull`-ing a commit that adds a Dockerfile would silently nuke and re-link every checkout's node_modules.
+- *Spooky action:* GVS mode flips wipe `node_modules` and reinstall from scratch (`PendingModeReset` in `gvs.rs`, WARN_AUBE_GVS_MODE_CHANGED; the wipe runs only once resolution and the pre-link checks have passed, so a failed install keeps the old tree) — `git pull`-ing a commit that adds a Dockerfile would silently nuke and re-link every checkout's node_modules.
 
 **(b) `/.dockerenv` / container detection at install time — EMPIRICALLY DEAD.** Settled by probe (2026-07-07, Docker 28.3.3, `debian:stable-slim`, `--no-cache`):
 - **BuildKit (default builder since Docker 23): `/.dockerenv` ABSENT** during `RUN`. Also absent/empty: `/run/.containerenv`, any marker env var (env is exactly `HOME`/`PATH`/`PWD`), and cgroup signal (`/proc/1/cgroup` = `0::/`, cgroup-v2 namespaced).
@@ -83,7 +83,7 @@ What the env gate DOES protect: **runner-side relocation flows** — node_module
 Real but modest, and its sharp direction is benign:
 - Resolution semantics, lockfile graph, and the isolated layout (phantom-dep protection) are IDENTICAL in both modes — the divergence is store location + the hidden hoist tree's existence.
 - The behavioral edge: GVS-on (local dev) has NO hidden hoist tree, so a phantom `require` that would be rescued by the pnpm-parity fallback fails; GVS-off (CI) builds the tree, so it may pass. I.e. **dev is stricter than CI** — a phantom-dep bug surfaces on the developer's machine first, the benign direction. The reverse (passes locally, breaks only in CI) has no known instance on this axis.
-- The genuinely sharp edge is mode FLIPPING on one checkout (`reset_on_mode_change` wipes node_modules): e.g. running `act` or a devcontainer that sets `CI` against your normal dev checkout. Rare, self-healing, and an argument for STABLE deterministic signals — i.e. for keeping `CI` + explicit config, against every heuristic in §5.
+- The genuinely sharp edge is mode FLIPPING on one checkout (`PendingModeReset` wipes node_modules): e.g. running `act` or a devcontainer that sets `CI` against your normal dev checkout. Rare, self-healing, and an argument for STABLE deterministic signals — i.e. for keeping `CI` + explicit config, against every heuristic in §5.
 
 Micro-divergence worth noting: aube keys on `CI` **presence** (`CI=false`/`CI=""` count as CI), pnpm on ci-info's `isCI` (excludes `CI=false`, adds vendor-specific detection for CIs that don't set `CI`, e.g. TeamCity/Jenkins defaults). Cosmetic in practice; see refinement (ii).
 
@@ -104,3 +104,4 @@ Every revision to this document, with the date and what changed.
 
 - 2026-07-07 — Initial write-up. Includes the BuildKit `/.dockerenv` probe (absent under BuildKit, present under the deprecated legacy builder), which retired container auto-detection.
 - 2026-08-28 — Removed references to earlier internal notes.
+- 2026-11-03 — The mode-flip wipe now runs just before linking instead of before resolution; renamed the reference from `reset_on_mode_change` to `PendingModeReset`.

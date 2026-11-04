@@ -276,7 +276,7 @@ fn check_manifest_engines(
 /// their own importer manifests. `engines.pnpm` is ignored everywhere;
 /// see the module docs.
 pub fn collect_dep_mismatches(
-    aube_dir: &Path,
+    aube_dir: Option<&Path>,
     graph: &LockfileGraph,
     indices: &BTreeMap<String, PackageIndex>,
     node_version: &str,
@@ -303,12 +303,21 @@ pub fn collect_dep_mismatches(
             // install driver threads it in via
             // `commands::resolve_virtual_store_dir` so custom
             // overrides land on the same path the linker wrote to.
-            let materialized = aube_dir
-                .join(dep_path_to_filename(dep_path, virtual_store_dir_max_length))
-                .join("node_modules")
-                .join(&pkg.name)
-                .join("package.json");
-            let content = match std::fs::read_to_string(&materialized) {
+            //
+            // `None` reads the fetched index only: the virtual store on
+            // disk is not this install's (a mode reset still pending), and a
+            // `file:` package keeps its dep_path while its contents change.
+            let materialized = aube_dir.map(|dir| {
+                dir.join(dep_path_to_filename(dep_path, virtual_store_dir_max_length))
+                    .join("node_modules")
+                    .join(&pkg.name)
+                    .join("package.json")
+            });
+            let read = match &materialized {
+                Some(path) => std::fs::read_to_string(path),
+                None => Err(std::io::ErrorKind::NotFound.into()),
+            };
+            let content = match read {
                 Ok(s) => s,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     // Fallback: CAS read via the package index, which
@@ -344,7 +353,7 @@ pub fn collect_dep_mismatches(
                         "failed to read materialized `package.json` for {}@{} at {}: {e}",
                         pkg.name,
                         pkg.version,
-                        materialized.display()
+                        materialized.as_deref().unwrap_or(Path::new("")).display()
                     ));
                 }
             };
@@ -422,7 +431,7 @@ pub fn check_workspace_importers(
 /// `engines.aube` — that one doesn't depend on Node.
 #[allow(clippy::too_many_arguments)]
 pub fn run_checks(
-    aube_dir: &Path,
+    aube_dir: Option<&Path>,
     manifest: &aube_manifest::PackageJson,
     workspace_manifests: &[(String, aube_manifest::PackageJson)],
     graph: &LockfileGraph,
@@ -725,7 +734,7 @@ mod tests {
         let indices: BTreeMap<String, PackageIndex> = BTreeMap::new();
         let aube_dir = tmp.path().join("node_modules/.aube");
         let mismatches = collect_dep_mismatches(
-            &aube_dir,
+            Some(&aube_dir),
             &graph,
             &indices,
             "18.0.0",
@@ -803,7 +812,7 @@ mod tests {
         let indices: BTreeMap<String, PackageIndex> = BTreeMap::new();
         let aube_dir = tmp.path().join("node_modules/.aube");
         let result = collect_dep_mismatches(
-            &aube_dir,
+            Some(&aube_dir),
             &graph,
             &indices,
             "18.0.0",
