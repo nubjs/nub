@@ -445,6 +445,46 @@ EOF
 	assert_output --partial 'is-even:'
 }
 
+@test "aube update -r bumps a caret catalog entry to the resolved version" {
+	# pnpm 10 and 11 floor-bump a `^` catalog entry the way they bump a
+	# plain `^` range; an exact entry stays put.
+	# `-r` resolves from each member's directory, and a member reads only
+	# its own `.npmrc`, so point every member at the fixture registry.
+	export npm_config_registry="$AUBE_TEST_REGISTRY"
+	mkdir -p packages/a packages/b
+	cat >pnpm-workspace.yaml <<'YAML'
+packages:
+  - packages/*
+catalog:
+  '@pnpm.e2e/foo': 100.0.0
+  '@pnpm.e2e/bar': 100.0.0
+YAML
+	echo '{"name":"root","private":true}' >package.json
+	for pkg in a b; do
+		echo "{\"name\":\"$pkg\",\"version\":\"1.0.0\",\"dependencies\":{\"@pnpm.e2e/foo\":\"catalog:\",\"@pnpm.e2e/bar\":\"catalog:\"}}" >"packages/$pkg/package.json"
+	done
+	run aube install --lockfile-only
+	assert_success
+	sed -i.bak "s|'@pnpm.e2e/foo': 100.0.0|'@pnpm.e2e/foo': ^100.0.0|" pnpm-workspace.yaml
+	run aube install --lockfile-only
+	assert_success
+	run grep '@pnpm.e2e/foo@100.0.0' pnpm-lock.yaml
+	assert_success
+
+	run aube update -r @pnpm.e2e/foo @pnpm.e2e/bar --lockfile-only
+	assert_success
+
+	run grep "'@pnpm.e2e/foo': ^100.1.0" pnpm-workspace.yaml
+	assert_success
+	run grep "'@pnpm.e2e/bar': 100.0.0" pnpm-workspace.yaml
+	assert_success
+	run grep -A8 '^catalogs:' pnpm-lock.yaml
+	assert_output --partial 'specifier: ^100.1.0'
+	assert_output --partial 'version: 100.1.0'
+	run grep '@pnpm.e2e/bar@100.1.0' pnpm-lock.yaml
+	assert_failure
+}
+
 @test "aube update -r skips deferred install when no importer updates" {
 	_setup_catalog_update_workspace
 
