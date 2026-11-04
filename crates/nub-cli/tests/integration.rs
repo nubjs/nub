@@ -2470,6 +2470,35 @@ fn temporal_lazy_global_and_import() {
 }
 
 #[test]
+fn package_clobber_applies_to_import_only() {
+    // The import clobber resolves to a data: URL, which the CommonJS loader reads
+    // as a file path (ENOENT). On the fast tier the resolve hook also sees
+    // require(), so it must leave that call to Node's resolver.
+    let (stdout, stderr, code) = run_nub("clobber-require", "main.cjs");
+    assert_eq!(
+        code, 0,
+        "require of a clobbered package must load it: {stderr}"
+    );
+    assert!(
+        stdout.contains("require-temporal:2026"),
+        "the installed package answered the require: {stdout}"
+    );
+
+    // A user-added "require" condition rides on imports too, so it must not be
+    // what tells a require() from an import.
+    let (stdout, stderr, code) = run_nub_with_env(
+        "clobber-require",
+        "import.mjs",
+        &[("NODE_OPTIONS", "--conditions=require")],
+    );
+    assert_eq!(code, 0, "import under --conditions=require: {stderr}");
+    assert!(
+        stdout.contains("import-is-global:true"),
+        "an import keeps the clobber under --conditions=require: {stdout}"
+    );
+}
+
+#[test]
 fn urlpattern_available() {
     // URLPattern is available under nub. A39 feature-detects before requiring
     // the polyfill: native on Node 24+ (the polyfill is skipped), polyfilled on
