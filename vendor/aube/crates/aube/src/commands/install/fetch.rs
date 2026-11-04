@@ -622,17 +622,23 @@ where
     // grouping the loads means the verification runs a single time no
     // matter how many placements share the package. Packages that will
     // take the already-linked shortcut never needed a load, so they
-    // are excluded here to keep the shortcut's zero-read behavior.
-    let needs_check: Vec<bool> = packages
-        .iter()
-        .map(|(dep_path, pkg)| {
+    // are excluded here to keep the shortcut's zero-read behavior. The
+    // shortcut test is a `read_link` + `exists` per package, so it stays
+    // on rayon like the per-dep_path check it was hoisted out of.
+    let packages_refs: Vec<(&String, &aube_lockfile::LockedPackage)> = packages.iter().collect();
+    let needs_check: Vec<bool> = packages_refs
+        .par_iter()
+        .map(|&(dep_path, pkg)| {
             if pkg.local_source.is_some() {
                 return false;
             }
             match already_linked_shortcut {
+                // `force_index_dep_paths` is the project-local closure the
+                // linker materializes as real directories rather than
+                // shared-store symlinks, so its freshness test is a
+                // different one; those always take the verified path.
                 Some(plan) if !force_index_dep_paths.contains(dep_path) => {
-                    let entry_name =
-                        dep_path_to_filename(dep_path, virtual_store_dir_max_length);
+                    let entry_name = dep_path_to_filename(dep_path, virtual_store_dir_max_length);
                     let entry = aube_dir.join(&entry_name);
                     !plan.entry_is_current(&entry, dep_path, virtual_store_dir_max_length)
                 }
@@ -643,7 +649,7 @@ where
     let mut store_keys: Vec<(&str, &str, Option<&str>)> = Vec::new();
     let mut seen_keys: std::collections::HashSet<(&str, &str, Option<&str>)> =
         std::collections::HashSet::new();
-    for ((_, pkg), needs) in packages.iter().zip(&needs_check) {
+    for (&(_, pkg), &needs) in packages_refs.iter().zip(&needs_check) {
         if !needs {
             continue;
         }
@@ -652,11 +658,7 @@ where
         if read_key.is_none() {
             continue;
         }
-        let key = (
-            pkg.registry_name(),
-            pkg.version.as_str(),
-            read_key,
-        );
+        let key = (pkg.registry_name(), pkg.version.as_str(), read_key);
         if seen_keys.insert(key) {
             store_keys.push(key);
         }
@@ -664,15 +666,8 @@ where
     let verified: HashMap<(&str, &str, Option<&str>), Option<aube_store::PackageIndex>> =
         store_keys
             .par_iter()
-            .map(|key| {
-                (
-                    *key,
-                    super::warm_load_index(store, key.0, key.1, key.2),
-                )
-            })
+            .map(|key| (*key, super::warm_load_index(store, key.0, key.1, key.2)))
             .collect();
-
-    let packages_refs: Vec<(&String, &aube_lockfile::LockedPackage)> = packages.iter().collect();
 
     // Parallel index check (rayon)
     let check_results: Vec<_> = packages_refs
@@ -680,10 +675,6 @@ where
         .enumerate()
         .filter(|(_, (_, pkg))| pkg.local_source.is_none())
         .map(|(i, (dep_path, pkg))| {
-            // `force_index_dep_paths` is the project-local closure the
-            // linker materializes as real directories rather than
-            // shared-store symlinks, so its freshness test is a
-            // different one; those always take the verified path.
             if !needs_check[i] {
                 return (dep_path.to_string(), pkg, CheckResult::AlreadyLinked);
             }
@@ -721,11 +712,7 @@ where
             // the same size as a single pass: every dep_path of one
             // store entry now sees the same verified snapshot.
             let read_key = warm_read_key(pkg, &no_integrity_index);
-            let key = (
-                pkg.registry_name(),
-                pkg.version.as_str(),
-                read_key,
-            );
+            let key = (pkg.registry_name(), pkg.version.as_str(), read_key);
             match verified.get(&key).cloned().flatten() {
                 Some(index) => (dep_path.to_string(), pkg, CheckResult::Cached(index)),
                 None => (dep_path.to_string(), pkg, CheckResult::NeedsFetch),

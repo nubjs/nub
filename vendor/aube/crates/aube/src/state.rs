@@ -2409,8 +2409,8 @@ mod tests {
         hash_settings, install_state_file, member_lockfiles_stale, new_workspace_member,
         preview_list, read_hoisted_placements, read_or_migrate_fresh_state, read_state,
         read_state_startup_snapshot, relative_path_or_original,
-        release_policy_changed_since_last_run, remove_state, state_dir,
-        verify_install_layout, write_hoisted_placements, write_state,
+        release_policy_changed_since_last_run, remove_state, state_dir, verify_install_layout,
+        write_hoisted_placements, write_state,
     };
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
