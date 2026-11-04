@@ -477,13 +477,21 @@ pub struct NativeAddons {
     forced_unbundled: Vec<String>,
     /// Which of those are shipped: reached by the resolver or inside a closure, or
     /// resolved from the entry when nothing reached them — see
-    /// [`Self::unreferenced_roots`] and [`Self::unreached_forced_unbundled`].
+    /// [`Self::unreached_forced_roots`] and [`Self::unreached_forced_unbundled`].
     forced_seen: Mutex<BTreeSet<String>>,
     /// Names the user forced into the bundle, overriding the manifest rules.
     forced_bundled: Vec<String>,
     /// String-literal pino transport targets in bundled code, with the module
     /// that named each — see [`transport_targets`].
     transport_targets: Mutex<BTreeSet<(String, String)>>,
+    /// Every package shipped VERBATIM: where it lands, and its directory. Its code
+    /// runs from that placement, so a transport target it names is resolved from
+    /// there — see [`Self::transport_roots`].
+    verbatim_members: Mutex<BTreeSet<(String, PathBuf)>>,
+    /// Every package any closure materialised, roots and members alike. Whether
+    /// pino ships is read from this, not from the roots: a wrapper that carries
+    /// pino in its closure ships it just the same.
+    shipped_names: Mutex<BTreeSet<String>>,
 }
 
 impl NativeAddons {
@@ -503,6 +511,8 @@ impl NativeAddons {
             forced_unbundled,
             forced_bundled,
             transport_targets: Mutex::new(BTreeSet::new()),
+            verbatim_members: Mutex::new(BTreeSet::new()),
+            shipped_names: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -544,6 +554,7 @@ impl NativeAddons {
         &self,
         root: &Path,
         anchor: &Path,
+        at: Option<String>,
         files: &mut BTreeMap<String, (Vec<u8>, bool)>,
         closure: &mut super::closure::Plan,
     ) -> Result<()> {
@@ -564,7 +575,9 @@ impl NativeAddons {
         // `sharp/@img/sharp-linux-arm64/@img/sharp-libvips-…` before
         // `sharp/@img/sharp-libvips-…`, and the shallow one cannot reuse a copy
         // buried under a sibling.
-        let seed_at = store_flattened_root(root_rel).unwrap_or_else(|| payload_path(root_rel));
+        let seed_at = at.unwrap_or_else(|| {
+            store_flattened_root(root_rel).unwrap_or_else(|| payload_path(root_rel))
+        });
         let mut queue: VecDeque<(PathBuf, String, Option<String>)> =
             VecDeque::from([(root.to_path_buf(), seed_at, None)]);
         let mut seen = BTreeSet::new();
@@ -712,6 +725,7 @@ impl NativeAddons {
             }
         }
         plan_closure(&mut members, closure, files);
+        self.record_shipped(&members);
         // Asked of the whole closure for the same reason the tally is: a napi-rs
         // package puts each libc in its OWN sidecar, so no single package holds
         // both builds and a per-package answer is always "no". That shipped the
@@ -760,6 +774,7 @@ impl NativeAddons {
     fn materialise_root(
         &self,
         root: &Path,
+        at: Option<String>,
         files: &mut BTreeMap<String, (Vec<u8>, bool)>,
         closure: &mut super::closure::Plan,
     ) -> Result<()> {
@@ -775,20 +790,31 @@ impl NativeAddons {
         // canonicalized during the walk to find what they really are. The two
         // forms differing is what `placement_for` is for.
         match install_tree_root(root) {
-            Some(anchor) => self.materialise_unbundled(root, &anchor, files, closure),
+            Some(anchor) => self.materialise_unbundled(root, &anchor, at, files, closure),
             None => Ok(()),
         }
     }
 
-    /// Packages that have to ship although nothing in the graph imports them, with
-    /// the line that reports each.
-    ///
-    /// Two kinds. A `--unbundled` name nothing reached is resolved from the entry,
-    /// as a top-level import of it would be. A pino transport target is resolved
-    /// from the module that named it, which is where pino's own
-    /// `createRequire(caller).resolve(target)` looks — and only when pino itself
-    /// ships, since nothing else reads the string.
-    fn unreferenced_roots(&self, entry: &Path, roots: &[PathBuf]) -> Vec<(PathBuf, String)> {
+    /// Note what a closure shipped, for [`Self::transport_roots`].
+    fn record_shipped(&self, members: &[Member]) {
+        if let Ok(mut names) = self.shipped_names.lock() {
+            names.extend(members.iter().map(|member| member.name.clone()));
+        }
+        if let Ok(mut verbatim) = self.verbatim_members.lock() {
+            verbatim.extend(
+                members
+                    .iter()
+                    // pino's own source names targets only in its examples, and
+                    // `pino/file` is pino resolving itself.
+                    .filter(|member| member.verbatim && member.name != "pino")
+                    .map(|member| (member.rel.clone(), member.dir.clone())),
+            );
+        }
+    }
+
+    /// `--unbundled` names nothing in the build reached, resolved from the entry
+    /// as a top-level import of them would be.
+    fn unreached_forced_roots(&self, entry: &Path) -> Vec<(PathBuf, String)> {
         let mut found = Vec::new();
         if let Ok(mut seen) = self.forced_seen.lock() {
             for name in &self.forced_unbundled {
@@ -802,29 +828,125 @@ impl NativeAddons {
                 }
             }
         }
-        let pino_ships = roots.iter().any(|root| {
-            std::fs::read_to_string(root.join("package.json"))
-                .ok()
-                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-                .is_some_and(|manifest| manifest["name"] == "pino")
-        });
-        let targets = match self.transport_targets.lock() {
-            Ok(targets) if pino_ships => targets.clone(),
-            _ => BTreeSet::new(),
+        found
+    }
+
+    /// The pino transport targets to ship, each with the payload path it has to
+    /// occupy — empty unless pino itself ships.
+    ///
+    /// pino resolves a target with `createRequire(caller).resolve(target)`, from
+    /// wherever the calling code runs IN THE ARTIFACT. Bundled code runs from the
+    /// app root, so a target it names has to sit at the top-level
+    /// `node_modules/<name>` whatever nested install it resolved to in the source
+    /// tree. A verbatim package keeps its layout, so a target it names is placed
+    /// where its own lookup finds it. Bundled callers that resolved different
+    /// installs of one name cannot all be served from the root, and shipping one
+    /// of them would hand the others the wrong package, so that is refused.
+    fn transport_roots(
+        &self,
+        files: &BTreeMap<String, (Vec<u8>, bool)>,
+    ) -> Result<Vec<(PathBuf, String, String)>> {
+        if !self
+            .shipped_names
+            .lock()
+            .is_ok_and(|names| names.contains("pino"))
+        {
+            return Ok(Vec::new());
+        }
+        // Placement -> (real directory, the path it was found at, who named it).
+        let mut wanted: BTreeMap<String, (PathBuf, PathBuf, String)> = BTreeMap::new();
+        let mut want = |at: String, root: PathBuf, caller: String| -> Result<()> {
+            let real = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+            if let Some((other, _, first)) = wanted.get(&at) {
+                if *other != real {
+                    bail!(
+                        "a pino transport resolves to two different installs that would both sit at {at}:\n\
+                         \x20 {} (named in {first})\n\
+                         \x20 {} (named in {caller})\n\
+                         \x20 pino resolves a target from where its caller runs in the compiled binary,\n\
+                         \x20 which for bundled code is the root, so one caller would load the wrong\n\
+                         \x20 package. Install a single version of it.",
+                        other.display(),
+                        real.display()
+                    );
+                }
+                return Ok(());
+            }
+            wanted.insert(at, (real, root, caller));
+            Ok(())
         };
-        for (importer, target) in targets {
+        let bundled = self
+            .transport_targets
+            .lock()
+            .map(|targets| targets.clone())
+            .unwrap_or_default();
+        for (importer, target) in bundled {
             let name = super::closure::package_of(&target);
             if self.forced_bundled.iter().any(|n| n == name) {
                 continue;
             }
             if let Some(root) = resolve_package_root(Path::new(&importer), name) {
-                found.push((
-                    root,
-                    format!("{name} — it is named as a pino transport target"),
-                ));
+                want(format!("node_modules/{name}"), root, importer)?;
             }
         }
-        found
+        let verbatim = self
+            .verbatim_members
+            .lock()
+            .map(|members| members.clone())
+            .unwrap_or_default();
+        for (rel, dir) in verbatim {
+            let real = std::fs::canonicalize(&dir).unwrap_or(dir);
+            for file in super::unbundlable::loadable_code(&real).unwrap_or_default() {
+                let Ok(text) = std::fs::read_to_string(real.join(&file)) else {
+                    continue;
+                };
+                if !text.contains("transport") {
+                    continue;
+                }
+                for target in transport_targets(&text) {
+                    let name = super::closure::package_of(&target);
+                    let Some(root) = resolve_package_root(&real.join(&file), name) else {
+                        continue;
+                    };
+                    if std::fs::canonicalize(&root).is_ok_and(|target| target == real) {
+                        continue;
+                    }
+                    let real_rel = install_tree_root(&root)
+                        .and_then(|anchor| root.strip_prefix(anchor).ok().map(payload_path));
+                    let at = placement_for(&rel, real_rel.as_deref(), name);
+                    want(at, root, format!("{rel}/{file}"))?;
+                }
+            }
+        }
+        let mut found = Vec::new();
+        for (at, (real, root, caller)) in wanted {
+            // Already in the payload at that path — an import reached it, or a
+            // closure placed it. The same package there is the one pino finds; a
+            // different one would be found instead of the one the caller named.
+            if let Some((bytes, _)) = files.get(&format!("{at}/package.json")) {
+                let version = |bytes: &[u8]| {
+                    serde_json::from_slice::<serde_json::Value>(bytes)
+                        .ok()
+                        .map(|manifest| (manifest["name"].clone(), manifest["version"].clone()))
+                };
+                let wanted_manifest = std::fs::read(real.join("package.json")).unwrap_or_default();
+                if version(bytes) != version(&wanted_manifest) {
+                    bail!(
+                        "a pino transport named in {caller} resolves to {},\n\
+                         \x20 but the compiled binary already carries a different package at {at},\n\
+                         \x20 which is the one pino would load. Install a single version of it.",
+                        real.display()
+                    );
+                }
+                continue;
+            }
+            let name = at
+                .rsplit_once("node_modules/")
+                .map_or(&*at, |(_, name)| name);
+            let summary = format!("{name} — it is named as a pino transport target");
+            found.push((root, at, summary));
+        }
+        Ok(found)
     }
 
     pub fn plan_survivors(
@@ -846,7 +968,7 @@ impl NativeAddons {
         let mut closure = super::closure::Plan::default();
         let roots = self.unbundled_roots();
         for root in &roots {
-            self.materialise_root(root, &mut files, &mut closure)?;
+            self.materialise_root(root, None, &mut files, &mut closure)?;
         }
         // Only after every closure has been walked: a `--unbundled` name is marked
         // reached when it turns up INSIDE a closure, so not until then does
@@ -855,14 +977,21 @@ impl NativeAddons {
             .iter()
             .map(|root| std::fs::canonicalize(root).unwrap_or_else(|_| root.clone()))
             .collect();
-        for (root, summary) in self.unreferenced_roots(entry, &roots) {
+        for (root, summary) in self.unreached_forced_roots(entry) {
             if !shipped.insert(std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone())) {
                 continue;
             }
             if let Ok(mut unbundled) = self.unbundled.lock() {
                 unbundled.insert(root.clone(), summary);
             }
-            self.materialise_root(&root, &mut files, &mut closure)?;
+            self.materialise_root(&root, None, &mut files, &mut closure)?;
+        }
+        // Last, so that whether pino ships counts every closure above.
+        for (root, at, summary) in self.transport_roots(&files)? {
+            if let Ok(mut unbundled) = self.unbundled.lock() {
+                unbundled.insert(root.clone(), summary);
+            }
+            self.materialise_root(&root, Some(at), &mut files, &mut closure)?;
         }
 
         for seed in seeds.values() {

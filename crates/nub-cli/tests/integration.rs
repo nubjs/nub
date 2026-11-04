@@ -910,53 +910,176 @@ fn an_unbundled_packages_dependencies_are_bundled_with_their_exports_intact() {
 }
 
 /// A pino transport is named by a string and resolved by pino at run time, so no
-/// import reaches it and the bundle alone ships without it. It travels two ways:
-/// named with `--unbundled`, which resolves it from the entry, or found as a
-/// literal `target` beside a pino that ships. The stand-in `pino` resolves the
-/// target the way the real one does, `createRequire(caller).resolve(target)`, and
-/// is left unbundled by name, like the real one.
+/// import reaches it and the bundle alone ships without it. The stand-in `pino`
+/// resolves a target the way the real one does, `createRequire(caller)` from the
+/// calling module, and is left unbundled by name, like the real one. Each
+/// transport prints its own version, so every case also says WHICH copy loaded.
+///
+/// The caller's location is the point: pino resolves from where the calling code
+/// runs in the binary. Bundled code runs from the root, so a target a bundled
+/// dependency resolved to a nested install has to move there; an unbundled
+/// package keeps its layout, so a target it names stays on its own lookup path.
 #[cfg(feature = "compile")]
 #[test]
 fn a_transport_named_only_as_a_string_ships_with_the_binary() {
     let runtime = compile_test_runtime();
-    let pino = "const { createRequire } = require(\"node:module\");\n\
-                module.exports = (opts, caller) =>\n\
-                \x20 require(createRequire(caller).resolve(opts.transport.target))();\n";
-    for (case, target, flags) in [
+    let pkg = |name: &str, version: &str, deps: &str, body: &str| {
+        (
+            format!(
+                r#"{{"name":"{name}","version":"{version}","main":"index.js","dependencies":{{{deps}}}}}"#
+            ),
+            body.to_string(),
+        )
+    };
+    let pino = pkg(
+        "pino",
+        "1.0.0",
+        "",
+        "const { createRequire } = require(\"node:module\");\n\
+         module.exports = (opts, caller) =>\n\
+         \x20 require(createRequire(caller).resolve(opts.transport.target))();\n",
+    );
+    let transport = |version: &str| {
+        pkg(
+            "fake-transport",
+            version,
+            "",
+            &format!("module.exports = () => \"transport {version}\";\n"),
+        )
+    };
+    // A dependency that calls pino itself, so its code is bundled or not by the
+    // flag alone.
+    let caller = |name: &str, deps: &str| {
+        pkg(
+            name,
+            "1.0.0",
+            deps,
+            "const pino = require(\"pino\");\n\
+             module.exports = () => pino({ transport: { target: \"fake-transport\" } }, __filename);\n",
+        )
+    };
+    let literal = "import pino from \"pino\";\n\
+                   console.log(pino({ transport: { target: \"fake-transport\" } }, import.meta.url));\n";
+    // Name, packages under node_modules, entry source, flags, and either the
+    // artifact's stdout or the refusal the build must print.
+    type Case = (
+        &'static str,
+        Vec<(&'static str, (String, String))>,
+        String,
+        &'static [&'static str],
+        Result<&'static str, &'static str>,
+    );
+    let cases: Vec<Case> = vec![
         (
             "--unbundled",
-            r#"["fake", "transport"].join("-")"#,
-            &["--unbundled", "fake-transport"][..],
+            vec![
+                ("pino", pino.clone()),
+                ("fake-transport", transport("1.0.0")),
+            ],
+            "import pino from \"pino\";\n\
+             const target = [\"fake\", \"transport\"].join(\"-\");\n\
+             console.log(pino({ transport: { target } }, import.meta.url));\n"
+                .to_string(),
+            &["--unbundled", "fake-transport"],
+            Ok("transport 1.0.0"),
         ),
-        ("a literal target", r#""fake-transport""#, &[][..]),
-    ] {
+        (
+            "a literal target",
+            vec![
+                ("pino", pino.clone()),
+                ("fake-transport", transport("1.0.0")),
+            ],
+            literal.to_string(),
+            &[],
+            Ok("transport 1.0.0"),
+        ),
+        (
+            "a bundled dependency's nested install",
+            vec![
+                ("pino", pino.clone()),
+                (
+                    "holder",
+                    caller("holder", r#""pino":"*","fake-transport":"2.0.0""#),
+                ),
+                ("holder/node_modules/fake-transport", transport("2.0.0")),
+            ],
+            "import holder from \"holder\";\nconsole.log(holder());\n".to_string(),
+            &[],
+            Ok("transport 2.0.0"),
+        ),
+        (
+            "bundled callers that resolve two installs",
+            vec![
+                ("pino", pino.clone()),
+                ("fake-transport", transport("1.0.0")),
+                (
+                    "holder",
+                    caller("holder", r#""pino":"*","fake-transport":"2.0.0""#),
+                ),
+                ("holder/node_modules/fake-transport", transport("2.0.0")),
+            ],
+            format!("import holder from \"holder\";\n{literal}console.log(holder());\n"),
+            &[],
+            Err("two different installs"),
+        ),
+        (
+            "pino shipped inside an unbundled wrapper",
+            vec![
+                ("pino", pino.clone()),
+                ("fake-transport", transport("1.0.0")),
+                (
+                    "logger",
+                    pkg(
+                        "logger",
+                        "1.0.0",
+                        r#""pino":"*""#,
+                        "module.exports = require(\"pino\");\n",
+                    ),
+                ),
+            ],
+            "import logger from \"logger\";\n\
+             console.log(logger({ transport: { target: \"fake-transport\" } }, import.meta.url));\n"
+                .to_string(),
+            &["--unbundled", "logger"],
+            Ok("transport 1.0.0"),
+        ),
+        (
+            "an unbundled package's own target",
+            vec![
+                ("pino", pino.clone()),
+                ("fake-transport", transport("1.0.0")),
+                // Handed pino rather than depending on it: pino's computed
+                // require would otherwise make this closure ship whole, which
+                // carries the transport by accident.
+                (
+                    "logger",
+                    pkg(
+                        "logger",
+                        "1.0.0",
+                        r#""fake-transport":"3.0.0""#,
+                        "module.exports = (pino) =>\n\
+                         \x20 pino({ transport: { target: \"fake-transport\" } }, __filename);\n",
+                    ),
+                ),
+                ("logger/node_modules/fake-transport", transport("3.0.0")),
+            ],
+            "import pino from \"pino\";\nimport logger from \"logger\";\nconsole.log(logger(pino));\n"
+                .to_string(),
+            &["--unbundled", "logger"],
+            Ok("transport 3.0.0"),
+        ),
+    ];
+    for (case, packages, entry_source, flags, expected) in cases {
         let work = unique_test_cache();
         let modules = work.join("node_modules");
-        for (name, body) in [
-            ("pino", pino),
-            (
-                "fake-transport",
-                "module.exports = () => \"transport loaded\";\n",
-            ),
-        ] {
-            let dir = modules.join(name);
+        for (at, (manifest, body)) in packages {
+            let dir = modules.join(at);
             std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(
-                dir.join("package.json"),
-                format!(r#"{{"name":"{name}","version":"1.0.0","main":"index.js"}}"#),
-            )
-            .unwrap();
+            std::fs::write(dir.join("package.json"), manifest).unwrap();
             std::fs::write(dir.join("index.js"), body).unwrap();
         }
         let entry = work.join("app.mjs");
-        std::fs::write(
-            &entry,
-            format!(
-                "import pino from \"pino\";\n\
-                 console.log(pino({{ transport: {{ target: {target} }} }}, import.meta.url));\n"
-            ),
-        )
-        .unwrap();
+        std::fs::write(&entry, entry_source).unwrap();
         let artifact = work.join("app");
         let compiled = Command::new(nub_binary())
             .args(["compile", "--smol", "--target", &runtime.node_target])
@@ -969,11 +1092,23 @@ fn a_transport_named_only_as_a_string_ships_with_the_binary() {
             .env("__NUB_LAUNCHER_TEMPLATE", &runtime.launcher)
             .output()
             .expect("spawn nub compile");
+        let compile_stderr = String::from_utf8_lossy(&compiled.stderr).into_owned();
+        let expected_stdout = match expected {
+            Err(refusal) => {
+                let _ = std::fs::remove_dir_all(&work);
+                assert!(
+                    !compiled.status.success() && compile_stderr.contains(refusal),
+                    "{case}: the build must be refused with {refusal:?}: {compile_stderr}"
+                );
+                continue;
+            }
+            Ok(stdout) => stdout,
+        };
         assert!(
             compiled.status.success(),
-            "{case}: compile failed: {}",
-            String::from_utf8_lossy(&compiled.stderr)
+            "{case}: compile failed: {compile_stderr}"
         );
+        // Hidden, so nothing the artifact loads can come from the source tree.
         std::fs::remove_dir_all(&modules).unwrap();
         let mut run = Command::new(&artifact);
         run.current_dir(&work)
@@ -982,9 +1117,8 @@ fn a_transport_named_only_as_a_string_ships_with_the_binary() {
             run_compiled_artifact_command_with_timeout(run, std::time::Duration::from_secs(10));
         let _ = std::fs::remove_dir_all(&work);
         assert!(
-            ran.status.success()
-                && String::from_utf8_lossy(&ran.stdout).trim() == "transport loaded",
-            "{case}: the transport must ship and load\nstdout: {}\nstderr: {}",
+            ran.status.success() && String::from_utf8_lossy(&ran.stdout).trim() == expected_stdout,
+            "{case}: the artifact must print {expected_stdout:?}\nstdout: {}\nstderr: {}",
             String::from_utf8_lossy(&ran.stdout),
             String::from_utf8_lossy(&ran.stderr)
         );
