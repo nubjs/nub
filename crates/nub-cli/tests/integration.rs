@@ -909,6 +909,82 @@ fn an_unbundled_packages_dependencies_are_bundled_with_their_exports_intact() {
     }
 }
 
+/// Two unbundled packages that share a dependency each stub it with the subpaths
+/// they named. The stub has to answer both: the first closure's manifest used to
+/// win, and the second package's require died on `ERR_PACKAGE_PATH_NOT_EXPORTED`.
+#[cfg(feature = "compile")]
+#[test]
+fn two_unbundled_packages_share_a_stub_of_their_dependency() {
+    let runtime = compile_test_runtime();
+    let work = unique_test_cache();
+    let modules = work.join("node_modules");
+    for (name, deps, body) in [
+        (
+            "host-a",
+            r#""shared":"1.0.0""#,
+            "module.exports = () => require(\"shared/one\")();\n",
+        ),
+        (
+            "host-b",
+            r#""shared":"1.0.0""#,
+            "module.exports = () => require(\"shared/two\")();\n",
+        ),
+        ("shared", "", "module.exports = \"root\";\n"),
+    ] {
+        let dir = modules.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            format!(
+                r#"{{"name":"{name}","version":"1.0.0","main":"index.js","dependencies":{{{deps}}}}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("index.js"), body).unwrap();
+    }
+    for subpath in ["one", "two"] {
+        std::fs::write(
+            modules.join(format!("shared/{subpath}.js")),
+            format!("module.exports = () => \"{subpath}\";\n"),
+        )
+        .unwrap();
+    }
+    let entry = work.join("app.mjs");
+    std::fs::write(
+        &entry,
+        "import a from \"host-a\";\nimport b from \"host-b\";\nconsole.log(a(), b());\n",
+    )
+    .unwrap();
+    let artifact = work.join("app");
+    let compiled = Command::new(nub_binary())
+        .args(["compile", "--smol", "--target", &runtime.node_target])
+        .args(["--unbundled", "host-a", "--unbundled", "host-b", "--out"])
+        .arg(&artifact)
+        .arg(&entry)
+        .current_dir(&work)
+        .env("XDG_CACHE_HOME", work.join("cache"))
+        .env("__NUB_LAUNCHER_TEMPLATE", &runtime.launcher)
+        .output()
+        .expect("spawn nub compile");
+    assert!(
+        compiled.status.success(),
+        "compile failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    std::fs::remove_dir_all(&modules).unwrap();
+    let mut run = Command::new(&artifact);
+    run.current_dir(&work)
+        .env("XDG_CACHE_HOME", work.join("run-cache"));
+    let ran = run_compiled_artifact_command_with_timeout(run, std::time::Duration::from_secs(10));
+    let _ = std::fs::remove_dir_all(&work);
+    assert!(
+        ran.status.success() && String::from_utf8_lossy(&ran.stdout).trim() == "one two",
+        "the artifact must print `one two`\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+}
+
 /// A pino transport is named by a string and resolved by pino at run time, so no
 /// import reaches it and the bundle alone ships without it. The stand-in `pino`
 /// resolves a target the way the real one does, `createRequire(caller)` from the
@@ -1068,11 +1144,85 @@ fn a_transport_named_only_as_a_string_ships_with_the_binary() {
             &["--unbundled", "logger"],
             Ok("transport 3.0.0"),
         ),
+        (
+            "a closure stub of the transport",
+            vec![
+                ("pino", pino.clone()),
+                // The logger requires a subpath, so its closure stubs the
+                // transport with that subpath alone — not the root pino loads.
+                (
+                    "logger",
+                    pkg(
+                        "logger",
+                        "1.0.0",
+                        r#""fake-transport":"4.0.0""#,
+                        "const helper = require(\"fake-transport/helper\");\n\
+                         module.exports = (pino) =>\n\
+                         \x20 helper() + \" \" + pino({ transport: { target: \"fake-transport\" } }, __filename);\n",
+                    ),
+                ),
+                ("fake-transport", transport("4.0.0")),
+                (
+                    "fake-transport/helper.js",
+                    (String::new(), "module.exports = () => \"helper\";\n".to_string()),
+                ),
+            ],
+            "import pino from \"pino\";\nimport logger from \"logger\";\nconsole.log(logger(pino));\n"
+                .to_string(),
+            &["--unbundled", "logger"],
+            Ok("helper transport 4.0.0"),
+        ),
+        (
+            "two transports whose closures collide",
+            vec![
+                ("pino", pino.clone()),
+                // pino-pretty is unbundled by name, so a-transport's closure
+                // ships its top-level copy as files — at the very path the
+                // holder's nested copy needs.
+                (
+                    "a-transport",
+                    pkg(
+                        "a-transport",
+                        "1.0.0",
+                        r#""pino-pretty":"1.0.0""#,
+                        "module.exports = () => \"a-transport\";\n",
+                    ),
+                ),
+                (
+                    "pino-pretty",
+                    pkg("pino-pretty", "1.0.0", "", "module.exports = () => \"pretty 1.0.0\";\n"),
+                ),
+                (
+                    "holder",
+                    pkg(
+                        "holder",
+                        "1.0.0",
+                        r#""pino":"*","pino-pretty":"2.0.0""#,
+                        "const pino = require(\"pino\");\n\
+                         module.exports = () => pino({ transport: { target: \"pino-pretty\" } }, __filename);\n",
+                    ),
+                ),
+                (
+                    "holder/node_modules/pino-pretty",
+                    pkg("pino-pretty", "2.0.0", "", "module.exports = () => \"pretty 2.0.0\";\n"),
+                ),
+            ],
+            "import pino from \"pino\";\nimport holder from \"holder\";\n\
+             console.log(pino({ transport: { target: \"a-transport\" } }, import.meta.url), holder());\n"
+                .to_string(),
+            &[],
+            Err("two different packages would occupy node_modules/pino-pretty"),
+        ),
     ];
     for (case, packages, entry_source, flags, expected) in cases {
         let work = unique_test_cache();
         let modules = work.join("node_modules");
         for (at, (manifest, body)) in packages {
+            // No manifest: a lone file inside a package written above.
+            if manifest.is_empty() {
+                std::fs::write(modules.join(at), body).unwrap();
+                continue;
+            }
             let dir = modules.join(at);
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("package.json"), manifest).unwrap();
