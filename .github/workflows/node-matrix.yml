@@ -194,6 +194,8 @@ jobs:
       # setup-node takes "latest" literally, prerelease included: index.json listed
       # v27.0.0-alpha.0.0.0 first on 2026-10-29, which nub rightly refuses for the
       # fixture's ">=18", so the leg ran 26.13.0 and failed its version check.
+      # `--retry-all-errors` because plain `--retry` skips DNS failures and connection
+      # resets, the same blips the setup-node retry below exists for.
       - name: Resolve "latest" to the newest release
         id: node
         shell: bash
@@ -203,11 +205,22 @@ jobs:
           set -euo pipefail
           version="$NODE_SPEC"
           if [[ "$version" == "latest" ]]; then
-            version=$(curl -fsSL --retry 3 https://nodejs.org/dist/index.json \
+            version=$(curl -fsSL --retry 3 --retry-all-errors https://nodejs.org/dist/index.json \
               | jq -er '[.[] | select(.version | contains("-") | not)][0].version')
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      # actions/node-versions publishes no 23.x or 25.x, so four of these legs (23.6, 23.11,
+      # 25.0, 25.2) miss the manifest and setup-node fetches nodejs.org/dist/index.json live
+      # on every run. That request retries only on 502/503/504 (@actions/http-client), so a
+      # DNS timeout or connection reset fails the leg outright (nubjs/nub#585, upstream
+      # actions/setup-node#1136). One retry turns that red back into the blip it is.
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        id: setup-node
+        continue-on-error: true
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        if: steps.setup-node.outcome == 'failure'
         with:
           node-version: ${{ steps.node.outputs.version }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
@@ -272,9 +285,14 @@ jobs:
     needs: [smoke, real-apps]
     if: always() && (github.event_name != 'pull_request' || github.event.label.name == 'ci')
     runs-on: ubuntu-latest
-    permissions: {}
+    permissions:
+      # The `needs.*.result` rollup collapses all 14 smoke legs into one word, so a red
+      # here used to say only "smoke failed" (nubjs/nub#585).
+      actions: read  # this run's own job list, so a red gate names the leg that failed
     steps:
       - shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           smoke='${{ needs.smoke.result }}'
@@ -283,21 +301,26 @@ jobs:
           # A skipped leg (PR that didn't trigger it) is fine; a failure is not.
           #
           # `cancelled` is also fine, and leaving it out painted main red: this job is
-          # `if: always()`, so it still runs when the RUN was cancelled, and this workflow's
-          # concurrency group (see the top of the file) keys on workflow name plus ref --
-          # which the `push: main` and `schedule` triggers SHARE, both carrying
-          # refs/heads/main. So the nightly cancels an in-flight push run, the legs report
-          # `cancelled`, and this gate turned that into a permanent failed check on a commit
-          # whose code was fine (the superseding run went on to pass the full matrix on the
-          # same SHA). Accepting `cancelled` cannot mask a real failure: a leg that genuinely
-          # fails aggregates to `failure`, not `cancelled`, even when fail-fast cancels its
-          # siblings.
+          # `if: always()`, so it still runs when the RUN was cancelled, and the concurrency
+          # group is cancel-in-progress, so every merge cancels the previous push's run. The
+          # legs report `cancelled`, and this gate turned that into a permanent failed check
+          # on a commit whose code was fine. Accepting `cancelled` cannot mask a real failure:
+          # a leg that genuinely fails aggregates to `failure`, not `cancelled`, even when
+          # fail-fast cancels its siblings.
           #
           # Do NOT write a GitHub expression literally in this comment. Actions expands
           # `${...}`-style template syntax inside a `run:` block BEFORE the shell runs,
           # comments included, so naming the group inline is a real template injection and
           # zizmor fails the build for it.
           ok() { [[ "$1" == "success" || "$1" == "skipped" || "$1" == "cancelled" ]]; }
-          ok "$smoke" || { echo "smoke failed"; exit 1; }
-          ok "$apps"  || { echo "real-apps failed"; exit 1; }
-          echo "node matrix gate: OK"
+          if ok "$smoke" && ok "$apps"; then
+            echo "node matrix gate: OK"
+            exit 0
+          fi
+          echo "::error::Node matrix red: smoke=$smoke real-apps=$apps. Failing legs:"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
+            --paginate --jq '.jobs[]
+              | select(.conclusion != null and .conclusion != "success"
+                       and .conclusion != "skipped" and .conclusion != "cancelled")
+              | "  \(.conclusion)\t\(.name)\t\(.html_url)"' || echo "  (job list unavailable)"
+          exit 1

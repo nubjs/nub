@@ -409,9 +409,11 @@ pub fn load_npmrc_entries(project_dir: &Path) -> Vec<(String, String)> {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct NpmrcCacheKey {
     project_dir: PathBuf,
+    invocation_dir: Option<PathBuf>,
     read_branded_pnpm_config: bool,
     read_pnpm_config_env_registry: bool,
     npmrc_settings_allowlist: bool,
+    workspace_npmrc: aube_util::WorkspaceNpmrc,
     read_yarn_config: bool,
     synthetic_user_npmrc_entries: Vec<(String, String)>,
     synthetic_project_npmrc_entries: Vec<(String, String)>,
@@ -433,9 +435,11 @@ fn npmrc_cache_key(project_dir: &Path) -> NpmrcCacheKey {
     };
     NpmrcCacheKey {
         project_dir: project_dir.to_path_buf(),
+        invocation_dir: invocation_dir(&ctx),
         read_branded_pnpm_config: ctx.read_branded_pnpm_config,
         read_pnpm_config_env_registry: ctx.read_pnpm_config_env_registry,
         npmrc_settings_allowlist: ctx.npmrc_settings_allowlist,
+        workspace_npmrc: ctx.workspace_npmrc,
         read_yarn_config: ctx.read_yarn_config,
         synthetic_user_npmrc_entries: ctx.synthetic_user_npmrc_entries,
         synthetic_project_npmrc_entries: ctx.synthetic_project_npmrc_entries,
@@ -584,17 +588,11 @@ pub(super) fn load_npmrc_entries_tagged_with_globals(
                 .map(|(k, v)| (NpmrcSource::UserNpmrcAuthFile, k, v)),
         );
     }
-    let project_rc = project_dir.join(".npmrc");
-    if project_rc.exists()
-        && !is_same_npmrc_file(&project_rc, user_rc.as_deref())
-        && let Ok(entries) = parse_npmrc_untrusted(&project_rc)
-    {
-        out.extend(
-            entries
-                .into_iter()
-                .map(|(k, v)| (NpmrcSource::Project, k, v)),
-        );
-    }
+    out.extend(
+        read_project_npmrc_layers(project_dir, user_rc.as_deref())
+            .into_iter()
+            .map(|(k, v)| (NpmrcSource::Project, k, v)),
+    );
     if let Some((auth_path, auth_source)) = resolve_npmrc_auth_file_tagged(home, project_dir, &out)
         && auth_source.is_project_controlled()
         && !is_same_npmrc_file(&auth_path, user_rc.as_deref())
@@ -692,17 +690,11 @@ fn load_project_npmrc_entries_tagged(
             .map(|(k, v)| (NpmrcSource::Project, k, v)),
     );
     let user_rc = resolve_user_rc_path(home);
-    let project_rc = project_dir.join(".npmrc");
-    if project_rc.exists()
-        && !is_same_npmrc_file(&project_rc, user_rc.as_deref())
-        && let Ok(entries) = parse_npmrc_untrusted(&project_rc)
-    {
-        out.extend(
-            entries
-                .into_iter()
-                .map(|(k, v)| (NpmrcSource::Project, k, v)),
-        );
-    }
+    out.extend(
+        read_project_npmrc_layers(project_dir, user_rc.as_deref())
+            .into_iter()
+            .map(|(k, v)| (NpmrcSource::Project, k, v)),
+    );
     if let Some((auth_path, _auth_source)) = resolve_npmrc_auth_file_tagged(home, project_dir, &out)
         && auth_path.exists()
         && !is_same_npmrc_file(&auth_path, user_rc.as_deref())
@@ -713,6 +705,98 @@ fn load_project_npmrc_entries_tagged(
                 .into_iter()
                 .map(|(k, v)| (NpmrcSource::ProjectNpmrcAuthFile, k, v)),
         );
+    }
+    out
+}
+
+/// The project-scope `.npmrc` directories for `project_dir`, lowest
+/// precedence first.
+///
+/// Inside a workspace, project config belongs to the workspace and to the
+/// invocation, not to whichever member a command happens to target: npm,
+/// pnpm, Yarn 1 and Bun all read the workspace root's `.npmrc` (where a
+/// monorepo declares its registry, scoped registries and auth), and none
+/// reads a member's file when invoked from elsewhere (`--filter`, `-r`).
+/// pnpm 10 and Yarn 1 additionally layer the `.npmrc` of the package the
+/// command was run from on top; pnpm 11, npm and Bun do not. The embedder
+/// picks that per incumbent ([`aube_util::WorkspaceNpmrc`]). A caller that
+/// hands the engine a member path with no invocation inside the workspace
+/// (no recorded invocation dir, and a process cwd elsewhere) gets the target
+/// itself as the invoking package, the way `pnpm -C <dir>` makes `<dir>` the
+/// local prefix. Outside a workspace this is just `project_dir`.
+fn project_npmrc_dirs(project_dir: &Path) -> Vec<PathBuf> {
+    let Some(root) = aube_manifest::workspace::find_workspace_root(project_dir) else {
+        return vec![project_dir.to_path_buf()];
+    };
+    let ctx = aube_util::engine_context();
+    let invoked_from = match ctx.workspace_npmrc {
+        aube_util::WorkspaceNpmrc::RootOnly => None,
+        aube_util::WorkspaceNpmrc::RootBeneathMember => {
+            match invocation_dir(&ctx).and_then(|dir| within(&dir, &root)) {
+                Some((dir, root)) => package_dir_below_root(&dir, &root),
+                None => within(project_dir, &root)
+                    .filter(|(dir, root)| dir != root)
+                    .map(|_| project_dir.to_path_buf()),
+            }
+        }
+    };
+    let mut dirs = vec![root];
+    dirs.extend(invoked_from);
+    dirs
+}
+
+fn invocation_dir(ctx: &aube_util::EngineContext) -> Option<PathBuf> {
+    ctx.invocation_dir
+        .clone()
+        .or_else(|| std::env::current_dir().ok())
+}
+
+/// `dir` and `root` in one spelling, when `dir` is `root` or inside it.
+fn within(dir: &Path, root: &Path) -> Option<(PathBuf, PathBuf)> {
+    let (dir, root) = if dir.starts_with(root) {
+        (dir.to_path_buf(), root.to_path_buf())
+    } else {
+        (dir.canonicalize().ok()?, root.canonicalize().ok()?)
+    };
+    dir.starts_with(&root).then_some((dir, root))
+}
+
+/// The nearest directory at or above `dir` holding a `package.json`, strictly
+/// inside the workspace `root` (pnpm's "local prefix"). Both come from [`within`].
+fn package_dir_below_root(dir: &Path, root: &Path) -> Option<PathBuf> {
+    dir.ancestors()
+        .take_while(|d| *d != root)
+        .find(|d| d.join("package.json").is_file())
+        .map(Path::to_path_buf)
+}
+
+/// Read every project-scope `.npmrc` from [`project_npmrc_dirs`], untrusted,
+/// skipping one that is the user rc itself. A relative `npmrc-auth-file` in a
+/// file outside `project_dir` is anchored to that file's directory here, since
+/// the shared resolver anchors relative paths to `project_dir`.
+fn read_project_npmrc_layers(project_dir: &Path, user_rc: Option<&Path>) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for dir in project_npmrc_dirs(project_dir) {
+        let rc = dir.join(".npmrc");
+        if !rc.exists() || is_same_npmrc_file(&rc, user_rc) {
+            continue;
+        }
+        let Ok(entries) = parse_npmrc_untrusted(&rc) else {
+            continue;
+        };
+        let anchor_auth_file = dir != project_dir;
+        out.extend(entries.into_iter().map(|(k, v)| {
+            if anchor_auth_file
+                && matches!(k.as_str(), "npmrcAuthFile" | "npmrc-auth-file")
+                && !v.starts_with('~')
+                && Path::new(&v).is_relative()
+            {
+                let anchored = dir.join(&v).to_string_lossy().into_owned();
+                (k, anchored)
+            } else {
+                (k, v)
+            }
+        }));
     }
     out
 }

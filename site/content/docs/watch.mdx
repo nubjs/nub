@@ -1,37 +1,35 @@
 ---
 title: Watch mode
-description: Restart-on-change for files and scripts, driven by the resolved dependency graph plus your environment files, tsconfig, and package manifest — no glob list to maintain.
+description: Restart a file when it or anything it imports changes, including environment files, tsconfig, and package.json, with no glob list to maintain.
 ---
 
-Watch mode (`nub watch`) runs your entry point and restarts it whenever a file it depends on changes.
-
-The engine underneath is Node's own `--watch` (run with `--watch-preserve-output`), with a Nub-side layer that reports the in-memory-transpiled dependency graph — plus the off-graph files that still invalidate a process — back to Node's watcher.
-
-For how `nub` runs files in the first place, see [Running files](/docs/runtime); for scripts, [Running scripts](/docs/run).
-
-## Watching a file
-
-The watcher takes a file, not a script name. Point `nub watch` at an entry file — the one your `dev` script runs, for example. It runs the file, then restarts the process on any change to the file or anything in its resolved import graph.
+Watch mode runs a file and restarts it when the file or anything it imports changes:
 
 ```bash
 nub watch src/server.ts
+nub --watch src/server.ts   # same thing, in node --watch's spelling
 ```
 
-TypeScript, JSX, `.env*` loading, `tsconfig.json` paths — everything `nub <file>` gives you is active here too, because `nub watch` runs the same augmented Node underneath. A project [`nub.jsonc`](/docs/config) is in force on every restart: preloads, environment files, loaders, conditions, TypeScript transforms, and the selected tsconfig.
+Everything [`nub <file>`](/docs/runtime) does is active: TypeScript, JSX, `.env*` loading, and `tsconfig.json` paths. A project [`nub.jsonc`](/docs/config) applies on every restart, including its preloads, environment files, loaders, conditions, and tsconfig selection.
 
-A `--watch` placed after a script name is forwarded *to the script* like any other argument — `nub run test --watch` runs your test tool's own watch mode, it does not invoke Nub's watcher. See [`nub run` → Forward arguments](/docs/run#argument-forwarding).
+The watcher takes a file, not a script name. A `--watch` after a script name goes to the script, so `nub run test --watch` runs your test tool's own watch mode (see [argument forwarding](/docs/run#argument-forwarding)).
 
-## `--watch`
+## Watched files
 
-Flag and subcommand are aliases: `nub --watch <file>` and `nub watch <file>` run the same code path. The flag form matches `node --watch script.ts`.
+The watch set comes from what the run actually loads, not from a glob. A restart fires on a change to:
 
-```bash
-nub --watch src/server.ts
-```
+- Any file in the entry's resolved import graph, including `.ts` and `.tsx` files Nub transpiles in memory
+- Environment files: `.env*`, plus any file named with `--env-file` or `--env-file-if-exists`
+- The `tsconfig.json` `extends` chain, so editing a `paths` mapping restarts the process
+- `package.json`
 
-## Preserve output
+Every restart re-reads the environment files, so an edited value is live on the next run. On Node older than 20.6, environment files are read once at startup; restart `nub watch` itself to pick up an edit.
 
-Nub runs Node's watcher with `--watch-preserve-output`, so a restart prints Node's own status lines instead of wiping the terminal — the previous run's error message stays visible:
+A build output such as `dist/foo.js` triggers a restart only if the run imported it.
+
+## Output
+
+A restart prints Node's status lines instead of clearing the terminal, so the previous run's error stays visible:
 
 ```console
 $ nub watch src/server.ts
@@ -40,33 +38,15 @@ restarting...
 Restarting 'src/server.ts'
 ```
 
-## Watched files
+## How it works
 
-The watch set is loader-instrumented, not glob-based: `nub watch` only watches files loaded as part of the run, plus a small set of off-graph files that invalidate the process when they change. A restart fires on a change to:
+The engine is Node's own `--watch`, run with `--watch-preserve-output`. Nub reports the in-memory-transpiled import graph and the off-graph files above to Node's watcher over its `WATCH_REPORT_DEPENDENCIES` channel.
 
-- Any file in the **resolved dependency graph** of the entry — including `.ts` / `.tsx` files transpiled in-memory through `module.registerHooks()` that Node never sees on disk.
-- Your **`.env*` files** — these are read once at boot and aren't in any import graph, so Nub reports them to the watcher explicitly. Files named with `--env-file` or `--env-file-if-exists` are watched the same way, and every restart re-reads them, so an edited value is live on the next run. Re-reading on restart needs Node 20.6 or newer, the version that introduced the underlying flag; below it the values are captured once at startup, and an edit applies only after you restart `nub watch` itself.
-- The **`tsconfig.json` extends chain** — editing a tsconfig (for example, changing a `paths` mapping) restarts the process even though tsconfig isn't imported by anything.
-- **`package.json`**.
-
-Nub reports the off-graph files to Node's watcher over its `WATCH_REPORT_DEPENDENCIES` channel.
-
-A rebuild that emits `dist/foo.js` does not trigger a restart unless something in the run imported `dist/foo.js`.
-
-```bash
-nub watch src/server.ts
-# editing dist/** or coverage/** does not restart
-```
-
-## Plain Node `--watch`
-
-Nub's watch mode adds the banner, the preserve-output default, and the off-graph reporting on top of Node's. For vanilla `node --watch`, run it directly:
+For vanilla Node watch mode, run `node --watch` directly:
 
 ```bash
 node --watch script.js
 ```
-
-Nub's per-invocation PATH shim only affects descendants of an active `nub` call. A `node` installed by [`nub node shim`](/docs/node#nub-node-shim) resolves the pinned version and adds nothing else, so `node --watch` stays vanilla there too.
 
 <Callout>
 Read the [full docs](https://nodejs.org/api/cli.html#--watch) for Node's `--watch` flag on nodejs.org.
