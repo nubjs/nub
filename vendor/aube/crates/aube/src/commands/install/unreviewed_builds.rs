@@ -27,9 +27,9 @@ pub(super) fn from_state(cwd: &std::path::Path) -> Vec<UnreviewedBuild> {
 /// of the error, since they are what the approval decision should weigh.
 ///
 /// pnpm 12 never fails a global install on one (`cli_args/global/install.rs`):
-/// it warns, and `add -g --allow-build` is the approval. Every global `add`,
-/// `update` and `remove` re-enters the install from inside the global
-/// package dir, which is how `cwd` identifies it — checked only once there
+/// it warns, and `add -g --allow-build` is the approval. A global `add` or
+/// `update` re-enters the install from inside the global package dir,
+/// which is how `cwd` identifies it — checked only once there
 /// is something to report, so an ordinary install never resolves the global
 /// layout.
 pub(super) fn report(

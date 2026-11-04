@@ -51,6 +51,7 @@ pub struct GlobalLayout {
 impl GlobalLayout {
     pub fn resolve() -> miette::Result<Self> {
         let pkg_dir = resolve_pkg_dir()?;
+        let _ = FIRST_RESOLVED_PKG_DIR.set(pkg_dir.clone());
         let legacy_subdir = format!("global-{}", aube_util::embedder().name);
         warn_on_legacy_global_dir(&pkg_dir, &legacy_subdir);
         let cwd = std::env::current_dir().unwrap_or_default();
@@ -84,11 +85,18 @@ fn resolve_pkg_dir() -> miette::Result<PathBuf> {
     setting_pkg.map_or_else(|| default_pkg_dir("global"), |p| Ok(p.join("global")))
 }
 
+/// [`GlobalLayout::pkg_dir`] as this process first resolved it. A global
+/// `add` or `update` resolves the layout before changing into an install
+/// dir, after which a relative `globalDir` would resolve against that dir.
+static FIRST_RESOLVED_PKG_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 /// Whether `dir` lies inside the global package dir, where every global
-/// `add`, `update` and `remove` re-enters the install.
+/// `add` and `update` re-enters the install.
 pub(crate) fn is_global_install_dir(dir: &Path) -> bool {
-    resolve_pkg_dir()
-        .ok()
+    FIRST_RESOLVED_PKG_DIR
+        .get()
+        .cloned()
+        .or_else(|| resolve_pkg_dir().ok())
         .and_then(|pkg_dir| crate::dirs::canonicalize(&pkg_dir).ok())
         .is_some_and(|pkg_dir| dir.starts_with(pkg_dir))
 }
