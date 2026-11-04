@@ -26,7 +26,8 @@ use crate::local_source::{
 };
 use crate::locked_index::LockedIndex;
 use crate::package_ext::{
-    apply_package_extensions, apply_package_extensions_to_deps, pick_override_spec,
+    apply_package_extensions, apply_package_extensions_to_deps, pick_catalog_override_spec,
+    pick_override_spec,
 };
 use crate::semver_util::{
     AgeGateCause, PickResult, Regime, classify_regime, pick_version, range_resolves_via_dist_tag,
@@ -2547,11 +2548,26 @@ impl<'a> ResolveDriver<'a> {
         // loop, so overrides can still target a catalog dep by bare
         // name. The raw `catalog:...` text stays in `original_specifier`;
         // the separate lockfile field changes only if an override fires.
+        //
+        // The override, though, is decided against that raw text, never the
+        // catalog's range: pnpm overrides the manifest before it resolves
+        // catalogs. So a range-keyed selector (`foo@^1`) leaves a `catalog:`
+        // dependency alone, and once the reference stands no override is
+        // tried again on what it expanded to.
+        let mut catalog_override = None;
+        let mut catalog_reference_stands = false;
         if let Some((catalog_name, real_range)) = self
             .resolver
             .resolve_catalog_spec(&task.name, &task.range)?
         {
             tracing::trace!("catalog: {} {} -> {}", task.name, task.range, real_range);
+            catalog_override = pick_catalog_override_spec(
+                &self.resolver.override_rules,
+                &task.name,
+                &task.range,
+                &task.ancestors,
+            );
+            catalog_reference_stands = catalog_override.is_none();
             self.catalog_picks
                 .entry(catalog_name)
                 .or_default()
@@ -2561,12 +2577,17 @@ impl<'a> ResolveDriver<'a> {
 
         for _ in 0..2 {
             let mut changed = false;
-            if let Some(override_spec) = pick_override_spec(
-                &self.resolver.override_rules,
-                &task.name,
-                &task.range,
-                &task.ancestors,
-            ) {
+            let picked = match catalog_override.take() {
+                Some(spec) => Some(spec),
+                None if catalog_reference_stands => None,
+                None => pick_override_spec(
+                    &self.resolver.override_rules,
+                    &task.name,
+                    &task.range,
+                    &task.ancestors,
+                ),
+            };
+            if let Some(override_spec) = picked {
                 // pnpm's removal marker: an override value of `"-"`
                 // drops the dep edge entirely. Skip before
                 // catalog/alias rewrites so `-` never reaches the
