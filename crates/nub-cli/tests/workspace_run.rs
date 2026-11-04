@@ -277,11 +277,12 @@ fn a_changed_since_selector_sees_uncommitted_edits_and_globs_its_directory() {
     );
 }
 
-/// A directory selector resolves against the directory the command runs in,
-/// as pnpm's does, for the package-manager verbs as well as `run`.
+/// A directory selector resolves against the project the command runs in,
+/// the nearest `package.json` at or above the cwd, as pnpm's does, for the
+/// package-manager verbs as well as `run`.
 #[test]
-fn a_filtered_install_resolves_paths_from_the_current_directory() {
-    let root = script_workspace("install-from-member");
+fn filter_paths_resolve_from_the_current_project() {
+    let root = script_workspace("from-member");
     write(
         &root.join("dep/package.json"),
         r#"{"name":"dep","version":"1.0.0"}"#,
@@ -290,11 +291,15 @@ fn a_filtered_install_resolves_paths_from_the_current_directory() {
         write(
             &root.join(format!("packages/{member}/package.json")),
             &format!(
-                r#"{{"name":"{member}","version":"1.0.0","dependencies":{{"dep":"file:../../dep"}}}}"#
+                r#"{{"name":"{member}","version":"1.0.0","dependencies":{{"dep":"file:../../dep"}},"scripts":{{"build":"echo BUILD:{member}"}}}}"#
             ),
         );
     }
-    let (stdout, stderr, code) = run_nub(&root.join("packages/api"), &["install", "--filter", "."]);
+    let src = root.join("packages/api/src");
+    std::fs::create_dir_all(&src).unwrap();
+    assert_eq!(built_in(&src, &["run", "--filter", ".", "build"]), ["api"]);
+    assert!(built_in(&src, &["run", "--filter", "..", "build"]).is_empty());
+    let (stdout, stderr, code) = run_nub(&src, &["install", "--filter", "."]);
     assert_eq!(code, 0, "{stdout}{stderr}");
     assert!(
         root.join("packages/api/node_modules/dep").exists(),

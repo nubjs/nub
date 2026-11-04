@@ -230,17 +230,22 @@ pub(crate) fn select_workspace_packages(
 }
 
 /// The workspace projects `filter` selects for `command`, the way pnpm
-/// selects them: directory selectors resolve against the directory the
-/// command was invoked from, and `run`, `exec`, `add` and `test` drop the
-/// root from a selection that names no project. Every `--filter` caller
-/// goes through here so none resolves paths against the workspace root.
+/// selects them: directory selectors resolve against the project the
+/// command was invoked in (the nearest `package.json` at or above the
+/// cwd, inside the workspace), and `run`, `exec`, `add` and `test` drop
+/// the root from a selection that names no project. Every `--filter`
+/// caller goes through here so none resolves paths against the
+/// workspace root.
 pub(crate) fn select_projects(
     workspace_root: &Path,
     workspace_pkgs: &[PathBuf],
     filter: &aube_workspace::selector::EffectiveFilter,
     command: &str,
 ) -> miette::Result<Vec<aube_workspace::selector::SelectedPackage>> {
-    let prefix = crate::dirs::cwd()?;
+    let cwd = crate::dirs::cwd()?;
+    let prefix = crate::dirs::find_project_root(&cwd)
+        .filter(|project| project.starts_with(workspace_root))
+        .unwrap_or(cwd);
     let root = if matches!(command, "add" | "run" | "exec" | "test") {
         aube_workspace::RootSelection::AutoExclude
     } else {

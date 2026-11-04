@@ -5238,12 +5238,19 @@ fn run_workspace_target(
         ..Default::default()
     };
     let member_dirs: Vec<PathBuf> = members.iter().map(|m| m.dir.clone()).collect();
+    // A directory selector resolves from the project the run started in,
+    // as pnpm's does, not from a subdirectory of it.
+    let prefix = if project.root.starts_with(ws_root) {
+        project.root.as_path()
+    } else {
+        cwd.as_path()
+    };
     let selected = aube_workspace::selector::select_workspace_projects(
         ws_root,
         &member_dirs,
         &filter,
         aube_workspace::SelectOptions {
-            prefix: &cwd,
+            prefix,
             root: aube_workspace::RootSelection::AutoExclude,
         },
     )
