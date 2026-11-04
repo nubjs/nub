@@ -356,17 +356,18 @@ async fn run_filtered(
     let cwd = crate::dirs::cwd()?;
     // A recursive `remove` keeps the workspace root in a selection that
     // names no project (pnpm drops it only for `run`, `exec`, `add` and
-    // `test`), so `-r` takes the dependency out of the root's manifest too.
-    let mut filter = filter.clone();
-    if filter
+    // `test`), so `-r` takes the dependency out of the root's manifest
+    // too, unless an exclusion names the root.
+    let names_no_project = filter
         .filters
         .iter()
         .chain(&filter.filter_prods)
-        .all(|selector| selector == "*" || selector.starts_with('!'))
-    {
-        filter.include_workspace_root = true;
-    }
-    let (_root, matched) = super::select_workspace_packages(&cwd, &filter, "remove")?;
+        .all(|selector| selector == "*" || selector.starts_with('!'));
+    let (_root, matched) = if names_no_project {
+        super::select_workspace_packages_keeping_root(&cwd, filter, "remove")?
+    } else {
+        super::select_workspace_packages(&cwd, filter, "remove")?
+    };
     let result = async {
         for pkg in matched {
             // Match pnpm's recursive-remove semantics: silently skip

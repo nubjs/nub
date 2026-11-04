@@ -187,18 +187,25 @@ pub(super) fn per_project_write_selection(
     Ok(Some(keys))
 }
 
-/// The importers a `--filter` install links: the root and the selection
-/// ([`filter_graph_to_workspace_selection`]), recorded in the install
-/// state as [`crate::state::InstallState::workspace_selection`]. `None`
-/// for an unfiltered install.
+/// The importers an install links, recorded in the install state as
+/// [`crate::state::InstallState::workspace_selection`]: the root and the
+/// selection for a `--filter` install
+/// ([`filter_graph_to_workspace_selection`]), the root alone for an
+/// unfiltered one under `recursiveInstall=false`, and `None` when it
+/// links every importer.
 pub(super) fn linked_workspace_selection(
     per_project_write_selection: Option<&std::collections::BTreeSet<String>>,
+    links_every_importer: bool,
 ) -> Option<std::collections::BTreeSet<String>> {
-    per_project_write_selection.map(|selected| {
-        let mut linked = selected.clone();
-        linked.insert(".".to_string());
-        linked
-    })
+    match per_project_write_selection {
+        Some(selected) => {
+            let mut linked = selected.clone();
+            linked.insert(".".to_string());
+            Some(linked)
+        }
+        None if links_every_importer => None,
+        None => Some(std::collections::BTreeSet::from([".".to_string()])),
+    }
 }
 
 pub(super) fn importer_project_dir(

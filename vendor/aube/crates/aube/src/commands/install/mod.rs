@@ -3092,6 +3092,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         npm_link_lifecycle: matches!(source_kind_before, Some(aube_lockfile::LockfileKind::Npm)),
         workspace_selection: workspace::linked_workspace_selection(
             per_project_write_selection.as_ref(),
+            !has_workspace || link_all_workspace_importers,
         ),
         dep_selection: opts.dep_selection,
         cli_flags: &opts.cli_flags,

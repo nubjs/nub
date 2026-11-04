@@ -107,6 +107,17 @@ fn recursive_remove_edits_the_workspace_root_and_a_filtered_one_does_not() {
         "a filter naming one member leaves the root and the others alone"
     );
     assert!(!declares_dep(&dir.join("packages/a/package.json")));
+    nub(&dir, &["remove", "-r", "--filter", "!root", "dep"]);
+    assert!(
+        declares_dep(&dir.join("package.json")),
+        "an exclusion naming the root keeps it out of a recursive remove"
+    );
+    assert!(!declares_dep(&dir.join("packages/b/package.json")));
+    std::fs::write(
+        dir.join("packages/b/package.json"),
+        r#"{ "name": "b", "version": "1.0.0", "dependencies": { "dep": "file:../../dep" } }"#,
+    )
+    .unwrap();
     nub(&dir, &["remove", "-r", "dep"]);
     assert!(
         !declares_dep(&dir.join("package.json")),
@@ -156,5 +167,26 @@ fn a_repeated_filtered_install_is_up_to_date_and_an_unfiltered_one_after_it_is_n
         installs(),
         2,
         "a filter inside a full install has nothing to do"
+    );
+}
+
+#[test]
+fn a_filtered_install_after_a_root_only_install_links_the_member() {
+    let dir = workspace(
+        "nonrecursive",
+        serde_json::json!({ "dep": "file:./dep" }),
+        &[("a", serde_json::json!({ "dep": "file:../../dep" }))],
+    );
+    std::fs::write(dir.join(".npmrc"), "recursive-install=false\n").unwrap();
+    nub(&dir, &["install"]);
+    assert!(
+        !dir.join("packages/a/node_modules/dep").exists(),
+        "`recursive-install=false` links only the root"
+    );
+    nub(&dir, &["install"]);
+    nub(&dir, &["install", "--filter", "a"]);
+    assert!(
+        dir.join("packages/a/node_modules/dep").exists(),
+        "a root-only install does not make a filtered one up to date"
     );
 }
