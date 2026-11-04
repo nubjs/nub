@@ -1832,6 +1832,7 @@ pub(in crate::commands::install) struct UnreviewedScan {
     pub deferred: Vec<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn unreviewed_dep_builds(
     aube_dir: &std::path::Path,
     graph: &aube_lockfile::LockfileGraph,

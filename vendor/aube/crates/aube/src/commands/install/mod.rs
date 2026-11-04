@@ -223,6 +223,7 @@ pub fn resolve_prefer_frozen_lockfile() -> Option<bool> {
 /// the packages in the selection (every package without one) whose build
 /// scripts nothing approved, as `ERR_AUBE_IGNORED_BUILDS` under `strict`
 /// and a warning otherwise — pnpm 12's `rebuild` fails the same way.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn report_unreviewed_rebuilds(
     cwd: &std::path::Path,
     aube_dir: &std::path::Path,
