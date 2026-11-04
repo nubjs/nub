@@ -9,7 +9,8 @@ name: Trunk red
 #
 # This workflow closes that loop: it files ONE tracking issue the first time a
 # main-branch run fails and comments on it for each subsequent failure, so the red is
-# visible and attributable to a commit. It auto-closes when main goes green again.
+# visible and attributable to a commit. It auto-closes once every workflow it reported
+# is green on main again.
 #
 # Scope: report only. It never reruns, reverts, or gates anything.
 
@@ -30,6 +31,7 @@ on:  # zizmor: ignore[dangerous-triggers] trunk-only notifier; reads CI conclusi
 permissions:
   contents: read
   issues: write
+  actions: read  # each reported workflow's latest main verdict, before closing the issue
 
 # Serialize so two failing workflows finishing together can't both create the
 # tracking issue (the find-or-create below is read-then-write, not atomic).
@@ -40,8 +42,10 @@ concurrency:
 jobs:
   report:
     # `skipped` and `cancelled` are not signal: main's CI concurrency group is
-    # cancel-in-progress, so a merge burst routinely cancels superseded runs.
-    if: ${{ github.event.workflow_run.conclusion == 'failure' || github.event.workflow_run.conclusion == 'success' }}
+    # cancel-in-progress, so a merge burst routinely cancels superseded runs. A
+    # pull-request run is not trunk either, but `branches: [main]` matches a fork PR
+    # opened from the fork's own main branch, so it is excluded by event.
+    if: ${{ github.event.workflow_run.event != 'pull_request' && (github.event.workflow_run.conclusion == 'failure' || github.event.workflow_run.conclusion == 'success') }}
     runs-on: ubuntu-latest
     steps:
       - name: File / update / resolve the trunk-red tracking issue
@@ -65,11 +69,64 @@ jobs:
           short="${SHA:0:9}"
 
           if [[ "$CONCLUSION" == "success" ]]; then
-            # Only the workflow that carries the macOS integration leg can clear
-            # the flag; a green Docker smoke says nothing about CI being fixed.
-            if [[ -n "$existing" && "$WORKFLOW" == "CI" ]]; then
+            [[ -n "$existing" ]] || exit 0
+
+            # Eight workflows can file this issue, so one of them going green does not mean
+            # trunk is green. Closing on any `CI` success cleared reds it never checked:
+            # #590, #719, #769, #977 and #987 each closed while the workflow that filed it
+            # was still red. Every report is "`<workflow>` failed on main at `<sha>`." with
+            # the failed run's URL two lines down, so the issue records which workflows are
+            # implicated and which run each one must recover from. Anything unreadable
+            # leaves the issue open: a missed close costs one more green, a false close
+            # hides a red trunk.
+            if ! issue_text=$( { gh issue view "$existing" --repo "$REPO" --json body --jq .body &&
+                gh api --paginate "repos/$REPO/issues/$existing/comments" --jq '.[].body'; } ); then
+              echo "could not read #$existing; leaving it open"
+              exit 0
+            fi
+            # "<workflow>\t<newest reported failed run id>", or id 0 when a report has no URL.
+            # Ids stay strings: mawk's printf %d cannot hold an 11-digit run id.
+            # shellcheck disable=SC2016  # an awk program: its $0 and backticks are literal
+            reported=$(awk '
+              /^`[^`]*` failed on main at / { split($0, p, "`"); wf = p[2]; seen[wf] = 1; next }
+              wf != "" && match($0, /\/actions\/runs\/[0-9]+/) {
+                id = substr($0, RSTART + 14, RLENGTH - 14)
+                if (!(wf in max) || id + 0 > max[wf] + 0) max[wf] = id
+                wf = ""
+              }
+              END { for (w in seen) printf "%s\t%s\n", w, ((w in max) ? max[w] : "0") }
+            ' <<< "$issue_text" | sort)
+
+            still_red=""
+            while IFS=$'\t' read -r wf failed_id; do
+              [[ -n "$wf" ]] || continue
+              # The newest run that reached a verdict, which must be the failed run itself
+              # (a successful re-run keeps its id) or a newer one. In-flight and cancelled
+              # runs count neither way: a merge burst cancels most push runs, so reading only
+              # the newest run would hold the issue open until main went quiet. Without the
+              # id floor, re-running the failed run would hide it (in progress, or cancelled)
+              # and let the green from before the failure clear it. Run ids increase with
+              # creation. Pull-request runs are excluded because `--branch main` also matches
+              # a fork's branch named main.
+              verdict=$(gh run list --repo "$REPO" --workflow "$wf" --branch main \
+                --status completed --limit 30 --json conclusion,event,databaseId \
+                --jq '[.[] | select(.event != "pull_request" and .conclusion != "cancelled"
+                                    and .conclusion != "skipped")][0]
+                      | if . then "\(.conclusion) \(.databaseId)" else empty end' \
+                || echo "")
+              read -r conclusion run_id <<< "$verdict"
+              if [[ "$conclusion" == "success" && "$failed_id" -gt 0 \
+                    && "${run_id:-0}" -ge "$failed_id" ]]; then
+                continue
+              fi
+              still_red="$still_red $wf"
+            done <<< "$reported"
+
+            if [[ -n "$reported" && -z "$still_red" ]]; then
               gh issue close "$existing" --repo "$REPO" \
                 --comment "Green again on \`$short\` — $RUN_URL"
+            else
+              echo "still red:${still_red:- (no reported workflow found)}; leaving #$existing open"
             fi
             exit 0
           fi
@@ -80,7 +137,7 @@ jobs:
 
           Trunk-only legs (the macOS integration suite) do not run on pull requests, so a
           regression can land green and only surface here. This issue tracks the red and
-          closes automatically when CI passes on main again."
+          closes automatically once every workflow reported above is green on main again."
 
           if [[ -n "$existing" ]]; then
             gh issue comment "$existing" --repo "$REPO" --body "$body"
