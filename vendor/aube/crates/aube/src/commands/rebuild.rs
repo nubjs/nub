@@ -51,7 +51,7 @@ pub async fn run(
     let settings_ctx = files.ctx(&raw_workspace, &env_snapshot, &[]);
     super::configure_script_settings(&cwd, &settings_ctx, Some("rebuild"));
 
-    let graph = match aube_lockfile::parse_lockfile(&cwd, &manifest) {
+    let graph = match super::install::parse_project_lockfile(&cwd, &manifest) {
         Ok(graph) => Some(graph),
         Err(aube_lockfile::Error::NotFound(_)) => None,
         Err(e) => return Err(miette::Report::new(e)).wrap_err("failed to parse lockfile"),

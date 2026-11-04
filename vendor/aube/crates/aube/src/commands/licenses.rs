@@ -89,7 +89,7 @@ pub async fn run(args: LicensesArgs) -> miette::Result<()> {
 
     let manifest = super::load_manifest(&cwd.join("package.json"))?;
 
-    let graph = match aube_lockfile::parse_lockfile(&cwd, &manifest) {
+    let graph = match super::install::parse_project_lockfile(&cwd, &manifest) {
         Ok(g) => g,
         Err(aube_lockfile::Error::NotFound(_)) => {
             eprintln!(

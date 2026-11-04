@@ -793,3 +793,69 @@ fn an_importers_own_bin_never_shadows_a_dependencys_bin() {
         );
     }
 }
+
+/// A member's lockfile records a `file:` dep relative to the member, which
+/// hashes to a different package key than the root-relative path install
+/// materialized it under. A rebuild from the member has to read the lockfile
+/// back in the workspace frame, or it looks up a store entry that does not
+/// exist and skips the build. The virtual store is pinned to one absolute
+/// directory so the member and the root resolve the same store.
+#[test]
+fn member_rebuild_finds_a_local_dep_installed_under_per_project_lockfiles() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let store = sbx.cache.join("vstore");
+    let npmrc = format!("virtual-store-dir={}\n", store.display());
+    sbx.write_file(".npmrc", &npmrc);
+    sbx.write_file("packages/app/.npmrc", &npmrc);
+    sbx.write_file(
+        "pnpm-workspace.yaml",
+        "packages:\n  - packages/*\nsharedWorkspaceLockfile: false\n",
+    );
+    sbx.write_manifest(r#"{ "name": "root", "version": "1.0.0", "private": true }"#);
+    sbx.write_file(
+        "vendor/ldir/package.json",
+        r#"{
+            "name": "ldir",
+            "version": "1.0.0",
+            "scripts": { "postinstall": "node -e \"require('fs').appendFileSync('RUNS', 'x')\"" }
+        }"#,
+    );
+    sbx.write_file(
+        "packages/app/package.json",
+        r#"{ "name": "app", "version": "1.0.0", "dependencies": { "ldir": "file:../../vendor/ldir" } }"#,
+    );
+
+    sbx.cmd().arg("install").assert().success();
+    let lock = fs::read_to_string(sbx.project.join("packages/app/aube-lock.yaml")).unwrap();
+    assert!(
+        lock.contains("file:../../vendor/ldir"),
+        "the member lockfile must record the dep from the member:\n{lock}"
+    );
+
+    sbx.cmd()
+        .current_dir(sbx.project.join("packages/app"))
+        .args(["rebuild", "ldir"])
+        .assert()
+        .success();
+    assert_eq!(
+        read_file_under(&store, "RUNS").as_deref(),
+        Some("x"),
+        "`rebuild ldir` from the member must run the build of the installed copy"
+    );
+}
+
+/// The contents of the first file named `name` under `dir`, if any.
+fn read_file_under(dir: &std::path::Path, name: &str) -> Option<String> {
+    for entry in fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if entry.file_type().ok()?.is_dir() {
+            if let Some(found) = read_file_under(&path, name) {
+                return Some(found);
+            }
+        } else if entry.file_name() == name {
+            return fs::read_to_string(path).ok();
+        }
+    }
+    None
+}
