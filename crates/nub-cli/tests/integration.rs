@@ -2457,7 +2457,7 @@ fn temporal_lazy_global_and_import() {
 }
 
 #[test]
-fn require_of_clobbered_package_loads_installed_package() {
+fn package_clobber_applies_to_import_only() {
     // The import clobber resolves to a data: URL, which the CommonJS loader reads
     // as a file path (ENOENT). On the fast tier the resolve hook also sees
     // require(), so it must leave that call to Node's resolver.
@@ -2469,6 +2469,19 @@ fn require_of_clobbered_package_loads_installed_package() {
     assert!(
         stdout.contains("require-temporal:2026"),
         "the installed package answered the require: {stdout}"
+    );
+
+    // A user-added "require" condition rides on imports too, so it must not be
+    // what tells a require() from an import.
+    let (stdout, stderr, code) = run_nub_with_env(
+        "clobber-require",
+        "import.mjs",
+        &[("NODE_OPTIONS", "--conditions=require")],
+    );
+    assert_eq!(code, 0, "import under --conditions=require: {stderr}");
+    assert!(
+        stdout.contains("import-is-global:true"),
+        "an import keeps the clobber under --conditions=require: {stdout}"
     );
 }
 

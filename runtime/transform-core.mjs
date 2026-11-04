@@ -485,20 +485,11 @@ function isNubInternalParent(parentURL) {
 // resolve hooks are synchronous, so a single flag cannot interleave.
 let resolvingInternal = false;
 
-// A resolve hook sees `require()` calls too, marked by the "require" condition.
-// Node passes `conditions` as an array, or as a Set on 22.15.0.
-function isRequireResolve(conditions) {
-  if (!conditions) return false;
-  return Array.isArray(conditions)
-    ? conditions.includes("require")
-    : typeof conditions.has === "function" && conditions.has("require");
-}
-
 // Resolve a specifier the way both hook tiers do. Returns `{ url, shortCircuit }`
 // to short-circuit Node's resolver, or `null` to fall through to `nextResolve`.
 // `parentURL` is the importer (a file: URL string), or "" for the entry.
-// `conditions` is the resolve hook's `context.conditions`.
-export function resolveSpec(specifier, parentURL, conditions) {
+// `fromRequire` is true when the fast tier's hook is resolving a `require()`.
+export function resolveSpec(specifier, parentURL, fromRequire = false) {
   // nub's own internal graph (importer inside nub's runtime dir OR a nub
   // dependency package): resolve natively and SHORT-CIRCUIT so nextResolve (the
   // user's loader chain) never observes nub's internals. This MUST run before the
@@ -565,7 +556,7 @@ export function resolveSpec(specifier, parentURL, conditions) {
   // package as it would on plain Node: CommonJS reads a data: URL as a file path
   // and fails with ENOENT, and a CommonJS caller expects the package's own export
   // shape (`require("abort-controller")` is the constructor, not a namespace).
-  if (CLOBBER_MAP.has(bare) && !isDependency(parentURL || "") && !isRequireResolve(conditions)) {
+  if (CLOBBER_MAP.has(bare) && !isDependency(parentURL || "") && !fromRequire) {
     return { url: `data:text/javascript,${encodeURIComponent(CLOBBER_MAP.get(bare)())}`, shortCircuit: true };
   }
 
