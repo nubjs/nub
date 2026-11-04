@@ -1,44 +1,57 @@
-//! Pnpm-style `--filter` selectors for workspace packages.
+//! pnpm's `--filter` / `--filter-prod` selection of workspace projects.
 //!
-//! Supported forms:
-//! - `name` — exact package-name match
-//! - `@scope/*`, `foo-*`, `*-plugin` — glob-style name match
-//! - `./path` or `path/` — match packages whose directory is at or under the
-//!   given path (relative to the workspace root)
-//! - `foo...` / `foo^...` — include dependencies / only dependencies
-//! - `...foo` / `...^foo` — include dependents / only dependents
-//! - `[origin/main]` — packages touched since a git ref
-//! - `!foo` — exclude a selector from the final set
+//! The grammar ([`parse_project_selector`]) and the directory glob
+//! ([`dir_glob`]) are ports of pnpm 12's `workspace-projects-filter`, and
+//! the selection below follows its `filter_workspace_projects`:
 //!
-//! `--filter-prod <pattern>` selectors go through the same parser but mark
-//! each selector as `prod_only`. Graph traversal (`foo...`, `...foo`) then
-//! walks only `dependencies` / `optionalDependencies` / `peerDependencies`
-//! edges, skipping `devDependencies` and everything reachable solely
-//! through them — matching pnpm's `--filter-prod` semantics.
+//! - every workspace project is a candidate, the root included;
+//! - selectors apply in order, in runs of the same polarity: an inclusion
+//!   run adds, an exclusion run removes, and a first run that excludes
+//!   starts from every project;
+//! - a directory selector (`./packages/*`, `{packages/a}`, `../x`) is a glob
+//!   against the project directory, resolved against the directory the
+//!   command runs in, so `./packages` selects a project at `packages`
+//!   itself and none below it;
+//! - `--filter-prod` selectors walk production edges only, in a pass of
+//!   their own whose result joins the regular one;
+//! - commands that drop the root from a recursive run (`add`, `run`,
+//!   `exec`, `test`) append pnpm's `!{<root>}` unless an inclusion selector,
+//!   `includeWorkspaceRoot`, or a root-only workspace keeps it.
+
+mod dir_glob;
+mod project_selector;
+
+pub use project_selector::{DependencyTraversal, ProjectSelector, parse_project_selector};
 
 use aube_manifest::{PackageJson, WorkspaceConfig};
+use dir_glob::DirGlob;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 /// The effective `--filter` / `--filter-prod` input for a single command
-/// invocation. Commands receive this after `compute_effective_filter` in
-/// `aube/src/main.rs` has merged the global `-r` wildcard into
-/// `filters` and pulled `filter_prods` from the separate global flag.
+/// invocation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EffectiveFilter {
-    /// Raw `--filter` / `-F` values (plus the `*` wildcard when `-r` was
-    /// passed without an explicit selector).
+    /// Raw `--filter` / `-F` values (plus the `*` that stands for `-r`
+    /// when it was passed without an explicit selector; see
+    /// [`Self::recursive`]).
     pub filters: Vec<String>,
     /// Raw `--filter-prod` values. These apply the same selector forms as
     /// `filters` but restrict graph walks to production edges.
     pub filter_prods: Vec<String>,
     /// `--fail-if-no-match` — promote "no projects matched" from a warning
-    /// to a hard error. pnpm's default is to warn and exit 0; this flag
-    /// (mirrored) opts into the strict behavior for CI use.
+    /// to a hard error.
     pub fail_if_no_match: bool,
-    /// Include the workspace root alongside the selected workspace packages.
+    /// `--include-workspace-root`: keep the root in a recursive selection
+    /// that would otherwise drop it. As in pnpm, it adds nothing to a
+    /// selection an inclusion selector already pins.
     pub include_workspace_root: bool,
+    /// `-r` with no selector. The caller still puts a `*` in `filters` so
+    /// the command takes its workspace path; this marks that `*` as "every
+    /// project" rather than the name glob a user-written `*` is, which
+    /// differs for an unnamed project and for the root's auto-exclusion.
+    pub recursive: bool,
 }
 
 impl EffectiveFilter {
@@ -55,151 +68,34 @@ impl EffectiveFilter {
     {
         Self {
             filters: filters.into_iter().map(Into::into).collect(),
-            filter_prods: Vec::new(),
-            fail_if_no_match: false,
-            include_workspace_root: false,
+            ..Self::default()
         }
+    }
+
+    /// `-r` alone: no selector narrows the run.
+    fn unnarrowed(&self) -> bool {
+        self.recursive && self.filter_prods.is_empty() && self.filters == ["*"]
     }
 }
 
-/// A single parsed selector.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Selector {
-    base: BaseSelector,
-    include_dependencies: bool,
-    include_dependents: bool,
-    exclude_self: bool,
-    exclude: bool,
-    /// Originates from `--filter-prod`: graph walks skip `devDependencies`.
-    prod_only: bool,
+/// How the command selecting projects treats the workspace root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootSelection {
+    /// The root is a candidate like any other project (`install`,
+    /// `remove`, `update`, `ls`, ...).
+    Keep,
+    /// pnpm's `AutoExcludeRoot` for `add`, `run`, `exec` and `test`: a
+    /// selection no inclusion selector pins leaves the root out.
+    AutoExclude,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum BaseSelector {
-    /// Exact package-name match.
-    Name(String),
-    /// Glob against the package name (e.g. `@scope/*`).
-    NameGlob(String),
-    /// Path selector rooted at the workspace directory. Matches packages
-    /// whose directory equals or is nested under this path.
-    Path(PathBuf),
-    /// Packages with files changed relative to a git ref.
-    ChangedSince(String),
-}
-
-impl Selector {
-    /// Parse a raw `--filter` argument.
-    pub fn parse(raw: &str) -> Result<Self, ParseError> {
-        Self::parse_kind(raw, false)
-    }
-
-    /// Parse a raw `--filter-prod` argument. Same grammar as `parse`, but
-    /// the resulting selector's graph walks skip `devDependencies`.
-    pub fn parse_prod(raw: &str) -> Result<Self, ParseError> {
-        Self::parse_kind(raw, true)
-    }
-
-    fn parse_kind(raw: &str, prod_only: bool) -> Result<Self, ParseError> {
-        if raw.is_empty() {
-            return Err(ParseError::Empty);
-        }
-        let (exclude, raw) = raw
-            .strip_prefix('!')
-            .map(|s| (true, s))
-            .unwrap_or((false, raw));
-        if raw.is_empty() {
-            return Err(ParseError::Empty);
-        }
-
-        let (include_dependents, raw) = raw
-            .strip_prefix("...")
-            .map(|s| (true, s))
-            .unwrap_or((false, raw));
-        let (exclude_self_from_dependents, raw) = raw
-            .strip_prefix('^')
-            .map(|s| (true, s))
-            .unwrap_or((false, raw));
-        let (include_dependencies, raw) = raw
-            .strip_suffix("...")
-            .map(|s| (true, s))
-            .unwrap_or((false, raw));
-        let (exclude_self_from_dependencies, raw) = raw
-            .strip_suffix('^')
-            .map(|s| (true, s))
-            .unwrap_or((false, raw));
-        if raw.is_empty() {
-            return Err(ParseError::Empty);
-        }
-        let exclude_self = exclude_self_from_dependents || exclude_self_from_dependencies;
-
-        let base = if raw.starts_with('[') && raw.ends_with(']') && raw.len() > 2 {
-            BaseSelector::ChangedSince(raw[1..raw.len() - 1].to_string())
-        }
-        // Path-style selectors: leading `./`, `../`, `/`, or a trailing `/`.
-        // The pnpm-style `./packages/**` "directory and all descendants"
-        // form already enters this branch via the `./` prefix; we then
-        // strip the `/**` suffix so it collapses to the same `./packages`
-        // path. We deliberately do NOT also accept a bare `/**` suffix
-        // here — `@scope/**` and `name/**` are name globs and must keep
-        // routing through the `NameGlob` branch below.
-        else if raw.starts_with("./")
-            || raw.starts_with("../")
-            || raw.starts_with('/')
-            || raw.ends_with('/')
-        {
-            let trimmed = raw.strip_suffix("/**").unwrap_or(raw).trim_end_matches('/');
-            // Strip a leading `./` so the stored PathBuf has no CurDir
-            // component. `Path::components` normalizes mid-path `CurDir`
-            // already, but keeping the stored form canonical makes the
-            // matcher's `starts_with` contract obvious at a glance.
-            let normalized = trimmed.strip_prefix("./").unwrap_or(trimmed);
-            BaseSelector::Path(PathBuf::from(normalized))
-        } else
-        // Only `*` and `?` are recognized glob metacharacters. Bracket
-        // expressions (`[ab]-pkg`) are intentionally treated as literal
-        // names — `glob_match` doesn't implement them, so detecting `[`
-        // here would only produce silent mismatches.
-        if raw.contains('*') || raw.contains('?') {
-            BaseSelector::NameGlob(raw.to_string())
-        } else {
-            BaseSelector::Name(raw.to_string())
-        };
-
-        Ok(Selector {
-            base,
-            include_dependencies,
-            include_dependents,
-            exclude_self,
-            exclude,
-            prod_only,
-        })
-    }
-
-    /// Test whether this selector matches a workspace package.
-    pub fn matches(&self, pkg: &WorkspacePkg<'_>) -> bool {
-        match &self.base {
-            BaseSelector::Name(n) => pkg.name == Some(n.as_str()),
-            BaseSelector::NameGlob(pat) => match pkg.name {
-                Some(name) => glob_match(pat, name),
-                None => false,
-            },
-            BaseSelector::Path(p) => {
-                let target = pkg.workspace_root.join(p);
-                // Normalize both sides by stripping trailing slashes; we
-                // don't canonicalize because the directories must exist on
-                // disk for the workspace walk to have found them anyway.
-                pkg.dir.starts_with(&target)
-            }
-            BaseSelector::ChangedSince(_) => false,
-        }
-    }
-}
-
-/// Lightweight view of a workspace package for matching.
-pub struct WorkspacePkg<'a> {
-    pub name: Option<&'a str>,
-    pub dir: &'a Path,
-    pub workspace_root: &'a Path,
+/// Where selectors resolve and how the root is treated.
+#[derive(Debug, Clone, Copy)]
+pub struct SelectOptions<'a> {
+    /// The directory a relative directory selector resolves against: the
+    /// one the command runs in.
+    pub prefix: &'a Path,
+    pub root: RootSelection,
 }
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -207,20 +103,6 @@ pub enum ParseError {
     #[error("empty --filter selector")]
     #[diagnostic(code(ERR_AUBE_FILTER_EMPTY))]
     Empty,
-}
-
-/// Parse the combined `--filter` + `--filter-prod` inputs into a single
-/// ordered selector list where each selector carries its `prod_only`
-/// flag. Exclusions (`!pkg`) from either list apply to the whole set.
-pub fn parse_effective(filter: &EffectiveFilter) -> Result<Vec<Selector>, ParseError> {
-    let mut out = Vec::with_capacity(filter.filters.len() + filter.filter_prods.len());
-    for raw in &filter.filters {
-        out.push(Selector::parse(raw)?);
-    }
-    for raw in &filter.filter_prods {
-        out.push(Selector::parse_prod(raw)?);
-    }
-    Ok(out)
 }
 
 #[derive(Debug, Clone)]
@@ -242,160 +124,307 @@ struct IndexedPackage {
     prod_deps: BTreeSet<String>,
 }
 
-pub fn select_workspace_packages(
+/// The workspace projects `filter` selects, in discovery order with the
+/// root last. `workspace_pkgs` are the discovered members; the root joins
+/// them as a candidate whenever it has a `package.json`.
+pub fn select_workspace_projects(
     workspace_root: &Path,
     workspace_pkgs: &[PathBuf],
     filter: &EffectiveFilter,
+    opts: SelectOptions<'_>,
 ) -> Result<Vec<SelectedPackage>, SelectError> {
-    let selectors = parse_effective(filter).map_err(SelectError::Parse)?;
-    let packages = index_packages(workspace_pkgs);
-    if selectors.is_empty() {
-        let mut selected: Vec<_> = packages.into_iter().map(|p| p.selected).collect();
-        include_workspace_root(workspace_root, filter, &mut selected)?;
-        return Ok(selected);
+    let mut packages = index_packages(workspace_pkgs);
+    let root_idx = index_root(workspace_root, &mut packages)?;
+    if filter.is_empty() {
+        let keep_root = include_root_setting(workspace_root, filter)?;
+        return Ok(packages
+            .into_iter()
+            .enumerate()
+            .filter(|(idx, _)| keep_root || Some(*idx) != root_idx)
+            .map(|(_, pkg)| pkg.selected)
+            .collect());
     }
 
-    let has_positive = selectors.iter().any(|s| !s.exclude);
-    let mut included: BTreeSet<usize> = if has_positive {
-        BTreeSet::new()
+    let mut regular: Vec<ProjectSelector> = if filter.unnarrowed() {
+        Vec::new()
     } else {
-        (0..packages.len()).collect()
+        parse_all(&filter.filters, opts.prefix, false)
     };
-    let mut excluded: BTreeSet<usize> = BTreeSet::new();
-    for selector in &selectors {
-        let matches = expand_selector(workspace_root, &packages, selector)?;
-        if selector.exclude {
-            excluded.extend(matches);
+    let mut prod = parse_all(&filter.filter_prods, opts.prefix, true);
+    let has_inclusion = regular.iter().chain(&prod).any(|s| !s.exclude);
+    if opts.root == RootSelection::AutoExclude
+        && root_idx.is_some()
+        && !has_inclusion
+        && !keeps_workspace_root(workspace_root, filter)?
+    {
+        let mut root_selector = ProjectSelector {
+            exclude: true,
+            parent_dir: Some(normalize(workspace_root)),
+            ..ProjectSelector::default()
+        };
+        if prod.is_empty() {
+            regular.push(root_selector);
         } else {
-            included.extend(matches);
+            root_selector.follow_prod_deps_only = true;
+            prod.push(root_selector);
         }
     }
-    for idx in excluded {
-        included.remove(&idx);
-    }
 
-    let mut selected: Vec<_> = packages
+    let mut selected = BTreeSet::new();
+    if regular.is_empty() && prod.is_empty() {
+        selected.extend(0..packages.len());
+    }
+    for selectors in [&regular, &prod] {
+        if !selectors.is_empty() {
+            selected.extend(filter_projects(workspace_root, &packages, selectors)?);
+        }
+    }
+    Ok(packages
         .into_iter()
         .enumerate()
-        .filter_map(|(idx, pkg)| included.contains(&idx).then_some(pkg.selected))
-        .collect();
-    include_workspace_root(workspace_root, filter, &mut selected)?;
+        .filter_map(|(idx, pkg)| selected.contains(&idx).then_some(pkg.selected))
+        .collect())
+}
+
+fn parse_all(raw: &[String], prefix: &Path, prod: bool) -> Vec<ProjectSelector> {
+    raw.iter()
+        .map(|raw| {
+            let mut selector = parse_project_selector(raw, prefix);
+            selector.follow_prod_deps_only = prod;
+            selector
+        })
+        .collect()
+}
+
+/// pnpm's `filter_workspace_projects`: selectors in runs of one polarity,
+/// a leading exclusion run starting from every project.
+fn filter_projects(
+    workspace_root: &Path,
+    packages: &[IndexedPackage],
+    selectors: &[ProjectSelector],
+) -> Result<BTreeSet<usize>, SelectError> {
+    let mut selected: BTreeSet<usize> = if selectors[0].exclude {
+        (0..packages.len()).collect()
+    } else {
+        BTreeSet::new()
+    };
+    for run in selectors.chunk_by(|a, b| a.exclude == b.exclude) {
+        let mut walk = BTreeSet::new();
+        for selector in run {
+            let entries = selector_entries(workspace_root, packages, selector)?;
+            select_entries(packages, selector, &entries, &mut walk);
+        }
+        if run[0].exclude {
+            selected.retain(|idx| !walk.contains(idx));
+        } else {
+            selected.extend(walk);
+        }
+    }
     Ok(selected)
 }
 
-fn index_packages(workspace_pkgs: &[PathBuf]) -> Vec<IndexedPackage> {
-    let mut packages = Vec::new();
-    for dir in workspace_pkgs {
-        let Ok(manifest) = PackageJson::from_path(&dir.join("package.json")) else {
-            continue;
+/// The projects a selector names before its `...` / `^` traversal.
+fn selector_entries(
+    workspace_root: &Path,
+    packages: &[IndexedPackage],
+    selector: &ProjectSelector,
+) -> Result<BTreeSet<usize>, SelectError> {
+    let mut entries: Option<BTreeSet<usize>> = if let Some(diff) = &selector.diff {
+        Some(changed_since(
+            workspace_root,
+            packages,
+            diff,
+            selector.parent_dir.as_deref(),
+        )?)
+    } else {
+        selector.parent_dir.as_ref().map(|dir| {
+            let glob = DirGlob::new(&dir.to_string_lossy());
+            (0..packages.len())
+                .filter(|&idx| {
+                    glob.is_match(&normalize(&packages[idx].selected.dir).to_string_lossy())
+                })
+                .collect()
+        })
+    };
+    if let Some(pattern) = &selector.name_pattern {
+        let candidates: Vec<usize> = match &entries {
+            Some(entries) => entries.iter().copied().collect(),
+            None => (0..packages.len()).collect(),
         };
-        let prod_deps: BTreeSet<String> = manifest
-            .dependencies
-            .keys()
-            .chain(manifest.optional_dependencies.keys())
-            .chain(manifest.peer_dependencies.keys())
-            .cloned()
-            .collect();
-        let all_deps: BTreeSet<String> = prod_deps
-            .iter()
-            .cloned()
-            .chain(manifest.dev_dependencies.keys().cloned())
-            .collect();
-        let private = manifest
-            .extra
-            .get("private")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        packages.push(IndexedPackage {
-            selected: SelectedPackage {
-                name: manifest.name.clone(),
-                version: manifest.version.clone(),
-                private,
-                dir: dir.clone(),
-                manifest,
-            },
-            all_deps,
-            prod_deps,
-        });
+        entries = Some(match_names(packages, &candidates, pattern));
     }
-    packages
+    Ok(entries.unwrap_or_default())
 }
 
-fn include_workspace_root(
+/// pnpm's name match: a `*` / `?` glob, falling back to `@*/<pattern>`
+/// when an unscoped pattern matches nothing and that names exactly one
+/// project.
+fn match_names(
+    packages: &[IndexedPackage],
+    candidates: &[usize],
+    pattern: &str,
+) -> BTreeSet<usize> {
+    let matches: BTreeSet<usize> = candidates
+        .iter()
+        .copied()
+        .filter(|&idx| {
+            packages[idx]
+                .selected
+                .name
+                .as_deref()
+                .is_some_and(|name| glob_match(pattern, name))
+        })
+        .collect();
+    if matches.is_empty() && !pattern.starts_with('@') && !pattern.contains('/') {
+        let scoped = match_names(packages, candidates, &format!("@*/{pattern}"));
+        return if scoped.len() == 1 {
+            scoped
+        } else {
+            BTreeSet::new()
+        };
+    }
+    matches
+}
+
+/// pnpm's `WalkState::select_entries`: the entries, their dependencies
+/// and/or dependents, and with both, the dependents' dependencies too. `^`
+/// drops an entry unless the walk reaches it again from another.
+fn select_entries(
+    packages: &[IndexedPackage],
+    selector: &ProjectSelector,
+    entries: &BTreeSet<usize>,
+    walk: &mut BTreeSet<usize>,
+) {
+    let traversal = selector.traversal;
+    let prod_only = selector.follow_prod_deps_only;
+    if !traversal.include_dependencies && !traversal.include_dependents {
+        walk.extend(entries);
+        return;
+    }
+    let keep_entries = !traversal.exclude_self;
+    if traversal.include_dependencies {
+        walk.extend(walk_dependencies(packages, entries, prod_only));
+        if keep_entries {
+            walk.extend(entries);
+        }
+    }
+    if traversal.include_dependents {
+        let mut dependents = walk_dependents(packages, entries, prod_only);
+        if keep_entries {
+            dependents.extend(entries);
+        }
+        if traversal.include_dependencies {
+            walk.extend(walk_dependencies(packages, &dependents, prod_only));
+        }
+        walk.extend(dependents);
+    }
+}
+
+/// Lexically normalized absolute form, the shape a directory selector is
+/// resolved to, so a glob compares like with like.
+fn normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                    out.pop();
+                } else {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+fn index_packages(workspace_pkgs: &[PathBuf]) -> Vec<IndexedPackage> {
+    workspace_pkgs
+        .iter()
+        .filter_map(|dir| {
+            let manifest = PackageJson::from_path(&dir.join("package.json")).ok()?;
+            Some(indexed(dir.clone(), manifest))
+        })
+        .collect()
+}
+
+fn indexed(dir: PathBuf, manifest: PackageJson) -> IndexedPackage {
+    let prod_deps: BTreeSet<String> = manifest
+        .dependencies
+        .keys()
+        .chain(manifest.optional_dependencies.keys())
+        .chain(manifest.peer_dependencies.keys())
+        .cloned()
+        .collect();
+    let all_deps: BTreeSet<String> = prod_deps
+        .iter()
+        .cloned()
+        .chain(manifest.dev_dependencies.keys().cloned())
+        .collect();
+    let private = manifest
+        .extra
+        .get("private")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    IndexedPackage {
+        selected: SelectedPackage {
+            name: manifest.name.clone(),
+            version: manifest.version.clone(),
+            private,
+            dir,
+            manifest,
+        },
+        all_deps,
+        prod_deps,
+    }
+}
+
+/// Add the workspace root to the candidates (when it has a manifest and
+/// discovery did not already list it), returning its index.
+fn index_root(
+    workspace_root: &Path,
+    packages: &mut Vec<IndexedPackage>,
+) -> Result<Option<usize>, SelectError> {
+    if let Some(idx) = packages
+        .iter()
+        .position(|pkg| normalize(&pkg.selected.dir) == normalize(workspace_root))
+    {
+        return Ok(Some(idx));
+    }
+    let manifest_path = workspace_root.join("package.json");
+    if !manifest_path.is_file() {
+        return Ok(None);
+    }
+    let manifest = PackageJson::from_path(&manifest_path).map_err(SelectError::Manifest)?;
+    packages.push(indexed(workspace_root.to_path_buf(), manifest));
+    Ok(Some(packages.len() - 1))
+}
+
+/// `--include-workspace-root` or the `includeWorkspaceRoot` setting.
+fn include_root_setting(
     workspace_root: &Path,
     filter: &EffectiveFilter,
-    selected: &mut Vec<SelectedPackage>,
-) -> Result<(), SelectError> {
-    let include_workspace_root = filter.include_workspace_root
+) -> Result<bool, SelectError> {
+    Ok(filter.include_workspace_root
         || WorkspaceConfig::load(workspace_root)
             .map_err(SelectError::WorkspaceConfig)?
             .include_workspace_root
-            .unwrap_or(false);
-    if !include_workspace_root || !workspace_root.join("package.json").is_file() {
-        return Ok(());
-    }
-    if selected.iter().any(|pkg| pkg.dir == workspace_root) {
-        return Ok(());
-    }
-
-    let manifest = PackageJson::from_path(&workspace_root.join("package.json"))
-        .map_err(SelectError::Manifest)?;
-    selected.push(SelectedPackage {
-        name: manifest.name.clone(),
-        version: manifest.version.clone(),
-        private: manifest
-            .extra
-            .get("private")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        dir: workspace_root.to_path_buf(),
-        manifest,
-    });
-    Ok(())
+            .unwrap_or(false))
 }
 
-fn expand_selector(
+/// pnpm's `keeps_workspace_root`: the root stays when it is asked for, or
+/// when the workspace lists no packages but the root.
+fn keeps_workspace_root(
     workspace_root: &Path,
-    packages: &[IndexedPackage],
-    selector: &Selector,
-) -> Result<BTreeSet<usize>, SelectError> {
-    let mut seeds = match &selector.base {
-        BaseSelector::ChangedSince(rev) => changed_since(workspace_root, packages, rev)?,
-        _ => packages
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, pkg)| {
-                let view = WorkspacePkg {
-                    name: pkg.selected.name.as_deref(),
-                    dir: &pkg.selected.dir,
-                    workspace_root,
-                };
-                selector.matches(&view).then_some(idx)
-            })
-            .collect(),
-    };
-    let original_seeds = seeds.clone();
-
-    if selector.include_dependencies {
-        seeds.extend(walk_dependencies(
-            packages,
-            &original_seeds,
-            selector.prod_only,
-        ));
+    filter: &EffectiveFilter,
+) -> Result<bool, SelectError> {
+    if include_root_setting(workspace_root, filter)? {
+        return Ok(true);
     }
-    if selector.include_dependents {
-        seeds.extend(walk_dependents(
-            packages,
-            &original_seeds,
-            selector.prod_only,
-        ));
-    }
-    if selector.exclude_self {
-        for idx in original_seeds {
-            seeds.remove(&idx);
-        }
-    }
-    Ok(seeds)
+    let patterns = crate::workspace_patterns(workspace_root).map_err(SelectError::Discovery)?;
+    Ok(patterns.is_empty() || patterns == ["."])
 }
 
 fn name_index(packages: &[IndexedPackage]) -> BTreeMap<&str, usize> {
@@ -465,16 +494,20 @@ fn walk_dependents(
     out
 }
 
+/// pnpm's `[<since>]` selection (`get_changed_projects`): the files `git
+/// diff` reports between the merge base of `rev` and `HEAD` and the
+/// working tree, so uncommitted and staged edits count, each credited to
+/// the project that most closely contains it. A `{dir}` part limits the
+/// diff to that pathspec, glob included.
 fn changed_since(
     workspace_root: &Path,
     packages: &[IndexedPackage],
     rev: &str,
+    pathspec_dir: Option<&Path>,
 ) -> Result<BTreeSet<usize>, SelectError> {
-    // `git diff <revspec> -- <paths>` can't accept a `--` terminator
-    // before the revspec, so a rev that begins with `-` would land as
-    // an option. Reject at the boundary as defense against the
-    // CVE-2017-1000117 class of argv injection. NUL is rejected too
-    // because it never appears in a legitimate ref.
+    // `--end-of-options` already keeps a `-`-led rev from reaching git as
+    // an option (the CVE-2017-1000117 class); refusing it here as well
+    // gives a clear error. NUL never appears in a legitimate ref.
     if rev.starts_with('-') {
         return Err(SelectError::GitFailed(format!(
             "refusing to pass revspec starting with `-` to git: {rev:?}"
@@ -485,36 +518,20 @@ fn changed_since(
             "refusing to pass revspec containing NUL byte to git".to_string(),
         ));
     }
-    let revspec = format!("{rev}...HEAD");
-    let git_root = git_root(workspace_root)?;
+    let repo_root = repo_root(workspace_root);
+    let base = merge_base(workspace_root, rev)?;
+    // Relative to the workspace root, where git runs, so the pathspec and
+    // git's own view of the worktree agree however the path was spelled.
+    let pathspec = match pathspec_dir {
+        Some(dir) => pathdiff::diff_paths(dir, normalize(workspace_root))
+            .filter(|rel| !rel.as_os_str().is_empty())
+            .unwrap_or_else(|| PathBuf::from(".")),
+        None => PathBuf::from("."),
+    };
     let output = Command::new("git")
-        .arg("diff")
-        .arg("--name-only")
-        .arg(&revspec)
-        .arg("--")
-        .current_dir(&git_root)
-        .output()
-        .map_err(SelectError::GitIo)?;
-    if !output.status.success() {
-        return Err(SelectError::GitFailed(
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ));
-    }
-    let mut out = BTreeSet::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let changed = git_root.join(line);
-        for (idx, pkg) in packages.iter().enumerate() {
-            if changed.starts_with(&pkg.selected.dir) {
-                out.insert(idx);
-            }
-        }
-    }
-    Ok(out)
-}
-
-fn git_root(workspace_root: &Path) -> Result<PathBuf, SelectError> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
+        .args(["diff", "--name-only", "-z", "--no-renames", "--no-relative"])
+        .args(["--end-of-options", &base, "--"])
+        .arg(&pathspec)
         .current_dir(workspace_root)
         .output()
         .map_err(SelectError::GitIo)?;
@@ -523,9 +540,62 @@ fn git_root(workspace_root: &Path) -> Result<PathBuf, SelectError> {
             String::from_utf8_lossy(&output.stderr).trim().to_string(),
         ));
     }
-    Ok(PathBuf::from(
-        String::from_utf8_lossy(&output.stdout).trim(),
-    ))
+    let dirs: Vec<PathBuf> = packages
+        .iter()
+        .map(|pkg| normalize(&pkg.selected.dir))
+        .collect();
+    let mut out = BTreeSet::new();
+    for file in String::from_utf8_lossy(&output.stdout).split('\0') {
+        if file.is_empty() {
+            continue;
+        }
+        let changed = repo_root.join(file);
+        let owner = changed
+            .ancestors()
+            .skip(1)
+            .find_map(|dir| dirs.iter().position(|pkg| pkg == dir));
+        if let Some(idx) = owner {
+            out.insert(idx);
+        }
+    }
+    Ok(out)
+}
+
+/// The commit `rev` and `HEAD` share, so commits made only on the `rev`
+/// side stay out of the diff. git exits 1 with no merge base (a shallow
+/// clone, unrelated histories) and 128 for a bad rev; both fall back to
+/// `rev` itself, so the diff reports a bad revision.
+fn merge_base(workspace_root: &Path, rev: &str) -> Result<String, SelectError> {
+    let output = Command::new("git")
+        .args(["merge-base", "--end-of-options", rev, "HEAD"])
+        .current_dir(workspace_root)
+        .output()
+        .map_err(SelectError::GitIo)?;
+    match output.status.code() {
+        Some(0) => {
+            let base = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Ok(if base.is_empty() {
+                rev.to_string()
+            } else {
+                base
+            })
+        }
+        Some(1 | 128) => Ok(rev.to_string()),
+        _ => Err(SelectError::GitFailed(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        )),
+    }
+}
+
+/// The nearest ancestor holding `.git`, found lexically so it compares
+/// with the project directories however a symlinked temp dir resolves.
+fn repo_root(workspace_root: &Path) -> PathBuf {
+    let start = normalize(workspace_root);
+    start
+        .ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .unwrap_or(&start)
+        .to_path_buf()
 }
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -537,6 +607,8 @@ pub enum SelectError {
     WorkspaceConfig(#[source] aube_manifest::Error),
     #[error("failed to read workspace root package.json: {0}")]
     Manifest(#[source] aube_manifest::Error),
+    #[error("failed to read the workspace package patterns: {0}")]
+    Discovery(#[source] crate::Error),
     #[error("failed to run git for [ref] filter: {0}")]
     #[diagnostic(code(ERR_AUBE_FILTER_GIT_IO))]
     GitIo(std::io::Error),
@@ -583,311 +655,195 @@ fn glob_match(pattern: &str, s: &str) -> bool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn parse_forms() {
-        assert_eq!(
-            Selector::parse("foo").unwrap(),
-            Selector {
-                base: BaseSelector::Name("foo".into()),
-                include_dependencies: false,
-                include_dependents: false,
-                exclude_self: false,
-                exclude: false,
-                prod_only: false,
-            }
-        );
-        assert_eq!(
-            Selector::parse("@babel/core").unwrap(),
-            Selector {
-                base: BaseSelector::Name("@babel/core".into()),
-                include_dependencies: false,
-                include_dependents: false,
-                exclude_self: false,
-                exclude: false,
-                prod_only: false,
-            }
-        );
-        assert_eq!(
-            Selector::parse("@babel/*").unwrap(),
-            Selector {
-                base: BaseSelector::NameGlob("@babel/*".into()),
-                include_dependencies: false,
-                include_dependents: false,
-                exclude_self: false,
-                exclude: false,
-                prod_only: false,
-            }
-        );
-        assert_eq!(
-            Selector::parse("./packages/a").unwrap(),
-            Selector {
-                base: BaseSelector::Path(PathBuf::from("packages/a")),
-                include_dependencies: false,
-                include_dependents: false,
-                exclude_self: false,
-                exclude: false,
-                prod_only: false,
-            }
-        );
-        // `./packages/**` is the pnpm "directory and all descendants"
-        // form; aube collapses it to the same path because the matcher
-        // is already "at or under".
-        assert_eq!(
-            Selector::parse("./packages/**").unwrap(),
-            Selector {
-                base: BaseSelector::Path(PathBuf::from("packages")),
-                include_dependencies: false,
-                include_dependents: false,
-                exclude_self: false,
-                exclude: false,
-                prod_only: false,
-            }
-        );
-        // A bare `<name>/**` (no path-y prefix) must keep routing
-        // through `NameGlob` — `@scope/**` is a scoped name glob, not
-        // a path.
-        assert_eq!(
-            Selector::parse("@scope/**").unwrap(),
-            Selector {
-                base: BaseSelector::NameGlob("@scope/**".into()),
-                include_dependencies: false,
-                include_dependents: false,
-                exclude_self: false,
-                exclude: false,
-                prod_only: false,
-            }
-        );
-        assert!(Selector::parse("").is_err());
+    /// A workspace of root, `a`, `b` (depends on `a`) and `c` (depends on
+    /// `b`) under `packages/`, returning the root and the member dirs.
+    fn workspace() -> (tempfile::TempDir, Vec<PathBuf>) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"root","private":true}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "packages:\n  - packages/*\n",
+        )
+        .unwrap();
+        let mut members = Vec::new();
+        for (name, dep) in [("a", None), ("b", Some("a")), ("c", Some("b"))] {
+            let member = root.join("packages").join(name);
+            std::fs::create_dir_all(&member).unwrap();
+            let deps = dep.map_or(String::new(), |dep| {
+                format!(r#","dependencies":{{"{dep}":"workspace:*"}}"#)
+            });
+            std::fs::write(
+                member.join("package.json"),
+                format!(r#"{{"name":"{name}","version":"1.0.0"{deps}}}"#),
+            )
+            .unwrap();
+            members.push(member);
+        }
+        (dir, members)
+    }
+
+    fn names(
+        root: &Path,
+        members: &[PathBuf],
+        filter: EffectiveFilter,
+        mode: RootSelection,
+    ) -> Vec<String> {
+        select_workspace_projects(
+            root,
+            members,
+            &filter,
+            SelectOptions {
+                prefix: root,
+                root: mode,
+            },
+        )
+        .unwrap()
+        .into_iter()
+        .filter_map(|pkg| pkg.name)
+        .collect()
+    }
+
+    fn select(root: &Path, members: &[PathBuf], filters: &[&str]) -> Vec<String> {
+        names(
+            root,
+            members,
+            EffectiveFilter::from_filters(filters.iter().copied()),
+            RootSelection::Keep,
+        )
     }
 
     #[test]
-    fn parse_prod_sets_prod_only() {
-        let sel = Selector::parse_prod("foo...").unwrap();
-        assert!(sel.prod_only);
-        assert!(sel.include_dependencies);
-        assert_eq!(sel.base, BaseSelector::Name("foo".into()));
-        assert!(!Selector::parse("foo...").unwrap().prod_only);
+    fn a_directory_selector_is_a_glob_over_project_directories() {
+        let (dir, members) = workspace();
+        let root = dir.path();
+        assert_eq!(select(root, &members, &["./packages/*"]), ["a", "b", "c"]);
+        assert_eq!(select(root, &members, &["{packages/[ab]}"]), ["a", "b"]);
+        assert_eq!(select(root, &members, &["b{./packages/*}"]), ["b"]);
+        // No project sits at `packages` itself.
+        assert!(select(root, &members, &["./packages"]).is_empty());
+        assert_eq!(select(root, &members, &["./packages/**"]), ["a", "b", "c"]);
+        assert_eq!(select(root, &members, &["."]), ["root"]);
+    }
+
+    #[test]
+    fn selectors_apply_in_runs_and_a_leading_exclusion_starts_from_every_project() {
+        let (dir, members) = workspace();
+        let root = dir.path();
+        assert_eq!(select(root, &members, &["!b"]), ["a", "c", "root"]);
+        assert_eq!(
+            select(root, &members, &["!a", "a"]),
+            ["a", "b", "c", "root"]
+        );
+        assert_eq!(select(root, &members, &["a", "!a"]), Vec::<String>::new());
+        assert_eq!(select(root, &members, &["*"]), ["a", "b", "c", "root"]);
+    }
+
+    #[test]
+    fn traversal_follows_pnpm() {
+        let (dir, members) = workspace();
+        let root = dir.path();
+        assert_eq!(select(root, &members, &["c..."]), ["a", "b", "c"]);
+        assert_eq!(select(root, &members, &["c^..."]), ["a", "b"]);
+        assert_eq!(select(root, &members, &["...{./packages/b}"]), ["b", "c"]);
+        // Both directions add the dependents' dependencies too.
+        assert_eq!(select(root, &members, &["...b..."]), ["a", "b", "c"]);
+        // The location fallback keeps no traversal.
+        assert_eq!(select(root, &members, &["./packages/c..."]), ["c"]);
+    }
+
+    #[test]
+    fn an_auto_excluding_command_drops_the_root_unless_kept() {
+        let (dir, members) = workspace();
+        let root = dir.path();
+        let recursive = EffectiveFilter {
+            filters: vec!["*".into()],
+            recursive: true,
+            ..EffectiveFilter::default()
+        };
+        assert_eq!(
+            names(root, &members, recursive.clone(), RootSelection::Keep),
+            ["a", "b", "c", "root"]
+        );
+        assert_eq!(
+            names(
+                root,
+                &members,
+                recursive.clone(),
+                RootSelection::AutoExclude
+            ),
+            ["a", "b", "c"]
+        );
+        let kept = EffectiveFilter {
+            include_workspace_root: true,
+            ..recursive
+        };
+        assert_eq!(
+            names(root, &members, kept, RootSelection::AutoExclude),
+            ["a", "b", "c", "root"]
+        );
+        let exclusion = EffectiveFilter::from_filters(["!a"]);
+        assert_eq!(
+            names(root, &members, exclusion, RootSelection::AutoExclude),
+            ["b", "c"]
+        );
+        // An inclusion selector pins the set, the root included when named.
+        let named = EffectiveFilter::from_filters(["*"]);
+        assert_eq!(
+            names(root, &members, named, RootSelection::AutoExclude),
+            ["a", "b", "c", "root"]
+        );
     }
 
     #[test]
     fn prod_graph_walk_skips_dev_deps() {
-        // Build three workspace packages:
-        //   api      → depends on lib (prod) and tooling (dev)
-        //   lib      → no deps
-        //   tooling  → no deps
-        // A regular `api...` walk should reach both `lib` and `tooling`;
-        // a `--filter-prod` `api...` walk should reach only `lib`.
         let mk_pkg = |name: &str, prod: &[&str], dev: &[&str]| -> IndexedPackage {
-            let manifest = aube_manifest::PackageJson {
-                name: Some(name.to_string()),
-                ..aube_manifest::PackageJson::default()
-            };
-            IndexedPackage {
-                selected: SelectedPackage {
+            let mut pkg = indexed(
+                PathBuf::from(format!("/ws/{name}")),
+                PackageJson {
                     name: Some(name.to_string()),
-                    version: None,
-                    private: false,
-                    dir: PathBuf::from(format!("/ws/{name}")),
-                    manifest,
+                    ..PackageJson::default()
                 },
-                all_deps: prod
-                    .iter()
-                    .chain(dev.iter())
-                    .map(|s| (*s).to_string())
-                    .collect(),
-                prod_deps: prod.iter().map(|s| (*s).to_string()).collect(),
-            }
+            );
+            pkg.prod_deps = prod.iter().map(|s| (*s).to_string()).collect();
+            pkg.all_deps = prod.iter().chain(dev).map(|s| (*s).to_string()).collect();
+            pkg
         };
         let packages = vec![
             mk_pkg("api", &["lib"], &["tooling"]),
             mk_pkg("lib", &[], &[]),
             mk_pkg("tooling", &[], &[]),
         ];
-
-        let mut seeds = BTreeSet::new();
-        seeds.insert(0); // api
-
-        let full = walk_dependencies(&packages, &seeds, false);
-        assert_eq!(full, BTreeSet::from([1, 2]));
-
-        let prod = walk_dependencies(&packages, &seeds, true);
-        assert_eq!(prod, BTreeSet::from([1]));
-
-        // walk_dependents with prod_only should also skip dev edges: the
-        // only dependent of `tooling` is `api` via a dev edge, so prod
-        // mode should return an empty set.
-        let mut tool_seeds = BTreeSet::new();
-        tool_seeds.insert(2);
-        let tool_all = walk_dependents(&packages, &tool_seeds, false);
-        assert_eq!(tool_all, BTreeSet::from([0]));
-        let tool_prod = walk_dependents(&packages, &tool_seeds, true);
-        assert!(tool_prod.is_empty());
+        let api = BTreeSet::from([0]);
+        assert_eq!(
+            walk_dependencies(&packages, &api, false),
+            BTreeSet::from([1, 2])
+        );
+        assert_eq!(
+            walk_dependencies(&packages, &api, true),
+            BTreeSet::from([1])
+        );
+        let tooling = BTreeSet::from([2]);
+        assert_eq!(
+            walk_dependents(&packages, &tooling, false),
+            BTreeSet::from([0])
+        );
+        assert!(walk_dependents(&packages, &tooling, true).is_empty());
     }
 
     #[test]
-    fn parse_graph_forms() {
-        let deps = Selector::parse("foo...").unwrap();
-        assert_eq!(deps.base, BaseSelector::Name("foo".into()));
-        assert!(deps.include_dependencies);
-        assert!(!deps.include_dependents);
-        assert!(!deps.exclude_self);
-
-        let only_deps = Selector::parse("foo^...").unwrap();
-        assert!(only_deps.include_dependencies);
-        assert!(only_deps.exclude_self);
-
-        let dependents = Selector::parse("...foo").unwrap();
-        assert!(dependents.include_dependents);
-
-        let only_dependents = Selector::parse("...^foo").unwrap();
-        assert!(only_dependents.include_dependents);
-        assert!(only_dependents.exclude_self);
-    }
-
-    #[test]
-    fn glob_matches_names() {
-        assert!(glob_match("@babel/*", "@babel/core"));
-        assert!(glob_match("@babel/*", "@babel/preset-env"));
-        assert!(!glob_match("@babel/*", "@babel-x/core"));
-        assert!(glob_match("foo-*", "foo-bar"));
-        assert!(glob_match("*-plugin", "a-plugin"));
-        assert!(glob_match("*", "anything"));
-        assert!(!glob_match("foo", "foobar"));
-    }
-
-    #[test]
-    fn path_selector_matches_nested() {
-        let root = Path::new("/ws");
-        let sel = Selector::parse("./packages").unwrap();
-        let dir = PathBuf::from("/ws/packages/a");
-        assert!(sel.matches(&WorkspacePkg {
-            name: Some("a"),
-            dir: &dir,
-            workspace_root: root,
-        }));
-    }
-
-    #[test]
-    fn include_workspace_root_adds_root_even_when_filter_matches_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("package.json"),
-            r#"{"name":"root","version":"0.0.0","private":true}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            dir.path().join("pnpm-workspace.yaml"),
-            "packages:\n  - packages/*\nincludeWorkspaceRoot: true\n",
-        )
-        .unwrap();
-        std::fs::create_dir_all(dir.path().join("packages/app")).unwrap();
-        std::fs::write(
-            dir.path().join("packages/app/package.json"),
-            r#"{"name":"app","version":"1.0.0"}"#,
-        )
-        .unwrap();
-
-        let selected = select_workspace_packages(
-            dir.path(),
-            &[dir.path().join("packages/app")],
-            &EffectiveFilter::from_filters(["missing"]),
-        )
-        .unwrap();
-
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].name.as_deref(), Some("root"));
-        assert_eq!(selected[0].dir, dir.path());
-    }
-
-    #[test]
-    fn include_workspace_root_yaml_applies_with_no_selectors() {
-        // Regression: when both `filters` and `filter_prods` are empty,
-        // `select_workspace_packages` short-circuits — root inclusion
-        // (CLI flag or YAML) must still apply on that path.
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("package.json"),
-            r#"{"name":"root","version":"0.0.0","private":true}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            dir.path().join("pnpm-workspace.yaml"),
-            "packages:\n  - packages/*\nincludeWorkspaceRoot: true\n",
-        )
-        .unwrap();
-        std::fs::create_dir_all(dir.path().join("packages/app")).unwrap();
-        std::fs::write(
-            dir.path().join("packages/app/package.json"),
-            r#"{"name":"app","version":"1.0.0"}"#,
-        )
-        .unwrap();
-
-        let selected = select_workspace_packages(
-            dir.path(),
-            &[dir.path().join("packages/app")],
-            &EffectiveFilter::default(),
-        )
-        .unwrap();
-
-        let names: Vec<_> = selected
-            .iter()
-            .filter_map(|pkg| pkg.name.as_deref())
-            .collect();
-        assert_eq!(names, vec!["app", "root"]);
-    }
-
-    #[test]
-    fn include_workspace_root_flag_adds_root_to_regular_matches() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("package.json"),
-            r#"{"name":"root","version":"0.0.0","private":true}"#,
-        )
-        .unwrap();
-        std::fs::create_dir_all(dir.path().join("packages/app")).unwrap();
-        std::fs::write(
-            dir.path().join("packages/app/package.json"),
-            r#"{"name":"app","version":"1.0.0"}"#,
-        )
-        .unwrap();
-        let mut filter = EffectiveFilter::from_filters(["app"]);
-        filter.include_workspace_root = true;
-
-        let selected =
-            select_workspace_packages(dir.path(), &[dir.path().join("packages/app")], &filter)
-                .unwrap();
-        let names: Vec<_> = selected
-            .iter()
-            .filter_map(|pkg| pkg.name.as_deref())
-            .collect();
-
-        assert_eq!(names, vec!["app", "root"]);
-    }
-
-    #[test]
-    fn changed_since_rejects_dash_prefixed_rev() {
-        // CVE-2017-1000117 class: a rev beginning with `-` would be
-        // interpreted by `git diff` as an option because the
-        // subcommand does not accept a `--` terminator before the
-        // revspec. Reject at the boundary before the format! call.
-        // The validation runs before `git_root`, so `workspace_root`
-        // does not need to exist for this test.
-        let err =
-            changed_since(Path::new("/nonexistent"), &[], "--upload-pack=/tmp/evil").unwrap_err();
-        let msg = match err {
-            SelectError::GitFailed(m) => m,
-            other => panic!("expected GitFailed, got {other:?}"),
-        };
-        assert!(msg.contains("refusing"), "unexpected error: {msg}");
-    }
-
-    #[test]
-    fn changed_since_rejects_nul_in_rev() {
-        let err = changed_since(Path::new("/nonexistent"), &[], "main\0evil").unwrap_err();
-        let msg = match err {
-            SelectError::GitFailed(m) => m,
-            other => panic!("expected GitFailed, got {other:?}"),
-        };
-        assert!(msg.contains("refusing"), "unexpected error: {msg}");
+    fn changed_since_rejects_option_shaped_and_nul_revs() {
+        // A rev beginning with `-` would reach `git diff` as an option
+        // (CVE-2017-1000117 class); the check runs before git does.
+        for rev in ["--upload-pack=/tmp/evil", "main\0evil"] {
+            match changed_since(Path::new("/nonexistent"), &[], rev, None).unwrap_err() {
+                SelectError::GitFailed(msg) => assert!(msg.contains("refusing"), "{msg}"),
+                other => panic!("expected GitFailed, got {other:?}"),
+            }
+        }
     }
 }

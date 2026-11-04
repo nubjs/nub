@@ -182,7 +182,8 @@ struct FilterFlags {
 /// no-op when an explicit `--filter`/`--filter-prod` already scopes the run.
 fn effective_filter(flags: &FilterFlags) -> EffectiveFilter {
     let mut filters = flags.filter.clone();
-    if flags.recursive && filters.is_empty() && flags.filter_prod.is_empty() {
+    let recursive = flags.recursive && filters.is_empty() && flags.filter_prod.is_empty();
+    if recursive {
         filters.push("*".to_string());
     }
     EffectiveFilter {
@@ -190,6 +191,7 @@ fn effective_filter(flags: &FilterFlags) -> EffectiveFilter {
         filter_prods: flags.filter_prod.clone(),
         fail_if_no_match: flags.fail_if_no_match,
         include_workspace_root: flags.include_workspace_root,
+        recursive,
     }
 }
 

@@ -134,8 +134,8 @@ fn detect_project_walk(cwd: &Path) -> Option<(Project, Vec<PathBuf>)> {
         // Also check for pnpm-workspace.yaml — but ONLY when pnpm is the
         // incumbent PM here. The brand hard gate (AGENTS.md): when the project's
         // PM is not pnpm, nub must never read a pnpm-NAMED path. A committed
-        // `pnpm-lock.yaml` beside it is the incumbent signal (file-presence
-        // detection, not config-consumption). Without it, a stray
+        // `pnpm-lock.yaml` or a declared pnpm pin beside it is the incumbent
+        // signal (detection, not config-consumption). Without either, a stray
         // `pnpm-workspace.yaml` must not make this dir the workspace root.
         let pnpm_ws = dir.join("pnpm-workspace.yaml");
         if pnpm_ws.is_file() && crate::workspace::filter::pnpm_is_incumbent(&dir) {
@@ -199,7 +199,7 @@ fn freshness_stamps(project: &Project, walked_dirs: &[PathBuf]) -> FreshnessStam
     {
         manifest_paths.push(ws.join("package.json"));
     }
-    let manifests = manifest_paths
+    let mut manifests: Vec<(PathBuf, (SystemTime, u64))> = manifest_paths
         .into_iter()
         .filter_map(|p| stamp_of(&p).map(|s| (p, s)))
         .collect();
@@ -210,6 +210,17 @@ fn freshness_stamps(project: &Project, walked_dirs: &[PathBuf]) -> FreshnessStam
             let path = dir.join(name);
             let present = path.is_file();
             pnpm_presence.push((path, present));
+        }
+    }
+    // Beside a `pnpm-workspace.yaml`, the dir's own manifest decides whether it is
+    // the root too (a declared pnpm pin), so a rewrite of it must miss as well.
+    for dir in walked_dirs {
+        let manifest = dir.join("package.json");
+        if dir.join("pnpm-workspace.yaml").is_file()
+            && !manifests.iter().any(|(p, _)| *p == manifest)
+            && let Some(stamp) = stamp_of(&manifest)
+        {
+            manifests.push((manifest, stamp));
         }
     }
 

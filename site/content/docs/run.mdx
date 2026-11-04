@@ -283,6 +283,8 @@ nub run --filter "./packages/*" lint   # path glob
 nub run --filter '!@org/legacy' build  # exclude a package
 ```
 
+A path selector is a glob over package directories, resolved from the current directory: `./packages/*` selects every package directly under `packages`, `./packages/**` every package at any depth below it, and `./packages` only a package whose directory is `packages` itself.
+
 Multiple `--filter` flags compose as a union of the matched sets:
 
 ```bash
@@ -342,7 +344,7 @@ nub run -r --resume-from @org/api build
 
 ## `-w, --workspace-root`
 
-The `-w` flag (pnpm's `--workspace-root`) targets only the root project, regardless of where you invoke it from. To run recursively across members and also include the root package, use the npm-style `--include-workspace-root`.
+The `-w` flag (pnpm's `--workspace-root`) targets only the root project, regardless of where you invoke it from. A recursive run leaves the root out; to include it, add `--include-workspace-root`.
 
 ```bash
 nub run -w lint                          # "lint" at the workspace root

@@ -11,7 +11,7 @@ pub mod topo;
 use std::path::{Component, Path, PathBuf};
 
 pub use aube_manifest::workspace::WorkspaceConfig;
-pub use selector::{Selector, WorkspacePkg};
+pub use selector::{EffectiveFilter, ProjectSelector, RootSelection, SelectOptions};
 
 /// Whether workspace globs may select packages outside the workspace root.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -79,6 +79,20 @@ pub fn is_workspace_project_root(project_dir: &Path) -> bool {
 ///    `{ packages: [...] }` object form).
 pub fn find_workspace_packages(project_dir: &Path) -> Result<Vec<PathBuf>, Error> {
     find_workspace_packages_with_options(project_dir, WorkspaceDiscoveryOptions::default())
+}
+
+/// The workspace's package patterns, from `pnpm-workspace.yaml` (or its
+/// aube equivalent) when one exists, else `package.json#workspaces`.
+pub(crate) fn workspace_patterns(project_dir: &Path) -> Result<Vec<String>, Error> {
+    if aube_manifest::workspace::workspace_yaml_existing(project_dir).is_some() {
+        let config = WorkspaceConfig::load(project_dir).map_err(|e| match e {
+            aube_manifest::Error::Io(p, e) => Error::Io(p, e),
+            aube_manifest::Error::YamlParse(p, e) => Error::Parse(p, e),
+            aube_manifest::Error::Parse(pe) => Error::ParseDiag(pe),
+        })?;
+        return Ok(config.packages);
+    }
+    package_json_workspace_patterns(project_dir)
 }
 
 /// Discover workspace package directories with host-selected policy.

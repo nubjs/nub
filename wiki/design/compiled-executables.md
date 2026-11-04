@@ -248,6 +248,8 @@ Two harnesses under `tests/compile-corpus/` do this continuously. One varies **w
 
 The package corpus requires a successful plain-Node control and compares complete stdout on both cold and warm launches, with source and dependencies hidden. Its SQLite fixture verifies rollback and persistence after reopen; its Express fixture sends an HTTP request to the compiled server.
 
+The Windows native-package and data-package gates keep their fixtures and extraction caches under the runner's user profile. Shared temporary-directory ancestors can fail the launcher's cache-safety checks, causing extraction to fall back to a different cache than the gate inspects.
+
 ### Platform coverage
 
 Nub publishes eight targets. Each is verified by building an artifact and running it, rather than inferred from a sibling that shares an operating system or an architecture.

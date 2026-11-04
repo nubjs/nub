@@ -118,6 +118,8 @@ pub const WARN_AUBE_LOCKFILE_MALFORMED_PEER_SUFFIX: &str =
 pub const WARN_AUBE_GLOBAL_OUTDATED_NO_LOCKFILE: &str = "WARN_AUBE_GLOBAL_OUTDATED_NO_LOCKFILE";
 pub const WARN_AUBE_LOCKFILE_LEGACY_INCOMPLETE_GRAPH: &str =
     "WARN_AUBE_LOCKFILE_LEGACY_INCOMPLETE_GRAPH";
+pub const WARN_AUBE_PACKAGE_MANAGER_PIN_NOT_RECORDED: &str =
+    "WARN_AUBE_PACKAGE_MANAGER_PIN_NOT_RECORDED";
 
 // ── global installs ─────────────────────────────────────────────────
 pub const WARN_AUBE_GLOBAL_DIR_LEGACY_LOCATION: &str = "WARN_AUBE_GLOBAL_DIR_LEGACY_LOCATION";
@@ -668,6 +670,12 @@ pub const ALL: &[CodeMeta] = &[
         name: WARN_AUBE_LOCKFILE_LEGACY_INCOMPLETE_GRAPH,
         category: category::LOCKFILE,
         description: "A legacy npm lockfile (lockfileVersion 1 / pre-2017 npm-shrinkwrap.json) hoists a package to the top level with no recorded dependency edge — pre-npm-5 shrinkwraps omit the `requires` links that record which package depends on it. The package is unreachable from the project's dependencies and will not be installed. Re-lock with npm 7+ (or `nub install` then commit the regenerated lockfile) for a complete graph.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: WARN_AUBE_PACKAGE_MANAGER_PIN_NOT_RECORDED,
+        category: category::LOCKFILE,
+        description: "The project pins pnpm 11 or later (`devEngines.packageManager`, or a v12+ `packageManager` field) but the pinned pnpm could not be resolved, so `pnpm-lock.yaml` does not record it in `packageManagerDependencies`. pnpm's `--frozen-lockfile` refuses such a lockfile; the next install retries.",
         exit_code: None,
     },
     // Global installs
