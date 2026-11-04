@@ -581,9 +581,9 @@ fn is_safe_dir(path: &Path) -> bool {
 ///   explicit or inherited. Such an account gains nothing it did not already have.
 ///   A grant that exists only below the profile, set there or materialized from an
 ///   inherit-only template on the profile, could rename the base away without any
-///   control of the profile, so it is refused. A reparse point among them is
-///   followed, and the path it resolves to is validated in full, as if it were
-///   outside the profile.
+///   control of the profile, so it is refused.
+/// - **A reparse point among the parents is refused**, inside the profile as well
+///   as outside it. A later location is used instead, quietly.
 /// - `C:\Users`, the volume root, and every parent of a base outside the profile get
 ///   the full check.
 #[cfg(windows)]
@@ -663,13 +663,6 @@ fn walk_windows_base_under(
         }
         let metadata = fs::symlink_metadata(parent)?;
         if reparse(&metadata) {
-            if in_profile {
-                // Follow it once. Whatever it points at gets the full check, so a
-                // junction cannot lend a shared directory the profile's trust.
-                let rest = path.strip_prefix(parent).map_err(std::io::Error::other)?;
-                let resolved = fs::canonicalize(parent)?.join(rest);
-                return walk_windows_base_under(&resolved, create_missing, None);
-            }
             return Err(std::io::Error::other(format!(
                 "its parent {} is a symlink or reparse point",
                 parent.display()
@@ -1736,11 +1729,17 @@ mod tests {
             ensure_safe_base(&junction).is_none(),
             "a junction must never be adopted as the runtime-cache base"
         );
-        // A junction among the parents inside the profile is followed, and what it
-        // points at is checked in full; outside the profile it is refused outright.
+        // A junction among the parents is refused inside the profile as well as
+        // outside it, even when it points at a private directory.
+        let refusal = walk_windows_base_under(&junction.join("nub"), true, Some(&root))
+            .expect_err("a base below a junction inside the profile is refused");
         assert!(
-            walk_windows_base_under(&junction.join("nub"), true, Some(&root)).is_ok(),
-            "a base below a junction to a private directory is adopted"
+            refusal.to_string().contains("symlink or reparse point"),
+            "{refusal}"
+        );
+        assert!(
+            !target.join("nub").exists(),
+            "nothing is created through the junction"
         );
         assert!(
             walk_windows_base_under(
@@ -1757,7 +1756,7 @@ mod tests {
         assert!(make_dir_link(&to_shared, &shared));
         assert!(
             walk_windows_base_under(&to_shared.join("nub"), true, Some(&root)).is_err(),
-            "a junction inside the profile lends no trust to a shared target"
+            "a base below a junction to a shared directory is refused"
         );
         fs::remove_dir(&junction).unwrap();
         fs::remove_dir(&to_shared).unwrap();
