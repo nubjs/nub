@@ -793,3 +793,367 @@ fn an_importers_own_bin_never_shadows_a_dependencys_bin() {
         );
     }
 }
+
+/// Find `program` on the test's own `PATH`.
+fn find_on_path(program: &str) -> std::path::PathBuf {
+    let names: Vec<String> = if cfg!(windows) {
+        vec![format!("{program}.exe"), format!("{program}.cmd")]
+    } else {
+        vec![program.to_string()]
+    };
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| panic!("{program} must be on PATH for this test"))
+}
+
+/// A `PATH` holding `node`, `git` and a shell, and no `cp`. On Unix the
+/// tools are symlinked into a private dir, because the dir `git` lives in
+/// (`/usr/bin`) carries `cp` too. On Windows each tool's own dir is used
+/// as is, which is what a stock PowerShell session sees.
+fn path_without_cp(sbx: &Sandbox) -> std::ffi::OsString {
+    let dirs: Vec<std::path::PathBuf> = if cfg!(windows) {
+        let system32 = std::path::PathBuf::from(
+            std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()),
+        )
+        .join("System32");
+        vec![
+            find_on_path("node").parent().unwrap().to_path_buf(),
+            find_on_path("git").parent().unwrap().to_path_buf(),
+            system32,
+        ]
+    } else {
+        let bin = sbx.home.join("bin-without-cp");
+        fs::create_dir_all(&bin).unwrap();
+        #[cfg(unix)]
+        for tool in ["node", "git", "sh"] {
+            std::os::unix::fs::symlink(find_on_path(tool), bin.join(tool)).unwrap();
+        }
+        vec![bin]
+    };
+    for dir in &dirs {
+        assert!(
+            !dir.join("cp").exists() && !dir.join("cp.exe").exists(),
+            "{} must not provide cp, or the test proves nothing",
+            dir.display()
+        );
+    }
+    std::env::join_paths(dirs).unwrap()
+}
+
+/// A local git repo holding `files`, committed once, as a `git+file:` URL.
+fn git_repo(sbx: &Sandbox, files: &[(&str, &str)]) -> String {
+    let repo = sbx.home.join("prep-repo");
+    fs::create_dir_all(&repo).unwrap();
+    for (path, contents) in files {
+        fs::write(repo.join(path), contents).unwrap();
+    }
+    for args in [
+        &["init", "-q"][..],
+        &["add", "-A"][..],
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "init",
+        ][..],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+    format!(
+        "git+file:///{}",
+        repo.to_string_lossy()
+            .replace('\\', "/")
+            .trim_start_matches('/')
+    )
+}
+
+/// A local git repo whose `prepare` builds `dist/index.js`.
+fn git_repo_with_prepare(sbx: &Sandbox) -> String {
+    git_repo(
+        sbx,
+        &[
+            (
+                "package.json",
+                r#"{
+                    "name": "prep-demo",
+                    "version": "1.0.0",
+                    "main": "dist/index.js",
+                    "files": ["dist"],
+                    "scripts": { "prepare": "node build.js" }
+                }"#,
+            ),
+            (
+                "build.js",
+                "require('fs').mkdirSync('dist', { recursive: true });\n\
+                 require('fs').writeFileSync('dist/index.js', 'module.exports = 42;\\n');\n",
+            ),
+        ],
+    )
+}
+
+/// Preparing a git dependency copies its checkout to a scratch dir before
+/// the build runs. That copy used to spawn `cp`, which stock Windows has
+/// no copy of, so any git dep with a `prepare` failed to install there.
+#[test]
+fn git_dep_prepare_runs_with_no_cp_on_path() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let url = git_repo_with_prepare(&sbx);
+    // The commit-free repository key approves every commit of the repo.
+    sbx.write_manifest(&format!(
+        r#"{{ "name": "consumer", "version": "0.0.0", "dependencies": {{ "prep-demo": "{url}" }},
+             "pnpm": {{ "allowBuilds": {{ "prep-demo@{url}": true }} }} }}"#
+    ));
+
+    sbx.cmd()
+        .arg("install")
+        .env("PATH", path_without_cp(&sbx))
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(sbx.project.join("node_modules/prep-demo/dist/index.js"))
+            .unwrap_or_default(),
+        "module.exports = 42;\n",
+        "the dependency's prepare script built dist/ before it was linked"
+    );
+}
+
+/// A git dependency that has to be built runs its build only when the
+/// allowlist names its source or repository, as pnpm's
+/// `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED` gate does. A bare package name
+/// cannot approve it; a denial installs the checkout unbuilt.
+#[test]
+fn git_dep_prepare_is_refused_unless_the_allowlist_names_its_source() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let url = git_repo_with_prepare(&sbx);
+    let install = |allow: &str| {
+        let _ = fs::remove_dir_all(sbx.project.join("node_modules"));
+        sbx.write_manifest(&format!(
+            r#"{{ "name": "consumer", "version": "0.0.0", "dependencies": {{ "prep-demo": "{url}" }},
+                 "pnpm": {{ "allowBuilds": {{ {allow} }} }} }}"#
+        ));
+        sbx.cmd().arg("install").assert()
+    };
+
+    for allow in ["", r#""prep-demo": true"#] {
+        let out = install(allow).code(1);
+        let stderr = String::from_utf8_lossy(&out.get_output().stderr).into_owned();
+        assert!(
+            stderr.contains("ERR_AUBE_GIT_DEP_PREPARE_NOT_ALLOWED"),
+            "allowBuilds {{{allow}}} refuses the build:\n{stderr}"
+        );
+        assert!(!sbx.project.join("node_modules/prep-demo").exists());
+    }
+
+    install(r#""prep-demo": false"#).success();
+    assert!(
+        sbx.project.join("node_modules/prep-demo/build.js").exists()
+            && !sbx.project.join("node_modules/prep-demo/dist").exists(),
+        "a denied build installs the checkout as it is"
+    );
+}
+
+/// A git dependency with no `prepare` but a `prepack` and its `main`
+/// missing is built too, and its publishing scripts run with their
+/// `pre`/`post` hooks, as `npm run prepack` runs them for pnpm: here
+/// `postprepack` writes the entry point.
+#[test]
+fn git_dep_prepack_runs_with_its_hooks_when_main_is_missing() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let url = git_repo(
+        &sbx,
+        &[
+            (
+                "package.json",
+                r#"{
+                    "name": "pack-demo",
+                    "version": "1.0.0",
+                    "main": "dist/index.js",
+                    "files": ["dist"],
+                    "scripts": { "prepack": "node -e 1", "postprepack": "node post.js" }
+                }"#,
+            ),
+            (
+                "post.js",
+                "require('fs').mkdirSync('dist', { recursive: true });\n\
+                 require('fs').writeFileSync('dist/index.js', 'module.exports = 9;\\n');\n",
+            ),
+        ],
+    );
+    sbx.write_manifest(&format!(
+        r#"{{ "name": "consumer", "version": "0.0.0", "dependencies": {{ "pack-demo": "{url}" }},
+             "pnpm": {{ "allowBuilds": {{ "pack-demo@{url}": true }} }} }}"#
+    ));
+
+    sbx.cmd().arg("install").assert().success();
+    assert_eq!(
+        fs::read_to_string(sbx.project.join("node_modules/pack-demo/dist/index.js"))
+            .unwrap_or_default(),
+        "module.exports = 9;\n",
+        "postprepack built the entry point before the package was packed"
+    );
+}
+
+/// A gzipped tarball shaped like a codeload archive: every entry under one
+/// `<owner>-<repo>-<sha>/` wrapper dir.
+fn codeload_tarball(wrapper: &str, files: &[(&str, &str)]) -> Vec<u8> {
+    let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut builder = tar::Builder::new(gz);
+    for (path, contents) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(
+                &mut header,
+                format!("{wrapper}/{path}"),
+                contents.as_bytes(),
+            )
+            .unwrap();
+    }
+    builder.into_inner().unwrap().finish().unwrap()
+}
+
+/// Serve `body` to every request through a plain-HTTP forward proxy on
+/// loopback, recording each request line. Lets a test reach a URL on a
+/// real host name (the codeload host is what marks a tarball as a git
+/// checkout) without the network.
+fn serve_through_proxy(
+    body: Vec<u8>,
+) -> (std::net::SocketAddr, std::sync::Arc<Mutex<Vec<String>>>) {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let requests = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let seen = requests.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            seen.lock().unwrap().push(line.trim_end().to_string());
+            loop {
+                let mut header = String::new();
+                match reader.read_line(&mut header) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) if header == "\r\n" || header == "\n" => break,
+                    Ok(_) => {}
+                }
+            }
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/x-gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(&body);
+        }
+    });
+    (addr, requests)
+}
+
+/// A hosted git dependency pinned to a commit is fetched and recorded as
+/// its codeload archive rather than as a git clone, and that route used
+/// to skip the `prepare` build the clone route runs: the install exited 0
+/// with no `dist/`. `rimraf@github:isaacs/rimraf#v6.1.3` was the reported
+/// case.
+#[test]
+fn hosted_git_tarball_dep_runs_its_prepare_script() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let tarball = codeload_tarball(
+        &format!("acme-demo-{sha}"),
+        &[
+            (
+                "package.json",
+                r#"{
+                    "name": "demo",
+                    "version": "1.0.0",
+                    "main": "dist/index.js",
+                    "files": ["dist"],
+                    "scripts": { "prepare": "node build.js" }
+                }"#,
+            ),
+            (
+                "build.js",
+                "require('fs').mkdirSync('dist', { recursive: true });\n\
+                 require('fs').writeFileSync('dist/index.js', 'module.exports = 7;\\n');\n",
+            ),
+        ],
+    );
+    let (proxy, requests) = serve_through_proxy(tarball);
+    let url = format!("http://codeload.github.com/acme/demo/tar.gz/{sha}");
+    let manifest = |allow: &str| {
+        sbx.write_manifest(&format!(
+            r#"{{ "name": "consumer", "version": "0.0.0", "dependencies": {{ "demo": "{url}" }},
+                 "pnpm": {{ "allowBuilds": {{ {allow} }} }} }}"#
+        ))
+    };
+    let install = |args: &[&str]| {
+        let _ = fs::remove_dir_all(sbx.project.join("node_modules"));
+        sbx.cmd()
+            .arg("install")
+            .args(args)
+            .env_remove("https_proxy")
+            .env_remove("HTTPS_PROXY")
+            .env_remove("no_proxy")
+            .env_remove("NO_PROXY")
+            .env_remove("http_proxy")
+            // Last: Windows env names are case-insensitive, so removing
+            // `http_proxy` after this would remove it too.
+            .env("HTTP_PROXY", format!("http://{proxy}/"))
+            .assert()
+    };
+
+    manifest("");
+    let out = install(&[]).code(1);
+    assert!(
+        String::from_utf8_lossy(&out.get_output().stderr)
+            .contains("ERR_AUBE_GIT_DEP_PREPARE_NOT_ALLOWED"),
+        "an archive nobody approved is not built"
+    );
+
+    // The archive is approved under the repository it was cut from.
+    manifest(r#""demo@git+https://github.com/acme/demo.git": true"#);
+    install(&[]).success();
+    assert!(
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains(&url)),
+        "the archive was fetched through the proxy: {:?}",
+        requests.lock().unwrap()
+    );
+    assert_eq!(
+        fs::read_to_string(sbx.project.join("node_modules/demo/dist/index.js")).unwrap_or_default(),
+        "module.exports = 7;\n",
+        "the archive's prepare script built dist/ before it was linked"
+    );
+    assert!(
+        !sbx.project.join("node_modules/demo/build.js").exists(),
+        "the prepared package is what `files` publishes, not the raw archive"
+    );
+
+    // Scripts disabled: the archive is linked as fetched, unbuilt.
+    install(&["--ignore-scripts"]).success();
+    assert!(sbx.project.join("node_modules/demo/build.js").exists());
+    assert!(!sbx.project.join("node_modules/demo/dist").exists());
+}

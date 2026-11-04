@@ -8,13 +8,16 @@
 #
 # Idempotent on a re-run. A version already live is skipped by the `npm view` check; a version
 # already sitting in the staged queue makes `npm stage publish` refuse (npm reserves the number
-# while it is staged), and that refusal is a success here: the approval wait downstream still
-# gates on the registry serving the version. The refusal's exact wording is matched loosely
-# because the first stage-only release is where it gets observed; anything else stays fatal.
+# while it is staged), and that refusal is a success here: release.yml's npm-served job still
+# gates on the registry serving the version after the approval. The refusal's exact wording is
+# matched loosely because the first stage-only release is where it gets observed; anything else
+# stays fatal.
 set -euo pipefail
 dir="${1:?usage: npm-stage-publish.sh <package-dir>}"
 version="${VERSION:?VERSION must name the version being released}"
-name="$(node -p "require('$dir/package.json').name")"
+# A relative directory is resolved to a path first: a bare `require('artifacts/x/package.json')`
+# is a package lookup in node_modules, and it took v0.9.5's first staging run down.
+name="$(node -p "require(require('node:path').resolve('$dir', 'package.json')).name")"
 if [ "$(npm view "$name@$version" version 2>/dev/null)" = "$version" ]; then
   echo "✓ $name@$version already published — skipping"
   exit 0

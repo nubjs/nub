@@ -112,12 +112,15 @@ if (-not (Test-Path $Exe)) {
 
 # `nubx` and `nubr` are the same binary as `nub`, dispatched on argv[0] (cli.rs
 # reads args_os()[0].file_stem(): "nubx" -> exec, "nubr" -> the unified runner).
-# The release archive ships only bin\nub.exe, so create each alias. On Windows we
-# COPY rather than symlink: symlinks require admin/Developer Mode, and a copy
-# reliably yields argv[0] "nubx.exe". Re-extract on upgrade wipes bin\, so these
-# are recreated each run.
+# The release zip carries each alias as a small stub (crates/nub-alias) that runs
+# the sibling nub.exe with the verb, so normally there is nothing to create. An
+# archive from before the stubs shipped has only bin\nub.exe; for that one, COPY
+# the binary under each name — a symlink needs admin/Developer Mode, and a copy
+# reliably yields argv[0] "nubx.exe".
 foreach ($alias in @("nubx", "nubr")) {
-    Copy-Item -Path $Exe -Destination "$BinDir\$alias.exe" -Force
+    if (-not (Test-Path "$BinDir\$alias.exe")) {
+        Copy-Item -Path $Exe -Destination "$BinDir\$alias.exe" -Force
+    }
 }
 
 # `nub pm shim` HARDLINKS %USERPROFILE%\.nub\shims\{npm,npx,…}.exe at the nub

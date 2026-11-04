@@ -187,6 +187,8 @@ nub --node script.js     # the project's pinned Node, vanilla
 node script.js           # your shell's Node, unaugmented, unprovisioned
 ```
 
+`--node` covers that process and any `node` it starts. A `nub` command started beneath it is a separate invocation and runs augmented.
+
 ### `NODE_COMPAT`
 
 Setting a truthy `NODE_COMPAT` (`1`, `true`, or `yes`, case-insensitive) has the same effect as `--node` and is inherited by every descendant `node` / `nub` in the tree:

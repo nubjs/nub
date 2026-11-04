@@ -89,8 +89,8 @@ fn declared_direct_range(manifest_path: &Path, name: &str) -> Option<String> {
 /// its major is the ceiling, not the floor: `<56` selects a below-floor version
 /// yet reads as major 56, so flooring it would wrongly KEEP GVS — treating it as
 /// ambiguous ejects instead (the safe direction). A `None` drives
-/// eject-on-ambiguity in [`expo_below_gvs_floor`] and its siblings.
-pub(super) fn major_floor(range: &str) -> Option<u32> {
+/// eject-on-ambiguity in [`expo_below_gvs_floor`].
+fn major_floor(range: &str) -> Option<u32> {
     let r = range.trim();
     if r.is_empty() || r.contains([' ', ':', '|', '<']) {
         return None;

@@ -1,0 +1,538 @@
+{
+  "date": "2026-10-01",
+  "machine": "c3d-standard-16 (GCE spot), 16 vCPU",
+  "node": "v26.8.1",
+  "nub": "main at 57b837b15d (v0.9.6), fast profile",
+  "bench": "tests/bench/runtime/pool-saturation.sh",
+  "load": "bcrypt cost 12; closed = autocannon -c 64 -d 30, open = -c 64 -R 12 -d 30; one round; busy-loops are nice-0 node processes in the server cgroup; pool16 = plain node with UV_THREADPOOL_SIZE=16, no demotion",
+  "conditions": {
+    "node/closed/hogs=0": {
+      "label": "node",
+      "mode": "closed",
+      "hogs": 0,
+      "pool": "env=unset workers=4 nices=0,0,0,0",
+      "rounds": [
+        {
+          "server": {
+            "rps": 18,
+            "n": 540,
+            "p50": 3537,
+            "p90": 3542,
+            "p97_5": 3549,
+            "p99": 3554,
+            "max": 3562,
+            "errors": 0,
+            "timeouts": 0
+          },
+          "hogMloopsPerSec": 0
+        }
+      ]
+    },
+    "nub/closed/hogs=0": {
+      "label": "nub",
+      "mode": "closed",
+      "hogs": 0,
+      "pool": "env=unset workers=16 nices=0,0,0,0,10,10,10,10,10,10,10,10,10,10,10,10",
+      "rounds": [
+        {
+          "server": {
+            "rps": 66.9,
+            "n": 2006,
+            "p50": 950,
+            "p90": 957,
+            "p97_5": 969,
+            "p99": 984,
+            "max": 1061,
+            "errors": 0,
+            "timeouts": 0
+          },
+          "hogMloopsPerSec": 0
+        }
+      ]
+    },
+    "pool16/closed/hogs=0": {
+      "label": "pool16",
+      "mode": "closed",
+      "hogs": 0,
+      "pool": "env=16 workers=16 nices=0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
+      "rounds": [
+        {
+          "server": {
+            "rps": 67.1,
+            "n": 2012,
+            "p50": 950,
+            "p90": 955,
+            "p97_5": 961,
+            "p99": 969,
+            "max": 990,
+            "errors": 0,
+            "timeouts": 0
+          },
+          "hogMloopsPerSec": 0
+        }
+      ]
+    },
+    "node/open/hogs=0": {
+      "label": "node",
+      "mode": "open",
+      "hogs": 0,
+      "pool": "env=unset workers=4 nices=0,0,0,0",
+      "rounds": [
+        {
+          "server": {
+            "rps": 12,
+            "n": 360,
+            "p50": 222,
+            "p90": 531,
+            "p97_5": 630,
+            "p99": 650,
+            "max": 669,
+            "errors": 0,
+            "timeouts": 0
+          },
+          "hogMloopsPerSec": 0
+        }
+      ]
+    },
+    "nub/open/hogs=0": {
+      "label": "nub",
+      "mode": "open",
+      "hogs": 0,
+      "pool": "env=unset workers=16 nices=0,0,0,0,10,10,10,10,10,10,10,10,10,10,10,10",
+      "rounds": [
+        {
+          "server": {
+            "rps": 12,
+            "n": 360,
+            "p50": 117,
+            "p90": 210,
+            "p97_5": 229,
+            "p99": 235,
+            "max": 243,
+            "errors": 0,
+            "timeouts": 0
+          },
+          "hogMloopsPerSec": 0
+        }
+      ]
+    },
+    "pool16/open/hogs=0": {
+      "label": "pool16",
+      "mode": "open",
+      "hogs": 0,
+      "pool": "env=16 workers=16 nices=0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
+      "rounds": [
+        {
+          "server": {
+            "rps": 12,
+            "n": 360,
+            "p50": 117,
+            "p90": 210,
+            "p97_5": 230,
+            "p99": 235,
+            "max": 245,
+            "errors": 0,
+            "timeouts": 0
+          },
+          "hogMloopsPerSec": 0
+        }
+      ]
+    },
+    "node/closed/hogs=12": {
+      "label": "node",
+      "mode": "closed",
+      "hogs": 12,
+      "pool": "env=unset workers=4 nices=0,0,0,0",
+      "rounds": [
+        {
+          "server": {
+            "rps": 17.1,
+            "n": 512,
+            "p50": 3735,
+            "p90": 3758,
+            "p97_5": 3768,
+            "p99": 3771,
+            "max": 3773,
+            "errors": 0,
+            "timeouts": 0
+          },
+          "hogMloopsPerSec": 1138
+        }
+      ]
+    },
+    "nub/closed/hogs=12": {
+      "label": "nub",
+      "mode": "closed",
+      "hogs": 12,
+      "pool": "env=unset workers=16 nices=0,0,0,0,10,10,10,10,10,10,10,10,10,10,10,10",
+      "rounds": [
+        {
+          "server": {
+            "rps": 20.7,
+            "n": 621,
+            "p50": 2614,
+            "p90": 4837,
+            "p97_5": 4970,
+            "p99": 5083,
+            "max": 5285,
+            "errors": 0,
+            "timeouts": 0
+          },
+          "hogMloopsPerSec": 1112
+        }
+      ]
+    },
+    "pool16/closed/hogs=12": {
+      "label": "pool16",
+      "mode": "closed",
+      "hogs": 12,
+      "pool": "env=16 workers=16 nices=0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
+      "rounds": [
+        {
+          "server": {
+            "rps": 38.3,
+            "n": 1149,
+            "p50": 1646,
+            "p90": 1795,
+            "p97_5": 1835,
+            "p99": 1886,
+            "max": 2169,
+            "errors": 0,
+            "timeouts": 0
+          },
+          "hogMloopsPerSec": 980
+        }
+      ]
+    },
+    "node/open/hogs=12": {
+      "label": "node",
+      "mode": "open",
+      "hogs": 12,
+      "pool": "env=unset workers=4 nices=0,0,0,0",
+      "rounds": [
+        {
+          "server": {
+            "rps": 12,
+            "n": 360,
+            "p50": 235,
+            "p90": 560,
+            "p97_5": 665,
+            "p99": 687,
+            "max": 770,
+            "errors": 0,
+            "timeouts": 0
+          },
+          "hogMloopsPerSec": 1162
+        }
+      ]
+    },
+    "nub/open/hogs=12": {
+      "label": "nub",
+      "mode": "open",
+      "hogs": 12,
+      "pool": "env=unset workers=16 nices=0,0,0,0,10,10,10,10,10,10,10,10,10,10,10,10",
+      "rounds": [
+        {
+          "server": {
+            "rps": 12,
+            "n": 360,
+            "p50": 238,
+            "p90": 524,
+            "p97_5": 613,
+            "p99": 642,
+            "max": 749,
+            "errors": 0,
+            "timeouts": 0
+          },
+          "hogMloopsPerSec": 1165
+        }
+      ]
+    },
+    "pool16/open/hogs=12": {
+      "label": "pool16",
+      "mode": "open",
+      "hogs": 12,
+      "pool": "env=16 workers=16 nices=0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
+      "rounds": [
+        {
+          "server": {
+            "rps": 12,
+            "n": 360,
+            "p50": 191,
+            "p90": 367,
+            "p97_5": 432,
+            "p99": 458,
+            "max": 526,
+            "errors": 0,
+            "timeouts": 0
+          },
+          "hogMloopsPerSec": 1151
+        }
+      ]
+    },
+    "node/closed/hogs=16": {
+      "label": "node",
+      "mode": "closed",
+      "hogs": 16,
+      "pool": "env=unset workers=4 nices=0,0,0,0",
+      "rounds": [
+        {
+          "server": {
+            "rps": 13.8,
+            "n": 414,
+            "p50": 4623,
+            "p90": 4785,
+            "p97_5": 4863,
+            "p99": 4890,
+            "max": 4929,
+            "errors": 0,
+            "timeouts": 0
+          },
+          "hogMloopsPerSec": 1412
+        }
+      ]
+    },
+    "nub/closed/hogs=16": {
+      "label": "nub",
+      "mode": "closed",
+      "hogs": 16,
+      "pool": "env=unset workers=16 nices=0,0,0,0,10,10,10,10,10,10,10,10,10,10,10,10",
+      "rounds": [
+        {
+          "server": {
+            "rps": 16.3,
+            "n": 490,
+            "p50": 3241,
+            "p90": 5987,
+            "p97_5": 6857,
+            "p99": 7313,
+            "max": 7467,
+            "errors": 0,
+            "timeouts": 0
+          },
+          "hogMloopsPerSec": 1321
+        }
+      ]
+    },
+    "pool16/closed/hogs=16": {
+      "label": "pool16",
+      "mode": "closed",
+      "hogs": 16,
+      "pool": "env=16 workers=16 nices=0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
+      "rounds": [
+        {
+          "server": {
+            "rps": 33.2,
+            "n": 996,
+            "p50": 1909,
+            "p90": 1993,
+            "p97_5": 2050,
+            "p99": 2092,
+            "max": 2190,
+            "errors": 0,
+            "timeouts": 0
+          },
+          "hogMloopsPerSec": 1231
+        }
+      ]
+    },
+    "node/open/hogs=16": {
+      "label": "node",
+      "mode": "open",
+      "hogs": 16,
+      "pool": "env=unset workers=4 nices=0,0,0,0",
+      "rounds": [
+        {
+          "server": {
+            "rps": 11.7,
+            "n": 351,
+            "p50": 393,
+            "p90": 842,
+            "p97_5": 1014,
+            "p99": 1111,
+            "max": 1425,
+            "errors": 0,
+            "timeouts": 0
+          },
+          "hogMloopsPerSec": 1428
+        }
+      ]
+    },
+    "nub/open/hogs=16": {
+      "label": "nub",
+      "mode": "open",
+      "hogs": 16,
+      "pool": "env=unset workers=16 nices=0,0,0,0,10,10,10,10,10,10,10,10,10,10,10,10",
+      "rounds": [
+        {
+          "server": {
+            "rps": 7.8,
+            "n": 234,
+            "p50": 923,
+            "p90": 2159,
+            "p97_5": 2494,
+            "p99": 2601,
+            "max": 2865,
+            "errors": 0,
+            "timeouts": 0
+          },
+          "hogMloopsPerSec": 1395
+        }
+      ]
+    },
+    "pool16/open/hogs=16": {
+      "label": "pool16",
+      "mode": "open",
+      "hogs": 16,
+      "pool": "env=16 workers=16 nices=0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
+      "rounds": [
+        {
+          "server": {
+            "rps": 12,
+            "n": 360,
+            "p50": 237,
+            "p90": 439,
+            "p97_5": 496,
+            "p99": 539,
+            "max": 645,
+            "errors": 0,
+            "timeouts": 0
+          },
+          "hogMloopsPerSec": 1422
+        }
+      ]
+    },
+    "node/closed/hogs=32": {
+      "label": "node",
+      "mode": "closed",
+      "hogs": 32,
+      "pool": "env=unset workers=4 nices=0,0,0,0",
+      "rounds": [
+        {
+          "server": {
+            "rps": 7.9,
+            "n": 238,
+            "p50": 7665,
+            "p90": 8438,
+            "p97_5": 8888,
+            "p99": 8918,
+            "max": 8954,
+            "errors": 0,
+            "timeouts": 0
+          },
+          "hogMloopsPerSec": 2358
+        }
+      ]
+    },
+    "nub/closed/hogs=32": {
+      "label": "nub",
+      "mode": "closed",
+      "hogs": 32,
+      "pool": "env=unset workers=16 nices=0,0,0,0,10,10,10,10,10,10,10,10,10,10,10,10",
+      "rounds": [
+        {
+          "server": {
+            "rps": 7.7,
+            "n": 232,
+            "p50": 5599,
+            "p90": 6420,
+            "p97_5": 9831,
+            "p99": 9941,
+            "max": 9984,
+            "errors": 42,
+            "timeouts": 42
+          },
+          "hogMloopsPerSec": 2136
+        }
+      ]
+    },
+    "pool16/closed/hogs=32": {
+      "label": "pool16",
+      "mode": "closed",
+      "hogs": 32,
+      "pool": "env=16 workers=16 nices=0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
+      "rounds": [
+        {
+          "server": {
+            "rps": 22.4,
+            "n": 671,
+            "p50": 2826,
+            "p90": 2965,
+            "p97_5": 3037,
+            "p99": 3074,
+            "max": 3155,
+            "errors": 0,
+            "timeouts": 0
+          },
+          "hogMloopsPerSec": 2258
+        }
+      ]
+    },
+    "node/open/hogs=32": {
+      "label": "node",
+      "mode": "open",
+      "hogs": 32,
+      "pool": "env=unset workers=4 nices=0,0,0,0",
+      "rounds": [
+        {
+          "server": {
+            "rps": 7.1,
+            "n": 213,
+            "p50": 821,
+            "p90": 1500,
+            "p97_5": 1705,
+            "p99": 1809,
+            "max": 2155,
+            "errors": 0,
+            "timeouts": 0
+          },
+          "hogMloopsPerSec": 2352
+        }
+      ]
+    },
+    "nub/open/hogs=32": {
+      "label": "nub",
+      "mode": "open",
+      "hogs": 32,
+      "pool": "env=unset workers=16 nices=0,0,0,0,10,10,10,10,10,10,10,10,10,10,10,10",
+      "rounds": [
+        {
+          "server": {
+            "rps": 4.3,
+            "n": 128,
+            "p50": 2030,
+            "p90": 4355,
+            "p97_5": 4972,
+            "p99": 5226,
+            "max": 5687,
+            "errors": 0,
+            "timeouts": 0
+          },
+          "hogMloopsPerSec": 2154
+        }
+      ]
+    },
+    "pool16/open/hogs=32": {
+      "label": "pool16",
+      "mode": "open",
+      "hogs": 32,
+      "pool": "env=16 workers=16 nices=0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
+      "rounds": [
+        {
+          "server": {
+            "rps": 12,
+            "n": 360,
+            "p50": 371,
+            "p90": 687,
+            "p97_5": 787,
+            "p99": 850,
+            "max": 1014,
+            "errors": 0,
+            "timeouts": 0
+          },
+          "hogMloopsPerSec": 2303
+        }
+      ]
+    }
+  }
+}

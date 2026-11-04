@@ -132,6 +132,17 @@ pub enum DiscoveryError {
         // Not named `source`: thiserror reads that name as the error's cause.
         origin: String,
     },
+
+    /// The first `node` on PATH handed the launch straight back to nub (see
+    /// [`handed_back`]), and no other `node` is on PATH to fall back to.
+    #[error(
+        "ERR_NUB_NODE_SHIM_LOOP: `{shim}` is the first `node` on PATH, and it runs nub's own `node` \
+         instead of a Node binary, so no Node is reachable through it.\n\
+         \x20\x20Its version manager has no Node active here and falls back to the next `node` on \
+         PATH. Activate a Node in that manager, put a Node binary on PATH, or pin one with \
+         `nub node pin <version>`."
+    )]
+    NodeShimLoop { shim: String },
 }
 
 /// Format the `NodeExecutableCommandFailed` text. The tool's own stderr is the
@@ -233,7 +244,7 @@ pub fn discover_node(cwd: &Path) -> Result<ResolvedNode, DiscoveryError> {
                     shell_version: format!("v{}", node.version),
                 });
             }
-            // No node on PATH at all — try nub's own store, then nvm.
+            // No usable node on PATH — try nub's own store, then nvm.
             if let Some(mut node) = nub_store_node(&parsed_pin) {
                 node.pin_source = Some(pin_source.clone());
                 return Ok(node);
@@ -242,7 +253,10 @@ pub fn discover_node(cwd: &Path) -> Result<ResolvedNode, DiscoveryError> {
                 node.pin_source = Some(pin_source);
                 return Ok(node);
             }
-            Err(DiscoveryError::NoNodeOnPath)
+            match which_node() {
+                Err(error @ DiscoveryError::NodeShimLoop { .. }) => Err(error),
+                _ => Err(DiscoveryError::NoNodeOnPath),
+            }
         }
     }
 }
@@ -986,17 +1000,21 @@ fn which_node() -> Result<PathBuf, DiscoveryError> {
     which_node_in(
         &env::var_os("PATH").unwrap_or_default(),
         persistent_shim.as_deref(),
+        &handed_back(),
     )
 }
 
-/// [`which_node`] against an explicit PATH + persistent-shim dir — the testable
-/// body. Two recursion guards: every directory holding nub wearing Node's name
-/// ([`is_nub_shim_dir_with`], which owns that rule for the whole module), and any
-/// `node_modules/.bin` ([`is_package_bin_dir`]).
+/// [`which_node`] against an explicit PATH, persistent-shim dir and hand-back
+/// chain — the testable body. Three recursion guards: every directory holding nub
+/// wearing Node's name ([`is_nub_shim_dir_with`], which owns that rule for the
+/// whole module), any `node_modules/.bin` ([`is_package_bin_dir`]), and every
+/// foreign `node` that handed this launch straight back to nub ([`handed_back`]).
 fn which_node_in(
     path_var: &std::ffi::OsStr,
     persistent_shim: Option<&Path>,
+    handed_back: &[PathBuf],
 ) -> Result<PathBuf, DiscoveryError> {
+    let mut skipped_loop = None;
     for dir in env::split_paths(path_var) {
         if is_nub_shim_dir_with(&dir, persistent_shim) {
             continue;
@@ -1005,19 +1023,121 @@ fn which_node_in(
             continue;
         }
 
-        let candidate = dir.join("node");
-        if candidate.is_file() {
+        let mut candidates = vec![dir.join("node")];
+        if cfg!(windows) {
+            candidates.push(dir.join("node.exe"));
+        }
+        for candidate in candidates {
+            if !candidate.is_file() {
+                continue;
+            }
+            if handed_back
+                .iter()
+                .any(|shim| same_file_path(&candidate, shim))
+            {
+                skipped_loop.get_or_insert(candidate);
+                continue;
+            }
             return Ok(candidate);
         }
-        #[cfg(windows)]
-        {
-            let candidate_exe = dir.join("node.exe");
-            if candidate_exe.is_file() {
-                return Ok(candidate_exe);
-            }
-        }
     }
-    Err(DiscoveryError::NoNodeOnPath)
+    Err(match skipped_loop {
+        Some(shim) => DiscoveryError::NodeShimLoop {
+            shim: shim.display().to_string(),
+        },
+        None => DiscoveryError::NoNodeOnPath,
+    })
+}
+
+fn same_file_path(a: &Path, b: &Path) -> bool {
+    a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
+}
+
+/// Internal marker naming the foreign `node`s a nub process has handed a launch to,
+/// so the nub such a `node` hands the launch straight back to can tell (#832).
+///
+/// A version manager's shim with nothing active for the directory falls back to
+/// the next `node` on PATH, stepping over only its OWN directories — mise's
+/// `not_found_system_fallback`, Volta with no platform. When that next `node` is
+/// nub's shim, nub resolves the manager's shim again and launches it again: one new
+/// process per round, without end (one esbuild postinstall reached 2,137). Nub
+/// cannot recognise such a shim by looking at it, since a healthy one is the same
+/// file, so it recognises the round trip instead: every launch or probe of a Node
+/// carries `<pid>:<candidates>`, the launching pid and a PATH-style list of every
+/// candidate along the current chain of hand-backs, the one being run last.
+///
+/// The whole chain is carried, not only the last candidate: with two fallback
+/// shims ahead of a real Node, skipping only the one that just handed back sends
+/// the walk to the other and back again forever. Each hand-back skips one more
+/// distinct candidate, so a chain ends once PATH runs out of them — at the real
+/// Node, or at [`DiscoveryError::NodeShimLoop`]. mise guards its own fallback the
+/// same way: a pid-scoped list of every hand-off along one `exec` chain.
+pub const LAUNCH_MARKER_ENV: &str = "__NUB_NODE_LAUNCH";
+
+/// Set [`LAUNCH_MARKER_ENV`] on a command that SPAWNS `node` — a launch, or a probe
+/// such as `node --version`, which loops exactly like a launch does. Never on an
+/// `exec`: the marker's pid would then also be the pid of the Node it became, whose
+/// own nested `node` calls would read as a round trip. Nor on a spawn of a wrapper
+/// in front of Node (a `prefix`, an env-owner loader): one that is itself a
+/// `#!/usr/bin/env node` script reaches nub's `node` shim as nub's direct child, and
+/// would read as the Node candidate handing the launch back. Use
+/// [`unmark_node_launch`] there.
+pub fn mark_node_launch(cmd: &mut Command, node: &Path) {
+    let mut chain = handed_back();
+    chain.push(node.to_path_buf());
+    match env::join_paths(&chain)
+        .ok()
+        .and_then(|list| list.into_string().ok())
+    {
+        Some(list) => cmd.env(LAUNCH_MARKER_ENV, format!("{}:{list}", std::process::id())),
+        None => cmd.env_remove(LAUNCH_MARKER_ENV),
+    };
+}
+
+/// Clear [`LAUNCH_MARKER_ENV`] on a command whose program is not the Node candidate.
+pub fn unmark_node_launch(cmd: &mut Command) {
+    cmd.env_remove(LAUNCH_MARKER_ENV);
+}
+
+/// The foreign `node`s that handed this launch straight back to nub, outermost
+/// first; empty unless this process was entered by such a hand-back.
+fn handed_back() -> Vec<PathBuf> {
+    handed_back_from(env::var_os(LAUNCH_MARKER_ENV).as_deref(), parent_pid())
+}
+
+/// The marker's pid is the whole test. A shim that `exec`s — mise, asdf, nodenv —
+/// keeps the pid nub spawned, so nub re-entered through it sees its launcher as its
+/// PARENT, and inherits the chain. Anything else starts afresh: a nested `node` run
+/// by a script has that script's Node as its parent, so however deep scripts nest,
+/// each level resolves PATH as if nothing had been skipped. A shim that spawns
+/// rather than execs (Volta, every Windows shim) hides the hand-back the same way,
+/// and is left to its own guard, as mise leaves a child process to start its own
+/// chain.
+fn handed_back_from(marker: Option<&std::ffi::OsStr>, parent: Option<u32>) -> Vec<PathBuf> {
+    let Some((pid, chain)) = marker
+        .and_then(|m| m.to_str())
+        .and_then(|m| m.split_once(':'))
+    else {
+        return Vec::new();
+    };
+    if parent.is_none() || pid.parse::<u32>().ok() != parent {
+        return Vec::new();
+    }
+    env::split_paths(chain)
+        .filter(|path| !path.as_os_str().is_empty())
+        .collect()
+}
+
+#[cfg(unix)]
+fn parent_pid() -> Option<u32> {
+    Some(std::os::unix::process::parent_id())
+}
+
+/// Windows has no `exec`, so a shim always sits between the two nubs and the
+/// parent test cannot match.
+#[cfg(not(unix))]
+fn parent_pid() -> Option<u32> {
+    None
 }
 
 /// Run `node --version` and parse the output, with a disk cache
@@ -1027,7 +1147,9 @@ fn detect_version(node_path: &Path) -> Result<NodeVersion, DiscoveryError> {
         return Ok(cached);
     }
 
-    let output = Command::new(node_path)
+    let mut probe = Command::new(node_path);
+    mark_node_launch(&mut probe, node_path);
+    let output = probe
         .arg("--version")
         .output()
         .map_err(|e| DiscoveryError::VersionDetection(format!("{node_path:?}: {e}")))?;
@@ -1669,7 +1791,9 @@ pub fn accepted_env_flags(node_path: &Path) -> Option<std::collections::BTreeSet
     // of the binary, independent of NODE_OPTIONS — so removing it makes the probe
     // deterministic and side-effect-free. (Pollution could only ADD tokens, never
     // drop a real flag, so this is defense-in-depth, not a correctness fix.)
-    let output = Command::new(node_path)
+    let mut probe = Command::new(node_path);
+    mark_node_launch(&mut probe, node_path);
+    let output = probe
         .arg("-e")
         .arg("process.stdout.write([...process.allowedNodeEnvironmentFlags].join(\"\\n\"))")
         .env_remove("NODE_OPTIONS")
@@ -1717,7 +1841,9 @@ pub fn accepts_argv_flag(node_path: &Path, flag: &str) -> Option<bool> {
     // `-e ""` so the probe runs no user code and exits immediately. NODE_OPTIONS is
     // cleared for the same reason as the env-flag probe: an inherited preload would
     // run for nothing and could fail the process for reasons unrelated to `flag`.
-    let output = Command::new(node_path)
+    let mut probe = Command::new(node_path);
+    mark_node_launch(&mut probe, node_path);
+    let output = probe
         .arg(flag)
         .arg("-e")
         .arg("")
@@ -2217,7 +2343,7 @@ mod tests {
 
         let path_var = env::join_paths([&shim, &real]).unwrap();
         let canon_shim = shim.canonicalize().unwrap();
-        let got = which_node_in(&path_var, Some(&canon_shim)).unwrap();
+        let got = which_node_in(&path_var, Some(&canon_shim), &[]).unwrap();
         assert_eq!(
             got.canonicalize().unwrap(),
             real.join("node").canonicalize().unwrap(),
@@ -2228,7 +2354,7 @@ mod tests {
         // recursion guard never resolves back to the shim.
         let only_shim = env::join_paths([&shim]).unwrap();
         assert!(matches!(
-            which_node_in(&only_shim, Some(&canon_shim)),
+            which_node_in(&only_shim, Some(&canon_shim), &[]),
             Err(DiscoveryError::NoNodeOnPath)
         ));
     }
@@ -2250,7 +2376,7 @@ mod tests {
         write_fake_node(&real.join("node"));
 
         let path_var = env::join_paths([&shim, &real]).unwrap();
-        let got = which_node_in(&path_var, None).unwrap();
+        let got = which_node_in(&path_var, None, &[]).unwrap();
         assert_eq!(
             got.canonicalize().unwrap(),
             real.join("node").canonicalize().unwrap(),
@@ -2262,7 +2388,7 @@ mod tests {
         let unrelated = tmp.join("vendor").join("node-shim");
         std::fs::create_dir_all(&unrelated).unwrap();
         write_fake_node(&unrelated.join("node"));
-        let got = which_node_in(&env::join_paths([&unrelated]).unwrap(), None).unwrap();
+        let got = which_node_in(&env::join_paths([&unrelated]).unwrap(), None, &[]).unwrap();
         assert_eq!(
             got.canonicalize().unwrap(),
             unrelated.join("node").canonicalize().unwrap(),
@@ -2286,7 +2412,7 @@ mod tests {
         write_fake_node(&real.join("node"));
 
         let path_var = env::join_paths([&dep_bin, &real]).unwrap();
-        let got = which_node_in(&path_var, None).unwrap();
+        let got = which_node_in(&path_var, None, &[]).unwrap();
         assert_eq!(
             got.canonicalize().unwrap(),
             real.join("node").canonicalize().unwrap(),
@@ -2298,7 +2424,7 @@ mod tests {
         // rather than a fall-back onto the dependency's wrapper.
         let only_dep = env::join_paths([&dep_bin]).unwrap();
         assert!(matches!(
-            which_node_in(&only_dep, None),
+            which_node_in(&only_dep, None, &[]),
             Err(DiscoveryError::NoNodeOnPath)
         ));
     }
@@ -2314,12 +2440,59 @@ mod tests {
         write_fake_node(&bare_bin.join("node"));
 
         let path_var = env::join_paths([&bare_bin]).unwrap();
-        let got = which_node_in(&path_var, None).unwrap();
+        let got = which_node_in(&path_var, None, &[]).unwrap();
         assert_eq!(
             got.canonicalize().unwrap(),
             bare_bin.join("node").canonicalize().unwrap(),
             "a `.bin` that is not under node_modules is an ordinary PATH entry"
         );
+    }
+
+    /// #832: every foreign `node` that handed the launch back is stepped over for
+    /// the next one, and with nothing after them the error names one instead of
+    /// looping.
+    #[test]
+    fn which_node_skips_handed_back_candidates_and_names_one_when_nothing_remains() {
+        let tmp = unique_tmp("which-loop");
+        let [mise, volta, real] = ["mise-shims", "volta-shims", "real-bin"].map(|d| tmp.join(d));
+        for dir in [&mise, &volta, &real] {
+            std::fs::create_dir_all(dir).unwrap();
+            write_fake_node(&dir.join("node"));
+        }
+        let chain = [mise.join("node"), volta.join("node")];
+
+        let path_var = env::join_paths([&mise, &volta, &real]).unwrap();
+        assert_eq!(
+            which_node_in(&path_var, None, &chain).unwrap(),
+            real.join("node")
+        );
+
+        let only_shims = env::join_paths([&mise, &volta]).unwrap();
+        match which_node_in(&only_shims, None, &chain) {
+            Err(DiscoveryError::NodeShimLoop { shim }) => {
+                assert_eq!(Path::new(&shim), chain[0]);
+            }
+            other => panic!("expected NodeShimLoop, got {other:?}"),
+        }
+    }
+
+    /// The marker's chain applies only to a direct hand-back from its launcher. The
+    /// same marker inherited by a nested `node` that a script started (whose parent
+    /// is that script's Node) starts afresh.
+    #[test]
+    fn a_launch_marker_carries_its_chain_only_across_a_direct_hand_back() {
+        let launcher = 4242;
+        let chain = env::join_paths(["/a/node", "/b/node"]).unwrap();
+        let mut marker = std::ffi::OsString::from(format!("{launcher}:"));
+        marker.push(&chain);
+
+        assert_eq!(
+            handed_back_from(Some(&marker), Some(launcher)),
+            [PathBuf::from("/a/node"), PathBuf::from("/b/node")]
+        );
+        assert!(handed_back_from(Some(&marker), Some(launcher + 1)).is_empty());
+        assert!(handed_back_from(Some(&marker), None).is_empty());
+        assert!(handed_back_from(Some("garbage".as_ref()), Some(launcher)).is_empty());
     }
 
     #[cfg(unix)]

@@ -159,7 +159,9 @@ function Invoke-CacheFallbackProbe {
 if (-not (Test-Path -LiteralPath $Nub -PathType Leaf)) { throw "nub.exe not found: $Nub" }
 if (-not (Test-Path -LiteralPath $Launcher -PathType Leaf)) { throw "nub-launcher.exe not found: $Launcher" }
 
-$root = Join-Path $env:RUNNER_TEMP ("nub-compile-cache-release-" + [Guid]::NewGuid().ToString('N'))
+# RUNNER_TEMP can live on a shared D:\ drive whose ancestor DACL the runtime
+# correctly rejects. Keep both the cache and its fallback below the user profile.
+$root = Join-Path $env:USERPROFILE ("nub-compile-cache-release-" + [Guid]::NewGuid().ToString('N'))
 $holder = $null
 try {
     New-Item -ItemType Directory -Force -Path $root | Out-Null
@@ -200,8 +202,9 @@ setInterval(() => {}, 1000);
 
     $nubRoot = Join-Path $cache 'nub'
     $runtimeDirs = @(Get-ChildItem -LiteralPath $nubRoot -Directory -Filter 'runtime-*')
-    # Nub names the reason it declined a cache base on stderr ("… is not usable for
-    # the runtime cache (<reason>)"); without it a relocation reads as a bare count.
+    # A declined cache base is logged at debug ("… is not usable for the runtime
+    # cache (<reason>)") and printed only when no location works, so a relocation
+    # shows up here as a count; rerun with RUST_LOG=debug to see the reason.
     if ($runtimeDirs.Count -ne 1) { throw "expected exactly one extracted runtime, got $($runtimeDirs.Count); cold-run stderr: $($cold.Stderr)" }
     $runtime = $runtimeDirs[0].FullName
     $workerBlob = Join-Path $runtime 'worker-blob-url.cjs'

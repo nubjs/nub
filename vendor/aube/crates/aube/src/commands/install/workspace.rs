@@ -187,6 +187,27 @@ pub(super) fn per_project_write_selection(
     Ok(Some(keys))
 }
 
+/// The importers whose own lifecycle hooks this install runs, in
+/// `lifecycle_manifests` (dependency) order. A caller's explicit set wins.
+/// Otherwise a `--filter` narrows them to the selected members plus the
+/// root, whose hooks pnpm runs under any filter; with neither, every linked
+/// importer runs its hooks.
+pub(super) fn project_hook_importers(
+    lifecycle_manifests: &[(String, aube_manifest::PackageJson)],
+    requested: Option<&std::collections::BTreeSet<String>>,
+    filter_selection: Option<&std::collections::BTreeSet<String>>,
+) -> Vec<(String, aube_manifest::PackageJson)> {
+    lifecycle_manifests
+        .iter()
+        .filter(|(importer, _)| match (requested, filter_selection) {
+            (Some(requested), _) => requested.contains(importer),
+            (None, Some(selected)) => importer == "." || selected.contains(importer),
+            (None, None) => true,
+        })
+        .cloned()
+        .collect()
+}
+
 pub(super) fn importer_project_dir(
     workspace_root: &std::path::Path,
     importer_path: &str,
@@ -255,7 +276,7 @@ pub(super) fn merge_member_lockfile_graphs(
     }
 }
 
-pub(super) fn order_lifecycle_manifests(
+pub(crate) fn order_lifecycle_manifests(
     manifests: Vec<(String, aube_manifest::PackageJson)>,
 ) -> Vec<(String, aube_manifest::PackageJson)> {
     if manifests.len() < 2 {

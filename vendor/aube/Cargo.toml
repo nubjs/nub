@@ -83,12 +83,12 @@ usage-rs = { version = "6", features = ["diagnostics", "completions", "validatio
 strum = { version = "0.28", features = ["derive"] }
 
 # HTTP
-# TLS backend and DNS resolver are deliberately NOT chosen here. Library
-# crates must stay backend-agnostic so embedders (mise) don't get rustls or
-# hickory-dns forced into their build via feature unification — reqwest's
-# hickory-dns cargo feature flips the default resolver for every client in
-# the final binary. The aube binary gets rustls + hickory-dns through
-# aube-registry's default features.
+# The TLS backend is deliberately NOT chosen here. Library crates must stay
+# backend-agnostic so embedders (mise) don't get rustls forced into their
+# build via feature unification. The aube binary gets rustls through
+# aube-registry's default features. Never enable reqwest's hickory-dns: it
+# switches every client in the final binary to Hickory, which loses
+# VPN-scoped and split DNS (see `aube_util::http::dns`).
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "http2", "charset", "system-proxy", "gzip", "brotli", "zstd"] }
 webpki-root-certs = "1"
 

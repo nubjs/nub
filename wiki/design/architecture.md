@@ -41,6 +41,8 @@ Banding is exact because it has to be. Injecting an experimental flag on a versi
 
 The flag-injection logic in [[crates/nub-core/src/node/flags.rs#compute_inject_flags]] reads the table in [[crates/nub-core/src/node/feature_matrix.rs#FEATURES]] rather than keeping its own copy, so a version-gated claim traces to a row. A band that runs to infinity would eventually inject a flag the running Node has dropped, so both unflag shapes are checked against the real binary before injection, by different probes. The ordinary set is filtered against the list Node reports as accepted in `NODE_OPTIONS` — a cheap read that stays a valid existence check even though the flags themselves travel on argv. The argv-only and runtime sets cannot use that list, since a flag Node refuses there is absent from it by construction, so each is checked by spawning the binary with it once and caching the verdict. A flag the binary no longer takes is dropped rather than aborting it at startup. Surveys behind the bands: [[research/node-experimental-flag-lifecycle]], [[research/node-flag-arity]].
 
+When Node lacks Temporal, the shared runtime installer copies the polyfill's members into an ordinary extensible namespace. Its value properties are writable, non-enumerable, and configurable; its `Symbol.toStringTag` is `"Temporal"`, non-writable, non-enumerable, and configurable. Member identities are preserved. Both lazy preload and compiled-artifact getters use this installer, and the package replacement exports the resulting global. See [The Temporal Object](https://tc39.es/proposal-temporal/#sec-temporal-objects) and the [built-in property defaults](https://tc39.es/ecma262/#sec-ecmascript-standard-built-in-objects).
+
 ## Two tiers
 
 The runtime exists in two shapes, chosen by the availability of the synchronous hooks API and carried as [[crates/nub-core/src/node/version.rs#SupportTier]]. The floor of 18.19 is set by what the extension mechanisms permit.
@@ -78,9 +80,13 @@ So Nub writes a private `node` into a temporary directory named with [[crates/nu
 
 The persistent shim installed by `nub node shim` is the opposite: it runs the resolved Node unaugmented. Version management is its job. A globally augmenting `node` would load environment files and inject globals into every Node process on the machine.
 
+For interactive Unix children, [[crates/nub-core/src/node/spawn.rs#foreground_child]] hands the terminal to the child's process group, then sends `SIGCONT`: a child that reads before the parent runs can already be stopped by `SIGTTIN`. The PTY regression test waits for that stop before handing over the terminal, and checks both the stopped negative control and a successful read. The guard restores the parent's foreground group when the child exits.
+
 ## Turning it off
 
-Both `--node` and a truthy `NODE_COMPAT` disable runtime augmentation — no hooks, no preload, no injected flags, no path shim. They compose, and `NODE_COMPAT` is stamped tree-wide so every descendant inherits it.
+Both `--node` and a truthy `NODE_COMPAT` disable runtime augmentation — no hooks, no preload, no injected flags, no path shim. They compose, and they differ in reach.
+
+`NODE_COMPAT` is the user's variable, so every descendant `node` and `nub` inherits it. A compat launch the user did not export — `--node`, `nodeCompat`, a plain `node` through the persistent shim — covers that process and the bare `node` processes beneath it. It travels as a private marker, [[crates/nub-core/src/node/spawn.rs#COMPAT_LAUNCH_ENV]], that only the `node` shim reads. A `nub` command started beneath it is a fresh invocation: it drops the marker and augments.
 
 Two details make the switch trustworthy. Compat mode does not merely skip augmentation; it restores a parent's augmented environment to its pre-Nub state. And version provisioning stays on, because running on stock Node and running on no particular Node are different requests.
 
@@ -111,6 +117,16 @@ Four files load in precedence order, with the real process environment always wi
 - `.env`
 
 Loading happens in the CLI before the spawn rather than in a preload. Cross-runtime load order, the expansion subset, and the security case for the ordering are in [[research/env-file-loading]].
+
+## HTTP DNS resolution
+
+Every HTTP client in the binary resolves host names through the operating system (`getaddrinfo`), so VPN-scoped and split DNS apply exactly as they do for other programs.
+
+That covers a VPN's interface-scoped resolver and `/etc/resolver/*` on macOS, NRPT and per-adapter servers on Windows, and `nsswitch` and `systemd-resolved` on Linux. An in-process resolver such as Hickory reads only the global nameserver list, and under a macOS TUN VPN that scopes DNS to its interface it fails every lookup.
+
+The registry clients wrap the system resolver in a process-wide cache. `getaddrinfo` keeps no cache of its own and an install opens hundreds of connections to a few origins, so each host is resolved once and reused for the rest of the process, and concurrent lookups of one host share a single query. A failed lookup is not cached.
+
+reqwest's `hickory-dns` Cargo feature must stay out of the dependency graph: through feature unification it switches every reqwest client in the binary to Hickory. `scripts/check-dns-features.sh` fails CI if it reappears.
 
 ## How the code is laid out
 

@@ -1904,6 +1904,124 @@ fn an_unreadable_tsconfig_stops_the_run() {
     );
 }
 
+/// #1032: the entry's tsconfig check reads the config the run will use. A
+/// dependency's own published tsconfig is not the project's and never stops a run;
+/// a workspace member reached through its `node_modules` link runs from its real
+/// directory, so its relative `extends` resolves from there.
+#[test]
+fn the_entry_tsconfig_check_follows_the_real_path_and_skips_dependencies() {
+    let dir = unique_test_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+    let write = |rel: &str, body: &str| {
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    };
+    let run_with = |args: &[&str], env: &[(&str, &str)]| {
+        let out = Command::new(nub_binary())
+            .args(args)
+            .envs(env.iter().copied())
+            .current_dir(&dir)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .env_remove("NODE_COMPAT")
+            .output()
+            .expect("failed to spawn nub");
+        (
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+            out.status.code(),
+        )
+    };
+    let run = |entry: &str| run_with(&[entry], &[]);
+    write(
+        "package.json",
+        r#"{"name":"root","workspaces":["packages/*"]}"#,
+    );
+    write("node_modules/dep/package.json", r#"{"name":"dep"}"#);
+    write(
+        "node_modules/dep/tsconfig.json",
+        r#"{"extends":"../../unpublished.json"}"#,
+    );
+    write("node_modules/dep/bin.cjs", "console.log('dependency-ok')");
+
+    let (stdout, stderr, code) = run("node_modules/dep/bin.cjs");
+    assert_eq!(
+        code,
+        Some(0),
+        "a dependency's own tsconfig must not stop the run: {stderr}"
+    );
+    assert!(stdout.contains("dependency-ok"), "{stdout}");
+
+    #[cfg(unix)]
+    {
+        write(
+            "tsconfig.base.json",
+            r#"{"compilerOptions":{"strict":true}}"#,
+        );
+        write(
+            "packages/cli/tsconfig.json",
+            r#"{"extends":"../../tsconfig.base.json"}"#,
+        );
+        write("packages/cli/bin.cjs", "console.log('linked-ok')");
+        write(
+            "packages/broken/tsconfig.json",
+            r#"{"extends":"./missing.json"}"#,
+        );
+        write("packages/broken/bin.cjs", "console.log('broken-ran')");
+        std::fs::create_dir_all(dir.join("node_modules/@repro")).unwrap();
+        for member in ["cli", "broken"] {
+            std::os::unix::fs::symlink(
+                format!("../../packages/{member}"),
+                dir.join("node_modules/@repro").join(member),
+            )
+            .unwrap();
+        }
+
+        let (stdout, stderr, code) = run("node_modules/@repro/cli/bin.cjs");
+        assert_eq!(
+            code,
+            Some(0),
+            "a linked workspace member must run: {stderr}"
+        );
+        assert!(stdout.contains("linked-ok"), "{stdout}");
+
+        // The link is followed, not exempted: a workspace member whose real config
+        // is broken still refuses, exactly as when run by its real path.
+        let (_stdout, stderr, code) = run("node_modules/@repro/broken/bin.cjs");
+        assert_ne!(
+            code,
+            Some(0),
+            "a broken workspace config must still stop the run"
+        );
+        assert!(stderr.contains("missing.json"), "{stderr}");
+
+        // `--preserve-symlinks-main` keeps Node on the link path, so the check reads
+        // the link directory's config, whose `extends` does not resolve from there.
+        // Node accepts `_` for `-` in option names, from argv and NODE_OPTIONS alike.
+        let entry = "node_modules/@repro/cli/bin.cjs";
+        for (args, env) in [
+            (vec!["--preserve-symlinks-main", entry], vec![]),
+            (vec!["--preserve_symlinks_main", entry], vec![]),
+            (
+                vec![entry],
+                vec![("NODE_OPTIONS", "--preserve_symlinks_main")],
+            ),
+        ] {
+            let (_stdout, stderr, code) = run_with(&args, &env);
+            assert_ne!(
+                code,
+                Some(0),
+                "{args:?} {env:?} must check the link's config"
+            );
+            assert!(
+                stderr.contains("@repro/cli/tsconfig.json"),
+                "{args:?} {env:?}: {stderr}"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ── Project-source plain JS (.js/.mjs/.cjs) transpile ───────────────
 // nub transpiles PROJECT plain JS through the same pipeline as `.ts`, so
 // transformable syntax (`using`/`await using`, `v`-flag RegExp, decorators) lowers
@@ -2310,6 +2428,19 @@ fn user_preload_named_preload_mjs_does_not_disable_augmentation() {
 }
 
 #[test]
+fn temporal_namespace_installers() {
+    let (stdout, stderr, code) = run_nub_with_env(
+        "temporal-lazy",
+        "namespace.test.mjs",
+        &[("NODE_COMPAT", "1")],
+    );
+    assert_eq!(
+        code, 0,
+        "Temporal installer tests failed: {stdout}\n{stderr}"
+    );
+}
+
+#[test]
 fn temporal_lazy_global_and_import() {
     // A37: Temporal is installed as a lazy global — loaded on first access, not
     // eagerly at startup (the polyfill is ~18ms). It must still be fully usable
@@ -2335,6 +2466,35 @@ fn temporal_lazy_global_and_import() {
     assert!(
         stdout.contains("temporal-instant:1970-01-01T00:00:00Z"),
         "toTemporalInstant re-exported, bound to Date.prototype, and callable: {stdout}"
+    );
+}
+
+#[test]
+fn package_clobber_applies_to_import_only() {
+    // The import clobber resolves to a data: URL, which the CommonJS loader reads
+    // as a file path (ENOENT). On the fast tier the resolve hook also sees
+    // require(), so it must leave that call to Node's resolver.
+    let (stdout, stderr, code) = run_nub("clobber-require", "main.cjs");
+    assert_eq!(
+        code, 0,
+        "require of a clobbered package must load it: {stderr}"
+    );
+    assert!(
+        stdout.contains("require-temporal:2026"),
+        "the installed package answered the require: {stdout}"
+    );
+
+    // A user-added "require" condition rides on imports too, so it must not be
+    // what tells a require() from an import.
+    let (stdout, stderr, code) = run_nub_with_env(
+        "clobber-require",
+        "import.mjs",
+        &[("NODE_OPTIONS", "--conditions=require")],
+    );
+    assert_eq!(code, 0, "import under --conditions=require: {stderr}");
+    assert!(
+        stdout.contains("import-is-global:true"),
+        "an import keeps the clobber under --conditions=require: {stdout}"
     );
 }
 
@@ -2901,7 +3061,7 @@ const targets = [
   [Math, "sumPrecise"],
   [IP, "map"], [IP, "filter"], [IP, "take"], [IP, "drop"], [IP, "flatMap"], [IP, "reduce"],
   [IP, "toArray"], [IP, "some"], [IP, "every"], [IP, "find"], [IP, "forEach"],
-  [IP, "chunks"], [IP, "windows"], [IP, "includes"], [IP, "join"],
+  [IP, "chunks"], [IP, "windows"], [IP, "includes"], [IP, "join"], [IP, Symbol.dispose],
   [Uint8Array.prototype, "toBase64"], [Uint8Array.prototype, "toHex"], [Uint8Array, "fromBase64"],
   [globalThis, "DisposableStack"], [globalThis, "AsyncDisposableStack"],
   [globalThis, "SuppressedError"], [globalThis, "reportError"],
@@ -2953,6 +3113,111 @@ console.log(JSON.stringify({ checked: planted.length + 1, clobbered }));
         parsed["checked"].as_u64().unwrap_or(0) >= 50,
         "expected >=50 surfaces checked, got {}",
         parsed["checked"]
+    );
+}
+
+#[test]
+fn iterator_stage4_helpers_and_promise_try_follow_spec() {
+    // The final Stage 4 text of iterator chunking/includes/join, plus the generic
+    // `this` of Promise.try. No Node release ships the four iterator methods, and
+    // Promise.try is deleted first so its fallback runs on 24+ too; each case below
+    // is one the pre-Stage-4 polyfill got wrong. Full conformance is checked against
+    // test262 (built-ins/Iterator/prototype, built-ins/Promise/try); this pins the
+    // observable contract. Plain `node` against the runtime file, as the no-clobber
+    // test above, so the CI Node matrix covers both tiers.
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let polyfills = Path::new(&manifest).join("../../runtime/polyfills.cjs");
+
+    let work = unique_test_cache();
+    std::fs::create_dir_all(&work).unwrap();
+    let script = work.join("_iterator_stage4.mjs");
+    std::fs::write(
+        &script,
+        r#"
+import { createRequire } from "node:module";
+const IP = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
+for (const k of ["chunks", "windows", "includes", "join"]) delete IP[k];
+delete Promise.try;
+createRequire(import.meta.url)(process.argv[2]).installSyncPolyfills({});
+
+const failures = [];
+const check = (name, fn) => {
+  try {
+    if (fn() !== true) failures.push(name);
+  } catch (e) {
+    failures.push(`${name}: ${e}`);
+  }
+};
+const throws = (Err, fn) => {
+  try {
+    fn();
+  } catch (e) {
+    return e instanceof Err;
+  }
+  return false;
+};
+const it = () => [1, 2, 3].values();
+// A receiver whose `next` must never be read, counting `return()` calls.
+const closable = () => {
+  const o = { closed: 0, get next() { throw new Error("next was read"); }, return() { o.closed++; return {}; } };
+  return o;
+};
+
+check("windows undersized", () =>
+  JSON.stringify(it().windows(5, "allow-partial").toArray()) === "[[1,2,3]]" &&
+  it().windows(5).toArray().length === 0 &&
+  JSON.stringify(it().windows(2, "allow-partial").toArray()) === "[[1,2],[2,3]]" &&
+  throws(TypeError, () => it().windows(2, "bogus")));
+check("includes skippedElements", () =>
+  it().includes(1, 1) === false && it().includes(2, 1) === true && it().includes(3, Infinity) === false &&
+  throws(TypeError, () => it().includes(1, 1.5)) && throws(TypeError, () => it().includes(1, "1")) &&
+  throws(RangeError, () => it().includes(1, -1)) && throws(RangeError, () => it().includes(1, 2 ** 53)));
+check("sizes are not coerced", () =>
+  throws(TypeError, () => it().chunks(2.5)) && throws(TypeError, () => it().chunks("2")) &&
+  throws(RangeError, () => it().chunks(0)) && throws(RangeError, () => it().windows(2 ** 32)));
+check("a bad argument closes the receiver before reading next", () =>
+  [["chunks", [0]], ["windows", [1, "x"]], ["includes", [0, -1]], ["join", [Symbol()]]]
+    .map(([m, args]) => {
+      const o = closable();
+      try { IP[m].apply(o, args); } catch {}
+      return o.closed;
+    })
+    .join() === "1,1,1,1");
+check("join uses ToString and closes on failure", () => {
+  let closed = 0;
+  const src = { next: () => ({ done: false, value: Symbol() }), return() { closed++; return {}; } };
+  return throws(TypeError, () => it().join(Symbol())) && throws(TypeError, () => IP.join.call(src)) && closed === 1;
+});
+check("return() before next() closes the source once", () => {
+  let closed = 0;
+  const src = { next: () => ({ done: false, value: 1 }), return() { closed++; return {}; } };
+  const h = IP.chunks.call(src, 2);
+  h.return();
+  h.return();
+  return closed === 1;
+});
+class Sub extends Promise {}
+check("Promise.try constructs from this", () =>
+  Sub.try(() => 1) instanceof Sub && throws(TypeError, () => Promise.try.call(1, () => 1)));
+console.log(JSON.stringify(failures));
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(target_node_path())
+        .arg(&script)
+        .arg(&polyfills)
+        .current_dir(&work)
+        .output()
+        .expect("failed to spawn node");
+
+    let _ = std::fs::remove_dir_all(&work);
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stdout, "[]",
+        "spec cases the polyfill failed (stderr: {stderr})"
     );
 }
 
@@ -9561,6 +9826,137 @@ fn node_compat_env_forces_vanilla_tree_wide() {
     assert!(
         falsy_out.contains("COMPAT_ENV=from_dotenv"),
         "NODE_COMPAT=0 must be falsy — run stays augmented (`.env` loads): {falsy_out}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A compat LAUNCH — `--node`, or a plain `node` through the persistent shim —
+/// covers that process and the bare `node` processes beneath it. It is not the
+/// user's `NODE_COMPAT`: a `nub` command started inside the tree is its own
+/// invocation and augments, along with its own subtree (#1005).
+/// `process.versions.nub` is the discriminator, present only while augmentation
+/// is active. Unix-only (both shims are reached through an argv0=`node` link).
+// @lat: [[compat-mode-tests#Compat mode#A compat launch does not opt out a nested nub invocation]]
+#[cfg(unix)]
+#[test]
+fn compat_launch_does_not_opt_out_a_nested_nub_invocation() {
+    let dir = unique_test_cache().join("compat-launch");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // The per-invocation hijack shim, which augments by default.
+    let hijack_dir = dir.join("nub-node-shim-test");
+    std::fs::create_dir_all(&hijack_dir).unwrap();
+    let hijack_node = hijack_dir.join("node");
+    std::os::unix::fs::symlink(nub_binary(), &hijack_node).expect("symlink nub → node");
+
+    // The persistent shim, recognized by its `nub/node-shim` directory shape. A
+    // hard link, not a symlink: Linux reads `current_exe` from `/proc/self/exe`,
+    // which follows a symlink back to the `nub` binary.
+    let persistent_dir = dir.join("nub").join("node-shim");
+    std::fs::create_dir_all(&persistent_dir).unwrap();
+    let persistent_node = persistent_dir.join("node");
+    if std::fs::hard_link(nub_binary(), &persistent_node).is_err() {
+        std::fs::copy(nub_binary(), &persistent_node).expect("copy nub → node");
+    }
+
+    let proj = dir.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(proj.join("package.json"), r#"{"name":"compat-launch"}"#).unwrap();
+    std::fs::write(
+        proj.join("probe.js"),
+        "console.log('PROBE=' + (process.versions.nub ? 'augmented' : 'vanilla'));\n",
+    )
+    .unwrap();
+    // Reports its own mode, then runs its arguments as a child command.
+    std::fs::write(
+        proj.join("launcher.cjs"),
+        r#"const { spawnSync } = require('node:child_process');
+const mode = process.versions.nub ? 'augmented' : 'vanilla';
+require('node:fs').writeSync(1, `LAUNCHER=${mode}\n`);
+const [command, ...args] = process.argv.slice(2);
+const child = spawnSync(command, args, { stdio: 'inherit' });
+if (child.error) throw child.error;
+process.exit(child.status ?? 1);
+"#,
+    )
+    .unwrap();
+
+    // The hijack shim leads PATH, standing in for a shim an outer invocation
+    // left behind: a bare `node` beneath a compat launch lands on it.
+    let ambient_path = std::env::var_os("PATH").unwrap();
+    let mut path_entries = vec![hijack_dir];
+    path_entries.extend(std::env::split_paths(&ambient_path));
+    let path = std::env::join_paths(path_entries).unwrap();
+
+    let run = |program: &Path, args: &[&str]| {
+        let out = Command::new(program)
+            .args(args)
+            .current_dir(&proj)
+            .env("PATH", &path)
+            .env("XDG_CACHE_HOME", unique_test_cache())
+            .env_remove("NODE_COMPAT")
+            .output()
+            .expect("spawn");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{program:?} {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let nub = nub_binary();
+    let nub = nub.to_str().unwrap();
+
+    // 1. A plain `node` from the persistent shim is vanilla; `nub probe.js`
+    //    beneath it augments.
+    let out = run(&persistent_node, &["launcher.cjs", nub, "probe.js"]);
+    assert!(
+        out.contains("LAUNCHER=vanilla"),
+        "the persistent shim must run `node` vanilla: {out}"
+    );
+    assert!(
+        out.contains("PROBE=augmented"),
+        "`nub probe.js` beneath the persistent shim's `node` must augment: {out}"
+    );
+
+    // 2. The same beneath an explicit `--node` run.
+    let out = run(Path::new(nub), &["--node", "launcher.cjs", nub, "probe.js"]);
+    assert!(
+        out.contains("LAUNCHER=vanilla"),
+        "`nub --node` must run its own file vanilla: {out}"
+    );
+    assert!(
+        out.contains("PROBE=augmented"),
+        "`nub probe.js` beneath a `--node` run must augment: {out}"
+    );
+
+    // 3. A bare `node` beneath the `--node` run continues it, even through a
+    //    shim that augments by default.
+    let out = run(
+        Path::new(nub),
+        &["--node", "launcher.cjs", "node", "probe.js"],
+    );
+    assert!(
+        out.contains("PROBE=vanilla"),
+        "a bare `node` beneath a `--node` run must stay vanilla: {out}"
+    );
+
+    // 4. The nested `nub` starts a fresh invocation: a bare `node` beneath IT
+    //    augments, rather than inheriting the outer compat launch.
+    let nested = [
+        "--node",
+        "launcher.cjs",
+        nub,
+        "launcher.cjs",
+        "node",
+        "probe.js",
+    ];
+    let out = run(Path::new(nub), &nested);
+    assert!(
+        out.contains("LAUNCHER=augmented") && out.contains("PROBE=augmented"),
+        "a nested `nub` and the `node` beneath it must both augment: {out}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

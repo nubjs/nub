@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$(git rev-parse --show-toplevel)/scripts/lat-prompt.mjs\"",
+            "command": "sh \"$(git rev-parse --show-toplevel)/scripts/exec-hook.sh\" node \"$(git rev-parse --show-toplevel)/scripts/lat-prompt.mjs\"",
             "timeout": 5
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$(git rev-parse --show-toplevel)/.codex/hooks/gh-comment-guard.mjs\""
+            "command": "sh \"$(git rev-parse --show-toplevel)/scripts/exec-hook.sh\" node \"$(git rev-parse --show-toplevel)/.codex/hooks/gh-comment-guard.mjs\""
           }
         ]
       }
