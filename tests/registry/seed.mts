@@ -36,6 +36,33 @@ function parseSpec(spec: string): { name: string; version: string } {
 }
 
 /**
+ * The platforms the suite runs on: CI (linux-x64), the dev Mac (darwin-arm64)
+ * and Docker on that Mac (linux-arm64). A version whose `os`/`cpu` rule out all
+ * three is never installed by a fixture: the package managers read only its
+ * packument, to record a platform-skipped optional dependency. Its tarball is
+ * left out of storage, which keeps esbuild's 23 platform binaries out of git.
+ */
+const SUITE_HOSTS = [
+  { os: 'linux', cpu: 'x64' },
+  { os: 'linux', cpu: 'arm64' },
+  { os: 'darwin', cpu: 'arm64' },
+]
+
+/** npm's `os`/`cpu` rule: absent or empty allows all; `!x` excludes x; otherwise x must be listed. */
+function platformAllows(rule: unknown, value: string): boolean {
+  if (!Array.isArray(rule) || rule.length === 0) return true
+  if (rule.includes(`!${value}`)) return false
+  const allowed = rule.filter((r) => typeof r === 'string' && !r.startsWith('!'))
+  return allowed.length === 0 || allowed.includes(value)
+}
+
+export function installsOnSuiteHost(versionMeta: { os?: unknown; cpu?: unknown }): boolean {
+  return SUITE_HOSTS.some(
+    (h) => platformAllows(versionMeta.os, h.os) && platformAllows(versionMeta.cpu, h.cpu),
+  )
+}
+
+/**
  * Compare two semver versions (no prerelease support — the seeded packages are
  * all plain releases). Returns >0 if a > b, <0 if a < b, 0 if equal.
  */
@@ -208,13 +235,16 @@ async function main(): Promise<void> {
       exit(1)
     }
 
-    // Download the tarball.
-    const tarballResp = await fetch(tarballUrl)
-    if (!tarballResp.ok) {
-      stderr.write(`seed: failed to download tarball for ${name}@${version}: ${tarballResp.status}\n`)
-      exit(1)
+    // Download the tarball, unless no suite host would ever install it.
+    let tarball: Buffer | undefined
+    if (installsOnSuiteHost(versionMeta)) {
+      const tarballResp = await fetch(tarballUrl)
+      if (!tarballResp.ok) {
+        stderr.write(`seed: failed to download tarball for ${name}@${version}: ${tarballResp.status}\n`)
+        exit(1)
+      }
+      tarball = Buffer.from(await tarballResp.arrayBuffer())
     }
-    const tarball = Buffer.from(await tarballResp.arrayBuffer())
 
     // Step 3: Place into Verdaccio storage.
     // Verdaccio stores: storage/<name>/package.json (packument) + storage/<name>/<version>.tgz (tarball)
@@ -252,11 +282,13 @@ async function main(): Promise<void> {
         })
     writeFileSync(packumentPath, JSON.stringify(minimalPackument, null, 2) + '\n')
 
-    // Write the tarball.
-    const tarballName = tarballUrl.split('/').pop()!
-    writeFileSync(join(pkgStorageDir, tarballName), tarball)
-
-    stderr.write(`  seeded: ${name}@${version} (${tarball.length} bytes)\n`)
+    if (tarball) {
+      const tarballName = tarballUrl.split('/').pop()!
+      writeFileSync(join(pkgStorageDir, tarballName), tarball)
+      stderr.write(`  seeded: ${name}@${version} (${tarball.length} bytes)\n`)
+    } else {
+      stderr.write(`  seeded: ${name}@${version} (packument only — no suite host installs it)\n`)
+    }
   }
 
   stderr.write(`seed: done — ${specs.length} package(s) seeded into ${STORAGE_DIR}\n`)

@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildMinimalPackument } from './seed.mts'
+import { buildMinimalPackument, installsOnSuiteHost } from './seed.mts'
 
 describe('buildMinimalPackument', () => {
   it('preserves the npm time field for the seeded version', () => {
@@ -49,5 +49,24 @@ describe('buildMinimalPackument', () => {
       versions['1.0.0']!.dist.tarball,
       'http://localhost:4874/@scope/pkg/-/@scope/pkg-1.0.0.tgz',
     )
+  })
+})
+
+describe('installsOnSuiteHost', () => {
+  it('keeps packages with no platform restriction', () => {
+    assert.equal(installsOnSuiteHost({}), true)
+    assert.equal(installsOnSuiteHost({ os: null, cpu: null }), true)
+  })
+
+  it('keeps a binary for a suite host and drops one no suite host installs', () => {
+    assert.equal(installsOnSuiteHost({ os: ['linux'], cpu: ['x64'] }), true)
+    assert.equal(installsOnSuiteHost({ os: ['darwin'], cpu: ['arm64'] }), true)
+    assert.equal(installsOnSuiteHost({ os: ['win32'], cpu: ['x64'] }), false)
+    assert.equal(installsOnSuiteHost({ os: ['darwin'], cpu: ['x64'] }), false)
+  })
+
+  it('honors negated entries', () => {
+    assert.equal(installsOnSuiteHost({ os: ['!win32'] }), true)
+    assert.equal(installsOnSuiteHost({ os: ['!linux', '!darwin'] }), false)
   })
 })

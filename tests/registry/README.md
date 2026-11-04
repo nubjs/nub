@@ -24,6 +24,6 @@ node seed.mts $(node resolve-fixtures.mts <fixture>…)   # or: node seed.mts <n
 node scan.mts                                            # re-check everything in storage/
 ```
 
-Commit the new files under `storage/`. Seeding keeps each version's original publish time, so release-age gates behave as they would against npm.
+Commit the new files under `storage/`. Seeding keeps each version's original publish time, so release-age gates behave as they would against npm. A version whose `os`/`cpu` exclude every host the suite runs on (linux-x64, linux-arm64, darwin-arm64) is seeded as a packument without its tarball: the package managers only read its metadata to record a skipped optional dependency.
 
 `npm test` here runs the scripts' own unit tests.
