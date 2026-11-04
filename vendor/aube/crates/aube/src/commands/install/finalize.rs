@@ -35,8 +35,7 @@ pub(super) struct FinalizePhaseInput<'a> {
     /// The root's `preinstall` already ran before resolution (install
     /// step 1b), so step 7b must not run it a second time.
     pub(super) root_preinstall_ran_early: bool,
-    /// [`super::InstallOptions::npm_project_lifecycle`].
-    pub(super) npm_project_lifecycle: bool,
+    pub(super) project_stages: super::ProjectStages,
     pub(super) direct_dep_info: &'a std::collections::HashMap<String, aube_resolver::DirectDepInfo>,
     pub(super) deprecations:
         &'a std::sync::Arc<std::sync::Mutex<Vec<crate::deprecations::DeprecationRecord>>>,
@@ -243,7 +242,7 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
         lifecycle_manifests,
         project_hook_importers,
         root_preinstall_ran_early,
-        npm_project_lifecycle,
+        project_stages,
         direct_dep_info,
         deprecations,
         build_policy,
@@ -518,12 +517,7 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
     //     A hook that exits non-zero fails the install (fail-fast, matching pnpm).
     if !ignore_scripts && !virtual_store_only && !skip_root_lifecycle {
         let phase_start = std::time::Instant::now();
-        let hooks: &[aube_scripts::LifecycleHook] =
-            if dep_selection.prod_only() && !npm_project_lifecycle {
-                &aube_scripts::PROJECT_INSTALL_HOOKS
-            } else {
-                &aube_scripts::PROJECT_LIFECYCLE_HOOKS
-            };
+        let hooks = project_stages.hooks(!dep_selection.prod_only());
         for (importer_path, importer_manifest) in project_hook_importers {
             let project_dir = importer_project_dir(cwd, importer_path);
             for &hook in hooks {

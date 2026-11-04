@@ -40,7 +40,7 @@ mod workspace;
 pub(crate) use resolve::check_patch_drift;
 
 use advisory::resolve_osv_routing_settings;
-pub use args::{EmbedderInstallOverrides, InstallArgs, InstallOptions};
+pub use args::{EmbedderInstallOverrides, InstallArgs, InstallOptions, ProjectStages};
 pub(crate) use bin_linking::{
     LinkDepBinsInput, ManagedBinLinks, PkgJsonCache, dep_modules_dir_for, link_dep_bins,
     materialized_pkg_dir, remove_managed_bin_links, remove_unclaimed_preserved_bin_links,
@@ -870,7 +870,10 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     // The warm fast path returned above, so an already-current repeat
     // install naturally skips it. An install that leaves devDependencies
     // out skips it too (pnpm's `installRunsDevPreinstall`).
-    if opts.run_dev_preinstall && !opts.dep_selection.prod_only() {
+    if opts.run_dev_preinstall
+        && !opts.dep_selection.prod_only()
+        && opts.project_stages != ProjectStages::Npm
+    {
         run_dev_preinstall(
             &cwd,
             opts.ignore_scripts,
@@ -3083,7 +3086,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         lifecycle_manifests: &lifecycle_manifests,
         project_hook_importers: &project_hook_importers,
         root_preinstall_ran_early,
-        npm_project_lifecycle: opts.npm_project_lifecycle,
+        project_stages: opts.project_stages,
         direct_dep_info: &direct_dep_info,
         deprecations: &deprecations,
         build_policy: &build_policy,

@@ -313,7 +313,7 @@ impl InstallArgs {
             // with package args opt into skipping them.
             skip_root_lifecycle: false,
             lifecycle_importers: None,
-            npm_project_lifecycle: false,
+            project_stages: ProjectStages::Install,
             run_dev_preinstall: true,
             script_command: "install",
             // Argumentless `aube install` doesn't force the live-API
@@ -501,11 +501,8 @@ pub struct InstallOptions {
     /// selection. A non-recursive `update` in a workspace root is the
     /// caller that needs it: pnpm runs only the root's hooks there.
     pub lifecycle_importers: Option<std::collections::BTreeSet<String>>,
-    /// Run npm's project stages instead of pnpm's: npm runs a project's
-    /// `prepare` family after every install, devDependencies or not, where
-    /// pnpm's `--prod` drops it. Set by an embedder mirroring a typed
-    /// `npm ci` / `npm install`.
-    pub npm_project_lifecycle: bool,
+    /// Which stages the projects' own hooks run ([`ProjectStages`]).
+    pub project_stages: ProjectStages,
     /// Run the root-only `pnpm:devPreinstall` hook before resolution.
     /// Unlike ordinary root lifecycle hooks, pnpm also runs this for
     /// `add` and `update`; other chained install callers leave it disabled.
@@ -538,6 +535,32 @@ pub struct InstallOptions {
     /// [`crate::runtime::set_embedder_runtime`]. `None` falls back to the
     /// process-wide runtime, else aube's normal switching / PATH fallback.
     pub embedder_runtime: Option<crate::runtime::EmbedderRuntime>,
+}
+
+/// The stage list a command runs in each project whose own hooks it runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectStages {
+    /// pnpm's install of the project: [`aube_scripts::PROJECT_LIFECYCLE_HOOKS`],
+    /// or [`aube_scripts::PROJECT_INSTALL_HOOKS`] when devDependencies are
+    /// left out.
+    Install,
+    /// pnpm's `add` (`InstallSome`): [`aube_scripts::PROJECT_INSTALL_HOOKS`]
+    /// alone.
+    InstallSome,
+    /// npm's root scripts after a bare `npm install` / `npm ci`:
+    /// [`aube_scripts::NPM_PROJECT_HOOKS`], devDependencies or not, and no
+    /// `pnpm:devPreinstall`. Set by an embedder mirroring a typed npm command.
+    Npm,
+}
+
+impl ProjectStages {
+    pub(crate) fn hooks(self, include_dev: bool) -> &'static [aube_scripts::LifecycleHook] {
+        match self {
+            Self::Install if include_dev => &aube_scripts::PROJECT_LIFECYCLE_HOOKS,
+            Self::Install | Self::InstallSome => &aube_scripts::PROJECT_INSTALL_HOOKS,
+            Self::Npm => &aube_scripts::NPM_PROJECT_HOOKS,
+        }
+    }
 }
 
 impl InstallOptions {
@@ -580,7 +603,7 @@ impl InstallOptions {
             // Chained callers opt in individually. pnpm runs this hook for
             // add/update, but not for unrelated internal installs.
             lifecycle_importers: None,
-            npm_project_lifecycle: false,
+            project_stages: ProjectStages::Install,
             run_dev_preinstall: false,
             script_command: "install",
             // Default `false`. `aube add` and `aube update` flip

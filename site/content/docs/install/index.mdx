@@ -543,7 +543,8 @@ Members run in dependency order, each after the members it depends on. The root'
 | `nub install`, a bare `nub update` | all six |
 | `nub install --prod` | `preinstall`, `install`, `postinstall` |
 | `nub remove <pkg>` | `preuninstall` and `uninstall` before the package is unlinked, `postuninstall` after |
-| `nub add <pkg>`, `nub update <pkg>` | none |
+| `nub add <pkg>` in a workspace | `preinstall`, `install`, `postinstall`, in the root and the project you add to |
+| `nub add <pkg>` in a single project, `nub update <pkg>`, `nub rebuild` | none |
 
 `--ignore-scripts` skips all of them.
 

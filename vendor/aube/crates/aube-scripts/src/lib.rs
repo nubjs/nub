@@ -1320,6 +1320,7 @@ pub enum LifecycleHook {
     PreInstall,
     Install,
     PostInstall,
+    Prepublish,
     PrePrepare,
     Prepare,
     PostPrepare,
@@ -1334,6 +1335,7 @@ impl LifecycleHook {
             Self::PreInstall => "preinstall",
             Self::Install => "install",
             Self::PostInstall => "postinstall",
+            Self::Prepublish => "prepublish",
             Self::PrePrepare => "preprepare",
             Self::Prepare => "prepare",
             Self::PostPrepare => "postprepare",
@@ -1359,6 +1361,18 @@ pub const PROJECT_LIFECYCLE_HOOKS: [LifecycleHook; 6] = [
     LifecycleHook::PreInstall,
     LifecycleHook::Install,
     LifecycleHook::PostInstall,
+    LifecycleHook::PrePrepare,
+    LifecycleHook::Prepare,
+    LifecycleHook::PostPrepare,
+];
+
+/// npm's root scripts after a bare `npm install` / `npm ci`
+/// (`lib/commands/install.js`), whatever the dependency selection.
+pub const NPM_PROJECT_HOOKS: [LifecycleHook; 7] = [
+    LifecycleHook::PreInstall,
+    LifecycleHook::Install,
+    LifecycleHook::PostInstall,
+    LifecycleHook::Prepublish,
     LifecycleHook::PrePrepare,
     LifecycleHook::Prepare,
     LifecycleHook::PostPrepare,

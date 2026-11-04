@@ -101,10 +101,15 @@ impl Fixture {
 
     /// Run `nub <args>` in `dir` and return the hooks it ran, in order.
     fn hooks(&self, args: &[&str]) -> Vec<String> {
+        self.hooks_in(".", args)
+    }
+
+    /// [`Self::hooks`] from the subdirectory `sub`.
+    fn hooks_in(&self, sub: &str, args: &[&str]) -> Vec<String> {
         std::fs::write(&self.log, "").unwrap();
         let out = Command::new(nub_binary())
             .args(args)
-            .current_dir(&self.dir)
+            .current_dir(self.dir.join(sub))
             .env("LC_LOG", &self.log)
             .env("XDG_DATA_HOME", &self.data)
             .env("XDG_CACHE_HOME", &self.cache)
@@ -130,15 +135,20 @@ fn names(hooks: &[&str]) -> Vec<String> {
     hooks.iter().map(|hook| hook.to_string()).collect()
 }
 
-#[test]
-fn install_runs_every_project_stage_after_linking_in_dependency_order() {
-    let fx = Fixture::new("ws");
+/// A workspace of `root` and members `a` and `b`, with no dependencies.
+fn workspace(fx: &Fixture) {
     project(&fx.dir, "root", serde_json::json!({}));
     std::fs::write(
         fx.dir.join("pnpm-workspace.yaml"),
         "packages:\n  - packages/*\n",
     )
     .unwrap();
+}
+
+#[test]
+fn install_runs_every_project_stage_after_linking_in_dependency_order() {
+    let fx = Fixture::new("ws");
+    workspace(&fx);
     // `a` depends on `b`, so `b`'s stages run first, against the
     // directories' sort order.
     project(
@@ -213,5 +223,38 @@ fn update_of_everything_runs_the_project_stages_and_a_named_update_does_not() {
     assert_eq!(
         fx.hooks(&["update", "dep"]),
         names(&["root:pnpm:devPreinstall+dep"])
+    );
+}
+
+#[test]
+fn workspace_add_runs_the_install_stages_of_the_root_and_the_edited_project() {
+    let fx = Fixture::new("add");
+    workspace(&fx);
+    project(&fx.dir.join("packages/a"), "a", serde_json::json!({}));
+    project(&fx.dir.join("packages/b"), "b", serde_json::json!({}));
+    local_dep(&fx.dir.join("dep"));
+    fx.hooks(&["install"]);
+    // The root, which pnpm pushes into every workspace run, runs its
+    // `preinstall` before anything is linked; `b` was not edited.
+    assert_eq!(
+        fx.hooks_in("packages/a", &["add", "file:../../dep"]),
+        names(&[
+            "root:pnpm:devPreinstall",
+            "root:preinstall",
+            "root:install",
+            "root:postinstall",
+            "a:preinstall+dep",
+            "a:install+dep",
+            "a:postinstall+dep",
+        ])
+    );
+    assert_eq!(
+        fx.hooks(&["add", "-w", "file:./dep"]),
+        names(&[
+            "root:pnpm:devPreinstall",
+            "root:preinstall",
+            "root:install+dep",
+            "root:postinstall+dep",
+        ])
     );
 }
