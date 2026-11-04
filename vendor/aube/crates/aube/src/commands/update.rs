@@ -1756,6 +1756,7 @@ enum RichPick {
 /// latest) so one invocation subsumes `-i` and `-i --latest`. Preserve-pin
 /// screening happens per-cell in `update_picker::build_row` (a `latest` at
 /// or below `current` is never offered), not by hiding whole rows.
+#[allow(clippy::too_many_arguments)]
 async fn pick_update_rich(
     keys: &[String],
     manifest: &aube_manifest::PackageJson,

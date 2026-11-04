@@ -4,5 +4,6 @@
 pub mod detect;
 pub mod env;
 pub mod filter;
+pub mod npmrc;
 pub mod scripts;
 pub mod shell_escape;

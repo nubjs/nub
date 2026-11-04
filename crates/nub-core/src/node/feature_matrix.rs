@@ -771,6 +771,19 @@ static FEATURES: &[Feature] = &[
         )],
         evidence: "Stage 3 (proposal-math-sum); absent on every Node through 26.5 (bun ships it)",
     },
+    // JSON.parse exists everywhere, so this anchor's runtime detect probes the
+    // options behavior rather than the global's presence.
+    Feature {
+        name: "JSON.parse options",
+        mitigations: &[(
+            band((18, 19, 0), None),
+            Mitigation::Polyfill {
+                runtime_file: "polyfills.cjs",
+                global: "JSON.parse",
+            },
+        )],
+        evidence: "Stage 2.7 (proposal-json-parseimmutable, 2026-09); absent on every Node through 26.7",
+    },
     // Only the well-known symbol; POPULATING class metadata is the decorator
     // transform's job, and the spec's value for an undecorated class is undefined.
     Feature {

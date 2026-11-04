@@ -69,6 +69,24 @@ use lifecycle::{
 };
 pub(crate) use workspace::order_lifecycle_manifests;
 
+/// Record the project's pnpm pin in `pnpm-lock.yaml`'s env document after
+/// the lockfile is written (pnpm 11+ parity; see
+/// [`crate::package_manager_pin`]). Best-effort like the runtime pin: an
+/// offline install that cannot resolve the pinned pnpm warns and goes on.
+pub(crate) async fn sync_package_manager_pin(
+    lockfile_dir: &std::path::Path,
+    network_mode: aube_registry::NetworkMode,
+) {
+    if let Err(error) =
+        crate::package_manager_pin::sync_pnpm_env_lockfile(lockfile_dir, network_mode).await
+    {
+        tracing::warn!(
+            code = aube_codes::warnings::WARN_AUBE_PACKAGE_MANAGER_PIN_NOT_RECORDED,
+            "could not record the pinned pnpm in pnpm-lock.yaml: {error:?}"
+        );
+    }
+}
+
 pub(crate) fn resolve_active_lockfile_dir(
     cwd: &std::path::Path,
     manifest: &aube_manifest::PackageJson,
@@ -81,7 +99,7 @@ use lockfile_dir::{
 };
 use materialize::{
     GvsPrewarmInputs, VirtualStorePlanInputs, combine_install_pipeline_errors, materialize_channel,
-    plan_virtual_store, spawn_gvs_prewarm,
+    plan_virtual_store, spawn_gvs_prewarm_unless_reset_pending,
 };
 pub(crate) use settings::PeerDependencyRules;
 pub(crate) use settings::resolve_catalog_prune;
@@ -837,6 +855,12 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     let ws_dirs = workspace_plan.ws_dirs;
     let lifecycle_manifests = workspace_plan.lifecycle_manifests;
     let default_trust_enabled = aube_settings::resolved::default_trust(&settings_ctx);
+    // The setting's env and `.npmrc` sources, not only the CLI flag, decide
+    // the policy: they already route the install off the fast path
+    // (`startup.rs`), and a policy that ignored them refused the builds the
+    // user had allowed.
+    let dangerously_allow_all_builds = opts.dangerously_allow_all_builds
+        || aube_settings::resolved::dangerously_allow_all_builds(&settings_ctx);
     // Importer keys whose per-project lockfiles a filtered install may
     // (re)write. `None` for an unfiltered install (write every importer).
     // Computed once and shared by the `--lockfile-only` short-circuit and
@@ -854,11 +878,11 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             // (explicit `false` survives). Without the floor, the
             // pnpm-parity short-circuit (allow-all drops the map)
             // stays untouched.
-            let compose_allow_all = opts.dangerously_allow_all_builds && default_trust_enabled;
+            let compose_allow_all = dangerously_allow_all_builds && default_trust_enabled;
             let (mut build_policy, policy_warnings) = build_policy_from_manifest_sources(
                 lifecycle_manifests.iter().map(|(_, manifest)| manifest),
                 &ws_config_shared,
-                opts.dangerously_allow_all_builds && !compose_allow_all,
+                dangerously_allow_all_builds && !compose_allow_all,
             );
             if compose_allow_all {
                 build_policy = build_policy.allow_all_except_denied();
@@ -1230,14 +1254,16 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         .then_some(materialization);
     // `effective_gvs`, not the raw `planned_gvs`: the callee only compares its
     // argument against the on-disk tree, so passing the raw request is what
-    // produced the spurious `disabled → enabled` wipe (#71).
-    gvs::reset_on_mode_change(
+    // produced the spurious `disabled → enabled` wipe (#71). The reset itself
+    // waits until just before the link phase (#841).
+    let pending_mode_reset = gvs::PendingModeReset::detect(
         &cwd,
         &aube_dir,
         &modules_dir_name,
         effective_gvs,
         &settings_ctx,
-    )?;
+    );
+    let mode_reset_pending = pending_mode_reset.is_some();
 
     // The fetch-pipelined materializer (`spawn_gvs_prewarm`) must target the
     // SAME virtual store the link phase reads from, or its work is wasted and
@@ -1573,8 +1599,11 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 supported_architectures: lock_supported_architectures,
                 ignored_optional_dependencies: lock_ignored_optional,
             };
-            let lock_materialize_handle =
-                spawn_gvs_prewarm(lock_prewarm_inputs, lock_materialize_rx);
+            let lock_materialize_handle = spawn_gvs_prewarm_unless_reset_pending(
+                mode_reset_pending,
+                lock_prewarm_inputs,
+                lock_materialize_rx,
+            );
             let lock_project_local_dep_paths = if planned_gvs {
                 gvs::legacy_vite_project_local_closure(&graph)
             } else {
@@ -1609,8 +1638,10 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 // always disables it: the entry on disk was linked against a
                 // different store.
                 /*already_linked_shortcut=*/
-                (!(explicit_store_dir_override || has_workspace && warm_store_verify()))
-                    .then_some(&lock_virtual_store_plan),
+                (!(mode_reset_pending
+                    || explicit_store_dir_override
+                    || has_workspace && warm_store_verify()))
+                .then_some(&lock_virtual_store_plan),
                 &lock_project_local_dep_paths,
                 virtual_store_dir_max_length,
                 opts.ignore_scripts,
@@ -2523,7 +2554,11 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 "materialize_spawn",
                 None,
             );
-            let materialize_handle = spawn_gvs_prewarm(materialize_inputs, materialize_rx);
+            let materialize_handle = spawn_gvs_prewarm_unless_reset_pending(
+                mode_reset_pending,
+                materialize_inputs,
+                materialize_rx,
+            );
 
             // On fetch err, await the materializer (don't abort): the
             // failing fetch task drops its `tx`, so the materializer's
@@ -2842,8 +2877,10 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                         // above: re-enable the workspace `AlreadyLinked`
                         // shortcut only under fast-trust.
                         /*already_linked_shortcut=*/
-                        (!(explicit_store_dir_override || has_workspace && warm_store_verify()))
-                            .then_some(&materialize_virtual_store_plan),
+                        (!(mode_reset_pending
+                            || explicit_store_dir_override
+                            || has_workspace && warm_store_verify()))
+                        .then_some(&materialize_virtual_store_plan),
                         &project_local_dep_paths,
                         virtual_store_dir_max_length,
                         opts.ignore_scripts,
@@ -2997,7 +3034,8 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     let node_version = crate::engines::effective_node_version(node_version_override.as_deref());
     let build_node_version = crate::engines::build_node_version();
     crate::engines::run_checks(
-        &aube_dir,
+        // While a mode reset is pending the tree on disk is the old one.
+        (!mode_reset_pending).then_some(aube_dir.as_path()),
         &manifest,
         &manifests,
         &graph_for_link,
@@ -3037,6 +3075,11 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         lockfile_vetted,
         inherited_picks,
     );
+    // Every pre-link gate has passed: only now is it safe to drop a tree
+    // linked under the other virtual-store mode (#841).
+    if let Some(reset) = pending_mode_reset {
+        reset.reset(&[store.store_v1_dir(), store.virtual_store_dir()])?;
+    }
     let link::LinkPhaseOutput {
         stats,
         node_linker,
@@ -3080,6 +3123,13 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     // path, so this is a no-op there.
     if let Some(handle) = lockfile_write_handle.take() {
         lockfile_write_overlap::join(handle).await?;
+    }
+    if lockfile_enabled
+        && !matches!(mode, FrozenMode::Frozen)
+        && matches!(write_kind, aube_lockfile::LockfileKind::Pnpm)
+        && (shared_workspace_lockfile || !has_workspace)
+    {
+        sync_package_manager_pin(&lockfile_dir, opts.network_mode).await;
     }
     finalize::run_finalize_phase(finalize::FinalizePhaseInput {
         cwd: &cwd,

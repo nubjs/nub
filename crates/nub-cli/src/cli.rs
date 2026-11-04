@@ -10748,6 +10748,19 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
         for line in crate::pm_engine::use_nub::regenerate_workspace_yaml(&root)? {
             println!("  {line}");
         }
+        // pnpm 11+ refuses a frozen install of a lockfile that does not record
+        // the pinned pnpm, and every alignment above writes only the project
+        // document. A failure (offline) leaves it to the next install.
+        match crate::pm_engine::sync_pnpm_package_manager_pin(&root) {
+            Ok(Some(recorded)) => println!(
+                "  pnpm-lock.yaml: packageManagerDependencies = pnpm@{recorded} (+integrity)"
+            ),
+            Ok(None) => {}
+            Err(e) => eprintln!(
+                "nub: could not record pnpm@{version} in pnpm-lock.yaml: {e:#}\n\
+                 \x20 the next `nub install` records it"
+            ),
+        }
     }
     Ok(0)
 }
@@ -11477,13 +11490,6 @@ fn shim_plan_with(
     cwd: &Path,
     route_installs: bool,
 ) -> Result<ShimPlan> {
-    use nub_core::pm::Pm;
-    use nub_core::pm::resolve::{self, PmTarget};
-    use nub_core::pm::shim::{self, Nesting, ShimDecision, ShimName};
-
-    let target = resolve::resolve_target(cwd);
-    let pin_state = shim_pin_state(cwd, target.as_ref());
-
     // Nested re-entry: when a running PM (e.g. a pnpm postinstall) spawns this
     // shim as a DIFFERENT PM, `npm_config_user_agent`/`npm_execpath` are set in
     // our environment — the ecosystem-standard "a PM is running above me" marker
@@ -11491,7 +11497,26 @@ fn shim_plan_with(
     // falls through to the system PM instead of refusing, so the install the
     // user issued one layer up isn't broken by its own lifecycle script. A
     // top-level invocation (no marker) keeps full strict behavior.
-    let nesting = Nesting::from_env(|k| env::var(k).ok());
+    let nesting = nub_core::pm::shim::Nesting::from_env(|k| env::var(k).ok());
+    shim_plan_at(invoked, args, cwd, route_installs, nesting)
+}
+
+/// [`shim_plan_with`] with the nesting read from the environment passed in, so
+/// a test is not turned into a nested invocation by the markers of an npm that
+/// happens to be running the test suite.
+fn shim_plan_at(
+    invoked: nub_core::pm::shim::ShimName,
+    args: &[String],
+    cwd: &Path,
+    route_installs: bool,
+    nesting: nub_core::pm::shim::Nesting,
+) -> Result<ShimPlan> {
+    use nub_core::pm::Pm;
+    use nub_core::pm::resolve::{self, PmTarget};
+    use nub_core::pm::shim::{self, Nesting, ShimDecision, ShimName};
+
+    let target = resolve::resolve_target(cwd);
+    let pin_state = shim_pin_state(cwd, target.as_ref());
 
     // A GLOBAL op (`npm install -g`, `yarn global add`, `npm ls -g`) writes the
     // user's global prefix, and a registry verb (`npm login`, `npm view`) the
@@ -14092,6 +14117,24 @@ mod tests {
     /// any code path that should NOT reach the network fails fast (connection
     /// refused) instead of touching the real registry — the same trick as
     /// nub-core's `pm::provision` tests.
+    /// [`shim_plan_with`] as a top-level invocation. The nesting markers an npm
+    /// exports to its children (`npm_execpath`, `npm_config_user_agent`) belong
+    /// to whatever ran the suite, not to the fixture.
+    fn top_level_plan(
+        invoked: nub_core::pm::shim::ShimName,
+        args: &[String],
+        dir: &Path,
+        route_installs: bool,
+    ) -> Result<ShimPlan> {
+        shim_plan_at(
+            invoked,
+            args,
+            dir,
+            route_installs,
+            nub_core::pm::shim::Nesting::TopLevel,
+        )
+    }
+
     fn offline_project(tag: &str, manifest: &str) -> PathBuf {
         let dir = pm_tmpdir(tag);
         std::fs::write(dir.join("package.json"), manifest).unwrap();
@@ -14640,7 +14683,7 @@ mod tests {
         // a Refuse plan), naming the pin, the field, the paste, and the escape.
         let dir = offline_project("shim-refuse", r#"{"packageManager":"pnpm@9.1.0"}"#);
         let args = vec!["install".to_string(), "react".to_string()];
-        match shim_plan(ShimName::Npm, &args, &dir).unwrap() {
+        match top_level_plan(ShimName::Npm, &args, &dir, false).unwrap() {
             ShimPlan::Refuse { message } => {
                 for needle in [
                     "pnpm",
@@ -14660,7 +14703,7 @@ mod tests {
         // A flags-only invocation (`npm --version`) still refuses, but with NO
         // "run instead" line: there is no verb to redirect, and echoing argv
         // back produced the nonsense "run instead: pnpm --version".
-        match shim_plan(ShimName::Npm, &["--version".to_string()], &dir).unwrap() {
+        match top_level_plan(ShimName::Npm, &["--version".to_string()], &dir, false).unwrap() {
             ShimPlan::Refuse { message } => {
                 assert!(
                     message.contains("pins pnpm") && message.contains("nub pm unshim"),
@@ -14677,7 +14720,7 @@ mod tests {
         // A committed-yarnPath project refuses invoked pnpm naming the yarnrc
         // provenance (decision 2: yarnPath projects, wrong name → refuse).
         let (dir, _release) = yarn_path_fixture("shim-refuse-yarnpath");
-        match shim_plan(ShimName::Pnpm, &["install".to_string()], &dir).unwrap() {
+        match top_level_plan(ShimName::Pnpm, &["install".to_string()], &dir, false).unwrap() {
             ShimPlan::Refuse { message } => assert!(
                 message.contains("yarn") && message.contains(".yarnrc.yml#yarnPath"),
                 "the yarnPath refusal must name yarn + the yarnrc provenance, got:\n{message}"
@@ -14700,7 +14743,7 @@ mod tests {
         // No npm lockfile: nothing frozen to install from, so npm keeps it.
         assert!(
             !matches!(
-                shim_plan_with(ShimName::Npm, &ci, &dir, true).unwrap(),
+                top_level_plan(ShimName::Npm, &ci, &dir, true).unwrap(),
                 ShimPlan::EngineInstall { .. }
             ),
             "without package-lock.json the real npm runs"
@@ -14710,7 +14753,7 @@ mod tests {
             r#"{"lockfileVersion":3,"packages":{}}"#,
         )
         .unwrap();
-        match shim_plan_with(ShimName::Npm, &ci, &dir, true).unwrap() {
+        match top_level_plan(ShimName::Npm, &ci, &dir, true).unwrap() {
             ShimPlan::EngineInstall {
                 route,
                 ignore_scripts,
@@ -14724,7 +14767,7 @@ mod tests {
         }
         assert!(
             !matches!(
-                shim_plan_with(ShimName::Npm, &ci, &dir, false).unwrap(),
+                top_level_plan(ShimName::Npm, &ci, &dir, false).unwrap(),
                 ShimPlan::EngineInstall { .. }
             ),
             "without the opt-in the real npm runs"
@@ -14733,7 +14776,7 @@ mod tests {
         // command line wins when it is not.
         std::fs::write(dir.join(".npmrc"), "ignore-scripts=true\n").unwrap();
         assert!(matches!(
-            shim_plan_with(ShimName::Npm, &ci, &dir, true).unwrap(),
+            top_level_plan(ShimName::Npm, &ci, &dir, true).unwrap(),
             ShimPlan::EngineInstall {
                 ignore_scripts: true,
                 ..
@@ -14741,7 +14784,7 @@ mod tests {
         ));
         let explicit = vec!["ci".to_string(), "--ignore-scripts=false".to_string()];
         assert!(matches!(
-            shim_plan_with(ShimName::Npm, &explicit, &dir, true).unwrap(),
+            top_level_plan(ShimName::Npm, &explicit, &dir, true).unwrap(),
             ShimPlan::EngineInstall {
                 ignore_scripts: false,
                 ..
@@ -14755,7 +14798,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            shim_plan_with(ShimName::Npm, &ci, &dir, true).unwrap(),
+            top_level_plan(ShimName::Npm, &ci, &dir, true).unwrap(),
             ShimPlan::EngineInstall { .. }
         ));
         // A project pinned to another PM refuses as before — routing never
@@ -14766,7 +14809,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            shim_plan_with(ShimName::Npm, &ci, &dir, true).unwrap(),
+            top_level_plan(ShimName::Npm, &ci, &dir, true).unwrap(),
             ShimPlan::Refuse { .. }
         ));
     }
