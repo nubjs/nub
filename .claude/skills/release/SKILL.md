@@ -9,10 +9,10 @@ description: >-
   commit + push to `main`, write the FACTUAL + NEUTRAL release notes from the
   full changeset, then dispatch release.yml with publish=true and the notes as
   its input (that dispatch runs the 8-platform build → glibc and pre-publish
-  native gates → immutable 32-asset DRAFT release carrying the notes → npm OIDC
-  STAGE → a held run until the maintainer approves with 2FA → the `v<ver>` tag
-  and `v0` pushed with the release deploy key → stable GitHub Release),
-  `stager await` the approval with no timeout,
+  native gates → immutable 32-asset DRAFT release carrying the notes → signed
+  packslip → npm OIDC STAGE → a held run until the maintainer approves with
+  2FA → the `v<ver>` tag and `v0` pushed with the release deploy key → stable
+  GitHub Release), `stager await` the approval with no timeout,
   then comment the version + release link on every closed issue + merged PR the
   release ships (mandatory maintainer hygiene). Do NOT cut until all fixes are
   green.
@@ -22,7 +22,7 @@ metadata:
 
 # Cutting a Nub release
 
-A Nub release is dispatch-started and automated up to one human gate. A `workflow_dispatch` of `.github/workflows/release.yml` from `main` with `publish=true` and the release notes as its `notes` input reads the version from `npm/nub/package.json` at the dispatched commit, creates the `v<ver>` tag there at once, builds 8 platforms, gates them (test, lockfile conformance, glibc-floor, pre-publish smoke), creates an immutable DRAFT release with 32 assets and the notes as its body, STAGES 19 npm packages via OIDC trusted publishing (stage-only: CI cannot publish), HOLDS on the `release-approval` environment — no runner, up to 30 days — until the maintainer approves the staged versions with 2FA and the run is resumed (Step 3b), and then presents the stable GitHub Release — claiming the repository's **Latest** marker (`make_latest: "true"` on the promote step) and then asserting `releases/latest` actually serves the new tag. That marker IS the upgrade channel: `nub upgrade`, `install.sh`, and `install.ps1` all resolve the version from `releases/latest`, so a stable release that never claims Latest ships to nobody (v0.8.0–v0.8.2 sat unserved behind v0.7.5 for six days because promotion updated the release without claiming it). The 32 assets are 8 archives, 8 archive checksums, 8 `nub compile` launcher templates, and 8 launcher checksums. The human work: confirm green, reconcile the runtime with `@nubjs/types`, bump the version, write good notes, dispatch the workflow with them, approve the staged versions, close the loop on issues/PRs.
+A Nub release is dispatch-started and automated up to one human gate. A `workflow_dispatch` of `.github/workflows/release.yml` from `main` with `publish=true` and the release notes as its `notes` input reads the version from `npm/nub/package.json` at the dispatched commit, builds 8 platforms, gates them (test, lockfile conformance, glibc-floor, pre-publish smoke), creates an immutable DRAFT release with 32 assets and the notes as its body, signs a packslip, STAGES 19 npm packages via OIDC trusted publishing (stage-only: CI cannot publish), HOLDS on the `release-approval` environment — no runner, up to 30 days — until the maintainer approves the staged versions with 2FA and the run is resumed (Step 3b), pushes the `v<ver>` tag at the dispatched commit, and then presents the stable GitHub Release — claiming the repository's **Latest** marker (`make_latest: "true"` on the promote step) and then asserting `releases/latest` actually serves the new tag. That marker IS the upgrade channel: `nub upgrade`, `install.sh`, and `install.ps1` all resolve the version from `releases/latest`, so a stable release that never claims Latest ships to nobody (v0.8.0–v0.8.2 sat unserved behind v0.7.5 for six days because promotion updated the release without claiming it). The 32 assets are 8 archives, 8 archive checksums, 8 `nub compile` launcher templates, and 8 launcher checksums; the `packslip` job adds `packslip.sigstore.json`, the signed manifest of the 8 archives. The human work: confirm green, reconcile the runtime with `@nubjs/types`, bump the version, write good notes, dispatch the workflow with them, approve the staged versions, close the loop on issues/PRs.
 
 **Guardrails (read first, non-negotiable):**
 
@@ -108,7 +108,7 @@ A dispatch whose version tag already exists at another commit is refused by `ver
 
 Post-merge, fast-forward the shared tree so it tracks origin: `git -C <shared-tree> pull --ff-only` (the eagerly-pull rule, AGENTS.md "Default to a PR flow" — the shared checkout otherwise drifts behind as PRs land).
 
-The workflow runs, in order: `verify` (version consistency, notes present), `primer`, `test` + `conformance` + `glibc-floor-guard` + `pre-publish-gate`, `build` (8 platforms), `stable-immutable-release` (32 assets on a DRAFT release whose body is the notes), `publish-npm` (19 packages STAGED), `await-approval` (the run is HELD on the `release-approval` environment until the maintainer approves; then it pushes `v<ver>` and moves `v0` with the release deploy key), `npm-served` (confirms npm serves every version and the root package installs and runs), `github-release` (publishes the draft as the stable release), then the post-publish fan-out — `test-install` / `test-install-musl`, `docker`, `bump-homebrew-tap`, `submit-winget`.
+The workflow runs, in order: `verify` (version consistency, notes present), `primer`, `test` + `conformance` + `glibc-floor-guard` + `pre-publish-gate`, `build` (8 platforms), `stable-immutable-release` (32 assets on a DRAFT release whose body is the notes), `packslip` (signs `packslip.sigstore.json` onto the draft), `publish-npm` (19 packages STAGED), `await-approval` (the run is HELD on the `release-approval` environment until the maintainer approves; then it pushes `v<ver>` and moves `v0` with the release deploy key), `npm-served` (confirms npm serves every version and the root package installs and runs), `github-release` (publishes the draft as the stable release), then the post-publish fan-out — `test-install` / `test-install-musl`, `docker`, `bump-homebrew-tap`, `submit-winget`.
 
 ### Step 3b — Approve the staged versions (the human gate; maintainer only)
 
@@ -266,7 +266,7 @@ gh api repos/nubjs/nub/releases/latest --jq .tag_name   # MUST print v<ver> — 
 npm view @nubjs/nub@<ver> version            # the root package is on the registry
 npm view @nubjs/nub@<ver> dist.tarball        # sanity: published artifact exists
 gh release view v<ver> --json assets --jq '.assets[].name' | sort
-# expect these exact 32 assets:
+# expect these exact 33 assets:
 # nub-darwin-arm64.tar.gz
 # nub-darwin-arm64.tar.gz.sha256
 # nub-darwin-x64.tar.gz
@@ -299,13 +299,14 @@ gh release view v<ver> --json assets --jq '.assets[].name' | sort
 # nub-launcher-win32-arm64.exe.sha256
 # nub-launcher-win32-x64.exe
 # nub-launcher-win32-x64.exe.sha256
+# packslip.sigstore.json
 ```
 
-A complete release has: the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub-<platform>` ×8, `@nubjs/types`), the stable GitHub Release present and marked **Latest**, and all 32 assets attached. CI's `stable-immutable-release` job asserts the 32 assets before npm can publish, `github-release` promotes that same release after npm succeeds, and `test-install` smokes the published package. This step confirms that the workflow reached green.
+A complete release has: the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub-<platform>` ×8, `@nubjs/types`), the stable GitHub Release present and marked **Latest**, and all 33 assets attached. CI's `stable-immutable-release` job asserts the 32 build assets and `packslip` adds the 33rd before npm can stage, `github-release` promotes that same release after npm succeeds, and `test-install` smokes the published package. This step confirms that the workflow reached green.
 
 The 8 `nub-launcher-*` assets are what `nub compile --platform <foreign>` fetches to cross-compile, so a release missing one silently disables cross-compiling to that platform for everyone on that version.
 
-**If CI failed partway:** Re-run the failed job from the Actions UI. The `stable-immutable-release` job rebuilds the deterministic archives and re-uploads missing assets before npm starts; `publish-npm` skips packages already published or already staged during a partial attempt; a run whose approval hold expired (30 days) is abandoned for the next version (Step 3); `github-release` only promotes the asset-complete prerelease. Do not re-cut a version for a failed upload or partial npm publish.
+**If CI failed partway:** Re-run the failed job from the Actions UI. The `stable-immutable-release` job rebuilds the deterministic archives and re-uploads missing assets before npm starts; `packslip` keeps an existing signed manifest and signs one only when absent; `publish-npm` skips packages already published or already staged during a partial attempt; a run whose approval hold expired (30 days) is abandoned for the next version (Step 3); `github-release` only promotes the asset-complete prerelease. Do not re-cut a version for a failed upload or partial npm publish.
 
 Then confirm the Homebrew channel actually moved — the tap lives in another repo, so a green release run here is not evidence that it did:
 
@@ -318,7 +319,7 @@ brew update && brew install nubjs/tap/nub && nub --version && nubx --help | head
 docker run --rm homebrew/brew brew install nubjs/tap/nub
 ```
 
-A complete release has the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub-<platform>` ×8, `@nubjs/types`), the GitHub Release present and marked **Latest**, all 32 assets attached, and the tap formula bumped to `<ver>` and installable.
+A complete release has the 10 npm packages published (`@nubjs/nub`, `@nubjs/nub-<platform>` ×8, `@nubjs/types`), the GitHub Release present and marked **Latest**, all 33 assets attached, and the tap formula bumped to `<ver>` and installable.
 
 **If CI failed partway:** `publish-npm` and `github-release` are split + idempotent on purpose — re-run the failed job from the Actions UI (npm publish skips already-published packages; the release job re-uploads only missing assets). Never re-cut a version for a flaky asset upload. `bump-homebrew-tap` is re-runnable too, and failing it is the safe outcome: the tap keeps serving the previous version rather than a broken formula, so fix the generator on `main` and re-run the job — never hand-edit the tap as the fix, since the next release regenerates it.
 
