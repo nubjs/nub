@@ -4876,16 +4876,11 @@ mod tests {
         manifest(r#"{"packageManager":"pnpm@10.0.0"}"#);
         assert!(!pnpm_v11_surface(&ConfigSurface::PnpmOrFresh, root.path()));
 
-        // The extra space is load-bearing, not style. `ROOT_MANIFEST_CACHE` keys
-        // freshness on `{mtime, size}`, and its own docs say a same-mtime,
-        // same-size content edit is deliberately NOT distinguished — the size half
-        // is what covers "tests that rewrite-then-reread the same path". Written
-        // without it, this rewrite is byte-identical in LENGTH to the v10 line
-        // above, so on a filesystem whose mtime granularity is coarser than the gap
-        // between two writes (Windows) both halves of the stamp collide, the stale
-        // v10 value is served, and this assertion fails. Every other rewrite in
-        // this test already differs in length by accident.
-        manifest(r#"{"packageManager": "pnpm@11.0.0"}"#);
+        // Same length as the v10 manifest and, on Windows, often inside the same
+        // mtime tick, so only the manifest caches' racy-mtime guard
+        // (`config_cache`) makes this rewrite visible. The equal length is
+        // deliberate: it is the case that guard exists for.
+        manifest(r#"{"packageManager":"pnpm@11.0.0"}"#);
         assert!(pnpm_v11_surface(&ConfigSurface::PnpmOrFresh, root.path()));
         assert!(
             !pnpm_v11_surface(&ConfigSurface::NubIdentity(dir.clone()), root.path()),
