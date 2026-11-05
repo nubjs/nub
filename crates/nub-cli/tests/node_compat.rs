@@ -71,11 +71,11 @@ fn run_with_timeout(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     // Each test runs in a session of its own, so `reap_session` can find what it
-    // leaves behind. A process group is not enough: nub puts Node in a group of
+    // leaves behind. A process group is not enough: Nub puts Node in a group of
     // its own (`group_on_spawn`), so the servers, workers and `process.execPath`
-    // children a test starts sit in Node's group, not nub's, but they all stay in
+    // children a test starts sit in Node's group, not Nub's, but they all stay in
     // this session. Killing only the leader orphaned them to PID 1, where they
-    // kept spinning, and at 16-way fan-out they piled up until the CI runner died.
+    // kept running.
     #[cfg(unix)]
     // SAFETY: setsid(2) is async-signal-safe and touches no parent state.
     unsafe {
@@ -520,7 +520,7 @@ fn node_compat_suite() {
     );
 }
 
-/// The reap reaches what a test leaves behind even though nub runs Node in a
+/// The reap reaches what a test leaves behind even though Nub runs Node in a
 /// process group of its own: a child still holding the test's stderr, after a
 /// clean exit and after a timeout. Without it, the exit case waited on that
 /// child for as long as it lived.
