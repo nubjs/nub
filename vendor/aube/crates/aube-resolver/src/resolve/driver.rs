@@ -455,6 +455,14 @@ impl<'a> ResolveDriver<'a> {
             )
         });
 
+        let workspace_members: BTreeMap<String, (String, String)> = self
+            .workspace_member_importers
+            .iter()
+            .filter_map(|(name, dir)| {
+                let version = self.workspace_packages.get(name)?;
+                Some((name.clone(), (dir.clone(), version.clone())))
+            })
+            .collect();
         let contextualized = self.resolver.finalize_resolved_graph(
             self.importers,
             self.resolved,
@@ -462,6 +470,7 @@ impl<'a> ResolveDriver<'a> {
             self.resolved_times,
             self.skipped_optional_dependencies,
             self.catalog_picks,
+            &workspace_members,
         )?;
         if let Some((state, sem)) = self.packument_persist_handle {
             sem.persist(&state, "packument:default");
@@ -644,7 +653,7 @@ impl<'a> ResolveDriver<'a> {
                 // overridden version) but NOT to a peer edge, so reusing the
                 // raw range here matches pnpm — verified empirically.
                 if let Some(peer_task) = self.deferred_auto_peers.pop() {
-                    if !self.try_peer_reuse(&peer_task) {
+                    if !self.try_peer_reuse(&peer_task) && !self.try_workspace_link(&peer_task) {
                         self.queue.push_back(peer_task);
                     }
                     continue;
@@ -776,7 +785,18 @@ impl<'a> ResolveDriver<'a> {
             return self.handle_local_source_task(task).await;
         }
 
-        if self.try_workspace_link(&task) {
+        // A member stands in only for what an importer declares: a package's own
+        // semver dependency on that name comes from the registry, as with pnpm's
+        // default `linkWorkspacePackagesDepth`. A local package is first-party
+        // code, so its dependency still links.
+        let parent_is_local = task
+            .parent
+            .as_ref()
+            .and_then(|parent| self.resolved.get(parent))
+            .is_some_and(|parent| parent.local_source.is_some());
+        if (task.is_root || task.range.starts_with("workspace:") || parent_is_local)
+            && self.try_workspace_link(&task)
+        {
             return Ok(());
         }
 
@@ -2950,7 +2970,29 @@ impl<'a> ResolveDriver<'a> {
             return false;
         }
         let ws_version = ws_version.clone();
-        self.link_to_existing_version(task, &ws_version);
+        match self.workspace_member_importers.get(&task.name) {
+            // A member is an importer and has no package entry, so a package's
+            // edge to it lands on the `link:` package pnpm records there.
+            Some(dir) if !task.is_root => {
+                let local = LocalSource::Link(dir.into());
+                let key = local.dep_path(&task.name);
+                let tail = key
+                    .strip_prefix(&format!("{}@", task.name))
+                    .unwrap_or(&key)
+                    .to_string();
+                self.resolved
+                    .entry(key.clone())
+                    .or_insert_with(|| LockedPackage {
+                        name: task.name.clone(),
+                        version: ws_version,
+                        dep_path: key,
+                        local_source: Some(local),
+                        ..Default::default()
+                    });
+                self.link_to_existing_version(task, &tail);
+            }
+            _ => self.link_to_existing_version(task, &ws_version),
+        }
         true
     }
 

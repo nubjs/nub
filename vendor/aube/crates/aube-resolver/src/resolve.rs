@@ -9,7 +9,7 @@ use crate::{
     Error, FxHashMap, PeerContextOptions, ReadPackageHook, Resolver, apply_peer_contexts, catalog,
     hoist_auto_installed_peers,
 };
-use aube_lockfile::{DirectDep, LockedPackage, LockfileGraph};
+use aube_lockfile::{DirectDep, LocalSource, LockedPackage, LockfileGraph};
 use aube_manifest::PackageJson;
 use aube_registry::VersionMetadata;
 use std::collections::{BTreeMap, HashMap};
@@ -103,6 +103,7 @@ impl Resolver {
     /// peer-context suffixes, then strips the hoisted importer entries
     /// again. Returns the post-peer-context graph ready for lockfile
     /// emission, with `importers` mirroring the manifests.
+    #[allow(clippy::too_many_arguments)]
     fn finalize_resolved_graph(
         &self,
         importers: BTreeMap<String, Vec<DirectDep>>,
@@ -111,6 +112,7 @@ impl Resolver {
         resolved_times: BTreeMap<String, String>,
         skipped_optional_dependencies: BTreeMap<String, BTreeMap<String, String>>,
         catalog_picks: BTreeMap<String, BTreeMap<String, String>>,
+        workspace_members: &BTreeMap<String, (String, String)>,
     ) -> Result<LockfileGraph, Error> {
         let resolved_catalogs =
             catalog::materialize_catalog_picks(catalog_picks, resolved_versions);
@@ -204,7 +206,10 @@ impl Resolver {
         };
         let _diag_peer =
             aube_util::diag::Span::new(aube_util::diag::Category::Resolver, "peer_context_apply");
+        let mut hoisted = hoisted;
+        let member_links = link_workspace_members(&mut hoisted, workspace_members);
         let mut contextualized = apply_peer_contexts(hoisted, &peer_options)?;
+        unlink_workspace_members(&mut contextualized, &member_links);
         crate::remove_auto_installed_peers(&mut contextualized, &auto_installed_peers);
         drop(_diag_peer);
         tracing::debug!(
@@ -239,6 +244,71 @@ impl Resolver {
         }
 
         Ok(contextualized)
+    }
+}
+
+/// A workspace member is an importer, not a package, so an importer's
+/// dependency on one (`name@version`) has no graph entry. The peer pass then
+/// found nothing to link for a registry package whose peer the member
+/// satisfies, and that package could not load it. pnpm links it
+/// (`react: link:packages/react`). For the pass, each such dependency points at
+/// the linked package the member is. Returns `link key -> name@version`.
+fn link_workspace_members(
+    graph: &mut LockfileGraph,
+    members: &BTreeMap<String, (String, String)>,
+) -> BTreeMap<String, String> {
+    let LockfileGraph {
+        importers,
+        packages,
+        ..
+    } = graph;
+    let mut links = BTreeMap::new();
+    for dep in importers.values_mut().flatten() {
+        let Some((dir, version)) = members.get(&dep.name) else {
+            continue;
+        };
+        if packages.contains_key(&dep.dep_path) || dep.dep_path != format!("{}@{version}", dep.name)
+        {
+            continue;
+        }
+        let local = LocalSource::Link(dir.into());
+        let key = local.dep_path(&dep.name);
+        packages
+            .entry(key.clone())
+            .or_insert_with(|| LockedPackage {
+                name: dep.name.clone(),
+                version: version.clone(),
+                dep_path: key.clone(),
+                local_source: Some(local),
+                ..Default::default()
+            });
+        links.insert(key.clone(), dep.dep_path.clone());
+        dep.dep_path = key;
+    }
+    links
+}
+
+/// Undoes [`link_workspace_members`] for the importers, which the workspace
+/// linker links itself, and drops each linked member nothing else reaches.
+fn unlink_workspace_members(graph: &mut LockfileGraph, links: &BTreeMap<String, String>) {
+    if links.is_empty() {
+        return;
+    }
+    for dep in graph.importers.values_mut().flatten() {
+        if let Some(original) = links.get(&dep.dep_path) {
+            dep.dep_path = original.clone();
+        }
+    }
+    let reached: std::collections::BTreeSet<String> = graph
+        .packages
+        .values()
+        .flat_map(|pkg| pkg.dependencies.iter())
+        .map(|(name, tail)| format!("{name}@{tail}"))
+        .collect();
+    for key in links.keys() {
+        if !reached.contains(key) {
+            graph.packages.remove(key);
+        }
     }
 }
 
