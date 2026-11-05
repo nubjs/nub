@@ -262,7 +262,7 @@ pub struct ExternalImport {
 
 #[cfg(test)]
 pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
-    bundle_inner(entry_abs, opts, None)
+    bundle_inner(entry_abs, opts, None, &BTreeMap::new())
 }
 
 /// Compile's artifact hook needs the original importer, whereas `nub build`
@@ -272,13 +272,14 @@ pub fn bundle_for_compile(
     opts: &BundleOptions,
     launch_root: &Path,
 ) -> Result<BundleResult> {
-    bundle_inner(entry_abs, opts, Some(launch_root))
+    bundle_inner(entry_abs, opts, Some(launch_root), &BTreeMap::new())
 }
 
 fn bundle_inner(
     entry_abs: &Path,
     opts: &BundleOptions,
     launch_root: Option<&Path>,
+    own_installs: &BTreeMap<PathBuf, String>,
 ) -> Result<BundleResult> {
     let cwd = entry_abs
         .parent()
@@ -451,6 +452,7 @@ fn bundle_inner(
             loader_plan.claims_extension("node"),
             opts.unbundled.clone(),
             opts.bundled.clone(),
+            own_installs.clone(),
         ))
     });
     let external_plugin = launch_root
@@ -551,6 +553,20 @@ fn bundle_inner(
     // while scanning, then refuse here so the author sees the source and the
     // precise v1 boundary rather than merely a plugin name.
     new_urls.reject_unsupported_workers()?;
+
+    // Excluding a module is a resolve-time answer, and the packages that have to leave
+    // the bundle are known only once every importer has been seen, by which time their
+    // modules are in it. So the bundle runs again without them. Each run moves at least
+    // one package, and nothing has been written or reported yet. A tree that needs this
+    // pays for it; every other one finds nothing to move.
+    if let Some(plugin) = &native_plugin {
+        let moved = plugin.out_of_reach(entry_abs);
+        if !moved.is_empty() {
+            let mut own_installs = own_installs.clone();
+            own_installs.extend(moved);
+            return bundle_inner(entry_abs, opts, launch_root, &own_installs);
+        }
+    }
 
     // `preload-common.cjs` is bundled whole, and two of its functions reach a
     // preload chain through a specifier built at run time. In an artifact they are

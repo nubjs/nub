@@ -114,32 +114,28 @@ fn payload_path(rel: &Path) -> String {
 
 /// Where an unbundled package's own root belongs in the payload.
 ///
-/// Its path relative to the install tree is normally the path Node reaches it
-/// by, and preserving it is what makes the artifact resolve. Under an ISOLATED
-/// install that stops being true for anything but a direct dependency: a
-/// transitive one resolves through a symlink into the manager's store, so the
-/// real directory is `node_modules/.bun/<owner>@<version>/node_modules/<name>`
-/// and only the (unshipped) symlink ever made it reachable. Preserved verbatim,
-/// the package ships and nothing can find it — measured compiling opencode,
-/// where fastify, pino, msgpackr-extract and @npmcli/run-script all landed in
-/// the store and the binary died on `Cannot find fastify`.
+/// A root is what BUNDLED code imports, and bundled code runs from the app root,
+/// so its lookup starts there whatever the importer's path was in the source tree.
+/// Any root below the top level is out of its reach: a transitive dependency of an
+/// isolated install, whose real directory is
+/// `node_modules/.bun/<owner>@<version>/node_modules/<name>`, and a nested install
+/// of a hoisted one, at `node_modules/<owner>/node_modules/<name>`. Preserved
+/// verbatim, the package ships and nothing can find it — measured compiling
+/// opencode, where fastify, pino, msgpackr-extract and @npmcli/run-script all
+/// landed in the store and the binary died on `Cannot find fastify`.
 ///
-/// So a root whose path passes through a store directory is flattened to the
-/// top-level `node_modules/<name>`, which is where a bare specifier from the
-/// bundle looks. Only the ROOT moves; the dependency walk below still places
-/// each dependency where its own dependent can reach it.
-fn store_flattened_root(rel: &Path) -> Option<String> {
+/// So such a root is flattened to the top-level `node_modules/<name>`, which is
+/// where a bare specifier from the bundle looks. Only the ROOT moves; the dependency
+/// walk below still places each dependency where its own dependent can reach it.
+/// [`NativeAddons::out_of_reach`] is what keeps two installs from wanting that path.
+fn flattened_root(rel: &Path) -> Option<String> {
     let parts: Vec<String> = rel
         .components()
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
         .collect();
-    // Every isolated layout nub reads uses a dot-prefixed sibling of the tree it
-    // hangs off: bun's `.bun`, pnpm's `.pnpm`, nub's own `.store`.
-    let store = parts
-        .iter()
-        .position(|part| matches!(part.as_str(), ".bun" | ".pnpm" | ".store"))?;
+    let first = parts.iter().position(|part| part == "node_modules")?;
     let last = parts.iter().rposition(|part| part == "node_modules")?;
-    if last <= store {
+    if last == first {
         return None;
     }
     let name = match parts.len() - last - 1 {
@@ -507,6 +503,12 @@ pub struct NativeAddons {
     /// Closure members shipped as files because their chunks could not reach an
     /// install they import — see [`Payload::stranded_by`].
     stranded: Mutex<BTreeSet<PathBuf>>,
+    /// Packages an earlier bundle found out of reach, by real directory, each with
+    /// the dependency that decided it — see [`Self::out_of_reach`].
+    own_installs: BTreeMap<PathBuf, String>,
+    /// Every external this bundle kept: the specifier, who named it, and the install
+    /// that importer resolves.
+    external_edges: Mutex<BTreeSet<(String, String, PathBuf)>>,
 }
 
 impl NativeAddons {
@@ -515,6 +517,7 @@ impl NativeAddons {
         user_mapped: bool,
         forced_unbundled: Vec<String>,
         forced_bundled: Vec<String>,
+        own_installs: BTreeMap<PathBuf, String>,
     ) -> Self {
         Self {
             target,
@@ -528,7 +531,9 @@ impl NativeAddons {
             transport_targets: Mutex::new(BTreeSet::new()),
             verbatim_members: Mutex::new(BTreeSet::new()),
             shipped_names: Mutex::new(BTreeSet::new()),
-            stranded: Mutex::new(BTreeSet::new()),
+            stranded: Mutex::new(own_installs.keys().cloned().collect()),
+            own_installs,
+            external_edges: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -578,9 +583,8 @@ impl NativeAddons {
         let Ok(root_rel) = root.strip_prefix(anchor) else {
             return Ok(());
         };
-        let seed_at = at.unwrap_or_else(|| {
-            store_flattened_root(root_rel).unwrap_or_else(|| payload_path(root_rel))
-        });
+        let seed_at = at
+            .unwrap_or_else(|| flattened_root(root_rel).unwrap_or_else(|| payload_path(root_rel)));
         let mut walk = self.walk_closure(root, anchor, &seed_at, caller, false)?;
         // A bundled package is placed as if its code had moved, so a closure that
         // ships as files after all needs walking again: each member now looks up its
@@ -1221,6 +1225,22 @@ impl NativeAddons {
         let Some(importer) = importer else {
             return false;
         };
+        // By package rather than by specifier: its files no longer go through the
+        // bundle, so a subpath of it has nothing to be inlined from. `--bundled` still
+        // wins, and leaves two installs to claim one directory.
+        let package = super::closure::package_of(specifier);
+        if !self.own_installs.is_empty() && !self.forced_bundled.iter().any(|n| n == package) {
+            let moved = resolve_package_root(Path::new(importer), package).and_then(|root| {
+                let real = std::fs::canonicalize(&root).ok()?;
+                let dependency = self.own_installs.get(&real)?;
+                Some((root, dependency))
+            });
+            if let Some((root, dependency)) = moved {
+                let reason = crate::compile::unbundlable::Reason::OwnInstall(dependency.clone());
+                self.record_external(package, importer, root, &reason);
+                return true;
+            }
+        }
         let Some(root) = resolve_package_root(Path::new(importer), specifier) else {
             return false;
         };
@@ -1248,10 +1268,72 @@ impl NativeAddons {
                 None => return false,
             }
         };
-        if let Ok(mut roots) = self.unbundled.lock() {
-            roots.insert(root, format!("{specifier} — {}", reason.describe()));
-        }
+        self.record_external(specifier, importer, root, &reason);
         true
+    }
+
+    fn record_external(
+        &self,
+        package: &str,
+        importer: &str,
+        root: PathBuf,
+        reason: &crate::compile::unbundlable::Reason,
+    ) {
+        if let Ok(mut edges) = self.external_edges.lock() {
+            edges.insert((package.to_string(), importer.to_string(), root.clone()));
+        }
+        if let Ok(mut roots) = self.unbundled.lock() {
+            roots.insert(root, format!("{package} — {}", reason.describe()));
+        }
+    }
+
+    /// The packages to take out of the bundle, because their code cannot load the
+    /// install it resolves from where bundled code runs.
+    ///
+    /// An external stays a bare specifier, and every module in the bundle looks it up
+    /// from the app root, where one directory answers for each name. That belongs to
+    /// the install the entry itself resolves, or to the first one named when the
+    /// entry resolves none. A module that wants any other install used to load that
+    /// one with no error, or fail on a missing module if nothing held the name.
+    ///
+    /// Shipping the module's package as files serves it exactly: the code runs from
+    /// its own directory, so its lookups, `require.resolve` and any self-reference
+    /// behave as they do uncompiled. A rewritten specifier would have kept the package
+    /// bundled, and answered only the imports the bundler can see.
+    ///
+    /// A package that is not an installed one, such as a workspace member shipping
+    /// source, cannot move. It stays, and both installs then claim the one directory,
+    /// which fails the build naming them.
+    pub fn out_of_reach(&self, entry: &Path) -> BTreeMap<PathBuf, String> {
+        let edges = self
+            .external_edges
+            .lock()
+            .map(|edges| edges.clone())
+            .unwrap_or_default();
+        let mut holders: BTreeMap<&str, PathBuf> = BTreeMap::new();
+        let mut moved = BTreeMap::new();
+        for (package, importer, root) in &edges {
+            let holder = holders
+                .entry(package)
+                .or_insert_with(|| resolve_package_root(entry, package).unwrap_or(root.clone()));
+            if same_instance(holder, root) {
+                continue;
+            }
+            let Some(owner) = owning_package(Path::new(importer)) else {
+                continue;
+            };
+            let Ok(real) = std::fs::canonicalize(&owner) else {
+                continue;
+            };
+            if real
+                .components()
+                .any(|part| part.as_os_str() == "node_modules")
+                && !self.own_installs.contains_key(&real)
+            {
+                moved.entry(real).or_insert_with(|| package.clone());
+            }
+        }
+        moved
     }
 
     /// Whether a package reached INSIDE an eject closure has to ship verbatim too.
@@ -1395,6 +1477,21 @@ impl Member {
 struct Selected {
     roots: BTreeMap<PathBuf, String>,
     reached: BTreeSet<String>,
+}
+
+/// The package a module belongs to: the nearest directory whose manifest has a name,
+/// since a `dist/esm/package.json` holding only `type` is not one.
+fn owning_package(module: &Path) -> Option<PathBuf> {
+    module
+        .ancestors()
+        .skip(1)
+        .find(|dir| {
+            std::fs::read_to_string(dir.join("package.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                .is_some_and(|manifest| manifest["name"].is_string())
+        })
+        .map(Path::to_path_buf)
 }
 
 /// One closure's members and where each lands, before any of it is written.
@@ -1592,13 +1689,7 @@ impl Payload {
             if reached {
                 continue;
             }
-            let owner = import.module.ancestors().skip(1).find(|dir| {
-                std::fs::read_to_string(dir.join("package.json"))
-                    .ok()
-                    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-                    .is_some_and(|manifest| manifest["name"].is_string())
-            });
-            if let Some(owner) = owner {
+            if let Some(owner) = owning_package(&import.module) {
                 let why = format!(
                     "{} imports {} from {}, and {} cannot reach that",
                     import.module.display(),
@@ -1606,7 +1697,7 @@ impl Payload {
                     import.instance.display(),
                     import.chunk
                 );
-                stranded.insert(owner.to_path_buf(), why);
+                stranded.insert(owner, why);
             }
         }
         stranded
@@ -2577,14 +2668,14 @@ fn fat_arches(bytes: &[u8], endian: Endian, record_size: usize) -> Option<Option
 
 #[cfg(test)]
 mod tests {
-    use super::store_flattened_root;
+    use super::flattened_root;
     use std::path::Path;
 
-    /// A transitive dependency of an isolated install resolves through a symlink
-    /// into the store. The symlink is not shipped, so preserving the real path
+    /// A root below the top level is out of reach of the bundle that imports it, whether
+    /// a store symlink or a nested hoisted install put it there. Preserving its path
     /// ships the package where nothing can find it.
     #[test]
-    fn a_store_nested_root_is_flattened_to_where_a_bare_specifier_looks() {
+    fn a_nested_root_is_flattened_to_where_a_bare_specifier_looks() {
         for (store, expected) in [
             (
                 "node_modules/.bun/opencode-gitlab-auth@2.1.0/node_modules/fastify",
@@ -2598,9 +2689,13 @@ mod tests {
                 "node_modules/.store/owner@1.0.0/node_modules/@scope/name",
                 "node_modules/@scope/name",
             ),
+            (
+                "node_modules/holder/node_modules/better-sqlite3",
+                "node_modules/better-sqlite3",
+            ),
         ] {
             assert_eq!(
-                store_flattened_root(Path::new(store)).as_deref(),
+                flattened_root(Path::new(store)).as_deref(),
                 Some(expected),
                 "{store} must land where the bundle's own resolution looks"
             );
@@ -2617,7 +2712,7 @@ mod tests {
             "packages/app/node_modules/web-tree-sitter",
         ] {
             assert_eq!(
-                store_flattened_root(Path::new(kept)),
+                flattened_root(Path::new(kept)),
                 None,
                 "{kept} is already reachable and must not move"
             );

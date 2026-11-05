@@ -1408,6 +1408,8 @@ fn a_compiled_closure_loads_the_installs_its_packages_resolve() {
     let calls_mid = "module.exports = () => require(\"mid\")();\n";
     let calls_m = "module.exports = () => require(\"m\")();\n";
     let calls_pretty = "module.exports = () => require(\"pino-pretty\")();\n";
+    let imports_a_and_pretty =
+        "import a from \"a\";\nimport top from \"pino-pretty\";\nconsole.log(a(), top());\n";
     let main_two_imports =
         "import r from \"r\";\nimport top from \"pino-pretty\";\nconsole.log(r(), top());\n";
     let wrapper_and_holder = "import logger from \"logger\";\nimport holder from \"holder\";\nconsole.log(logger(), holder());\n";
@@ -1879,6 +1881,115 @@ fn a_compiled_closure_loads_the_installs_its_packages_resolve() {
              console.log(r(), top(), pino({ transport: { target } }, import.meta.url), holder());\n",
             &["--unbundled", "r", "--unbundled", "extra"],
             Ok("pino-pretty 2.0.0 pino-pretty 1.0.0 extra 1.0.0 fake-transport 2.0.0"),
+        ),
+        // A bundled package whose own install of an unbundled one is not what a bare
+        // name finds from the app root, where its code would run. The nested copy looks
+        // itself up by name, which only works from a directory that keeps its name.
+        (
+            "a bundled package's own install beside a top-level one, hoisted",
+            [
+                pkg("node_modules/a", "1.0.0", &["pino-pretty"], calls_pretty),
+                pkg(
+                    "node_modules/a/node_modules/pino-pretty",
+                    "2.0.0",
+                    &[],
+                    "module.exports = () => \"pino-pretty \" + require(\"pino-pretty/package.json\").version;\n",
+                ),
+                pkg("node_modules/pino-pretty", "1.0.0", &[], ""),
+            ]
+            .concat(),
+            vec![],
+            imports_a_and_pretty,
+            &[],
+            Ok("pino-pretty 2.0.0 pino-pretty 1.0.0"),
+        ),
+        (
+            "a bundled package's own install beside a top-level one, isolated",
+            [
+                pkg(&store("1.0.0", "a"), "1.0.0", &["pino-pretty"], calls_pretty),
+                pkg(&store("1.0.0", "pino-pretty"), "1.0.0", &[], ""),
+                pkg(&store("2.0.0", "pino-pretty"), "2.0.0", &[], ""),
+            ]
+            .concat(),
+            [
+                ("node_modules/a", ".store/a@1.0.0/node_modules/a"),
+                (
+                    "node_modules/pino-pretty",
+                    ".store/pino-pretty@1.0.0/node_modules/pino-pretty",
+                ),
+                (
+                    "node_modules/.store/a@1.0.0/node_modules/pino-pretty",
+                    "../../pino-pretty@2.0.0/node_modules/pino-pretty",
+                ),
+            ]
+            .map(|(at, to)| (at.to_string(), to.to_string()))
+            .to_vec(),
+            imports_a_and_pretty,
+            &[],
+            Ok("pino-pretty 2.0.0 pino-pretty 1.0.0"),
+        ),
+        (
+            "a bundled package's own install with nothing at the top level",
+            [
+                pkg("node_modules/a", "1.0.0", &["pino-pretty"], calls_pretty),
+                pkg("node_modules/a/node_modules/pino-pretty", "2.0.0", &[], ""),
+            ]
+            .concat(),
+            vec![],
+            "import a from \"a\";\nconsole.log(a());\n",
+            &[],
+            Ok("pino-pretty 2.0.0"),
+        ),
+        (
+            "two bundled packages with their own versions and nothing at the top level",
+            [
+                pkg("node_modules/a", "1.0.0", &["pino-pretty"], calls_pretty),
+                pkg("node_modules/a/node_modules/pino-pretty", "2.0.0", &[], ""),
+                pkg("node_modules/b", "1.0.0", &["pino-pretty"], calls_pretty),
+                pkg("node_modules/b/node_modules/pino-pretty", "3.0.0", &[], ""),
+            ]
+            .concat(),
+            vec![],
+            "import a from \"a\";\nimport b from \"b\";\nconsole.log(a(), b());\n",
+            &[],
+            Ok("pino-pretty 2.0.0 pino-pretty 3.0.0"),
+        ),
+        // Three bundles: the nested `a` leaves first, and that makes `b` the bundled
+        // package with an install the root cannot serve.
+        (
+            "a package that moves makes its own dependent move",
+            [
+                pkg("node_modules/b", "1.0.0", &["a"], "module.exports = () => require(\"a\")();\n"),
+                pkg("node_modules/b/node_modules/a", "1.0.0", &["pino-pretty"], calls_pretty),
+                pkg(
+                    "node_modules/b/node_modules/a/node_modules/pino-pretty",
+                    "2.0.0",
+                    &[],
+                    "",
+                ),
+                pkg("node_modules/a", "9.0.0", &[], ""),
+                pkg("node_modules/pino-pretty", "1.0.0", &[], ""),
+            ]
+            .concat(),
+            vec![],
+            "import b from \"b\";\nimport a from \"a\";\nimport top from \"pino-pretty\";\n\
+             console.log(b(), a(), top());\n",
+            &[],
+            Ok("pino-pretty 2.0.0 a 9.0.0 pino-pretty 1.0.0"),
+        ),
+        // The author said to keep it bundled, so nothing can serve both.
+        (
+            "a package kept bundled by --bundled",
+            [
+                pkg("node_modules/a", "1.0.0", &["pino-pretty"], calls_pretty),
+                pkg("node_modules/a/node_modules/pino-pretty", "2.0.0", &[], ""),
+                pkg("node_modules/pino-pretty", "1.0.0", &[], ""),
+            ]
+            .concat(),
+            vec![],
+            imports_a_and_pretty,
+            &["--bundled", "a"],
+            Err("two different packages would occupy node_modules/pino-pretty"),
         ),
         // A bundled package's stub under `v` sits on `v`'s own lookup path, ahead of the
         // top-level install `v` resolves.
