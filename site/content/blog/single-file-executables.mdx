@@ -324,7 +324,7 @@ $ nub compile index.ts --platform linux-x64
 \e[2m  container is the usual way — or drop --platform to build for this machine.\e[22m
 ```
 
-Builds are reproducible: compiling an unchanged tree twice produces a byte-identical executable.
+Builds are reproducible: with an exact Node version, compiling an unchanged tree twice produces a byte-identical executable. A range such as `--target 24` or `lts` embeds the newest matching release, so its output changes when Node ships one.
 
 ## The `--smol` flag
 

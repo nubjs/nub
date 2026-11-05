@@ -981,7 +981,7 @@ $ rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/nub/compile-app"
 
 ## The same input compiles to the same bytes
 
-Compiling twice from unchanged sources gives byte-identical executables, so a checksum is worth publishing and a build cache can key on one:
+Compiling twice from unchanged sources for an exact Node version gives byte-identical executables, so a checksum is worth publishing and a build cache can key on one:
 
 ```console
 $ nub compile app.ts --out app && shasum -a256 app
@@ -990,7 +990,7 @@ $ nub compile app.ts --out app && shasum -a256 app
 7be0305d99774e65aed5016f…  app
 ```
 
-The build directory is not part of the result — the same sources compiled from another path, with an empty cache, produce the same bytes. This holds for `--smol` and for a cross-compiled target as well, and a one-character change to the source changes the hash.
+The build directory is not part of the result — the same sources compiled from another path, with an empty cache, produce the same bytes. This holds for `--smol` and for a cross-compiled target as well, and a one-character change to the source changes the hash. A range or alias, such as `--target 24` or `lts`, embeds the newest matching release, so its bytes change when Node publishes one; pin an exact version where the checksum matters.
 
 ## Distributing on macOS
 
