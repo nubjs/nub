@@ -1,0 +1,76 @@
+{
+  "name": "@esbuild/sunos-x64",
+  "versions": {
+    "0.21.5": {
+      "name": "@esbuild/sunos-x64",
+      "version": "0.21.5",
+      "license": "MIT",
+      "_id": "@esbuild/sunos-x64@0.21.5",
+      "maintainers": [
+        {
+          "name": "evanw",
+          "email": "evan.exe@gmail.com"
+        },
+        {
+          "name": "esbuild",
+          "email": "evan.exe+esbuild@gmail.com"
+        }
+      ],
+      "homepage": "https://github.com/evanw/esbuild#readme",
+      "bugs": {
+        "url": "https://github.com/evanw/esbuild/issues"
+      },
+      "os": [
+        "sunos"
+      ],
+      "cpu": [
+        "x64"
+      ],
+      "dist": {
+        "shasum": "08741512c10d529566baba837b4fe052c8f3487b",
+        "tarball": "http://localhost:4874/@esbuild/sunos-x64/-/@esbuild/sunos-x64-0.21.5.tgz",
+        "fileCount": 3,
+        "integrity": "sha512-6+gjmFpfy0BHU5Tpptkuh8+uw3mnrvgs+dSPQXQOv3ekbordwnzTVEb4qnIvQcYXq6gzkyTnoZ9dZG+D4garKg==",
+        "signatures": [
+          {
+            "sig": "MEUCIQCHeAH1I1oUiIS8gQaUIaqBCI+xYr6/qO+DtsPmJxYkwAIgW8uoJNKix//X5EMuO+g/8nyD5LGXPJURBDtDeNeyEWY=",
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+          }
+        ],
+        "unpackedSize": 9691653
+      },
+      "engines": {
+        "node": ">=12"
+      },
+      "gitHead": "fc37c2fa9de2ad77476a6d4a8f1516196b90187e",
+      "_npmUser": {
+        "name": "evanw",
+        "email": "evan.exe@gmail.com"
+      },
+      "repository": {
+        "url": "git+https://github.com/evanw/esbuild.git",
+        "type": "git"
+      },
+      "_npmVersion": "10.5.1",
+      "description": "The illumos 64-bit binary for esbuild, a JavaScript bundler.",
+      "directories": {},
+      "_nodeVersion": "22.0.0",
+      "_hasShrinkwrap": false,
+      "preferUnplugged": true,
+      "_npmOperationalInternal": {
+        "tmp": "tmp/sunos-x64_0.21.5_1717967803949_0.24702344088270367",
+        "host": "s3://npm-registry-packages"
+      }
+    }
+  },
+  "time": {
+    "created": "2022-12-05T23:58:00.183Z",
+    "modified": "2026-08-08T19:59:20.503Z",
+    "0.21.5": "2024-06-09T21:16:44.204Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "0.21.5"
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "name": "@esbuild/linux-s390x",
+  "versions": {
+    "0.21.5": {
+      "name": "@esbuild/linux-s390x",
+      "version": "0.21.5",
+      "license": "MIT",
+      "_id": "@esbuild/linux-s390x@0.21.5",
+      "maintainers": [
+        {
+          "name": "evanw",
+          "email": "evan.exe@gmail.com"
+        },
+        {
+          "name": "esbuild",
+          "email": "evan.exe+esbuild@gmail.com"
+        }
+      ],
+      "homepage": "https://github.com/evanw/esbuild#readme",
+      "bugs": {
+        "url": "https://github.com/evanw/esbuild/issues"
+      },
+      "os": [
+        "linux"
+      ],
+      "cpu": [
+        "s390x"
+      ],
+      "dist": {
+        "shasum": "b7ccf686751d6a3e44b8627ababc8be3ef62d8de",
+        "tarball": "http://localhost:4874/@esbuild/linux-s390x/-/@esbuild/linux-s390x-0.21.5.tgz",
+        "fileCount": 3,
+        "integrity": "sha512-zus5sxzqBJD3eXxwvjN1yQkRepANgxE9lgOW2qLnmr8ikMTphkjgXu1HR01K4FJg8h1kEEDAqDcZQtbrRnB41A==",
+        "signatures": [
+          {
+            "sig": "MEUCIQDRViB5tVxpaaQsB24/ZmXS3v48oWWiQGVspYAz+VP/sAIgTJQqRSakH12CCCSxJ9OaS3JCBZe3o/9/3DvpwPFyER0=",
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+          }
+        ],
+        "unpackedSize": 10158631
+      },
+      "engines": {
+        "node": ">=12"
+      },
+      "gitHead": "fc37c2fa9de2ad77476a6d4a8f1516196b90187e",
+      "_npmUser": {
+        "name": "evanw",
+        "email": "evan.exe@gmail.com"
+      },
+      "repository": {
+        "url": "git+https://github.com/evanw/esbuild.git",
+        "type": "git"
+      },
+      "_npmVersion": "10.5.1",
+      "description": "The Linux IBM Z 64-bit Big Endian binary for esbuild, a JavaScript bundler.",
+      "directories": {},
+      "_nodeVersion": "22.0.0",
+      "_hasShrinkwrap": false,
+      "preferUnplugged": true,
+      "_npmOperationalInternal": {
+        "tmp": "tmp/linux-s390x_0.21.5_1717967851632_0.1414382720026377",
+        "host": "s3://npm-registry-packages"
+      }
+    }
+  },
+  "time": {
+    "created": "2022-12-05T23:54:05.569Z",
+    "modified": "2026-08-08T19:58:42.786Z",
+    "0.21.5": "2024-06-09T21:17:31.872Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "0.21.5"
+  }
+}

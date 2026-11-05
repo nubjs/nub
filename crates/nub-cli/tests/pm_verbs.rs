@@ -4,10 +4,13 @@
 //! wiring under test lives in `src/pm_engine/install_family.rs`; `install` /
 //! `ci` have their own file (`install_engine.rs`).
 //!
-//! Network tests are `#[ignore]` per the provisioning-test convention — run
-//! via `cargo test -p nub-cli --test pm_verbs -- --ignored` — and self-skip
-//! when the registry is unreachable. Everything else is offline by
-//! construction (gate pre-flights, lockfile conversion, symlink plumbing).
+//! Registry tests whose packages are seeded in the offline test registry run
+//! against it and self-skip when `NUB_TEST_REGISTRY` is unset (`source
+//! tests/registry/start.bash`). The other network tests are `#[ignore]` per the
+//! provisioning-test convention — run via
+//! `cargo test -p nub-cli --test pm_verbs -- --ignored` — and self-skip when
+//! the registry is unreachable. Everything else is offline by construction
+//! (gate pre-flights, lockfile conversion, symlink plumbing).
 //!
 //! Brand guard: every test asserts no `aube` token in the combined output.
 //! Exception: `link`/`unlink -g` print the engine's global-links registry
@@ -67,14 +70,46 @@ impl Output {
 /// the given roots — pass the same pair across spawns that must share engine
 /// state (the CAS store rides `XDG_DATA_HOME`; the packument cache and the
 /// global-links registry ride `XDG_CACHE_HOME`).
+/// The Verdaccio offline test registry URL (set by `tests/registry/start.bash`
+/// via `NUB_TEST_REGISTRY`). When set, tests run against the pre-seeded
+/// offline registry instead of registry.npmjs.org.
+fn test_registry() -> Option<String> {
+    std::env::var("NUB_TEST_REGISTRY")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+/// Point a `Command` at the offline Verdaccio registry when
+/// `NUB_TEST_REGISTRY` is set: writes a project `.npmrc` + bypasses any
+/// inherited HTTP_PROXY for localhost. No-op when the env var is unset.
+fn apply_test_registry(cmd: &mut Command, dir: &Path) {
+    if let Some(registry) = test_registry() {
+        let npmrc = dir.join(".npmrc");
+        let existing = std::fs::read_to_string(&npmrc).unwrap_or_default();
+        if !existing
+            .lines()
+            .any(|l| l.trim_start().starts_with("registry="))
+        {
+            let prefix = if existing.is_empty() || existing.ends_with('\n') {
+                ""
+            } else {
+                "\n"
+            };
+            std::fs::write(&npmrc, format!("{existing}{prefix}registry={registry}\n")).unwrap();
+        }
+        cmd.env("NO_PROXY", "localhost,127.0.0.1")
+            .env("no_proxy", "localhost,127.0.0.1");
+    }
+}
+
 fn run_nub_with(dir: &Path, args: &[&str], xdg_data: &Path, xdg_cache: &Path) -> Output {
-    let out = Command::new(nub_binary())
-        .args(args)
+    let mut cmd = Command::new(nub_binary());
+    cmd.args(args)
         .current_dir(dir)
         .env("XDG_DATA_HOME", xdg_data)
-        .env("XDG_CACHE_HOME", xdg_cache)
-        .output()
-        .expect("failed to spawn nub");
+        .env("XDG_CACHE_HOME", xdg_cache);
+    apply_test_registry(&mut cmd, dir);
+    let out = cmd.output().expect("failed to spawn nub");
     Output {
         stdout: String::from_utf8_lossy(&out.stdout).to_string(),
         stderr: String::from_utf8_lossy(&out.stderr).to_string(),
@@ -192,10 +227,9 @@ const PEER_DEP_PACKAGE_LOCK: &str = r#"{
 /// persists the dep + writes nub's neutral `nub.lock` + links node_modules;
 /// remove strips the dep from the manifest again. Both outputs brand-clean.
 #[test]
-#[ignore = "network: resolves + fetches is-positive@3.1.0 from the npm registry"]
 fn add_then_remove_round_trips_manifest_lockfile_and_node_modules() {
-    if !registry_reachable() {
-        eprintln!("skipping: registry.npmjs.org unreachable");
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY not set — run: source tests/registry/start.bash");
         return;
     }
     let dir = pm_tmpdir("addrm");
@@ -242,13 +276,13 @@ fn add_then_remove_round_trips_manifest_lockfile_and_node_modules() {
 
 /// The patch workflow round-trips: `patch` extracts into a nub-named edit
 /// dir and prints the rebranded patch-commit hint; `patch-commit` writes
-/// the `.patch` file, records `pnpm.patchedDependencies`, and re-links the
-/// edited content; `patch-remove` reverts all of it. All outputs brand-clean.
+/// the `.patch` file, records the neutral top-level `patchedDependencies`
+/// field (nub identity emits no pnpm namespace), and re-links the edited
+/// content; `patch-remove` reverts all of it. All outputs brand-clean.
 #[test]
-#[ignore = "network: resolves + fetches is-positive@3.1.0 from the npm registry"]
 fn patch_workflow_round_trips_through_commit_and_remove() {
-    if !registry_reachable() {
-        eprintln!("skipping: registry.npmjs.org unreachable");
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY not set — run: source tests/registry/start.bash");
         return;
     }
     let dir = pm_tmpdir("patchwf");
@@ -292,8 +326,12 @@ fn patch_workflow_round_trips_through_commit_and_remove() {
     );
     let manifest = std::fs::read_to_string(dir.join("package.json")).unwrap();
     assert!(
-        manifest.contains("patchedDependencies") && manifest.contains("\"pnpm\""),
-        "patch-commit must record the entry under the pnpm namespace: {manifest}"
+        manifest.contains("patchedDependencies"),
+        "patch-commit must record the neutral top-level patchedDependencies field: {manifest}"
+    );
+    assert!(
+        !manifest.contains("\"pnpm\""),
+        "nub identity must not emit a pnpm namespace for patches: {manifest}"
     );
     let linked = dir.join("node_modules/is-positive/index.js");
     assert!(
@@ -489,10 +527,9 @@ fn update_rejects_non_semver_specs_without_touching_the_manifest() {
 /// lockfile + manifest but never links `node_modules` — the grammar the
 /// pre-fix `add` rejected outright (`unexpected argument '--lockfile-only'`).
 #[test]
-#[ignore = "network: resolves is-positive from the npm registry"]
 fn add_lockfile_only_writes_lockfile_without_linking_node_modules() {
-    if !registry_reachable() {
-        eprintln!("skipping: registry.npmjs.org unreachable");
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY not set — run: source tests/registry/start.bash");
         return;
     }
     let dir = pm_tmpdir("addlockonly");
@@ -717,10 +754,9 @@ fn dedupe_ignores_workspace_links_and_check_passes() {
 /// `--check` failed forever on a byte-identical lockfile. Needs the
 /// registry: dedupe's whole job is a fresh resolve.
 #[test]
-#[ignore = "network: resolves + fetches is-number@7.0.0 from the npm registry"]
 fn dedupe_ignores_npm_alias_targets_and_check_passes() {
-    if !registry_reachable() {
-        eprintln!("skipping: registry.npmjs.org unreachable");
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY not set — run: source tests/registry/start.bash");
         return;
     }
     let dir = pm_tmpdir("dedupe-alias");
