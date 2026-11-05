@@ -274,7 +274,13 @@ function main() {
       skipped++;
       continue;
     }
-    gh([t.kind === "pr" ? "pr" : "issue", "comment", String(t.num), "--repo", REPO, "--body", message]);
+    // The one write here, so the one call that goes through Keyward for a write-capable token
+    // (a Touch ID the first time in ten minutes). Every read uses plain, read-only gh.
+    execFileSync(
+      "keyward",
+      ["--reason", `nub release-notify: comment on ${t.kind} #${t.num}`, "--", "gh", t.kind === "pr" ? "pr" : "issue", "comment", String(t.num), "--repo", REPO, "--body", message],
+      { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
+    );
     console.log(`  posted ${t.kind} #${t.num}`);
     posted++;
   }

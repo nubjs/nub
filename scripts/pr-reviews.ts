@@ -40,7 +40,7 @@ function sh(cmd: string): string {
 
 const token = sh("gh auth token");
 if (!token) {
-  console.error("no `gh auth token`; run `gh auth login` first");
+  console.error('no `gh auth token`; plain gh holds no credential, so run this under `keyward run --reason "<the task>" GH_TOKEN -- …`');
   process.exit(1);
 }
 

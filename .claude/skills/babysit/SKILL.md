@@ -7,6 +7,8 @@ description: Bring one nubjs/nub pull request to merge-readiness — pull the in
 
 Loop: pull reviews → verify each finding → fix → re-verify locally → push → repeat. CI comes ONCE, at the end: PR CI is opt-in, so a push starts nothing and the run is requested with `gh pr edit <n> --add-label ci` when the head is final.
 
+On the maintainer's Mac, every `gh` below that writes (`pr edit`, `pr close`, `pr reopen`, `pr merge`, the `resolveReviewThread` mutation) runs as `keyward --reason "<the task>" -- gh …`. Reads stay plain `gh`.
+
 **Babysit ends at merge-ready.** Report that state and stop; the merge is the maintainer's. Only an instruction to babysit it *to merge* authorizes one — and that phrasing delegates the readiness judgment too, so decide against the criteria below instead of asking.
 
 ## Reviews
