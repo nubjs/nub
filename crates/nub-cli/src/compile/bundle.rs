@@ -429,7 +429,9 @@ fn bundle_inner(
     ));
     let mut prelude = CompilePreamble::new(entry_abs, opts.target_node, opts.eager_startup)?;
     let runtime_names = Arc::new(RuntimeNames::new(&prelude.runtime_dir));
-    prelude.region_names = Some((cwd.clone(), Arc::clone(&runtime_names)));
+    if !opts.minify {
+        prelude.region_names = Some((cwd.clone(), Arc::clone(&runtime_names)));
+    }
     let prelude = Arc::new(prelude);
     if options.sourcemap.is_some() {
         options.sourcemap_path_transform = Some(runtime_source_names(runtime_names));
@@ -2149,7 +2151,8 @@ struct CompilePreamble {
     /// extraction directory and fails before application code runs.
     support_files: Vec<(String, Vec<u8>)>,
     /// The bundler's `cwd` and the runtime's output names, for
-    /// [`rename_runtime_regions`]. Unset where nothing renders a chunk.
+    /// [`rename_runtime_regions`]. Unset when minifying, which strips those comments,
+    /// and where nothing renders a chunk.
     region_names: Option<(PathBuf, Arc<RuntimeNames>)>,
     /// Runtime bootstrap extracted at the payload root rather than beside the
     /// content-addressed bundle layout. The launcher loads it before the entry.
@@ -2678,7 +2681,7 @@ impl Plugin for CompilePreamble {
 
     /// See [`hoist_module_wrappers`] and [`rename_runtime_regions`]. No source map
     /// is returned: the first rewrite is confined to the wrapper's own declaration
-    /// head and tail and the second to comment lines, so every line of module code
+    /// head and tail and the second to comment text, so every line of module code
     /// keeps its position and the incoming map stays accurate.
     fn render_chunk(
         &self,
@@ -4808,29 +4811,42 @@ fn runtime_source_names(names: Arc<RuntimeNames>) -> SourceMapPathTransform {
     }))
 }
 
-/// Rolldown heads each module in an unminified chunk with `//#region <id>`, the id
-/// relative to the bundler's `cwd`, on a line of its own. Only the comment line
-/// changes, so no mapped position moves.
+/// Rolldown heads each module in an unminified chunk with a `//#region <id>` line
+/// comment, the id relative to the bundler's `cwd`. Comments come from a parse
+/// because a template literal can hold the same line as data. Only comment text
+/// changes, so no mapped line moves. An unparseable chunk is left for
+/// `reject_invalid_chunks`, as in [`hoist_module_wrappers`].
 fn rename_runtime_regions(code: &str, cwd: &Path, names: &RuntimeNames) -> Option<String> {
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, code, SourceType::mjs()).parse();
+    if parsed.panicked {
+        return None;
+    }
     let mut out = String::with_capacity(code.len());
-    let mut renamed = false;
-    for line in code.split_inclusive('\n') {
-        let body = line.trim_end_matches(['\n', '\r']);
-        let name = body
-            .strip_prefix("//#region ")
+    let mut copied = 0;
+    for comment in parsed.program.comments.iter().filter(|c| c.is_line()) {
+        let span = comment.content_span();
+        let (start, end) = (span.start as usize, span.end as usize);
+        let name = code[start..end]
+            .strip_prefix("#region ")
             .filter(|id| !id.starts_with("\\0"))
             .and_then(|id| names.name(cwd, id));
-        match name {
-            Some(name) => {
-                out.push_str("//#region ");
-                out.push_str(&name);
-                out.push_str(&line[body.len()..]);
-                renamed = true;
-            }
-            None => out.push_str(line),
+        if let Some(name) = name {
+            out.push_str(&code[copied..start]);
+            out.push_str("#region ");
+            out.push_str(&name);
+            copied = end;
         }
     }
-    renamed.then_some(out)
+    if copied == 0 {
+        return None;
+    }
+    out.push_str(&code[copied..]);
+    Some(out)
 }
 
 fn sourcemap_type(mode: SourcemapMode) -> Option<SourceMapType> {
@@ -6277,6 +6293,25 @@ fn reject_invalid_chunks(chunks: &[BundledFile]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A line that only looks like a region comment is the application's data.
+    #[test]
+    fn a_region_rename_leaves_a_template_holding_the_same_line_alone() {
+        let names = RuntimeNames {
+            roots: vec![(PathBuf::from("/build/runtime"), "runtime".to_string())],
+        };
+        let template =
+            "export const raw = String.raw`\n//#region ../runtime/compile-record.mjs\n`;\n";
+        let code = format!(
+            "//#region ../runtime/compile-record.mjs\nvar a = 1;\n//#endregion\n{template}"
+        );
+        let renamed = rename_runtime_regions(&code, Path::new("/build/app"), &names)
+            .expect("the real region comment should be renamed");
+        assert_eq!(
+            renamed,
+            format!("//#region runtime/compile-record.mjs\nvar a = 1;\n//#endregion\n{template}")
+        );
+    }
 
     fn opts() -> BundleOptions {
         BundleOptions {
