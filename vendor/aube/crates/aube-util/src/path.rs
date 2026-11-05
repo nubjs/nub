@@ -35,13 +35,12 @@ pub fn normalize_lexical(path: &Path) -> PathBuf {
 /// project itself. Two spellings of one path give the same string.
 pub fn normalize_dep_path(path: &str) -> String {
     let path = path.replace('\\', "/");
-    let path = normalize_lexical(Path::new(&path));
-    let path = path.to_string_lossy();
-    if path.is_empty() {
-        ".".to_string()
-    } else {
-        path.into_owned()
-    }
+    // `PathBuf` joins with `\` on Windows, so the separators are fixed after
+    // normalizing as well as before.
+    let path = normalize_lexical(Path::new(&path))
+        .to_string_lossy()
+        .replace('\\', "/");
+    if path.is_empty() { ".".to_string() } else { path }
 }
 
 /// Strip a Windows `\\?\` verbatim drive prefix from `path` so callers
