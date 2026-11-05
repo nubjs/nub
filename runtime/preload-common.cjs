@@ -882,6 +882,7 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
           if (recovered) return recovered;
         }
       }
+      core.explainUnmappedExtension(err, url);
       throw err;
     }
 

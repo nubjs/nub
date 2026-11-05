@@ -4011,9 +4011,11 @@ fn prepare_preload_chain(
     node: &nub_core::node::discovery::ResolvedNode,
     fold: FoldInherited,
 ) -> Result<Option<nub_core::node::spawn::PreloadInjection>> {
-    let Some(root) = runtime.preload_root.clone() else {
-        return Ok(None);
-    };
+    let mappers: Vec<String> = runtime
+        .content_mappers
+        .iter()
+        .flat_map(|found| found.registers.iter().map(|r| r.path.clone()))
+        .collect();
     // Preload entries reaching nub through an INHERITED NODE_OPTIONS are folded into
     // the same chainers as the config's, so the child ends up with at most one
     // `--require` and one `--import` no matter how many arrive. Without this an
@@ -4026,9 +4028,25 @@ fn prepare_preload_chain(
     };
     let (_, inherited_requires, inherited_imports) =
         nub_core::node::spawn::split_inherited_preloads(&inherited);
-    if runtime.preload.is_empty() && inherited_requires.is_empty() && inherited_imports.is_empty() {
+    let own_entries = !runtime.preload.is_empty()
+        || !inherited_requires.is_empty()
+        || !inherited_imports.is_empty();
+    let has_mappers = !mappers.is_empty();
+    if !own_entries && !has_mappers {
         return Ok(None);
     }
+    let root = if own_entries {
+        runtime.preload_root.clone()
+    } else {
+        runtime
+            .content_mappers
+            .as_ref()
+            .and_then(|found| found.chain_root.clone())
+            .or_else(|| runtime.preload_root.clone())
+    };
+    let Some(root) = root else {
+        return Ok(None);
+    };
 
     // Which channel the CONFIG entries ride. Unchanged from the per-entry router it
     // replaced: a `.cjs`-only list keeps `--require`'s synchronous entry semantics,
@@ -4040,8 +4058,12 @@ fn prepare_preload_chain(
     // skip. Same rule the compat tier already needs, for the same reason.
     let async_tier_coming = !inherited_imports.is_empty()
         && nub_core::node::spawn::force_async_tier_env(&node.version, ["--import"]).is_some();
+    // Mapper registers are `--import` entries, and an explicit entry must register
+    // AFTER them to take precedence, so their presence puts the config on the ESM
+    // chain too.
     let config_is_esm = !node.version.supports_augmentation()
         || async_tier_coming
+        || has_mappers
         || runtime.preload.iter().any(|spec| {
             !std::path::Path::new(spec)
                 .extension()
@@ -4053,6 +4075,20 @@ fn prepare_preload_chain(
     // (every `--require` before any `--import`) still separates the two channels.
     let mut cjs: Vec<String> = Vec::new();
     let mut esm: Vec<String> = Vec::new();
+    // tsconfig mapper registers first, so the user's own `preload` entries register
+    // later and answer first (`registerHooks` is last-registered-first). A register
+    // the user also lists in `preload` loads once, where they listed it.
+    if has_mappers {
+        let resolver = bare_preload_resolver(true);
+        let explicit: Vec<_> = runtime
+            .preload
+            .iter()
+            .filter_map(|spec| std::fs::canonicalize(resolve_bare_preload(&resolver, spec)).ok())
+            .collect();
+        esm.extend(mappers.into_iter().filter(|register| {
+            std::fs::canonicalize(register).map_or(true, |real| !explicit.contains(&real))
+        }));
+    }
     if config_is_esm {
         esm.extend(runtime.preload.iter().cloned());
     } else {
@@ -4073,13 +4109,27 @@ fn prepare_preload_chain(
     esm.extend(inherited_imports);
 
     let dir = root.join("node_modules").join(".nub");
-    if !cjs.is_empty() || !esm.is_empty() {
-        std::fs::create_dir_all(&dir).with_context(|| {
-            format!("could not create the preload chainer dir {}", dir.display())
-        })?;
-    }
-    let cjs_path = write_preload_chain(&dir, false, &cjs)?;
-    let esm_path = write_preload_chain(&dir, true, &esm)?;
+    let write_to = |dir: &Path| -> Result<(Option<PathBuf>, Option<PathBuf>)> {
+        if !cjs.is_empty() || !esm.is_empty() {
+            std::fs::create_dir_all(dir).with_context(|| {
+                format!("could not create the preload chainer dir {}", dir.display())
+            })?;
+        }
+        Ok((
+            write_preload_chain(dir, false, &cjs, false)?,
+            write_preload_chain(dir, true, &esm, has_mappers)?,
+        ))
+    };
+    // A mapper-only chain holds nothing but absolute paths, so it works from anywhere.
+    // A read-only deployment that nobody told to preload anything must keep running,
+    // so it falls back to Nub's cache, which that run already needs writable.
+    let (cjs_path, esm_path) = match write_to(&dir) {
+        Err(error) if !own_entries => match nub_core::node::discovery::cache_dir() {
+            Some(cache) => write_to(&cache.join("preload-chains").join(".nub"))?,
+            None => return Err(error),
+        },
+        written => written?,
+    };
 
     // nub's own preload carries whichever chainer matches its channel, so that one
     // costs no token at all; the other gets the single token of its name.
@@ -4111,14 +4161,25 @@ fn prepare_preload_chain(
 /// Node resolves it; an absolute path on the ESM side becomes a `file://` URL, because
 /// Windows rejects a raw `C:\...` as an ESM specifier (ERR_UNSUPPORTED_ESM_URL_SCHEME)
 /// where POSIX would have tolerated it.
-fn write_preload_chain(dir: &Path, esm: bool, entries: &[String]) -> Result<Option<PathBuf>> {
+///
+/// `content_addressed` puts a hash of the body in the file name. A chain carrying
+/// tsconfig mapper registers needs it: `preload` belongs to the root its file is
+/// under, but two workspace members can share one hoisted `node_modules` and list
+/// different mappers, and a long-lived process re-reads its chainer each time it
+/// forks, so a shared name would hand it the other member's plugins.
+fn write_preload_chain(
+    dir: &Path,
+    esm: bool,
+    entries: &[String],
+    content_addressed: bool,
+) -> Result<Option<PathBuf>> {
     if entries.is_empty() {
         return Ok(None);
     }
     let mut body = String::from(
-        "// Generated by nub from `nub.jsonc` `preload` and any inherited NODE_OPTIONS\n\
-         // preload flags. Regenerated every run; do not edit. One module instead of one\n\
-         // token per entry — see vercel/next.js#96582.\n",
+        "// Generated by nub from tsconfig `contentMappers`, `nub.jsonc` `preload` and any\n\
+         // inherited NODE_OPTIONS preload flags. Regenerated every run; do not edit. One\n\
+         // module instead of one token per entry — see vercel/next.js#96582.\n",
     );
     let resolver = bare_preload_resolver(esm);
     for spec in entries {
@@ -4141,15 +4202,25 @@ fn write_preload_chain(dir: &Path, esm: bool, entries: &[String]) -> Result<Opti
             body.push_str(&format!("require({literal});\n"));
         }
     }
-    let name = if esm {
-        "preload-chain.mjs"
+    let extension = if esm { "mjs" } else { "cjs" };
+    let name = if content_addressed {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        body.hash(&mut hasher);
+        format!("preload-chain-{:016x}.{extension}", hasher.finish())
     } else {
-        "preload-chain.cjs"
+        format!("preload-chain.{extension}")
     };
-    let path = dir.join(name);
+    let path = dir.join(&name);
     // Write via a sibling temp file so a concurrent nub in the same project can never
-    // observe a half-written chainer.
-    let tmp = dir.join(format!("{name}.{}.tmp", std::process::id()));
+    // observe a half-written chainer. The counter is for `run -r`, whose members
+    // build their options on threads of ONE process, so the pid alone can collide.
+    static NEXT_TMP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let tmp = dir.join(format!(
+        "{name}.{}.{}.tmp",
+        std::process::id(),
+        NEXT_TMP.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::write(&tmp, body)
         .with_context(|| format!("could not write the preload chainer {}", tmp.display()))?;
     std::fs::rename(&tmp, &path)
@@ -4163,7 +4234,7 @@ fn write_preload_chain(dir: &Path, esm: bool, entries: &[String]) -> Result<Opti
 /// includes [`NUB_CONDITION`], because this resolves a specifier the child Node
 /// would otherwise resolve for itself, with the `nub` condition already on its argv.
 ///
-fn bare_preload_resolver(esm: bool) -> oxc_resolver::Resolver {
+pub(crate) fn bare_preload_resolver(esm: bool) -> oxc_resolver::Resolver {
     oxc_resolver::Resolver::new(oxc_resolver::ResolveOptions {
         condition_names: vec![
             "node".to_string(),
@@ -4495,6 +4566,8 @@ pub(crate) fn runtime_node_options_with(
         }
     }
 
+    discover_content_mappers(runtime, tsconfig_gate);
+
     for preload in &runtime.preload {
         if preload.is_empty() || preload.contains('\0') {
             bail!("nub.jsonc `preload` entries must be non-empty paths or module specifiers");
@@ -4504,6 +4577,7 @@ pub(crate) fn runtime_node_options_with(
     // for why (vercel/next.js#96582) and where the chainer has to live.
     if let Some(injection) = prepare_preload_chain(runtime, node, fold)? {
         options.push(injection.node_options_token());
+        runtime.preload_chain_import = Some(injection.value);
     }
 
     if let Some(tsconfig) = runtime.tsconfig.as_deref()
@@ -4513,6 +4587,48 @@ pub(crate) fn runtime_node_options_with(
     }
 
     Ok(options)
+}
+
+/// Fill in the run's tsconfig `contentMappers` registers ([`crate::content_mappers`]).
+///
+/// The anchor is the run's ENTRY directory when it has one: an entry is transformed
+/// against its own directory's tsconfig, which is also the config `tsc` and the
+/// editor check it with, so `nub sub/main.ts` from the parent directory loads `sub`'s
+/// mappers. A `nub run` script anchors at its package, where the script runs, so a
+/// recursive run gives each member its own. Anything else has the CWD, where
+/// `nub.jsonc`, `customConditions` and a bare `preload` are already read from.
+///
+/// A descendant `node` adds to what it inherited instead of replacing it: a root
+/// script running `node apps/web/server.ts` needs `apps/web`'s mappers even though
+/// the root's tsconfig lists none, and the parent's own chainer stays on its
+/// `NODE_OPTIONS` regardless. With no entry there is nothing new to ask about, so a
+/// descendant's CWD is not consulted.
+///
+/// A config that will not read in full contributes nothing: under `Required` a gate
+/// refuses that run anyway (`ensure_tsconfig_parses`), and the lifecycle path guesses
+/// at nothing, as with conditions.
+fn discover_content_mappers(
+    runtime: &mut crate::project_config::RuntimeConfig,
+    tsconfig_gate: TsconfigGate,
+) {
+    let inherited = runtime.content_mappers.is_some();
+    let anchor = runtime
+        .content_mapper_anchor
+        .clone()
+        .or_else(|| (!inherited).then(|| std::env::current_dir().ok()).flatten());
+    let found = runtime.content_mappers.get_or_insert_with(Default::default);
+    let Some(anchor) = anchor else {
+        return;
+    };
+    let anchor = anchor.to_string_lossy();
+    let explicit = runtime.tsconfig.as_deref();
+    let readable = match tsconfig_gate {
+        TsconfigGate::Required => nub_tsconfig::diagnostics(&anchor, explicit).is_empty(),
+        TsconfigGate::BestEffort => nub_tsconfig::probe_diagnostics(&anchor, explicit).is_empty(),
+    };
+    if readable {
+        found.merge(crate::content_mappers::discover(&anchor, explicit));
+    }
 }
 
 fn validate_runtime_node_option(
@@ -4906,6 +5022,11 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     let (runtime_node_options, runtime_v8_flags) = if compat_mode {
         (Vec::new(), Vec::new())
     } else {
+        runtime.content_mapper_anchor = entry_tsconfig_dir(args, cwd, &runtime.node_options);
+        let inherited_registers = runtime
+            .content_mappers
+            .as_ref()
+            .map(|found| found.registers.len());
         let options = runtime_node_options(&mut runtime, &node)?;
         // `runtime_node_options` anchors its own check at the CWD, which is the config
         // `nub.jsonc` and a bare preload specifier resolve against. The ENTRY can sit
@@ -4918,7 +5039,17 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
         {
             ensure_tsconfig_parses(&entry_dir.to_string_lossy(), runtime.tsconfig.as_deref())?;
         }
-        let v8_flags = runtime_v8_flags(&runtime)?;
+        let mut v8_flags = runtime_v8_flags(&runtime)?;
+        // A descendant `node` whose entry added mappers: spawn leaves an already
+        // augmented NODE_OPTIONS alone, so the new chainer's token would go nowhere.
+        // Argv reaches this process and, through `execArgv`, its workers. The chainer
+        // the parent loaded stays on NODE_OPTIONS; its entries import once by URL.
+        let registers = runtime.content_mappers.as_ref().map(|f| f.registers.len());
+        if inherited_registers.is_some_and(|before| registers > Some(before))
+            && let Some(chain) = runtime.preload_chain_import.as_ref()
+        {
+            v8_flags.push(format!("--import={chain}"));
+        }
         env_vars.insert(
             crate::project_config::RUNTIME_CONFIG_ENV.to_string(),
             runtime_config_json(&runtime)?,
@@ -4932,7 +5063,11 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     // `!compat_mode`, so `--node` skips it regardless).
     let pnp_ctx = nub_core::pnp::detect(cwd);
     let config = nub_core::node::spawn::SpawnConfig {
-        runtime_has_preloads: !runtime.preload.is_empty(),
+        runtime_has_preloads: !runtime.preload.is_empty()
+            || runtime
+                .content_mappers
+                .as_ref()
+                .is_some_and(|found| !found.registers.is_empty()),
         // Put the loader in front of Node when one owns this project.
         env_owner: env_owner
             .as_ref()
@@ -6054,6 +6189,7 @@ fn build_script_command(
         // npmrc first so nub.jsonc `nodeOptions` wins a conflicting flag under
         // Node's last-wins rule. See npmrc_script_node_options.
         let mut options = npmrc_script_node_options(&project.root);
+        runtime.content_mapper_anchor = Some(project.root.clone());
         options.extend(runtime_node_options(&mut runtime, &node)?);
         options
     };
@@ -7229,6 +7365,8 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         let status = nub_core::node::spawn::status_forwarding_signals(&mut cmd)?;
         return Ok(nub_core::node::spawn::exit_code_from_status(&status));
     }
+    runtime.content_mapper_anchor =
+        entry_tsconfig_dir(&[file.to_string()], &cwd, &runtime.node_options);
     let runtime_node_options = runtime_node_options_with(
         &mut runtime,
         &node,

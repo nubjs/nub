@@ -166,6 +166,8 @@ if (typeof process.getBuiltinModule === "function") __ensureBuiltins();
 let runtimeConfig = {};
 try { runtimeConfig = JSON.parse(process.env.__NUB_RUNTIME_CONFIG || "{}"); } catch {}
 const RUNTIME_LOADER = runtimeConfig.loader || {};
+// tsconfig `contentMappers` extensions whose package has no runtime to preload.
+const UNLOADED_CONTENT_MAPPERS = runtimeConfig.contentMappers?.unloaded || [];
 const RUNTIME_TSCONFIG = runtimeConfig.tsconfig || undefined;
 // Transform-only TypeScript options may live directly in `nub.jsonc`. They
 // override the selected/nearest tsconfig because the project runtime config is
@@ -247,6 +249,30 @@ export const TS_PARENT_EXTS = new Set([".ts", ".tsx", ".mts", ".cts"]);
 // SWAP rather than a bail: the built-in half must keep serving deps. Both the dispatch
 // sites and loadData() route through here, so "does this load?" and "as what?" can
 // never disagree.
+// Node's "Unknown file extension" says nothing about why a file the type checker
+// accepted will not load. `tsc` is satisfied by a mapper alone and never emits for
+// these files, so the gap only shows at runtime: name it. Longest suffix wins, as
+// TypeScript routes. Both `message` and `stack` change because an uncaught error
+// prints the stack, which captured the message when it was created.
+export function explainUnmappedExtension(err, url) {
+  if (err?.code !== "ERR_UNKNOWN_FILE_EXTENSION" || typeof url !== "string") return;
+  let entry;
+  for (const candidate of UNLOADED_CONTENT_MAPPERS) {
+    if (url.endsWith(candidate.extension) && !(entry?.extension.length >= candidate.extension.length)) {
+      entry = candidate;
+    }
+  }
+  if (!entry) return;
+  const why = entry.reason === "missing"
+    ? `is not installed`
+    : entry.reason === "pnp"
+      ? `Nub does not discover under Yarn Plug'n'Play; add "${entry.package}/register" to \`preload\` in nub.jsonc`
+      : `has no "./register" export to load it at runtime`;
+  const message = `${err.message}\n"${entry.extension}" is mapped in ${entry.tsconfig} by "${entry.package}", which ${why}.`;
+  if (typeof err.stack === "string") err.stack = err.stack.replace(err.message, message);
+  err.message = message;
+}
+
 export function dataExtsFor(url) {
   return isNodeModules(url) ? BUILTIN_DATA_EXTS : PROJECT_DATA_EXTS;
 }

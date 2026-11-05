@@ -3514,8 +3514,13 @@ fn is_nub_preload_entry(value: &str) -> bool {
         "preload.mjs" | "preload.cjs" | THREADPOOL_SNAPSHOT_SIDECAR => {
             is_nub_runtime_dir(parent.rsplit('/').next().unwrap_or_default())
         }
-        // The chainer nub synthesizes into `<preload root>/node_modules/.nub/`.
-        "preload-chain.mjs" | "preload-chain.cjs" => parent.ends_with("/.nub"),
+        // The chainer nub synthesizes into `<preload root>/node_modules/.nub/`, whose
+        // name carries a content hash when it holds tsconfig mapper registers.
+        _ if file.starts_with("preload-chain")
+            && (file.ends_with(".mjs") || file.ends_with(".cjs")) =>
+        {
+            parent.ends_with("/.nub")
+        }
         _ => false,
     }
 }

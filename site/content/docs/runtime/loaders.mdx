@@ -29,6 +29,34 @@ Nub picks the loader by file extension. Plain `.json` is not in the set, because
 | `.yaml`, `.yml` | YAML, parsed |
 | `.txt` | a string, unparsed |
 
+## Content mappers
+
+TypeScript 7.1's [content mappers](https://github.com/microsoft/typescript-go/pull/4712) type-check other file types, but TypeScript never runs them. The runtime half is the package's `./register` export, which Nub preloads for every package your tsconfig lists.
+
+```jsonc title="tsconfig.json"
+{
+  // ...
+  "contentMappers": [{ "package": "motherload", "extensions": [".toml", ".yaml"] }]
+}
+```
+
+```ts title="main.ts"
+import config from "./config.yaml"; // loaded by motherload/register
+```
+
+```sh
+nub main.ts
+```
+
+There is no `--import` to pass and nothing to add to `nub.jsonc`. A mapper takes precedence over Nub's own loaders.
+
+- **Which tsconfig:** the nearest to the entry file, or to the package for `nub run`. `extends` and `references` are followed, and each `package` resolves from the config that declares it.
+- **Order:** the longest extension answers first, as in TypeScript, so `.schema.jsonc` wins over `.jsonc`. A [`preload`](/docs/config#preload) entry answers before any mapper.
+- **Options:** a register reads its own `options` from the tsconfig entry. Nub passes nothing.
+- **No runtime:** a package that is not installed or has no `./register` export is skipped. Importing one of its extensions fails, and the error names the package.
+
+`--node` and `NODE_COMPAT` load no registers.
+
 ## Default export
 
 A data module has a single default export, the parsed value, like Node's own JSON modules. There are no named exports, so destructure the default to pull out top-level keys.

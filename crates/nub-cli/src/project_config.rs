@@ -499,6 +499,18 @@ pub(crate) struct RuntimeConfig {
     /// (never by config resolution). `Some` only when the chainer rides nub's
     /// preload rather than its own `NODE_OPTIONS` token — see prepare_preload_chain.
     pub preload_chain: Option<PathBuf>,
+    /// The directory whose tsconfig `contentMappers` this run loads, when it is not
+    /// the CWD (a run with an entry file). Never crosses to a child.
+    #[serde(skip)]
+    pub content_mapper_anchor: Option<PathBuf>,
+    /// The registers discovered from tsconfig `contentMappers`, set by the spawn path.
+    /// `None` until something discovered them; `Some` in a descendant `node`, which
+    /// adds to its parent's list rather than starting over.
+    pub content_mappers: Option<crate::content_mappers::Discovered>,
+    /// The chainer's `--import` value when it got its own token (see
+    /// `prepare_preload_chain`). Spawn-local, like the anchor above.
+    #[serde(skip)]
+    pub preload_chain_import: Option<String>,
     pub node_options: Vec<String>,
     pub v8_flags: Vec<String>,
     pub env_file: RuntimeEnvFile,
@@ -958,6 +970,9 @@ impl EffectiveConfig {
             preload,
             preload_root,
             preload_chain: None,
+            content_mapper_anchor: None,
+            content_mappers: None,
+            preload_chain_import: None,
             node_options: values.node_options.clone().unwrap_or_default(),
             v8_flags: values.v8_flags.clone().unwrap_or_default(),
             env_file,
