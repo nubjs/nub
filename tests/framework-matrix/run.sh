@@ -30,7 +30,8 @@ kill_group() { local g="$1"; kill -TERM -"$g" 2>/dev/null; sleep 0.4; kill -KILL
 cd "$proj" || { log "step=setup result=FAIL detail=no-dir"; echo "VERDICT|$name|FAIL"; exit 2; }
 
 # ── install ──────────────────────────────────────────────────────────────────
-"$NUB" install >/tmp/fm-$name-install.log 2>&1; inst=$?
+# Scaffolds carry no build approvals; a build nothing approves is skipped, not fatal.
+npm_config_strict_dep_builds=false "$NUB" install >/tmp/fm-$name-install.log 2>&1; inst=$?
 if [ $inst -ne 0 ]; then
   log "step=install result=FAIL exit=$inst"; tail -8 /tmp/fm-$name-install.log | sed "s/^/  install> /"
   echo "VERDICT|$name|FAIL"; exit 2

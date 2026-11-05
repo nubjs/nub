@@ -2541,19 +2541,23 @@ examples = []
 [strictDepBuilds]
 description = "Exit with an error if dependencies have unreviewed build scripts."
 type = "bool"
-default = "false"
+default = "true"
 docs = """
 aube never runs dependency lifecycle scripts unless the package is
 listed in `allowBuilds` or `--dangerously-allow-all-builds` is set.
-With `strictDepBuilds = true`, an install that sees unreviewed build
-scripts fails after linking and before any dependency build scripts run.
-Add reviewed packages to `allowBuilds` with `true`, keep intentionally
-skipped packages as `false`, or leave the default `strictDepBuilds=false`
-behavior to skip unreviewed builds.
+With `strictDepBuilds = true` (the default, as in pnpm 11 and later),
+an install that skipped any unreviewed build fails with
+`ERR_AUBE_IGNORED_BUILDS` once everything else is done: `node_modules`
+is linked, the approved builds and the project's own lifecycle scripts
+have run. Approve the packages with `aube approve-builds`, or mark them
+`false` in `allowBuilds` to keep them skipped. `strictDepBuilds = false`
+skips unreviewed builds with a warning instead. Global installs and
+`dlx` never fail on an unreviewed build.
 """
 sources.cli = []
 sources.env = ["npm_config_strict_dep_builds", "NPM_CONFIG_STRICT_DEP_BUILDS", "AUBE_STRICT_DEP_BUILDS"]
 sources.npmrc = ["strictDepBuilds"]
+sources.workspaceYaml = ["strictDepBuilds"]
 managedPolicy = "trueWins"
 examples = []
 
@@ -2584,14 +2588,15 @@ type = "bool"
 default = "false"
 docs = """
 Opt-out escape hatch for the `allowBuilds` allowlist: when set, every
-dependency's `preinstall` / `install` / `postinstall` / `prepare`
-scripts run regardless of the allowlist. Equivalent to pnpm's
-`--dangerously-allow-all-builds`. Useful for ad-hoc debugging; do not
-use in CI.
+dependency's `preinstall` / `install` / `postinstall` scripts run
+unless an `allowBuilds` entry denies the package with `false` — a
+denial always wins, as in pnpm 12. Useful for ad-hoc debugging; do
+not use in CI.
 """
 sources.cli = ["dangerously-allow-all-builds"]
 sources.env = ["npm_config_dangerously_allow_all_builds", "NPM_CONFIG_DANGEROUSLY_ALLOW_ALL_BUILDS", "AUBE_DANGEROUSLY_ALLOW_ALL_BUILDS"]
 sources.npmrc = ["dangerouslyAllowAllBuilds"]
+sources.workspaceYaml = ["dangerouslyAllowAllBuilds"]
 managedPolicy = "falseWins"
 examples = ["aube install --dangerously-allow-all-builds"]
 

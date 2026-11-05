@@ -244,9 +244,19 @@ fn paranoid_requires_full_pipeline(cwd: &Path, opts: &InstallOptions) -> bool {
     aube_settings::resolved::paranoid(&ctx)
 }
 
-pub(super) fn emit_up_to_date(cwd: &Path) {
-    super::unreviewed_builds::emit_warning(&super::unreviewed_builds::from_state(cwd));
+pub(super) fn emit_up_to_date(cwd: &Path, opts: &InstallOptions) -> miette::Result<()> {
+    let unreviewed = super::unreviewed_builds::from_state(cwd);
+    if !unreviewed.is_empty() {
+        let files = crate::commands::FileSources::load(cwd);
+        let raw_workspace = aube_manifest::workspace::load_raw(cwd).unwrap_or_default();
+        let ctx = files.ctx(&raw_workspace, &opts.env_snapshot, &opts.cli_flags);
+        let strict = aube_settings::resolved::strict_dep_builds(&ctx)
+            || aube_settings::resolved::paranoid(&ctx);
+        super::print_already_up_to_date();
+        return super::unreviewed_builds::report(&unreviewed, strict, cwd);
+    }
     super::print_already_up_to_date();
+    Ok(())
 }
 
 pub(super) fn merge_branch_lockfiles_if_needed(
