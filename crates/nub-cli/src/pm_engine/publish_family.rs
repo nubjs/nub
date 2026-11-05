@@ -460,7 +460,8 @@ impl FilterFlags {
     /// `--filter=*` and a no-op when an explicit selector is present.
     fn effective(self) -> EffectiveFilter {
         let mut filters = self.filter;
-        if self.recursive && filters.is_empty() && self.filter_prod.is_empty() {
+        let recursive = self.recursive && filters.is_empty() && self.filter_prod.is_empty();
+        if recursive {
             filters.push("*".to_string());
         }
         EffectiveFilter {
@@ -468,6 +469,7 @@ impl FilterFlags {
             filter_prods: self.filter_prod,
             fail_if_no_match: self.fail_if_no_match,
             include_workspace_root: self.include_workspace_root,
+            recursive,
         }
     }
 }

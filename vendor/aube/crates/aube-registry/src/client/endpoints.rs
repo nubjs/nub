@@ -200,6 +200,9 @@ impl RegistryClient {
     /// on the registry — a stale cached document would roll back other
     /// publishers' changes on the subsequent PUT.
     pub async fn fetch_packument_json_fresh(&self, name: &str) -> Result<serde_json::Value, Error> {
+        if self.network_mode == NetworkMode::Offline {
+            return Err(Error::Offline(format!("packument for {name}")));
+        }
         let (url, registry_url) = self.packument_url(name);
         let resp = self
             .send_metadata_with_retry(&format!("packument {name}"), || {

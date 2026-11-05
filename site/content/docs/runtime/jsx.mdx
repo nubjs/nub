@@ -1,17 +1,19 @@
 ---
 title: JSX
-description: How Nub runs JSX on stock Node — automatic-runtime defaults, tsconfig-driven configuration, and the per-file import-source pragma for mixing runtimes.
+description: How Nub runs JSX on stock Node, with automatic-runtime defaults, tsconfig-driven configuration, and a per-file import-source pragma for mixing runtimes.
 ---
 
-Files ending in `.jsx` and `.tsx` execute through the same load hook. JSX is recognized in `.jsx` / `.tsx` only, never in plain `.js`. The defaults are the modern ones — automatic runtime, `react` as the import source — matching oxc-transformer, Vite's React plugins, Rolldown, and Bun.
+Files ending in `.jsx` and `.tsx` run directly, with the automatic runtime and `react` as the import source by default. Nub parses plain `.js` as JavaScript, so JSX needs a `.jsx` or `.tsx` extension.
 
 ```bash
 nub render.tsx
 ```
 
+Preact, Hono, and Vue JSX work through their import source. Solid's JSX needs `babel-preset-solid`'s compiler, which a per-file transpiler cannot run, so run Solid through its bundler (for example `nub run vite`).
+
 ## `nub.jsonc`
 
-Configure the runtime directly in the project file. The field names match TypeScript's compiler options, and the `jsx` field accepts the three modes that emit executable JavaScript: `react`, `react-jsx`, and `react-jsxdev`.
+Configure the runtime in the project file. The field names match TypeScript's compiler options, and `jsx` accepts the three modes that emit executable JavaScript: `react`, `react-jsx`, and `react-jsxdev`.
 
 ```jsonc title="nub.jsonc"
 {
@@ -20,7 +22,7 @@ Configure the runtime directly in the project file. The field names match TypeSc
 }
 ```
 
-The classic runtime also accepts `jsxFactory` and `jsxFragmentFactory`.
+The classic runtime also takes `jsxFactory` and `jsxFragmentFactory`.
 
 ```jsonc title="nub.jsonc"
 {
@@ -32,7 +34,7 @@ The classic runtime also accepts `jsxFactory` and `jsxFragmentFactory`.
 
 ## `tsconfig.json`
 
-Nub still reads the same settings from `compilerOptions` when they are absent from `nub.jsonc`, so the runtime can share configuration with the rest of the toolchain. Top-level Nub fields win when both files set the same option.
+Nub reads the same options from `compilerOptions` when `nub.jsonc` does not set them. A field set in `nub.jsonc` wins.
 
 | Option | Effect |
 | --- | --- |
@@ -54,11 +56,9 @@ Nub still reads the same settings from `compilerOptions` when they are absent fr
 Read the [full docs](https://www.typescriptlang.org/tsconfig/jsx.html) for `jsx` on typescriptlang.org.
 </Callout>
 
-Preact, Hono, and Vue JSX work via passthrough. Solid is the exception — its JSX needs `babel-preset-solid`'s reactive-graph compilation, which a per-file transpiler can't do, so run Solid through its bundler (e.g. `nub run vite`).
-
 ## `@jsxImportSource`
 
-A per-file `/** @jsxImportSource ... */` pragma overrides the tsconfig import source for that one file. This is the standard mechanism for mixing JSX runtimes in a single project — a Hono route alongside React components.
+A `/** @jsxImportSource ... */` pragma sets the import source for one file. Use it to mix JSX runtimes in one project, such as a Hono route alongside React components.
 
 ```tsx
 /** @jsxImportSource hono/jsx */

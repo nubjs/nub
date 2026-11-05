@@ -282,6 +282,16 @@ async fn remove_from_project(args: RemoveArgs, uninstall_hooks: bool) -> miette:
             aube_registry::NetworkMode::Online
         };
     }
+    // The follow-up install runs frozen after a prune, which skips recording
+    // the pnpm pin, so record it first (unless the user asked for frozen).
+    if used_lockfile_prune
+        && !matches!(
+            super::global_frozen_override(),
+            Some(install::FrozenOverride::Frozen)
+        )
+    {
+        install::sync_package_manager_pin(&cwd, opts.network_mode).await;
+    }
     install::run_with_project_lock(opts, &lock).await?;
     if uninstall_hooks {
         run_uninstall_hooks(
@@ -428,20 +438,7 @@ async fn run_filtered(
     filter: &aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<()> {
     let cwd = crate::dirs::cwd()?;
-    // A recursive `remove` keeps the workspace root in a selection that
-    // names no project (pnpm drops it only for `run`, `exec`, `add` and
-    // `test`), so `-r` takes the dependency out of the root's manifest
-    // too, unless an exclusion names the root.
-    let names_no_project = filter
-        .filters
-        .iter()
-        .chain(&filter.filter_prods)
-        .all(|selector| selector == "*" || selector.starts_with('!'));
-    let (root, matched) = if names_no_project {
-        super::select_workspace_packages_keeping_root(&cwd, filter, "remove")?
-    } else {
-        super::select_workspace_packages(&cwd, filter, "remove")?
-    };
+    let (root, matched) = super::select_workspace_packages(&cwd, filter, "remove")?;
     // Match pnpm's recursive-remove semantics: silently skip projects
     // that don't declare any of the named packages, and per-project
     // narrow the package list to just the ones present so a partial

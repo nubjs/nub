@@ -245,7 +245,7 @@ pub(super) fn detect_aube_dir_gvs_mode(aube_dir: &std::path::Path) -> Option<boo
         // plain directory off that kind is why this function could never
         // return `Some(false)` on Windows (nub#566; see
         // `aube_util::fs::is_real_dir`). With the mode change therefore
-        // invisible there, `reset_on_mode_change` never wiped a
+        // invisible there, the mode-change reset never wiped a
         // per-project tree and the gvs link pass that followed collided
         // with the surviving directories (`ERROR_ALREADY_EXISTS`).
         // Anything that is neither a link nor a real directory is

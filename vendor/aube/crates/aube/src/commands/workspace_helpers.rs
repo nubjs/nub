@@ -220,9 +220,7 @@ pub(crate) fn select_workspace_packages(
             cwd.display()
         ));
     }
-    let matched =
-        aube_workspace::selector::select_workspace_packages(&root, &workspace_pkgs, filter)
-            .map_err(|e| miette!("invalid --filter selector: {e}"))?;
+    let matched = select_projects(&root, &workspace_pkgs, filter, command)?;
     if matched.is_empty() {
         return Err(miette!(
             "aube {command}: filter {filter:?} did not match any workspace package"
@@ -231,36 +229,38 @@ pub(crate) fn select_workspace_packages(
     Ok((root, matched))
 }
 
-/// [`select_workspace_packages`] for a selection of only `*` and
-/// exclusions, with the workspace root a candidate like any member: the
-/// selection is every project, root included, minus what the exclusions
-/// match.
-pub(crate) fn select_workspace_packages_keeping_root(
-    cwd: &Path,
+/// The workspace projects `filter` selects for `command`, the way pnpm
+/// selects them: directory selectors resolve against the project the
+/// command was invoked in (the nearest `package.json` at or above the
+/// cwd, inside the workspace), and `run`, `exec`, `add` and `test` drop
+/// the root from a selection that names no project. Every `--filter`
+/// caller goes through here so none resolves paths against the
+/// workspace root.
+pub(crate) fn select_projects(
+    workspace_root: &Path,
+    workspace_pkgs: &[PathBuf],
     filter: &aube_workspace::selector::EffectiveFilter,
     command: &str,
-) -> miette::Result<(PathBuf, Vec<aube_workspace::selector::SelectedPackage>)> {
-    let root = crate::dirs::find_workspace_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
-    let mut candidates = aube_workspace::find_workspace_packages(&root)
-        .map_err(|e| miette!("failed to discover workspace packages: {e}"))?;
-    if candidates.is_empty() {
-        return select_workspace_packages(cwd, filter, command);
-    }
-    if root.join("package.json").is_file() && !candidates.contains(&root) {
-        candidates.push(root.clone());
-    }
-    let mut exclusions = filter.clone();
-    exclusions.filters.retain(|selector| selector != "*");
-    exclusions.filter_prods.retain(|selector| selector != "*");
-    let matched =
-        aube_workspace::selector::select_workspace_packages(&root, &candidates, &exclusions)
-            .map_err(|e| miette!("invalid --filter selector: {e}"))?;
-    if matched.is_empty() {
-        return Err(miette!(
-            "aube {command}: filter {filter:?} did not match any workspace package"
-        ));
-    }
-    Ok((root, matched))
+) -> miette::Result<Vec<aube_workspace::selector::SelectedPackage>> {
+    let cwd = crate::dirs::cwd()?;
+    let prefix = crate::dirs::find_project_root(&cwd)
+        .filter(|project| project.starts_with(workspace_root))
+        .unwrap_or(cwd);
+    let root = if matches!(command, "add" | "run" | "exec" | "test") {
+        aube_workspace::RootSelection::AutoExclude
+    } else {
+        aube_workspace::RootSelection::Keep
+    };
+    aube_workspace::selector::select_workspace_projects(
+        workspace_root,
+        workspace_pkgs,
+        filter,
+        aube_workspace::SelectOptions {
+            prefix: &prefix,
+            root,
+        },
+    )
+    .map_err(|e| miette!("invalid --filter selector: {e}"))
 }
 
 pub(crate) fn workspace_importer_path(workspace_root: &Path, dir: &Path) -> miette::Result<String> {
