@@ -63,9 +63,23 @@ use miette::miette;
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::Path;
 
+/// Which reputation gates this invocation was told to skip. Each gate has a
+/// flag named after it, so a refusal can point at the one that clears it and
+/// leave the other two standing: a name that both resembles a popular package
+/// and was registered last week should have to answer for both.
+///
+/// `--allow-low-downloads` predates the split and keeps clearing all three,
+/// because scripts have relied on that since the gates shipped.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ReputationOverrides {
+    pub(crate) similar_name: bool,
+    pub(crate) new_name: bool,
+    pub(crate) low_downloads: bool,
+}
+
 #[derive(Clone)]
 pub(crate) struct ReputationPolicy<'a> {
-    pub(crate) allow: bool,
+    pub(crate) overrides: ReputationOverrides,
     pub(crate) prompt: LowDownloadPrompt,
     pub(crate) minimum_package_age_minutes: u64,
     pub(crate) registry_client: &'a aube_registry::client::RegistryClient,
@@ -98,9 +112,9 @@ pub(crate) enum LowDownloadPrompt {
 /// a malicious version) and a bare install whose resolved version is
 /// itself malicious.
 ///
-/// `reputation_policy` controls the per-invocation
-/// `--allow-low-downloads` override and whether the caller permits a
-/// terminal prompt or delegates confirmation to an embedding host.
+/// `reputation_policy` controls the per-invocation overrides
+/// ([`ReputationOverrides`]) and whether the caller permits a terminal
+/// prompt or delegates confirmation to an embedding host.
 ///
 /// `allowed_unpopular_globs` are the `allowedUnpopularPackages`
 /// setting entries: full-name globs that exempt matching names from
@@ -118,10 +132,11 @@ pub(crate) async fn run_gates(
     if exact_advisory_pairs.is_empty() && download_names.is_empty() {
         return Ok(());
     }
-    let gated_reputation_names = if !reputation_policy.allow {
-        download_names_to_gate(download_names, allowed_unpopular_globs)
-    } else {
+    let overrides = reputation_policy.overrides;
+    let gated_reputation_names = if overrides.low_downloads {
         Vec::new()
+    } else {
+        download_names_to_gate(download_names, allowed_unpopular_globs)
     };
     // One lightweight client shared across OSV and downloads probes.
     // Package age uses the standard RegistryClient supplied by the
@@ -180,7 +195,7 @@ pub(crate) async fn run_gates(
         .await?;
     }
     if !gated_reputation_names.is_empty() {
-        let cutoff = (reputation_policy.minimum_package_age_minutes > 0)
+        let cutoff = (reputation_policy.minimum_package_age_minutes > 0 && !overrides.new_name)
             .then(|| aube_resolver::MinimumReleaseAge {
                 minutes: reputation_policy.minimum_package_age_minutes,
                 ..Default::default()
@@ -194,7 +209,9 @@ pub(crate) async fn run_gates(
             cutoff.is_some(),
         )
         .await?;
-        similar_name_gate(&gated_reputation_names, &reputation_policy.prompt).await?;
+        if !overrides.similar_name {
+            similar_name_gate(&gated_reputation_names, &reputation_policy.prompt).await?;
+        }
         if let Some(cutoff) = cutoff.as_deref() {
             package_age_gate(
                 &package_created,
@@ -1055,20 +1072,22 @@ fn bounded_damerau_levenshtein(left: &str, right: &str, limit: u8) -> Option<u8>
     (distance <= u16::from(limit)).then_some(distance as u8)
 }
 
+fn similar_name_refusal(name: &str, suggestion: &PackageNameSuggestion) -> miette::Report {
+    miette!(
+        code = ERR_AUBE_SIMILAR_PACKAGE_NAME,
+        "refusing to add {name}: did you mean {} (top-100,000 rank #{}, edit distance {})? After verifying the package name, pass --allow-similar-name, or add it to `allowedUnpopularPackages` in .npmrc to keep it allowed.",
+        suggestion.name,
+        suggestion.rank,
+        suggestion.distance
+    )
+}
+
 async fn confirm_similar_package(
     prompt: &LowDownloadPrompt,
     name: &str,
     suggestion: &PackageNameSuggestion,
 ) -> miette::Result<bool> {
-    let refusal = || {
-        miette!(
-            code = ERR_AUBE_SIMILAR_PACKAGE_NAME,
-            "refusing to add {name}: did you mean {} (top-100,000 rank #{}, edit distance {})? Pass --allow-low-downloads after verifying the package name.",
-            suggestion.name,
-            suggestion.rank,
-            suggestion.distance
-        )
-    };
+    let refusal = || similar_name_refusal(name, suggestion);
     match prompt {
         LowDownloadPrompt::Terminal
             if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() =>
@@ -1186,18 +1205,20 @@ async fn downloads_gate(
     Ok(())
 }
 
+fn low_download_refusal(name: &str, weekly: u64, threshold: u64) -> miette::Report {
+    miette!(
+        code = ERR_AUBE_LOW_DOWNLOAD_PACKAGE,
+        "refusing to add {name}: only {weekly} weekly downloads (threshold: {threshold}). After verifying the package, pass --allow-low-downloads, or add it to `allowedUnpopularPackages` in .npmrc to keep it allowed. `lowDownloadThreshold = 0` turns this check off."
+    )
+}
+
 async fn confirm_low_download(
     prompt: &LowDownloadPrompt,
     name: &str,
     weekly: u64,
     threshold: u64,
 ) -> miette::Result<bool> {
-    let refusal = || {
-        miette!(
-            code = ERR_AUBE_LOW_DOWNLOAD_PACKAGE,
-            "refusing to add {name}: only {weekly} weekly downloads (threshold: {threshold}). Pass --allow-low-downloads to bypass, or set `lowDownloadThreshold = 0`."
-        )
-    };
+    let refusal = || low_download_refusal(name, weekly, threshold);
     match prompt {
         LowDownloadPrompt::Terminal
             if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() =>
@@ -1241,18 +1262,20 @@ fn prompt_continue(name: &str, weekly: u64, threshold: u64) -> miette::Result<bo
     Ok(answer == "y" || answer == "yes")
 }
 
+fn new_name_refusal(name: &str, created: &str, minimum_age_minutes: u64) -> miette::Report {
+    miette!(
+        code = ERR_AUBE_NEW_PACKAGE_NAME,
+        "refusing to add {name}: the package name was first published at {created}, within the configured `minimumPackageAge` of {minimum_age_minutes} minutes. After verifying the package, pass --allow-new-name, or add it to `allowedUnpopularPackages` in .npmrc to keep it allowed."
+    )
+}
+
 async fn confirm_new_package(
     prompt: &LowDownloadPrompt,
     name: &str,
     created: &str,
     minimum_age_minutes: u64,
 ) -> miette::Result<bool> {
-    let refusal = || {
-        miette!(
-            code = ERR_AUBE_NEW_PACKAGE_NAME,
-            "refusing to add {name}: the package name was first published at {created}, within the configured `minimumPackageAge` of {minimum_age_minutes} minutes. Pass --allow-low-downloads to approve this new name explicitly."
-        )
-    };
+    let refusal = || new_name_refusal(name, created, minimum_age_minutes);
     match prompt {
         LowDownloadPrompt::Terminal
             if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() =>
@@ -1340,7 +1363,7 @@ mod tests {
                 AdvisoryCheck::Required,
                 1000,
                 ReputationPolicy {
-                    allow: false,
+                    overrides: ReputationOverrides::default(),
                     prompt: LowDownloadPrompt::Terminal,
                     minimum_package_age_minutes: 43_200,
                     registry_client: &crate::commands::make_client(std::path::Path::new(".")),
@@ -1387,7 +1410,7 @@ mod tests {
             AdvisoryCheck::Off,
             0,
             ReputationPolicy {
-                allow: false,
+                overrides: ReputationOverrides::default(),
                 prompt: LowDownloadPrompt::Terminal,
                 minimum_package_age_minutes: 0,
                 registry_client: &client,
@@ -1753,6 +1776,53 @@ mod tests {
                 distance: 1,
             })
         );
+    }
+
+    /// Each refusal has to name the flag that clears that gate and the setting
+    /// that clears it for good; a flag named for another gate is how a user gets
+    /// sent looking at the wrong check.
+    #[test]
+    fn each_refusal_names_its_own_flag_and_the_durable_setting() {
+        let suggestion = PackageNameSuggestion {
+            name: "regl".to_string(),
+            rank: 11387,
+            distance: 2,
+        };
+        for (refusal, code, flag) in [
+            (
+                similar_name_refusal("reylo", &suggestion),
+                ERR_AUBE_SIMILAR_PACKAGE_NAME,
+                "--allow-similar-name",
+            ),
+            (
+                new_name_refusal("reylo", "2026-11-01T00:00:00.000Z", 43_200),
+                ERR_AUBE_NEW_PACKAGE_NAME,
+                "--allow-new-name",
+            ),
+            (
+                low_download_refusal("reylo", 3, 1000),
+                ERR_AUBE_LOW_DOWNLOAD_PACKAGE,
+                "--allow-low-downloads",
+            ),
+        ] {
+            let message = refusal.to_string();
+            assert_eq!(refusal.code().map(|c| c.to_string()).as_deref(), Some(code));
+            assert!(message.contains(flag), "{code} must name {flag}: {message}");
+            assert!(
+                message.contains("`allowedUnpopularPackages` in .npmrc"),
+                "{code} must name the durable setting: {message}"
+            );
+            for other in [
+                "--allow-similar-name",
+                "--allow-new-name",
+                "--allow-low-downloads",
+            ] {
+                assert!(
+                    other == flag || !message.contains(other),
+                    "{code} must not point at {other}: {message}"
+                );
+            }
+        }
     }
 
     #[test]

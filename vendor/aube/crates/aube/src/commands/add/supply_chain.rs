@@ -6,7 +6,7 @@ use std::path::Path;
 pub(super) async fn run_cli_name_gates(
     cwd: &Path,
     packages: &[String],
-    allow_low_downloads: bool,
+    overrides: crate::commands::add_supply_chain::ReputationOverrides,
     prompt: crate::commands::add_supply_chain::LowDownloadPrompt,
     setting_overrides: &[(String, String)],
 ) -> miette::Result<()> {
@@ -50,7 +50,7 @@ pub(super) async fn run_cli_name_gates(
         advisory_check,
         low_download_threshold,
         crate::commands::add_supply_chain::ReputationPolicy {
-            allow: allow_low_downloads,
+            overrides,
             prompt,
             minimum_package_age_minutes,
             registry_client: &registry_client,

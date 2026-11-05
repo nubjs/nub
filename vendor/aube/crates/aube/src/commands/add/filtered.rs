@@ -49,7 +49,11 @@ pub(super) async fn run(
     supply_chain::run_cli_name_gates(
         &root,
         &args.packages,
-        args.allow_low_downloads,
+        crate::commands::add_supply_chain::ReputationOverrides {
+            similar_name: args.allow_similar_name,
+            new_name: args.allow_new_name,
+            low_downloads: args.allow_low_downloads,
+        },
         crate::commands::add_supply_chain::LowDownloadPrompt::Terminal,
         &[],
     )
