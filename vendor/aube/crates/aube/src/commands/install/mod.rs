@@ -1057,6 +1057,19 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         &manifest,
         lockfile_parse_options,
     )?;
+    // Under `sharedWorkspaceLockfile=false` the root lockfile holds only the
+    // `.` importer. Fold every member's own lockfile in before the drift
+    // check and the resolver hint read it: a root-only graph is stale against
+    // every member manifest, so each install re-resolved the members from
+    // scratch and dropped their locked versions.
+    let member_lockfiles = !shared_workspace_lockfile && has_workspace;
+    let lockfile_pre_parse = lockfile_pre_parse.map(|(mut graph, kind)| {
+        if member_lockfiles {
+            // A member left out for a config mismatch keeps the graph stale.
+            let _ = merge_member_lockfile_graphs(&cwd, &mut graph, &manifests);
+        }
+        (graph, kind)
+    });
     let lockfile_conflict_marker_warning_emitted = lockfile_pre_parse.is_none()
         && lockfile_enabled
         && matches!(mode, FrozenMode::Fix | FrozenMode::Prefer)
@@ -1188,6 +1201,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 revalidate_release_policy,
                 effective_package_extensions_checksum: effective_package_extensions_checksum
                     .clone(),
+                member_lockfiles,
             })? {
                 Ok(_) => {}
                 Err(aube_lockfile::Error::NotFound(_)) => {
@@ -1411,6 +1425,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         lockfile_pre_parse: lockfile_pre_parse.as_ref(),
         revalidate_release_policy,
         effective_package_extensions_checksum,
+        member_lockfiles,
     })?;
 
     // Deprecation messages from freshly-resolved packages. Only the
@@ -1471,7 +1486,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             // projects, and the cold resolve path (which already
             // produces every importer).
             if !shared_workspace_lockfile && has_workspace {
-                merge_member_lockfile_graphs(&cwd, &mut graph, &manifests);
+                let _ = merge_member_lockfile_graphs(&cwd, &mut graph, &manifests);
             }
             let graph = resolve::apply_lockfile_graph_platform_rules(
                 graph,
