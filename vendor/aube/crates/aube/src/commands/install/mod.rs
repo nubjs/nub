@@ -589,6 +589,12 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     aube_util::diag::instant(aube_util::diag::Category::Install, "begin", None);
     let _diag_install = aube_util::diag::Span::new(aube_util::diag::Category::Install, "total");
 
+    // A `--filter` that selects no project changes nothing, as in pnpm:
+    // settled before the `--force` reset, the branch-lockfile merge and
+    // every hook.
+    if super::empty_selection_noop(&cwd, &opts.workspace_filter, "install")? {
+        return Ok(());
+    }
     if !opts.dry_run {
         apply_force_state_reset(&cwd, &opts)?;
     }

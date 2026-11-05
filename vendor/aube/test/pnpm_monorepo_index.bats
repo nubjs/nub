@@ -39,13 +39,14 @@ _setup_no_match_workspace() {
 	EOF
 }
 
-@test "aube list --filter=<no-match>: warns to stdout and exits 0" {
-	# Ported from pnpm/test/monorepo/index.ts:31 ('no projects matched the filters').
+@test "aube list --filter=<no-match>: prints nothing and exits 0" {
+	# Ported from pnpm/test/monorepo/index.ts:31 ('no projects matched the
+	# filters'). pnpm 10 and 11 print the notice here; pnpm 12 lists nothing.
 	_setup_no_match_workspace
 
 	run aube list --filter=not-exists
 	assert_success
-	assert_output --partial "No projects matched the filters in"
+	refute_output --partial "No projects matched"
 }
 
 @test "aube list --filter=<no-match> --fail-if-no-match: exits 1" {
@@ -54,7 +55,7 @@ _setup_no_match_workspace() {
 
 	run aube list --filter=not-exists --fail-if-no-match
 	assert_failure
-	assert_output --partial "did not match"
+	assert_output --partial "No projects matched the filters in"
 }
 
 @test "aube list --filter=<no-match> --parseable: silent stdout, exits 0" {
