@@ -1647,3 +1647,68 @@ fn member_licenses_read_a_linked_sibling_under_per_project_lockfiles() {
         );
     }
 }
+
+fn local_deps_project(sbx: &Sandbox) {
+    sbx.write_manifest(
+        r#"{ "name": "fmt", "version": "1.0.0", "dependencies": { "llink": "link:./llink", "ldir": "file:./ldir" } }"#,
+    );
+    sbx.write_file(
+        "llink/package.json",
+        r#"{ "name": "llink", "version": "1.0.0" }"#,
+    );
+    sbx.write_file(
+        "ldir/package.json",
+        r#"{ "name": "ldir", "version": "1.0.0" }"#,
+    );
+}
+
+/// Lockfiles written before local paths were normalized spell them as the
+/// manifest does (`file:./ldir`). A frozen install still reads them, and
+/// leaves the file as it was.
+#[test]
+fn frozen_install_reads_unnormalized_local_paths() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    local_deps_project(&sbx);
+    let lockfile = "lockfileVersion: '9.0'\n\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: false\n\n\
+        importers:\n\n  .:\n    dependencies:\n      ldir:\n        specifier: file:./ldir\n        version: file:./ldir\n      \
+        llink:\n        specifier: link:./llink\n        version: link:./llink\n\n\
+        packages:\n\n  ldir@file:./ldir:\n    resolution: {directory: ./ldir, type: directory}\n\n\
+        snapshots:\n\n  ldir@file:./ldir: {}\n";
+    sbx.write_file("pnpm-lock.yaml", lockfile);
+    sbx.cmd()
+        .args(["install", "--frozen-lockfile"])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(sbx.project.join("pnpm-lock.yaml")).unwrap(),
+        lockfile
+    );
+    for name in ["ldir", "llink"] {
+        assert!(
+            sbx.project
+                .join("node_modules")
+                .join(name)
+                .join("package.json")
+                .exists(),
+            "{name} must be linked"
+        );
+    }
+}
+
+/// The lockfile records no version for a local package, so an install from
+/// it lists the installed version, as the install that wrote it did.
+#[test]
+fn install_from_lockfile_lists_local_packages_at_their_version() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    local_deps_project(&sbx);
+    sbx.cmd().arg("install").assert().success();
+    fs::remove_dir_all(sbx.project.join("node_modules")).unwrap();
+    let output = sbx.cmd().arg("install").output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    for line in ["+ ldir@1.0.0", "+ llink@1.0.0"] {
+        assert!(stderr.contains(line), "missing {line:?} in:\n{stderr}");
+    }
+}
