@@ -1,7 +1,7 @@
 name: Trunk red
 
 # Trunk regressions are only caught POST-merge here by design: the CI matrix drops
-# macos-14 from `pull_request` (the macOS-5 concurrent-runner cap), so the leg that
+# macos-15 from `pull_request` (the macOS-5 concurrent-runner cap), so the leg that
 # runs the integration suite on macOS runs on push:main and nightly only. That is a
 # deliberate cost trade — but it means nothing is watching when trunk breaks. It once
 # stayed red for ~16h across 8 merges (a macOS-only fork bomb, #517) because a failed

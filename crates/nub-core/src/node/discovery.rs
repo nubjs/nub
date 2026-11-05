@@ -133,16 +133,22 @@ pub enum DiscoveryError {
         origin: String,
     },
 
-    /// The first `node` on PATH handed the launch straight back to nub (see
-    /// [`handed_back`]), and no other `node` is on PATH to fall back to.
+    /// Every `node` left on PATH leads back to nub: probing it started nub again
+    /// ([`DiscoveryError::ReentersNub`]).
     #[error(
         "ERR_NUB_NODE_SHIM_LOOP: `{shim}` is the first `node` on PATH, and it runs nub's own `node` \
          instead of a Node binary, so no Node is reachable through it.\n\
-         \x20\x20Its version manager has no Node active here and falls back to the next `node` on \
-         PATH. Activate a Node in that manager, put a Node binary on PATH, or pin one with \
-         `nub node pin <version>`."
+         \x20\x20A link or copy of nub, a wrapper script that runs it, or a version manager with no \
+         Node active here (which falls back to the next `node` on PATH) does this. Put a Node \
+         binary on PATH, activate one in that manager, or pin one with `nub node pin <version>`."
     )]
     NodeShimLoop { shim: String },
+
+    /// Probing `candidate` started nub again: nub refused the probe at its
+    /// recursion bound ([`crate::node::nesting`]). The PATH walk skips such a
+    /// candidate; an explicit binary turns this into [`Self::NodeExecutableIsNub`].
+    #[error("`{candidate}` starts nub again instead of running Node")]
+    ReentersNub { candidate: String },
 }
 
 /// Format the `NodeExecutableCommandFailed` text. The tool's own stderr is the
@@ -246,7 +252,9 @@ pub fn discover_node(cwd: &Path) -> Result<ResolvedNode, DiscoveryError> {
         Some((pin_str, parsed_pin, pin_source)) => {
             let parsed_pin = concretize_alias(parsed_pin, &pin_str);
             // Try shell PATH first (covers fnm/Volta/mise auto-switch).
-            if let Ok(node) = shell_path_node(Some(pin_source.clone())) {
+            let path_node = shell_path_node(Some(pin_source.clone()));
+            if let Ok(node) = &path_node {
+                let node = node.clone();
                 if node.version.satisfies(&parsed_pin) {
                     return Ok(node);
                 }
@@ -273,7 +281,7 @@ pub fn discover_node(cwd: &Path) -> Result<ResolvedNode, DiscoveryError> {
                 node.pin_source = Some(pin_source);
                 return Ok(node);
             }
-            match which_node() {
+            match path_node {
                 Err(error @ DiscoveryError::NodeShimLoop { .. }) => Err(error),
                 _ => Err(DiscoveryError::NoNodeOnPath),
             }
@@ -365,12 +373,16 @@ pub fn discover_or_provision_node(cwd: &Path) -> Result<ResolvedNode, DiscoveryE
     // Fast path: PATH / nub's store / nvm already satisfy the pin (or there's no
     // pin). Aliases never satisfy a concrete check, so they always fall through.
     // Only PinnedNotFound / NoNodeOnPath are recoverable here (provision the pin,
-    // or auto-provision when unpinned); every other error propagates unchanged.
-    match discover_node(cwd) {
+    // or auto-provision when unpinned); every other error propagates unchanged. So
+    // is a `node` that leads back to nub when a pin names the version to use. With
+    // no pin it stays an error: that `node` is most likely a version manager with
+    // nothing active, so downloading a Node would hide the setup problem it names.
+    let looped = match discover_node(cwd) {
         Ok(node) => return Ok(node),
-        Err(DiscoveryError::PinnedNotFound { .. } | DiscoveryError::NoNodeOnPath) => {}
+        Err(DiscoveryError::PinnedNotFound { .. } | DiscoveryError::NoNodeOnPath) => None,
+        Err(error @ DiscoveryError::NodeShimLoop { .. }) => Some(error),
         Err(other) => return Err(other),
-    }
+    };
     // Re-resolve the chain for the pin to provision. Warnings are deliberately
     // not re-printed — the discover_node call above already emitted them; a
     // refusal can't reach here (discover_node returned it as `other`).
@@ -378,7 +390,10 @@ pub fn discover_or_provision_node(cwd: &Path) -> Result<ResolvedNode, DiscoveryE
         // No pin AND no node on PATH (discover_node's no-pin branch returns Ok
         // when PATH has a node). Rather than dead-ending on a fresh machine,
         // auto-provision so the zero-config "default node runner" just works.
-        return provision_unpinned_node();
+        return match looped {
+            Some(error) => Err(error),
+            None => provision_unpinned_node(),
+        };
     };
 
     let fail = |reason: String| DiscoveryError::ProvisionFailed {
@@ -993,16 +1008,37 @@ fn shell_node_is_nub_shim_in(path_var: &std::ffi::OsStr, persistent_shim: Option
 /// Resolve `node` from the shell PATH and detect its version.
 /// `pin_source` is threaded through so the resulting `ResolvedNode`
 /// carries the pin filename when one was found by the walk-up.
+///
+/// A candidate whose probe starts nub again is skipped and the walk goes on, so no
+/// link, copy or wrapper of nub has to be recognised up front, and each skip removes
+/// one distinct candidate, so the walk ends. A version manager's shim with nothing
+/// active for the directory is the common case (#832): it falls back to the next
+/// `node` on PATH, stepping over only its own directories (mise's
+/// `not_found_system_fallback`, Volta with no platform), and inside a nub run that is
+/// nub's shim. It cannot be told from a healthy shim by looking at it, since a healthy
+/// one is the same file, and one esbuild postinstall reached 2,137 processes this way.
 fn shell_path_node(pin_source: Option<String>) -> Result<ResolvedNode, DiscoveryError> {
-    let node_path = which_node()?;
-    let version = detect_version(&node_path)?;
-    let utf8_path = Utf8PathBuf::try_from(node_path)
-        .map_err(|e| DiscoveryError::VersionDetection(e.to_string()))?;
-    Ok(ResolvedNode {
-        path: utf8_path,
-        version,
-        pin_source,
-    })
+    loop {
+        let node_path = which_node()?;
+        let version = match detect_version(&node_path) {
+            Ok(version) => version,
+            Err(DiscoveryError::ReentersNub { .. }) => {
+                REENTERS_NUB
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(node_path);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let utf8_path = Utf8PathBuf::try_from(node_path)
+            .map_err(|e| DiscoveryError::VersionDetection(e.to_string()))?;
+        return Ok(ResolvedNode {
+            path: utf8_path,
+            version,
+            pin_source,
+        });
+    }
 }
 
 /// True for a `node_modules/.bin` directory, which the PATH walk must step
@@ -1026,7 +1062,12 @@ fn is_package_bin_dir(dir: &Path) -> bool {
             .is_some_and(|n| n == "node_modules")
 }
 
-/// Find `node` on PATH, skipping nub's own PATH shim directories.
+/// The PATH candidates this process has seen lead back to nub, so a later
+/// discovery pass in the same run skips them without spawning another probe.
+static REENTERS_NUB: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Find `node` on PATH, skipping nub's own PATH shim directories and the candidates
+/// already known to lead back to nub.
 fn which_node() -> Result<PathBuf, DiscoveryError> {
     // The persistent global `node` shim (`~/.nub/node-shim`, `nub node shim`) is
     // a `node` hardlink to nub sitting on PATH. When nub-as-node resolves the
@@ -1038,19 +1079,21 @@ fn which_node() -> Result<PathBuf, DiscoveryError> {
     which_node_in(
         &env::var_os("PATH").unwrap_or_default(),
         persistent_shim.as_deref(),
-        &handed_back(),
+        &REENTERS_NUB
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
     )
 }
 
-/// [`which_node`] against an explicit PATH, persistent-shim dir and hand-back
-/// chain — the testable body. Three recursion guards: every directory holding nub
-/// wearing Node's name ([`is_nub_shim_dir_with`], which owns that rule for the
-/// whole module), any `node_modules/.bin` ([`is_package_bin_dir`]), and every
-/// foreign `node` that handed this launch straight back to nub ([`handed_back`]).
+/// [`which_node`] against an explicit PATH, persistent-shim dir and list of
+/// rejected candidates — the testable body. Three recursion guards: every directory
+/// holding nub wearing Node's name ([`is_nub_shim_dir_with`], which owns that rule
+/// for the whole module), any `node_modules/.bin` ([`is_package_bin_dir`]), and every
+/// `node` whose probe started nub again ([`REENTERS_NUB`]).
 fn which_node_in(
     path_var: &std::ffi::OsStr,
     persistent_shim: Option<&Path>,
-    handed_back: &[PathBuf],
+    reentrant: &[PathBuf],
 ) -> Result<PathBuf, DiscoveryError> {
     let mut skipped_loop = None;
     for dir in env::split_paths(path_var) {
@@ -1069,7 +1112,7 @@ fn which_node_in(
             if !candidate.is_file() || links_back_to_nub(&candidate, persistent_shim) {
                 continue;
             }
-            if handed_back
+            if reentrant
                 .iter()
                 .any(|shim| same_file_path(&candidate, shim))
             {
@@ -1091,7 +1134,9 @@ fn which_node_in(
 /// executable, or into one of nub's shim directories. The directory tests in
 /// [`which_node_in`] cannot see it, and resolving through it re-enters nub, which
 /// finds the same link again. A test bin dir holding `node -> <shim dir>/node`
-/// recursed without bound under a shim that predated the hand-back guard.
+/// recursed without bound this way. A probe would catch this too, but only if the
+/// shim is new enough to refuse one ([`crate::node::nesting`]); probing a link to an
+/// older installed shim would start that recursion, so this looks before it probes.
 fn links_back_to_nub(candidate: &Path, persistent_shim: Option<&Path>) -> bool {
     let Ok(target) = candidate.canonicalize() else {
         return false;
@@ -1111,91 +1156,37 @@ fn same_file_path(a: &Path, b: &Path) -> bool {
     a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
 }
 
-/// Internal marker naming the foreign `node`s a nub process has handed a launch to,
-/// so the nub such a `node` hands the launch straight back to can tell (#832).
-///
-/// A version manager's shim with nothing active for the directory falls back to
-/// the next `node` on PATH, stepping over only its OWN directories — mise's
-/// `not_found_system_fallback`, Volta with no platform. When that next `node` is
-/// nub's shim, nub resolves the manager's shim again and launches it again: one new
-/// process per round, without end (one esbuild postinstall reached 2,137). Nub
-/// cannot recognise such a shim by looking at it, since a healthy one is the same
-/// file, so it recognises the round trip instead: every launch or probe of a Node
-/// carries `<pid>:<candidates>`, the launching pid and a PATH-style list of every
-/// candidate along the current chain of hand-backs, the one being run last.
-///
-/// The whole chain is carried, not only the last candidate: with two fallback
-/// shims ahead of a real Node, skipping only the one that just handed back sends
-/// the walk to the other and back again forever. Each hand-back skips one more
-/// distinct candidate, so a chain ends once PATH runs out of them — at the real
-/// Node, or at [`DiscoveryError::NodeShimLoop`]. mise guards its own fallback the
-/// same way: a pid-scoped list of every hand-off along one `exec` chain.
-pub const LAUNCH_MARKER_ENV: &str = "__NUB_NODE_LAUNCH";
-
-/// Set [`LAUNCH_MARKER_ENV`] on a command that SPAWNS `node` — a launch, or a probe
-/// such as `node --version`, which loops exactly like a launch does. Never on an
-/// `exec`: the marker's pid would then also be the pid of the Node it became, whose
-/// own nested `node` calls would read as a round trip. Nor on a spawn of a wrapper
-/// in front of Node (a `prefix`, an env-owner loader): one that is itself a
-/// `#!/usr/bin/env node` script reaches nub's `node` shim as nub's direct child, and
-/// would read as the Node candidate handing the launch back. Use
-/// [`unmark_node_launch`] there.
+/// Record a launch of `node` in nub's recursion count ([`crate::node::nesting`]): a
+/// Node known to be real ends the chain, and anything else stays in it. Not for a
+/// wrapper in front of Node (a `prefix`, an env-owner loader), which inherits the
+/// count like any other child.
 pub fn mark_node_launch(cmd: &mut Command, node: &Path) {
-    let mut chain = handed_back();
-    chain.push(node.to_path_buf());
-    match env::join_paths(&chain)
-        .ok()
-        .and_then(|list| list.into_string().ok())
-    {
-        Some(list) => cmd.env(LAUNCH_MARKER_ENV, format!("{}:{list}", std::process::id())),
-        None => cmd.env_remove(LAUNCH_MARKER_ENV),
-    };
-}
-
-/// Clear [`LAUNCH_MARKER_ENV`] on a command whose program is not the Node candidate.
-pub fn unmark_node_launch(cmd: &mut Command) {
-    cmd.env_remove(LAUNCH_MARKER_ENV);
-}
-
-/// The foreign `node`s that handed this launch straight back to nub, outermost
-/// first; empty unless this process was entered by such a hand-back.
-fn handed_back() -> Vec<PathBuf> {
-    handed_back_from(env::var_os(LAUNCH_MARKER_ENV).as_deref(), parent_pid())
-}
-
-/// The marker's pid is the whole test. A shim that `exec`s — mise, asdf, nodenv —
-/// keeps the pid nub spawned, so nub re-entered through it sees its launcher as its
-/// PARENT, and inherits the chain. Anything else starts afresh: a nested `node` run
-/// by a script has that script's Node as its parent, so however deep scripts nest,
-/// each level resolves PATH as if nothing had been skipped. A shim that spawns
-/// rather than execs (Volta, every Windows shim) hides the hand-back the same way,
-/// and is left to its own guard, as mise leaves a child process to start its own
-/// chain.
-fn handed_back_from(marker: Option<&std::ffi::OsStr>, parent: Option<u32>) -> Vec<PathBuf> {
-    let Some((pid, chain)) = marker
-        .and_then(|m| m.to_str())
-        .and_then(|m| m.split_once(':'))
-    else {
-        return Vec::new();
-    };
-    if parent.is_none() || pid.parse::<u32>().ok() != parent {
-        return Vec::new();
+    if is_real_node(node) {
+        super::nesting::clear(cmd);
+    } else {
+        super::nesting::mark_launch(cmd, node);
     }
-    env::split_paths(chain)
-        .filter(|path| !path.as_os_str().is_empty())
-        .collect()
 }
 
-#[cfg(unix)]
-fn parent_pid() -> Option<u32> {
-    Some(std::os::unix::process::parent_id())
+/// Paths this process has seen answer as the Node binary they are.
+static REAL_NODES: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+fn remember_real_node(node: &Path) {
+    if let Ok(mut real) = REAL_NODES.lock() {
+        real.push(node.to_path_buf());
+    }
 }
 
-/// Windows has no `exec`, so a shim always sits between the two nubs and the
-/// parent test cannot match.
-#[cfg(not(unix))]
-fn parent_pid() -> Option<u32> {
-    None
+/// Whether `node` is known to be a Node binary rather than something that may lead
+/// back to nub, which is what ends a chain for [`crate::node::nesting`]: the file
+/// answered with its own `process.execPath`, or it sits in a store of real binaries
+/// and was picked by version. An unknown path, a shim's above all, is not.
+fn is_real_node(node: &Path) -> bool {
+    REAL_NODES
+        .lock()
+        .is_ok_and(|real| real.iter().any(|known| known == node))
+        || node_store_dir().is_some_and(|store| node.starts_with(store))
+        || nvm_dir().is_some_and(|nvm| node.starts_with(nvm.join("versions")))
 }
 
 /// The version of the Node at `node_path`, from a disk cache keyed on the binary's
@@ -1214,10 +1205,13 @@ fn detect_version(node_path: &Path) -> Result<NodeVersion, DiscoveryError> {
         Some(VersionEntry::Shim) => return probe_version_flag(node_path),
         None => {}
     }
-    match probe_identity(node_path) {
+    match probe_identity(node_path)? {
         Some((version, exec_path)) => {
             let direct = is_same_binary(node_path, &exec_path);
             write_version_cache(node_path, direct.then_some(&version));
+            if direct {
+                remember_real_node(node_path);
+            }
             Ok(version)
         }
         // A binary that could not say where it lives still has a version to report;
@@ -1227,28 +1221,42 @@ fn detect_version(node_path: &Path) -> Result<NodeVersion, DiscoveryError> {
 }
 
 /// `node -e` printing `process.version` and `process.execPath`, one per line. `None`
-/// when the probe fails or answers in any other shape.
-fn probe_identity(node_path: &Path) -> Option<(NodeVersion, PathBuf)> {
+/// when the probe fails or answers in any other shape; an error when it started nub
+/// again.
+fn probe_identity(node_path: &Path) -> Result<Option<(NodeVersion, PathBuf)>, DiscoveryError> {
     let mut probe = Command::new(node_path);
-    mark_node_launch(&mut probe, node_path);
+    super::nesting::mark_probe(&mut probe, node_path);
     // NODE_OPTIONS is cleared for the reason `accepted_env_flags` gives: `-e`, unlike
     // `--version`, runs its preloads.
-    let output = probe
+    let Ok(output) = probe
         .arg("-e")
         .arg("process.stdout.write(process.version + \"\\n\" + process.execPath)")
         .env_remove("NODE_OPTIONS")
         .output()
-        .ok()?;
+    else {
+        return Ok(None);
+    };
     if !output.status.success() {
-        return None;
+        if super::nesting::probe_reentered_nub(&output.stderr) {
+            return Err(DiscoveryError::ReentersNub {
+                candidate: node_path.display().to_string(),
+            });
+        }
+        return Ok(None);
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let (version, exec_path) = stdout.split_once('\n')?;
+    let Some((version, exec_path)) = stdout.split_once('\n') else {
+        return Ok(None);
+    };
     let exec_path = exec_path.trim();
     if exec_path.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some((version.trim().parse().ok()?, PathBuf::from(exec_path)))
+    Ok(version
+        .trim()
+        .parse()
+        .ok()
+        .map(|version| (version, PathBuf::from(exec_path))))
 }
 
 /// Whether two paths name one file. Hard links count, which a canonical-path
@@ -1268,13 +1276,18 @@ fn is_same_binary(a: &Path, b: &Path) -> bool {
 /// `node --version`, uncached.
 fn probe_version_flag(node_path: &Path) -> Result<NodeVersion, DiscoveryError> {
     let mut probe = Command::new(node_path);
-    mark_node_launch(&mut probe, node_path);
+    super::nesting::mark_probe(&mut probe, node_path);
     let output = probe
         .arg("--version")
         .output()
         .map_err(|e| DiscoveryError::VersionDetection(format!("{node_path:?}: {e}")))?;
 
     if !output.status.success() {
+        if super::nesting::probe_reentered_nub(&output.stderr) {
+            return Err(DiscoveryError::ReentersNub {
+                candidate: node_path.display().to_string(),
+            });
+        }
         return Err(DiscoveryError::VersionDetection(format!(
             "{node_path:?} --version exited with {}",
             output.status
@@ -1310,8 +1323,17 @@ fn node_executable_from(
         });
     }
     // Detect the version (spawns `<path> --version`, mtime-cached). A bad path /
-    // non-Node binary surfaces a clear VersionDetection error.
-    let version = detect_version(&path)?;
+    // non-Node binary surfaces a clear VersionDetection error, and one whose probe
+    // starts nub again is nub by behavior even when no path test above saw it.
+    let version = match detect_version(&path) {
+        Err(DiscoveryError::ReentersNub { .. }) => {
+            return Err(DiscoveryError::NodeExecutableIsNub {
+                path: path.display().to_string(),
+                origin: source.to_string(),
+            });
+        }
+        result => result?,
+    };
     let utf8_path =
         Utf8PathBuf::try_from(path).map_err(|e| DiscoveryError::VersionDetection(e.to_string()))?;
     Ok(Some(ResolvedNode {
@@ -1824,9 +1846,11 @@ fn read_version_entry(node_path: &Path) -> Option<VersionEntry> {
     // An entry with no `kind` predates the shim check and may hold a version a
     // shim reported for some other directory, so it is a miss.
     match entry.get("kind")?.as_str()? {
-        "binary" => Some(VersionEntry::Binary(
-            entry.get("version")?.as_str()?.parse().ok()?,
-        )),
+        "binary" => {
+            let version = entry.get("version")?.as_str()?.parse().ok()?;
+            remember_real_node(node_path);
+            Some(VersionEntry::Binary(version))
+        }
         "shim" => Some(VersionEntry::Shim),
         _ => None,
     }
@@ -1932,7 +1956,7 @@ pub fn accepted_env_flags(
     // deterministic and side-effect-free. (Pollution could only ADD tokens, never
     // drop a real flag, so this is defense-in-depth, not a correctness fix.)
     let mut probe = Command::new(node_path);
-    mark_node_launch(&mut probe, node_path);
+    super::nesting::mark_probe(&mut probe, node_path);
     let output = probe
         .arg("-e")
         .arg("process.stdout.write([...process.allowedNodeEnvironmentFlags].join(\"\\n\"))")
@@ -1982,7 +2006,7 @@ pub fn accepts_argv_flag(node_path: &Path, version: &NodeVersion, flag: &str) ->
     // cleared for the same reason as the env-flag probe: an inherited preload would
     // run for nothing and could fail the process for reasons unrelated to `flag`.
     let mut probe = Command::new(node_path);
-    mark_node_launch(&mut probe, node_path);
+    super::nesting::mark_probe(&mut probe, node_path);
     let output = probe
         .arg(flag)
         .arg("-e")
@@ -2667,11 +2691,10 @@ mod tests {
         );
     }
 
-    /// #832: every foreign `node` that handed the launch back is stepped over for
-    /// the next one, and with nothing after them the error names one instead of
-    /// looping.
+    /// #832: every `node` that leads back to nub is stepped over for the next one, and
+    /// with nothing after them the error names one instead of looping.
     #[test]
-    fn which_node_skips_handed_back_candidates_and_names_one_when_nothing_remains() {
+    fn which_node_skips_candidates_that_lead_back_to_nub_and_names_one_when_nothing_remains() {
         let tmp = unique_tmp("which-loop");
         let [mise, volta, real] = ["mise-shims", "volta-shims", "real-bin"].map(|d| tmp.join(d));
         for dir in [&mise, &volta, &real] {
@@ -2693,25 +2716,6 @@ mod tests {
             }
             other => panic!("expected NodeShimLoop, got {other:?}"),
         }
-    }
-
-    /// The marker's chain applies only to a direct hand-back from its launcher. The
-    /// same marker inherited by a nested `node` that a script started (whose parent
-    /// is that script's Node) starts afresh.
-    #[test]
-    fn a_launch_marker_carries_its_chain_only_across_a_direct_hand_back() {
-        let launcher = 4242;
-        let chain = env::join_paths(["/a/node", "/b/node"]).unwrap();
-        let mut marker = std::ffi::OsString::from(format!("{launcher}:"));
-        marker.push(&chain);
-
-        assert_eq!(
-            handed_back_from(Some(&marker), Some(launcher)),
-            [PathBuf::from("/a/node"), PathBuf::from("/b/node")]
-        );
-        assert!(handed_back_from(Some(&marker), Some(launcher + 1)).is_empty());
-        assert!(handed_back_from(Some(&marker), None).is_empty());
-        assert!(handed_back_from(Some("garbage".as_ref()), Some(launcher)).is_empty());
     }
 
     #[cfg(unix)]

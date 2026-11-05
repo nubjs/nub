@@ -848,7 +848,7 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
     // `--reporter=append-only` skip the progress object but still get the
     // dependency summary; silent and ndjson stay machine-clean.
     if !install_is_noop && should_print_human_install_summary() {
-        print_direct_dependency_summary(graph_for_link, manifests, direct_dep_info);
+        print_direct_dependency_summary(cwd, graph_for_link, manifests, direct_dep_info);
     }
     // The embedder's report slot. Placed here so a host's own end-of-install
     // block lands above the success line rather than after it. Inert with no

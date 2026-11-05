@@ -372,7 +372,7 @@ fn approve_builds_surfaces_and_runs_a_local_source_dep() {
             .assert()
             .code(1)
             .stderr(predicates::str::contains("ERR_AUBE_IGNORED_BUILDS"))
-            .stderr(predicates::str::contains("dep@file:./dep"));
+            .stderr(predicates::str::contains("dep@file:dep"));
     }
     let node_modules = sbx.project.join("node_modules");
     assert!(
@@ -396,7 +396,7 @@ fn approve_builds_surfaces_and_runs_a_local_source_dep() {
         .arg("ignored-builds")
         .assert()
         .success()
-        .stdout(predicates::str::contains("dep@file:./dep"));
+        .stdout(predicates::str::contains("dep@file:dep"));
 
     // Approving records the source key AND runs the build in the same
     // invocation, exactly like a registry dep. The scoped rebuild reaches
@@ -419,7 +419,7 @@ fn approve_builds_surfaces_and_runs_a_local_source_dep() {
         .arg("install")
         .assert()
         .success()
-        .stderr(predicates::str::contains("dep@file:./dep").not());
+        .stderr(predicates::str::contains("dep@file:dep").not());
     assert!(
         marker_exists_under(&node_modules, "BUILT_527_MARKER"),
         "the approved build must survive a reinstall"
@@ -1645,5 +1645,524 @@ fn member_licenses_read_a_linked_sibling_under_per_project_lockfiles() {
             !stdout.contains("packages/b/packages/a"),
             "{args:?} resolved the sibling against the member:\n{stdout}"
         );
+    }
+}
+
+/// Serve a one-package registry on loopback: the packument for `flaky` on any
+/// path but its tarball's. While `cut` is set, the next tarball response
+/// promises the whole body and closes the connection halfway through it, as a
+/// dropped download does. Returns the registry URL and the path of every
+/// tarball request.
+fn serve_flaky_registry(
+    tarball: Vec<u8>,
+    cut: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> (String, std::sync::Arc<Mutex<Vec<String>>>) {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let integrity = format!(
+        "sha512-{}",
+        base64::engine::general_purpose::STANDARD.encode(sha2::Sha512::digest(&tarball))
+    );
+    // Old enough for the default `minimumReleaseAge`.
+    let published = "2020-01-01T00:00:00.000Z";
+    let packument = serde_json::json!({
+        "name": "flaky",
+        "dist-tags": { "latest": "1.0.0" },
+        "modified": published,
+        "time": { "created": published, "modified": published, "1.0.0": published },
+        "versions": {
+            "1.0.0": {
+                "name": "flaky",
+                "version": "1.0.0",
+                "dist": {
+                    "tarball": format!("{url}flaky/-/flaky-1.0.0.tgz"),
+                    "integrity": integrity,
+                },
+            },
+        },
+    })
+    .to_string();
+    let requests = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let seen = requests.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            loop {
+                let mut header = String::new();
+                match reader.read_line(&mut header) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) if header == "\r\n" || header == "\n" => break,
+                    Ok(_) => {}
+                }
+            }
+            let path = line.split_whitespace().nth(1).unwrap_or_default();
+            let is_tarball = path.ends_with(".tgz");
+            let body = if is_tarball {
+                seen.lock().unwrap().push(path.to_string());
+                tarball.as_slice()
+            } else {
+                packument.as_bytes()
+            };
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let sent = if is_tarball && cut.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                &body[..body.len() / 2]
+            } else {
+                body
+            };
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(sent);
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+        }
+    });
+    (url, requests)
+}
+
+/// A tarball download the connection cuts off is downloaded again, on both
+/// paths that fetch one: the fresh resolve, which fetches as it resolves, and
+/// the install from a lockfile. The streaming fetch used to fail the install
+/// on the first broken body.
+#[test]
+fn a_tarball_download_cut_off_mid_body_is_retried() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let tarball = codeload_tarball(
+        "package",
+        &[
+            ("package.json", r#"{ "name": "flaky", "version": "1.0.0" }"#),
+            ("index.js", "module.exports = 7;\n"),
+        ],
+    );
+    let cut = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (registry, requests) = serve_flaky_registry(tarball, cut.clone());
+    sbx.write_manifest(
+        r#"{ "name": "consumer", "version": "0.0.0", "dependencies": { "flaky": "1.0.0" } }"#,
+    );
+    sbx.write_file(".npmrc", &format!("registry={registry}\n"));
+    for (shape, from_lockfile) in [("fresh resolve", false), ("lockfile install", true)] {
+        for dir in [&sbx.store, &sbx.cache] {
+            let _ = fs::remove_dir_all(dir);
+            fs::create_dir_all(dir).unwrap();
+        }
+        let _ = fs::remove_dir_all(sbx.project.join("node_modules"));
+        assert_eq!(
+            sbx.project.join("aube-lock.yaml").exists(),
+            from_lockfile,
+            "{shape}"
+        );
+        requests.lock().unwrap().clear();
+        cut.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let out = sbx.cmd().arg("install").output().unwrap();
+        assert!(
+            out.status.success(),
+            "{shape}: install failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(sbx.project.join("node_modules/flaky/index.js")).unwrap(),
+            "module.exports = 7;\n",
+            "{shape}"
+        );
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            2,
+            "{shape}: the cut-off download and the one after it"
+        );
+    }
+}
+
+/// A workspace whose members keep their own lockfiles
+/// (`sharedWorkspaceLockfile: false`), with members `a` and `b`; `b` takes a
+/// `file:` dependency so the graph is non-trivial without a registry.
+fn per_project_lockfile_workspace(sbx: &Sandbox, a_deps: &str) {
+    sbx.write_file(
+        "pnpm-workspace.yaml",
+        "packages:\n  - packages/*\nsharedWorkspaceLockfile: false\n",
+    );
+    sbx.write_manifest(r#"{ "name": "root", "version": "1.0.0", "private": true }"#);
+    sbx.write_file(
+        "packages/a/package.json",
+        &format!(r#"{{ "name": "a", "version": "1.0.0", "dependencies": {{ {a_deps} }} }}"#),
+    );
+    sbx.write_file(
+        "dep/package.json",
+        r#"{ "name": "local-dep", "version": "1.0.0" }"#,
+    );
+    sbx.write_file(
+        "packages/b/package.json",
+        r#"{ "name": "b", "version": "1.0.0", "dependencies": { "a": "workspace:*", "local-dep": "file:../../dep" } }"#,
+    );
+}
+
+/// The root lockfile of a per-project-lockfile workspace holds only the root
+/// importer, so a frozen install has to read the members' own lockfiles
+/// before judging them. Read against the root alone, every member looked like
+/// a manifest with no lockfile entry, and a frozen install of a tree the
+/// previous install had just written failed as out of date.
+#[test]
+fn frozen_install_accepts_per_project_lockfiles_it_wrote() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    per_project_lockfile_workspace(&sbx, r#""local-dep": "file:../../dep""#);
+
+    sbx.cmd().arg("install").assert().success();
+    fs::remove_dir_all(sbx.project.join("node_modules")).unwrap();
+    fs::remove_dir_all(sbx.project.join("packages/b/node_modules")).unwrap();
+    sbx.cmd()
+        .args(["install", "--frozen-lockfile"])
+        .assert()
+        .success();
+    assert!(
+        sbx.project
+            .join("packages/b/node_modules/local-dep/package.json")
+            .exists(),
+        "the frozen install must relink member b's dependencies"
+    );
+}
+
+/// pnpm records a catalog entry only in the lockfile of the project that
+/// uses it, so a frozen install has to check the member's lockfile against
+/// the workspace catalog, as pnpm 10 does (`ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`).
+/// The lockfiles are pnpm 10's own; the check fails before anything is fetched.
+#[test]
+fn frozen_install_checks_a_catalog_only_a_member_lockfile_records() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let header = "lockfileVersion: '9.0'\n\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: false\n\n";
+    sbx.write_manifest(r#"{ "name": "root", "version": "1.0.0", "private": true }"#);
+    sbx.write_file(
+        "pnpm-workspace.yaml",
+        "packages:\n  - packages/*\nsharedWorkspaceLockfile: false\ncatalog:\n  pinned-pkg: ^2.0.0\n",
+    );
+    sbx.write_file(
+        "pnpm-lock.yaml",
+        &format!("{header}importers:\n\n  .: {{}}\n"),
+    );
+    // Nothing may be fetched: an install that accepts the lockfile fails here.
+    sbx.write_file(".npmrc", "registry=http://127.0.0.1:9/\n");
+    sbx.write_file(
+        "packages/a/package.json",
+        r#"{ "name": "a", "version": "1.0.0", "dependencies": { "pinned-pkg": "catalog:" } }"#,
+    );
+    sbx.write_file(
+        "packages/a/pnpm-lock.yaml",
+        &format!(
+            "{header}catalogs:\n  default:\n    pinned-pkg:\n      specifier: ^1.0.0\n      version: 1.0.0\n\n\
+             importers:\n\n  .:\n    dependencies:\n      pinned-pkg:\n        specifier: 'catalog:'\n        version: 1.0.0\n\n\
+             packages:\n\n  pinned-pkg@1.0.0:\n    resolution: {{integrity: sha512-AAAA}}\n\n\
+             snapshots:\n\n  pinned-pkg@1.0.0: {{}}\n"
+        ),
+    );
+    sbx.cmd()
+        .args(["install", "--frozen-lockfile"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("ERR_AUBE_OUTDATED_LOCKFILE"))
+        .stderr(predicates::str::contains("lockfile says ^1.0.0"));
+}
+
+/// `devEngines.runtime` belongs to one project, so a member can pin a runtime
+/// the root doesn't. The lockfiles are pnpm 10's, which frozen-installs this
+/// tree, with the pin's platform list cut to one entry.
+#[test]
+fn frozen_install_accepts_a_runtime_pin_only_a_member_records() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let header = "lockfileVersion: '9.0'\n\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: false\n\n";
+    sbx.write_manifest(r#"{ "name": "root", "version": "1.0.0", "private": true }"#);
+    sbx.write_file(
+        "pnpm-workspace.yaml",
+        "packages:\n  - packages/*\nsharedWorkspaceLockfile: false\n",
+    );
+    sbx.write_file(
+        "pnpm-lock.yaml",
+        &format!("{header}importers:\n\n  .: {{}}\n"),
+    );
+    sbx.write_file(
+        "packages/a/package.json",
+        r#"{ "name": "a", "version": "1.0.0", "devEngines": { "runtime": { "name": "node", "version": "24.4.0", "onFail": "download" } } }"#,
+    );
+    sbx.write_file(
+        "packages/a/pnpm-lock.yaml",
+        &format!(
+            "{header}importers:\n\n  .:\n    devDependencies:\n      node:\n        specifier: runtime:24.4.0\n        version: runtime:24.4.0\n\n\
+             packages:\n\n  node@runtime:24.4.0:\n    resolution:\n      type: variations\n      variants:\n        - resolution:\n            archive: tarball\n            bin: bin/node\n            integrity: sha256-19sOUBfWj040QF9cma04lUgXk8xkIFUOWCt+7fkReA8=\n            type: binary\n            url: https://nodejs.org/download/release/v24.4.0/node-v24.4.0-darwin-arm64.tar.gz\n          targets:\n            - cpu: arm64\n              os: darwin\n    hasBin: true\n\n\
+             snapshots:\n\n  node@runtime:24.4.0: {{}}\n"
+        ),
+    );
+    sbx.cmd()
+        .args(["install", "--frozen-lockfile"])
+        .assert()
+        .success();
+}
+
+/// A registry that serves one packument, `pinned-pkg`, whose versions the
+/// test can change between installs. `--lockfile-only` installs read only
+/// packuments, so no tarballs are needed.
+fn packument_registry() -> (String, std::sync::Arc<Mutex<Vec<&'static str>>>) {
+    use std::io::{Read, Write};
+    let versions = std::sync::Arc::new(Mutex::new(vec!["1.0.0"]));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let served = versions.clone();
+    let base = url.clone();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut request = Vec::new();
+            let mut buf = [0_u8; 4096];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => request.extend_from_slice(&buf[..n]),
+                }
+            }
+            let path = String::from_utf8_lossy(&request)
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("/")
+                .to_string();
+            let body = if path == "/pinned-pkg" {
+                let list = served.lock().unwrap().clone();
+                let entries: Vec<String> = list
+                    .iter()
+                    .map(|v| {
+                        format!(
+                            r#""{v}": {{ "name": "pinned-pkg", "version": "{v}", "dist": {{ "tarball": "{base}pinned-pkg-{v}.tgz", "integrity": "sha512-AAAA" }} }}"#
+                        )
+                    })
+                    .collect();
+                let times: Vec<String> = list
+                    .iter()
+                    .map(|v| format!(r#""{v}": "2020-01-01T00:00:00.000Z""#))
+                    .collect();
+                Some(format!(
+                    r#"{{ "name": "pinned-pkg", "dist-tags": {{ "latest": "{}" }}, "versions": {{ {} }}, "time": {{ "modified": "2020-01-01T00:00:00.000Z", {} }} }}"#,
+                    list.last().unwrap(),
+                    entries.join(", "),
+                    times.join(", ")
+                ))
+            } else {
+                None
+            };
+            let (status, body) = match body {
+                Some(body) => ("200 OK", body),
+                None => ("404 Not Found", "{}".to_string()),
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+            let _ = stream.read_to_end(&mut Vec::new());
+        }
+    });
+    (url, versions)
+}
+
+/// A member's locked version survives an install once a newer version is
+/// published, as with pnpm. The members' lockfiles used to be read only
+/// after the drift check, which compared the root-only lockfile against every
+/// member and re-resolved them all to the newest match.
+#[test]
+fn install_keeps_member_versions_locked_in_per_project_lockfiles() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let (registry, versions) = packument_registry();
+    per_project_lockfile_workspace(&sbx, r#""pinned-pkg": ">=1.0.0""#);
+    sbx.write_file(".npmrc", &format!("registry={registry}\n"));
+    let locked = |sbx: &Sandbox| {
+        let lock = fs::read_to_string(sbx.project.join("packages/a/aube-lock.yaml")).unwrap();
+        ["1.0.0", "2.0.0"]
+            .into_iter()
+            .find(|v| lock.contains(&format!("pinned-pkg@{v}:")))
+            .unwrap_or_else(|| panic!("no pinned-pkg entry in:\n{lock}"))
+    };
+
+    sbx.cmd()
+        .args(["install", "--lockfile-only"])
+        .assert()
+        .success();
+    assert_eq!(locked(&sbx), "1.0.0");
+
+    versions.lock().unwrap().push("2.0.0");
+    // Drop the cached packument, so every later resolve sees 2.0.0.
+    fs::remove_dir_all(&sbx.cache).unwrap();
+    fs::create_dir_all(&sbx.cache).unwrap();
+    sbx.cmd()
+        .args(["install", "--lockfile-only"])
+        .assert()
+        .success();
+    assert_eq!(
+        locked(&sbx),
+        "1.0.0",
+        "the member's locked version must be kept"
+    );
+
+    // Control: without the member's lockfile the same install does see 2.0.0,
+    // so the assertion above is not a stale packument cache.
+    fs::remove_file(sbx.project.join("packages/a/aube-lock.yaml")).unwrap();
+    sbx.cmd()
+        .args(["install", "--lockfile-only"])
+        .assert()
+        .success();
+    assert_eq!(locked(&sbx), "2.0.0");
+}
+
+fn local_deps_project(sbx: &Sandbox) {
+    sbx.write_manifest(
+        r#"{ "name": "fmt", "version": "1.0.0", "dependencies": { "llink": "link:./llink", "ldir": "file:./ldir" } }"#,
+    );
+    sbx.write_file(
+        "llink/package.json",
+        r#"{ "name": "llink", "version": "1.0.0" }"#,
+    );
+    sbx.write_file(
+        "ldir/package.json",
+        r#"{ "name": "ldir", "version": "1.0.0" }"#,
+    );
+}
+
+/// Lockfiles written before local paths were normalized spell them as the
+/// manifest does (`file:./ldir`). A frozen install still reads them, and
+/// leaves the file as it was.
+#[test]
+fn frozen_install_reads_unnormalized_local_paths() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    local_deps_project(&sbx);
+    let lockfile = "lockfileVersion: '9.0'\n\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: false\n\n\
+        importers:\n\n  .:\n    dependencies:\n      ldir:\n        specifier: file:./ldir\n        version: file:./ldir\n      \
+        llink:\n        specifier: link:./llink\n        version: link:./llink\n\n\
+        packages:\n\n  ldir@file:./ldir:\n    resolution: {directory: ./ldir, type: directory}\n\n\
+        snapshots:\n\n  ldir@file:./ldir: {}\n";
+    sbx.write_file("pnpm-lock.yaml", lockfile);
+    sbx.cmd()
+        .args(["install", "--frozen-lockfile"])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(sbx.project.join("pnpm-lock.yaml")).unwrap(),
+        lockfile
+    );
+    for name in ["ldir", "llink"] {
+        assert!(
+            sbx.project
+                .join("node_modules")
+                .join(name)
+                .join("package.json")
+                .exists(),
+            "{name} must be linked"
+        );
+    }
+}
+
+/// A local package is named as pnpm names it, which is how the lockfile hands
+/// it back (`dep@file:.deps/dep`). A policy key spelled from the manifest has
+/// to keep its meaning through that round trip.
+const LOCAL_PATH_SPELLINGS: [(&str, &str); 4] = [
+    ("./dep", "dep"),
+    ("./.deps/dep", ".deps/dep"),
+    ("./../dep", "../dep"),
+    ("unused/../dep", "dep"),
+];
+
+fn local_build_project(sbx: &Sandbox, spelled: &str, on_disk: &str, marker: &str, allow: bool) {
+    write_marker_dep(sbx, on_disk, marker);
+    fs::create_dir_all(sbx.project.join("unused")).unwrap();
+    // `write_marker_dep` names the package after its path.
+    let manifest = sbx.project.join(on_disk).join("package.json");
+    let contents = fs::read_to_string(&manifest).unwrap();
+    fs::write(
+        &manifest,
+        contents.replace(&format!("\"name\": \"{on_disk}\""), "\"name\": \"dep\""),
+    )
+    .unwrap();
+    sbx.write_manifest(&format!(
+        r#"{{
+            "name": "root",
+            "version": "1.0.0",
+            "dependencies": {{ "dep": "file:{spelled}" }},
+            "aube": {{ "allowBuilds": {{ "dep@file:{spelled}": {allow} }} }}
+        }}"#
+    ));
+}
+
+#[test]
+fn source_approval_spelled_from_the_manifest_holds_on_an_install_from_lockfile() {
+    let _guard = e2e_lock();
+    for (spelled, on_disk) in LOCAL_PATH_SPELLINGS {
+        let sbx = Sandbox::new();
+        local_build_project(&sbx, spelled, on_disk, "SPELLED_APPROVED", true);
+        let node_modules = sbx.project.join("node_modules");
+        sbx.cmd().arg("install").assert().success();
+        assert!(
+            marker_exists_under(&node_modules, "SPELLED_APPROVED"),
+            "{spelled}: a fresh install runs the approved build"
+        );
+        fs::remove_dir_all(&node_modules).unwrap();
+        sbx.cmd()
+            .args(["install", "--frozen-lockfile"])
+            .assert()
+            .success();
+        assert!(
+            marker_exists_under(&node_modules, "SPELLED_APPROVED"),
+            "{spelled}: the approval must match the path the lockfile hands back"
+        );
+    }
+}
+
+/// An explicit denial outranks allow-all, so one that stopped matching after
+/// the round trip would run a script somebody forbade.
+#[test]
+fn source_denial_spelled_from_the_manifest_holds_on_an_install_from_lockfile() {
+    let _guard = e2e_lock();
+    for (spelled, on_disk) in LOCAL_PATH_SPELLINGS {
+        let sbx = Sandbox::new();
+        local_build_project(&sbx, spelled, on_disk, "SPELLED_DENIED", false);
+        sbx.write_file(".npmrc", "dangerouslyAllowAllBuilds=true\n");
+        let node_modules = sbx.project.join("node_modules");
+        sbx.cmd().arg("install").assert().success();
+        assert!(
+            !marker_exists_under(&node_modules, "SPELLED_DENIED"),
+            "{spelled}: a fresh install must not run the denied build"
+        );
+        fs::remove_dir_all(&node_modules).unwrap();
+        sbx.cmd()
+            .args(["install", "--frozen-lockfile"])
+            .assert()
+            .success();
+        assert!(
+            !marker_exists_under(&node_modules, "SPELLED_DENIED"),
+            "{spelled}: the denial must match the path the lockfile hands back"
+        );
+    }
+}
+
+/// The lockfile records no version for a local package, so an install from
+/// it lists the installed version, as the install that wrote it did.
+#[test]
+fn install_from_lockfile_lists_local_packages_at_their_version() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    local_deps_project(&sbx);
+    sbx.cmd().arg("install").assert().success();
+    fs::remove_dir_all(sbx.project.join("node_modules")).unwrap();
+    let output = sbx.cmd().arg("install").output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    for line in ["+ ldir@1.0.0", "+ llink@1.0.0"] {
+        assert!(stderr.contains(line), "missing {line:?} in:\n{stderr}");
     }
 }

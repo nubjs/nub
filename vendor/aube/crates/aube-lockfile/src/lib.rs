@@ -707,7 +707,7 @@ impl LockedPackage {
     pub fn source_approval_key(&self) -> Option<String> {
         self.local_source
             .as_ref()
-            .map(|source| format!("{}@{}", self.registry_name(), source.specifier()))
+            .map(|source| format!("{}@{}", self.registry_name(), source.pnpm_specifier()))
     }
 
     /// Every exact-source approval key: [`Self::source_approval_key`] first,
@@ -864,6 +864,17 @@ mod locked_package_tests {
             pkg.source_approval_key(),
             Some("pkg@file:vendor/pkg".to_string())
         );
+    }
+
+    #[test]
+    fn source_approval_key_normalizes_a_local_path() {
+        let mut pkg = pkg();
+        pkg.local_source = Some(LocalSource::Directory(PathBuf::from("./vendor/pkg")));
+        assert_eq!(
+            pkg.source_approval_key(),
+            Some("pkg@file:vendor/pkg".to_string())
+        );
+        assert_eq!(pkg.source_approval_keys(), ["pkg@file:vendor/pkg"]);
     }
 
     #[test]
@@ -1351,10 +1362,15 @@ impl LockfileGraph {
                 LocalSource::Git(_) | LocalSource::RemoteTarball(_) => continue,
             };
             *path = rebase(path);
-            // A peer-context suffix after the hashed base stays as it was.
-            if let Some(rest) = key.strip_prefix(&old_base) {
-                renames.insert(key.clone(), format!("{}{rest}", local.dep_path(&pkg.name)));
-            }
+            // A peer-context suffix after the base stays as it was. The pnpm
+            // reader keeps a transitive-only local under its raw key
+            // (`foo@file:../lib.tgz`), which names a different package in
+            // each frame, so it takes the hashed key too.
+            let rest = key.strip_prefix(&old_base).unwrap_or_else(|| {
+                let tail = key.strip_prefix(&format!("{}@", pkg.name)).unwrap_or(key);
+                tail.find('(').map_or("", |i| &tail[i..])
+            });
+            renames.insert(key.clone(), format!("{}{rest}", local.dep_path(&pkg.name)));
         }
         renames.retain(|old, new| old != new);
         if renames.is_empty() {

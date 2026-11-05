@@ -278,3 +278,39 @@ test("a flag-led file run hands Node the test runner flag bare", async () => {
   assert.ok(children.length > 0, `the probe never ran in a test child:\n${out}`);
   for (const line of children) assert.match(line, / \[\]$/, out);
 });
+
+test(
+  "a flag-led file run hands Node the watch-path flag in the spelling its filter knows",
+  { skip: process.platform === "win32" }, // Killing the run's whole tree needs a group.
+  async () => {
+    // Watch mode only removes `--watch-path` from the child it starts, so with
+    // `--watch_path` the child is a supervisor too, without end, and the program never
+    // runs. A regression reaches the deadline without the line.
+    writeFileSync(join(fixture, "watched.cjs"), 'console.log("BODY-RAN");\n');
+    const child = spawn(process.execPath, [nubr, "--watch_path=.", "watched.cjs"], {
+      cwd: fixture,
+      detached: true,
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    const kill = () => {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        // The deadline already took the group down.
+      }
+    };
+    const deadline = setTimeout(kill, 30_000);
+    const out = await new Promise((resolve) => {
+      let seen = "";
+      child.stdout.on("data", (chunk) => {
+        seen += chunk;
+        if (seen.includes("BODY-RAN")) resolve(seen);
+      });
+      child.on("exit", () => resolve(seen));
+    });
+    clearTimeout(deadline);
+    kill();
+    child.stdout.destroy();
+    assert.match(out, /BODY-RAN/);
+  },
+);

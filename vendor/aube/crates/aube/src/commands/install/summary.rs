@@ -25,6 +25,7 @@ pub(super) fn print_already_up_to_date() {
 }
 
 pub(super) fn print_direct_dependency_summary(
+    root: &std::path::Path,
     graph: &aube_lockfile::LockfileGraph,
     manifests: &[(String, aube_manifest::PackageJson)],
     direct_dep_info: &std::collections::HashMap<String, aube_resolver::DirectDepInfo>,
@@ -47,19 +48,14 @@ pub(super) fn print_direct_dependency_summary(
             let label = direct_dependency_importer_label(importer, manifests);
             eprintln!("{}{}", style::ebold(&label), style::edim(":"));
         }
-        print_direct_dependency_section(
-            graph,
-            deps,
+        let importer_dir = root.join(importer);
+        for dep_type in [
             aube_lockfile::DepType::Production,
-            direct_dep_info,
-        );
-        print_direct_dependency_section(
-            graph,
-            deps,
             aube_lockfile::DepType::Optional,
-            direct_dep_info,
-        );
-        print_direct_dependency_section(graph, deps, aube_lockfile::DepType::Dev, direct_dep_info);
+            aube_lockfile::DepType::Dev,
+        ] {
+            print_direct_dependency_section(&importer_dir, graph, deps, dep_type, direct_dep_info);
+        }
     }
     eprintln!();
 }
@@ -83,6 +79,7 @@ pub(super) fn should_print_human_install_summary() -> bool {
 }
 
 fn print_direct_dependency_section(
+    importer_dir: &std::path::Path,
     graph: &aube_lockfile::LockfileGraph,
     deps: &[aube_lockfile::DirectDep],
     dep_type: aube_lockfile::DepType,
@@ -100,7 +97,7 @@ fn print_direct_dependency_section(
     // out to hold only workspace-linked deps (no registry version to show)
     // prints no header at all, matching pnpm — which omits workspace deps
     // from the install summary entirely.
-    let rendered: Vec<(&aube_lockfile::DirectDep, &str)> = deps
+    let rendered: Vec<(&aube_lockfile::DirectDep, Option<String>)> = deps
         .iter()
         .filter_map(|dep| {
             // A `workspace:` / `link:` dep resolves to a local importer, not a
@@ -109,7 +106,7 @@ fn print_direct_dependency_section(
             // `+ pkg@?` line, so skip them here too.
             graph
                 .get_package(&dep.dep_path)
-                .map(|pkg| (*dep, pkg.version.as_str()))
+                .map(|pkg| (*dep, displayed_version(importer_dir, dep, pkg)))
         })
         .collect();
     if rendered.is_empty() {
@@ -122,10 +119,30 @@ fn print_direct_dependency_section(
             "{} {}{}{}",
             style::egreen("+").bold(),
             dep.name,
-            style::edim(format!("@{version}")),
+            style::edim(version.map(|v| format!("@{v}")).unwrap_or_default()),
             badges,
         );
     }
+}
+
+/// The version a direct dependency is listed at. pnpm records no version for
+/// a local package, so one read back from its lockfile carries a `0.0.0`
+/// placeholder; the installed manifest has the version a fresh resolve shows.
+fn displayed_version(
+    importer_dir: &std::path::Path,
+    dep: &aube_lockfile::DirectDep,
+    pkg: &aube_lockfile::LockedPackage,
+) -> Option<String> {
+    if pkg.local_source.is_none() || pkg.version != "0.0.0" {
+        return Some(pkg.version.clone());
+    }
+    let manifest = importer_dir
+        .join("node_modules")
+        .join(&dep.name)
+        .join("package.json");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(manifest).ok()?).ok()?;
+    Some(manifest.get("version")?.as_str()?.to_string())
 }
 
 /// Render the trailing badge column for a direct-dep line. Empty string

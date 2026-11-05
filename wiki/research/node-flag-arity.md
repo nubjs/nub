@@ -151,6 +151,8 @@ Harvested empirically from each Node's own authoritative metadata — `internalB
 | `--redirect-warnings` | String | ★ | | `--watch-kill-signal` | String |  |
 | `--report-dir` | String | ★ | | `--watch-path` | StringList | ★ |
 
+Releases through Node 26.13 add `--bench-isolation`, `--bench-name-pattern`, `--bench-reporter`, `--bench-reporter-destination`, `--bench-samples`, `--bench-warmup`, `--config-file`, `--process-timeout` and `--vfs-load`.
+
 ### Value-accepting aliases — Node v26.2.0 (9)
 
 These expand to a value option and so consume a token in space form. `-e`, `-r`, and `-C` are stable across all five majors.
@@ -238,22 +240,27 @@ Two viable shapes, both minimal:
 
 They compose: (A)'s baked table is the fast path, and (B) is what (A)'s fallback does, optionally memoized. Given the churn in §8 — a frozen core and a slow niche tail — (A) is the right default, correct for ~100% of real command lines with zero spawns, with the version-gated fallback closing the only correctness gap. Adopt (B)'s mtime-keyed memoization for the fallback if the introspect ever fires often enough to matter.
 
-## 10. Mode flags written with a value
+## 10. Mode flags that reach a child
 
-A valued `--test` or `--watch` starts the same mode as the bare flag, but only the bare token is kept out of the children those modes start, so the valued one reaches them.
+A `--test` or `--watch` that reaches the child its mode starts makes that child start the mode again. A valued flag, `--watch_path` and `NODE_OPTIONS` each get past Node's filter on some releases.
 
-Both are booleans, and a boolean's `=value` is ignored, so `--test=true` (or `--test=false`) starts the test runner exactly as `--test` does. Each mode removes its own flag from the `execArgv` it passes down, and the removal matches the bare token only:
+Both are booleans, and a boolean's `=value` is ignored, so `--test=true` (or `--test=false`) starts the test runner exactly as `--test` does. The parser also reads `_` in a name as `-`, and `--watch-path` implies `--watch`, so `--watch_path=src` starts watch mode exactly as `--watch-path=src` does. Each mode removes its own flags from the `execArgv` it passes down, and that removal compares text:
 
 | Node | test runner child filter | watch-mode child filter | runner started inside a test child |
 |---|---|---|---|
-| 18.19 – 18.20 | exact `--test`, `--watch` | exact `--watch` | starts another runner |
-| 20.11 | exact `--test`, `--watch` | exact `--watch` | starts another runner |
-| 20.12 | exact `--test`, `--watch` | `--watch` and `--watch=` | starts another runner |
-| 20.13 – 26 | exact `--test`, `--watch` | `--watch` and `--watch=` | refuses to run its files ([nodejs/node#52322](https://github.com/nodejs/node/pull/52322)) |
+| 18.19 – 18.20, 20.11 | exact `--test`, `--watch` | exact `--watch`, prefix `--watch-path` | starts another runner |
+| 20.12 | exact `--test`, `--watch` | `--watch`, `--watch=`, prefix `--watch-path` | starts another runner |
+| 20.13 – 22.13 | exact `--test`, `--watch` | prefix `--watch` | refuses to run its files ([nodejs/node#52322](https://github.com/nodejs/node/pull/52322)) |
+| 24.11 – 24.22, 26.5 – 26.11 | exact `--test`, `--watch` | `--watch`, `--watch=`, prefix `--watch-path` | refuses to run its files |
+| 26.13 | exact `--test`, `--watch` | the same, after reading `_` in a name as `-` | refuses to run its files |
 
-So with `--test=<value>` the child that should run a file is a runner too. Through 20.12 it starts its own child, which does the same, and the chain grows until the machine runs out of processes; each level waits on the next, so killing the first process leaves the rest running. From 20.13 the inner runner skips its files, and the command reports no tests from them. `--watch=<value>` recurses the same way on 18.x and 20.11, through watch mode's own child. Read from each release's embedded `internal/test_runner/runner` and `internal/main/watch_mode`.
+So with `--test=<value>` the child that should run a file is a runner too. Through 20.12 it starts its own child, which does the same, and the chain grows until the machine runs out of processes; each level waits on the next, so killing the first process leaves the rest running. From 20.13 the inner runner skips its files, and the command reports no tests from them. `--watch=<value>` recurses the same way on 18.x and 20.11, through watch mode's own child, and `--watch_path` on every row but 20.13 – 22.13 and 26.13, with the program never running. Read from each release's embedded `internal/test_runner/runner` and `internal/main/watch_mode`, and run against 18.19, 20.11, 20.12, 20.19, 22.13, 24.11, 24.22, 26.5, 26.11 and 26.13. [nodejs/node#66365](https://github.com/nodejs/node/pull/66365) is the 26.13 change.
 
-Nub spells both modes bare before handing an argv to Node (`child_safe_modes` in `crates/nub-core/src/node/argv.rs`), so the launched process runs in the mode it asked for and no child inherits it. It scans with the §4 table and no introspect fallback: a value option missing from the table ends the scan early at its value, which can only leave a later mode flag unrewritten, and the releases that could add such an option all contain the recursion themselves.
+`NODE_OPTIONS` is the other route: every child inherits it, and no `execArgv` filter touches it. `--test` is refused there on every release. `--watch` was refused too, because the check that watch mode has a file read only the options in the variable (exit 9 from 18.19 through 24.11). Once `--watch` with no file became legal, the flag recursed ([nodejs/node#61740](https://github.com/nodejs/node/issues/61740)): 24.22 and 26.5 do, under each spelling. [nodejs/node#62143](https://github.com/nodejs/node/pull/62143) strips watch flags from the child's `NODE_OPTIONS`, so 26.11 keeps watch mode in the launched process and out of the child, except for `--watch_path` ([nodejs/node#66364](https://github.com/nodejs/node/issues/66364)), which 26.13 also strips.
+
+An env file is the third route, on plain Node only. Node reads `NODE_OPTIONS` out of `--env-file`, and each child reads the same file, so a watch flag there recursed on 24.22, 26.5, 26.11 and 26.13. Nub ignores that variable in an env file, so a run through Nub stayed at one supervisor on each of those releases. Two other channels are not routes: with watch settings in Node's own config file, 24.11 through 26.13 ran the program with no chain, and so did `--experimental-bench --bench=1` on 26.11 and 26.13.
+
+Nub hands Node only what its filters remove. `child_safe_modes` in `crates/nub-core/src/node/argv.rs` respells these flags among Node's own options, and `lift_watch_flags` moves a watch flag from an inherited `NODE_OPTIONS` to the launched process's argv. That gives every release the behavior of the upstream fix, including the releases that refuse the flag: the launched process runs in watch mode and no child does. A `--no-watch` after the last of them selects no mode at all, so that value stays as written. A project's `nodeOptions` cannot set a watch flag at all, because that field also reaches Node processes Nub does not start. The scan uses the §4 table and no introspect fallback: a value option missing from the table ends the scan early at its value, which can only leave a later mode flag unrewritten, and from 26.13 Node contains that by itself.
 
 ## Appendix: reproduction
 
@@ -271,3 +278,4 @@ Every revision to this document, with the date and what changed.
 
 - 2026-06-28 — Initial write-up.
 - 2026-11-04 — Added §10: how a valued `--test` or `--watch` reaches the children those modes start, per release, and the bare spelling Nub hands Node.
+- 2026-11-05 — §10 now covers `--watch_path`, `NODE_OPTIONS` and env files, the other routes to a child, with each release's filter. §4 lists the value options added through 26.13.

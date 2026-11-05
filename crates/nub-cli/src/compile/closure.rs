@@ -2,9 +2,9 @@
 //!
 //! Ejecting a package used to eject everything it depends on. The predicate was
 //! evaluated once, at the root, and the rest of the closure inherited the verdict
-//! by association — an association nothing justified. `pdfkit` must ship verbatim
-//! because it reads its fonts off `__dirname`; `fontkit` never had to, and
-//! `@swc/helpers` shipped 438 files so that two of them could be loaded.
+//! by association — an association nothing justified. `jsdom` must ship verbatim
+//! because it reads a stylesheet from a path built at run time; `parse5` never had
+//! to, and its 64 files now ship as a chunk and a stub manifest.
 //!
 //! That matters more than the file count suggests. The launcher byte-verifies the
 //! WHOLE extracted tree on every warm start (`app_cache_tree_matches`), so an
@@ -13,8 +13,9 @@
 //!
 //! So [`super::native`] classifies every package in the closure on its own and
 //! hands the clean ones here. Each specifier an ejected package names across the
-//! boundary becomes an entry, and the chunk answering it is emitted AT the path
-//! Node will look for — `node_modules/fontkit/index.js` — beside a stub manifest.
+//! boundary becomes an entry, and the chunk answering it is emitted inside the
+//! directory Node will look in — `node_modules/parse5/__nub/0.js` — beside a stub
+//! manifest whose `exports` points at it.
 //! Writing the chunk in the stub's own directory rather than at the app root is
 //! what keeps a `require` of a still-verbatim neighbour resolving: Node walks up
 //! from the file that ran, which is exactly where the materialiser placed that
@@ -31,9 +32,9 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use rolldown::plugin::__inner::SharedPluginable;
 use rolldown::plugin::{
     HookLoadArgs, HookLoadOutput, HookLoadReturn, HookResolveIdArgs, HookResolveIdOutput,
@@ -43,6 +44,7 @@ use rolldown::{BundlerBuilder, BundlerOptions, InputItem};
 use rolldown_common::{
     IsExternal, ModuleType, Output, OutputFormat, Platform, RawMinifyOptions, ResolveOptions,
 };
+use rolldown_error::{BuildDiagnostic, DiagnosticOptions, EventKind};
 
 use super::native_layout::IslandFile;
 
@@ -68,7 +70,7 @@ pub struct Entry {
     /// as Node would from there, `exports` map and all.
     pub importer: PathBuf,
     pub specifier: String,
-    /// Where the chunk lands: `node_modules/fontkit/__nub/0.js`.
+    /// Where the chunk lands: `node_modules/parse5/__nub/0.js`.
     pub chunk: String,
     pub esm: bool,
 }
@@ -76,10 +78,30 @@ pub struct Entry {
 #[derive(Default)]
 pub struct Plan {
     pub entries: Vec<Entry>,
-    /// Packages left verbatim. The bundle leaves every one of them to Node: the
-    /// real files are already in the payload, and a copy inside a chunk would be a
-    /// second module object with a different `__dirname`.
-    pub verbatim: BTreeSet<String>,
+    /// Installs left verbatim, by real directory. The bundle leaves every one of
+    /// them to Node: the real files are already in the payload, and a copy inside a
+    /// chunk would be a second module object with a different `__dirname`. Not by
+    /// name: a clean install of a package another closure ships verbatim still
+    /// bundles, and left to Node it would load the other one.
+    pub verbatim: BTreeSet<PathBuf>,
+    /// The next chunk number. It only ever goes up: entries are filtered and removed
+    /// after they are numbered, so counting them hands out a number a live chunk holds.
+    pub next_chunk: usize,
+}
+
+/// A verbatim install a bundled module imports, and the chunk that module landed in.
+pub struct VerbatimImport {
+    pub chunk: String,
+    pub module: PathBuf,
+    pub package: String,
+    pub instance: PathBuf,
+}
+
+/// What [`bundle`] emitted, with every import it left to Node.
+#[derive(Default)]
+pub struct Bundled {
+    pub files: Vec<IslandFile>,
+    pub imports: Vec<VerbatimImport>,
 }
 
 /// The bare specifiers `root` names in its own source.
@@ -194,32 +216,37 @@ pub fn export_entry(at: &str, entry: &Entry) -> (String, &'static str, String) {
 /// under `__nub_closure/` at the app root — so `@noble/hashes/sha2` and
 /// `@noble/hashes/utils` share their internals instead of carrying two copies.
 ///
-/// One consequence is worth stating rather than hiding: a package left verbatim is
-/// external here, and a shared chunk resolves it by walking up from the app root,
-/// which finds a top-level `node_modules` and not a nested one. Every tree
-/// measured so far puts the verbatim packages at the top level, and the shape that
-/// would break — a bundled package requiring a verbatim one out of a NESTED
-/// install — has not been produced. It stays a known limit rather than machinery
-/// nothing has needed.
-pub fn bundle(plan: &Plan, minify: bool, keep_names: bool) -> Result<Vec<IslandFile>> {
-    let mut files = Vec::new();
+/// A package left verbatim is external here, so a chunk finds it by walking up from
+/// where the chunk landed: an entry chunk from its stub, a shared one from the app
+/// root. Neither is where the importing module sat, so the imports are returned for
+/// the caller to check against the payload.
+pub fn bundle(plan: &Plan, minify: bool, keep_names: bool) -> Result<Bundled> {
+    let mut bundled = Bundled::default();
     for esm in [false, true] {
         let entries: Vec<&Entry> = plan.entries.iter().filter(|e| e.esm == esm).collect();
         if !entries.is_empty() {
-            files.extend(build(&entries, &plan.verbatim, esm, minify, keep_names)?);
+            let built = build(&entries, &plan.verbatim, esm, minify, keep_names)?;
+            bundled.files.extend(built.files);
+            bundled.imports.extend(built.imports);
         }
     }
-    Ok(files)
+    Ok(bundled)
 }
 
 fn build(
     plan: &[&Entry],
-    verbatim: &BTreeSet<String>,
+    verbatim: &BTreeSet<PathBuf>,
     esm: bool,
     minify: bool,
     keep_names: bool,
-) -> Result<Vec<IslandFile>> {
+) -> Result<Bundled> {
     let verbatim = verbatim.clone();
+    let synthetic: BTreeSet<String> = plan
+        .iter()
+        .map(|entry| entry.importer.to_string_lossy().into_owned())
+        .collect();
+    let imports: Arc<Mutex<BTreeSet<(String, String, PathBuf)>>> = Arc::default();
+    let recorded = Arc::clone(&imports);
     let entries = Arc::new(Entries {
         sources: plan
             .iter()
@@ -270,8 +297,19 @@ fn build(
         minify: Some(RawMinifyOptions::Bool(minify)),
         keep_names: Some(keep_names),
         external: Some(IsExternal::Fn(Some(Arc::new(
-            move |specifier: &str, _importer: Option<&str>, _resolved: bool| {
-                let external = verbatim.contains(package_of(specifier));
+            move |specifier: &str, importer: Option<&str>, _resolved: bool| {
+                // Never an entry's own specifier: its chunk is written into a stub
+                // of that package, so leaving it to Node is a `require` of itself.
+                let install = importer
+                    .filter(|importer| !synthetic.contains(*importer))
+                    .and_then(|importer| {
+                        verbatim_install(&verbatim, specifier, importer)
+                            .map(|install| (importer.to_string(), install))
+                    });
+                let external = install.is_some();
+                if let (Some((importer, install)), Ok(mut seen)) = (install, recorded.lock()) {
+                    seen.insert((importer, package_of(specifier).to_string(), install));
+                }
                 Box::pin(async move { Ok(external) })
             },
         )))),
@@ -299,18 +337,81 @@ fn build(
             .await
             .map_err(|e| anyhow!("bundling the eject closure failed: {e:?}"))
     })?;
-    Ok(output
-        .assets
+    reject_unresolved_entries(plan, &output.warnings)?;
+    let recorded = imports
+        .lock()
+        .map_err(|_| anyhow!("the closure import collector was poisoned"))?;
+    let mut bundled = Bundled::default();
+    for asset in &output.assets {
+        let Output::Chunk(chunk) = asset else {
+            continue;
+        };
+        bundled.files.push(IslandFile {
+            name: chunk.filename.to_string(),
+            bytes: chunk.code.as_bytes().to_vec(),
+            executable: false,
+        });
+        for (module, package, instance) in recorded.iter() {
+            if chunk.modules.keys.iter().any(|key| key.as_str() == module) {
+                bundled.imports.push(VerbatimImport {
+                    chunk: chunk.filename.to_string(),
+                    module: PathBuf::from(module),
+                    package: package.clone(),
+                    instance: instance.clone(),
+                });
+            }
+        }
+    }
+    Ok(bundled)
+}
+
+/// The verbatim install a bare specifier resolves to from `importer`, if it is one.
+fn verbatim_install(
+    verbatim: &BTreeSet<PathBuf>,
+    specifier: &str,
+    importer: &str,
+) -> Option<PathBuf> {
+    if specifier.starts_with('.') || Path::new(specifier).is_absolute() {
+        return None;
+    }
+    let root = super::native::resolve_package_root(Path::new(importer), package_of(specifier))?;
+    let real = std::fs::canonicalize(root).ok()?;
+    verbatim.contains(&real).then_some(real)
+}
+
+/// Fail the build when an entry's own specifier resolved to nothing.
+///
+/// Every entry names a package the closure walk found installed, so this is never
+/// the package's fault. And the outcome is never a working binary: Rolldown leaves
+/// an unresolved bare specifier external, so the chunk becomes a `require` of the
+/// very stub it is written into, and Node's cycle handling gives every caller an
+/// empty object. That is how every jsdom chunk shipped under an isolated install,
+/// failing at run time with `SymbolTree is not a constructor`.
+///
+/// Matched on the rendered message because [`BuildDiagnostic`] offers no
+/// structured importer, and the synthetic importer's file name is nub's own.
+fn reject_unresolved_entries(plan: &[&Entry], warnings: &[BuildDiagnostic]) -> Result<()> {
+    let importers: Vec<String> = plan
         .iter()
-        .filter_map(|asset| match asset {
-            Output::Chunk(chunk) => Some(IslandFile {
-                name: chunk.filename.to_string(),
-                bytes: chunk.code.as_bytes().to_vec(),
-                executable: false,
-            }),
-            Output::Asset(_) => None,
-        })
-        .collect())
+        .filter_map(|entry| entry.importer.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect();
+    let opts = DiagnosticOptions::default();
+    let unresolved: Vec<String> = warnings
+        .iter()
+        .filter(|w| matches!(w.kind(), EventKind::UnresolvedImport))
+        .map(|w| w.to_message_with(&opts))
+        .filter(|message| importers.iter().any(|name| message.contains(name.as_str())))
+        .collect();
+    if unresolved.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "Nub could not bundle the dependencies of an unbundled package:\n  {}\n\
+         \x20 This is a bug in Nub. Passing --unbundled <package> for each package named\n\
+         \x20 above ships it as installed instead, which avoids it.",
+        unresolved.join("\n  ")
+    )
 }
 
 /// Supplies each entry: a one-line CommonJS module whose whole body is the
@@ -494,11 +595,11 @@ fn skip_noncode(bytes: &[u8], i: usize) -> Option<usize> {
     }
 }
 
-fn is_word_byte(byte: u8) -> bool {
+pub(super) fn is_word_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
 }
 
-fn skip_spaces(bytes: &[u8], mut i: usize) -> usize {
+pub(super) fn skip_spaces(bytes: &[u8], mut i: usize) -> usize {
     while matches!(bytes.get(i), Some(b' ' | b'\t' | b'\n' | b'\r')) {
         i += 1;
     }
@@ -511,7 +612,7 @@ fn skip_spaces(bytes: &[u8], mut i: usize) -> usize {
 /// constant any parser would fold, but a scanner that accepted the backtick would
 /// then have to decide whether a `${` follows — and reading a substitution as a
 /// constant is the one mistake here that ships a broken binary.
-fn literal(text: &str, i: usize) -> Option<(&str, usize)> {
+pub(super) fn literal(text: &str, i: usize) -> Option<(&str, usize)> {
     let bytes = text.as_bytes();
     let quote = *bytes.get(i)?;
     if quote != b'\'' && quote != b'"' {

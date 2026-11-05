@@ -29,7 +29,7 @@ jobs:
         # release.yml builds + publishes but no x64 Windows leg ever runs (free for
         # public repos). darwin-arm64 + win32-x64 cover the other binary-selection
         # paths.
-        os: [ubuntu-latest, macos-14, windows-latest, windows-11-arm]
+        os: [ubuntu-latest, macos-15, windows-latest, windows-11-arm]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read

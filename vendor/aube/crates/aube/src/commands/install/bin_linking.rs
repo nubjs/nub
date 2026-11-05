@@ -220,22 +220,163 @@ fn read_materialized_pkg_json_cached(
     Ok(value)
 }
 
-/// Create top-level + bundled bin symlinks for one dep. Extracted so
-/// both the root-importer pass (`link_bins`) and the per-workspace
-/// loop use the same code path.
+/// Who gets a bin name when several dependencies of one `.bin` declare it. The
+/// choice is made per name, before anything is written; a write order could not
+/// make it, because two packages can each deserve a different name they share.
+///
+/// The order, strongest first:
+///
+/// 1. A package's own bins beat those of a package bundled inside another.
+///    pnpm does not link bundled bins at all, so they yield to everything.
+/// 2. `pkg_owns_bin`, as pnpm's `compareCommandsInConflict`.
+/// 3. A dependency installed under its own package name beats one that is not
+///    (`"ts5": "npm:typescript@5"`). **This tier is nub's, not pnpm's.** pnpm goes
+///    straight to the tie-breaks below, so `typescript@5` beside
+///    `ts7: npm:typescript@7` runs 7 when a script says `tsc`. The alias is there
+///    so that code can import a second copy; it should not change which compiler
+///    the project's plain `typescript` dependency answers to.
+/// 4. The greater package name, then the greater version, as pnpm.
+#[derive(Clone)]
+struct BinProvider {
+    pkg_name: String,
+    version: Option<node_semver::Version>,
+    aliased: bool,
+    bundled: bool,
+}
+
+impl BinProvider {
+    fn new(install_name: &str, pkg_json: &serde_json::Value, bundled: bool) -> Self {
+        let declared_name = pkg_json.get("name").and_then(|name| name.as_str());
+        Self {
+            pkg_name: declared_name.unwrap_or(install_name).to_string(),
+            version: pkg_json
+                .get("version")
+                .and_then(|version| version.as_str())
+                .and_then(|version| node_semver::Version::parse(version).ok()),
+            aliased: declared_name.is_some_and(|name| name != install_name),
+            bundled,
+        }
+    }
+
+    fn compare_for_bin(&self, other: &Self, bin_name: &str) -> std::cmp::Ordering {
+        other
+            .bundled
+            .cmp(&self.bundled)
+            .then_with(|| {
+                pkg_owns_bin(bin_name, &self.pkg_name).cmp(&pkg_owns_bin(bin_name, &other.pkg_name))
+            })
+            .then_with(|| other.aliased.cmp(&self.aliased))
+            .then_with(|| compare_pkg_names(&self.pkg_name, &other.pkg_name))
+            .then_with(|| self.version.cmp(&other.version))
+    }
+}
+
+/// pnpm's `pkgOwnsBin`: a package named `X` owns the `X` bin, plus the names in
+/// its `BIN_OWNER_OVERRIDES`, for tools shipped inside a differently named package.
+fn pkg_owns_bin(bin_name: &str, pkg_name: &str) -> bool {
+    bin_name == pkg_name
+        || match bin_name {
+            "npx" => pkg_name == "npm",
+            "pnpm" => pkg_name == "@pnpm/exe",
+            "pn" | "pnpx" | "pnx" => matches!(pkg_name, "pnpm" | "@pnpm/exe"),
+            _ => false,
+        }
+}
+
+/// `String.prototype.localeCompare` over the characters npm names use, which is
+/// what pnpm's tie-break calls: punctuation before digits before letters, letters
+/// case-insensitive, lowercase first on an otherwise equal name.
+fn compare_pkg_names(left: &str, right: &str) -> std::cmp::Ordering {
+    fn collation_key(byte: u8) -> (u8, u8) {
+        match byte {
+            b'_' => (0, 0),
+            b'-' => (1, 0),
+            b'.' => (2, 0),
+            b'@' => (3, 0),
+            b'/' => (4, 0),
+            b'0'..=b'9' => (5, byte),
+            _ => (6, byte.to_ascii_lowercase()),
+        }
+    }
+    left.bytes()
+        .map(collation_key)
+        .cmp(right.bytes().map(collation_key))
+        .then_with(|| right.cmp(left))
+}
+
+/// The winner of every bin name offered for one `.bin` directory.
+#[derive(Default)]
+struct BinClaims(BTreeMap<String, (PathBuf, BinProvider)>);
+
+impl BinClaims {
+    fn offer(&mut self, bin_name: String, target: PathBuf, provider: &BinProvider) {
+        match self.0.entry(bin_name) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert((target, provider.clone()));
+            }
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                let bin_name = slot.key().clone();
+                let (_, current) = slot.get();
+                if provider.compare_for_bin(current, &bin_name).is_gt() {
+                    tracing::debug!(
+                        "bin {bin_name}: {} takes it from {}",
+                        provider.pkg_name,
+                        current.pkg_name
+                    );
+                    slot.insert((target, provider.clone()));
+                }
+            }
+        }
+    }
+
+    /// Offer every bin one package declares: `bin` when present, else
+    /// `directories.bin` as the fallback.
+    fn offer_pkg(
+        &mut self,
+        pkg_dir: &Path,
+        install_name: &str,
+        pkg_json: &serde_json::Value,
+        bundled: bool,
+    ) -> miette::Result<()> {
+        let provider = BinProvider::new(install_name, pkg_json, bundled);
+        let entries = if let Some(bin) = pkg_json.get("bin") {
+            bin_entries(pkg_dir, Some(&provider.pkg_name), bin)
+        } else if let Some(dir_bin) = pkg_json.get("directories").and_then(|d| d.get("bin")) {
+            dir_bin_entries(pkg_dir, dir_bin)?
+        } else {
+            Vec::new()
+        };
+        for (bin_name, target) in entries {
+            self.offer(bin_name, target, &provider);
+        }
+        Ok(())
+    }
+
+    fn link(
+        self,
+        bin_dir: &Path,
+        shim_opts: aube_linker::BinShimOptions,
+        managed: &mut ManagedBinLinks,
+        preserved: Option<&PreservedBinLinks>,
+    ) -> miette::Result<()> {
+        for (bin_name, (target, _)) in self.0 {
+            create_bin_link(bin_dir, &bin_name, &target, shim_opts, managed, preserved)?;
+        }
+        Ok(())
+    }
+}
+
+/// Offer one materialized dep's own and bundled bins.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn link_bins_for_dep(
+fn claim_bins_for_dep(
+    claims: &mut BinClaims,
     cache: &mut PkgJsonCache,
     aube_dir: &std::path::Path,
-    bin_dir: &std::path::Path,
     graph: &aube_lockfile::LockfileGraph,
     dep_path: &str,
     name: &str,
     virtual_store_dir_max_length: usize,
     placements: Option<&aube_linker::HoistedPlacements>,
-    shim_opts: aube_linker::BinShimOptions,
-    managed: &mut ManagedBinLinks,
-    preserved: Option<&PreservedBinLinks>,
 ) -> miette::Result<()> {
     let pkg_dir = materialized_pkg_dir(
         aube_dir,
@@ -252,59 +393,29 @@ pub(super) fn link_bins_for_dep(
         virtual_store_dir_max_length,
         placements,
     )?;
-    link_bins_of_pkg_dir(
-        bin_dir,
-        &pkg_dir,
-        name,
-        pkg_json.as_ref(),
-        graph,
-        dep_path,
-        shim_opts,
-        managed,
-        preserved,
-    )
+    claim_bins_of_pkg_dir(claims, &pkg_dir, name, pkg_json.as_ref(), graph, dep_path)
 }
 
-/// Shim one package's own bins (plus its bundled deps') into `bin_dir`,
-/// resolving every target against the caller's `pkg_dir`.
+/// Offer one package's own bins (plus its bundled deps'), resolving every
+/// target against the caller's `pkg_dir`.
 ///
-/// Split out of [`link_bins_for_dep`] so the hoisted pass can hand in a
+/// Split out of [`claim_bins_for_dep`] so the hoisted pass can hand in a
 /// *concrete* placement directory. A package whose name conflicts with a
 /// shallower version is materialized once per site, and each site's shims
 /// must point at its own copy — `materialized_pkg_dir` only ever returns
 /// the shallowest, so the deeper sites need their path passed in.
-#[allow(clippy::too_many_arguments)]
-fn link_bins_of_pkg_dir(
-    bin_dir: &std::path::Path,
+fn claim_bins_of_pkg_dir(
+    claims: &mut BinClaims,
     pkg_dir: &std::path::Path,
     name: &str,
     pkg_json: Option<&serde_json::Value>,
     graph: &aube_lockfile::LockfileGraph,
     dep_path: &str,
-    shim_opts: aube_linker::BinShimOptions,
-    managed: &mut ManagedBinLinks,
-    preserved: Option<&PreservedBinLinks>,
 ) -> miette::Result<()> {
     if let Some(pkg_json) = pkg_json {
-        if let Some(bin) = pkg_json.get("bin") {
-            link_bin_entries(
-                bin_dir,
-                pkg_dir,
-                Some(name),
-                bin,
-                shim_opts,
-                managed,
-                preserved,
-            )?;
-        } else if let Some(dir_bin) = pkg_json.get("directories").and_then(|d| d.get("bin")) {
-            // `bin` wins; `directories.bin` is the fallback only.
-            link_dir_bins(bin_dir, pkg_dir, dir_bin, shim_opts, managed, preserved)?;
-        }
+        claims.offer_pkg(pkg_dir, name, pkg_json, false)?;
     }
-    link_bundled_bins(
-        bin_dir, pkg_dir, graph, dep_path, shim_opts, managed, preserved,
-    )?;
-    Ok(())
+    claim_bundled_bins(claims, pkg_dir, graph, dep_path)
 }
 
 /// Hoisted layout: shim every placed package's bins into the `.bin` of
@@ -323,18 +434,11 @@ fn link_bins_of_pkg_dir(
 /// binsDir)` once per `node_modules/` in the tree and links the bins of
 /// every package sitting directly inside it.
 ///
-/// ORDERING is the conflict resolution. This pass runs before the
-/// direct-dep and self-bin passes, whose writes then overwrite it
-/// (`create_bin_shim` unlinks first), reproducing pnpm's
-/// `preferDirectCmds` — a direct dep's bin beats a hoisted transitive's —
-/// without a separate conflict table. Among colliding transitives,
-/// `HoistedPlacements::iter` yields dep_paths in `BTreeMap` order, so the
-/// greatest dep_path wins — deterministic across runs and platforms.
-/// That matches only the MIDDLE tier of pnpm's `compareCommandsInConflict`
-/// (`pkgOwnsBin` first, then `pkgName.localeCompare`, then `semver`), so a
-/// collision where one package's bin is named after the package itself —
-/// the common CLI-tool shape — can still pick the other one. Closing that
-/// gap needs a real conflict table, not a write order.
+/// [`BinClaims`] settles a name two placements in one directory share. Between
+/// this pass and the direct-dep and self-bin passes, ORDERING does: this one
+/// runs first and their writes overwrite it (`create_bin_shim` unlinks first),
+/// reproducing pnpm's `preferDirectCmds`, where a direct dep's bin beats a
+/// hoisted transitive's.
 #[allow(clippy::too_many_arguments)]
 fn link_hoisted_placement_bins(
     aube_dir: &std::path::Path,
@@ -346,6 +450,7 @@ fn link_hoisted_placement_bins(
     managed: &mut ManagedBinLinks,
     preserved: Option<&PreservedBinLinks>,
 ) -> miette::Result<()> {
+    let mut claims_by_dir: BTreeMap<PathBuf, BinClaims> = BTreeMap::new();
     for (dep_path, pkg_dir) in placements.iter() {
         let Some(pkg) = graph.get_package(dep_path) else {
             continue;
@@ -359,17 +464,17 @@ fn link_hoisted_placement_bins(
             Some(placements),
         )?;
         let bin_dir = dep_modules_dir_for(pkg_dir, &pkg.name).join(".bin");
-        link_bins_of_pkg_dir(
-            &bin_dir,
+        claim_bins_of_pkg_dir(
+            claims_by_dir.entry(bin_dir).or_default(),
             pkg_dir,
             &pkg.name,
             pkg_json.as_ref(),
             graph,
             dep_path,
-            shim_opts,
-            managed,
-            preserved,
         )?;
+    }
+    for (bin_dir, claims) in claims_by_dir {
+        claims.link(&bin_dir, shim_opts, managed, preserved)?;
     }
     Ok(())
 }
@@ -390,57 +495,82 @@ pub(super) fn link_bins(
     preserved: Option<&PreservedBinLinks>,
 ) -> miette::Result<()> {
     let bin_dir = project_dir.join(modules_dir_name).join(".bin");
-    std::fs::create_dir_all(&bin_dir).into_diagnostic()?;
+    link_importer_dep_bins(
+        project_dir,
+        &bin_dir,
+        graph.root_deps(),
+        aube_dir,
+        graph,
+        virtual_store_dir_max_length,
+        placements,
+        shim_opts,
+        cache,
+        ws_dirs,
+        ws_cache,
+        managed,
+        preserved,
+    )
+}
 
-    for dep in graph.root_deps() {
+/// Link the bins of one importer's direct deps into its `.bin`, for the root
+/// importer and each workspace member alike.
+#[allow(clippy::too_many_arguments)]
+fn link_importer_dep_bins(
+    project_dir: &std::path::Path,
+    bin_dir: &std::path::Path,
+    deps: &[aube_lockfile::DirectDep],
+    aube_dir: &std::path::Path,
+    graph: &aube_lockfile::LockfileGraph,
+    virtual_store_dir_max_length: usize,
+    placements: Option<&aube_linker::HoistedPlacements>,
+    shim_opts: aube_linker::BinShimOptions,
+    cache: &mut PkgJsonCache,
+    ws_dirs: Option<&BTreeMap<String, PathBuf>>,
+    ws_cache: &mut WsPkgJsonCache,
+    managed: &mut ManagedBinLinks,
+    preserved: Option<&PreservedBinLinks>,
+) -> miette::Result<()> {
+    std::fs::create_dir_all(bin_dir).into_diagnostic()?;
+
+    let mut claims = BinClaims::default();
+    for dep in deps {
         if let Some(ws_dir) = ws_dirs.and_then(|m| m.get(&dep.name)) {
-            link_bins_from_dir(
-                ws_cache, &bin_dir, ws_dir, &dep.name, shim_opts, managed, preserved,
-            )?;
+            claim_bins_from_dir(&mut claims, ws_cache, ws_dir, &dep.name)?;
         } else if let Some(dir) = symlinked_dep_dir(graph, &dep.dep_path, project_dir) {
-            link_bins_from_dir(
-                ws_cache, &bin_dir, &dir, &dep.name, shim_opts, managed, preserved,
-            )?;
+            claim_bins_from_dir(&mut claims, ws_cache, &dir, &dep.name)?;
         } else {
-            link_bins_for_dep(
+            claim_bins_for_dep(
+                &mut claims,
                 cache,
                 aube_dir,
-                &bin_dir,
                 graph,
                 &dep.dep_path,
                 &dep.name,
                 virtual_store_dir_max_length,
                 placements,
-                shim_opts,
-                managed,
-                preserved,
             )?;
         }
     }
-
-    Ok(())
+    claims.link(bin_dir, shim_opts, managed, preserved)
 }
 
-/// Link bins declared by a dep that lives at a directory on disk rather
+/// Offer the bins declared by a dep that lives at a directory on disk rather
 /// than in the virtual store — a `workspace:` sibling, or a `link:` /
 /// `portal:` target. The linker symlinks all of these straight into the
 /// importer's `node_modules/` and never materializes a
-/// `.aube/<dep_path>/`, so `link_bins_for_dep` looks up a path that does
+/// `.aube/<dep_path>/`, so `claim_bins_for_dep` looks up a path that does
 /// not exist and silently shims nothing. Read the package's own
-/// `package.json` from `pkg_dir` instead and shim each bin entry, which
+/// `package.json` from `pkg_dir` instead and offer each bin entry, which
 /// is what pnpm does for every one of these kinds.
 ///
 /// `cache` deduplicates the read+parse across importers — without it,
 /// a popular tooling package consumed by N workspace members gets its
 /// `package.json` read N times during a single install.
-pub(super) fn link_bins_from_dir(
+fn claim_bins_from_dir(
+    claims: &mut BinClaims,
     cache: &mut WsPkgJsonCache,
-    bin_dir: &Path,
     pkg_dir: &Path,
     name: &str,
-    shim_opts: aube_linker::BinShimOptions,
-    managed: &mut ManagedBinLinks,
-    preserved: Option<&PreservedBinLinks>,
 ) -> miette::Result<()> {
     let pkg_json = if let Some(cached) = cache.get(pkg_dir) {
         cached.clone()
@@ -466,19 +596,7 @@ pub(super) fn link_bins_from_dir(
         parsed
     };
     if let Some(pkg_json) = pkg_json {
-        if let Some(bin) = pkg_json.get("bin") {
-            link_bin_entries(
-                bin_dir,
-                pkg_dir,
-                Some(name),
-                bin,
-                shim_opts,
-                managed,
-                preserved,
-            )?;
-        } else if let Some(dir_bin) = pkg_json.get("directories").and_then(|d| d.get("bin")) {
-            link_dir_bins(bin_dir, pkg_dir, dir_bin, shim_opts, managed, preserved)?;
-        }
+        claims.offer_pkg(pkg_dir, name, &pkg_json, false)?;
     }
     Ok(())
 }
@@ -609,6 +727,7 @@ pub(crate) fn link_dep_bins(input: LinkDepBinsInput<'_>) -> miette::Result<()> {
         // lands, so deps whose children contribute zero shims stay
         // empty on disk.
 
+        let mut claims = BinClaims::default();
         for (child_name, child_version) in &pkg.dependencies {
             // Resolve the edge to its graph key across reader conventions —
             // in lockstep with the linker (a raw `name@tail` doubled yarn's
@@ -627,22 +746,20 @@ pub(crate) fn link_dep_bins(input: LinkDepBinsInput<'_>) -> miette::Result<()> {
                 continue;
             }
             // The sibling may have been filtered (optional on another
-            // platform); `link_bins_for_dep` already returns Ok when
+            // platform); `claim_bins_for_dep` already returns Ok when
             // the target pkg_json is absent, so just call through.
-            link_bins_for_dep(
+            claim_bins_for_dep(
+                &mut claims,
                 cache,
                 aube_dir,
-                &bin_dir,
                 graph,
                 &child_dep_path,
                 child_name,
                 virtual_store_dir_max_length,
                 placements,
-                shim_opts,
-                managed,
-                preserved,
             )?;
         }
+        claims.link(&bin_dir, shim_opts, managed, preserved)?;
     }
     Ok(())
 }
@@ -702,8 +819,8 @@ pub(super) fn link_all_bins(input: LinkAllBinsInput<'_>) -> miette::Result<Manag
     let ws_dirs_for_bins = has_workspace.then_some(ws_dirs);
     // Writers into a SHARED `.bin` run lowest-precedence first, because every
     // later pass overwrites a same-named shim (`create_bin_shim` unlinks
-    // before it writes). That makes the order below the whole conflict
-    // resolution for the hoisted layout:
+    // before it writes). Within a pass `BinClaims` picks the winner; between
+    // passes the order below does, for the hoisted layout:
     //   hoisted placements < direct deps.
     // The importer's own bins come last and never overwrite: they fill only
     // the names no dependency claimed (`link_importer_own_bins`).
@@ -768,44 +885,21 @@ pub(super) fn link_all_bins(input: LinkAllBinsInput<'_>) -> miette::Result<Manag
             }
             let pkg_dir = project_dir.join(importer_path);
             let bin_dir = pkg_dir.join(modules_dir_name).join(".bin");
-            std::fs::create_dir_all(&bin_dir).into_diagnostic()?;
-            for dep in deps {
-                if let Some(ws_dir) = ws_dirs.get(&dep.name) {
-                    link_bins_from_dir(
-                        &mut ws_pkg_json_cache,
-                        &bin_dir,
-                        ws_dir,
-                        &dep.name,
-                        shim_opts,
-                        &mut managed,
-                        preserved,
-                    )?;
-                } else if let Some(dir) = symlinked_dep_dir(graph, &dep.dep_path, project_dir) {
-                    link_bins_from_dir(
-                        &mut ws_pkg_json_cache,
-                        &bin_dir,
-                        &dir,
-                        &dep.name,
-                        shim_opts,
-                        &mut managed,
-                        preserved,
-                    )?;
-                } else {
-                    link_bins_for_dep(
-                        &mut pkg_json_cache,
-                        aube_dir,
-                        &bin_dir,
-                        graph,
-                        &dep.dep_path,
-                        &dep.name,
-                        virtual_store_dir_max_length,
-                        placements,
-                        shim_opts,
-                        &mut managed,
-                        preserved,
-                    )?;
-                }
-            }
+            link_importer_dep_bins(
+                project_dir,
+                &bin_dir,
+                deps,
+                aube_dir,
+                graph,
+                virtual_store_dir_max_length,
+                placements,
+                shim_opts,
+                &mut pkg_json_cache,
+                ws_dirs_for_bins,
+                &mut ws_pkg_json_cache,
+                &mut managed,
+                preserved,
+            )?;
             if let Some((_, member_manifest)) =
                 manifests.iter().find(|(path, _)| path == importer_path)
                 && let Some(bin) = member_manifest.extra.get("bin")
@@ -961,14 +1055,11 @@ fn bin_link_paths(bin_dir: &Path, name: &str) -> Vec<PathBuf> {
 /// Used by both the root importer (`link_bins`) and the per-workspace
 /// loop so a workspace package depending on a parent with bundled deps
 /// sees the children's bins in its own `node_modules/.bin`.
-fn link_bundled_bins(
-    bin_dir: &std::path::Path,
+fn claim_bundled_bins(
+    claims: &mut BinClaims,
     pkg_dir: &std::path::Path,
     graph: &aube_lockfile::LockfileGraph,
     dep_path: &str,
-    shim_opts: aube_linker::BinShimOptions,
-    managed: &mut ManagedBinLinks,
-    preserved: Option<&PreservedBinLinks>,
 ) -> miette::Result<()> {
     let Some(locked) = graph.get_package(dep_path) else {
         return Ok(());
@@ -982,63 +1073,13 @@ fn link_bundled_bins(
         let Ok(bundled_pkg_json) = serde_json::from_str::<serde_json::Value>(&content) else {
             continue;
         };
-        if let Some(bin) = bundled_pkg_json.get("bin") {
-            link_bin_entries(
-                bin_dir,
-                &bundled_dir,
-                Some(bundled),
-                bin,
-                shim_opts,
-                managed,
-                preserved,
-            )?;
-        } else if let Some(dir_bin) = bundled_pkg_json
-            .get("directories")
-            .and_then(|d| d.get("bin"))
-        {
-            link_dir_bins(
-                bin_dir,
-                &bundled_dir,
-                dir_bin,
-                shim_opts,
-                managed,
-                preserved,
-            )?;
-        }
+        claims.offer_pkg(&bundled_dir, bundled, &bundled_pkg_json, true)?;
     }
     Ok(())
 }
 
-/// Shim each entry of a package.json `bin` field into `bin_dir`,
-/// resolving relative targets against `pkg_dir`. Shared by the
-/// dep-bin pass (`link_bins_for_dep`), bundled-deps pass
-/// (`link_bundled_bins`), and importer self-bin pass (root + each
-/// workspace member, discussion #228).
-///
-/// String-form `bin: "./x.js"` uses the basename of `pkg_name` as the
-/// shim name (scope `@a/b` → `b`); the entry is silently skipped when
-/// `pkg_name` is `None`. Object-form `bin: { foo: "./f" }` uses each
-/// key as-is. Entries whose name or target fail
-/// [`aube_linker::validate_bin_name`] / [`aube_linker::validate_bin_target`]
-/// are dropped without error, matching the pnpm/npm "silently ignore
-/// invalid bin" behavior.
-pub(super) fn link_bin_entries(
-    bin_dir: &std::path::Path,
-    pkg_dir: &std::path::Path,
-    pkg_name: Option<&str>,
-    bin: &serde_json::Value,
-    shim_opts: aube_linker::BinShimOptions,
-    managed: &mut ManagedBinLinks,
-    preserved: Option<&PreservedBinLinks>,
-) -> miette::Result<()> {
-    for (bin_name, target) in bin_entries(pkg_dir, pkg_name, bin) {
-        create_bin_link(bin_dir, &bin_name, &target, shim_opts, managed, preserved)?;
-    }
-    Ok(())
-}
-
-/// [`link_bin_entries`] for an importer's OWN `bin` field (the root, or a
-/// workspace member into its own `.bin`): every name a dependency already
+/// Shim an importer's OWN `bin` field (the root, or a workspace member into
+/// its own `.bin`): every name a dependency already
 /// claimed in `bin_dir` during this install is skipped, so the importer's
 /// entry — usually a build output that does not exist yet — never shadows
 /// the tool its scripts mean to run.
@@ -1061,7 +1102,17 @@ fn link_importer_own_bins(
 }
 
 /// The `(shim name, target path)` pairs a package.json `bin` field declares,
-/// with invalid names and targets dropped as [`link_bin_entries`] documents.
+/// resolving relative targets against `pkg_dir`.
+///
+/// String-form `bin: "./x.js"` uses the basename of `pkg_name` as the
+/// shim name (scope `@a/b` → `b`); the entry is silently skipped when
+/// `pkg_name` is `None`. A dep's `pkg_name` is the name its own manifest
+/// declares rather than the alias it was installed under, as in npm, pnpm
+/// and bun: `"mk": "npm:mkdirp"` provides `mkdirp`. Object-form
+/// `bin: { foo: "./f" }` uses each key as-is. Entries whose name or target
+/// fail [`aube_linker::validate_bin_name`] /
+/// [`aube_linker::validate_bin_target`] are dropped without error, matching
+/// the pnpm/npm "silently ignore invalid bin" behavior.
 fn bin_entries(
     pkg_dir: &std::path::Path,
     pkg_name: Option<&str>,
@@ -1120,19 +1171,15 @@ fn bin_entries(
 ///
 /// The walk does not follow symlinks, so a symlinked subdir can't pull
 /// the walk outside the tree.
-fn link_dir_bins(
-    bin_dir: &std::path::Path,
+fn dir_bin_entries(
     pkg_dir: &std::path::Path,
     directories_bin: &serde_json::Value,
-    shim_opts: aube_linker::BinShimOptions,
-    managed: &mut ManagedBinLinks,
-    preserved: Option<&PreservedBinLinks>,
-) -> miette::Result<()> {
+) -> miette::Result<Vec<(String, std::path::PathBuf)>> {
     let Some(rel) = directories_bin.as_str() else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     if rel.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     let bins_root = pkg_dir.join(rel);
@@ -1147,14 +1194,14 @@ fn link_dir_bins(
         std::fs::canonicalize(pkg_dir),
         std::fs::canonicalize(&bins_root),
     ) else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     // Reject both an escape (`../x`, absolute, symlink-elsewhere) AND
     // the package root itself: pnpm's `isSubdir(pkgPath, binDir)` is
     // false when the two are equal, so `directories.bin: "."` links
     // NOTHING rather than shimming every file in the package.
     if canon_bins == canon_root || !canon_bins.starts_with(&canon_root) {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     let mut files = Vec::new();
@@ -1163,7 +1210,8 @@ fn link_dir_bins(
     // readdir order across platforms.
     files.sort();
 
-    for file in &files {
+    let mut entries = Vec::with_capacity(files.len());
+    for file in files {
         let Some(file_name) = file.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
@@ -1173,9 +1221,9 @@ fn link_dir_bins(
         if aube_linker::validate_bin_name(file_name).is_err() {
             continue;
         }
-        create_bin_link(bin_dir, file_name, file, shim_opts, managed, preserved)?;
+        entries.push((file_name.to_string(), file.clone()));
     }
-    Ok(())
+    Ok(entries)
 }
 
 /// Recursively collect regular files under `dir`, NOT following
@@ -1982,6 +2030,214 @@ mod tests {
             None,
         )
         .unwrap();
+    }
+
+    /// Materialize root deps from `(install name, manifest)` pairs, each with
+    /// `cli.js` as its only bin target, and link them.
+    fn link_root_deps(deps: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path();
+        let aube_dir = project_dir.join("node_modules/.aube");
+        let mut packages = BTreeMap::new();
+        let mut direct = Vec::new();
+        for (name, manifest) in deps {
+            let dep_path = format!("{name}@1.0.0");
+            let pkg_dir = materialized_pkg_dir(&aube_dir, &dep_path, name, 120, None);
+            std::fs::create_dir_all(&pkg_dir).unwrap();
+            std::fs::write(pkg_dir.join("package.json"), manifest).unwrap();
+            std::fs::write(pkg_dir.join("cli.js"), "#!/usr/bin/env node\n").unwrap();
+            packages.insert(dep_path.clone(), locked(name, "1.0.0", BTreeMap::new()));
+            direct.push(DirectDep {
+                name: name.to_string(),
+                dep_path,
+                dep_type: DepType::Dev,
+                specifier: None,
+            });
+        }
+        let graph = LockfileGraph {
+            importers: BTreeMap::from([(".".to_string(), direct)]),
+            packages,
+            ..Default::default()
+        };
+        run_link_bins(project_dir, &graph, &aube_dir);
+        dir
+    }
+
+    /// The install name of the dep a `.bin` entry runs, read from its target:
+    /// `…/node_modules/<install name>/cli.js`. `.bin` holds a symlink or a shim
+    /// that records the target in its marker line, depending on the options.
+    #[cfg(unix)]
+    fn bin_owner(project: &tempfile::TempDir, bin_name: &str) -> String {
+        let shim = project.path().join("node_modules/.bin").join(bin_name);
+        let target = match std::fs::read_link(&shim) {
+            Ok(target) => target,
+            Err(_) => {
+                let content = std::fs::read_to_string(&shim).unwrap();
+                let marker = content
+                    .lines()
+                    .find_map(|line| line.strip_prefix(aube_linker::sys::POSIX_SHIM_MARKER_PREFIX))
+                    .unwrap_or_else(|| panic!("no shim marker in {content}"));
+                PathBuf::from(marker)
+            }
+        };
+        target
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .unwrap_or_else(|| panic!("unexpected bin target {}", target.display()))
+            .to_string()
+    }
+
+    fn manifest(name: &str, version: &str, bin: &str) -> String {
+        format!(r#"{{"name":"{name}","version":"{version}","bin":{bin}}}"#)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn alias_never_takes_a_bin_from_the_dep_installed_under_its_own_name() {
+        const BIN: &str = r#"{"tsc":"cli.js"}"#;
+        // Install names cover the alias sorting on each side of `typescript`,
+        // and versions cover it being older and newer: pnpm's rule would pick
+        // the newer copy, and a last-writer-wins pass the later name.
+        for (alias, direct_version, alias_version) in [
+            ("typescript5", "7.1.0", "5.9.3"),
+            ("typescript7", "5.9.3", "7.1.0"),
+            ("ats5", "7.1.0", "5.9.3"),
+            ("ats7", "5.9.3", "7.1.0"),
+        ] {
+            let project = link_root_deps(&[
+                ("typescript", &manifest("typescript", direct_version, BIN)),
+                (alias, &manifest("typescript", alias_version, BIN)),
+            ]);
+            assert_eq!(
+                bin_owner(&project, "tsc"),
+                "typescript",
+                "alias {alias}@{alias_version} against typescript@{direct_version}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bin_only_the_alias_ships_still_links() {
+        let project = link_root_deps(&[
+            (
+                "typescript",
+                &manifest("typescript", "7.1.0", r#"{"tsc":"cli.js"}"#),
+            ),
+            (
+                "typescript5",
+                &manifest(
+                    "typescript",
+                    "5.9.3",
+                    r#"{"tsc":"cli.js","tsserver":"cli.js"}"#,
+                ),
+            ),
+        ]);
+        assert_eq!(bin_owner(&project, "tsc"), "typescript");
+        assert_eq!(bin_owner(&project, "tsserver"), "typescript5");
+    }
+
+    /// `pkgOwnsBin`, then the greater name, then the greater version: pnpm's
+    /// `compareCommandsInConflict`, checked against pnpm 10 and 11.
+    #[cfg(unix)]
+    #[test]
+    fn collisions_the_alias_rule_does_not_settle_follow_pnpm() {
+        const PROBE: &str = r#"{"probe":"cli.js"}"#;
+        let by_ownership = link_root_deps(&[
+            ("probe", &manifest("probe", "1.0.0", PROBE)),
+            ("zzz", &manifest("zzz", "1.0.0", PROBE)),
+        ]);
+        assert_eq!(bin_owner(&by_ownership, "probe"), "probe");
+
+        let by_name = link_root_deps(&[
+            ("zzz", &manifest("zzz", "1.0.0", PROBE)),
+            ("aaa", &manifest("aaa", "1.0.0", PROBE)),
+        ]);
+        assert_eq!(bin_owner(&by_name, "probe"), "zzz");
+
+        let owner_alias_beats_plain_non_owner = link_root_deps(&[
+            ("aaa", &manifest("aaa", "1.0.0", PROBE)),
+            ("alias", &manifest("probe", "1.0.0", PROBE)),
+        ]);
+        assert_eq!(
+            bin_owner(&owner_alias_beats_plain_non_owner, "probe"),
+            "alias"
+        );
+
+        let by_version = link_root_deps(&[
+            ("older", &manifest("same", "1.0.0", PROBE)),
+            ("newer", &manifest("same", "10.0.0-beta.1", PROBE)),
+        ]);
+        assert_eq!(bin_owner(&by_version, "probe"), "newer");
+    }
+
+    /// Each package deserves a different one of the two names they share, so no
+    /// order of writing whole packages can get both right.
+    #[cfg(unix)]
+    #[test]
+    fn each_shared_bin_name_is_decided_on_its_own() {
+        let project = link_root_deps(&[
+            (
+                "left",
+                &manifest("left", "1.0.0", r#"{"left":"cli.js","right":"cli.js"}"#),
+            ),
+            (
+                "right",
+                &manifest("right", "1.0.0", r#"{"left":"cli.js","right":"cli.js"}"#),
+            ),
+        ]);
+        assert_eq!(bin_owner(&project, "left"), "left");
+        assert_eq!(bin_owner(&project, "right"), "right");
+    }
+
+    #[test]
+    fn string_form_bin_is_named_after_the_package_not_the_alias() {
+        let project = link_root_deps(&[("mk", &manifest("mkdirp", "0.5.6", r#""cli.js""#))]);
+        let bin = project.path().join("node_modules/.bin");
+        assert!(bin.join("mkdirp").exists(), "the package's own name links");
+        assert!(!bin.join("mk").exists(), "the alias is not a bin name");
+    }
+
+    #[test]
+    fn package_name_order_matches_locale_compare() {
+        // `Array.prototype.sort` with `localeCompare`, run under Node 26.
+        let sorted = [
+            "_x",
+            "-x",
+            ".x",
+            "@a/b",
+            "@x",
+            "/x",
+            "0x",
+            "7zip",
+            "a_b",
+            "a-b",
+            "a.b",
+            "a@b",
+            "a/b",
+            "a1",
+            "A1",
+            "ab",
+            "ax",
+            "Ax",
+            "foo",
+            "foo_bar",
+            "foo-bar",
+            "foo.bar",
+            "foo1",
+            "foobar",
+            "jsonstream",
+            "JSONStream",
+        ];
+        for pair in sorted.windows(2) {
+            assert!(
+                compare_pkg_names(pair[0], pair[1]).is_lt(),
+                "{} must sort before {}",
+                pair[0],
+                pair[1]
+            );
+        }
     }
 
     /// THE PARITY REPRO. A dep with only `directories.bin` (no `bin`)

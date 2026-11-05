@@ -176,7 +176,7 @@ async fn rebuild_project(packages: &[String], importers: Option<&[String]>) -> m
             let node_version = crate::engines::build_node_version();
             // Re-emit per-dep `.bin/` shims so a rebuild on a tree
             // that pre-dates the transitive-bin fix still lands them
-            // on PATH for the lifecycle scripts. `link_bins_for_dep`
+            // on PATH for the lifecycle scripts. `link_dep_bins`
             // is idempotent, so re-running on an already-wired tree
             // is a no-op.
             let isolated = !matches!(

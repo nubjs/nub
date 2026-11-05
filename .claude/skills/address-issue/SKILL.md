@@ -20,6 +20,8 @@ metadata:
 
 Taking a GitHub issue from "reported" to "shipped and the reporter told." The hygiene rules here are mandatory, not courtesies — maintainer responsiveness on a public repo is a visible health signal.
 
+On the maintainer's Mac, every `gh` below that writes (comment, close, `pr create`, `pr edit`) runs as `keyward --reason "<the task>" -- gh …`. Reads stay plain `gh`.
+
 ## Guardrails
 
 - **Tone is factual, neutral, professional** — never braggy, competitive, or over-promising. Invoke the `prose-writing` skill.

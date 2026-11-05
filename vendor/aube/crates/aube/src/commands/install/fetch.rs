@@ -1047,10 +1047,29 @@ where
                         strict_pkg_content_check,
                     )
                     .await;
-                    let (index, bytes_len, computed_integrity) = match streamed {
-                        Ok(v) => {
+                    match streamed {
+                        Ok((index, bytes_len, computed_integrity)) => {
                             permit.record_success();
-                            v
+                            let dl_time = dl_start.elapsed();
+                            if let Some(p) = bytes_progress.as_ref() {
+                                p.inc_downloaded_bytes(bytes_len);
+                            }
+                            tracing::trace!(
+                                "fetch (stream) {display_name}@{version}: wait={:.0?} total={:.0?} ({} bytes)",
+                                wait_time,
+                                dl_time,
+                                bytes_len
+                            );
+                            return Ok::<_, miette::Report>((dep_path, index, computed_integrity));
+                        }
+                        // Falls through to the buffered fetch below, which
+                        // downloads the whole body again and records the permit.
+                        Err(e) if e.retry_buffered => {
+                            tracing::warn!(
+                                error = %e.report,
+                                code = aube_codes::warnings::WARN_AUBE_HTTP_RETRY_TRANSPORT,
+                                "retrying HTTP request after transport error",
+                            );
                         }
                         Err(e) => {
                             if e.is_throttle {
@@ -1060,18 +1079,7 @@ where
                             }
                             return Err(e.into());
                         }
-                    };
-                    let dl_time = dl_start.elapsed();
-                    if let Some(p) = bytes_progress.as_ref() {
-                        p.inc_downloaded_bytes(bytes_len);
                     }
-                    tracing::trace!(
-                        "fetch (stream) {display_name}@{version}: wait={:.0?} total={:.0?} ({} bytes)",
-                        wait_time,
-                        dl_time,
-                        bytes_len
-                    );
-                    return Ok::<_, miette::Report>((dep_path, index, computed_integrity));
                 }
 
                 // Buffered SHA-512 path. Streaming SHA-512 hashes
