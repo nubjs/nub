@@ -166,8 +166,8 @@ if (typeof process.getBuiltinModule === "function") __ensureBuiltins();
 let runtimeConfig = {};
 try { runtimeConfig = JSON.parse(process.env.__NUB_RUNTIME_CONFIG || "{}"); } catch {}
 const RUNTIME_LOADER = runtimeConfig.loader || {};
-// tsconfig `contentMappers` extensions whose package has no runtime to preload.
-const UNLOADED_CONTENT_MAPPERS = runtimeConfig.contentMappers?.unloaded || [];
+// tsconfig `contentMappers` extensions and what became of each package's register.
+const MAPPED_EXTENSIONS = runtimeConfig.contentMappers?.extensions || [];
 const RUNTIME_TSCONFIG = runtimeConfig.tsconfig || undefined;
 // Transform-only TypeScript options may live directly in `nub.jsonc`. They
 // override the selected/nearest tsconfig because the project runtime config is
@@ -246,21 +246,21 @@ export const TS_PARENT_EXTS = new Set([".ts", ".tsx", ".mts", ".cts"]);
 // these files, so the gap only shows at runtime: name it. Longest suffix wins, as
 // TypeScript routes. Both `message` and `stack` change because an uncaught error
 // prints the stack, which captured the message when it was created.
-export function explainUnmappedExtension(err, url) {
+export function explainMappedExtension(err, url) {
   if (err?.code !== "ERR_UNKNOWN_FILE_EXTENSION" || typeof url !== "string") return;
   let entry;
-  for (const candidate of UNLOADED_CONTENT_MAPPERS) {
+  for (const candidate of MAPPED_EXTENSIONS) {
     if (url.endsWith(candidate.extension) && !(entry?.extension.length >= candidate.extension.length)) {
       entry = candidate;
     }
   }
   if (!entry) return;
-  const why = entry.reason === "missing"
-    ? `is not installed`
-    : entry.reason === "pnp"
-      ? `Nub does not discover under Yarn Plug'n'Play; add "${entry.package}/register" to \`preload\` in nub.jsonc`
-      : `has no "./register" export to load it at runtime`;
-  const message = `${err.message}\n"${entry.extension}" is mapped in ${entry.tsconfig} by "${entry.package}", which ${why}.`;
+  const why = {
+    registered: `whose "./register" did not load it on Node ${process.version}`,
+    missing: `which is not installed`,
+    pnp: `which Nub does not discover under Yarn Plug'n'Play; add "${entry.package}/register" to \`preload\` in nub.jsonc`,
+  }[entry.reason] ?? `which has no "./register" export to load it at runtime`;
+  const message = `${err.message}\n"${entry.extension}" is mapped in ${entry.tsconfig} by "${entry.package}", ${why}.`;
   if (typeof err.stack === "string") err.stack = err.stack.replace(err.message, message);
   err.message = message;
 }

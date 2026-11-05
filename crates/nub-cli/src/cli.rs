@@ -4078,6 +4078,7 @@ fn prepare_preload_chain(
     // tsconfig mapper registers first, so the user's own `preload` entries register
     // later and answer first (`registerHooks` is last-registered-first). A register
     // the user also lists in `preload` loads once, where they listed it.
+    let mut mapper_entries = 0;
     if has_mappers {
         let resolver = bare_preload_resolver(true);
         let explicit: Vec<_> = runtime
@@ -4088,6 +4089,7 @@ fn prepare_preload_chain(
         esm.extend(mappers.into_iter().filter(|register| {
             std::fs::canonicalize(register).map_or(true, |real| !explicit.contains(&real))
         }));
+        mapper_entries = esm.len();
     }
     if config_is_esm {
         esm.extend(runtime.preload.iter().cloned());
@@ -4116,8 +4118,8 @@ fn prepare_preload_chain(
             })?;
         }
         Ok((
-            write_preload_chain(dir, false, &cjs, false)?,
-            write_preload_chain(dir, true, &esm, has_mappers)?,
+            write_preload_chain(dir, false, &cjs, 0)?,
+            write_preload_chain(dir, true, &esm, mapper_entries)?,
         ))
     };
     // A mapper-only chain holds nothing but absolute paths, so it works from anywhere.
@@ -4162,16 +4164,24 @@ fn prepare_preload_chain(
 /// Windows rejects a raw `C:\...` as an ESM specifier (ERR_UNSUPPORTED_ESM_URL_SCHEME)
 /// where POSIX would have tolerated it.
 ///
-/// `content_addressed` puts a hash of the body in the file name. A chain carrying
-/// tsconfig mapper registers needs it: `preload` belongs to the root its file is
-/// under, but two workspace members can share one hoisted `node_modules` and list
-/// different mappers, and a long-lived process re-reads its chainer each time it
-/// forks, so a shared name would hand it the other member's plugins.
+/// The first `mapper_entries` entries are tsconfig mapper registers, on the ESM side
+/// only, and a chain with any puts a hash of its body in the file name: `preload`
+/// belongs to the root its file is under, but two workspace members can share one
+/// hoisted `node_modules` and list different mappers, and a long-lived process re-reads
+/// its chainer each time it forks, so a shared name would hand it the other member's
+/// plugins.
+///
+/// Only those entries may fail quietly. A `preload` line is something the user asked
+/// to run, so its failure is theirs to see. Nobody asked for a discovered register on
+/// this run: real ones call `registerHooks` unguarded, which Nub's Node floor lacks,
+/// and that must not take down a file importing nothing mapped. A Node that has the
+/// API still fails with the register's own stack, as `node --import` does. The check
+/// reads the default export because a named import is a link error on those Nodes.
 fn write_preload_chain(
     dir: &Path,
     esm: bool,
     entries: &[String],
-    content_addressed: bool,
+    mapper_entries: usize,
 ) -> Result<Option<PathBuf>> {
     if entries.is_empty() {
         return Ok(None);
@@ -4181,8 +4191,11 @@ fn write_preload_chain(
          // inherited NODE_OPTIONS preload flags. Regenerated every run; do not edit. One\n\
          // module instead of one token per entry — see vercel/next.js#96582.\n",
     );
+    if mapper_entries > 0 {
+        body.push_str("import nodeModule from \"node:module\";\n");
+    }
     let resolver = bare_preload_resolver(esm);
-    for spec in entries {
+    for (index, spec) in entries.iter().enumerate() {
         let spec = resolve_bare_preload(&resolver, spec);
         let spec = if esm && Path::new(&spec).is_absolute() {
             nub_core::node::spawn::file_url_for(&spec)
@@ -4197,13 +4210,20 @@ fn write_preload_chain(
             // entry before starting the next, but STATIC imports of sibling modules
             // may interleave, so an entry with top-level await would let a later one
             // land first. Sequential dynamic import reproduces the token ordering.
-            body.push_str(&format!("await import({literal});\n"));
+            if index < mapper_entries {
+                body.push_str(&format!(
+                    "try {{ await import({literal}); }} catch (error) \
+                     {{ if (typeof nodeModule.registerHooks === \"function\") throw error; }}\n"
+                ));
+            } else {
+                body.push_str(&format!("await import({literal});\n"));
+            }
         } else {
             body.push_str(&format!("require({literal});\n"));
         }
     }
     let extension = if esm { "mjs" } else { "cjs" };
-    let name = if content_addressed {
+    let name = if mapper_entries > 0 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         body.hash(&mut hasher);

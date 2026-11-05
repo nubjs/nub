@@ -30,7 +30,7 @@ import "./floor-builtin.mjs";
 import {
   TRANSPILE_EXTS, PLAIN_JS_EXTS, CLOBBER_MAP, dataExtsFor,
   extname, isFileUrl, resolveSpec, loadTranspile, maybeTranspilePlainJs, loadData, loadTextImport, isDependency,
-  noteRuntimeV8FlagSource, outerHookOwnsFormat, explainUnmappedExtension,
+  noteRuntimeV8FlagSource, outerHookOwnsFormat, explainMappedExtension,
 } from "./transform-core.mjs";
 import { createRequire, isBuiltin } from "node:module";
 import { existsSync } from "node:fs";
@@ -191,7 +191,7 @@ async function loadInner(url, context, nextLoad) {
   try {
     return await nextLoad(url, context);
   } catch (err) {
-    explainUnmappedExtension(err, url);
+    explainMappedExtension(err, url);
     throw err;
   }
 }

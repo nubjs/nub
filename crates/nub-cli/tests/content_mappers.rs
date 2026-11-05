@@ -219,6 +219,31 @@ fn an_explicit_preload_takes_precedence_and_a_duplicate_loads_once() {
     );
 }
 
+/// A Node with `registerHooks` has no reason to excuse a register, so its failure ends
+/// the run with its own stack, as `node --import` does. Only a Node lacking the API
+/// skips one (`version_tiers.rs`).
+#[test]
+fn a_register_that_throws_fails_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    mapper(root, "m", ".data", "from-mapper");
+    write(
+        root.join("node_modules/m/register.mjs"),
+        "throw new Error('register blew up');\n",
+    );
+    write(root.join("tsconfig.json"), &tsconfig(&[("m", ".data")]));
+    write(root.join("plain.js"), "console.log('ran');\n");
+
+    let output = run(root, &["plain.js"]);
+    assert!(!output.status.success(), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("register blew up"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("ran"));
+}
+
 /// `--node` and `NODE_COMPAT` add nothing, and neither explains anything: the error is
 /// Node's own. The first test here is the positive control.
 #[test]

@@ -21,8 +21,8 @@ pub(crate) struct Discovered {
     /// the chainer goes when nothing else asked for one, so a run started outside the
     /// project never creates `node_modules/` in the CWD.
     pub chain_root: Option<PathBuf>,
-    /// Mapped extensions nothing will load at runtime, for the runtime's error.
-    pub unloaded: Vec<UnloadedContentMapper>,
+    /// Every mapped extension and what became of its package, for the runtime's error.
+    pub extensions: Vec<MappedExtension>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -33,17 +33,20 @@ pub(crate) struct Register {
     pub specificity: usize,
 }
 
-/// A mapped extension whose package contributes no runtime, read by the runtime so
-/// an import that Node then refuses says why.
+/// One mapped extension, read by the runtime so an import Node refuses says why. It is
+/// decided here rather than recorded by the chainer because the async tier's hook runs
+/// on another thread, which no main-thread state reaches.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct UnloadedContentMapper {
+pub(crate) struct MappedExtension {
     pub extension: String,
     pub package: String,
     pub tsconfig: String,
-    /// `"missing"` when the package does not resolve, `"no-register"` when it ships
-    /// no `./register` export, `"pnp"` under Yarn Plug'n'Play, where this discovery
-    /// does not reach.
+    /// `"registered"` when its `./register` is in the chain, so an unknown-extension
+    /// error means that register did not answer: skipped for needing a newer Node, or
+    /// loaded without claiming this extension. `"missing"` when the package does not
+    /// resolve, `"no-register"` when it ships no `./register` export, `"pnp"` under
+    /// Yarn Plug'n'Play, where this discovery does not reach.
     pub reason: String,
 }
 
@@ -67,9 +70,9 @@ impl Discovered {
             self.add(register.path, register.specificity);
         }
         self.chain_root = self.chain_root.take().or(other.chain_root);
-        for entry in other.unloaded {
-            if !self.unloaded.contains(&entry) {
-                self.unloaded.push(entry);
+        for entry in other.extensions {
+            if !self.extensions.contains(&entry) {
+                self.extensions.push(entry);
             }
         }
     }
@@ -96,12 +99,12 @@ pub(crate) fn discover(anchor: &str, explicit: Option<&str>) -> Discovered {
                 Some(register) => {
                     out.add(register, specificity);
                     out.chain_root = out.chain_root.take().or(root);
-                    continue;
+                    "registered"
                 }
             },
         };
-        out.unloaded
-            .extend(mapper.extensions.iter().map(|ext| UnloadedContentMapper {
+        out.extensions
+            .extend(mapper.extensions.iter().map(|ext| MappedExtension {
                 extension: ext.clone(),
                 package: mapper.package.clone(),
                 tsconfig: mapper.declared_in.clone(),

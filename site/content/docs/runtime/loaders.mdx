@@ -55,7 +55,7 @@ There is no `--import` to pass and nothing to add to `nub.jsonc`. A mapper takes
 - **Which tsconfig:** the nearest to the entry file, or to the package for `nub run`. `extends` and `references` are followed, and each `package` resolves from the config that declares it.
 - **Order:** the longest extension answers first, as in TypeScript, so `.schema.jsonc` wins over `.jsonc`. A [`preload`](/docs/config#preload) entry answers before any mapper.
 - **Options:** a register reads its own `options` from the tsconfig entry. Nub passes nothing.
-- **No runtime:** a package that is not installed or has no `./register` export is skipped. Importing one of its extensions fails, and the error names the package.
+- **No runtime:** a package that is not installed, has no `./register` export, or whose register needs a newer Node is skipped. Importing one of its extensions fails, and the error names the package.
 
 `--node` and `NODE_COMPAT` load no registers.
 
