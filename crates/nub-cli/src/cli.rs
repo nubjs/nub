@@ -7186,6 +7186,15 @@ fn list_scripts(manifest: &serde_json::Value) -> String {
     }
 }
 
+/// A watch run's file and arguments as Node gets them. Its first argument is taken as
+/// the file, and may be one of Node's own flags (`nub --watch --test=1 a.js`), so they
+/// take the same rewrite as every other launch.
+fn watched_program(file: &str, args: &[String]) -> Vec<String> {
+    let mut program = vec![file.to_string()];
+    program.extend(args.iter().cloned());
+    nub_core::node::argv::child_safe_modes(&program)
+}
+
 fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     use crate::project_config::RuntimeEnvFile;
 
@@ -7267,8 +7276,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
         let mut node_args = vec!["--watch".to_string(), "--watch-preserve-output".to_string()];
         node_args.extend(nub_core::node::spawn::lift_inherited_watch_flags(&mut cmd));
-        node_args.push(file.to_string());
-        node_args.extend(args.iter().cloned());
+        node_args.extend(watched_program(file, args));
         cmd.args(&node_args)
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
@@ -7470,8 +7478,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         }
     }
 
-    node_args.push(file.to_string());
-    node_args.extend(args.iter().cloned());
+    node_args.extend(watched_program(file, args));
 
     // Watch assembles its own command instead of going through `spawn_node`, so
     // it must put the loader in front of Node itself. Detection above has already
