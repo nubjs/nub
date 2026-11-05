@@ -507,10 +507,10 @@ pub(crate) struct RuntimeConfig {
     /// `None` until something discovered them; `Some` in a descendant `node`, which
     /// adds to its parent's list rather than starting over.
     pub content_mappers: Option<crate::content_mappers::Discovered>,
-    /// The chainer's `--import` value when it got its own token (see
-    /// `prepare_preload_chain`). Spawn-local, like the anchor above.
-    #[serde(skip)]
-    pub preload_chain_import: Option<String>,
+    /// `--require` / `--import` entries folded out of an inherited `NODE_OPTIONS`,
+    /// resolved. See `prepare_preload_chain`.
+    pub folded_requires: Vec<String>,
+    pub folded_imports: Vec<String>,
     pub node_options: Vec<String>,
     pub v8_flags: Vec<String>,
     pub env_file: RuntimeEnvFile,
@@ -972,7 +972,8 @@ impl EffectiveConfig {
             preload_chain: None,
             content_mapper_anchor: None,
             content_mappers: None,
-            preload_chain_import: None,
+            folded_requires: Vec::new(),
+            folded_imports: Vec::new(),
             node_options: values.node_options.clone().unwrap_or_default(),
             v8_flags: values.v8_flags.clone().unwrap_or_default(),
             env_file,

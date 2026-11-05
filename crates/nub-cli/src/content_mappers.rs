@@ -15,7 +15,8 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub(crate) struct Discovered {
-    /// Resolved `./register` files, in registration order.
+    /// Resolved `./register` files, in declaration order. See
+    /// [`Discovered::registration_order`].
     pub registers: Vec<Register>,
     /// The directory holding the `node_modules` a mapper package was found in — where
     /// the chainer goes when nothing else asked for one, so a run started outside the
@@ -29,8 +30,8 @@ pub(crate) struct Discovered {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Register {
     pub path: String,
-    /// The length of the entry's longest extension.
-    pub specificity: usize,
+    #[serde(default)]
+    pub extensions: Vec<String>,
 }
 
 /// One mapped extension, read by the runtime so an import Node refuses says why. It is
@@ -51,23 +52,55 @@ pub(crate) struct MappedExtension {
 }
 
 impl Discovered {
-    /// Registration order is by specificity: `module.registerHooks` runs the hook
-    /// registered LAST first, and TypeScript routes a file to the mapper with the
-    /// longest matching extension, so entries register in ascending order of their
-    /// longest extension and `.schema.jsonc` answers before `.jsonc`. Ties keep
-    /// declaration order. One package listed twice registers once, at its most
-    /// specific slot.
-    fn add(&mut self, path: String, specificity: usize) {
-        match self.registers.iter_mut().find(|r| r.path == path) {
-            Some(existing) => existing.specificity = existing.specificity.max(specificity),
-            None => self.registers.push(Register { path, specificity }),
+    /// One package listed twice registers once, with the union of its extensions.
+    fn add(&mut self, path: String, extensions: &[String]) {
+        let index = match self.registers.iter().position(|r| r.path == path) {
+            Some(index) => index,
+            None => {
+                self.registers.push(Register {
+                    path,
+                    extensions: Vec::new(),
+                });
+                self.registers.len() - 1
+            }
+        };
+        let known = &mut self.registers[index].extensions;
+        for extension in extensions {
+            if !known.contains(extension) {
+                known.push(extension.clone());
+            }
         }
-        self.registers.sort_by_key(|r| r.specificity);
+    }
+
+    /// `module.registerHooks` runs the hook registered LAST first, and TypeScript routes
+    /// a file to the mapper with the longest matching extension. Only suffix relations
+    /// can disagree between two mappers, so a package holding a proper suffix of another's
+    /// extension registers first, in a stable topological sort that leaves unrelated
+    /// packages in declaration order. A true cycle (A `.b` + `.x.c`, B `.c` + `.y.b`)
+    /// cannot be expressed by ordering whole modules and falls back to declaration order.
+    pub(crate) fn registration_order(&self) -> Vec<String> {
+        let more_general = |a: &Register, b: &Register| {
+            a.extensions.iter().any(|x| {
+                b.extensions
+                    .iter()
+                    .any(|y| y.len() > x.len() && y.ends_with(x))
+            })
+        };
+        let mut remaining: Vec<&Register> = self.registers.iter().collect();
+        let mut ordered = Vec::with_capacity(remaining.len());
+        while !remaining.is_empty() {
+            let next = remaining
+                .iter()
+                .position(|r| !remaining.iter().any(|other| more_general(other, r)))
+                .unwrap_or(0);
+            ordered.push(remaining.remove(next).path.clone());
+        }
+        ordered
     }
 
     pub(crate) fn merge(&mut self, other: Discovered) {
         for register in other.registers {
-            self.add(register.path, register.specificity);
+            self.add(register.path, &register.extensions);
         }
         self.chain_root = self.chain_root.take().or(other.chain_root);
         for entry in other.extensions {
@@ -90,14 +123,13 @@ pub(crate) fn discover(anchor: &str, explicit: Option<&str>) -> Discovered {
         let declared_dir = Path::new(&mapper.declared_in)
             .parent()
             .unwrap_or(Path::new("."));
-        let specificity = mapper.extensions.iter().map(String::len).max().unwrap_or(0);
         let reason = match package_dir(declared_dir, &mapper.package) {
             None if nub_core::pnp::detect(declared_dir).is_some() => "pnp",
             None => "missing",
             Some((dir, root)) => match register_of(&resolver, &dir) {
                 None => "no-register",
                 Some(register) => {
-                    out.add(register, specificity);
+                    out.add(register, &mapper.extensions);
                     out.chain_root = out.chain_root.take().or(root);
                     "registered"
                 }
@@ -141,8 +173,12 @@ fn register_of(resolver: &oxc_resolver::Resolver, dir: &Path) -> Option<String> 
         serde_json::from_slice(&std::fs::read(dir.join("package.json")).ok()?).ok()?;
     manifest.get("exports")?;
     let name = manifest.get("name")?.as_str()?;
-    resolver
-        .resolve(dir, &format!("{name}/register"))
-        .ok()
-        .map(|resolution| resolution.full_path().to_string_lossy().into_owned())
+    let register = resolver.resolve(dir, &format!("{name}/register")).ok()?;
+    // One spelling per file, whatever the anchor. A `nub run` anchored at a Windows 8.3
+    // path (`RUNNER~1`) and a descendant anchored at its entry's real path would
+    // otherwise see two registers in one file: two URLs, so it evaluates twice.
+    let real = std::fs::canonicalize(register.full_path()).ok()?;
+    Some(crate::cli::strip_windows_verbatim_prefix(
+        &real.to_string_lossy(),
+    ))
 }

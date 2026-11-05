@@ -366,7 +366,7 @@ Measured confirmation of the last row, on the same fixture that destroys the amb
 
 **Already correct, verified by measurement:**
 
-- Nub routes value-bearing preload/PnP flags through `NODE_OPTIONS` only, never argv, precisely because a child that rebuilds its flags by merging `process.execArgv + NODE_OPTIONS` (Next.js, `jest-worker`) would otherwise collect the same path twice. One exception: a descendant `node` whose own entry's tsconfig lists `contentMappers` the inherited set lacks gets its chainer as an `--import` argv token, because the inherited `NODE_OPTIONS` is left as it is. That chainer appears only in that process's argv, so a merge still sees it once.
+- Nub routes value-bearing preload/PnP flags through `NODE_OPTIONS` only, never argv, precisely because a child that rebuilds its flags by merging `process.execArgv + NODE_OPTIONS` (Next.js, `jest-worker`) would otherwise collect the same path twice.
 - Nub detects a foreign async loader (`tsx`/`ts-node`, or any `--import`/`--loader`) in the child's argv and downgrades its own tier, avoiding the broken sync/async hook composition on Node 22.15–24.11.
 - **Nub does not hit the Yarn PnP `conditions` crash**, despite installing a `registerHooks` resolve hook — measured against a `yarn@4.9.2` PnP project with PnP active (`process.versions.pnp = 3`), where a bare pass-through hook crashes. The mechanism is UNVERIFIED; the likely cause is that Nub installs its own `Module._resolveFilename` override on top of PnP's and resolves PnP specifiers through `pnpapi.resolveRequest` directly.
 
@@ -391,4 +391,3 @@ Every revision to this document, with the date and what changed.
 - 2026-08-03 — Confirmed the Next.js repeated-flag defect end-to-end on a real `next@16.3.0` build and filed it upstream as [vercel/next.js#96582](https://github.com/vercel/next.js/issues/96582) with a [hosted reproduction](https://github.com/colinhacks/nextjs-node-options-repro), plus the root-cause analysis on the existing [#77550](https://github.com/vercel/next.js/issues/77550).
 - 2026-08-03 — **Correction to the OTel cost bisection.** The ~1.2 s residual left by `OTEL_METRICS_EXPORTER=none` was attributed to the module load of ~40 instrumentation packages. Re-measured with a positive control and a pinned OTLP port: it is ~1.02 s of **resource detectors** plus only ~0.14 s of module load — turning both off lands at 219 ms. Added the full no-collector/collector-listening matrix and the three-term decomposition, plus the observation that the two dominant terms are decidable before the process starts.
 - 2026-08-28 — Trimmed to the measured findings and current behavior.
-- 2026-11-04 — Noted the one argv preload token: a descendant `node` adding tsconfig `contentMappers` registers.

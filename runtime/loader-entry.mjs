@@ -175,6 +175,7 @@ export function arm({ esm = true, cjs = true } = {}) {
       // its own thread and finds the addon via the inherited __NUB_ADDON_PATH.
       // The data payload carries the clobber-map clear into that thread's OWN
       // transform-core instance — the clear() above only reaches this realm's.
+      common.installAsyncTierCjsSource();
       common.registerLoaderWorker("./preload-async-hooks.mjs", import.meta.url, {
         data: { standaloneLoader: true },
       });

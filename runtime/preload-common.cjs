@@ -417,6 +417,44 @@ function shouldAutoAsyncTierAtPreload() {
 // restore `process.emitWarning` untouched, so a user's later `module.register()` (or
 // any other deprecation) still warns normally. Default-preserving: only nub's
 // internal call is silenced, only for DEP0205, only on the versions that emit it.
+// On the async tier a user's `registerHooks` call moves every load onto `#loadSync`,
+// whose default step asks the async default load, and that returns no source for
+// CommonJS (nodejs/node#57327). Node's stricter validator on the 22.15-24.11 band then
+// throws inside the register's own `next()`, so one pass-through hook breaks every CJS
+// file in a run where plain `node --import` works. Answer that one failure from disk,
+// beneath every user hook. On a `file:` URL only `commonjs` gets no source there. Plain
+// `commonjs` matches plain Node; `commonjs-sync` would give a real `require.cache` but
+// dies on a required `.cts`, because this tier has no main-thread require shim. Armed
+// at the first call rather than at tier entry, because any registered hook moves the
+// run onto `#loadSync`, which a run that never calls `registerHooks` must not pay for.
+function installAsyncTierCjsSource() {
+  if (typeof module_.registerHooks !== "function") return;
+  const orig = module_.registerHooks;
+  let installed = false;
+  module_.registerHooks = function (...args) {
+    if (!installed) {
+      installed = true;
+      orig.call(this, {
+        load(url, context, next) {
+          try {
+            return next(url, context);
+          } catch (err) {
+            if (err && err.code === "ERR_INVALID_RETURN_PROPERTY_VALUE" &&
+                typeof url === "string" && url.startsWith("file:")) {
+              const source = getBuiltin("node:fs").readFileSync(fileURLToPath(url));
+              return { format: "commonjs", source, shortCircuit: true };
+            }
+            throw err;
+          }
+        },
+      });
+    }
+    return orig.apply(this, args);
+  };
+  // A register's `import { registerHooks } from "node:module"` reads the live binding.
+  module_.syncBuiltinESMExports();
+}
+
 function registerLoaderWorker(specifier, parentURL, options) {
   const realEmitWarning = process.emitWarning;
   let restored = false;
@@ -2492,6 +2530,7 @@ module.exports = {
   installThreadpoolPolicy,
   installWatchReporting,
   registerLoaderWorker,
+  installAsyncTierCjsSource,
   makeHooks,
   shouldAutoAsyncTierAtPreload,
   // Consumed by the standalone loader entry (loader-entry.mjs), whose foreign-

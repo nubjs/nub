@@ -477,7 +477,7 @@ fn windows_long_watch_path(path: &Path) -> Result<PathBuf> {
 /// Rust canonicalization and some Windows APIs emit verbatim paths, but Node's
 /// option parser expects the ordinary drive/UNC spelling. Handle UNC first so
 /// `\\?\UNC\server\share` becomes `\\server\share`, not `UNC\server\share`.
-fn strip_windows_verbatim_prefix(path: &str) -> String {
+pub(crate) fn strip_windows_verbatim_prefix(path: &str) -> String {
     if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
         format!(r"\\{rest}")
     } else {
@@ -4014,7 +4014,7 @@ fn prepare_preload_chain(
     let mappers: Vec<String> = runtime
         .content_mappers
         .iter()
-        .flat_map(|found| found.registers.iter().map(|r| r.path.clone()))
+        .flat_map(crate::content_mappers::Discovered::registration_order)
         .collect();
     // Preload entries reaching nub through an INHERITED NODE_OPTIONS are folded into
     // the same chainers as the config's, so the child ends up with at most one
@@ -4028,6 +4028,24 @@ fn prepare_preload_chain(
     };
     let (_, inherited_requires, inherited_imports) =
         nub_core::node::spawn::split_inherited_preloads(&inherited);
+    // What a folded entry leaves behind is only a chainer, and a descendant `node`
+    // writes its own, so the entries travel in the snapshot. Otherwise that rewrite,
+    // and the carried chain it resets, drop an ambient preload from the whole subtree.
+    // Resolved now because a descendant's CWD may differ from the one Node would use.
+    for (folded, entries, esm) in [
+        (&mut runtime.folded_requires, inherited_requires, false),
+        (&mut runtime.folded_imports, inherited_imports, true),
+    ] {
+        let resolver = bare_preload_resolver(esm);
+        for entry in entries {
+            let entry = resolve_bare_preload(&resolver, &entry);
+            if !folded.contains(&entry) {
+                folded.push(entry);
+            }
+        }
+    }
+    let inherited_requires = runtime.folded_requires.clone();
+    let inherited_imports = runtime.folded_imports.clone();
     let own_entries = !runtime.preload.is_empty()
         || !inherited_requires.is_empty()
         || !inherited_imports.is_empty();
@@ -4227,7 +4245,7 @@ fn write_preload_chain(
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         body.hash(&mut hasher);
-        format!("preload-chain-{:016x}.{extension}", hasher.finish())
+        format!("preload-chain.{:016x}.{extension}", hasher.finish())
     } else {
         format!("preload-chain.{extension}")
     };
@@ -4597,7 +4615,6 @@ pub(crate) fn runtime_node_options_with(
     // for why (vercel/next.js#96582) and where the chainer has to live.
     if let Some(injection) = prepare_preload_chain(runtime, node, fold)? {
         options.push(injection.node_options_token());
-        runtime.preload_chain_import = Some(injection.value);
     }
 
     if let Some(tsconfig) = runtime.tsconfig.as_deref()
@@ -4620,9 +4637,9 @@ pub(crate) fn runtime_node_options_with(
 ///
 /// A descendant `node` adds to what it inherited instead of replacing it: a root
 /// script running `node apps/web/server.ts` needs `apps/web`'s mappers even though
-/// the root's tsconfig lists none, and the parent's own chainer stays on its
-/// `NODE_OPTIONS` regardless. With no entry there is nothing new to ask about, so a
-/// descendant's CWD is not consulted.
+/// the root's tsconfig lists none. Its new chainer takes the inherited one's place on
+/// `NODE_OPTIONS` (`spawn.rs`, `reentrant_node_options`). With no entry there is
+/// nothing new to ask about, so a descendant's CWD is not consulted.
 ///
 /// A config that will not read in full contributes nothing: under `Required` a gate
 /// refuses that run anyway (`ensure_tsconfig_parses`), and the lifecycle path guesses
@@ -5059,10 +5076,6 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
         (Vec::new(), Vec::new())
     } else {
         runtime.content_mapper_anchor = entry_tsconfig_dir(args, cwd, &runtime.node_options);
-        let inherited_registers = runtime
-            .content_mappers
-            .as_ref()
-            .map(|found| found.registers.len());
         let options = runtime_node_options(&mut runtime, &node)?;
         // `runtime_node_options` anchors its own check at the CWD, which is the config
         // `nub.jsonc` and a bare preload specifier resolve against. The ENTRY can sit
@@ -5075,17 +5088,7 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
         {
             ensure_tsconfig_parses(&entry_dir.to_string_lossy(), runtime.tsconfig.as_deref())?;
         }
-        let mut v8_flags = runtime_v8_flags(&runtime)?;
-        // A descendant `node` whose entry added mappers: spawn leaves an already
-        // augmented NODE_OPTIONS alone, so the new chainer's token would go nowhere.
-        // Argv reaches this process and, through `execArgv`, its workers. The chainer
-        // the parent loaded stays on NODE_OPTIONS; its entries import once by URL.
-        let registers = runtime.content_mappers.as_ref().map(|f| f.registers.len());
-        if inherited_registers.is_some_and(|before| registers > Some(before))
-            && let Some(chain) = runtime.preload_chain_import.as_ref()
-        {
-            v8_flags.push(format!("--import={chain}"));
-        }
+        let v8_flags = runtime_v8_flags(&runtime)?;
         env_vars.insert(
             crate::project_config::RUNTIME_CONFIG_ENV.to_string(),
             runtime_config_json(&runtime)?,

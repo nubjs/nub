@@ -1409,6 +1409,15 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         }
     }
 
+    if !config.compat_mode
+        && is_reentrant
+        && let Some(node_options) =
+            reentrant_node_options(node_options.as_deref(), config.runtime_node_options)
+    {
+        cmd.env("NODE_OPTIONS", &node_options);
+        mark_augmented(&mut cmd, "NODE_OPTIONS", Some(OsStr::new(&node_options)));
+    }
+
     // `preload.is_some()` is kept from the augment block's guard: without our preload
     // there is nothing to augment, and injecting flags alone is the "half-setup" that
     // block's comment warns about. Only `!is_reentrant` is dropped, which is the point.
@@ -3516,8 +3525,9 @@ fn is_nub_preload_entry(value: &str) -> bool {
             is_nub_runtime_dir(parent.rsplit('/').next().unwrap_or_default())
         }
         // The chainer nub synthesizes into `<preload root>/node_modules/.nub/`, whose
-        // name carries a content hash when it holds tsconfig mapper registers.
-        _ if file.starts_with("preload-chain")
+        // name carries a content hash when it holds tsconfig mapper registers. The
+        // runtime's `NUB_CHAIN_MARKER` matches the same `preload-chain.` prefix.
+        _ if file.starts_with("preload-chain.")
             && (file.ends_with(".mjs") || file.ends_with(".cjs")) =>
         {
             parent.ends_with("/.nub")
@@ -3638,6 +3648,65 @@ pub fn split_inherited_preloads(value: &str) -> (String, Vec<String>, Vec<String
             .join(" "),
         requires,
         imports,
+    )
+}
+
+/// The `NODE_OPTIONS` for a re-entrant launch whose entry brought tsconfig mappers the
+/// inherited chainer lacks, or `None` to leave the inherited value alone.
+///
+/// A re-entrant launch otherwise keeps `NODE_OPTIONS` as it is, so a new chainer has to
+/// take the old one's place here or an ordinary spawned grandchild never sees it. It
+/// must REPLACE rather than sit beside the old one: the new chainer holds the whole
+/// effective set in order, and a preload the old one registered first would then be a
+/// module-cache hit, leaving a new mapper above an explicit `preload` entry. Argv was
+/// no alternative, since `spawn` inherits the environment and not `execArgv`. Entries
+/// folded out of the inherited value are in the new chainer too, so they go as well.
+fn reentrant_node_options(existing: Option<&str>, runtime_options: &[String]) -> Option<String> {
+    let chain = runtime_options
+        .iter()
+        .flat_map(|option| split_node_options(option))
+        .find(|token| {
+            token.strip_prefix("--import=").is_some_and(|value| {
+                let value = value.replace('\\', "/");
+                is_nub_preload_entry(&value) && !value.ends_with("/preload-chain.mjs")
+            })
+        })?;
+    let (rest, _, _) = split_inherited_preloads(existing?);
+    let tokens = split_node_options(&rest);
+    if tokens.contains(&chain) {
+        return None;
+    }
+    let mut out: Vec<String> = Vec::with_capacity(tokens.len() + 1);
+    let mut placed = false;
+    let mut tokens = tokens.into_iter().peekable();
+    while let Some(token) = tokens.next() {
+        let is_chain = |value: &str| {
+            let value = value.replace('\\', "/");
+            is_nub_preload_entry(&value) && value.ends_with(".mjs")
+        };
+        let inherited_chain = match token.strip_prefix("--import=") {
+            Some(value) => is_chain(value),
+            None if token == "--import" && tokens.peek().is_some_and(|v| is_chain(v)) => {
+                tokens.next();
+                true
+            }
+            None => false,
+        };
+        if !inherited_chain {
+            out.push(token);
+        } else if !placed {
+            out.push(chain.clone());
+            placed = true;
+        }
+    }
+    if !placed {
+        out.push(chain);
+    }
+    Some(
+        out.iter()
+            .map(|token| node_options_token(token))
+            .collect::<Vec<_>>()
+            .join(" "),
     )
 }
 
@@ -4194,6 +4263,42 @@ mod tests {
             r#""--conditions=a\"b""#
         );
         assert_eq!(node_options_token(""), r#""""#);
+    }
+
+    #[test]
+    fn a_reentrant_launch_replaces_the_chainer_only_when_mappers_change_it() {
+        let ours = "--require=/nub/runtime/preload.cjs";
+        let hashed = "--import=file:///p/node_modules/.nub/preload-chain.aaaa.mjs";
+        let new = "--import=file:///p/node_modules/.nub/preload-chain.bbbb.mjs";
+        let fixed = "--import=file:///p/node_modules/.nub/preload-chain.mjs";
+        let options = |token: &str| vec!["--conditions=nub".to_string(), token.to_string()];
+
+        // In place, with the rest kept and an already-folded entry gone.
+        assert_eq!(
+            reentrant_node_options(
+                Some(&format!(
+                    "{ours} {hashed} --max-old-space-size=99 --import=/agent.mjs"
+                )),
+                &options(new)
+            )
+            .as_deref(),
+            Some(format!("{ours} {new} --max-old-space-size=99").as_str())
+        );
+        // The inherited chainer may be the fixed-name one, or absent.
+        assert_eq!(
+            reentrant_node_options(Some(&format!("{ours} {fixed}")), &options(new)).as_deref(),
+            Some(format!("{ours} {new}").as_str())
+        );
+        assert_eq!(
+            reentrant_node_options(Some(ours), &options(new)).as_deref(),
+            Some(format!("{ours} {new}").as_str())
+        );
+        // Unchanged, or no mappers in the new chainer: the inherited value stands.
+        assert_eq!(
+            reentrant_node_options(Some(&format!("{ours} {new}")), &options(new)),
+            None
+        );
+        assert_eq!(reentrant_node_options(Some(ours), &options(fixed)), None);
     }
 
     #[test]
