@@ -4260,37 +4260,6 @@ fn tsconfig_reported_env() -> Option<(String, String)> {
     (!reported.is_empty()).then(|| (nub_tsconfig::REPORTED_ENV.to_string(), reported.join("\n")))
 }
 
-/// Where the entry script sits in a Node command line: the first argument that is
-/// neither a flag nor the separate value of one.
-///
-/// Lists only the preload and resolution options, which are what precede an entry
-/// in practice, rather than all of Node's value flags. A flag missing from the list
-/// has its value read as the entry, so a caller must degrade safely on a wrong
-/// answer. Node treats `_` and `-` as the same character in an option name.
-pub(crate) fn node_entry_index(args: &[String]) -> Option<usize> {
-    const VALUE_FLAGS: [&str; 7] = [
-        "-r",
-        "--require",
-        "--import",
-        "--loader",
-        "--experimental-loader",
-        "-C",
-        "--conditions",
-    ];
-    let mut at = 0;
-    while let Some(arg) = args.get(at) {
-        if !arg.starts_with('-') {
-            return Some(at);
-        }
-        at += if VALUE_FLAGS.contains(&arg.replace('_', "-").as_str()) {
-            2
-        } else {
-            1
-        };
-    }
-    None
-}
-
 /// The directory whose tsconfig governs the entry of a `nub <file>` run, resolved
 /// against `cwd`. With no entry (a bare `--flag`) this is `None` and the
 /// CWD-anchored check stands alone.
@@ -4305,7 +4274,7 @@ pub(crate) fn node_entry_index(args: &[String]) -> Option<usize> {
 /// often extending a file that was never published — governs nothing and is
 /// skipped outright rather than warned about.
 fn entry_tsconfig_dir(args: &[String], cwd: &Path, node_options: &[String]) -> Option<PathBuf> {
-    let at = node_entry_index(args)?;
+    let at = nub_core::node::argv::entry_index(args)?;
     let joined = cwd.join(&args[at]);
     let real = std::fs::canonicalize(&joined)
         .map(|p| PathBuf::from(strip_windows_verbatim_prefix(&p.to_string_lossy())))
