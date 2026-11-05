@@ -183,6 +183,27 @@ pub(super) fn per_project_write_selection(
     Ok(Some(keys))
 }
 
+/// The importers an install links, recorded in the install state as
+/// [`crate::state::InstallState::workspace_selection`]: the root and the
+/// selection for a `--filter` install
+/// ([`filter_graph_to_workspace_selection`]), the root alone for an
+/// unfiltered one under `recursiveInstall=false`, and `None` when it
+/// links every importer.
+pub(super) fn linked_workspace_selection(
+    per_project_write_selection: Option<&std::collections::BTreeSet<String>>,
+    links_every_importer: bool,
+) -> Option<std::collections::BTreeSet<String>> {
+    match per_project_write_selection {
+        Some(selected) => {
+            let mut linked = selected.clone();
+            linked.insert(".".to_string());
+            Some(linked)
+        }
+        None if links_every_importer => None,
+        None => Some(std::collections::BTreeSet::from([".".to_string()])),
+    }
+}
+
 /// The importers whose own lifecycle hooks this install runs, in
 /// `lifecycle_manifests` (dependency) order. A caller's explicit set wins.
 /// Otherwise a `--filter` narrows them to the selected members plus the

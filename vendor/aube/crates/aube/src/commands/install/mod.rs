@@ -3168,7 +3168,10 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         ignore_scripts: opts.ignore_scripts,
         skip_root_lifecycle: opts.skip_root_lifecycle,
         npm_link_lifecycle: matches!(source_kind_before, Some(aube_lockfile::LockfileKind::Npm)),
-        workspace_filter_empty: opts.workspace_filter.is_empty(),
+        workspace_selection: workspace::linked_workspace_selection(
+            per_project_write_selection.as_ref(),
+            !has_workspace || link_all_workspace_importers,
+        ),
         dep_selection: opts.dep_selection,
         cli_flags: &opts.cli_flags,
         cached_count,

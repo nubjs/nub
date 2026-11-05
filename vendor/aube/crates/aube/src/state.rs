@@ -1,6 +1,6 @@
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 const DEFAULT_STATE_DIR: &str = "node_modules";
@@ -180,6 +180,18 @@ pub struct InstallState {
     /// every clean install would read back as legacy-unknown.
     #[serde(default)]
     pub deferred_dep_builds: Option<Vec<String>>,
+    /// The importers a `--filter` install linked (`.` plus the selected
+    /// members), or `None` when the install covered the whole workspace.
+    /// The install warm path holds a filtered state only to a selection
+    /// it contains, so a repeated filtered install is up to date while
+    /// an unfiltered one, or a filter reaching another member, is not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_selection: Option<BTreeSet<String>>,
+    /// Whether `workspace_selection` was recorded at all. A state written
+    /// before the field existed has no coverage record, and the warm path
+    /// then credits it with the root alone, which every install links.
+    #[serde(default)]
+    pub workspace_selection_recorded: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -227,6 +239,11 @@ struct FreshnessState {
     /// struct.
     #[serde(default)]
     deferred_dep_builds: Option<Vec<String>>,
+    /// See [`InstallState::workspace_selection`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace_selection: Option<BTreeSet<String>>,
+    #[serde(default)]
+    workspace_selection_recorded: bool,
 }
 
 /// `(size, mtime)` snapshot used by `R1` mtime fast path. mtime is
@@ -315,6 +332,8 @@ impl From<&InstallState> for FreshnessState {
             layout: state.layout.clone(),
             unreviewed_builds: state.unreviewed_builds.clone(),
             deferred_dep_builds: state.deferred_dep_builds.clone(),
+            workspace_selection: state.workspace_selection.clone(),
+            workspace_selection_recorded: state.workspace_selection_recorded,
         }
     }
 }
@@ -387,7 +406,7 @@ pub struct InstalledPackageState {
 
 /// Check if install is needed. Returns None if up-to-date, or Some(reason) if stale.
 pub fn check_needs_install(project_dir: &Path) -> Option<String> {
-    check_needs_install_inner(project_dir, None)
+    check_needs_install_inner(project_dir, None, None)
 }
 
 /// Variant of [`check_needs_install`] that also checks `settings_hash`
@@ -395,11 +414,15 @@ pub fn check_needs_install(project_dir: &Path) -> Option<String> {
 /// path short circuit so `--node-linker=hoisted` and friends also feed
 /// the hash. `ensure_installed` (from `aube run`) uses the plain
 /// [`check_needs_install`] on purpose, see the note there.
+/// `workspace_selection` is the importers the install would link (`None`
+/// for the whole workspace), checked against
+/// [`InstallState::workspace_selection`].
 pub fn check_needs_install_with_flags(
     project_dir: &Path,
     cli_flags: &[(String, String)],
+    workspace_selection: Option<&BTreeSet<String>>,
 ) -> Option<String> {
-    check_needs_install_inner(project_dir, Some(cli_flags))
+    check_needs_install_inner(project_dir, Some(cli_flags), workspace_selection)
 }
 
 /// Whether the resolved install settings differ from the last successful
@@ -420,6 +443,7 @@ pub(crate) fn install_settings_changed_since_last_run(
 fn check_needs_install_inner(
     project_dir: &Path,
     cli_flags: Option<&[(String, String)]>,
+    workspace_selection: Option<&BTreeSet<String>>,
 ) -> Option<String> {
     // Surface the warm-path verdict on the diagnostic pipeline. A miss
     // re-runs the full resolve/fetch/delta/link pipeline (the visible
@@ -428,7 +452,7 @@ fn check_needs_install_inner(
     // install` now names the exact freshness input that drifted instead
     // of leaving them to guess. Trace-level on a hit keeps the default
     // output clean.
-    let reason = check_needs_install_compute(project_dir, cli_flags);
+    let reason = check_needs_install_compute(project_dir, cli_flags, workspace_selection);
     match &reason {
         Some(reason) => tracing::debug!(
             project_dir = %project_dir.display(),
@@ -445,6 +469,7 @@ fn check_needs_install_inner(
 fn check_needs_install_compute(
     project_dir: &Path,
     cli_flags: Option<&[(String, String)]>,
+    workspace_selection: Option<&BTreeSet<String>>,
 ) -> Option<String> {
     let _diag =
         aube_util::diag::Span::new(aube_util::diag::Category::Frozen, "check_needs_install");
@@ -562,6 +587,27 @@ fn check_needs_install_compute(
         return Some(
             "previous install omitted dependency sections; auto-installing full graph".into(),
         );
+    }
+
+    // Only the install path holds a `--filter` install to its selection.
+    // The plain check serves commands that use whatever tree the last
+    // install built, which a filtered install leaves usable.
+    if cli_flags.is_some() {
+        let root_only = BTreeSet::from([".".to_string()]);
+        let installed = match &state.workspace_selection {
+            Some(installed) => Some(installed),
+            None if !state.workspace_selection_recorded => Some(&root_only),
+            None => None,
+        };
+        match (installed, workspace_selection) {
+            (Some(_), None) if state.workspace_selection_recorded => {
+                return Some("the previous install was filtered to part of the workspace".into());
+            }
+            (Some(installed), Some(wanted)) if !wanted.is_subset(installed) => {
+                return Some("the install links a project the previous one did not".into());
+            }
+            _ => {}
+        }
     }
 
     // Every other input here describes what the tree was built FROM.
@@ -971,6 +1017,8 @@ pub struct WriteStateInput<'a> {
     /// owed", which is what distinguishes a fresh clean install from
     /// state written before the field existed.
     pub deferred_dep_builds: Vec<String>,
+    /// See [`InstallState::workspace_selection`].
+    pub workspace_selection: Option<BTreeSet<String>>,
 }
 
 pub fn write_state(project_dir: &Path, input: WriteStateInput<'_>) -> Result<(), std::io::Error> {
@@ -985,6 +1033,7 @@ pub fn write_state(project_dir: &Path, input: WriteStateInput<'_>) -> Result<(),
         layout,
         unreviewed_builds,
         deferred_dep_builds,
+        workspace_selection,
     } = input;
 
     let state_path = state_dir(project_dir);
@@ -1064,6 +1113,8 @@ pub fn write_state(project_dir: &Path, input: WriteStateInput<'_>) -> Result<(),
         layout: Some(install_layout),
         unreviewed_builds,
         deferred_dep_builds: Some(deferred_dep_builds),
+        workspace_selection,
+        workspace_selection_recorded: true,
     };
 
     let fresh_state = FreshnessState::from(&state);
@@ -2491,6 +2542,8 @@ mod tests {
             }),
             unreviewed_builds: Vec::new(),
             deferred_dep_builds: Some(Vec::new()),
+            workspace_selection: None,
+            workspace_selection_recorded: true,
         };
 
         assert_eq!(
@@ -3004,6 +3057,8 @@ mod tests {
             }),
             unreviewed_builds: Vec::new(),
             deferred_dep_builds: Some(Vec::new()),
+            workspace_selection: None,
+            workspace_selection_recorded: true,
         };
         let json = serde_json::to_string(&state).expect("state should serialize");
         std::fs::write(install_state_file(&state_path), json).expect("state should write");
@@ -3057,6 +3112,8 @@ mod tests {
                 "better-sqlite3@11.5.0".to_string(),
             ],
             deferred_dep_builds: Some(Vec::new()),
+            workspace_selection: None,
+            workspace_selection_recorded: true,
         };
         let json = serde_json::to_string(&state).expect("state should serialize");
         std::fs::write(install_state_file(&state_path), json).expect("state should write");
@@ -3105,6 +3162,8 @@ mod tests {
             layout: None,
             unreviewed_builds: Vec::new(),
             deferred_dep_builds: Some(vec!["esbuild@0.24.0".to_string()]),
+            workspace_selection: None,
+            workspace_selection_recorded: true,
         };
         let json = serde_json::to_string(&state).expect("state should serialize");
         std::fs::write(install_state_file(&state_path), json).expect("state should write");
@@ -3391,6 +3450,8 @@ mod tests {
             layout: None,
             unreviewed_builds: Vec::new(),
             deferred_dep_builds: Some(Vec::new()),
+            workspace_selection: None,
+            workspace_selection_recorded: true,
         };
         let reformatted = r#"{
   "name": "x",
@@ -3455,6 +3516,8 @@ mod tests {
             layout: None,
             unreviewed_builds: Vec::new(),
             deferred_dep_builds: Some(Vec::new()),
+            workspace_selection: None,
+            workspace_selection_recorded: true,
         };
 
         // Every recorded member matches what is on disk → fresh.
@@ -3534,6 +3597,8 @@ mod tests {
             layout: None,
             unreviewed_builds: Vec::new(),
             deferred_dep_builds: Some(Vec::new()),
+            workspace_selection: None,
+            workspace_selection_recorded: true,
         };
 
         // Every current member was recorded → fresh.
@@ -3592,6 +3657,8 @@ mod tests {
             layout: None,
             unreviewed_builds: Vec::new(),
             deferred_dep_builds: Some(Vec::new()),
+            workspace_selection: None,
+            workspace_selection_recorded: true,
         };
 
         // Root + apps/server both recorded → fresh (no churn on the root).
@@ -3776,6 +3843,7 @@ mod tests {
                     },
                     unreviewed_builds: Vec::new(),
                     deferred_dep_builds: Vec::new(),
+                    workspace_selection: None,
                 },
             )
             .expect("state should write");
@@ -3886,6 +3954,8 @@ mod tests {
                 layout: None,
                 unreviewed_builds: unreviewed,
                 deferred_dep_builds: deferred,
+                workspace_selection: None,
+                workspace_selection_recorded: true,
             }
         }
 
