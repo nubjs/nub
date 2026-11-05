@@ -275,13 +275,13 @@ const VALUE_OPTIONS = new Set([
   "--watch-path",
 ]);
 
-// A flag-led argv with the test runner and watch mode spelled bare among Node's
-// own options. `--test=true` selects the same mode as `--test`, but only the bare
-// token is kept out of the child the mode starts, and on Node 18 and 20.0–20.12
-// each child then starts another without end. `child_safe_modes` in argv.rs has
-// the whole account. The list only says where Node's options END; Node still
-// finds the entry itself, and an option missing from it stops the scan early
-// rather than reaching an argument of the program.
+// A flag-led argv with the test runner and watch mode spelled the way Node's filters
+// know them, among Node's own options. `--test=true` and `--watch_path=src` select the
+// same mode as `--test` and `--watch-path=src`, but only the known spelling is kept out
+// of the child the mode starts, and the child then starts another without end.
+// `child_safe_modes` in argv.rs has the whole account. The list only says where Node's
+// options END; Node still finds the entry itself, and an option missing from it stops
+// the scan early rather than reaching an argument of the program.
 function childSafeModes(argv) {
   const out = [...argv];
   for (let at = 0; at < argv.length; ) {
@@ -289,6 +289,9 @@ function childSafeModes(argv) {
     if (arg === "--" || arg === "-" || !arg.startsWith("-")) break;
     const mode = ["--test", "--watch"].find((flag) => arg.startsWith(`${flag}=`));
     if (mode) out[at] = mode;
+    if (arg === "--watch_path" || arg.startsWith("--watch_path=")) {
+      out[at] = arg.replace("--watch_path", "--watch-path");
+    }
     const name = arg.startsWith("--") ? arg.replaceAll("_", "-") : arg;
     const next = argv[at + 1];
     const takesValue = !arg.includes("=") && VALUE_OPTIONS.has(name);

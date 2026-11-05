@@ -278,3 +278,38 @@ test("a flag-led file run hands Node the test runner flag bare", async () => {
   assert.ok(children.length > 0, `the probe never ran in a test child:\n${out}`);
   for (const line of children) assert.match(line, / \[\]$/, out);
 });
+
+test(
+  "a flag-led file run hands Node the watch-path flag in the spelling its filter knows",
+  { skip: process.platform === "win32" }, // Killing the run's whole tree needs a group.
+  async () => {
+    // Watch mode only removes `--watch-path` from the child it starts, so with
+    // `--watch_path` the child is a supervisor too, without end. The `--require` probe
+    // runs first in the launched process, which says which spelling it was handed.
+    writeFileSync(
+      join(fixture, "watch-flags.cjs"),
+      "console.log(`WATCH ${JSON.stringify(process.execArgv.filter((a) => a.startsWith('--watch')))}`);\n",
+    );
+    writeFileSync(join(fixture, "idle.cjs"), "");
+    const child = spawn(
+      process.execPath,
+      [nubr, "--watch_path=.", "--require", "./watch-flags.cjs", "idle.cjs"],
+      { cwd: fixture, detached: true, stdio: ["ignore", "pipe", "inherit"] },
+    );
+    const kill = () => process.kill(-child.pid, "SIGKILL");
+    const deadline = setTimeout(kill, 30_000);
+    const line = await new Promise((resolve) => {
+      let out = "";
+      child.stdout.on("data", (chunk) => {
+        out += chunk;
+        const found = out.match(/WATCH .*/);
+        if (found) resolve(found[0]);
+      });
+      child.on("exit", () => resolve(out));
+    });
+    clearTimeout(deadline);
+    kill();
+    child.stdout.destroy();
+    assert.equal(line, 'WATCH ["--watch-path=."]');
+  },
+);

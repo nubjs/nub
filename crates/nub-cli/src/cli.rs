@@ -3561,7 +3561,9 @@ fn run_nubr() -> Result<i32> {
         .context("nubr: the nub runtime could not be located")?;
     let mut cmd = std::process::Command::new(node.path.as_str());
     nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
-    cmd.arg(runtime.join("nubr.mjs"))
+    let watch_flags = nub_core::node::spawn::lift_inherited_watch_flags(&mut cmd);
+    cmd.args(watch_flags)
+        .arg(runtime.join("nubr.mjs"))
         .args(&args)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
@@ -4541,6 +4543,15 @@ fn validate_runtime_node_option(
         bail!("nub.jsonc `nodeOptions` entry `{value}` must be one complete Node option token");
     }
     let name = value.split_once('=').map_or(value, |(name, _)| name);
+    // This field reaches every Node below the launched one, including those nub never
+    // starts itself, so nothing can move the flag out of their way as it can for an
+    // inherited variable.
+    if nub_core::node::argv::starts_watch_mode(value) {
+        bail!(
+            "nub.jsonc `nodeOptions` option `{name}` would start watch mode in every Node process below this one\n\
+             \x20\x20Run `nub watch <file>` to watch a file"
+        );
+    }
     if let Some(accepted) = accepted
         && !accepted.contains(name)
     {
@@ -7252,11 +7263,12 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // zero-augmentation contract of `--node`/compat everywhere else. Version
     // provisioning above still applies (compat = no augmentation, not no-pinning).
     if compat_mode {
-        let mut node_args = vec!["--watch".to_string(), "--watch-preserve-output".to_string()];
-        node_args.push(file.to_string());
-        node_args.extend(args.iter().cloned());
         let mut cmd = std::process::Command::new(node.path.as_str());
         nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
+        let mut node_args = vec!["--watch".to_string(), "--watch-preserve-output".to_string()];
+        node_args.extend(nub_core::node::spawn::lift_inherited_watch_flags(&mut cmd));
+        node_args.push(file.to_string());
+        node_args.extend(args.iter().cloned());
         cmd.args(&node_args)
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
@@ -7391,6 +7403,13 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
 
     let node_options_os = env::var_os("NODE_OPTIONS");
     let node_options = node_options_os.as_ref().and_then(|value| value.to_str());
+    let lifted = node_options.and_then(nub_core::node::argv::lift_watch_flags);
+    let node_options = lifted
+        .as_ref()
+        .map_or(node_options, |(rest, _)| Some(rest.as_str()));
+    if let Some((_, flags)) = &lifted {
+        node_args.extend(flags.iter().cloned());
+    }
     let accepted =
         nub_core::node::discovery::accepted_env_flags(node.path.as_std_path(), &node.version);
     let inject = nub_core::node::flags::compute_inject_flags(
@@ -7737,7 +7756,9 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
                 .map(|option| nub_core::node::spawn::node_options_token(option)),
         )
         .collect();
-    if !node_options_parts.is_empty() {
+    // With nothing left after a lift the variable is still set, to keep the inherited
+    // watch flags out of the child.
+    if !node_options_parts.is_empty() || lifted.is_some() {
         let effective_node_options = node_options_parts.join(" ");
         cmd.env("NODE_OPTIONS", &effective_node_options);
         if nub_augmented {
@@ -12408,6 +12429,20 @@ mod tests {
     // left to Node's `--env-file` (which re-reads on every restart), so editing
     // `.env` is picked up live instead of freezing at startup. `watch_inject_vars`
     // is the selection; the integration suite separately locks the real restart.
+    #[test]
+    fn node_options_config_refuses_what_would_start_watch_mode_below_every_process() {
+        for value in [
+            "--watch",
+            "--watch=1",
+            "--watch-path=src",
+            "--watch_path=src",
+        ] {
+            let err = validate_runtime_node_option(value, None, &"26.5.0").unwrap_err();
+            assert!(err.to_string().contains("watch mode"), "{value}: {err}");
+        }
+        validate_runtime_node_option("--watch-preserve-output", None, &"26.5.0").unwrap();
+    }
+
     #[test]
     fn watch_injects_only_expansion_changed_vars() {
         // A plain var (raw == expanded) and an expansion-changed var.
