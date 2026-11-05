@@ -1549,6 +1549,11 @@ pub(super) fn import_verified_tarball_streamed(
 pub(super) struct TarballStreamErr {
     pub report: miette::Report,
     pub is_throttle: bool,
+    /// The connection broke off mid-body. The caller downloads the
+    /// tarball again through the buffered fetch, which retries the
+    /// whole body: [`aube_registry::client::RegistryClient::start_tarball_stream`]
+    /// retries only the request, and leaves the body to its caller.
+    pub retry_buffered: bool,
 }
 
 impl From<TarballStreamErr> for miette::Report {
@@ -1580,14 +1585,17 @@ pub(super) async fn fetch_and_import_tarball_streaming(
     let local = |report: miette::Report| TarballStreamErr {
         report,
         is_throttle: false,
+        retry_buffered: false,
     };
     // Network-error helper, used for chunk read errors during
     // body streaming. Connection resets and read timeouts mid-
     // body are the same kind of upstream signal as a 503 reply.
-    let net = |e: aube_registry::Error, ctx: miette::Report| TarballStreamErr {
-        is_throttle: e.is_throttle(),
-        report: ctx,
-    };
+    let net =
+        |e: aube_registry::Error, ctx: miette::Report, retry_buffered: bool| TarballStreamErr {
+            is_throttle: e.is_throttle(),
+            report: ctx,
+            retry_buffered,
+        };
 
     let mut resp = client.start_tarball_stream(url).await.map_err(|e| {
         let is_throttle = e.is_throttle();
@@ -1600,6 +1608,7 @@ pub(super) async fn fetch_and_import_tarball_streaming(
                 ),
             ),
             is_throttle,
+            retry_buffered: false,
         }
     })?;
 
@@ -1630,7 +1639,9 @@ pub(super) async fn fetch_and_import_tarball_streaming(
     let mut hasher = sha2::Sha512::new();
     let mut total: u64 = 0;
     let mut chunk_tx = Some(chunk_tx);
-    let stream_err: Option<aube_registry::Error> = loop {
+    // The flag says whether downloading the body again can help: a
+    // connection that broke off, not a body past the cap.
+    let stream_err: Option<(aube_registry::Error, bool)> = loop {
         match resp.chunk().await {
             Ok(Some(chunk)) => {
                 if cap > 0 && total.saturating_add(chunk.len() as u64) > cap {
@@ -1642,10 +1653,13 @@ pub(super) async fn fetch_and_import_tarball_streaming(
                             )))
                             .await;
                     }
-                    break Some(aube_registry::Error::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("tarball body exceeds cap {cap}"),
-                    )));
+                    break Some((
+                        aube_registry::Error::Io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("tarball body exceeds cap {cap}"),
+                        )),
+                        false,
+                    ));
                 }
                 total += chunk.len() as u64;
                 hasher.update(&chunk);
@@ -1663,14 +1677,14 @@ pub(super) async fn fetch_and_import_tarball_streaming(
                 if let Some(tx) = chunk_tx.as_ref() {
                     let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
                 }
-                break Some(aube_registry::Error::from(e));
+                break Some((aube_registry::Error::from(e), true));
             }
         }
     };
     drop(chunk_tx);
 
     let import_result = import_handle.await.into_diagnostic().map_err(local)?;
-    if let Some(e) = stream_err {
+    if let Some((e, retry_buffered)) = stream_err {
         // Stash the Display rendering before `net` consumes `e`
         // for `is_throttle()` — the user-facing diagnostic must
         // still name the underlying cause (timeout, status 503,
@@ -1683,6 +1697,7 @@ pub(super) async fn fetch_and_import_tarball_streaming(
                 "stream error for {display_name}@{version}: {cause}{}",
                 crate::dep_chain::format_chain_for(registry_name, version)
             ),
+            retry_buffered,
         ));
     }
     let index = import_result.map_err(local)?;

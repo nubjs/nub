@@ -1939,6 +1939,12 @@ fn augmentation_to_lifecycle_overlay(
         OsString::from(crate::cli::LIFECYCLE_ENV),
         OsString::from("1"),
     ));
+    // The build jail clears the environment before this overlay lands; without
+    // this, a chain through dependency scripts would restart nub's recursion
+    // count at every link.
+    if let Some(depth) = std::env::var_os(nub_core::node::nesting::NESTING_ENV) {
+        overlay.push((OsString::from(nub_core::node::nesting::NESTING_ENV), depth));
+    }
     // localStorage-neutralize signal for dependency build scripts' node children
     // (webstorage flag-needed band, no user --localstorage-file); preload reads + deletes.
     aug.apply_localstorage_env(|k, v| {
