@@ -876,7 +876,13 @@ fn a_single_executable_reports_an_uncaught_error_where_it_was_thrown() {
     // the map beside the artifact under the entry chunk's name.
     let floor = work.join(format!("orders-floor{}", std::env::consts::EXE_SUFFIX));
     compile(
-        &["--smol", "--target", "22.20.0", "--sourcemap=external"],
+        &[
+            "--smol",
+            "--target",
+            "22.20.0",
+            "--sourcemap=external",
+            "--no-minify",
+        ],
         &floor,
     );
     let floor_map: serde_json::Value = serde_json::from_slice(
@@ -898,6 +904,64 @@ fn a_single_executable_reports_an_uncaught_error_where_it_was_thrown() {
             "a 22.20 target bundles the runtime's {package}, which should be named under \
              {prefix}: {runtime_sources:?}"
         );
+    }
+
+    // Unminified, every module is headed by a `//#region <name>` comment, and those
+    // names ship. A map makes this shape extract on first run, so the chunk Node
+    // actually loads is on disk to read.
+    let extracted = work.join("artifact-cache");
+    let mut command = Command::new(&floor);
+    command
+        .current_dir(&work)
+        .env("__NUB_COMPILE_CACHE_DIR", &extracted);
+    run_compiled_artifact_command_with_timeout(command, std::time::Duration::from_secs(20));
+    let mut pending = vec![extracted.clone()];
+    let mut chunk = None;
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read the extraction cache") {
+            let path = entry.expect("read an extraction entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.file_name().is_some_and(|name| name == "app.mjs") {
+                chunk = Some(path);
+            }
+        }
+    }
+    let chunk = chunk.expect("the artifact extracted its entry chunk");
+    let text = std::fs::read_to_string(&chunk).expect("read the extracted chunk");
+    let regions: Vec<&str> = text
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("//#region "))
+        .collect();
+    let stray: Vec<&&str> = regions
+        .iter()
+        .filter(|id| {
+            !(id.starts_with("runtime/") || id.starts_with("\\0"))
+                && (id.starts_with("..") || Path::new(id).is_absolute())
+        })
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "a region names a module outside the project by its place on this machine: {stray:?}"
+    );
+    for prefix in ["runtime/", "runtime/node_modules/@js-temporal/polyfill/"] {
+        assert!(
+            regions.iter().any(|id| id.starts_with(prefix)),
+            "an unminified chunk should head the runtime's modules with `//#region {prefix}…`: \
+             {regions:?}"
+        );
+    }
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut machine_paths = vec![work.clone(), cache.clone(), checkout];
+    machine_paths.extend(std::env::var_os("HOME").map(PathBuf::from));
+    for path in machine_paths {
+        for spelling in [path.clone(), std::fs::canonicalize(&path).unwrap_or(path)] {
+            let spelling = spelling.to_string_lossy().into_owned();
+            assert!(
+                !text.contains(&spelling),
+                "the bundled chunk names {spelling}, a path on the building machine"
+            );
+        }
     }
 
     let summary = compile(
@@ -1160,12 +1224,38 @@ fn assert_compile_path_eq(actual: &str, expected: &str, context: &str) {
     );
 }
 
+/// A second spelling of the host Node at a path of its own, so a fork told to use
+/// it can be told apart from one that fell back to the default.
+///
+/// A hard link or a copy, never a symlink: Node reports its resolved path as
+/// `process.execPath`, so through a symlink the explicit case would report the
+/// original and assert nothing. A Node linked against a shared `libnode` (Homebrew
+/// builds one) loads it from `@loader_path/../lib`, or `$ORIGIN/../lib` on Linux,
+/// which a copy anywhere else loses. A hard link fails the same way on most runs:
+/// dyld takes `@loader_path` from whichever of the file's names the kernel hands
+/// back, which is rarely the original. So the alias gets a `bin/` of its
+/// own beside a `lib` link to the original's, and loads from either name.
 #[cfg(feature = "compile")]
-fn make_compile_test_node_alias(source: &Path, destination: &Path) {
-    if std::fs::hard_link(source, destination).is_ok() {
-        return;
+fn make_compile_test_node_alias(source: &Path, work: &Path) -> PathBuf {
+    let root = work.join("explicit-node");
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).expect("create the explicit fork Node's bin dir");
+    #[cfg(unix)]
+    {
+        let lib = source
+            .parent()
+            .and_then(Path::parent)
+            .map(|prefix| prefix.join("lib"));
+        if let Some(lib) = lib.filter(|lib| lib.is_dir()) {
+            std::os::unix::fs::symlink(&lib, root.join("lib"))
+                .expect("link the explicit fork Node's lib dir");
+        }
     }
-    std::fs::copy(source, destination).unwrap_or_else(|error| {
+    let destination = bin.join(format!("explicit-node{}", std::env::consts::EXE_SUFFIX));
+    if std::fs::hard_link(source, &destination).is_ok() {
+        return destination;
+    }
+    std::fs::copy(source, &destination).unwrap_or_else(|error| {
         panic!(
             "copying explicit fork Node {} to {}: {error}",
             source.display(),
@@ -1179,9 +1269,10 @@ fn make_compile_test_node_alias(source: &Path, destination: &Path) {
             .expect("read explicit fork Node permissions")
             .permissions()
             .mode();
-        std::fs::set_permissions(destination, std::fs::Permissions::from_mode(mode))
+        std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(mode))
             .expect("preserve explicit fork Node executable permissions");
     }
+    destination
 }
 
 #[cfg(feature = "compile")]
@@ -1194,9 +1285,8 @@ fn compile_artifact_process_bootstrap_topology() {
     let entry = work.join("topology-main.mjs");
     let artifact = work.join(format!("topology-app{}", std::env::consts::EXE_SUFFIX));
     let fork_child = work.join("fork-child.mjs");
-    let explicit_node = work.join(format!("explicit-node{}", std::env::consts::EXE_SUFFIX));
     std::fs::create_dir_all(&work).unwrap();
-    make_compile_test_node_alias(Path::new(&runtime.node_exec_path), &explicit_node);
+    let explicit_node = make_compile_test_node_alias(Path::new(&runtime.node_exec_path), &work);
 
     // An ordinary Node child: fork() must select the captured real Node rather
     // than the public outer executable, retain IPC, and normalize only its Node
