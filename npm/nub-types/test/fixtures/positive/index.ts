@@ -9,6 +9,33 @@ import tomlCfg from "./config.toml";
 // The default-export handler type, which is module-scoped rather than global so it
 // cannot merge with Cloudflare's same-named global.
 import type { ExportedHandler, FetchHandler } from "@nubjs/types";
+import { debounce, throttle } from "node:util";
+import { debounce as aliasDebounce, throttle as aliasThrottle } from "util";
+
+const debounced = debounce((value: string) => value.length, 10, { leading: true });
+const throttled = throttle((value: number) => Promise.resolve(value.toString()), 2, 100, { overflow: "drop" });
+const debouncedResult: Promise<number> = debounced("draft");
+const throttledResult: Promise<string> = throttled(2);
+const pendingDebounced: Promise<number> | null = debounced.pending;
+const pendingThrottled: Promise<string> | null = throttled.pending;
+const canInvoke: boolean = throttled.hasImmediateCapacity();
+const aliasDebouncedResult: Promise<number> = aliasDebounce((value: number) => value, 1)(1);
+const aliasThrottledResult: Promise<number> = aliasThrottle((value: number) => value, 1, 1)(1);
+const debouncedWithThis = debounce(function (value: string) {
+  const pendingCount: number = this.pendingCount;
+  const recursiveCall: Promise<unknown> = this(value);
+  void recursiveCall;
+  return value.length + pendingCount;
+}, 1);
+const throttledWithThis = throttle(function (value: number) {
+  const activeCount: number = this.activeCount;
+  const recursiveCall: Promise<unknown> = this(value);
+  void recursiveCall;
+  return value + activeCount;
+}, 1, 1);
+const debouncedWithThisResult: Promise<number> = debouncedWithThis("draft");
+const throttledWithThisResult: Promise<number> = throttledWithThis(1);
+void [debouncedResult, throttledResult, pendingDebounced, pendingThrottled, canInvoke, aliasDebouncedResult, aliasThrottledResult, debouncedWithThisResult, throttledWithThisResult];
 
 // Browser-shape Worker global + its methods/handlers.
 const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
@@ -74,6 +101,11 @@ const joined: string = [1, 2, 3].values().join("-");
 void [firstChunk, firstWindow, partialWindow, hasTwo, hasTwoAfterSkip, joined];
 
 const precise: number = Math.sumPrecise([1e20, 0.1, -1e20]);
+JSON.parse("{}", { freeze: true, preferNullPrototype: false });
+// The runtime throws on a non-boolean option rather than coercing it; an
+// `options: object` signature would accept this.
+// @ts-expect-error `freeze` is a boolean.
+JSON.parse("{}", { freeze: 1 });
 const metadataKey: symbol = Symbol.metadata;
 Atomics.pause(1);
 void [precise, metadataKey];

@@ -51,6 +51,22 @@ impl CliSupportedArchitectures {
     }
 }
 
+/// Which project `.npmrc` files a command inside a workspace reads. Every
+/// package manager reads the workspace root's `.npmrc`, whichever member a
+/// command targets; they disagree on whether the `.npmrc` of the package the
+/// command was RUN from also counts (measured on pnpm 10.34, pnpm 11.28, npm
+/// 11.20, Yarn 1.22 and Bun 1.4).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum WorkspaceNpmrc {
+    /// The root `.npmrc`, then the invoking package's own on top: pnpm 10 and
+    /// earlier, Yarn 1.
+    #[default]
+    RootBeneathMember,
+    /// The root `.npmrc` alone; a member `.npmrc` is never read: pnpm 11, npm,
+    /// Bun.
+    RootOnly,
+}
+
 /// Per-invocation values an embedder computes and hands to aube.
 ///
 /// Every field defaults to aube's upstream behavior, so an unset context is
@@ -190,6 +206,18 @@ pub struct EngineContext {
     /// the keys the allowlist keeps, so auth resolution is identical with the
     /// posture on or off.
     pub npmrc_settings_allowlist: bool,
+
+    /// Whether the invoking package's `.npmrc` layers over the workspace
+    /// root's; see [`WorkspaceNpmrc`]. Both layers are project-scope, so both
+    /// keep the project trust tier.
+    pub workspace_npmrc: WorkspaceNpmrc,
+
+    /// The directory the command was invoked from, after `--dir`/`-C`, which
+    /// decides the invoking package for [`WorkspaceNpmrc::RootBeneathMember`].
+    /// Recorded once by the embedder because filtered and recursive commands
+    /// later chdir into each member they visit. `None` falls back to the
+    /// process cwd at read time.
+    pub invocation_dir: Option<std::path::PathBuf>,
 
     /// Whether aube reads Yarn Berry's `.yarnrc.yml` config surface and
     /// translates the subset that maps cleanly onto the existing npmrc-shaped
@@ -475,6 +503,8 @@ impl Default for EngineContext {
             read_layout_from_workspace_yaml: true,
             read_pnpm_config_env_registry: false,
             npmrc_settings_allowlist: false,
+            workspace_npmrc: WorkspaceNpmrc::RootBeneathMember,
+            invocation_dir: None,
             read_yarn_config: false,
             yarn_is_classic: false,
             read_bun_config: false,

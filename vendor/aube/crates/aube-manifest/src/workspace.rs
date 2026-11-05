@@ -16,6 +16,8 @@
 //! The submodules are private; the public API is re-exported from
 //! this module so callers continue to use `aube_manifest::workspace::X`.
 
+use std::path::{Path, PathBuf};
+
 mod config;
 mod edits;
 mod mutations;
@@ -35,6 +37,47 @@ pub use mutations::{
     ALLOW_BUILDS_REVIEW_PLACEHOLDER, add_to_allow_builds, remove_workspace_patched_dependency,
     set_allow_builds, upsert_workspace_patched_dependency,
 };
+
+/// Walk upward from `start` to the nearest workspace root: an ancestor (or
+/// `start` itself) holding a workspace yaml from [`workspace_yaml_names`], or a
+/// `package.json` with a `workspaces` field (npm / yarn / bun). Uncached.
+///
+/// Any workspace yaml is a hard boundary, matching pnpm: a file with no
+/// `packages:` list configures a single-package workspace rather than meaning
+/// "keep walking to an enclosing one". The walk stops at `$HOME` so a stray
+/// command in an empty scratch dir never attaches to a workspace above it.
+pub fn find_workspace_root(start: &Path) -> Option<PathBuf> {
+    let stop = aube_util::env::home_dir();
+    for dir in start.ancestors() {
+        if workspace_yaml_existing(dir).is_some() {
+            return Some(dir.to_path_buf());
+        }
+        let pkg = dir.join("package.json");
+        if pkg.is_file() && package_json_has_workspaces(&pkg) {
+            return Some(dir.to_path_buf());
+        }
+        if stop.as_deref() == Some(dir) {
+            return None;
+        }
+    }
+    None
+}
+
+/// Shape-only check for a `package.json`'s `workspaces` field, skipping the
+/// full `PackageJson` parse for every ancestor in the walk.
+fn package_json_has_workspaces(path: &Path) -> bool {
+    #[derive(serde::Deserialize)]
+    struct ShapeOnly {
+        #[serde(default)]
+        workspaces: Option<serde::de::IgnoredAny>,
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    serde_json::from_slice::<ShapeOnly>(&bytes)
+        .map(|s| s.workspaces.is_some())
+        .unwrap_or(false)
+}
 
 #[cfg(test)]
 mod tests {

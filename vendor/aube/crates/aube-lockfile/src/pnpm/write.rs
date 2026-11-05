@@ -67,7 +67,13 @@ mod tests {
 pub fn write(path: &Path, graph: &LockfileGraph, manifest: &PackageJson) -> Result<(), Error> {
     let Built { lockfile, .. } = build(path, graph, manifest)?;
     let yaml = yaml_serde::to_string(&lockfile).map_err(|e| Error::parse(path, e.to_string()))?;
-    let yaml = reformat_for_pnpm_parity(&yaml);
+    let mut yaml = reformat_for_pnpm_parity(&yaml);
+    // The env document (pnpm 11+'s package-manager pin) belongs to the
+    // package-manager sync, not to this writer: carry the one on disk
+    // across, as pnpm's `save_value_to_path` does.
+    if let Some(env) = super::env::preserved_env_document(path) {
+        yaml = super::env::compose_with_env_document(&env, &yaml);
+    }
     // Atomic via tempfile + persist. Crash, Ctrl+C, or AV
     // quarantine during the write used to leave the user with a
     // truncated pnpm-lock.yaml on disk, next install failed to
