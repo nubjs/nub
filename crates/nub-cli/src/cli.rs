@@ -8236,9 +8236,9 @@ enum UpgradeChannel {
     Winget,
     /// mise-managed install, through any backend (the registry's `nub` is
     /// `github:nubjs/nub`; `npm:@nubjs/nub` also works). mise picks the version
-    /// from config, so the upgrade is mise's own `upgrade --bump`, which moves
-    /// that request. `tool` is the name mise recorded for the install;
-    /// `install_root` is the version directory the binary runs from.
+    /// from config, so the upgrade runs through mise and moves that request.
+    /// `tool` is the name mise recorded for the install; `install_root` is the
+    /// version directory the binary runs from.
     Mise { tool: String, install_root: PathBuf },
     /// The curl/`~/.nub` self-owned install — Nub owns the binary and swaps it
     /// in place. `install_dir` is the `…/.nub` root (parent of `bin/`).
