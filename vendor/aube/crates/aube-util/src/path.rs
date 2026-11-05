@@ -30,6 +30,19 @@ pub fn normalize_lexical(path: &Path) -> PathBuf {
     out
 }
 
+/// A local dependency path in the form pnpm records it: forward slashes,
+/// lexically normalized (`./dep`, `unused/../dep` -> `dep`), and `.` for the
+/// project itself. Two spellings of one path give the same string.
+pub fn normalize_dep_path(path: &str) -> String {
+    let path = path.replace('\\', "/");
+    // `PathBuf` joins with `\` on Windows, so the separators are fixed after
+    // normalizing as well as before.
+    let path = normalize_lexical(Path::new(&path))
+        .to_string_lossy()
+        .replace('\\', "/");
+    if path.is_empty() { ".".to_string() } else { path }
+}
+
 /// Strip a Windows `\\?\` verbatim drive prefix from `path` so callers
 /// that interpolate it into a path-concatenating template (`%~dp0\{rel}`
 /// in the bin-shim generator, `starts_with` ownership checks in

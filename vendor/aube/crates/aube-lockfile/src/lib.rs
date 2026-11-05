@@ -707,7 +707,7 @@ impl LockedPackage {
     pub fn source_approval_key(&self) -> Option<String> {
         self.local_source
             .as_ref()
-            .map(|source| format!("{}@{}", self.registry_name(), source.specifier()))
+            .map(|source| format!("{}@{}", self.registry_name(), source.pnpm_specifier()))
     }
 
     /// Every exact-source approval key: [`Self::source_approval_key`] first,
@@ -864,6 +864,17 @@ mod locked_package_tests {
             pkg.source_approval_key(),
             Some("pkg@file:vendor/pkg".to_string())
         );
+    }
+
+    #[test]
+    fn source_approval_key_normalizes_a_local_path() {
+        let mut pkg = pkg();
+        pkg.local_source = Some(LocalSource::Directory(PathBuf::from("./vendor/pkg")));
+        assert_eq!(
+            pkg.source_approval_key(),
+            Some("pkg@file:vendor/pkg".to_string())
+        );
+        assert_eq!(pkg.source_approval_keys(), ["pkg@file:vendor/pkg"]);
     }
 
     #[test]
