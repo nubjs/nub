@@ -2754,7 +2754,7 @@ fn version_flag_never_spawns_node_even_when_node_is_slow() {
         .unwrap()
         .as_secs();
     let cache_json = format!(
-        r#"{{"{}":{{"version":"22.16.0","mtime":{mtime}}}}}"#,
+        r#"{{"{}":{{"kind":"binary","version":"22.16.0","mtime":{mtime}}}}}"#,
         fake_node.to_string_lossy()
     );
     std::fs::write(cache.join("nub").join("node-discovery.json"), cache_json).unwrap();
@@ -3511,6 +3511,49 @@ console.log(JSON.stringify({ setOk, fromAsyncOk, iterOk, mapOk, sumOk, symOk, js
     assert_eq!(
         stdout,
         r#"{"setOk":true,"fromAsyncOk":true,"iterOk":true,"mapOk":true,"sumOk":true,"symOk":true,"jsonOk":true}"#,
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn util_rate_helpers_reach_named_imports_and_require() {
+    // Below Node 24.22 / 26.10 the backfill adds both helpers to the util object
+    // after `node:util`'s ESM export names are fixed, so the static named import
+    // here fails to link unless the resolve hook routes it through the facade. The
+    // CI tier legs (18.19 through 22.15) cover both loader tiers; newer Node is
+    // native and must come through untouched.
+    let work = unique_test_cache();
+    std::fs::create_dir_all(&work).unwrap();
+    let test_file = work.join("_util_rate.mjs");
+    std::fs::write(
+        &test_file,
+        r#"
+import { debounce, throttle } from "node:util";
+import util from "util";
+import { createRequire } from "node:module";
+const cjs = createRequire(import.meta.url)("util");
+const dynamic = await import("node:util");
+const same = debounce === util.debounce && throttle === util.throttle &&
+  cjs.debounce === debounce && dynamic.throttle === throttle;
+const results = await Promise.all([debounce((v) => v + 1, 1)(1), throttle((v) => v * 2, 1, 1)(2)]);
+console.log(JSON.stringify({ same, results }));
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(nub_binary())
+        .arg(test_file.to_str().unwrap())
+        .current_dir(&work)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("failed to spawn nub");
+
+    let _ = std::fs::remove_dir_all(&work);
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stdout, r#"{"same":true,"results":[2,4]}"#,
         "stderr: {stderr}"
     );
 }

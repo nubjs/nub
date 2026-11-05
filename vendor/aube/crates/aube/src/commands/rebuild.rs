@@ -49,8 +49,20 @@ async fn rebuild_project(packages: &[String], importers: Option<&[String]>) -> m
         Some(packages.iter().cloned().collect::<HashSet<String>>())
     };
 
-    let cwd = crate::dirs::project_root()?;
-    let manifest = load_manifest(&cwd)?;
+    let project_dir = crate::dirs::project_root()?;
+    let project_manifest = load_manifest(&project_dir)?;
+    // Under `sharedWorkspaceLockfile=false` a member keeps its own lockfile,
+    // but install still links every member into the workspace root's virtual
+    // store and takes build approvals from the root. So a member's graph comes
+    // from its own lockfile and everything else — store, settings, policy,
+    // the project the scripts run for — from the root, as install did.
+    let cwd = unshared_lockfile_workspace_root(&project_dir).unwrap_or_else(|| project_dir.clone());
+    // A root holding only `pnpm-workspace.yaml` is valid, as install accepts.
+    let manifest = if cwd == project_dir {
+        project_manifest.clone()
+    } else {
+        super::load_manifest_or_default(&cwd)?
+    };
     let files = crate::commands::FileSources::load(&cwd);
     let (workspace, raw_workspace) = aube_manifest::workspace::load_both(&cwd)
         .into_diagnostic()
@@ -59,7 +71,7 @@ async fn rebuild_project(packages: &[String], importers: Option<&[String]>) -> m
     let settings_ctx = files.ctx(&raw_workspace, &env_snapshot, &[]);
     super::configure_script_settings(&cwd, &settings_ctx, Some("rebuild"));
 
-    let graph = match aube_lockfile::parse_lockfile(&cwd, &manifest) {
+    let graph = match aube_lockfile::parse_lockfile(&project_dir, &project_manifest) {
         Ok(graph) => Some(graph),
         Err(aube_lockfile::Error::NotFound(_)) => None,
         Err(e) => return Err(miette::Report::new(e)).wrap_err("failed to parse lockfile"),
@@ -72,7 +84,7 @@ async fn rebuild_project(packages: &[String], importers: Option<&[String]>) -> m
     if selected.is_some() && graph.is_none() {
         return Err(miette!(
             "no lockfile found at {} — run `{}` before targeting specific packages",
-            cwd.display(),
+            project_dir.display(),
             aube_util::cmd("install")
         ));
     }
@@ -274,6 +286,16 @@ async fn rebuild_project(packages: &[String], importers: Option<&[String]>) -> m
     }
 
     Ok(())
+}
+
+/// The workspace root when `project_dir` is a member of a workspace that
+/// keeps one lockfile per project; `None` for the root itself, a shared
+/// lockfile, or no workspace.
+fn unshared_lockfile_workspace_root(project_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let root = crate::dirs::find_workspace_root(project_dir)?;
+    let shared =
+        super::with_settings_ctx(&root, aube_settings::resolved::shared_workspace_lockfile);
+    (root != project_dir && !shared).then_some(root)
 }
 
 async fn run_filtered(

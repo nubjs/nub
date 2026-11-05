@@ -168,6 +168,53 @@ const fn band(lo: (u32, u32, u32), hi: Option<(u32, u32, u32)>) -> VersionBand {
 /// from this — do not add a parallel table elsewhere.
 // @lat: [[architecture#Architecture#Feature support across Node versions]]
 static FEATURES: &[Feature] = &[
+    // ── util.debounce / util.throttle ──────────────────────────────────────
+    // Native in 26.10 and backported to 24.22. 25.x reached end of life without
+    // the backport, so the row has a hole there, the same shape as URL.parse.
+    Feature {
+        name: "util.debounce",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((24, 22, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "util/rate.cjs",
+                    global: "util.debounce",
+                },
+            ),
+            (band((24, 22, 0), Some((25, 0, 0))), Mitigation::Native),
+            (
+                band((25, 0, 0), Some((26, 10, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "util/rate.cjs",
+                    global: "util.debounce",
+                },
+            ),
+            (band((26, 10, 0), None), Mitigation::Native),
+        ],
+        evidence: "nodejs/node#65899; native 26.10.0, backported to 24.22.0; 25.x never got it",
+    },
+    Feature {
+        name: "util.throttle",
+        mitigations: &[
+            (
+                band((18, 19, 0), Some((24, 22, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "util/rate.cjs",
+                    global: "util.throttle",
+                },
+            ),
+            (band((24, 22, 0), Some((25, 0, 0))), Mitigation::Native),
+            (
+                band((25, 0, 0), Some((26, 10, 0))),
+                Mitigation::Polyfill {
+                    runtime_file: "util/rate.cjs",
+                    global: "util.throttle",
+                },
+            ),
+            (band((26, 10, 0), None), Mitigation::Native),
+        ],
+        evidence: "nodejs/node#65899; native 26.10.0, backported to 24.22.0; 25.x never got it",
+    },
     // ── vm.Module / vm.SourceTextModule ────────────────────────────────────
     // Flag added in Node 9.6.0 (#14253) and NEVER unflagged through Node 26 —
     // `vm.Module` stays experimental and the flag is always required. So inject

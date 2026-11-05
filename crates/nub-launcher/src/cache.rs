@@ -268,6 +268,11 @@ fn resolve_from<T>(
 /// verdict then costs one launch on a mislabelled Node, not a safety property.
 const PROBE_DIR: &str = "smol-probe";
 
+/// First line of every entry. Entries from before it are dropped on read: they
+/// were written without the shim check, so one may hold the version a version
+/// manager's shim reported for some other directory.
+const PROBE_FORMAT: &str = "binary-v2";
+
 /// Remember a probe verdict. Best effort: a cache that cannot be written is a
 /// slower launch, never a failed one, so every error here is discarded.
 ///
@@ -288,7 +293,7 @@ pub fn write_node_version(node_bin: &Path, stamp: &str, version: &str) {
         if create(parent).is_err() {
             continue;
         }
-        if fs::write(&path, format!("{stamp}\n{version}\n")).is_ok() {
+        if fs::write(&path, format!("{PROBE_FORMAT}\n{stamp}\n{version}\n")).is_ok() {
             let _ = harden_probe(&path);
             return;
         }
@@ -372,7 +377,11 @@ impl ProbeStore {
             // `<stamp>\n<version>`: the stamp must match the binary as it is NOW,
             // or this entry describes a different file that happened to sit at
             // this path.
-            let Some((recorded, version)) = body.split_once('\n') else {
+            let Some((recorded, version)) = body
+                .strip_prefix(PROBE_FORMAT)
+                .and_then(|rest| rest.strip_prefix('\n'))
+                .and_then(|rest| rest.split_once('\n'))
+            else {
                 continue;
             };
             if recorded == stamp {

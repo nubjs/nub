@@ -45,6 +45,7 @@ const { createRequire } = getBuiltin("node:module");
 const runtimeRequire = typeof compileBootstrap?.createRequire === "function"
   ? compileBootstrap.createRequire(__filename)
   : createRequire(__filename);
+const { installUtilRateShims } = require("./util/rate.cjs");
 
 // Install every globalThis/prototype polyfill that doesn't depend on loading the
 // ESM side-effect modules (worker-polyfill, navigator-locks). Synchronous and
@@ -53,6 +54,7 @@ const runtimeRequire = typeof compileBootstrap?.createRequire === "function"
 // resolve hook would otherwise clobber a later import of them.
 function installSyncPolyfills(preloaded) {
   preloaded = preloaded || {};
+  installUtilRateShims();
 
   // ── Web Storage: neutralize the throwing localStorage getter ────────
   // When nub injects `--experimental-webstorage` on the 22.4–24 band AND the user
@@ -127,7 +129,11 @@ function installSyncPolyfills(preloaded) {
   // force one throwaway construction INSIDE a suppression window: that consumes
   // Node's once-per-feature guard (the warning is dropped here) so the user's later
   // `new File(...)` is silent.
-  if (typeof globalThis.File === "undefined" || typeof globalThis.Blob === "undefined") {
+  //
+  // Probe with `in`, never `typeof`: from Node 20 `File` is a lazy global, and
+  // reading its value loads `internal/file` into every augmented startup. `in`
+  // sees the property without materializing it.
+  if (!("File" in globalThis) || !("Blob" in globalThis)) {
     const origEmitWarning = process.emitWarning;
     process.emitWarning = function (warning, ...rest) {
       const opt = rest[0];
