@@ -359,6 +359,10 @@ pub(crate) const PHANTOM_SCANNER_VERSION: u32 = 6;
 /// a tree, so without this salt the fix reaches nobody until unrelated churn
 /// (a lockfile edit, `--force`) happens to bust the state.
 ///
+/// Version 2 is the same story through the planner: ejecting a registry package
+/// with a project-local child moves no hash either, so a tree holding that dangling
+/// link would otherwise stay "up to date".
+///
 /// Same shape and same remedy as aube's `hoisted_layout_algo` salt, which exists
 /// because a hoisted-layout algorithm change likewise left the graph hash
 /// identical. Bump on any future change to what that pass materializes.
@@ -375,7 +379,7 @@ pub(crate) const PHANTOM_SCANNER_VERSION: u32 = 6;
 /// non-empty" is NOT available — the closure needs the resolved graph, and this
 /// hash is computed before resolution. The auto-install path (`nub run`) does not
 /// pay it at all: it passes no CLI flags, which skips the settings-hash check.
-pub(crate) const GVS_EJECT_ALGO_VERSION: u32 = 1;
+pub(crate) const GVS_EJECT_ALGO_VERSION: u32 = 2;
 
 /// THE single source of truth for a phantom sidecar's location: the versioned
 /// subdir `<phantom_cache_dir>/s<PHANTOM_SCANNER_VERSION>/<fingerprint>.json`.
