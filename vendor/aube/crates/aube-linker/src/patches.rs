@@ -256,7 +256,45 @@ fn is_case_only_rename(from: &Path, to: &Path) -> bool {
         })
 }
 
-pub(crate) fn apply_multi_file_patch(pkg_dir: &Path, patch_text: &str) -> Result<(), String> {
+/// Write a package's original files from the store into `dest`, the
+/// baseline `aube patch` diffs against. Every file is a fresh copy,
+/// never a hard link: the copy is edited in place, and a link would
+/// write the edit through to the shared store. Index keys pass the
+/// same traversal check the linker applies, and each file's mode comes
+/// from the index, because a CAS inode can carry an `+x` bit that
+/// another package's entry for the same content set.
+pub fn copy_package_from_store(
+    index: &aube_store::PackageIndex,
+    dest: &Path,
+) -> Result<(), String> {
+    for (rel, stored) in index {
+        crate::validate_index_key(rel).map_err(|e| e.to_string())?;
+        let target = dest.join(rel);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+        }
+        std::fs::copy(&stored.store_path, &target).map_err(|e| {
+            format!(
+                "failed to copy {} from the store to {}: {e}",
+                rel,
+                target.display()
+            )
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = if stored.executable { 0o755 } else { 0o644 };
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode))
+                .map_err(|e| format!("failed to set the mode of {}: {e}", target.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Apply a multi-file unified diff to the package directory `pkg_dir`,
+/// the same way install applies a declared patch.
+pub fn apply_multi_file_patch(pkg_dir: &Path, patch_text: &str) -> Result<(), String> {
     let sections = split_patch_sections(patch_text);
     if sections.is_empty() {
         return Err("patch contained no parseable file sections".to_string());
@@ -984,6 +1022,56 @@ fn split_patch_sections(text: &str) -> Vec<PatchSection> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_package_from_store_takes_modes_from_the_index_and_refuses_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        // One CAS file shared by an executable and a plain entry, with the
+        // +x bit an earlier link already set on its inode.
+        let cas = dir.path().join("cas");
+        std::fs::write(&cas, "#!/usr/bin/env node\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&cas, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let stored = |executable| aube_store::StoredFile {
+            hex_hash: String::new(),
+            store_path: cas.clone(),
+            executable,
+            size: None,
+        };
+        let mut index = aube_store::PackageIndex::default();
+        index.insert("bin/cli.js".to_string(), stored(true));
+        index.insert("lib/plain.js".to_string(), stored(false));
+        let dest = dir.path().join("copy");
+        copy_package_from_store(&index, &dest).unwrap();
+
+        std::fs::write(dest.join("lib/plain.js"), "edited\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&cas).unwrap(),
+            "#!/usr/bin/env node\n",
+            "editing the copy must not write through to the store"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |rel: &str| {
+                std::fs::metadata(dest.join(rel))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777
+            };
+            assert_eq!(mode("bin/cli.js"), 0o755);
+            assert_eq!(mode("lib/plain.js"), 0o644);
+        }
+
+        let mut escaping = aube_store::PackageIndex::default();
+        escaping.insert("../outside.js".to_string(), stored(false));
+        assert!(copy_package_from_store(&escaping, &dest).is_err());
+        assert!(!dir.path().join("outside.js").exists());
+    }
 
     #[test]
     fn empty_patch_set_writes_no_sidecar_and_cleans_a_stale_one() {
