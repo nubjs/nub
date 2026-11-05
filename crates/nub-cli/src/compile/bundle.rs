@@ -427,13 +427,14 @@ fn bundle_inner(
         &loader_plan,
         Arc::clone(&collected),
     ));
-    let prelude = Arc::new(CompilePreamble::new(
-        entry_abs,
-        opts.target_node,
-        opts.eager_startup,
-    )?);
+    let mut prelude = CompilePreamble::new(entry_abs, opts.target_node, opts.eager_startup)?;
+    let runtime_names = Arc::new(RuntimeNames::new(&prelude.runtime_dir));
+    if !opts.minify {
+        prelude.region_names = Some((cwd.clone(), Arc::clone(&runtime_names)));
+    }
+    let prelude = Arc::new(prelude);
     if options.sourcemap.is_some() {
-        options.sourcemap_path_transform = Some(runtime_source_names(&prelude.runtime_dir));
+        options.sourcemap_path_transform = Some(runtime_source_names(runtime_names));
     }
     let new_urls = Arc::new(NewUrlAssets {
         collected: Arc::clone(&collected),
@@ -2149,6 +2150,10 @@ struct CompilePreamble {
     /// prelude is bundled; otherwise the emitted chunk resolves them from the
     /// extraction directory and fails before application code runs.
     support_files: Vec<(String, Vec<u8>)>,
+    /// The bundler's `cwd` and the runtime's output names, for
+    /// [`rename_runtime_regions`]. Unset when minifying, which strips those comments,
+    /// and where nothing renders a chunk.
+    region_names: Option<(PathBuf, Arc<RuntimeNames>)>,
     /// Runtime bootstrap extracted at the payload root rather than beside the
     /// content-addressed bundle layout. The launcher loads it before the entry.
     root_support_files: Vec<(String, Vec<u8>)>,
@@ -2411,6 +2416,7 @@ impl CompilePreamble {
                 COMPILE_PREAMBLE_ID.to_string()
             ]))),
             support_files: Vec::new(),
+            region_names: None,
             root_support_files: Vec::new(),
             app_uses_child_process: AtomicBool::new(false),
             app_uses_worker: AtomicBool::new(false),
@@ -2673,17 +2679,23 @@ impl Plugin for CompilePreamble {
             | HookUsage::RenderChunk
     }
 
-    /// See [`hoist_module_wrappers`]. No source map is returned: the rewrite is
-    /// confined to the wrapper's own declaration head and tail, so every line of
-    /// module code keeps its position and the incoming map stays accurate.
+    /// See [`hoist_module_wrappers`] and [`rename_runtime_regions`]. No source map
+    /// is returned: the first rewrite is confined to the wrapper's own declaration
+    /// head and tail and the second to comment text, so every line of module code
+    /// keeps its position and the incoming map stays accurate.
     fn render_chunk(
         &self,
         _ctx: &PluginContext,
         args: &HookRenderChunkArgs<'_>,
     ) -> impl Future<Output = HookRenderChunkReturn> + Send {
-        let hoisted = hoist_module_wrappers(&args.code);
+        let rewritten = hoist_module_wrappers(&args.code).map(|hoisted| {
+            let renamed = self.region_names.as_ref().and_then(|(cwd, names)| {
+                rename_runtime_regions(hoisted.as_deref().unwrap_or(&args.code), cwd, names)
+            });
+            renamed.or(hoisted)
+        });
         async move {
-            Ok(hoisted?.map(|code| HookRenderChunkOutput {
+            Ok(rewritten?.map(|code| HookRenderChunkOutput {
                 code,
                 map: HookTransformOutputMap::Omitted,
             }))
@@ -4721,72 +4733,120 @@ fn effective_jsx_setting(entry_abs: &Path, explicit_tsconfig: Option<&Path>) -> 
     tsconfig.compiler_options.jsx.clone()
 }
 
-/// Names nub's own runtime modules in a source map by their place in the runtime,
-/// not by where the building machine keeps it.
+/// What nub's own runtime modules are called in emitted output: their place in the
+/// runtime, never where the building machine keeps it.
 ///
-/// The prelude is bundled from the runtime extraction cache, so Rolldown listed
-/// each of its files relative to the output — `../../.cache/nub/runtime-0.9.7-…/
-/// compile-record.mjs`, or a temporary `XDG_CACHE_HOME` — and every artifact built
-/// with a map carried that layout into its stack frames. `runtime/<file>` resolves
-/// beside the chunk instead: `/N:/$nub/runtime/compile-record.mjs` in a single
-/// executable.
+/// The prelude is bundled from the runtime extraction cache, so Rolldown names
+/// each of its files by its path relative to the output or the project —
+/// `../../.cache/nub/runtime-0.9.7-…/compile-record.mjs`, or a temporary
+/// `XDG_CACHE_HOME` — and that reached every artifact through its source map and,
+/// unminified, its `//#region` comments. `runtime/<file>` names it instead, which
+/// a single executable's map resolves to `/N:/$nub/runtime/compile-record.mjs`.
 ///
 /// The runtime's vendored packages (a Temporal polyfill on a target without one)
 /// sit in its own `node_modules/` once extracted, but a development build resolves
 /// them from the checkout, outside the runtime directory. Each is resolved from the
 /// runtime as Node would and named `runtime/node_modules/<pkg>/…` wherever it
-/// lives. Every other source, including an application's own copy of one of those
+/// lives. Every other module, including an application's own copy of one of those
 /// packages, keeps Rolldown's spelling.
-fn runtime_source_names(runtime_dir: &Path) -> SourceMapPathTransform {
-    let mut roots = Vec::new();
-    let mut add = |dir: &Path, name: String| {
-        for spelling in [dir.to_path_buf(), canonicalize_for_bundler(dir)] {
-            if !roots.iter().any(|(root, _)| *root == spelling) {
-                roots.push((spelling, name.clone()));
+#[derive(Debug)]
+struct RuntimeNames {
+    roots: Vec<(PathBuf, String)>,
+}
+
+impl RuntimeNames {
+    fn new(runtime_dir: &Path) -> Self {
+        let mut roots: Vec<(PathBuf, String)> = Vec::new();
+        let mut add = |dir: &Path, name: String| {
+            for spelling in [dir.to_path_buf(), canonicalize_for_bundler(dir)] {
+                if !roots.iter().any(|(root, _)| *root == spelling) {
+                    roots.push((spelling, name.clone()));
+                }
+            }
+        };
+        add(runtime_dir, "runtime".to_string());
+        for package in nub_core::node::vendored_runtime::VENDORED_RUNTIME_PACKAGES {
+            let resolved = runtime_dir.ancestors().find_map(|dir| {
+                let candidate = dir.join("node_modules").join(package);
+                candidate
+                    .join("package.json")
+                    .is_file()
+                    .then_some(candidate)
+            });
+            if let Some(dir) = resolved {
+                add(&dir, format!("runtime/node_modules/{package}"));
             }
         }
-    };
-    add(runtime_dir, "runtime".to_string());
-    for package in nub_core::node::vendored_runtime::VENDORED_RUNTIME_PACKAGES {
-        let resolved = runtime_dir.ancestors().find_map(|dir| {
-            let candidate = dir.join("node_modules").join(package);
-            candidate
-                .join("package.json")
-                .is_file()
-                .then_some(candidate)
-        });
-        if let Some(dir) = resolved {
-            add(&dir, format!("runtime/node_modules/{package}"));
-        }
+        Self { roots }
     }
+
+    /// `relative` is resolved lexically against `base`, the way both Node (for a
+    /// map's `sources`) and Rolldown (for a module's debug name) spell it.
+    fn name(&self, base: &Path, relative: &str) -> Option<String> {
+        let mut absolute = PathBuf::new();
+        for part in base.join(relative).components() {
+            match part {
+                std::path::Component::ParentDir => {
+                    absolute.pop();
+                }
+                std::path::Component::CurDir => {}
+                other => absolute.push(other),
+            }
+        }
+        self.roots.iter().find_map(|(root, name)| {
+            let rel = absolute.strip_prefix(root).ok()?;
+            Some(format!("{name}/{}", slash_path(rel)))
+        })
+    }
+}
+
+/// A map's `sources` arrive relative to the map's own directory.
+fn runtime_source_names(names: Arc<RuntimeNames>) -> SourceMapPathTransform {
     SourceMapPathTransform::new(Arc::new(move |source: &str, map_path: &str| {
-        let named =
-            runtime_source_name(&roots, source, map_path).unwrap_or_else(|| source.to_string());
+        let named = Path::new(map_path)
+            .parent()
+            .and_then(|dir| names.name(dir, source))
+            .unwrap_or_else(|| source.to_string());
         Box::pin(async move { Ok(named) })
     }))
 }
 
-/// `source` arrives relative to the map's directory, which is where Node resolves
-/// it from too.
-fn runtime_source_name(
-    roots: &[(PathBuf, String)],
-    source: &str,
-    map_path: &str,
-) -> Option<String> {
-    let mut absolute = PathBuf::new();
-    for part in Path::new(map_path).parent()?.join(source).components() {
-        match part {
-            std::path::Component::ParentDir => {
-                absolute.pop();
-            }
-            std::path::Component::CurDir => {}
-            other => absolute.push(other),
+/// Rolldown heads each module in an unminified chunk with a `//#region <id>` line
+/// comment, the id relative to the bundler's `cwd`. Comments come from a parse
+/// because a template literal can hold the same line as data. Only comment text
+/// changes, so no mapped line moves. An unparseable chunk is left for
+/// `reject_invalid_chunks`, as in [`hoist_module_wrappers`].
+fn rename_runtime_regions(code: &str, cwd: &Path, names: &RuntimeNames) -> Option<String> {
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, code, SourceType::mjs()).parse();
+    if parsed.panicked {
+        return None;
+    }
+    let mut out = String::with_capacity(code.len());
+    let mut copied = 0;
+    for comment in parsed.program.comments.iter().filter(|c| c.is_line()) {
+        let span = comment.content_span();
+        let (start, end) = (span.start as usize, span.end as usize);
+        let name = code[start..end]
+            .strip_prefix("#region ")
+            .filter(|id| !id.starts_with("\\0"))
+            .and_then(|id| names.name(cwd, id));
+        if let Some(name) = name {
+            out.push_str(&code[copied..start]);
+            out.push_str("#region ");
+            out.push_str(&name);
+            copied = end;
         }
     }
-    roots.iter().find_map(|(root, name)| {
-        let rel = absolute.strip_prefix(root).ok()?;
-        Some(format!("{name}/{}", slash_path(rel)))
-    })
+    if copied == 0 {
+        return None;
+    }
+    out.push_str(&code[copied..]);
+    Some(out)
 }
 
 fn sourcemap_type(mode: SourcemapMode) -> Option<SourceMapType> {
@@ -6233,6 +6293,25 @@ fn reject_invalid_chunks(chunks: &[BundledFile]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A line that only looks like a region comment is the application's data.
+    #[test]
+    fn a_region_rename_leaves_a_template_holding_the_same_line_alone() {
+        let names = RuntimeNames {
+            roots: vec![(PathBuf::from("/build/runtime"), "runtime".to_string())],
+        };
+        let template =
+            "export const raw = String.raw`\n//#region ../runtime/compile-record.mjs\n`;\n";
+        let code = format!(
+            "//#region ../runtime/compile-record.mjs\nvar a = 1;\n//#endregion\n{template}"
+        );
+        let renamed = rename_runtime_regions(&code, Path::new("/build/app"), &names)
+            .expect("the real region comment should be renamed");
+        assert_eq!(
+            renamed,
+            format!("//#region runtime/compile-record.mjs\nvar a = 1;\n//#endregion\n{template}")
+        );
+    }
 
     fn opts() -> BundleOptions {
         BundleOptions {
