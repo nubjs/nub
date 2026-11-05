@@ -673,8 +673,9 @@ snapshots:
 #[test]
 fn a_link_edge_reaches_a_package_and_is_written_back_as_pnpm_spells_it() {
     // pnpm keeps `link:` targets out of `packages:`, so these edges are their only
-    // record. A registry parent's is relative to the lockfile directory, and a local
-    // parent's to that parent.
+    // record. A local parent's own dependency is relative to that parent. Anything
+    // else is relative to the lockfile directory: a registry or tarball parent's
+    // edge, a peer, and an override's value.
     let dir = tempfile::tempdir().unwrap();
     let lockfile_path = dir.path().join("pnpm-lock.yaml");
     std::fs::write(
@@ -682,27 +683,53 @@ fn a_link_edge_reaches_a_package_and_is_written_back_as_pnpm_spells_it() {
         r#"
 lockfileVersion: '9.0'
 
+overrides:
+  via-override: link:./vendor/via-override
+
 importers:
   .:
     dependencies:
       local-parent:
         specifier: file:./a
         version: file:a
+      peer-consumer:
+        specifier: file:./c
+        version: file:c(member@packages+member)
       registry-parent:
         specifier: 1.0.0
         version: 1.0.0
+      tarball-parent:
+        specifier: file:./t.tgz
+        version: file:t.tgz
 
 packages:
   local-parent@file:a:
     resolution: {directory: a, type: directory}
 
+  peer-consumer@file:c:
+    resolution: {directory: c, type: directory}
+    peerDependencies:
+      member: ^1.0.0
+
   registry-parent@1.0.0:
     resolution: {integrity: sha512-parent}
+
+  tarball-parent@file:t.tgz:
+    resolution: {tarball: file:t.tgz}
 
 snapshots:
   local-parent@file:a:
     dependencies:
       sibling: link:../b
+      via-override: link:vendor/via-override
+
+  peer-consumer@file:c(member@packages+member):
+    dependencies:
+      member: link:packages/member
+
+  tarball-parent@file:t.tgz:
+    dependencies:
+      tarball-peer: link:packages/tarball-peer
 
   registry-parent@1.0.0:
     dependencies:
@@ -727,19 +754,30 @@ snapshots:
         "overridden",
         "vendor/overridden",
     );
-    let local_parent = graph
-        .packages
-        .values()
-        .find(|pkg| pkg.name == "local-parent")
-        .unwrap();
-    reaches(local_parent, "sibling", "b");
+    let named = |name: &str| {
+        graph
+            .packages
+            .values()
+            .find(|pkg| pkg.name == name)
+            .unwrap()
+    };
+    reaches(named("local-parent"), "sibling", "b");
+    reaches(named("local-parent"), "via-override", "vendor/via-override");
+    reaches(named("peer-consumer"), "member", "packages/member");
+    reaches(
+        named("tarball-parent"),
+        "tarball-peer",
+        "packages/tarball-peer",
+    );
 
     let manifest = PackageJson {
         name: Some("root".to_string()),
         version: Some("0.0.0".to_string()),
         dependencies: [
             ("local-parent".to_string(), "file:./a".to_string()),
+            ("peer-consumer".to_string(), "file:./c".to_string()),
             ("registry-parent".to_string(), "1.0.0".to_string()),
+            ("tarball-parent".to_string(), "file:./t.tgz".to_string()),
         ]
         .into(),
         ..PackageJson::default()
@@ -749,7 +787,10 @@ snapshots:
     let written = std::fs::read_to_string(&out_path).unwrap();
     assert!(
         written.contains("overridden: link:vendor/overridden\n")
-            && written.contains("sibling: link:../b\n"),
+            && written.contains("sibling: link:../b\n")
+            && written.contains("via-override: link:vendor/via-override\n")
+            && written.contains("member: link:packages/member\n")
+            && written.contains("tarball-peer: link:packages/tarball-peer\n"),
         "each edge keeps pnpm's spelling and anchor: {written}"
     );
 }
@@ -4678,6 +4719,16 @@ packages:
             .packages
             .contains_key(&LocalSource::Directory("vendor/real-dep".into()).dep_path("real-dep")),
         "a file: alias target must survive the sweep: {:?}",
+        graph.packages.keys().collect::<Vec<_>>()
+    );
+    let direct = graph.importers["."]
+        .iter()
+        .find(|dep| dep.name == "aliased-dep")
+        .expect("the alias stays a direct dependency");
+    assert!(
+        graph.packages.contains_key(&direct.dep_path),
+        "the importer must reach its alias at {}: {:?}",
+        direct.dep_path,
         graph.packages.keys().collect::<Vec<_>>()
     );
 }

@@ -6198,57 +6198,123 @@ async fn an_override_counts_on_a_reused_edge_that_already_holds_its_value() {
 // unable to install until its lockfile was deleted.
 #[tokio::test]
 async fn a_removed_override_sends_a_reused_parent_back_to_its_declared_range() {
-    let client = Arc::new(aube_registry::client::RegistryClient::new(
-        "http://127.0.0.1:0",
-    ));
-    let mut resolver = Resolver::new(client);
-    let mut parent = make_packument("parent", &["1.0.0", "1.1.0"], "1.1.0");
-    parent
-        .versions
-        .get_mut("1.0.0")
-        .unwrap()
-        .dependencies
-        .insert("child".to_string(), "^1.0.0".to_string());
-    resolver.cache.insert("parent".to_string(), parent);
-    resolver.cache.insert(
-        "child".to_string(),
-        make_packument("child", &["1.0.0"], "1.0.0"),
-    );
+    let override_rule = BTreeMap::from([("child".to_string(), "file:./vendor/child".to_string())]);
+    let declares_a_range = BTreeMap::from([("child".to_string(), "^1.0.0".to_string())]);
+    // What says the edge is not the package's own: the overrides the lockfile
+    // recorded, the range an npm-style lockfile records, or a declared peer.
+    for (overrides, declared, peer) in [
+        (override_rule, None, false),
+        (BTreeMap::new(), Some(declares_a_range), false),
+        (BTreeMap::new(), None, true),
+    ] {
+        let client = Arc::new(aube_registry::client::RegistryClient::new(
+            "http://127.0.0.1:0",
+        ));
+        let mut resolver = Resolver::new(client);
+        let mut parent = make_packument("parent", &["1.0.0", "1.1.0"], "1.1.0");
+        parent
+            .versions
+            .get_mut("1.0.0")
+            .unwrap()
+            .dependencies
+            .insert("child".to_string(), "^1.0.0".to_string());
+        resolver.cache.insert("parent".to_string(), parent);
+        resolver.cache.insert(
+            "child".to_string(),
+            make_packument("child", &["1.0.0"], "1.0.0"),
+        );
 
-    let existing = LockfileGraph {
-        packages: BTreeMap::from([(
-            "parent@1.0.0".to_string(),
-            LockedPackage {
-                name: "parent".to_string(),
-                version: "1.0.0".to_string(),
-                dep_path: "parent@1.0.0".to_string(),
-                dependencies: [("child".to_string(), "file:./vendor/child".to_string())].into(),
-                ..Default::default()
-            },
-        )]),
-        ..Default::default()
-    };
+        let mut locked = LockedPackage {
+            name: "parent".to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: "parent@1.0.0".to_string(),
+            dependencies: [("child".to_string(), "file:./vendor/child".to_string())].into(),
+            ..Default::default()
+        };
+        if let Some(declared) = declared {
+            locked.declared_dependencies = declared;
+            locked.declared_dependencies_known = true;
+        }
+        if peer {
+            locked.peer_dependencies = [("child".to_string(), "^1.0.0".to_string())].into();
+        }
+        let existing = LockfileGraph {
+            packages: BTreeMap::from([("parent@1.0.0".to_string(), locked)]),
+            overrides,
+            ..Default::default()
+        };
 
-    let mut manifest = PackageJson::default();
-    manifest
-        .dependencies
-        .insert("parent".to_string(), "^1.0.0".to_string());
+        let mut manifest = PackageJson::default();
+        manifest
+            .dependencies
+            .insert("parent".to_string(), "^1.0.0".to_string());
 
-    let graph = resolver
-        .resolve(&manifest, Some(&existing))
-        .await
-        .expect("a stale edge must not stop the install");
+        let graph = resolver
+            .resolve(&manifest, Some(&existing))
+            .await
+            .expect("a stale edge must not stop the install");
 
-    assert!(
-        graph.packages.contains_key("parent@1.0.0"),
-        "the parent keeps its locked version: {:?}",
-        graph.packages.keys().collect::<Vec<_>>()
-    );
-    assert_eq!(
-        graph.packages["parent@1.0.0"].dependencies["child"],
-        "1.0.0"
-    );
-    assert!(graph.packages["child@1.0.0"].local_source.is_none());
+        assert!(
+            graph.packages.contains_key("parent@1.0.0"),
+            "the parent keeps its locked version: {:?}",
+            graph.packages.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            graph.packages["parent@1.0.0"].dependencies["child"],
+            "1.0.0"
+        );
+        assert!(graph.packages["child@1.0.0"].local_source.is_none());
+    }
+}
+
+// A package can declare a source itself, which `blockExoticSubdeps: false` lets
+// through. That edge is not left over from an override, so reuse keeps it and does
+// not go to the parent's packument, which this test does not provide. A registry
+// package's `file:` edge then fails on its own, which is past the decision under
+// test and needs no network to reach.
+#[tokio::test]
+async fn a_source_a_package_declares_itself_is_not_a_removed_override() {
+    let source = "file:./vendor/child".to_string();
+
+    for declared in [false, true] {
+        let client = Arc::new(aube_registry::client::RegistryClient::new(
+            "http://127.0.0.1:0",
+        ));
+        let mut resolver = Resolver::new(client).with_dependency_policy(crate::DependencyPolicy {
+            block_exotic_subdeps: false,
+            ..Default::default()
+        });
+
+        let mut parent = LockedPackage {
+            name: "parent".to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: "parent@1.0.0".to_string(),
+            dependencies: [("child".to_string(), source.clone())].into(),
+            ..Default::default()
+        };
+        if declared {
+            parent.declared_dependencies = [("child".to_string(), source.clone())].into();
+            parent.declared_dependencies_known = true;
+        }
+        let existing = LockfileGraph {
+            packages: BTreeMap::from([("parent@1.0.0".to_string(), parent)]),
+            ..Default::default()
+        };
+
+        let mut manifest = PackageJson::default();
+        manifest
+            .dependencies
+            .insert("parent".to_string(), "1.0.0".to_string());
+
+        let err = resolver
+            .resolve(&manifest, Some(&existing))
+            .await
+            .expect_err("nothing can anchor the child's path");
+        assert!(
+            matches!(&err, Error::Registry(name, _) if name == "child"),
+            "reuse must reach the child without refetching the parent: {err:?}"
+        );
+    }
 }
 
 #[tokio::test]

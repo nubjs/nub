@@ -37,7 +37,7 @@ use crate::workspace_spec::workspace_range_binds;
 use crate::{
     Error, ExoticSubdepDetails, FxHashMap, FxHashSet, ResolutionMode, ResolveTask, ResolvedPackage,
     Resolver, WorkspacePkgNotFoundDetails, WorkspaceVersionMismatchDetails, error,
-    is_deprecation_allowed, is_supported,
+    is_deprecation_allowed, is_supported, override_rule,
 };
 use aube_lockfile::{DepType, DirectDep, LocalSource, LockedPackage, LockfileGraph};
 use aube_manifest::PackageJson;
@@ -173,6 +173,9 @@ pub(crate) struct ResolveDriver<'a> {
     /// `name → resolved versions seen this run`. Drives sibling dedupe.
     /// Pre-sized for typical monorepo (5000-dep graphs take one grow).
     resolved_versions: FxHashMap<String, Vec<String>>,
+    /// The overrides the existing lockfile recorded, which say which of its
+    /// source-valued edges an override put there.
+    previous_override_rules: Vec<override_rule::OverrideRule>,
     /// Importer paths → direct dep records, populated as root tasks
     /// resolve.
     importers: BTreeMap<String, Vec<DirectDep>>,
@@ -394,6 +397,9 @@ impl<'a> ResolveDriver<'a> {
             importer_declared_dep_names,
             resolved: BTreeMap::new(),
             resolved_versions: FxHashMap::with_capacity_and_hasher(1024, Default::default()),
+            previous_override_rules: existing
+                .map(|graph| override_rule::compile(&graph.overrides))
+                .unwrap_or_default(),
             importers,
             queue,
             visited: FxHashSet::with_capacity_and_hasher(2048, Default::default()),
@@ -3061,7 +3067,9 @@ impl<'a> ResolveDriver<'a> {
         // edges, which hold what each one resolved to, not the range it declares.
         // A version stands in for the range. A source an override put there does
         // not: once no override applies, the edge is stale and only the packument
-        // has the real range. Go back to it, keeping this version.
+        // has the real range. Go back to it, keeping this version. A source the
+        // package declares itself is not stale. npm, bun and yarn lockfiles keep
+        // what it declares; pnpm's keeps the overrides that were in effect.
         let stale = locked_pkg.dependencies.iter().any(|(dep_name, edge)| {
             let edge = edge
                 .strip_prefix(dep_name.as_str())
@@ -3073,7 +3081,21 @@ impl<'a> ResolveDriver<'a> {
             }
             let mut ancestors = task.ancestors.to_vec();
             ancestors.push((task.name.clone(), version.clone()));
-            pick_override_spec(&self.resolver.override_rules, dep_name, edge, &ancestors).is_none()
+            if pick_override_spec(&self.resolver.override_rules, dep_name, edge, &ancestors)
+                .is_some()
+            {
+                return false;
+            }
+            if locked_pkg.peer_dependencies.contains_key(dep_name) {
+                return true;
+            }
+            if locked_pkg.declared_dependencies_known {
+                return !locked_pkg
+                    .declared_dependencies
+                    .get(dep_name)
+                    .is_some_and(|declared| is_non_registry_specifier(declared));
+            }
+            pick_override_spec(&self.previous_override_rules, dep_name, edge, &ancestors).is_some()
         });
         if stale {
             task.range = version;

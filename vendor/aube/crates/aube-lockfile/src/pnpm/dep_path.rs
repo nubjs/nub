@@ -306,6 +306,20 @@ fn is_name_part(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~'))
 }
 
+/// Whether an override points at `target`, a path relative to the lockfile
+/// directory. pnpm writes the edge an override put on a local parent relative to
+/// that directory, where the parent's own `link:` dependency is relative to it.
+pub(super) fn is_override_link_target(
+    overrides: &std::collections::BTreeMap<String, String>,
+    target: &std::path::Path,
+) -> bool {
+    let target = aube_util::path::normalize_lexical(target);
+    overrides
+        .values()
+        .filter_map(|value| value.strip_prefix("link:"))
+        .any(|path| aube_util::path::normalize_lexical(std::path::Path::new(path)) == target)
+}
+
 #[cfg(test)]
 mod rewrite_peer_suffix_tests {
     use super::rewrite_peer_suffix;
