@@ -145,7 +145,11 @@ async function main() {
   const dispatchedAt = Date.now();
   process.stdout.write(`mac-build: dispatching ${WORKFLOW} on ${ref} (profile=${a.profile}, runner=${a.runner})\n`);
   try {
-    sh("gh", [
+    // The one write here, so the one call that goes through Keyward for a write-capable token
+    // (a Touch ID the first time in ten minutes). Every read below uses plain, read-only gh.
+    sh("keyward", [
+      "--reason", `nub mac-build: dispatch ${WORKFLOW} on ${ref} (profile=${a.profile}, runner=${a.runner})`,
+      "--", "gh",
       "workflow", "run", WORKFLOW,
       "--ref", ref,
       "-f", `profile=${a.profile}`,
