@@ -64,25 +64,24 @@ struct Inherited {
     candidate: Option<PathBuf>,
 }
 
-/// An unset or unreadable value counts as depth 0: nub never writes one it
-/// cannot read, and refusing to run over a stray variable would be worse than
-/// missing one loop.
+/// An unset or unreadable depth counts as 0: nub never writes one it cannot
+/// read, and refusing to run over a stray variable would be worse than missing
+/// one loop. The depth is read from the raw bytes, because the candidate after it
+/// is a path and need not be UTF-8; it only names the loop, so it is shown lossily.
 fn parse(value: Option<&OsStr>) -> Inherited {
-    let Some(value) = value.and_then(OsStr::to_str) else {
-        return Inherited {
-            depth: 0,
-            candidate: None,
-        };
-    };
-    let (depth, candidate) = match value.split_once(':') {
-        Some((depth, candidate)) => (depth, Some(candidate)),
-        None => (value, None),
+    let bytes = value.map(OsStr::as_encoded_bytes).unwrap_or_default();
+    let (depth, candidate) = match bytes.iter().position(|&byte| byte == b':') {
+        Some(colon) => (&bytes[..colon], Some(&bytes[colon + 1..])),
+        None => (bytes, None),
     };
     Inherited {
-        depth: depth.trim().parse().unwrap_or(0),
+        depth: std::str::from_utf8(depth)
+            .ok()
+            .and_then(|depth| depth.trim().parse().ok())
+            .unwrap_or(0),
         candidate: candidate
             .filter(|candidate| !candidate.is_empty())
-            .map(PathBuf::from),
+            .map(|candidate| PathBuf::from(String::from_utf8_lossy(candidate).into_owned())),
     }
 }
 
@@ -199,6 +198,24 @@ mod tests {
         let inherited = parse(Some(value));
         assert_eq!(inherited.depth, MAX_DEPTH);
         assert_eq!(inherited.candidate, Some(PathBuf::from("/opt/bin/node")));
+
+        // A candidate path that is not UTF-8 must not cost the depth, or a probe
+        // through it would re-enter nub at depth 1 every time.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let mut probe = Command::new("node");
+            mark_probe(
+                &mut probe,
+                Path::new(OsStr::from_bytes(b"/tmp/tools-\xff/node")),
+            );
+            let value = probe
+                .get_envs()
+                .find(|(key, _)| *key == NESTING_ENV)
+                .and_then(|(_, value)| value)
+                .unwrap();
+            assert_eq!(parse(Some(value)).depth, MAX_DEPTH);
+        }
 
         let refusal = LaunchLoop {
             started_as: "/opt/bin/node".into(),
