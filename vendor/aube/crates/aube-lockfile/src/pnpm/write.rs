@@ -1,6 +1,6 @@
 use super::dep_path::{
-    dep_path_tail, parse_dep_path, peerless_dep_path, rewrite_peer_suffix, strip_patch_hash_suffix,
-    version_to_dep_path,
+    dep_path_tail, is_override_link_target, parse_dep_path, peerless_dep_path, rewrite_peer_suffix,
+    strip_patch_hash_suffix, version_to_dep_path,
 };
 use super::format::reformat_for_pnpm_parity;
 use crate::{DepType, Error, LocalSource, LockedPackage, LockfileGraph, link_from_importer};
@@ -800,9 +800,10 @@ pub(super) fn build(
                 let rewritten = if let Some(target) = target
                     && let Some(LocalSource::Link(path)) = &target.local_source
                 {
-                    // Relative to a local parent, or to the lockfile directory
-                    // for a registry one, as pnpm writes it and the reader
-                    // anchors it. `link:` has no `packages:` entry to record it.
+                    // Relative to a local parent for its own dependency, and
+                    // otherwise (a peer, an override's value) to the lockfile
+                    // directory, as pnpm writes it and the reader anchors it.
+                    // `link:` has no `packages:` entry to record it.
                     let posix =
                         |path: &Path| normalize_lexical(path).to_string_lossy().replace('\\', "/");
                     let base = match &parent.local_source {
@@ -810,7 +811,11 @@ pub(super) fn build(
                             LocalSource::Directory(base)
                             | LocalSource::Link(base)
                             | LocalSource::Portal(base),
-                        ) => posix(base),
+                        ) if !parent.peer_dependencies.contains_key(&name)
+                            && !is_override_link_target(&graph.overrides, path) =>
+                        {
+                            posix(base)
+                        }
                         _ => ".".to_string(),
                     };
                     format!("link:{}", link_from_importer(&base, &posix(path)))
