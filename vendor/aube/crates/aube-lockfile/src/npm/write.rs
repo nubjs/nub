@@ -94,12 +94,11 @@ struct WriteNpmPackage<'a> {
     /// npm `inBundle: true` — present iff the package ships inside
     /// another package's tarball.
     in_bundle: bool,
-    /// npm v3 collapses the "reachable via dev *and* via optional,
-    /// but never via production" case into a single `devOptional`
-    /// flag. Emitting both `dev: true` and `optional: true` instead
-    /// would trip `npm install --omit=dev` into dropping a package
-    /// that should have stayed because it's still reachable via
-    /// the optional chain (or vice versa with `--omit=optional`).
+    /// npm v3 `devOptional: true`: no pure-production path exists, but
+    /// neither `dev` nor `optional` holds on every path, as when one path
+    /// is dev and another optional. Emitting `dev` and `optional` there
+    /// would make `--omit=dev` (or `--omit=optional`) drop a package the
+    /// other path still needs.
     dev_optional: bool,
 }
 
@@ -746,33 +745,26 @@ pub fn write(
             })
             .collect();
 
-        // npm v3 flag semantics:
-        //   prod-reachable     → neither flag
-        //   dev only           → `dev: true`
-        //   optional only      → `optional: true`
-        //   dev + optional     → `devOptional: true` (single flag)
-        // Emitting both `dev` and `optional` for the both-reachable
-        // case is *wrong*: `npm install --omit=dev` drops anything
-        // with `dev: true` and `--omit=optional` drops anything with
-        // `optional: true`, so a package reachable through both
-        // chains would get removed under either omit even though the
-        // other chain still needs it.
+        // npm v3 flag semantics, from arborist's calc-dep-flags and
+        // shrinkwrap writer:
+        //   a production path exists     → no flag
+        //   every path crosses dev       → `dev: true`
+        //   every path crosses optional  → `optional: true`
+        //   both of the above            → `dev: true` and `optional: true`
+        //   no production path, neither  → `devOptional: true`
+        // An optional dep of a dev dep takes both flags, and npm ci relies
+        // on `optional` to skip a platform-mismatched package: `devOptional`
+        // there fails with EBADPLATFORM. `devOptional` is only for a package
+        // that one path needs as dev and another as optional, which neither
+        // omit may drop.
         // Unreachable entries (canonical-key mismatches, hand-built
         // graphs) stay unflagged rather than collapsing into
         // `devOptional` vacuously.
         let is_reachable = any_reach.contains(canonical_key);
-        let is_dev = is_reachable && !non_dev_reach.contains(canonical_key);
-        let is_opt = is_reachable && !non_opt_reach.contains(canonical_key);
-        // Third bit, npm's `devOptional`: no pure-production path
-        // exists, but neither "every path is dev" nor "every path is
-        // optional" holds (e.g. reachable via a dev chain *and* via an
-        // optional chain). The all-paths-dev-and-optional case
-        // collapses into the same flag.
-        let is_dev_opt = is_reachable && !prod_reach.contains(canonical_key);
+        let dev = is_reachable && !non_dev_reach.contains(canonical_key);
+        let optional = is_reachable && !non_opt_reach.contains(canonical_key);
         let peer = is_reachable && !non_peer_reach.contains(canonical_key);
-        let dev_optional = (is_dev && is_opt) || (is_dev_opt && !is_dev && !is_opt);
-        let dev = is_dev && !is_opt;
-        let optional = is_opt && !is_dev;
+        let dev_optional = is_reachable && !prod_reach.contains(canonical_key) && !dev && !optional;
 
         // Aliased deps (`"h3-v2": "npm:h3@..."` in package.json)
         // round-trip as `node_modules/h3-v2` with an explicit
@@ -1137,7 +1129,7 @@ fn dep_sections_from_direct_deps(deps: &[DirectDep]) -> DepSections<'_> {
 /// `optional` flags mean "every install path crosses a dev /
 /// optional edge", so a package earns a flag iff it drops out of
 /// the set when those edges are off-limits (and `devOptional` iff it
-/// drops out when both are). Root edges carry their importer dep
+/// drops out only when both are). Root edges carry their importer dep
 /// type; below the root the only typed edges are
 /// `optionalDependencies` (a dependency's `devDependencies` are
 /// never installed), so the `Dev` exclusion filters seeds only,
