@@ -3315,6 +3315,17 @@ fn is_reentrant_in(node_options: Option<&str>, preload: Option<&str>) -> bool {
     }
 }
 
+/// Whether a launch of `version` from this process would count as re-entrant in
+/// [`spawn_node`]. A binary that cannot find its preload passes `NODE_OPTIONS` through
+/// untouched, which also continues the parent's invocation.
+pub fn is_reentrant_launch(nub_binary: &Path, version: &NodeVersion) -> bool {
+    let Some(preload) = find_preload(nub_binary) else {
+        return true;
+    };
+    let key = preload_injection(&preload, version).node_options_token();
+    is_reentrant_in(env::var("NODE_OPTIONS").ok().as_deref(), Some(&key))
+}
+
 /// Strip Windows' verbatim / extended-length path prefixes (`\\?\` and
 /// `\\?\UNC\`) that `fs::canonicalize` emits. Node's module loader and NODE_PATH
 /// reject them. Returns a native Windows path (backslashes preserved — valid for
@@ -4299,6 +4310,37 @@ mod tests {
             None
         );
         assert_eq!(reentrant_node_options(Some(ours), &options(fixed)), None);
+    }
+
+    #[test]
+    fn windows_spelled_nub_tokens_are_not_folded_and_the_chainer_is_replaced() {
+        let chain = |hash: &str| {
+            format!(
+                "--import=file:///C:/Users/RUNNER~1/AppData/Local/Temp/.tmpAb/node_modules/.nub/preload-chain.{hash}.mjs"
+            )
+        };
+        let inherited = format!(
+            r"--require=D:\a\nub\nub\runtime\preload.cjs --conditions=nub {}",
+            chain("15e604a265d9faa0")
+        );
+        let (rest, requires, imports) = split_inherited_preloads(&inherited);
+        assert!(
+            requires.is_empty() && imports.is_empty(),
+            "{requires:?} {imports:?}"
+        );
+        assert_eq!(rest, inherited);
+
+        let quoted = r#"--require="C:\\Program Files\\nub\\runtime\\preload.cjs""#;
+        let (_, requires, _) = split_inherited_preloads(quoted);
+        assert!(requires.is_empty(), "{requires:?}");
+
+        assert_eq!(
+            reentrant_node_options(Some(&inherited), &[chain("97573208cbce4ee3")]),
+            Some(format!(
+                r"--require=D:\a\nub\nub\runtime\preload.cjs --conditions=nub {}",
+                chain("97573208cbce4ee3")
+            ))
+        );
     }
 
     #[test]

@@ -236,6 +236,23 @@ fn a_suffix_relation_decides_order_whatever_else_a_package_declares() {
         ] }"#,
     );
     assert_eq!(stdout(&run(root, &["main.ts"])), "specific\ngeneral");
+
+    // A package relating two of its OWN extensions is no constraint on itself, or nothing
+    // can go first and the order falls back to declaration, wherever that puts the rest.
+    mapper(root, "selfie", ".jsonc", "selfie");
+    let selfie = r#"{ "package": "selfie", "extensions": [".jsonc", ".other.jsonc"] }"#;
+    let specific = r#"{ "package": "specific", "extensions": [".schema.jsonc"] }"#;
+    for mappers in [[selfie, specific], [specific, selfie]] {
+        write(
+            root.join("tsconfig.json"),
+            &format!(r#"{{ "contentMappers": [{}] }}"#, mappers.join(",")),
+        );
+        assert_eq!(
+            stdout(&run(root, &["main.ts"])),
+            "specific\nselfie",
+            "{mappers:?}"
+        );
+    }
 }
 
 /// An explicit entry registers after every mapper so it answers first, on the `.cjs`
@@ -419,6 +436,48 @@ for (const bin of ["node", process.execPath, "node"]) {
     assert_eq!(printed.matches("agent mjs").count(), 4, "{printed}");
 }
 
+/// The other side of carrying them: a child that took them out of its `NODE_OPTIONS`
+/// does not get them back, as under plain Node.
+#[test]
+fn a_child_that_clears_or_replaces_node_options_drops_the_ambient_preloads() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root.join("agent.cjs"), "console.log('agent cjs');\n");
+    write(root.join("agent.mjs"), "console.log('agent mjs');\n");
+    write(root.join("kid.mjs"), "console.log('kid');\n");
+    write(
+        root.join("main.mjs"),
+        r#"import { spawnSync } from "node:child_process";
+const { NODE_OPTIONS, ...cleared } = process.env;
+for (const [label, env] of [
+  ["inherited", process.env],
+  ["cleared", cleared],
+  ["replaced", { ...process.env, NODE_OPTIONS: "--no-warnings" }],
+]) {
+  const { stdout } = spawnSync("node", ["kid.mjs"], { env, encoding: "utf8" });
+  console.log(label, stdout.trim().split(/\r?\n/).join(" "));
+}
+"#,
+    );
+    let ambient = |flags: String| {
+        let output = nub(root, &["main.mjs"])
+            .env("NODE_OPTIONS", flags)
+            .output()
+            .unwrap();
+        stdout(&output)
+    };
+    let require = format!("--require={}", root.join("agent.cjs").display());
+    let import = format!("--import={}", root.join("agent.mjs").display());
+    assert_eq!(
+        ambient(format!("{require} {import}")),
+        "agent cjs\nagent mjs\ninherited agent cjs agent mjs kid\ncleared kid\nreplaced kid"
+    );
+    assert_eq!(
+        ambient(require),
+        "agent cjs\ninherited agent cjs kid\ncleared kid\nreplaced kid"
+    );
+}
+
 /// A foreign `--import` on Node 22.15-24.11 puts Nub on the async tier, where any
 /// `registerHooks` call used to make a pass-through `next()` throw on every CommonJS
 /// file. Nobody asked for the discovered register on this run, and plain
@@ -463,6 +522,34 @@ registerHooks({ load: (url, context, next) => next(url, context) });
     assert_eq!(
         stdout(&run(root, &["--import", "./mine.mjs", "plain.mjs"])),
         "from-cjs"
+    );
+
+    // A foreign loader's invalid result is that loader's error, not a CommonJS file with
+    // no source to read from disk.
+    write(
+        root.join("foreign.mjs"),
+        r#"import nodeModule from "node:module";
+nodeModule.register("./foreign-hooks.mjs", import.meta.url);
+if (nodeModule.registerHooks) await import("./static.mjs");
+"#,
+    );
+    write(
+        root.join("foreign-hooks.mjs"),
+        r#"export async function load(url, context, next) {
+  if (url.endsWith("/rejected.cjs")) return { format: "module", source: 42, shortCircuit: true };
+  return next(url, context);
+}
+"#,
+    );
+    write(root.join("rejected.cjs"), "console.log('raw file ran');\n");
+    write(root.join("rejected.mjs"), "import './rejected.cjs';\n");
+    let output = run(root, &["--import", "./foreign.mjs", "rejected.mjs"]);
+    assert!(!output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert!(
+        stderr(&output).contains("ERR_INVALID_RETURN_PROPERTY_VALUE"),
+        "{}",
+        stderr(&output)
     );
 
     // The standalone runner makes the same tier decision. Unix-only: `--import` needs a
@@ -635,12 +722,21 @@ fn workspace_members_keep_their_own_mappers() {
 
     let chains: Vec<_> = std::fs::read_dir(root.join("node_modules/.nub"))
         .unwrap()
-        .map(|entry| entry.unwrap().file_name())
+        .map(|entry| {
+            let entry = entry.unwrap();
+            let body = std::fs::read_to_string(entry.path()).unwrap();
+            let imports: Vec<String> = body
+                .lines()
+                .filter(|line| line.contains("import("))
+                .map(str::to_string)
+                .collect();
+            (entry.file_name(), imports)
+        })
         .collect();
     assert_eq!(
         chains.len(),
         2,
-        "each member's mapper set gets its own chainer: {chains:?}"
+        "each member's mapper set gets its own chainer: {chains:#?}"
     );
     assert!(stdout(&run(root, &["run", "reach"])).contains("from-one"));
 }

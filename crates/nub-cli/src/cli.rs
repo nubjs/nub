@@ -4011,6 +4011,9 @@ fn prepare_preload_chain(
     node: &nub_core::node::discovery::ResolvedNode,
     fold: FoldInherited,
 ) -> Result<Option<nub_core::node::spawn::PreloadInjection>> {
+    // Written below whenever this launch has a chainer to carry. One left over from the
+    // snapshot would run preloads a child took out of its `NODE_OPTIONS`.
+    runtime.preload_chain = None;
     let mappers: Vec<String> = runtime
         .content_mappers
         .iter()
@@ -4032,6 +4035,17 @@ fn prepare_preload_chain(
     // writes its own, so the entries travel in the snapshot. Otherwise that rewrite,
     // and the carried chain it resets, drop an ambient preload from the whole subtree.
     // Resolved now because a descendant's CWD may differ from the one Node would use.
+    //
+    // They hold only while this launch continues its parent's invocation. A child whose
+    // `NODE_OPTIONS` lost Nub's token cleared or replaced the value, and as under plain
+    // Node what it left is all that runs. The watch path keeps ambient entries on the
+    // inherited value, so it has nothing to carry either.
+    if (!runtime.folded_requires.is_empty() || !runtime.folded_imports.is_empty())
+        && (fold == FoldInherited::No || !continues_parent_invocation(node))
+    {
+        runtime.folded_requires.clear();
+        runtime.folded_imports.clear();
+    }
     for (folded, entries, esm) in [
         (&mut runtime.folded_requires, inherited_requires, false),
         (&mut runtime.folded_imports, inherited_imports, true),
@@ -4173,6 +4187,11 @@ fn prepare_preload_chain(
             sidecar: None,
         }),
     )
+}
+
+fn continues_parent_invocation(node: &nub_core::node::discovery::ResolvedNode) -> bool {
+    nub_core::node::spawn::current_nub_binary()
+        .is_ok_and(|binary| nub_core::node::spawn::is_reentrant_launch(&binary, &node.version))
 }
 
 /// Write one chainer, or `Ok(None)` when it would be empty.

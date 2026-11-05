@@ -91,7 +91,11 @@ impl Discovered {
         while !remaining.is_empty() {
             let next = remaining
                 .iter()
-                .position(|r| !remaining.iter().any(|other| more_general(other, r)))
+                .position(|r| {
+                    !remaining
+                        .iter()
+                        .any(|other| !std::ptr::eq(*other, *r) && more_general(other, r))
+                })
                 .unwrap_or(0);
             ordered.push(remaining.remove(next).path.clone());
         }
