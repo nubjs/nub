@@ -1,0 +1,6 @@
+big: 9007199254740993
+nan: .nan
+inf: -.inf
+zero: -0.0
+plain: [nan, inf]
+__proto__: { x: 1 }

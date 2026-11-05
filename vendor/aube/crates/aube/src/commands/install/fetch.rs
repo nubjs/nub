@@ -1,5 +1,11 @@
 use super::critical_path::is_likely_native_build;
-use super::git_prepare::{prepare_scratch_copy, run_git_dep_prepare};
+use super::git_prepare::{
+    archive_has_path, checkout_build_allowed, checkout_needs_build, prepare_scratch_copy,
+    run_git_dep_prepare,
+};
+#[cfg(test)]
+use super::index_remap::remap_indices_to_contextualized;
+use super::index_remap::strip_peer_context_suffix;
 use super::lifecycle::run_import_on_blocking;
 use super::settings::{
     default_lockfile_network_concurrency, resolve_network_concurrency,
@@ -13,7 +19,7 @@ use crate::progress::InstallProgress;
 use aube_lockfile::dep_path_filename::dep_path_to_filename;
 use miette::{Context, IntoDiagnostic, miette};
 use rayon::prelude::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// `failed to fetch …` as a report, carrying the sandbox help when the
 /// registry client classified the failure as a network deny — the one case
@@ -288,61 +294,27 @@ pub(super) async fn import_local_source(
                 }
             }
 
-            // If the cloned repo defines a `prepare` script, treat
-            // it as a source checkout that needs to be built before
-            // we snapshot it. Matches npm/pnpm: a TypeScript repo
-            // installed from git has devDependencies + a `prepare`
-            // that compiles `src/` into `dist/`, and consumers
-            // expect the built output. We run a nested `aube
-            // install` inside the clone, which installs its deps
-            // and runs its own root lifecycle hooks (including
-            // `prepare`), then `aube pack`'s file-selection logic
-            // snapshots exactly what would be published (honors
-            // `files`, `.npmignore`, and skips `node_modules`).
-            //
-            // `--ignore-scripts` short-circuits the whole branch:
-            // the only reason we'd pay the cost of a nested install
-            // is to run `prepare`, so with scripts disabled we fall
-            // through to the plain directory import. Matches pnpm,
-            // which skips `prepare` for git deps under
-            // `--ignore-scripts` as well.
-            let manifest_path = pkg_root.join("package.json");
-            let needs_prepare = !ignore_scripts
-                && aube_manifest::PackageJson::from_path(&manifest_path)
-                    .ok()
-                    .is_some_and(|pj| pj.scripts.contains_key("prepare"));
-
-            if needs_prepare {
-                // Run `prepare` on a private copy of the checkout,
-                // not on the shared `git_shallow_clone` cache
-                // directory. The cache is keyed by (url, commit)
-                // and reused across installs; mutating it in place
-                // would leave `node_modules/`, `aube-lock.yaml`,
-                // and any generated `dist/` behind, so a later
-                // `aube install --ignore-scripts` — which falls
-                // through to the plain directory-import path —
-                // would silently pull those build artifacts into
-                // the store even though the user asked for a
-                // scripts-free install. Copying also isolates
-                // concurrent installs of the same git dep from
-                // clobbering each other's in-progress prepare.
-                //
-                // `ScratchDir` removes the copy on drop, including
-                // on the error path.
-                let scratch = prepare_scratch_copy(&pkg_root, &spec)?;
-                run_git_dep_prepare(
-                    scratch.path(),
+            let manifest = aube_manifest::PackageJson::from_path(&pkg_root.join("package.json"));
+            let build = match &manifest {
+                Ok(manifest)
+                    if !ignore_scripts
+                        && checkout_needs_build(manifest, |p| pkg_root.join(p).exists()) =>
+                {
+                    checkout_build_allowed(inherited_build_policy.as_deref(), local, manifest)?
+                }
+                _ => false,
+            };
+            if build {
+                let index = prepare_git_checkout(
+                    store,
+                    &pkg_root,
                     &spec,
                     ignore_scripts,
                     git_prepare_depth,
                     inherited_build_policy,
+                    &chain,
                 )
                 .await?;
-                let archive = crate::commands::pack::build_archive(scratch.path())
-                    .wrap_err_with(|| format!("failed to pack prepared git dep {spec}{chain}"))?;
-                let index = store
-                    .import_tarball(&archive.tarball)
-                    .map_err(|e| miette!("failed to import prepared {spec}: {e}{chain}"))?;
                 return Ok(Some(index));
             }
 
@@ -389,9 +361,110 @@ pub(super) async fn import_local_source(
             let index = store
                 .import_tarball(&bytes)
                 .map_err(|e| miette!("failed to import {}: {e}{chain}", local.specifier()))?;
+
+            // A hosted git dep pinned to a commit is recorded as its
+            // codeload archive (`hosted_git_local_source` in the
+            // resolver), so it arrives here rather than in the `Git`
+            // arm. It is still a source checkout and gets the same
+            // build, under the same gate. The manifest is read from the
+            // just-imported index so a dep with nothing to build costs
+            // one small file read, not an extract.
+            let hosted_git = if ignore_scripts {
+                None
+            } else {
+                t.as_hosted_git_source()
+            };
+            let manifest = hosted_git.as_ref().and_then(|_| index_manifest(&index));
+            let build = match &manifest {
+                Some(manifest)
+                    if checkout_needs_build(manifest, |p| archive_has_path(&index, p)) =>
+                {
+                    checkout_build_allowed(inherited_build_policy.as_deref(), local, manifest)?
+                }
+                _ => false,
+            };
+            if build && let Some(g) = hosted_git {
+                let spec = format!("{}#{}", g.url, g.resolved);
+                let integrity = (!t.integrity.is_empty()).then(|| t.integrity.clone());
+                let (checkout, _) = tokio::task::spawn_blocking(move || {
+                    aube_store::extract_codeload_tarball(
+                        &bytes,
+                        &g.url,
+                        &g.resolved,
+                        integrity.as_deref(),
+                    )
+                })
+                .await
+                .map_err(|e| miette!("codeload extract task panicked: {e}"))?
+                .map_err(|e| miette!("git dep {spec}: extract codeload archive: {e}{chain}"))?;
+                let index = prepare_git_checkout(
+                    store,
+                    &checkout,
+                    &spec,
+                    ignore_scripts,
+                    git_prepare_depth,
+                    inherited_build_policy,
+                    &chain,
+                )
+                .await?;
+                return Ok(Some(index));
+            }
             Ok(Some(index))
         }
     }
+}
+
+fn index_manifest(index: &aube_store::PackageIndex) -> Option<aube_manifest::PackageJson> {
+    index
+        .get("package.json")
+        .and_then(|stored| std::fs::read(&stored.store_path).ok())
+        .and_then(|bytes| aube_manifest::PackageJson::from_slice(&bytes).ok())
+}
+
+/// Build a git dep's source checkout and import what it would publish.
+///
+/// A TypeScript repo installed from git has devDependencies plus a
+/// `prepare` that compiles `src/` into `dist/`, and consumers expect
+/// the built output (npm and pnpm both build it). A nested install
+/// inside the checkout links its deps and runs its own root lifecycle,
+/// `prepare` included; then `pack`'s file selection snapshots exactly
+/// what would be published (honors `files` and `.npmignore`, skips
+/// `node_modules`). Callers gate this as pnpm does: with
+/// `--ignore-scripts`, or a build the allowlist denies, they import the
+/// checkout as-is, and one it does not mention fails the install
+/// (`checkout_build_allowed`).
+///
+/// The build runs on a private copy, never on `checkout` itself, which
+/// is the shared `(url, commit)` git or codeload cache. Building in
+/// place would leave `node_modules/`, a lockfile and `dist/` behind, so
+/// a later `--ignore-scripts` install, which imports the cache
+/// directory directly, would silently pick up those build artifacts.
+/// The copy also keeps concurrent installs of the same dep from
+/// clobbering each other's build, and `ScratchDir` removes it on drop,
+/// error path included.
+async fn prepare_git_checkout(
+    store: &std::sync::Arc<aube_store::Store>,
+    checkout: &std::path::Path,
+    spec: &str,
+    ignore_scripts: bool,
+    git_prepare_depth: u32,
+    inherited_build_policy: Option<std::sync::Arc<aube_scripts::BuildPolicy>>,
+    chain: &str,
+) -> miette::Result<aube_store::PackageIndex> {
+    let scratch = prepare_scratch_copy(checkout, spec)?;
+    run_git_dep_prepare(
+        scratch.path(),
+        spec,
+        ignore_scripts,
+        git_prepare_depth,
+        inherited_build_policy,
+    )
+    .await?;
+    let archive = crate::commands::pack::build_archive(scratch.path())
+        .wrap_err_with(|| format!("failed to pack prepared git dep {spec}{chain}"))?;
+    store
+        .import_tarball(&archive.tarball)
+        .map_err(|e| miette!("failed to import prepared {spec}: {e}{chain}"))
 }
 
 /// The warm-classifier index read key for `pkg`: its lockfile SRI when
@@ -612,23 +685,68 @@ where
     let no_integrity_index =
         crate::state::read_no_integrity_index_for(project_root, packages.values());
 
-    // Parallel index check (rayon)
-    let check_results: Vec<_> = packages
+    // Verify each distinct store entry once, before the per-dep_path
+    // check. Peer placements re-enter the same (registry name, version,
+    // read key) once per dep_path, and every verified load stats one
+    // file per index entry (or the first file under fast-trust);
+    // grouping the loads means the verification runs a single time no
+    // matter how many placements share the package. Packages that will
+    // take the already-linked shortcut never needed a load, so they
+    // are excluded here to keep the shortcut's zero-read behavior. The
+    // shortcut test is a `read_link` + `exists` per package, so it stays
+    // on rayon like the per-dep_path check it was hoisted out of.
+    let packages_refs: Vec<(&String, &aube_lockfile::LockedPackage)> = packages.iter().collect();
+    let needs_check: Vec<bool> = packages_refs
         .par_iter()
-        .filter(|(_, pkg)| pkg.local_source.is_none())
-        .map(|(dep_path, pkg)| {
-            // `force_index_dep_paths` is the project-local closure the
-            // linker materializes as real directories rather than
-            // shared-store symlinks, so its freshness test is a
-            // different one; those always take the verified path.
-            if let Some(plan) = already_linked_shortcut
-                && !force_index_dep_paths.contains(dep_path)
-            {
-                let entry_name = dep_path_to_filename(dep_path, virtual_store_dir_max_length);
-                let entry = aube_dir.join(&entry_name);
-                if plan.entry_is_current(&entry, dep_path, virtual_store_dir_max_length) {
-                    return (dep_path.clone(), pkg, CheckResult::AlreadyLinked);
+        .map(|&(dep_path, pkg)| {
+            if pkg.local_source.is_some() {
+                return false;
+            }
+            match already_linked_shortcut {
+                // `force_index_dep_paths` is the project-local closure the
+                // linker materializes as real directories rather than
+                // shared-store symlinks, so its freshness test is a
+                // different one; those always take the verified path.
+                Some(plan) if !force_index_dep_paths.contains(dep_path) => {
+                    let entry_name = dep_path_to_filename(dep_path, virtual_store_dir_max_length);
+                    let entry = aube_dir.join(&entry_name);
+                    !plan.entry_is_current(&entry, dep_path, virtual_store_dir_max_length)
                 }
+                _ => true,
+            }
+        })
+        .collect();
+    let mut store_keys: Vec<(&str, &str, Option<&str>)> = Vec::new();
+    let mut seen_keys: std::collections::HashSet<(&str, &str, Option<&str>)> =
+        std::collections::HashSet::new();
+    for (&(_, pkg), &needs) in packages_refs.iter().zip(&needs_check) {
+        if !needs {
+            continue;
+        }
+        let read_key = warm_read_key(pkg, &no_integrity_index);
+        // `None` must re-fetch (see `warm_read_key`), never a load.
+        if read_key.is_none() {
+            continue;
+        }
+        let key = (pkg.registry_name(), pkg.version.as_str(), read_key);
+        if seen_keys.insert(key) {
+            store_keys.push(key);
+        }
+    }
+    let verified: HashMap<(&str, &str, Option<&str>), Option<aube_store::PackageIndex>> =
+        store_keys
+            .par_iter()
+            .map(|key| (*key, super::warm_load_index(store, key.0, key.1, key.2)))
+            .collect();
+
+    // Parallel index check (rayon)
+    let check_results: Vec<_> = packages_refs
+        .par_iter()
+        .enumerate()
+        .filter(|(_, (_, pkg))| pkg.local_source.is_none())
+        .map(|(i, (dep_path, pkg))| {
+            if !needs_check[i] {
+                return (dep_path.to_string(), pkg, CheckResult::AlreadyLinked);
             }
             // Keyed by registry name so two npm-aliases of the same
             // real package share one store index entry instead of
@@ -660,18 +778,14 @@ where
             // store predating this index) → re-fetch rather than read the
             // content-free selector that, in a shared store, could return
             // a different project's bytes for the same name@version.
+            // The grouped verification above keeps the staleness window
+            // the same size as a single pass: every dep_path of one
+            // store entry now sees the same verified snapshot.
             let read_key = warm_read_key(pkg, &no_integrity_index);
-            match read_key {
-                None => (dep_path.clone(), pkg, CheckResult::NeedsFetch),
-                Some(key) => match super::warm_load_index(
-                    store,
-                    pkg.registry_name(),
-                    &pkg.version,
-                    Some(key),
-                ) {
-                    Some(index) => (dep_path.clone(), pkg, CheckResult::Cached(index)),
-                    None => (dep_path.clone(), pkg, CheckResult::NeedsFetch),
-                },
+            let key = (pkg.registry_name(), pkg.version.as_str(), read_key);
+            match verified.get(&key).cloned().flatten() {
+                Some(index) => (dep_path.to_string(), pkg, CheckResult::Cached(index)),
+                None => (dep_path.to_string(), pkg, CheckResult::NeedsFetch),
             }
         })
         .collect();
@@ -1266,60 +1380,6 @@ pub(super) fn version_from_dep_path(dep_path: &str, name: &str) -> String {
     tail.split('(').next().unwrap_or(tail).to_string()
 }
 
-/// Re-key a canonical-indexed indices map to match the peer-contextualized
-/// dep_paths in `graph`. Each contextualized entry points at the same
-/// underlying files as its canonical name@version, so we look each graph
-/// entry up by canonical and clone the index — a no-op when canonical ==
-/// contextualized (i.e. the package has no peer deps).
-pub(super) fn remap_indices_to_contextualized(
-    canonical_indices: &BTreeMap<String, aube_store::PackageIndex>,
-    graph: &aube_lockfile::LockfileGraph,
-) -> BTreeMap<String, aube_store::PackageIndex> {
-    let mut out = BTreeMap::new();
-    for (dep_path, pkg) in &graph.packages {
-        let canonical_key = pkg.spec_key();
-        // The peer-context pass appends a `(peer@ver)` suffix (or a
-        // parenthesized `(<short-hash>)` when it exceeds the cap) onto a
-        // package's canonical dep_path. Source-backed deps (git /
-        // remote tarball / file) are streamed from the resolver — and
-        // therefore keyed in `canonical_indices` — under their
-        // *source-coordinate* dep_path (`name@git+<short>`), not their
-        // semver `spec_key()`. So once such a dep picks up a peer
-        // suffix, neither the contextualized `dep_path` (carries the
-        // suffix) nor `spec_key()` (semver, not the git coordinate)
-        // matches the streamed key, and the index would be silently
-        // dropped — later tripping `ERR_AUBE_MISSING_PACKAGE_INDEX` in
-        // the linker's global-virtual-store pass. Stripping the suffix
-        // recovers the exact canonical coordinate the index was stored
-        // under (the peer-context pass builds the key as
-        // `{canonical_base}{suffix}`, so this is its precise inverse).
-        let canonical_dep_path = strip_peer_context_suffix(dep_path);
-        if let Some(idx) = canonical_indices
-            .get(dep_path)
-            .or_else(|| canonical_indices.get(canonical_dep_path))
-            .or_else(|| canonical_indices.get(&canonical_key))
-        {
-            out.insert(dep_path.clone(), idx.clone());
-        }
-    }
-    out
-}
-
-/// Strip the peer-context suffix from a `dep_path`, recovering the
-/// canonical dep_path the resolver streamed it under (and that
-/// `canonical_indices` is keyed by). The peer-context pass in
-/// `aube-resolver` appends either a parenthesized `(peer@ver)…` tail
-/// or, when the suffix body exceeds the length cap, a single
-/// parenthesized short hash `(<short-hash>)` (pnpm's
-/// `createPeerDepGraphHash`). Both forms begin at the first `(`, so
-/// cutting there is the exact inverse and recovers the canonical
-/// coordinate. A `dep_path` with no suffix is returned unchanged — a
-/// bare `_<hex>` tail belongs to a `git+`/`url+`/`file+` source
-/// coordinate and is never a peer marker, so it is preserved.
-pub(super) fn strip_peer_context_suffix(dep_path: &str) -> &str {
-    dep_path.split('(').next().unwrap_or(dep_path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::lockfile_tarball_url_matches_metadata;
@@ -1472,7 +1532,7 @@ mod tests {
             .packages
             .insert(contextualized.clone(), git_pkg(&contextualized));
 
-        let out = super::remap_indices_to_contextualized(&canonical_indices, &graph);
+        let out = super::remap_indices_to_contextualized(canonical_indices, &graph);
         assert!(
             out.contains_key(&contextualized),
             "git dep with peer suffix should recover its canonical index; got {:?}",
@@ -1496,7 +1556,7 @@ mod tests {
             .packages
             .insert(contextualized.clone(), git_pkg(&contextualized));
 
-        let out = super::remap_indices_to_contextualized(&canonical_indices, &graph);
+        let out = super::remap_indices_to_contextualized(canonical_indices, &graph);
         assert!(
             out.contains_key(&contextualized),
             "git dep with hashed peer suffix should recover its canonical index; got {:?}",
@@ -1518,7 +1578,7 @@ mod tests {
             .packages
             .insert(canonical.to_string(), git_pkg(canonical));
 
-        let out = super::remap_indices_to_contextualized(&canonical_indices, &graph);
+        let out = super::remap_indices_to_contextualized(canonical_indices, &graph);
         assert!(out.contains_key(canonical));
     }
 }

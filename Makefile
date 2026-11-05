@@ -25,7 +25,7 @@ else
   CARGO_FLAGS = --profile $(PROFILE)
 endif
 
-.PHONY: build addon addon-fast install-dev uninstall-dev qos-global build-status build-slots-off build-slots-on target-gc test-target-gc test test-build-slots verify test-node-matrix bench clean npm-build npm-publish npm-publish-dry
+.PHONY: build addon addon-fast install-dev uninstall-dev qos-global build-status build-slots-off build-slots-on target-gc test-target-gc test test-build-slots verify fix test-node-matrix bench clean npm-build npm-publish npm-publish-dry
 
 build: addon
 	$(CARGO) build $(CARGO_FLAGS)
@@ -177,6 +177,29 @@ verify:
 	tests/brand-lint/check-path-literals.sh
 	@tests/target-gc/run.sh
 	NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" test
+
+# Apply Clippy's machine-applicable autofixes in the root and nub-native
+# workspaces, matching `verify`. The separate nub-launcher workspace is out of
+# scope, as it is for `verify`; its CI clippy gate remains independent. Run on
+# a dirty tree is intended; review the diff before committing.
+fix:
+	@# `--all-features` turns on `embed-runtime`, whose build.rs wants the vendored
+	@# runtime packages (waived by NUB_ALLOW_INCOMPLETE_RUNTIME, as in `verify` and
+	@# CI's clippy job) and hashes runtime/addons/nub-native.node. With no built
+	@# addon, stage CI's placeholder for the lint and remove it on exit: left behind,
+	@# a dev-profile `nub` would load it as the real addon. No `-D warnings`: `--fix`
+	@# ignores it, so what clippy cannot fix prints as warnings and `verify` fails.
+	@# No NUB_SHARED_TARGET either: `verify` pins target/ for its addon copy, but
+	@# nothing here reads target/, and the wrapper's own pick is warm in a worktree.
+	@set -e; \
+	addon="$(CURDIR)/runtime/addons/nub-native.node"; \
+	if [ ! -s "$$addon" ]; then \
+		trap 'rm -f "$$addon"' EXIT; trap 'exit 130' INT TERM; \
+		mkdir -p "$$(dirname "$$addon")"; \
+		printf 'placeholder-addon' > "$$addon"; \
+	fi; \
+	NUB_ALLOW_INCOMPLETE_RUNTIME=1 "$(RUST_BUILD)" clippy --fix --workspace --all-targets --all-features --profile fast --allow-dirty --allow-staged; \
+	(cd crates/nub-native && "$(RUST_BUILD)" clippy --fix --all-features --profile fast --allow-dirty --allow-staged)
 
 # Run the integration suite across a Node version matrix (18.19 floor → 22.15
 # fast-path floor) — the local mirror of ci.yml's `test` job. Locates or

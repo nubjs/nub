@@ -646,12 +646,20 @@ function restoreSchemeOnlyBuiltinURL(result) {
 function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsyncLoaderFlagPresent()) {
   installUserHookDetector();
   installUserAsyncLoaderDetector();
+  const { resolveUtilRateFacade } = require("./util/rate.cjs");
 
   function resolve(specifier, context, nextResolve) {
     // The fetch-handler pass tells the entry's own load from a preload's import of
     // the same file by Node resolving it first as the main, with no parent.
     noteEntryResolve(specifier, context);
-    const r = core.resolveSpec(specifier, context.parentURL);
+    const utilFacade = resolveUtilRateFacade(specifier, context, !!process.versions.nub);
+    if (utilFacade) return utilFacade;
+    // Unlike `module.register` hooks, these also run for `require()`. Node passes
+    // `importAttributes` for every import (static, dynamic, `import.meta.resolve`)
+    // and leaves it undefined for `require()` and `createRequire()`. The conditions
+    // cannot tell the two apart: a user may add "require" as a custom condition.
+    const fromRequire = context.importAttributes === undefined;
+    const r = core.resolveSpec(specifier, context.parentURL, fromRequire);
     if (r) return r;
     // Yarn PnP (ESM): PnP doesn't patch the ESM loader, so `import` of a PnP dep must
     // be resolved explicitly — through `pnpapi.resolveRequest`, passing Node's
@@ -1212,22 +1220,11 @@ function installCjsRequireHooks(core, withClassicTranspile) {
   // the document AS JavaScript — `a: 1` is a valid labeled statement, so
   // `require("./x.yaml")` silently produced `{}` instead of the parsed document.
   const dataExtension = (mod, filename, url, ext) => {
-    // Round-tripped through JSON because the ESM path emits
-    // `export default ${JSON.stringify(parsed)}` — a TOML date reaches an
-    // `import` as a string, so `require()` must not hand back something richer.
+    // Compiled from the same expression the ESM path exports, so a NaN, a
+    // BigInt or a Date reaches `require()` exactly as it reaches `import`.
     // `{__esModule, default}` is the shape require(esm) already yields on the
     // fast tier, so the same file destructures identically on both.
-    const value = core.dataValue(url, ext);
-    mod.exports = {
-      __esModule: true,
-      // `== null` mirrors `loadData`'s own guard rather than testing undefined
-      // strictly: it emits `export default undefined` for null AND undefined,
-      // so a document parsing to null — an empty `.yaml`, a `.json5`/`.jsonc`
-      // whose whole content is `null` — would otherwise default to `null` here
-      // and `undefined` through `import`. Same file, two answers, which is the
-      // divergence sharing `dataValue` exists to prevent.
-      default: value == null ? undefined : JSON.parse(JSON.stringify(value)),
-    };
+    mod._compile(`module.exports = { __esModule: true, default: ${core.dataExpression(url, ext)} };`, filename);
   };
 
   // ONE handler, dispatching PER URL rather than per extension — because the
@@ -1382,7 +1379,23 @@ function installTemporalValue(polyfill) {
       enumerable: false,
     });
   }
-  const T = polyfill.Temporal;
+  // The library exports a frozen module namespace; the global needs the
+  // ordinary Temporal object's built-in property attributes and prototype.
+  const T = {};
+  for (const name of Object.getOwnPropertyNames(polyfill.Temporal)) {
+    Object.defineProperty(T, name, {
+      value: polyfill.Temporal[name],
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+  Object.defineProperty(T, Symbol.toStringTag, {
+    value: "Temporal",
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
   defineTemporal(T);
   return T;
 }

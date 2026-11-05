@@ -2811,7 +2811,7 @@ dependencies = [
  "json5",
  "jsonc-parser",
  "nub-json-guard",
- "serde_json",
+ "serde",
  "toml",
  "yaml-rust2",
 ]

@@ -55,27 +55,32 @@ pub use tsconfig::load_tsconfig;
 /// The data-format parsers live in `nub-data-formats` so this addon and
 /// `nub compile` share ONE implementation. The compiler inlines a data import
 /// into the bundle at build time; if it parsed with its own copy, a document
-/// could mean one thing run and another compiled. These wrappers exist only to
-/// put the shared `String` error behind napi's error type.
+/// could mean one thing run and another compiled. Each returns the JavaScript
+/// expression the module's default export is, not a value: a NaN, a `-0`, a
+/// `BigInt`, a `Date` and an own `__proto__` key all survive as source text,
+/// and the preload emits it verbatim.
 #[napi]
-pub fn parse_yaml(source: String) -> napi::Result<serde_json::Value> {
-    nub_data_formats::parse_yaml(&source).map_err(napi::Error::from_reason)
+pub fn yaml_to_js(source: String) -> napi::Result<String> {
+    data_to_js(nub_data_formats::parse_yaml(&source))
 }
 
-/// Parse TOML source into a JS value.
 #[napi]
-pub fn parse_toml(source: String) -> napi::Result<serde_json::Value> {
-    nub_data_formats::parse_toml(&source).map_err(napi::Error::from_reason)
+pub fn toml_to_js(source: String) -> napi::Result<String> {
+    data_to_js(nub_data_formats::parse_toml(&source))
 }
 
-/// Parse JSON5 source into a JS value.
 #[napi]
-pub fn parse_json5(source: String) -> napi::Result<serde_json::Value> {
-    nub_data_formats::parse_json5(&source).map_err(napi::Error::from_reason)
+pub fn json5_to_js(source: String) -> napi::Result<String> {
+    data_to_js(nub_data_formats::parse_json5(&source))
 }
 
-/// Parse JSONC (JSON with comments) source into a JS value.
 #[napi]
-pub fn parse_jsonc(source: String) -> napi::Result<serde_json::Value> {
-    nub_data_formats::parse_jsonc(&source).map_err(napi::Error::from_reason)
+pub fn jsonc_to_js(source: String) -> napi::Result<String> {
+    data_to_js(nub_data_formats::parse_jsonc(&source))
+}
+
+fn data_to_js(parsed: Result<nub_data_formats::Value, String>) -> napi::Result<String> {
+    parsed
+        .map(|value| value.to_default_export())
+        .map_err(napi::Error::from_reason)
 }

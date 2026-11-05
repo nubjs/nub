@@ -179,7 +179,7 @@ The bundler FOLLOWS the import and emits the module, then leaves the original sp
 
 Nub's runtime loads `.jsonc`, `.json5`, `.toml`, `.yaml`, `.yml` and `.txt` as data imports, and the compiler reads the same table rather than restating it.
 
-The five the bundler does not handle natively are parsed at build time and inlined as a JSON literal, so no parser reaches the artifact. How that stayed one implementation rather than two is [One parser, not two](#one-parser-not-two).
+The five the bundler does not handle natively are parsed at build time and inlined as a JavaScript literal, so no parser reaches the artifact. How that stayed one implementation rather than two is [One parser, not two](#one-parser-not-two).
 
 **Superseded.** These five formerly failed the build, and this section recorded that as an open gap — a program that ran under `nub` could not be compiled.
 
@@ -247,6 +247,8 @@ ok
 Two harnesses under `tests/compile-corpus/` do this continuously. One varies **which package** is compiled, across pure JavaScript, node-gyp, node-pre-gyp and napi-rs packages. The other varies **the shape of the tree** it sits in — a nested duplicate version, a scoped package, a symlinked workspace member, an isolated install, a peer dependency, and a package that reads a data file. The second axis is the one that finds path defects, because it inspects the payload rather than only running the artifact: a tree shape can produce a collision that no ordinary package would, and the binary still exits 0 printing the right answer.
 
 The package corpus requires a successful plain-Node control and compares complete stdout on both cold and warm launches, with source and dependencies hidden. Its SQLite fixture verifies rollback and persistence after reopen; its Express fixture sends an HTTP request to the compiled server.
+
+The Windows native-package and data-package gates keep their fixtures and extraction caches under the runner's user profile. Shared temporary-directory ancestors can fail the launcher's cache-safety checks, causing extraction to fall back to a different cache than the gate inspects.
 
 ### Platform coverage
 
@@ -331,9 +333,11 @@ Named fixtures can only test what someone thought to name, and `compile-preamble
 
 Data-format imports are transform-time, and the compiler must not grow a second implementation of them. Two parsers behind one syntax would let a document mean different things depending on whether it was run or compiled.
 
-The runtime already parses YAML, TOML, JSON5 and JSONC **in Rust**, through `nub-native`'s `parseYaml`/`parseToml`/`parseJson5`/`parseJsonc`, with the JavaScript libraries only as a fallback when the addon is missing.
+The runtime already parses YAML, TOML, JSON5 and JSONC **in Rust**, through `nub-native`'s `yamlToJs`/`tomlToJs`/`json5ToJs`/`jsoncToJs`, with the JavaScript libraries only as a fallback when the addon is missing.
 
 So the four parsers and their depth and alias-expansion guards move into a small crate both sides depend on: `nub-native` keeps its `#[napi]` wrappers, and the compiler's loader plugin calls the same functions. `nub-native` is its own workspace, but the shared crate is a sibling under `crates/` rather than beneath it, so an ordinary path dependency reaches it from both. The extension table stays the runtime's — the compiler reads it rather than restating it, so the two surfaces cannot disagree about what `.yaml` means.
+
+The crate shares the emitter as well as the parsers. Each parser's result is written out as the JavaScript expression the module's default export is, and `import`, `require()` and the compiled bundle all evaluate that one text. JSON could not be the interchange: it has no form for NaN, -0, an integer past 2^53, a date, or an own `__proto__` key.
 
 ## What deliberately does not survive
 

@@ -9,7 +9,7 @@
 //! on Linux and macOS.
 //!
 //! Measured on the `fast` profile, feeding `[[[…1…]]]` through the addon's
-//! `parseJson5` (json5 0.4 imposes no bound of its own): abort between 2500 and
+//! JSON5 parser (json5 0.4 imposes no bound of its own): abort between 2500 and
 //! 3000 levels on a stock 8 MiB macOS stack, and between 300 and 400 on a 1 MiB
 //! one. `jsonc_parser` 0.32.4 happens to stop at 512 internally — above what a
 //! 1 MiB stack survives, and an upstream implementation detail no test of ours

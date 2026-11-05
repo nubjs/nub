@@ -1756,6 +1756,7 @@ enum RichPick {
 /// latest) so one invocation subsumes `-i` and `-i --latest`. Preserve-pin
 /// screening happens per-cell in `update_picker::build_row` (a `latest` at
 /// or below `current` is never offered), not by hiding whole rows.
+#[allow(clippy::too_many_arguments)]
 async fn pick_update_rich(
     keys: &[String],
     manifest: &aube_manifest::PackageJson,
@@ -2053,6 +2054,10 @@ async fn run_filtered(
     reject_unsupported_pkg_specs(&args.packages)?;
     let cwd = crate::dirs::cwd()?;
     let (root, matched) = super::select_workspace_packages(&cwd, filter, "update")?;
+    if matched.is_empty() {
+        super::no_projects_matched(&root, filter, super::NoMatchReport::Scope)?;
+        return Ok(None);
+    }
     install::run_dev_preinstall(
         &root,
         args.ignore_scripts,

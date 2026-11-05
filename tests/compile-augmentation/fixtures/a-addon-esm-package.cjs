@@ -17,4 +17,4 @@
 // to nothing at build time.
 const addon = require("./nub-native.node");
 
-console.log("addon", addon.parseJson5("{answer:42}").answer);
+console.log("addon", JSON.parse(addon.json5ToJs("{answer:42}")).answer);

@@ -64,7 +64,7 @@ EOF
 	assert_failure
 }
 
-@test "patch-commit extends an existing patch at its declared path" {
+@test "patch-commit replaces an existing patch with the full consolidated diff" {
 	cat >package.json <<'EOF'
 {
   "name": "patch-existing-test",
@@ -79,7 +79,7 @@ packages:
   - .
 EOF
 
-	run aube install --ignore-scripts
+	run aube install
 	assert_success
 
 	run aube patch is-odd@3.0.1
@@ -94,25 +94,40 @@ EOF
 	mv "$generated_patch" "$declared_patch"
 	sed -i.bak "s#$generated_patch#$declared_patch#" pnpm-workspace.yaml
 	rm pnpm-workspace.yaml.bak
-	run aube install --ignore-scripts
+	run aube install
 	assert_success
 
+	# Re-patch the same package: the edit dir starts from the currently
+	# effective (patched) tree, and the recommit must REPLACE the patch
+	# file with one consolidated pristine→edited diff rather than
+	# appending incremental hunks to it.
 	run aube patch is-odd@3.0.1
 	assert_success
 	edit_dir="$(echo "$output" | grep -oE '/[^ ]*/user' | head -1)"
 	run grep -q "existing-patch-marker" "$edit_dir/index.js"
 	assert_success
+	# Edit the SAME line the first patch added — the classic repeated
+	# patching of one file.
+	sed -i.bak "s/existing-patch-marker/existing-patch-marker-v2/" "$edit_dir/index.js"
+	rm "$edit_dir/index.js.bak"
 	echo "// second-patch-marker" >>"$edit_dir/index.js"
 	retry_parent="$BATS_TEST_TMPDIR/retry-edit"
 	cp -R "$(dirname "$edit_dir")" "$retry_parent"
 
 	run aube patch-commit "$edit_dir"
 	assert_success
+	# A retry from a leftover edit snapshot rewrites identical bytes.
 	run aube patch-commit "$retry_parent/user"
 	assert_success
 	assert [ -f "$declared_patch" ]
 	assert [ ! -f "patches/is-odd@3.0.1.patch" ]
-	run grep -q '^+// existing-patch-marker' "$declared_patch"
+	# One consolidated section for the file, not one per patch session.
+	run grep -c '^diff --git' "$declared_patch"
+	assert_output "1"
+	# The old hunks are gone: the patch carries only the latest content.
+	run grep -q '^+// existing-patch-marker$' "$declared_patch"
+	assert_failure
+	run grep -q '^+// existing-patch-marker-v2' "$declared_patch"
 	assert_success
 	run grep -c '^+// second-patch-marker' "$declared_patch"
 	assert_output "1"
@@ -120,12 +135,80 @@ EOF
 	assert_success
 
 	rm -rf node_modules
-	run aube install --ignore-scripts
+	run aube install
 	assert_success
-	run grep -q "existing-patch-marker" node_modules/is-odd/index.js
+	run grep -q "existing-patch-marker-v2" node_modules/is-odd/index.js
 	assert_success
 	run grep -q "second-patch-marker" node_modules/is-odd/index.js
 	assert_success
+}
+
+@test "patch-commit keeps a pnpm-written rename and deletion when it replaces the patch" {
+	cat >package.json <<'EOF'
+{
+  "name": "patch-pnpm-written-test",
+  "version": "1.0.0",
+  "dependencies": {
+    "is-odd": "3.0.1"
+  }
+}
+EOF
+	cat >pnpm-workspace.yaml <<'EOF'
+packages:
+  - .
+patchedDependencies:
+  is-odd@3.0.1: patches/is-odd@3.0.1.patch
+EOF
+	mkdir patches
+	# Written by `pnpm patch-commit`: a rename carries no hunks, and the
+	# deletion carries no content because pnpm diffs with
+	# --irreversible-delete, so neither can be undone from the patch alone.
+	cat >patches/is-odd@3.0.1.patch <<'EOF'
+diff --git a/LICENSE b/LICENSE.txt
+similarity index 100%
+rename from LICENSE
+rename to LICENSE.txt
+diff --git a/README.md b/README.md
+deleted file mode 100644
+index b08207cbb4af1d17983fafeb50e369e8b9f7fcd2..0000000000000000000000000000000000000000
+diff --git a/index.js b/index.js
+index 79d1f22a8e7a27efb8841bb83cb682ea1ff3a59c..2d87267acdf39678958cc3e937951549510f7569 100644
+--- a/index.js
++++ b/index.js
+@@ -9,6 +9,7 @@
+
+ const isNumber = require('is-number');
+
++// first-patch-marker
+ module.exports = function isOdd(value) {
+   const n = Math.abs(value);
+   if (!isNumber(n)) {
+EOF
+
+	run aube install
+	assert_success
+
+	run aube patch is-odd@3.0.1
+	assert_success
+	edit_dir="$(echo "$output" | grep -oE '/[^ ]*/user' | head -1)"
+	assert [ ! -e "$edit_dir/README.md" ]
+	assert [ ! -e "$edit_dir/LICENSE" ]
+	assert [ -f "$edit_dir/LICENSE.txt" ]
+	echo "// second-patch-marker" >>"$edit_dir/index.js"
+
+	run aube patch-commit "$edit_dir"
+	assert_success
+	run grep -c '^diff --git a/index.js' patches/is-odd@3.0.1.patch
+	assert_output "1"
+
+	rm -rf node_modules
+	run aube install
+	assert_success
+	assert [ ! -e node_modules/is-odd/README.md ]
+	assert [ ! -e node_modules/is-odd/LICENSE ]
+	assert [ -f node_modules/is-odd/LICENSE.txt ]
+	run grep -c "first-patch-marker\|second-patch-marker" node_modules/is-odd/index.js
+	assert_output "2"
 }
 
 @test "pnpm patch hash drift fails frozen install and refreshes plain install" {
@@ -218,6 +301,59 @@ EOF
 
 	# Requiring through the alias should see the patched export.
 	run node -e 'if (require("odd-alias").patched !== "v1") process.exit(1)'
+	assert_success
+}
+
+# The alias is a name the virtual store files the package under, not
+# the one a patch is keyed by, so both spellings must find the package
+# and both must record the registry name install applies.
+@test "aube patch finds an npm-aliased install by registry name and by alias" {
+	cat >package.json <<'EOF'
+{
+  "name": "aliased-patch-cli-test",
+  "version": "1.0.0",
+  "dependencies": { "odd-alias": "npm:is-odd@3.0.1" }
+}
+EOF
+	run aube install
+	assert_success
+
+	for spec in is-odd@3.0.1 odd-alias@3.0.1; do
+		run aube patch "$spec"
+		assert_success
+		edit_dir="$(echo "$output" | grep -oE '/[^ ]*/user' | head -1)"
+		echo "// patched-as-$spec" >>"$edit_dir/index.js"
+		run aube patch-commit "$edit_dir"
+		assert_success
+	done
+
+	assert [ -f patches/is-odd@3.0.1.patch ]
+	assert [ ! -e patches/odd-alias@3.0.1.patch ]
+	run grep -c "patched-as-" node_modules/odd-alias/index.js
+	assert_output "2"
+}
+
+# The hoisted linker has no virtual store to find the package in.
+@test "aube patch works under the hoisted linker" {
+	cat >package.json <<'EOF'
+{
+  "name": "hoisted-patch-test",
+  "version": "1.0.0",
+  "dependencies": { "is-odd": "3.0.1" }
+}
+EOF
+	echo "node-linker=hoisted" >.npmrc
+	run aube install
+	assert_success
+	assert [ ! -L node_modules/is-odd ]
+
+	run aube patch is-odd@3.0.1
+	assert_success
+	edit_dir="$(echo "$output" | grep -oE '/[^ ]*/user' | head -1)"
+	echo "// patched-hoisted" >>"$edit_dir/index.js"
+	run aube patch-commit "$edit_dir"
+	assert_success
+	run grep -q "patched-hoisted" node_modules/is-odd/index.js
 	assert_success
 }
 

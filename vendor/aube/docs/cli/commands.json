@@ -10188,7 +10188,7 @@
             "name": "PACKAGE",
             "usage": "<PACKAGE>",
             "help": "Package spec, `<name>@<version>`.",
-            "help_long": "Package spec, `<name>@<version>`.\n\nThe package must already be installed in `node_modules` (aube copies from the linked virtual store, not from the registry, so the layout matches what install would later patch).",
+            "help_long": "Package spec, `<name>@<version>`.\n\nThe package must already be installed in `node_modules` (aube copies the files install linked, not a fresh registry download, so the layout matches what install would later patch).",
             "help_first_line": "Package spec, `<name>@<version>`.",
             "required": true,
             "double_dash": "Optional",
@@ -10220,7 +10220,7 @@
             "name": "ignore-existing",
             "usage": "--ignore-existing",
             "help": "Ignore any existing patch entry for this package.",
-            "help_long": "Ignore any existing patch entry for this package.\n\nExtracts a pristine copy from `node_modules` rather than re-applying the existing patch first. Accepted for pnpm parity; aube already extracts from the *linked* (post-patch) tree, so this flag is effectively informational here.",
+            "help_long": "Ignore any existing patch entry for this package.\n\nStarts the edit copy from the package's original files instead of applying the existing patch first, so the committed patch replaces it rather than building on it.",
             "help_first_line": "Ignore any existing patch entry for this package.",
             "short": [],
             "long": [

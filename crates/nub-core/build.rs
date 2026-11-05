@@ -26,6 +26,10 @@
 mod runtime_tree;
 
 #[cfg(feature = "embed-runtime")]
+#[path = "src/node/vendored_runtime.rs"]
+mod vendored_runtime;
+
+#[cfg(feature = "embed-runtime")]
 fn main() {
     use sha2::{Digest, Sha256};
     use std::path::PathBuf;
@@ -77,27 +81,22 @@ fn main() {
     // natively. Nothing downstream catches it: the integrity hashes below cover only
     // the entrypoints, and a packager's smoke test on a current Node exercises none of
     // those paths — which is how a from-source Homebrew build reached review with a
-    // degraded runtime. Keep this list in step with release.yml's vendoring step.
+    // degraded runtime.
     // NUB_ALLOW_INCOMPLETE_RUNTIME opts out for builds exercising only the
     // embed/extract PLUMBING (the lint + round-trip CI jobs), never a shipped binary.
     println!("cargo:rerun-if-env-changed=NUB_ALLOW_INCOMPLETE_RUNTIME");
     if std::env::var_os("NUB_ALLOW_INCOMPLETE_RUNTIME").is_none() {
-        let missing: Vec<&str> = [
-            "@js-temporal/polyfill",
-            "@oxc-project/runtime",
-            "@petamoriken/float16",
-            "jsbi",
-            "urlpattern-polyfill",
-        ]
-        .into_iter()
-        .filter(|dep| {
-            !staging
-                .join("node_modules")
-                .join(dep)
-                .join("package.json")
-                .is_file()
-        })
-        .collect();
+        let missing: Vec<&str> = vendored_runtime::VENDORED_RUNTIME_PACKAGES
+            .iter()
+            .copied()
+            .filter(|dep| {
+                !staging
+                    .join("node_modules")
+                    .join(dep)
+                    .join("package.json")
+                    .is_file()
+            })
+            .collect();
         if !missing.is_empty() {
             panic!(
                 "embed-runtime: {} is missing vendored runtime packages: {}. Stage them into \

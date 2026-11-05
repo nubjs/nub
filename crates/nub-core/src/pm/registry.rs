@@ -101,16 +101,22 @@ pub fn registry_config(root: &std::path::Path) -> RegistryConfig {
     // then public. The selection rule is the pure [`resolve_base`]. The PROJECT
     // `.npmrc` (repo-controlled) and the USER `~/.npmrc` (operator-controlled) are
     // read SEPARATELY so their values can carry different trust for `${VAR}`
-    // expansion (see [`project_npmrc_trusted`] / [`resolve_base`]).
-    let project_trusted = project_npmrc_trusted(root);
+    // expansion (see [`project_npmrc_layers`] / [`resolve_base`]).
+    let project = project_npmrc_layers(root);
+    // The most specific project file that sets `registry` wins, with its own trust.
+    let (project_registry, project_trusted) = project
+        .iter()
+        .rev()
+        .find_map(|(path, trusted)| read_npmrc_key(path, "registry").map(|r| (Some(r), *trusted)))
+        .unwrap_or((None, false));
     let user_registry = home_npmrc().and_then(|p| read_npmrc_key(&p, "registry"));
     let base = resolve_base(
         env_nonempty("npm_config_registry"),
-        read_npmrc_key(&root.join(".npmrc"), "registry"),
+        project_registry,
         user_registry,
         project_trusted,
     );
-    let auth = npmrc_auth_for(root, &base, project_trusted);
+    let auth = npmrc_auth_for(&project, &base);
     RegistryConfig { base, auth }
 }
 
@@ -135,28 +141,39 @@ pub fn registry_config(root: &std::path::Path) -> RegistryConfig {
 /// path. The flag comes from the ENVIRONMENT (a cloned/PR'd repo can't set it for
 /// you), and the USER `~/.npmrc` is always trusted regardless — it is the
 /// operator's own file, the home of the normal `${NPM_TOKEN}` pattern.
-fn project_npmrc_trusted(root: &std::path::Path) -> bool {
-    let Some(raw) = env_nonempty("PNPM_CONFIG_NPMRC_AUTH_FILE") else {
-        return false;
-    };
+///
+/// The project scope can be more than one file: in a workspace it is the root's
+/// `.npmrc` plus, per incumbent, the invoking member's
+/// ([`crate::workspace::npmrc::project_npmrc_paths`]). Each carries its own trust,
+/// so the opt-in re-trusts only the file it names. Returned lowest precedence first.
+fn project_npmrc_layers(root: &std::path::Path) -> Vec<(PathBuf, bool)> {
+    let auth_file = env_nonempty("PNPM_CONFIG_NPMRC_AUTH_FILE");
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    auth_file_trusts_project(&raw, &cwd, root)
+    crate::workspace::npmrc::project_npmrc_paths(root)
+        .into_iter()
+        .map(|path| {
+            let trusted = auth_file
+                .as_deref()
+                .is_some_and(|raw| auth_file_trusts_project(raw, &cwd, &path));
+            (path, trusted)
+        })
+        .collect()
 }
 
 /// PURE: does the configured `PNPM_CONFIG_NPMRC_AUTH_FILE` path point AT the
-/// project's own `<root>/.npmrc`? A relative value resolves against `cwd` (pnpm's
-/// rule). Comparison is fail-CLOSED: it trusts only when both paths canonicalize
-/// to the same real file; if either can't be canonicalized (e.g. the file doesn't
-/// exist), it returns false rather than risk trusting a repo-controlled file.
-fn auth_file_trusts_project(configured: &str, cwd: &Path, root: &Path) -> bool {
+/// project `.npmrc` at `project_rc`? A relative value resolves against `cwd`
+/// (pnpm's rule). Comparison is fail-CLOSED: it trusts only when both paths
+/// canonicalize to the same real file; if either can't be canonicalized (e.g. the
+/// file doesn't exist), it returns false rather than risk trusting a
+/// repo-controlled file.
+fn auth_file_trusts_project(configured: &str, cwd: &Path, project_rc: &Path) -> bool {
     let p = Path::new(configured);
     let resolved = if p.is_absolute() {
         p.to_path_buf()
     } else {
         cwd.join(p)
     };
-    let project = root.join(".npmrc");
-    match (resolved.canonicalize(), project.canonicalize()) {
+    match (resolved.canonicalize(), project_rc.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,
     }
@@ -279,24 +296,24 @@ fn interpolate_with(value: &str, mut lookup: impl FnMut(&str) -> Option<String>)
 /// matching `registry_base`. This is npm's nerfDart resolution: an auth line is
 /// keyed by a registry URL minus its scheme (`//npm.example.com/path/:_authToken`),
 /// and the most-specific (longest) matching prefix wins.
-fn npmrc_auth_for(
-    root: &std::path::Path,
-    registry_base: &str,
-    project_trusted: bool,
-) -> Option<Auth> {
-    let project = std::fs::read_to_string(root.join(".npmrc")).unwrap_or_default();
+fn npmrc_auth_for(project: &[(PathBuf, bool)], registry_base: &str) -> Option<Auth> {
+    let project: Vec<(String, bool)> = project
+        .iter()
+        .map(|(path, trusted)| (std::fs::read_to_string(path).unwrap_or_default(), *trusted))
+        .collect();
     let user = home_npmrc()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .unwrap_or_default();
     // Preserve npm's per-prefix last-writer-wins: project text first, user text
-    // last. Trust is per-source — the user file always expands `${VAR}`; the
+    // last. Trust is per-source — the user file always expands `${VAR}`; a
     // project file only when trusted — so a repo-controlled auth line can never
     // interpolate a secret from the environment unless the operator opted in.
-    parse_npmrc_auth(
-        &[(&project, project_trusted), (&user, true)],
-        registry_base,
-        |name| std::env::var(name).ok(),
-    )
+    let mut sources: Vec<(&str, bool)> = project
+        .iter()
+        .map(|(text, trusted)| (text.as_str(), *trusted))
+        .collect();
+    sources.push((&user, true));
+    parse_npmrc_auth(&sources, registry_base, |name| std::env::var(name).ok())
 }
 
 /// PURE auth resolver over already-read `.npmrc` text — no filesystem, no network,
@@ -1297,6 +1314,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn a_workspace_member_downloads_through_the_root_npmrc() {
+        // PM provisioning for a member must use the mirror and auth the workspace
+        // root's `.npmrc` declares, not fall back to the public registry.
+        if std::env::var("npm_config_registry").is_ok_and(|v| !v.trim().is_empty())
+            || std::env::var("COREPACK_NPM_REGISTRY").is_ok()
+        {
+            return; // env outranks every file; see the test above
+        }
+        let root = std::env::temp_dir().join(format!("nub-pm-reg-ws-{}", std::process::id()));
+        let member = root.join("packages").join("a");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"name":"root","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+        std::fs::write(member.join("package.json"), r#"{"name":"a"}"#).unwrap();
+        std::fs::write(
+            root.join(".npmrc"),
+            "registry=https://mirror.example.test/\n//mirror.example.test/:_authToken=root-tok\n",
+        )
+        .unwrap();
+
+        let cfg = registry_config(&member);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(cfg.base, "https://mirror.example.test");
+        assert_eq!(cfg.auth, Some(Auth::Bearer("root-tok".to_string())));
+    }
+
     /// GHSA-3qhv-2rgh-x77r class: a PROJECT `.npmrc` is repo-controlled — a clone
     /// or PR fully authors it — so a `${VAR}` in its `registry` value must NOT be
     /// expanded from the caller's environment. A hostile
@@ -1353,22 +1400,30 @@ mod tests {
 
         // Absolute path AT the project `.npmrc` → trusted.
         assert!(
-            auth_file_trusts_project(dir.join(".npmrc").to_str().unwrap(), &dir, &dir),
+            auth_file_trusts_project(
+                dir.join(".npmrc").to_str().unwrap(),
+                &dir,
+                &dir.join(".npmrc")
+            ),
             "the project's own .npmrc path must trust it"
         );
         // Relative `.npmrc` resolved against cwd == root → trusted.
         assert!(
-            auth_file_trusts_project(".npmrc", &dir, &dir),
+            auth_file_trusts_project(".npmrc", &dir, &dir.join(".npmrc")),
             "a relative `.npmrc` against the project dir must trust it"
         );
         // A different auth file → NOT trusted (the reopened-exfiltration case).
         assert!(
-            !auth_file_trusts_project(other.to_str().unwrap(), &dir, &dir),
+            !auth_file_trusts_project(other.to_str().unwrap(), &dir, &dir.join(".npmrc")),
             "a non-project auth file must leave the repo .npmrc untrusted"
         );
         // A path that doesn't exist → fail-closed (untrusted).
         assert!(
-            !auth_file_trusts_project(dir.join("missing.npmrc").to_str().unwrap(), &dir, &dir),
+            !auth_file_trusts_project(
+                dir.join("missing.npmrc").to_str().unwrap(),
+                &dir,
+                &dir.join(".npmrc")
+            ),
             "an unresolvable path must fail closed"
         );
 

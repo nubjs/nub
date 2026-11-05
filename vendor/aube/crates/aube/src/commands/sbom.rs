@@ -96,8 +96,10 @@ pub async fn run(args: SbomArgs) -> miette::Result<()> {
     } else {
         closure
     };
+    // As in `licenses`: a per-project-lockfile member was installed from the root.
+    let install_root = super::install::unshared_lockfile_workspace_root(&cwd).unwrap_or(cwd);
     let installed_metadata = super::licenses::collect_installed_licenses(
-        &cwd,
+        &install_root,
         &graph,
         closure.keys().map(String::as_str),
     )?;

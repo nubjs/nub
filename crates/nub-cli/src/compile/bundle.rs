@@ -54,9 +54,10 @@ use rolldown::plugin::{
 use rolldown::{BundlerBuilder, BundlerOptions, InputItem};
 use rolldown_common::bundler_options::{BundlerTransformOptions, Either, JsxOptions};
 use rolldown_common::{
-    EmittedChunk, InnerOptions, IsExternal, ModuleType, Output, OutputFormat, Platform,
+    EmittedChunk, ImportKind, InnerOptions, IsExternal, ModuleType, Output, OutputFormat, Platform,
     RawCompressOptions, RawMangleOptions, RawMinifyOptions, RawMinifyOptionsDetailed,
-    ResolveOptions, ResolvedExternal, SourceMapType, StrOrBytes, TreeshakeOptions, TsConfig,
+    ResolveOptions, ResolvedExternal, SourceMapPathTransform, SourceMapType, StrOrBytes,
+    TreeshakeOptions, TsConfig,
 };
 use rolldown_error::{BuildDiagnostic, DiagnosticOptions, EventKind};
 use rolldown_utils::indexmap::FxIndexMap;
@@ -295,7 +296,7 @@ fn bundle_inner(
 
     let loader_plan = loaders::plan(&opts.loaders)?;
 
-    let options = BundlerOptions {
+    let mut options = BundlerOptions {
         input: Some(vec![InputItem {
             name: Some(stem),
             // A virtual root statically imports the compile prelude before the
@@ -431,6 +432,9 @@ fn bundle_inner(
         opts.target_node,
         opts.eager_startup,
     )?);
+    if options.sourcemap.is_some() {
+        options.sourcemap_path_transform = Some(runtime_source_names(&prelude.runtime_dir));
+    }
     let new_urls = Arc::new(NewUrlAssets {
         collected: Arc::clone(&collected),
         files: Arc::clone(&files_plugin),
@@ -1602,6 +1606,7 @@ impl<'a> oxc_ast_visit::Visit<'a> for PathGlobalScan {
 /// collide with the compiler's roots.
 const COMPILE_ROOT_ID: &str = "\0nub:compile-root";
 const COMPILE_PREAMBLE_ID: &str = "\0nub:compile-preamble";
+const COMPILE_UTIL_RATE_ID: &str = "\0nub:compile-util-rate";
 /// The name every chunk-level CommonJS loader is declared under. Deliberately
 /// NOT `require`: a chunk holds authored ESM beside the CommonJS modules it
 /// wraps, and Node gives ESM no `require` binding. [`hoist_module_wrappers`]
@@ -2162,6 +2167,17 @@ struct CompilePreamble {
     /// Whether the emitted chunk is shaped for a complete V8 code cache — see
     /// [`finish_eager_startup`]. Decided by the target Node, never by the host.
     eager: bool,
+    /// Whether `node:util` imports link through [`COMPILE_UTIL_RATE_ID`]. The
+    /// preamble adds `debounce` and `throttle` to the util object only after ESM
+    /// has linked, so a target without them needs the facade for named imports.
+    util_rate_facade: bool,
+}
+
+/// Whether the target Node ships `util.debounce` and `util.throttle`: from 26.10,
+/// and from 24.22 by backport. 25.x never got them. `None` is a `--smol` artifact
+/// whose runtime is unknown until launch, so it keeps the facade.
+fn util_rate_native(target_node: Option<(u64, u64, u64)>) -> bool {
+    target_node.is_some_and(|v| v >= (26, 10, 0) || ((24, 22, 0)..(25, 0, 0)).contains(&v))
 }
 
 /// Polyfills the compile preamble installs, and the first Node version that ships
@@ -2377,6 +2393,7 @@ impl CompilePreamble {
         })?;
         let mut prelude = Self::from_source(entry, runtime_dir, source);
         prelude.eager = eager;
+        prelude.util_rate_facade = !util_rate_native(target_node);
         prelude.root_support_files.push((
             nub_core::compile::COMPILE_BOOTSTRAP_NAME.to_string(),
             bootstrap_bytes,
@@ -2399,6 +2416,7 @@ impl CompilePreamble {
             app_uses_worker: AtomicBool::new(false),
             app_computes_module_specifier: AtomicBool::new(false),
             eager: false,
+            util_rate_facade: true,
         }
     }
 
@@ -2699,6 +2717,8 @@ impl Plugin for CompilePreamble {
         let root = self.has_root(args.specifier);
         let specifier = args.specifier.to_string();
         let kind = args.kind;
+        let util_rate_facade = self.util_rate_facade;
+        let from_util_rate_facade = args.importer == Some(COMPILE_UTIL_RATE_ID);
         let prelude_path = self.runtime_dir.join("compile-preamble.mjs");
         let private_importers = Arc::clone(&self.private_importers);
         let private_import = args.importer.is_some_and(|importer| {
@@ -2712,6 +2732,19 @@ impl Plugin for CompilePreamble {
         async move {
             if root || specifier == COMPILE_PREAMBLE_ID {
                 return Ok(Some(HookResolveIdOutput::from_id(specifier)));
+            }
+            if specifier == COMPILE_UTIL_RATE_ID {
+                return Ok(Some(HookResolveIdOutput::from_id(specifier)));
+            }
+            if !private_import
+                && util_rate_facade
+                && matches!(kind, ImportKind::Import | ImportKind::DynamicImport)
+                && (specifier == "node:util" || specifier == "util")
+                && !from_util_rate_facade
+            {
+                return Ok(Some(HookResolveIdOutput::from_id(
+                    COMPILE_UTIL_RATE_ID.to_string(),
+                )));
             }
             if !private_import {
                 return Ok(None);
@@ -2756,6 +2789,9 @@ impl Plugin for CompilePreamble {
         args: &HookLoadArgs<'_>,
     ) -> impl std::future::Future<Output = HookLoadReturn> + Send {
         let prelude = (args.id == COMPILE_PREAMBLE_ID).then(|| self.source.clone());
+        let util_rate = (args.id == COMPILE_UTIL_RATE_ID).then(|| {
+            "import util from 'node:util'; export * from 'node:util'; export default util; export const debounce = util.debounce; export const throttle = util.throttle;".to_string()
+        });
         let wrapper = (!args.id.eq(COMPILE_PREAMBLE_ID))
             .then(|| self.root_source(args.id))
             .flatten();
@@ -2764,6 +2800,13 @@ impl Plugin for CompilePreamble {
             .then(|| PathBuf::from(clean_url(args.id)));
         async move {
             if let Some(code) = prelude {
+                return Ok(Some(HookLoadOutput {
+                    code: code.into(),
+                    module_type: Some(ModuleType::Js),
+                    ..Default::default()
+                }));
+            }
+            if let Some(code) = util_rate {
                 return Ok(Some(HookLoadOutput {
                     code: code.into(),
                     module_type: Some(ModuleType::Js),
@@ -4676,6 +4719,74 @@ fn effective_jsx_setting(entry_abs: &Path, explicit_tsconfig: Option<&Path>) -> 
     let resolver = oxc_resolver::Resolver::new(oxc_resolver::ResolveOptions::default());
     let tsconfig = resolver.resolve_tsconfig(&path).ok()?;
     tsconfig.compiler_options.jsx.clone()
+}
+
+/// Names nub's own runtime modules in a source map by their place in the runtime,
+/// not by where the building machine keeps it.
+///
+/// The prelude is bundled from the runtime extraction cache, so Rolldown listed
+/// each of its files relative to the output — `../../.cache/nub/runtime-0.9.7-…/
+/// compile-record.mjs`, or a temporary `XDG_CACHE_HOME` — and every artifact built
+/// with a map carried that layout into its stack frames. `runtime/<file>` resolves
+/// beside the chunk instead: `/N:/$nub/runtime/compile-record.mjs` in a single
+/// executable.
+///
+/// The runtime's vendored packages (a Temporal polyfill on a target without one)
+/// sit in its own `node_modules/` once extracted, but a development build resolves
+/// them from the checkout, outside the runtime directory. Each is resolved from the
+/// runtime as Node would and named `runtime/node_modules/<pkg>/…` wherever it
+/// lives. Every other source, including an application's own copy of one of those
+/// packages, keeps Rolldown's spelling.
+fn runtime_source_names(runtime_dir: &Path) -> SourceMapPathTransform {
+    let mut roots = Vec::new();
+    let mut add = |dir: &Path, name: String| {
+        for spelling in [dir.to_path_buf(), canonicalize_for_bundler(dir)] {
+            if !roots.iter().any(|(root, _)| *root == spelling) {
+                roots.push((spelling, name.clone()));
+            }
+        }
+    };
+    add(runtime_dir, "runtime".to_string());
+    for package in nub_core::node::vendored_runtime::VENDORED_RUNTIME_PACKAGES {
+        let resolved = runtime_dir.ancestors().find_map(|dir| {
+            let candidate = dir.join("node_modules").join(package);
+            candidate
+                .join("package.json")
+                .is_file()
+                .then_some(candidate)
+        });
+        if let Some(dir) = resolved {
+            add(&dir, format!("runtime/node_modules/{package}"));
+        }
+    }
+    SourceMapPathTransform::new(Arc::new(move |source: &str, map_path: &str| {
+        let named =
+            runtime_source_name(&roots, source, map_path).unwrap_or_else(|| source.to_string());
+        Box::pin(async move { Ok(named) })
+    }))
+}
+
+/// `source` arrives relative to the map's directory, which is where Node resolves
+/// it from too.
+fn runtime_source_name(
+    roots: &[(PathBuf, String)],
+    source: &str,
+    map_path: &str,
+) -> Option<String> {
+    let mut absolute = PathBuf::new();
+    for part in Path::new(map_path).parent()?.join(source).components() {
+        match part {
+            std::path::Component::ParentDir => {
+                absolute.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => absolute.push(other),
+        }
+    }
+    roots.iter().find_map(|(root, name)| {
+        let rel = absolute.strip_prefix(root).ok()?;
+        Some(format!("{name}/{}", slash_path(rel)))
+    })
 }
 
 fn sourcemap_type(mode: SourcemapMode) -> Option<SourceMapType> {
@@ -11174,6 +11285,23 @@ after
                 out.contains("before") && out.contains("after"),
                 "the stripper must only remove its own regions"
             );
+        }
+    }
+
+    /// Each boundary was probed on a real Node: absent on 24.21.0, 25.9.0 and
+    /// 26.9.0, native on 24.22.0 and 26.10.0.
+    #[test]
+    fn util_rate_facade_is_skipped_only_for_targets_with_native_helpers() {
+        for (target, native) in [
+            (Some((18, 19, 0)), false),
+            (Some((24, 21, 0)), false),
+            (Some((24, 22, 0)), true),
+            (Some((25, 9, 0)), false),
+            (Some((26, 9, 0)), false),
+            (Some((26, 10, 0)), true),
+            (None, false),
+        ] {
+            assert_eq!(util_rate_native(target), native, "target {target:?}");
         }
     }
 
