@@ -238,6 +238,23 @@ Two viable shapes, both minimal:
 
 They compose: (A)'s baked table is the fast path, and (B) is what (A)'s fallback does, optionally memoized. Given the churn in §8 — a frozen core and a slow niche tail — (A) is the right default, correct for ~100% of real command lines with zero spawns, with the version-gated fallback closing the only correctness gap. Adopt (B)'s mtime-keyed memoization for the fallback if the introspect ever fires often enough to matter.
 
+## 10. Mode flags written with a value
+
+A valued `--test` or `--watch` starts the same mode as the bare flag, but only the bare token is kept out of the children those modes start, so the valued one reaches them.
+
+Both are booleans, and a boolean's `=value` is ignored, so `--test=true` (or `--test=false`) starts the test runner exactly as `--test` does. Each mode removes its own flag from the `execArgv` it passes down, and the removal matches the bare token only:
+
+| Node | test runner child filter | watch-mode child filter | runner started inside a test child |
+|---|---|---|---|
+| 18.19 – 18.20 | exact `--test`, `--watch` | exact `--watch` | starts another runner |
+| 20.11 | exact `--test`, `--watch` | exact `--watch` | starts another runner |
+| 20.12 | exact `--test`, `--watch` | `--watch` and `--watch=` | starts another runner |
+| 20.13 – 26 | exact `--test`, `--watch` | `--watch` and `--watch=` | refuses to run its files ([nodejs/node#52322](https://github.com/nodejs/node/pull/52322)) |
+
+So with `--test=<value>` the child that should run a file is a runner too. Through 20.12 it starts its own child, which does the same, and the chain grows until the machine runs out of processes; each level waits on the next, so killing the first process leaves the rest running. From 20.13 the inner runner skips its files, and the command reports no tests from them. `--watch=<value>` recurses the same way on 18.x and 20.11, through watch mode's own child. Read from each release's embedded `internal/test_runner/runner` and `internal/main/watch_mode`.
+
+Nub spells both modes bare before handing an argv to Node (`child_safe_modes` in `crates/nub-core/src/node/argv.rs`), so the launched process runs in the mode it asked for and no child inherits it. It scans with the §4 table and no introspect fallback: a value option missing from the table ends the scan early at its value, which can only leave a later mode flag unrewritten, and the releases that could add such an option all contain the recursion themselves.
+
 ## Appendix: reproduction
 
 ```sh
@@ -253,3 +270,4 @@ Ground-truth source: `node/src/node_options.{h,cc}` and `node_options-inl.h`, sp
 Every revision to this document, with the date and what changed.
 
 - 2026-06-28 — Initial write-up.
+- 2026-11-04 — Added §10: how a valued `--test` or `--watch` reaches the children those modes start, per release, and the bare spelling Nub hands Node.
