@@ -248,7 +248,7 @@ nub compile app.ts --include='data/**/*.json' --include=schema.sql
 
 A pattern that matches nothing fails the build, since the alternative is discovering the missing file on someone else's machine:
 
-```ansi
+```ansi wide
 $ nub compile app.ts --include=data/missing.json
 \e[35m\e[1mnub\e[22m\e[39m \e[2m0.9.7\e[22m \e[2m·\e[22m compiling app.ts \e[2m→\e[22m \e[96mapp\e[39m
 \e[31m\e[1merror\e[22m\e[39m  --include "data/missing.json" matched no files (the path does not exist)
@@ -362,7 +362,7 @@ import prompt from "./prompt.md" with { type: "text" };
 
 A **dynamic** import carrying attributes is refused at build time, because it cannot be carried into the binary — the bundler follows it and then leaves the original specifier in place, so it would resolve against the extracted app directory when the binary runs. Move it to the static position above, or pass [`--allow-dynamic-import`](#--allow-dynamic-import) to keep it and resolve it from the directory the binary is started in:
 
-```console
+```console wide
 $ nub compile app.ts
 nub 0.9.7 · compiling app.ts → app
 error  1 import could not be resolved at build time:
@@ -527,7 +527,7 @@ Shipping 1 package unbundled, in its own installed layout:
 
 An addon is machine code for one platform, so `--platform` needs that platform's copy installed. The build fails when what it resolves does not match:
 
-```console
+```console wide
 $ nub compile app.ts --platform linux-x64
 nub 0.9.7 · compiling app.ts → app
 error  this native addon is built for macOS, but the binary targets linux-x64:
@@ -633,7 +633,7 @@ A cross-build that selects the launcher needs the target platform's launcher tem
 
 A compiled binary carries no `node_modules`, so an import the bundler cannot resolve is a crash on the machine you ship to — with no stack-trace clue and nothing to install. Nub fails the build instead, naming the file and line:
 
-```console
+```console wide
 $ nub compile app.ts
 nub 0.9.7 · compiling app.ts → app
 error  1 import could not be resolved at build time:
@@ -664,7 +664,7 @@ When the specifier genuinely cannot be a literal — a plugin loader importing a
 
 A `require()` the bundler cannot rewrite fails the same way. The usual source is a package whose `main` is a UMD build: the factory takes `require` as a parameter, so the calls inside are ordinary function calls that survive into the bundle and resolve against the extracted app directory at runtime.
 
-```console
+```console wide
 $ nub compile app.ts
 nub 0.9.7 · compiling app.ts → app
 error  1 import could not be resolved at build time:
@@ -695,7 +695,7 @@ A local `require` returned by `createRequire()` is another ordinary function bin
 
 Every emitted chunk is parsed before the binary is written. One that is not valid JavaScript fails the compile instead of producing an executable that throws on startup:
 
-```console
+```console wide
 $ nub compile app.ts
 nub 0.9.7 · compiling app.ts → app
 error  the bundler emitted 1 chunk that is not valid JavaScript:

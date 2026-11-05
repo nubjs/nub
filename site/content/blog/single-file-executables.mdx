@@ -290,7 +290,7 @@ Everything platform-dependent comes from the target. That means the embedded Nod
 
 Windows resources cross-compile too:
 
-```ansi
+```ansi wide
 # from the same macOS arm64 laptop
 $ nub compile cli.ts --platform win32-x64 --icon icon.ico
 \e[35m\e[1mnub\e[22m\e[39m \e[2m0.9.7\e[22m \e[2m·\e[22m compiling cli.ts \e[2m→\e[22m \e[96mcli.exe\e[39m
@@ -310,7 +310,7 @@ The produced PE carries real `RT_ICON` and `RT_GROUP_ICON` resources, verified o
 
 One thing does not come from the target: a native addon. Cross-compiling with an addon means having that target's binary package on disk. When the resolved addon doesn't match the target, the build refuses:
 
-```ansi
+```ansi wide
 $ nub compile index.ts --platform linux-x64
 \e[35m\e[1mnub\e[22m\e[39m \e[2m0.9.7\e[22m \e[2m·\e[22m compiling index.ts \e[2m→\e[22m \e[96mindex\e[39m
 \e[31m\e[1merror\e[22m\e[39m  this native addon is built for macOS, but the binary targets linux-x64:                      # ❌
