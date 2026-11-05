@@ -875,6 +875,21 @@ fn find_on_path(program: &str) -> std::path::PathBuf {
         .unwrap_or_else(|| panic!("{program} must be on PATH for this test"))
 }
 
+/// The Node binary itself. `node` on the host's PATH may be a version
+/// manager's shim, Nub's included, which looks `node` up on PATH again; linked
+/// into a private bin dir it finds its own link and recurses.
+fn real_node() -> std::path::PathBuf {
+    let out = std::process::Command::new(find_on_path("node"))
+        .args(["-p", "process.execPath"])
+        .output()
+        .expect("running node");
+    assert!(
+        out.status.success(),
+        "node -p process.execPath failed: {out:?}"
+    );
+    std::path::PathBuf::from(String::from_utf8(out.stdout).unwrap().trim())
+}
+
 /// A `PATH` holding `node`, `git` and a shell, and no `cp`. On Unix the
 /// tools are symlinked into a private dir, because the dir `git` lives in
 /// (`/usr/bin`) carries `cp` too. On Windows each tool's own dir is used
@@ -886,7 +901,7 @@ fn path_without_cp(sbx: &Sandbox) -> std::ffi::OsString {
         )
         .join("System32");
         vec![
-            find_on_path("node").parent().unwrap().to_path_buf(),
+            real_node().parent().unwrap().to_path_buf(),
             find_on_path("git").parent().unwrap().to_path_buf(),
             system32,
         ]
@@ -894,8 +909,11 @@ fn path_without_cp(sbx: &Sandbox) -> std::ffi::OsString {
         let bin = sbx.home.join("bin-without-cp");
         fs::create_dir_all(&bin).unwrap();
         #[cfg(unix)]
-        for tool in ["node", "git", "sh"] {
-            std::os::unix::fs::symlink(find_on_path(tool), bin.join(tool)).unwrap();
+        {
+            std::os::unix::fs::symlink(real_node(), bin.join("node")).unwrap();
+            for tool in ["git", "sh"] {
+                std::os::unix::fs::symlink(find_on_path(tool), bin.join(tool)).unwrap();
+            }
         }
         vec![bin]
     };
