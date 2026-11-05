@@ -368,7 +368,13 @@ async function main() {
     }
 
     console.log(`  ${tag}: green — squash-merging…`);
-    gh(["pr", "merge", String(e.pr), "--repo", REPO, "--squash", "--admin"]);
+    // The one write here, so the one call that goes through Keyward for a write-capable token
+    // (a Touch ID the first time in ten minutes). Every read uses plain, read-only gh.
+    execFileSync(
+      "keyward",
+      ["--reason", `nub merge-cascade: squash-merge PR #${e.pr}`, "--", "gh", "pr", "merge", String(e.pr), "--repo", REPO, "--squash", "--admin"],
+      { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
+    );
     merged++;
 
     // CONFIRMED merge — flip the bound fray thread to done (the queue entry's

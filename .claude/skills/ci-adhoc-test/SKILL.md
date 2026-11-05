@@ -37,7 +37,7 @@ on:
 ```
 
 - **Push to the branch → the probe runs.** Open no PR, or close one you opened.
-- **Re-run with another push:** `git commit --allow-empty -m rerun && git push`. Or re-run a finished run with `gh run rerun <run-id>` (`gh run list --branch <branch>` for the id).
+- **Re-run with another push:** `git commit --allow-empty -m rerun && git push`. Or re-run a finished run with `keyward --reason "<the task>" -- gh run rerun <run-id>` (`gh run list --branch <branch>` for the id).
 - **`push` is load-bearing; `workflow_dispatch` alone will NOT work for a branch-only probe.** GitHub only registers a `workflow_dispatch` workflow if the file is on the **default branch**, so `gh workflow run <wf>.yml --ref <branch>` errors ("no workflows found") and it never appears in the Actions UI. Keep the entry for when the probe graduates to `main`; don't rely on it before then.
 - **Do NOT open a PR just to get CI.** A PR signals "ready to land," which a prototype is not.
 - Omit any `pull_request:` trigger — it ties runs to PR state, which is what you're avoiding.

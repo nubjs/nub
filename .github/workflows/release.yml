@@ -279,8 +279,8 @@ jobs:
         name: Compute build matrix
         run: |
           FULL='[
-            {"platform":"darwin-arm64","runner":"macos-14","target":"aarch64-apple-darwin","cross":false},
-            {"platform":"darwin-x64","runner":"macos-14","target":"x86_64-apple-darwin","cross":false},
+            {"platform":"darwin-arm64","runner":"macos-15","target":"aarch64-apple-darwin","cross":false},
+            {"platform":"darwin-x64","runner":"macos-15","target":"x86_64-apple-darwin","cross":false},
             {"platform":"linux-x64","runner":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu","cross":false},
             {"platform":"linux-x64-musl","runner":"ubuntu-latest","target":"x86_64-unknown-linux-musl","cross":true},
             {"platform":"linux-arm64","runner":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","cross":true},
@@ -1211,7 +1211,7 @@ jobs:
     #     linux-arm64     (ubuntu-24.04-arm)
     #     linux-x64-musl  (node:22-alpine on ubuntu-latest)
     #     linux-arm64-musl (multiarch node:22-alpine on ubuntu-24.04-arm)
-    #     darwin-arm64    (macos-14)
+    #     darwin-arm64    (macos-15)
     #     darwin-x64      (macos-15-intel)
     #     win32-x64       (windows-latest)
     #     win32-arm64     (windows-11-arm)
@@ -1263,7 +1263,7 @@ jobs:
             expected_platform: linux
             expected_arch: arm64
           - platform: darwin-arm64
-            runner: macos-14
+            runner: macos-15
             bin: bin/nub
             expected_platform: darwin
             expected_arch: arm64
@@ -3121,7 +3121,7 @@ jobs:
         # aarch64-pc-windows-msvc nub.exe that's built + published but otherwise never
         # run (free for public repos). linux-musl is a separate job below (a container,
         # not a runner OS).
-        os: [ubuntu-latest, macos-14, windows-latest, windows-11-arm]
+        os: [ubuntu-latest, macos-15, windows-latest, windows-11-arm]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
