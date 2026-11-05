@@ -85,6 +85,11 @@ impl<'a> LockedIndex<'a> {
     /// could bind to the integrity-less bundled entry (it sorts ahead of
     /// the real standalone entry in nested dep_path order) and fail
     /// offline. The real standalone entry, if any, is selected instead.
+    ///
+    /// Packages with a source of their own are excluded too: a range binds
+    /// to the registry, here as on a fresh resolve. Otherwise a URL or git
+    /// package keeps its source after the manifest entry or override that
+    /// asked for it is gone, because its version still satisfies the range.
     pub fn find_satisfying(
         &self,
         name: &str,
@@ -94,6 +99,7 @@ impl<'a> LockedIndex<'a> {
     ) -> Option<&'a LockedPackage> {
         self.bucket(name).iter().copied().find(|p| {
             !p.in_bundle
+                && p.local_source.is_none()
                 && version_satisfies(&p.version, range)
                 && !is_vulnerable(registry_name, &p.version, vulnerable_ranges)
         })

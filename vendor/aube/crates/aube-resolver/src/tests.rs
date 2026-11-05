@@ -6184,6 +6184,53 @@ async fn a_removed_override_sends_a_reused_parent_back_to_its_declared_range() {
     assert!(graph.packages["child@1.0.0"].local_source.is_none());
 }
 
+#[tokio::test]
+async fn a_range_binds_to_the_registry_and_not_a_locked_url_package() {
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:0",
+    ));
+    let mut resolver = Resolver::new(client);
+    resolver.cache.insert(
+        "child".to_string(),
+        make_packument("child", &["1.0.0"], "1.0.0"),
+    );
+
+    let source = LocalSource::RemoteTarball(aube_lockfile::RemoteTarballSource {
+        url: "https://example.com/fork/child-1.0.0.tgz".to_string(),
+        integrity: String::new(),
+        git_hosted: false,
+    });
+    let key = source.dep_path("child");
+    let existing = LockfileGraph {
+        packages: BTreeMap::from([(
+            key.clone(),
+            LockedPackage {
+                name: "child".to_string(),
+                version: "1.0.0".to_string(),
+                dep_path: key,
+                local_source: Some(source),
+                ..Default::default()
+            },
+        )]),
+        ..Default::default()
+    };
+
+    let mut manifest = PackageJson::default();
+    manifest
+        .dependencies
+        .insert("child".to_string(), "^1.0.0".to_string());
+
+    let graph = resolver
+        .resolve(&manifest, Some(&existing))
+        .await
+        .expect("the registry has this version");
+
+    assert!(
+        graph.packages["child@1.0.0"].local_source.is_none(),
+        "the manifest no longer asks for the URL"
+    );
+}
+
 // Bun and yarn parsers store transitive deps in `pkg.dependencies`
 // using the full dep_path form (`is-number@6.0.0`), while pnpm uses
 // bare versions (`6.0.0`). The resolver's lockfile-reuse path

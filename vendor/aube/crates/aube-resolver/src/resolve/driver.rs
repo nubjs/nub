@@ -3020,25 +3020,22 @@ impl<'a> ResolveDriver<'a> {
         // A version stands in for the range. A source an override put there does
         // not: once no override applies, the edge is stale and only the packument
         // has the real range. Go back to it, keeping this version.
-        if locked_pkg.local_source.is_none() {
-            let stale = locked_pkg.dependencies.iter().any(|(dep_name, edge)| {
-                let edge = edge
-                    .strip_prefix(dep_name.as_str())
-                    .and_then(|rest| rest.strip_prefix('@'))
-                    .unwrap_or(edge);
-                let edge = edge.split('(').next().unwrap_or(edge);
-                if !edge_names_a_source(edge) || self.workspace_packages.contains_key(dep_name) {
-                    return false;
-                }
-                let mut ancestors = task.ancestors.to_vec();
-                ancestors.push((task.name.clone(), version.clone()));
-                pick_override_spec(&self.resolver.override_rules, dep_name, edge, &ancestors)
-                    .is_none()
-            });
-            if stale {
-                task.range = version;
+        let stale = locked_pkg.dependencies.iter().any(|(dep_name, edge)| {
+            let edge = edge
+                .strip_prefix(dep_name.as_str())
+                .and_then(|rest| rest.strip_prefix('@'))
+                .unwrap_or(edge);
+            let edge = edge.split('(').next().unwrap_or(edge);
+            if !edge_names_a_source(edge) || self.workspace_packages.contains_key(dep_name) {
                 return false;
             }
+            let mut ancestors = task.ancestors.to_vec();
+            ancestors.push((task.name.clone(), version.clone()));
+            pick_override_spec(&self.resolver.override_rules, dep_name, edge, &ancestors).is_none()
+        });
+        if stale {
+            task.range = version;
+            return false;
         }
         let dep_path = dep_path_for(&task.name, &version);
 
