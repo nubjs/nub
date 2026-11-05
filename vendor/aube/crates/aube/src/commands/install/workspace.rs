@@ -1361,4 +1361,38 @@ mod member_graph_merge_tests {
             "a member recording other overrides than the root must be left out"
         );
     }
+
+    /// pnpm keys a transitive-only local package by its spelling from the
+    /// lockfile (`foo@file:../lib`), which names a different directory in
+    /// each member: both must survive the merge as separate packages.
+    #[test]
+    fn members_spelling_a_transitive_local_alike_keep_their_own_packages() {
+        let root = tempfile::tempdir().unwrap();
+        let body = "importers:\n\n  .:\n    dependencies:\n      parent:\n        specifier: file:../parent\n        version: file:../parent\n\n\
+                    packages:\n\n  foo@file:../lib:\n    resolution: {directory: ../lib, type: directory}\n\n  \
+                    parent@file:../parent:\n    resolution: {directory: ../parent, type: directory}\n\n\
+                    snapshots:\n\n  foo@file:../lib: {}\n\n  parent@file:../parent:\n    dependencies:\n      foo: file:../lib\n";
+        let mut manifests = Vec::new();
+        for group in ["a", "b"] {
+            let member = format!("groups/{group}/app");
+            write_member_lockfile(root.path(), &member, body);
+            manifests.push((member, manifest(&format!("app-{group}"))));
+        }
+        let mut graph = LockfileGraph::default();
+        assert_eq!(
+            merge_member_lockfile_graphs(root.path(), &mut graph, &manifests),
+            None
+        );
+
+        for group in ["a", "b"] {
+            let parent =
+                &graph.packages[&graph.importers[&format!("groups/{group}/app")][0].dep_path];
+            let foo = &graph.packages[&format!("foo@{}", parent.dependencies["foo"])];
+            assert_eq!(
+                foo.local_source.as_ref().and_then(|l| l.path()),
+                Some(std::path::Path::new(&format!("groups/{group}/lib"))),
+                "groups/{group}/app's foo"
+            );
+        }
+    }
 }

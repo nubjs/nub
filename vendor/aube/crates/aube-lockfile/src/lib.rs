@@ -1341,10 +1341,15 @@ impl LockfileGraph {
                 LocalSource::Git(_) | LocalSource::RemoteTarball(_) => continue,
             };
             *path = rebase(path);
-            // A peer-context suffix after the hashed base stays as it was.
-            if let Some(rest) = key.strip_prefix(&old_base) {
-                renames.insert(key.clone(), format!("{}{rest}", local.dep_path(&pkg.name)));
-            }
+            // A peer-context suffix after the base stays as it was. The pnpm
+            // reader keeps a transitive-only local under its raw key
+            // (`foo@file:../lib.tgz`), which names a different package in
+            // each frame, so it takes the hashed key too.
+            let rest = key.strip_prefix(&old_base).unwrap_or_else(|| {
+                let tail = key.strip_prefix(&format!("{}@", pkg.name)).unwrap_or(key);
+                tail.find('(').map_or("", |i| &tail[i..])
+            });
+            renames.insert(key.clone(), format!("{}{rest}", local.dep_path(&pkg.name)));
         }
         renames.retain(|old, new| old != new);
         if renames.is_empty() {
