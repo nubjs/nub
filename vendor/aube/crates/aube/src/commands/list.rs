@@ -315,7 +315,6 @@ pub async fn run(
 
 use super::DepFilter;
 
-#[allow(clippy::too_many_arguments)]
 /// Whether the command was invoked inside a workspace member of the
 /// workspace rooted at `workspace_root`, the nearest `package.json` at or
 /// above the cwd being one of its members.
@@ -330,6 +329,7 @@ fn invoked_in_member(workspace_root: &std::path::Path) -> miette::Result<bool> {
         .is_ok_and(|members| members.contains(&project)))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_filtered(
     root: &std::path::Path,
     root_manifest: &aube_manifest::PackageJson,
