@@ -16,7 +16,7 @@
 // fixtures are plain CommonJS. That keeps the leg to a checkout plus Node.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -240,4 +240,41 @@ test("a script receives the manifest-derived npm environment", () => {
     port: "8080",
     event: "env",
   });
+});
+
+test("a flag-led file run hands Node the test runner flag bare", async () => {
+  // `--test=true` starts the runner as `--test` does, but Node keeps only the bare
+  // token out of the child that runs each file. With the valued one that child is
+  // a runner too, and on Node 18 and 20.0–20.12 it starts another, without end.
+  // The `--require` probe runs in the runner and in each child, and reports the
+  // mode flags that process received; it sits after the flag, so the scan also
+  // has to step over a separate value to reach the entry.
+  writeFileSync(
+    join(fixture, "modes.cjs"),
+    "console.log(`MODES ${process.env.NODE_TEST_CONTEXT ?? 'runner'} ${JSON.stringify(process.execArgv.filter((a) => /^--(test|watch)(=|$)/.test(a)))}`);\n",
+  );
+  writeFileSync(join(fixture, "noop.test.cjs"), 'require("node:test")("noop", () => {});\n');
+  // This file runs as a test child itself; the run must not inherit that.
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  // Its own process group, so a regression that recurses dies whole at the deadline.
+  const group = process.platform !== "win32";
+  const child = spawn(process.execPath, [nubr, "--test=true", "--require", "./modes.cjs", "noop.test.cjs"], {
+    cwd: fixture,
+    env,
+    detached: group,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let out = "";
+  child.stdout.on("data", (chunk) => (out += chunk));
+  child.stderr.on("data", (chunk) => (out += chunk));
+  const kill = () => (group ? process.kill(-child.pid, "SIGKILL") : child.kill("SIGKILL"));
+  const deadline = setTimeout(kill, 30_000);
+  const code = await new Promise((resolve) => child.on("exit", resolve));
+  clearTimeout(deadline);
+  assert.equal(code, 0, out);
+  assert.deepEqual(out.match(/MODES runner .*/g), ['MODES runner ["--test"]'], out);
+  const children = out.match(/MODES child\S* .*/g) ?? [];
+  assert.ok(children.length > 0, `the probe never ran in a test child:\n${out}`);
+  for (const line of children) assert.match(line, / \[\]$/, out);
 });

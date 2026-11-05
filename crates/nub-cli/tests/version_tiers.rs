@@ -146,16 +146,16 @@ fn run_nub_args_against_node(
 
     // `PORT=0`, as for a server: when the defect under test is a run that serves where
     // it should exit, the listener takes a free port rather than a shared default.
-    let mut child = Command::new(nub_binary())
+    let mut command = Command::new(nub_binary());
+    command
         .args(args)
         .current_dir(&fixture_path)
         .env("PATH", new_path)
         .env("PORT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("failed to spawn nub");
+        .stderr(Stdio::piped());
+    let mut child = spawn_in_own_group(&mut command);
     // Both pipes drain on their own threads, so a chatty child can neither block
     // nor be blocked by the wait below.
     let stdout = slurp(child.stdout.take().unwrap());
@@ -166,12 +166,14 @@ fn run_nub_args_against_node(
             break status.code();
         }
         if started.elapsed() > deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_group(&mut child);
             break None;
         }
         std::thread::sleep(Duration::from_millis(50));
     };
+    // Whatever the leader left behind holds the pipes open, so the readers below
+    // would wait on it too.
+    kill_group(&mut child);
     Some((stdout.join().unwrap(), stderr.join().unwrap(), code))
 }
 
@@ -194,16 +196,16 @@ fn run_nub_args_until<T>(
     paths.extend(std::env::split_paths(&existing));
     let new_path = std::env::join_paths(paths).expect("join PATH");
 
-    let mut child = Command::new(nub_binary())
+    let mut command = Command::new(nub_binary());
+    command
         .args(args)
         .current_dir(&fixture_path)
         .env("PATH", new_path)
         .env("PORT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("failed to spawn nub");
+        .stderr(Stdio::piped());
+    let mut child = spawn_in_own_group(&mut command);
     let stdout = slurp(child.stdout.take().unwrap());
     let (tx, rx) = std::sync::mpsc::channel();
     let stderr = child.stderr.take().unwrap();
@@ -227,9 +229,31 @@ fn run_nub_args_until<T>(
             Err(_) => break None,
         }
     };
+    kill_group(&mut child);
+    Some((seen, stdout.join().unwrap()))
+}
+
+/// Spawn `command` as the leader of a fresh process group, so [`kill_group`] reaches
+/// every process the run started, however deep — a run that recurses included.
+fn spawn_in_own_group(command: &mut Command) -> std::process::Child {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    command.spawn().expect("failed to spawn nub")
+}
+
+fn kill_group(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    // SAFETY: `spawn_in_own_group` made the child the leader of its own group, so a
+    // negative pid names only that run's processes.
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
     let _ = child.kill();
     let _ = child.wait();
-    Some((seen, stdout.join().unwrap()))
 }
 
 /// One `GET /` against the server a `Listening on http://<host>:<port>` line
@@ -1313,6 +1337,41 @@ fn a_handler_file_is_served_exactly_when_node_runs_it_as_the_program_on_both_tie
         assert!(
             !stdout.contains("Listening on") && !stderr.contains("Listening on"),
             "Node {maj}.{min}.{pat}: under --test nothing may bind a listener: stdout={stdout:?} stderr={stderr:?}"
+        );
+    }
+}
+
+/// `--test=<value>` starts the test runner as `--test` does, but Node keeps only the
+/// bare token out of the child that runs each file. With the valued one that child
+/// was a runner too: on 20.11 it started another, and so on without end, and on
+/// 26.5 it refuses to run the file.
+/// nub hands Node the bare token, so the file runs once and the run ends. A
+/// regression here recurses until the deadline, which kills the whole process group.
+#[test]
+fn a_valued_test_flag_runs_the_file_once_instead_of_recursing() {
+    for want in [(20, 11, 0), (26, 5, 0)] {
+        let (maj, min, pat) = want;
+        let Some((stdout, stderr, code)) = run_nub_args_against_node(
+            want,
+            "non-program-modes",
+            &["--test=true", "counts.test.mjs"],
+            Duration::from_secs(15),
+        ) else {
+            eprintln!(
+                "skipping: Node {maj}.{min}.{pat} not installed \
+                 (set TEST_NODE_BIN_{maj}_{min}_{pat} or nvm install)"
+            );
+            continue;
+        };
+        assert_eq!(
+            code,
+            Some(0),
+            "Node {maj}.{min}.{pat}: `nub --test=true` must end on its own: stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert_eq!(
+            stdout.matches("BODY-RAN").count(),
+            1,
+            "Node {maj}.{min}.{pat}: the test file must run exactly once: stdout={stdout:?} stderr={stderr:?}"
         );
     }
 }

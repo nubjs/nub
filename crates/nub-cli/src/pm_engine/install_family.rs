@@ -448,10 +448,7 @@ fn finish_code_quieted(
 /// Map an engine result to nub's exit contract: success → 0, failure →
 /// rendered through the presentation layer + the engine's exit table.
 fn finish(result: miette::Result<()>) -> Result<i32> {
-    match result {
-        Ok(()) => Ok(0),
-        Err(report) => Ok(present::emit_report(&report)),
-    }
+    Ok(Exit::of(result.map(|()| None)).code)
 }
 
 /// Same exit contract as [`finish`], for engine verbs that return an
@@ -459,10 +456,55 @@ fn finish(result: miette::Result<()>) -> Result<i32> {
 /// chosen code, `None` is plain success (0), `Err` renders via the
 /// presentation layer + the engine's exit table.
 fn finish_code(result: miette::Result<Option<i32>>) -> Result<i32> {
-    match result {
-        Ok(code) => Ok(code.unwrap_or(0)),
-        Err(report) => Ok(present::emit_report(&report)),
+    Ok(Exit::of(result).code)
+}
+
+/// A tree-materializing verb's exit code, and whether it left the tree
+/// complete.
+#[derive(Clone, Copy)]
+struct Exit {
+    code: i32,
+    /// True on success, and on unapproved build scripts under
+    /// `strictDepBuilds`: like pnpm, the engine raises that only after
+    /// linking, the approved builds, the root hooks and the state write.
+    settled: bool,
+}
+
+impl Exit {
+    fn of(result: miette::Result<Option<i32>>) -> Self {
+        match result {
+            Ok(code) => {
+                let code = code.unwrap_or(0);
+                Self {
+                    code,
+                    settled: code == 0,
+                }
+            }
+            Err(report) => Self {
+                settled: report.code().is_some_and(|code| {
+                    code.to_string() == aube_codes::errors::ERR_AUBE_IGNORED_BUILDS
+                }),
+                code: present::emit_report(&report),
+            },
+        }
     }
+
+    /// The code the bookkeeping that describes a finished tree keys on —
+    /// the engine stamp, the first-install `devEngines` stamp, Vite's
+    /// `.modules.yaml`, recorded release-age exclusions. Each skips a failed
+    /// verb, and a settled tree is not one.
+    fn tree_code(self) -> i32 {
+        if self.settled { 0 } else { self.code }
+    }
+}
+
+/// [`finish_quieted`] for the verbs that materialize the tree.
+fn finish_tree_quieted(
+    output: &super::output::OutputFlags,
+    session: &EngineSession,
+    fut: impl std::future::Future<Output = miette::Result<Option<i32>>>,
+) -> Exit {
+    Exit::of(with_output(output, || session.runtime.block_on(fut)))
 }
 
 /// pnpm settles a `--filter` that selects no project before the command does
@@ -591,11 +633,12 @@ fn run_add(typed: &str, args: &[String]) -> Result<i32> {
     // Read before the move: `run` consumes `verb`.
     let is_global = verb.global;
     super::min_release_age::arm();
-    let code = finish_quieted(
-        &globals.output,
-        &session,
-        aube::commands::add::run(verb, globals.effective_filter()),
-    )?;
+    let exit = finish_tree_quieted(&globals.output, &session, async {
+        aube::commands::add::run(verb, globals.effective_filter())
+            .await
+            .map(|()| None)
+    });
+    let code = exit.tree_code();
     super::min_release_age::persist(&session.cwd, code == 0, &globals.output);
     if is_global {
         wire_global_bin_path(code);
@@ -608,7 +651,7 @@ fn run_add(typed: &str, args: &[String]) -> Result<i32> {
     // settings time), so Unit A applies immediately (≥ 8.1) and the < 8.1 dist
     // patch lands on the next `nub install` once vite is a declared direct dep.
     apply_vite_compat(&session, code);
-    Ok(code)
+    Ok(exit.code)
 }
 
 fn run_remove(typed: &str, args: &[String]) -> Result<i32> {
@@ -629,14 +672,14 @@ fn run_remove(typed: &str, args: &[String]) -> Result<i32> {
             &yarn_remedy("remove", &verb.packages),
         ));
     }
-    let code = finish_quieted(
-        &globals.output,
-        &session,
-        aube::commands::remove::run(verb, globals.effective_filter()),
-    )?;
-    stamp_if_virgin(&session, code);
-    crate::install_engine::record(&session.cwd, code);
-    Ok(code)
+    let exit = finish_tree_quieted(&globals.output, &session, async {
+        aube::commands::remove::run(verb, globals.effective_filter())
+            .await
+            .map(|()| None)
+    });
+    stamp_if_virgin(&session, exit.tree_code());
+    crate::install_engine::record(&session.cwd, exit.tree_code());
+    Ok(exit.code)
 }
 
 fn run_update(typed: &str, args: &[String]) -> Result<i32> {
@@ -671,18 +714,19 @@ fn run_update(typed: &str, args: &[String]) -> Result<i32> {
         ));
     }
     super::min_release_age::arm();
-    let code = finish_code_quieted(
+    let exit = finish_tree_quieted(
         &globals.output,
         &session,
         aube::commands::update::run(verb, globals.effective_filter()),
-    )?;
+    );
+    let code = exit.tree_code();
     super::min_release_age::persist(&session.cwd, code == 0, &globals.output);
     stamp_if_virgin(&session, code);
     crate::install_engine::record(&session.cwd, code);
     // `nub update` re-resolves; a vite bump can cross the 8.1 boundary, so
     // refresh `.modules.yaml` + the < 8.1 patch to match the new graph.
     apply_vite_compat(&session, code);
-    Ok(code)
+    Ok(exit.code)
 }
 
 fn run_dedupe(typed: &str, args: &[String]) -> Result<i32> {
@@ -698,9 +742,11 @@ fn run_dedupe(typed: &str, args: &[String]) -> Result<i32> {
         ));
     }
     super::min_release_age::arm();
-    let code = finish_quieted(&globals.output, &session, aube::commands::dedupe::run(verb))?;
-    super::min_release_age::persist(&session.cwd, code == 0, &globals.output);
-    Ok(code)
+    let exit = finish_tree_quieted(&globals.output, &session, async {
+        aube::commands::dedupe::run(verb).await.map(|()| None)
+    });
+    super::min_release_age::persist(&session.cwd, exit.tree_code() == 0, &globals.output);
+    Ok(exit.code)
 }
 
 fn run_prune(typed: &str, args: &[String]) -> Result<i32> {
@@ -1278,9 +1324,8 @@ pub struct InstallFlags {
     pub dir: Option<std::path::PathBuf>,
     /// Run every lifecycle script, as npm does. Not a CLI flag: set only by the
     /// `npm` shim's install routing, where the user typed `npm ci` and npm's
-    /// contract is that scripts run. Composes with the default-trust floor
-    /// like `dangerouslyAllowAllBuilds` — an explicit `allowBuilds: false`
-    /// still denies.
+    /// contract is that scripts run. Behaves as `dangerouslyAllowAllBuilds`:
+    /// an explicit `allowBuilds: false` still denies.
     pub allow_all_builds: bool,
     /// Run npm's project lifecycle stages: `prepublish` and the `prepare`
     /// family on every install, and no `pnpm:devPreinstall`. Not a CLI flag: set only by the `npm` shim's
@@ -1500,7 +1545,8 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     }
 
     super::min_release_age::arm();
-    let code = run_engine(&session, opts, yarn, &flags.output)?;
+    let exit = run_engine(&session, opts, yarn, &flags.output)?;
+    let code = exit.tree_code();
     super::min_release_age::persist(&session.cwd, code == 0, &flags.output);
     // Vite symlink-GVS serving compat (#315): after a successful install, write
     // `node_modules/.modules.yaml` and (for Vite < 8.1) patch the ejected vite
@@ -1526,7 +1572,7 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     // its brand on another PM's project (the symmetric brand boundary).
     stamp_if_virgin(&session, code);
     crate::install_engine::record(&session.cwd, code);
-    Ok(code)
+    Ok(exit.code)
 }
 
 /// Stamp the virgin `devEngines.packageManager` range after a successful
@@ -1754,9 +1800,9 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
             ));
         }
     }
-    let code = run_engine(&session, opts, yarn, &flags.output)?;
-    crate::install_engine::record(&session.cwd, code);
-    Ok(code)
+    let exit = run_engine(&session, opts, yarn, &flags.output)?;
+    crate::install_engine::record(&session.cwd, exit.tree_code());
+    Ok(exit.code)
 }
 
 /// Yarn-kind drift pre-flight, at the nub layer.
@@ -1927,7 +1973,7 @@ fn run_engine(
     opts: InstallOptions,
     yarn_gated: bool,
     output: &super::output::OutputFlags,
-) -> Result<i32> {
+) -> Result<Exit> {
     // The two halves of the install report bracket the engine: the resolved
     // layout prints ahead of the progress display, and the materialization
     // digest is registered here so the engine fires it after linking — above its
@@ -1946,7 +1992,6 @@ fn run_engine(
         result
     });
     match result {
-        Ok(()) => Ok(0),
         // Frozen-drift on a gated yarn project: the install *would* rewrite
         // yarn.lock if allowed to re-resolve. Surface the gate, not aube's
         // "run without --frozen-lockfile" hint (which would punch through it).
@@ -1967,7 +2012,7 @@ fn run_engine(
         // Everything else: render with the brand rewrite, exit with the
         // engine's own code for the diagnostic (EXIT_TABLE; generic 1
         // fallback) — matching aube's own cli_main behavior.
-        Err(report) => Ok(present::emit_report(&report)),
+        result => Ok(Exit::of(result.map(|()| None))),
     }
 }
 

@@ -1,0 +1,102 @@
+{
+  "name": "esbuild",
+  "versions": {
+    "0.21.5": {
+      "name": "esbuild",
+      "version": "0.21.5",
+      "license": "MIT",
+      "_id": "esbuild@0.21.5",
+      "maintainers": [
+        {
+          "name": "evanw",
+          "email": "evan.exe@gmail.com"
+        },
+        {
+          "name": "esbuild",
+          "email": "evan.exe+esbuild@gmail.com"
+        }
+      ],
+      "homepage": "https://github.com/evanw/esbuild#readme",
+      "bugs": {
+        "url": "https://github.com/evanw/esbuild/issues"
+      },
+      "bin": {
+        "esbuild": "bin/esbuild"
+      },
+      "dist": {
+        "shasum": "9ca301b120922959b766360d8ac830da0d02997d",
+        "tarball": "http://localhost:4874/esbuild/-/esbuild-0.21.5.tgz",
+        "fileCount": 7,
+        "integrity": "sha512-mg3OPMV4hXywwpoDxu3Qda5xCKQi+vCTZq8S9J/EpkhB2HzKXq4SNFZE3+NK93JYxc8VMSep+lOUSC/RVKaBqw==",
+        "signatures": [
+          {
+            "sig": "MEYCIQCp4VYe0qSyMyRLA83/vAF65Lh8VVjaE4I/QvuPB3jw3QIhALooNOuz+9k8utArWPqe0hKj+HSQur3Cv3Tdm3HTzwc/",
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+          }
+        ],
+        "unpackedSize": 133372
+      },
+      "main": "lib/main.js",
+      "types": "lib/main.d.ts",
+      "engines": {
+        "node": ">=12"
+      },
+      "gitHead": "fc37c2fa9de2ad77476a6d4a8f1516196b90187e",
+      "scripts": {
+        "postinstall": "node install.js"
+      },
+      "_npmUser": {
+        "name": "evanw",
+        "email": "evan.exe@gmail.com"
+      },
+      "repository": {
+        "url": "git+https://github.com/evanw/esbuild.git",
+        "type": "git"
+      },
+      "_npmVersion": "10.5.1",
+      "description": "An extremely fast JavaScript and CSS bundler and minifier.",
+      "directories": {},
+      "_nodeVersion": "22.0.0",
+      "_hasShrinkwrap": false,
+      "optionalDependencies": {
+        "@esbuild/aix-ppc64": "0.21.5",
+        "@esbuild/linux-arm": "0.21.5",
+        "@esbuild/linux-x64": "0.21.5",
+        "@esbuild/sunos-x64": "0.21.5",
+        "@esbuild/win32-x64": "0.21.5",
+        "@esbuild/darwin-x64": "0.21.5",
+        "@esbuild/linux-ia32": "0.21.5",
+        "@esbuild/netbsd-x64": "0.21.5",
+        "@esbuild/win32-ia32": "0.21.5",
+        "@esbuild/android-arm": "0.21.5",
+        "@esbuild/android-x64": "0.21.5",
+        "@esbuild/freebsd-x64": "0.21.5",
+        "@esbuild/linux-arm64": "0.21.5",
+        "@esbuild/linux-ppc64": "0.21.5",
+        "@esbuild/linux-s390x": "0.21.5",
+        "@esbuild/openbsd-x64": "0.21.5",
+        "@esbuild/win32-arm64": "0.21.5",
+        "@esbuild/darwin-arm64": "0.21.5",
+        "@esbuild/android-arm64": "0.21.5",
+        "@esbuild/freebsd-arm64": "0.21.5",
+        "@esbuild/linux-loong64": "0.21.5",
+        "@esbuild/linux-riscv64": "0.21.5",
+        "@esbuild/linux-mips64el": "0.21.5"
+      },
+      "_npmOperationalInternal": {
+        "tmp": "tmp/esbuild_0.21.5_1717967861465_0.2468915134572156",
+        "host": "s3://npm-registry-packages"
+      }
+    }
+  },
+  "time": {
+    "created": "2017-11-26T05:52:58.272Z",
+    "modified": "2026-08-08T20:00:55.803Z",
+    "0.21.5": "2024-06-09T21:17:41.628Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "0.21.5"
+  }
+}

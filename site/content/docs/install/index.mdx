@@ -508,7 +508,28 @@ Permission comes from the [`allowScripts`](#allowscripts) field in any project. 
 - pnpm: `pnpm.onlyBuiltDependencies`, `pnpm.allowBuilds`
 - Bun: `trustedDependencies`
 
-A package with build scripts that is not allowed is skipped. The `WARN_NUB_IGNORED_BUILD_SCRIPTS` warning names it and suggests `nub approve-builds`.
+`dangerouslyAllowAllBuilds=true` runs every build script except the ones denied.
+
+### Unapproved build scripts
+
+An install that meets a build script nobody has approved fails with `ERR_NUB_IGNORED_BUILDS`, as pnpm does. It fails last, once `node_modules` is linked and the approved builds and your project's own scripts have run, so the only step left is the decision:
+
+```console wide
+# captured: nub 0.9.7 dev build, core-js@3.40.0 — no allowScripts entry
+$ nub install
+dependencies:
++ core-js@3.40.0
+
+ERR_NUB_IGNORED_BUILDS
+
+  × Ignored build scripts: core-js@3.40.0
+  help: Run `nub approve-builds` to pick which dependencies may run their
+        build scripts, or set `strictDepBuilds=false` to install without them.
+```
+
+Approve the package with `nub approve-builds`, or deny it to keep it skipped: `nub approve-builds '!<pkg>'` and `nub add --allow-build='!<pkg>'` both record `false`. `--allow-build` will not approve a package the project already denies; change that entry instead. To skip unapproved builds with a warning rather than fail, set `strictDepBuilds=false` in `.npmrc`. Global installs and `nubx` never fail on one.
+
+`nub rebuild <pkg>` re-runs an approved package's build. Naming a package there does not approve it.
 
 ### Git dependencies
 
@@ -570,11 +591,11 @@ A curated set of well-known packages, such as `esbuild`, may build without appro
 |---|---|
 | **Registry provenance** | Resolved from a registry. Git, file, link, tarball, and npm-alias specifiers never qualify. |
 | **Advisory vetting** | The [advisory check](#advisory-gate) ran against this graph, or the graph came from an already-checked lockfile (a frozen install, `nub ci`, a teammate's clone). |
-| **Cooling window** | The version is older than the [cooling window](#cooling-window). An unknown publish time fails the gate. |
+| **Cooling window** | The version is older than the [cooling window](#cooling-window). An unknown publish time fails the gate for a newly resolved version; a version kept from the existing lockfile passes it. |
 
 Explicit decisions outrank the floor: a package you approve always builds, and an explicit denial always wins.
 
-A fresh resolve, or a lockfile Nub wrote, carries the publish times the floor needs:
+A fresh resolve or an existing lockfile gives the floor what it needs:
 
 ```console
 # captured: nub 0.0.44, pnpm, esbuild@0.21.5 — no allowScripts entry
@@ -584,19 +605,21 @@ dependencies:
 + esbuild@0.21.5
 ```
 
-When a gate fails, the package is skipped like any other unapproved build:
+When a gate fails, the package is an [unapproved build](#unapproved-build-scripts) like any other. Exempting `esbuild` from a long cooling window lets it resolve, but the floor still checks the window, so it fails closed:
 
-```console
-# captured: nub 0.0.44, esbuild — minimumReleaseAge set past every release
+```console wide
+# captured: nub 0.9.7 dev build, esbuild@0.21.5, fresh resolve —
+# minimumReleaseAge=2000000, minimumReleaseAgeExclude=esbuild,@esbuild/*
 $ nub install
-WARN ignored build scripts for 1 package(s): esbuild@0.21.5.
-     Run `nub approve-builds` to review and enable them.
-     code=WARN_NUB_IGNORED_BUILD_SCRIPTS   # ❌ cooling gate closed
 dependencies:
-+ esbuild@0.21.5
-```
++ esbuild@0.21.5  latest 0.28.2
 
-A foreign lockfile with no publish times, such as `bun.lock`, fails the cooling gate the same way (see the [Bun page](/docs/install/bun#install-behavior)).
+ERR_NUB_IGNORED_BUILDS
+
+  × Ignored build scripts: esbuild@0.21.5   # ❌ cooling gate closed
+  help: Run `nub approve-builds` to pick which dependencies may run their
+        build scripts, or set `strictDepBuilds=false` to install without them.
+```
 
 ## Supply-chain checks
 

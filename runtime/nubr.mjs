@@ -246,6 +246,57 @@ function findBin(name, cwd) {
   return null;
 }
 
+// Every Node option that takes a value. The same list as `VALUE_OPTIONS` in
+// crates/nub-core/src/node/argv.rs, which says where it comes from and checks
+// this copy against itself.
+const VALUE_OPTIONS = new Set([
+  "-C", "-e", "-p", "-pe", "-r", "--allow-fs-read", "--allow-fs-write", "--build-sea",
+  "--build-snapshot-config", "--conditions", "--cpu-prof-dir", "--cpu-prof-interval",
+  "--cpu-prof-name", "--debug-port", "--diagnostic-dir", "--disable-proto", "--disable-warning",
+  "--dns-result-order", "--env-file", "--env-file-if-exists", "--es-module-specifier-resolution",
+  "--eval", "--experimental-config-file", "--experimental-default-type", "--experimental-loader",
+  "--experimental-package-map", "--experimental-policy", "--experimental-sea-config",
+  "--experimental-specifier-resolution", "--experimental-test-isolation",
+  "--experimental-test-tag-filter", "--heap-prof-dir", "--heap-prof-interval", "--heap-prof-name",
+  "--heapsnapshot-near-heap-limit", "--heapsnapshot-signal", "--icu-data-dir", "--import",
+  "--input-type", "--inspect-port", "--inspect-publish-uid", "--loader", "--localstorage-file",
+  "--max-http-header-size", "--max-old-space-size-percentage",
+  "--network-family-autoselection-attempt-timeout", "--openssl-config", "--policy-integrity",
+  "--print", "--redirect-warnings", "--report-dir", "--report-directory", "--report-filename",
+  "--report-signal", "--require", "--run", "--secure-heap", "--secure-heap-min",
+  "--security-revert", "--security-reverts", "--snapshot-blob", "--stack-trace-limit",
+  "--test-concurrency", "--test-coverage-branches", "--test-coverage-exclude",
+  "--test-coverage-functions", "--test-coverage-include", "--test-coverage-lines",
+  "--test-global-setup", "--test-isolation", "--test-name-pattern", "--test-random-seed",
+  "--test-reporter", "--test-reporter-destination", "--test-rerun-failures", "--test-shard",
+  "--test-skip-pattern", "--test-timeout", "--title", "--tls-cipher-list", "--tls-keylog",
+  "--trace-event-categories", "--trace-event-file-pattern", "--trace-require-module",
+  "--unhandled-rejections", "--use-largepages", "--v8-pool-size", "--watch-kill-signal",
+  "--watch-path",
+]);
+
+// A flag-led argv with the test runner and watch mode spelled bare among Node's
+// own options. `--test=true` selects the same mode as `--test`, but only the bare
+// token is kept out of the child the mode starts, and on Node 18 and 20.0–20.12
+// each child then starts another without end. `child_safe_modes` in argv.rs has
+// the whole account. The list only says where Node's options END; Node still
+// finds the entry itself, and an option missing from it stops the scan early
+// rather than reaching an argument of the program.
+function childSafeModes(argv) {
+  const out = [...argv];
+  for (let at = 0; at < argv.length; ) {
+    const arg = argv[at];
+    if (arg === "--" || arg === "-" || !arg.startsWith("-")) break;
+    const mode = ["--test", "--watch"].find((flag) => arg.startsWith(`${flag}=`));
+    if (mode) out[at] = mode;
+    const name = arg.startsWith("--") ? arg.replaceAll("_", "-") : arg;
+    const next = argv[at + 1];
+    const takesValue = !arg.includes("=") && VALUE_OPTIONS.has(name);
+    at += takesValue && next !== undefined && !next.startsWith("-") ? 2 : 1;
+  }
+  return out;
+}
+
 // `args` is already a Node command line: either [file, ...rest] that we
 // classified ourselves, or the caller's verbatim argv when it opened with a
 // flag. Only the preload is inserted.
@@ -283,12 +334,13 @@ async function main() {
   // A leading flag means a file run under Node options, and Node is the only
   // thing that knows which of its options take a separate value — enumerating
   // them here would silently mis-split `--conditions development app.ts`,
-  // treating the value as the target. So hand the whole argv to Node verbatim
-  // and let it find its own entry point. Only a first token that is NOT a flag
-  // has to be classified as file-or-script, and that case has no ambiguity.
+  // treating the value as the target. So hand the argv to Node, with only the
+  // mode spellings `childSafeModes` rewrites, and let it find its own entry
+  // point. Only a first token that is NOT a flag has to be classified as
+  // file-or-script, and that case has no ambiguity.
   let i = 0;
   if (argv[0].startsWith("-") && argv[0] !== "--") {
-    runFile(argv);
+    runFile(childSafeModes(argv));
     return;
   }
   if (argv[0] === "--") i = 1;

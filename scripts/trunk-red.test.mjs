@@ -1,5 +1,6 @@
-// Guards trunk-red's close rule by running the workflow's real shell step against a stub
-// `gh`. trunk-red only ever runs from the default branch's copy, so no pull-request run can
+// Guards trunk-red: its close rule, by running the workflow's real shell step against a stub
+// `gh`, and its coverage, by checking every workflow that runs on main is one it watches.
+// trunk-red only ever runs from the default branch's copy, so no pull-request run can
 // exercise a change to it, and a wrong close hides a red trunk from everyone. The stub
 // applies the step's own --jq filters with real jq.
 //
@@ -7,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -185,4 +186,57 @@ test("a failure comments on the open issue, or files one when none is open", () 
 
 test("a green with no open issue does nothing", () => {
   assert.deepEqual(trigger({ event: CI_GREEN }).actions, []);
+});
+
+// Workflows that run on main but whose result is not a verdict on the code. Every other one
+// must be watched: Node flag drift failed every night from August to November because it was
+// never added to trunk-red's list, so nothing reported it.
+const NOT_A_VERDICT = {
+  "Download stats snapshot": "records npm download counts",
+  "soak-autofix": "a bot that commits its own fixes",
+};
+
+const WORKFLOWS = ".github/workflows";
+
+// Runs on main = a schedule, or a push whose branch filter includes main. ci-optin.test.mjs
+// already forbids a push trigger with no branch filter.
+function runsOnMain(file) {
+  const lines = readFileSync(join(WORKFLOWS, file), "utf8").split("\n");
+  const name = lines.find((l) => /^name:/.test(l))?.replace(/^name:\s*/, "").trim();
+  const on = lines.findIndex((l) => /^on:/.test(l));
+  const end = lines.findIndex((l, i) => i > on && /^[^\s#]/.test(l));
+  const block = lines.slice(on + 1, end === -1 ? undefined : end);
+  const trigger = (key) => {
+    const i = block.findIndex((l) => l.startsWith(`  ${key}:`));
+    if (i === -1) return null;
+    const j = block.findIndex((l, k) => k > i && /^ {0,2}[^\s#]/.test(l));
+    return block.slice(i + 1, j === -1 ? undefined : j).join("\n");
+  };
+  const push = trigger("push");
+  const branches = push?.match(/^ {4}branches:\s*\[([^\]]*)\]/m)?.[1].split(",").map((b) => b.trim()) ??
+    push?.match(/^ {4}branches:\s*\n((?: {6}- .*\n?)+)/m)?.[1].split("\n").map((b) => b.replace(/^\s*- /, "").trim());
+  return { name, onMain: trigger("schedule") !== null || (branches ?? []).includes("main") };
+}
+
+function watched() {
+  const lines = readFileSync(join(WORKFLOWS, "trunk-red.yml"), "utf8").split("\n");
+  const start = lines.indexOf("    workflows:") + 1;
+  const end = lines.findIndex((l, i) => i >= start && !l.startsWith("      - "));
+  return lines.slice(start, end).map((l) => l.replace("      - ", "").trim());
+}
+
+test("every workflow that runs on main is watched by trunk-red, unless it is not a verdict", () => {
+  const all = readdirSync(WORKFLOWS).filter((f) => f.endsWith(".yml")).map(runsOnMain);
+  const onMain = all.filter((w) => w.onMain).map((w) => w.name);
+  // Instrument check: a schedule-only, a push-to-main and a probe-branch-only workflow.
+  assert.ok(onMain.includes("Node flag drift") && onMain.includes("zizmor"), onMain.join(", "));
+  assert.ok(!onMain.includes("busybox-lifecycle-probe"), "a probe pushes on its own branch only");
+
+  const list = watched();
+  const missing = onMain.filter((n) => !list.includes(n) && !(n in NOT_A_VERDICT));
+  assert.deepEqual(missing, [], "add these to trunk-red.yml's workflows list, or to NOT_A_VERDICT with a reason");
+  const names = all.map((w) => w.name);
+  const unknown = list.filter((n) => !names.includes(n));
+  assert.deepEqual(unknown, [], "trunk-red.yml watches names no workflow has; a renamed workflow goes unwatched");
+  assert.deepEqual(list.filter((n) => n in NOT_A_VERDICT), [], "a workflow is either watched or not a verdict");
 });

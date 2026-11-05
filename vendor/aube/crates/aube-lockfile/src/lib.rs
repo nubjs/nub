@@ -710,6 +710,16 @@ impl LockedPackage {
             .map(|source| format!("{}@{}", self.registry_name(), source.specifier()))
     }
 
+    /// Every exact-source approval key: [`Self::source_approval_key`] first,
+    /// then for a Git clone pnpm's `name@git+…#sha` spelling. Empty for a
+    /// registry package.
+    pub fn source_approval_keys(&self) -> Vec<String> {
+        self.local_source
+            .as_ref()
+            .map(|source| source.source_approval_keys(self.registry_name()))
+            .unwrap_or_default()
+    }
+
     /// Repository-wide approval key for a Git-backed package source.
     ///
     /// Unlike [`Self::source_approval_key`], this deliberately omits the

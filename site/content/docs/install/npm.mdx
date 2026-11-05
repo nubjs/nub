@@ -128,7 +128,7 @@ The default `node_modules` layout is isolated, and npm's `install-strategy`, `gl
 node-linker=hoisted
 ```
 
-Dependency build scripts are denied by default, unlike npm. Curated packages that pass the [default-trust floor](/docs/install#default-trust-floor) build automatically. Everything else is skipped with `WARN_NUB_IGNORED_BUILD_SCRIPTS` until you run `nub approve-builds`.
+Dependency build scripts are denied by default, unlike npm. Curated packages that pass the [default-trust floor](/docs/install#default-trust-floor) build automatically. Any other build script fails the install with [`ERR_NUB_IGNORED_BUILDS`](/docs/install#unapproved-build-scripts) until `nub approve-builds` approves or denies it.
 
 ## Gaps
 

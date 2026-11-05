@@ -57,8 +57,7 @@
 //!   consults the cooling defense, it never substitutes for it.
 //!
 //! `aube rebuild` does not consult the floor: no advisory gate runs
-//! there, and `aube rebuild <name>` already bypasses the policy for
-//! explicitly named packages.
+//! there.
 
 use aube_scripts::AllowDecision;
 use std::collections::{BTreeMap, HashSet};
@@ -368,16 +367,40 @@ pub(crate) fn decide_with_floor(
     pkg: &aube_lockfile::LockedPackage,
     times: &BTreeMap<String, String>,
 ) -> AllowDecision {
-    let source_key = pkg.source_approval_key();
-    let git_repository_key = pkg.git_repository_approval_key();
-    match policy.decide_package_with_git_repository(
-        pkg.registry_name(),
-        &pkg.version,
-        source_key.as_deref(),
-        git_repository_key.as_deref(),
-    ) {
+    match decide_package_build(policy, pkg) {
         AllowDecision::Unspecified if floor.trusts(pkg, times) => AllowDecision::Allow,
         decision => decision,
+    }
+}
+
+/// The policy's decision on `pkg`'s dependency build, under every spelling
+/// of its exact source key (Nub's lockfile key, and pnpm's
+/// `name@git+…#sha` for a Git clone): a denial under any spelling wins,
+/// then an approval under any.
+pub(crate) fn decide_package_build(
+    policy: &aube_scripts::BuildPolicy,
+    pkg: &aube_lockfile::LockedPackage,
+) -> AllowDecision {
+    let git_repository_key = pkg.git_repository_approval_key();
+    let decide = |source_key: Option<&str>| {
+        policy.decide_package_with_git_repository(
+            pkg.registry_name(),
+            &pkg.version,
+            source_key,
+            git_repository_key.as_deref(),
+        )
+    };
+    let source_keys = pkg.source_approval_keys();
+    if source_keys.is_empty() {
+        return decide(None);
+    }
+    let decisions: Vec<AllowDecision> = source_keys.iter().map(|key| decide(Some(key))).collect();
+    if decisions.contains(&AllowDecision::Deny) {
+        AllowDecision::Deny
+    } else if decisions.contains(&AllowDecision::Allow) {
+        AllowDecision::Allow
+    } else {
+        AllowDecision::Unspecified
     }
 }
 
@@ -500,6 +523,34 @@ mod tests {
         let times = times_published_minutes_ago(&pkg, 10 * 1440);
         let decision = decide_with_floor(&policy_from(&[], false), &active_floor(), &pkg, &times);
         assert_eq!(decision, AllowDecision::Allow);
+    }
+
+    #[test]
+    fn a_git_clone_is_decided_under_pnpms_exact_key_spelling() {
+        let mut pkg = listed_pkg();
+        pkg.local_source = Some(aube_lockfile::LocalSource::Git(aube_lockfile::GitSource {
+            url: "https://github.com/acme/pkg.git".to_string(),
+            committish: None,
+            resolved: "0123456789012345678901234567890123456789".to_string(),
+            integrity: None,
+            subpath: None,
+        }));
+        let key = format!(
+            "{}@git+https://github.com/acme/pkg.git#0123456789012345678901234567890123456789",
+            pkg.registry_name()
+        );
+        let times = BTreeMap::new();
+        let floor = DefaultTrustFloor::disabled();
+        let allowed = policy_from(&[(key.as_str(), true)], false);
+        assert_eq!(
+            decide_with_floor(&allowed, &floor, &pkg, &times),
+            AllowDecision::Allow
+        );
+        let denied = policy_from(&[(key.as_str(), false)], false);
+        assert_eq!(
+            decide_with_floor(&denied, &floor, &pkg, &times),
+            AllowDecision::Deny
+        );
     }
 
     #[test]
@@ -769,11 +820,10 @@ mod tests {
     #[test]
     fn explicit_false_survives_dangerously_allow_all_when_the_floor_is_active() {
         // The documented chain when defaultTrust is on: explicit entry
-        // > allow-all > floor. The install path composes this via
-        // `allow_all_except_denied`; pin the end-to-end decision here.
+        // > allow-all > floor.
         let pkg = listed_pkg();
         let times = times_published_minutes_ago(&pkg, 10 * 1440);
-        let policy = policy_from(&[("esbuild", false)], false).allow_all_except_denied();
+        let policy = policy_from(&[("esbuild", false)], true);
         assert_eq!(
             decide_with_floor(&policy, &active_floor(), &pkg, &times),
             AllowDecision::Deny

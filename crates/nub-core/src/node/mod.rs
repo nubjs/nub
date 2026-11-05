@@ -1,6 +1,7 @@
 //! Node.js binary discovery, version detection, flag injection, and
 //! process spawning.
 
+pub mod argv;
 pub mod discovery;
 pub mod feature_matrix;
 pub mod flags;

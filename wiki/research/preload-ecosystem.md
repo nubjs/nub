@@ -349,7 +349,7 @@ The survey's coexistence playbook, checked against the code:
 | Pattern found in the wild | Nub's existing implementation |
 |---|---|
 | `tsx` reads **both** `NODE_OPTIONS` and `execArgv` to pick its tier | `shouldAutoAsyncTierAtPreload()` = `nodeHookComposeBroken() && foreignAsyncLoaderFlagPresent()` ([`preload-common.cjs:280`](../../runtime/preload-common.cjs)), reading both channels, plus the launcher's predictive argv scan |
-| Sentinel env var rather than stripping `NODE_OPTIONS` (dd-trace's forced retreat) | `__NUB_ENV_OWNER_WRAPPED`, and `is_reentrant_in` keying on Nub's own token ([`spawn.rs:809`](../../crates/nub-core/src/node/spawn.rs)) |
+| Sentinel env var rather than stripping `NODE_OPTIONS` (dd-trace's forced retreat) | `is_reentrant_in`, keying on Nub's own token ([`spawn.rs:809`](../../crates/nub-core/src/node/spawn.rs)). The env-owner path reads two: `__NUB_ENV_OWNER_WRAPPED` on a chain Nub builds, and Varlock's own `__VARLOCK_ENV` for one it did not — a sentinel the *other* tool already publishes also covers launchers you never see |
 | Absolute paths only, never bare/relative specifiers | Nub emits absolute paths and `file://` URLs |
 | Append to a pre-existing `NODE_OPTIONS`, never assign | Nub appends ([`spawn.rs:1086`](../../crates/nub-core/src/node/spawn.rs)) |
 | Yarn PnP needs its token installed first | PnP token pushed before Nub's own ([`spawn.rs:1098`](../../crates/nub-core/src/node/spawn.rs)) |
