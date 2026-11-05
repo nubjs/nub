@@ -247,5 +247,28 @@ fn an_override_to_a_local_copy_loads_through_a_registry_parent_in_the_shared_sto
     install(&project, &home);
     assert_eq!(require_parent(&project), "local-child");
 
+    // A later install keeps the ejected parent, and has to move its link when the
+    // override moves.
+    std::fs::create_dir_all(project.join("vendor/other")).unwrap();
+    std::fs::write(
+        project.join("vendor/other/package.json"),
+        r#"{"name":"child","version":"1.0.0","main":"index.js"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("vendor/other/index.js"),
+        "module.exports = 'other-child';",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"name":"app","version":"1.0.0","private":true,
+            "dependencies":{"parent":"1.0.0","sibling":"1.0.0"},
+            "overrides":{"child":"file:./vendor/other"}}"#,
+    )
+    .unwrap();
+    install(&project, &home);
+    assert_eq!(require_parent(&project), "other-child");
+
     let _ = std::fs::remove_dir_all(&root);
 }

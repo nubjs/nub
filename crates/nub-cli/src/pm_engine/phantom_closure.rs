@@ -443,8 +443,28 @@ fn plan_from_flags(
         }
     }
 
-    // Rung 1 — reverse-BFS ancestor-closure = the affected subtree.
-    let closure = graph.importer_closure(seed_dep_paths.iter().copied());
+    // Rung 1 — reverse-BFS ancestor-closure = the affected subtree. The executor is
+    // name-keyed, so every version of a name in the closure leaves the store, and its
+    // importers must leave with it. One left behind keeps loading that version from
+    // the store: a second module instance beside the project's copy.
+    let mut closure = graph.importer_closure(seed_dep_paths.iter().copied());
+    loop {
+        let closure_names: HashSet<&str> = closure
+            .iter()
+            .filter_map(|dep_path| graph.packages.get(dep_path))
+            .map(|pkg| pkg.name.as_str())
+            .collect();
+        let versions: Vec<&str> = graph
+            .packages
+            .iter()
+            .filter(|(_, pkg)| closure_names.contains(pkg.name.as_str()))
+            .map(|(dep_path, _)| dep_path.as_str())
+            .collect();
+        if versions.iter().all(|dep_path| closure.contains(*dep_path)) {
+            break;
+        }
+        closure = graph.importer_closure(versions);
+    }
 
     // Bounded-subtree guard: the closure must stay a small slice of the tree. A
     // closure approaching the whole tree means a foundational seed — a bug, since
@@ -812,6 +832,7 @@ mod tests {
         let names: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
         assert!(names.contains("vite"), "name-keyed vite still materializes");
         assert!(names.contains("astro"), "the <8.1 framework closure ejects");
+        assert!(names.contains("app"), "the ejected >=8.1 copy brings `app`");
     }
 
     #[test]
@@ -872,6 +893,22 @@ mod tests {
         let plan = plan_from_flags(&g, &[], &[]);
         let planned: HashSet<String> = plan.names.into_iter().collect();
         assert_eq!(planned, names(&["outer", "parent"]));
+    }
+
+    #[test]
+    fn ejecting_one_version_of_a_name_brings_the_importers_of_the_others() {
+        // Only parent@1.0.0 has the local child, but the executor ejects by name, so
+        // parent@2.0.0 moves too and has to take its own importer with it.
+        let mut g = registry_parent_of(LocalSource::Directory("vendor/child".into()));
+        g.packages.extend(
+            graph(&[
+                ("parent@2.0.0", "parent", &[]),
+                ("uses-two@1.0.0", "uses-two", &[("parent", "2.0.0")]),
+            ])
+            .packages,
+        );
+        let planned: HashSet<String> = plan_from_flags(&g, &[], &[]).names.into_iter().collect();
+        assert_eq!(planned, names(&["outer", "parent", "uses-two"]));
     }
 
     #[test]
