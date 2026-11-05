@@ -372,7 +372,7 @@ fn approve_builds_surfaces_and_runs_a_local_source_dep() {
             .assert()
             .code(1)
             .stderr(predicates::str::contains("ERR_AUBE_IGNORED_BUILDS"))
-            .stderr(predicates::str::contains("dep@file:./dep"));
+            .stderr(predicates::str::contains("dep@file:dep"));
     }
     let node_modules = sbx.project.join("node_modules");
     assert!(
@@ -396,7 +396,7 @@ fn approve_builds_surfaces_and_runs_a_local_source_dep() {
         .arg("ignored-builds")
         .assert()
         .success()
-        .stdout(predicates::str::contains("dep@file:./dep"));
+        .stdout(predicates::str::contains("dep@file:dep"));
 
     // Approving records the source key AND runs the build in the same
     // invocation, exactly like a registry dep. The scoped rebuild reaches
@@ -419,7 +419,7 @@ fn approve_builds_surfaces_and_runs_a_local_source_dep() {
         .arg("install")
         .assert()
         .success()
-        .stderr(predicates::str::contains("dep@file:./dep").not());
+        .stderr(predicates::str::contains("dep@file:dep").not());
     assert!(
         marker_exists_under(&node_modules, "BUILT_527_MARKER"),
         "the approved build must survive a reinstall"
@@ -1694,6 +1694,36 @@ fn frozen_install_reads_unnormalized_local_paths() {
             "{name} must be linked"
         );
     }
+}
+
+/// A local package is named as pnpm names it (`dep@file:dep`), which is how
+/// the lockfile hands it back. An approval spelled from the manifest has to
+/// survive that round trip, or its build stops running on the next install.
+#[test]
+fn source_approval_spelled_from_the_manifest_holds_on_an_install_from_lockfile() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    write_marker_dep(&sbx, "dep", "DOT_SLASH_APPROVED");
+    sbx.write_manifest(
+        r#"{
+            "name": "root",
+            "version": "1.0.0",
+            "dependencies": { "dep": "file:./dep" },
+            "aube": { "allowBuilds": { "dep@file:./dep": true } }
+        }"#,
+    );
+    let node_modules = sbx.project.join("node_modules");
+    sbx.cmd().arg("install").assert().success();
+    assert!(marker_exists_under(&node_modules, "DOT_SLASH_APPROVED"));
+    fs::remove_dir_all(&node_modules).unwrap();
+    sbx.cmd()
+        .args(["install", "--frozen-lockfile"])
+        .assert()
+        .success();
+    assert!(
+        marker_exists_under(&node_modules, "DOT_SLASH_APPROVED"),
+        "the approval must still match the path the lockfile hands back"
+    );
 }
 
 /// The lockfile records no version for a local package, so an install from

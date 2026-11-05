@@ -336,7 +336,7 @@ pub(super) fn build(
                             link_from_importer(importer_path, &local.path_posix())
                         )
                     }
-                    _ => pnpm_specifier(local),
+                    _ => local.pnpm_specifier(),
                 }
             } else if let Some(member_dir) = workspace_link_dir {
                 format!("link:{}", link_from_importer(importer_path, member_dir))
@@ -465,7 +465,7 @@ pub(super) fn build(
             .is_some_and(|url| parse_dep_path(&pkg.dep_path).is_some_and(|(_, v)| v == *url));
         let canonical = match pkg.local_source.as_ref() {
             Some(LocalSource::Link(_)) | Some(LocalSource::Exec(_)) => continue,
-            Some(local) => format!("{}@{}", pkg.name, pnpm_specifier(local)),
+            Some(local) => format!("{}@{}", pkg.name, local.pnpm_specifier()),
             None => {
                 if native_pnpm_aliases && let Some(real_name) = pkg.alias_of.as_deref() {
                     version_to_dep_path(real_name, &pkg.version)
@@ -513,7 +513,7 @@ pub(super) fn build(
         } else {
             Some(peer_meta)
         };
-        // Always render the path through `pnpm_path()` so the
+        // Always render the path through `LocalSource::pnpm_path` so the
         // lockfile uses forward slashes regardless of the host OS —
         // a lockfile written on Windows must resolve identically on
         // Unix and vice versa. `Path::display()` honors the host
@@ -543,7 +543,7 @@ pub(super) fn build(
             Some(local @ LocalSource::Directory(_)) => Some(WritableResolution {
                 integrity: None,
                 git_hosted: false,
-                directory: Some(pnpm_path(local)),
+                directory: Some(local.pnpm_path()),
                 tarball: None,
                 commit: None,
                 repo: None,
@@ -555,7 +555,7 @@ pub(super) fn build(
                 integrity: None,
                 git_hosted: false,
                 directory: None,
-                tarball: Some(format!("file:{}", pnpm_path(local))),
+                tarball: Some(format!("file:{}", local.pnpm_path())),
                 commit: None,
                 repo: None,
                 type_: None,
@@ -566,7 +566,7 @@ pub(super) fn build(
             Some(local @ LocalSource::Portal(_)) => Some(WritableResolution {
                 integrity: None,
                 git_hosted: false,
-                directory: Some(pnpm_path(local)),
+                directory: Some(local.pnpm_path()),
                 tarball: None,
                 commit: None,
                 repo: None,
@@ -798,7 +798,7 @@ pub(super) fn build(
                     && let Some(ref local) = target.local_source
                     && !matches!(local, LocalSource::Link(_))
                 {
-                    pnpm_specifier(local)
+                    local.pnpm_specifier()
                 } else if native_pnpm_aliases
                     && let Some(target) = target
                     && let Some(real_name) = target.alias_of.as_deref()
@@ -825,7 +825,7 @@ pub(super) fn build(
         // parser lines them up with the packages entry above.
         let mut key = match pkg.local_source.as_ref() {
             Some(LocalSource::Link(_)) | Some(LocalSource::Exec(_)) => continue,
-            Some(local) => format!("{}@{}", pkg.name, pnpm_specifier(local)),
+            Some(local) => format!("{}@{}", pkg.name, local.pnpm_specifier()),
             None => {
                 if native_pnpm_aliases && let Some(real_name) = pkg.alias_of.as_deref() {
                     format!("{real_name}@{}", dep_path_tail(dep_path, &pkg.name))
@@ -1078,35 +1078,6 @@ fn pruned_time_entries(
 }
 
 // -- Writable serde types for pnpm-lock.yaml v9 --
-
-/// A `file:` or `link:` path as pnpm writes it: lexically normalized, so a
-/// manifest's `link:./llink` is recorded as `link:llink`. The graph keeps
-/// the manifest's spelling, which hashes to the same package key, and the
-/// reader takes either form. `portal:` and `exec:`, which pnpm lacks, stay
-/// as spelled.
-fn pnpm_path(local: &LocalSource) -> String {
-    let (LocalSource::Directory(path) | LocalSource::Tarball(path) | LocalSource::Link(path)) =
-        local
-    else {
-        return local.path_posix();
-    };
-    let path = aube_util::path::normalize_lexical(path);
-    let path = path.to_string_lossy().replace('\\', "/");
-    if path.is_empty() {
-        ".".to_string()
-    } else {
-        path
-    }
-}
-
-fn pnpm_specifier(local: &LocalSource) -> String {
-    match local {
-        LocalSource::Directory(_) | LocalSource::Tarball(_) | LocalSource::Link(_) => {
-            format!("{}:{}", local.kind_str(), pnpm_path(local))
-        }
-        _ => local.specifier(),
-    }
-}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
