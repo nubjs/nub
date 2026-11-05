@@ -36,7 +36,7 @@ fn main() -> Result<()> {
     // First: a fresh invocation's ambient environment must be restored before
     // config discovery or logging can observe it, and the restore mutates the
     // process environment, which is only sound while nub is single-threaded.
-    cli::normalize_invocation_environment();
+    cli::normalize_invocation_environment()?;
 
     // Embedder identity before any subsystem initialization. Every
     // brand-scoped path the engine derives — cache root, data root, config

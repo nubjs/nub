@@ -199,20 +199,22 @@ d="$WORK/esm-project"; rm -rf "$d"; mkdir -p "$d/node_modules/cjsdata"; (
   cat > package.json <<'EOF'
 {"name":"esm-app","version":"1.0.0","type":"module"}
 EOF
-  # TWO ejected packages sharing one helper. One is not enough: with a single
-  # closure the helper is inlined into that package's own chunk and no shared
-  # `__nub_closure/` directory is emitted at all, so the case passes without ever
-  # reaching the code under test. Two closures force the helper into a shared
+  # TWO ejected packages reaching one helper through DIFFERENT specifiers. One
+  # chunk is not enough: a single entry inlines the helper into that chunk and no
+  # shared `__nub_closure/` directory is emitted at all, so the case passes without
+  # ever reaching the code under test — and two closures naming the SAME specifier
+  # share one chunk. Two specifiers force the helper's common module into a shared
   # chunk, which is the file whose extension decides how Node reads it.
-  for p in cjsdata cjsdata2; do
+  for pair in cjsdata:cjshelper cjsdata2:cjshelper/two; do
+    p=${pair%%:*}; spec=${pair#*:}
     mkdir -p "node_modules/$p"
     cat > "node_modules/$p/package.json" <<EOF
 {"name":"$p","version":"1.0.0","main":"index.js","dependencies":{"cjshelper":"1.0.0"}}
 EOF
     # Ejected: builds a path at run time AND ships a non-code file.
-    cat > "node_modules/$p/index.js" <<'EOF'
+    cat > "node_modules/$p/index.js" <<EOF
 const fs = require("fs"), path = require("path");
-const help = require("cjshelper");
+const help = require("$spec");
 module.exports = () => fs.readFileSync(path.join(__dirname, "t.dat"), "utf8").trim() + ":" + help();
 EOF
     printf 'DAT-OK\n' > "node_modules/$p/t.dat"
@@ -221,7 +223,9 @@ EOF
   cat > node_modules/cjshelper/package.json <<'EOF'
 {"name":"cjshelper","version":"1.0.0","main":"index.js"}
 EOF
-  echo 'module.exports = () => "helped";' > node_modules/cjshelper/index.js
+  echo 'module.exports = () => "helped";' > node_modules/cjshelper/common.js
+  echo 'module.exports = require("./common.js");' > node_modules/cjshelper/index.js
+  echo 'module.exports = require("./common.js");' > node_modules/cjshelper/two.js
   cat > app.mjs <<'EOF'
 import read from "cjsdata";
 import read2 from "cjsdata2";
