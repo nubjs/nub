@@ -44,9 +44,15 @@ pub(super) fn try_install_fast_path(
     ) {
         return Ok(None);
     }
+    let Some(snapshot) = state::read_state_startup_snapshot(cwd) else {
+        return Ok(None);
+    };
+    if !compatibility_metadata_is_current(cwd, opts, &snapshot.layout) {
+        return Ok(None);
+    }
     opts.control.check_cancelled()?;
-    let total = state::read_state_package_content_hashes(cwd)
-        .map(|packages| packages.len())
+    let total = snapshot
+        .package_count
         .or_else(|| {
             let manifest = super::super::load_manifest_or_default(cwd).ok()?;
             aube_lockfile::parse_lockfile_with_kind(cwd, &manifest)
@@ -109,7 +115,7 @@ fn install_fast_path_eligible(
     // consulted), leaving `aube install -v` silent on repeat-install loops
     // that originate from state drift rather than lockfile drift.
     match state::check_needs_install_with_flags(cwd, &opts.cli_flags) {
-        None => compatibility_metadata_is_current(cwd, opts),
+        None => true,
         Some(reason) => {
             tracing::debug!("install warm path skipped: {reason}");
             false
@@ -132,10 +138,11 @@ fn pin_sync_writes_lockfile(cwd: &Path, opts: &InstallOptions) -> bool {
             || aube_workspace::find_workspace_packages(cwd).map_or(true, |p| p.is_empty()))
 }
 
-fn compatibility_metadata_is_current(cwd: &Path, opts: &InstallOptions) -> bool {
-    let Some(layout) = state::read_state_layout(cwd) else {
-        return false;
-    };
+fn compatibility_metadata_is_current(
+    cwd: &Path,
+    opts: &InstallOptions,
+    layout: &state::InstallLayoutState,
+) -> bool {
     let modules_dir_name = super::super::resolve_modules_dir_name_for_cwd(cwd);
     let aube_dir = super::super::resolve_virtual_store_dir_for_cwd(cwd);
     let mut legacy_vite_patches_current = true;
@@ -161,7 +168,7 @@ fn compatibility_metadata_is_current(cwd: &Path, opts: &InstallOptions) -> bool 
                         );
                         return false;
                     }
-                    if !state::gvs_nested_links_are_current(cwd, &layout) {
+                    if !state::gvs_nested_links_are_current(cwd, layout) {
                         tracing::debug!(
                             "install warm path skipped: global virtual store links are stale"
                         );

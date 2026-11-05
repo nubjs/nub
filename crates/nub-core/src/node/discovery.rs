@@ -961,15 +961,30 @@ pub fn discover_shell_node() -> Result<ResolvedNode, DiscoveryError> {
 /// find the real binary, so a caller describing what a script's `node` will run
 /// under has to ask this first: with the shim in front, PATH semantics are the
 /// pin. A dependency's `node_modules/.bin/node` is skipped as in every probe.
+/// A `node` elsewhere that links back to nub counts too, since
+/// [`which_node_in`] steps over it for the same reason.
 pub fn shell_node_is_nub_shim() -> bool {
-    for dir in env::split_paths(&env::var_os("PATH").unwrap_or_default()) {
+    let persistent = crate::node::shim::node_shim_dir()
+        .ok()
+        .and_then(|d| d.canonicalize().ok());
+    shell_node_is_nub_shim_in(
+        &env::var_os("PATH").unwrap_or_default(),
+        persistent.as_deref(),
+    )
+}
+
+fn shell_node_is_nub_shim_in(path_var: &std::ffi::OsStr, persistent_shim: Option<&Path>) -> bool {
+    for dir in env::split_paths(path_var) {
         if is_package_bin_dir(&dir) {
             continue;
         }
-        let has_node =
-            dir.join("node").is_file() || (cfg!(windows) && dir.join("node.exe").is_file());
-        if has_node {
-            return is_nub_shim_dir(&dir);
+        let node = [dir.join("node"), dir.join("node.exe")]
+            .into_iter()
+            .take(if cfg!(windows) { 2 } else { 1 })
+            .find(|candidate| candidate.is_file());
+        if let Some(node) = node {
+            return is_nub_shim_dir_with(&dir, persistent_shim)
+                || links_back_to_nub(&node, persistent_shim);
         }
     }
     false
@@ -1051,7 +1066,7 @@ fn which_node_in(
             candidates.push(dir.join("node.exe"));
         }
         for candidate in candidates {
-            if !candidate.is_file() {
+            if !candidate.is_file() || links_back_to_nub(&candidate, persistent_shim) {
                 continue;
             }
             if handed_back
@@ -1070,6 +1085,26 @@ fn which_node_in(
         },
         None => DiscoveryError::NoNodeOnPath,
     })
+}
+
+/// A `node` in an ordinary directory that is a link back to nub: to this
+/// executable, or into one of nub's shim directories. The directory tests in
+/// [`which_node_in`] cannot see it, and resolving through it re-enters nub, which
+/// finds the same link again. A test bin dir holding `node -> <shim dir>/node`
+/// recursed without bound under a shim that predated the hand-back guard.
+fn links_back_to_nub(candidate: &Path, persistent_shim: Option<&Path>) -> bool {
+    let Ok(target) = candidate.canonicalize() else {
+        return false;
+    };
+    if env::current_exe()
+        .and_then(|exe| exe.canonicalize())
+        .is_ok_and(|exe| exe == target)
+    {
+        return true;
+    }
+    target
+        .parent()
+        .is_some_and(|dir| is_nub_shim_dir_with(dir, persistent_shim))
 }
 
 fn same_file_path(a: &Path, b: &Path) -> bool {
@@ -2499,6 +2534,48 @@ mod tests {
             which_node_in(&only_shim, Some(&canon_shim), &[]),
             Err(DiscoveryError::NoNodeOnPath)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn which_node_skips_a_link_back_to_nub_from_an_ordinary_dir() {
+        // A plain directory whose `node` is a symlink into the shim dir, or to
+        // this executable, passes every directory test; following it re-enters
+        // nub, which finds the same link again.
+        let tmp = unique_tmp("which-skip-link");
+        let shim = tmp.join("nub").join("node-shim");
+        let to_shim = tmp.join("links-to-shim");
+        let to_self = tmp.join("links-to-self");
+        let real = tmp.join("real-bin");
+        for dir in [&shim, &to_shim, &to_self, &real] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        write_fake_node(&shim.join("node"));
+        write_fake_node(&real.join("node"));
+        std::os::unix::fs::symlink(shim.join("node"), to_shim.join("node")).unwrap();
+        std::os::unix::fs::symlink(env::current_exe().unwrap(), to_self.join("node")).unwrap();
+
+        let path_var = env::join_paths([&to_shim, &to_self, &real]).unwrap();
+        let got = which_node_in(&path_var, None, &[]).unwrap();
+        assert_eq!(
+            got.canonicalize().unwrap(),
+            real.join("node").canonicalize().unwrap(),
+            "links into the shim dir and to nub itself are skipped; the real node wins"
+        );
+
+        // A script's bare `node` still reaches the link, so the question "is
+        // the shell's node nub's shim" must answer yes for the same PATH, or the
+        // recorded lifecycle Node is the later binary while scripts run the pin.
+        for first in [&to_shim, &to_self] {
+            let path_var = env::join_paths([first, &real]).unwrap();
+            assert!(
+                shell_node_is_nub_shim_in(&path_var, None),
+                "{} links back to nub",
+                first.display()
+            );
+        }
+        let real_first = env::join_paths([&real, &to_shim]).unwrap();
+        assert!(!shell_node_is_nub_shim_in(&real_first, None));
     }
 
     #[test]
