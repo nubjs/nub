@@ -10,7 +10,10 @@ use std::collections::HashSet;
 /// With one or more package names, run lifecycle scripts only for the
 /// named deps. Match is by graph `name`, which is the in-tree alias when
 /// one is configured (so `aube rebuild my-alias` works for a manifest
-/// entry like `"my-alias": "npm:real-pkg@1.0"`, matching pnpm).
+/// entry like `"my-alias": "npm:real-pkg@1.0"`, matching pnpm). Naming a
+/// package does not approve it: as in pnpm 12, an unapproved package is
+/// reported as an ignored build — `ERR_AUBE_IGNORED_BUILDS` under the
+/// default `strictDepBuilds`, a warning otherwise.
 ///
 /// Unlike the other lifecycle shortcuts, `rebuild` intentionally does not
 /// auto-install: `aube install` already runs these same scripts after
@@ -20,10 +23,8 @@ use std::collections::HashSet;
 #[derive(Debug, usage_rs::Args)]
 pub struct RebuildArgs {
     /// Optional package names. When supplied, only matching deps'
-    /// scripts run. Match is by graph `name`,
-    /// not by `dep_path`. The active `allowBuilds` /
-    /// `onlyBuiltDependencies` policy is bypassed for the named
-    /// deps — naming the package is the explicit opt-in.
+    /// scripts run. Match is by graph `name`, not by `dep_path`. The
+    /// active `allowBuilds` policy still decides which of them may run.
     #[usage(arg, name = "PACKAGE")]
     pub packages: Vec<String>,
 }
@@ -35,10 +36,17 @@ pub async fn run(
     if !filter.is_empty() {
         return run_filtered(&args, &filter).await;
     }
-    let selected = if args.packages.is_empty() {
+    rebuild_project(&args.packages, None).await
+}
+
+/// Rebuild the project at the current directory. `importers` narrows the
+/// rebuild to those workspace projects' dependencies, as a filtered
+/// `pnpm rebuild` does; `None` takes every dependency in the lockfile.
+async fn rebuild_project(packages: &[String], importers: Option<&[String]>) -> miette::Result<()> {
+    let selected = if packages.is_empty() {
         None
     } else {
-        Some(args.packages.iter().cloned().collect::<HashSet<String>>())
+        Some(packages.iter().cloned().collect::<HashSet<String>>())
     };
 
     let project_dir = crate::dirs::project_root()?;
@@ -71,9 +79,9 @@ pub async fn run(
     };
 
     // Selective rebuild needs a graph to match names against. Without
-    // the lockfile the unmatched-name check below never runs, root
-    // hooks are skipped (selected.is_some()), and the command would
-    // exit Ok with no scripts run and no diagnostic — invisible in CI.
+    // the lockfile the unmatched-name check below never runs, and the
+    // command would exit Ok with no scripts run and no diagnostic —
+    // invisible in CI.
     if selected.is_some() && graph.is_none() {
         return Err(miette!(
             "no lockfile found at {} — run `{}` before targeting specific packages",
@@ -102,13 +110,55 @@ pub async fn run(
             }
         }
 
-        let (policy, warnings) =
-            super::install::build_policy_from_sources(&manifest, &workspace, false);
+        // The tree the last install linked: its `--prod` / `--dev` /
+        // `--no-optional` selection drops the same edges here, so a package
+        // installed only for an unselected project stays out.
+        let closure = importers.map(|importers| {
+            let selection = crate::state::read_dep_selection(&cwd);
+            let installed = graph.filter_deps(|dep| selection.keeps(dep));
+            importers_dep_closure(&installed, importers)
+        });
+
+        let policy_manifests =
+            super::install::build_policy_manifests(&cwd, &manifest, &settings_ctx)?;
+        let (policy, warnings) = super::install::build_policy_from_manifest_sources(
+            policy_manifests.iter(),
+            &workspace,
+            aube_settings::resolved::dangerously_allow_all_builds(&settings_ctx),
+        );
         for warning in warnings {
             eprintln!("warn: {warning}");
         }
 
-        if selected.is_some() || policy.has_any_allow_rule() {
+        // The generated accessor already reads `nodeLinker` from
+        // `raw_workspace`, which is the same map `workspace.node_linker`
+        // is parsed out of — no need for a separate fallback on the
+        // typed struct field.
+        let node_linker_setting = aube_settings::resolved::node_linker(&settings_ctx);
+        let hoisting_limits = crate::commands::settings_hoisting_limits_to_linker(
+            aube_settings::resolved::hoisting_limits(&settings_ctx),
+        );
+        let hoisted_placements = match node_linker_setting {
+            aube_settings::resolved::NodeLinker::Pnp => {
+                return Err(miette!(
+                    "node-linker=pnp is not supported by aube; use `isolated` (default) or `hoisted`"
+                ));
+            }
+            aube_settings::resolved::NodeLinker::Hoisted => {
+                Some(match crate::state::read_hoisted_placements(&cwd) {
+                    Some(placements) => placements,
+                    None => aube_linker::HoistedPlacements::from_graph(
+                        &cwd,
+                        &graph,
+                        &modules_dir_name,
+                        hoisting_limits,
+                    )?,
+                })
+            }
+            aube_settings::resolved::NodeLinker::Isolated => None,
+        };
+
+        if policy.has_any_allow_rule() {
             let child_concurrency =
                 aube_settings::resolved::child_concurrency(&settings_ctx) as usize;
             let (jail_policy, jail_policy_warnings) =
@@ -116,33 +166,6 @@ pub async fn run(
             for warning in jail_policy_warnings {
                 eprintln!("warn: {warning}");
             }
-            // The generated accessor already reads `nodeLinker` from
-            // `raw_workspace`, which is the same map `workspace.node_linker`
-            // is parsed out of — no need for a separate fallback on the
-            // typed struct field.
-            let node_linker_setting = aube_settings::resolved::node_linker(&settings_ctx);
-            let hoisting_limits = crate::commands::settings_hoisting_limits_to_linker(
-                aube_settings::resolved::hoisting_limits(&settings_ctx),
-            );
-            let hoisted_placements = match node_linker_setting {
-                aube_settings::resolved::NodeLinker::Pnp => {
-                    return Err(miette!(
-                        "node-linker=pnp is not supported by aube; use `isolated` (default) or `hoisted`"
-                    ));
-                }
-                aube_settings::resolved::NodeLinker::Hoisted => {
-                    Some(match crate::state::read_hoisted_placements(&cwd) {
-                        Some(placements) => placements,
-                        None => aube_linker::HoistedPlacements::from_graph(
-                            &cwd,
-                            &graph,
-                            &modules_dir_name,
-                            hoisting_limits,
-                        )?,
-                    })
-                }
-                aube_settings::resolved::NodeLinker::Isolated => None,
-            };
             let side_effects_cache_root =
                 if aube_settings::resolved::side_effects_cache(&settings_ctx) {
                     let store = super::open_store(&cwd)?;
@@ -199,8 +222,7 @@ pub async fn run(
                 &graph,
                 &policy,
                 // No defaultTrust floor on rebuild: no advisory gate
-                // runs here, and `aube rebuild <name>` already
-                // bypasses the policy for explicitly named packages.
+                // runs here.
                 &super::install::DefaultTrustFloor::disabled(),
                 super::resolve_virtual_store_dir_max_length(&settings_ctx),
                 canonicalize_package_dir,
@@ -225,7 +247,7 @@ pub async fn run(
                     })
                     .unwrap_or(super::install::SideEffectsCacheConfig::Disabled),
                 &jail_policy,
-                None,
+                closure.as_ref(),
                 selected.as_ref(),
             )
             .await?;
@@ -250,6 +272,18 @@ pub async fn run(
                 &refreshed_bin_links,
             )?;
         }
+        return super::install::report_unreviewed_rebuilds(
+            &cwd,
+            &aube_dir,
+            &graph,
+            &policy,
+            super::resolve_virtual_store_dir_max_length(&settings_ctx),
+            hoisted_placements.as_ref(),
+            closure.as_ref(),
+            selected.as_ref(),
+            aube_settings::resolved::strict_dep_builds(&settings_ctx)
+                || aube_settings::resolved::paranoid(&settings_ctx),
+        );
     }
 
     Ok(())
@@ -265,18 +299,62 @@ async fn run_filtered(
         return super::no_projects_matched(&root, filter, super::NoMatchReport::Quiet);
     }
     let result = async {
+        // A shared workspace lockfile: the members have none of their own,
+        // so rebuild the selected projects' dependencies from the root, in
+        // one pass, as pnpm does.
+        if let Some(importers) = root_lockfile_importers(&root, &matched)? {
+            super::retarget_cwd(&root)?;
+            return rebuild_project(&args.packages, Some(&importers)).await;
+        }
+        let mut ignored_builds = None;
         for pkg in matched {
             super::retarget_cwd(&pkg.dir)?;
-            Box::pin(run(
-                RebuildArgs {
-                    packages: args.packages.clone(),
-                },
-                aube_workspace::selector::EffectiveFilter::default(),
-            ))
-            .await?;
+            super::install::defer_ignored_builds(
+                Box::pin(rebuild_project(&args.packages, None)).await,
+                &mut ignored_builds,
+            )?;
         }
-        Ok(())
+        ignored_builds.map_or(Ok(()), Err)
     }
     .await;
     super::finish_filtered_workspace(&cwd, result)
+}
+
+/// The selected projects' importer keys, when the workspace root's
+/// lockfile records every one of them.
+fn root_lockfile_importers(
+    root: &std::path::Path,
+    matched: &[aube_workspace::selector::SelectedPackage],
+) -> miette::Result<Option<Vec<String>>> {
+    let Ok(manifest) = load_manifest(root) else {
+        return Ok(None);
+    };
+    let graph = match aube_lockfile::parse_lockfile(root, &manifest) {
+        Ok(graph) => graph,
+        Err(aube_lockfile::Error::NotFound(_)) => return Ok(None),
+        Err(e) => return Err(miette::Report::new(e)).wrap_err("failed to parse lockfile"),
+    };
+    let importers = matched
+        .iter()
+        .map(|pkg| super::workspace_importer_path(root, &pkg.dir))
+        .collect::<miette::Result<Vec<_>>>()?;
+    Ok(importers
+        .iter()
+        .all(|importer| graph.importers.contains_key(importer))
+        .then_some(importers))
+}
+
+fn importers_dep_closure(
+    graph: &aube_lockfile::LockfileGraph,
+    importers: &[String],
+) -> std::collections::BTreeSet<String> {
+    let direct = importers
+        .iter()
+        .filter_map(|importer| graph.importers.get(importer))
+        .flatten()
+        .map(|dep| dep.dep_path.clone())
+        .collect();
+    super::dep_closure_from(graph, direct, false)
+        .into_keys()
+        .collect()
 }

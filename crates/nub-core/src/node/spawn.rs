@@ -1593,8 +1593,9 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         cmd.env(COMPAT_LAUNCH_ENV, "1");
     }
 
-    // User args always pass through.
-    cmd.args(config.user_args);
+    // User args always pass through, compat mode included: with a runner or watcher
+    // flag spelled `--flag=<value>`, Node recurses on its older releases.
+    cmd.args(super::argv::child_safe_modes(config.user_args));
 
     // Inherit stdio.
     cmd.stdin(std::process::Stdio::inherit())

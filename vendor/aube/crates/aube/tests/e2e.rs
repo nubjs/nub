@@ -333,7 +333,7 @@ fn run_failing_pre_script_short_circuits_with_its_code() {
 #[test]
 fn approve_builds_surfaces_and_runs_a_local_source_dep() {
     // Regression for the `file:`-dep approve-builds dead-end: install
-    // warns about a local-source dependency's build script, but
+    // reports a local-source dependency's build script, but
     // `ignored-builds` / `approve-builds` then reported nothing to
     // approve — the warned dep was keyed only in the install-recorded
     // set, never in the store the enumeration read. This pins the whole
@@ -362,14 +362,29 @@ fn approve_builds_surfaces_and_runs_a_local_source_dep() {
         }"#,
     );
 
-    // Install gates the build: the marker must not exist yet, and the
-    // ignored-build warning must fire naming the source key.
-    sbx.cmd()
-        .arg("install")
-        .assert()
-        .success()
-        .stderr(predicates::str::contains("dep@file:./dep"));
+    // Install gates the build and, under the default `strictDepBuilds`,
+    // fails naming the source key — after linking, so the dep is in place
+    // and the next step is approving it. A repeat install from the
+    // up-to-date state fails the same way.
+    for _ in 0..2 {
+        sbx.cmd()
+            .arg("install")
+            .assert()
+            .code(1)
+            .stderr(predicates::str::contains("ERR_AUBE_IGNORED_BUILDS"))
+            .stderr(predicates::str::contains("dep@file:./dep"));
+    }
     let node_modules = sbx.project.join("node_modules");
+    assert!(
+        node_modules.join("dep/package.json").exists(),
+        "the failing install must still link the dependency"
+    );
+    // Naming the package to `rebuild` does not approve it either.
+    sbx.cmd()
+        .args(["rebuild", "dep"])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("ERR_AUBE_IGNORED_BUILDS"));
     assert!(
         !marker_exists_under(&node_modules, "BUILT_527_MARKER"),
         "postinstall must not run before approval"
@@ -399,7 +414,7 @@ fn approve_builds_surfaces_and_runs_a_local_source_dep() {
         "approve-builds must run a local-source dep's build in the same invocation"
     );
 
-    // Reinstalling keeps the build and clears the warning.
+    // Reinstalling keeps the build and clears the failure.
     sbx.cmd()
         .arg("install")
         .assert()
@@ -414,6 +429,256 @@ fn approve_builds_surfaces_and_runs_a_local_source_dep() {
         .assert()
         .success()
         .stdout(predicates::str::contains("No ignored builds"));
+}
+
+/// A `file:` dependency whose postinstall writes `marker` into its own dir.
+fn write_marker_dep(sbx: &Sandbox, name: &str, marker: &str) {
+    sbx.write_file(
+        &format!("{name}/package.json"),
+        &format!(
+            r#"{{
+                "name": "{name}",
+                "version": "1.0.0",
+                "scripts": {{ "postinstall": "node -e \"require('fs').writeFileSync('{marker}','ok')\"" }}
+            }}"#
+        ),
+    );
+}
+
+#[test]
+fn allow_build_records_denials_and_never_overturns_one() {
+    // pnpm 12's `--allow-build` grammar: `!pkg` records a denial, and an
+    // approval of a package the project denies is refused rather than
+    // silently flipping the entry.
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    write_marker_dep(&sbx, "dep", "DENIED_DEP_BUILT");
+    sbx.write_manifest(r#"{"name":"e2e-allow-build-denial","version":"0.0.0"}"#);
+
+    sbx.cmd()
+        .args(["add", "file:./dep", "--allow-build=!dep"])
+        .assert()
+        .success();
+    let manifest = fs::read_to_string(sbx.project.join("package.json")).unwrap();
+    assert!(
+        manifest.contains(r#""dep": false"#),
+        "`--allow-build=!dep` must record a denial:\n{manifest}"
+    );
+
+    sbx.cmd()
+        .args(["add", "file:./dep", "--allow-build=dep"])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains(
+            "ERR_AUBE_OVERRIDING_IGNORED_BUILT_DEPENDENCIES",
+        ));
+    assert_eq!(
+        fs::read_to_string(sbx.project.join("package.json")).unwrap(),
+        manifest,
+        "a refused approval must leave the denial in place"
+    );
+    assert!(!marker_exists_under(
+        &sbx.project.join("node_modules"),
+        "DENIED_DEP_BUILT"
+    ));
+}
+
+#[test]
+fn rebuild_and_ignored_builds_honor_a_workspace_members_approval() {
+    // Install builds what a member's manifest approves. `rebuild` and
+    // `ignored-builds` must read the same approvals: naming a package to
+    // `rebuild` does not bypass the policy, so a root-only read would report
+    // an approved package as unapproved.
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    write_marker_dep(&sbx, "dep", "MEMBER_BUILT");
+    sbx.write_manifest(
+        r#"{"name":"e2e-member-approval","version":"0.0.0","private":true,"workspaces":["packages/*"]}"#,
+    );
+    sbx.write_file(
+        "packages/a/package.json",
+        r#"{
+            "name": "a",
+            "version": "1.0.0",
+            "dependencies": { "dep": "file:../../dep" },
+            "aube": { "allowBuilds": { "dep@file:dep": true } }
+        }"#,
+    );
+
+    sbx.cmd().arg("install").assert().success();
+    assert!(marker_exists_under(
+        &sbx.project.join("node_modules"),
+        "MEMBER_BUILT"
+    ));
+    sbx.cmd().args(["rebuild", "dep"]).assert().success();
+    sbx.cmd()
+        .arg("ignored-builds")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No ignored builds"));
+}
+
+#[test]
+fn remove_runs_postuninstall_before_reporting_an_unapproved_build() {
+    // pnpm 12 runs `postuninstall` inside a remove's install and raises
+    // `ERR_PNPM_IGNORED_BUILDS` only after it.
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    write_marker_dep(&sbx, "dep", "DEP_BUILT");
+    sbx.write_file(
+        "other/package.json",
+        r#"{"name":"other","version":"1.0.0"}"#,
+    );
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-remove-hooks",
+            "version": "0.0.0",
+            "dependencies": { "dep": "file:./dep", "other": "file:./other" },
+            "scripts": { "postuninstall": "node -e \"require('fs').writeFileSync('POSTUNINSTALL_RAN','ok')\"" }
+        }"#,
+    );
+
+    sbx.cmd().arg("install").assert().code(1);
+    sbx.cmd()
+        .args(["remove", "other"])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("ERR_AUBE_IGNORED_BUILDS"));
+    assert!(
+        sbx.project.join("POSTUNINSTALL_RAN").exists(),
+        "postuninstall must run before the unapproved build fails the remove"
+    );
+    let manifest = fs::read_to_string(sbx.project.join("package.json")).unwrap();
+    assert!(!manifest.contains(r#""other""#), "{manifest}");
+}
+
+#[test]
+fn filtered_rebuild_builds_only_the_selected_projects_dependencies() {
+    // Members of a shared-lockfile workspace have no lockfile of their own,
+    // so a filtered rebuild works from the root's, over the selected
+    // projects' dependencies only.
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let log = sbx.project.join("builds.log");
+    let log_js = log.display().to_string().replace('\\', "/");
+    for name in ["x", "y"] {
+        sbx.write_file(
+            &format!("{name}/package.json"),
+            &format!(
+                r#"{{
+                    "name": "{name}",
+                    "version": "1.0.0",
+                    "scripts": {{ "postinstall": "node -e \"require('fs').appendFileSync('{log_js}','{name};')\"" }}
+                }}"#
+            ),
+        );
+    }
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-filtered-rebuild",
+            "version": "0.0.0",
+            "private": true,
+            "workspaces": ["packages/*"],
+            "aube": { "allowBuilds": { "x@file:x": true, "y@file:y": true } }
+        }"#,
+    );
+    sbx.write_file(
+        "packages/a/package.json",
+        r#"{"name":"a","version":"1.0.0","dependencies":{"x":"file:../../x"}}"#,
+    );
+    sbx.write_file(
+        "packages/b/package.json",
+        r#"{"name":"b","version":"1.0.0","dependencies":{"y":"file:../../y"}}"#,
+    );
+
+    sbx.cmd().arg("install").assert().success();
+    assert_eq!(fs::read_to_string(&log).unwrap().len(), "x;y;".len());
+    fs::write(&log, "").unwrap();
+    sbx.cmd()
+        .args(["--filter", "a", "rebuild"])
+        .assert()
+        .success();
+    assert_eq!(fs::read_to_string(&log).unwrap(), "x;");
+}
+
+#[test]
+fn filtered_rebuild_keeps_the_dependency_groups_the_install_linked() {
+    // After `install --prod`, a package one member uses only as a
+    // devDependency is installed solely for the member that needs it in
+    // production. pnpm rebuilds it only when that member is selected.
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let log = sbx.project.join("builds.log");
+    let log_js = log.display().to_string().replace('\\', "/");
+    sbx.write_file(
+        "x/package.json",
+        &format!(
+            r#"{{
+                "name": "x",
+                "version": "1.0.0",
+                "scripts": {{ "postinstall": "node -e \"require('fs').appendFileSync('{log_js}','x;')\"" }}
+            }}"#
+        ),
+    );
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-filtered-rebuild-prod",
+            "version": "0.0.0",
+            "private": true,
+            "workspaces": ["packages/*"],
+            "aube": { "allowBuilds": { "x@file:x": true } }
+        }"#,
+    );
+    sbx.write_file(
+        "packages/a/package.json",
+        r#"{"name":"a","version":"1.0.0","devDependencies":{"x":"file:../../x"}}"#,
+    );
+    sbx.write_file(
+        "packages/b/package.json",
+        r#"{"name":"b","version":"1.0.0","dependencies":{"x":"file:../../x"}}"#,
+    );
+
+    sbx.cmd().args(["install", "--prod"]).assert().success();
+    fs::write(&log, "").unwrap();
+    sbx.cmd()
+        .args(["--filter", "a", "rebuild"])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        "",
+        "a's devDependency was not installed"
+    );
+    sbx.cmd()
+        .args(["--filter", "b", "rebuild"])
+        .assert()
+        .success();
+    assert_eq!(fs::read_to_string(&log).unwrap(), "x;");
+}
+
+#[test]
+fn dangerously_allow_all_builds_from_npmrc_runs_builds_but_keeps_denials() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    write_marker_dep(&sbx, "open", "OPEN_BUILT");
+    write_marker_dep(&sbx, "denied", "DENIED_BUILT");
+    sbx.write_manifest(
+        r#"{
+            "name": "e2e-allow-all-npmrc",
+            "version": "0.0.0",
+            "dependencies": { "open": "file:./open", "denied": "file:./denied" },
+            "aube": { "allowBuilds": { "denied": false } }
+        }"#,
+    );
+    sbx.write_file(".npmrc", "dangerouslyAllowAllBuilds=true\n");
+
+    sbx.cmd().arg("install").assert().success();
+    let node_modules = sbx.project.join("node_modules");
+    assert!(marker_exists_under(&node_modules, "OPEN_BUILT"));
+    assert!(
+        !marker_exists_under(&node_modules, "DENIED_BUILT"),
+        "an explicit `false` must outrank dangerouslyAllowAllBuilds"
+    );
 }
 
 #[test]
@@ -1093,6 +1358,45 @@ fn git_dep_prepack_runs_with_its_hooks_when_main_is_missing() {
     );
 }
 
+/// A git dependency's build is decided under pnpm's exact key,
+/// `<name>@git+<repository>#<commit>`, though the lockfile spells its
+/// source without `git+`.
+#[test]
+fn git_dep_build_is_decided_under_pnpms_exact_key() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let url = git_repo(
+        &sbx,
+        &[(
+            "package.json",
+            r#"{ "name": "post-demo", "version": "1.0.0",
+                 "scripts": { "postinstall": "node -e \"require('fs').writeFileSync('BUILT', '')\"" } }"#,
+        )],
+    );
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(sbx.home.join("prep-repo"))
+        .output()
+        .unwrap();
+    let key = format!(
+        "post-demo@{url}#{}",
+        String::from_utf8_lossy(&head.stdout).trim()
+    );
+    for allowed in [true, false] {
+        let _ = fs::remove_dir_all(sbx.project.join("node_modules"));
+        sbx.write_manifest(&format!(
+            r#"{{ "name": "consumer", "version": "0.0.0", "dependencies": {{ "post-demo": "{url}" }},
+                 "pnpm": {{ "allowBuilds": {{ "{key}": {allowed} }} }} }}"#
+        ));
+        sbx.cmd().arg("install").assert().success();
+        assert_eq!(
+            sbx.project.join("node_modules/post-demo/BUILT").exists(),
+            allowed,
+            "allowBuilds {{{key}: {allowed}}}"
+        );
+    }
+}
+
 /// A gzipped tarball shaped like a codeload archive: every entry under one
 /// `<owner>-<repo>-<sha>/` wrapper dir.
 fn codeload_tarball(wrapper: &str, files: &[(&str, &str)]) -> Vec<u8> {
@@ -1260,7 +1564,7 @@ fn member_rebuild_finds_a_local_dep_installed_under_per_project_lockfiles() {
     sbx.write_file("packages/app/.npmrc", &npmrc);
     sbx.write_file(
         "pnpm-workspace.yaml",
-        "packages:\n  - packages/*\nsharedWorkspaceLockfile: false\n",
+        "packages:\n  - packages/*\nsharedWorkspaceLockfile: false\nallowBuilds:\n  \"ldir@file:vendor/ldir\": true\n",
     );
     sbx.write_manifest(r#"{ "name": "root", "version": "1.0.0", "private": true }"#);
     sbx.write_file(
@@ -1276,7 +1580,10 @@ fn member_rebuild_finds_a_local_dep_installed_under_per_project_lockfiles() {
         r#"{ "name": "app", "version": "1.0.0", "dependencies": { "ldir": "file:../../vendor/ldir" } }"#,
     );
 
-    sbx.cmd().arg("install").assert().success();
+    sbx.cmd()
+        .args(["install", "--ignore-scripts"])
+        .assert()
+        .success();
     let lock = fs::read_to_string(sbx.project.join("packages/app/aube-lock.yaml")).unwrap();
     assert!(
         lock.contains("file:../../vendor/ldir"),

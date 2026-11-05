@@ -4332,8 +4332,8 @@ fn tsconfig_reported_env() -> Option<(String, String)> {
 }
 
 /// The directory whose tsconfig governs the entry of a `nub <file>` run, resolved
-/// against `cwd`. The first non-flag argument is the entry; with none (a bare
-/// `--flag`) this is `None` and the CWD-anchored check stands alone.
+/// against `cwd`. With no entry (a bare `--flag`) this is `None` and the
+/// CWD-anchored check stands alone.
 ///
 /// Mirrors the config the run itself reads (#1032). Node loads the main entry from
 /// its REAL path unless `--preserve-symlinks-main` (`NODE_PRESERVE_SYMLINKS` does
@@ -4345,7 +4345,7 @@ fn tsconfig_reported_env() -> Option<(String, String)> {
 /// often extending a file that was never published — governs nothing and is
 /// skipped outright rather than warned about.
 fn entry_tsconfig_dir(args: &[String], cwd: &Path, node_options: &[String]) -> Option<PathBuf> {
-    let at = args.iter().position(|a| !a.starts_with('-'))?;
+    let at = nub_core::node::argv::entry_index(args)?;
     let joined = cwd.join(&args[at]);
     let real = std::fs::canonicalize(&joined)
         .map(|p| PathBuf::from(strip_windows_verbatim_prefix(&p.to_string_lossy())))
@@ -4937,16 +4937,32 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     // loader would resolve differently. Detection is a `stat` and runs before any
     // loading, so nothing has to be undone.
     let env_owner = detect_env_owner(project.as_ref(), compat_mode);
-    check_schema_usable(env_owner.as_ref(), compat_mode)?;
+    // A spawn that LAUNCHES the loader is never refused for want of one: the
+    // `.bin`/`PATH` lookup can miss a loader that is nonetheless the very program
+    // starting (an entry run by path, an install shape the lookup does not
+    // cover), and "not installed" is false then. Skipping the whole check is
+    // exact, not a shortcut: its other error needs NO schema to fire, and a
+    // launch with an owner has one.
+    let launches_loader = env_owner
+        .as_ref()
+        .is_some_and(|owner| owner.launches_loader(args, cwd));
+    if !launches_loader {
+        check_schema_usable(env_owner.as_ref(), compat_mode)?;
+    }
     let mut env_vars = runtime_child_env(&runtime, project_root, compat_mode, env_owner.as_ref())?;
     if let Some((_, schema_dir)) = env_owner
         .as_ref()
+        .filter(|_| !launches_loader)
         .and_then(crate::env_owner::EnvOwner::spawn_target)
     {
-        // Reaches the loader process AND the Node it spawns, so neither re-enters
-        // nub and wraps a second time. Carries the schema dir rather than a bare
-        // flag: a nested nub in a DIFFERENT schema-owned project must still wrap
-        // its own, instead of inheriting this project's environment silently.
+        // Reaches everything nub puts in the chain — a configured `prefix`, the
+        // loader, and the Node it spawns — so none of them re-enters nub and
+        // wraps a second time. The loader's own blob cannot do this job for the
+        // first of those: a `prefix` whose bin is a `#!/usr/bin/env node` script
+        // comes back through the PATH shim BEFORE the loader has run, carrying
+        // its own entry rather than the loader's. Carries the schema dir rather
+        // than a bare flag: a nested nub in a DIFFERENT schema-owned project must
+        // still wrap its own, instead of inheriting this project's environment.
         env_vars.insert(
             crate::env_owner::WRAPPED_ENV.to_string(),
             crate::env_owner::wrapped_marker(schema_dir),
@@ -5068,9 +5084,14 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
                 .content_mappers
                 .as_ref()
                 .is_some_and(|found| !found.registers.is_empty()),
-        // Put the loader in front of Node when one owns this project.
+        // Put the loader in front of Node when one owns this project — unless the
+        // loader is what this very spawn runs, in which case it is about to own
+        // the environment for everything below it and a wrap would only resolve
+        // the project twice (and, when the script passed its own `--path` or
+        // `--filter`, resolve something the caller did not ask for).
         env_owner: env_owner
             .as_ref()
+            .filter(|_| !launches_loader)
             .and_then(crate::env_owner::EnvOwner::spawn_target),
         prefix: prefix_argv.as_deref(),
         node: &node,
@@ -7564,6 +7585,12 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // restarts, which is the trade-off this path already makes for every
     // expansion-dependent var it injects.
     //
+    // No `launches_loader` check here, unlike the file-run path, and the asymmetry
+    // is deliberate: watch never launches the loader. The loader's own shebang
+    // `node` re-enters nub as a plain FILE RUN carrying the loader's entry, so
+    // that path is where the check belongs; the Node this spawns is the loader's
+    // direct child, launched by absolute path, and never comes back here.
+    //
     // The configured `prefix` goes in front of all of that, the loader included,
     // exactly as `spawn_node` orders it — and, like the loader, not in compat mode.
     let prefix = if compat_mode {
@@ -8207,7 +8234,6 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Resul
         });
     }
     cmd.env(crate::project_config::RUNTIME_CONFIG_ENV, runtime_json);
-    // Stamp the env-owner markers wherever the adapter is injected — without them
     if let Some((k, val)) = force_async_tier {
         cmd.env(k, val);
     }

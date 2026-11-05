@@ -1,6 +1,7 @@
 //! Node.js binary discovery, version detection, flag injection, and
 //! process spawning.
 
+pub mod argv;
 pub mod discovery;
 pub mod feature_matrix;
 pub mod flags;
@@ -22,4 +23,5 @@ pub fn verify_or_heal_embedded_runtime_tree(dir: &std::path::Path) -> bool {
     runtime_cache::verify_or_heal_embedded_runtime_tree(dir)
 }
 pub mod spawn;
+pub mod vendored_runtime;
 pub mod version;

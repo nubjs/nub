@@ -80,6 +80,14 @@ if (sep < 0) {{
 const flags = argv.slice(1, sep);
 const cmd = argv.slice(sep + 1);
 const pathIdx = flags.indexOf("--path");
+// A real loader publishes its resolution to every child, and that blob is what
+// tells a nub further down the chain to stand down instead of resolving again.
+// `basePath` tracks `--path` and is absolute, and each schema read is listed
+// relative to it — measured against varlock 1.16.1 and 1.24.0, and exactly what
+// nub's containment test reads.
+const basePath = require("node:path").resolve(
+  pathIdx < 0 ? process.cwd() : flags[pathIdx + 1],
+);
 const res = spawnSync(cmd[0], cmd.slice(1), {{
   stdio: "inherit",
   env: {{
@@ -87,6 +95,10 @@ const res = spawnSync(cmd[0], cmd.slice(1), {{
     FROM_LOADER: "yes",
     LOADER_SAW_NODE: /node/.test(cmd[0]) ? "yes" : "no",
     LOADER_PATH: pathIdx < 0 ? "" : flags[pathIdx + 1],
+    __VARLOCK_ENV: JSON.stringify({{
+      basePath,
+      sources: [{{ type: "schema", path: ".env.schema" }}],
+    }}),
   }},
 }});
 process.exit(res.status ?? 1);
@@ -148,6 +160,20 @@ fn which_node_dir() -> PathBuf {
         .parent()
         .expect("node has a parent dir")
         .to_path_buf()
+}
+
+/// The blob a real loader publishes to every child, standing for "the schema at
+/// `base` is already resolved".
+///
+/// A loader nub did not launch leaves no marker of nub's own, so a test that
+/// fakes being behind one has to speak the loader's shape. Built through
+/// `serde_json` so a Windows path's backslashes survive.
+fn resolved_blob(base: &Path) -> String {
+    serde_json::json!({
+        "basePath": base,
+        "sources": [{"type": "schema", "path": ".env.schema"}],
+    })
+    .to_string()
 }
 
 #[test]
@@ -329,7 +355,7 @@ fn nub_watch_also_puts_the_loader_in_front_of_node() {
 fn a_watcher_inside_the_loader_still_honours_declared_sources() {
     // `run_watch` builds its own env instead of going through `runtime_child_env`,
     // so it is a second copy of the precedence rule and has to agree with the first.
-    // Reachable because the wrap marker is INHERITED: any `nub watch` started by a
+    // Reachable because the loader's blob is INHERITED: any `nub watch` started by a
     // program already running behind the loader arrives here owned. Declared still
     // beats inferred there — being inside a wrap is not a reason to drop what the
     // project asked for.
@@ -344,7 +370,7 @@ fn a_watcher_inside_the_loader_still_honours_declared_sources() {
         .args(["watch", "probe.mjs"])
         .current_dir(dir.path())
         .env("PATH", which_node_dir())
-        .env("__NUB_ENV_OWNER_WRAPPED", &root)
+        .env("__VARLOCK_ENV", resolved_blob(&root))
         .env_remove("NODE_OPTIONS")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -410,7 +436,7 @@ fn the_node_command_reaches_the_loader_intact() {
 fn the_loader_is_invoked_exactly_once() {
     // The loader's real bin is a `#!/usr/bin/env node` script, so its own
     // interpreter resolves through nub's PATH shim and re-enters nub. Without the
-    // wrapped-marker that nub detects the same project and wraps again, forever.
+    // stand-down rules that nub detects the same project and wraps again, forever.
     let dir = project(&[(".env.schema", "# ---\nA=1\n")]);
     let tally = dir.path().join("tally");
     install_stub_loader(dir.path(), &tally);
@@ -442,9 +468,9 @@ fn a_nested_nub_behind_the_loader_does_not_load_env_files() {
         .arg("probe.mjs")
         .current_dir(dir.path())
         .env("PATH", &node_dir)
-        // The marker carries the wrapped project's root, so a nested nub can tell
+        // The blob carries the resolved project's root, so a nested nub can tell
         // "this project is already behind the loader" from "some other one is".
-        .env("__NUB_ENV_OWNER_WRAPPED", dir.path())
+        .env("__VARLOCK_ENV", resolved_blob(dir.path()))
         .env_remove("NODE_OPTIONS")
         .output()
         .expect("spawn nub");
@@ -619,11 +645,11 @@ fn a_declared_rival_tool_blocks_the_hand_over_even_with_the_loader_installed() {
 #[cfg(unix)]
 #[test]
 fn a_different_project_inside_the_wrap_still_wraps_its_own() {
-    // The marker records WHICH project is wrapped, not merely that something is.
-    // A bare flag made any project reached from inside the wrap stand down — so a
-    // second schema-owned project ran on the outer project's environment, its own
-    // schema never resolved and no warning, since the diagnostic is gated on the
-    // same flag.
+    // Both signals record WHICH project is resolved, not merely that something
+    // is. A bare flag made any project reached from inside the wrap stand down —
+    // so a second schema-owned project ran on the outer project's environment, its
+    // own schema never resolved and no warning, since the diagnostic is gated on
+    // the same flag.
     let dir = project(&[(".env.schema", "# ---\nA=1\n")]);
     let tally = dir.path().join("tally");
     install_stub_loader(dir.path(), &tally);
@@ -632,8 +658,12 @@ fn a_different_project_inside_the_wrap_still_wraps_its_own() {
     let output = Command::new(nub_binary())
         .arg("probe.mjs")
         .current_dir(dir.path())
-        // A parent nub wrapped a DIFFERENT project.
+        // A parent nub wrapped, and the loader ran, for a DIFFERENT project.
         .env("__NUB_ENV_OWNER_WRAPPED", "/somewhere/else/entirely")
+        .env(
+            "__VARLOCK_ENV",
+            resolved_blob(Path::new("/somewhere/else/entirely")),
+        )
         .env("PATH", &node_dir)
         .env_remove("NODE_OPTIONS")
         .output()
@@ -914,5 +944,136 @@ fn compat_mode_does_no_owner_handling_at_all() {
     assert!(
         !tally.exists(),
         "and must not invoke the loader at all in compat mode"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_script_that_runs_the_loader_itself_gets_one_resolution() {
+    // The defect this guards, measured against real varlock 1.16.1 before the
+    // fix: an existing project that already wired the loader into its own scripts
+    // got a SECOND resolution inserted in front of the one it asked for. That
+    // second one carries nub's arguments, not the script's, so it re-ran `exec()`
+    // resolvers a `--filter` had excluded, and — where the script passed its own
+    // `--path` — died on the root schema's validation before the script's own
+    // invocation ever ran. `npm run` exited 0 on the same project; nub exited 1.
+    //
+    // Two rules have to hold together for the count to be 1. nub must not wrap
+    // the loader it is LAUNCHING, and the nub that the loader's own `node` child
+    // re-enters must read the loader's published blob and stand down.
+    let dir = project(&[
+        (".env.schema", "# ---\nA=1\n"),
+        (
+            "package.json",
+            r#"{"name":"fx","version":"1.0.0","scripts":{"go":"varlock run -- node probe.mjs"}}"#,
+        ),
+    ]);
+    let tally = dir.path().join("tally");
+    install_stub_loader(dir.path(), &tally);
+
+    // A script needs `sh` as well as `node`; nub prepends the project's own
+    // `node_modules/.bin`, which is where the script's `varlock` comes from.
+    let path = std::env::join_paths([which_node_dir(), PathBuf::from("/bin"), "/usr/bin".into()])
+        .expect("join PATH");
+    let output = Command::new(nub_binary())
+        .args(["run", "go"])
+        .current_dir(dir.path())
+        .env("PATH", path)
+        .env_remove("NODE_OPTIONS")
+        .output()
+        .expect("spawn nub run");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        output.status.success(),
+        "nub run exited {:?}\nstdout: {stdout}\nstderr: {stderr}",
+        output.status.code()
+    );
+
+    let runs = std::fs::read_to_string(&tally)
+        .unwrap_or_default()
+        .lines()
+        .count();
+    assert_eq!(
+        runs, 1,
+        "the script asked for one resolution; {runs} means nub inserted its own \
+         in front of it.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // A positive control on the count: the script's own invocation really did
+    // reach Node, so `1` is one WORKING resolution rather than none plus a stray.
+    let probe = stdout
+        .lines()
+        .rev()
+        .find(|line| line.trim_start().starts_with('{'))
+        .unwrap_or_else(|| panic!("no probe JSON in stdout: {stdout}"));
+    let run = Run {
+        stdout: probe.to_string(),
+        stderr,
+    };
+    assert_eq!(
+        run.var("FROM_LOADER").as_deref(),
+        Some("yes"),
+        "the script's own loader invocation must still feed Node. stderr: {}",
+        run.stderr
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_node_based_prefix_in_front_of_the_loader_gets_one_resolution() {
+    // nub orders a file run `<prefix…> <loader> run --path <dir> -- <node> …`, so
+    // a prefix whose bin is a `#!/usr/bin/env node` script — dotenvx's shape —
+    // re-enters nub through the PATH shim BEFORE the loader has run. That nub
+    // carries the prefix's entry, not the loader's, and finds no blob yet; only
+    // the marker the outer nub stamped on the chain tells it the loader is
+    // already placed. Without it the loader runs twice, the second time OUTSIDE
+    // the prefix.
+    let dir = project(&[
+        (".env.schema", "# ---\nA=1\n"),
+        ("nub.jsonc", r#"{ "prefix": "wrap --" }"#),
+    ]);
+    let tally = dir.path().join("tally");
+    install_stub_loader(dir.path(), &tally);
+    let wrapper_tally = dir.path().join("wrapper-tally");
+    let wrap = dir.path().join("node_modules/.bin/wrap");
+    std::fs::write(
+        &wrap,
+        format!(
+            r#"#!/usr/bin/env node
+require("node:fs").appendFileSync({wrapper_tally:?}, "ran\n");
+const argv = process.argv.slice(2);
+const cmd = argv.slice(argv.indexOf("--") + 1);
+const res = require("node:child_process").spawnSync(cmd[0], cmd.slice(1), {{
+  stdio: "inherit",
+}});
+process.exit(res.status ?? 1);
+"#,
+            wrapper_tally = wrapper_tally.to_string_lossy()
+        ),
+    )
+    .expect("write wrapper");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&wrap, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let run = run(dir.path());
+    let count = |path: &Path| {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+    assert_eq!(
+        (count(&wrapper_tally), count(&tally)),
+        (1, 1),
+        "one prefix and one loader; a second loader run means the prefix's own \
+         re-entry wrapped again. stderr: {}",
+        run.stderr
+    );
+    assert_eq!(
+        run.var("FROM_LOADER").as_deref(),
+        Some("yes"),
+        "and the program still runs behind the loader. stderr: {}",
+        run.stderr
     );
 }

@@ -15,7 +15,7 @@
 #                                         classifies a red; always also records the wall-clock
 #                                         of both installs.
 #        MODE=install|npm-ci   install = `nub install --frozen-lockfile` (Nub's own layout and
-#                              build-script posture); npm-ci = exactly what the npm-ci GitHub
+#                              build-script posture, unapproved builds skipped); npm-ci = exactly what the npm-ci GitHub
 #                              Action runs: `npm ci` routed onto the engine, hoisted layout,
 #                              every lifecycle script.
 #        WORK=<dir>   clone and install here (default: a fresh temp dir, removed on success)
@@ -108,7 +108,10 @@ for entry in "${entries[@]}"; do
       echo "  the routed npm ci provisioned or switched Node for a lifecycle script" >> "$nub_log"; rc=1
     fi
   else
-    ( cd "$dir" && "${TIMEOUT[@]}" "$NUB" install --frozen-lockfile ) > "$nub_log" 2>&1; rc=$?
+    # These projects carry no build approvals for Nub, so the default
+    # `strictDepBuilds` would fail most of them on an unapproved build script;
+    # the tree is what this mode checks, so unapproved builds are only skipped.
+    ( cd "$dir" && npm_config_strict_dep_builds=false "${TIMEOUT[@]}" "$NUB" install --frozen-lockfile ) > "$nub_log" 2>&1; rc=$?
   fi
   nub_s=$(elapsed "$t0")
   stage="install"

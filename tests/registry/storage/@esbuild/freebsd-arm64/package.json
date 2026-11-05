@@ -1,0 +1,76 @@
+{
+  "name": "@esbuild/freebsd-arm64",
+  "versions": {
+    "0.21.5": {
+      "name": "@esbuild/freebsd-arm64",
+      "version": "0.21.5",
+      "license": "MIT",
+      "_id": "@esbuild/freebsd-arm64@0.21.5",
+      "maintainers": [
+        {
+          "name": "evanw",
+          "email": "evan.exe@gmail.com"
+        },
+        {
+          "name": "esbuild",
+          "email": "evan.exe+esbuild@gmail.com"
+        }
+      ],
+      "homepage": "https://github.com/evanw/esbuild#readme",
+      "bugs": {
+        "url": "https://github.com/evanw/esbuild/issues"
+      },
+      "os": [
+        "freebsd"
+      ],
+      "cpu": [
+        "arm64"
+      ],
+      "dist": {
+        "shasum": "646b989aa20bf89fd071dd5dbfad69a3542e550e",
+        "tarball": "http://localhost:4874/@esbuild/freebsd-arm64/-/@esbuild/freebsd-arm64-0.21.5.tgz",
+        "fileCount": 3,
+        "integrity": "sha512-5JcRxxRDUJLX8JXp/wcBCy3pENnCgBR9bN6JsY4OmhfUtIHe3ZW0mawA7+RDAcMLrMIZaf03NlQiX9DGyB8h4g==",
+        "signatures": [
+          {
+            "sig": "MEYCIQC1ReaQnbdDGcGniw/gDVg9Bpcv07i/ZpFTDw58U8wPxAIhAKm7zfjembn9ZX5nLZ6LnQcEpyKK9+udlJxOWm3/f+Go",
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+          }
+        ],
+        "unpackedSize": 8978965
+      },
+      "engines": {
+        "node": ">=12"
+      },
+      "gitHead": "fc37c2fa9de2ad77476a6d4a8f1516196b90187e",
+      "_npmUser": {
+        "name": "evanw",
+        "email": "evan.exe@gmail.com"
+      },
+      "repository": {
+        "url": "git+https://github.com/evanw/esbuild.git",
+        "type": "git"
+      },
+      "_npmVersion": "10.5.1",
+      "description": "The FreeBSD ARM 64-bit binary for esbuild, a JavaScript bundler.",
+      "directories": {},
+      "_nodeVersion": "22.0.0",
+      "_hasShrinkwrap": false,
+      "preferUnplugged": true,
+      "_npmOperationalInternal": {
+        "tmp": "tmp/freebsd-arm64_0.21.5_1717967811884_0.7065954691136056",
+        "host": "s3://npm-registry-packages"
+      }
+    }
+  },
+  "time": {
+    "created": "2022-12-05T23:43:11.577Z",
+    "modified": "2026-08-08T19:58:54.774Z",
+    "0.21.5": "2024-06-09T21:16:52.135Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "0.21.5"
+  }
+}

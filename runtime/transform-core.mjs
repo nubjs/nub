@@ -241,14 +241,6 @@ for (const [ext, loader] of Object.entries(RUNTIME_LOADER)) {
 }
 export const TS_PARENT_EXTS = new Set([".ts", ".tsx", ".mts", ".cts"]);
 
-// Which data-loader map governs `url`. A project's `loader` config must not reach code
-// the project didn't write — `{".json": "text"}` would otherwise turn every dependency's
-// JSON import into a string, and pointing a built-in extension at a transpile loader
-// would DELETE a loader a dependency relies on. Same project/dependency boundary the
-// TRANSPILE_EXTS and PLAIN_JS_EXTS dispatches draw with `!isNodeModules`, but as a map
-// SWAP rather than a bail: the built-in half must keep serving deps. Both the dispatch
-// sites and loadData() route through here, so "does this load?" and "as what?" can
-// never disagree.
 // Node's "Unknown file extension" says nothing about why a file the type checker
 // accepted will not load. `tsc` is satisfied by a mapper alone and never emits for
 // these files, so the gap only shows at runtime: name it. Longest suffix wins, as
@@ -273,6 +265,14 @@ export function explainUnmappedExtension(err, url) {
   err.message = message;
 }
 
+// Which data-loader map governs `url`. A project's `loader` config must not reach code
+// the project didn't write — `{".json": "text"}` would otherwise turn every dependency's
+// JSON import into a string, and pointing a built-in extension at a transpile loader
+// would DELETE a loader a dependency relies on. Same project/dependency boundary the
+// TRANSPILE_EXTS and PLAIN_JS_EXTS dispatches draw with `!isNodeModules`, but as a map
+// SWAP rather than a bail: the built-in half must keep serving deps. Both the dispatch
+// sites and loadData() route through here, so "does this load?" and "as what?" can
+// never disagree.
 export function dataExtsFor(url) {
   return isNodeModules(url) ? BUILTIN_DATA_EXTS : PROJECT_DATA_EXTS;
 }

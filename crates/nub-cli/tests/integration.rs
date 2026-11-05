@@ -779,6 +779,194 @@ named.on("message", (message) => {
     );
 }
 
+/// The `sources` of a compiled program's source map, split into nub's own runtime
+/// (`runtime/…`) and everything else, which is sorted.
+#[cfg(feature = "compile")]
+fn compiled_map_sources(map: &serde_json::Value) -> (Vec<String>, Vec<String>) {
+    let (runtime, mut app): (Vec<String>, Vec<String>) =
+        compiled_json_string_array(&map["sources"])
+            .into_iter()
+            .partition(|source| source.starts_with("runtime/"));
+    app.sort_unstable();
+    (runtime, app)
+}
+
+/// An uncaught error in a single-executable program is reported where it was
+/// thrown, as `nub <file>` reports it, and the program's source map names nub's
+/// own runtime modules without the building machine's paths.
+///
+/// The header is the part a reader looks at first. The blob's main used to
+/// rethrow the entry's rejection with a `throw` of its own, and Node builds the
+/// header from the throw site, so every such program printed the loader's
+/// `throw error;` as the location of its own bug.
+///
+/// The map half is checked twice. A host-targeted build maps the runtime's own
+/// files. A 22.20 target, which lacks Temporal, URLPattern and Float16Array, also
+/// bundles the runtime's vendored polyfill packages, and a development build
+/// resolves those from the checkout rather than from the runtime directory. The
+/// fixture's own `jsbi` shares a name with one of them and must keep its own.
+#[cfg(feature = "compile")]
+#[test]
+fn a_single_executable_reports_an_uncaught_error_where_it_was_thrown() {
+    let runtime = compile_test_runtime();
+    let work = unique_test_cache();
+    let cache = work.join("cache");
+    let artifact = work.join(format!("orders{}", std::env::consts::EXE_SUFFIX));
+    std::fs::create_dir_all(work.join("src")).expect("create the work dir");
+    std::fs::create_dir_all(work.join("node_modules/jsbi")).expect("create the package dir");
+    std::fs::write(
+        work.join("package.json"),
+        "{ \"name\": \"orders\", \"private\": true, \"type\": \"module\" }\n",
+    )
+    .expect("write the fixture manifest");
+    std::fs::write(
+        work.join("node_modules/jsbi/package.json"),
+        "{ \"name\": \"jsbi\", \"version\": \"0.0.1\", \"type\": \"module\", \
+         \"exports\": \"./index.mjs\" }\n",
+    )
+    .expect("write the package manifest");
+    std::fs::write(
+        work.join("node_modules/jsbi/index.mjs"),
+        "export const tag = \"own jsbi\";\n",
+    )
+    .expect("write the package");
+    std::fs::write(
+        work.join("src/order.ts"),
+        "export function loadOrder(id: string): string {\n  if (id !== \"a1\") {\n    \
+         throw new Error(\"no such order\");\n  }\n  return id;\n}\n",
+    )
+    .expect("write the module");
+    std::fs::write(
+        work.join("app.ts"),
+        "import { tag } from \"jsbi\";\nimport { loadOrder } from \"./src/order.ts\";\n\n\
+         console.log(tag);\nconsole.log(loadOrder(\"zz\"));\n",
+    )
+    .expect("write the entry");
+    let app_sources = [
+        "../app.ts",
+        "../node_modules/jsbi/index.mjs",
+        "../src/order.ts",
+    ];
+    let compile = |args: &[&str], out: &Path| {
+        let compiled = Command::new(nub_binary())
+            .arg("compile")
+            .args(args)
+            .arg("--out")
+            .arg(out)
+            .arg("app.ts")
+            .current_dir(&work)
+            .env("XDG_CACHE_HOME", &cache)
+            .env("__NUB_LAUNCHER_TEMPLATE", &runtime.launcher)
+            .output()
+            .expect("spawn nub compile");
+        assert!(
+            compiled.status.success(),
+            "compile {args:?} failed: {}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&compiled.stdout),
+            String::from_utf8_lossy(&compiled.stderr)
+        )
+    };
+
+    // Ahead of the single-executable half, so it runs on every host. `--smol`
+    // embeds no Node, so the old target costs no download, and `external` writes
+    // the map beside the artifact under the entry chunk's name.
+    let floor = work.join(format!("orders-floor{}", std::env::consts::EXE_SUFFIX));
+    compile(
+        &["--smol", "--target", "22.20.0", "--sourcemap=external"],
+        &floor,
+    );
+    let floor_map: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(work.join("app.mjs.map")).expect("the external map is beside the artifact"),
+    )
+    .expect("the external map is JSON");
+    let (runtime_sources, others) = compiled_map_sources(&floor_map);
+    assert_eq!(
+        others, app_sources,
+        "every source outside the application must be named under `runtime/`, never by \
+         where the building machine keeps the runtime or its packages: {runtime_sources:?}"
+    );
+    for package in ["@js-temporal/polyfill", "jsbi"] {
+        let prefix = format!("runtime/node_modules/{package}/");
+        assert!(
+            runtime_sources
+                .iter()
+                .any(|source| source.starts_with(&prefix)),
+            "a 22.20 target bundles the runtime's {package}, which should be named under \
+             {prefix}: {runtime_sources:?}"
+        );
+    }
+
+    let summary = compile(
+        &["--sourcemap", "--target", &runtime.node_target],
+        &artifact,
+    );
+    if !summary.contains("a single-executable application") {
+        assert!(
+            !sea_container_is_available(&runtime.node_target),
+            "the payload declined the single-executable container, so this case tested \
+             nothing. Compile summary:\n{summary}"
+        );
+        return;
+    }
+
+    let ran = run_compiled_artifact_with_timeout(&artifact, &work);
+    let stdout = String::from_utf8_lossy(&ran.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&ran.stderr).into_owned();
+    assert_eq!(
+        ran.status.code(),
+        Some(1),
+        "an uncaught error must exit 1\nstderr: {stderr}"
+    );
+    assert_eq!(
+        stdout, "own jsbi\n",
+        "the application's own jsbi must be the one it imports"
+    );
+    let mut lines = stderr.lines().skip_while(|line| line.trim().is_empty());
+    let header = lines.next().unwrap_or_default();
+    let source_line = lines.next().unwrap_or_default();
+    assert!(
+        header.ends_with("order.ts:3")
+            && source_line.trim() == "throw new Error(\"no such order\");",
+        "the header must name the line that threw, not the loader that reported it\n\
+         stderr: {stderr}"
+    );
+
+    // The inline map rides inside the chunk, so it is read out of the executable.
+    let bytes = std::fs::read(&artifact).expect("read the artifact");
+    let marker = b"sourceMappingURL=data:application/json;charset=utf-8;base64,";
+    let start = bytes
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .expect("the artifact carries an inline source map")
+        + marker.len();
+    let encoded: Vec<u8> = bytes[start..]
+        .iter()
+        .copied()
+        .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+        .collect();
+    use base64::Engine as _;
+    let map: serde_json::Value = serde_json::from_slice(
+        &base64::engine::general_purpose::STANDARD
+            .decode(&encoded)
+            .expect("the inline map is base64"),
+    )
+    .expect("the inline map is JSON");
+    let (runtime_sources, others) = compiled_map_sources(&map);
+    assert_eq!(
+        others, app_sources,
+        "every source outside the application must be named under `runtime/`, never by \
+         where the building machine keeps the runtime: {runtime_sources:?}"
+    );
+    assert!(
+        !runtime_sources.is_empty(),
+        "the prelude's runtime modules should still be mapped: {others:?}"
+    );
+}
+
 #[cfg(feature = "compile")]
 #[test]
 fn compile_resolves_commonjs_requires_of_esm() {

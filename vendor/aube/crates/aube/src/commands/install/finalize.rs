@@ -354,29 +354,6 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
         }
     }
 
-    if !ignore_scripts && strict_dep_builds_setting && !virtual_store_only {
-        let unreviewed = unreviewed_dep_builds(
-            aube_dir,
-            graph_for_link,
-            build_policy,
-            default_trust_floor,
-            virtual_store_dir_max_length,
-            placements_ref,
-        )?
-        .unreviewed;
-        if !unreviewed.is_empty() {
-            return Err(miette!(
-                "dependencies with build scripts must be reviewed before install:\n{}\nhelp: add the package(s) to `{}` with `true`/`false`, or set `strictDepBuilds=false`",
-                unreviewed
-                    .into_iter()
-                    .map(|b| format!("  - {}", b.spec_key))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                aube_manifest::allow_scripts_field_name(),
-            ));
-        }
-    }
-
     let dep_build_policy_hash = dep_build_policy_hash(
         build_policy,
         default_trust_floor,
@@ -396,6 +373,14 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
             virtual_store_only,
         )
     };
+
+    // Recorded once the tree is linked and before any script can fail,
+    // so a failed hook never leaves the previous install's groups behind.
+    if !virtual_store_only {
+        state::write_dep_selection(cwd, dep_selection)
+            .into_diagnostic()
+            .wrap_err("failed to record the installed dependency groups")?;
+    }
 
     // 7a. Dependency lifecycle scripts (allowBuilds).
     //     Every dep that the `BuildPolicy` explicitly allows runs its
@@ -569,7 +554,7 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
     // The same walk also separates out the builds this run deferred for
     // a reason it invented rather than one the config decided — see
     // `UnreviewedScan::deferred`.
-    let scan = if !ignore_scripts && !strict_dep_builds_setting && !virtual_store_only {
+    let scan = if !ignore_scripts && !virtual_store_only {
         unreviewed_dep_builds(
             aube_dir,
             graph_for_link,
@@ -577,6 +562,8 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
             default_trust_floor,
             virtual_store_dir_max_length,
             placements_ref,
+            None,
+            None,
         )?
     } else {
         super::lifecycle::UnreviewedScan::default()
@@ -880,19 +867,16 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
         );
     }
 
-    // Surface packages whose build scripts were skipped because they're
-    // not on the `allowBuilds` / `onlyBuiltDependencies` allowlist. Without
-    // this, a fresh install of a project that depends on native bindings
-    // (`better-sqlite3`, `esbuild`, napi-rs packages, etc.) looks like it
-    // succeeded but leaves those packages unbuilt — the failure only
-    // surfaces later when something tries to `require` the binding.
-    // Skipped under `--ignore-scripts`, `virtualStoreOnly`, and
-    // `strictDepBuilds=true` (the strict path already errored above).
-    if !unreviewed_builds.is_empty() {
-        unreviewed_builds::emit_warning(&unreviewed_builds);
-    }
-
-    Ok(())
+    // Packages whose build scripts were skipped because nothing approved
+    // them. Without this, a fresh install of a project that depends on
+    // native bindings (`better-sqlite3`, napi-rs packages, etc.) looks like
+    // it succeeded but leaves those packages unbuilt. Under
+    // `strictDepBuilds` (the default, as in pnpm 12) the install fails
+    // here — after `node_modules`, the approved builds, the root hooks and
+    // the state file are all in place, so the next step is approving, and
+    // a repeat install fails the same way from the warm path. Skipped
+    // under `--ignore-scripts` and `virtualStoreOnly`, which collect none.
+    unreviewed_builds::report(&unreviewed_builds, strict_dep_builds_setting, cwd)
 }
 
 #[cfg(test)]

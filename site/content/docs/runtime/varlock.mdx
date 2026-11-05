@@ -27,6 +27,16 @@ nub index.ts
 nub run dev
 ```
 
+Varlock invocations you write yourself run exactly as written. A script that calls Varlock directly keeps its own flags, and Nub does not add a second Varlock run in front of it.
+
+```json title="package.json"
+{
+  "scripts": {
+    "build": "varlock run --path ./config -- node build.js"
+  }
+}
+```
+
 Nub looks for the schema in the package you are running, then walks up to the workspace root. The nearest one wins, so a package with its own schema keeps it.
 
 A project that depends on [dotenv-extended](https://www.npmjs.com/package/dotenv-extended), which uses the `.env.schema` name for its own format, keeps Nub's own environment loading.
