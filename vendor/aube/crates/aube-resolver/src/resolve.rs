@@ -267,7 +267,10 @@ fn link_workspace_members(
         let Some((dir, version)) = members.get(&dep.name) else {
             continue;
         };
-        if packages.contains_key(&dep.dep_path) || dep.dep_path != format!("{}@{version}", dep.name)
+        if dep.dep_path != format!("{}@{version}", dep.name)
+            || packages
+                .get(&dep.dep_path)
+                .is_some_and(|pkg| pkg.alias_of.is_some())
         {
             continue;
         }
@@ -290,24 +293,36 @@ fn link_workspace_members(
 
 /// Undoes [`link_workspace_members`] for the importers, which the workspace
 /// linker links itself, and drops each linked member nothing else reaches.
+///
+/// The linkers read an importer's `name@version` as the member only while no
+/// package holds that key. When a registry package does, because something else
+/// depends on the registry copy at the member's own version, the importer keeps
+/// its link, or it would load the registry copy.
 fn unlink_workspace_members(graph: &mut LockfileGraph, links: &BTreeMap<String, String>) {
     if links.is_empty() {
         return;
     }
-    for dep in graph.importers.values_mut().flatten() {
-        if let Some(original) = links.get(&dep.dep_path) {
+    let LockfileGraph {
+        importers,
+        packages,
+        ..
+    } = graph;
+    for dep in importers.values_mut().flatten() {
+        if let Some(original) = links.get(&dep.dep_path)
+            && !packages.contains_key(original)
+        {
             dep.dep_path = original.clone();
         }
     }
-    let reached: std::collections::BTreeSet<String> = graph
-        .packages
+    let reached: std::collections::BTreeSet<String> = packages
         .values()
         .flat_map(|pkg| pkg.dependencies.iter())
         .map(|(name, tail)| format!("{name}@{tail}"))
+        .chain(importers.values().flatten().map(|dep| dep.dep_path.clone()))
         .collect();
     for key in links.keys() {
         if !reached.contains(key) {
-            graph.packages.remove(key);
+            packages.remove(key);
         }
     }
 }
