@@ -1327,7 +1327,33 @@ fn a_compiled_closure_loads_the_installs_its_packages_resolve() {
             &["--unbundled", "logger"],
             Err("two different packages would occupy node_modules/foo"),
         ),
-        // The control for the two above: copies whose dependencies are also only copies
+        // The same, with only the files to tell the two installs apart.
+        (
+            "a stub replaced by one version with other code",
+            [
+                pkg("node_modules/logger", "1.0.0", &["foo"], calls_foo),
+                pkg("node_modules/foo", "1.0.0", &[], ""),
+                pkg(
+                    "node_modules/holder",
+                    "1.0.0",
+                    &["foo", "pino"],
+                    uses_foo_transport,
+                ),
+                pkg(
+                    "node_modules/holder/node_modules/foo",
+                    "1.0.0",
+                    &[],
+                    "module.exports = () => \"other code\";\n",
+                ),
+                pino("node_modules/pino"),
+            ]
+            .concat(),
+            vec![],
+            wrapper_and_holder,
+            &["--unbundled", "logger"],
+            Err("two different packages would occupy node_modules/foo"),
+        ),
+        // The control for the three above: copies whose dependencies are also only copies
         // are one package, and share the directory.
         (
             "byte-identical hoisted copies",
@@ -1573,6 +1599,35 @@ fn a_compiled_closure_loads_the_installs_its_packages_resolve() {
             &["--unbundled", "r"],
             Ok("pino-pretty 2.0.0 pino-pretty 1.0.0"),
         ),
+        // `foo` has to move, so planning runs twice. Each pass has to add what the first
+        // added: a root nothing imports, and a transport relocated from a nested install.
+        (
+            "an unimported --unbundled package and a transport across a replan",
+            [
+                pkg("node_modules/r", "1.0.0", &["foo"], calls_foo),
+                pkg("node_modules/foo", "1.0.0", &["pino-pretty"], calls_pretty),
+                pkg("node_modules/foo/node_modules/pino-pretty", "2.0.0", &[], ""),
+                pkg("node_modules/pino-pretty", "1.0.0", &[], ""),
+                pkg("node_modules/extra", "1.0.0", &[], ""),
+                pkg(
+                    "node_modules/holder",
+                    "1.0.0",
+                    &["fake-transport", "pino"],
+                    "const pino = require(\"pino\");\n\
+                     module.exports = () => pino({ transport: { target: \"fake-transport\" } }, __filename);\n",
+                ),
+                pkg("node_modules/holder/node_modules/fake-transport", "2.0.0", &[], ""),
+                pino("node_modules/pino"),
+            ]
+            .concat(),
+            vec![],
+            "import pino from \"pino\";\nimport r from \"r\";\nimport top from \"pino-pretty\";\n\
+             import holder from \"holder\";\n\
+             const target = [\"ex\", \"tra\"].join(\"\");\n\
+             console.log(r(), top(), pino({ transport: { target } }, import.meta.url), holder());\n",
+            &["--unbundled", "r", "--unbundled", "extra"],
+            Ok("pino-pretty 2.0.0 pino-pretty 1.0.0 extra 1.0.0 fake-transport 2.0.0"),
+        ),
         // A bundled package's stub under `v` sits on `v`'s own lookup path, ahead of the
         // top-level install `v` resolves.
         (
@@ -1796,6 +1851,46 @@ fn a_transport_named_only_as_a_string_ships_with_the_binary() {
             format!("import holder from \"holder\";\n{literal}console.log(holder());\n"),
             &[],
             Err("two different installs"),
+        ),
+        // One version with other code, which only the files can tell apart: a local or
+        // tarball install shares a manifest as readily as any other two.
+        (
+            "bundled callers that resolve one version with other code",
+            vec![
+                ("pino", pino.clone()),
+                ("fake-transport", transport("1.0.0")),
+                (
+                    "holder",
+                    caller("holder", r#""pino":"*","fake-transport":"1.0.0""#),
+                ),
+                (
+                    "holder/node_modules/fake-transport",
+                    pkg(
+                        "fake-transport",
+                        "1.0.0",
+                        "",
+                        "module.exports = () => \"other code\";\n",
+                    ),
+                ),
+            ],
+            format!("import holder from \"holder\";\n{literal}console.log(holder());\n"),
+            &[],
+            Err("two different installs"),
+        ),
+        (
+            "bundled callers that resolve byte-identical copies",
+            vec![
+                ("pino", pino.clone()),
+                ("fake-transport", transport("1.0.0")),
+                (
+                    "holder",
+                    caller("holder", r#""pino":"*","fake-transport":"1.0.0""#),
+                ),
+                ("holder/node_modules/fake-transport", transport("1.0.0")),
+            ],
+            format!("import holder from \"holder\";\n{literal}console.log(holder());\n"),
+            &[],
+            Ok("transport 1.0.0\ntransport 1.0.0"),
         ),
         (
             "pino shipped inside an unbundled wrapper",

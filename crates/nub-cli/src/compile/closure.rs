@@ -2,9 +2,9 @@
 //!
 //! Ejecting a package used to eject everything it depends on. The predicate was
 //! evaluated once, at the root, and the rest of the closure inherited the verdict
-//! by association — an association nothing justified. `pdfkit` must ship verbatim
-//! because it reads its fonts off `__dirname`; `fontkit` never had to, and
-//! `@swc/helpers` shipped 438 files so that two of them could be loaded.
+//! by association — an association nothing justified. `jsdom` must ship verbatim
+//! because it reads a stylesheet from a path built at run time; `parse5` never had
+//! to, and its 64 files now ship as a chunk and a stub manifest.
 //!
 //! That matters more than the file count suggests. The launcher byte-verifies the
 //! WHOLE extracted tree on every warm start (`app_cache_tree_matches`), so an
@@ -13,8 +13,9 @@
 //!
 //! So [`super::native`] classifies every package in the closure on its own and
 //! hands the clean ones here. Each specifier an ejected package names across the
-//! boundary becomes an entry, and the chunk answering it is emitted AT the path
-//! Node will look for — `node_modules/fontkit/index.js` — beside a stub manifest.
+//! boundary becomes an entry, and the chunk answering it is emitted inside the
+//! directory Node will look in — `node_modules/parse5/__nub/0.js` — beside a stub
+//! manifest whose `exports` points at it.
 //! Writing the chunk in the stub's own directory rather than at the app root is
 //! what keeps a `require` of a still-verbatim neighbour resolving: Node walks up
 //! from the file that ran, which is exactly where the materialiser placed that
@@ -69,7 +70,7 @@ pub struct Entry {
     /// as Node would from there, `exports` map and all.
     pub importer: PathBuf,
     pub specifier: String,
-    /// Where the chunk lands: `node_modules/fontkit/__nub/0.js`.
+    /// Where the chunk lands: `node_modules/parse5/__nub/0.js`.
     pub chunk: String,
     pub esm: bool,
 }
