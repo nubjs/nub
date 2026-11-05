@@ -112,7 +112,7 @@ impl Resolver {
         resolved_times: BTreeMap<String, String>,
         skipped_optional_dependencies: BTreeMap<String, BTreeMap<String, String>>,
         catalog_picks: BTreeMap<String, BTreeMap<String, String>>,
-        workspace_members: &BTreeMap<String, (String, String)>,
+        importer_member_links: &ImporterMemberLinks,
     ) -> Result<LockfileGraph, Error> {
         let resolved_catalogs =
             catalog::materialize_catalog_picks(catalog_picks, resolved_versions);
@@ -207,7 +207,7 @@ impl Resolver {
         let _diag_peer =
             aube_util::diag::Span::new(aube_util::diag::Category::Resolver, "peer_context_apply");
         let mut hoisted = hoisted;
-        let member_links = link_workspace_members(&mut hoisted, workspace_members);
+        let member_links = link_workspace_members(&mut hoisted, importer_member_links);
         let mut contextualized = apply_peer_contexts(hoisted, &peer_options)?;
         unlink_workspace_members(&mut contextualized, &member_links);
         crate::remove_auto_installed_peers(&mut contextualized, &auto_installed_peers);
@@ -247,6 +247,10 @@ impl Resolver {
     }
 }
 
+/// Importer -> dependency name -> (member directory, member version), for each
+/// importer dependency the resolver bound to a workspace member.
+type ImporterMemberLinks = BTreeMap<String, BTreeMap<String, (String, String)>>;
+
 /// A workspace member is an importer, not a package, so an importer's
 /// dependency on one (`name@version`) has no graph entry. The peer pass then
 /// found nothing to link for a registry package whose peer the member
@@ -255,7 +259,7 @@ impl Resolver {
 /// the linked package the member is. Returns `link key -> name@version`.
 fn link_workspace_members(
     graph: &mut LockfileGraph,
-    members: &BTreeMap<String, (String, String)>,
+    importer_member_links: &ImporterMemberLinks,
 ) -> BTreeMap<String, String> {
     let LockfileGraph {
         importers,
@@ -263,15 +267,17 @@ fn link_workspace_members(
         ..
     } = graph;
     let mut links = BTreeMap::new();
-    for dep in importers.values_mut().flatten() {
-        let Some((dir, version)) = members.get(&dep.name) else {
+    for (importer, dep) in importers
+        .iter_mut()
+        .flat_map(|(importer, deps)| deps.iter_mut().map(move |dep| (importer, dep)))
+    {
+        let Some((dir, version)) = importer_member_links
+            .get(importer)
+            .and_then(|deps| deps.get(&dep.name))
+        else {
             continue;
         };
-        if dep.dep_path != format!("{}@{version}", dep.name)
-            || packages
-                .get(&dep.dep_path)
-                .is_some_and(|pkg| pkg.alias_of.is_some())
-        {
+        if dep.dep_path != format!("{}@{version}", dep.name) {
             continue;
         }
         let local = LocalSource::Link(dir.into());

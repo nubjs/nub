@@ -5662,11 +5662,10 @@ async fn a_peer_a_workspace_member_satisfies_links_to_the_member() {
     );
 }
 
-// `workspace:*` and a registry package that happens to depend on the member's
-// exact version name one key. The importer and its peer consumer have to stay on
-// the member, and only the registry package's own dependency on the registry copy.
-#[tokio::test]
-async fn a_member_and_a_registry_package_at_one_version_stay_distinct() {
+/// `packages/web` depends on `react` at `react_spec`, on `store` with a `react`
+/// peer, and on `uses-react` with an ordinary dependency on it. A member and the
+/// registry both have `react` at 18.2.0.
+async fn resolve_member_beside_registry_copy(react_spec: &str) -> LockfileGraph {
     let mut store = make_packument("store", &["1.2.0"], "1.2.0");
     store
         .versions
@@ -5702,13 +5701,13 @@ async fn a_member_and_a_registry_package_at_one_version_stay_distinct() {
         dependencies: [
             ("store".to_string(), "1.2.0".to_string()),
             ("uses-react".to_string(), "1.0.0".to_string()),
-            ("react".to_string(), "workspace:*".to_string()),
+            ("react".to_string(), react_spec.to_string()),
         ]
         .into(),
         ..PackageJson::default()
     };
 
-    let graph = resolver
+    resolver
         .resolve_workspace(
             &[
                 (".".to_string(), PackageJson::default()),
@@ -5722,7 +5721,15 @@ async fn a_member_and_a_registry_package_at_one_version_stay_distinct() {
             ]),
         )
         .await
-        .expect("resolve failed");
+        .expect("resolve failed")
+}
+
+// `workspace:*` and a registry package that happens to depend on the member's
+// exact version name one key. The importer and its peer consumer have to stay on
+// the member, and only the registry package's own dependency on the registry copy.
+#[tokio::test]
+async fn a_member_and_a_registry_package_at_one_version_stay_distinct() {
+    let graph = resolve_member_beside_registry_copy("workspace:*").await;
 
     let member = Some(aube_lockfile::LocalSource::Link("packages/react".into()));
     let web_react = graph.importers["packages/web"]
@@ -5743,6 +5750,32 @@ async fn a_member_and_a_registry_package_at_one_version_stay_distinct() {
         "18.2.0"
     );
     assert!(graph.packages["react@18.2.0"].local_source.is_none());
+}
+
+// A dist-tag names a registry version, so the importer's choice has to survive the
+// member sharing that version. It decides the peer consumer's provider too.
+#[tokio::test]
+async fn a_dist_tag_at_a_members_version_stays_on_the_registry() {
+    let graph = resolve_member_beside_registry_copy("latest").await;
+
+    let web_react = graph.importers["packages/web"]
+        .iter()
+        .find(|dep| dep.name == "react")
+        .unwrap();
+    assert_eq!(web_react.dep_path, "react@18.2.0");
+    assert!(graph.packages["react@18.2.0"].local_source.is_none());
+    assert_eq!(
+        graph.packages["store@1.2.0(react@18.2.0)"].dependencies["react"],
+        "18.2.0"
+    );
+    assert!(
+        !graph
+            .packages
+            .values()
+            .any(|pkg| matches!(pkg.local_source, Some(aube_lockfile::LocalSource::Link(_)))),
+        "{:?}",
+        graph.packages.keys().collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]

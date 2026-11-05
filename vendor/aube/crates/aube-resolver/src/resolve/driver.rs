@@ -16,6 +16,7 @@
 //! sibling-dedupe → lockfile-reuse → fetch-and-pick) is staged for a
 //! later refactor.
 
+use super::ImporterMemberLinks;
 use super::fetch::{FetchKey, FetchScheduler, TrustHistory};
 use super::seed::seed_direct_deps;
 use super::vulnerable::{is_vulnerable, prefer_non_vulnerable_pick};
@@ -147,6 +148,12 @@ pub(crate) struct ResolveDriver<'a> {
     /// Derived from the same `manifests` slice the importer seed walks,
     /// so the two can never disagree about the member set.
     workspace_member_importers: BTreeMap<String, String>,
+
+    /// The importer dependencies that bound to a workspace member, as importer ->
+    /// dependency name -> (member directory, member version). `name@version`
+    /// alone cannot say so: `latest` can select the registry copy at the member's
+    /// own version.
+    importer_member_links: ImporterMemberLinks,
 
     /// Borrowed set of names present in the existing lockfile. Used as
     /// a prefetch gate so packuments that will hit the lockfile-reuse
@@ -393,6 +400,7 @@ impl<'a> ResolveDriver<'a> {
             existing,
             workspace_packages,
             workspace_member_importers,
+            importer_member_links: BTreeMap::new(),
             existing_names,
             locked_index,
             importer_declared_dep_names,
@@ -462,14 +470,6 @@ impl<'a> ResolveDriver<'a> {
             )
         });
 
-        let workspace_members: BTreeMap<String, (String, String)> = self
-            .workspace_member_importers
-            .iter()
-            .filter_map(|(name, dir)| {
-                let version = self.workspace_packages.get(name)?;
-                Some((name.clone(), (dir.clone(), version.clone())))
-            })
-            .collect();
         let contextualized = self.resolver.finalize_resolved_graph(
             self.importers,
             self.resolved,
@@ -477,7 +477,7 @@ impl<'a> ResolveDriver<'a> {
             self.resolved_times,
             self.skipped_optional_dependencies,
             self.catalog_picks,
-            &workspace_members,
+            &self.importer_member_links,
         )?;
         if let Some((state, sem)) = self.packument_persist_handle {
             sem.persist(&state, "packument:default");
@@ -2977,7 +2977,7 @@ impl<'a> ResolveDriver<'a> {
             return false;
         }
         let ws_version = ws_version.clone();
-        match self.workspace_member_importers.get(&task.name) {
+        match self.workspace_member_importers.get(&task.name).cloned() {
             // A member is an importer and has no package entry, so a package's
             // edge to it lands on the `link:` package pnpm records there.
             Some(dir) if !task.is_root => {
@@ -2998,7 +2998,14 @@ impl<'a> ResolveDriver<'a> {
                     });
                 self.link_to_existing_version(task, &tail);
             }
-            _ => self.link_to_existing_version(task, &ws_version),
+            Some(dir) => {
+                self.importer_member_links
+                    .entry(task.importer.clone())
+                    .or_default()
+                    .insert(task.name.clone(), (dir, ws_version.clone()));
+                self.link_to_existing_version(task, &ws_version);
+            }
+            None => self.link_to_existing_version(task, &ws_version),
         }
         true
     }
