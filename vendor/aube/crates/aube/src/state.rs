@@ -2414,6 +2414,10 @@ fn hash_settings(project_dir: &Path, cli_flags: &[(String, String)]) -> String {
         }
     }
     hasher.update(b"\0");
+    // The rules `install::bin_linking` decides a shared bin name by. Bump when
+    // they change what a `.bin` holds: an upgrade would otherwise keep the old
+    // shims behind "already up to date" until something else moved this hash.
+    hasher.update(b"bin_rules=1\0");
     format!("blake3:{}", hasher.finalize().to_hex())
 }
 

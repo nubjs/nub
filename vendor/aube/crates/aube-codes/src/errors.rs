@@ -449,7 +449,7 @@ pub const ALL: &[CodeMeta] = &[
     CodeMeta {
         name: ERR_AUBE_SIMILAR_PACKAGE_NAME,
         category: category::SUPPLY_CHAIN,
-        description: "`aube add` refused a package whose name closely resembles a more popular npm package. This protects against typosquatting and slopsquatting.",
+        description: "`aube add` refused a package whose name closely resembles a more popular npm package. This protects against typosquatting and slopsquatting. Pass `--allow-similar-name` to bypass.",
         exit_code: None,
     },
     CodeMeta {
@@ -461,7 +461,7 @@ pub const ALL: &[CodeMeta] = &[
     CodeMeta {
         name: ERR_AUBE_NEW_PACKAGE_NAME,
         category: category::SUPPLY_CHAIN,
-        description: "`aube add` refused a package name first published within `minimumPackageAge`. This protects against newly registered slopsquatting names.",
+        description: "`aube add` refused a package name first published within `minimumPackageAge`. This protects against newly registered slopsquatting names. Pass `--allow-new-name` to bypass.",
         exit_code: None,
     },
     CodeMeta {

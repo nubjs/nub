@@ -2259,6 +2259,13 @@ mod tests {
         assert_eq!(add.allow_build, ["esbuild"]);
         assert_eq!(add.packages, ["lodash", "react"]);
 
+        let (_, add) = parse!(
+            AddCli,
+            "add",
+            &["--allow-similar-name", "--allow-new-name", "reylo"]
+        );
+        assert!(add.allow_similar_name && add.allow_new_name && !add.allow_low_downloads);
+
         let (_, rm) = parse!(RemoveCli, "rm", &["-g", "lodash"]);
         assert!(rm.global);
         assert_eq!(rm.packages, ["lodash"]);
