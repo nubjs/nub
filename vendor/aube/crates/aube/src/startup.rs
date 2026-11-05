@@ -459,7 +459,8 @@ pub(crate) fn package_manager_guard_mode(command: Option<&Commands>) -> PackageM
 
 pub(crate) fn compute_effective_filter(cli: &Cli) -> aube_workspace::selector::EffectiveFilter {
     let mut filters = cli.filter.clone();
-    if cli.recursive && filters.is_empty() && cli.filter_prod.is_empty() {
+    let recursive = cli.recursive && filters.is_empty() && cli.filter_prod.is_empty();
+    if recursive {
         filters.push("*".to_string());
     }
     aube_workspace::selector::EffectiveFilter {
@@ -467,5 +468,6 @@ pub(crate) fn compute_effective_filter(cli: &Cli) -> aube_workspace::selector::E
         filter_prods: cli.filter_prod.clone(),
         fail_if_no_match: cli.fail_if_no_match,
         include_workspace_root: cli.include_workspace_root || cli.workspace_root,
+        recursive,
     }
 }

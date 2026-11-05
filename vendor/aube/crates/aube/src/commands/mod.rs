@@ -173,6 +173,6 @@ pub use settings_context::{
 };
 pub(crate) use workspace_helpers::{
     collect_dep_closure, find_workspace_root, finish_filtered_workspace, load_graph,
-    prepare_resolved_graph_for_lockfile_write, retarget_cwd, select_workspace_packages,
-    workspace_importer_path, write_and_log_lockfile,
+    prepare_resolved_graph_for_lockfile_write, retarget_cwd, select_projects,
+    select_workspace_packages, workspace_importer_path, write_and_log_lockfile,
 };

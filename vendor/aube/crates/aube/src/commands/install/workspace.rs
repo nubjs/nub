@@ -119,12 +119,8 @@ pub(super) fn filter_graph_to_workspace_selection(
     graph: &aube_lockfile::LockfileGraph,
     filters: &aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<aube_lockfile::LockfileGraph> {
-    let selected = aube_workspace::selector::select_workspace_packages(
-        workspace_root,
-        workspace_packages,
-        filters,
-    )
-    .map_err(|e| miette!("invalid --filter selector: {e}"))?;
+    let selected =
+        crate::commands::select_projects(workspace_root, workspace_packages, filters, "install")?;
     if selected.is_empty() {
         return Err(miette!(
             "{}: filter {filters:?} did not match any workspace package",
@@ -174,12 +170,12 @@ pub(super) fn per_project_write_selection(
     if workspace_filter.is_empty() {
         return Ok(None);
     }
-    let selected = aube_workspace::selector::select_workspace_packages(
+    let selected = crate::commands::select_projects(
         workspace_root,
         workspace_packages,
         workspace_filter,
-    )
-    .map_err(|e| miette!("invalid --filter selector: {e}"))?;
+        "install",
+    )?;
     let mut keys = std::collections::BTreeSet::new();
     for pkg in &selected {
         keys.insert(workspace_importer_path(workspace_root, &pkg.dir)?);
@@ -349,20 +345,29 @@ pub(crate) fn parse_member_lockfile(
     Ok(graph)
 }
 
+/// The workspace root when `project_dir` is a member of a workspace that
+/// keeps one lockfile per project; `None` for the root itself, a shared
+/// lockfile, or no workspace. Install runs at that root, so it holds the
+/// member's store, install state and settings.
+pub(crate) fn unshared_lockfile_workspace_root(project_dir: &Path) -> Option<PathBuf> {
+    let root = crate::dirs::find_workspace_root(project_dir)?;
+    let shared = crate::commands::with_settings_ctx(
+        &root,
+        aube_settings::resolved::shared_workspace_lockfile,
+    );
+    (root != project_dir && !shared).then_some(root)
+}
+
 /// The lockfile of the project at `project_dir`, in the frame its installation
 /// used: a member of a workspace with per-project lockfiles reads through
 /// [`parse_member_lockfile`], so a local package's key matches the one its
-/// store entry was materialized under.
+/// store entry was materialized under, and its path is relative to the
+/// workspace root [`unshared_lockfile_workspace_root`] names.
 pub(crate) fn parse_project_lockfile(
     project_dir: &Path,
     manifest: &aube_manifest::PackageJson,
 ) -> Result<aube_lockfile::LockfileGraph, aube_lockfile::Error> {
-    if let Some(root) = crate::dirs::find_workspace_root(project_dir)
-        && root != project_dir
-        && !crate::commands::with_settings_ctx(
-            &root,
-            aube_settings::resolved::shared_workspace_lockfile,
-        )
+    if let Some(root) = unshared_lockfile_workspace_root(project_dir)
         && let Ok(importer_path) = workspace_importer_path(&root, project_dir)
     {
         return parse_member_lockfile(&root, &importer_path, manifest);

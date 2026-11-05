@@ -1,9 +1,9 @@
 ---
 title: Bun
-description: When Bun is the incumbent, Nub installs against it — Bun's text lockfile round-trips byte-for-byte, its trusted-dependencies list gates build scripts, and overrides, resolutions, patches, and catalogs all resolve Bun's way.
+description: When Bun owns a project, Nub reads and writes its text lockfile unchanged, gates build scripts on its trusted-dependencies list, and resolves overrides, patches, and catalogs the way Bun does.
 ---
 
-When Bun is the incumbent package manager, Nub installs against it and writes no lockfile of its own. The `bun.lock` text lockfile round-trips byte-for-byte; `trustedDependencies`, `overrides` / `resolutions`, `patchedDependencies`, and workspaces + catalogs all resolve the way Bun resolves them. Everything below is gated on Bun being the incumbent — a `packageManager: "bun@…"` field or an existing `bun.lock`.
+When Bun is the incumbent — a `packageManager: "bun@…"` field or an existing `bun.lock` — Nub installs against Bun's lockfile and writes none of its own. Overrides, resolutions, patches, workspaces, and catalogs resolve the way Bun resolves them.
 
 ## Configuration
 
@@ -41,7 +41,7 @@ When Bun is the incumbent package manager, Nub installs against it and writes no
 
 ## `bun.lock`
 
-The text lockfile (Bun 1.2+ default) is read, written, and preserved as-is.
+Nub reads and writes the text lockfile, the default since Bun 1.2, and leaves it byte-identical when nothing changes:
 
 ```console
 # captured: nub 0.0.44 — install in a bun.lock project, then diff the lock
@@ -56,9 +56,7 @@ $ ls pnpm-lock.yaml              # ✓ no foreign lockfile written
 ls: pnpm-lock.yaml: No such file or directory
 ```
 
-## `bun.lockb`
-
-The legacy binary lockfile (pre-1.2) is **not** read. With only a `bun.lockb` and no text `bun.lock`, Nub refuses up front rather than guess or fall through to another format:
+The binary `bun.lockb` from before Bun 1.2 is not read. A project with only a `bun.lockb` fails up front:
 
 ```console wide
 # captured: nub 0.0.44 — a project with only bun.lockb
@@ -72,22 +70,45 @@ ERR_NUB_LOCKFILE_PARSE          # ❌ binary format rejected
       where text is the default
 ```
 
-Run `bun install --save-text-lockfile` once to migrate, then Nub round-trips the resulting `bun.lock`.
+Run `bun install --save-text-lockfile` once to migrate.
 
-## `trustedDependencies`
+## `bunfig.toml`
 
-Bun gates dependency build scripts behind a `trustedDependencies` allowlist in `package.json`. Nub mirrors it exactly when Bun is the incumbent: listed packages run their `install`/`postinstall` scripts, everything else is installed without building.
+Nub reads the install settings from the project `bunfig.toml` and the global `.bunfig.toml` in `XDG_CONFIG_HOME`, or `HOME` when that is unset. Project config wins.
+
+- `[install].registry` — a URL string, or a `{ url, token, username, password }` object
+- `[install.scopes]` — scoped registries, in either form
+- `[install].cafile`, `[install].ca` — the same TLS trust as the `.npmrc` `cafile` and `ca` keys
+- `[install].minimumReleaseAge`, `[install].minimumReleaseAgeExcludes` — the [cooling window](/docs/install#cooling-window), converted from Bun's seconds
+
+The `BUN_CONFIG_REGISTRY` and `BUN_CONFIG_TOKEN` environment variables set the default registry and its token, and outrank the file.
 
 <Callout>
-Read the [full docs](https://bun.com/docs/pm/lifecycle#trusteddependencies) on bun.com.
+Read the [full docs](https://bun.com/docs/runtime/bunfig) on bun.com.
 </Callout>
 
-```jsonc title="package.json"
+For registry, auth, or TLS settings shared with other tools, use `.npmrc`, which Nub reads under every incumbent:
+
+```ini title=".npmrc"
+//registry.example.com/:_authToken=${NPM_TOKEN}
+@myscope:registry=https://registry.example.com/
+cafile=./corp-ca.pem
+```
+
+## Install behavior
+
+Bun gates dependency build scripts behind the `trustedDependencies` list in `package.json`, and Nub does the same. Listed packages run their `install` and `postinstall` scripts; everything else installs without building.
+
+```json title="package.json"
 {
   "dependencies": { "esbuild": "0.21.5" },
   "trustedDependencies": ["esbuild"]
 }
 ```
+
+<Callout>
+Read the [full docs](https://bun.com/docs/pm/lifecycle#trusteddependencies) on bun.com.
+</Callout>
 
 ```console wide
 # captured: nub 0.0.44 — esbuild NOT in trustedDependencies — build skipped
@@ -109,40 +130,11 @@ dependencies:
 nub 0.0.44 · ✓ installed 2 packages in 35ms
 ```
 
-Nub's curated default-trust floor is inert over a `bun.lock`: its cooling-window gate needs per-package publish times, which `bun.lock` does not carry, so it fails closed. Only `trustedDependencies` builds anything, matching Bun.
+Nub's [default-trust floor](/docs/install#default-trust-floor) builds nothing over a `bun.lock`. Its cooling-window gate needs publish times, which `bun.lock` does not record, so only `trustedDependencies` builds anything, as in Bun.
 
-## `bunfig.toml`
-
-Nub reads a small install-only subset of Bun config when Bun is the incumbent package manager: project `bunfig.toml`, plus global `.bunfig.toml` from `XDG_CONFIG_HOME` (or `HOME` when `XDG_CONFIG_HOME` is unset). Project config wins over global config.
-
-<Callout>
-Read the [full docs](https://bun.com/docs/runtime/bunfig) on bun.com.
-</Callout>
-
-Supported today:
-
-- `[install].registry` as a string URL or `{ url, token, username, password }` object. Auth-only objects without `url` apply to the default npm registry.
-- `[install.scopes]` entries as string URLs or registry objects. Auth-only scoped objects inherit `[install].registry`, or the default npm registry when no default is configured, for registry routing.
-- `[install].cafile` (a path to a PEM file) and `[install].ca` (inline PEM, single string or array), mapped onto the same TLS trust the `.npmrc` `cafile` / `ca` keys feed.
-- `[install].minimumReleaseAge` and `[install].minimumReleaseAgeExcludes`, converted from bunfig's seconds to Nub's minutes.
-
-Plus `BUN_CONFIG_REGISTRY` and `BUN_CONFIG_TOKEN` from the environment, which set the default registry and its auth token and outrank the file config.
-
-Not read: `[install].linker`. A Bun-owned project can set [`install.linker` in `nub.jsonc`](/docs/config#installlinker), put `node-linker` in `.npmrc`, or pass `--node-linker` for one command. See [layout settings](/docs/install#layout-settings).
-
-Unreadable or invalid TOML is ignored rather than failing the install.
+Nub does not read `[install].linker`. Set layout with [`install.linker` in `nub.jsonc`](/docs/config#installlinker), `node-linker` in `.npmrc`, or `--node-linker` for one command.
 
 ## Gaps
 
-- **Install-only `bunfig.toml`.** The `[install]` keys (registry, scopes, TLS, release-age gate) are read; `linker`, runtime/test/serve fields, the security scanner, cache and global-dir behavior, and the wider `BUN_CONFIG_*` install-behavior family (retry, lockfile, and skip toggles) have no effect. Custom CAs work through bunfig's `[install] cafile` and `ca` keys, and through the `.npmrc` `cafile` / `ca` keys, which work under every incumbent — see [Custom CAs](/docs/install/npm#custom-cas). For registry, auth, or TLS that must be shared across tools, `.npmrc` is the most portable home:
-
-  ```ini title=".npmrc"
-  //registry.example.com/:_authToken=${NPM_TOKEN}
-  @myscope:registry=https://registry.example.com/
-  cafile=./corp-ca.pem
-  ```
-
-  A scoped credential whose registry URL matches the default registry keeps its scoped route, but Nub does not widen it into registry-wide auth.
-
-- **No `bun.lockb`.** The binary lockfile is rejected, not migrated — run `bun install --save-text-lockfile` to produce a `bun.lock` first.
-- **Default-trust floor inert over `bun.lock`.** No publish-time data means curated packages aren't auto-trusted; only `trustedDependencies` builds.
+- **No `bun.lockb`.** Convert to a text `bun.lock` first.
+- **Only the `[install]` settings above.** Nub ignores the rest of `bunfig.toml`: `linker`, runtime, test, and serve fields, the security scanner, and cache and global-dir settings. Other `BUN_CONFIG_*` variables, such as the retry, lockfile, and skip toggles, have no effect.
