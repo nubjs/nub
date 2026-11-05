@@ -17,6 +17,11 @@ tests/fixtures/import-text-named/*  text eol=lf
 tests/fixtures/data-loaders-require/*       text eol=lf
 tests/fixtures/loader-redirect-both-ways/*  text eol=lf
 
+# `data-loaders-fidelity` compares stdout to this file. Only the answer is pinned:
+# the documents keep the platform's line endings, so the Windows leg also parses
+# CRLF YAML and TOML.
+tests/fixtures/data-loaders-fidelity/expected.txt  text eol=lf
+
 # Same trap, third form: the compile-augmentation harness reads `*.flags` as
 # ARGV and `*.differs` as a reason string, so a CRLF checkout appends `\r` to a
 # flag's value. On Windows that turned `--sourcemap=inline` into

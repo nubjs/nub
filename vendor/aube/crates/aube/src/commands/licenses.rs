@@ -89,7 +89,7 @@ pub async fn run(args: LicensesArgs) -> miette::Result<()> {
 
     let manifest = super::load_manifest(&cwd.join("package.json"))?;
 
-    let graph = match aube_lockfile::parse_lockfile(&cwd, &manifest) {
+    let graph = match super::install::parse_project_lockfile(&cwd, &manifest) {
         Ok(g) => g,
         Err(aube_lockfile::Error::NotFound(_)) => {
             eprintln!(
@@ -103,8 +103,15 @@ pub async fn run(args: LicensesArgs) -> miette::Result<()> {
 
     let filter = DepFilter::from_flags(args.prod, args.dev);
     let filtered = graph.filter_deps(|d| filter.keeps(d.dep_type));
-    let installed_metadata =
-        collect_installed_metadata(&cwd, &graph, filtered.packages.keys().map(String::as_str))?;
+    // A member of a workspace with per-project lockfiles was installed from
+    // the root: its store, install state and the graph's local paths are the
+    // root's.
+    let install_root = super::install::unshared_lockfile_workspace_root(&cwd).unwrap_or(cwd);
+    let installed_metadata = collect_installed_metadata(
+        &install_root,
+        &graph,
+        filtered.packages.keys().map(String::as_str),
+    )?;
     let rows = collect_rows(&filtered, &installed_metadata, args.long);
 
     if args.json {

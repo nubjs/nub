@@ -67,7 +67,9 @@ use lifecycle::{
     resolve_link_strategy, run_import_on_blocking, run_root_lifecycle_script,
     validate_required_scripts,
 };
-pub(crate) use workspace::order_lifecycle_manifests;
+pub(crate) use workspace::{
+    order_lifecycle_manifests, parse_project_lockfile, unshared_lockfile_workspace_root,
+};
 
 /// Record the project's pnpm pin in `pnpm-lock.yaml`'s env document after
 /// the lockfile is written (pnpm 11+ parity; see
@@ -634,6 +636,12 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     aube_util::diag::instant(aube_util::diag::Category::Install, "begin", None);
     let _diag_install = aube_util::diag::Span::new(aube_util::diag::Category::Install, "total");
 
+    // A `--filter` that selects no project changes nothing, as in pnpm:
+    // settled before the `--force` reset, the branch-lockfile merge and
+    // every hook.
+    if super::empty_selection_noop(&cwd, &opts.workspace_filter, "install")? {
+        return Ok(());
+    }
     if !opts.dry_run {
         apply_force_state_reset(&cwd, &opts)?;
     }
@@ -3196,7 +3204,10 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         ignore_scripts: opts.ignore_scripts,
         skip_root_lifecycle: opts.skip_root_lifecycle,
         npm_link_lifecycle: matches!(source_kind_before, Some(aube_lockfile::LockfileKind::Npm)),
-        workspace_filter_empty: opts.workspace_filter.is_empty(),
+        workspace_selection: workspace::linked_workspace_selection(
+            per_project_write_selection.as_ref(),
+            !has_workspace || link_all_workspace_importers,
+        ),
         dep_selection: opts.dep_selection,
         cli_flags: &opts.cli_flags,
         cached_count,

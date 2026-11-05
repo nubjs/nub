@@ -9,7 +9,7 @@ Extract a package into an edit directory so it can be patched
 ## Arguments
 - **`<PACKAGE>`** — Package spec, `<name>@<version>`.
 
-  The package must already be installed in `node_modules` (aube copies from the linked virtual store, not from the registry, so the layout matches what install would later patch).
+  The package must already be installed in `node_modules` (aube copies the files install linked, not a fresh registry download, so the layout matches what install would later patch).
 
 ## Flags
 - **`--edit-dir <DIR>`** — Directory to extract the writable copy into.
@@ -17,5 +17,5 @@ Extract a package into an edit directory so it can be patched
   When omitted, `aube` picks a fresh temp dir under the system tmpdir.
 - **`--ignore-existing`** — Ignore any existing patch entry for this package.
 
-  Extracts a pristine copy from `node_modules` rather than re-applying the existing patch first. Accepted for pnpm parity; aube already extracts from the *linked* (post-patch) tree, so this flag is effectively informational here.
+  Starts the edit copy from the package's original files instead of applying the existing patch first, so the committed patch replaces it rather than building on it.
 - **`-h --help`** — Print help

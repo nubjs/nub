@@ -70,6 +70,13 @@ fn resolve_dangerously_allow_all_builds(cwd: &Path, opts: &InstallOptions) -> bo
     aube_settings::resolved::dangerously_allow_all_builds(&ctx)
 }
 
+fn recursive_install(cwd: &Path, opts: &InstallOptions) -> bool {
+    let files = super::super::FileSources::load(cwd);
+    let raw_workspace = aube_manifest::workspace::load_raw(cwd).unwrap_or_default();
+    let ctx = files.ctx(&raw_workspace, &opts.env_snapshot, &opts.cli_flags);
+    aube_settings::resolved::recursive_install(&ctx)
+}
+
 fn install_fast_path_eligible(
     cwd: &Path,
     opts: &InstallOptions,
@@ -84,7 +91,6 @@ fn install_fast_path_eligible(
         && !opts.merge_git_branch_lockfiles
         && !opts.strict_no_lockfile
         && !dangerously_allow_all_builds
-        && opts.workspace_filter.is_empty()
         && modules_cache_sweep_default;
     if !preconditions_met {
         return false;
@@ -114,7 +120,30 @@ fn install_fast_path_eligible(
     // freshness reason is otherwise discarded here (only `.is_none()` is
     // consulted), leaving `aube install -v` silent on repeat-install loops
     // that originate from state drift rather than lockfile drift.
-    match state::check_needs_install_with_flags(cwd, &opts.cli_flags) {
+    // An install is up to date when the last one linked every importer
+    // this one would: the selection for `--filter`, the root alone under
+    // `recursiveInstall=false`. A selector that fails to resolve takes
+    // the full pipeline, which reports it.
+    let workspace_selection = if opts.workspace_filter.is_empty() {
+        let links_every_importer = recursive_install(cwd, opts)
+            || aube_workspace::find_workspace_packages(cwd).is_ok_and(|p| p.is_empty());
+        super::workspace::linked_workspace_selection(None, links_every_importer)
+    } else {
+        let Ok(packages) = aube_workspace::find_workspace_packages(cwd) else {
+            return false;
+        };
+        let Ok(Some(selected)) =
+            super::workspace::per_project_write_selection(cwd, &packages, &opts.workspace_filter)
+        else {
+            return false;
+        };
+        if selected.is_empty() {
+            return false;
+        }
+        super::workspace::linked_workspace_selection(Some(&selected), false)
+    };
+    match state::check_needs_install_with_flags(cwd, &opts.cli_flags, workspace_selection.as_ref())
+    {
         None => true,
         Some(reason) => {
             tracing::debug!("install warm path skipped: {reason}");

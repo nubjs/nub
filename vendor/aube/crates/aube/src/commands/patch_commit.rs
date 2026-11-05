@@ -4,6 +4,10 @@
 //! record a new `patchedDependencies` entry when needed, and re-run
 //! install so the patched files land in the linked tree.
 //!
+//! When the snapshot is the package's original files (the normal case,
+//! see `patch`), the diff is the complete patch and REPLACES the patch
+//! file, as `pnpm patch-commit` does.
+//!
 //! The patch format is git-compatible: each per-file hunk is wrapped
 //! in `diff --git a/<rel> b/<rel>` so a generated patch round-trips
 //! through `git apply` as well as aube's own applier in `aube-linker`.
@@ -79,7 +83,7 @@ pub async fn run(args: PatchCommitArgs) -> Result<()> {
         .into_diagnostic()
         .map_err(|e| miette!("failed to create {}: {e}", abs_dir.display()))?;
 
-    // Snapshot any existing patch so a re-patch can be rolled back to
+    // Snapshot any existing patch so a recommit can be rolled back to
     // the previous content if the manifest write fails. atomic_write
     // replaces unconditionally, so without the snapshot a re-patch
     // failure would leave the manifest pointing at a path that lost
@@ -94,15 +98,6 @@ pub async fn run(args: PatchCommitArgs) -> Result<()> {
             ));
         }
     };
-    let mut combined_patch = match &prior_patch {
-        Some(bytes) if had_existing_patch => String::from_utf8(bytes.clone())
-            .into_diagnostic()
-            .map_err(|e| miette!("existing patch {} is not UTF-8: {e}", abs_path.display()))?,
-        _ => String::new(),
-    };
-    if !combined_patch.is_empty() && !combined_patch.ends_with('\n') {
-        combined_patch.push('\n');
-    }
 
     // Invalidate freshness before mutating the patch. Declared patch
     // paths can live outside the default patches/ directory covered by
@@ -117,12 +112,30 @@ pub async fn run(args: PatchCommitArgs) -> Result<()> {
         )
     })?;
 
-    // A failed best-effort snapshot cleanup can leave the edit tree
-    // behind. Make retrying the exact patch-commit idempotent instead
-    // of appending its incremental hunks a second time.
-    if !had_existing_patch || !combined_patch.ends_with(&patch) {
-        combined_patch.push_str(&patch);
-        aube_util::fs_atomic::atomic_write(&abs_path, combined_patch.as_bytes())
+    // A diff taken against the original files is the whole patch, so it
+    // replaces the file, and retrying after a failed edit-snapshot
+    // cleanup rewrites identical bytes. A diff taken against an
+    // already-patched snapshot holds only the new edits: append it, and
+    // skip a retry whose hunks are already the file's tail.
+    let contents = match &prior_patch {
+        Some(bytes) if had_existing_patch && !state.replaces_patch => {
+            let mut combined = String::from_utf8(bytes.clone())
+                .into_diagnostic()
+                .map_err(|e| miette!("existing patch {} is not UTF-8: {e}", abs_path.display()))?;
+            if combined.ends_with(&patch) {
+                None
+            } else {
+                if !combined.is_empty() && !combined.ends_with('\n') {
+                    combined.push('\n');
+                }
+                combined.push_str(&patch);
+                Some(combined)
+            }
+        }
+        _ => Some(patch),
+    };
+    if let Some(contents) = contents {
+        aube_util::fs_atomic::atomic_write(&abs_path, contents.as_bytes())
             .into_diagnostic()
             .map_err(|e| miette!("failed to write {}: {e}", abs_path.display()))?;
     }
@@ -178,7 +191,7 @@ pub async fn run(args: PatchCommitArgs) -> Result<()> {
 
     // The patch and declaration are now committed. Drop the edit
     // snapshot before relinking so an unrelated install failure cannot
-    // lead the user to recommit the same incremental diff.
+    // lead the user to recommit the same diff.
     if let Some(parent) = state.user_dir.parent() {
         let _ = std::fs::remove_dir_all(parent);
     }
@@ -233,9 +246,10 @@ fn build_patch(state: &PatchState) -> Result<String> {
         let body = patch.to_string();
         let body = strip_default_headers(&body);
         // Match git's convention for added/deleted files: `--- /dev/null`
-        // for an addition, `+++ /dev/null` for a deletion. The linker
-        // recognizes these markers and creates / removes the file rather
-        // than writing an empty placeholder.
+        // for an addition, `+++ /dev/null` for a deletion, each under a
+        // `new file mode` / `deleted file mode` header. pnpm's applier
+        // rejects a whole-file addition or deletion that lacks the
+        // header, and the mode carries an executable bit through.
         let src_missing = !src.exists();
         let dst_missing = !dst.exists();
         let from_header = if src_missing {
@@ -249,6 +263,11 @@ fn build_patch(state: &PatchState) -> Result<String> {
             format!("+++ b/{rel_str}")
         };
         out.push_str(&format!("diff --git a/{rel_str} b/{rel_str}\n"));
+        if src_missing {
+            out.push_str(&format!("new file mode {}\n", git_file_mode(&dst)));
+        } else if dst_missing {
+            out.push_str(&format!("deleted file mode {}\n", git_file_mode(&src)));
+        }
         out.push_str(&from_header);
         out.push('\n');
         out.push_str(&to_header);
@@ -259,6 +278,20 @@ fn build_patch(state: &PatchState) -> Result<String> {
         }
     }
     Ok(out)
+}
+
+/// The mode git records a file with: `100755` when it is executable.
+fn git_file_mode(path: &Path) -> &'static str {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0) {
+            return "100755";
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    "100644"
 }
 
 /// Read a file as UTF-8 text. Returns `Ok(Some(""))` for missing files
@@ -320,4 +353,66 @@ fn strip_default_headers(s: &str) -> &str {
     let _ = iter.next();
     let _ = iter.next();
     iter.next().unwrap_or("")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn whole_file_additions_and_deletions_carry_git_mode_headers_and_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let (source, user) = (dir.path().join("source"), dir.path().join("user"));
+        for root in [&source, &user] {
+            std::fs::create_dir_all(root.join("bin")).unwrap();
+            std::fs::write(root.join("index.js"), "module.exports = 1;\n").unwrap();
+        }
+        std::fs::write(source.join("gone.js"), "old\n").unwrap();
+        std::fs::write(user.join("bin/cli.js"), "#!/usr/bin/env node\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let exec = std::fs::Permissions::from_mode(0o755);
+            std::fs::set_permissions(user.join("bin/cli.js"), exec).unwrap();
+        }
+        let state = PatchState {
+            name: "pkg".into(),
+            version: "1.0.0".into(),
+            project: None,
+            source_dir: source.clone(),
+            user_dir: user.clone(),
+            replaces_patch: true,
+        };
+        let patch = build_patch(&state).unwrap();
+
+        let new_mode = if cfg!(unix) { "100755" } else { "100644" };
+        assert!(
+            patch.contains(&format!(
+                "diff --git a/bin/cli.js b/bin/cli.js\nnew file mode {new_mode}\n--- /dev/null\n"
+            )),
+            "{patch}"
+        );
+        assert!(
+            patch.contains(
+                "diff --git a/gone.js b/gone.js\ndeleted file mode 100644\n--- a/gone.js\n"
+            ),
+            "{patch}"
+        );
+
+        aube_linker::apply_multi_file_patch(&source, &patch).unwrap();
+        assert!(!source.join("gone.js").exists());
+        assert_eq!(
+            std::fs::read_to_string(source.join("bin/cli.js")).unwrap(),
+            "#!/usr/bin/env node\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(source.join("bin/cli.js"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o755);
+        }
+    }
 }

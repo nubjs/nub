@@ -2257,6 +2257,7 @@ docs = "When `true`, workspace installs resolve and link all importers by defaul
 sources.cli = []
 sources.env = ["npm_config_recursive_install", "NPM_CONFIG_RECURSIVE_INSTALL", "AUBE_RECURSIVE_INSTALL"]
 sources.npmrc = ["recursiveInstall"]
+sources.workspaceYaml = ["recursiveInstall"]
 examples = []
 
 [engineStrict]

@@ -2054,6 +2054,10 @@ async fn run_filtered(
     reject_unsupported_pkg_specs(&args.packages)?;
     let cwd = crate::dirs::cwd()?;
     let (root, matched) = super::select_workspace_packages(&cwd, filter, "update")?;
+    if matched.is_empty() {
+        super::no_projects_matched(&root, filter, super::NoMatchReport::Scope)?;
+        return Ok(None);
+    }
     install::run_dev_preinstall(
         &root,
         args.ignore_scripts,

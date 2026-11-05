@@ -56,7 +56,8 @@ async fn rebuild_project(packages: &[String], importers: Option<&[String]>) -> m
     // store and takes build approvals from the root. So a member's graph comes
     // from its own lockfile and everything else — store, settings, policy,
     // the project the scripts run for — from the root, as install did.
-    let cwd = unshared_lockfile_workspace_root(&project_dir).unwrap_or_else(|| project_dir.clone());
+    let cwd = super::install::unshared_lockfile_workspace_root(&project_dir)
+        .unwrap_or_else(|| project_dir.clone());
     // A root holding only `pnpm-workspace.yaml` is valid, as install accepts.
     let manifest = if cwd == project_dir {
         project_manifest.clone()
@@ -71,7 +72,7 @@ async fn rebuild_project(packages: &[String], importers: Option<&[String]>) -> m
     let settings_ctx = files.ctx(&raw_workspace, &env_snapshot, &[]);
     super::configure_script_settings(&cwd, &settings_ctx, Some("rebuild"));
 
-    let graph = match aube_lockfile::parse_lockfile(&project_dir, &project_manifest) {
+    let graph = match super::install::parse_project_lockfile(&project_dir, &project_manifest) {
         Ok(graph) => Some(graph),
         Err(aube_lockfile::Error::NotFound(_)) => None,
         Err(e) => return Err(miette::Report::new(e)).wrap_err("failed to parse lockfile"),
@@ -288,22 +289,15 @@ async fn rebuild_project(packages: &[String], importers: Option<&[String]>) -> m
     Ok(())
 }
 
-/// The workspace root when `project_dir` is a member of a workspace that
-/// keeps one lockfile per project; `None` for the root itself, a shared
-/// lockfile, or no workspace.
-fn unshared_lockfile_workspace_root(project_dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    let root = crate::dirs::find_workspace_root(project_dir)?;
-    let shared =
-        super::with_settings_ctx(&root, aube_settings::resolved::shared_workspace_lockfile);
-    (root != project_dir && !shared).then_some(root)
-}
-
 async fn run_filtered(
     args: &RebuildArgs,
     filter: &aube_workspace::selector::EffectiveFilter,
 ) -> miette::Result<()> {
     let cwd = crate::dirs::cwd()?;
     let (root, matched) = super::select_workspace_packages(&cwd, filter, "rebuild")?;
+    if matched.is_empty() {
+        return super::no_projects_matched(&root, filter, super::NoMatchReport::Quiet);
+    }
     let result = async {
         // A shared workspace lockfile: the members have none of their own,
         // so rebuild the selected projects' dependencies from the root, in
