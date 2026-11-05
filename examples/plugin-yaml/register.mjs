@@ -1,7 +1,8 @@
 // Node loader hook: `import config from "./config.yaml"` evaluates to the parsed
-// document. Activated by `--import @nubjs/plugin-yaml/register` on plain Node, or
-// by listing the package in nub.jsonc. Uses the synchronous hook API (Node >= 22.15),
-// so the import resolves in-thread with no loader worker.
+// document. Activated by `--import @nubjs/plugin-yaml/register` on plain Node. Nub
+// preloads it for a package the tsconfig lists under `contentMappers`. Uses the
+// synchronous hook API (Node >= 22.15), so the import resolves in-thread with no
+// loader worker.
 import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { fileURLToPath } from "node:url";

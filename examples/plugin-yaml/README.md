@@ -13,7 +13,7 @@ One package, three integrations, all through standard extension points:
 
 | Surface | Entry | Mechanism |
 | --- | --- | --- |
-| Node / Nub runtime | `@nubjs/plugin-yaml/register` | `module.registerHooks` load hook (Node ≥ 22.15). `node --import @nubjs/plugin-yaml/register app.mjs`, or list it as a Nub preload. |
+| Node / Nub runtime | `@nubjs/plugin-yaml/register` | `module.registerHooks` load hook (Node ≥ 22.15). Nub loads it for a package your tsconfig lists; on plain Node, `node --import @nubjs/plugin-yaml/register app.mjs`. |
 | TypeScript | `typescript.contentMapper` in `package.json` | A [content mapper](https://github.com/microsoft/typescript-go/pull/4712) (TypeScript ≥ 7.1). Each `.yaml` file becomes a typed module; parse errors are reported in the YAML file. |
 | TypeScript < 7.1 | `register.d.ts` | Wildcard `declare module "*.yaml"` giving `Record<string, unknown>`, referenced from the same `/register` specifier. |
 | Vite / Rollup | `@nubjs/plugin-yaml/vite` | A `transform` plugin producing the same `export default` module. |
@@ -28,9 +28,7 @@ One package, three integrations, all through standard extension points:
 }
 ```
 
-```ts title="nub-env.d.ts"
-/// <reference types="@nubjs/plugin-yaml/register" />
-```
+That entry is the whole setup. `nub main.ts` preloads `@nubjs/plugin-yaml/register` because of it, with nothing in `nub.jsonc`.
 
 Run the checker with the flag content mappers require:
 
@@ -38,7 +36,11 @@ Run the checker with the flag content mappers require:
 tsc --noEmit --runExternalCode
 ```
 
-Without the flag, or on a compiler older than 7.1, the wildcard declaration applies and every value is `unknown`.
+On a compiler older than 7.1, reference the wildcard declaration instead, and every value is `unknown`:
+
+```ts title="nub-env.d.ts"
+/// <reference types="@nubjs/plugin-yaml/register" />
+```
 
 ## Notes
 
