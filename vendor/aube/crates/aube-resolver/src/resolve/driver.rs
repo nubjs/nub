@@ -23,6 +23,7 @@ use crate::local_source::{
     LocalManifest, dep_path_for, edge_names_a_source, is_non_registry_specifier,
     probe_remote_tarball_manifest, read_local_manifest, rebase_local, resolve_exec_manifest,
     resolve_git_source, resolve_remote_tarball, should_block_exotic_subdep,
+    source_matches_declaration,
 };
 use crate::locked_index::LockedIndex;
 use crate::package_ext::{
@@ -3025,7 +3026,7 @@ impl<'a> ResolveDriver<'a> {
         // edges, which hold what each one resolved to, not the range it declares.
         // A version stands in for the range. A source an override put there does
         // not: once no override applies, the edge is stale and only the packument
-        // has the real range. Go back to it, keeping this version. A source the
+        // has the real range. Go back to it, keeping this version. The source the
         // package declares itself is not stale. npm, bun and yarn lockfiles keep
         // what it declares; pnpm's keeps the overrides that were in effect.
         let stale = locked_pkg.dependencies.iter().any(|(dep_name, edge)| {
@@ -3048,10 +3049,16 @@ impl<'a> ResolveDriver<'a> {
                 return true;
             }
             if locked_pkg.declared_dependencies_known {
+                let held = self
+                    .locked_index
+                    .local_source(dep_name, edge)
+                    .cloned()
+                    .or_else(|| LocalSource::parse(edge, std::path::Path::new("")));
                 return !locked_pkg
                     .declared_dependencies
                     .get(dep_name)
-                    .is_some_and(|declared| is_non_registry_specifier(declared));
+                    .zip(held)
+                    .is_some_and(|(declared, held)| source_matches_declaration(&held, declared));
             }
             pick_override_spec(&self.previous_override_rules, dep_name, edge, &ancestors).is_some()
         });

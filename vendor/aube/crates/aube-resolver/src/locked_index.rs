@@ -124,8 +124,14 @@ impl<'a> LockedIndex<'a> {
     /// which is what a reused parent's edge has to be to re-resolve. `None` for
     /// any edge that does not land on a local package.
     pub fn local_specifier(&self, name: &str, tail: &str) -> Option<String> {
+        self.local_source(name, tail).map(LocalSource::specifier)
+    }
+
+    /// The local source a hashed edge lands on, if it lands on one.
+    pub fn local_source(&self, name: &str, tail: &str) -> Option<&'a LocalSource> {
         self.bucket(name)
             .iter()
+            .copied()
             .find(|pkg| {
                 pkg.dep_path
                     .strip_prefix(name)
@@ -133,7 +139,6 @@ impl<'a> LockedIndex<'a> {
                     == Some(tail)
             })
             .and_then(|pkg| pkg.local_source.as_ref())
-            .map(LocalSource::specifier)
     }
 
     /// Integrity of the first locked package matching `name` + a local

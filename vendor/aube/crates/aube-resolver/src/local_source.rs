@@ -366,6 +366,27 @@ pub(crate) fn is_non_registry_specifier(s: &str) -> bool {
     s.starts_with("file:")
 }
 
+/// Whether `held`, the source a locked edge lands on, is what `declared` asks for.
+/// A git spec naming a branch or tag cannot be compared to a resolved commit, so it
+/// does not match, and the caller re-reads the package's metadata.
+pub(crate) fn source_matches_declaration(held: &LocalSource, declared: &str) -> bool {
+    match (held, LocalSource::parse(declared, Path::new(""))) {
+        (LocalSource::RemoteTarball(held), Some(LocalSource::RemoteTarball(declared))) => {
+            held.url == declared.url
+        }
+        (LocalSource::Git(held), Some(LocalSource::Git(declared))) => {
+            held.url == declared.url
+                && held.subpath == declared.subpath
+                && declared
+                    .committish
+                    .as_deref()
+                    .is_none_or(|commit| held.resolved.starts_with(commit))
+        }
+        (held, Some(declared)) => held.specifier() == declared.specifier(),
+        (_, None) => false,
+    }
+}
+
 /// Whether a lockfile edge holds a source rather than a registry version: a
 /// specifier, or the hashed tail of a local package's key (`file+<16 hex>`).
 pub(crate) fn edge_names_a_source(edge: &str) -> bool {
@@ -795,6 +816,48 @@ pub(crate) async fn probe_remote_tarball_manifest(
         .ok()?;
     let manifest_bytes = read_tarball_package_json(&prefix).ok()?;
     LocalManifest::parse(&manifest_bytes).ok()
+}
+
+#[cfg(test)]
+mod source_match_tests {
+    use super::*;
+
+    #[test]
+    fn a_held_source_matches_only_the_declaration_it_came_from() {
+        let parse = |spec: &str| LocalSource::parse(spec, Path::new("")).unwrap();
+        let tarball = parse("https://example.com/a.tgz");
+        assert!(source_matches_declaration(
+            &tarball,
+            "https://example.com/a.tgz"
+        ));
+        assert!(!source_matches_declaration(
+            &tarball,
+            "https://example.com/fork.tgz"
+        ));
+        assert!(!source_matches_declaration(&tarball, "^1.0.0"));
+
+        let LocalSource::Git(mut git) = parse("git+https://example.com/a.git") else {
+            panic!("a git spec parses as git");
+        };
+        git.resolved = "abc1234def".to_string();
+        let git = LocalSource::Git(git);
+        assert!(source_matches_declaration(
+            &git,
+            "git+https://example.com/a.git"
+        ));
+        assert!(source_matches_declaration(
+            &git,
+            "git+https://example.com/a.git#abc1234"
+        ));
+        assert!(!source_matches_declaration(
+            &git,
+            "git+https://example.com/a.git#main"
+        ));
+        assert!(!source_matches_declaration(
+            &git,
+            "git+https://example.com/fork.git"
+        ));
+    }
 }
 
 #[cfg(test)]

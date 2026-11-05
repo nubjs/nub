@@ -720,6 +720,7 @@ packages:
 snapshots:
   local-parent@file:a:
     dependencies:
+      own-link: link:vendor/via-override
       sibling: link:../b
       via-override: link:vendor/via-override
 
@@ -762,6 +763,8 @@ snapshots:
             .unwrap()
     };
     reaches(named("local-parent"), "sibling", "b");
+    // The override's path, but not the dependency it overrides.
+    reaches(named("local-parent"), "own-link", "a/vendor/via-override");
     reaches(named("local-parent"), "via-override", "vendor/via-override");
     reaches(named("peer-consumer"), "member", "packages/member");
     reaches(
@@ -788,6 +791,7 @@ snapshots:
     assert!(
         written.contains("overridden: link:vendor/overridden\n")
             && written.contains("sibling: link:../b\n")
+            && written.contains("own-link: link:vendor/via-override\n")
             && written.contains("via-override: link:vendor/via-override\n")
             && written.contains("member: link:packages/member\n")
             && written.contains("tarball-peer: link:packages/tarball-peer\n"),

@@ -812,7 +812,7 @@ pub(super) fn build(
                             | LocalSource::Link(base)
                             | LocalSource::Portal(base),
                         ) if !parent.peer_dependencies.contains_key(&name)
-                            && !is_override_link_target(&graph.overrides, path) =>
+                            && !is_override_link_target(&graph.overrides, &name, path) =>
                         {
                             posix(base)
                         }
