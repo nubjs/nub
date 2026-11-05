@@ -205,7 +205,10 @@ fn an_explicit_preload_takes_precedence_and_a_duplicate_loads_once() {
     write(root.join("nub.jsonc"), r#"{ "preload": ["./mine.cjs"] }"#);
     assert_eq!(stdout(&run(root, &["main.ts"])), "from-preload");
 
-    write(root.join("nub.jsonc"), r#"{ "preload": ["./mine.cjs", "m/register"] }"#);
+    write(
+        root.join("nub.jsonc"),
+        r#"{ "preload": ["./mine.cjs", "m/register"] }"#,
+    );
     let output = run(root, &["main.ts"]);
     assert_eq!(stdout(&output), "from-mapper");
     assert_eq!(
