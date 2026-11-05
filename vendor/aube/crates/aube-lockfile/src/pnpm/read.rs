@@ -1095,6 +1095,36 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
         }
     }
 
+    // Same for an importer-declared local package that another package also
+    // depends on (root -> `file:./a`, `file:./b`; `a` -> `file:../b`). The
+    // snapshot edge keeps the lockfile spelling `file:./b`, but the package was
+    // re-keyed to the hashed `b@file+<hash>`, so no graph key carries that
+    // spelling and every `resolve_dep_edge` walker dropped the edge: the linker
+    // wrote a dangling sibling symlink, and optional marking treated a
+    // required package as optional-only. A fresh resolve stores the hashed
+    // tail, and the writer renders it back to `file:`, so this matches both.
+    // `link:` targets are left alone: their edge values are importer-relative,
+    // and the writer does not render a hashed `link+` tail back.
+    let file_local_keys: BTreeMap<String, String> = local_by_canonical
+        .iter()
+        .filter(|(_, key)| {
+            packages
+                .get(*key)
+                .is_some_and(|pkg| !matches!(pkg.local_source, Some(LocalSource::Link(_))))
+        })
+        .map(|(canonical, key)| (canonical.clone(), key.clone()))
+        .collect();
+    for pkg in packages.values_mut() {
+        for map in [&mut pkg.dependencies, &mut pkg.optional_dependencies] {
+            for (dep_name, value) in map.iter_mut() {
+                let bare = value.split('(').next().unwrap_or(value);
+                if let Some(key) = file_local_keys.get(&format!("{dep_name}@{bare}")) {
+                    *value = dep_path_tail(key, dep_name).to_string();
+                }
+            }
+        }
+    }
+
     // Drop each alias-clone source that nothing else in the graph reaches.
     //
     // pnpm v9 writes only the canonical (real-name-keyed) entry for an

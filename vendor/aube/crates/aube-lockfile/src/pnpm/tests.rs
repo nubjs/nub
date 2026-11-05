@@ -535,6 +535,81 @@ snapshots:
 }
 
 #[test]
+fn a_snapshot_edge_to_a_root_declared_local_package_resolves_and_round_trips() {
+    // `dual` is declared by the root, which re-keys it to the hashed
+    // `dual@file+<hash>`, and is also a dependency of `parent`. `parent`'s
+    // edge must follow it there: the linker, the graph hasher and optional
+    // marking all walk edges through `resolve_dep_edge`.
+    let dir = tempfile::tempdir().unwrap();
+    let lockfile_path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &lockfile_path,
+        r#"
+lockfileVersion: '9.0'
+
+importers:
+  .:
+    dependencies:
+      parent:
+        specifier: file:./parent
+        version: file:./parent
+    optionalDependencies:
+      dual:
+        specifier: file:./dual
+        version: file:./dual
+
+packages:
+  dual@file:./dual:
+    resolution: {directory: ./dual, type: directory}
+
+  parent@file:./parent:
+    resolution: {directory: ./parent, type: directory}
+
+snapshots:
+  dual@file:./dual: {}
+
+  parent@file:./parent:
+    dependencies:
+      dual: file:./dual
+"#,
+    )
+    .unwrap();
+
+    let graph = parse(&lockfile_path).unwrap();
+    let dual_key = &graph.importers["."]
+        .iter()
+        .find(|dep| dep.name == "dual")
+        .unwrap()
+        .dep_path;
+    let parent = graph
+        .packages
+        .values()
+        .find(|pkg| pkg.name == "parent")
+        .unwrap();
+    let edge = &parent.dependencies["dual"];
+    assert_eq!(
+        crate::resolve_dep_edge("dual", edge, |k| graph.packages.contains_key(k)).as_ref(),
+        Some(dual_key),
+        "parent's edge `dual: {edge}` must resolve to the root's `{dual_key}`",
+    );
+
+    let manifest = PackageJson {
+        name: Some("root".to_string()),
+        version: Some("0.0.0".to_string()),
+        dependencies: [("parent".to_string(), "file:./parent".to_string())].into(),
+        optional_dependencies: [("dual".to_string(), "file:./dual".to_string())].into(),
+        ..PackageJson::default()
+    };
+    let out_path = dir.path().join("round-trip.yaml");
+    write(&out_path, &graph, &manifest).unwrap();
+    let written = std::fs::read_to_string(&out_path).unwrap();
+    assert!(
+        written.contains("    dependencies:\n      dual: file:./dual\n"),
+        "parent's edge must be written back as `file:./dual`: {written}"
+    );
+}
+
+#[test]
 fn parse_workspace_local_snapshot_keys_do_not_duplicate_rebased_packages() {
     let dir = tempfile::tempdir().unwrap();
     let lockfile_path = dir.path().join("pnpm-lock.yaml");
