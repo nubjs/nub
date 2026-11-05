@@ -31,7 +31,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow, bail};
 use rolldown::plugin::__inner::SharedPluginable;
@@ -77,10 +77,30 @@ pub struct Entry {
 #[derive(Default)]
 pub struct Plan {
     pub entries: Vec<Entry>,
-    /// Packages left verbatim. The bundle leaves every one of them to Node: the
-    /// real files are already in the payload, and a copy inside a chunk would be a
-    /// second module object with a different `__dirname`.
-    pub verbatim: BTreeSet<String>,
+    /// Installs left verbatim, by real directory. The bundle leaves every one of
+    /// them to Node: the real files are already in the payload, and a copy inside a
+    /// chunk would be a second module object with a different `__dirname`. Not by
+    /// name: a clean install of a package another closure ships verbatim still
+    /// bundles, and left to Node it would load the other one.
+    pub verbatim: BTreeSet<PathBuf>,
+    /// The next chunk number. It only ever goes up: entries are filtered and removed
+    /// after they are numbered, so counting them hands out a number a live chunk holds.
+    pub next_chunk: usize,
+}
+
+/// A verbatim install a bundled module imports, and the chunk that module landed in.
+pub struct VerbatimImport {
+    pub chunk: String,
+    pub module: PathBuf,
+    pub package: String,
+    pub instance: PathBuf,
+}
+
+/// What [`bundle`] emitted, with every import it left to Node.
+#[derive(Default)]
+pub struct Bundled {
+    pub files: Vec<IslandFile>,
+    pub imports: Vec<VerbatimImport>,
 }
 
 /// The bare specifiers `root` names in its own source.
@@ -195,32 +215,37 @@ pub fn export_entry(at: &str, entry: &Entry) -> (String, &'static str, String) {
 /// under `__nub_closure/` at the app root — so `@noble/hashes/sha2` and
 /// `@noble/hashes/utils` share their internals instead of carrying two copies.
 ///
-/// One consequence is worth stating rather than hiding: a package left verbatim is
-/// external here, and a shared chunk resolves it by walking up from the app root,
-/// which finds a top-level `node_modules` and not a nested one. Every tree
-/// measured so far puts the verbatim packages at the top level, and the shape that
-/// would break — a bundled package requiring a verbatim one out of a NESTED
-/// install — has not been produced. It stays a known limit rather than machinery
-/// nothing has needed.
-pub fn bundle(plan: &Plan, minify: bool, keep_names: bool) -> Result<Vec<IslandFile>> {
-    let mut files = Vec::new();
+/// A package left verbatim is external here, so a chunk finds it by walking up from
+/// where the chunk landed: an entry chunk from its stub, a shared one from the app
+/// root. Neither is where the importing module sat, so the imports are returned for
+/// the caller to check against the payload.
+pub fn bundle(plan: &Plan, minify: bool, keep_names: bool) -> Result<Bundled> {
+    let mut bundled = Bundled::default();
     for esm in [false, true] {
         let entries: Vec<&Entry> = plan.entries.iter().filter(|e| e.esm == esm).collect();
         if !entries.is_empty() {
-            files.extend(build(&entries, &plan.verbatim, esm, minify, keep_names)?);
+            let built = build(&entries, &plan.verbatim, esm, minify, keep_names)?;
+            bundled.files.extend(built.files);
+            bundled.imports.extend(built.imports);
         }
     }
-    Ok(files)
+    Ok(bundled)
 }
 
 fn build(
     plan: &[&Entry],
-    verbatim: &BTreeSet<String>,
+    verbatim: &BTreeSet<PathBuf>,
     esm: bool,
     minify: bool,
     keep_names: bool,
-) -> Result<Vec<IslandFile>> {
+) -> Result<Bundled> {
     let verbatim = verbatim.clone();
+    let synthetic: BTreeSet<String> = plan
+        .iter()
+        .map(|entry| entry.importer.to_string_lossy().into_owned())
+        .collect();
+    let imports: Arc<Mutex<BTreeSet<(String, String, PathBuf)>>> = Arc::default();
+    let recorded = Arc::clone(&imports);
     let entries = Arc::new(Entries {
         sources: plan
             .iter()
@@ -271,8 +296,19 @@ fn build(
         minify: Some(RawMinifyOptions::Bool(minify)),
         keep_names: Some(keep_names),
         external: Some(IsExternal::Fn(Some(Arc::new(
-            move |specifier: &str, _importer: Option<&str>, _resolved: bool| {
-                let external = verbatim.contains(package_of(specifier));
+            move |specifier: &str, importer: Option<&str>, _resolved: bool| {
+                // Never an entry's own specifier: its chunk is written into a stub
+                // of that package, so leaving it to Node is a `require` of itself.
+                let install = importer
+                    .filter(|importer| !synthetic.contains(*importer))
+                    .and_then(|importer| {
+                        verbatim_install(&verbatim, specifier, importer)
+                            .map(|install| (importer.to_string(), install))
+                    });
+                let external = install.is_some();
+                if let (Some((importer, install)), Ok(mut seen)) = (install, recorded.lock()) {
+                    seen.insert((importer, package_of(specifier).to_string(), install));
+                }
                 Box::pin(async move { Ok(external) })
             },
         )))),
@@ -301,18 +337,45 @@ fn build(
             .map_err(|e| anyhow!("bundling the eject closure failed: {e:?}"))
     })?;
     reject_unresolved_entries(plan, &output.warnings)?;
-    Ok(output
-        .assets
-        .iter()
-        .filter_map(|asset| match asset {
-            Output::Chunk(chunk) => Some(IslandFile {
-                name: chunk.filename.to_string(),
-                bytes: chunk.code.as_bytes().to_vec(),
-                executable: false,
-            }),
-            Output::Asset(_) => None,
-        })
-        .collect())
+    let recorded = imports
+        .lock()
+        .map_err(|_| anyhow!("the closure import collector was poisoned"))?;
+    let mut bundled = Bundled::default();
+    for asset in &output.assets {
+        let Output::Chunk(chunk) = asset else {
+            continue;
+        };
+        bundled.files.push(IslandFile {
+            name: chunk.filename.to_string(),
+            bytes: chunk.code.as_bytes().to_vec(),
+            executable: false,
+        });
+        for (module, package, instance) in recorded.iter() {
+            if chunk.modules.keys.iter().any(|key| key.as_str() == module) {
+                bundled.imports.push(VerbatimImport {
+                    chunk: chunk.filename.to_string(),
+                    module: PathBuf::from(module),
+                    package: package.clone(),
+                    instance: instance.clone(),
+                });
+            }
+        }
+    }
+    Ok(bundled)
+}
+
+/// The verbatim install a bare specifier resolves to from `importer`, if it is one.
+fn verbatim_install(
+    verbatim: &BTreeSet<PathBuf>,
+    specifier: &str,
+    importer: &str,
+) -> Option<PathBuf> {
+    if specifier.starts_with('.') || Path::new(specifier).is_absolute() {
+        return None;
+    }
+    let root = super::native::resolve_package_root(Path::new(importer), package_of(specifier))?;
+    let real = std::fs::canonicalize(root).ok()?;
+    verbatim.contains(&real).then_some(real)
 }
 
 /// Fail the build when an entry's own specifier resolved to nothing.
@@ -343,8 +406,8 @@ fn reject_unresolved_entries(plan: &[&Entry], warnings: &[BuildDiagnostic]) -> R
         return Ok(());
     }
     bail!(
-        "nub could not bundle the dependencies of an unbundled package:\n  {}\n\
-         \x20 This is a bug in nub. Passing --unbundled <package> for each package named\n\
+        "Nub could not bundle the dependencies of an unbundled package:\n  {}\n\
+         \x20 This is a bug in Nub. Passing --unbundled <package> for each package named\n\
          \x20 above ships it as installed instead, which avoids it.",
         unresolved.join("\n  ")
     )

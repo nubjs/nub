@@ -430,7 +430,7 @@ fn is_executable(_path: &Path) -> bool {
 /// own lookup order, and stops at the first hit. Only the DIRECTORY is resolved —
 /// the manifest inside it is all the caller needs — so none of `exports`, `main`
 /// or condition resolution applies.
-fn resolve_package_root(importer: &Path, specifier: &str) -> Option<PathBuf> {
+pub(super) fn resolve_package_root(importer: &Path, specifier: &str) -> Option<PathBuf> {
     let mut dir = importer.parent()?;
     loop {
         let candidate = dir.join("node_modules").join(specifier);
@@ -494,6 +494,9 @@ pub struct NativeAddons {
     /// pino ships is read from this, not from the roots: a wrapper that carries
     /// pino in its closure ships it just the same.
     shipped_names: Mutex<BTreeSet<String>>,
+    /// Closure members shipped as files because their chunks could not reach an
+    /// install they import — see [`Payload::stranded_by`].
+    stranded: Mutex<BTreeSet<PathBuf>>,
 }
 
 impl NativeAddons {
@@ -515,6 +518,7 @@ impl NativeAddons {
             transport_targets: Mutex::new(BTreeSet::new()),
             verbatim_members: Mutex::new(BTreeSet::new()),
             shipped_names: Mutex::new(BTreeSet::new()),
+            stranded: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -564,6 +568,131 @@ impl NativeAddons {
         let Ok(root_rel) = root.strip_prefix(anchor) else {
             return Ok(());
         };
+        let seed_at = at.unwrap_or_else(|| {
+            store_flattened_root(root_rel).unwrap_or_else(|| payload_path(root_rel))
+        });
+        let mut walk = self.walk_closure(root, anchor, &seed_at, caller, false)?;
+        // A bundled package is placed as if its code had moved, so a closure that
+        // ships as files after all needs walking again: each member now looks up its
+        // dependencies from its own directory.
+        if !plan_closure(&walk.members, closure, payload)? {
+            walk = self.walk_closure(root, anchor, &seed_at, caller, true)?;
+        }
+        let Walk {
+            members,
+            shadowed,
+            mut saw_addon,
+            mut unloadable,
+        } = walk;
+        self.record_shipped(&members);
+        let mut kept_addon = false;
+        // Asked of the whole closure for the same reason the tally is: a napi-rs
+        // package puts each libc in its OWN sidecar, so no single package holds
+        // both builds and a per-package answer is always "no". That shipped the
+        // musl sidecar into every glibc artifact — harmless, since sharp picks its
+        // sidecar by name, but ~10 MB of an artifact that cannot use it.
+        let verbatim = || members.iter().filter(|member| member.verbatim);
+        let disambiguate_libc = self.target.os == TargetOs::Linux
+            && verbatim().any(|member| has_libc_match(&member.dir, &self.target));
+        for member in verbatim() {
+            match payload.claim_full(&member.rel, member.holder(None))? {
+                Claim::Reuse => continue,
+                // Whatever imported through the stub now resolves against the
+                // package's own files, as it does uncompiled — so its chunks go.
+                Claim::ReplacedStub => {
+                    let chunks = format!("{}/__nub/", member.rel);
+                    closure
+                        .entries
+                        .retain(|entry| !entry.chunk.starts_with(&chunks));
+                }
+                Claim::Copy => {}
+            }
+            let (dir, rel) = (&member.dir, &member.rel);
+            let tally = copy_package_tree(
+                dir,
+                Path::new(rel),
+                &self.target,
+                disambiguate_libc,
+                &mut payload.files,
+            )?;
+            saw_addon |= tally.saw;
+            kept_addon |= tally.kept;
+            if tally.saw && !tally.kept {
+                unloadable.get_or_insert(dir.clone());
+            }
+        }
+
+        // A package the walk skipped because another one had its placement. Its
+        // code is inlined wherever it is reached unless it ships as files, and
+        // then it needs that directory to itself.
+        for (rel, dir, reached_from) in shadowed {
+            let Some(manifest) = std::fs::read_to_string(dir.join("package.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            else {
+                continue;
+            };
+            if !manifest_runs_on(&manifest, &self.target)
+                || !self.closure_member_ejects(&dir, &manifest)
+            {
+                continue;
+            }
+            let skipped = Holder {
+                name: manifest["name"].as_str().unwrap_or_default().to_string(),
+                version: manifest["version"].as_str().map(str::to_string),
+                instance: dir,
+                caller: reached_from,
+                stub: None,
+            };
+            let kept = members
+                .iter()
+                .find(|member| member.rel == rel)
+                .map(|member| member.holder(None));
+            if let Some(held) = payload.holders.get(&rel).or(kept.as_ref()) {
+                if !same_instance(&held.instance, &skipped.instance) {
+                    return Err(collision(&rel, held, &skipped));
+                }
+            }
+        }
+
+        if saw_addon && !kept_addon {
+            // Re-run the check on one of them purely to reuse its diagnostic,
+            // which names the platform found, the platform wanted, and how to
+            // install for the target. Reporting that beats a bespoke message
+            // that would drift.
+            if let Some(addon) = unloadable.as_deref().and_then(first_addon) {
+                let bytes = std::fs::read(&addon)
+                    .map_err(|e| anyhow::anyhow!("reading {}: {e}", addon.display()))?;
+                check_target(&bytes, &addon, &self.target)?;
+                // Reached only when that check is HAPPY with the addon — which it
+                // can be while the package is still unusable, because it reads the
+                // ELF header and the header does not record libc. A glibc-only
+                // sidecar for a musl target passed it and the compile went on to
+                // ship nothing loadable.
+                anyhow::bail!(
+                    "no native addon here can be loaded on {}: {}\n\
+                     \x20 Its platform packages are all for another C library. Install this \
+                     dependency\n\x20 for the target and compile again, or drop --platform to \
+                     build for this machine.",
+                    self.target.triple(),
+                    addon.display()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Find one closure's members and where each lands, writing nothing.
+    ///
+    /// `all_files` is a closure [`plan_closure`] refused: every member ships as files.
+    fn walk_closure(
+        &self,
+        root: &Path,
+        anchor: &Path,
+        seed_at: &str,
+        caller: &str,
+        all_files: bool,
+    ) -> Result<Walk> {
         // Each entry is a package's real directory paired with where it lands in
         // the payload. The two diverge under an isolated install, where the real
         // directory is inside `.store/` and the path Node reaches it by is a
@@ -578,11 +707,8 @@ impl NativeAddons {
         // `sharp/@img/sharp-linux-arm64/@img/sharp-libvips-…` before
         // `sharp/@img/sharp-libvips-…`, and the shallow one cannot reuse a copy
         // buried under a sibling.
-        let seed_at = at.unwrap_or_else(|| {
-            store_flattened_root(root_rel).unwrap_or_else(|| payload_path(root_rel))
-        });
         let mut queue: VecDeque<(PathBuf, String, Option<String>)> =
-            VecDeque::from([(root.to_path_buf(), seed_at, None)]);
+            VecDeque::from([(root.to_path_buf(), seed_at.to_string(), None)]);
         let mut seen: BTreeMap<String, PathBuf> = BTreeMap::new();
         // A different package reaching a placement already taken in this walk.
         let mut shadowed: Vec<(String, PathBuf, String)> = Vec::new();
@@ -601,7 +727,6 @@ impl NativeAddons {
         // cross-compile against a tree installed for the build host, which would
         // otherwise ship a package with nothing loadable and say nothing here.
         let mut saw_addon = false;
-        let mut kept_addon = false;
         let mut unloadable: Option<PathBuf> = None;
         let mut members: Vec<Member> = Vec::new();
         while let Some((dir, rel, dependent)) = queue.pop_front() {
@@ -669,7 +794,10 @@ impl NativeAddons {
                     continue;
                 }
             }
-            placed.entry(identity).or_default().push(rel.clone());
+            placed
+                .entry(identity.clone())
+                .or_default()
+                .push(rel.clone());
 
             let Ok(text) = std::fs::read_to_string(dir.join("package.json")) else {
                 continue;
@@ -681,9 +809,11 @@ impl NativeAddons {
             // asked on its own account. Before this, one verdict at the root made
             // the whole closure verbatim by association — pdfkit reads its fonts
             // off `__dirname` and must ship as files, but fontkit never had to.
-            let verbatim = dependent.is_none() || self.closure_member_ejects(&dir, &manifest);
+            let verbatim =
+                all_files || dependent.is_none() || self.closure_member_ejects(&dir, &manifest);
             members.push(Member {
                 dir: dir.clone(),
+                real: identity,
                 rel: rel.clone(),
                 name: manifest
                     .get("name")
@@ -738,103 +868,12 @@ impl NativeAddons {
                 }
             }
         }
-        plan_closure(&mut members, closure, payload)?;
-        self.record_shipped(&members);
-        // Asked of the whole closure for the same reason the tally is: a napi-rs
-        // package puts each libc in its OWN sidecar, so no single package holds
-        // both builds and a per-package answer is always "no". That shipped the
-        // musl sidecar into every glibc artifact — harmless, since sharp picks its
-        // sidecar by name, but ~10 MB of an artifact that cannot use it.
-        let verbatim = || members.iter().filter(|member| member.verbatim);
-        let disambiguate_libc = self.target.os == TargetOs::Linux
-            && verbatim().any(|member| has_libc_match(&member.dir, &self.target));
-        for member in verbatim() {
-            let (name, version) = (&member.name, member.version.as_deref());
-            match payload.claim_full(&member.rel, name, version, &member.caller)? {
-                Claim::Reuse => continue,
-                // Whatever imported through the stub now resolves against the
-                // package's own files, as it does uncompiled — so its chunks go.
-                Claim::ReplacedStub => {
-                    let chunks = format!("{}/__nub/", member.rel);
-                    closure
-                        .entries
-                        .retain(|entry| !entry.chunk.starts_with(&chunks));
-                }
-                Claim::Copy => {}
-            }
-            let (dir, rel) = (&member.dir, &member.rel);
-            let tally = copy_package_tree(
-                dir,
-                Path::new(rel),
-                &self.target,
-                disambiguate_libc,
-                &mut payload.files,
-            )?;
-            saw_addon |= tally.saw;
-            kept_addon |= tally.kept;
-            if tally.saw && !tally.kept {
-                unloadable.get_or_insert(dir.clone());
-            }
-        }
-
-        // A package the walk skipped because another one had its placement. Its
-        // code is inlined wherever it is reached unless it ships as files, and
-        // then it needs that directory to itself.
-        for (rel, dir, reached_from) in shadowed {
-            let Some(manifest) = std::fs::read_to_string(dir.join("package.json"))
-                .ok()
-                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-            else {
-                continue;
-            };
-            if !manifest_runs_on(&manifest, &self.target)
-                || !self.closure_member_ejects(&dir, &manifest)
-            {
-                continue;
-            }
-            let name = manifest["name"].as_str().unwrap_or_default();
-            let version = manifest["version"].as_str();
-            let held = members
-                .iter()
-                .find(|member| member.rel == rel)
-                .map(|kept| Holder {
-                    name: kept.name.clone(),
-                    version: kept.version.clone(),
-                    caller: kept.caller.clone(),
-                    stub: None,
-                });
-            match payload.holders.get(&rel).or(held.as_ref()) {
-                Some(held) if held.name == name && held.version.as_deref() == version => {}
-                Some(held) => return Err(collision(&rel, held, name, version, &reached_from)),
-                None => {}
-            }
-        }
-
-        if saw_addon && !kept_addon {
-            // Re-run the check on one of them purely to reuse its diagnostic,
-            // which names the platform found, the platform wanted, and how to
-            // install for the target. Reporting that beats a bespoke message
-            // that would drift.
-            if let Some(addon) = unloadable.as_deref().and_then(first_addon) {
-                let bytes = std::fs::read(&addon)
-                    .map_err(|e| anyhow::anyhow!("reading {}: {e}", addon.display()))?;
-                check_target(&bytes, &addon, &self.target)?;
-                // Reached only when that check is HAPPY with the addon — which it
-                // can be while the package is still unusable, because it reads the
-                // ELF header and the header does not record libc. A glibc-only
-                // sidecar for a musl target passed it and the compile went on to
-                // ship nothing loadable.
-                anyhow::bail!(
-                    "no native addon here can be loaded on {}: {}\n\
-                     \x20 Its platform packages are all for another C library. Install this \
-                     dependency\n\x20 for the target and compile again, or drop --platform to \
-                     build for this machine.",
-                    self.target.triple(),
-                    addon.display()
-                );
-            }
-        }
-        Ok(())
+        Ok(Walk {
+            members,
+            shadowed,
+            saw_addon,
+            unloadable,
+        })
     }
 
     fn materialise_root(
@@ -922,7 +961,7 @@ impl NativeAddons {
         let mut want = |at: String, root: PathBuf, caller: String| -> Result<()> {
             let real = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
             if let Some((other, _, first)) = wanted.get(&at) {
-                if *other != real {
+                if !same_instance(other, &real) {
                     bail!(
                         "a pino transport resolves to two different installs that would both sit at {at}:\n\
                          \x20 {} (named in {first})\n\
@@ -994,25 +1033,27 @@ impl NativeAddons {
         Ok(found)
     }
 
-    pub fn plan_survivors(
+    /// Every eject closure in the build, and the second bundle that serves them.
+    fn plan_closures(
         &self,
-        chunks: &mut [super::bundle::BundledFile],
+        roots: &[PathBuf],
         entry: &Path,
-    ) -> Result<PlannedNative> {
-        let seeds = self
-            .seeds
-            .lock()
-            .map_err(|_| anyhow::anyhow!("the native-addon seed collector was poisoned"))?
-            .clone();
+        minify: bool,
+        keep_names: bool,
+    ) -> Result<(Payload, super::closure::Bundled)> {
+        if let Ok(mut names) = self.shipped_names.lock() {
+            names.clear();
+        }
+        if let Ok(mut verbatim) = self.verbatim_members.lock() {
+            verbatim.clear();
+        }
         let mut payload = Payload::default();
-        let mut summaries = BTreeSet::new();
         // ONE plan across every root. Two closures can overlap, and a package one
         // of them ships verbatim has to be external to the other's chunks — a
         // second copy inside a chunk would be a different module object reading a
         // different `__dirname`.
         let mut closure = super::closure::Plan::default();
-        let roots = self.unbundled_roots();
-        for root in &roots {
+        for root in roots {
             self.materialise_root(
                 root,
                 None,
@@ -1044,6 +1085,47 @@ impl NativeAddons {
             }
             self.materialise_root(&root, Some(at), &caller, &mut payload, &mut closure)?;
         }
+        let bundled = super::closure::bundle(&closure, minify, keep_names)?;
+        Ok((payload, bundled))
+    }
+
+    pub fn plan_survivors(
+        &self,
+        chunks: &mut [super::bundle::BundledFile],
+        entry: &Path,
+        minify: bool,
+        keep_names: bool,
+    ) -> Result<PlannedNative> {
+        let seeds = self
+            .seeds
+            .lock()
+            .map_err(|_| anyhow::anyhow!("the native-addon seed collector was poisoned"))?
+            .clone();
+        let mut summaries = BTreeSet::new();
+        let roots = self.unbundled_roots();
+        // Again from the top each time a bundled package turns out to need shipping as
+        // files, since that moves whatever it depends on. Each round adds a package,
+        // and a closure with none left to add has no chunks to get wrong.
+        let (mut payload, closure_files) = loop {
+            let (payload, bundled) = self.plan_closures(&roots, entry, minify, keep_names)?;
+            let stranded = payload.stranded_by(&bundled.imports);
+            let mut known = self
+                .stranded
+                .lock()
+                .map_err(|_| anyhow::anyhow!("the stranded package set was poisoned"))?;
+            let before = known.len();
+            known.extend(stranded.keys().cloned());
+            if known.len() == before {
+                if let Some(why) = stranded.values().next() {
+                    bail!(
+                        "{why}.\n\
+                         \x20 Pass --unbundled for the package that imports it so it ships as files."
+                    );
+                }
+                payload.reject_shadowed_imports()?;
+                break (payload, bundled.files);
+            }
+        };
 
         for seed in seeds.values() {
             let token = seed.token.as_bytes();
@@ -1086,7 +1168,6 @@ impl NativeAddons {
             }
         }
         Ok(PlannedNative {
-            closure,
             files: payload
                 .files
                 .into_iter()
@@ -1095,6 +1176,7 @@ impl NativeAddons {
                     bytes,
                     executable,
                 })
+                .chain(closure_files)
                 .collect(),
             summaries: summaries.into_iter().collect(),
         })
@@ -1174,6 +1256,11 @@ impl NativeAddons {
         if self.forced_bundled.iter().any(|n| n == name) {
             return false;
         }
+        if self.stranded.lock().is_ok_and(|stranded| {
+            std::fs::canonicalize(dir).is_ok_and(|real| stranded.contains(&real))
+        }) {
+            return true;
+        }
         if first_addon(dir).is_some() {
             return true;
         }
@@ -1230,10 +1317,6 @@ impl NativeAddons {
 pub struct PlannedNative {
     pub files: Vec<IslandFile>,
     pub summaries: Vec<String>,
-    /// What the ejected packages still reach across the eject boundary. The
-    /// caller bundles it, because [`super::closure`] needs the bundler's flags and
-    /// this plugin only knows the tree.
-    pub closure: super::closure::Plan,
 }
 
 /// Whether the package reaches the filesystem by a path it builds at run time, in
@@ -1260,6 +1343,8 @@ fn builds_its_own_require(dir: &Path, code: &[String]) -> bool {
 /// One package in an eject closure, and where it lands.
 struct Member {
     dir: PathBuf,
+    /// `dir` with its symlinks resolved: which installed package this is.
+    real: PathBuf,
     rel: String,
     name: String,
     version: Option<String>,
@@ -1271,13 +1356,83 @@ struct Member {
     caller: String,
 }
 
+impl Member {
+    fn holder(&self, stub: Option<BTreeMap<String, BTreeMap<&'static str, String>>>) -> Holder {
+        Holder {
+            name: self.name.clone(),
+            version: self.version.clone(),
+            instance: self.real.clone(),
+            caller: self.caller.clone(),
+            stub,
+        }
+    }
+}
+
+/// One closure's members and where each lands, before any of it is written.
+struct Walk {
+    members: Vec<Member>,
+    /// A different package reaching a placement already taken in this walk.
+    shadowed: Vec<(String, PathBuf, String)>,
+    saw_addon: bool,
+    unloadable: Option<PathBuf>,
+}
+
 /// What occupies one package directory of the payload, and what put it there.
 struct Holder {
     name: String,
     version: Option<String>,
+    /// The installed directory it came from. See [`same_instance`].
+    instance: PathBuf,
     caller: String,
     /// A closure stub's `exports` map; `None` for the package's own files.
     stub: Option<BTreeMap<String, BTreeMap<&'static str, String>>>,
+}
+
+/// Whether two installed directories are one package to anything that loads them:
+/// same name and version, and each dependency and peer resolving to the same thing
+/// from both, all the way down.
+///
+/// A real directory alone is too strict: npm hoists byte-identical copies of `x@1`
+/// side by side, and refusing those would fail ordinary trees. A version alone is too
+/// loose: a peer-suffixed store holds `foo@1` with `peer@1` beside `foo@1` with
+/// `peer@2`, and treating those as one moves a caller onto the wrong peer.
+fn same_instance(a: &Path, b: &Path) -> bool {
+    fn compare(a: &Path, b: &Path, seen: &mut BTreeSet<(PathBuf, PathBuf)>) -> bool {
+        let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.into());
+        let (a, b) = (real(a), real(b));
+        // A pair already being compared is a dependency cycle, and answers true so
+        // that the rest of the walk decides.
+        if a == b || !seen.insert((a.clone(), b.clone())) {
+            return true;
+        }
+        let manifest = |dir: &Path| {
+            let text = std::fs::read_to_string(dir.join("package.json")).ok()?;
+            serde_json::from_str::<serde_json::Value>(&text).ok()
+        };
+        let (Some(left), Some(right)) = (manifest(&a), manifest(&b)) else {
+            return false;
+        };
+        if left["name"] != right["name"] || left["version"] != right["version"] {
+            return false;
+        }
+        let mut names = BTreeSet::new();
+        for manifest in [&left, &right] {
+            for field in ["dependencies", "optionalDependencies", "peerDependencies"] {
+                if let Some(deps) = manifest.get(field).and_then(|deps| deps.as_object()) {
+                    names.extend(deps.keys().cloned());
+                }
+            }
+        }
+        names.iter().all(|name| {
+            let from = |dir: &Path| resolve_package_root(&dir.join("x"), name);
+            match (from(&a), from(&b)) {
+                (None, None) => true,
+                (Some(left), Some(right)) => compare(&left, &right, seen),
+                _ => false,
+            }
+        })
+    }
+    compare(a, b, &mut BTreeSet::new())
 }
 
 /// The payload as it is assembled, and every package directory placed in it.
@@ -1293,6 +1448,9 @@ struct Holder {
 struct Payload {
     files: BTreeMap<String, (Vec<u8>, bool)>,
     holders: BTreeMap<String, Holder>,
+    /// Each package a verbatim one names: where it lands, the name, and the install
+    /// that answers uncompiled. See [`Self::reject_shadowed_imports`].
+    named: Vec<(String, String, PathBuf)>,
 }
 
 enum Claim {
@@ -1302,32 +1460,18 @@ enum Claim {
 }
 
 impl Payload {
-    fn claim_full(
-        &mut self,
-        at: &str,
-        name: &str,
-        version: Option<&str>,
-        caller: &str,
-    ) -> Result<Claim> {
+    fn claim_full(&mut self, at: &str, holder: Holder) -> Result<Claim> {
         let Some(held) = self.holders.get_mut(at) else {
-            self.holders.insert(
-                at.to_string(),
-                Holder {
-                    name: name.to_string(),
-                    version: version.map(str::to_string),
-                    caller: caller.to_string(),
-                    stub: None,
-                },
-            );
+            self.holders.insert(at.to_string(), holder);
             return Ok(Claim::Copy);
         };
-        if held.name != name || held.version.as_deref() != version {
-            return Err(collision(at, held, name, version, caller));
+        if !same_instance(&held.instance, &holder.instance) {
+            return Err(collision(at, held, &holder));
         }
-        if held.stub.take().is_none() {
+        if held.stub.is_none() {
             return Ok(Claim::Reuse);
         }
-        held.caller = caller.to_string();
+        *held = holder;
         self.files.remove(&format!("{at}/package.json"));
         Ok(Claim::ReplacedStub)
     }
@@ -1339,26 +1483,19 @@ impl Payload {
     fn claim_stub(
         &mut self,
         at: &str,
-        name: &str,
-        version: Option<&str>,
-        exports: BTreeMap<String, BTreeMap<&'static str, String>>,
-        caller: &str,
+        mut holder: Holder,
     ) -> Result<BTreeSet<(String, &'static str)>> {
-        let held = self
-            .holders
-            .entry(at.to_string())
-            .or_insert_with(|| Holder {
-                name: name.to_string(),
-                version: version.map(str::to_string),
-                caller: caller.to_string(),
-                stub: Some(BTreeMap::new()),
-            });
-        if held.name != name || held.version.as_deref() != version {
-            return Err(collision(at, held, name, version, caller));
+        let exports = holder.stub.take().unwrap_or_default();
+        if let Some(held) = self.holders.get(at) {
+            if !same_instance(&held.instance, &holder.instance) {
+                return Err(collision(at, held, &holder));
+            }
+            if held.stub.is_none() {
+                return Ok(BTreeSet::new());
+            }
         }
-        let Some(existing) = held.stub.as_mut() else {
-            return Ok(BTreeSet::new());
-        };
+        let held = self.holders.entry(at.to_string()).or_insert(holder);
+        let existing = held.stub.get_or_insert_with(BTreeMap::new);
         let mut added = BTreeSet::new();
         for (key, conditions) in exports {
             let answered = existing.entry(key.clone()).or_default();
@@ -1369,49 +1506,123 @@ impl Payload {
                 }
             }
         }
-        let manifest = super::closure::stub_manifest(name, version, existing);
+        let manifest = super::closure::stub_manifest(&held.name, held.version.as_deref(), existing);
         self.files
             .insert(format!("{at}/package.json"), (manifest, false));
         Ok(added)
     }
+
+    /// What Node finds for `package`, walking up from `from` in the artifact.
+    fn lookup(&self, from: &str, package: &str) -> Option<(String, &Holder)> {
+        let mut dir = from;
+        loop {
+            let at = if dir.is_empty() {
+                format!("node_modules/{package}")
+            } else {
+                format!("{dir}/node_modules/{package}")
+            };
+            if let Some(held) = self.holders.get(&at) {
+                return Some((at, held));
+            }
+            if dir.is_empty() {
+                return None;
+            }
+            dir = dir.rsplit_once('/').map_or("", |(parent, _)| parent);
+        }
+    }
+
+    /// The packages whose bundled code landed where it cannot reach an install it
+    /// imports, so that those packages can ship as files, where their own lookups
+    /// work: a chunk runs from its stub or the app root, not from where the module sat.
+    fn stranded_by(&self, imports: &[super::closure::VerbatimImport]) -> BTreeMap<PathBuf, String> {
+        let mut stranded = BTreeMap::new();
+        for import in imports {
+            let from = import.chunk.rsplit_once('/').map_or("", |(dir, _)| dir);
+            let reached = self
+                .lookup(from, &import.package)
+                .is_some_and(|(_, held)| same_instance(&held.instance, &import.instance));
+            if reached {
+                continue;
+            }
+            let owner = import.module.ancestors().skip(1).find(|dir| {
+                std::fs::read_to_string(dir.join("package.json"))
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                    .is_some_and(|manifest| manifest["name"].is_string())
+            });
+            if let Some(owner) = owner {
+                let why = format!(
+                    "{} imports {} from {}, and {} cannot reach that",
+                    import.module.display(),
+                    import.package,
+                    import.instance.display(),
+                    import.chunk
+                );
+                stranded.insert(owner.to_path_buf(), why);
+            }
+        }
+        stranded
+    }
+
+    /// Fail when a verbatim package would load a different install than it does
+    /// uncompiled: the same directory can be on two packages' lookup paths, and each
+    /// was placed without knowing what the other would find there.
+    fn reject_shadowed_imports(&self) -> Result<()> {
+        for (from, package, wanted) in &self.named {
+            let Some((at, held)) = self.lookup(from, package) else {
+                continue;
+            };
+            if !same_instance(&held.instance, wanted) {
+                bail!(
+                    "{from} resolves {package} to {}, but in the compiled binary it would load \
+                     {} from {at}.\n\
+                     \x20 Install a single version of it, or pass --unbundled for the package that\n\
+                     \x20 depends on the other copy so that each keeps its own.",
+                    wanted.display(),
+                    held.instance.display()
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
-fn collision(
-    at: &str,
-    held: &Holder,
-    name: &str,
-    version: Option<&str>,
-    caller: &str,
-) -> anyhow::Error {
-    let describe = |name: &str, version: Option<&str>| match version {
-        Some(version) => format!("{name}@{version}"),
-        None => name.to_string(),
+fn collision(at: &str, held: &Holder, other: &Holder) -> anyhow::Error {
+    let describe = |holder: &Holder| {
+        let name = match &holder.version {
+            Some(version) => format!("{}@{version}", holder.name),
+            None => holder.name.clone(),
+        };
+        format!(
+            "{name} from {}, reached from {}",
+            holder.instance.display(),
+            holder.caller
+        )
     };
     anyhow::anyhow!(
         "two different packages would occupy {at} in the compiled binary:\n\
-         \x20 {}, reached from {}\n\
-         \x20 {}, reached from {caller}\n\
+         \x20 {}\n\
+         \x20 {}\n\
          \x20 Only one can ship there, and the other's callers would load it instead.\n\
-         \x20 Install a single version of it.",
-        describe(&held.name, held.version.as_deref()),
-        held.caller,
-        describe(name, version)
+         \x20 Install a single copy of it.",
+        describe(held),
+        describe(other)
     )
 }
 
 /// Turn one walked closure into a bundling plan, writing the stub manifests that
 /// let Node resolve what the plan replaces.
 ///
-/// The whole closure reverts to verbatim on either refusal — a package whose
+/// Returns false, having written nothing, on either refusal — a package whose
 /// specifiers cannot be enumerated, or one named through a subpath no `.js` file
-/// can answer. Partial is not an option: a stub set missing one entry produces a
-/// binary that builds clean and dies on the machine it ships to, which is the one
-/// failure this pipeline exists to avoid.
+/// can answer. The whole closure then ships as files. Partial is not an option: a
+/// stub set missing one entry produces a binary that builds clean and dies on the
+/// machine it ships to, which is the one failure this pipeline exists to avoid.
 fn plan_closure(
-    members: &mut [Member],
+    members: &[Member],
     closure: &mut super::closure::Plan,
     payload: &mut Payload,
-) -> Result<()> {
+) -> Result<bool> {
     let mut named: Vec<(usize, String, super::closure::Uses)> = Vec::new();
     let mut refuse = false;
     for (index, member) in members.iter().enumerate().filter(|(_, m)| m.verbatim) {
@@ -1421,42 +1632,51 @@ fn plan_closure(
         }
     }
 
-    // Each entry with the stub and `exports` key it answers. Numbered across every
-    // closure, so two closures stubbing one package never write one chunk path.
-    let base = closure.entries.len();
+    // Each entry with the stub and `exports` key it answers.
     let mut entries: Vec<(String, String, &'static str, super::closure::Entry)> = Vec::new();
     let mut stubs: BTreeMap<String, Holder> = BTreeMap::new();
+    let mut imports: Vec<(String, String, PathBuf)> = Vec::new();
     for (importer, specifier, uses) in named {
         let package = super::closure::package_of(&specifier);
-        let bundled = |member: &&Member| !member.verbatim && member.name == package;
-        // Which placement the importer would actually reach: Node walks up from the
-        // file that ran, and an isolated install puts the same package under
-        // several dependents. A named package with no reachable placement is a
-        // refusal rather than a skip — the specifier is real and nothing would
-        // answer it. A package outside the closure entirely (a builtin, an
-        // undeclared dependency) has no placements at all and is left alone.
-        let Some(member) = members
-            .iter()
-            .filter(bundled)
-            .find(|member| reachable_from(&members[importer].rel, &member.rel))
+        let from = &members[importer];
+        // The install this importer resolves uncompiled, placed where it can reach it:
+        // an isolated install puts one package under several dependents, and the name
+        // alone would answer with whichever of them the walk met first. A bundled install
+        // with no such placement is a refusal rather than a skip — the specifier is real
+        // and nothing would answer it. A specifier that resolves to nothing uncompiled (a
+        // builtin, a devDependency named in a test file) is left alone, as is a package
+        // outside the closure.
+        let Some(wanted) = resolve_package_root(&from.real.join("x"), package)
+            .and_then(|root| std::fs::canonicalize(root).ok())
         else {
-            refuse |= members.iter().any(|member| bundled(&member));
             continue;
         };
+        let Some(member) = members
+            .iter()
+            .find(|member| member.real == wanted && reachable_from(&from.rel, &member.rel))
+        else {
+            refuse |= members
+                .iter()
+                .any(|member| !member.verbatim && member.real == wanted);
+            continue;
+        };
+        imports.push((from.rel.clone(), package.to_string(), member.real.clone()));
+        if member.verbatim {
+            continue;
+        }
         if !super::closure::answerable(&specifier, uses) {
             refuse = true;
             break;
         }
         let stub = stubs.entry(member.rel.clone()).or_insert_with(|| Holder {
-            name: member.name.clone(),
-            version: member.version.clone(),
-            caller: members[importer].rel.clone(),
-            stub: Some(BTreeMap::new()),
+            caller: from.rel.clone(),
+            ..member.holder(Some(BTreeMap::new()))
         });
         for esm in [false, true] {
             if !(if esm { uses.imported } else { uses.required }) {
                 continue;
             }
+            let number = closure.next_chunk;
             let entry = super::closure::Entry {
                 // Names no real file. The bundler needs only its DIRECTORY, so the
                 // specifier resolves from the package that wrote it — from its REAL
@@ -1464,9 +1684,9 @@ fn plan_closure(
                 // `dir` is the `node_modules/<name>` symlink under an isolated
                 // install, and none of its `.store/` siblings is reachable from
                 // there: every jsdom entry resolved to nothing.
-                importer: super::bundle::canonicalize_for_bundler(&members[importer].dir)
-                    .join(format!("__nub_closure_{}.js", base + entries.len())),
-                chunk: super::closure::chunk_path(&member.rel, base + entries.len(), esm),
+                importer: super::bundle::canonicalize_for_bundler(&from.dir)
+                    .join(format!("__nub_closure_{number}.js")),
+                chunk: super::closure::chunk_path(&member.rel, number, esm),
                 specifier: specifier.clone(),
                 esm,
             };
@@ -1481,6 +1701,7 @@ fn plan_closure(
             if !targets.contains_key(condition) {
                 targets.insert(condition, target);
                 entries.push((member.rel.clone(), key, condition, entry));
+                closure.next_chunk += 1;
             }
         }
     }
@@ -1488,18 +1709,11 @@ fn plan_closure(
     // Nothing is written until both refusals have had their say, so giving up
     // leaves the payload exactly as it was before closure bundling existed.
     if refuse {
-        for member in members.iter_mut() {
-            member.verbatim = true;
-        }
-        return Ok(());
+        return Ok(false);
     }
     let mut answered = BTreeSet::new();
     for (at, stub) in stubs {
-        let exports = stub.stub.unwrap_or_default();
-        let version = stub.version.as_deref();
-        for (key, condition) in
-            payload.claim_stub(&at, &stub.name, version, exports, &stub.caller)?
-        {
+        for (key, condition) in payload.claim_stub(&at, stub)? {
             answered.insert((at.clone(), key, condition));
         }
     }
@@ -1514,10 +1728,11 @@ fn plan_closure(
     closure.verbatim.extend(
         members
             .iter()
-            .filter(|member| member.verbatim && !member.name.is_empty())
-            .map(|member| member.name.clone()),
+            .filter(|member| member.verbatim)
+            .map(|member| member.real.clone()),
     );
-    Ok(())
+    payload.named.extend(imports);
+    Ok(true)
 }
 
 /// Say when an island shipped without an optional dependency that is not
@@ -3162,18 +3377,44 @@ mod tests {
         );
     }
 
+    fn install(dir: &Path, version: &str, deps: &[&str]) -> PathBuf {
+        let name = dir.file_name().unwrap().to_str().unwrap();
+        std::fs::create_dir_all(dir).unwrap();
+        let deps: Vec<String> = deps.iter().map(|dep| format!(r#""{dep}":"*""#)).collect();
+        std::fs::write(
+            dir.join("package.json"),
+            format!(
+                r#"{{"name":"{name}","version":"{version}","dependencies":{{{}}}}}"#,
+                deps.join(",")
+            ),
+        )
+        .unwrap();
+        dir.to_path_buf()
+    }
+
     /// The rules for two packages meeting at one payload directory. A stub answers
     /// only the subpaths the scan saw, so it never stands in for the package's own
     /// files, while they stand in for it; anything else is a different package and
     /// one of its callers would load the wrong code.
     #[test]
     fn a_package_directory_holds_one_package_and_its_own_files_beat_a_stub() {
+        let tree = tempfile::tempdir().unwrap();
+        let one = install(&tree.path().join("one/node_modules/x"), "1", &[]);
+        let two = install(&tree.path().join("two/node_modules/x"), "2", &[]);
         let at = "node_modules/x";
-        let exports = |key: &str| {
-            BTreeMap::from([(
+        let holder = |instance: &Path, version: &str, caller: &str, stub| Holder {
+            name: "x".to_string(),
+            version: Some(version.to_string()),
+            instance: instance.to_path_buf(),
+            caller: caller.to_string(),
+            stub,
+        };
+        let stub = |key: &str, caller: &str| {
+            let exports = BTreeMap::from([(
                 key.to_string(),
                 BTreeMap::from([("require", format!("./__nub/{}.js", key.len()))]),
-            )])
+            )]);
+            holder(&one, "1", caller, Some(exports))
         };
         let keys = |added: BTreeSet<(String, &'static str)>| -> Vec<String> {
             added.into_iter().map(|(key, _)| key).collect()
@@ -3181,29 +3422,16 @@ mod tests {
 
         let mut payload = Payload::default();
         assert_eq!(
-            keys(
-                payload
-                    .claim_stub(at, "x", Some("1"), exports("./a"), "one")
-                    .unwrap()
-            ),
+            keys(payload.claim_stub(at, stub("./a", "one")).unwrap()),
             ["./a"]
         );
         // A second closure's stub adds what the first did not name.
         assert_eq!(
-            keys(
-                payload
-                    .claim_stub(at, "x", Some("1"), exports("./bb"), "two")
-                    .unwrap()
-            ),
+            keys(payload.claim_stub(at, stub("./bb", "two")).unwrap()),
             ["./bb"]
         );
         assert!(
-            keys(
-                payload
-                    .claim_stub(at, "x", Some("1"), exports("./a"), "two")
-                    .unwrap()
-            )
-            .is_empty(),
+            keys(payload.claim_stub(at, stub("./a", "two")).unwrap()).is_empty(),
             "a specifier already answered needs no second chunk"
         );
         let manifest: serde_json::Value =
@@ -3212,26 +3440,23 @@ mod tests {
 
         // The package's own files replace the stub, and its manifest with it.
         assert!(matches!(
-            payload.claim_full(at, "x", Some("1"), "three").unwrap(),
+            payload
+                .claim_full(at, holder(&one, "1", "three", None))
+                .unwrap(),
             Claim::ReplacedStub
         ));
         assert!(!payload.files.contains_key(&format!("{at}/package.json")));
         // From then on the same package is reused, and a stub adds nothing.
         assert!(matches!(
-            payload.claim_full(at, "x", Some("1"), "four").unwrap(),
+            payload
+                .claim_full(at, holder(&one, "1", "four", None))
+                .unwrap(),
             Claim::Reuse
         ));
-        assert!(
-            keys(
-                payload
-                    .claim_stub(at, "x", Some("1"), exports("./c"), "five")
-                    .unwrap()
-            )
-            .is_empty()
-        );
+        assert!(keys(payload.claim_stub(at, stub("./c", "five")).unwrap()).is_empty());
 
         // Anything else fails, in either order, and names both sides.
-        let text = match payload.claim_full(at, "x", Some("2"), "six") {
+        let text = match payload.claim_full(at, holder(&two, "2", "six", None)) {
             Err(error) => error.to_string(),
             Ok(_) => panic!("a different version must not share a directory"),
         };
@@ -3241,11 +3466,42 @@ mod tests {
                 .all(|part| text.contains(part)),
             "{text}"
         );
+        let mut stubbed = Payload::default();
+        stubbed.claim_stub(at, stub("./a", "seven")).unwrap();
         assert!(
-            payload
-                .claim_stub(at, "y", Some("1"), exports("./a"), "seven")
-                .is_err(),
-            "a different package's stub must not share a directory"
+            stubbed
+                .claim_stub(at, holder(&two, "2", "eight", Some(BTreeMap::new())))
+                .is_err()
         );
+    }
+
+    /// One version in a peer-suffixed store is several installed packages, and npm's
+    /// byte-identical hoisted copies are one. Only the dependencies can tell them apart.
+    #[test]
+    fn an_installed_package_is_its_version_and_what_its_dependencies_resolve_to() {
+        let tree = tempfile::tempdir().unwrap();
+        let foo = |project: &str, peer: Option<&str>| {
+            let modules = tree.path().join(project).join("node_modules");
+            if let Some(version) = peer {
+                install(&modules.join("peer"), version, &[]);
+            }
+            install(&modules.join("foo"), "1", &["peer"])
+        };
+        let peer_one = foo("a", Some("1"));
+        assert!(same_instance(&peer_one, &peer_one));
+        assert!(same_instance(&peer_one, &foo("copy", Some("1"))));
+        assert!(!same_instance(&peer_one, &foo("other", Some("2"))));
+        assert!(!same_instance(&peer_one, &foo("absent", None)));
+
+        // Through a cycle, which has to end, and still see the difference past it.
+        let cycle = |project: &str, leaf: &str| {
+            let modules = tree.path().join(project).join("node_modules");
+            install(&modules.join("back"), "1", &["start", "leaf"]);
+            install(&modules.join("leaf"), leaf, &[]);
+            install(&modules.join("start"), "1", &["back"])
+        };
+        let start = cycle("c1", "1");
+        assert!(same_instance(&start, &cycle("c2", "1")));
+        assert!(!same_instance(&start, &cycle("c3", "2")));
     }
 }

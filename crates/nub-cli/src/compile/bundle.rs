@@ -65,7 +65,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use string_wizard::{Hires, MagicString, SourceMapOptions};
 
-use super::{closure, loaders, metafile, native, native_layout};
+use super::{loaders, metafile, native, native_layout};
 
 /// Where the source map goes. `Linked` and `External` both emit a real `.map`;
 /// they differ only in whether the bundle references it — which for a compiled
@@ -712,23 +712,14 @@ fn bundle_inner(
     // copying starts here, after tree-shaking: a foreign optional variant whose
     // wrapper disappeared cannot affect this target's payload or fail the build.
     let planned_native = if let Some(plugin) = &native_plugin {
-        plugin.plan_survivors(&mut files, entry_abs)?
+        plugin.plan_survivors(&mut files, entry_abs, opts.minify, opts.keep_names)?
     } else {
         native::PlannedNative {
             files: Vec::new(),
             summaries: Vec::new(),
-            closure: closure::Plan::default(),
         }
     };
-    let mut native_files = planned_native.files;
-    // A second, much smaller bundle: the packages inside an eject closure that
-    // did not have to be ejected. It runs here rather than inside the plugin
-    // because the flags it has to match — minify, keep_names — are the caller's.
-    native_files.extend(closure::bundle(
-        &planned_native.closure,
-        opts.minify,
-        opts.keep_names,
-    )?);
+    let native_files = planned_native.files;
     let native_addons = planned_native.summaries;
     // Reported AFTER tree-shaking so a package the program never actually reaches
     // is not named. These bundled clean — a package that finds its addon through

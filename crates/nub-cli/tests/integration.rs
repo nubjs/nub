@@ -894,9 +894,10 @@ fn an_unbundled_packages_dependencies_are_bundled_with_their_exports_intact() {
         ),
         (
             "tree",
-            "",
+            r#","dependencies":{"leaf":"1.0.0"}"#,
             "module.exports = class Tree { constructor(name) { this.name = name; } };\n",
         ),
+        ("leaf", "", "module.exports = 1;\n"),
         (
             "esm-host",
             r#","type":"module","dependencies":{"hooks":"1.0.0"}"#,
@@ -925,6 +926,12 @@ fn an_unbundled_packages_dependencies_are_bundled_with_their_exports_intact() {
             )
             .unwrap();
             std::fs::write(dir.join("index.js"), body).unwrap();
+            // A devDependency named in a file nothing loads. Under an isolated install
+            // it resolves to nothing from here, which must not cost the closure its
+            // stubs because a bundled member happens to share the name.
+            if name == "cjs-host" {
+                std::fs::write(dir.join("bench.js"), "require(\"leaf\");\n").unwrap();
+            }
         }
         if isolated {
             for (host, dep) in [("cjs-host", "tree"), ("esm-host", "hooks")] {
@@ -936,6 +943,11 @@ fn an_unbundled_packages_dependencies_are_bundled_with_their_exports_intact() {
                 )
                 .unwrap();
             }
+            std::os::unix::fs::symlink(
+                "../../leaf@1.0.0/node_modules/leaf",
+                modules.join(".store/tree@1.0.0/node_modules/leaf"),
+            )
+            .unwrap();
         }
         let entry = work.join("app.mjs");
         std::fs::write(
@@ -1082,6 +1094,594 @@ fn two_unbundled_packages_share_a_stub_of_their_dependency() {
         String::from_utf8_lossy(&ran.stdout),
         String::from_utf8_lossy(&ran.stderr)
     );
+}
+
+/// A compiled package finds its dependencies by Node walking up from where it landed,
+/// so the layout has to answer each lookup with the install that answers it uncompiled.
+/// Each package prints its own version, so every case says WHICH copy loaded, and plain
+/// Node confirms the expected line before the compiler gets a say. The refusals are
+/// layouts that cannot serve both callers, where the alternative is a binary that loads
+/// the wrong one without a word.
+#[cfg(all(feature = "compile", unix))]
+#[test]
+fn a_compiled_closure_loads_the_installs_its_packages_resolve() {
+    type Tree = Vec<(String, String)>;
+    fn pkg(at: &str, version: &str, deps: &[&str], body: &str) -> Tree {
+        let name = at.rsplit_once("node_modules/").map_or(at, |(_, name)| name);
+        let field = |peer: bool| {
+            let names: Vec<String> = deps
+                .iter()
+                .filter(|dep| dep.starts_with("peer:") == peer)
+                .map(|dep| format!(r#""{}":"*""#, dep.trim_start_matches("peer:")))
+                .collect();
+            names.join(",")
+        };
+        let body = if body.is_empty() {
+            format!("module.exports = () => \"{name} {version}\";\n")
+        } else {
+            body.to_string()
+        };
+        vec![
+            (
+                format!("{at}/package.json"),
+                format!(
+                    r#"{{"name":"{name}","version":"{version}","main":"index.js","dependencies":{{{}}},"peerDependencies":{{{}}}}}"#,
+                    field(false),
+                    field(true)
+                ),
+            ),
+            (format!("{at}/index.js"), body),
+        ]
+    }
+    fn store(version: &str, name: &str) -> String {
+        format!("node_modules/.store/{name}@{version}/node_modules/{name}")
+    }
+    // `pino` stands in for the real one: left unbundled by name, it resolves a target
+    // from its caller. `pino-pretty` is unbundled by name, so it is a verbatim package
+    // that needs no flag.
+    let pino = |at: &str| {
+        pkg(
+            at,
+            "1.0.0",
+            &[],
+            "const { createRequire } = require(\"node:module\");\n\
+             module.exports = (opts, caller) =>\n\
+             \x20 require(createRequire(caller).resolve(opts.transport.target))();\n",
+        )
+    };
+    let uses_foo_transport = "const pino = require(\"pino\");\n\
+         module.exports = () => pino({ transport: { target: \"foo\" } }, __filename);\n";
+    let calls_foo = "module.exports = () => require(\"foo\")();\n";
+    let calls_peer = "module.exports = () => require(\"peer\")();\n";
+    let calls_mid = "module.exports = () => require(\"mid\")();\n";
+    let calls_m = "module.exports = () => require(\"m\")();\n";
+    let calls_pretty = "module.exports = () => require(\"pino-pretty\")();\n";
+    let main_two_imports =
+        "import r from \"r\";\nimport top from \"pino-pretty\";\nconsole.log(r(), top());\n";
+    let wrapper_and_holder = "import logger from \"logger\";\nimport holder from \"holder\";\nconsole.log(logger(), holder());\n";
+    let foo_v = "const foo = require(\"foo\");\nconst v = require(\"v\");\n\
+         module.exports = () => foo() + \" \" + v();\n";
+
+    // Name, files, symlinks, entry, flags, and the artifact's stdout or the build's refusal.
+    type Case<'a> = (
+        &'a str,
+        Tree,
+        Vec<(String, String)>,
+        &'a str,
+        &'a [&'a str],
+        Result<&'a str, &'a str>,
+    );
+    let cases: Vec<Case> = vec![
+        // Chunk numbers: entries filtered as duplicates must not free a number.
+        (
+            "three closures over one stub",
+            [
+                pkg(
+                    "node_modules/host-a",
+                    "1.0.0",
+                    &["shared"],
+                    "module.exports = () => require(\"shared/a\")();\n",
+                ),
+                pkg(
+                    "node_modules/host-b",
+                    "1.0.0",
+                    &["shared"],
+                    "module.exports = () => require(\"shared/a\")() + require(\"shared/b\")();\n",
+                ),
+                pkg(
+                    "node_modules/host-c",
+                    "1.0.0",
+                    &["shared"],
+                    "module.exports = () => require(\"shared/c\")();\n",
+                ),
+                pkg("node_modules/shared", "1.0.0", &[], "module.exports = 0;\n"),
+                ["a", "b", "c"]
+                    .map(|sub| {
+                        (
+                            format!("node_modules/shared/{sub}.js"),
+                            format!("module.exports = () => \"{sub}\";\n"),
+                        )
+                    })
+                    .to_vec(),
+            ]
+            .concat(),
+            vec![],
+            "import a from \"host-a\";\nimport b from \"host-b\";\nimport c from \"host-c\";\n\
+             console.log(a(), b(), c());\n",
+            &[
+                "--unbundled",
+                "host-a",
+                "--unbundled",
+                "host-b",
+                "--unbundled",
+                "host-c",
+            ],
+            Ok("a ab c"),
+        ),
+        // Same versions, different peers, under an isolated install: a bundled caller's
+        // transport lands on the directory an unbundled `foo` already holds. Every name
+        // and version matches down to the peer, so only following them can tell.
+        (
+            "one version with two peers, isolated",
+            [
+                pkg(
+                    &store("1.0.0_peer@1", "foo"),
+                    "1.0.0",
+                    &["peer:mid"],
+                    calls_mid,
+                ),
+                pkg(
+                    &store("1.0.0_peer@2", "foo"),
+                    "1.0.0",
+                    &["peer:mid"],
+                    calls_mid,
+                ),
+                pkg(
+                    &store("1.0.0_peer@1", "mid"),
+                    "1.0.0",
+                    &["peer:peer"],
+                    calls_peer,
+                ),
+                pkg(
+                    &store("1.0.0_peer@2", "mid"),
+                    "1.0.0",
+                    &["peer:peer"],
+                    calls_peer,
+                ),
+                pkg(&store("1.0.0", "peer"), "1.0.0", &[], ""),
+                pkg(&store("2.0.0", "peer"), "2.0.0", &[], ""),
+                pkg(
+                    &store("1.0.0", "holder"),
+                    "1.0.0",
+                    &["foo", "pino"],
+                    uses_foo_transport,
+                ),
+                pino(&store("1.0.0", "pino")),
+            ]
+            .concat(),
+            [
+                (
+                    "node_modules/foo",
+                    ".store/foo@1.0.0_peer@1/node_modules/foo",
+                ),
+                (
+                    "node_modules/holder",
+                    ".store/holder@1.0.0/node_modules/holder",
+                ),
+                (
+                    "node_modules/.store/foo@1.0.0_peer@1/node_modules/mid",
+                    "../../mid@1.0.0_peer@1/node_modules/mid",
+                ),
+                (
+                    "node_modules/.store/foo@1.0.0_peer@2/node_modules/mid",
+                    "../../mid@1.0.0_peer@2/node_modules/mid",
+                ),
+                (
+                    "node_modules/.store/mid@1.0.0_peer@1/node_modules/peer",
+                    "../../peer@1.0.0/node_modules/peer",
+                ),
+                (
+                    "node_modules/.store/mid@1.0.0_peer@2/node_modules/peer",
+                    "../../peer@2.0.0/node_modules/peer",
+                ),
+                (
+                    "node_modules/.store/holder@1.0.0/node_modules/foo",
+                    "../../foo@1.0.0_peer@2/node_modules/foo",
+                ),
+                (
+                    "node_modules/.store/holder@1.0.0/node_modules/pino",
+                    "../../pino@1.0.0/node_modules/pino",
+                ),
+            ]
+            .map(|(at, to)| (at.to_string(), to.to_string()))
+            .to_vec(),
+            "import foo from \"foo\";\nimport holder from \"holder\";\nconsole.log(foo(), holder());\n",
+            &["--unbundled", "foo"],
+            Err("two different packages would occupy node_modules/foo"),
+        ),
+        // A transport's own files replacing a stub would move the wrapper to peer 2.
+        (
+            "a stub replaced by one version with another peer",
+            [
+                pkg("node_modules/logger", "1.0.0", &["foo"], calls_foo),
+                pkg("node_modules/foo", "1.0.0", &["peer:peer"], calls_peer),
+                pkg("node_modules/peer", "1.0.0", &[], ""),
+                pkg(
+                    "node_modules/holder",
+                    "1.0.0",
+                    &["foo", "pino"],
+                    uses_foo_transport,
+                ),
+                pkg(
+                    "node_modules/holder/node_modules/foo",
+                    "1.0.0",
+                    &["peer:peer"],
+                    calls_peer,
+                ),
+                pkg("node_modules/holder/node_modules/peer", "2.0.0", &[], ""),
+                pino("node_modules/pino"),
+            ]
+            .concat(),
+            vec![],
+            wrapper_and_holder,
+            &["--unbundled", "logger"],
+            Err("two different packages would occupy node_modules/foo"),
+        ),
+        // The control for the two above: copies whose dependencies are also only copies
+        // are one package, and share the directory.
+        (
+            "byte-identical hoisted copies",
+            [
+                pkg("node_modules/logger", "1.0.0", &["foo"], calls_foo),
+                pkg("node_modules/foo", "1.0.0", &["peer:peer"], calls_peer),
+                pkg("node_modules/peer", "1.0.0", &[], ""),
+                pkg(
+                    "node_modules/holder",
+                    "1.0.0",
+                    &["foo", "pino"],
+                    uses_foo_transport,
+                ),
+                pkg(
+                    "node_modules/holder/node_modules/foo",
+                    "1.0.0",
+                    &["peer:peer"],
+                    calls_peer,
+                ),
+                pkg("node_modules/holder/node_modules/peer", "1.0.0", &[], ""),
+                pino("node_modules/pino"),
+            ]
+            .concat(),
+            vec![],
+            wrapper_and_holder,
+            &["--unbundled", "logger"],
+            Ok("peer 1.0.0 peer 1.0.0"),
+        ),
+        // The other control: two peers that never meet in one directory both ship.
+        (
+            "two hosts with one version under two peers",
+            [
+                pkg(&store("1.0.0", "host-a"), "1.0.0", &["foo"], calls_foo),
+                pkg(&store("1.0.0", "host-b"), "1.0.0", &["foo"], calls_foo),
+                pkg(
+                    &store("1.0.0_peer@1", "foo"),
+                    "1.0.0",
+                    &["peer:peer"],
+                    calls_peer,
+                ),
+                pkg(
+                    &store("1.0.0_peer@2", "foo"),
+                    "1.0.0",
+                    &["peer:peer"],
+                    calls_peer,
+                ),
+                pkg(&store("1.0.0", "peer"), "1.0.0", &[], ""),
+                pkg(&store("2.0.0", "peer"), "2.0.0", &[], ""),
+            ]
+            .concat(),
+            [
+                (
+                    "node_modules/host-a",
+                    ".store/host-a@1.0.0/node_modules/host-a",
+                ),
+                (
+                    "node_modules/host-b",
+                    ".store/host-b@1.0.0/node_modules/host-b",
+                ),
+                (
+                    "node_modules/.store/host-a@1.0.0/node_modules/foo",
+                    "../../foo@1.0.0_peer@1/node_modules/foo",
+                ),
+                (
+                    "node_modules/.store/host-b@1.0.0/node_modules/foo",
+                    "../../foo@1.0.0_peer@2/node_modules/foo",
+                ),
+                (
+                    "node_modules/.store/foo@1.0.0_peer@1/node_modules/peer",
+                    "../../peer@1.0.0/node_modules/peer",
+                ),
+                (
+                    "node_modules/.store/foo@1.0.0_peer@2/node_modules/peer",
+                    "../../peer@2.0.0/node_modules/peer",
+                ),
+            ]
+            .map(|(at, to)| (at.to_string(), to.to_string()))
+            .to_vec(),
+            "import a from \"host-a\";\nimport b from \"host-b\";\nconsole.log(a(), b());\n",
+            &["--unbundled", "host-a", "--unbundled", "host-b"],
+            Ok("peer 1.0.0 peer 2.0.0"),
+        ),
+        // Two verbatim packages naming one package, each with its own install: the walk
+        // meets the shallower first, and the name alone would answer both with it.
+        (
+            "two verbatim importers with their own installs, hoisted",
+            [
+                pkg("node_modules/r", "1.0.0", &["foo", "v"], foo_v),
+                pkg("node_modules/v", "1.0.0", &["foo"], calls_foo),
+                pkg("node_modules/foo", "1.0.0", &[], ""),
+                pkg("node_modules/v/node_modules/foo", "2.0.0", &[], ""),
+            ]
+            .concat(),
+            vec![],
+            "import r from \"r\";\nconsole.log(r());\n",
+            &["--unbundled", "r", "--unbundled", "v"],
+            Ok("foo 1.0.0 foo 2.0.0"),
+        ),
+        (
+            "two verbatim importers with their own installs, isolated",
+            [
+                pkg(&store("1.0.0", "r"), "1.0.0", &["foo", "v"], foo_v),
+                pkg(&store("1.0.0", "v"), "1.0.0", &["foo"], calls_foo),
+                pkg(&store("1.0.0", "foo"), "1.0.0", &[], ""),
+                pkg(&store("2.0.0", "foo"), "2.0.0", &[], ""),
+            ]
+            .concat(),
+            [
+                ("node_modules/r", ".store/r@1.0.0/node_modules/r"),
+                ("node_modules/v", ".store/v@1.0.0/node_modules/v"),
+                (
+                    "node_modules/.store/r@1.0.0/node_modules/foo",
+                    "../../foo@1.0.0/node_modules/foo",
+                ),
+                (
+                    "node_modules/.store/r@1.0.0/node_modules/v",
+                    "../../v@1.0.0/node_modules/v",
+                ),
+                (
+                    "node_modules/.store/v@1.0.0/node_modules/foo",
+                    "../../foo@2.0.0/node_modules/foo",
+                ),
+            ]
+            .map(|(at, to)| (at.to_string(), to.to_string()))
+            .to_vec(),
+            "import r from \"r\";\nconsole.log(r());\n",
+            &["--unbundled", "r", "--unbundled", "v"],
+            Ok("foo 1.0.0 foo 2.0.0"),
+        ),
+        // A computed require sends the whole closure out as files, so `b` no longer
+        // finds its dependency where it would have as bundled code.
+        (
+            "a closure refused for a computed require",
+            [
+                pkg(
+                    &store("1.0.0", "r"),
+                    "1.0.0",
+                    &["b", "foo"],
+                    "const foo = require([\"f\", \"oo\"].join(\"\"));\nconst b = require(\"b\");\n\
+                     module.exports = () => foo() + \" \" + b();\n",
+                ),
+                pkg(&store("1.0.0", "b"), "1.0.0", &["foo"], calls_foo),
+                pkg(&store("1.0.0", "foo"), "1.0.0", &[], ""),
+                pkg(&store("3.0.0", "foo"), "3.0.0", &[], ""),
+            ]
+            .concat(),
+            [
+                ("node_modules/r", ".store/r@1.0.0/node_modules/r"),
+                (
+                    "node_modules/.store/r@1.0.0/node_modules/b",
+                    "../../b@1.0.0/node_modules/b",
+                ),
+                (
+                    "node_modules/.store/r@1.0.0/node_modules/foo",
+                    "../../foo@1.0.0/node_modules/foo",
+                ),
+                (
+                    "node_modules/.store/b@1.0.0/node_modules/foo",
+                    "../../foo@3.0.0/node_modules/foo",
+                ),
+            ]
+            .map(|(at, to)| (at.to_string(), to.to_string()))
+            .to_vec(),
+            "import r from \"r\";\nconsole.log(r());\n",
+            &["--unbundled", "r"],
+            Ok("foo 1.0.0 foo 3.0.0"),
+        ),
+        // A module two entries share lands at the app root, where its nested verbatim
+        // dependency is out of reach and a top-level copy is not.
+        (
+            "a shared chunk that imports a nested verbatim package",
+            [
+                pkg(
+                    &store("1.0.0", "r"),
+                    "1.0.0",
+                    &["a", "b"],
+                    "const a = require(\"a\");\nconst b = require(\"b\");\n\
+                     module.exports = () => a() + \" \" + b();\n",
+                ),
+                pkg(&store("1.0.0", "a"), "1.0.0", &["m"], calls_m),
+                pkg(&store("1.0.0", "b"), "1.0.0", &["m"], calls_m),
+                pkg(
+                    &store("1.0.0", "m"),
+                    "1.0.0",
+                    &["pino-pretty"],
+                    calls_pretty,
+                ),
+                pkg(&store("9.0.0", "pino-pretty"), "9.0.0", &[], ""),
+                pkg(&store("1.0.0", "pino-pretty"), "1.0.0", &[], ""),
+            ]
+            .concat(),
+            [
+                ("node_modules/r", ".store/r@1.0.0/node_modules/r"),
+                (
+                    "node_modules/pino-pretty",
+                    ".store/pino-pretty@1.0.0/node_modules/pino-pretty",
+                ),
+                (
+                    "node_modules/.store/r@1.0.0/node_modules/a",
+                    "../../a@1.0.0/node_modules/a",
+                ),
+                (
+                    "node_modules/.store/r@1.0.0/node_modules/b",
+                    "../../b@1.0.0/node_modules/b",
+                ),
+                (
+                    "node_modules/.store/a@1.0.0/node_modules/m",
+                    "../../m@1.0.0/node_modules/m",
+                ),
+                (
+                    "node_modules/.store/b@1.0.0/node_modules/m",
+                    "../../m@1.0.0/node_modules/m",
+                ),
+                (
+                    "node_modules/.store/m@1.0.0/node_modules/pino-pretty",
+                    "../../pino-pretty@9.0.0/node_modules/pino-pretty",
+                ),
+            ]
+            .map(|(at, to)| (at.to_string(), to.to_string()))
+            .to_vec(),
+            main_two_imports,
+            &["--unbundled", "r"],
+            Ok("pino-pretty 9.0.0 pino-pretty 9.0.0 pino-pretty 1.0.0"),
+        ),
+        // An entry chunk landing at a hoisted stub, out of reach of where its verbatim
+        // dependency was nested, with a top-level copy to find instead.
+        (
+            "an entry chunk that imports a nested verbatim package",
+            [
+                pkg("node_modules/r", "1.0.0", &["foo"], calls_foo),
+                pkg("node_modules/foo", "1.0.0", &["pino-pretty"], calls_pretty),
+                pkg(
+                    "node_modules/foo/node_modules/pino-pretty",
+                    "2.0.0",
+                    &[],
+                    "",
+                ),
+                pkg("node_modules/pino-pretty", "1.0.0", &[], ""),
+            ]
+            .concat(),
+            vec![],
+            main_two_imports,
+            &["--unbundled", "r"],
+            Ok("pino-pretty 2.0.0 pino-pretty 1.0.0"),
+        ),
+        // A bundled package's stub under `v` sits on `v`'s own lookup path, ahead of the
+        // top-level install `v` resolves.
+        (
+            "a stub that shadows its dependent's own install",
+            [
+                pkg(
+                    "node_modules/v",
+                    "1.0.0",
+                    &["b", "foo"],
+                    "const foo = require(\"foo\");\nconst b = require(\"b\");\n\
+                     module.exports = () => foo() + \" \" + b();\n",
+                ),
+                pkg("node_modules/foo", "1.0.0", &[], ""),
+                pkg(
+                    "node_modules/v/node_modules/b",
+                    "1.0.0",
+                    &["foo", "pino-pretty"],
+                    calls_pretty,
+                ),
+                pkg(
+                    "node_modules/v/node_modules/b/node_modules/foo",
+                    "3.0.0",
+                    &[],
+                    "",
+                ),
+                pkg(
+                    "node_modules/v/node_modules/b/node_modules/pino-pretty",
+                    "1.0.0",
+                    &["foo"],
+                    calls_foo,
+                ),
+            ]
+            .concat(),
+            vec![],
+            "import v from \"v\";\nconsole.log(v());\n",
+            &["--unbundled", "v"],
+            Err("it would load"),
+        ),
+    ];
+
+    let runtime = compile_test_runtime();
+    for (case, files, links, entry, flags, expected) in cases {
+        let work = unique_test_cache();
+        for (path, text) in files {
+            let path = work.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        for (path, target) in links {
+            let path = work.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(target, path).unwrap();
+        }
+        let source = work.join("app.mjs");
+        std::fs::write(&source, entry).unwrap();
+        if let Ok(line) = expected {
+            let node = Command::new("node")
+                .arg(&source)
+                .current_dir(&work)
+                .output()
+                .expect("spawn node");
+            assert_eq!(
+                String::from_utf8_lossy(&node.stdout).trim(),
+                line,
+                "{case}: plain Node disagrees, so the fixture is wrong: {}",
+                String::from_utf8_lossy(&node.stderr)
+            );
+        }
+        let artifact = work.join("app");
+        let compiled = Command::new(nub_binary())
+            .args(["compile", "--smol", "--target", &runtime.node_target])
+            .args(flags)
+            .arg("--out")
+            .arg(&artifact)
+            .arg(&source)
+            .current_dir(&work)
+            .env("XDG_CACHE_HOME", work.join("cache"))
+            .env("__NUB_LAUNCHER_TEMPLATE", &runtime.launcher)
+            .output()
+            .expect("spawn nub compile");
+        let stderr = String::from_utf8_lossy(&compiled.stderr);
+        match expected {
+            Err(refusal) => assert!(
+                !compiled.status.success() && stderr.contains(refusal),
+                "{case}: the build must refuse with `{refusal}`\nstderr: {stderr}"
+            ),
+            Ok(line) => {
+                assert!(
+                    compiled.status.success(),
+                    "{case}: compile failed: {stderr}"
+                );
+                std::fs::remove_dir_all(work.join("node_modules")).unwrap();
+                let mut run = Command::new(&artifact);
+                run.current_dir(&work)
+                    .env("XDG_CACHE_HOME", work.join("run-cache"));
+                let ran = run_compiled_artifact_command_with_timeout(
+                    run,
+                    std::time::Duration::from_secs(10),
+                );
+                assert_eq!(
+                    String::from_utf8_lossy(&ran.stdout).trim(),
+                    line,
+                    "{case}: the artifact loaded another install\nstderr: {}",
+                    String::from_utf8_lossy(&ran.stderr)
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&work);
+    }
 }
 
 /// A pino transport is named by a string and resolved by pino at run time, so no
