@@ -173,10 +173,14 @@ pub fn child_safe_modes(args: &[String]) -> Vec<String> {
 /// means no process selects the mode, and argv would override it, so that value stays
 /// as written. One before them stays too, where the flags on argv override it as they
 /// did in the variable.
+///
+/// Argv gets one `--watch`, or none beside a `--watch-path`, which implies it: on 20.13
+/// through 22.13 the filter keeps whichever flag follows one it removes, so a second
+/// would make the child a supervisor too.
 pub fn lift_watch_flags(node_options: &str) -> Option<(String, Vec<String>)> {
     let tokens = split_node_options(node_options);
     let mut rest = Vec::new();
-    let mut flags = Vec::new();
+    let mut paths = Vec::new();
     let mut selected = false;
     let mut at = 0;
     while at < tokens.len() {
@@ -184,17 +188,24 @@ pub fn lift_watch_flags(node_options: &str) -> Option<(String, Vec<String>)> {
         let option = &tokens[at..at + width];
         if starts_watch_mode(&tokens[at]) {
             selected = true;
-            flags.extend(
-                option
-                    .iter()
-                    .map(|token| filtered_spelling(token).unwrap_or_else(|| token.clone())),
-            );
+            if option_name(&tokens[at]) != "--watch" {
+                paths.extend(
+                    option
+                        .iter()
+                        .map(|token| filtered_spelling(token).unwrap_or_else(|| token.clone())),
+                );
+            }
         } else {
             selected &= !matches!(option_name(&tokens[at]), "--no-watch" | "--no_watch");
             rest.extend(option.iter().map(|token| node_options_token(token)));
         }
         at += width;
     }
+    let flags = if paths.is_empty() {
+        vec!["--watch".to_string()]
+    } else {
+        paths
+    };
     selected.then(|| (rest.join(" "), flags))
 }
 
@@ -325,6 +336,9 @@ mod tests {
             ),
             // A negation before the flags loses to them, as it did in the variable.
             ("--no-watch --watch", "--no-watch", &["--watch"][..]),
+            // Argv gets one flag where one says it all.
+            ("--watch --no-watch --watch", "--no-watch", &["--watch"][..]),
+            ("--watch --watch-path=src", "", &["--watch-path=src"][..]),
         ];
         for (input, rest, flags) in cases {
             assert_eq!(

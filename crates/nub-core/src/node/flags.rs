@@ -10,6 +10,7 @@
 //! own startup hygiene, not user-facing *features*, so they stay local.
 
 use super::feature_matrix::{self, Mitigation};
+use super::spawn::{node_options_token, split_node_options};
 use super::version::NodeVersion;
 
 /// Flags Nub injects on EVERY supported Node version where they are safe.
@@ -650,20 +651,28 @@ fn flag_existence_floor(flag: &str) -> Option<NodeVersion> {
 /// NODE_OPTIONS, its value token survives and Node may complain about the stray value
 /// — but the gated flag itself (the exit-9 trigger) is still removed.
 pub fn strip_unsupported_node_options(node_options: &str, node_version: &NodeVersion) -> String {
-    node_options
-        .split_whitespace()
-        .filter(|token| {
-            // The flag name is the token up to the first `=` (value form) or the
-            // whole token (valueless form). Match the EXACT name against the floor
-            // table; never a prefix, so an unrelated longer token isn't mangled.
-            let name = token.split('=').next().unwrap_or(token);
-            match flag_existence_floor(name) {
-                // Gated flag below the child's floor → snip it.
-                Some(floor) => *node_version >= floor,
-                // Not a gated flag nub knows about → always preserve.
-                None => true,
-            }
-        })
+    let tokens = split_node_options(node_options);
+    let supported = |token: &String| {
+        // The flag name is the token up to the first `=` (value form) or the
+        // whole token (valueless form). Match the EXACT name against the floor
+        // table; never a prefix, so an unrelated longer token isn't mangled.
+        let name = token.split('=').next().unwrap_or(token);
+        match flag_existence_floor(name) {
+            // Gated flag below the child's floor → snip it.
+            Some(floor) => *node_version >= floor,
+            // Not a gated flag nub knows about → always preserve.
+            None => true,
+        }
+    };
+    // With nothing to snip the value goes on as written: rebuilding it can only risk
+    // what its quotes hold.
+    if !tokens.is_empty() && tokens.iter().all(supported) {
+        return node_options.to_string();
+    }
+    tokens
+        .iter()
+        .filter(|token| supported(token))
+        .map(|token| node_options_token(token))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -1325,6 +1334,20 @@ mod tests {
         // --experimental-webstorage match.
         let opts = "--max-old-space-size=4096 --experimental-webstorage-extra=1";
         assert_eq!(strip_unsupported_node_options(opts, &v(18, 19, 0)), opts);
+    }
+
+    #[test]
+    fn a_value_keeps_its_spacing_through_the_strip() {
+        for opts in [r#""--title=a  b""#, "--title=foo\tbar"] {
+            assert_eq!(strip_unsupported_node_options(opts, &v(20, 0, 0)), opts);
+        }
+        assert_eq!(
+            strip_unsupported_node_options(
+                r#"--experimental-webstorage "--title=a  b""#,
+                &v(20, 0, 0)
+            ),
+            r#""--title=a  b""#
+        );
     }
 
     #[test]
