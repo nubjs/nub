@@ -418,11 +418,20 @@ pub(crate) fn parse_project_lockfile(
 /// or `member_lockfiles_stale` under `sharedWorkspaceLockfile=false`) and gets
 /// a full resolve instead, so this merge only ever runs on the warm path for
 /// members already present at the last install.
+///
+/// Each lockfile records its own resolution config, and the drift checks
+/// read it off the merged graph. pnpm writes the workspace-wide part
+/// (settings, overrides, checksums) into every lockfile alike, but only the
+/// catalog entries the project uses, so the member's catalogs are folded in.
+/// A member whose config disagrees with the graph's is left out, which makes
+/// the graph stale against its manifest, and the first such disagreement is
+/// returned for a frozen install to report.
 pub(super) fn merge_member_lockfile_graphs(
     workspace_root: &std::path::Path,
     graph: &mut aube_lockfile::LockfileGraph,
     manifests: &[(String, aube_manifest::PackageJson)],
-) {
+) -> Option<String> {
+    let mut mismatch = None;
     for (importer_path, manifest) in manifests {
         if importer_path == "." || graph.importers.contains_key(importer_path) {
             continue;
@@ -436,6 +445,19 @@ pub(super) fn merge_member_lockfile_graphs(
                 continue;
             }
         };
+        if let Some(reason) = member_config_mismatch(graph, &member_graph) {
+            tracing::debug!(
+                "sharedWorkspaceLockfile=false: skipping member {importer_path} graph merge: {reason}"
+            );
+            mismatch.get_or_insert(format!("{importer_path}: {reason}"));
+            continue;
+        }
+        for (catalog, entries) in member_graph.catalogs {
+            let merged = graph.catalogs.entry(catalog).or_default();
+            for (name, entry) in entries {
+                merged.entry(name).or_insert(entry);
+            }
+        }
         if let Some(deps) = member_graph.importers.get(".") {
             graph.importers.insert(importer_path.clone(), deps.clone());
         }
@@ -443,6 +465,54 @@ pub(super) fn merge_member_lockfile_graphs(
             graph.packages.entry(dep_path).or_insert(pkg);
         }
     }
+    mismatch
+}
+
+/// Why `member`'s recorded resolution config can't share a graph with
+/// `graph`'s, if it can't. Patch paths are left out: each lockfile spells
+/// them from its own directory, and the hashes identify the patches.
+fn member_config_mismatch(
+    graph: &aube_lockfile::LockfileGraph,
+    member: &aube_lockfile::LockfileGraph,
+) -> Option<String> {
+    for (catalog, entries) in &member.catalogs {
+        for (name, entry) in entries {
+            // Projects resolve on their own, so only the range must agree.
+            if let Some(merged) = graph.catalogs.get(catalog).and_then(|c| c.get(name))
+                && merged.specifier != entry.specifier
+            {
+                return Some(format!(
+                    "lockfile records catalogs.{catalog}.{name} as {}, another workspace lockfile as {}",
+                    entry.specifier, merged.specifier
+                ));
+            }
+        }
+    }
+    let differs = [
+        ("settings", graph.settings != member.settings),
+        ("overrides", graph.overrides != member.overrides),
+        (
+            "packageExtensionsChecksum",
+            graph.package_extensions_checksum != member.package_extensions_checksum,
+        ),
+        (
+            "pnpmfileChecksum",
+            graph.pnpmfile_checksum != member.pnpmfile_checksum,
+        ),
+        (
+            "ignoredOptionalDependencies",
+            graph.ignored_optional_dependencies != member.ignored_optional_dependencies,
+        ),
+        (
+            "patchedDependencies",
+            graph.patched_dependency_hashes != member.patched_dependency_hashes,
+        ),
+        ("runtimes", graph.runtimes != member.runtimes),
+    ];
+    differs
+        .into_iter()
+        .find(|(_, differs)| *differs)
+        .map(|(field, _)| format!("lockfile's {field} differs from the workspace root lockfile's"))
 }
 
 pub(crate) fn order_lifecycle_manifests(
@@ -1210,6 +1280,85 @@ mod member_graph_merge_tests {
         assert!(
             paths.contains(&"vendor/other".into()),
             "the transitive local dep must stay at vendor/other, got {paths:?}"
+        );
+    }
+
+    const PNPM_HEADER: &str = "lockfileVersion: '9.0'\n\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: false\n\n";
+
+    fn write_member_lockfile(root: &std::path::Path, member: &str, body: &str) {
+        let dir = root.join(member);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("pnpm-lock.yaml"), format!("{PNPM_HEADER}{body}")).unwrap();
+    }
+
+    fn catalog_member_lockfile(range: &str) -> String {
+        format!(
+            "catalogs:\n  default:\n    post-only:\n      specifier: {range}\n      version: 1.0.0\n\n\
+             importers:\n\n  .:\n    dependencies:\n      post-only:\n        specifier: 'catalog:'\n        version: 1.0.0\n\n\
+             packages:\n\n  post-only@1.0.0:\n    resolution: {{integrity: sha512-AAAA}}\n\n\
+             snapshots:\n\n  post-only@1.0.0: {{}}\n"
+        )
+    }
+
+    /// pnpm records a catalog entry only in the lockfile of a project that
+    /// uses it, so a member's catalogs must reach the freshness check; and a
+    /// member whose recorded config disagrees with the rest is left out.
+    #[test]
+    fn member_lockfile_config_reaches_the_freshness_check() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("pnpm-lock.yaml"),
+            format!("{PNPM_HEADER}importers:\n\n  .: {{}}\n"),
+        )
+        .unwrap();
+        write_member_lockfile(
+            root.path(),
+            "packages/a",
+            &catalog_member_lockfile("^1.0.0"),
+        );
+        write_member_lockfile(
+            root.path(),
+            "packages/b",
+            &catalog_member_lockfile("^2.0.0"),
+        );
+        write_member_lockfile(
+            root.path(),
+            "packages/c",
+            "overrides:\n  post-only: 1.0.0\n\nimporters:\n\n  .: {}\n",
+        );
+        let manifests = vec![
+            (".".to_string(), manifest("root")),
+            ("packages/a".to_string(), manifest("a")),
+            ("packages/b".to_string(), manifest("b")),
+            ("packages/c".to_string(), manifest("c")),
+        ];
+        let mut graph = aube_lockfile::parse_lockfile(root.path(), &manifests[0].1).unwrap();
+        let mismatch = merge_member_lockfile_graphs(root.path(), &mut graph, &manifests);
+
+        let catalog = |range: &str| {
+            BTreeMap::from([(
+                "default".to_string(),
+                BTreeMap::from([("post-only".to_string(), range.to_string())]),
+            )])
+        };
+        assert!(graph.importers.contains_key("packages/a"));
+        assert!(matches!(
+            graph.check_catalogs_drift(&catalog("^1.0.0")),
+            aube_lockfile::DriftStatus::Fresh
+        ));
+        assert!(
+            matches!(
+                graph.check_catalogs_drift(&catalog("^2.0.0")),
+                aube_lockfile::DriftStatus::Stale { .. }
+            ),
+            "a catalog range only a member lockfile records must be checked"
+        );
+        let mismatch = mismatch.expect("packages/b records another catalog range");
+        assert!(mismatch.starts_with("packages/b: "), "{mismatch}");
+        assert!(!graph.importers.contains_key("packages/b"));
+        assert!(
+            !graph.importers.contains_key("packages/c"),
+            "a member recording other overrides than the root must be left out"
         );
     }
 }

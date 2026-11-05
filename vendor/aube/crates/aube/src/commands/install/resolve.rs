@@ -552,18 +552,28 @@ pub(super) fn select_lockfile_result(
         FrozenMode::Fix => Ok(Err(aube_lockfile::Error::NotFound(cwd.to_path_buf()))),
         FrozenMode::Frozen => {
             // Use the lockfile, but error out on any drift across all workspace importers.
-            let parsed = parse_lockfile_dir_remapped_with_kind_and_options(
+            let parsed = match parse_lockfile_dir_remapped_with_kind_and_options(
                 lockfile_dir,
                 lockfile_importer_key,
                 manifest,
                 parse_options,
-            )
-            .map(|(mut graph, kind)| {
-                if member_lockfiles {
-                    super::workspace::merge_member_lockfile_graphs(cwd, &mut graph, manifests);
+            ) {
+                Ok((mut graph, kind)) => {
+                    if member_lockfiles
+                        && let Some(reason) = super::workspace::merge_member_lockfile_graphs(
+                            cwd, &mut graph, manifests,
+                        )
+                    {
+                        return Err(miette!(
+                            code = aube_codes::errors::ERR_AUBE_OUTDATED_LOCKFILE,
+                            "lockfile is out of date: {reason}\n\
+                             help: run without --frozen-lockfile to update the lockfile"
+                        ));
+                    }
+                    Ok((graph, kind))
                 }
-                (graph, kind)
-            });
+                Err(e) => Err(e),
+            };
             if let Ok((ref graph, kind)) = parsed {
                 if let DriftStatus::Stale { reason } =
                     graph.check_catalogs_drift(workspace_catalogs)

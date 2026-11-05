@@ -1031,7 +1031,8 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     let member_lockfiles = !shared_workspace_lockfile && has_workspace;
     let lockfile_pre_parse = lockfile_pre_parse.map(|(mut graph, kind)| {
         if member_lockfiles {
-            merge_member_lockfile_graphs(&cwd, &mut graph, &manifests);
+            // A member left out for a config mismatch keeps the graph stale.
+            let _ = merge_member_lockfile_graphs(&cwd, &mut graph, &manifests);
         }
         (graph, kind)
     });
@@ -1451,7 +1452,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             // projects, and the cold resolve path (which already
             // produces every importer).
             if !shared_workspace_lockfile && has_workspace {
-                merge_member_lockfile_graphs(&cwd, &mut graph, &manifests);
+                let _ = merge_member_lockfile_graphs(&cwd, &mut graph, &manifests);
             }
             let graph = resolve::apply_lockfile_graph_platform_rules(
                 graph,

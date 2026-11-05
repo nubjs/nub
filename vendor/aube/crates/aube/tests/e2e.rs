@@ -1390,6 +1390,47 @@ fn frozen_install_accepts_per_project_lockfiles_it_wrote() {
     );
 }
 
+/// pnpm records a catalog entry only in the lockfile of the project that
+/// uses it, so a frozen install has to check the member's lockfile against
+/// the workspace catalog, as pnpm 10 does (`ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`).
+/// The lockfiles are pnpm 10's own; the check fails before anything is fetched.
+#[test]
+fn frozen_install_checks_a_catalog_only_a_member_lockfile_records() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let header = "lockfileVersion: '9.0'\n\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: false\n\n";
+    sbx.write_manifest(r#"{ "name": "root", "version": "1.0.0", "private": true }"#);
+    sbx.write_file(
+        "pnpm-workspace.yaml",
+        "packages:\n  - packages/*\nsharedWorkspaceLockfile: false\ncatalog:\n  pinned-pkg: ^2.0.0\n",
+    );
+    sbx.write_file(
+        "pnpm-lock.yaml",
+        &format!("{header}importers:\n\n  .: {{}}\n"),
+    );
+    // Nothing may be fetched: an install that accepts the lockfile fails here.
+    sbx.write_file(".npmrc", "registry=http://127.0.0.1:9/\n");
+    sbx.write_file(
+        "packages/a/package.json",
+        r#"{ "name": "a", "version": "1.0.0", "dependencies": { "pinned-pkg": "catalog:" } }"#,
+    );
+    sbx.write_file(
+        "packages/a/pnpm-lock.yaml",
+        &format!(
+            "{header}catalogs:\n  default:\n    pinned-pkg:\n      specifier: ^1.0.0\n      version: 1.0.0\n\n\
+             importers:\n\n  .:\n    dependencies:\n      pinned-pkg:\n        specifier: 'catalog:'\n        version: 1.0.0\n\n\
+             packages:\n\n  pinned-pkg@1.0.0:\n    resolution: {{integrity: sha512-AAAA}}\n\n\
+             snapshots:\n\n  pinned-pkg@1.0.0: {{}}\n"
+        ),
+    );
+    sbx.cmd()
+        .args(["install", "--frozen-lockfile"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("ERR_AUBE_OUTDATED_LOCKFILE"))
+        .stderr(predicates::str::contains("lockfile says ^1.0.0"));
+}
+
 /// A registry that serves one packument, `pinned-pkg`, whose versions the
 /// test can change between installs. `--lockfile-only` installs read only
 /// packuments, so no tarballs are needed.
