@@ -1185,7 +1185,11 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
                     let target = match &parent_dir {
                         Some(dir)
                             if !pkg.peer_dependencies.contains_key(dep_name)
-                                && !is_override_link_target(overrides, Path::new(target)) =>
+                                && !is_override_link_target(
+                                    overrides,
+                                    dep_name,
+                                    Path::new(target),
+                                ) =>
                         {
                             dir.join(target)
                         }

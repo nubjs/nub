@@ -6283,11 +6283,17 @@ async fn an_override_counts_on_a_reused_edge_that_already_holds_its_value() {
 async fn a_removed_override_sends_a_reused_parent_back_to_its_declared_range() {
     let override_rule = BTreeMap::from([("child".to_string(), "file:./vendor/child".to_string())]);
     let declares_a_range = BTreeMap::from([("child".to_string(), "^1.0.0".to_string())]);
+    let declares_another_source = BTreeMap::from([(
+        "child".to_string(),
+        "https://example.com/original.tgz".to_string(),
+    )]);
     // What says the edge is not the package's own: the overrides the lockfile
-    // recorded, the range an npm-style lockfile records, or a declared peer.
+    // recorded, a range or another source in the declarations an npm-style lockfile
+    // records, or a declared peer.
     for (overrides, declared, peer) in [
         (override_rule, None, false),
         (BTreeMap::new(), Some(declares_a_range), false),
+        (BTreeMap::new(), Some(declares_another_source), false),
         (BTreeMap::new(), None, true),
     ] {
         let client = Arc::new(aube_registry::client::RegistryClient::new(
