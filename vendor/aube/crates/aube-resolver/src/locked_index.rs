@@ -114,6 +114,22 @@ impl<'a> LockedIndex<'a> {
             .find(|p| version_satisfies(&p.version, range))
     }
 
+    /// The specifier behind a hashed local edge (`file+<hash>`, `link+<hash>`),
+    /// which is what a reused parent's edge has to be to re-resolve. `None` for
+    /// any edge that does not land on a local package.
+    pub fn local_specifier(&self, name: &str, tail: &str) -> Option<String> {
+        self.bucket(name)
+            .iter()
+            .find(|pkg| {
+                pkg.dep_path
+                    .strip_prefix(name)
+                    .and_then(|rest| rest.strip_prefix('@'))
+                    == Some(tail)
+            })
+            .and_then(|pkg| pkg.local_source.as_ref())
+            .map(LocalSource::specifier)
+    }
+
     /// Integrity of the first locked package matching `name` + a local
     /// source that matches `local` (with the git placeholder-version
     /// allowance). Mirrors `existing_local_source_integrity`.

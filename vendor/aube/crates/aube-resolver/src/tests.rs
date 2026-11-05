@@ -6065,6 +6065,125 @@ async fn lockfile_reuse_preserves_transitive_optional_edges() {
     );
 }
 
+// The override is what lets a registry package depend on a local path. Its edge
+// read back from the lockfile already holds the override's value, so the override
+// rewrites nothing there, and it still has to count.
+#[tokio::test]
+async fn an_override_counts_on_a_reused_edge_that_already_holds_its_value() {
+    let project = tempfile::tempdir().unwrap();
+    let child_dir = project.path().join("vendor/child");
+    std::fs::create_dir_all(&child_dir).unwrap();
+    std::fs::write(
+        child_dir.join("package.json"),
+        r#"{"name":"child","version":"1.0.0"}"#,
+    )
+    .unwrap();
+
+    let spec = "file:./vendor/child".to_string();
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:0",
+    ));
+    let mut resolver = Resolver::new(client)
+        .with_project_root(project.path().to_path_buf())
+        .with_overrides(BTreeMap::from([("child".to_string(), spec.clone())]));
+
+    let existing = LockfileGraph {
+        packages: BTreeMap::from([(
+            "parent@1.0.0".to_string(),
+            LockedPackage {
+                name: "parent".to_string(),
+                version: "1.0.0".to_string(),
+                dep_path: "parent@1.0.0".to_string(),
+                dependencies: [("child".to_string(), spec)].into(),
+                ..Default::default()
+            },
+        )]),
+        ..Default::default()
+    };
+
+    let mut manifest = PackageJson::default();
+    manifest
+        .dependencies
+        .insert("parent".to_string(), "1.0.0".to_string());
+
+    let graph = resolver
+        .resolve(&manifest, Some(&existing))
+        .await
+        .expect("the override allows a local child under a registry parent");
+
+    let child = graph
+        .packages
+        .values()
+        .find(|pkg| pkg.name == "child")
+        .expect("child resolved");
+    assert!(
+        matches!(
+            &child.local_source,
+            Some(aube_lockfile::LocalSource::Directory(path)) if path.ends_with("vendor/child")
+        ),
+        "the path anchors at the project root: {:?}",
+        child.local_source
+    );
+}
+
+// With the override gone, that same edge is stale, and the range the parent
+// declares is only in its packument. Removing an override used to leave a project
+// unable to install until its lockfile was deleted.
+#[tokio::test]
+async fn a_removed_override_sends_a_reused_parent_back_to_its_declared_range() {
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:0",
+    ));
+    let mut resolver = Resolver::new(client);
+    let mut parent = make_packument("parent", &["1.0.0", "1.1.0"], "1.1.0");
+    parent
+        .versions
+        .get_mut("1.0.0")
+        .unwrap()
+        .dependencies
+        .insert("child".to_string(), "^1.0.0".to_string());
+    resolver.cache.insert("parent".to_string(), parent);
+    resolver.cache.insert(
+        "child".to_string(),
+        make_packument("child", &["1.0.0"], "1.0.0"),
+    );
+
+    let existing = LockfileGraph {
+        packages: BTreeMap::from([(
+            "parent@1.0.0".to_string(),
+            LockedPackage {
+                name: "parent".to_string(),
+                version: "1.0.0".to_string(),
+                dep_path: "parent@1.0.0".to_string(),
+                dependencies: [("child".to_string(), "file:./vendor/child".to_string())].into(),
+                ..Default::default()
+            },
+        )]),
+        ..Default::default()
+    };
+
+    let mut manifest = PackageJson::default();
+    manifest
+        .dependencies
+        .insert("parent".to_string(), "^1.0.0".to_string());
+
+    let graph = resolver
+        .resolve(&manifest, Some(&existing))
+        .await
+        .expect("a stale edge must not stop the install");
+
+    assert!(
+        graph.packages.contains_key("parent@1.0.0"),
+        "the parent keeps its locked version: {:?}",
+        graph.packages.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        graph.packages["parent@1.0.0"].dependencies["child"],
+        "1.0.0"
+    );
+    assert!(graph.packages["child@1.0.0"].local_source.is_none());
+}
+
 // Bun and yarn parsers store transitive deps in `pkg.dependencies`
 // using the full dep_path form (`is-number@6.0.0`), while pnpm uses
 // bare versions (`6.0.0`). The resolver's lockfile-reuse path

@@ -3,8 +3,9 @@ use super::dep_path::{
     version_to_dep_path,
 };
 use super::format::reformat_for_pnpm_parity;
-use crate::{DepType, Error, LocalSource, LockfileGraph, link_from_importer};
+use crate::{DepType, Error, LocalSource, LockedPackage, LockfileGraph, link_from_importer};
 use aube_manifest::PackageJson;
+use aube_util::path::normalize_lexical;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -780,7 +781,9 @@ pub(super) fn build(
     // `file:<path>` for local). Registry deps keep their plain semver
     // values. The target package's `local_source` is authoritative:
     // the tail alone doesn't encode the URL.
-    let rewrite_local_deps = |deps: BTreeMap<String, String>| -> BTreeMap<String, String> {
+    let rewrite_local_deps = |deps: BTreeMap<String, String>,
+                              parent: &LockedPackage|
+     -> BTreeMap<String, String> {
         deps.into_iter()
             .map(|(name, value)| {
                 let dp = version_to_dep_path(&name, &value);
@@ -789,8 +792,24 @@ pub(super) fn build(
                     .get(&dp)
                     .or_else(|| graph.packages.get(&peerless_dep_path(&name, &value)));
                 let rewritten = if let Some(target) = target
+                    && let Some(LocalSource::Link(path)) = &target.local_source
+                {
+                    // Relative to a local parent, or to the lockfile directory
+                    // for a registry one, as pnpm writes it and the reader
+                    // anchors it. `link:` has no `packages:` entry to record it.
+                    let posix =
+                        |path: &Path| normalize_lexical(path).to_string_lossy().replace('\\', "/");
+                    let base = match &parent.local_source {
+                        Some(
+                            LocalSource::Directory(base)
+                            | LocalSource::Link(base)
+                            | LocalSource::Portal(base),
+                        ) => posix(base),
+                        _ => ".".to_string(),
+                    };
+                    format!("link:{}", link_from_importer(&base, &posix(path)))
+                } else if let Some(target) = target
                     && let Some(ref local) = target.local_source
-                    && !matches!(local, LocalSource::Link(_))
                 {
                     local.specifier()
                 } else if native_pnpm_aliases
@@ -833,8 +852,8 @@ pub(super) fn build(
         };
         key = decorate_patch_hash(&key, Some(pkg));
         snapshot_keys.insert(key.clone(), dep_path.clone());
-        let pkg_deps = rewrite_local_deps(pkg.dependencies.clone());
-        let pkg_opt_deps = rewrite_local_deps(pkg.optional_dependencies.clone());
+        let pkg_deps = rewrite_local_deps(pkg.dependencies.clone(), pkg);
+        let pkg_opt_deps = rewrite_local_deps(pkg.optional_dependencies.clone(), pkg);
         snapshots.insert(
             key,
             WritableSnapshot {

@@ -20,9 +20,9 @@ use super::fetch::{FetchKey, FetchScheduler, TrustHistory};
 use super::seed::seed_direct_deps;
 use super::vulnerable::{is_vulnerable, prefer_non_vulnerable_pick};
 use crate::local_source::{
-    LocalManifest, dep_path_for, is_non_registry_specifier, probe_remote_tarball_manifest,
-    read_local_manifest, rebase_local, resolve_exec_manifest, resolve_git_source,
-    resolve_remote_tarball, should_block_exotic_subdep,
+    LocalManifest, dep_path_for, edge_names_a_source, is_non_registry_specifier,
+    probe_remote_tarball_manifest, read_local_manifest, rebase_local, resolve_exec_manifest,
+    resolve_git_source, resolve_remote_tarball, should_block_exotic_subdep,
 };
 use crate::locked_index::LockedIndex;
 use crate::package_ext::{
@@ -794,7 +794,7 @@ impl<'a> ResolveDriver<'a> {
             return Ok(());
         }
 
-        if self.try_lockfile_reuse(&task).await {
+        if self.try_lockfile_reuse(&mut task).await {
             return Ok(());
         }
 
@@ -2623,6 +2623,14 @@ impl<'a> ResolveDriver<'a> {
                 if task.is_root {
                     task.lockfile_override_specifier = Some(effective_spec.clone());
                 }
+                // Overrides are declared at the project root, so a substituted
+                // `link:`/`file:` path is project-root-relative — mark the task so
+                // the local-source branch anchors it correctly. This holds when the
+                // range already equals the override, as on a registry parent reused
+                // from the lockfile, whose stored edge is the override's value.
+                if is_non_registry_specifier(&effective_spec) {
+                    task.range_from_override = true;
+                }
                 if task.range != effective_spec {
                     if let Some((catalog_name, real_range)) = pending_pick {
                         self.catalog_picks
@@ -2636,13 +2644,6 @@ impl<'a> ResolveDriver<'a> {
                         task.range,
                         effective_spec
                     );
-                    // Overrides are declared at the project root, so
-                    // a substituted `link:`/`file:` path is
-                    // project-root-relative — mark the task so the
-                    // local-source branch anchors it correctly.
-                    if is_non_registry_specifier(&effective_spec) {
-                        task.range_from_override = true;
-                    }
                     task.range = effective_spec;
                     // If the override replaced the spec with a bare
                     // range (not itself an `npm:`/`jsr:` alias), it's
@@ -2974,7 +2975,7 @@ impl<'a> ResolveDriver<'a> {
     ///
     /// Returns true when a lockfile entry handled the task (whether
     /// fully resolved or dropped as a platform-mismatched optional).
-    async fn try_lockfile_reuse(&mut self, task: &ResolveTask) -> bool {
+    async fn try_lockfile_reuse(&mut self, task: &mut ResolveTask) -> bool {
         let Some(locked_pkg) = self.locked_index.find_satisfying(
             &task.name,
             &task.range,
@@ -3014,6 +3015,31 @@ impl<'a> ResolveDriver<'a> {
             return true;
         }
         let version = locked_pkg.version.clone();
+        // Reuse reads a registry package's dependencies back from its lockfile
+        // edges, which hold what each one resolved to, not the range it declares.
+        // A version stands in for the range. A source an override put there does
+        // not: once no override applies, the edge is stale and only the packument
+        // has the real range. Go back to it, keeping this version.
+        if locked_pkg.local_source.is_none() {
+            let stale = locked_pkg.dependencies.iter().any(|(dep_name, edge)| {
+                let edge = edge
+                    .strip_prefix(dep_name.as_str())
+                    .and_then(|rest| rest.strip_prefix('@'))
+                    .unwrap_or(edge);
+                let edge = edge.split('(').next().unwrap_or(edge);
+                if !edge_names_a_source(edge) || self.workspace_packages.contains_key(dep_name) {
+                    return false;
+                }
+                let mut ancestors = task.ancestors.to_vec();
+                ancestors.push((task.name.clone(), version.clone()));
+                pick_override_spec(&self.resolver.override_rules, dep_name, edge, &ancestors)
+                    .is_none()
+            });
+            if stale {
+                task.range = version;
+                return false;
+            }
+        }
         let dep_path = dep_path_for(&task.name, &version);
 
         if task.is_root
@@ -3168,6 +3194,10 @@ impl<'a> ResolveDriver<'a> {
                 let prefix = format!("{dep_name}@");
                 let stripped = dep_version.strip_prefix(&prefix).unwrap_or(dep_version);
                 let canonical_version = stripped.split('(').next().unwrap_or(stripped).to_string();
+                let canonical_version = self
+                    .locked_index
+                    .local_specifier(dep_name, &canonical_version)
+                    .unwrap_or(canonical_version);
                 let dep_type = if locked_pkg.optional_dependencies.contains_key(dep_name) {
                     DepType::Optional
                 } else {

@@ -366,6 +366,17 @@ pub(crate) fn is_non_registry_specifier(s: &str) -> bool {
     s.starts_with("file:")
 }
 
+/// Whether a lockfile edge holds a source rather than a registry version: a
+/// specifier, or the hashed tail of a local package's key (`file+<16 hex>`).
+pub(crate) fn edge_names_a_source(edge: &str) -> bool {
+    is_non_registry_specifier(edge)
+        || edge.split_once('+').is_some_and(|(kind, hash)| {
+            kind.bytes().all(|b| b.is_ascii_lowercase())
+                && hash.len() == 16
+                && hash.bytes().all(|b| b.is_ascii_hexdigit())
+        })
+}
+
 pub(crate) fn should_block_exotic_subdep(
     task: &ResolveTask,
     resolved: &BTreeMap<String, LockedPackage>,
