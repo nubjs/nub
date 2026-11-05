@@ -439,6 +439,9 @@ async fn run_filtered(
 ) -> miette::Result<()> {
     let cwd = crate::dirs::cwd()?;
     let (root, matched) = super::select_workspace_packages(&cwd, filter, "remove")?;
+    if matched.is_empty() {
+        return super::no_projects_matched(&root, filter, super::NoMatchReport::Scope);
+    }
     // Match pnpm's recursive-remove semantics: silently skip projects
     // that don't declare any of the named packages, and per-project
     // narrow the package list to just the ones present so a partial

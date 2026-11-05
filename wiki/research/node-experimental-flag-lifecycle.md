@@ -37,7 +37,7 @@ Two ways to read a binary's accepted flags were measured. Scanning the binary's 
 
 Option A — **probe and cache the binary's accepted-flag set; inject = (version-band wants it) ∩ (binary accepts it).** Self-correcting: a flag the running Node removed is dropped with no Nub release needed.
 
-- `discovery::accepted_env_flags(node_path) -> Option<BTreeSet<String>>` invokes the `-e` probe once and caches per (path, mtime) in `~/.cache/nub/node-env-flags.json`, alongside the existing `node-discovery.json` version cache. Amortized cost ≈ 0.
+- `discovery::accepted_env_flags(node_path, version) -> Option<BTreeSet<String>>` invokes the `-e` probe once and caches per (path, version, mtime) in one file per binary under `~/.cache/nub/node-flags/`, alongside the `node-discovery.json` version cache. The version is part of the key because a version manager's shim is one path serving several Nodes. Amortized cost ≈ 0.
 - `flags::compute_inject_flags` gained a Stage-4 intersection against that set, name-based, so `--disable-warning=…` matches the bare `--disable-warning`. `None` (probe unavailable) means pure version-band behavior, no regression.
 - The universe is sound because Nub injects flags via argv AND propagates them to children via `NODE_OPTIONS`, so every Nub-injected flag is already envvar-allowed — exactly what `allowedNodeEnvironmentFlags` enumerates. Guarded by the `host_node_accepts_every_injected_flag` test: the intersection must drop nothing on a current, supported Node.
 
@@ -60,3 +60,5 @@ Dated revisions, newest first. The 2026-08 entry records a second failure direct
   band). Established that Node hard-removes some experimental flags (`policy`,
   `network-imports`, `permission`→`--permission` at 24.0); implemented the probe-and-intersect
   guard.
+- 2026-11-03 — The accepted-flag cache keys on (path, version, mtime): one shim path can serve
+  several Nodes, and a verdict recorded for one was being applied to another.

@@ -66,8 +66,8 @@ const DEFAULT_TEXT: &[&str] = &["md"];
 ///
 /// The parse happens at build time through `nub-data-formats`, the same crate the
 /// N-API addon calls at run time, so a document cannot mean one thing run and
-/// another compiled. The value is inlined into the module as a JSON literal —
-/// there is no parser in the artifact.
+/// another compiled. The value is inlined into the module as a JavaScript
+/// literal — there is no parser in the artifact.
 const DEFAULT_DATA: &[&str] = &["yaml", "yml", "toml", "jsonc", "json5"];
 
 /// Binary extensions that get `file`. Each is a format no JavaScript parser can
@@ -90,7 +90,7 @@ pub struct Loaders {
     /// Rolldown's built-in plugin and produce the chunk-relative path this
     /// module exists to avoid.
     pub file: Vec<String>,
-    /// Extensions nub parses at build time and inlines as a JSON literal. Also
+    /// Extensions nub parses at build time and inlines as a JavaScript literal. Also
     /// not in `module_types`: Rolldown's `json` loader would have to be handed
     /// JSON, and these are not JSON until nub has parsed them.
     pub data: Vec<String>,
@@ -440,7 +440,7 @@ fn file_module(name: &str) -> String {
 ///
 /// The runtime reaches these through `nub-native`'s parsers; this calls the same
 /// functions in the same crate, so the two surfaces cannot disagree about what a
-/// document means. The emitted module is a JSON literal and nothing else — no
+/// document means. The emitted module is a JavaScript literal and nothing else — no
 /// parser reaches the artifact, which is the point: the work moved to build time.
 #[derive(Debug, Default)]
 pub struct DataPlugin {
@@ -499,12 +499,8 @@ impl Plugin for DataPlugin {
             // The parser's message already names its format, so the file is all
             // this has to add.
             .map_err(|e| anyhow::anyhow!("{id}: {e}"))?;
-            // `to_string` emits valid JSON, which is a subset of the object
-            // literal syntax this position accepts — no escaping pass needed.
-            let json = serde_json::to_string(&value)
-                .map_err(|e| anyhow::anyhow!("serializing the parsed {id}: {e}"))?;
             Ok(Some(HookLoadOutput {
-                code: format!("export default {json};\n").into(),
+                code: format!("export default {};\n", value.to_default_export()).into(),
                 module_type: Some(ModuleType::Js),
                 // A data literal observes nothing, so it must not anchor
                 // anything that would otherwise be shaken out.

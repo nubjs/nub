@@ -316,7 +316,7 @@ ignore-compatibility-db=true
 
 ### `patchedDependencies`
 
-Apply a patch file to a package's contents, keyed by name and version. Running `nub patch <pkg>` writes both the patch and this entry. A key that matches no installed package fails the install.
+Apply a patch file to a package's contents, keyed by name and version. `nub patch <pkg>@<version>` opens an editable copy of the package, and `nub patch-commit` writes the patch and this entry. Patching the same package again starts from its patched files, and the commit rewrites the patch with all of the changes. A key that matches no installed package fails the install.
 
 ```json title="package.json"
 {

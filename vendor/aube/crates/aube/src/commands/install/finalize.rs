@@ -66,7 +66,9 @@ pub(super) struct FinalizePhaseInput<'a> {
     /// The lockfile read was npm's, so a `file:` directory link carries
     /// npm's link build pass ([`run_link_lifecycle_scripts`]).
     pub(super) npm_link_lifecycle: bool,
-    pub(super) workspace_filter_empty: bool,
+    /// The importers a `--filter` install linked, `None` for the whole
+    /// workspace ([`super::workspace::linked_workspace_selection`]).
+    pub(super) workspace_selection: Option<std::collections::BTreeSet<String>>,
     pub(super) dep_selection: DepSelection,
     pub(super) cli_flags: &'a [(String, String)],
     pub(super) cached_count: usize,
@@ -267,7 +269,7 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
         ignore_scripts,
         skip_root_lifecycle,
         npm_link_lifecycle,
-        workspace_filter_empty,
+        workspace_selection,
         dep_selection,
         cli_flags,
         cached_count,
@@ -375,7 +377,6 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
         }
     }
 
-    let filtered_install = !workspace_filter_empty || dep_selection.is_filtered();
     let dep_build_policy_hash = dep_build_policy_hash(
         build_policy,
         default_trust_floor,
@@ -591,35 +592,50 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
     deferred_dep_builds.sort();
     deferred_dep_builds.dedup();
 
-    if !virtual_store_only && !filtered_install {
+    // A `--prod`/`--dev`/`--no-optional` install writes no state, so the
+    // next install rebuilds the full graph. A `--filter` install writes
+    // one that records its selection (`workspace_selection`), which is
+    // what lets a repeat of it take the warm path, and leaves out the
+    // per-package hashes: they would describe the whole graph to the
+    // next install's delta passes, which would then skip linking and
+    // building what this one never touched.
+    if !virtual_store_only && !dep_selection.is_filtered() {
         let phase_start = std::time::Instant::now();
+        let scoped = workspace_selection.is_some();
         // Fingerprint every package in the final graph so the next
         // install can diff and skip unchanged entries. Missing or
         // stale fingerprints fall back to a full install on the
         // read side. Safe for older readers that ignore the field.
         // When the early pass already produced the leaf map for
         // `graph_for_link`, reuse it here as long as it covers every
-        // dep_path in the writeback `graph`. Filtered installs short-
-        // circuit before this branch so the two graphs are normally
-        // identical, but verifying every key keeps the reuse safe
-        // against any future code path that diverges them. Any miss
-        // falls back to a fresh compute over `graph`.
-        let package_content_hashes = current_leaf_hashes
-            .filter(|leaf| {
-                leaf.len() == graph.packages.len()
-                    && graph.packages.keys().all(|k| leaf.contains_key(k))
-            })
-            .unwrap_or_else(|| delta::compute_package_hashes(graph, &patch_hashes, cwd));
-        let package_subtree_hashes = current_subtree_hashes.unwrap_or_else(|| {
-            delta::compute_subtree_hashes_from_leaf(graph, &package_content_hashes)
-        });
-        let graph_lthash = hex::encode(delta::lthash_of(&package_content_hashes).digest());
+        // dep_path in the writeback `graph`. Any miss falls back to a
+        // fresh compute over `graph`.
+        let (package_content_hashes, package_subtree_hashes, graph_lthash) = if scoped {
+            (BTreeMap::new(), BTreeMap::new(), String::new())
+        } else {
+            let package_content_hashes = current_leaf_hashes
+                .filter(|leaf| {
+                    leaf.len() == graph.packages.len()
+                        && graph.packages.keys().all(|k| leaf.contains_key(k))
+                })
+                .unwrap_or_else(|| delta::compute_package_hashes(graph, &patch_hashes, cwd));
+            let package_subtree_hashes = current_subtree_hashes.unwrap_or_else(|| {
+                delta::compute_subtree_hashes_from_leaf(graph, &package_content_hashes)
+            });
+            let graph_lthash = hex::encode(delta::lthash_of(&package_content_hashes).digest());
+            (package_content_hashes, package_subtree_hashes, graph_lthash)
+        };
         let package_json_hashes = state::collect_package_json_hashes_from_manifests(cwd, manifests);
         // One parse for every prior-install field this block consumes.
         // The per-field accessors each re-parse the full O(graph) state
         // file; on a large monorepo that was four parses of the same
-        // bytes.
-        let prior_state = state::read_state_delta_snapshot(cwd);
+        // bytes. The diagnostics below compare graphs, so a scoped
+        // install, which records none, skips them.
+        let prior_state = if scoped {
+            None
+        } else {
+            state::read_state_delta_snapshot(cwd)
+        };
         // Diff against the previous install. Logs delta counts at
         // debug so `-v` installs surface what actually moved. A
         // later pass feeds the plan into fetch and link as a
@@ -758,6 +774,7 @@ pub(super) async fn run_finalize_phase(input: FinalizePhaseInput<'_>) -> miette:
                 },
                 unreviewed_builds: unreviewed_builds_for_state,
                 deferred_dep_builds,
+                workspace_selection,
             },
         )
         .into_diagnostic()
@@ -1032,6 +1049,7 @@ mod tests {
                 },
                 unreviewed_builds: Vec::new(),
                 deferred_dep_builds: Vec::new(),
+                workspace_selection: None,
             },
         )
         .expect("state should write");
