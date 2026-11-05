@@ -282,6 +282,16 @@ async fn remove_from_project(args: RemoveArgs, uninstall_hooks: bool) -> miette:
             aube_registry::NetworkMode::Online
         };
     }
+    // The follow-up install runs frozen after a prune, which skips recording
+    // the pnpm pin, so record it first (unless the user asked for frozen).
+    if used_lockfile_prune
+        && !matches!(
+            super::global_frozen_override(),
+            Some(install::FrozenOverride::Frozen)
+        )
+    {
+        install::sync_package_manager_pin(&cwd, opts.network_mode).await;
+    }
     install::run_with_project_lock(opts, &lock).await?;
     if uninstall_hooks {
         run_uninstall_hooks(

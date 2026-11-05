@@ -170,6 +170,7 @@ pub fn argv_inject_flags(
     probed_v8_flags(
         feature_matrix::argv_unflag_flags_for(node_version),
         node_path,
+        node_version,
         user_argv,
     )
 }
@@ -194,6 +195,7 @@ pub fn runtime_inject_flags(
     probed_v8_flags(
         feature_matrix::runtime_v8_flags_for(node_version),
         node_path,
+        node_version,
         user_argv,
     )
 }
@@ -201,6 +203,7 @@ pub fn runtime_inject_flags(
 fn probed_v8_flags(
     banded: Vec<&'static str>,
     node_path: Option<&std::path::Path>,
+    node_version: &NodeVersion,
     user_argv: &[String],
 ) -> Vec<&'static str> {
     // Below every floor there is nothing to probe, so an out-of-band Node pays no
@@ -221,7 +224,9 @@ fn probed_v8_flags(
             // follow from its version — skips the probe and trusts the band, mirroring
             // why `accepted_env_flags` is skipped for a managed Node.
             None => true,
-            Some(path) => super::discovery::accepts_argv_flag(path, flag).unwrap_or(true),
+            Some(path) => {
+                super::discovery::accepts_argv_flag(path, node_version, flag).unwrap_or(true)
+            }
         })
         .collect()
 }
@@ -898,7 +903,8 @@ mod tests {
             eprintln!("skipping: no node discoverable");
             return;
         };
-        let Some(accepted) = crate::node::discovery::accepted_env_flags(node.path.as_std_path())
+        let Some(accepted) =
+            crate::node::discovery::accepted_env_flags(node.path.as_std_path(), &node.version)
         else {
             eprintln!("skipping: could not probe {}", node.path);
             return;
@@ -933,7 +939,8 @@ mod tests {
             eprintln!("skipping: no node discoverable");
             return;
         };
-        let Some(accepted) = crate::node::discovery::accepted_env_flags(node.path.as_std_path())
+        let Some(accepted) =
+            crate::node::discovery::accepted_env_flags(node.path.as_std_path(), &node.version)
         else {
             eprintln!("skipping: could not probe {}", node.path);
             return;

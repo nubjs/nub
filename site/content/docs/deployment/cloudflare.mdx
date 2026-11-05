@@ -3,7 +3,11 @@ title: Cloudflare
 description: Workers Builds preinstalls Nub. Cloudflare Pages uses the managed-builder devDependency pattern instead.
 ---
 
-Cloudflare's [Workers Builds image](https://developers.cloudflare.com/workers/ci-cd/builds/build-image/) has included Nub since July 30, 2026. A package script can call `nub` or `nubx` without an install step:
+Cloudflare's [Workers Builds image](https://developers.cloudflare.com/workers/ci-cd/builds/build-image/) has included Nub since July 30, 2026. Nub runs the build; deployed Workers run on Cloudflare's runtime.
+
+## Build settings
+
+The `nub` binary is on `PATH` in Workers Builds, so a package script can call `nub` or `nubx` with no install step and no devDependency:
 
 ```json title="package.json"
 {
@@ -13,13 +17,7 @@ Cloudflare's [Workers Builds image](https://developers.cloudflare.com/workers/ci
 }
 ```
 
-The binary is on `PATH` in Workers Builds. The change applies to the Workers image, not the separate Pages build image ([tracking issue](https://github.com/cloudflare/pages-build-image/issues/13)).
-
-## Workers Builds
-
-Cloudflare runs an optional build command and then a Wrangler deploy command. Point the build command at the package script that uses Nub; the preinstalled binary means no devDependency is required.
-
-The image currently defaults to Node 24.18.0 and also preinstalls Node 22.23.2. Use `.node-version`, `.nvmrc`, or `.tool-versions` to select a version that both Cloudflare and Nub read.
+Set **Settings → Build → Build command** to `nub run build`. Workers Builds does not read build settings from `wrangler.jsonc`.
 
 <Callout>
 Read the [full docs](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/) on developers.cloudflare.com.
@@ -27,9 +25,9 @@ Read the [full docs](https://developers.cloudflare.com/workers/ci-cd/builds/conf
 
 ## Letting Nub run the install
 
-Workers Builds installs dependencies itself before the build command runs, picking the package manager from the lockfile it finds. It does not yet recognize `nub.lock`, so a Nub-owned project ends up with a second lockfile from whichever manager Cloudflare falls back to. The next `nub install` then refuses, unable to tell which one owns the project.
+Workers Builds installs dependencies before the build command, picking the package manager from the lockfile. It does not recognize `nub.lock`, so it falls back to another manager and writes a second lockfile, and the next `nub install` refuses to guess which one owns the project.
 
-Add a build variable so Cloudflare skips its install and Nub owns it:
+Set a build variable so Cloudflare skips its install:
 
 ```bash
 SKIP_DEPENDENCY_INSTALL=true
@@ -41,11 +39,11 @@ Then install from the build command:
 nub install && nub run build
 ```
 
-Projects that keep an existing `pnpm-lock.yaml`, `package-lock.json`, or `bun.lock` are unaffected — Cloudflare installs with that manager, one lockfile stays on disk, and Nub reads it.
+A project with a `pnpm-lock.yaml`, `package-lock.json`, or `bun.lock` needs neither step. Cloudflare installs with that manager, and Nub reads the same lockfile.
 
 ## HTTP endpoint
 
-Workers use Cloudflare's `fetch` handler rather than a Node HTTP server. A minimal aliveness endpoint:
+Workers use a `fetch` handler rather than a Node HTTP server:
 
 ```ts title="src/index.ts"
 export default {
@@ -70,9 +68,11 @@ Point Wrangler at the handler:
 }
 ```
 
-If the project defines a `build` package script, set **Settings → Build → Build command** to `nub run build`. Leave it empty for the standalone handler shown here. Workers Builds does not read custom-build settings from `wrangler.jsonc`; its default deploy command is `npx wrangler deploy`.
+Wrangler bundles the TypeScript handler itself, so this example needs no build command.
 
-Wrangler bundles the TypeScript handler without a separate local build. Deploy it from a workstation with:
+## Deploy
+
+Connect the repository in the Cloudflare dashboard, where the default deploy command is `npx wrangler deploy`. To deploy from a workstation:
 
 ```bash
 nubx -y wrangler deploy
@@ -80,9 +80,22 @@ curl --fail https://nub-app.ACCOUNT.workers.dev
 # {"alive":true,"provider":"cloudflare","runtime":"cloudflare-workers"}
 ```
 
+## Version pinning
+
+Workers Builds provisions its tools with asdf, so a project-root `.tool-versions` pins Nub and Node together. Nub reads the same file for its own Node.
+
+```text title=".tool-versions"
+nodejs 24.18.0
+nub {{NUB_VERSION}}
+```
+
+A pinned version the image does not carry is downloaded during the build. Without a pin, the image defaults to Node 24.18.0 and also carries Node 22.23.2. A `.node-version` or `.nvmrc` file also selects a Node version that both Cloudflare and Nub read.
+
+Adding `@nubjs/nub` as a devDependency also works, and pins the Nub version in the lockfile.
+
 ## Pages
 
-Cloudflare Pages does not include Nub. Add the npm package as a devDependency so the install links both commands into `node_modules/.bin`:
+The Cloudflare Pages build image does not include Nub ([tracking issue](https://github.com/cloudflare/pages-build-image/issues/13)). Add the npm package as a devDependency, so the install links both commands into `node_modules/.bin`:
 
 ```json title="package.json"
 {
@@ -95,23 +108,8 @@ Cloudflare Pages does not include Nub. Add the npm package as a devDependency so
 }
 ```
 
-See [Managed builders](/docs/deployment#managed-builders) for the same pattern on other hosted build systems.
+See [Managed builders](/docs/deployment#managed-builders) for the same pattern on other hosted builders.
 
 <Callout>
 Read the [full docs](https://developers.cloudflare.com/pages/configuration/build-configuration/) on developers.cloudflare.com.
 </Callout>
-
-## Version pinning
-
-Workers Builds provisions its tools with asdf, so a project-root `.tool-versions` pins Nub and Node together:
-
-```text title=".tool-versions"
-nodejs 24.18.0
-nub {{NUB_VERSION}}
-```
-
-A pinned version the image doesn't already carry is downloaded during the build, so the pin holds even when it differs from the image default. Nub reads the same file when resolving its own Node, so one file pins both.
-
-Adding `@nubjs/nub` as a devDependency also works, and pins the version in the lockfile alongside the project's other dependencies.
-
-Nub only participates in the build. Deployed Workers execute on Cloudflare's runtime rather than Node with Nub augmentation.

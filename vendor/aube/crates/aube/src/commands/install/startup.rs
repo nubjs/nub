@@ -44,9 +44,15 @@ pub(super) fn try_install_fast_path(
     ) {
         return Ok(None);
     }
+    let Some(snapshot) = state::read_state_startup_snapshot(cwd) else {
+        return Ok(None);
+    };
+    if !compatibility_metadata_is_current(cwd, opts, &snapshot.layout) {
+        return Ok(None);
+    }
     opts.control.check_cancelled()?;
-    let total = state::read_state_package_content_hashes(cwd)
-        .map(|packages| packages.len())
+    let total = snapshot
+        .package_count
         .or_else(|| {
             let manifest = super::super::load_manifest_or_default(cwd).ok()?;
             aube_lockfile::parse_lockfile_with_kind(cwd, &manifest)
@@ -86,12 +92,30 @@ fn install_fast_path_eligible(
     if paranoid_requires_full_pipeline(cwd, opts) {
         return false;
     }
+    // A lockfile that does not record the pnpm the project pins is not
+    // current under pnpm 11+, whose frozen install refuses it, so a
+    // non-frozen install takes the full path that records it. A frozen one
+    // stays lenient: it must not start failing lockfiles Nub wrote before.
+    // Demanded only where the install's sync would write it, or the warm
+    // path would be lost for good.
+    let workspace_root = crate::dirs::find_workspace_root(cwd);
+    if matches!(mode, FrozenMode::Prefer)
+        && !crate::package_manager_pin::env_document_is_current(
+            workspace_root.as_deref().unwrap_or(cwd),
+        )
+        && pin_sync_writes_lockfile(cwd, opts)
+    {
+        tracing::debug!(
+            "install warm path skipped: pnpm-lock.yaml does not record the pinned pnpm"
+        );
+        return false;
+    }
     // Surface *why* the warm path was missed at debug level — the state
     // freshness reason is otherwise discarded here (only `.is_none()` is
     // consulted), leaving `aube install -v` silent on repeat-install loops
     // that originate from state drift rather than lockfile drift.
     match state::check_needs_install_with_flags(cwd, &opts.cli_flags) {
-        None => compatibility_metadata_is_current(cwd, opts),
+        None => true,
         Some(reason) => {
             tracing::debug!("install warm path skipped: {reason}");
             false
@@ -99,10 +123,26 @@ fn install_fast_path_eligible(
     }
 }
 
-fn compatibility_metadata_is_current(cwd: &Path, opts: &InstallOptions) -> bool {
-    let Some(layout) = state::read_state_layout(cwd) else {
-        return false;
-    };
+/// The install tail's pin-sync gate, asked from the warm path: a lockfile
+/// is written, and it is the shared one or there are no workspace members.
+/// "Workspace" is the pipeline's own predicate (discovered member packages,
+/// `discover_workspace_plan`), not a marker file: a settings-only
+/// `pnpm-workspace.yaml` is a single project. Member discovery runs only
+/// when `sharedWorkspaceLockfile` is off, and a failed one demands the pin.
+fn pin_sync_writes_lockfile(cwd: &Path, opts: &InstallOptions) -> bool {
+    let files = super::super::FileSources::load(cwd);
+    let raw_workspace = aube_manifest::workspace::load_raw(cwd).unwrap_or_default();
+    let ctx = files.ctx(&raw_workspace, &opts.env_snapshot, &opts.cli_flags);
+    aube_settings::resolved::lockfile(&ctx)
+        && (aube_settings::resolved::shared_workspace_lockfile(&ctx)
+            || aube_workspace::find_workspace_packages(cwd).map_or(true, |p| p.is_empty()))
+}
+
+fn compatibility_metadata_is_current(
+    cwd: &Path,
+    opts: &InstallOptions,
+    layout: &state::InstallLayoutState,
+) -> bool {
     let modules_dir_name = super::super::resolve_modules_dir_name_for_cwd(cwd);
     let aube_dir = super::super::resolve_virtual_store_dir_for_cwd(cwd);
     let mut legacy_vite_patches_current = true;
@@ -128,7 +168,7 @@ fn compatibility_metadata_is_current(cwd: &Path, opts: &InstallOptions) -> bool 
                         );
                         return false;
                     }
-                    if !state::gvs_nested_links_are_current(cwd, &layout) {
+                    if !state::gvs_nested_links_are_current(cwd, layout) {
                         tracing::debug!(
                             "install warm path skipped: global virtual store links are stale"
                         );

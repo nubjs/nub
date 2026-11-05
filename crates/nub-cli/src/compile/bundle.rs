@@ -54,7 +54,7 @@ use rolldown::plugin::{
 use rolldown::{BundlerBuilder, BundlerOptions, InputItem};
 use rolldown_common::bundler_options::{BundlerTransformOptions, Either, JsxOptions};
 use rolldown_common::{
-    EmittedChunk, InnerOptions, IsExternal, ModuleType, Output, OutputFormat, Platform,
+    EmittedChunk, ImportKind, InnerOptions, IsExternal, ModuleType, Output, OutputFormat, Platform,
     RawCompressOptions, RawMangleOptions, RawMinifyOptions, RawMinifyOptionsDetailed,
     ResolveOptions, ResolvedExternal, SourceMapType, StrOrBytes, TreeshakeOptions, TsConfig,
 };
@@ -1602,6 +1602,7 @@ impl<'a> oxc_ast_visit::Visit<'a> for PathGlobalScan {
 /// collide with the compiler's roots.
 const COMPILE_ROOT_ID: &str = "\0nub:compile-root";
 const COMPILE_PREAMBLE_ID: &str = "\0nub:compile-preamble";
+const COMPILE_UTIL_RATE_ID: &str = "\0nub:compile-util-rate";
 /// The name every chunk-level CommonJS loader is declared under. Deliberately
 /// NOT `require`: a chunk holds authored ESM beside the CommonJS modules it
 /// wraps, and Node gives ESM no `require` binding. [`hoist_module_wrappers`]
@@ -2162,6 +2163,17 @@ struct CompilePreamble {
     /// Whether the emitted chunk is shaped for a complete V8 code cache — see
     /// [`finish_eager_startup`]. Decided by the target Node, never by the host.
     eager: bool,
+    /// Whether `node:util` imports link through [`COMPILE_UTIL_RATE_ID`]. The
+    /// preamble adds `debounce` and `throttle` to the util object only after ESM
+    /// has linked, so a target without them needs the facade for named imports.
+    util_rate_facade: bool,
+}
+
+/// Whether the target Node ships `util.debounce` and `util.throttle`: from 26.10,
+/// and from 24.22 by backport. 25.x never got them. `None` is a `--smol` artifact
+/// whose runtime is unknown until launch, so it keeps the facade.
+fn util_rate_native(target_node: Option<(u64, u64, u64)>) -> bool {
+    target_node.is_some_and(|v| v >= (26, 10, 0) || ((24, 22, 0)..(25, 0, 0)).contains(&v))
 }
 
 /// Polyfills the compile preamble installs, and the first Node version that ships
@@ -2377,6 +2389,7 @@ impl CompilePreamble {
         })?;
         let mut prelude = Self::from_source(entry, runtime_dir, source);
         prelude.eager = eager;
+        prelude.util_rate_facade = !util_rate_native(target_node);
         prelude.root_support_files.push((
             nub_core::compile::COMPILE_BOOTSTRAP_NAME.to_string(),
             bootstrap_bytes,
@@ -2399,6 +2412,7 @@ impl CompilePreamble {
             app_uses_worker: AtomicBool::new(false),
             app_computes_module_specifier: AtomicBool::new(false),
             eager: false,
+            util_rate_facade: true,
         }
     }
 
@@ -2699,6 +2713,8 @@ impl Plugin for CompilePreamble {
         let root = self.has_root(args.specifier);
         let specifier = args.specifier.to_string();
         let kind = args.kind;
+        let util_rate_facade = self.util_rate_facade;
+        let from_util_rate_facade = args.importer == Some(COMPILE_UTIL_RATE_ID);
         let prelude_path = self.runtime_dir.join("compile-preamble.mjs");
         let private_importers = Arc::clone(&self.private_importers);
         let private_import = args.importer.is_some_and(|importer| {
@@ -2712,6 +2728,19 @@ impl Plugin for CompilePreamble {
         async move {
             if root || specifier == COMPILE_PREAMBLE_ID {
                 return Ok(Some(HookResolveIdOutput::from_id(specifier)));
+            }
+            if specifier == COMPILE_UTIL_RATE_ID {
+                return Ok(Some(HookResolveIdOutput::from_id(specifier)));
+            }
+            if !private_import
+                && util_rate_facade
+                && matches!(kind, ImportKind::Import | ImportKind::DynamicImport)
+                && (specifier == "node:util" || specifier == "util")
+                && !from_util_rate_facade
+            {
+                return Ok(Some(HookResolveIdOutput::from_id(
+                    COMPILE_UTIL_RATE_ID.to_string(),
+                )));
             }
             if !private_import {
                 return Ok(None);
@@ -2756,6 +2785,9 @@ impl Plugin for CompilePreamble {
         args: &HookLoadArgs<'_>,
     ) -> impl std::future::Future<Output = HookLoadReturn> + Send {
         let prelude = (args.id == COMPILE_PREAMBLE_ID).then(|| self.source.clone());
+        let util_rate = (args.id == COMPILE_UTIL_RATE_ID).then(|| {
+            "import util from 'node:util'; export * from 'node:util'; export default util; export const debounce = util.debounce; export const throttle = util.throttle;".to_string()
+        });
         let wrapper = (!args.id.eq(COMPILE_PREAMBLE_ID))
             .then(|| self.root_source(args.id))
             .flatten();
@@ -2764,6 +2796,13 @@ impl Plugin for CompilePreamble {
             .then(|| PathBuf::from(clean_url(args.id)));
         async move {
             if let Some(code) = prelude {
+                return Ok(Some(HookLoadOutput {
+                    code: code.into(),
+                    module_type: Some(ModuleType::Js),
+                    ..Default::default()
+                }));
+            }
+            if let Some(code) = util_rate {
                 return Ok(Some(HookLoadOutput {
                     code: code.into(),
                     module_type: Some(ModuleType::Js),
@@ -11174,6 +11213,23 @@ after
                 out.contains("before") && out.contains("after"),
                 "the stripper must only remove its own regions"
             );
+        }
+    }
+
+    /// Each boundary was probed on a real Node: absent on 24.21.0, 25.9.0 and
+    /// 26.9.0, native on 24.22.0 and 26.10.0.
+    #[test]
+    fn util_rate_facade_is_skipped_only_for_targets_with_native_helpers() {
+        for (target, native) in [
+            (Some((18, 19, 0)), false),
+            (Some((24, 21, 0)), false),
+            (Some((24, 22, 0)), true),
+            (Some((25, 9, 0)), false),
+            (Some((26, 9, 0)), false),
+            (Some((26, 10, 0)), true),
+            (None, false),
+        ] {
+            assert_eq!(util_rate_native(target), native, "target {target:?}");
         }
     }
 
