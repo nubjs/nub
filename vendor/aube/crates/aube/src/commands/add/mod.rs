@@ -301,22 +301,6 @@ pub struct AddArgs {
         validate_error = "The --allow-build flag is missing a package name. Please specify the package name(s) that are allowed to run installation scripts."
     )]
     pub allow_build: Vec<String>,
-    /// Bypass the similar-name confirm prompt / refusal for this invocation.
-    ///
-    /// `aube add` prompts (interactive) or fails (CI) when a name closely
-    /// resembles a top-100,000 npm package. The new-name and
-    /// `lowDownloadThreshold` checks still run. List the package in
-    /// `allowedUnpopularPackages` to keep it allowed.
-    #[usage(long)]
-    pub allow_similar_name: bool,
-    /// Bypass the new-name confirm prompt / refusal for this invocation.
-    ///
-    /// `aube add` prompts (interactive) or fails (CI) when a name was first
-    /// published within `minimumPackageAge`. The similar-name and
-    /// `lowDownloadThreshold` checks still run. List the package in
-    /// `allowedUnpopularPackages` to keep it allowed.
-    #[usage(long)]
-    pub allow_new_name: bool,
     /// Bypass the `lowDownloadThreshold`, similar-name, and new-name confirm
     /// prompts / refusals for this invocation.
     ///
@@ -329,6 +313,22 @@ pub struct AddArgs {
     /// malicious-package check, which remains a hard block.
     #[usage(long)]
     pub allow_low_downloads: bool,
+    /// Bypass the new-name confirm prompt / refusal for this invocation.
+    ///
+    /// `aube add` prompts (interactive) or fails (CI) when a name was first
+    /// published within `minimumPackageAge`. The similar-name and
+    /// `lowDownloadThreshold` checks still run. List the package in
+    /// `allowedUnpopularPackages` to keep it allowed.
+    #[usage(long)]
+    pub allow_new_name: bool,
+    /// Bypass the similar-name confirm prompt / refusal for this invocation.
+    ///
+    /// `aube add` prompts (interactive) or fails (CI) when a name closely
+    /// resembles a top-100,000 npm package. The new-name and
+    /// `lowDownloadThreshold` checks still run. List the package in
+    /// `allowedUnpopularPackages` to keep it allowed.
+    #[usage(long)]
+    pub allow_similar_name: bool,
     /// Allow every dependency's lifecycle scripts to run.
     ///
     /// Bypasses the `allowBuilds` allowlist for this invocation. Do not
