@@ -13,8 +13,8 @@ use super::spawn::{node_options_token, split_node_options};
 /// `--experimental-default-config-file`, an alias of a value option that Node's own
 /// filters treat as a single token. A name missing here only ends the scan early, at
 /// its value, so it can never carry the scan past the entry into the program's
-/// arguments; the cost is a valued mode flag after it going unrewritten, which on 26
-/// and later Node contains by itself.
+/// arguments; the cost is a mode flag after it going unrewritten, which Node contains
+/// by itself from 26.13.
 // @lat: [[research/node-flag-arity#Node flag arity — the exhaustive value-accepting set, for file-tier subject resolution#4. The exhaustive value-accepting set]]
 const VALUE_OPTIONS: &[&str] = &[
     "-C",
@@ -24,9 +24,16 @@ const VALUE_OPTIONS: &[&str] = &[
     "-r",
     "--allow-fs-read",
     "--allow-fs-write",
+    "--bench-isolation",
+    "--bench-name-pattern",
+    "--bench-reporter",
+    "--bench-reporter-destination",
+    "--bench-samples",
+    "--bench-warmup",
     "--build-sea",
     "--build-snapshot-config",
     "--conditions",
+    "--config-file",
     "--cpu-prof-dir",
     "--cpu-prof-interval",
     "--cpu-prof-name",
@@ -66,6 +73,7 @@ const VALUE_OPTIONS: &[&str] = &[
     "--openssl-config",
     "--policy-integrity",
     "--print",
+    "--process-timeout",
     "--redirect-warnings",
     "--report-dir",
     "--report-directory",
@@ -104,6 +112,7 @@ const VALUE_OPTIONS: &[&str] = &[
     "--unhandled-rejections",
     "--use-largepages",
     "--v8-pool-size",
+    "--vfs-load",
     "--watch-kill-signal",
     "--watch-path",
 ];
@@ -133,11 +142,11 @@ pub fn entry_index(args: &[String]) -> Option<usize> {
 /// mode and survive the filter, and the child starts in the mode too. It then starts
 /// another, until the machine runs out of processes: `--test=<value>` on 18.x and
 /// 20.0–20.12, `--watch=<value>` on 18.x and through 20.11, and `--watch_path` on
-/// 18.x, 20.11, 24 and 26. From 20.13 a runner started inside a test child refuses to
-/// run its files (nodejs/node#52322), so there `--test=<value>` skips the tests
-/// instead. Rewritten here, where every Node nub launches gets its argv, the mode
-/// stays out of every child on every release, and the launched process runs in the
-/// mode it would have.
+/// 18.x, 20.11, 20.12, 24, and 26 before 26.13. From 20.13 a runner started inside a
+/// test child refuses to run its files (nodejs/node#52322), so there `--test=<value>`
+/// skips the tests instead. Rewritten here, where every Node nub launches gets its
+/// argv, the mode stays out of every child on every release, and the launched process
+/// runs in the mode it would have.
 pub fn child_safe_modes(args: &[String]) -> Vec<String> {
     let end = options_end(args);
     let mut out = args.to_vec();

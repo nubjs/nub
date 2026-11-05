@@ -250,8 +250,10 @@ function findBin(name, cwd) {
 // crates/nub-core/src/node/argv.rs, which says where it comes from and checks
 // this copy against itself.
 const VALUE_OPTIONS = new Set([
-  "-C", "-e", "-p", "-pe", "-r", "--allow-fs-read", "--allow-fs-write", "--build-sea",
-  "--build-snapshot-config", "--conditions", "--cpu-prof-dir", "--cpu-prof-interval",
+  "-C", "-e", "-p", "-pe", "-r", "--allow-fs-read", "--allow-fs-write", "--bench-isolation",
+  "--bench-name-pattern", "--bench-reporter", "--bench-reporter-destination", "--bench-samples",
+  "--bench-warmup", "--build-sea", "--build-snapshot-config", "--conditions", "--config-file",
+  "--cpu-prof-dir", "--cpu-prof-interval",
   "--cpu-prof-name", "--debug-port", "--diagnostic-dir", "--disable-proto", "--disable-warning",
   "--dns-result-order", "--env-file", "--env-file-if-exists", "--es-module-specifier-resolution",
   "--eval", "--experimental-config-file", "--experimental-default-type", "--experimental-loader",
@@ -262,7 +264,8 @@ const VALUE_OPTIONS = new Set([
   "--input-type", "--inspect-port", "--inspect-publish-uid", "--loader", "--localstorage-file",
   "--max-http-header-size", "--max-old-space-size-percentage",
   "--network-family-autoselection-attempt-timeout", "--openssl-config", "--policy-integrity",
-  "--print", "--redirect-warnings", "--report-dir", "--report-directory", "--report-filename",
+  "--print", "--process-timeout", "--redirect-warnings", "--report-dir", "--report-directory",
+  "--report-filename",
   "--report-signal", "--require", "--run", "--secure-heap", "--secure-heap-min",
   "--security-revert", "--security-reverts", "--snapshot-blob", "--stack-trace-limit",
   "--test-concurrency", "--test-coverage-branches", "--test-coverage-exclude",
@@ -271,8 +274,8 @@ const VALUE_OPTIONS = new Set([
   "--test-reporter", "--test-reporter-destination", "--test-rerun-failures", "--test-shard",
   "--test-skip-pattern", "--test-timeout", "--title", "--tls-cipher-list", "--tls-keylog",
   "--trace-event-categories", "--trace-event-file-pattern", "--trace-require-module",
-  "--unhandled-rejections", "--use-largepages", "--v8-pool-size", "--watch-kill-signal",
-  "--watch-path",
+  "--unhandled-rejections", "--use-largepages", "--v8-pool-size", "--vfs-load",
+  "--watch-kill-signal", "--watch-path",
 ]);
 
 // A flag-led argv with the test runner and watch mode spelled the way Node's filters

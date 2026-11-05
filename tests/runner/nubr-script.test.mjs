@@ -284,32 +284,33 @@ test(
   { skip: process.platform === "win32" }, // Killing the run's whole tree needs a group.
   async () => {
     // Watch mode only removes `--watch-path` from the child it starts, so with
-    // `--watch_path` the child is a supervisor too, without end. The `--require` probe
-    // runs first in the launched process, which says which spelling it was handed.
-    writeFileSync(
-      join(fixture, "watch-flags.cjs"),
-      "console.log(`WATCH ${JSON.stringify(process.execArgv.filter((a) => a.startsWith('--watch')))}`);\n",
-    );
-    writeFileSync(join(fixture, "idle.cjs"), "");
-    const child = spawn(
-      process.execPath,
-      [nubr, "--watch_path=.", "--require", "./watch-flags.cjs", "idle.cjs"],
-      { cwd: fixture, detached: true, stdio: ["ignore", "pipe", "inherit"] },
-    );
-    const kill = () => process.kill(-child.pid, "SIGKILL");
+    // `--watch_path` the child is a supervisor too, without end, and the program never
+    // runs. A regression reaches the deadline without the line.
+    writeFileSync(join(fixture, "watched.cjs"), 'console.log("BODY-RAN");\n');
+    const child = spawn(process.execPath, [nubr, "--watch_path=.", "watched.cjs"], {
+      cwd: fixture,
+      detached: true,
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    const kill = () => {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        // The deadline already took the group down.
+      }
+    };
     const deadline = setTimeout(kill, 30_000);
-    const line = await new Promise((resolve) => {
-      let out = "";
+    const out = await new Promise((resolve) => {
+      let seen = "";
       child.stdout.on("data", (chunk) => {
-        out += chunk;
-        const found = out.match(/WATCH .*/);
-        if (found) resolve(found[0]);
+        seen += chunk;
+        if (seen.includes("BODY-RAN")) resolve(seen);
       });
-      child.on("exit", () => resolve(out));
+      child.on("exit", () => resolve(seen));
     });
     clearTimeout(deadline);
     kill();
     child.stdout.destroy();
-    assert.equal(line, 'WATCH ["--watch-path=."]');
+    assert.match(out, /BODY-RAN/);
   },
 );
