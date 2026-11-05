@@ -173,7 +173,8 @@ pub use settings_context::{
 };
 pub use workspace_helpers::empty_selection_noop;
 pub(crate) use workspace_helpers::{
-    NoMatchReport, collect_dep_closure, find_workspace_root, finish_filtered_workspace, load_graph,
-    no_projects_matched, prepare_resolved_graph_for_lockfile_write, retarget_cwd, select_projects,
+    NoMatchReport, collect_dep_closure, dep_closure_from, find_workspace_root,
+    finish_filtered_workspace, load_graph, no_projects_matched,
+    prepare_resolved_graph_for_lockfile_write, retarget_cwd, select_projects,
     select_workspace_packages, workspace_importer_path, write_and_log_lockfile,
 };

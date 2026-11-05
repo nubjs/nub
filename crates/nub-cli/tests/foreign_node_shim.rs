@@ -130,16 +130,16 @@ fn fallback_shims_ahead_of_the_real_node_are_each_launched_once() {
 
         let out = run_nub(&root, &path, &["-p", "process.execPath"]);
         // Probes (`--version` and the flag probes) reach the Node behind a shim and
-        // are fine; the launch must happen once per shim, not once per round trip.
+        // are fine; the launch must happen at most once per shim, not once per round
+        // trip. A shim whose probe already comes back to nub is skipped unlaunched.
         for name in shims {
             let calls = shim_calls(&root, name);
             let launches = calls
                 .iter()
                 .filter(|call| call.ends_with("-p process.execPath"))
                 .count();
-            assert_eq!(
-                launches,
-                1,
+            assert!(
+                launches <= 1,
                 "nub relaunched {name} ({} shims); calls: {calls:?}\nstderr:\n{}",
                 shims.len(),
                 String::from_utf8_lossy(&out.stderr)

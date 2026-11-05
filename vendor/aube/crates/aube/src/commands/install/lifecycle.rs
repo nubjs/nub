@@ -274,7 +274,9 @@ pub(super) async fn run_root_lifecycle_script(
 }
 
 /// Build the dependency lifecycle-script `BuildPolicy` by merging
-/// every supported source on the root manifest + workspace file:
+/// every supported source on the given manifests (the root, plus the
+/// workspace members an install links — see
+/// [`super::build_policy_manifests`]) and the workspace file:
 ///
 /// - `package.json` / `pnpm-workspace.yaml` `pnpm.allowBuilds` map
 ///   (aube's superset format — patterns with bool values)
@@ -291,21 +293,6 @@ pub(super) async fn run_root_lifecycle_script(
 /// Workspace and manifest entries in the `allowBuilds` map merge for the same
 /// pattern, with an explicit denial from either source taking precedence. The
 /// flat lists are pure append — deny always wins at `decide()` time.
-pub(crate) fn build_policy_from_sources(
-    manifest: &aube_manifest::PackageJson,
-    workspace: &aube_manifest::WorkspaceConfig,
-    dangerously_allow_all_builds: bool,
-) -> (
-    aube_scripts::BuildPolicy,
-    Vec<aube_scripts::BuildPolicyError>,
-) {
-    build_policy_from_manifest_sources(
-        std::iter::once(manifest),
-        workspace,
-        dangerously_allow_all_builds,
-    )
-}
-
 pub(crate) fn build_policy_from_manifest_sources<'a>(
     manifests: impl IntoIterator<Item = &'a aube_manifest::PackageJson>,
     workspace: &aube_manifest::WorkspaceConfig,
@@ -669,16 +656,12 @@ pub(crate) async fn run_dep_lifecycle_scripts(
     jail_policy: &JailBuildPolicy,
     // `Some` enables install-delta mode: only current graph entries
     // whose dep_path changed since the prior install are eligible.
-    // Policy still gates those packages below. This differs from
-    // `selected_names`, which is rebuild's explicit user selection
-    // and intentionally bypasses policy.
+    // Policy still gates those packages below.
     selected_dep_paths: Option<&std::collections::BTreeSet<String>>,
-    // `Some` enables selective mode: only deps whose in-tree `name`
-    // (the alias when one is configured) is in the set are eligible,
-    // and the policy is bypassed for those deps. `None` is the
-    // default install path: every dep is eligible and the policy
-    // gates which ones actually run. Match is by `pkg.name`, matching
-    // pnpm's `pnpm rebuild <name>`.
+    // `Some` enables selective mode (`rebuild <name>`): only deps whose
+    // in-tree `name` (the alias when one is configured) is in the set are
+    // eligible. The policy still gates them, as in pnpm 12. `None` is the
+    // default install path: every dep is eligible.
     selected_names: Option<&std::collections::HashSet<String>>,
 ) -> miette::Result<DepLifecycleOutcome> {
     // Pass 1 (serial, cheap): walk the graph, keep only the packages
@@ -727,40 +710,33 @@ pub(crate) async fn run_dep_lifecycle_scripts(
         // alongside the job so the floor is never silent about what
         // it let through.
         let mut via_floor = false;
-        if let Some(selected) = selected_names {
-            // Selective mode: user named this dep explicitly, so
-            // bypass the policy. Match by `pkg.name` (the in-tree
-            // alias when one is configured), matching pnpm's
-            // `pnpm rebuild <name>`.
-            if !selected.contains(&pkg.name) {
-                continue;
+        // Selective mode (`rebuild <name>`) narrows the candidates by
+        // `pkg.name` (the in-tree alias when one is configured), matching
+        // pnpm's `pnpm rebuild <name>`. Naming a package is not an
+        // approval: pnpm 12's rebuild "never builds a disallowed package",
+        // so the policy below still gates it.
+        if let Some(selected) = selected_names
+            && !selected.contains(&pkg.name)
+        {
+            continue;
+        }
+        // Use registry_name(), not pkg.name. pkg.name is the in-tree
+        // alias (`h3-safe`). Real package is `h3`. Allowlist entry for
+        // `h3` would miss if we checked against the alias. Attacker
+        // writes `"h3-safe": "npm:h3@0.19.0"` to sneak a denied pkg
+        // through the allowlist. registry_name() strips alias back to
+        // real name. #860 added a per-package source key
+        // (`Option<String>`); `decide_package` consults the explicit
+        // allowlist/denylist by name+version+source. We keep nub's
+        // `defaultTrust` floor as a belt-and-suspenders arm that only
+        // fires on `Unspecified`, so explicit entries always win.
+        match super::default_trust::decide_package_build(policy, pkg) {
+            aube_scripts::AllowDecision::Allow => {}
+            aube_scripts::AllowDecision::Unspecified if floor.trusts(pkg, &graph.times) => {
+                via_floor = true;
             }
-        } else {
-            // Use registry_name(), not pkg.name. pkg.name is the in-tree
-            // alias (`h3-safe`). Real package is `h3`. Allowlist entry for
-            // `h3` would miss if we checked against the alias. Attacker
-            // writes `"h3-safe": "npm:h3@0.19.0"` to sneak a denied pkg
-            // through the allowlist. registry_name() strips alias back to
-            // real name. #860 added a per-package source key
-            // (`Option<String>`); `decide_package` consults the explicit
-            // allowlist/denylist by name+version+source. We keep nub's
-            // `defaultTrust` floor as a belt-and-suspenders arm that only
-            // fires on `Unspecified`, so explicit entries always win.
-            let source_key = pkg.source_approval_key();
-            let git_repository_key = pkg.git_repository_approval_key();
-            match policy.decide_package_with_git_repository(
-                pkg.registry_name(),
-                &pkg.version,
-                source_key.as_deref(),
-                git_repository_key.as_deref(),
-            ) {
-                aube_scripts::AllowDecision::Allow => {}
-                aube_scripts::AllowDecision::Unspecified if floor.trusts(pkg, &graph.times) => {
-                    via_floor = true;
-                }
-                aube_scripts::AllowDecision::Deny | aube_scripts::AllowDecision::Unspecified => {
-                    continue;
-                }
+            aube_scripts::AllowDecision::Deny | aube_scripts::AllowDecision::Unspecified => {
+                continue;
             }
         }
         let package_dir = materialized_pkg_dir(
@@ -1573,6 +1549,11 @@ pub(super) fn import_verified_tarball_streamed(
 pub(super) struct TarballStreamErr {
     pub report: miette::Report,
     pub is_throttle: bool,
+    /// The connection broke off mid-body. The caller downloads the
+    /// tarball again through the buffered fetch, which retries the
+    /// whole body: [`aube_registry::client::RegistryClient::start_tarball_stream`]
+    /// retries only the request, and leaves the body to its caller.
+    pub retry_buffered: bool,
 }
 
 impl From<TarballStreamErr> for miette::Report {
@@ -1604,14 +1585,17 @@ pub(super) async fn fetch_and_import_tarball_streaming(
     let local = |report: miette::Report| TarballStreamErr {
         report,
         is_throttle: false,
+        retry_buffered: false,
     };
     // Network-error helper, used for chunk read errors during
     // body streaming. Connection resets and read timeouts mid-
     // body are the same kind of upstream signal as a 503 reply.
-    let net = |e: aube_registry::Error, ctx: miette::Report| TarballStreamErr {
-        is_throttle: e.is_throttle(),
-        report: ctx,
-    };
+    let net =
+        |e: aube_registry::Error, ctx: miette::Report, retry_buffered: bool| TarballStreamErr {
+            is_throttle: e.is_throttle(),
+            report: ctx,
+            retry_buffered,
+        };
 
     let mut resp = client.start_tarball_stream(url).await.map_err(|e| {
         let is_throttle = e.is_throttle();
@@ -1624,6 +1608,7 @@ pub(super) async fn fetch_and_import_tarball_streaming(
                 ),
             ),
             is_throttle,
+            retry_buffered: false,
         }
     })?;
 
@@ -1654,7 +1639,9 @@ pub(super) async fn fetch_and_import_tarball_streaming(
     let mut hasher = sha2::Sha512::new();
     let mut total: u64 = 0;
     let mut chunk_tx = Some(chunk_tx);
-    let stream_err: Option<aube_registry::Error> = loop {
+    // The flag says whether downloading the body again can help: a
+    // connection that broke off, not a body past the cap.
+    let stream_err: Option<(aube_registry::Error, bool)> = loop {
         match resp.chunk().await {
             Ok(Some(chunk)) => {
                 if cap > 0 && total.saturating_add(chunk.len() as u64) > cap {
@@ -1666,10 +1653,13 @@ pub(super) async fn fetch_and_import_tarball_streaming(
                             )))
                             .await;
                     }
-                    break Some(aube_registry::Error::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("tarball body exceeds cap {cap}"),
-                    )));
+                    break Some((
+                        aube_registry::Error::Io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("tarball body exceeds cap {cap}"),
+                        )),
+                        false,
+                    ));
                 }
                 total += chunk.len() as u64;
                 hasher.update(&chunk);
@@ -1687,14 +1677,14 @@ pub(super) async fn fetch_and_import_tarball_streaming(
                 if let Some(tx) = chunk_tx.as_ref() {
                     let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
                 }
-                break Some(aube_registry::Error::from(e));
+                break Some((aube_registry::Error::from(e), true));
             }
         }
     };
     drop(chunk_tx);
 
     let import_result = import_handle.await.into_diagnostic().map_err(local)?;
-    if let Some(e) = stream_err {
+    if let Some((e, retry_buffered)) = stream_err {
         // Stash the Display rendering before `net` consumes `e`
         // for `is_throttle()` — the user-facing diagnostic must
         // still name the underlying cause (timeout, status 503,
@@ -1707,6 +1697,7 @@ pub(super) async fn fetch_and_import_tarball_streaming(
                 "stream error for {display_name}@{version}: {cause}{}",
                 crate::dep_chain::format_chain_for(registry_name, version)
             ),
+            retry_buffered,
         ));
     }
     let index = import_result.map_err(local)?;
@@ -1856,6 +1847,7 @@ pub(in crate::commands::install) struct UnreviewedScan {
     pub deferred: Vec<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn unreviewed_dep_builds(
     aube_dir: &std::path::Path,
     graph: &aube_lockfile::LockfileGraph,
@@ -1863,10 +1855,19 @@ pub(super) fn unreviewed_dep_builds(
     floor: &super::default_trust::DefaultTrustFloor,
     virtual_store_dir_max_length: usize,
     placements: Option<&aube_linker::HoistedPlacements>,
+    // A filtered rebuild's selected projects' dependencies, by dep path.
+    selected_dep_paths: Option<&std::collections::BTreeSet<String>>,
+    // `rebuild <name>`'s selection, by in-tree name; `None` scans every package.
+    selected_names: Option<&std::collections::HashSet<String>>,
 ) -> miette::Result<UnreviewedScan> {
     let mut unreviewed = Vec::new();
     let mut deferred = Vec::new();
     for (dep_path, pkg) in &graph.packages {
+        if selected_dep_paths.is_some_and(|paths| !paths.contains(dep_path))
+            || selected_names.is_some_and(|names| !names.contains(&pkg.name))
+        {
+            continue;
+        }
         // A package the `defaultTrust` floor vouches for is not
         // unreviewed — its scripts ran. Same decision seam as
         // `run_dep_lifecycle_scripts` so the warning and the runner
@@ -2079,7 +2080,7 @@ mod tests {
     fn undeclared_policy_leaves_default_trust_to_the_floor() {
         let manifest = aube_manifest::PackageJson::default();
         let workspace = aube_manifest::WorkspaceConfig::default();
-        let (policy, warnings) = build_policy_from_sources(&manifest, &workspace, false);
+        let (policy, warnings) = build_policy_from_manifest_sources([&manifest], &workspace, false);
 
         assert!(warnings.is_empty());
         assert_eq!(
@@ -2096,7 +2097,7 @@ mod tests {
     fn explicit_deny_overrides_default_trust() {
         let manifest = manifest_with_allow_build("esbuild", false);
         let workspace = aube_manifest::WorkspaceConfig::default();
-        let (policy, warnings) = build_policy_from_sources(&manifest, &workspace, false);
+        let (policy, warnings) = build_policy_from_manifest_sources([&manifest], &workspace, false);
 
         assert!(warnings.is_empty());
         assert_eq!(
@@ -2112,7 +2113,7 @@ mod tests {
         workspace
             .allow_builds
             .insert("esbuild".to_string(), yaml_serde::Value::Bool(true));
-        let (policy, warnings) = build_policy_from_sources(&manifest, &workspace, false);
+        let (policy, warnings) = build_policy_from_manifest_sources([&manifest], &workspace, false);
 
         assert!(warnings.is_empty());
         assert_eq!(
@@ -2128,7 +2129,7 @@ mod tests {
         workspace
             .allow_builds
             .insert("esbuild".to_string(), yaml_serde::Value::Bool(false));
-        let (policy, warnings) = build_policy_from_sources(&manifest, &workspace, false);
+        let (policy, warnings) = build_policy_from_manifest_sources([&manifest], &workspace, false);
 
         assert!(warnings.is_empty());
         assert_eq!(
@@ -2172,7 +2173,7 @@ mod tests {
         );
 
         let workspace = aube_manifest::WorkspaceConfig::default();
-        let (policy, warnings) = build_policy_from_sources(&manifest, &workspace, false);
+        let (policy, warnings) = build_policy_from_manifest_sources([&manifest], &workspace, false);
 
         assert!(warnings.is_empty());
         assert_eq!(

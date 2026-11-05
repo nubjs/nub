@@ -1,5 +1,5 @@
 {
-  "nodeVersion": "v26.5.0",
+  "nodeVersion": "v26.13.0",
   "optionTypeLegend": {
     "0": "kNoOp",
     "1": "kV8Option",
@@ -23,12 +23,16 @@
       2,
       0
     ],
-    "--experimental-config-file": [
-      5,
-      1
+    "--experimental-bench": [
+      2,
+      0
     ],
     "--experimental-detect-module": [
       2,
+      0
+    ],
+    "--experimental-dtls": [
+      0,
       0
     ],
     "--experimental-eventsource": [
@@ -165,6 +169,10 @@
     ],
     "--experimental-wasm-modules": [
       0,
+      0
+    ],
+    "--experimental-web-worker": [
+      2,
       0
     ],
     "--experimental-websocket": [

@@ -62,7 +62,7 @@ trap cleanup EXIT
 # the OSV advisory gate to have run (`osv_gate_active = true`). The OSV gate
 # depends on nub's packument cache, which lives in $XDG_CACHE_HOME/nub/pm/ —
 # a completely cold sandbox defeats the gate, causing the floor to fall back to
-# deny+warn (`WARN_NUB_IGNORED_BUILD_SCRIPTS`) instead of the expected allow+
+# deny (`ERR_NUB_IGNORED_BUILDS`) instead of the expected allow+
 # disclose path. On CI (ubuntu-latest),
 # the runner has network access and the XDG cache starts cold — but the
 # resolver warms it during the resolve phase before the scripts phase, so the
@@ -186,16 +186,19 @@ cat > "$PROJ_DENY/package.json" <<'JSON'
 }
 JSON
 
-deny_out="$(cd "$PROJ_DENY" && "$NUB" install 2>&1)" || true
+deny_rc=0
+deny_out="$(cd "$PROJ_DENY" && "$NUB" install 2>&1)" || deny_rc=$?
 
-# The floor must NOT allow core-js's build (it is not on the allowlist).
-# The ignored-build-scripts warning must appear — not a hard failure, but not
-# a silent allow.
-echo "$deny_out" | grep -q 'WARN_NUB_IGNORED_BUILD_SCRIPTS' \
-  || fail "core-js build was not mentioned in WARN_NUB_IGNORED_BUILD_SCRIPTS (deny side broken). Output: $deny_out"
+# The floor must NOT allow core-js's build (it is not on the allowlist), and
+# under the default `strictDepBuilds` the install fails naming it, as pnpm 12's
+# ERR_PNPM_IGNORED_BUILDS does.
+[ "$deny_rc" -ne 0 ] \
+  || fail "install with an unapproved core-js build exited 0 (deny side broken). Output: $deny_out"
+echo "$deny_out" | grep -q 'ERR_NUB_IGNORED_BUILDS' \
+  || fail "core-js build was not reported as ERR_NUB_IGNORED_BUILDS (deny side broken). Output: $deny_out"
 echo "$deny_out" | grep -q 'core-js' \
-  || fail "core-js not named in ignored-build-scripts warning. Output: $deny_out"
-pass "default-trust deny side: core-js build blocked + named in warning"
+  || fail "core-js not named in the ignored-builds error. Output: $deny_out"
+pass "default-trust deny side: core-js build blocked + named in the error"
 
 echo ""
 echo "native-deps: all assertions passed."

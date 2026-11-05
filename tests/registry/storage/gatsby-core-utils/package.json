@@ -1,0 +1,154 @@
+{
+  "name": "gatsby-core-utils",
+  "versions": {
+    "2.13.0": {
+      "name": "gatsby-core-utils",
+      "version": "2.13.0",
+      "keywords": [
+        "gatsby",
+        "gatsby-core-utils"
+      ],
+      "author": {
+        "name": "Ward Peeters",
+        "email": "ward@coding-tech.com"
+      },
+      "license": "MIT",
+      "_id": "gatsby-core-utils@2.13.0",
+      "maintainers": [
+        {
+          "name": "dschau",
+          "email": "dustinschau@gmail.com"
+        },
+        {
+          "name": "jamo",
+          "email": "jamo@isotalo.fi"
+        },
+        {
+          "name": "kylemathews",
+          "email": "mathews.kyle@gmail.com"
+        },
+        {
+          "name": "pieh",
+          "email": "misiek.piechowiak@gmail.com"
+        },
+        {
+          "name": "sidharthachatterjee",
+          "email": "me@sidharthachatterjee.com"
+        },
+        {
+          "name": "wardpeet",
+          "email": "ward@coding-tech.com"
+        },
+        {
+          "name": "vladar",
+          "email": "vladimir.razuvaev@gmail.com"
+        },
+        {
+          "name": "tylerbarnes",
+          "email": "tyler@known.design"
+        },
+        {
+          "name": "fk",
+          "email": "sechskilo@gmail.com"
+        },
+        {
+          "name": "smthomas",
+          "email": "shane@codekarate.com"
+        },
+        {
+          "name": "lekoarts",
+          "email": "lekoarts@gmail.com"
+        },
+        {
+          "name": "rachelbahl",
+          "email": "rachel@gatsbyjs.com"
+        },
+        {
+          "name": "daniellewgatsby",
+          "email": "daniel.lew@gatsbyjs.com"
+        },
+        {
+          "name": "veryspry",
+          "email": "ehlinger.matt@gmail.com"
+        },
+        {
+          "name": "abhiaiyer",
+          "email": "abhiaiyer91+npm@gmail.com"
+        }
+      ],
+      "homepage": "https://github.com/gatsbyjs/gatsby/tree/master/packages/gatsby-core-utils#readme",
+      "bugs": {
+        "url": "https://github.com/gatsbyjs/gatsby/issues"
+      },
+      "dist": {
+        "shasum": "8ba74904bdeb66d310325ca588d0ca7614efb351",
+        "tarball": "http://localhost:4874/gatsby-core-utils/-/gatsby-core-utils-2.13.0.tgz",
+        "fileCount": 42,
+        "integrity": "sha512-fkMAxiWFY8N26Iui/Wq8yfE2FY2b31bGJVtlIlSwLgfsoO7fpta64lxeivRtfpNLbAoywmWY/L8TC74GFlnuWg==",
+        "signatures": [
+          {
+            "sig": "MEYCIQC8Sc1dimmzZJep+cQI8sCaTnVd6/YdowJIRMAOZHNDRQIhAOk6cCTSXLWf/t2wWMpwdsc1kYh8iH4F4zT3t7GTV9wJ",
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+          }
+        ],
+        "unpackedSize": 63834,
+        "npm-signature": "-----BEGIN PGP SIGNATURE-----\r\nVersion: OpenPGP.js v3.0.13\r\nComment: https://openpgpjs.org\r\n\r\nwsFcBAEBCAAQBQJhLnGpCRA9TVsSAnZWagAAxgsP/3siRVUCN4evI1KQ2wlv\nehsY8rQZVHfAkFJBLBwkLpm4Mo+NMeFjECy7EMh9dKgmT+SLznI6BXFoGbIK\nK5gb0X7Yyt/RmqvcPYvZI+kMv1+1niAhDxkEJpeQHdCAzBYIzU87cQy2J3/A\ntuc5LyOQXt9fl5xZaGhDIhCOZ7qODF5xss35ol1sYa2Z5UZzlEBn2F4VPr+J\nV5F6c7ko/kORdx6hjgfmliblVbBmpl3pj0MJNDfDQsH9uAo4DRUoyKLRyMml\nLVtHFZSx5fjTFI8yp224mujeEqrng40KN7ng5MrsGSeh1BjDdcX6fVr1RjQ/\nL1USK8zG5nt8gWSfkRPj0jV3UCIHhSVV1lYRm+LjPfEudqvMJ+7tmyi7bHX4\napfEEiyA/Ji35xLLyGXfddO9K/NnBhJvaRewBg/KxmzC6GDg/nPWM86jCdtd\ncMMt2hEy5wMZVhsjcbI4odK8bXK4kqmG7w+hRmY7pC/2cl/a/iqkEt6qTQ79\nbv/4ZJgs3wg7Bf3Hy41RbtKa3AiEB/thkYYI/NAfXzko1uiKNzWZogdWV6yD\n1A1Ok914QdCW3xmQ23j7HF7IQLXNRnHtUC+uoGLDJ4sl2xg11PlDbmKraWeW\nuqLINCNR/IjL92h9yQg7w8Pll0Fgs5rpPmib94jR0MJYWDobJCErzgtQ5wTR\nEc7k\r\n=JLuB\r\n-----END PGP SIGNATURE-----\r\n"
+      },
+      "main": "dist/index.js",
+      "types": "dist/index.d.ts",
+      "engines": {
+        "node": ">=12.13.0"
+      },
+      "gitHead": "0a455df964ce0ee46fda1c053617d5adf22a34da",
+      "scripts": {
+        "build": "babel src --out-dir dist/ --ignore \"**/__tests__\" --ignore \"**/__mocks__\" --extensions \".ts\"",
+        "watch": "babel -w src --out-dir dist/ --ignore \"**/__tests__\" --extensions \".ts\"",
+        "prepare": "cross-env NODE_ENV=production npm run build && npm run typegen",
+        "typegen": "tsc --emitDeclarationOnly --declaration --declarationDir dist/"
+      },
+      "_npmUser": {
+        "name": "vladar",
+        "email": "vladimir.razuvaev@gmail.com"
+      },
+      "repository": {
+        "url": "git+https://github.com/gatsbyjs/gatsby.git",
+        "type": "git",
+        "directory": "packages/gatsby-core-utils"
+      },
+      "_npmVersion": "lerna/3.22.1/node@v14.17.3+x64 (win32)",
+      "description": "A collection of gatsby utils used in different gatsby packages",
+      "directories": {},
+      "_nodeVersion": "14.17.3",
+      "dependencies": {
+        "tmp": "^0.2.1",
+        "ci-info": "2.0.0",
+        "fs-extra": "^8.1.0",
+        "file-type": "^16.5.3",
+        "configstore": "^5.0.1",
+        "xdg-basedir": "^4.0.0",
+        "proper-lockfile": "^4.1.2",
+        "node-object-hash": "^2.3.8"
+      },
+      "_hasShrinkwrap": false,
+      "devDependencies": {
+        "cross-env": "^7.0.3",
+        "@babel/cli": "^7.14.8",
+        "typescript": "^4.3.5",
+        "@babel/core": "^7.14.8",
+        "@types/ci-info": "2.0.0",
+        "babel-preset-gatsby-package": "^1.13.0"
+      },
+      "_npmOperationalInternal": {
+        "tmp": "tmp/gatsby-core-utils_2.13.0_1630433705612_0.17146704566030802",
+        "host": "s3://npm-registry-packages"
+      }
+    }
+  },
+  "time": {
+    "created": "2019-07-08T06:58:58.365Z",
+    "modified": "2026-06-30T21:54:11.279Z",
+    "2.13.0": "2021-08-31T18:15:05.730Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {}
+}

@@ -286,6 +286,9 @@ pub async fn run(
         )?);
     }
 
+    // A target whose install skipped an unapproved build is still
+    // deployed; the error waits until every target is.
+    let mut ignored_builds = None;
     for (s, source_pkg_dir) in staged.iter().zip(plan.iter().map(|(_, src, _)| src)) {
         // Seed the target with a pruned copy of the source workspace
         // lockfile before chdir'ing into the target. Both the source
@@ -384,17 +387,17 @@ pub async fn run(
             // version that wasn't pinned.
             osv_transitive_check: false,
         };
-        install::run(opts).await?;
-
-        println!(
-            "deployed {}@{} to {}",
-            s.name,
-            s.version,
-            s.target.display()
-        );
+        if install::defer_ignored_builds(install::run(opts).await, &mut ignored_builds)?.is_some() {
+            println!(
+                "deployed {}@{} to {}",
+                s.name,
+                s.version,
+                s.target.display()
+            );
+        }
     }
 
-    Ok(())
+    ignored_builds.map_or(Ok(()), Err)
 }
 
 /// Canonicalize a path, falling back to the input on error. Used as a

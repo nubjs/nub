@@ -181,8 +181,19 @@ pub(super) fn collect_ignored(project_dir: &std::path::Path) -> miette::Result<V
     let workspace = aube_manifest::WorkspaceConfig::load(project_dir)
         .into_diagnostic()
         .wrap_err("failed to load workspace config")?;
-    let (policy, _warnings) =
-        super::install::build_policy_from_sources(&manifest, &workspace, false);
+    // The install's own policy inputs: member manifests and the allow-all
+    // setting included, so this lists exactly what an install skipped.
+    let (policy_manifests, allow_all) = super::with_settings_ctx(project_dir, |ctx| {
+        Ok::<_, miette::Report>((
+            super::install::build_policy_manifests(project_dir, &manifest, ctx)?,
+            aube_settings::resolved::dangerously_allow_all_builds(ctx),
+        ))
+    })?;
+    let (policy, _warnings) = super::install::build_policy_from_manifest_sources(
+        policy_manifests.iter(),
+        &workspace,
+        allow_all,
+    );
 
     let store = super::open_store(project_dir)?;
     // Resolve a no-integrity package's index by its URL-keyed

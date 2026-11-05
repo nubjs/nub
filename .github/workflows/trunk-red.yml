@@ -13,6 +13,11 @@ name: Trunk red
 # is green on main again.
 #
 # Scope: report only. It never reruns, reverts, or gates anything.
+#
+# Every workflow that runs against main is listed below, because a red nobody is told about
+# stays red: Node flag drift failed every night from August to November unseen.
+# scripts/trunk-red.test.mjs fails when a workflow that runs on main is neither listed here
+# nor named there as not a verdict, and when a name here matches no workflow.
 
 on:  # zizmor: ignore[dangerous-triggers] trunk-only notifier; reads CI conclusion for main, never checks out or runs PR-controlled code
   workflow_run:
@@ -25,6 +30,20 @@ on:  # zizmor: ignore[dangerous-triggers] trunk-only notifier; reads CI conclusi
       - Daily-driver smoke
       - WPT Worker
       - Action smoke
+      - Compile native package islands
+      - Docker image
+      - Launcher heal
+      - Lockfile round-trip
+      - Nix flake
+      - Node flag drift
+      - npm corpus
+      - pnpm conformance
+      - Release
+      - Verb dispatch (one-binary platform package)
+      - Verify install scripts
+      - lat check
+      - winget manifest
+      - zizmor
     branches: [main]
     types: [completed]
 
@@ -34,10 +53,13 @@ permissions:
   actions: read  # each reported workflow's latest main verdict, before closing the issue
 
 # Serialize so two failing workflows finishing together can't both create the
-# tracking issue (the find-or-create below is read-then-write, not atomic).
+# tracking issue (the find-or-create below is read-then-write, not atomic). `queue: max`
+# because a newer pending run otherwise replaces the older one, and a merge cancels every
+# watched workflow at once: that burst of no-op events could drop a queued failure report.
 concurrency:
   group: trunk-red
   cancel-in-progress: false
+  queue: max
 
 jobs:
   report:

@@ -922,8 +922,6 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     cmd.current_dir(config.cwd);
     if config.env_owner.is_none() && config.prefix.is_none() {
         super::discovery::mark_node_launch(&mut cmd, config.node.path.as_std_path());
-    } else {
-        super::discovery::unmark_node_launch(&mut cmd);
     }
 
     // Permission model detection and auto-grant.
@@ -1593,8 +1591,9 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         cmd.env(COMPAT_LAUNCH_ENV, "1");
     }
 
-    // User args always pass through.
-    cmd.args(config.user_args);
+    // User args always pass through, compat mode included: with a runner or watcher
+    // flag spelled `--flag=<value>`, Node recurses on its older releases.
+    cmd.args(super::argv::child_safe_modes(config.user_args));
 
     // Inherit stdio.
     cmd.stdin(std::process::Stdio::inherit())
@@ -1724,10 +1723,8 @@ impl Drop for CompileCacheSentinelGuard {
     }
 }
 
-/// Public so a caller spawning a `#!/usr/bin/env node` tool can REMOVE the shim
-/// from that child's `PATH`. Leaving it in makes the tool's shebang resolve
-/// `node` back to nub, which re-enters and can spawn the same tool again without
-/// bound — see `env_owner::strip_node_shim_from_path`.
+/// The name every per-invocation shim directory starts with, which discovery and
+/// the stale-shim reaper recognise them by ([`is_path_shim_candidate`]).
 // @lat: [[architecture#Architecture#Composition]]
 pub const PATH_SHIM_PREFIX: &str = "nub-node-shim-";
 const PATH_SHIM_CREATE_RETRIES: usize = 16;
