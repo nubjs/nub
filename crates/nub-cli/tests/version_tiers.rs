@@ -189,6 +189,18 @@ fn run_nub_args_until<T>(
     deadline: Duration,
     ready: impl FnOnce(&str) -> T,
 ) -> Option<(Option<T>, String)> {
+    run_nub_args_until_with_env(want, fixture, args, &[], needle, deadline, ready)
+}
+
+fn run_nub_args_until_with_env<T>(
+    want: (u32, u32, u32),
+    fixture: &str,
+    args: &[&str],
+    env: &[(&str, &str)],
+    needle: &str,
+    deadline: Duration,
+    ready: impl FnOnce(&str) -> T,
+) -> Option<(Option<T>, String)> {
     let bin_dir = find_node_bin_dir(want)?;
     let fixture_path = fixtures_dir().join(fixture);
     let existing = std::env::var_os("PATH").unwrap_or_default();
@@ -202,6 +214,7 @@ fn run_nub_args_until<T>(
         .current_dir(&fixture_path)
         .env("PATH", new_path)
         .env("PORT", "0")
+        .envs(env.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -1373,6 +1386,54 @@ fn a_valued_test_flag_runs_the_file_once_instead_of_recursing() {
             1,
             "Node {maj}.{min}.{pat}: the test file must run exactly once: stdout={stdout:?} stderr={stderr:?}"
         );
+    }
+}
+
+/// Watch mode runs the program in a child, so a watch flag that reaches the child makes
+/// it a supervisor too, and so on without end, with the program never running. Two
+/// routes get past Node's own filter: the `--watch_path` spelling (both releases here
+/// recurse on it) and `NODE_OPTIONS`, which every child inherits (26.5 recurses, 20.11
+/// refuses the flag). Every path nub starts Node on hands it a flag the filter removes.
+/// A regression reaches the deadline without the line, which kills the process group.
+#[test]
+fn watch_flags_node_would_pass_to_its_child_still_run_the_program() {
+    type Case<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
+    const COMPAT: (&str, &str) = ("NODE_COMPAT", "1");
+    let watch = ("NODE_OPTIONS", "--watch");
+    let watch_path = ("NODE_OPTIONS", "--watch_path=.");
+    let cases: [Case<'_>; 8] = [
+        (&["--watch_path=.", "watched.mjs"], &[]),
+        (&["--watch_path=.", "watched.mjs"], &[COMPAT]),
+        (&["--watch", "--watch_path=.", "watched.mjs"], &[]),
+        (&["--watch", "--watch_path=.", "watched.mjs"], &[COMPAT]),
+        (&["watched.mjs"], &[watch]),
+        (&["watched.mjs"], &[watch, COMPAT]),
+        (&["watch", "watched.mjs"], &[watch_path]),
+        (&["watch", "watched.mjs"], &[watch_path, COMPAT]),
+    ];
+    for want in [(20, 11, 0), (26, 5, 0)] {
+        let (maj, min, pat) = want;
+        for (args, env) in cases {
+            let Some((seen, stdout)) = run_nub_args_until_with_env(
+                want,
+                "non-program-modes",
+                args,
+                env,
+                "BODY-RAN",
+                Duration::from_secs(30),
+                |_| (),
+            ) else {
+                eprintln!(
+                    "skipping: Node {maj}.{min}.{pat} not installed \
+                     (set TEST_NODE_BIN_{maj}_{min}_{pat} or nvm install)"
+                );
+                break;
+            };
+            assert!(
+                seen.is_some(),
+                "Node {maj}.{min}.{pat}: `nub {args:?}` with {env:?} never ran the program: stdout={stdout:?}"
+            );
+        }
     }
 }
 

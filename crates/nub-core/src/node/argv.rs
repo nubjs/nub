@@ -1,6 +1,8 @@
 //! Node's own command-line grammar, as far as nub reads a user's Node argv: where
 //! Node's options end and the entry begins, and the mode spellings nub hands on.
 
+use super::spawn::{node_options_token, split_node_options};
+
 /// Every Node option that takes a value, under each name Node accepts for it, so a
 /// separate value is never mistaken for the entry. The union of each release's own
 /// option table from 18.19 through 26 (`internalBinding('options')`, every option of a
@@ -11,8 +13,8 @@
 /// `--experimental-default-config-file`, an alias of a value option that Node's own
 /// filters treat as a single token. A name missing here only ends the scan early, at
 /// its value, so it can never carry the scan past the entry into the program's
-/// arguments; the cost is a valued mode flag after it going unrewritten, which on 26
-/// and later Node contains by itself.
+/// arguments; the cost is a mode flag after it going unrewritten, which Node contains
+/// by itself from 26.13.
 // @lat: [[research/node-flag-arity#Node flag arity — the exhaustive value-accepting set, for file-tier subject resolution#4. The exhaustive value-accepting set]]
 const VALUE_OPTIONS: &[&str] = &[
     "-C",
@@ -22,9 +24,16 @@ const VALUE_OPTIONS: &[&str] = &[
     "-r",
     "--allow-fs-read",
     "--allow-fs-write",
+    "--bench-isolation",
+    "--bench-name-pattern",
+    "--bench-reporter",
+    "--bench-reporter-destination",
+    "--bench-samples",
+    "--bench-warmup",
     "--build-sea",
     "--build-snapshot-config",
     "--conditions",
+    "--config-file",
     "--cpu-prof-dir",
     "--cpu-prof-interval",
     "--cpu-prof-name",
@@ -64,6 +73,7 @@ const VALUE_OPTIONS: &[&str] = &[
     "--openssl-config",
     "--policy-integrity",
     "--print",
+    "--process-timeout",
     "--redirect-warnings",
     "--report-dir",
     "--report-directory",
@@ -102,6 +112,7 @@ const VALUE_OPTIONS: &[&str] = &[
     "--unhandled-rejections",
     "--use-largepages",
     "--v8-pool-size",
+    "--vfs-load",
     "--watch-kill-signal",
     "--watch-path",
 ];
@@ -121,34 +132,108 @@ pub fn entry_index(args: &[String]) -> Option<usize> {
     }
 }
 
-/// `args` with the test runner and watch mode spelled bare wherever Node reads them
-/// as its own options.
+/// `args` with the test runner and watch mode spelled the way Node's filters know
+/// them, wherever Node reads them as its own options.
 ///
 /// Both modes start the program in a child, and keep themselves out of it by
-/// dropping the exact token `--test` or `--watch` from the `execArgv` they pass
-/// down. A valued spelling such as `--test=true` selects the same mode (Node ignores
-/// a boolean's value) but survives that filter, so the child starts in the mode
-/// too. On 18.x and 20.0–20.12 the test child then starts another, and so on
-/// until the machine runs out of processes; `--watch=<value>` does the same on
-/// 18.x and through 20.11. From 20.13 a runner started inside a test child refuses to run its files
-/// (nodejs/node#52322), so there the same command skips the tests instead. Rewritten
-/// here, where every Node nub launches gets its argv, the mode stays out of every
-/// child on every release, and the launched process runs in the mode it would have.
+/// dropping the tokens they recognize from the `execArgv` they pass down. Those
+/// filters compare text, while Node's parser ignores a boolean's value and reads `_`
+/// in a name as `-`. So `--test=true`, `--watch=1` and `--watch_path=src` select the
+/// mode and survive the filter, and the child starts in the mode too. It then starts
+/// another, until the machine runs out of processes: `--test=<value>` on 18.x and
+/// 20.0–20.12, `--watch=<value>` on 18.x and through 20.11, and `--watch_path` on
+/// 18.x, 20.11, 20.12, 24, and 26 before 26.13. From 20.13 a runner started inside a
+/// test child refuses to run its files (nodejs/node#52322), so there `--test=<value>`
+/// skips the tests instead. Rewritten here, where every Node nub launches gets its
+/// argv, the mode stays out of every child on every release, and the launched process
+/// runs in the mode it would have.
 pub fn child_safe_modes(args: &[String]) -> Vec<String> {
     let end = options_end(args);
     let mut out = args.to_vec();
     let mut at = 0;
     while at < end {
-        let arg = &args[at];
-        if let Some(mode) = CHILD_MODES.iter().find(|mode| {
-            arg.strip_prefix(**mode)
-                .is_some_and(|rest| rest.starts_with('='))
-        }) {
-            out[at] = (*mode).to_string();
+        if let Some(spelling) = filtered_spelling(&args[at]) {
+            out[at] = spelling;
         }
         at += option_width(args, at);
     }
     out
+}
+
+/// `NODE_OPTIONS` split into what stays in it and the watch flags it carried, ready
+/// for the launched process's argv. `None` when it selects no watch mode, so the value
+/// goes on byte for byte.
+///
+/// The variable reaches every descendant, and no argv filter touches it, so a watch
+/// flag there starts watch mode again in the child watch mode spawns. Node refused
+/// the flag here until `--watch` with no file became legal, then recursed
+/// (nodejs/node#61740), and its fix strips these from the child's `NODE_OPTIONS`.
+/// Moving them to argv gives that behavior on every release: the launched process
+/// runs in watch mode and nothing below it does. A `--no-watch` after the last of them
+/// means no process selects the mode, and argv would override it, so that value stays
+/// as written. One before them stays too, where the flags on argv override it as they
+/// did in the variable.
+///
+/// Argv gets one `--watch`, or none beside a `--watch-path`, which implies it: on 20.13
+/// through 22.13 the filter keeps whichever flag follows one it removes, so a second
+/// would make the child a supervisor too.
+pub fn lift_watch_flags(node_options: &str) -> Option<(String, Vec<String>)> {
+    let tokens = split_node_options(node_options);
+    let mut rest = Vec::new();
+    let mut paths = Vec::new();
+    let mut selected = false;
+    let mut at = 0;
+    while at < tokens.len() {
+        let width = option_width(&tokens, at);
+        let option = &tokens[at..at + width];
+        if starts_watch_mode(&tokens[at]) {
+            selected = true;
+            if option_name(&tokens[at]) != "--watch" {
+                paths.extend(
+                    option
+                        .iter()
+                        .map(|token| filtered_spelling(token).unwrap_or_else(|| token.clone())),
+                );
+            }
+        } else {
+            selected &= !matches!(option_name(&tokens[at]), "--no-watch" | "--no_watch");
+            rest.extend(option.iter().map(|token| node_options_token(token)));
+        }
+        at += width;
+    }
+    let flags = if paths.is_empty() {
+        vec!["--watch".to_string()]
+    } else {
+        paths
+    };
+    selected.then(|| (rest.join(" "), flags))
+}
+
+/// Whether `option` selects watch mode, under any spelling Node accepts.
+/// `--watch-path` implies `--watch`.
+pub fn starts_watch_mode(option: &str) -> bool {
+    matches!(
+        option_name(option),
+        "--watch" | "--watch-path" | "--watch_path"
+    )
+}
+
+fn option_name(option: &str) -> &str {
+    option.split_once('=').map_or(option, |(name, _)| name)
+}
+
+/// `arg` as Node's filters recognize it, when it selects a mode under another
+/// spelling. `--watch-path` has only the one other spelling; `--test` and `--watch`
+/// have no `_` to read.
+fn filtered_spelling(arg: &str) -> Option<String> {
+    if let Some(mode) = CHILD_MODES.iter().find(|mode| {
+        arg.strip_prefix(**mode)
+            .is_some_and(|rest| rest.starts_with('='))
+    }) {
+        return Some((*mode).to_string());
+    }
+    let rest = arg.strip_prefix("--watch_path")?;
+    (rest.is_empty() || rest.starts_with('=')).then(|| format!("--watch-path{rest}"))
 }
 
 /// The index of the first argument that is not one of Node's options or the value
@@ -203,6 +288,14 @@ mod tests {
                 &["--test_reporter", "spec", "--test=1", "a.js"][..],
                 &["--test_reporter", "spec", "--test", "a.js"][..],
             ),
+            (
+                &["--watch_path=src", "a.js"][..],
+                &["--watch-path=src", "a.js"][..],
+            ),
+            (
+                &["--watch_path", "src", "a.js"][..],
+                &["--watch-path", "src", "a.js"][..],
+            ),
         ];
         for (input, want) in rewrites {
             assert_eq!(child_safe_modes(&argv(input)), argv(want), "{input:?}");
@@ -220,6 +313,56 @@ mod tests {
             &["--test-only=1", "--watch-path=src", "--no-test=1", "a.js"][..],
         ] {
             assert_eq!(child_safe_modes(&argv(input)), argv(input), "{input:?}");
+        }
+    }
+
+    #[test]
+    fn watch_flags_leave_node_options_for_argv() {
+        let cases = [
+            ("--watch", "", &["--watch"][..]),
+            ("--watch=1 --no-warnings", "--no-warnings", &["--watch"][..]),
+            ("--watch_path=src", "", &["--watch-path=src"][..]),
+            // A separate value goes with its flag, and what stays keeps its quoting.
+            (
+                r#"--watch-path "my src" "--title=a b""#,
+                r#""--title=a b""#,
+                &["--watch-path", "my src"][..],
+            ),
+            // Only a space separates in this variable, so a tab stays inside its token.
+            (
+                "--title=foo\tbar --watch",
+                "\"--title=foo\tbar\"",
+                &["--watch"][..],
+            ),
+            // A negation before the flags loses to them, as it did in the variable.
+            ("--no-watch --watch", "--no-watch", &["--watch"][..]),
+            // Argv gets one flag where one says it all.
+            ("--watch --no-watch --watch", "--no-watch", &["--watch"][..]),
+            ("--watch --watch-path=src", "", &["--watch-path=src"][..]),
+        ];
+        for (input, rest, flags) in cases {
+            assert_eq!(
+                lift_watch_flags(input),
+                Some((rest.to_string(), argv(flags))),
+                "{input}"
+            );
+        }
+        // Options that merely start the same way select no mode, and stay as written.
+        assert_eq!(
+            lift_watch_flags("--watch-preserve-output --no-warnings"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_negation_after_the_watch_flags_leaves_node_options_as_written() {
+        for input in [
+            "--watch --no-watch",
+            "--watch --no_watch",
+            "--watch --no-watch=1",
+            "--watch-path=src --no-watch",
+        ] {
+            assert_eq!(lift_watch_flags(input), None, "{input}");
         }
     }
 

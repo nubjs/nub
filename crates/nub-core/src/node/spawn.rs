@@ -984,6 +984,15 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         restore_compat_environment(&mut cmd);
     }
 
+    // After the restore, so a compat launch reads the value it will start with. The
+    // assembly below then builds on what is left.
+    let watch_flags = lift_inherited_watch_flags(&mut cmd);
+    let node_options = if watch_flags.is_empty() {
+        node_options
+    } else {
+        effective_node_options(&cmd)
+    };
+
     // Augment only when we can locate our own preload. If `find_preload` fails —
     // a broken install, or (Windows, A-WIN2) the PATH-shim `node.exe` running
     // from a temp dir where the relative walk to `runtime/` can't reach (a
@@ -1592,7 +1601,8 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     }
 
     // User args always pass through, compat mode included: with a runner or watcher
-    // flag spelled `--flag=<value>`, Node recurses on its older releases.
+    // flag in a spelling Node's filters miss, Node recurses.
+    cmd.args(watch_flags);
     cmd.args(super::argv::child_safe_modes(config.user_args));
 
     // Inherit stdio.
@@ -3632,6 +3642,8 @@ pub fn split_inherited_preloads(value: &str) -> (String, Vec<String>, Vec<String
     )
 }
 
+/// `NODE_OPTIONS` read the way Node's `ParseNodeOptionsEnvVar` reads it: only a space
+/// separates tokens, so a tab or newline stays inside one.
 pub fn split_node_options(value: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut in_string = false;
@@ -3644,7 +3656,7 @@ pub fn split_node_options(value: &str) -> Vec<String> {
                 Some(next) => c = next,
                 None => break,
             }
-        } else if c.is_whitespace() && !in_string {
+        } else if c == ' ' && !in_string {
             start_new = true;
             continue;
         } else if c == '"' {
@@ -3658,6 +3670,30 @@ pub fn split_node_options(value: &str) -> Vec<String> {
         out.last_mut().expect("pushed above").push(c);
     }
     out
+}
+
+/// The `NODE_OPTIONS` `cmd` will start with: its own setting, or else this process's.
+fn effective_node_options(cmd: &Command) -> Option<String> {
+    match cmd
+        .get_envs()
+        .find(|(name, _)| *name == OsStr::new("NODE_OPTIONS"))
+    {
+        Some((_, value)) => value.and_then(OsStr::to_str).map(str::to_string),
+        None => env::var("NODE_OPTIONS").ok(),
+    }
+}
+
+/// Take the watch flags out of the `NODE_OPTIONS` `cmd` would start with, and return
+/// them for its argv. See [`super::argv::lift_watch_flags`].
+pub fn lift_inherited_watch_flags(cmd: &mut Command) -> Vec<String> {
+    let Some((rest, flags)) = effective_node_options(cmd)
+        .as_deref()
+        .and_then(super::argv::lift_watch_flags)
+    else {
+        return Vec::new();
+    };
+    cmd.env("NODE_OPTIONS", rest);
+    flags
 }
 
 /// Pick the preload injection for a Node version, given the located ESM preload
@@ -4348,7 +4384,12 @@ mod tests {
             split_node_options(r#""--require=C:\\Users\\John Doe\\x.cjs""#),
             vec![r#"--require=C:\Users\John Doe\x.cjs"#]
         );
-        // Empty and whitespace-only inputs yield nothing, never a bogus empty flag.
+        // Only a space separates, as in Node.
+        assert_eq!(
+            split_node_options("--title=foo\tbar --trace-warnings"),
+            vec!["--title=foo\tbar", "--trace-warnings"]
+        );
+        // Empty and space-only inputs yield nothing, never a bogus empty flag.
         assert!(split_node_options("").is_empty());
         assert!(split_node_options("   ").is_empty());
 
@@ -4356,6 +4397,7 @@ mod tests {
         for value in [
             "--title=plain",
             "--title=a b c",
+            "--title=foo\tbar",
             r#"--title=a"b"#,
             r#"--require=C:\Users\John Doe\x.cjs"#,
         ] {
