@@ -194,27 +194,14 @@ impl LocalSource {
     /// pnpm prints and writes, so a project's existing pnpm approval
     /// matches here too.
     ///
-    /// A `file:` or `link:` source is named as pnpm names it
-    /// (`dep@file:dep`), which is also how the lockfile hands it back. An
-    /// approval spelled from the manifest (`dep@file:./dep`) keeps matching.
+    /// A `file:` or `link:` source is named as pnpm names it (`dep@file:dep`),
+    /// which is also how the lockfile hands it back. `BuildPolicy` normalizes
+    /// the keys it is configured with, so any spelling of the path matches.
     pub fn source_approval_keys(&self, name: &str) -> Vec<String> {
         let specifier = self.pnpm_specifier();
         let mut keys = vec![format!("{name}@{specifier}")];
         if matches!(self, LocalSource::Git(_)) && !specifier.starts_with("git+") {
             keys.push(format!("{name}@git+{specifier}"));
-        }
-        if let LocalSource::Directory(_) | LocalSource::Tarball(_) | LocalSource::Link(_) = self {
-            let path = self.pnpm_path();
-            let mut spellings = vec![self.specifier()];
-            if !path.starts_with(['.', '/']) {
-                spellings.push(format!("{}:./{path}", self.kind_str()));
-            }
-            for spelling in spellings {
-                let key = format!("{name}@{spelling}");
-                if !keys.contains(&key) {
-                    keys.push(key);
-                }
-            }
         }
         keys
     }
@@ -263,13 +250,7 @@ impl LocalSource {
         else {
             return self.path_posix();
         };
-        let path = aube_util::path::normalize_lexical(path);
-        let path = path.to_string_lossy().replace('\\', "/");
-        if path.is_empty() {
-            ".".to_string()
-        } else {
-            path
-        }
+        aube_util::path::normalize_dep_path(&path.to_string_lossy())
     }
 
     /// [`Self::specifier`] with the path as [`Self::pnpm_path`] gives it: how

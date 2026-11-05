@@ -1696,34 +1696,86 @@ fn frozen_install_reads_unnormalized_local_paths() {
     }
 }
 
-/// A local package is named as pnpm names it (`dep@file:dep`), which is how
-/// the lockfile hands it back. An approval spelled from the manifest has to
-/// survive that round trip, or its build stops running on the next install.
+/// A local package is named as pnpm names it, which is how the lockfile hands
+/// it back (`dep@file:.deps/dep`). A policy key spelled from the manifest has
+/// to keep its meaning through that round trip.
+const LOCAL_PATH_SPELLINGS: [(&str, &str); 4] = [
+    ("./dep", "dep"),
+    ("./.deps/dep", ".deps/dep"),
+    ("./../dep", "../dep"),
+    ("unused/../dep", "dep"),
+];
+
+fn local_build_project(sbx: &Sandbox, spelled: &str, on_disk: &str, marker: &str, allow: bool) {
+    write_marker_dep(sbx, on_disk, marker);
+    fs::create_dir_all(sbx.project.join("unused")).unwrap();
+    // `write_marker_dep` names the package after its path.
+    let manifest = sbx.project.join(on_disk).join("package.json");
+    let contents = fs::read_to_string(&manifest).unwrap();
+    fs::write(
+        &manifest,
+        contents.replace(&format!("\"name\": \"{on_disk}\""), "\"name\": \"dep\""),
+    )
+    .unwrap();
+    sbx.write_manifest(&format!(
+        r#"{{
+            "name": "root",
+            "version": "1.0.0",
+            "dependencies": {{ "dep": "file:{spelled}" }},
+            "aube": {{ "allowBuilds": {{ "dep@file:{spelled}": {allow} }} }}
+        }}"#
+    ));
+}
+
 #[test]
 fn source_approval_spelled_from_the_manifest_holds_on_an_install_from_lockfile() {
     let _guard = e2e_lock();
-    let sbx = Sandbox::new();
-    write_marker_dep(&sbx, "dep", "DOT_SLASH_APPROVED");
-    sbx.write_manifest(
-        r#"{
-            "name": "root",
-            "version": "1.0.0",
-            "dependencies": { "dep": "file:./dep" },
-            "aube": { "allowBuilds": { "dep@file:./dep": true } }
-        }"#,
-    );
-    let node_modules = sbx.project.join("node_modules");
-    sbx.cmd().arg("install").assert().success();
-    assert!(marker_exists_under(&node_modules, "DOT_SLASH_APPROVED"));
-    fs::remove_dir_all(&node_modules).unwrap();
-    sbx.cmd()
-        .args(["install", "--frozen-lockfile"])
-        .assert()
-        .success();
-    assert!(
-        marker_exists_under(&node_modules, "DOT_SLASH_APPROVED"),
-        "the approval must still match the path the lockfile hands back"
-    );
+    for (spelled, on_disk) in LOCAL_PATH_SPELLINGS {
+        let sbx = Sandbox::new();
+        local_build_project(&sbx, spelled, on_disk, "SPELLED_APPROVED", true);
+        let node_modules = sbx.project.join("node_modules");
+        sbx.cmd().arg("install").assert().success();
+        assert!(
+            marker_exists_under(&node_modules, "SPELLED_APPROVED"),
+            "{spelled}: a fresh install runs the approved build"
+        );
+        fs::remove_dir_all(&node_modules).unwrap();
+        sbx.cmd()
+            .args(["install", "--frozen-lockfile"])
+            .assert()
+            .success();
+        assert!(
+            marker_exists_under(&node_modules, "SPELLED_APPROVED"),
+            "{spelled}: the approval must match the path the lockfile hands back"
+        );
+    }
+}
+
+/// An explicit denial outranks allow-all, so one that stopped matching after
+/// the round trip would run a script somebody forbade.
+#[test]
+fn source_denial_spelled_from_the_manifest_holds_on_an_install_from_lockfile() {
+    let _guard = e2e_lock();
+    for (spelled, on_disk) in LOCAL_PATH_SPELLINGS {
+        let sbx = Sandbox::new();
+        local_build_project(&sbx, spelled, on_disk, "SPELLED_DENIED", false);
+        sbx.write_file(".npmrc", "dangerouslyAllowAllBuilds=true\n");
+        let node_modules = sbx.project.join("node_modules");
+        sbx.cmd().arg("install").assert().success();
+        assert!(
+            !marker_exists_under(&node_modules, "SPELLED_DENIED"),
+            "{spelled}: a fresh install must not run the denied build"
+        );
+        fs::remove_dir_all(&node_modules).unwrap();
+        sbx.cmd()
+            .args(["install", "--frozen-lockfile"])
+            .assert()
+            .success();
+        assert!(
+            !marker_exists_under(&node_modules, "SPELLED_DENIED"),
+            "{spelled}: the denial must match the path the lockfile hands back"
+        );
+    }
 }
 
 /// The lockfile records no version for a local package, so an install from

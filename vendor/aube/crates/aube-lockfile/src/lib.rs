@@ -867,20 +867,14 @@ mod locked_package_tests {
     }
 
     #[test]
-    fn source_approval_key_is_pnpms_and_still_matches_the_manifests_spelling() {
+    fn source_approval_key_normalizes_a_local_path() {
         let mut pkg = pkg();
         pkg.local_source = Some(LocalSource::Directory(PathBuf::from("./vendor/pkg")));
         assert_eq!(
             pkg.source_approval_key(),
             Some("pkg@file:vendor/pkg".to_string())
         );
-        let read_back = LocalSource::Directory(PathBuf::from("vendor/pkg"));
-        for keys in [
-            pkg.source_approval_keys(),
-            read_back.source_approval_keys("pkg"),
-        ] {
-            assert_eq!(keys, ["pkg@file:vendor/pkg", "pkg@file:./vendor/pkg"]);
-        }
+        assert_eq!(pkg.source_approval_keys(), ["pkg@file:vendor/pkg"]);
     }
 
     #[test]
