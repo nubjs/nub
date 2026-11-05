@@ -6,7 +6,7 @@ aube ships a black-box bats suite (`vendor/aube/test/*.bats`) that spawns the `a
 
 `run.sh <path-to-nub> [suite.bats ...]` builds a scratch mirror of the layout aube's `common_setup.bash` derives from the test directory (`PROJECT_ROOT/test`, `PROJECT_ROOT/fixtures`, `PROJECT_ROOT/target/debug`) out of symlinks into `vendor/aube`, and writes a shim at `PROJECT_ROOT/target/debug/aube` that exec's nub — so the harness's own `PATH` prepend resolves `aube` straight to nub with zero outside `PATH` surgery. The shim also translates the harness's `AUBE_*` knobs (`AUBE_ADVISORY_CHECK`, `AUBE_LOW_DOWNLOAD_THRESHOLD`) to their `npm_config_*` spellings, because nub deliberately deadens the engine's `AUBE_*` env family while the same settings stay reachable through the `npm_config_*` sources registered in `aube-settings/settings.toml`. The registry needs no translation (`common_setup` writes it into the per-test `.npmrc`), and aube's update notifier needs none (nub's dispatch never calls it).
 
-The default curated subset is the install family: `install.bats ci.bats add.bats remove.bats update.bats lockfile_settings.bats lockfile_dir.bats`.
+The default curated subset is the install family plus the patch workflow: `install.bats ci.bats add.bats remove.bats update.bats prune.bats lockfile_settings.bats lockfile_dir.bats patch.bats`.
 
 ## The two lists
 

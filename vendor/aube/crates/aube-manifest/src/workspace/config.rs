@@ -568,6 +568,11 @@ pub struct WorkspaceConfig {
     #[serde(default)]
     pub dedupe_peers: Option<bool>,
 
+    /// `recursiveInstall: false` makes an unfiltered workspace install
+    /// link only the root. Default: true.
+    #[serde(default)]
+    pub recursive_install: Option<bool>,
+
     /// Consult the root workspace importer's direct deps for peer
     /// resolution before falling back to a graph-wide scan.
     /// Default: true.

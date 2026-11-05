@@ -52,6 +52,9 @@ fn run_nub(dir: &Path, args: &[&str]) -> (String, String, i32) {
         .current_dir(dir)
         .env("XDG_DATA_HOME", tmp_workspace("xdg-data"))
         .env("XDG_CACHE_HOME", tmp_workspace("xdg-cache"))
+        // Either one skips the pre-run freshness gate, whatever the shell has.
+        .env_remove("NODE_COMPAT")
+        .env_remove("npm_lifecycle_event")
         .output()
         .expect("failed to spawn nub");
     (
@@ -308,6 +311,37 @@ fn filter_paths_resolve_from_the_current_project() {
     assert!(!root.join("packages/web/node_modules/dep").exists());
 }
 
+/// pnpm's selector flags work before the verb as well as after it, and
+/// `--filter-prod` walks production dependencies only.
+#[test]
+fn selector_flags_before_the_verb_select_as_after_it() {
+    let root = script_workspace("pre-verb-flags");
+    write(
+        &root.join("packages/api/package.json"),
+        r#"{"name":"api","version":"1.0.0","devDependencies":{"web":"workspace:*"},"scripts":{"build":"echo BUILD:api"}}"#,
+    );
+    assert_eq!(
+        built_in(&root, &["--filter", "api...", "run", "build"]),
+        ["api", "utils", "web"]
+    );
+    assert_eq!(
+        built_in(&root, &["--filter-prod", "api...", "run", "build"]),
+        ["api"]
+    );
+    assert_eq!(
+        built_in(&root, &["run", "--filter-prod", "api...", "build"]),
+        ["api"]
+    );
+    assert_eq!(
+        built_in(&root, &["-C", "packages/api", "run", "build"]),
+        ["api"]
+    );
+    assert_eq!(
+        built_in(&root, &["--dir", "packages/web", "run", "build"]),
+        ["web"]
+    );
+}
+
 /// `pnpm-workspace.yaml` is pnpm's, so a workspace another manager owns
 /// ignores one, here malformed, when it selects packages.
 #[test]
@@ -324,31 +358,187 @@ fn a_stray_pnpm_workspace_yaml_leaves_an_npm_workspace_selection_alone() {
     );
 }
 
+/// Every file under `dir`, with its bytes, not following symlinks: the
+/// installed tree, its state and stamps, the lockfile and the manifests.
+fn tree_snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    fn walk(base: &Path, dir: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            let kind = entry.file_type().unwrap();
+            let rel = path.strip_prefix(base).unwrap().to_path_buf();
+            if kind.is_dir() {
+                walk(base, &path, out);
+            } else if kind.is_symlink() {
+                out.push((
+                    rel,
+                    std::fs::read_link(&path)
+                        .unwrap()
+                        .into_os_string()
+                        .into_encoded_bytes(),
+                ));
+            } else {
+                out.push((rel, std::fs::read(&path).unwrap()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out);
+    out.sort();
+    out
+}
+
+/// Panics naming every path added, removed or changed since `before`.
+fn assert_tree_unchanged(root: &Path, before: &[(PathBuf, Vec<u8>)], context: &str) {
+    let after = tree_snapshot(root);
+    if after == before {
+        return;
+    }
+    let old: std::collections::BTreeMap<_, _> = before.iter().cloned().collect();
+    let new: std::collections::BTreeMap<_, _> = after.into_iter().collect();
+    let mut diff = Vec::new();
+    for (path, bytes) in &new {
+        match old.get(path) {
+            None => diff.push(format!("added    {}", path.display())),
+            Some(prev) if prev != bytes => diff.push(format!("changed  {}", path.display())),
+            Some(_) => {}
+        }
+    }
+    for path in old.keys().filter(|path| !new.contains_key(*path)) {
+        diff.push(format!("removed  {}", path.display()));
+    }
+    panic!("{context}: the tree changed\n{}", diff.join("\n"));
+}
+
+/// A filter that selects no project changes nothing and exits 0, as in
+/// pnpm, since CI runs selectors like `...[origin/main]` that are empty on
+/// many commits: an installed tree, its state, the lockfile and the
+/// recorded engine stay byte-identical, so a Node major switch still gets
+/// its rebuild later, by the next run that selects something. A zero-match
+/// `run` must not repair it either. `--fail-if-no-match` makes it exit 1.
 #[test]
-fn filter_matching_no_package_is_a_clean_no_op() {
+fn a_filter_matching_no_project_changes_nothing_unless_told_to_fail() {
     let root = script_workspace("no-match-filter");
-    let (_stdout, stderr, code) = run_nub(&root, &["run", "-F", "does-not-exist", "build"]);
-    assert_eq!(
-        code, 0,
-        "a filter that matches nothing exits 0 (pnpm parity)\n{stderr}"
+    write(
+        &root.join("dep/package.json"),
+        r#"{"name":"dep","version":"1.0.0"}"#,
     );
+    write(
+        &root.join("dep2/package.json"),
+        r#"{"name":"dep2","version":"1.0.0"}"#,
+    );
+    write(
+        &root.join("package.json"),
+        r#"{"name":"e2e-root","private":true,"workspaces":["packages/*"],"dependencies":{"dep":"file:./dep"}}"#,
+    );
+    let (stdout, stderr, code) = run_nub(&root, &["install"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let stamp = root.join("node_modules/.nub-engine");
+    assert!(stamp.is_file(), "the install records its engine");
+    std::fs::write(&stamp, "node-v1-darwin-arm64").unwrap();
+    let before = tree_snapshot(&root);
+    let notice = "No projects matched the filters in";
+
+    for args in [
+        &["install", "--filter", "nope"][..],
+        &["install", "--force", "--filter", "nope"],
+        &["add", "file:./dep2", "--filter", "nope"],
+        &["remove", "dep", "--filter", "nope"],
+        &["update", "--filter", "nope"],
+    ] {
+        let (_, stderr, code) = run_nub(&root, args);
+        assert_eq!(code, 0, "nub {args:?}\n{stderr}");
+        assert_tree_unchanged(&root, &before, &format!("nub {args:?}\n{stderr}"));
+    }
+    let (_, stderr, code) = run_nub(&root, &["install", "--filter", "nope"]);
     assert!(
-        stderr.contains("No projects matched the filters"),
-        "the pnpm-style no-match message must surface, got: {stderr}"
+        code == 0 && stderr.contains("Scope: 0 of 4 workspace projects"),
+        "{stderr}"
+    );
+    let (_, stderr, code) = run_nub(&root, &["run", "-F", "nope", "build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains(notice), "{stderr}");
+
+    for args in [
+        &["install", "--filter", "nope", "--fail-if-no-match"][..],
+        &["run", "-F", "nope", "--fail-if-no-match", "build"],
+    ] {
+        let (_, stderr, code) = run_nub(&root, args);
+        assert_eq!(code, 1, "nub {args:?}\n{stderr}");
+        assert!(stderr.contains(notice), "nub {args:?}\n{stderr}");
+    }
+    assert_tree_unchanged(
+        &root,
+        &before,
+        "the zero-match run and the failing selections",
     );
 }
 
+/// A workspace whose `packages/*` matches no member yet still has the root
+/// to select from: `--filter nope` selects nothing, so no root hook runs and
+/// nothing is reset, while a filter naming the root installs it.
 #[test]
-fn fail_if_no_match_turns_an_empty_filter_into_an_error() {
-    let root = script_workspace("fail-if-no-match");
-    let (_stdout, stderr, code) = run_nub(
+fn a_workspace_with_no_members_yet_selects_among_its_root() {
+    let root = tmp_workspace("no-members");
+    write(
+        &root.join("package.json"),
+        r#"{"name":"ws-root","version":"1.0.0","private":true,"dependencies":{"dep":"file:./dep"},
+            "scripts":{"preinstall":"node -e \"require('fs').appendFileSync('hook.log','preinstall\\n')\""}}"#,
+    );
+    write(
+        &root.join("pnpm-workspace.yaml"),
+        "packages:\n  - 'packages/*'\n",
+    );
+    write(
+        &root.join("dep/package.json"),
+        r#"{"name":"dep","version":"1.0.0"}"#,
+    );
+    std::fs::create_dir_all(root.join("packages")).unwrap();
+    let (stdout, stderr, code) = run_nub(&root, &["install"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let hook_log = root.join("hook.log");
+    assert_eq!(std::fs::read_to_string(&hook_log).unwrap(), "preinstall\n");
+    let before = tree_snapshot(&root);
+
+    for args in [
+        &["install", "--filter", "nope"][..],
+        &["install", "--force", "--filter", "nope"],
+    ] {
+        let (_, stderr, code) = run_nub(&root, args);
+        assert_eq!(code, 0, "nub {args:?}\n{stderr}");
+        assert_tree_unchanged(&root, &before, &format!("nub {args:?}\n{stderr}"));
+    }
+    let (_, stderr, code) = run_nub(&root, &["run", "-F", "nope", "preinstall"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_tree_unchanged(&root, &before, "the run selects nothing");
+    let (_, stderr, code) = run_nub(
         &root,
-        &["run", "-F", "does-not-exist", "--fail-if-no-match", "build"],
+        &["install", "--filter", "nope", "--fail-if-no-match"],
     );
-    assert_ne!(
-        code, 0,
-        "--fail-if-no-match restores the hard error\n{stderr}"
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("No projects matched the filters in"),
+        "{stderr}"
     );
+    assert_tree_unchanged(&root, &before, "the failure runs no hook");
+
+    let (_, stderr, code) = run_nub(&root, &["install", "--filter", "ws-root"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(&hook_log).unwrap(),
+        "preinstall\npreinstall\n",
+        "a filter naming the root installs it"
+    );
+}
+
+/// `nub ls` inside a workspace member lists that member, as pnpm does.
+#[test]
+fn list_inside_a_member_lists_the_member() {
+    let root = script_workspace("list-member");
+    let (stdout, stderr, code) = run_nub(&root, &["install"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let (stdout, stderr, code) = run_nub(&root.join("packages/web"), &["ls", "--depth=-1"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.starts_with("web@1.0.0 "), "{stdout}");
 }
 
 /// Offline guard for the network-backed remove test.

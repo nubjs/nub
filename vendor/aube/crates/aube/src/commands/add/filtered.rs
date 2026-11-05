@@ -21,6 +21,13 @@ pub(super) async fn run(
     // walks up) mutate the real root lockfile and then silently skip
     // the restore under `--no-save`.
     let (root, matched) = crate::commands::select_workspace_packages(&cwd, filter, "add")?;
+    if matched.is_empty() {
+        return crate::commands::no_projects_matched(
+            &root,
+            filter,
+            crate::commands::NoMatchReport::Quiet,
+        );
+    }
     let lock = crate::commands::take_project_lock(&root)?;
 
     // CLI build review flags write against the workspace root (where

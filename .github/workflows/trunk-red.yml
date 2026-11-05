@@ -34,10 +34,13 @@ permissions:
   actions: read  # each reported workflow's latest main verdict, before closing the issue
 
 # Serialize so two failing workflows finishing together can't both create the
-# tracking issue (the find-or-create below is read-then-write, not atomic).
+# tracking issue (the find-or-create below is read-then-write, not atomic). `queue: max`
+# because a newer pending run otherwise replaces the older one, and a merge cancels every
+# watched workflow at once: that burst of no-op events could drop a queued failure report.
 concurrency:
   group: trunk-red
   cancel-in-progress: false
+  queue: max
 
 jobs:
   report:

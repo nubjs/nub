@@ -845,6 +845,10 @@ pub enum Command {
         #[usage(short = 'F', long)]
         filter: Vec<String>,
 
+        /// `--filter`, but a `...` walk follows production dependencies only.
+        #[usage(long, value_name = "PATTERN")]
+        filter_prod: Vec<String>,
+
         /// npm-style member selection: alias for `--filter <name>`. Long-only
         /// (the short `-w` is pnpm's `--workspace-root`). Repeatable.
         #[usage(long = "workspace", value_name = "NAME")]
@@ -859,8 +863,8 @@ pub enum Command {
         #[usage(long)]
         include_workspace_root: bool,
 
-        /// Error if the filter selects zero packages. (Nub also errors on a
-        /// zero-match filter by default; this is the explicit form.)
+        /// Exit 1 when the filter selects no package, instead of the default
+        /// exit-0 no-op.
         #[usage(long)]
         fail_if_no_match: bool,
 
@@ -967,6 +971,10 @@ pub enum Command {
         #[usage(short = 'F', long)]
         filter: Vec<String>,
 
+        /// `--filter`, but a `...` walk follows production dependencies only.
+        #[usage(long, value_name = "PATTERN")]
+        filter_prod: Vec<String>,
+
         /// npm-style member selection: alias for `--filter <name>`. Long-only
         /// (the short `-w` is pnpm's `--workspace-root`). Repeatable.
         #[usage(long = "workspace", value_name = "NAME")]
@@ -981,8 +989,8 @@ pub enum Command {
         #[usage(long)]
         include_workspace_root: bool,
 
-        /// Error if the filter selects zero packages. (Nub also errors on a
-        /// zero-match filter by default; this is the explicit form.)
+        /// Exit 1 when the filter selects no package, instead of the default
+        /// exit-0 no-op.
         #[usage(long)]
         fail_if_no_match: bool,
 
@@ -1029,6 +1037,10 @@ pub enum Command {
         /// `--filter`s union; `!`-prefixed filters subtract. `-F` is the alias.
         #[usage(short = 'F', long)]
         filter: Vec<String>,
+
+        /// `--filter`, but a `...` walk follows production dependencies only.
+        #[usage(long, value_name = "PATTERN")]
+        filter_prod: Vec<String>,
 
         /// npm-style member selection: alias for `--filter <name>`. Long-only
         /// (the short `-w` is pnpm's `--workspace-root`). Repeatable.
@@ -1822,11 +1834,13 @@ struct WorkspaceOpts {
     /// Union of `--filter`/`-F` selectors and the `--workspace <name>` aliases
     /// (npm member selection desugars to a name filter).
     filter: Vec<String>,
+    /// `--filter-prod` selectors.
+    filter_prod: Vec<String>,
     workspace_root: bool,
     /// Add the workspace-root package to the recursive set (`--include-workspace-root`).
     include_workspace_root: bool,
-    /// `--fail-if-no-match`: the explicit, self-documenting form of the
-    /// zero-match-filter error (which Nub also raises by default).
+    /// `--fail-if-no-match`: exit 1 on a selection of zero packages, which is
+    /// otherwise an exit-0 no-op.
     fail_if_no_match: bool,
     workspace_concurrency: Option<i32>,
     parallel: bool,
@@ -2079,6 +2093,7 @@ fn normalize_leading_run_flags(args: &[String]) -> Option<Vec<String>> {
     const VALUE_FLAGS: &[&str] = &[
         "-F",
         "--filter",
+        "--filter-prod",
         "--workspace",
         "--script-shell",
         "--resume-from",
@@ -2086,9 +2101,23 @@ fn normalize_leading_run_flags(args: &[String]) -> Option<Vec<String>> {
     ];
     let mut i = 0;
     let mut leading: Vec<String> = Vec::new();
+    // pnpm's `-C <dir>` / `--dir <dir>` before the verb is Nub's global
+    // `--cwd`, which every verb honors; after the verb it means that verb's
+    // own `--dir`, which not every verb has.
+    let mut dir: Option<String> = None;
     while i < args.len() {
         let bare = args[i].split('=').next().unwrap_or("");
-        if BOOL_FLAGS.contains(&bare) {
+        if bare == "-C" || bare == "--dir" {
+            if let Some((_, value)) = args[i].split_once('=') {
+                dir = Some(value.to_string());
+                i += 1;
+            } else if let Some(value) = args.get(i + 1) {
+                dir = Some(value.clone());
+                i += 2;
+            } else {
+                break;
+            }
+        } else if BOOL_FLAGS.contains(&bare) {
             leading.push(args[i].clone());
             i += 1;
         } else if VALUE_FLAGS.contains(&bare) {
@@ -2103,12 +2132,16 @@ fn normalize_leading_run_flags(args: &[String]) -> Option<Vec<String>> {
             break; // not a run-flag — stop scanning
         }
     }
-    if !leading.is_empty()
+    if (!leading.is_empty() || dir.is_some())
         && args
             .get(i)
             .is_some_and(|v| is_normalizable_leading_flag_verb(v))
     {
-        let mut out = Vec::with_capacity(args.len());
+        let mut out = Vec::with_capacity(args.len() + 1);
+        if let Some(dir) = dir {
+            out.push("--cwd".to_string());
+            out.push(dir);
+        }
         out.push(args[i].clone()); // subcommand first
         out.extend(leading); // then the moved run-flags
         out.extend(args[i + 1..].iter().cloned()); // then the subcommand's argv
@@ -2681,15 +2714,16 @@ fn run_nub() -> Result<i32> {
 ///
 /// Every separate-token value flag on `run` is listed here. The run-flag set
 /// adds `--workspace <name>`, `--resume-from <pkg>`, `--script-shell <path>`,
-/// and the `-F` short for `--filter` — each takes a following token, so each
-/// must appear below or the positional split would mis-bind its value as the
-/// script name (`nub run --workspace foo build` ⇒ member `foo`, script `build`,
+/// `--filter-prod <sel>` and the `-F` short for `--filter` — each takes a
+/// following token, so each must appear below or the positional split would
+/// mis-bind its value as the script name (`nub run --workspace foo build` ⇒ member `foo`, script `build`,
 /// not script `foo`).
 fn value_consuming_flags(subcommand: &str) -> &'static [&'static str] {
     match subcommand {
         "run" => &[
             "--filter",
             "-F",
+            "--filter-prod",
             "--workspace",
             "--resume-from",
             "--script-shell",
@@ -2704,6 +2738,7 @@ fn value_consuming_flags(subcommand: &str) -> &'static [&'static str] {
         "exec" => &[
             "--filter",
             "-F",
+            "--filter-prod",
             "--workspace",
             "--workspace-concurrency",
             "--cwd",
@@ -2719,6 +2754,7 @@ fn value_consuming_flags(subcommand: &str) -> &'static [&'static str] {
         "nubx" => &[
             "--filter",
             "-F",
+            "--filter-prod",
             "--workspace",
             "--workspace-concurrency",
             "--package",
@@ -2994,6 +3030,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             node,
             recursive,
             mut filter,
+            filter_prod,
             workspace,
             workspace_root,
             include_workspace_root,
@@ -3050,6 +3087,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             let ws_opts = WorkspaceOpts {
                 recursive,
                 filter,
+                filter_prod,
                 workspace_root,
                 include_workspace_root,
                 fail_if_no_match,
@@ -3086,6 +3124,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             node,
             recursive,
             mut filter,
+            filter_prod,
             workspace,
             workspace_root,
             include_workspace_root,
@@ -3115,6 +3154,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             let ws_opts = WorkspaceOpts {
                 recursive,
                 filter,
+                filter_prod,
                 workspace_root,
                 include_workspace_root,
                 fail_if_no_match,
@@ -3132,7 +3172,11 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             };
             // The workspace branch engages only on -r/--filter/--parallel;
             // a plain `nub exec tsc` stays the single-package path unchanged.
-            if ws_opts.recursive || !ws_opts.filter.is_empty() || ws_opts.parallel {
+            if ws_opts.recursive
+                || !ws_opts.filter.is_empty()
+                || !ws_opts.filter_prod.is_empty()
+                || ws_opts.parallel
+            {
                 run_workspace_target(
                     WorkspaceTarget::Bin {
                         name: &bin,
@@ -3150,6 +3194,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             node,
             recursive,
             mut filter,
+            filter_prod,
             workspace,
             workspace_root,
             include_workspace_root,
@@ -3178,7 +3223,8 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             platform.apply();
             filter.extend(workspace);
             let recursive = recursive || parallel || include_workspace_root;
-            let workspace_run = recursive || !filter.is_empty() || parallel;
+            let workspace_run =
+                recursive || !filter.is_empty() || !filter_prod.is_empty() || parallel;
 
             // `--ignore-existing` was removed from npm v9+; accept it for muscle
             // memory but warn that it does nothing (matches real npx, which prints
@@ -3200,6 +3246,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 let ws_opts = WorkspaceOpts {
                     recursive,
                     filter,
+                    filter_prod,
                     workspace_root,
                     include_workspace_root,
                     fail_if_no_match,
@@ -4213,9 +4260,40 @@ fn tsconfig_reported_env() -> Option<(String, String)> {
     (!reported.is_empty()).then(|| (nub_tsconfig::REPORTED_ENV.to_string(), reported.join("\n")))
 }
 
+/// Where the entry script sits in a Node command line: the first argument that is
+/// neither a flag nor the separate value of one.
+///
+/// Lists only the preload and resolution options, which are what precede an entry
+/// in practice, rather than all of Node's value flags. A flag missing from the list
+/// has its value read as the entry, so a caller must degrade safely on a wrong
+/// answer. Node treats `_` and `-` as the same character in an option name.
+pub(crate) fn node_entry_index(args: &[String]) -> Option<usize> {
+    const VALUE_FLAGS: [&str; 7] = [
+        "-r",
+        "--require",
+        "--import",
+        "--loader",
+        "--experimental-loader",
+        "-C",
+        "--conditions",
+    ];
+    let mut at = 0;
+    while let Some(arg) = args.get(at) {
+        if !arg.starts_with('-') {
+            return Some(at);
+        }
+        at += if VALUE_FLAGS.contains(&arg.replace('_', "-").as_str()) {
+            2
+        } else {
+            1
+        };
+    }
+    None
+}
+
 /// The directory whose tsconfig governs the entry of a `nub <file>` run, resolved
-/// against `cwd`. The first non-flag argument is the entry; with none (a bare
-/// `--flag`) this is `None` and the CWD-anchored check stands alone.
+/// against `cwd`. With no entry (a bare `--flag`) this is `None` and the
+/// CWD-anchored check stands alone.
 ///
 /// Mirrors the config the run itself reads (#1032). Node loads the main entry from
 /// its REAL path unless `--preserve-symlinks-main` (`NODE_PRESERVE_SYMLINKS` does
@@ -4227,7 +4305,7 @@ fn tsconfig_reported_env() -> Option<(String, String)> {
 /// often extending a file that was never published — governs nothing and is
 /// skipped outright rather than warned about.
 fn entry_tsconfig_dir(args: &[String], cwd: &Path, node_options: &[String]) -> Option<PathBuf> {
-    let at = args.iter().position(|a| !a.starts_with('-'))?;
+    let at = node_entry_index(args)?;
     let joined = cwd.join(&args[at]);
     let real = std::fs::canonicalize(&joined)
         .map(|p| PathBuf::from(strip_windows_verbatim_prefix(&p.to_string_lossy())))
@@ -4774,16 +4852,32 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     // loader would resolve differently. Detection is a `stat` and runs before any
     // loading, so nothing has to be undone.
     let env_owner = detect_env_owner(project.as_ref(), compat_mode);
-    check_schema_usable(env_owner.as_ref(), compat_mode)?;
+    // A spawn that LAUNCHES the loader is never refused for want of one: the
+    // `.bin`/`PATH` lookup can miss a loader that is nonetheless the very program
+    // starting (an entry run by path, an install shape the lookup does not
+    // cover), and "not installed" is false then. Skipping the whole check is
+    // exact, not a shortcut: its other error needs NO schema to fire, and a
+    // launch with an owner has one.
+    let launches_loader = env_owner
+        .as_ref()
+        .is_some_and(|owner| owner.launches_loader(args, cwd));
+    if !launches_loader {
+        check_schema_usable(env_owner.as_ref(), compat_mode)?;
+    }
     let mut env_vars = runtime_child_env(&runtime, project_root, compat_mode, env_owner.as_ref())?;
     if let Some((_, schema_dir)) = env_owner
         .as_ref()
+        .filter(|_| !launches_loader)
         .and_then(crate::env_owner::EnvOwner::spawn_target)
     {
-        // Reaches the loader process AND the Node it spawns, so neither re-enters
-        // nub and wraps a second time. Carries the schema dir rather than a bare
-        // flag: a nested nub in a DIFFERENT schema-owned project must still wrap
-        // its own, instead of inheriting this project's environment silently.
+        // Reaches everything nub puts in the chain — a configured `prefix`, the
+        // loader, and the Node it spawns — so none of them re-enters nub and
+        // wraps a second time. The loader's own blob cannot do this job for the
+        // first of those: a `prefix` whose bin is a `#!/usr/bin/env node` script
+        // comes back through the PATH shim BEFORE the loader has run, carrying
+        // its own entry rather than the loader's. Carries the schema dir rather
+        // than a bare flag: a nested nub in a DIFFERENT schema-owned project must
+        // still wrap its own, instead of inheriting this project's environment.
         env_vars.insert(
             crate::env_owner::WRAPPED_ENV.to_string(),
             crate::env_owner::wrapped_marker(schema_dir),
@@ -4886,9 +4980,14 @@ fn run_file_in_dir(args: &[String], compat_mode: bool, cwd: &Path, exec_ua: bool
     let pnp_ctx = nub_core::pnp::detect(cwd);
     let config = nub_core::node::spawn::SpawnConfig {
         runtime_has_preloads: !runtime.preload.is_empty(),
-        // Put the loader in front of Node when one owns this project.
+        // Put the loader in front of Node when one owns this project — unless the
+        // loader is what this very spawn runs, in which case it is about to own
+        // the environment for everything below it and a wrap would only resolve
+        // the project twice (and, when the script passed its own `--path` or
+        // `--filter`, resolve something the caller did not ask for).
         env_owner: env_owner
             .as_ref()
+            .filter(|_| !launches_loader)
             .and_then(crate::env_owner::EnvOwner::spawn_target),
         prefix: prefix_argv.as_deref(),
         node: &node,
@@ -4945,17 +5044,18 @@ fn run_script(
         return Ok(0);
     };
 
+    // Workspace-wide execution: -r, --filter, or --parallel. It gates itself,
+    // once it knows the selection is not empty.
+    if ws.recursive || !ws.filter.is_empty() || !ws.filter_prod.is_empty() || ws.parallel {
+        return run_workspace_target(WorkspaceTarget::Script(script, args), compat_mode, ws);
+    }
+
     // Pre-run dependency-freshness gate (#252): warn (or, per policy, abort)
     // when node_modules looks stale, so a missing dep surfaces as a nub message
     // rather than a raw `foo: command not found`. Cheap and once-per-process;
     // skipped in compat mode and inside a running script (see `verify_deps`).
     if let Some(code) = crate::verify_deps::gate(&project.root, compat_mode) {
         return Ok(code);
-    }
-
-    // Workspace-wide execution: -r, --filter, or --parallel.
-    if ws.recursive || !ws.filter.is_empty() || ws.parallel {
-        return run_workspace_target(WorkspaceTarget::Script(script, args), compat_mode, ws);
     }
 
     // `-w` / `--workspace-root` alone: run the script in the workspace ROOT
@@ -5195,7 +5295,12 @@ fn run_workspace_target(
         })?;
 
     let mut members = nub_core::workspace::filter::discover_members(ws_root);
-    if members.iter().all(|m| m.dir == ws_root) && !ws.include_workspace_root {
+    // A workspace whose globs match no member yet still selects among its
+    // root, as pnpm's does; only a `-w` run outside any workspace has none.
+    if project.workspace_root.is_none()
+        && members.iter().all(|m| m.dir == ws_root)
+        && !ws.include_workspace_root
+    {
         bail!("no workspace packages found under {}", ws_root.display());
     }
 
@@ -5230,12 +5335,13 @@ fn run_workspace_target(
     // only when pnpm is the incumbent.
     crate::pm_engine::engine_brand_preflight();
     let filter = aube_workspace::EffectiveFilter {
-        filters: if ws.filter.is_empty() {
+        filters: if ws.filter.is_empty() && ws.filter_prod.is_empty() {
             vec!["*".to_string()]
         } else {
             ws.filter.clone()
         },
-        recursive: ws.filter.is_empty(),
+        filter_prods: ws.filter_prod.clone(),
+        recursive: ws.filter.is_empty() && ws.filter_prod.is_empty(),
         include_workspace_root: ws.include_workspace_root,
         ..Default::default()
     };
@@ -5266,29 +5372,34 @@ fn run_workspace_target(
         .map(|(idx, _)| idx)
         .collect();
 
-    // Zero-match handling. A filter that selects nothing is a clean exit-0
-    // no-op (matching pnpm: `No projects matched the filters in "<dir>"`), not
-    // an error — CI commonly runs `--filter <maybe-empty>` and expects success.
-    // `--fail-if-no-match` is the opt-in that turns the empty selection back
-    // into a hard error (pnpm's `--fail-if-no-match` semantics, exit 1).
+    // Zero-match handling, as pnpm 12: a filter that selects nothing is an
+    // exit-0 no-op reporting the scope and `No projects matched the filters
+    // in "<dir>"`, since CI runs selectors like `...[origin/main]` that are
+    // empty on many commits. `--fail-if-no-match` makes it an error carrying
+    // the same notice.
     if matched_set.is_empty() {
+        let notice = format!(
+            "No projects matched the filters in \"{}\"",
+            ws_root.display()
+        );
         if ws.fail_if_no_match {
-            if !ws.filter.is_empty() {
-                bail!(
-                    "no packages matched the filter{}: {}",
-                    if ws.filter.len() == 1 { "" } else { "s" },
-                    ws.filter.join(", ")
-                );
-            }
-            bail!("no packages to run (--fail-if-no-match)");
+            bail!("{notice}");
         }
-        if !ws.filter.is_empty() {
-            eprintln!(
-                "No projects matched the filters in \"{}\"",
-                ws_root.display()
-            );
+        // pnpm reports the scope for `run`, and only the notice for `exec`.
+        if matches!(target, WorkspaceTarget::Script(..)) {
+            let total = members.len() + usize::from(root_idx.is_none());
+            eprintln!("Scope: 0 of {total} workspace projects");
         }
+        eprintln!("{notice}");
         return Ok(0);
+    }
+
+    // After the zero-match return: a run of nothing leaves a stale tree alone,
+    // as pnpm's does, where the freshness gate could reinstall it.
+    if matches!(target, WorkspaceTarget::Script(..))
+        && let Some(code) = crate::verify_deps::gate(&project.root, compat_mode)
+    {
+        return Ok(code);
     }
 
     // pnpm's "Scope:" header (reportScope.ts): how many workspace projects this
@@ -7367,6 +7478,12 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // restarts, which is the trade-off this path already makes for every
     // expansion-dependent var it injects.
     //
+    // No `launches_loader` check here, unlike the file-run path, and the asymmetry
+    // is deliberate: watch never launches the loader. The loader's own shebang
+    // `node` re-enters nub as a plain FILE RUN carrying the loader's entry, so
+    // that path is where the check belongs; the Node this spawns is the loader's
+    // direct child, launched by absolute path, and never comes back here.
+    //
     // The configured `prefix` goes in front of all of that, the loader included,
     // exactly as `spawn_node` orders it — and, like the loader, not in compat mode.
     let prefix = if compat_mode {
@@ -8010,7 +8127,6 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Resul
         });
     }
     cmd.env(crate::project_config::RUNTIME_CONFIG_ENV, runtime_json);
-    // Stamp the env-owner markers wherever the adapter is injected — without them
     if let Some((k, val)) = force_async_tier {
         cmd.env(k, val);
     }

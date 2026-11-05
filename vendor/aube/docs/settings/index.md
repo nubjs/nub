@@ -2162,6 +2162,7 @@ Install on all workspace packages by default.
 - Default: `true`
 - Environment: `npm_config_recursive_install`, `NPM_CONFIG_RECURSIVE_INSTALL`, `AUBE_RECURSIVE_INSTALL`
 - .npmrc keys: `recursiveInstall`, `recursive-install`
+- Workspace YAML keys: `recursiveInstall`
 
 When `true`, workspace installs resolve and link all importers by default. Set to `false` to opt out of implicit workspace-wide install behavior; explicit `--filter` / `--recursive` still wins.
 

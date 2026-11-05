@@ -33,10 +33,34 @@
 //! So nub's whole involvement is: notice, stand down, and put the loader in the
 //! spawn chain. It resolves nothing, injects nothing, and redacts nothing.
 //!
+//! ## When NOT to put it in the chain
+//!
+//! Three cases. Each covers a moment the other two cannot see.
+//!
+//! - **The loader already ran** — [`LOADER_ENV_BLOB`] is in the environment and
+//!   names a resolution anchored at or below the schema nub found. This is the
+//!   general rule: it reads the loader's OWN surface, so it covers launchers nub
+//!   never observes — a script's own `varlock run`, a Makefile, a CI wrapper. A
+//!   second resolution on top of one is what made nub fire `exec()` resolvers a
+//!   `--filter` had excluded, and made a script's own `--path` run die on the
+//!   root schema's validation before it ever executed.
+//! - **The loader is what nub is about to run** — see
+//!   [`EnvOwner::launches_loader`]. No blob exists yet at that moment, by
+//!   construction, so nub has to recognize the program. The loader's bin is a
+//!   `#!/usr/bin/env node` script whose interpreter re-enters nub through the
+//!   PATH shim, which makes this the recursion guard for every loader invocation
+//!   nub did not write itself.
+//! - **A parent nub already put the loader in this chain** — [`WRAPPED_ENV`]. The
+//!   one gap the first two leave: a configured `prefix` sits in FRONT of the
+//!   loader, so a prefix whose bin is itself a Node script re-enters nub before
+//!   the loader has published anything, carrying the prefix's entry rather than
+//!   the loader's.
+//!
 //! ## Replaceability
 //!
-//! nub is expected to grow its own schema-driven loader. The only
-//! loader-specific knowledge here is [`LOADER_PACKAGE`] and the `run` verb.
+//! nub is expected to grow its own schema-driven loader. The loader-specific
+//! knowledge here is [`LOADER_PACKAGE`], the `run` verb, and the shape of
+//! [`LOADER_ENV_BLOB`].
 
 use std::path::{Path, PathBuf};
 
@@ -52,13 +76,31 @@ pub(crate) const SCHEMA_FILE: &str = ".env.schema";
 /// so one lookup covers every install shape.
 const LOADER_PACKAGE: &str = "varlock";
 
-/// Set on the loader process so a nested nub does not wrap again.
-///
-/// The loader's bin is a `#!/usr/bin/env node` script, so its own interpreter
-/// resolves through nub's PATH shim and re-enters nub. Without this marker that
-/// nub would detect the same project and wrap once more, without bound.
+/// Set on everything nub puts in front of Node, so a nested nub does not wrap
+/// again — see the module docs for why the loader's own blob cannot cover this.
+/// Only ever stamped on a chain nub BUILT; a loader the user invoked is
+/// recognized by [`LOADER_ENV_BLOB`] and [`EnvOwner::launches_loader`] instead.
 /// Internal `__NUB_*` plumbing, not a user knob.
 pub(crate) const WRAPPED_ENV: &str = "__NUB_ENV_OWNER_WRAPPED";
+
+/// The blob the loader publishes to every child it launches.
+///
+/// How nub learns the environment is already resolved by a launcher it never
+/// saw. Measured shape:
+///
+/// ```json
+/// {"basePath": "/abs/dir",
+///  "sources": [{"type": "schema", "path": "<relative to basePath>"}, …]}
+/// ```
+///
+/// Plain JSON in the loader's default inject mode, `@encryptInjectedEnv`
+/// included — measured on 1.16.1 and 1.24.0. It is NOT always readable:
+/// `--inject blob` with `@encryptInjectedEnv` encrypts the whole envelope
+/// (`varlock:v1:…`), as does the in-process `auto-load` under that setting, and
+/// `--inject vars` publishes no blob at all. Anything nub cannot parse is
+/// treated as absent, so those shapes — and any future one — degrade to a
+/// second resolution rather than to a silently empty environment.
+const LOADER_ENV_BLOB: &str = "__VARLOCK_ENV";
 
 /// A schema nub cannot act on, and why. Always fatal.
 ///
@@ -123,7 +165,7 @@ pub(crate) struct EnvOwner {
     /// Where [`Self::root`] sits in [`Self::search_roots`].
     schema_index: usize,
     cli: Option<PathBuf>,
-    wrapped: bool,
+    already_resolved: bool,
 }
 
 impl EnvOwner {
@@ -139,8 +181,8 @@ impl EnvOwner {
 
     /// What to put in front of Node: the loader, and the directory to point it at.
     ///
-    /// `None` when nothing is to be spawned — either no loader is installed, or a
-    /// parent nub already wrapped this process.
+    /// `None` when nothing is to be spawned — either no loader is installed, or
+    /// the environment is already resolved (see the module docs).
     pub(crate) fn spawn_target(&self) -> Option<(&Path, &Path)> {
         self.cli().map(|cli| (cli, self.root()))
     }
@@ -154,10 +196,16 @@ impl EnvOwner {
     /// therefore keep loading.
     pub(crate) fn suppresses_env_files(&self) -> bool {
         // True in BOTH owned states. `cli` is Some when this process will put the
-        // loader in front of Node; it is None-but-wrapped when a parent nub
-        // already did, and the values are already in this environment. Loading
-        // `.env*` in either case would layer nub's answer over the loader's.
-        self.cli.is_some() || self.wrapped
+        // loader in front of Node; `already_resolved` is true when the loader
+        // already ran above, and its values are already in this environment.
+        // Loading `.env*` in either case would layer nub's answer over the
+        // loader's.
+        //
+        // Deliberately NOT gated on whether this particular launch will wrap:
+        // when nub declines because the loader itself is what it is launching
+        // ([`Self::launches_loader`]), the loader still owns the environment, so
+        // nub must not feed its own cascade to the loader's own process.
+        self.cli.is_some() || self.already_resolved
     }
 
     /// Whether this `.env.schema` is one nub should act on at all.
@@ -190,7 +238,7 @@ impl EnvOwner {
     /// not applied" is false while that tool is applying it correctly, and
     /// recommends a package it never asked for.
     pub(crate) fn schema_problem(&self) -> Option<SchemaProblem> {
-        if self.wrapped || self.cli.is_some() || !self.is_ours() {
+        if self.already_resolved || self.cli.is_some() || !self.is_ours() {
             return None;
         }
         Some(if self.loader_declared() {
@@ -324,21 +372,18 @@ pub(crate) fn detect(project_root: &Path, workspace_root: Option<&Path>) -> Opti
         .iter()
         .position(|dir| dir.join(SCHEMA_FILE).is_file())?;
     let root = search_roots[schema_index].clone();
-    // Already behind the loader: do NOT wrap again. Its bin is a
-    // `#!/usr/bin/env node` script, so its own interpreter resolves through nub's
-    // PATH shim and re-enters nub — which would otherwise detect this same
-    // project and wrap once more, without bound.
-    let wrapped = wrapped_for(&root);
+    // Already behind the loader: do NOT resolve on top of it.
+    let already_resolved = wrapped_for(&root) || resolved_by_loader(&root);
     let mut owner = EnvOwner {
         root,
         search_roots,
         schema_index,
         cli: None,
-        wrapped,
+        already_resolved,
     };
     // `is_ours` gates the hand-over, not just the diagnostic: a project that
     // declares a rival claimant of this filename gets neither.
-    if !wrapped && owner.is_ours() {
+    if !already_resolved && owner.is_ours() {
         owner.cli = find_loader_cli(&owner.search_roots);
     }
     Some(owner)
@@ -377,21 +422,138 @@ fn search_roots(project_root: &Path, workspace_root: Option<&Path>) -> Vec<PathB
 /// project's environment, with its own schema never resolved and no warning,
 /// because the missing-loader diagnostic is gated on this too.
 fn wrapped_for(root: &Path) -> bool {
-    let Some(marked) = std::env::var_os(WRAPPED_ENV) else {
-        return false;
-    };
-    // Canonicalize both sides: the marker travels through a spawn, and a symlinked
-    // or `..`-relative root would otherwise compare unequal to the same directory.
-    let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
-    };
-    same(Path::new(&marked), root)
+    std::env::var_os(WRAPPED_ENV)
+        .is_some_and(|marked| canonical(Path::new(&marked)) == canonical(root))
 }
 
 /// The value to stamp so a nested nub can tell WHICH project is wrapped.
 pub(crate) fn wrapped_marker(root: &Path) -> String {
     root.to_string_lossy().into_owned()
+}
+
+/// Resolve a path as far as the filesystem allows, so two spellings of one
+/// directory compare equal.
+///
+/// The loader's paths and nub's roots routinely differ in spelling — macOS's
+/// `/tmp` is `/private/tmp`, and a symlinked `--path` keeps its symlink spelling
+/// in `basePath`. A path that cannot be canonicalized is compared as written,
+/// which is the best available answer and never worse than not comparing.
+fn canonical(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Whether the loader has ALREADY resolved the schema nub found here.
+///
+/// The test is what the loader READ, and two answers stand nub down:
+///
+/// - THIS schema is among the files it read, as its entry or through an
+///   `@import` from anywhere.
+/// - The caller pointed the loader INSIDE this project (`run --path ./config`):
+///   `basePath` is at or below the schema directory, and a schema at or below
+///   `basePath` was read. Their entry point is more specific than nub's, they
+///   chose it, and it resolves the same project.
+///
+/// Everything else leaves this schema unresolved, so nub must still resolve it:
+///
+/// - The loader resolved an ancestor while nub found a nearer schema — a
+///   workspace root's run reaching a member that ships its own. A member schema
+///   wins over the root's.
+/// - A different project: the case where standing down on a bare "the loader
+///   ran" flag would hand project B project A's values. That run `@import`ing
+///   some file below this directory changes nothing, because this project's own
+///   schema still went unread.
+/// - `basePath` inside the project with no schema read there, which is why it
+///   cannot decide this alone. Two measured shapes: `run --path .env.prod` reads
+///   only that values file, and several `-p` flags collapse `basePath` to the
+///   working directory while every schema read lives elsewhere.
+fn resolved_by_loader(schema_dir: &Path) -> bool {
+    let Some(text) = std::env::var_os(LOADER_ENV_BLOB).and_then(|raw| raw.into_string().ok())
+    else {
+        return false;
+    };
+    let Ok(blob) = serde_json::from_str::<serde_json::Value>(&text) else {
+        // Not JSON — an encrypted or future envelope nub has no claim to
+        // interpret. Wrapping costs a second resolution; standing down on a blob
+        // nub cannot read would hand the program whatever it happened to hold.
+        return false;
+    };
+    let Some(base) = blob.get("basePath").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let base = Path::new(base);
+    let canonical_base = canonical(base);
+    let own_schema = canonical(&schema_dir.join(SCHEMA_FILE));
+    let selected_inside = canonical_base.starts_with(canonical(schema_dir));
+    blob.get("sources")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|sources| {
+            sources
+                .iter()
+                .filter(|source| {
+                    source.get("type").and_then(serde_json::Value::as_str) == Some("schema")
+                })
+                .filter_map(|source| source.get("path").and_then(serde_json::Value::as_str))
+                .map(|path| canonical(&base.join(path)))
+                .any(|read| {
+                    read == own_schema || (selected_inside && read.starts_with(&canonical_base))
+                })
+        })
+}
+
+// Kept beside the other stand-down rules rather than up in the main block:
+// reading one without the others invites putting the loader in front of itself.
+impl EnvOwner {
+    /// Whether the program nub is about to launch IS the loader's own CLI.
+    ///
+    /// The one stand-down that cannot be a sentinel. At this moment the loader
+    /// has not run, so it has published nothing; nub must recognize the program
+    /// instead. The loader's bin is a `#!/usr/bin/env node` script, so its
+    /// interpreter comes back through nub's PATH shim, finds the same schema, and
+    /// would wrap again — around a loader invocation the user wrote, with nub's
+    /// arguments in place of theirs.
+    ///
+    /// Only the ENTRY decides — see [`crate::cli::node_entry_index`]. Its arguments
+    /// are the program's data: matching them would strip the wrap from
+    /// `nub check.js node_modules/varlock/package.json`, and with nub's own cascade
+    /// already suppressed that program would run with no environment at all.
+    ///
+    /// Two clauses, because no single one covers every install shape:
+    ///
+    /// - The bin nub RESOLVED, canonicalized. `node_modules/.bin` normally holds
+    ///   a symlink into the package, so this and the next clause agree — but an
+    ///   install that copies the entry there instead leaves this as the only
+    ///   match.
+    /// - Any path inside a `node_modules/<loader>/` directory. This is what
+    ///   catches Windows, where `.bin` holds a generated `.cmd` shim that hands
+    ///   Node the package's entry; it also catches a global install's
+    ///   `<prefix>/lib/node_modules/<loader>/…`, a pnpm store path, and someone
+    ///   running the entry by hand.
+    pub(crate) fn launches_loader(&self, args: &[String], cwd: &Path) -> bool {
+        let Some(at) = crate::cli::node_entry_index(args) else {
+            return false;
+        };
+        let entry = canonical(&cwd.join(&args[at]));
+        self.cli
+            .as_deref()
+            .is_some_and(|cli| canonical(cli) == entry)
+            || in_loader_package(&entry)
+    }
+}
+
+/// Whether a path lies inside a `node_modules/<loader>/` directory.
+fn in_loader_package(path: &Path) -> bool {
+    let mut components = path.components();
+    while let Some(component) = components.next() {
+        if component.as_os_str() == "node_modules"
+            && components
+                .clone()
+                .next()
+                .is_some_and(|next| next.as_os_str() == LOADER_PACKAGE)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// The loader CLI: the project's `node_modules/.bin` first, then `PATH`.
@@ -452,30 +614,45 @@ mod tests {
         dir
     }
 
-    /// `PATH` is process-global, so every test that reads or writes it takes this
-    /// lock rather than racing a sibling.
-    fn path_lock() -> std::sync::MutexGuard<'static, ()> {
+    /// The environment is process-global, so every test that reads or writes
+    /// `PATH` or the loader's blob takes this lock rather than racing a sibling.
+    /// One lock covers both, because `with_env` sets both and a second lock would
+    /// only invite a nested-acquisition deadlock.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         LOCK.lock().unwrap_or_else(|err| err.into_inner())
     }
 
-    fn with_path<T>(dir: Option<&Path>, f: impl FnOnce() -> T) -> T {
-        let _guard = path_lock();
-        let saved = std::env::var_os("PATH");
-        unsafe {
-            match dir {
-                Some(dir) => std::env::set_var("PATH", dir),
-                None => std::env::remove_var("PATH"),
+    fn with_env<T>(dir: Option<&Path>, blob: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _guard = env_lock();
+        let saved_path = std::env::var_os("PATH");
+        let saved_blob = std::env::var_os(LOADER_ENV_BLOB);
+        let set = |key: &str, value: Option<&std::ffi::OsStr>| unsafe {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
             }
-        }
+        };
+        set("PATH", dir.map(Path::as_os_str));
+        set(LOADER_ENV_BLOB, blob.map(std::ffi::OsStr::new));
         let out = f();
-        unsafe {
-            match saved {
-                Some(value) => std::env::set_var("PATH", value),
-                None => std::env::remove_var("PATH"),
-            }
-        }
+        set("PATH", saved_path.as_deref());
+        set(LOADER_ENV_BLOB, saved_blob.as_deref());
         out
+    }
+
+    fn with_path<T>(dir: Option<&Path>, f: impl FnOnce() -> T) -> T {
+        with_env(dir, None, f)
+    }
+
+    /// A loader blob resolved at `base`, listing the schema files at `schemas`
+    /// (paths relative to `base`, as the loader reports them).
+    fn blob(base: &Path, schemas: &[&str]) -> String {
+        let sources: Vec<_> = schemas
+            .iter()
+            .map(|path| serde_json::json!({"type": "schema", "path": path}))
+            .collect();
+        serde_json::json!({"basePath": base, "sources": sources}).to_string()
     }
 
     /// The loader bin name this platform's lookup actually probes.
@@ -765,6 +942,252 @@ mod tests {
         assert!(
             owner.suppresses_env_files(),
             "and the hand-over must still stand nub's own cascade down"
+        );
+    }
+    /// The loader wrote the blob for THIS schema, so a second resolution on top
+    /// would be nub asking again for an answer it already has — and asking with
+    /// its own flags rather than the caller's.
+    #[test]
+    fn a_loader_run_over_this_schema_stands_nub_down() {
+        let dir = project(&[
+            (".env.schema", "# ---\nA=1\n"),
+            ("config/.env.schema", "# ---\nA=2\n"),
+            (&format!("node_modules/.bin/{}", bin_name()), "#!/bin/sh\n"),
+        ]);
+        for base in [dir.path().to_path_buf(), dir.path().join("config")] {
+            let owner = with_env(None, Some(&blob(&base, &[".env.schema"])), || {
+                detect(dir.path(), None)
+            })
+            .expect("schema present");
+            assert_eq!(
+                owner.spawn_target(),
+                None,
+                "a resolution anchored at {} must not be wrapped in a second one",
+                base.display()
+            );
+            assert!(
+                owner.suppresses_env_files(),
+                "the loader owns the environment, so nub's own cascade stays off"
+            );
+        }
+    }
+
+    /// The sharp one: standing down here would hand the member the ROOT's
+    /// environment and never resolve its own schema, silently — which is what a
+    /// bare "the loader ran" flag would have done.
+    #[test]
+    fn a_loader_run_above_a_member_schema_does_not_stand_it_down() {
+        let dir = project(&[
+            (".env.schema", "# ---\nROOT=1\n"),
+            (&format!("node_modules/.bin/{}", bin_name()), "#!/bin/sh\n"),
+            ("pkgs/web/package.json", r#"{"name":"web"}"#),
+            ("pkgs/web/.env.schema", "# ---\nMEMBER=1\n"),
+        ]);
+        let member = dir.path().join("pkgs/web");
+        let owner = with_env(None, Some(&blob(dir.path(), &[".env.schema"])), || {
+            detect(&member, Some(dir.path()))
+        })
+        .expect("member schema");
+        assert!(
+            owner.spawn_target().is_some(),
+            "the member's own schema is the one that has NOT been resolved"
+        );
+    }
+
+    #[test]
+    fn a_loader_run_in_another_project_does_not_stand_nub_down() {
+        let other = project(&[(".env.schema", "# ---\nB=1\n")]);
+        let dir = project(&[
+            (".env.schema", "# ---\nA=1\n"),
+            (&format!("node_modules/.bin/{}", bin_name()), "#!/bin/sh\n"),
+        ]);
+        let owner = with_env(None, Some(&blob(other.path(), &[".env.schema"])), || {
+            detect(dir.path(), None)
+        })
+        .expect("schema present");
+        assert!(
+            owner.spawn_target().is_some(),
+            "another project's resolution says nothing about this one"
+        );
+    }
+
+    /// Containment alone would miss this: the root sits ABOVE the member, but it
+    /// `@import`ed the member's file, so that schema really has been resolved.
+    #[test]
+    fn an_imported_schema_counts_as_already_resolved() {
+        let dir = project(&[
+            (
+                ".env.schema",
+                "# @import(\"./pkgs/web/.env.schema\")\n# ---\n",
+            ),
+            (&format!("node_modules/.bin/{}", bin_name()), "#!/bin/sh\n"),
+            ("pkgs/web/package.json", r#"{"name":"web"}"#),
+            ("pkgs/web/.env.schema", "# ---\nMEMBER=1\n"),
+        ]);
+        let member = dir.path().join("pkgs/web");
+        let sources = [".env.schema", "pkgs/web/.env.schema"];
+        let owner = with_env(None, Some(&blob(dir.path(), &sources)), || {
+            detect(&member, Some(dir.path()))
+        })
+        .expect("member schema");
+        assert_eq!(
+            owner.spawn_target(),
+            None,
+            "the loader listed this member's schema among the files it read"
+        );
+    }
+
+    /// An import is evidence about the file it names, not about the directory
+    /// that file sits in: another project pulling in a fragment from below this
+    /// one leaves this project's own schema unread.
+    #[test]
+    fn an_unrelated_run_importing_a_fragment_from_here_does_not_stand_nub_down() {
+        let dir = project(&[
+            ("app/.env.schema", "# ---\nA=1\n"),
+            ("app/shared/.env.schema", "# ---\nS=1\n"),
+            (
+                "other/.env.schema",
+                "# @import(../app/shared/.env.schema)\n# ---\n",
+            ),
+            (
+                &format!("app/node_modules/.bin/{}", bin_name()),
+                "#!/bin/sh\n",
+            ),
+        ]);
+        let app = dir.path().join("app");
+        let blob = blob(
+            &dir.path().join("other"),
+            &[".env.schema", "../app/shared/.env.schema"],
+        );
+        let owner = with_env(None, Some(&blob), || detect(&app, None)).expect("schema present");
+        assert!(
+            owner.spawn_target().is_some(),
+            "this project's own schema was never read"
+        );
+    }
+
+    /// `basePath` inside the project is not evidence the schema was read. Both
+    /// shapes are real loader output, and standing down on either hands the
+    /// program an environment the schema never resolved.
+    #[test]
+    fn a_loader_run_that_read_no_schema_here_does_not_stand_nub_down() {
+        let dir = project(&[
+            ("app/.env.schema", "# ---\nA=1\n"),
+            ("app/.env.prod", "A=prod\n"),
+            ("elsewhere/.env.schema", "# ---\nB=1\n"),
+            (
+                &format!("app/node_modules/.bin/{}", bin_name()),
+                "#!/bin/sh\n",
+            ),
+        ]);
+        let app = dir.path().join("app");
+        // `run --path .env.prod`: anchored here, but only the values file read.
+        let values_only = serde_json::json!({
+            "basePath": app,
+            "sources": [{"type": "values", "path": ".env.prod"}],
+        })
+        .to_string();
+        // Several `-p` flags: `basePath` is the working directory, and the
+        // schemas read live outside it.
+        let elsewhere = blob(&app, &["../elsewhere/.env.schema"]);
+        for blob in [values_only, elsewhere] {
+            let owner = with_env(None, Some(&blob), || detect(&app, None)).expect("schema present");
+            assert!(
+                owner.spawn_target().is_some(),
+                "a resolution that never read this schema must not stand nub down: {blob}"
+            );
+        }
+    }
+
+    /// Degrade toward resolving, never toward an empty environment: a blob nub
+    /// cannot read may hold anything, including another project's values.
+    #[test]
+    fn a_blob_nub_cannot_read_is_treated_as_absent() {
+        let dir = project(&[
+            (".env.schema", "# ---\nA=1\n"),
+            (&format!("node_modules/.bin/{}", bin_name()), "#!/bin/sh\n"),
+        ]);
+        for opaque in ["varlock:v1:ZW5jcnlwdGVk", "{}", "not json at all"] {
+            let owner =
+                with_env(None, Some(opaque), || detect(dir.path(), None)).expect("schema present");
+            assert!(
+                owner.spawn_target().is_some(),
+                "an unreadable blob ({opaque}) must not be trusted to have resolved anything"
+            );
+        }
+    }
+
+    /// The other stand-down: nub is LAUNCHING the loader, so it must not put the
+    /// loader in front of it. Also the recursion guard — the loader's own
+    /// interpreter comes back through the PATH shim and finds this same schema.
+    #[test]
+    fn the_loaders_own_cli_is_recognized_wherever_it_lives() {
+        let dir = project(&[
+            (".env.schema", "# ---\nA=1\n"),
+            (&format!("node_modules/.bin/{}", bin_name()), "#!/bin/sh\n"),
+        ]);
+        let owner = with_path(None, || detect(dir.path(), None)).expect("schema present");
+        let bin = dir.path().join("node_modules/.bin").join(bin_name());
+
+        let entries = [
+            // The bin nub resolved — the shape an install leaves when it copies
+            // the entry into `.bin` instead of symlinking it.
+            bin.to_string_lossy().into_owned(),
+            // Inside the package, wherever the package lives.
+            format!("/app/node_modules/{LOADER_PACKAGE}/bin/cli.js"),
+            format!("/usr/local/lib/node_modules/{LOADER_PACKAGE}/bin/cli.js"),
+            // Relative, as typed: resolved against the run's own directory.
+            format!("node_modules/.bin/{}", bin_name()),
+        ];
+        for entry in &entries {
+            assert!(
+                owner.launches_loader(&[entry.into(), "run".into()], dir.path()),
+                "{entry} is the loader's own code, whoever invoked it"
+            );
+        }
+        let loader = format!("/app/node_modules/{LOADER_PACKAGE}/bin/cli.js");
+        for preload in [
+            vec!["--require".to_string(), "./preload.cjs".to_string()],
+            vec!["--require=./preload.cjs".to_string()],
+        ] {
+            let args: Vec<String> = preload.into_iter().chain([loader.clone()]).collect();
+            assert!(
+                owner.launches_loader(&args, dir.path()),
+                "a preload option's value is not the entry: {args:?}"
+            );
+        }
+        assert!(
+            !owner.launches_loader(
+                &["-r".into(), loader.clone(), "/app/index.js".into()],
+                dir.path()
+            ),
+            "a preload from the loader's package is not the program"
+        );
+        assert!(
+            !owner.launches_loader(&["/app/src/index.js".into(), "--path".into()], dir.path()),
+            "an ordinary entry file must still be wrapped"
+        );
+        assert!(
+            !owner.launches_loader(
+                &[
+                    "/app/scripts/check.js".into(),
+                    format!("/app/node_modules/{LOADER_PACKAGE}/package.json"),
+                ],
+                dir.path()
+            ),
+            "an ARGUMENT inside the loader's package is the program's data, not \
+             the program — matching it would run the script with no environment"
+        );
+        assert!(
+            !owner.launches_loader(
+                &[
+                    format!("--require=/app/node_modules/{LOADER_PACKAGE}/x.js"),
+                    "/app/src/index.js".into()
+                ],
+                dir.path()
+            ),
+            "a flag is not an entry point — matching one would strip the wrap from \
+             any command that merely mentions the loader"
         );
     }
 }

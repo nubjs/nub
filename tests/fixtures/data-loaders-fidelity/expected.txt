@@ -1,0 +1,3 @@
+yaml:{"big":n:9007199254740992,"nan":n:NaN,"inf":n:-Infinity,"zero":n:-0,"plain":[s:"nan",s:"inf"],"__proto__":{"x":n:1}}
+toml:{"zeta":b:9007199254740993,"nan":n:NaN,"inf":n:-Infinity,"when":d:1979-05-27T07:32:00.000Z,"day":d:1979-05-27T00:00:00.000Z,"time":s:"07:32:00.000","alpha":n:1}
+json5:{"nan":n:NaN,"ninf":n:-Infinity,"zero":n:-0}

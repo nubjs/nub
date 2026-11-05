@@ -117,7 +117,7 @@ let fileURLToPath, pathToFileURL, join, dirname;
 // Nub's N-API addon — the in-process TS/JSX transpiler (`transform`,
 // `transformCached`, `detectModuleInfo`), the tsconfig reader + additive
 // TS-resolver (`loadTsconfig`, `resolveTs`), AND the data-format parsers
-// (`parseYaml`/`parseToml`/`parseJson5`/`parseJsonc`), all native. Loaded once
+// (`yamlToJs`/`tomlToJs`/`json5ToJs`/`jsoncToJs`), all native. Loaded once
 // per module instance (= once per thread: the main thread and the loader worker
 // each import this module separately). It is a `.node` binary resolved by absolute
 // path off this file's dir, so it never touches the ESM loader chain — the
@@ -1146,43 +1146,68 @@ export function allDataExts() {
   return new Set([...Object.keys(BUILTIN_DATA_EXTS), ...Object.keys(PROJECT_DATA_EXTS)]);
 }
 
-/// The value a data module exposes as its default export. Split out of
+/// The JavaScript expression a data module's default export is. Split out of
 /// [`loadData`] so the classic `require()` handler resolves a file through the
 /// SAME parser dispatch and the same `dataExtsFor` node_modules pinning — two
 /// tiers cannot disagree about what a document means if only one function reads it.
-export function dataValue(url, ext) {
+///
+/// Source text rather than a value, because the ESM path has to emit source and
+/// JSON cannot spell NaN, -0, a BigInt, a Date or an own `__proto__` key. The
+/// native parsers emit it in Rust, sharing that emitter with `nub compile`;
+/// the JavaScript fallback goes through `toJsLiteral`, which matches it.
+export function dataExpression(url, ext) {
   const raw = readFileSync(fileURLToPath(url), "utf8");
   const kind = dataExtsFor(url)[ext];
-  if (kind === "txt") return raw;
+  if (kind === "txt") return JSON.stringify(raw);
 
   if (nubNative) {
-    if (kind === "yaml") return nubNative.parseYaml(raw);
-    if (kind === "toml") return nubNative.parseToml(raw);
-    if (kind === "json5") return nubNative.parseJson5(raw);
-    if (kind === "jsonc") return nubNative.parseJsonc(raw);
-  } else {
-    if (kind === "yaml") return lazyRequire("yaml").parse(raw);
-    if (kind === "toml") return lazyRequire("@iarna/toml").parse(raw);
-    if (kind === "json5") return lazyRequire("json5").parse(raw);
-    if (kind === "jsonc") return JSON.parse(stripJsonComments(raw));
+    if (kind === "yaml") return nubNative.yamlToJs(raw);
+    if (kind === "toml") return nubNative.tomlToJs(raw);
+    if (kind === "json5") return nubNative.json5ToJs(raw);
+    if (kind === "jsonc") return nubNative.jsoncToJs(raw);
+    return "undefined";
   }
-  return undefined;
+  let value;
+  // `@iarna/toml` already returns a BigInt only past 2^53, and `yaml`'s
+  // defaults are the core schema the native parser implements.
+  if (kind === "yaml") value = lazyRequire("yaml").parse(raw);
+  else if (kind === "toml") value = lazyRequire("@iarna/toml").parse(raw);
+  else if (kind === "json5") value = lazyRequire("json5").parse(raw);
+  else if (kind === "jsonc") value = JSON.parse(stripJsonComments(raw));
+  return value == null ? "undefined" : toJsLiteral(value);
+}
+
+/// The JavaScript fallback's twin of the Rust emitter in `nub-data-formats`.
+/// `@iarna/toml` marks a local date as `isDate` and a local time as `isTime`;
+/// its `toISOString` then returns the forms the Rust side writes.
+function toJsLiteral(v) {
+  if (v === null || v === undefined) return "null";
+  switch (typeof v) {
+    case "number":
+      return Object.is(v, -0) ? "-0" : String(v);
+    case "bigint":
+      return `${v}n`;
+    case "boolean":
+      return String(v);
+    case "string":
+      return JSON.stringify(v);
+  }
+  if (v instanceof Date) {
+    return v.isTime ? JSON.stringify(v.toISOString()) : `new Date(${JSON.stringify(v.toISOString())})`;
+  }
+  if (Array.isArray(v)) return `[${v.map(toJsLiteral).join(",")}]`;
+  const entries = Object.keys(v).map((k) => `${k === "__proto__" ? '["__proto__"]' : JSON.stringify(k)}:${toJsLiteral(v[k])}`);
+  return `{${entries.join(",")}}`;
 }
 
 export function loadData(url, ext) {
-  const parsed = dataValue(url, ext);
-
-  if (parsed == null) {
-    return { format: "module", source: "export default undefined;\n", responseURL: url, shortCircuit: true };
-  }
-
   // Default export only. Data modules deliberately do NOT emit per-key named
   // exports: named imports of data are categorically un-typeable in TypeScript
   // (a `declare module "*.yaml"` wildcard has no per-key export index signature),
   // and default-only matches Node's own JSON modules. Consumers destructure the
   // default — `import cfg from "./c.yaml"; const { host } = cfg;` — which the
   // `@nubjs/types` `Record<string, unknown>` default type makes sound.
-  const code = `export default ${JSON.stringify(parsed)};\n`;
+  const code = `export default ${dataExpression(url, ext)};\n`;
   return { format: "module", source: code, responseURL: url, shortCircuit: true };
 }
 

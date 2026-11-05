@@ -24,7 +24,7 @@ pub(crate) fn load_graph(
     manifest: &aube_manifest::PackageJson,
     missing_hint: &str,
 ) -> miette::Result<aube_lockfile::LockfileGraph> {
-    match aube_lockfile::parse_lockfile(project_dir, manifest) {
+    match super::install::parse_project_lockfile(project_dir, manifest) {
         Ok(g) => Ok(g),
         Err(aube_lockfile::Error::NotFound(_)) => Err(miette!("{missing_hint}")),
         Err(e) => Err(miette::Report::new(e)).wrap_err("failed to parse lockfile"),
@@ -221,12 +221,88 @@ pub(crate) fn select_workspace_packages(
         ));
     }
     let matched = select_projects(&root, &workspace_pkgs, filter, command)?;
-    if matched.is_empty() {
-        return Err(miette!(
-            "aube {command}: filter {filter:?} did not match any workspace package"
-        ));
-    }
     Ok((root, matched))
+}
+
+/// Settle a `--filter` that selects no project before `command` touches
+/// anything: report it as pnpm does and return `true`, so the caller
+/// skips the command and every step after it, or fail under
+/// `--fail-if-no-match`. `false` when there is no filter, no workspace,
+/// or a selection to act on.
+pub fn empty_selection_noop(
+    cwd: &Path,
+    filter: &aube_workspace::selector::EffectiveFilter,
+    command: &str,
+) -> miette::Result<bool> {
+    if filter.is_empty() {
+        return Ok(false);
+    }
+    let Some(root) = crate::dirs::find_workspace_root(cwd) else {
+        return Ok(false);
+    };
+    // A workspace whose globs match no member yet still has the root as
+    // a candidate, so the selection is evaluated with no members too.
+    let Ok(workspace_pkgs) = aube_workspace::find_workspace_packages(&root) else {
+        return Ok(false);
+    };
+    if !select_projects(&root, &workspace_pkgs, filter, command)?.is_empty() {
+        return Ok(false);
+    }
+    let report = match command {
+        "install" | "remove" | "update" => NoMatchReport::Scope,
+        "run" => NoMatchReport::ScopeAndNotice,
+        "exec" => NoMatchReport::Notice,
+        _ => NoMatchReport::Quiet,
+    };
+    no_projects_matched(&root, filter, report)?;
+    Ok(true)
+}
+
+/// What pnpm prints for a `--filter` that selects no project when that is
+/// not an error. Commands differ: `install`, `remove` and `update` report
+/// the scope, `run` reports the scope and the notice, `exec` the notice
+/// alone, and the rest print nothing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NoMatchReport {
+    Quiet,
+    Notice,
+    Scope,
+    ScopeAndNotice,
+}
+
+/// pnpm's handling of a `--filter` that selects no project: the command
+/// does nothing and exits 0, which CI relies on for selectors like
+/// `...[origin/main]` that are empty on many commits. `--fail-if-no-match`
+/// turns it into an error carrying pnpm's notice.
+pub(crate) fn no_projects_matched(
+    workspace_root: &Path,
+    filter: &aube_workspace::selector::EffectiveFilter,
+    report: NoMatchReport,
+) -> miette::Result<()> {
+    let notice = format!(
+        "No projects matched the filters in \"{}\"",
+        workspace_root.display()
+    );
+    let scope = matches!(report, NoMatchReport::Scope | NoMatchReport::ScopeAndNotice);
+    // pnpm drops the scope line from a failing `run`, and keeps it for the
+    // install family.
+    if scope && !(filter.fail_if_no_match && report == NoMatchReport::ScopeAndNotice) {
+        let members = aube_workspace::find_workspace_packages(workspace_root).unwrap_or_default();
+        let root_counted = workspace_root.join("package.json").is_file()
+            && !members.iter().any(|dir| dir == workspace_root);
+        let total = members.len() + usize::from(root_counted);
+        eprintln!("Scope: 0 of {total} workspace projects");
+    }
+    if filter.fail_if_no_match {
+        return Err(miette!("{notice}"));
+    }
+    if matches!(
+        report,
+        NoMatchReport::Notice | NoMatchReport::ScopeAndNotice
+    ) {
+        eprintln!("{notice}");
+    }
+    Ok(())
 }
 
 /// The workspace projects `filter` selects for `command`, the way pnpm

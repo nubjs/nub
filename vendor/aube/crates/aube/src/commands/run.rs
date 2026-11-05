@@ -709,6 +709,10 @@ async fn run_script_filtered(
     // enumerating packages, so yarn / npm / bun monorepos work from a
     // subpackage.
     let (root, matched) = super::select_workspace_packages(cwd, filter, "run")?;
+    if matched.is_empty() {
+        super::no_projects_matched(&root, filter, super::NoMatchReport::ScopeAndNotice)?;
+        return Ok(None);
+    }
     crate::runtime::ensure_for_cwd(&root).await?;
     let enable_pre_post_scripts = configure_script_settings_for_project(&root)?;
 

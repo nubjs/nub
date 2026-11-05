@@ -31,7 +31,7 @@ shift
 
 SUITES=("$@")
 if [ ${#SUITES[@]} -eq 0 ]; then
-  SUITES=(install.bats ci.bats add.bats remove.bats update.bats prune.bats lockfile_settings.bats lockfile_dir.bats)
+  SUITES=(install.bats ci.bats add.bats remove.bats update.bats prune.bats lockfile_settings.bats lockfile_dir.bats patch.bats)
 fi
 
 SCRATCH=$(mktemp -d)

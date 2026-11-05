@@ -17,6 +17,7 @@ mod finalize;
 mod frozen;
 mod git_prepare;
 mod gvs;
+mod index_remap;
 mod layout;
 mod lifecycle;
 mod link;
@@ -53,12 +54,10 @@ pub use control::{
 pub(crate) use default_trust::DefaultTrustFloor;
 pub use dep_selection::DepSelection;
 pub(super) use fetch::fetch_packages;
-use fetch::{
-    fetch_packages_with_root, import_local_source, remap_indices_to_contextualized,
-    strip_peer_context_suffix, version_from_dep_path,
-};
+use fetch::{fetch_packages_with_root, import_local_source, version_from_dep_path};
 pub use frozen::{FrozenMode, FrozenOverride, GlobalVirtualStoreFlags};
 pub(crate) use gvs::detect_existing_global_virtual_store;
+use index_remap::{remap_indices_to_contextualized, strip_peer_context_suffix};
 pub(crate) use lifecycle::{
     JailBuildPolicy, build_policy_from_manifest_sources, build_policy_from_sources,
     run_dep_lifecycle_scripts, run_importer_lifecycle,
@@ -67,7 +66,9 @@ use lifecycle::{
     resolve_link_strategy, run_import_on_blocking, run_root_lifecycle_script,
     validate_required_scripts,
 };
-pub(crate) use workspace::order_lifecycle_manifests;
+pub(crate) use workspace::{
+    order_lifecycle_manifests, parse_project_lockfile, unshared_lockfile_workspace_root,
+};
 
 /// Record the project's pnpm pin in `pnpm-lock.yaml`'s env document after
 /// the lockfile is written (pnpm 11+ parity; see
@@ -590,6 +591,12 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     aube_util::diag::instant(aube_util::diag::Category::Install, "begin", None);
     let _diag_install = aube_util::diag::Span::new(aube_util::diag::Category::Install, "total");
 
+    // A `--filter` that selects no project changes nothing, as in pnpm:
+    // settled before the `--force` reset, the branch-lockfile merge and
+    // every hook.
+    if super::empty_selection_noop(&cwd, &opts.workspace_filter, "install")? {
+        return Ok(());
+    }
     if !opts.dry_run {
         apply_force_state_reset(&cwd, &opts)?;
     }
@@ -2629,8 +2636,8 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             // linker can find each variant by the dep_path on its
             // `LockedPackage`. Multiple contextualized variants of the
             // same canonical package share a single set of files, so
-            // cloning the PackageIndex is cheap relative to re-extraction.
-            let mut indices = remap_indices_to_contextualized(&canonical_indices, &graph);
+            // only additional placements need to clone the PackageIndex.
+            let mut indices = remap_indices_to_contextualized(canonical_indices, &graph);
             persist_no_integrity_index(&cwd, &graph, &computed_integrities);
             apply_computed_integrities(&mut graph, &computed_integrities);
 
@@ -3163,7 +3170,10 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         ignore_scripts: opts.ignore_scripts,
         skip_root_lifecycle: opts.skip_root_lifecycle,
         npm_link_lifecycle: matches!(source_kind_before, Some(aube_lockfile::LockfileKind::Npm)),
-        workspace_filter_empty: opts.workspace_filter.is_empty(),
+        workspace_selection: workspace::linked_workspace_selection(
+            per_project_write_selection.as_ref(),
+            !has_workspace || link_all_workspace_importers,
+        ),
         dep_selection: opts.dep_selection,
         cli_flags: &opts.cli_flags,
         cached_count,

@@ -1,0 +1,76 @@
+{
+  "name": "@esbuild/linux-ppc64",
+  "versions": {
+    "0.21.5": {
+      "name": "@esbuild/linux-ppc64",
+      "version": "0.21.5",
+      "license": "MIT",
+      "_id": "@esbuild/linux-ppc64@0.21.5",
+      "maintainers": [
+        {
+          "name": "evanw",
+          "email": "evan.exe@gmail.com"
+        },
+        {
+          "name": "esbuild",
+          "email": "evan.exe+esbuild@gmail.com"
+        }
+      ],
+      "homepage": "https://github.com/evanw/esbuild#readme",
+      "bugs": {
+        "url": "https://github.com/evanw/esbuild/issues"
+      },
+      "os": [
+        "linux"
+      ],
+      "cpu": [
+        "ppc64"
+      ],
+      "dist": {
+        "shasum": "5f2203860a143b9919d383ef7573521fb154c3e4",
+        "tarball": "http://localhost:4874/@esbuild/linux-ppc64/-/@esbuild/linux-ppc64-0.21.5.tgz",
+        "fileCount": 3,
+        "integrity": "sha512-1hHV/Z4OEfMwpLO8rp7CvlhBDnjsC3CttJXIhBi+5Aj5r+MBvy4egg7wCbe//hSsT+RvDAG7s81tAvpL2XAE4w==",
+        "signatures": [
+          {
+            "sig": "MEQCIHt5YyWsJS2wF+Q7S1UmN2fkgBh9G3oPYKoVIG7ob4hpAiAvMUhk2XoZKMb2o9LA9vtCCC/f9SMjpNInk7ijeF1K3w==",
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+          }
+        ],
+        "unpackedSize": 9241137
+      },
+      "engines": {
+        "node": ">=12"
+      },
+      "gitHead": "fc37c2fa9de2ad77476a6d4a8f1516196b90187e",
+      "_npmUser": {
+        "name": "evanw",
+        "email": "evan.exe@gmail.com"
+      },
+      "repository": {
+        "url": "git+https://github.com/evanw/esbuild.git",
+        "type": "git"
+      },
+      "_npmVersion": "10.5.1",
+      "description": "The Linux PowerPC 64-bit Little Endian binary for esbuild, a JavaScript bundler.",
+      "directories": {},
+      "_nodeVersion": "22.0.0",
+      "_hasShrinkwrap": false,
+      "preferUnplugged": true,
+      "_npmOperationalInternal": {
+        "tmp": "tmp/linux-ppc64_0.21.5_1717967851054_0.021849120878972617",
+        "host": "s3://npm-registry-packages"
+      }
+    }
+  },
+  "time": {
+    "created": "2022-12-05T23:51:57.154Z",
+    "modified": "2026-08-08T19:58:31.897Z",
+    "0.21.5": "2024-06-09T21:17:31.268Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "0.21.5"
+  }
+}

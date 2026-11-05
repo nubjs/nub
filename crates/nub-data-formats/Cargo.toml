@@ -19,10 +19,7 @@ license = "MIT"
 repository = "https://github.com/nubjs/nub"
 
 [dependencies]
-# `preserve_order` keeps object key order as authored. A compiled artifact must be
-# byte-reproducible, and a data import inlined into the bundle is part of those
-# bytes — HashMap ordering would make two builds of one input differ.
-serde_json = { version = "1", features = ["preserve_order"] }
+serde = "1"
 yaml-rust2 = "0.9"
 toml = "1.1"
 json5 = "0.4"
