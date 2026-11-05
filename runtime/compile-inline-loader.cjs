@@ -210,14 +210,15 @@
     },
     (error) => {
       done();
-      // Rethrown rather than reported, because a failed ESM ENTRY is an uncaught
-      // exception in Node and not an unhandled rejection — so it must fail the
-      // process whatever `--unhandled-rejections` says, and it must still reach an
-      // `uncaughtException` handler the application installed. The `ROOT`-rooted
-      // frames the `sourceURL` above establishes are preserved either way.
-      process.nextTick(() => {
+      // Reported as an uncaught exception, never an unhandled rejection, through
+      // the throwing diagnostics_channel subscriber the single-executable loader
+      // explains — so the header names the line that threw rather than this one.
+      const channel = Symbol("nub.compile.entry-failure");
+      const dc = boot.getBuiltin("node:diagnostics_channel");
+      dc.subscribe(channel, () => {
         throw error;
       });
+      dc.channel(channel).publish();
     },
   );
 })();
