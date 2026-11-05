@@ -3642,6 +3642,8 @@ pub fn split_inherited_preloads(value: &str) -> (String, Vec<String>, Vec<String
     )
 }
 
+/// `NODE_OPTIONS` read the way Node's `ParseNodeOptionsEnvVar` reads it: only a space
+/// separates tokens, so a tab or newline stays inside one.
 pub fn split_node_options(value: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut in_string = false;
@@ -3654,7 +3656,7 @@ pub fn split_node_options(value: &str) -> Vec<String> {
                 Some(next) => c = next,
                 None => break,
             }
-        } else if c.is_whitespace() && !in_string {
+        } else if c == ' ' && !in_string {
             start_new = true;
             continue;
         } else if c == '"' {
@@ -4382,7 +4384,12 @@ mod tests {
             split_node_options(r#""--require=C:\\Users\\John Doe\\x.cjs""#),
             vec![r#"--require=C:\Users\John Doe\x.cjs"#]
         );
-        // Empty and whitespace-only inputs yield nothing, never a bogus empty flag.
+        // Only a space separates, as in Node.
+        assert_eq!(
+            split_node_options("--title=foo\tbar --trace-warnings"),
+            vec!["--title=foo\tbar", "--trace-warnings"]
+        );
+        // Empty and space-only inputs yield nothing, never a bogus empty flag.
         assert!(split_node_options("").is_empty());
         assert!(split_node_options("   ").is_empty());
 
@@ -4390,6 +4397,7 @@ mod tests {
         for value in [
             "--title=plain",
             "--title=a b c",
+            "--title=foo\tbar",
             r#"--title=a"b"#,
             r#"--require=C:\Users\John Doe\x.cjs"#,
         ] {

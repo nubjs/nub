@@ -1397,10 +1397,11 @@ fn a_valued_test_flag_runs_the_file_once_instead_of_recursing() {
 /// A regression reaches the deadline without the line, which kills the process group.
 #[test]
 fn watch_flags_node_would_pass_to_its_child_still_run_the_program() {
+    type Case<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
     const COMPAT: (&str, &str) = ("NODE_COMPAT", "1");
     let watch = ("NODE_OPTIONS", "--watch");
     let watch_path = ("NODE_OPTIONS", "--watch_path=.");
-    let cases: [(&[&str], &[(&str, &str)]); 8] = [
+    let cases: [Case<'_>; 8] = [
         (&["--watch_path=.", "watched.mjs"], &[]),
         (&["--watch_path=.", "watched.mjs"], &[COMPAT]),
         (&["--watch", "--watch_path=.", "watched.mjs"], &[]),
