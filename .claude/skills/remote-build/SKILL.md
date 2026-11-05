@@ -40,6 +40,26 @@ clippy killed at 2m13s, then again at 10m, each orphaning a builder. `--attach` 
 windows and exits **75** for "still running, call again"; re-run it until it returns the job's own
 exit code.
 
+## Credentials come from Keyward
+
+Every `gcloud` call the script makes runs as `keyward --reason "nub remote-build: …" -- gcloud …`. Keyward keeps the Google Cloud service-account key sealed (stored as `GCLOUD_KEY`) and writes it out for that one run, so there is no key file on disk; the old `~/.config/pullfrog/vertex-service-account.json` is gone and nothing reads it.
+
+- **One Touch ID covers ten minutes of this repository's gcloud runs**, from any worktree, and runs that start together ask once. A detached job is usually collected after that window has closed, so the `--attach` that deletes the VM may ask again. Tell the maintainer before you start a run that will raise the sheet.
+- **A locked screen fails at once** with `keyward: not released: screen locked` (exit 1). Wait for the unlock (the `keyward` skill has the check and how to wait), then re-run the same command; never retry in a loop. Every invocation is safe to re-run: `--attach` picks up where it left off, and a run that died before its delete leaves a VM the server-side TTL reclaims. `not released: declined or authentication failed` means the maintainer said no: stop and ask.
+- **A missing `GCLOUD_KEY` makes keyward print the command that stores it.** Storing it is the maintainer's step; never recreate a key file to route around it.
+- **The key holds only `roles/compute.instanceAdmin.v1`**, so every builder and the bake are created with `--no-service-account --no-scopes`. Attaching the default compute account would need `iam.serviceAccounts.actAs`, and nothing on a builder calls a Google API, so a job finds no token at the metadata server.
+- **gcloud's saved configuration does not apply** under Keyward (it gets an empty config directory), so the script names `--project` and `--zone` on every call. Do the same for any `gcloud` you run by hand.
+
+`scripts/mac-build.ts` works the same way for GitHub: its one write, `gh workflow run`, runs as `keyward --reason … -- gh …`; its reads (`run list`, `run view`, `run download`) use plain `gh`, which is signed in read-only. Its `git push` is signed by the Keyward SSH agent, which is its own Touch ID sheet.
+
+### Every VM has its own throwaway SSH key
+
+There is no shared `~/.ssh/nub-vm` key. Creating a VM first makes an ed25519 key with no passphrase at `~/.cache/nub/remote-build/keys/<vm-name>/id_ed25519` (directory `0700`, files `0600`) and puts its public half in that VM's `ssh-keys` metadata, alone. Deleting the VM deletes the key, on every path: the job finishing, a failure, an interrupt, `--attach`'s delete, `--reap`. A kept (`--keep`) VM keeps its key so you can reach it until its TTL; the script prints the ssh command.
+
+- **`--attach` finds the key by VM name**, so collect a detached job on the machine that ran `--detach`. A missing key fails with a message naming the VM before any gcloud call is made.
+- **No connection to a builder goes through the SSH agent.** Every `ssh`, and rsync's `-e`, passes `-o IdentitiesOnly=yes -o IdentityAgent=none -i <key>`: the maintainer's ssh config routes through the Keyward agent, where each signature can raise a Touch ID sheet. Reaching a builder by hand, use the same options.
+- **`--reap` also sweeps leftover keys**: any key directory older than 90 minutes whose VM is no longer listed (a `--keep` run, or a launcher SIGKILLed before its delete).
+
 ## What goes remote, and what must NOT
 
 Measured, `n2-standard-16` vs the Mac:
@@ -82,12 +102,12 @@ A build is never detached **locally** — a detached local build reparents to PI
 
 `--build-image` bakes a `nub-builder` image family with apt deps, rustup + the darwin target + clippy, pinned zig, cargo-zigbuild, Node, a warmed crate registry, and pre-compiled dependency artifacts in `$HOME/.cargo-shared-target`. **That path is load-bearing and must match the one every job exports** — the bake deletes `~/src` when it finishes, so a target dir inside it would be destroyed while the image advertised warm artifacts. Re-bake when the toolchain or dependency graph moves substantially, **or when the warm block below changes** — a warm-up that no longer matches `jobScript` is exactly as cold as no warm-up.
 
-**The bake covers every job — but a given image is only as warm as its bake.** The warm block runs every cargo invocation `jobScript` emits, verbatim: the root clippy, the `nub-native` clippy, the `nub-launcher` leg (its own workspace, so nothing the root gates run reaches it), `cargo test --workspace --no-run`, `cargo test -p nub-cli --features compile --bin nub compile:: --no-run` (the test job's second leg — `compile` is not a default feature, so the whole-workspace line warms none of it), `(cd crates/nub-native && cargo build)`, and `cargo build -p nub-cli --profile fast` (the adhoc job's binary). `--build-image` is manual-only, though — no workflow or cron invokes it — so the live `nub-builder` family stays exactly as it was last baked. **Check the image date before sizing a run** (`gcloud compute images list --project pullfrog --no-standard-images --format='table(name,family,creationTimestamp)' --sort-by=~creationTimestamp` — the default columns carry no timestamp): an image baked before the warm block covered clippy leaves builders cold-compiling at ~250s rather than ~35s, and that is the state of the family until someone re-bakes. Cargo fingerprints on the command shape, so a warm-up differing by driver, profile, package scope, or feature set produces artifacts the job cannot use and the image goes silently cold.
+**The bake covers every job — but a given image is only as warm as its bake.** The warm block runs every cargo invocation `jobScript` emits, verbatim: the root clippy, the `nub-native` clippy, the `nub-launcher` leg (its own workspace, so nothing the root gates run reaches it), `cargo test --workspace --no-run`, `cargo test -p nub-cli --features compile --bin nub compile:: --no-run` (the test job's second leg — `compile` is not a default feature, so the whole-workspace line warms none of it), `(cd crates/nub-native && cargo build)`, and `cargo build -p nub-cli --profile fast` (the adhoc job's binary). `--build-image` is manual-only, though — no workflow or cron invokes it — so the live `nub-builder` family stays exactly as it was last baked. **Check the image date before sizing a run** (`keyward --reason "nub: check the nub-builder image date" -- gcloud compute images list --project pullfrog --no-standard-images --format='table(name,family,creationTimestamp)' --sort-by=~creationTimestamp` — the default columns carry no timestamp): an image baked before the warm block covered clippy leaves builders cold-compiling at ~250s rather than ~35s, and that is the state of the family until someone re-bakes. Cargo fingerprints on the command shape, so a warm-up differing by driver, profile, package scope, or feature set produces artifacts the job cannot use and the image goes silently cold.
 
 ## What this does NOT give you
 
 - **No provenance binding.** The artifact is checked for being a runnable arm64 Mach-O with a valid ad-hoc signature — which attests *runnability*, not origin. Nothing cryptographically ties the binary to the source that was sent.
-- **The golden image is a trust concentration.** Baked once and reused for every build, so anyone with write access to the `pullfrog` project (or its service-account key) could bake something into every dev binary you later run. An accepted property of the design, not an oversight.
+- **The golden image is a trust concentration.** Baked once and reused for every build, so anyone with write access to the `pullfrog` project (or the service-account key Keyward holds for it) could bake something into every dev binary you later run. An accepted property of the design, not an oversight.
 - **`StrictHostKeyChecking=no`.** Unavoidable with ephemeral VMs on recycled IPs. Closing it properly means `--no-address` + IAP tunnelling.
 
 ## Cost

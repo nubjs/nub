@@ -2575,6 +2575,25 @@ fn ignored_optional_dependencies_section_matches_pnpm_order() {
     let graph = LockfileGraph {
         ignored_optional_dependencies,
         catalogs,
+        importers: BTreeMap::from([(
+            ".".to_string(),
+            vec![DirectDep {
+                name: "react".to_string(),
+                dep_path: "react@18.2.0".to_string(),
+                dep_type: DepType::Production,
+                specifier: Some("catalog:".to_string()),
+            }],
+        )]),
+        packages: BTreeMap::from([(
+            "react@18.2.0".to_string(),
+            LockedPackage {
+                name: "react".to_string(),
+                version: "18.2.0".to_string(),
+                integrity: Some("sha512-react".to_string()),
+                dep_path: "react@18.2.0".to_string(),
+                ..Default::default()
+            },
+        )]),
         ..Default::default()
     };
     let manifest = PackageJson {
@@ -6103,4 +6122,76 @@ mod lockfile_version_properties {
             prop_assert_eq!(accepted(&bare), major >= 9);
         }
     }
+}
+
+fn written(graph: &LockfileGraph, manifest: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let lockfile_path = dir.path().join("pnpm-lock.yaml");
+    let manifest: PackageJson = serde_json::from_str(manifest).unwrap();
+    write(&lockfile_path, graph, &manifest).unwrap();
+    std::fs::read_to_string(&lockfile_path).unwrap()
+}
+
+const PNPM_SETTINGS: &str = "lockfileVersion: '9.0'\n\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: false\n\n";
+
+/// pnpm 10 and 12 leave `packages:` and `snapshots:` out when nothing is
+/// in them, rather than writing them as `{}`.
+#[test]
+fn empty_package_sections_are_left_out() {
+    let graph = LockfileGraph {
+        importers: BTreeMap::from([(".".to_string(), Vec::new())]),
+        ..Default::default()
+    };
+    assert_eq!(
+        written(&graph, r#"{"name":"nodeps","version":"1.0.0"}"#),
+        format!("{PNPM_SETTINGS}importers:\n\n  .: {{}}\n")
+    );
+}
+
+/// pnpm records a local package's path normalized (`link:./llink` becomes
+/// `link:llink`) and keeps the manifest's spelling in `specifier:`. The
+/// expected text is what pnpm 10.34.9 and 12.16.1 both write.
+#[test]
+fn local_paths_are_written_normalized() {
+    let local = |name: &str, source: LocalSource| {
+        let dep_path = source.dep_path(name);
+        let pkg = LockedPackage {
+            name: name.to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: dep_path.clone(),
+            local_source: Some(source),
+            ..Default::default()
+        };
+        (dep_path, pkg)
+    };
+    let (ldir_key, ldir) = local("ldir", LocalSource::Directory("./ldir".into()));
+    let (llink_key, llink) = local("llink", LocalSource::Link("./llink".into()));
+    let direct = |name: &str, dep_path: &str, specifier: &str| DirectDep {
+        name: name.to_string(),
+        dep_path: dep_path.to_string(),
+        dep_type: DepType::Production,
+        specifier: Some(specifier.to_string()),
+    };
+    let graph = LockfileGraph {
+        importers: BTreeMap::from([(
+            ".".to_string(),
+            vec![
+                direct("ldir", &ldir_key, "file:./ldir"),
+                direct("llink", &llink_key, "link:./llink"),
+            ],
+        )]),
+        packages: BTreeMap::from([(ldir_key, ldir), (llink_key, llink)]),
+        ..Default::default()
+    };
+    let manifest = r#"{"name":"fmt","version":"1.0.0","dependencies":{"llink":"link:./llink","ldir":"file:./ldir"}}"#;
+    assert_eq!(
+        written(&graph, manifest),
+        format!(
+            "{PNPM_SETTINGS}importers:\n\n  .:\n    dependencies:\n      \
+             ldir:\n        specifier: file:./ldir\n        version: file:ldir\n      \
+             llink:\n        specifier: link:./llink\n        version: link:llink\n\n\
+             packages:\n\n  ldir@file:ldir:\n    resolution: {{directory: ldir, type: directory}}\n\n\
+             snapshots:\n\n  ldir@file:ldir: {{}}\n"
+        )
+    );
 }

@@ -8336,6 +8336,12 @@ enum UpgradeChannel {
     /// discussion #3304) and the next real `winget upgrade` would silently
     /// clobber it. So this channel only prints the command to run.
     Winget,
+    /// mise-managed install, through any backend (the registry's `nub` is
+    /// `github:nubjs/nub`; `npm:@nubjs/nub` also works). mise picks the version
+    /// from config, so the upgrade runs through mise and moves that request.
+    /// `tool` is the name mise recorded for the install; `install_root` is the
+    /// version directory the binary runs from.
+    Mise { tool: String, install_root: PathBuf },
     /// The curl/`~/.nub` self-owned install — Nub owns the binary and swaps it
     /// in place. `install_dir` is the `…/.nub` root (parent of `bin/`).
     SelfOwned { install_dir: PathBuf },
@@ -8347,12 +8353,21 @@ enum UpgradeChannel {
 /// see [`UpgradeChannel::Winget`] for why nub never spawns it.
 const WINGET_UPGRADE_DISPLAY: &str = "winget upgrade --id Nubjs.Nub";
 
-/// Classify the install channel from the canonicalized binary path. Pure (no
-/// I/O) so the routing matrix is unit-testable; the actual `current_nub_binary`
-/// canonicalization happens in [`run_upgrade`]. Order matters: a `~/.nub` binary
-/// pulled in as an npm dep would live under `node_modules`, so npm wins first;
-/// the self-owned layout is `…/.nub/bin/nub`, never under `node_modules`.
+/// Classify the install channel from the canonicalized binary path. The only
+/// I/O is reading marker files in the binary's ancestors (mise's install
+/// records, the installer's receipt), so the routing matrix is unit-testable
+/// against a temp tree; the actual `current_nub_binary` canonicalization
+/// happens in [`run_upgrade`]. Order matters: a `~/.nub` binary pulled in as an
+/// npm dep would live under `node_modules`, so npm wins over self-owned; the
+/// self-owned layout is `…/.nub/bin/nub`, never under `node_modules`.
 fn detect_channel(bin_path: &Path) -> UpgradeChannel {
+    // mise BEFORE the node_modules rung: its npm backend installs under
+    // `installs/npm-nubjs-nub/<ver>/node_modules/…`, and handing that to
+    // `npm install -g` would plant a second global copy that shadows the mise
+    // shim instead of moving the version mise selects.
+    if let Some((tool, install_root)) = detect_mise_install(bin_path) {
+        return UpgradeChannel::Mise { tool, install_root };
+    }
     let s = bin_path.to_string_lossy();
     if s.contains("/node_modules/") || s.contains("\\node_modules\\") {
         return UpgradeChannel::Npm;
@@ -8387,6 +8402,103 @@ fn detect_channel(bin_path: &Path) -> UpgradeChannel {
             install_dir: dir.to_path_buf(),
         },
         None => UpgradeChannel::Unknown,
+    }
+}
+
+/// Detect a mise-managed nub from mise's own install record above the binary,
+/// returning the tool name mise recorded and the version directory the binary
+/// runs from. This is the detection mise documents for self-updating tools
+/// (mise.jdx.dev/dev-tools/self-updating-tools.html). Matching directory names
+/// instead misses a custom `MISE_DATA_DIR`, backend-named tool dirs
+/// (`github-nubjs-nub`) and the identity layout's hashed dirs. Env vars are no
+/// signal at all: every process mise launches passes them on.
+///
+/// The walk stops at the FIRST record, nub's or not. `npm install -g
+/// @nubjs/nub` under a mise-managed Node lands in
+/// `installs/node/<ver>/lib/node_modules/…`, whose record names `node`: that nub
+/// belongs to npm, and upgrading the record's tool would upgrade Node.
+fn detect_mise_install(bin_path: &Path) -> Option<(String, PathBuf)> {
+    let mut below = bin_path;
+    for dir in bin_path.ancestors().skip(1) {
+        if let Some((tool, backend, install_root)) = mise_install_record(dir, below) {
+            return is_nub_mise_backend(&backend).then_some((tool, install_root));
+        }
+        below = dir;
+    }
+    None
+}
+
+/// The mise install record in `dir`, if it holds one, as `(tool, backend,
+/// install root)`. `below` is the ancestor one level under `dir`, which is the
+/// version directory when `dir` is a tool directory.
+fn mise_install_record(dir: &Path, below: &Path) -> Option<(String, String, PathBuf)> {
+    let table = |name: &str| {
+        std::fs::read_to_string(dir.join(name))
+            .ok()?
+            .parse::<toml::Table>()
+            .ok()
+    };
+    let text = |t: &toml::Table, key: &str| t.get(key)?.as_str().map(str::to_owned);
+    // Identity layout: the receipt sits in the installation dir itself.
+    if let Some(t) = table(".mise-install.toml") {
+        let backend = text(t.get("identity")?.as_table()?, "backend")?;
+        return Some((text(&t, "requested_as")?, backend, dir.to_path_buf()));
+    }
+    // `installs/<tool>/<version>/`: the record sits in the tool dir.
+    if let Some(t) = table(".mise.backend.toml") {
+        return Some((text(&t, "short")?, text(&t, "full")?, below.to_path_buf()));
+    }
+    // Older mise wrote the same record as text: the short name, then the backend.
+    let legacy = std::fs::read_to_string(dir.join(".mise.backend")).ok()?;
+    let mut lines = legacy.lines().map(str::trim).filter(|l| !l.is_empty());
+    Some((
+        lines.next()?.to_owned(),
+        lines.next()?.to_owned(),
+        below.to_path_buf(),
+    ))
+}
+
+/// Whether a mise backend id installs nub itself: `github:nubjs/nub`,
+/// `npm:@nubjs/nub`, or the same repository through another backend.
+fn is_nub_mise_backend(backend: &str) -> bool {
+    backend
+        .split_once(':')
+        .is_some_and(|(_, id)| id.trim_start_matches('@') == "nubjs/nub")
+}
+
+/// The config file whose request selects `tool` in this directory, from `mise
+/// ls --json <tool>` (an array of entries; the requested one carries
+/// `source.path`). `active` is no test for this: mise marks a requested version
+/// that is not installed yet `active: false`. `None` when no config file requests
+/// it, including a `MISE_<TOOL>_VERSION` request, whose source has no path. `mise
+/// upgrade` then has no request to move, prints "All tools are up to date" and
+/// exits 0, so the caller must not run it and report success.
+fn parse_mise_request_source(json: &serde_json::Value) -> Option<PathBuf> {
+    json.as_array()?
+        .iter()
+        .find_map(|e| Some(PathBuf::from(e.get("source")?.get("path")?.as_str()?)))
+}
+
+/// The `mise` arguments that upgrade a mise-managed nub, whose request is in the
+/// config file `source`. For `latest`, `upgrade --bump` moves the request past
+/// its range, which is what `nub upgrade` means, and keeps its precision, so
+/// `latest` stays `latest`. A plain `mise upgrade` stays inside the range, so an
+/// exact pin would never move. Run in the caller's directory, it moves whichever
+/// config selects nub there, a project's `mise.toml` or the global config.
+///
+/// An explicit `--version` is `use --path` instead, which installs that version
+/// and writes it to `source`, older versions included. `upgrade --bump
+/// <tool>@<version>` does that only on recent mise: 2026.1.0 ignores the version,
+/// installs the newest and leaves the config alone.
+fn mise_upgrade_args(tool: &str, version_spec: &str, source: &Path) -> Vec<String> {
+    match version_spec {
+        "latest" => vec!["upgrade".into(), "--bump".into(), tool.to_string()],
+        v => vec![
+            "use".into(),
+            "--path".into(),
+            source.to_string_lossy().into_owned(),
+            format!("{tool}@{}", v.trim_start_matches('v')),
+        ],
     }
 }
 
@@ -8513,6 +8625,67 @@ fn run_upgrade(
     dry_run: bool,
     _yes: bool,
 ) -> Result<i32> {
+    /// The config file that selects a mise-managed nub here (see
+    /// [`parse_mise_request_source`]), or the reason there is none to upgrade
+    /// through, phrased for the user.
+    fn mise_request_source(tool: &str) -> std::result::Result<PathBuf, String> {
+        let out = std::process::Command::new("mise")
+            .args(["ls", "--json", tool])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|_| {
+                format!(
+                    "this nub was installed by mise (as `{tool}`), but `mise` is not on PATH.\n\
+                     Run `mise upgrade --bump {tool}` where it is."
+                )
+            })?;
+        if !out.status.success() {
+            return Err(format!(
+                "`mise ls --json {tool}` failed:\n{}",
+                String::from_utf8_lossy(&out.stderr).trim_end()
+            ));
+        }
+        serde_json::from_slice(&out.stdout)
+            .ok()
+            .and_then(|json| parse_mise_request_source(&json))
+            .ok_or_else(|| {
+                format!(
+                    "this nub was installed by mise (as `{tool}`), but no mise config file \
+                     requests it in this directory, so mise has no version to move.\n\
+                     Pin one with `mise use --global {tool}@latest`."
+                )
+            })
+    }
+
+    /// Upgrade a mise-managed install through mise, which owns the install
+    /// directory and picks the version from config. Writing into
+    /// `installs/<tool>/<version>/` would leave the directory naming one
+    /// version and holding another; installing elsewhere would leave a copy
+    /// mise does not manage. mise's own upgrade also honors the user's
+    /// `minimum_release_age` and lockfile settings.
+    ///
+    /// MANUAL-VERIFICATION NOTE: like [`perform_selfowned_upgrade`], this needs a
+    /// live `mise` and a published release, so the unit tests cover the pure
+    /// pieces ([`detect_mise_install`], [`parse_mise_request_source`],
+    /// [`mise_upgrade_args`]) and the glue is verified against a real mise.
+    fn perform_mise_upgrade(tool: &str, version_spec: &str) -> Result<i32> {
+        let source = mise_request_source(tool).map_err(|e| anyhow::anyhow!("nub upgrade: {e}"))?;
+        let args = mise_upgrade_args(tool, version_spec, &source);
+        println!(
+            "running `mise {}` (the request is in {})",
+            args.join(" "),
+            display_path(&source)
+        );
+        let status = std::process::Command::new("mise").args(&args).status()?;
+        let code = nub_core::node::spawn::exit_code_from_status(&status);
+        if code == 0 {
+            if let Some(msg) = shim_relink_reminder() {
+                eprintln!("{msg}");
+            }
+        }
+        Ok(code)
+    }
+
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
     let bin_str = display_path(&nub_binary);
     let channel = detect_channel(&nub_binary);
@@ -8553,6 +8726,32 @@ fn run_upgrade(
                 } else {
                     println!("would upgrade to {target} via winget (run it yourself)");
                     println!("  command: {WINGET_UPGRADE_DISPLAY}");
+                }
+            }
+            UpgradeChannel::Mise { tool, install_root } => {
+                if release_channel == ReleaseChannel::Canary {
+                    println!(
+                        "would upgrade to canary, but canary builds are not published to mise"
+                    );
+                    println!("  install instead: {}", canary_install_hint());
+                } else {
+                    println!("would upgrade to {target} via mise (tool: {tool})");
+                    println!("  install: {}", display_path(install_root));
+                    match mise_request_source(tool) {
+                        Ok(source) => {
+                            let args = mise_upgrade_args(tool, target, &source);
+                            println!("  command: mise {}", args.join(" "));
+                            println!("  request: {}", display_path(&source));
+                            // mise's own dry run names the version it would
+                            // install and the file it would rewrite.
+                            let _ = std::process::Command::new("mise")
+                                .args(&args)
+                                .arg("--dry-run")
+                                .stdin(std::process::Stdio::null())
+                                .status();
+                        }
+                        Err(reason) => println!("  ({})", reason.replace('\n', "\n   ")),
+                    }
                 }
             }
             UpgradeChannel::SelfOwned { install_dir } => {
@@ -8632,20 +8831,27 @@ fn run_upgrade(
         return Ok(0);
     }
 
-    // Homebrew and winget only carry stable releases — a canary ask on those
-    // channels has nothing to install, so route the user to the standalone
-    // installer rather than silently handing them a stable build. (npm DOES
-    // carry canary, as the `canary` dist-tag — handled in the npm arm below.)
+    // Homebrew, winget, and mise only carry stable releases — a canary ask on
+    // those channels has nothing to install, so route the user to the
+    // standalone installer rather than silently handing them a stable build.
+    // (npm DOES carry canary, as the `canary` dist-tag — handled in the npm
+    // arm below. mise does not: its `github:` backend skips prereleases by
+    // default, and its npm backend resolves from the version list, where
+    // dist-tags never appear.)
     if release_channel == ReleaseChannel::Canary
-        && matches!(channel, UpgradeChannel::Homebrew | UpgradeChannel::Winget)
+        && matches!(
+            channel,
+            UpgradeChannel::Homebrew | UpgradeChannel::Winget | UpgradeChannel::Mise { .. }
+        )
     {
         bail!(
             "nub upgrade: canary builds are not published to {}.\n\
              Install the canary via the standalone installer instead:\n  {}",
-            if channel == UpgradeChannel::Homebrew {
-                "Homebrew"
-            } else {
-                "winget"
+            match &channel {
+                UpgradeChannel::Homebrew => "Homebrew",
+                UpgradeChannel::Winget => "winget",
+                UpgradeChannel::Mise { .. } => "mise",
+                _ => unreachable!("canary gate only matches Homebrew/Winget/Mise"),
             },
             canary_install_hint()
         );
@@ -8711,6 +8917,7 @@ fn run_upgrade(
                  itself.\nRun: {WINGET_UPGRADE_DISPLAY}"
             );
         }
+        UpgradeChannel::Mise { tool, .. } => perform_mise_upgrade(&tool, target),
         UpgradeChannel::SelfOwned { install_dir } => {
             if is_canary_build() && release_channel == ReleaseChannel::Stable {
                 // Explicit --stable (or --version) from a canary build: make the
@@ -13231,6 +13438,117 @@ mod tests {
         assert_eq!(
             detect_channel(Path::new("/some/random/place/nub")),
             UpgradeChannel::Unknown
+        );
+    }
+
+    // mise routing reads mise's own install record, so it holds under a custom
+    // data dir (`data/`, not `mise/`), for every record format mise writes, and
+    // ahead of the node_modules rung the npm backend's path would hit. The walk
+    // stops at the first record: a nub that npm installed into a mise-managed
+    // Node sits under the `node` tool's record and stays npm's to upgrade.
+    #[test]
+    fn detect_channel_routes_mise_installs_by_install_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let installs = tmp.path().join("data").join("installs");
+        let write = |rel: &str, body: &str| {
+            let path = installs.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        };
+        write(
+            "nub/.mise.backend.toml",
+            "short = \"nub\"\nfull = \"github:nubjs/nub\"\n",
+        );
+        write(
+            "npm-nubjs-nub/.mise.backend.toml",
+            "short = \"npm:@nubjs/nub\"\nfull = \"npm:@nubjs/nub\"\n",
+        );
+        write(
+            "github-nubjs-nub/.mise.backend",
+            "github:nubjs/nub\ngithub:nubjs/nub\n1\n",
+        );
+        write(
+            "nub-xqeuclcz/.mise-install.toml",
+            "requested_as = \"nub\"\n\n[identity]\nbackend = \"github:nubjs/nub\"\n",
+        );
+        write(
+            "node/.mise.backend.toml",
+            "short = \"node\"\nfull = \"core:node\"\n",
+        );
+
+        let mise = |tool: &str, root: &str| UpgradeChannel::Mise {
+            tool: tool.to_string(),
+            install_root: installs.join(root),
+        };
+        let cases = [
+            ("nub/0.9.7/bin/nub", mise("nub", "nub/0.9.7")),
+            (
+                "npm-nubjs-nub/0.9.5/node_modules/.mise/node_modules/@nubjs/nub-linux-x64/bin/nub",
+                mise("npm:@nubjs/nub", "npm-nubjs-nub/0.9.5"),
+            ),
+            (
+                "github-nubjs-nub/0.9.5/bin/nub",
+                mise("github:nubjs/nub", "github-nubjs-nub/0.9.5"),
+            ),
+            ("nub-xqeuclcz/bin/nub", mise("nub", "nub-xqeuclcz")),
+            (
+                "node/24.11.0/lib/node_modules/@nubjs/nub/bin/nub",
+                UpgradeChannel::Npm,
+            ),
+        ];
+        for (rel, expected) in cases {
+            assert_eq!(detect_channel(&installs.join(rel)), expected, "{rel}");
+        }
+    }
+
+    // `mise ls --json <tool>`: an entry's `source.path` is the request, whether or
+    // not that version is installed yet (mise then says `active: false`). With no
+    // config file behind the request, `mise upgrade` exits 0 having moved nothing,
+    // so the upgrade must refuse rather than report success.
+    #[test]
+    fn parse_mise_request_source_reads_the_config_behind_the_request() {
+        let installed_only =
+            serde_json::json!({"version": "0.9.5", "installed": true, "active": false});
+        let requested = |installed: bool| {
+            serde_json::json!([installed_only, {
+                "version": "0.9.6",
+                "requested_version": "0.9.6",
+                "source": {"type": "mise.toml", "path": "/proj/mise.toml"},
+                "installed": installed,
+                "active": installed
+            }])
+        };
+        let source = Some(PathBuf::from("/proj/mise.toml"));
+        assert_eq!(parse_mise_request_source(&requested(true)), source);
+        assert_eq!(parse_mise_request_source(&requested(false)), source);
+
+        let from_env = serde_json::json!([{
+            "version": "0.9.5",
+            "source": {"type": "environment", "key": "MISE_NUB_VERSION", "value": "0.9.5"},
+            "active": true
+        }]);
+        assert_eq!(parse_mise_request_source(&from_env), None);
+        assert_eq!(
+            parse_mise_request_source(&serde_json::json!([installed_only])),
+            None
+        );
+        assert_eq!(parse_mise_request_source(&serde_json::json!({})), None);
+    }
+
+    // `latest` is `upgrade --bump`: without `--bump` an exact pin never moves, and
+    // naming no version lets mise keep the request's precision. An explicit version
+    // goes through `use --path`, because `upgrade --bump <tool>@<version>` ignores
+    // the version on older mise.
+    #[test]
+    fn mise_upgrade_args_pick_the_command_by_version_spec() {
+        let source = Path::new("/proj/mise.toml");
+        assert_eq!(
+            mise_upgrade_args("nub", "latest", source),
+            ["upgrade", "--bump", "nub"]
+        );
+        assert_eq!(
+            mise_upgrade_args("npm:@nubjs/nub", "v0.9.6", source),
+            ["use", "--path", "/proj/mise.toml", "npm:@nubjs/nub@0.9.6"]
         );
     }
 

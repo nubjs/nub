@@ -33,6 +33,7 @@
 //! name can't be used to assert "this exact build was audited."
 
 use aube_manifest::AllowBuildRaw;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 
 /// The decision for a single `(name, version)` lookup.
@@ -286,6 +287,8 @@ impl BuildPolicy {
         if matches_any_wildcard(name, &self.denied_wildcards) {
             return AllowDecision::Deny;
         }
+        let source_key = source_key.map(normalize_source_key);
+        let source_key = source_key.as_deref();
         if let Some(source_key) = source_key
             && self.denied_sources.contains(source_key)
         {
@@ -542,7 +545,7 @@ fn expand_spec(pattern: &str) -> Result<Vec<String>, BuildPolicyError> {
     for raw in versions_part.split("||") {
         let trimmed = raw.trim();
         if is_source_version(trimmed) && !versions_part.contains("||") {
-            out.push(format!("{name}@{trimmed}"));
+            out.push(normalize_source_key(&format!("{name}@{trimmed}")).into_owned());
             return Ok(out);
         }
         if trimmed.is_empty() || !is_exact_semver(trimmed) {
@@ -551,6 +554,27 @@ fn expand_spec(pattern: &str) -> Result<Vec<String>, BuildPolicyError> {
         out.push(format!("{name}@{trimmed}"));
     }
     Ok(out)
+}
+
+/// One spelling for an exact `file:` / `link:` key, on both sides of a match,
+/// so `dep@file:./dep` and `dep@file:unused/../dep` name the `dep@file:dep` a
+/// lockfile hands back. Dropping a denial on a spelling mismatch would let its
+/// script run, so this has to cover every spelling rather than list some.
+fn normalize_source_key(key: &str) -> Cow<'_, str> {
+    let (name, source) = split_name_and_versions(key);
+    let Some((kind, path)) = source
+        .strip_prefix("file:")
+        .map(|path| ("file", path))
+        .or_else(|| source.strip_prefix("link:").map(|path| ("link", path)))
+    else {
+        return Cow::Borrowed(key);
+    };
+    let normalized = aube_util::path::normalize_dep_path(path);
+    if normalized == path {
+        Cow::Borrowed(key)
+    } else {
+        Cow::Owned(format!("{name}@{kind}:{normalized}"))
+    }
 }
 
 fn is_source_key(key: &str) -> bool {
@@ -638,6 +662,51 @@ mod tests {
         let (p, errs) = BuildPolicy::from_config(&map, &[], &[], false);
         assert!(errs.is_empty(), "unexpected warnings: {errs:?}");
         p
+    }
+
+    /// A lockfile hands a local source back normalized, so every spelling of
+    /// its path has to reach the same decision, an allow-all included: a denial
+    /// that stopped matching would let the script run. A jail exclusion goes
+    /// through the same keys.
+    #[test]
+    fn exact_source_keys_match_across_path_spellings() {
+        for (spelled, read_back) in [
+            ("dep@file:./dep", "dep@file:dep"),
+            ("dep@file:./.deps/dep", "dep@file:.deps/dep"),
+            ("dep@file:./../dep", "dep@file:../dep"),
+            ("dep@file:unused/../dep", "dep@file:dep"),
+            ("dep@link:./dep", "dep@link:dep"),
+        ] {
+            for (config, probe) in [(spelled, read_back), (read_back, spelled)] {
+                let source = Some(probe);
+                assert_eq!(
+                    policy(&[(config, true)]).decide_package("dep", "1.0.0", source),
+                    AllowDecision::Allow,
+                    "{config} allows {probe}"
+                );
+                let map = BTreeMap::from([(config.to_string(), AllowBuildRaw::Bool(false))]);
+                let (denied, _) = BuildPolicy::from_config(&map, &[], &[], true);
+                assert_eq!(
+                    denied.decide_package("dep", "1.0.0", source),
+                    AllowDecision::Deny,
+                    "{config} denies {probe} under allow-all"
+                );
+                let (exclusions, _) = BuildPolicy::denylist(&[config.to_string()]);
+                assert_eq!(
+                    exclusions.decide_package("dep", "1.0.0", source),
+                    AllowDecision::Deny,
+                    "{config} excludes {probe}"
+                );
+            }
+        }
+        assert_eq!(
+            policy(&[("dep@file:other", true)]).decide_package(
+                "dep",
+                "1.0.0",
+                Some("dep@file:dep")
+            ),
+            AllowDecision::Unspecified
+        );
     }
 
     #[test]

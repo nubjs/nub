@@ -510,7 +510,7 @@ fn full_pkg_id(pkg: &LockedPackage, patch_hash: PatchHashFn<'_>, content: Option
     let source = pkg
         .local_source
         .as_ref()
-        .map(|source| format!(":source:{}", source.specifier()))
+        .map(|source| format!(":source:{}", source.pnpm_specifier()))
         .unwrap_or_default();
     let content = content
         .map(|hex| format!(":content:{hex}"))
@@ -587,6 +587,18 @@ mod tests {
             packages: BTreeMap::new(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_local_path_hashes_alike_as_resolved_and_as_read_from_the_lockfile() {
+        let hash = |path: &str| {
+            let mut g = empty_graph();
+            let mut pkg = mk_pkg("dep", "1.0.0", None);
+            pkg.local_source = Some(LocalSource::Directory(PathBuf::from(path)));
+            g.packages.insert("dep@1.0.0".into(), pkg);
+            compute_graph_hashes(&g, &|_| false, None).node_hash
+        };
+        assert_eq!(hash("./dep"), hash("dep"));
     }
 
     #[test]

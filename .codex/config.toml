@@ -11,11 +11,8 @@ startup_timeout_sec = 60
 tool_timeout_sec = 600
 
 [mcp_servers.chrome-devtools]
-command = "npx"
-args = [
-    "-y",
-    "chrome-devtools-mcp@latest",
-]
+command = "node"
+args = ["scripts/chrome-devtools-mcp.mjs"]
 
 [mcp_servers.chrome-devtools.tools.evaluate_script]
 approval_mode = "approve"
