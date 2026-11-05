@@ -1738,6 +1738,41 @@ fn frozen_install_checks_a_catalog_only_a_member_lockfile_records() {
         .stderr(predicates::str::contains("lockfile says ^1.0.0"));
 }
 
+/// `devEngines.runtime` belongs to one project, so a member can pin a runtime
+/// the root doesn't. The lockfiles are pnpm 10's, which frozen-installs this
+/// tree, with the pin's platform list cut to one entry.
+#[test]
+fn frozen_install_accepts_a_runtime_pin_only_a_member_records() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let header = "lockfileVersion: '9.0'\n\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: false\n\n";
+    sbx.write_manifest(r#"{ "name": "root", "version": "1.0.0", "private": true }"#);
+    sbx.write_file(
+        "pnpm-workspace.yaml",
+        "packages:\n  - packages/*\nsharedWorkspaceLockfile: false\n",
+    );
+    sbx.write_file(
+        "pnpm-lock.yaml",
+        &format!("{header}importers:\n\n  .: {{}}\n"),
+    );
+    sbx.write_file(
+        "packages/a/package.json",
+        r#"{ "name": "a", "version": "1.0.0", "devEngines": { "runtime": { "name": "node", "version": "24.4.0", "onFail": "download" } } }"#,
+    );
+    sbx.write_file(
+        "packages/a/pnpm-lock.yaml",
+        &format!(
+            "{header}importers:\n\n  .:\n    devDependencies:\n      node:\n        specifier: runtime:24.4.0\n        version: runtime:24.4.0\n\n\
+             packages:\n\n  node@runtime:24.4.0:\n    resolution:\n      type: variations\n      variants:\n        - resolution:\n            archive: tarball\n            bin: bin/node\n            integrity: sha256-19sOUBfWj040QF9cma04lUgXk8xkIFUOWCt+7fkReA8=\n            type: binary\n            url: https://nodejs.org/download/release/v24.4.0/node-v24.4.0-darwin-arm64.tar.gz\n          targets:\n            - cpu: arm64\n              os: darwin\n    hasBin: true\n\n\
+             snapshots:\n\n  node@runtime:24.4.0: {{}}\n"
+        ),
+    );
+    sbx.cmd()
+        .args(["install", "--frozen-lockfile"])
+        .assert()
+        .success();
+}
+
 /// A registry that serves one packument, `pinned-pkg`, whose versions the
 /// test can change between installs. `--lockfile-only` installs read only
 /// packuments, so no tarballs are needed.

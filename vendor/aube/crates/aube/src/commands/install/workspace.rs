@@ -285,6 +285,19 @@ fn project_lockfile_graph(
     workspace_manifests: &[(String, aube_manifest::PackageJson)],
 ) -> Option<aube_lockfile::LockfileGraph> {
     let mut subset = graph.subset_to_importer(importer_path, |_| true)?;
+    // A runtime pin belongs to the project whose manifest declares it.
+    if importer_path != "." {
+        let manifest = workspace_manifests
+            .iter()
+            .find(|(path, _)| path == importer_path)
+            .map(|(_, manifest)| manifest);
+        let pins = |name: &str| {
+            manifest
+                .and_then(|manifest| manifest.dev_engines.as_ref())
+                .is_some_and(|engines| engines.runtime.iter().any(|r| r.name == name))
+        };
+        subset.runtimes.retain(|name, _| pins(name));
+    }
     // Same `name@version` match the shared-lockfile writer uses to spot a
     // workspace member, including its `0.0.0` default for a versionless one.
     let member_dirs: BTreeMap<String, &str> = workspace_manifests
@@ -419,13 +432,11 @@ pub(crate) fn parse_project_lockfile(
 /// a full resolve instead, so this merge only ever runs on the warm path for
 /// members already present at the last install.
 ///
-/// Each lockfile records its own resolution config, and the drift checks
-/// read it off the merged graph. pnpm writes the workspace-wide part
-/// (settings, overrides, checksums) into every lockfile alike, but only the
-/// catalog entries the project uses, so the member's catalogs are folded in.
-/// A member whose config disagrees with the graph's is left out, which makes
-/// the graph stale against its manifest, and the first such disagreement is
-/// returned for a frozen install to report.
+/// pnpm records a catalog entry only in the lockfile of a project that uses
+/// it, so the member's catalogs are folded into the graph the drift checks
+/// read. A member whose catalog range or runtime pin no longer holds is left
+/// out, which makes the graph stale against its manifest, and the first such
+/// disagreement is returned for a frozen install to report.
 pub(super) fn merge_member_lockfile_graphs(
     workspace_root: &std::path::Path,
     graph: &mut aube_lockfile::LockfileGraph,
@@ -445,7 +456,7 @@ pub(super) fn merge_member_lockfile_graphs(
                 continue;
             }
         };
-        if let Some(reason) = member_config_mismatch(graph, &member_graph) {
+        if let Some(reason) = member_config_mismatch(graph, &member_graph, manifest) {
             tracing::debug!(
                 "sharedWorkspaceLockfile=false: skipping member {importer_path} graph merge: {reason}"
             );
@@ -468,12 +479,17 @@ pub(super) fn merge_member_lockfile_graphs(
     mismatch
 }
 
-/// Why `member`'s recorded resolution config can't share a graph with
-/// `graph`'s, if it can't. Patch paths are left out: each lockfile spells
-/// them from its own directory, and the hashes identify the patches.
+/// Why a member lockfile's recorded config no longer holds, if it doesn't.
+///
+/// pnpm scopes the rest of this config to each project: a member's `.npmrc`,
+/// `pnpm` manifest field and `.pnpmfile.cjs` give it its own settings,
+/// overrides, checksums, ignored optionals and patches, so they may differ
+/// from the root's. A catalog has one definition, so two ranges for an entry
+/// mean one is stale, and a runtime pin answers to its own project's manifest.
 fn member_config_mismatch(
     graph: &aube_lockfile::LockfileGraph,
     member: &aube_lockfile::LockfileGraph,
+    manifest: &aube_manifest::PackageJson,
 ) -> Option<String> {
     for (catalog, entries) in &member.catalogs {
         for (name, entry) in entries {
@@ -488,31 +504,20 @@ fn member_config_mismatch(
             }
         }
     }
-    let differs = [
-        ("settings", graph.settings != member.settings),
-        ("overrides", graph.overrides != member.overrides),
-        (
-            "packageExtensionsChecksum",
-            graph.package_extensions_checksum != member.package_extensions_checksum,
-        ),
-        (
-            "pnpmfileChecksum",
-            graph.pnpmfile_checksum != member.pnpmfile_checksum,
-        ),
-        (
-            "ignoredOptionalDependencies",
-            graph.ignored_optional_dependencies != member.ignored_optional_dependencies,
-        ),
-        (
-            "patchedDependencies",
-            graph.patched_dependency_hashes != member.patched_dependency_hashes,
-        ),
-        ("runtimes", graph.runtimes != member.runtimes),
-    ];
-    differs
-        .into_iter()
-        .find(|(_, differs)| *differs)
-        .map(|(field, _)| format!("lockfile's {field} differs from the workspace root lockfile's"))
+    // Earlier writers copied the root's pin into every member's lockfile.
+    let own = aube_lockfile::LockfileGraph {
+        runtimes: member
+            .runtimes
+            .iter()
+            .filter(|(name, pin)| graph.runtimes.get(*name) != Some(*pin))
+            .map(|(name, pin)| (name.clone(), pin.clone()))
+            .collect(),
+        ..Default::default()
+    };
+    match own.check_runtimes_drift(manifest) {
+        aube_lockfile::DriftStatus::Stale { reason } => Some(reason),
+        aube_lockfile::DriftStatus::Fresh => None,
+    }
 }
 
 pub(crate) fn order_lifecycle_manifests(
@@ -1301,8 +1306,9 @@ mod member_graph_merge_tests {
     }
 
     /// pnpm records a catalog entry only in the lockfile of a project that
-    /// uses it, so a member's catalogs must reach the freshness check; and a
-    /// member whose recorded config disagrees with the rest is left out.
+    /// uses it, so a member's catalogs must reach the freshness check, and two
+    /// ranges for one entry leave the later member out. Everything else pnpm
+    /// scopes to the project may differ from the root (`packages/c`).
     #[test]
     fn member_lockfile_config_reaches_the_freshness_check() {
         let root = tempfile::tempdir().unwrap();
@@ -1324,7 +1330,7 @@ mod member_graph_merge_tests {
         write_member_lockfile(
             root.path(),
             "packages/c",
-            "overrides:\n  post-only: 1.0.0\n\nimporters:\n\n  .: {}\n",
+            "overrides:\n  post-only: 1.0.0\n\npackageExtensionsChecksum: sha256-AAAA\n\npnpmfileChecksum: sha256-BBBB\n\nimporters:\n\n  .: {}\n\nignoredOptionalDependencies:\n  - fsevents\n",
         );
         let manifests = vec![
             (".".to_string(), manifest("root")),
@@ -1357,9 +1363,58 @@ mod member_graph_merge_tests {
         assert!(mismatch.starts_with("packages/b: "), "{mismatch}");
         assert!(!graph.importers.contains_key("packages/b"));
         assert!(
-            !graph.importers.contains_key("packages/c"),
-            "a member recording other overrides than the root must be left out"
+            graph.importers.contains_key("packages/c"),
+            "a member's own overrides, checksums and ignored optionals may differ from the root's"
         );
+    }
+
+    fn runtime_manifest(version: &str) -> aube_manifest::PackageJson {
+        serde_json::from_str(&format!(
+            r#"{{"name":"a","version":"1.0.0","devEngines":{{"runtime":{{"name":"node","version":"{version}"}}}}}}"#
+        ))
+        .unwrap()
+    }
+
+    /// A runtime pin answers to its own project's manifest: a member's pin may
+    /// be absent from the root's lockfile, but not from the member's manifest.
+    /// The writer keeps it there too, leaving the root's pin out of a member.
+    #[test]
+    fn member_runtime_pin_answers_to_its_own_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        let lockfile = "importers:\n\n  .:\n    devDependencies:\n      node:\n        specifier: runtime:24.4.0\n        version: runtime:24.4.0\n";
+        for member in ["packages/a", "packages/b"] {
+            write_member_lockfile(root.path(), member, lockfile);
+        }
+        let manifests = vec![
+            ("packages/a".to_string(), runtime_manifest("24.4.0")),
+            ("packages/b".to_string(), manifest("b")),
+        ];
+        let mut graph = LockfileGraph::default();
+        let mismatch = merge_member_lockfile_graphs(root.path(), &mut graph, &manifests)
+            .expect("packages/b no longer pins the runtime");
+        assert!(mismatch.starts_with("packages/b: "), "{mismatch}");
+        assert!(graph.importers.contains_key("packages/a"));
+        assert!(graph.runtimes.is_empty());
+
+        let pinned =
+            aube_lockfile::parse_lockfile(&root.path().join("packages/a"), &manifests[0].1)
+                .unwrap();
+        let full = LockfileGraph {
+            importers: BTreeMap::from([("packages/b".to_string(), Vec::new())]),
+            runtimes: pinned.runtimes,
+            ..Default::default()
+        };
+        write_per_project_lockfiles(
+            root.path(),
+            &full,
+            &manifests[1..],
+            LockfileKind::Pnpm,
+            None,
+        )
+        .unwrap();
+        let written =
+            std::fs::read_to_string(root.path().join("packages/b/pnpm-lock.yaml")).unwrap();
+        assert!(!written.contains("runtime:"), "{written}");
     }
 
     /// pnpm keys a transitive-only local package by its spelling from the
