@@ -1243,3 +1243,100 @@ fn hosted_git_tarball_dep_runs_its_prepare_script() {
     assert!(sbx.project.join("node_modules/demo/build.js").exists());
     assert!(!sbx.project.join("node_modules/demo/dist").exists());
 }
+
+/// A member's lockfile records a `file:` dep relative to the member, which
+/// hashes to a different package key than the root-relative path install
+/// materialized it under. A rebuild from the member has to read the lockfile
+/// back in the workspace frame, or it looks up a store entry that does not
+/// exist and skips the build. The virtual store is pinned to one absolute
+/// directory so the member and the root resolve the same store.
+#[test]
+fn member_rebuild_finds_a_local_dep_installed_under_per_project_lockfiles() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let store = sbx.cache.join("vstore");
+    let npmrc = format!("virtual-store-dir={}\n", store.display());
+    sbx.write_file(".npmrc", &npmrc);
+    sbx.write_file("packages/app/.npmrc", &npmrc);
+    sbx.write_file(
+        "pnpm-workspace.yaml",
+        "packages:\n  - packages/*\nsharedWorkspaceLockfile: false\n",
+    );
+    sbx.write_manifest(r#"{ "name": "root", "version": "1.0.0", "private": true }"#);
+    sbx.write_file(
+        "vendor/ldir/package.json",
+        r#"{
+            "name": "ldir",
+            "version": "1.0.0",
+            "scripts": { "postinstall": "node -e \"require('fs').appendFileSync('RUNS', 'x')\"" }
+        }"#,
+    );
+    sbx.write_file(
+        "packages/app/package.json",
+        r#"{ "name": "app", "version": "1.0.0", "dependencies": { "ldir": "file:../../vendor/ldir" } }"#,
+    );
+
+    sbx.cmd().arg("install").assert().success();
+    let lock = fs::read_to_string(sbx.project.join("packages/app/aube-lock.yaml")).unwrap();
+    assert!(
+        lock.contains("file:../../vendor/ldir"),
+        "the member lockfile must record the dep from the member:\n{lock}"
+    );
+
+    sbx.cmd()
+        .current_dir(sbx.project.join("packages/app"))
+        .args(["rebuild", "ldir"])
+        .assert()
+        .success();
+    assert_eq!(
+        read_file_under(&store, "RUNS").as_deref(),
+        Some("x"),
+        "`rebuild ldir` from the member must run the build of the installed copy"
+    );
+}
+
+/// A per-project-lockfile member's graph holds its local paths relative to the
+/// workspace root, so `licenses` from the member has to resolve them there. A
+/// linked sibling's license is read live, so changing it after install shows
+/// which directory answered.
+#[test]
+fn member_licenses_read_a_linked_sibling_under_per_project_lockfiles() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    sbx.write_file(
+        "pnpm-workspace.yaml",
+        "packages:\n  - packages/*\nsharedWorkspaceLockfile: false\n",
+    );
+    sbx.write_manifest(r#"{ "name": "root", "version": "1.0.0", "private": true }"#);
+    sbx.write_file(
+        "packages/a/package.json",
+        r#"{ "name": "a", "version": "1.0.0", "license": "MIT" }"#,
+    );
+    sbx.write_file(
+        "packages/b/package.json",
+        r#"{ "name": "b", "version": "1.0.0", "dependencies": { "a": "workspace:*" } }"#,
+    );
+    sbx.cmd().arg("install").assert().success();
+    sbx.write_file(
+        "packages/a/package.json",
+        r#"{ "name": "a", "version": "1.0.0", "license": "Apache-2.0" }"#,
+    );
+
+    for args in [&["licenses"][..], &["licenses", "--long"][..]] {
+        let output = sbx
+            .cmd()
+            .current_dir(sbx.project.join("packages/b"))
+            .args(args)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("Apache-2.0"),
+            "{args:?} must read the sibling's current license:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains("packages/b/packages/a"),
+            "{args:?} resolved the sibling against the member:\n{stdout}"
+        );
+    }
+}

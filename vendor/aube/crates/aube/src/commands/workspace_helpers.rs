@@ -24,7 +24,7 @@ pub(crate) fn load_graph(
     manifest: &aube_manifest::PackageJson,
     missing_hint: &str,
 ) -> miette::Result<aube_lockfile::LockfileGraph> {
-    match aube_lockfile::parse_lockfile(project_dir, manifest) {
+    match super::install::parse_project_lockfile(project_dir, manifest) {
         Ok(g) => Ok(g),
         Err(aube_lockfile::Error::NotFound(_)) => Err(miette!("{missing_hint}")),
         Err(e) => Err(miette::Report::new(e)).wrap_err("failed to parse lockfile"),

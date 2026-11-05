@@ -66,7 +66,9 @@ use lifecycle::{
     resolve_link_strategy, run_import_on_blocking, run_root_lifecycle_script,
     validate_required_scripts,
 };
-pub(crate) use workspace::order_lifecycle_manifests;
+pub(crate) use workspace::{
+    order_lifecycle_manifests, parse_project_lockfile, unshared_lockfile_workspace_root,
+};
 
 /// Record the project's pnpm pin in `pnpm-lock.yaml`'s env document after
 /// the lockfile is written (pnpm 11+ parity; see
