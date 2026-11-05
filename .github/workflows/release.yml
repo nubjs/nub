@@ -1485,7 +1485,7 @@ jobs:
             'const included = readFileSync(join(here, "included.txt"), "utf8").trim();' \
             'require = createRequire(import.meta.url);' \
             'const native = require("./compile-native.node");' \
-            'const answer = native.parseJson5("{answer:42}").answer;' \
+            'const answer = JSON.parse(native.json5ToJs("{answer:42}")).answer;' \
             'const child = fork(new URL("./fork-child.cjs", import.meta.url), { stdio: ["ignore", "ignore", "ignore", "ipc"] });' \
             'const childMessage = await new Promise((resolve, reject) => {' \
             '  child.once("message", resolve);' \

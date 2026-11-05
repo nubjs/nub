@@ -160,8 +160,18 @@ fn strip_patch_hash_markers(raw: &mut RawPnpmLockfile) {
 
 pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<LockfileGraph, Error> {
     let content = crate::read_lockfile(path)?;
-    let mut raw = parse_raw_lockfile(&content)
-        .map_err(|e| Error::parse_yaml_err(path, content.clone(), &e))?;
+    // Parse the project document alone when pnpm 11+'s env document leads
+    // the file, so the subset fast path still applies. A failure falls
+    // back to the whole file so a diagnostic's span points into it.
+    let main = match super::env::split_env_document(&content) {
+        (Some(_), main) => parse_raw_lockfile(main).ok(),
+        (None, _) => None,
+    };
+    let mut raw = match main {
+        Some(raw) => raw,
+        None => parse_raw_lockfile(&content)
+            .map_err(|e| Error::parse_yaml_err(path, content.clone(), &e))?,
+    };
     strip_patch_hash_markers(&mut raw);
 
     // Version guard before any structural pass: a pre-v9 lockfile is

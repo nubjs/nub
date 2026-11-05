@@ -3894,3 +3894,78 @@ fn genuine_committed_project_npmrc_in_nested_dir_stays_untrusted() {
         "committed project .npmrc must not disable strict-ssl (untrusted)",
     );
 }
+
+#[test]
+fn workspace_member_reads_the_workspace_root_npmrc() {
+    // A command that targets a member (`add` inside it, `update -r`,
+    // `--filter`) hands the loader the member's directory. The workspace
+    // root's `.npmrc` must still supply the registry, scoped registries and
+    // auth, at the same untrusted project tier as any project file; whether
+    // the invoking member's own file layers on top is the per-PM model.
+    use aube_util::WorkspaceNpmrc::{RootBeneathMember, RootOnly};
+    let _gate = AUTH_INI_GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let root = tempfile::tempdir().unwrap();
+    let env = isolated_npmrc_env(root.path());
+    std::fs::write(
+        root.path().join("package.json"),
+        r#"{"name":"root","workspaces":["packages/*"]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.path().join(".npmrc"),
+        "registry=https://root.example/\n\
+         @corp:registry=https://corp.example/\n\
+         //corp.example/:_authToken=root-token\n\
+         //corp.example/:tokenHelper=/bin/evil\n",
+    )
+    .unwrap();
+    let member = root.path().join("packages").join("a");
+    std::fs::create_dir_all(&member).unwrap();
+    std::fs::write(member.join("package.json"), r#"{"name":"a"}"#).unwrap();
+    std::fs::write(member.join(".npmrc"), "registry=https://member.example/\n").unwrap();
+
+    // A caller outside the workspace that hands the engine the member path
+    // (`-C packages/a` from elsewhere) makes the member the invoking package.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let saved = aube_util::engine_context();
+    let cases = [
+        (
+            RootBeneathMember,
+            member.as_path(),
+            "https://member.example/",
+        ),
+        (RootBeneathMember, root.path(), "https://root.example/"),
+        (
+            RootBeneathMember,
+            elsewhere.path(),
+            "https://member.example/",
+        ),
+        (RootOnly, elsewhere.path(), "https://root.example/"),
+        (RootOnly, member.as_path(), "https://root.example/"),
+    ];
+    for (model, invoked_from, expected) in cases {
+        aube_util::update_engine_context(|c| {
+            c.workspace_npmrc = model;
+            c.invocation_dir = Some(invoked_from.to_path_buf());
+        });
+        let cfg = NpmConfig::load_with_env(&member, &env);
+        let invoked = invoked_from.display();
+        assert_eq!(cfg.registry, expected, "{model:?} invoked from {invoked}");
+        assert_eq!(
+            cfg.registry_for("@corp/pkg"),
+            "https://corp.example/",
+            "{model:?} invoked from {invoked}: root scoped registry"
+        );
+        assert_eq!(
+            cfg.auth_token_for("https://corp.example/"),
+            Some("root-token"),
+            "{model:?} invoked from {invoked}: root auth"
+        );
+        assert_eq!(
+            cfg.token_helper_for("https://corp.example/"),
+            None,
+            "{model:?} invoked from {invoked}: a tokenHelper in the root .npmrc is project-controlled"
+        );
+    }
+    aube_util::set_engine_context(saved);
+}

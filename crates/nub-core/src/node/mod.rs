@@ -22,4 +22,5 @@ pub fn verify_or_heal_embedded_runtime_tree(dir: &std::path::Path) -> bool {
     runtime_cache::verify_or_heal_embedded_runtime_tree(dir)
 }
 pub mod spawn;
+pub mod vendored_runtime;
 pub mod version;

@@ -208,7 +208,7 @@ Invalidation:
 - Any pin-file content change → recompute.
 - Any version-manager install-root mtime change → recompute (user installed/removed a Node).
 - PATH change → recompute.
-- The `node --version` result is itself cached by `(path, mtime)` for auto-flag-injection; the discovery cache piggybacks on it.
+- A PATH `node`'s version is itself cached by `(path, mtime)` for auto-flag-injection, but only when the path is the binary that answered: the first probe also asks for `process.execPath`, and a path that is not that file is recorded as a shim and asked again on every launch. The discovery cache piggybacks on it.
 
 Steady-state cost: one stat per manager root seen (typically 3–5), one read of the cache file, one PATH compare. Sub-millisecond.
 
@@ -242,7 +242,7 @@ Nub explicitly does not install Nodes — that stays the manager's job, and Nub'
 The cases where discovery must produce an explicit error or accept a known cost, rather than fall through to whatever `node` happens to be on PATH.
 
 - **Pin file names a version no manager installed.** Hard error with an install hint. Silently falling through to "whatever node is on PATH" is a bug-attractor.
-- **PATH `node` is a Volta/asdf/mise shim that re-execs.** The PATH probe sees the shim, runs `--version`, gets the right answer, and uses the shim path. Costs one shim-exec (~30–120 ms) per cache miss. Resolving through the shim instead would need manager-specific knowledge.
+- **PATH `node` is a Volta/asdf/mise shim that re-execs.** The PATH probe sees the shim, gets the right answer, and uses the shim path. A shim is one path whose Node depends on the directory (`mise use node@24` in one project, 26 in another), so its version is never cached: a version recorded in one project and reused in the next led Nub to inject a flag only the recorded Node accepts, which the selected Node rejects with `bad option` (exit 9). The first probe asks for `process.execPath` as well as the version, the same test uv applies to a pyenv shim through `sys.executable`; a path that is not the file that answered is a shim, re-asked with `--version` on every launch at one shim-exec (~30–120 ms). The flag caches key on `(path, version, mtime)`, so each Node a shim serves keeps its own verdicts. Resolving through the shim instead would need manager-specific knowledge.
 - **User has `nvm` in the shell but Nub launched from a GUI (no rc sourced).** Discovery finds the nvm install dir directly and ignores PATH. This is the main case Nub wins on.
 - **Stale cache after `nvm install <x>`.** The manager-root mtime changes when a version is added; the cache busts on the next probe.
 - **Windows path-separator landmines.** All paths above are parameterized; the parser normalizes `/` vs `\` and case-folds drive letters.
@@ -274,3 +274,4 @@ Every revision to this document, with the date and what changed.
 - 2026-09-02 — Recorded the scope of a failing `nodeExecutable` command: it refuses a run, while the version-store verbs continue.
 - 2026-09-01 — Recorded the explicit-binary layer above the pin chain: `NODE_EXECUTABLE`, and the `nub.jsonc` `nodeExecutable` field with its `$(command)` form, lazy resolution, two anchors, and disagreement reporting. The note that Volta and mise participate only through `PATH` was true when written and is now superseded — a command can delegate to either.
 - 2026-09-19 — Alias pins resolve against the cached release index on the offline discovery path; the codename table this section described was never the shipped mechanism.
+- 2026-11-03 — A PATH `node` that is a version manager's shim is no longer cached by `(path, mtime)`: its version is read on every launch, and the flag caches key on the version too.

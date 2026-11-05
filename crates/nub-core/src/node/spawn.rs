@@ -1003,7 +1003,10 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     let inject_flags: Vec<&'static str> = if config.compat_mode {
         Vec::new()
     } else {
-        let accepted = super::discovery::accepted_env_flags(config.node.path.as_std_path());
+        let accepted = super::discovery::accepted_env_flags(
+            config.node.path.as_std_path(),
+            &config.node.version,
+        );
         flags::compute_inject_flags(
             config.node.version.clone(),
             config.user_args,

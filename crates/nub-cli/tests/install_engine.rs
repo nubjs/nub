@@ -3,11 +3,14 @@
 //! The layout policy and the yarn write gate live in
 //! `crates/nub-cli/src/pm_engine.rs`.
 //!
-//! The two installing tests are `#[ignore]` (network) following the
-//! provisioning-test convention — run them via
-//! `cargo test -p nub-cli --test install_engine -- --ignored`. They also
-//! self-skip when the npm registry is unreachable so an offline `--ignored`
-//! sweep doesn't report false failures.
+//! Installing tests whose packages are seeded in the offline test registry
+//! run against it and self-skip when `NUB_TEST_REGISTRY` is unset — run via
+//! `source tests/registry/start.bash` then
+//! `cargo test -p nub-cli --test install_engine`. The rest are `#[ignore]`
+//! (network) per the provisioning-test convention — run via
+//! `cargo test -p nub-cli --test install_engine -- --ignored` with
+//! `NUB_TEST_REGISTRY` unset — and self-skip when the npm registry is
+//! unreachable so an offline `--ignored` sweep doesn't report false failures.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -35,17 +38,54 @@ fn pm_tmpdir(tag: &str) -> PathBuf {
     dir
 }
 
+/// The Verdaccio offline test registry URL (set by `tests/registry/start.bash`
+/// via `NUB_TEST_REGISTRY`). When set, tests run against the pre-seeded
+/// offline registry instead of registry.npmjs.org.
+fn test_registry() -> Option<String> {
+    std::env::var("NUB_TEST_REGISTRY")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+/// Point a `Command` at the offline Verdaccio registry when
+/// `NUB_TEST_REGISTRY` is set: writes a project `.npmrc` + bypasses any
+/// inherited HTTP_PROXY for localhost (reqwest honors NO_PROXY, without
+/// which a fleet proxy intercepts the loopback request and returns 405).
+/// No-op when the env var is unset, so non-Verdaccio runs are unchanged.
+fn apply_test_registry(cmd: &mut Command, dir: &Path) {
+    if let Some(registry) = test_registry() {
+        // Merge the registry line into any existing .npmrc rather than
+        // overwriting it: the release-age test pre-writes `minimum-release-age`
+        // and depends on both settings being present at spawn time.
+        let npmrc = dir.join(".npmrc");
+        let existing = std::fs::read_to_string(&npmrc).unwrap_or_default();
+        if !existing
+            .lines()
+            .any(|l| l.trim_start().starts_with("registry="))
+        {
+            let prefix = if existing.is_empty() || existing.ends_with('\n') {
+                ""
+            } else {
+                "\n"
+            };
+            std::fs::write(&npmrc, format!("{existing}{prefix}registry={registry}\n")).unwrap();
+        }
+        cmd.env("NO_PROXY", "localhost,127.0.0.1")
+            .env("no_proxy", "localhost,127.0.0.1");
+    }
+}
+
 /// Spawn `nub <args>` in `dir` with the aube store/cache isolated to fresh
 /// temp roots (XDG_DATA_HOME carries the CAS store, XDG_CACHE_HOME the
 /// packument cache) so tests never warm-hit the dev box's real store.
 fn run_install(dir: &Path, args: &[&str]) -> (String, String, i32) {
-    let out = Command::new(nub_binary())
-        .args(args)
+    let mut cmd = Command::new(nub_binary());
+    cmd.args(args)
         .current_dir(dir)
         .env("XDG_DATA_HOME", pm_tmpdir("xdg-data"))
-        .env("XDG_CACHE_HOME", pm_tmpdir("xdg-cache"))
-        .output()
-        .expect("failed to spawn nub");
+        .env("XDG_CACHE_HOME", pm_tmpdir("xdg-cache"));
+    apply_test_registry(&mut cmd, dir);
+    let out = cmd.output().expect("failed to spawn nub");
     (
         String::from_utf8_lossy(&out.stdout).to_string(),
         String::from_utf8_lossy(&out.stderr).to_string(),
@@ -56,14 +96,14 @@ fn run_install(dir: &Path, args: &[&str]) -> (String, String, i32) {
 /// Like [`run_install`], but with `CI=true` in the environment so the
 /// install hits nub's CI-aware frozen-mode auto-default.
 fn run_install_ci(dir: &Path, args: &[&str]) -> (String, String, i32) {
-    let out = Command::new(nub_binary())
-        .args(args)
+    let mut cmd = Command::new(nub_binary());
+    cmd.args(args)
         .current_dir(dir)
         .env("CI", "true")
         .env("XDG_DATA_HOME", pm_tmpdir("xdg-data"))
-        .env("XDG_CACHE_HOME", pm_tmpdir("xdg-cache"))
-        .output()
-        .expect("failed to spawn nub");
+        .env("XDG_CACHE_HOME", pm_tmpdir("xdg-cache"));
+    apply_test_registry(&mut cmd, dir);
+    let out = cmd.output().expect("failed to spawn nub");
     (
         String::from_utf8_lossy(&out.stdout).to_string(),
         String::from_utf8_lossy(&out.stderr).to_string(),
@@ -147,10 +187,9 @@ fn install_dir_initializes_one_project_snapshot_from_final_cwd() {
 /// `packageManager` / `devEngines` into `package.json`: that exclusivity claim
 /// is reserved for the explicit `nub pm use nub` command.
 #[test]
-#[ignore = "network: resolves + fetches is-positive@3.1.0 from the npm registry"]
 fn install_truly_fresh_project_claims_nub_identity() {
-    if !registry_reachable() {
-        eprintln!("skipping: registry.npmjs.org unreachable");
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY not set — run: source tests/registry/start.bash");
         return;
     }
     let dir = pm_tmpdir("fresh");
@@ -238,10 +277,9 @@ fn install_truly_fresh_project_claims_nub_identity() {
 /// that the default is NOT empty — so a regression that silences the default,
 /// or one that fails to silence `--silent`, both fail.
 #[test]
-#[ignore = "network: resolves + fetches is-positive@3.1.0 from the npm registry"]
 fn install_silent_flag_suppresses_all_nonerror_output() {
-    if !registry_reachable() {
-        eprintln!("skipping: registry.npmjs.org unreachable");
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY not set — run: source tests/registry/start.bash");
         return;
     }
     let manifest = r#"{"name":"q","version":"1.0.0","dependencies":{"is-positive":"3.1.0"}}"#;
@@ -291,10 +329,9 @@ fn install_silent_flag_suppresses_all_nonerror_output() {
 /// the lockfile and merely rewrote the new settings hash while `--force`
 /// correctly failed the same pinned version under the hard age gate.
 #[test]
-#[ignore = "network: resolves is-number@7 and revalidates its publish time"]
 fn release_age_policy_drift_bare_install_matches_force_validation() {
-    if !registry_reachable() {
-        eprintln!("skipping: registry.npmjs.org unreachable");
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY not set — run: source tests/registry/start.bash");
         return;
     }
 
@@ -310,16 +347,16 @@ fn release_age_policy_drift_bare_install_matches_force_validation() {
     std::fs::write(dir.join(".npmrc"), "minimum-release-age=0\n").unwrap();
 
     let run = |args: &[&str]| {
-        Command::new(nub_binary())
-            .args(args)
+        let mut cmd = Command::new(nub_binary());
+        cmd.args(args)
             .current_dir(&dir)
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))
             .env("XDG_DATA_HOME", &data)
             .env("XDG_CACHE_HOME", &cache)
-            .env_remove("CI")
-            .output()
-            .expect("run release-age install")
+            .env_remove("CI");
+        apply_test_registry(&mut cmd, &dir);
+        cmd.output().expect("run release-age install")
     };
 
     let baseline = run(&["install"]);
@@ -442,10 +479,9 @@ fn per_verb_reporter_overrides_pre_verb_silent() {
 /// truly-fresh project: nub stays pnpm-shaped — writes `pnpm-lock.yaml` and
 /// does NOT stamp the manifest.
 #[test]
-#[ignore = "network: resolves + fetches is-positive@3.1.0 from the npm registry"]
 fn install_with_pnpm_workspace_stays_pnpm_shaped_no_stamp() {
-    if !registry_reachable() {
-        eprintln!("skipping: registry.npmjs.org unreachable");
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY not set — run: source tests/registry/start.bash");
         return;
     }
     let dir = pm_tmpdir("pnpm-ws");
@@ -1004,13 +1040,13 @@ fn install_links_yarn_workspace_member_into_consumer() {
 /// warm-satisfied loop, unlike [`run_install`] which isolates a fresh store
 /// per call.
 fn run_install_in_store(dir: &Path, store: &Path, cache: &Path, args: &[&str]) -> (String, i32) {
-    let out = Command::new(nub_binary())
-        .args(args)
+    let mut cmd = Command::new(nub_binary());
+    cmd.args(args)
         .current_dir(dir)
         .env("XDG_DATA_HOME", store)
-        .env("XDG_CACHE_HOME", cache)
-        .output()
-        .expect("failed to spawn nub");
+        .env("XDG_CACHE_HOME", cache);
+    apply_test_registry(&mut cmd, dir);
+    let out = cmd.output().expect("failed to spawn nub");
     (
         String::from_utf8_lossy(&out.stderr).to_string(),
         out.status.code().unwrap_or(-1),
@@ -1028,10 +1064,9 @@ fn run_install_in_store(dir: &Path, store: &Path, cache: &Path, args: &[&str]) -
 /// still trips the gate) is covered by
 /// `cold_install_with_trust_downgrade_still_aborts`.
 #[test]
-#[ignore = "network: resolves + fetches is-positive@3.1.0 from the npm registry"]
 fn warm_satisfied_install_short_circuits_under_no_downgrade() {
-    if !registry_reachable() {
-        eprintln!("skipping: registry.npmjs.org unreachable");
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY not set — run: source tests/registry/start.bash");
         return;
     }
     let dir = pm_tmpdir("warm-satisfied");
@@ -1063,6 +1098,164 @@ fn warm_satisfied_install_short_circuits_under_no_downgrade() {
         "a warm-satisfied online install must short-circuit to 'Already up to date' \
          under the default trustPolicy=no-downgrade, got: {warm_stderr}"
     );
+}
+
+/// A pnpm 12 pin makes pnpm's `--frozen-lockfile` require the pin's env
+/// document at the head of `pnpm-lock.yaml`. A lockfile left without one —
+/// by an older Nub, or by an install whose sync failed offline — must not
+/// count as up to date: the next online `nub install` records it, from the
+/// project root or a workspace member alike, and the install after that is
+/// a byte-for-byte no-op on the warm path.
+#[test]
+#[ignore = "network: resolves is-number@7.0.0 and pnpm@12.16.1 from the npm registry"]
+fn install_records_a_missing_pnpm_pin_then_stays_up_to_date() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    const PIN: &str = r#""packageManager":"pnpm@12.16.1",
+        "devEngines":{"packageManager":{"name":"pnpm","version":"^12.16.1","onFail":"warn"}}"#;
+    const DEPS: &str = r#""dependencies":{"is-number":"7.0.0"}"#;
+    // "settings-only yaml": pnpm 11+'s usual layout, a single project whose
+    // `pnpm-workspace.yaml` carries settings and no `packages:`. It is not a
+    // workspace, so `sharedWorkspaceLockfile: false` must not waive the pin.
+    for layout in ["project", "settings-only yaml", "workspace member"] {
+        let root = pm_tmpdir("pnpm-pin");
+        let store = pm_tmpdir("pnpm-pin-store");
+        let cache = pm_tmpdir("pnpm-pin-cache");
+        let dir = if layout != "workspace member" {
+            std::fs::write(
+                root.join("package.json"),
+                format!(r#"{{"name":"pin",{DEPS},{PIN}}}"#),
+            )
+            .unwrap();
+            if layout == "settings-only yaml" {
+                std::fs::write(
+                    root.join("pnpm-workspace.yaml"),
+                    "sharedWorkspaceLockfile: false\n",
+                )
+                .unwrap();
+            }
+            root.clone()
+        } else {
+            // The pin sits in the root manifest, the install runs in a member.
+            std::fs::write(
+                root.join("package.json"),
+                format!(r#"{{"name":"root",{PIN}}}"#),
+            )
+            .unwrap();
+            std::fs::write(
+                root.join("pnpm-workspace.yaml"),
+                "packages:\n  - packages/*\n",
+            )
+            .unwrap();
+            let member = root.join("packages/a");
+            std::fs::create_dir_all(&member).unwrap();
+            std::fs::write(
+                member.join("package.json"),
+                format!(r#"{{"name":"a",{DEPS}}}"#),
+            )
+            .unwrap();
+            member
+        };
+        let lockfile = root.join("pnpm-lock.yaml");
+        let (stderr, code) = run_install_in_store(&dir, &store, &cache, &["install"]);
+        assert_eq!(code, 0, "{layout}: first install must succeed: {stderr}");
+
+        // Drop the env document, leaving the lockfile an older Nub wrote.
+        let written = std::fs::read_to_string(&lockfile).unwrap();
+        let (_, project) = written
+            .strip_prefix("---\n")
+            .and_then(|rest| rest.split_once("\n---\n"))
+            .unwrap_or_else(|| panic!("{layout}: install must record the pin:\n{written}"));
+        std::fs::write(&lockfile, project).unwrap();
+        // Offline with nothing cached, the sync fails: it warns and writes
+        // nothing rather than reach the registry.
+        let cold_cache = pm_tmpdir("pnpm-pin-cold-cache");
+        let (stderr, code) =
+            run_install_in_store(&dir, &store, &cold_cache, &["install", "--offline"]);
+        assert_eq!(code, 0, "{layout}: offline install must succeed: {stderr}");
+        assert!(
+            stderr.contains("PACKAGE_MANAGER_PIN_NOT_RECORDED"),
+            "{layout}: an offline sync must warn rather than reach the registry: {stderr}"
+        );
+        assert_eq!(std::fs::read_to_string(&lockfile).unwrap(), project);
+        // A frozen install stays lenient (it neither fails nor writes), and
+        // leaves install state current for the document-less lockfile: the
+        // state a failed sync or an older Nub leaves behind, which the warm
+        // path must not accept. (`--offline` itself is part of the state's
+        // flag hash, so it alone would not reach the warm path.)
+        let (stderr, code) =
+            run_install_in_store(&dir, &store, &cache, &["install", "--frozen-lockfile"]);
+        assert_eq!(
+            code, 0,
+            "{layout}: frozen must not reject the lockfile: {stderr}"
+        );
+        assert_eq!(std::fs::read_to_string(&lockfile).unwrap(), project);
+
+        let (stderr, code) = run_install_in_store(&dir, &store, &cache, &["install"]);
+        assert_eq!(code, 0, "{layout}: re-install must succeed: {stderr}");
+        let recorded = std::fs::read_to_string(&lockfile).unwrap();
+        assert!(
+            recorded.starts_with("---\n")
+                && recorded.contains(
+                    "    packageManagerDependencies:\n      pnpm:\n        specifier: ^12.16.1\n        version: 12.16.1\n"
+                ),
+            "{layout}: a lockfile missing the pin is not up to date; install must record it:\n{recorded}"
+        );
+
+        let (stderr, code) = run_install_in_store(&dir, &store, &cache, &["install"]);
+        assert_eq!(code, 0, "{layout}: warm install must succeed: {stderr}");
+        assert!(
+            stderr.contains("Already up to date") && !stderr.contains("package)"),
+            "{layout}: the install after recording must take the warm path: {stderr}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&lockfile).unwrap(),
+            recorded,
+            "{layout}: the warm install must leave the lockfile byte-identical"
+        );
+    }
+}
+
+/// With `lockfile: false` the install writes no lockfile, so it never
+/// records the pnpm pin either, and a stale `pnpm-lock.yaml` must not keep
+/// it off the warm path: the second install is up to date.
+#[test]
+#[ignore = "network: resolves is-number@7.0.0 and pnpm@12.16.1 from the npm registry"]
+fn lockfile_false_does_not_demand_the_pnpm_pin() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let dir = pm_tmpdir("pnpm-pin-nolock");
+    let store = pm_tmpdir("pnpm-pin-nolock-store");
+    let cache = pm_tmpdir("pnpm-pin-nolock-cache");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"pin","dependencies":{"is-number":"7.0.0"},"packageManager":"pnpm@12.16.1"}"#,
+    )
+    .unwrap();
+    let (stderr, code) = run_install_in_store(&dir, &store, &cache, &["install"]);
+    assert_eq!(code, 0, "first install must succeed: {stderr}");
+    let lockfile = dir.join("pnpm-lock.yaml");
+    let written = std::fs::read_to_string(&lockfile).unwrap();
+    let (_, project) = written
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---\n"))
+        .unwrap_or_else(|| panic!("install must record the pin:\n{written}"));
+    std::fs::write(&lockfile, project).unwrap();
+    std::fs::write(dir.join("pnpm-workspace.yaml"), "lockfile: false\n").unwrap();
+
+    let (stderr, code) = run_install_in_store(&dir, &store, &cache, &["install"]);
+    assert_eq!(code, 0, "install must succeed: {stderr}");
+    let (stderr, code) = run_install_in_store(&dir, &store, &cache, &["install"]);
+    assert_eq!(code, 0, "second install must succeed: {stderr}");
+    assert!(
+        stderr.contains("Already up to date") && !stderr.contains("package)"),
+        "with lockfile: false the missing pin must not block the warm path: {stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(&lockfile).unwrap(), project);
 }
 
 /// SECURITY INVARIANT: trusting versions already in the lockfile must NOT weaken

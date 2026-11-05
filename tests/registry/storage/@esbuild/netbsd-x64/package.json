@@ -1,0 +1,75 @@
+{
+  "name": "@esbuild/netbsd-x64",
+  "versions": {
+    "0.21.5": {
+      "name": "@esbuild/netbsd-x64",
+      "version": "0.21.5",
+      "license": "MIT",
+      "_id": "@esbuild/netbsd-x64@0.21.5",
+      "maintainers": [
+        {
+          "name": "evanw",
+          "email": "evan.exe@gmail.com"
+        },
+        {
+          "name": "esbuild",
+          "email": "evan.exe+esbuild@gmail.com"
+        }
+      ],
+      "homepage": "https://github.com/evanw/esbuild#readme",
+      "bugs": {
+        "url": "https://github.com/evanw/esbuild/issues"
+      },
+      "os": [
+        "netbsd"
+      ],
+      "cpu": [
+        "x64"
+      ],
+      "dist": {
+        "shasum": "bbe430f60d378ecb88decb219c602667387a6047",
+        "tarball": "http://localhost:4874/@esbuild/netbsd-x64/-/@esbuild/netbsd-x64-0.21.5.tgz",
+        "fileCount": 3,
+        "integrity": "sha512-Woi2MXzXjMULccIwMnLciyZH4nCIMpWQAs049KEeMvOcNADVxo0UBIQPfSmxB3CWKedngg7sWZdLvLczpe0tLg==",
+        "signatures": [
+          {
+            "sig": "MEQCIBeXMaTmfjnFYqVhQy5rBfCOhCniHQEp1m3D1uss591HAiAprVC+xdGlO6GljuThPGrlr3zdd1OKRnqkGBKGYhichA==",
+            "keyid": "SHA256:jl3bwswu80PjjokCgh0o2w5c2U4LhQAE57gj9cz1kzA"
+          }
+        ],
+        "unpackedSize": 9691886
+      },
+      "engines": {
+        "node": ">=12"
+      },
+      "gitHead": "fc37c2fa9de2ad77476a6d4a8f1516196b90187e",
+      "_npmUser": {
+        "name": "evanw",
+        "email": "evan.exe@gmail.com"
+      },
+      "repository": {
+        "url": "git+https://github.com/evanw/esbuild.git",
+        "type": "git"
+      },
+      "_npmVersion": "10.5.1",
+      "description": "The NetBSD AMD64 binary for esbuild, a JavaScript bundler.",
+      "directories": {},
+      "_nodeVersion": "22.0.0",
+      "_hasShrinkwrap": false,
+      "_npmOperationalInternal": {
+        "tmp": "tmp/netbsd-x64_0.21.5_1717967812340_0.7746355149291662",
+        "host": "s3://npm-registry-packages"
+      }
+    }
+  },
+  "time": {
+    "created": "2022-12-05T23:55:55.712Z",
+    "modified": "2026-08-08T19:58:58.805Z",
+    "0.21.5": "2024-06-09T21:16:52.583Z"
+  },
+  "_distfiles": {},
+  "_uplinks": {},
+  "dist-tags": {
+    "latest": "0.21.5"
+  }
+}

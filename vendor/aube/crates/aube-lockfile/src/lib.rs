@@ -14,7 +14,7 @@ pub mod yarn;
 
 pub use detect::{
     DeclarationSource, DeclaredPackageManager, ResolvedLockfileKind, declared_package_manager,
-    resolve_project_lockfile_kind,
+    declared_version_for, resolve_project_lockfile_kind,
 };
 pub use drift::DriftStatus;
 pub use io::{
@@ -1315,6 +1315,68 @@ impl LockfileGraph {
             extra_fields: self.extra_fields.clone(),
             workspace_extra_fields: self.workspace_extra_fields.clone(),
         })
+    }
+
+    /// Pass the path of every path-based local package (`file:`, `link:`,
+    /// `portal:`, `exec:`) through `rebase`, re-keying it and every importer
+    /// and package edge that points at it.
+    ///
+    /// The resolver and linker keep those paths relative to the workspace
+    /// root, while a per-project lockfile (`sharedWorkspaceLockfile=false`)
+    /// records them relative to its own project, as pnpm does. This moves a
+    /// graph between the two frames.
+    pub fn rebase_local_paths(&mut self, rebase: impl Fn(&std::path::Path) -> std::path::PathBuf) {
+        let mut renames: BTreeMap<String, String> = BTreeMap::new();
+        for (key, pkg) in &mut self.packages {
+            let Some(local) = pkg.local_source.as_mut() else {
+                continue;
+            };
+            let old_base = local.dep_path(&pkg.name);
+            let path = match local {
+                LocalSource::Directory(p)
+                | LocalSource::Tarball(p)
+                | LocalSource::Link(p)
+                | LocalSource::Portal(p)
+                | LocalSource::Exec(p) => p,
+                LocalSource::Git(_) | LocalSource::RemoteTarball(_) => continue,
+            };
+            *path = rebase(path);
+            // A peer-context suffix after the hashed base stays as it was.
+            if let Some(rest) = key.strip_prefix(&old_base) {
+                renames.insert(key.clone(), format!("{}{rest}", local.dep_path(&pkg.name)));
+            }
+        }
+        renames.retain(|old, new| old != new);
+        if renames.is_empty() {
+            return;
+        }
+        self.packages = std::mem::take(&mut self.packages)
+            .into_iter()
+            .map(|(key, mut pkg)| {
+                let key = match renames.get(&key) {
+                    Some(new) => {
+                        pkg.dep_path.clone_from(new);
+                        new.clone()
+                    }
+                    None => key,
+                };
+                for edges in [&mut pkg.dependencies, &mut pkg.optional_dependencies] {
+                    for (name, tail) in edges.iter_mut() {
+                        if let Some(new) = renames.get(&format!("{name}@{tail}"))
+                            && let Some(new_tail) = new.strip_prefix(&format!("{name}@"))
+                        {
+                            *tail = new_tail.to_string();
+                        }
+                    }
+                }
+                (key, pkg)
+            })
+            .collect();
+        for dep in self.importers.values_mut().flatten() {
+            if let Some(new) = renames.get(&dep.dep_path) {
+                dep.dep_path.clone_from(new);
+            }
+        }
     }
 
     /// Overlay per-package metadata fields from `prior` onto `self`

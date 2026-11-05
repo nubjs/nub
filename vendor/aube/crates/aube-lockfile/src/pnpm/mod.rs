@@ -1,5 +1,6 @@
 mod checksum;
 mod dep_path;
+mod env;
 mod format;
 pub mod hook_view;
 mod raw;
@@ -11,6 +12,10 @@ mod write;
 mod tests;
 
 pub use checksum::{package_extensions_checksum, pnpmfile_checksum};
+pub use env::{
+    EnvDependency, EnvLockfile, compose_with_env_document, read_env_document,
+    render_package_manager_env, split_env_document,
+};
 pub use read::{parse, parse_with_options};
 pub use write::write;
 
