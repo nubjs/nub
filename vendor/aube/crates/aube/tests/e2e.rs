@@ -1647,3 +1647,137 @@ fn member_licenses_read_a_linked_sibling_under_per_project_lockfiles() {
         );
     }
 }
+
+/// Serve a one-package registry on loopback: the packument for `flaky` on any
+/// path but its tarball's. While `cut` is set, the next tarball response
+/// promises the whole body and closes the connection halfway through it, as a
+/// dropped download does. Returns the registry URL and the path of every
+/// tarball request.
+fn serve_flaky_registry(
+    tarball: Vec<u8>,
+    cut: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> (String, std::sync::Arc<Mutex<Vec<String>>>) {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let integrity = format!(
+        "sha512-{}",
+        base64::engine::general_purpose::STANDARD.encode(sha2::Sha512::digest(&tarball))
+    );
+    // Old enough for the default `minimumReleaseAge`.
+    let published = "2020-01-01T00:00:00.000Z";
+    let packument = serde_json::json!({
+        "name": "flaky",
+        "dist-tags": { "latest": "1.0.0" },
+        "modified": published,
+        "time": { "created": published, "modified": published, "1.0.0": published },
+        "versions": {
+            "1.0.0": {
+                "name": "flaky",
+                "version": "1.0.0",
+                "dist": {
+                    "tarball": format!("{url}flaky/-/flaky-1.0.0.tgz"),
+                    "integrity": integrity,
+                },
+            },
+        },
+    })
+    .to_string();
+    let requests = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let seen = requests.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            loop {
+                let mut header = String::new();
+                match reader.read_line(&mut header) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) if header == "\r\n" || header == "\n" => break,
+                    Ok(_) => {}
+                }
+            }
+            let path = line.split_whitespace().nth(1).unwrap_or_default();
+            let is_tarball = path.ends_with(".tgz");
+            let body = if is_tarball {
+                seen.lock().unwrap().push(path.to_string());
+                tarball.as_slice()
+            } else {
+                packument.as_bytes()
+            };
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let sent = if is_tarball && cut.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                &body[..body.len() / 2]
+            } else {
+                body
+            };
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(sent);
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+        }
+    });
+    (url, requests)
+}
+
+/// A tarball download the connection cuts off is downloaded again, on both
+/// paths that fetch one: the fresh resolve, which fetches as it resolves, and
+/// the install from a lockfile. The streaming fetch used to fail the install
+/// on the first broken body.
+#[test]
+fn a_tarball_download_cut_off_mid_body_is_retried() {
+    let _guard = e2e_lock();
+    let sbx = Sandbox::new();
+    let tarball = codeload_tarball(
+        "package",
+        &[
+            ("package.json", r#"{ "name": "flaky", "version": "1.0.0" }"#),
+            ("index.js", "module.exports = 7;\n"),
+        ],
+    );
+    let cut = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (registry, requests) = serve_flaky_registry(tarball, cut.clone());
+    sbx.write_manifest(
+        r#"{ "name": "consumer", "version": "0.0.0", "dependencies": { "flaky": "1.0.0" } }"#,
+    );
+    sbx.write_file(".npmrc", &format!("registry={registry}\n"));
+    for (shape, from_lockfile) in [("fresh resolve", false), ("lockfile install", true)] {
+        for dir in [&sbx.store, &sbx.cache] {
+            let _ = fs::remove_dir_all(dir);
+            fs::create_dir_all(dir).unwrap();
+        }
+        let _ = fs::remove_dir_all(sbx.project.join("node_modules"));
+        assert_eq!(
+            sbx.project.join("aube-lock.yaml").exists(),
+            from_lockfile,
+            "{shape}"
+        );
+        requests.lock().unwrap().clear();
+        cut.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let out = sbx.cmd().arg("install").output().unwrap();
+        assert!(
+            out.status.success(),
+            "{shape}: install failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(sbx.project.join("node_modules/flaky/index.js")).unwrap(),
+            "module.exports = 7;\n",
+            "{shape}"
+        );
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            2,
+            "{shape}: the cut-off download and the one after it"
+        );
+    }
+}
