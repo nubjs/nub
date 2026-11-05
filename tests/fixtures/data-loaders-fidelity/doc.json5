@@ -1,0 +1,1 @@
+{ nan: NaN, ninf: -Infinity, zero: -0.0 }
