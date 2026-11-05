@@ -129,7 +129,11 @@ function installSyncPolyfills(preloaded) {
   // force one throwaway construction INSIDE a suppression window: that consumes
   // Node's once-per-feature guard (the warning is dropped here) so the user's later
   // `new File(...)` is silent.
-  if (typeof globalThis.File === "undefined" || typeof globalThis.Blob === "undefined") {
+  //
+  // Probe with `in`, never `typeof`: from Node 20 `File` is a lazy global, and
+  // reading its value loads `internal/file` into every augmented startup. `in`
+  // sees the property without materializing it.
+  if (!("File" in globalThis) || !("Blob" in globalThis)) {
     const origEmitWarning = process.emitWarning;
     process.emitWarning = function (warning, ...rest) {
       const opt = rest[0];

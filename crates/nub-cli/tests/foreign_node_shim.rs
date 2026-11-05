@@ -211,3 +211,77 @@ fn a_deep_chain_of_nested_node_runs_stays_on_the_same_node() {
         format!("depth 20 {}", node.display())
     );
 }
+
+/// A version manager's shim is one path whose Node depends on the directory, so a
+/// version learned in one project must not be reused in another. Reusing one handed
+/// a Node 26 flag to the Node 24 the next project selected: `bad option`, exit 9.
+/// Here the second project's Node is older than nub's floor, which nub reports only
+/// if it asked the shim again rather than reading the first project's answer.
+#[test]
+fn a_shim_serving_a_different_node_per_project_is_asked_again_in_each() {
+    let Some(node) = real_node() else {
+        eprintln!("skipping: no Node on PATH");
+        return;
+    };
+    let root = tmp("per-project");
+    let old = root.join("old-node");
+    std::fs::write(
+        &old,
+        "#!/bin/sh\n\
+         case \"$1\" in\n\
+           --version) echo v16.20.2 ;;\n\
+           -e) printf 'v16.20.2\\n%s' \"$0\" ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // Like mise reading the directory's `mise.toml`: a marker file picks the Node.
+    let shim_dir = root.join("shims");
+    std::fs::create_dir_all(&shim_dir).unwrap();
+    let shim = shim_dir.join("node");
+    std::fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\n\
+             if [ -f use-old-node ]; then exec '{}' \"$@\"; fi\n\
+             exec '{}' \"$@\"\n",
+            old.display(),
+            node.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let run_in = |project: &str| {
+        let dir = root.join(project);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("package.json"), r#"{"name":"p","private":true}"#).unwrap();
+        if project == "old" {
+            std::fs::write(dir.join("use-old-node"), "").unwrap();
+        }
+        Command::new(nub_binary())
+            .args(["-p", "process.version"])
+            .current_dir(&dir)
+            .env(
+                "PATH",
+                std::env::join_paths([shim_dir.clone(), "/usr/bin".into(), "/bin".into()]).unwrap(),
+            )
+            .env("XDG_CACHE_HOME", root.join("cache"))
+            .env_remove("NODE_COMPAT")
+            .env_remove("NODE_OPTIONS")
+            .output()
+            .expect("spawn nub")
+    };
+
+    let current = run_in("current");
+    assert_ok(&current);
+    let old_run = run_in("old");
+    let stderr = String::from_utf8_lossy(&old_run.stderr);
+    assert!(
+        !old_run.status.success() && stderr.contains("requires Node 18.19 or newer"),
+        "the old project's Node is 16.20.2, so nub must refuse it; got {:?}\nstderr:\n{stderr}",
+        old_run.status.code()
+    );
+    // And back again: the refusal is not remembered for the shim either.
+    assert_ok(&run_in("current"));
+}

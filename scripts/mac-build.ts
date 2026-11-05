@@ -22,7 +22,7 @@
 // local incremental remains the fastest way to iterate and should stay local.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, copyFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, copyFileSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -213,7 +213,15 @@ async function main() {
   mkdirSync(outDir, { recursive: true });
   const name = artifactName(a.profile);
   process.stdout.write(`mac-build: downloading ${name} → ${outDir}\n`);
-  sh("gh", ["run", "download", String(runId), "-n", name, "-D", outDir], { cwd: root });
+  // `gh run download` refuses to overwrite a file, so a repeat build into the same directory
+  // would die here, after the whole run. Unpack beside the destination and move into place,
+  // which also leaves the previous artifact intact if the download itself fails.
+  const unpacked = mkdtempSync(join(outDir, ".download-"));
+  sh("gh", ["run", "download", String(runId), "-n", name, "-D", unpacked], { cwd: root });
+  for (const entry of readdirSync(unpacked)) {
+    renameSync(join(unpacked, entry), join(outDir, entry));
+  }
+  rmSync(unpacked, { recursive: true });
 
   const bin = join(outDir, "nub");
   const addon = join(outDir, "nub-native.node");

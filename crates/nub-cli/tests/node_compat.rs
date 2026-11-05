@@ -25,8 +25,8 @@ enum RunOutcome {
     TimedOut,
 }
 
-/// Spawn `nub <test>` and wait up to [`PER_TEST_TIMEOUT`], killing the child if
-/// it overruns. Polls `try_wait` rather than blocking on `output()` so a hung
+/// Spawn `nub <test>` and wait up to `timeout`, killing the child if it
+/// overruns. Polls `try_wait` rather than blocking on `output()` so a hung
 /// child can't wedge the suite. stdout is discarded; stderr is captured for the
 /// failure report.
 ///
@@ -56,9 +56,10 @@ fn run_with_timeout(
     cwd: &Path,
     tmp: &Path,
     serial_id: usize,
+    timeout: Duration,
 ) -> RunOutcome {
-    let mut child = match Command::new(nub)
-        .args(flags)
+    let mut cmd = Command::new(nub);
+    cmd.args(flags)
         .arg(test_path)
         .current_dir(cwd)
         .env("NODE_TEST_KNOWN_GLOBALS", "0")
@@ -68,58 +69,196 @@ fn run_with_timeout(
         .env("TEST_SERIAL_ID", serial_id.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+        .stderr(Stdio::piped());
+    // Each test runs in a session of its own, so `reap_session` can find what it
+    // leaves behind. A process group is not enough: Nub puts Node in a group of
+    // its own (`group_on_spawn`), so the servers, workers and `process.execPath`
+    // children a test starts sit in Node's group, not Nub's, but they all stay in
+    // this session. Killing only the leader orphaned them to PID 1, where they
+    // kept running.
+    #[cfg(unix)]
+    // SAFETY: setsid(2) is async-signal-safe and touches no parent state.
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(&mut cmd, || {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return RunOutcome::Failed(format!("spawn error: {e}")),
     };
-
-    // Drain stderr WHILE the child runs. Reading it only after exit deadlocks a
-    // chatty test: once the pipe's buffer fills, the child blocks on its next
-    // write and never exits, which the gate then misreports as a hang
-    // (test-stream2-large-read-stall.js logs every push and read).
-    let drain = child.stderr.take().map(|mut s| {
-        std::thread::spawn(move || {
-            let mut stderr = String::new();
-            let _ = s.read_to_string(&mut stderr);
-            stderr
-        })
-    });
-    let collect = |drain: Option<std::thread::JoinHandle<String>>| {
-        drain.and_then(|h| h.join().ok()).unwrap_or_default()
-    };
+    let mut stderr = StderrDrain::new(child.stderr.take());
 
     let start = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let stderr = collect(drain);
+                // A clean leader exit can still leave a server or worker running.
+                reap_session(&child);
+                let stderr = stderr.finish();
                 if status.success() {
                     return RunOutcome::Passed;
                 }
                 let code = status.code().unwrap_or(-1);
-                let snippet = if stderr.len() > 200 {
-                    format!("\n  {}", &stderr[..200])
-                } else if !stderr.is_empty() {
-                    format!("\n  {stderr}")
+                let snippet: String = stderr.chars().take(200).collect();
+                let snippet = if snippet.is_empty() {
+                    snippet
                 } else {
-                    String::new()
+                    format!("\n  {snippet}")
                 };
                 return RunOutcome::Failed(format!("exit {code}{snippet}"));
             }
             Ok(None) => {
-                if start.elapsed() >= PER_TEST_TIMEOUT {
+                if start.elapsed() >= timeout {
+                    reap_session(&child);
                     let _ = child.kill();
                     let _ = child.wait();
-                    let _ = collect(drain);
+                    let _ = stderr.finish();
                     return RunOutcome::TimedOut;
                 }
+                stderr.pump();
                 std::thread::sleep(Duration::from_millis(25));
             }
             Err(e) => return RunOutcome::Failed(format!("wait error: {e}")),
         }
     }
+}
+
+/// A test's stderr, read WHILE it runs: reading only after exit deadlocks a
+/// chatty test, which blocks on its next write once the pipe fills and is then
+/// misreported as a hang (test-stream2-large-read-stall.js logs every push and
+/// read).
+///
+/// On unix the pipe is non-blocking and read from the poll loop, then once more
+/// after the reap, and closed. A blocking read would last until every holder of
+/// the pipe exits, and one `reap_session` cannot reach (a `detached: true`
+/// child starts its own session, as test-listen-fd-detached-inherit.js does
+/// with stderr inherited) would hold up the whole suite, or leave a reader
+/// thread behind per test.
+#[cfg(unix)]
+struct StderrDrain {
+    pipe: Option<std::process::ChildStderr>,
+    buf: Vec<u8>,
+}
+
+#[cfg(unix)]
+impl StderrDrain {
+    fn new(pipe: Option<std::process::ChildStderr>) -> Self {
+        if let Some(pipe) = &pipe {
+            use std::os::fd::AsRawFd;
+            let fd = pipe.as_raw_fd();
+            // SAFETY: fcntl(2) on a descriptor this drain owns.
+            unsafe {
+                libc::fcntl(
+                    fd,
+                    libc::F_SETFL,
+                    libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK,
+                );
+            }
+        }
+        Self {
+            pipe,
+            buf: Vec::new(),
+        }
+    }
+
+    /// Read whatever is buffered without waiting for more.
+    fn pump(&mut self) {
+        let Some(pipe) = &mut self.pipe else { return };
+        let mut chunk = [0u8; 8192];
+        let open = loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break false,
+                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => break e.kind() == std::io::ErrorKind::WouldBlock,
+            }
+        };
+        if !open {
+            self.pipe = None;
+        }
+    }
+
+    fn finish(mut self) -> String {
+        self.pump();
+        String::from_utf8_lossy(&self.buf).into_owned()
+    }
+}
+
+/// Off unix there is no session to reap, so stderr is read on a thread and
+/// joined after exit.
+#[cfg(not(unix))]
+struct StderrDrain(Option<std::thread::JoinHandle<String>>);
+
+#[cfg(not(unix))]
+impl StderrDrain {
+    fn new(pipe: Option<std::process::ChildStderr>) -> Self {
+        Self(pipe.map(|mut pipe| {
+            std::thread::spawn(move || {
+                let mut stderr = String::new();
+                let _ = pipe.read_to_string(&mut stderr);
+                stderr
+            })
+        }))
+    }
+
+    fn pump(&mut self) {}
+
+    fn finish(self) -> String {
+        self.0.and_then(|h| h.join().ok()).unwrap_or_default()
+    }
+}
+
+/// SIGKILL every process in the test's session: the child is the session leader,
+/// so this is its whole subtree and nothing outside it. A process can fork
+/// between a scan and its kill, so scan again until a pass turns up nothing new.
+/// Off unix the caller's `child.kill()` is the only cleanup.
+fn reap_session(child: &std::process::Child) {
+    #[cfg(unix)]
+    {
+        let sid = child.id() as libc::pid_t;
+        let mut killed = std::collections::HashSet::new();
+        for _ in 0..10 {
+            let fresh: Vec<libc::pid_t> = all_pids()
+                .into_iter()
+                // SAFETY: getsid(2) and kill(2) take no pointers.
+                .filter(|&pid| unsafe { libc::getsid(pid) } == sid && killed.insert(pid))
+                .collect();
+            if fresh.is_empty() {
+                break;
+            }
+            for pid in fresh {
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = child;
+}
+
+#[cfg(target_os = "macos")]
+fn all_pids() -> Vec<libc::pid_t> {
+    // SAFETY: a null buffer only asks for the count; the second call writes at
+    // most `buf.len()` pids, and both return a count of pids, not bytes.
+    unsafe {
+        let n = libc::proc_listallpids(std::ptr::null_mut(), 0).max(0) as usize;
+        let mut buf: Vec<libc::pid_t> = vec![0; n + 64];
+        let size = (buf.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+        let got = libc::proc_listallpids(buf.as_mut_ptr().cast(), size).max(0) as usize;
+        buf.truncate(got);
+        buf
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn all_pids() -> Vec<libc::pid_t> {
+    fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse().ok())
+        .collect()
 }
 
 fn nub_binary() -> PathBuf {
@@ -286,7 +425,15 @@ fn node_compat_suite() {
                     for rel in &bucket {
                         let test_path = suite.join(rel);
                         let flags = test_flags(&test_path);
-                        match run_with_timeout(nub, &test_path, &flags, suite_root, &tmp, wid) {
+                        match run_with_timeout(
+                            nub,
+                            &test_path,
+                            &flags,
+                            suite_root,
+                            &tmp,
+                            wid,
+                            PER_TEST_TIMEOUT,
+                        ) {
                             RunOutcome::Passed => p += 1,
                             RunOutcome::Failed(_) | RunOutcome::TimedOut => {
                                 suspect.push(rel.clone())
@@ -330,7 +477,15 @@ fn node_compat_suite() {
     for rel in &suspects {
         let test_path = suite.join(rel);
         let flags = test_flags(&test_path);
-        match run_with_timeout(&nub, &test_path, &flags, &suite_root, &reverify_tmp, 0) {
+        match run_with_timeout(
+            &nub,
+            &test_path,
+            &flags,
+            &suite_root,
+            &reverify_tmp,
+            0,
+            PER_TEST_TIMEOUT,
+        ) {
             RunOutcome::Passed => {
                 passed += 1;
                 false_positives += 1;
@@ -363,4 +518,77 @@ fn node_compat_suite() {
         0,
         "{failed} Node compat tests failed, {timed_out} timed out (confirmed in isolation)"
     );
+}
+
+/// The reap reaches what a test leaves behind even though Nub runs Node in a
+/// process group of its own: a child still holding the test's stderr, after a
+/// clean exit and after a timeout. Without it, the exit case waited on that
+/// child for as long as it lived.
+#[cfg(unix)]
+#[test]
+fn leftover_processes_are_killed_when_a_test_exits_or_times_out() {
+    let dir = std::env::temp_dir().join(format!("nub-compat-reap-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    for (name, ending, expected) in [
+        ("exits.js", "c.unref();", "passed"),
+        ("hangs.js", "setInterval(() => {}, 1000);", "timed out"),
+    ] {
+        let script = dir.join(name);
+        fs::write(
+            &script,
+            format!(
+                "const c = require('child_process').spawn(process.execPath, \
+                 ['-e', 'setInterval(() => {{}}, 1000)'], {{ stdio: ['ignore', 'ignore', 'inherit'] }});\n\
+                 require('fs').writeFileSync(__filename + '.pid', String(c.pid));\n{ending}\n"
+            ),
+        )
+        .unwrap();
+
+        let outcome = run_with_timeout(
+            &nub_binary(),
+            &script,
+            &[],
+            &dir,
+            &dir,
+            0,
+            // Far above startup on a loaded machine, so only hangs.js reaches it.
+            Duration::from_secs(10),
+        );
+        let pid: libc::pid_t = fs::read_to_string(dir.join(format!("{name}.pid")))
+            .expect("the fixture never wrote its child's pid")
+            .parse()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while running(pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let survived = running(pid);
+        // SAFETY: kill(2) takes no pointers.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+
+        let got = match outcome {
+            RunOutcome::Passed => "passed".to_string(),
+            RunOutcome::Failed(detail) => format!("failed: {detail}"),
+            RunOutcome::TimedOut => "timed out".to_string(),
+        };
+        assert_eq!(got, expected, "{name}: wrong outcome");
+        assert!(
+            !survived,
+            "{name}: the child it left (pid {pid}) is still running"
+        );
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Alive and not a zombie: a killed orphan can wait a moment for its new parent
+/// to reap it.
+#[cfg(unix)]
+fn running(pid: libc::pid_t) -> bool {
+    let zombie = fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
+        s.rsplit(')')
+            .next()
+            .is_some_and(|r| r.trim_start().starts_with('Z'))
+    });
+    // SAFETY: kill(2) with signal 0 only checks that the process exists.
+    !zombie && unsafe { libc::kill(pid, 0) } == 0
 }

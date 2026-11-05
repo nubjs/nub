@@ -4363,7 +4363,8 @@ pub(crate) fn runtime_node_options_with(
     fold: FoldInherited,
     tsconfig_gate: TsconfigGate,
 ) -> Result<Vec<String>> {
-    let accepted = nub_core::node::discovery::accepted_env_flags(node.path.as_std_path());
+    let accepted =
+        nub_core::node::discovery::accepted_env_flags(node.path.as_std_path(), &node.version);
     let mut options = Vec::new();
 
     for value in &runtime.node_options {
@@ -7293,7 +7294,8 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
 
     let node_options_os = env::var_os("NODE_OPTIONS");
     let node_options = node_options_os.as_ref().and_then(|value| value.to_str());
-    let accepted = nub_core::node::discovery::accepted_env_flags(node.path.as_std_path());
+    let accepted =
+        nub_core::node::discovery::accepted_env_flags(node.path.as_std_path(), &node.version);
     let inject = nub_core::node::flags::compute_inject_flags(
         node.version.clone(),
         args,

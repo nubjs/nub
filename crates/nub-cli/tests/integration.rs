@@ -2754,7 +2754,7 @@ fn version_flag_never_spawns_node_even_when_node_is_slow() {
         .unwrap()
         .as_secs();
     let cache_json = format!(
-        r#"{{"{}":{{"version":"22.16.0","mtime":{mtime}}}}}"#,
+        r#"{{"{}":{{"kind":"binary","version":"22.16.0","mtime":{mtime}}}}}"#,
         fake_node.to_string_lossy()
     );
     std::fs::write(cache.join("nub").join("node-discovery.json"), cache_json).unwrap();

@@ -332,10 +332,10 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
     // — and it is also the backstop for a version inferred from a directory name
     // that lies. Skipping it for a Node nub embedded or just provisioned keeps the
     // common path at zero extra spawns; `accepted_env_flags` caches per
-    // (path, mtime), so even the discovered path pays the probe once.
+    // (path, version, mtime), so even the discovered path pays the probe once.
     let accepted = match origin {
         NodeOrigin::Managed => None,
-        NodeOrigin::Discovered => discovery::accepted_env_flags(&node_path),
+        NodeOrigin::Discovered => discovery::accepted_env_flags(&node_path, &version),
     };
     phase("  flags: accepted_env_flags");
     let mut inject = flags::compute_inject_flags(
@@ -2146,8 +2146,10 @@ fn probe_node_version(probes: &cache::ProbeStore, path: &Path) -> Option<NodeVer
         }
     }
     phase_with(|| format!("  PROBE EXEC: {}", path.display()));
-    let version = probe_node_version_inner(path)?;
-    if let Some(stamp) = &stamp {
+    let (version, direct) = probe_node_version_inner(path)?;
+    // A version manager's shim is one path serving whichever Node the directory
+    // selects, so only a path that IS the binary that answered may be remembered.
+    if let Some(stamp) = stamp.as_ref().filter(|_| direct) {
         cache::write_node_version(path, stamp, &version.to_string());
     }
     Some(version)
@@ -2172,7 +2174,24 @@ fn node_binary_stamp(path: &Path) -> Option<String> {
     Some(format!("{mtime}:{}", metadata.len()))
 }
 
-fn probe_node_version_inner(path: &Path) -> Option<NodeVersion> {
+/// The version of the Node at `path`, and whether `path` is that Node itself rather
+/// than a shim that ran it, from `process.execPath`. A binary that cannot answer the
+/// `-e` probe still reports `--version`, counted as not itself since nothing about
+/// its identity was learned.
+fn probe_node_version_inner(path: &Path) -> Option<(NodeVersion, bool)> {
+    let mut probe = Command::new(path);
+    probe
+        .arg("-e")
+        .arg("process.stdout.write(process.version + \"\\n\" + process.execPath)")
+        .env_remove("NODE_OPTIONS");
+    hidden::apply(&mut probe);
+    if let Ok(out) = probe.output()
+        && out.status.success()
+        && let Some((version, exec_path)) = String::from_utf8_lossy(&out.stdout).split_once('\n')
+        && let Ok(version) = version.trim().parse()
+    {
+        return Some((version, same_file(path, Path::new(exec_path.trim()))));
+    }
     let mut probe = Command::new(path);
     probe.arg("--version");
     hidden::apply(&mut probe);
@@ -2180,7 +2199,22 @@ fn probe_node_version_inner(path: &Path) -> Option<NodeVersion> {
     if !out.status.success() {
         return None;
     }
-    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    Some((
+        String::from_utf8_lossy(&out.stdout).trim().parse().ok()?,
+        false,
+    ))
+}
+
+/// Whether two paths name one file, hard links included where the platform says.
+fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(a), Ok(b)) = (fs::metadata(a), fs::metadata(b)) {
+            return a.dev() == b.dev() && a.ino() == b.ino();
+        }
+    }
+    matches!((fs::canonicalize(a), fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b)
 }
 
 /// Minimal `which`: first PATH entry containing an executable `name`.
@@ -5243,6 +5277,35 @@ mod tests {
         fs::write(&node, script).unwrap();
         set_executable(&node).unwrap();
         node
+    }
+
+    /// Only a path that IS the Node that answered may have its version remembered: a
+    /// version manager's shim serves whichever Node the directory selects, so a
+    /// verdict recorded through it in one project is wrong in the next.
+    #[cfg(unix)]
+    #[test]
+    fn a_probe_through_a_shim_is_not_counted_as_the_binary_itself() {
+        let base = fresh_cache_dir("smol-probe-shim");
+        let node = fake_version_manager_node(
+            &base,
+            "24.14.0",
+            "#!/bin/sh\nprintf 'v24.14.0\\n%s' \"$0\"\n",
+        );
+        let shim = base.join("shim-node");
+        fs::write(
+            &shim,
+            format!("#!/bin/sh\nexec '{}' \"$@\"\n", node.display()),
+        )
+        .unwrap();
+        set_executable(&shim).unwrap();
+
+        let version = NodeVersion::new(24, 14, 0);
+        assert_eq!(
+            probe_node_version_inner(&node),
+            Some((version.clone(), true))
+        );
+        assert_eq!(probe_node_version_inner(&shim), Some((version, false)));
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[cfg(unix)]

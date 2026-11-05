@@ -794,6 +794,74 @@ fn an_importers_own_bin_never_shadows_a_dependencys_bin() {
     }
 }
 
+/// The contents of the first file named `name` under `dir`, if any.
+fn read_file_under(dir: &std::path::Path, name: &str) -> Option<String> {
+    for entry in fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        let file_type = entry.file_type().ok()?;
+        if file_type.is_dir() {
+            if let Some(found) = read_file_under(&path, name) {
+                return Some(found);
+            }
+        } else if entry.file_name() == name {
+            return fs::read_to_string(path).ok();
+        }
+    }
+    None
+}
+
+/// Under `sharedWorkspaceLockfile: false` a member's lockfile is its own, but
+/// install links its packages into the workspace root's virtual store and
+/// takes approvals from the root. A member-scoped rebuild has to look there:
+/// resolved against the member it found nothing and exited 0. The root may
+/// also be config-only, a `pnpm-workspace.yaml` with no `package.json`.
+#[test]
+fn member_rebuild_with_per_project_lockfiles_runs_root_approved_builds() {
+    let _guard = e2e_lock();
+    for root_manifest in [true, false] {
+        let sbx = Sandbox::new();
+        sbx.write_file(
+            "dep/package.json",
+            r#"{
+                "name": "rebuild-dep",
+                "version": "1.0.0",
+                "scripts": { "postinstall": "node -e \"require('fs').appendFileSync('RUNS', 'x')\"" }
+            }"#,
+        );
+        sbx.write_file(
+            "packages/a/package.json",
+            r#"{ "name": "a", "version": "1.0.0", "dependencies": { "rebuild-dep": "file:../../dep" } }"#,
+        );
+        sbx.write_file(
+            "pnpm-workspace.yaml",
+            "packages:\n  - packages/*\nsharedWorkspaceLockfile: false\nallowBuilds:\n  \"rebuild-dep@file:dep\": true\n",
+        );
+        if root_manifest {
+            sbx.write_manifest(r#"{ "name": "root", "version": "1.0.0", "private": true }"#);
+        }
+
+        sbx.cmd().arg("install").assert().success();
+        let node_modules = sbx.project.join("node_modules");
+        assert_eq!(
+            read_file_under(&node_modules, "RUNS").as_deref(),
+            Some("x"),
+            "install must build rebuild-dep once in the root virtual store \
+             (root package.json: {root_manifest})"
+        );
+
+        sbx.cmd()
+            .args(["--filter", "a", "rebuild"])
+            .assert()
+            .success();
+        assert_eq!(
+            read_file_under(&node_modules, "RUNS").as_deref(),
+            Some("xx"),
+            "`--filter a rebuild` must re-run rebuild-dep's postinstall where install put it \
+             (root package.json: {root_manifest})"
+        );
+    }
+}
+
 /// Find `program` on the test's own `PATH`.
 fn find_on_path(program: &str) -> std::path::PathBuf {
     let names: Vec<String> = if cfg!(windows) {
@@ -807,6 +875,21 @@ fn find_on_path(program: &str) -> std::path::PathBuf {
         .unwrap_or_else(|| panic!("{program} must be on PATH for this test"))
 }
 
+/// The Node binary itself. `node` on the host's PATH may be a version
+/// manager's shim, Nub's included, which looks `node` up on PATH again; linked
+/// into a private bin dir it finds its own link and recurses.
+fn real_node() -> std::path::PathBuf {
+    let out = std::process::Command::new(find_on_path("node"))
+        .args(["-p", "process.execPath"])
+        .output()
+        .expect("running node");
+    assert!(
+        out.status.success(),
+        "node -p process.execPath failed: {out:?}"
+    );
+    std::path::PathBuf::from(String::from_utf8(out.stdout).unwrap().trim())
+}
+
 /// A `PATH` holding `node`, `git` and a shell, and no `cp`. On Unix the
 /// tools are symlinked into a private dir, because the dir `git` lives in
 /// (`/usr/bin`) carries `cp` too. On Windows each tool's own dir is used
@@ -818,7 +901,7 @@ fn path_without_cp(sbx: &Sandbox) -> std::ffi::OsString {
         )
         .join("System32");
         vec![
-            find_on_path("node").parent().unwrap().to_path_buf(),
+            real_node().parent().unwrap().to_path_buf(),
             find_on_path("git").parent().unwrap().to_path_buf(),
             system32,
         ]
@@ -826,8 +909,11 @@ fn path_without_cp(sbx: &Sandbox) -> std::ffi::OsString {
         let bin = sbx.home.join("bin-without-cp");
         fs::create_dir_all(&bin).unwrap();
         #[cfg(unix)]
-        for tool in ["node", "git", "sh"] {
-            std::os::unix::fs::symlink(find_on_path(tool), bin.join(tool)).unwrap();
+        {
+            std::os::unix::fs::symlink(real_node(), bin.join("node")).unwrap();
+            for tool in ["git", "sh"] {
+                std::os::unix::fs::symlink(find_on_path(tool), bin.join(tool)).unwrap();
+            }
         }
         vec![bin]
     };
