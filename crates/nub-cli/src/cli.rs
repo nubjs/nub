@@ -723,7 +723,10 @@ impl Argv0 {
 /// argv0 is a fresh user invocation and gets the parent's captured ambient
 /// environment back. A hidden internal re-entry belongs to its parent and is
 /// exempt for the same reason `node` is.
-pub fn normalize_invocation_environment() {
+///
+/// Every other process also counts itself into nub's recursion bound here, and
+/// fails when it is one nub too many ([`nub_core::node::nesting`]).
+pub fn normalize_invocation_environment() -> Result<()> {
     // UNCONDITIONALLY FIRST, before the early returns below: this both establishes the
     // verb every later `Argv0::detect()` sees and erases `__NUB_ARGV0` so no child
     // inherits it. Gating it behind the returns would leak the variable into the whole
@@ -737,8 +740,21 @@ pub fn normalize_invocation_environment() {
     let internal_reentry = env::args_os().nth(1).is_some_and(|arg| {
         (cfg!(unix) && arg == "__pdeath-watch") || arg == "__node-gyp-bootstrap"
     });
-    if internal_reentry || matches!(Argv0::detect(), Argv0::Node) {
-        return;
+    if internal_reentry {
+        return Ok(());
+    }
+    // The env-selected watcher form (see `run`) is a re-entry too, and must not
+    // refuse at the bound: the nub that started it already passed.
+    let env_watcher = cfg!(unix)
+        && env::var_os("__NUB_COMPILED_LAUNCHER_MODE").is_some_and(|mode| mode == "pdeath-watch")
+        && env::args_os().len() == 3;
+    if !env_watcher {
+        // SAFETY: `main` calls this before logging, config initialization, or any
+        // thread-capable Nub subsystem. No other thread exists yet.
+        unsafe { nub_core::node::nesting::enter() }?;
+    }
+    if matches!(Argv0::detect(), Argv0::Node) {
+        return Ok(());
     }
 
     // SAFETY: `main` calls this before logging, config initialization, or any
@@ -746,6 +762,7 @@ pub fn normalize_invocation_environment() {
     unsafe {
         nub_core::node::spawn::restore_fresh_invocation_environment();
     }
+    Ok(())
 }
 
 /// Nub — TypeScript-first developer supertool.
@@ -7483,8 +7500,6 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     }
     if spawns_node {
         nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
-    } else {
-        nub_core::node::discovery::unmark_node_launch(&mut cmd);
     }
     cmd.args(&node_args)
         .stdin(std::process::Stdio::inherit())
