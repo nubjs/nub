@@ -83,6 +83,35 @@ void test("the variants option sets, replaces, sorts and validates variants", ()
   class Sub extends Intl.Locale {}
   assert.ok(new (Sub as unknown as typeof Locale)("sl", { variants: "rozaj" }) instanceof Sub);
   assert.ok(new Sub("sl", { region: "IT" }) instanceof Sub);
+  for (const options of [undefined, { variants: "rozaj" }]) {
+    let prototypeReads = 0;
+    const first = {}, second = {};
+    const newTarget = new Proxy(function LocaleTarget() {}, {
+      get(target, key, receiver) {
+        if (key === "prototype") return ++prototypeReads === 1 ? first : second;
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    const instance = Reflect.construct(Locale, ["sl", options], newTarget);
+    assert.equal(prototypeReads, 1);
+    assert.equal(Object.getPrototypeOf(instance), first);
+
+    let throwReads = 0;
+    const throwingTarget = new Proxy(function LocaleTarget() {}, {
+      get(target, key, receiver) {
+        if (key === "prototype" && ++throwReads > 1) throw new Error("prototype read twice");
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    assert.doesNotThrow(() => Reflect.construct(Locale, ["sl", options], throwingTarget));
+    assert.equal(throwReads, 1);
+  }
+  let calendarReads = 0;
+  assert.throws(() => new Locale("sl", {
+    variants: "rozaj-Rozaj",
+    get calendar() { calendarReads++; return "gregory"; },
+  }), RangeError);
+  assert.equal(calendarReads, 0);
   assert.ok(new Intl.Locale("en") instanceof Intl.Locale);
   assert.equal(Intl.Locale.prototype.constructor, Intl.Locale);
   assert.equal(Intl.Locale.name, "Locale");

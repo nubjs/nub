@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { validateSelection, implementedSuites, parseRunnerOptions, selectShard } from "../tests/test262/selection.mjs";
+import { validateSelection, implementedSuites, parseRunnerOptions, selectShard, inspectHarnessResult } from "../tests/test262/selection.mjs";
 
 interface SelectionConfig {
   revision: string;
@@ -30,6 +30,20 @@ void test("Test262 refuses floating pins and oversized or invalid execution coun
   for (const name of ["expectedFiles", "expectedScenarios"]) {
     for (const value of [0, -1, 2001, 1.5, Infinity, "504"]) assert.throws(() => validateSelection({ ...config, [name]: value }), /budget/);
   }
+});
+
+void test("Test262 rejects a matching success summary when the harness exits unsuccessfully", () => {
+  const output = "Ran 710 tests\n710 passed\n0 failed\n";
+  for (const result of [
+    { status: 7, signal: null, stdout: output },
+    { status: null, signal: "SIGTERM", stdout: output },
+  ]) {
+    const report = inspectHarnessResult(result, 710, ["test.js"], [], 24, false);
+    assert.ok(report.errors.some((error: string) => error.includes("exited unsuccessfully")));
+  }
+  assert.deepEqual(inspectHarnessResult(
+    { status: 0, signal: null, stdout: output }, 710, ["test.js"], [], 24, false,
+  ).errors, []);
 });
 
 

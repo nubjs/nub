@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { validateSelection, parseRunnerOptions, selectShard } from "./selection.mjs";
+import { validateSelection, parseRunnerOptions, selectShard, inspectHarnessResult } from "./selection.mjs";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
@@ -80,19 +80,10 @@ const result = spawnSync(command, commandArgs, {
 if (result.error) throw result.error;
 process.stdout.write(result.stdout || "");
 process.stderr.write(result.stderr || "");
-const summary = /Ran (\d+) tests\s+(\d+) passed\s+(\d+) failed/.exec(result.stdout || "");
 const major = Number(/^v(\d+)/.exec(run(node, ["--version"]))[1]);
-const known = native ? [] : config.knownFailures
-  .filter((entry) => entry.nodeMajors.includes(major))
-  .flatMap((entry) => entry.files)
-  .filter((file) => selected.files.includes(file));
-const failed = [...(result.stdout || "").matchAll(/^FAIL (\S+\.js) \(/gm)].map((match) => match[1]);
-const unexpected = failed.filter((file) => !known.some((entry) => file.endsWith(entry)));
-const stale = !summary ? [] : known.filter((entry) => !failed.some((file) => file.endsWith(entry)));
-for (const file of unexpected) console.error(`Unexpected failure: ${file}`);
-for (const file of stale) console.error(`Listed in knownFailures for Node ${major}, but passed: ${file}`);
+const report = inspectHarnessResult(result, selected.expectedScenarios, selected.files, config.knownFailures, major, native);
 // Fail closed: a runner failure or zero/truncated test selection is never green.
-if (!summary || +summary[1] !== selected.expectedScenarios || +summary[3] !== failed.length || unexpected.length || stale.length) {
-  if (summary) console.error(`Ran ${summary[1]} of ${selected.expectedScenarios} expected scenarios; ${summary[3]} failed`);
+if (report.errors.length) {
+  for (const error of report.errors) console.error(error);
   process.exit(1);
 }

@@ -99,3 +99,26 @@ export function selectShard(files, shard, expectedScenarios) {
   const selected = [...files].sort().filter((_, position) => position % count === index - 1);
   return { files: selected, expectedScenarios: selected.length * 2 };
 }
+
+export function inspectHarnessResult(result, expectedScenarios, selectedFiles, knownFailures, nodeMajor, native) {
+  const output = result.stdout || "";
+  const summary = /Ran (\d+) tests\s+(\d+) passed\s+(\d+) failed/.exec(output);
+  const known = native ? [] : knownFailures
+    .filter((entry) => entry.nodeMajors.includes(nodeMajor))
+    .flatMap((entry) => entry.files)
+    .filter((file) => selectedFiles.includes(file));
+  const failed = [...output.matchAll(/^FAIL (\S+\.js) \(/gm)].map((match) => match[1]);
+  const unexpected = failed.filter((file) => !known.some((entry) => file.endsWith(entry)));
+  const stale = !summary ? [] : known.filter((entry) => !failed.some((file) => file.endsWith(entry)));
+  const errors = [];
+  if (result.status !== 0 || result.signal !== null) {
+    errors.push(`Test262 harness exited unsuccessfully (status ${result.status}, signal ${result.signal})`);
+  }
+  if (!summary) errors.push("Test262 harness did not print a complete summary");
+  else if (+summary[1] !== expectedScenarios || +summary[3] !== failed.length) {
+    errors.push(`Ran ${summary[1]} of ${expectedScenarios} expected scenarios; ${summary[3]} failed`);
+  }
+  for (const file of unexpected) errors.push(`Unexpected failure: ${file}`);
+  for (const file of stale) errors.push(`Listed in knownFailures for Node ${nodeMajor}, but passed: ${file}`);
+  return { errors, failed, summary };
+}

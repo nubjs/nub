@@ -1374,43 +1374,52 @@ function installLocaleVariants() {
   // engine. The tag is then rebuilt, because the engine sorts variants and rejects
   // duplicates only when parsing a tag.
   const variantList = /^(?:[a-z0-9]{5,8}|[0-9][a-z0-9]{3})(?:-(?:[a-z0-9]{5,8}|[0-9][a-z0-9]{3}))*$/i;
-  const Locale = function Locale(tag) {
-    if (new.target === undefined) throw new TypeError("Constructor Intl.Locale requires 'new'");
-    const options = arguments[1];
-    if (options === undefined || options === null) {
-      return ReflectConstruct(NativeLocale, [tag, options], new.target);
-    }
-    let variants;
-    const hooked = new Proxy(Object(options), {
-      __proto__: null,
-      get(target, key) {
-        if (key === "variants") return undefined;
-        if (key === "calendar") {
-          const value = target.variants;
-          if (value !== undefined) {
-            variants = `${value}`;
-            if (RegExpPrototypeExec(variantList, variants) === null) {
-              throw new RangeError(`Invalid variants: ${variants}`);
+  const Locale = new Proxy(NativeLocale, {
+    __proto__: null,
+    construct(target, args, newTarget) {
+      const [tag, options] = args;
+      if (options === undefined || options === null) {
+        return ReflectConstruct(target, args, newTarget);
+      }
+      let variants;
+      const hooked = new Proxy(Object(options), {
+        __proto__: null,
+        get(target, key) {
+          if (key === "variants") return undefined;
+          if (key === "calendar") {
+            const value = target.variants;
+            if (value !== undefined) {
+              variants = `${value}`;
+              if (RegExpPrototypeExec(variantList, variants) === null) {
+                throw new RangeError(`Invalid variants: ${variants}`);
+              }
+              const parts = StringPrototypeSplit(variants.toLowerCase(), "-");
+              const seen = new Set();
+              for (const part of parts) {
+                if (SetPrototypeHas(seen, part)) throw new RangeError(`Duplicate variants: ${variants}`);
+                SetPrototypeAdd(seen, part);
+              }
             }
           }
+          return ReflectGet(target, key);
         }
-        return ReflectGet(target, key);
-      },
-    });
-    const locale = ReflectConstruct(NativeLocale, [tag, hooked]);
-    const text = ReflectApply(localeToString, locale, []);
-    if (variants === undefined) {
-      return new.target === Locale ? locale : ReflectConstruct(NativeLocale, [text], new.target);
-    }
-    const base = ReflectApply(baseName, locale, []);
-    const parts = StringPrototypeSplit(base, "-");
-    let id = parts[0];
-    for (let i = 1; i < parts.length; i++) {
-      if (!isVariant(parts[i])) id = `${id}-${parts[i]}`;
-    }
-    return ReflectConstruct(NativeLocale, [`${id}-${variants}${StringPrototypeSlice(text, base.length)}`], new.target);
-  };
-  ObjectDefineProperty(Locale, "prototype", { value: proto, writable: false });
+      });
+      const locale = ReflectConstruct(target, [tag, hooked], newTarget);
+      if (variants === undefined) return locale;
+
+      const text = ReflectApply(localeToString, locale, []);
+      const base = ReflectApply(baseName, locale, []);
+      const parts = StringPrototypeSplit(base, "-");
+      let id = parts[0];
+      for (let i = 1; i < parts.length; i++) {
+        if (!isVariant(parts[i])) id = `${id}-${parts[i]}`;
+      }
+      const selectedPrototype = ObjectGetPrototypeOf(locale);
+      const surrogate = function LocaleWithVariants() {};
+      ObjectDefineProperty(surrogate, "prototype", { value: selectedPrototype });
+      return ReflectConstruct(target, [`${id}-${variants.toLowerCase()}${StringPrototypeSlice(text, base.length)}`], surrogate);
+    },
+  });
   ObjectDefineProperty(proto, "constructor", { value: Locale });
   ObjectDefineProperty(Intl, "Locale", { value: Locale });
 }
