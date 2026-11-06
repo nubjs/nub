@@ -25,7 +25,9 @@ const {
   Date,
   JSONParse,
   Number,
+  ObjectCreate,
   ObjectDefineProperty,
+  ObjectFreeze,
   ObjectGetOwnPropertyNames,
   ObjectGetOwnPropertySymbols,
   ObjectHasOwn,
@@ -34,10 +36,12 @@ const {
   PromisePrototypeThen,
   PromiseResolve,
   ReflectApply,
+  RegExpPrototypeTest,
   Set,
   SetPrototypeAdd,
   SetPrototypeHas,
   String,
+  StringPrototypeStartsWith,
   SymbolFor,
   SymbolToStringTag,
 } = require("./primordials.cjs");
@@ -459,35 +463,35 @@ function installAsyncTierCjsSource() {
     }
   };
   module_.registerHooks = function (hooks) {
-    if (typeof hooks?.load !== "function") return orig.apply(this, arguments);
+    if (typeof hooks?.load !== "function") return ReflectApply(orig, this, arguments);
     userLoadHooks++;
     // Registered first, because hooks run last-registered first and this one has to
     // sit beneath every user hook.
-    recovery ??= orig.call(this, {
+    recovery ??= ReflectApply(orig, this, [{
       load(url, context, next) {
         try {
           return next(url, context);
         } catch (err) {
           if (err && err.code === "ERR_INVALID_RETURN_PROPERTY_VALUE" &&
-              ASYNC_TIER_NO_SOURCE.test(err.message) && context.format !== "module" &&
-              typeof url === "string" && url.startsWith("file:")) {
+              RegExpPrototypeTest(ASYNC_TIER_NO_SOURCE, err.message) && context.format !== "module" &&
+              typeof url === "string" && StringPrototypeStartsWith(url, "file:")) {
             const source = getBuiltin("node:fs").readFileSync(fileURLToPath(url));
             return { format: "commonjs", source, shortCircuit: true };
           }
           throw err;
         }
       },
-    });
+    }]);
     let handle;
     try {
-      handle = orig.apply(this, arguments);
+      handle = ReflectApply(orig, this, arguments);
     } catch (err) {
       release();
       throw err;
     }
     // Node freezes the handle, so its `deregister` can only be shadowed by a new object.
     let released = false;
-    return Object.freeze(Object.create(handle, {
+    return ObjectFreeze(ObjectCreate(handle, {
       deregister: {
         value() {
           handle.deregister();
