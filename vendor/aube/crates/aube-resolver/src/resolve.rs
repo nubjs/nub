@@ -9,7 +9,7 @@ use crate::{
     Error, FxHashMap, PeerContextOptions, ReadPackageHook, Resolver, apply_peer_contexts, catalog,
     hoist_auto_installed_peers,
 };
-use aube_lockfile::{DirectDep, LockedPackage, LockfileGraph};
+use aube_lockfile::{DirectDep, LocalSource, LockedPackage, LockfileGraph};
 use aube_manifest::PackageJson;
 use aube_registry::VersionMetadata;
 use std::collections::{BTreeMap, HashMap};
@@ -103,6 +103,7 @@ impl Resolver {
     /// peer-context suffixes, then strips the hoisted importer entries
     /// again. Returns the post-peer-context graph ready for lockfile
     /// emission, with `importers` mirroring the manifests.
+    #[allow(clippy::too_many_arguments)]
     fn finalize_resolved_graph(
         &self,
         importers: BTreeMap<String, Vec<DirectDep>>,
@@ -111,6 +112,7 @@ impl Resolver {
         resolved_times: BTreeMap<String, String>,
         skipped_optional_dependencies: BTreeMap<String, BTreeMap<String, String>>,
         catalog_picks: BTreeMap<String, BTreeMap<String, String>>,
+        importer_member_links: &ImporterMemberLinks,
     ) -> Result<LockfileGraph, Error> {
         let resolved_catalogs =
             catalog::materialize_catalog_picks(catalog_picks, resolved_versions);
@@ -208,9 +210,12 @@ impl Resolver {
             &hoisted,
             &self.dependency_policy.package_extensions,
             &peer_options,
+            |graph| {
+                link_workspace_members(graph, importer_member_links);
+            },
         );
         // Gated as pnpm gates it (`hoistPeers`): either setting asks for it.
-        let hoisted = if self.auto_install_peers || self.dedupe_peer_dependents {
+        let mut hoisted = if self.auto_install_peers || self.dedupe_peer_dependents {
             crate::hoist_missing_peers(
                 hoisted,
                 &mut auto_installed_peers,
@@ -220,9 +225,12 @@ impl Resolver {
         } else {
             hoisted
         };
+        let member_links = link_workspace_members(&mut hoisted, importer_member_links);
         let mut contextualized = apply_peer_contexts(hoisted, &peer_options)?;
         crate::remove_auto_installed_peers(&mut contextualized, &auto_installed_peers);
         crate::peer_context::bind_database_peers(&mut contextualized, &database_peers);
+        // After the repairs, which may be all that still reaches a linked member.
+        unlink_workspace_members(&mut contextualized, &member_links);
         drop(_diag_peer);
         tracing::debug!(
             "peer-context pass produced {} contextualized packages",
@@ -256,6 +264,92 @@ impl Resolver {
         }
 
         Ok(contextualized)
+    }
+}
+
+/// Importer -> dependency name -> (member directory, member version), for each
+/// importer dependency the resolver bound to a workspace member.
+type ImporterMemberLinks = BTreeMap<String, BTreeMap<String, (String, String)>>;
+
+/// A workspace member is an importer, not a package, so an importer's
+/// dependency on one (`name@version`) has no graph entry. The peer pass then
+/// found nothing to link for a registry package whose peer the member
+/// satisfies, and that package could not load it. pnpm links it
+/// (`react: link:packages/react`). For the pass, each such dependency points at
+/// the linked package the member is. Returns `link key -> name@version`.
+fn link_workspace_members(
+    graph: &mut LockfileGraph,
+    importer_member_links: &ImporterMemberLinks,
+) -> BTreeMap<String, String> {
+    let LockfileGraph {
+        importers,
+        packages,
+        ..
+    } = graph;
+    let mut links = BTreeMap::new();
+    for (importer, dep) in importers
+        .iter_mut()
+        .flat_map(|(importer, deps)| deps.iter_mut().map(move |dep| (importer, dep)))
+    {
+        let Some((dir, version)) = importer_member_links
+            .get(importer)
+            .and_then(|deps| deps.get(&dep.name))
+        else {
+            continue;
+        };
+        if dep.dep_path != format!("{}@{version}", dep.name) {
+            continue;
+        }
+        let local = LocalSource::Link(dir.into());
+        let key = local.dep_path(&dep.name);
+        packages
+            .entry(key.clone())
+            .or_insert_with(|| LockedPackage {
+                name: dep.name.clone(),
+                version: version.clone(),
+                dep_path: key.clone(),
+                local_source: Some(local),
+                ..Default::default()
+            });
+        links.insert(key.clone(), dep.dep_path.clone());
+        dep.dep_path = key;
+    }
+    links
+}
+
+/// Undoes [`link_workspace_members`] for the importers, which the workspace
+/// linker links itself, and drops each linked member nothing else reaches.
+///
+/// The linkers read an importer's `name@version` as the member only while no
+/// package holds that key. When a registry package does, because something else
+/// depends on the registry copy at the member's own version, the importer keeps
+/// its link, or it would load the registry copy.
+fn unlink_workspace_members(graph: &mut LockfileGraph, links: &BTreeMap<String, String>) {
+    if links.is_empty() {
+        return;
+    }
+    let LockfileGraph {
+        importers,
+        packages,
+        ..
+    } = graph;
+    for dep in importers.values_mut().flatten() {
+        if let Some(original) = links.get(&dep.dep_path)
+            && !packages.contains_key(original)
+        {
+            dep.dep_path = original.clone();
+        }
+    }
+    let reached: std::collections::BTreeSet<String> = packages
+        .values()
+        .flat_map(|pkg| pkg.dependencies.iter())
+        .map(|(name, tail)| format!("{name}@{tail}"))
+        .chain(importers.values().flatten().map(|dep| dep.dep_path.clone()))
+        .collect();
+    for key in links.keys() {
+        if !reached.contains(key) {
+            packages.remove(key);
+        }
     }
 }
 

@@ -41,7 +41,7 @@
     "lat:check": "npx --yes lat.md@0.12.2 check",
     "test:test262": "node tests/test262/run.mjs",
     "test:scripts": "node --test 'scripts/**/*.test.m[jt]s' 'tests/cross-runtime/*.test.mjs'",
-    "test:util-rate": "node --test scripts/util-rate.test.mjs"
+    "test:util-rate": "node --test scripts/util-rate.test.mts"
   },
   "untracked": {
     "whitelist": [

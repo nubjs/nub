@@ -29,7 +29,7 @@ Output lands in `tmp/download-stats/` (gitignored — derived data, regenerated 
 | `summary.json` | Machine-readable totals, the platform split, and the caveats as data. |
 | `downloads.html` | Self-contained page — no deps, no CDN, opens from disk. Hero total, an all-time source split, and one stacked chart (npm below, GitHub above) toggling weekly/monthly. |
 
-Pure aggregation logic lives in `scripts/lib/download-stats.mjs` and is tested in `scripts/download-stats.test.mjs`; the renderer is `scripts/lib/download-chart.mjs`.
+Pure aggregation logic lives in `scripts/lib/download-stats.mjs` and is tested in `scripts/download-stats.test.mts`; the renderer is `scripts/lib/download-chart.mjs`.
 
 The page draws COMPLETE PERIODS ONLY. A part-period bar is not a small period, it is an unfinished one, and drawing it puts a fake cliff at the right edge; the month in progress is the single exception, shown at its full projected height with the forecast hatched so the bar still spans a real month. Bars stack by SOURCE — the only split that can be stacked, since the npm platform packages are pulled BY an npm install and stacking them would draw the same install twice.
 

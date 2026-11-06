@@ -1167,9 +1167,10 @@ static FEATURES: &[Feature] = &[
         evidence: "TC39 Stage 4; native on Node 26+ (typeof probe on 25.9.0 vs 26.0.0); lazy global (A37)",
     },
     // ── Worker (browser-shape global) ───────────────────────────────────────
-    // The browser-shape `Worker` global is not shipped by any Node version (Node
-    // has `node:worker_threads.Worker`, not the browser global), so nub polyfills
-    // it across the floor, wrapping `worker_threads.Worker` with EventTarget.
+    // Node's own browser-shape `Worker` global exists only behind
+    // `--experimental-web-worker` (26.9+), which nub does not inject, so nub polyfills
+    // it across the floor, wrapping `worker_threads.Worker` with EventTarget. With
+    // that flag set, the polyfill finds a constructor already there and stands aside.
     Feature {
         name: "Worker",
         mitigations: &[(
@@ -1179,7 +1180,7 @@ static FEATURES: &[Feature] = &[
                 global: "globalThis.Worker",
             },
         )],
-        evidence: "browser-shape Worker not in any Node; wraps node:worker_threads",
+        evidence: "browser-shape Worker only behind --experimental-web-worker (26.9+); wraps node:worker_threads",
     },
     // ── navigator global ────────────────────────────────────────────────────
     // The `navigator` object (hardwareConcurrency / userAgent / language / languages

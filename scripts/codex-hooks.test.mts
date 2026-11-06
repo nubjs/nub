@@ -6,7 +6,7 @@ import test from "node:test";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 
-function softLimitUnder(setup) {
+function softLimitUnder(setup: string) {
   const result = spawnSync("sh", ["-c", `${setup}; exec sh scripts/exec-hook.sh sh -c 'ulimit -Sn'`], {
     cwd: root,
     encoding: "utf8",
@@ -15,8 +15,8 @@ function softLimitUnder(setup) {
   return Number(result.stdout.trim());
 }
 
-test("Codex command hooks raise the soft descriptor limit before Node", () => {
-  const config = JSON.parse(readFileSync(new URL("../.codex/hooks.json", import.meta.url), "utf8"));
+void test("Codex command hooks raise the soft descriptor limit before Node", () => {
+  const config: { hooks: Record<string, { hooks: { command: string }[] }[]> } = JSON.parse(readFileSync(new URL("../.codex/hooks.json", import.meta.url), "utf8"));
   const commands = Object.values(config.hooks).flatMap((events) =>
     events.flatMap((event) => event.hooks.map((hook) => hook.command)),
   );
@@ -29,7 +29,7 @@ test("Codex command hooks raise the soft descriptor limit before Node", () => {
   assert.ok(raised > 64, `expected a soft limit above 64, got ${raised}`);
 });
 
-test("hook raises the soft limit no further than the inherited hard limit", () => {
+void test("hook raises the soft limit no further than the inherited hard limit", () => {
   for (const [soft, hard, expected] of [[64, 4096, 4096], [64, 64, 64], [4096, 4096, 4096]]) {
     const got = softLimitUnder(`ulimit -Sn ${soft}; ulimit -Hn ${hard}`);
     assert.equal(got, expected, `soft=${soft} hard=${hard}: expected ${expected}, got ${got}`);

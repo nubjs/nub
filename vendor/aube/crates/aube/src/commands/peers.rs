@@ -120,11 +120,29 @@ enum IssueKind {
 /// `package.json` version before the satisfaction check. Returns None
 /// when the spec isn't a local link or the target version is
 /// unreadable (caller then falls back to the raw tail → Unparseable).
-fn link_target_version(tail: &str, project_root: &std::path::Path) -> Option<String> {
-    let rel = tail
+///
+/// The lockfile reader turns that tail into the hashed key a fresh resolve
+/// stores (`link+<hash>`), so the path comes from the package it names.
+fn link_target_version(
+    name: &str,
+    tail: &str,
+    graph: &LockfileGraph,
+    project_root: &std::path::Path,
+) -> Option<String> {
+    let rel = match tail
         .strip_prefix("link:")
         .or_else(|| tail.strip_prefix("portal:"))
-        .or_else(|| tail.strip_prefix("file:"))?;
+        .or_else(|| tail.strip_prefix("file:"))
+    {
+        Some(rel) => std::path::PathBuf::from(rel),
+        None => graph
+            .packages
+            .get(&format!("{name}@{tail}"))?
+            .local_source
+            .as_ref()?
+            .path()?
+            .to_path_buf(),
+    };
     let manifest_path = project_root.join(rel).join("package.json");
     let pj = super::load_manifest(&manifest_path).ok()?;
     pj.version
@@ -151,7 +169,8 @@ fn collect_issues(graph: &LockfileGraph, project_root: &std::path::Path) -> Vec<
                     // the linked member's manifest version — a workspace
                     // peer is satisfied by the local member, not flagged
                     // unparseable.
-                    let resolved_version = link_target_version(tail, project_root);
+                    let resolved_version =
+                        link_target_version(peer_name, tail, graph, project_root);
                     let version_str = resolved_version
                         .as_deref()
                         .unwrap_or_else(|| tail.split_once('(').map(|(v, _)| v).unwrap_or(tail));
@@ -449,6 +468,42 @@ mod tests {
         )]);
 
         // 3.5.38 satisfies ^3.2.25 → no issue.
+        assert!(collect_issues(&g, tmp.path()).is_empty());
+    }
+
+    // The same peer read back from a lockfile, whose edge is the hashed key.
+    #[test]
+    fn workspace_link_peer_with_a_hashed_edge_resolves_to_member_version() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let member_dir = tmp.path().join("packages/vue");
+        std::fs::create_dir_all(&member_dir).expect("mkdir member");
+        std::fs::write(
+            member_dir.join("package.json"),
+            r#"{"name":"vue","version":"3.5.38"}"#,
+        )
+        .expect("write member manifest");
+
+        let local = aube_lockfile::LocalSource::Link("packages/vue".into());
+        let key = local.dep_path("vue");
+        let tail = key.strip_prefix("vue@").unwrap().to_string();
+        let member = LockedPackage {
+            name: "vue".to_string(),
+            version: "0.0.0".to_string(),
+            dep_path: key,
+            local_source: Some(local),
+            ..Default::default()
+        };
+        let g = graph_of(vec![
+            pkg_with_peer(
+                "@vitejs/plugin-vue",
+                "6.0.7",
+                ("vue", "^3.2.25"),
+                Some(&tail),
+                false,
+            ),
+            member,
+        ]);
+
         assert!(collect_issues(&g, tmp.path()).is_empty());
     }
 

@@ -5600,6 +5600,275 @@ async fn auto_install_peers_skips_importers_own_optional_peer() {
 }
 
 #[tokio::test]
+async fn a_peer_a_workspace_member_satisfies_links_to_the_member() {
+    let mut store = make_packument("store", &["1.2.0"], "1.2.0");
+    store
+        .versions
+        .get_mut("1.2.0")
+        .unwrap()
+        .peer_dependencies
+        .insert("react".to_string(), "^18.0.0".to_string());
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:0",
+    ));
+    let mut resolver = Resolver::new(client);
+    resolver.cache.insert("store".to_string(), store);
+
+    let react = PackageJson {
+        name: Some("react".to_string()),
+        version: Some("18.2.0".to_string()),
+        ..PackageJson::default()
+    };
+    let mut web = PackageJson {
+        name: Some("web".to_string()),
+        ..PackageJson::default()
+    };
+    web.dependencies
+        .insert("store".to_string(), "1.2.0".to_string());
+    web.dependencies
+        .insert("react".to_string(), "workspace:*".to_string());
+
+    let graph = resolver
+        .resolve_workspace(
+            &[
+                (".".to_string(), PackageJson::default()),
+                ("packages/react".to_string(), react),
+                ("packages/web".to_string(), web),
+            ],
+            None,
+            &std::collections::HashMap::from([
+                ("react".to_string(), "18.2.0".to_string()),
+                ("web".to_string(), "0.0.0".to_string()),
+            ]),
+        )
+        .await
+        .expect("resolve failed");
+
+    // pnpm 10 and 12 write `store@1.2.0(react@packages+react)` with
+    // `react: link:packages/react`.
+    let store = graph
+        .packages
+        .get("store@1.2.0(react@packages+react)")
+        .unwrap_or_else(|| panic!("{:?}", graph.packages.keys().collect::<Vec<_>>()));
+    let edge = &store.dependencies["react"];
+    let target = &graph.packages[&format!("react@{edge}")];
+    assert_eq!(
+        target.local_source,
+        Some(aube_lockfile::LocalSource::Link("packages/react".into()))
+    );
+    let web_react = graph.importers["packages/web"]
+        .iter()
+        .find(|dep| dep.name == "react")
+        .unwrap();
+    assert_eq!(
+        web_react.dep_path, "react@18.2.0",
+        "the importer's own link stays the workspace linker's"
+    );
+}
+
+/// `packages/web` depends on `react` at `react_spec`, on `store` with a `react`
+/// peer, and on `uses-react` with an ordinary dependency on it. A member and the
+/// registry both have `react` at 18.2.0.
+async fn resolve_member_beside_registry_copy(react_spec: &str) -> LockfileGraph {
+    let mut store = make_packument("store", &["1.2.0"], "1.2.0");
+    store
+        .versions
+        .get_mut("1.2.0")
+        .unwrap()
+        .peer_dependencies
+        .insert("react".to_string(), "^18.0.0".to_string());
+    let mut uses_react = make_packument("uses-react", &["1.0.0"], "1.0.0");
+    uses_react
+        .versions
+        .get_mut("1.0.0")
+        .unwrap()
+        .dependencies
+        .insert("react".to_string(), "^18.0.0".to_string());
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:0",
+    ));
+    let mut resolver = Resolver::new(client);
+    resolver.cache.insert("store".to_string(), store);
+    resolver.cache.insert("uses-react".to_string(), uses_react);
+    resolver.cache.insert(
+        "react".to_string(),
+        make_packument("react", &["18.2.0"], "18.2.0"),
+    );
+
+    let react = PackageJson {
+        name: Some("react".to_string()),
+        version: Some("18.2.0".to_string()),
+        ..PackageJson::default()
+    };
+    let web = PackageJson {
+        name: Some("web".to_string()),
+        dependencies: [
+            ("store".to_string(), "1.2.0".to_string()),
+            ("uses-react".to_string(), "1.0.0".to_string()),
+            ("react".to_string(), react_spec.to_string()),
+        ]
+        .into(),
+        ..PackageJson::default()
+    };
+
+    resolver
+        .resolve_workspace(
+            &[
+                (".".to_string(), PackageJson::default()),
+                ("packages/react".to_string(), react),
+                ("packages/web".to_string(), web),
+            ],
+            None,
+            &std::collections::HashMap::from([
+                ("react".to_string(), "18.2.0".to_string()),
+                ("web".to_string(), "0.0.0".to_string()),
+            ]),
+        )
+        .await
+        .expect("resolve failed")
+}
+
+// A compatibility-database peer is repaired with an edge after the peer pass. It has
+// to land on what the importer chose, with or without a registry copy at the member's
+// version, and the member has to survive as a package for that edge to reach.
+#[tokio::test]
+async fn a_database_peer_lands_on_what_the_importer_chose() {
+    for (react_spec, with_registry_copy, lands_on_member) in [
+        ("workspace:*", false, true),
+        ("workspace:*", true, true),
+        ("latest", true, false),
+    ] {
+        let mut uses_react = make_packument("uses-react", &["1.0.0"], "1.0.0");
+        uses_react
+            .versions
+            .get_mut("1.0.0")
+            .unwrap()
+            .dependencies
+            .insert("react".to_string(), "^18.0.0".to_string());
+        let client = Arc::new(aube_registry::client::RegistryClient::new(
+            "http://127.0.0.1:0",
+        ));
+        let mut resolver = Resolver::new(client).with_dependency_policy(crate::DependencyPolicy {
+            package_extensions: vec![crate::PackageExtension {
+                selector: "repaired@*".to_string(),
+                database_peers: [("react".to_string(), "*".to_string())].into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        resolver.cache.insert(
+            "repaired".to_string(),
+            make_packument("repaired", &["1.0.0"], "1.0.0"),
+        );
+        resolver.cache.insert("uses-react".to_string(), uses_react);
+        resolver.cache.insert(
+            "react".to_string(),
+            make_packument("react", &["18.2.0"], "18.2.0"),
+        );
+
+        let mut dependencies: BTreeMap<String, String> = [
+            ("repaired".to_string(), "1.0.0".to_string()),
+            ("react".to_string(), react_spec.to_string()),
+        ]
+        .into();
+        if with_registry_copy {
+            dependencies.insert("uses-react".to_string(), "1.0.0".to_string());
+        }
+        let web = PackageJson {
+            name: Some("web".to_string()),
+            dependencies,
+            ..PackageJson::default()
+        };
+        let react = PackageJson {
+            name: Some("react".to_string()),
+            version: Some("18.2.0".to_string()),
+            ..PackageJson::default()
+        };
+        let graph = resolver
+            .resolve_workspace(
+                &[
+                    (".".to_string(), PackageJson::default()),
+                    ("packages/react".to_string(), react),
+                    ("packages/web".to_string(), web),
+                ],
+                None,
+                &std::collections::HashMap::from([
+                    ("react".to_string(), "18.2.0".to_string()),
+                    ("web".to_string(), "0.0.0".to_string()),
+                ]),
+            )
+            .await
+            .expect("resolve failed");
+
+        let repaired = &graph.packages["repaired@1.0.0"];
+        let target =
+            aube_lockfile::resolve_dep_edge("react", &repaired.dependencies["react"], |k| {
+                graph.packages.contains_key(k)
+            })
+            .unwrap_or_else(|| panic!("the repair must reach a package for {react_spec}"));
+        assert_eq!(
+            graph.packages[&target].local_source,
+            lands_on_member.then(|| LocalSource::Link("packages/react".into())),
+            "{react_spec}, registry copy: {with_registry_copy}"
+        );
+    }
+}
+
+// `workspace:*` and a registry package that happens to depend on the member's
+// exact version name one key. The importer and its peer consumer have to stay on
+// the member, and only the registry package's own dependency on the registry copy.
+#[tokio::test]
+async fn a_member_and_a_registry_package_at_one_version_stay_distinct() {
+    let graph = resolve_member_beside_registry_copy("workspace:*").await;
+
+    let member = Some(aube_lockfile::LocalSource::Link("packages/react".into()));
+    let web_react = graph.importers["packages/web"]
+        .iter()
+        .find(|dep| dep.name == "react")
+        .unwrap();
+    assert_eq!(graph.packages[&web_react.dep_path].local_source, member);
+
+    let store = graph
+        .packages
+        .get("store@1.2.0(react@packages+react)")
+        .unwrap_or_else(|| panic!("{:?}", graph.packages.keys().collect::<Vec<_>>()));
+    let peer = format!("react@{}", store.dependencies["react"]);
+    assert_eq!(graph.packages[&peer].local_source, member);
+
+    assert_eq!(
+        graph.packages["uses-react@1.0.0"].dependencies["react"],
+        "18.2.0"
+    );
+    assert!(graph.packages["react@18.2.0"].local_source.is_none());
+}
+
+// A dist-tag names a registry version, so the importer's choice has to survive the
+// member sharing that version. It decides the peer consumer's provider too.
+#[tokio::test]
+async fn a_dist_tag_at_a_members_version_stays_on_the_registry() {
+    let graph = resolve_member_beside_registry_copy("latest").await;
+
+    let web_react = graph.importers["packages/web"]
+        .iter()
+        .find(|dep| dep.name == "react")
+        .unwrap();
+    assert_eq!(web_react.dep_path, "react@18.2.0");
+    assert!(graph.packages["react@18.2.0"].local_source.is_none());
+    assert_eq!(
+        graph.packages["store@1.2.0(react@18.2.0)"].dependencies["react"],
+        "18.2.0"
+    );
+    assert!(
+        !graph
+            .packages
+            .values()
+            .any(|pkg| matches!(pkg.local_source, Some(aube_lockfile::LocalSource::Link(_)))),
+        "{:?}",
+        graph.packages.keys().collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
 async fn importer_peer_dependencies_are_seeded_as_direct_deps() {
     let zod = make_packument("zod", &["3.22.0"], "3.22.0");
 
@@ -6069,6 +6338,316 @@ async fn lockfile_reuse_preserves_transitive_optional_edges() {
     );
 }
 
+// The override is what lets a registry package depend on a local path. Its edge
+// read back from the lockfile already holds the override's value, so the override
+// rewrites nothing there, and it still has to count.
+#[tokio::test]
+async fn an_override_counts_on_a_reused_edge_that_already_holds_its_value() {
+    let project = tempfile::tempdir().unwrap();
+    let child_dir = project.path().join("vendor/child");
+    std::fs::create_dir_all(&child_dir).unwrap();
+    std::fs::write(
+        child_dir.join("package.json"),
+        r#"{"name":"child","version":"1.0.0"}"#,
+    )
+    .unwrap();
+
+    let spec = "file:./vendor/child".to_string();
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:0",
+    ));
+    let mut resolver = Resolver::new(client)
+        .with_project_root(project.path().to_path_buf())
+        .with_overrides(BTreeMap::from([("child".to_string(), spec.clone())]));
+
+    let existing = LockfileGraph {
+        packages: BTreeMap::from([(
+            "parent@1.0.0".to_string(),
+            LockedPackage {
+                name: "parent".to_string(),
+                version: "1.0.0".to_string(),
+                dep_path: "parent@1.0.0".to_string(),
+                dependencies: [("child".to_string(), spec)].into(),
+                ..Default::default()
+            },
+        )]),
+        ..Default::default()
+    };
+
+    let mut manifest = PackageJson::default();
+    manifest
+        .dependencies
+        .insert("parent".to_string(), "1.0.0".to_string());
+
+    let graph = resolver
+        .resolve(&manifest, Some(&existing))
+        .await
+        .expect("the override allows a local child under a registry parent");
+
+    let child = graph
+        .packages
+        .values()
+        .find(|pkg| pkg.name == "child")
+        .expect("child resolved");
+    assert!(
+        matches!(
+            &child.local_source,
+            Some(aube_lockfile::LocalSource::Directory(path)) if path.ends_with("vendor/child")
+        ),
+        "the path anchors at the project root: {:?}",
+        child.local_source
+    );
+}
+
+// With the override gone, that same edge is stale, and the range the parent
+// declares is only in its packument. Removing an override used to leave a project
+// unable to install until its lockfile was deleted.
+#[tokio::test]
+async fn a_removed_override_sends_a_reused_parent_back_to_its_declared_range() {
+    let override_rule = BTreeMap::from([("child".to_string(), "file:./vendor/child".to_string())]);
+    let declares_a_range = BTreeMap::from([("child".to_string(), "^1.0.0".to_string())]);
+    let declares_another_source = BTreeMap::from([(
+        "child".to_string(),
+        "https://example.com/original.tgz".to_string(),
+    )]);
+    let declares_that_source =
+        BTreeMap::from([("child".to_string(), "file:./vendor/child".to_string())]);
+    // What says the edge is not the package's own: the overrides the lockfile
+    // recorded, even where the declaration reads the same (a git tag cannot be told
+    // from another tag of its repository), a range or another source in the
+    // declarations an npm-style lockfile records, or a declared peer.
+    for (overrides, declared, peer) in [
+        (override_rule.clone(), None, false),
+        (override_rule, Some(declares_that_source), false),
+        (BTreeMap::new(), Some(declares_a_range), false),
+        (BTreeMap::new(), Some(declares_another_source), false),
+        (BTreeMap::new(), None, true),
+    ] {
+        let client = Arc::new(aube_registry::client::RegistryClient::new(
+            "http://127.0.0.1:0",
+        ));
+        let mut resolver = Resolver::new(client);
+        let mut parent = make_packument("parent", &["1.0.0", "1.1.0"], "1.1.0");
+        parent
+            .versions
+            .get_mut("1.0.0")
+            .unwrap()
+            .dependencies
+            .insert("child".to_string(), "^1.0.0".to_string());
+        resolver.cache.insert("parent".to_string(), parent);
+        resolver.cache.insert(
+            "child".to_string(),
+            make_packument("child", &["1.0.0"], "1.0.0"),
+        );
+
+        let mut locked = LockedPackage {
+            name: "parent".to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: "parent@1.0.0".to_string(),
+            dependencies: [("child".to_string(), "file:./vendor/child".to_string())].into(),
+            ..Default::default()
+        };
+        if let Some(declared) = declared {
+            locked.declared_dependencies = declared;
+            locked.declared_dependencies_known = true;
+        }
+        if peer {
+            locked.peer_dependencies = [("child".to_string(), "^1.0.0".to_string())].into();
+        }
+        let existing = LockfileGraph {
+            packages: BTreeMap::from([("parent@1.0.0".to_string(), locked)]),
+            overrides,
+            ..Default::default()
+        };
+
+        let mut manifest = PackageJson::default();
+        manifest
+            .dependencies
+            .insert("parent".to_string(), "^1.0.0".to_string());
+
+        let graph = resolver
+            .resolve(&manifest, Some(&existing))
+            .await
+            .expect("a stale edge must not stop the install");
+
+        assert!(
+            graph.packages.contains_key("parent@1.0.0"),
+            "the parent keeps its locked version: {:?}",
+            graph.packages.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            graph.packages["parent@1.0.0"].dependencies["child"],
+            "1.0.0"
+        );
+        assert!(graph.packages["child@1.0.0"].local_source.is_none());
+    }
+}
+
+// A package can declare a source itself, which `blockExoticSubdeps: false` lets
+// through. That edge is not left over from an override, so reuse keeps it and does
+// not go to the parent's packument, which this test does not provide. A registry
+// package's `file:` edge then fails on its own, which is past the decision under
+// test and needs no network to reach.
+#[tokio::test]
+async fn a_source_a_package_declares_itself_is_not_a_removed_override() {
+    let source = "file:./vendor/child".to_string();
+
+    for declared in [false, true] {
+        let client = Arc::new(aube_registry::client::RegistryClient::new(
+            "http://127.0.0.1:0",
+        ));
+        let mut resolver = Resolver::new(client).with_dependency_policy(crate::DependencyPolicy {
+            block_exotic_subdeps: false,
+            ..Default::default()
+        });
+
+        let mut parent = LockedPackage {
+            name: "parent".to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: "parent@1.0.0".to_string(),
+            dependencies: [("child".to_string(), source.clone())].into(),
+            ..Default::default()
+        };
+        if declared {
+            parent.declared_dependencies = [("child".to_string(), source.clone())].into();
+            parent.declared_dependencies_known = true;
+        }
+        let existing = LockfileGraph {
+            packages: BTreeMap::from([("parent@1.0.0".to_string(), parent)]),
+            ..Default::default()
+        };
+
+        let mut manifest = PackageJson::default();
+        manifest
+            .dependencies
+            .insert("parent".to_string(), "1.0.0".to_string());
+
+        let err = resolver
+            .resolve(&manifest, Some(&existing))
+            .await
+            .expect_err("nothing can anchor the child's path");
+        assert!(
+            matches!(&err, Error::Registry(name, _) if name == "child"),
+            "reuse must reach the child without refetching the parent: {err:?}"
+        );
+    }
+}
+
+// npm stores `github:acme/child#<ref>` as an SSH URL, so a package's declaration and
+// the lockfile spell one repository differently. Reuse keeps the edge without the
+// parent's packument, which this test does not provide. The child is then blocked as
+// an exotic dependency of a registry package, which needs no network to reach.
+#[tokio::test]
+async fn an_unchanged_git_dependency_spelled_another_way_keeps_its_reused_parent() {
+    let sha = "98e8ff1da1a89f93d1397a24d7413ed15421c139";
+    for declared in [
+        format!("github:acme/child#{sha}"),
+        "github:acme/child#main".to_string(),
+    ] {
+        let client = Arc::new(aube_registry::client::RegistryClient::new(
+            "http://127.0.0.1:0",
+        ));
+        let mut resolver = Resolver::new(client);
+        let source = LocalSource::Git(aube_lockfile::GitSource {
+            url: "git+ssh://git@github.com/acme/child.git".to_string(),
+            committish: None,
+            resolved: sha.to_string(),
+            integrity: None,
+            subpath: None,
+        });
+        let child_key = source.dep_path("child");
+        let edge = child_key.strip_prefix("child@").unwrap().to_string();
+        let existing = LockfileGraph {
+            packages: BTreeMap::from([
+                (
+                    "parent@1.0.0".to_string(),
+                    LockedPackage {
+                        name: "parent".to_string(),
+                        version: "1.0.0".to_string(),
+                        dep_path: "parent@1.0.0".to_string(),
+                        dependencies: [("child".to_string(), edge)].into(),
+                        declared_dependencies: [("child".to_string(), declared.clone())].into(),
+                        declared_dependencies_known: true,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    child_key.clone(),
+                    LockedPackage {
+                        name: "child".to_string(),
+                        version: "7.0.0".to_string(),
+                        dep_path: child_key,
+                        local_source: Some(source),
+                        ..Default::default()
+                    },
+                ),
+            ]),
+            ..Default::default()
+        };
+
+        let mut manifest = PackageJson::default();
+        manifest
+            .dependencies
+            .insert("parent".to_string(), "1.0.0".to_string());
+
+        let err = resolver
+            .resolve(&manifest, Some(&existing))
+            .await
+            .expect_err("a git dependency of a registry package is blocked by default");
+        assert!(
+            matches!(&err, Error::BlockedExoticSubdep(details) if details.name == "child"),
+            "reuse must reach the child without refetching the parent, for {declared}: {err:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_range_binds_to_the_registry_and_not_a_locked_url_package() {
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:0",
+    ));
+    let mut resolver = Resolver::new(client);
+    resolver.cache.insert(
+        "child".to_string(),
+        make_packument("child", &["1.0.0"], "1.0.0"),
+    );
+
+    let source = LocalSource::RemoteTarball(aube_lockfile::RemoteTarballSource {
+        url: "https://example.com/fork/child-1.0.0.tgz".to_string(),
+        integrity: String::new(),
+        git_hosted: false,
+    });
+    let key = source.dep_path("child");
+    let existing = LockfileGraph {
+        packages: BTreeMap::from([(
+            key.clone(),
+            LockedPackage {
+                name: "child".to_string(),
+                version: "1.0.0".to_string(),
+                dep_path: key,
+                local_source: Some(source),
+                ..Default::default()
+            },
+        )]),
+        ..Default::default()
+    };
+
+    let mut manifest = PackageJson::default();
+    manifest
+        .dependencies
+        .insert("child".to_string(), "^1.0.0".to_string());
+
+    let graph = resolver
+        .resolve(&manifest, Some(&existing))
+        .await
+        .expect("the registry has this version");
+
+    assert!(
+        graph.packages["child@1.0.0"].local_source.is_none(),
+        "the manifest no longer asks for the URL"
+    );
+}
+
 // Bun and yarn parsers store transitive deps in `pkg.dependencies`
 // using the full dep_path form (`is-number@6.0.0`), while pnpm uses
 // bare versions (`6.0.0`). The resolver's lockfile-reuse path
@@ -6212,15 +6791,124 @@ async fn workspace_link_transitive_from_registry_parent_is_not_blocked_as_exotic
         graph_has_package(&graph, "@vitejs/plugin-vue", "6.0.7"),
         "plugin-vue should resolve"
     );
-    // The `vue` peer must bind to the workspace member version, not error.
+    // The `vue` edge must reach the workspace member, not error.
     let plugin = graph
         .packages
         .get("@vitejs/plugin-vue@6.0.7")
         .expect("plugin-vue in graph");
+    let vue = format!("vue@{}", plugin.dependencies["vue"]);
     assert_eq!(
-        plugin.dependencies.get("vue").map(String::as_str),
-        Some("3.5.38"),
-        "plugin-vue's vue peer must bind to the workspace member version"
+        graph.packages[&vue].local_source,
+        Some(LocalSource::Link("packages/vue".into())),
+        "plugin-vue's vue edge must land on the workspace member"
+    );
+    assert_eq!(graph.packages[&vue].version, "3.5.38");
+}
+
+// pnpm's default `linkWorkspacePackagesDepth`: a member stands in for what an
+// importer declares, not for a registry package's own dependency.
+#[tokio::test]
+async fn a_registry_packages_dependency_named_like_a_member_comes_from_the_registry() {
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:0",
+    ));
+    let mut resolver = Resolver::new(client);
+    let mut parent = make_packument("parent", &["1.0.0"], "1.0.0");
+    parent
+        .versions
+        .get_mut("1.0.0")
+        .unwrap()
+        .dependencies
+        .insert("child".to_string(), "^1.0.0".to_string());
+    resolver.cache.insert("parent".to_string(), parent);
+    resolver.cache.insert(
+        "child".to_string(),
+        make_packument("child", &["1.0.0"], "1.0.0"),
+    );
+
+    let app = PackageJson {
+        name: Some("app".to_string()),
+        version: Some("0.0.0".to_string()),
+        dependencies: [("parent".to_string(), "1.0.0".to_string())].into(),
+        ..Default::default()
+    };
+    let member = PackageJson {
+        name: Some("child".to_string()),
+        version: Some("1.0.0".to_string()),
+        ..Default::default()
+    };
+    let workspace_packages = std::collections::HashMap::from([
+        ("app".to_string(), "0.0.0".to_string()),
+        ("child".to_string(), "1.0.0".to_string()),
+    ]);
+
+    let graph = resolver
+        .resolve_workspace(
+            &[
+                ("packages/app".to_string(), app),
+                ("packages/child".to_string(), member),
+            ],
+            None,
+            &workspace_packages,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        graph.packages["parent@1.0.0"].dependencies["child"],
+        "1.0.0"
+    );
+    assert!(graph.packages["child@1.0.0"].local_source.is_none());
+}
+
+// A local package is first-party code: its dependency on a member links, and
+// the edge has to reach it.
+#[tokio::test]
+async fn a_local_packages_dependency_on_a_member_lands_on_the_member() {
+    let project = tempfile::tempdir().unwrap();
+    let vendored = project.path().join("vendor/local");
+    std::fs::create_dir_all(&vendored).unwrap();
+    std::fs::write(
+        vendored.join("package.json"),
+        r#"{ "name": "local", "version": "1.0.0", "dependencies": { "lib": "^1.0.0" } }"#,
+    )
+    .unwrap();
+
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:0",
+    ));
+    let mut resolver = Resolver::new(client).with_project_root(project.path().to_path_buf());
+
+    let root = PackageJson {
+        dependencies: [("local".to_string(), "file:./vendor/local".to_string())].into(),
+        ..Default::default()
+    };
+    let lib = PackageJson {
+        name: Some("lib".to_string()),
+        version: Some("1.0.0".to_string()),
+        ..Default::default()
+    };
+    let workspace_packages =
+        std::collections::HashMap::from([("lib".to_string(), "1.0.0".to_string())]);
+
+    let graph = resolver
+        .resolve_workspace(
+            &[(".".to_string(), root), ("packages/lib".to_string(), lib)],
+            None,
+            &workspace_packages,
+        )
+        .await
+        .expect("the member is on disk, so the registry is never asked");
+
+    let local = graph
+        .packages
+        .values()
+        .find(|pkg| pkg.name == "local")
+        .expect("the local package resolves");
+    let lib = format!("lib@{}", local.dependencies["lib"]);
+    assert_eq!(
+        graph.packages[&lib].local_source,
+        Some(LocalSource::Link("packages/lib".into()))
     );
 }
 

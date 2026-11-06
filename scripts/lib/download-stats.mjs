@@ -1,6 +1,6 @@
 // Pure data logic for nub's download statistics, shared by scripts/download-stats.mjs
 // (the CLI) and scripts/lib/download-chart.mjs (the renderer). Everything here is
-// side-effect free and unit-tested in scripts/download-stats.test.mjs, so the
+// side-effect free and unit-tested in scripts/download-stats.test.mts, so the
 // aggregation rules that decide what a number MEANS live in one place:
 //
 //   - Weeks are UTC Monday-anchored and carry a `complete` flag. npm's counts lag

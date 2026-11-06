@@ -1,5 +1,11 @@
 "use strict";
 
+const {
+  ArrayIsArray,
+  ArrayPrototypeIncludes,
+  ObjectDefineProperty,
+} = require("../primordials.cjs");
+
 const util = require("node:util");
 // `in`, not a read: where Node ships these they are lazy getters, and reading
 // one would load Node's implementation at every start.
@@ -14,7 +20,7 @@ function installUtilRateShims() {
   if (!needsFacade) return;
   require("./internals.cjs");
   if (typeof util.debounce !== "function") {
-    Object.defineProperty(util, "debounce", {
+    ObjectDefineProperty(util, "debounce", {
       __proto__: null,
       configurable: true,
       enumerable: true,
@@ -22,7 +28,7 @@ function installUtilRateShims() {
     });
   }
   if (typeof util.throttle !== "function") {
-    Object.defineProperty(util, "throttle", {
+    ObjectDefineProperty(util, "throttle", {
       __proto__: null,
       configurable: true,
       enumerable: true,
@@ -37,7 +43,7 @@ function resolveUtilRateFacade(specifier, context, enabled) {
   if (!enabled || !needsFacade || context.parentURL === facadeURL) return null;
   if (specifier !== "util" && specifier !== "node:util") return null;
   const { conditions } = context;
-  if (!Array.isArray(conditions) || !conditions.includes("import") || conditions.includes("require")) return null;
+  if (!ArrayIsArray(conditions) || !ArrayPrototypeIncludes(conditions, "import") || ArrayPrototypeIncludes(conditions, "require")) return null;
   return { url: facadeURL, shortCircuit: true };
 }
 

@@ -1,4 +1,4 @@
-// Regression tests for release-version stamping. Run: node --test scripts/set-version.test.mjs
+// Regression tests for release-version stamping. Run: node --test scripts/set-version.test.mts
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -47,14 +47,14 @@ const VERSION_SURFACES = [
   "runtime/version.mjs",
 ];
 
-function write(root, file, content) {
+function write(root: string, file: string, content: string) {
   mkdirSync(join(root, dirname(file)), { recursive: true });
   writeFileSync(join(root, file), content);
 }
 
 function fixture({ latest = false, corruptLatest = false, crlfLocks = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), "nub-set-version-"));
-  const lock = (text) => (crlfLocks ? text.replace(/\n/g, "\r\n") : text);
+  const lock = (text: string) => (crlfLocks ? text.replace(/\n/g, "\r\n") : text);
   for (const file of PACKAGE_FILES) write(root, file, JSON.stringify({ version: "0.0.0" }) + "\n");
   write(root, "Cargo.toml", '[workspace.package]\nversion = "0.0.0"\n');
   write(root, "crates/nub-native/Cargo.toml", '[package]\nversion = "0.0.0"\n');
@@ -94,11 +94,11 @@ function fixture({ latest = false, corruptLatest = false, crlfLocks = false } = 
   return root;
 }
 
-function run(root) {
+function run(root: string) {
   return spawnSync(process.execPath, [SCRIPT, VERSION], { cwd: root, encoding: "utf8" });
 }
 
-test("stamps a pinned schema snapshot from latest", () => {
+void test("stamps a pinned schema snapshot from latest", () => {
   const root = fixture({ latest: true });
   try {
     const result = run(root);
@@ -131,7 +131,7 @@ test("stamps a pinned schema snapshot from latest", () => {
 // reference is hidden pending ship (3539b65db1), so an absent latest.json is a
 // normal state and must not block a release bump. A latest.json that EXISTS but
 // cannot be parsed still aborts before anything is stamped — the next test.
-test("absent latest schema still stamps every version surface, writing no snapshot", () => {
+void test("absent latest schema still stamps every version surface, writing no snapshot", () => {
   const root = fixture();
   try {
     const result = run(root);
@@ -150,7 +150,7 @@ test("absent latest schema still stamps every version surface, writing no snapsh
 // the runner's core.autocrlf=true checks both locks out as CRLF. A literal `\n`
 // matches only 0x0A, so this is the shape that failed there while every local
 // run stayed green.
-test("stamps CRLF lockfiles, as a Windows runner checks them out", () => {
+void test("stamps CRLF lockfiles, as a Windows runner checks them out", () => {
   const root = fixture({ crlfLocks: true });
   try {
     const result = run(root);
@@ -177,7 +177,7 @@ test("stamps CRLF lockfiles, as a Windows runner checks them out", () => {
   }
 });
 
-test("unreadable latest schema leaves every version surface unchanged", () => {
+void test("unreadable latest schema leaves every version surface unchanged", () => {
   const root = fixture({ corruptLatest: true });
   try {
     const before = new Map(VERSION_SURFACES.map((file) => [file, readFileSync(join(root, file), "utf8")]));

@@ -44,7 +44,7 @@ You never hand-review the upstream diff.
 
 Work in a nub worktree off latest `origin/main` (see the `worktree` skill). Never touch the shared tree.
 
-**Mechanics are a script, not shell improvisation.** `scripts/aube-bump.ts` does the deterministic parts: `plan` (base/delta sanity), `venue [--reset]` (build the venue + merge + conflict table), `gate` (check/clippy verdicts), `land` (rsync + UPSTREAM marker + identical-tree check). Run its subcommands instead of retyping the shell. Guarded by `scripts/aube-bump.test.mjs`.
+**Mechanics are a script, not shell improvisation.** `scripts/aube-bump.ts` does the deterministic parts: `plan` (base/delta sanity), `venue [--reset]` (build the venue + merge + conflict table), `gate` (check/clippy verdicts), `land` (rsync + UPSTREAM marker + identical-tree check). Run its subcommands instead of retyping the shell. Guarded by `scripts/aube-bump.test.mts`.
 
 **Never archive-overwrite the vendor tree.** `git archive | tar -x -C vendor/aube` throws away the fork delta and turns the bump into N hand-rebuilt features. The venue 3-way merge is the process; the delta survives unless both sides edited the same lines.
 

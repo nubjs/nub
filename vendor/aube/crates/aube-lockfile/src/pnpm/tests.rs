@@ -535,6 +535,483 @@ snapshots:
 }
 
 #[test]
+fn a_snapshot_edge_to_a_root_declared_local_package_resolves_and_round_trips() {
+    // `dual` is declared by the root, which re-keys it to the hashed
+    // `dual@file+<hash>`, and is also a dependency of `parent`. `parent`'s
+    // edge must follow it there: the linker, the graph hasher and optional
+    // marking all walk edges through `resolve_dep_edge`.
+    let dir = tempfile::tempdir().unwrap();
+    let lockfile_path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &lockfile_path,
+        r#"
+lockfileVersion: '9.0'
+
+importers:
+  .:
+    dependencies:
+      parent:
+        specifier: file:./parent
+        version: file:./parent
+    optionalDependencies:
+      dual:
+        specifier: file:./dual
+        version: file:./dual
+
+packages:
+  dual@file:./dual:
+    resolution: {directory: ./dual, type: directory}
+
+  parent@file:./parent:
+    resolution: {directory: ./parent, type: directory}
+
+snapshots:
+  dual@file:./dual: {}
+
+  parent@file:./parent:
+    dependencies:
+      dual: file:./dual
+"#,
+    )
+    .unwrap();
+
+    let graph = parse(&lockfile_path).unwrap();
+    let dual_key = &graph.importers["."]
+        .iter()
+        .find(|dep| dep.name == "dual")
+        .unwrap()
+        .dep_path;
+    let parent = graph
+        .packages
+        .values()
+        .find(|pkg| pkg.name == "parent")
+        .unwrap();
+    let edge = &parent.dependencies["dual"];
+    assert_eq!(
+        crate::resolve_dep_edge("dual", edge, |k| graph.packages.contains_key(k)).as_ref(),
+        Some(dual_key),
+        "parent's edge `dual: {edge}` must resolve to the root's `{dual_key}`",
+    );
+
+    let manifest = PackageJson {
+        name: Some("root".to_string()),
+        version: Some("0.0.0".to_string()),
+        dependencies: [("parent".to_string(), "file:./parent".to_string())].into(),
+        optional_dependencies: [("dual".to_string(), "file:./dual".to_string())].into(),
+        ..PackageJson::default()
+    };
+    let out_path = dir.path().join("round-trip.yaml");
+    write(&out_path, &graph, &manifest).unwrap();
+    let written = std::fs::read_to_string(&out_path).unwrap();
+    assert!(
+        written.contains("    dependencies:\n      dual: file:dual\n"),
+        "parent's edge must be written back as `file:dual`: {written}"
+    );
+}
+
+#[test]
+fn a_transitive_local_package_gets_the_key_a_fresh_resolve_gives_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let lockfile_path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &lockfile_path,
+        r#"
+lockfileVersion: '9.0'
+
+importers:
+  .:
+    dependencies:
+      parent:
+        specifier: 1.0.0
+        version: 1.0.0
+
+packages:
+  child@file:./child:
+    resolution: {directory: ./child, type: directory}
+
+  parent@1.0.0:
+    resolution: {integrity: sha512-parent}
+
+snapshots:
+  child@file:./child: {}
+
+  parent@1.0.0:
+    dependencies:
+      child: file:./child
+"#,
+    )
+    .unwrap();
+
+    let graph = parse(&lockfile_path).unwrap();
+    let key = LocalSource::Directory("./child".into()).dep_path("child");
+    assert_eq!(graph.packages[&key].dep_path, key);
+    assert_eq!(
+        crate::resolve_dep_edge(
+            "child",
+            &graph.packages["parent@1.0.0"].dependencies["child"],
+            |k| { graph.packages.contains_key(k) }
+        )
+        .as_ref(),
+        Some(&key),
+    );
+
+    let manifest = PackageJson {
+        name: Some("root".to_string()),
+        version: Some("0.0.0".to_string()),
+        dependencies: [("parent".to_string(), "1.0.0".to_string())].into(),
+        ..PackageJson::default()
+    };
+    let out_path = dir.path().join("round-trip.yaml");
+    write(&out_path, &graph, &manifest).unwrap();
+    let written = std::fs::read_to_string(&out_path).unwrap();
+    assert!(
+        written.contains("child@file:child:") && written.contains("child: file:child\n"),
+        "the key and the edge agree: {written}"
+    );
+}
+
+#[test]
+fn a_link_edge_reaches_a_package_and_is_written_back_as_pnpm_spells_it() {
+    // pnpm keeps `link:` targets out of `packages:`, so these edges are their only
+    // record. Each is relative to the lockfile directory, whichever package holds it:
+    // pnpm 10 and 12 link a directory parent's own `link:./x` to `<root>/x`.
+    let dir = tempfile::tempdir().unwrap();
+    let lockfile_path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &lockfile_path,
+        r#"
+lockfileVersion: '9.0'
+
+importers:
+  .:
+    dependencies:
+      local-parent:
+        specifier: file:./a
+        version: file:a
+      peer-consumer:
+        specifier: file:./c
+        version: file:c(member@packages+member)
+      registry-parent:
+        specifier: 1.0.0
+        version: 1.0.0
+      tarball-parent:
+        specifier: file:./t.tgz
+        version: file:t.tgz
+
+packages:
+  local-parent@file:a:
+    resolution: {directory: a, type: directory}
+
+  peer-consumer@file:c:
+    resolution: {directory: c, type: directory}
+    peerDependencies:
+      member: ^1.0.0
+
+  registry-parent@1.0.0:
+    resolution: {integrity: sha512-parent}
+
+  tarball-parent@file:t.tgz:
+    resolution: {tarball: file:t.tgz}
+
+snapshots:
+  local-parent@file:a:
+    dependencies:
+      inside: link:a/inside
+      own: link:vendor/own
+      sibling: link:../b
+
+  peer-consumer@file:c(member@packages+member):
+    dependencies:
+      member: link:packages/member
+
+  tarball-parent@file:t.tgz:
+    dependencies:
+      tarball-peer: link:packages/tarball-peer
+
+  registry-parent@1.0.0:
+    dependencies:
+      overridden: link:vendor/overridden
+"#,
+    )
+    .unwrap();
+
+    let graph = parse(&lockfile_path).unwrap();
+    let reaches = |parent: &LockedPackage, name: &str, target: &str| {
+        let key = crate::resolve_dep_edge(name, &parent.dependencies[name], |k| {
+            graph.packages.contains_key(k)
+        })
+        .unwrap_or_else(|| panic!("{name}'s edge must reach a package"));
+        assert_eq!(
+            graph.packages[&key].local_source,
+            Some(LocalSource::Link(target.into())),
+        );
+    };
+    reaches(
+        &graph.packages["registry-parent@1.0.0"],
+        "overridden",
+        "vendor/overridden",
+    );
+    let named = |name: &str| {
+        graph
+            .packages
+            .values()
+            .find(|pkg| pkg.name == name)
+            .unwrap()
+    };
+    reaches(named("local-parent"), "sibling", "../b");
+    reaches(named("local-parent"), "own", "vendor/own");
+    reaches(named("local-parent"), "inside", "a/inside");
+    reaches(named("peer-consumer"), "member", "packages/member");
+    reaches(
+        named("tarball-parent"),
+        "tarball-peer",
+        "packages/tarball-peer",
+    );
+
+    let manifest = PackageJson {
+        name: Some("root".to_string()),
+        version: Some("0.0.0".to_string()),
+        dependencies: [
+            ("local-parent".to_string(), "file:./a".to_string()),
+            ("peer-consumer".to_string(), "file:./c".to_string()),
+            ("registry-parent".to_string(), "1.0.0".to_string()),
+            ("tarball-parent".to_string(), "file:./t.tgz".to_string()),
+        ]
+        .into(),
+        ..PackageJson::default()
+    };
+    let out_path = dir.path().join("round-trip.yaml");
+    write(&out_path, &graph, &manifest).unwrap();
+    let written = std::fs::read_to_string(&out_path).unwrap();
+    assert!(
+        written.contains("overridden: link:vendor/overridden\n")
+            && written.contains("sibling: link:../b\n")
+            && written.contains("own: link:vendor/own\n")
+            && written.contains("inside: link:a/inside\n")
+            && written.contains("member: link:packages/member\n")
+            && written.contains("tarball-peer: link:packages/tarball-peer\n"),
+        "each edge keeps pnpm's spelling and anchor: {written}"
+    );
+}
+
+#[test]
+fn a_local_package_keeps_one_entry_per_set_of_peers() {
+    // A package with its own source, consumed with two sets of peers, is two
+    // entries, as pnpm writes it. Read as one, every consumer loads whichever peer
+    // was read last.
+    let dir = tempfile::tempdir().unwrap();
+    let lockfile_path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &lockfile_path,
+        r#"
+lockfileVersion: '9.0'
+
+importers:
+  packages/a:
+    dependencies:
+      is-number:
+        specifier: 6.0.0
+        version: 6.0.0
+      peer-dir:
+        specifier: file:../../vendor/pd
+        version: file:vendor/pd(is-number@6.0.0)
+  packages/b:
+    dependencies:
+      is-number:
+        specifier: 7.0.0
+        version: 7.0.0
+      peer-dir:
+        specifier: file:../../vendor/pd
+        version: file:vendor/pd(is-number@7.0.0)
+      uses-peer-dir:
+        specifier: 1.0.0
+        version: 1.0.0(is-number@8.0.0)
+  packages/c:
+    dependencies:
+      is-number:
+        specifier: 6.0.0
+        version: 6.0.0
+      peer-url:
+        specifier: https://example.com/peer-url.tgz
+        version: https://example.com/peer-url.tgz(is-number@6.0.0)
+  packages/d:
+    dependencies:
+      is-number:
+        specifier: 7.0.0
+        version: 7.0.0
+      peer-url:
+        specifier: https://example.com/peer-url.tgz
+        version: https://example.com/peer-url.tgz(is-number@7.0.0)
+
+packages:
+  is-number@6.0.0:
+    resolution: {integrity: sha512-six}
+  is-number@7.0.0:
+    resolution: {integrity: sha512-seven}
+  is-number@8.0.0:
+    resolution: {integrity: sha512-eight}
+  peer-dir@file:vendor/pd:
+    resolution: {directory: vendor/pd, type: directory}
+    peerDependencies:
+      is-number: '*'
+  peer-url@https://example.com/peer-url.tgz:
+    resolution: {integrity: sha512-url, tarball: https://example.com/peer-url.tgz}
+    version: 1.0.0
+    peerDependencies:
+      is-number: '*'
+  uses-peer-dir@1.0.0:
+    resolution: {integrity: sha512-parent}
+
+snapshots:
+  is-number@6.0.0: {}
+  is-number@7.0.0: {}
+  is-number@8.0.0: {}
+  peer-dir@file:vendor/pd(is-number@6.0.0):
+    dependencies:
+      is-number: 6.0.0
+  peer-dir@file:vendor/pd(is-number@7.0.0):
+    dependencies:
+      is-number: 7.0.0
+  peer-dir@file:vendor/pd(is-number@8.0.0):
+    dependencies:
+      is-number: 8.0.0
+  peer-url@https://example.com/peer-url.tgz(is-number@6.0.0):
+    dependencies:
+      is-number: 6.0.0
+  peer-url@https://example.com/peer-url.tgz(is-number@7.0.0):
+    dependencies:
+      is-number: 7.0.0
+  peer-url@https://example.com/peer-url.tgz(is-number@8.0.0):
+    dependencies:
+      is-number: 8.0.0
+  uses-peer-dir@1.0.0(is-number@8.0.0):
+    dependencies:
+      peer-dir: file:vendor/pd(is-number@8.0.0)
+      peer-url: https://example.com/peer-url.tgz(is-number@8.0.0)
+"#,
+    )
+    .unwrap();
+
+    let graph = parse(&lockfile_path).unwrap();
+    let dir_key = LocalSource::Directory("vendor/pd".into()).dep_path("peer-dir");
+    let url_key = crate::shared_local_dep_path("peer-url", "https://example.com/peer-url.tgz")
+        .expect("a URL has a shared key");
+    for (importer, name, key, peer) in [
+        ("packages/a", "peer-dir", &dir_key, "6.0.0"),
+        ("packages/b", "peer-dir", &dir_key, "7.0.0"),
+        ("packages/c", "peer-url", &url_key, "6.0.0"),
+        ("packages/d", "peer-url", &url_key, "7.0.0"),
+    ] {
+        let dep = graph.importers[importer]
+            .iter()
+            .find(|dep| dep.name == name)
+            .unwrap();
+        assert_eq!(dep.dep_path, format!("{key}(is-number@{peer})"));
+        let pkg = &graph.packages[&dep.dep_path];
+        assert_eq!(pkg.dependencies["is-number"], peer);
+        assert!(pkg.local_source.is_some());
+    }
+    // A set of peers only another package reaches is read the same way.
+    let parent = &graph.packages["uses-peer-dir@1.0.0(is-number@8.0.0)"];
+    for (name, key) in [("peer-dir", &dir_key), ("peer-url", &url_key)] {
+        let edge = crate::resolve_dep_edge(name, &parent.dependencies[name], |k| {
+            graph.packages.contains_key(k)
+        })
+        .expect("the edge reaches its own set of peers");
+        assert_eq!(edge, format!("{key}(is-number@8.0.0)"));
+        assert_eq!(graph.packages[&edge].dependencies["is-number"], "8.0.0");
+    }
+
+    let manifest = PackageJson {
+        name: Some("root".to_string()),
+        version: Some("0.0.0".to_string()),
+        ..PackageJson::default()
+    };
+    let out_path = dir.path().join("round-trip.yaml");
+    write(&out_path, &graph, &manifest).unwrap();
+    let written = std::fs::read_to_string(&out_path).unwrap();
+    for spelling in [
+        "version: file:vendor/pd(is-number@6.0.0)\n",
+        "version: file:vendor/pd(is-number@7.0.0)\n",
+        "peer-dir@file:vendor/pd(is-number@6.0.0):\n",
+        "peer-dir@file:vendor/pd(is-number@7.0.0):\n",
+        "peer-dir@file:vendor/pd(is-number@8.0.0):\n",
+        "peer-dir: file:vendor/pd(is-number@8.0.0)\n",
+        "version: https://example.com/peer-url.tgz(is-number@6.0.0)\n",
+        "peer-url@https://example.com/peer-url.tgz(is-number@8.0.0):\n",
+        "peer-url: https://example.com/peer-url.tgz(is-number@8.0.0)\n",
+    ] {
+        assert!(written.contains(spelling), "missing {spelling}: {written}");
+    }
+    assert_eq!(
+        written.matches("resolution: {directory: vendor/pd").count(),
+        1,
+        "one `packages:` entry for the source: {written}"
+    );
+    assert_eq!(
+        written
+            .matches("tarball: https://example.com/peer-url.tgz")
+            .count(),
+        1,
+        "one `packages:` entry for the URL: {written}"
+    );
+}
+
+#[test]
+fn a_snapshot_edge_to_a_root_declared_remote_tarball_keeps_its_url() {
+    // Lockfile reuse enqueues a registry parent's stored edge as a resolve
+    // range, so a hashed `url+<hash>` tail would be looked up on the registry.
+    // `resolve_dep_edge` reaches the hashed key from the URL.
+    let dir = tempfile::tempdir().unwrap();
+    let lockfile_path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &lockfile_path,
+        r#"
+lockfileVersion: '9.0'
+
+importers:
+  .:
+    dependencies:
+      child:
+        specifier: https://example.com/child.tgz
+        version: https://example.com/child.tgz
+      parent:
+        specifier: 1.0.0
+        version: 1.0.0
+
+packages:
+  child@https://example.com/child.tgz:
+    resolution: {tarball: https://example.com/child.tgz}
+    version: 1.0.0
+
+  parent@1.0.0:
+    resolution: {integrity: sha512-parent}
+
+snapshots:
+  child@https://example.com/child.tgz: {}
+
+  parent@1.0.0:
+    dependencies:
+      child: https://example.com/child.tgz
+"#,
+    )
+    .unwrap();
+
+    let graph = parse(&lockfile_path).unwrap();
+    let edge = &graph.packages["parent@1.0.0"].dependencies["child"];
+    assert_eq!(edge, "https://example.com/child.tgz");
+    let child_key = &graph.importers["."]
+        .iter()
+        .find(|dep| dep.name == "child")
+        .unwrap()
+        .dep_path;
+    assert_eq!(
+        crate::resolve_dep_edge("child", edge, |k| graph.packages.contains_key(k)).as_ref(),
+        Some(child_key),
+    );
+}
+
+#[test]
 fn parse_workspace_local_snapshot_keys_do_not_duplicate_rebased_packages() {
     let dir = tempfile::tempdir().unwrap();
     let lockfile_path = dir.path().join("pnpm-lock.yaml");
@@ -4421,9 +4898,18 @@ packages:
     assert!(
         graph
             .packages
-            .keys()
-            .any(|k| k.starts_with("real-dep@file:")),
+            .contains_key(&LocalSource::Directory("vendor/real-dep".into()).dep_path("real-dep")),
         "a file: alias target must survive the sweep: {:?}",
+        graph.packages.keys().collect::<Vec<_>>()
+    );
+    let direct = graph.importers["."]
+        .iter()
+        .find(|dep| dep.name == "aliased-dep")
+        .expect("the alias stays a direct dependency");
+    assert!(
+        graph.packages.contains_key(&direct.dep_path),
+        "the importer must reach its alias at {}: {:?}",
+        direct.dep_path,
         graph.packages.keys().collect::<Vec<_>>()
     );
 }

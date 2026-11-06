@@ -14,11 +14,12 @@
 // `blobUrlSource()`. Touches only URL / Blob / Buffer — all already-realized
 // core globals — so requiring it adds nothing to the main-thread bootstrap set.
 //
-// WHAT IS RETAINED, AND WHY IT IS THE MINIMUM. This wrap is installed on EVERY
-// nub run, and the overwhelming majority of object URLs never back a Worker at
-// all (a download link, an image preview, a CSV export). Node cannot read a
-// Blob's bytes synchronously, so supporting `new Worker(blobUrl)` at all means
-// capturing SOMETHING when the Blob is built. Three properties keep that honest:
+// WHAT IS RETAINED, AND WHY IT IS THE MINIMUM. This wrap is installed on every
+// nub run without a native Worker, and the overwhelming majority of object URLs
+// never back a Worker at all (a download link, an image preview, a CSV export).
+// Node cannot read a Blob's bytes synchronously, so supporting `new Worker(blobUrl)`
+// at all means capturing SOMETHING when the Blob is built. Three properties keep
+// that honest:
 //
 //   * it is a COMPACT COPY, not the caller's parts. Holding the parts pinned
 //     whatever they referenced — `new Blob([big.subarray(0, 32)])` kept the
@@ -33,6 +34,31 @@
 //     kept, and `new Worker` reports the URL as unknown rather than silently
 //     retaining tens of megabytes per object URL to serve a case that does not
 //     occur in practice.
+
+const {
+  ArrayBuffer,
+  ArrayBufferIsView,
+  ArrayPrototypePush,
+  Map,
+  MapPrototypeDelete,
+  MapPrototypeGet,
+  MapPrototypeSet,
+  ObjectDefineProperty,
+  Proxy,
+  ReflectApply,
+  ReflectConstruct,
+  SymbolFor,
+  WeakMap,
+  WeakMapPrototypeGet,
+  WeakMapPrototypeSet,
+  uncurryThis,
+} = require("./primordials.cjs");
+
+const { Buffer } = require("node:buffer");
+const BufferFrom = Buffer.from;
+const BufferConcat = Buffer.concat;
+const BufferIsBuffer = Buffer.isBuffer;
+const BufferPrototypeToString = uncurryThis(Buffer.prototype.toString);
 
 // blob: URL → the Blob's UTF-8 source bytes (a Buffer, off the V8 heap).
 // Read via blobUrlSource(); cleared by revokeObjectURL.
@@ -54,19 +80,19 @@ function encodeParts(parts) {
   let total = 0;
   for (const p of parts ?? []) {
     let chunk;
-    if (typeof p === "string") chunk = Buffer.from(p, "utf8");
-    else if (typeof Buffer !== "undefined" && Buffer.isBuffer(p)) chunk = p;
-    else if (ArrayBuffer.isView(p)) chunk = Buffer.from(p.buffer, p.byteOffset, p.byteLength);
-    else if (p instanceof ArrayBuffer) chunk = Buffer.from(p);
+    if (typeof p === "string") chunk = BufferFrom(p, "utf8");
+    else if (BufferIsBuffer(p)) chunk = p;
+    else if (ArrayBufferIsView(p)) chunk = BufferFrom(p.buffer, p.byteOffset, p.byteLength);
+    else if (p instanceof ArrayBuffer) chunk = BufferFrom(p);
     else if (typeof p === "object" && p && typeof p.size === "number") {
-      chunk = blobParts.get(p); // a nested Blob made via our wrapper
+      chunk = WeakMapPrototypeGet(blobParts, p); // a nested Blob made via our wrapper
       if (chunk === undefined) return null; // nested blob was over the cap
     } else continue;
     total += chunk.length;
     if (total > MAX_CAPTURE_BYTES) return null;
-    chunks.push(chunk);
+    ArrayPrototypePush(chunks, chunk);
   }
-  return Buffer.concat(chunks, total);
+  return BufferConcat(chunks, total);
 }
 
 // Wrap URL.createObjectURL/revokeObjectURL and Proxy Blob to remember parts.
@@ -77,7 +103,7 @@ function encodeParts(parts) {
 // Blob constructor (a shared global), so a string key would show up in
 // `Reflect.ownKeys(Blob)` / `"x" in Blob` — a (cosmetic) divergence from vanilla
 // Node. A Symbol keeps the marker invisible to those reflective surfaces.
-const INSTALLED = Symbol.for("nub.blobUrlSupport.installed");
+const INSTALLED = SymbolFor("nub.blobUrlSupport.installed");
 function installBlobUrlSupport() {
   if (typeof URL === "undefined" || typeof URL.createObjectURL !== "function") return;
   if (URL.createObjectURL[INSTALLED]) return;
@@ -113,7 +139,7 @@ function installBlobUrlSupport() {
         // resolves the new instance's proto from `Proxy.prototype`, which the Proxy
         // forwards to NativeBlob.prototype — so a direct Blob is byte-identical to a
         // native one (same brand, passes instanceof + undici's webidl check).
-        const inst = Reflect.construct(target, args, newTarget);
+        const inst = ReflectConstruct(target, args, newTarget);
         if (args[0] != null) {
           // Capture a compact copy NOW — the only moment the bytes are readable
           // synchronously. `encodeParts` returns null past the cap, and a Blob
@@ -121,7 +147,7 @@ function installBlobUrlSupport() {
           // accounting fail a Blob construction that vanilla Node would allow.
           try {
             const bytes = encodeParts(args[0]);
-            if (bytes !== null) blobParts.set(inst, bytes);
+            if (bytes !== null) WeakMapPrototypeSet(blobParts, inst, bytes);
           } catch {
             /* exotic parts: no capture, so no blob: worker from this Blob */
           }
@@ -129,8 +155,8 @@ function installBlobUrlSupport() {
         return inst;
       },
     });
-    Object.defineProperty(NativeBlob, INSTALLED, { value: true });
-    Object.defineProperty(globalThis, "Blob", {
+    ObjectDefineProperty(NativeBlob, INSTALLED, { value: true });
+    ObjectDefineProperty(globalThis, "Blob", {
       value: BlobProxy,
       enumerable: false,
       writable: true,
@@ -140,23 +166,26 @@ function installBlobUrlSupport() {
     // `new File(...) instanceof Blob` holds natively — no re-parenting needed.
   }
 
-  const nativeCreate = URL.createObjectURL.bind(URL);
+  const URLConstructor = URL;
+  const createObjectURL = URL.createObjectURL;
+  const revokeObjectURL = URL.revokeObjectURL;
+  const nativeCreate = (obj) => ReflectApply(createObjectURL, URLConstructor, [obj]);
   const nativeRevoke =
-    typeof URL.revokeObjectURL === "function" ? URL.revokeObjectURL.bind(URL) : null;
+    typeof revokeObjectURL === "function" ? (...args) => ReflectApply(revokeObjectURL, URLConstructor, args) : null;
   const wrappedCreate = function createObjectURL(obj) {
     const url = nativeCreate(obj);
     // Point the URL at the compact bytes captured at construction — never at the
     // Blob itself, which would keep our own WeakMap entry (and so the caller's
     // parts) reachable for as long as the URL lives.
-    const bytes = blobParts.get(obj);
-    if (bytes !== undefined) blobUrlSources.set(url, bytes);
+    const bytes = WeakMapPrototypeGet(blobParts, obj);
+    if (bytes !== undefined) MapPrototypeSet(blobUrlSources, url, bytes);
     return url;
   };
-  Object.defineProperty(wrappedCreate, INSTALLED, { value: true });
+  ObjectDefineProperty(wrappedCreate, INSTALLED, { value: true });
   URL.createObjectURL = wrappedCreate;
   if (nativeRevoke) {
     URL.revokeObjectURL = function revokeObjectURL(url) {
-      blobUrlSources.delete(url);
+      MapPrototypeDelete(blobUrlSources, url);
       // Forward the caller's real arguments rather than a fixed arity of one, so a
       // zero-arg call still reaches Node's own ERR_MISSING_ARGS check.
       return nativeRevoke(...arguments);
@@ -170,8 +199,8 @@ function installBlobUrlSupport() {
 // not minted through our wrap, was revoked, or held content past the capture
 // cap; the constructor turns that into its "not a known object URL" TypeError.
 function blobUrlSource(url) {
-  const bytes = blobUrlSources.get(url);
-  return bytes === undefined ? undefined : bytes.toString("utf8");
+  const bytes = MapPrototypeGet(blobUrlSources, url);
+  return bytes === undefined ? undefined : BufferPrototypeToString(bytes, "utf8");
 }
 
 module.exports = { blobUrlSources, blobUrlSource, installBlobUrlSupport };
