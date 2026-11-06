@@ -230,9 +230,9 @@ pub struct BundleResult {
     /// Static `--external` imports with the authored importer retained for a
     /// compiled artifact's runtime hook. Empty for the generic build path.
     pub external_imports: Vec<ExternalImport>,
-    /// Package directories in the payload whose source path differs, as payload path
-    /// and source path, for the runtime hook to look an external up from. Empty unless
-    /// the build has `--external`.
+    /// Each package directory the bundle placed, as its bundle-relative path and its
+    /// source path, for the runtime hook to look an external up from. Empty unless the
+    /// build has `--external`. Compile applies the payload layout to the first.
     pub shipped_sources: Vec<(String, String)>,
     /// The public worker entry named from application code and its private
     /// bundled implementation chunk.  Compile writes a tiny public wrapper for
@@ -738,7 +738,16 @@ fn bundle_inner(
     // copying starts here, after tree-shaking: a foreign optional variant whose
     // wrapper disappeared cannot affect this target's payload or fail the build.
     let planned_native = if let Some(plugin) = &native_plugin {
-        plugin.plan_survivors(&mut files, entry_abs, opts.minify, opts.keep_names)?
+        let external = external_plugin
+            .as_ref()
+            .map(|plugin| Arc::clone(plugin) as SharedPluginable);
+        plugin.plan_survivors(
+            &mut files,
+            entry_abs,
+            external.as_ref(),
+            opts.minify,
+            opts.keep_names,
+        )?
     } else {
         native::PlannedNative {
             files: Vec::new(),
@@ -5316,26 +5325,41 @@ impl Plugin for ExternalImports {
     }
 }
 
-/// Where each package directory in the payload sits relative to the launch directory,
-/// longest payload path first, so the first that matches a module is its own package.
-///
-/// A directory outside the project, which is every package in nub's global store, has
-/// no source path that means anything on another machine, so it keeps its payload path.
+/// Where each package directory the bundle placed sits relative to the launch directory.
+/// A package from a store has no such place, so it counts as sitting where it was placed.
 fn shipped_sources(placed: &[(String, PathBuf)], launch_root: &Path) -> Vec<(String, String)> {
-    let mut sources: Vec<(String, String)> = placed
+    placed
         .iter()
         .filter_map(|(at, instance)| {
             let instance = canonicalize_for_bundler(instance);
-            let source = portable_importer(&instance.to_string_lossy(), launch_root)?;
-            let climbs = source.starts_with("../") || Path::new(&source).is_absolute();
-            let inside = !climbs
-                || native::install_tree_root(&instance)
-                    .is_some_and(|tree| launch_root.starts_with(tree));
-            (inside && source != *at).then(|| (at.clone(), source))
+            let source = if store_relative(&instance, launch_root).is_some() {
+                at.clone()
+            } else {
+                portable_importer(&instance.to_string_lossy(), launch_root)?
+            };
+            Some((at.clone(), source))
         })
-        .collect();
-    sources.sort_by_key(|(at, _)| std::cmp::Reverse(at.len()));
-    sources
+        .collect()
+}
+
+/// A module's path inside its package manager's store, if that is where it lives: the
+/// install tree it hangs off is neither above nor below the launch directory, and is no
+/// project of its own.
+///
+/// Its path means nothing on another machine, and written down it would carry this
+/// one's home directory into the artifact. A sibling workspace member's tree looks the
+/// same from here but has a manifest at its root, where a store's per-package directory
+/// holds only `node_modules`, and there the relative path is real source layout.
+fn store_relative(path: &Path, launch_root: &Path) -> Option<String> {
+    let tree = native::install_tree_root(path)?;
+    if launch_root.starts_with(&tree)
+        || tree.starts_with(launch_root)
+        || tree.join("package.json").is_file()
+    {
+        return None;
+    }
+    let inner = path.strip_prefix(&tree).ok()?;
+    Some(inner.to_string_lossy().replace('\\', "/"))
 }
 
 /// Convert only a genuine file importer to a path portable from the launch cwd.
@@ -5353,6 +5377,9 @@ fn portable_importer(id: &str, launch_root: &Path) -> Option<String> {
     };
     if path.is_relative() {
         path = launch_root.join(path);
+    }
+    if let Some(inner) = store_relative(&path, launch_root) {
+        return Some(inner);
     }
     pathdiff::diff_paths(path, launch_root)
         .map(|relative| relative.to_string_lossy().replace('\\', "/"))
@@ -11089,6 +11116,49 @@ const pkg = require("./package.json");
             Some("../sibling/index.mjs"),
             "a source outside the launch cwd must retain relocatable provenance"
         );
+    }
+
+    /// A store's path means nothing on another machine and carries this one's home
+    /// directory; everything else is layout a deployment can reproduce.
+    #[test]
+    fn an_importer_keeps_its_relative_path_unless_it_lives_in_a_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = canonicalize_for_bundler(dir.path());
+        let launch = root.join("repo/packages/app");
+        let member = root.join("repo/packages/lib");
+        std::fs::create_dir_all(&launch).unwrap();
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(member.join("package.json"), "{}").unwrap();
+        for (importer, expected) in [
+            (
+                "home/.cache/store/v1/foo@1-abc/node_modules/foo/lib/index.js",
+                "node_modules/foo/lib/index.js",
+            ),
+            (
+                "home/.cache/store/v1/foo@1-abc/node_modules/foo/node_modules/bar/index.js",
+                "node_modules/foo/node_modules/bar/index.js",
+            ),
+            ("repo/packages/lib/index.js", "../lib/index.js"),
+            (
+                "repo/packages/lib/node_modules/x/index.js",
+                "../lib/node_modules/x/index.js",
+            ),
+            (
+                "repo/node_modules/.pnpm/x@1/node_modules/x/index.js",
+                "../../node_modules/.pnpm/x@1/node_modules/x/index.js",
+            ),
+            (
+                "repo/packages/app/node_modules/.store/x@1/node_modules/x/index.js",
+                "node_modules/.store/x@1/node_modules/x/index.js",
+            ),
+        ] {
+            let id = root.join(importer);
+            assert_eq!(
+                portable_importer(&id.to_string_lossy(), &launch).as_deref(),
+                Some(expected),
+                "{importer}"
+            );
+        }
     }
 
     #[test]
