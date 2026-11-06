@@ -409,9 +409,11 @@ function shouldAutoAsyncTierAtPreload() {
 // file in a run where plain `node --import` works. Answer that one failure from disk,
 // beneath every user hook. On a `file:` URL only `commonjs` gets no source there. Plain
 // `commonjs` matches plain Node; `commonjs-sync` would give a real `require.cache` but
-// dies on a required `.cts`, because this tier has no main-thread require shim. Armed
-// at the first call rather than at tier entry, because any registered hook moves the
-// run onto `#loadSync`, which a run that never calls `registerHooks` must not pay for.
+// dies on a required `.cts`, because this tier has no main-thread require shim. This
+// hook lives exactly as long as a user load hook does, because it moves CommonJS onto
+// the translator whose `require` has no `.cache`: a run with no user load hook, whether
+// it never registered one, registered only `resolve`, or deregistered it, must keep
+// Node's own path, as plain Node does.
 // Only Node's own "no source" result qualifies: a user loader's wrong-typed `source`
 // names that loader's hook and surfaces as under plain Node. A loader's nullish `source`
 // on a CommonJS file reads the same and cannot be told apart. Matching the message is
@@ -421,27 +423,54 @@ const ASYNC_TIER_NO_SOURCE = /"source" from the "load" hook but got (undefined|n
 function installAsyncTierCjsSource() {
   if (typeof module_.registerHooks !== "function") return;
   const orig = module_.registerHooks;
-  let installed = false;
-  module_.registerHooks = function (...args) {
-    if (!installed) {
-      installed = true;
-      orig.call(this, {
-        load(url, context, next) {
-          try {
-            return next(url, context);
-          } catch (err) {
-            if (err && err.code === "ERR_INVALID_RETURN_PROPERTY_VALUE" &&
-                ASYNC_TIER_NO_SOURCE.test(err.message) && context.format !== "module" &&
-                typeof url === "string" && url.startsWith("file:")) {
-              const source = getBuiltin("node:fs").readFileSync(fileURLToPath(url));
-              return { format: "commonjs", source, shortCircuit: true };
-            }
-            throw err;
+  let recovery = null;
+  let userLoadHooks = 0;
+  const release = () => {
+    if (--userLoadHooks === 0) {
+      recovery.deregister();
+      recovery = null;
+    }
+  };
+  module_.registerHooks = function (hooks) {
+    if (typeof hooks?.load !== "function") return orig.apply(this, arguments);
+    userLoadHooks++;
+    // Registered first, because hooks run last-registered first and this one has to
+    // sit beneath every user hook.
+    recovery ??= orig.call(this, {
+      load(url, context, next) {
+        try {
+          return next(url, context);
+        } catch (err) {
+          if (err && err.code === "ERR_INVALID_RETURN_PROPERTY_VALUE" &&
+              ASYNC_TIER_NO_SOURCE.test(err.message) && context.format !== "module" &&
+              typeof url === "string" && url.startsWith("file:")) {
+            const source = getBuiltin("node:fs").readFileSync(fileURLToPath(url));
+            return { format: "commonjs", source, shortCircuit: true };
+          }
+          throw err;
+        }
+      },
+    });
+    let handle;
+    try {
+      handle = orig.apply(this, arguments);
+    } catch (err) {
+      release();
+      throw err;
+    }
+    // Node freezes the handle, so its `deregister` can only be shadowed by a new object.
+    let released = false;
+    return Object.freeze(Object.create(handle, {
+      deregister: {
+        value() {
+          handle.deregister();
+          if (!released) {
+            released = true;
+            release();
           }
         },
-      });
-    }
-    return orig.apply(this, args);
+      },
+    }));
   };
   // A register's `import { registerHooks } from "node:module"` reads the live binding.
   module_.syncBuiltinESMExports();

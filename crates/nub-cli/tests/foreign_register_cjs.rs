@@ -91,6 +91,45 @@ fn a_foreign_register_leaves_commonjs_files_running() {
     }
 }
 
+/// The recovery moves CommonJS onto the translator whose `require` has no `.cache`, so it
+/// exists only while a user load hook does, and a run with none keeps Node's own path.
+#[test]
+fn a_register_with_no_active_load_hook_keeps_require_cache() {
+    let dir = fixture();
+    let root = dir.path();
+    write(
+        root,
+        "cache.cjs",
+        "module.exports = Boolean(require.cache[__filename]);\n",
+    );
+    write(
+        root,
+        "cache.mjs",
+        "import c from './cache.cjs';\nconsole.log(c);\n",
+    );
+    write(
+        root,
+        "resolve-only.mjs",
+        r#"import nodeModule from "node:module";
+nodeModule.registerHooks?.({ resolve: (specifier, context, next) => next(specifier, context) });
+"#,
+    );
+    write(
+        root,
+        "deregistered.mjs",
+        r#"import nodeModule from "node:module";
+nodeModule.registerHooks?.({ load: (url, context, next) => next(url, context) }).deregister();
+"#,
+    );
+    for register in ["./resolve-only.mjs", "./deregistered.mjs"] {
+        assert_eq!(
+            stdout(&nub(root, &["--import", register, "cache.mjs"])),
+            "true",
+            "register {register}"
+        );
+    }
+}
+
 /// The recovery answers only Node's own missing source. A loader's wrong `source` for a
 /// `.cjs` file stays that loader's error, and the raw file never runs.
 #[test]
