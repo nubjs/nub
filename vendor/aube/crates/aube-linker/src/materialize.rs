@@ -2,12 +2,13 @@ use tracing::{debug, trace, warn};
 
 use crate::patches::apply_multi_file_patch;
 use crate::sweep::{
-    EntryState, classify_entry_state, mkdirp, reconcile_dir_link, try_remove_entry,
+    EntryState, classify_entry_state, mkdirp, reconcile_dir_link, sweep_stale_top_level_entries,
+    try_remove_entry,
 };
 use crate::{Error, LinkStats, LinkStrategy, Linker, sys};
 use aube_lockfile::{LockedPackage, LockfileGraph, resolve_dep_edge, shared_local_dep_path};
 use aube_store::{PackageIndex, StoredFile};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -382,41 +383,88 @@ impl Linker {
         pkg: &LockedPackage,
         nested_link_targets: Option<&BTreeMap<String, PathBuf>>,
     ) -> Result<(), Error> {
-        let pkg_nm_parent = self
-            .virtual_store
-            .join(self.virtual_store_subdir(dep_path))
-            .join("node_modules");
+        self.reconcile_dep_links(
+            &self.virtual_store,
+            &self.virtual_store_subdir(dep_path),
+            |dep_dep_path| self.virtual_store_subdir(dep_dep_path),
+            |dep_name, dep_version| {
+                shared_local_dep_path(dep_name, dep_version)
+                    .unwrap_or_else(|| format!("{dep_name}@{dep_version}"))
+            },
+            pkg,
+            nested_link_targets,
+        )
+    }
+
+    /// The same for a per-project `.aube/<dep_path>` entry a previous install
+    /// left, which is reused because it exists. A package's key does not name
+    /// what its dependencies resolved to, so a compatibility database edge moves
+    /// or drops a link while the key stays. In the shared store that changes the
+    /// entry's hash instead, so only this layout needs the dropped links removed.
+    pub(crate) fn reconcile_aube_dir_entry(
+        &self,
+        aube_dir: &Path,
+        dep_path: &str,
+        graph: &LockfileGraph,
+        pkg: &LockedPackage,
+        nested_link_targets: Option<&BTreeMap<String, PathBuf>>,
+    ) -> Result<(), Error> {
+        let entry = self.aube_dir_entry_name(dep_path);
+        self.reconcile_dep_links(
+            aube_dir,
+            &entry,
+            |dep_dep_path| self.aube_dir_entry_name(dep_dep_path),
+            |dep_name, dep_version| {
+                resolve_dep_edge(dep_name, dep_version, |k| graph.packages.contains_key(k))
+                    .unwrap_or_else(|| {
+                        shared_local_dep_path(dep_name, dep_version)
+                            .unwrap_or_else(|| format!("{dep_name}@{dep_version}"))
+                    })
+            },
+            pkg,
+            nested_link_targets,
+        )?;
+        let mut keep: HashSet<&str> = pkg.dependencies.keys().map(String::as_str).collect();
+        keep.insert(&pkg.name);
+        sweep_stale_top_level_entries(&aube_dir.join(entry).join("node_modules"), &keep, None);
+        Ok(())
+    }
+
+    fn reconcile_dep_links(
+        &self,
+        root: &Path,
+        entry: &str,
+        entry_of: impl Fn(&str) -> String,
+        dep_path_of: impl Fn(&str, &str) -> String,
+        pkg: &LockedPackage,
+        nested_link_targets: Option<&BTreeMap<String, PathBuf>>,
+    ) -> Result<(), Error> {
+        let pkg_nm_parent = root.join(entry).join("node_modules");
         for (dep_name, dep_version) in &pkg.dependencies {
             if dep_name == &pkg.name {
                 continue;
             }
             validate_package_link_name(dep_name)?;
-            let dep_dep_path = shared_local_dep_path(dep_name, dep_version)
-                .unwrap_or_else(|| format!("{dep_name}@{dep_version}"));
+            let dep_dep_path = dep_path_of(dep_name, dep_version);
             let symlink_path = pkg_nm_parent.join(dep_name);
             let target = if let Some(abs_target) =
                 nested_link_targets.and_then(|targets| targets.get(&dep_dep_path))
             {
                 abs_target.clone()
             } else {
-                let sibling_subdir = self.virtual_store_subdir(&dep_dep_path);
+                let sibling_abs = root
+                    .join(entry_of(&dep_dep_path))
+                    .join("node_modules")
+                    .join(dep_name);
                 #[cfg(not(windows))]
                 {
-                    let sibling_abs = self
-                        .virtual_store
-                        .join(sibling_subdir)
-                        .join("node_modules")
-                        .join(dep_name);
                     let link_parent = symlink_path.parent().unwrap_or(&pkg_nm_parent);
                     pathdiff::diff_paths(&sibling_abs, link_parent)
                         .unwrap_or_else(|| sibling_abs.clone())
                 }
                 #[cfg(windows)]
                 {
-                    self.virtual_store
-                        .join(sibling_subdir)
-                        .join("node_modules")
-                        .join(dep_name)
+                    sibling_abs
                 }
             };
             if reconcile_dir_link(&symlink_path, &target)? {

@@ -220,12 +220,21 @@ pub fn export_entry(at: &str, entry: &Entry) -> (String, &'static str, String) {
 /// where the chunk landed: an entry chunk from its stub, a shared one from the app
 /// root. Neither is where the importing module sat, so the imports are returned for
 /// the caller to check against the payload.
-pub fn bundle(plan: &Plan, minify: bool, keep_names: bool) -> Result<Bundled> {
+///
+/// `external` is the plugin that gives the main bundle's `--external` imports their
+/// ids. A chunk can inline modules from several packages, and sits apart from all of
+/// them when it is shared, so only the import itself can say which module made it.
+pub fn bundle(
+    plan: &Plan,
+    external: Option<&SharedPluginable>,
+    minify: bool,
+    keep_names: bool,
+) -> Result<Bundled> {
     let mut bundled = Bundled::default();
     for esm in [false, true] {
         let entries: Vec<&Entry> = plan.entries.iter().filter(|e| e.esm == esm).collect();
         if !entries.is_empty() {
-            let built = build(&entries, &plan.verbatim, esm, minify, keep_names)?;
+            let built = build(&entries, &plan.verbatim, external, esm, minify, keep_names)?;
             bundled.files.extend(built.files);
             bundled.imports.extend(built.imports);
         }
@@ -236,6 +245,7 @@ pub fn bundle(plan: &Plan, minify: bool, keep_names: bool) -> Result<Bundled> {
 fn build(
     plan: &[&Entry],
     verbatim: &BTreeSet<PathBuf>,
+    external: Option<&SharedPluginable>,
     esm: bool,
     minify: bool,
     keep_names: bool,
@@ -322,6 +332,11 @@ fn build(
         }),
         ..Default::default()
     };
+    let plugins: Vec<SharedPluginable> = external
+        .cloned()
+        .into_iter()
+        .chain([entries as SharedPluginable])
+        .collect();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -329,7 +344,7 @@ fn build(
     let output = rt.block_on(async move {
         let mut bundler = BundlerBuilder::default()
             .with_options(options)
-            .with_plugins(vec![entries as SharedPluginable])
+            .with_plugins(plugins)
             .build()
             .map_err(|e| anyhow!("closure bundler init: {e:?}"))?;
         bundler

@@ -16,13 +16,15 @@
 //! sibling-dedupe → lockfile-reuse → fetch-and-pick) is staged for a
 //! later refactor.
 
+use super::ImporterMemberLinks;
 use super::fetch::{FetchKey, FetchScheduler, TrustHistory};
 use super::seed::seed_direct_deps;
 use super::vulnerable::{is_vulnerable, prefer_non_vulnerable_pick};
 use crate::local_source::{
-    LocalManifest, dep_path_for, is_non_registry_specifier, probe_remote_tarball_manifest,
-    read_local_manifest, rebase_local, resolve_exec_manifest, resolve_git_source,
-    resolve_remote_tarball, should_block_exotic_subdep,
+    LocalManifest, dep_path_for, edge_names_a_source, is_non_registry_specifier,
+    probe_remote_tarball_manifest, read_local_manifest, rebase_local, resolve_exec_manifest,
+    resolve_git_source, resolve_remote_tarball, should_block_exotic_subdep,
+    source_matches_declaration,
 };
 use crate::locked_index::LockedIndex;
 use crate::package_ext::{
@@ -37,7 +39,7 @@ use crate::workspace_spec::workspace_range_binds;
 use crate::{
     Error, ExoticSubdepDetails, FxHashMap, FxHashSet, ResolutionMode, ResolveTask, ResolvedPackage,
     Resolver, WorkspacePkgNotFoundDetails, WorkspaceVersionMismatchDetails, error,
-    is_deprecation_allowed, is_supported,
+    is_deprecation_allowed, is_supported, override_rule,
 };
 use aube_lockfile::{DepType, DirectDep, LocalSource, LockedPackage, LockfileGraph};
 use aube_manifest::PackageJson;
@@ -147,6 +149,12 @@ pub(crate) struct ResolveDriver<'a> {
     /// so the two can never disagree about the member set.
     workspace_member_importers: BTreeMap<String, String>,
 
+    /// The importer dependencies that bound to a workspace member, as importer ->
+    /// dependency name -> (member directory, member version). `name@version`
+    /// alone cannot say so: `latest` can select the registry copy at the member's
+    /// own version.
+    importer_member_links: ImporterMemberLinks,
+
     /// Borrowed set of names present in the existing lockfile. Used as
     /// a prefetch gate so packuments that will hit the lockfile-reuse
     /// path never burn a tokio spawn. Strictly an optimization — the
@@ -173,6 +181,9 @@ pub(crate) struct ResolveDriver<'a> {
     /// `name → resolved versions seen this run`. Drives sibling dedupe.
     /// Pre-sized for typical monorepo (5000-dep graphs take one grow).
     resolved_versions: FxHashMap<String, Vec<String>>,
+    /// The overrides the existing lockfile recorded, which say which of its
+    /// source-valued edges an override put there.
+    previous_override_rules: Vec<override_rule::OverrideRule>,
     /// Importer paths → direct dep records, populated as root tasks
     /// resolve.
     importers: BTreeMap<String, Vec<DirectDep>>,
@@ -225,6 +236,11 @@ pub(crate) struct ResolveDriver<'a> {
     /// can't drag a major nothing depends on into the graph (the Expo/RN
     /// `@babel/core` 8-vs-7 break). Full rationale at the drain site.
     deferred_auto_peers: Vec<ResolveTask>,
+    /// A lockfile's optional edges that a database entry names, parked until
+    /// the other versions in the graph are known. A lockfile cannot say whether
+    /// such an edge is that repair, which `database_peer_targets` recomputes, or
+    /// an optional dependency the package declares. Decided at the drain site.
+    deferred_database_edges: Vec<ResolveTask>,
 
     /// ISO-8601 UTC cutoff string used by the version picker. Seeded
     /// from `minimum_release_age` for supply-chain mitigation;
@@ -389,11 +405,15 @@ impl<'a> ResolveDriver<'a> {
             existing,
             workspace_packages,
             workspace_member_importers,
+            importer_member_links: BTreeMap::new(),
             existing_names,
             locked_index,
             importer_declared_dep_names,
             resolved: BTreeMap::new(),
             resolved_versions: FxHashMap::with_capacity_and_hasher(1024, Default::default()),
+            previous_override_rules: existing
+                .map(|graph| override_rule::compile(&graph.overrides))
+                .unwrap_or_default(),
             importers,
             queue,
             visited: FxHashSet::with_capacity_and_hasher(2048, Default::default()),
@@ -405,6 +425,7 @@ impl<'a> ResolveDriver<'a> {
             catalog_picks: BTreeMap::new(),
             deferred_transitives: Vec::new(),
             deferred_auto_peers: Vec::new(),
+            deferred_database_edges: Vec::new(),
             published_by,
             time_cutoff: None,
             age_gate_cutoff,
@@ -462,6 +483,7 @@ impl<'a> ResolveDriver<'a> {
             self.resolved_times,
             self.skipped_optional_dependencies,
             self.catalog_picks,
+            &self.importer_member_links,
         )?;
         if let Some((state, sem)) = self.packument_persist_handle {
             sem.persist(&state, "packument:default");
@@ -644,8 +666,22 @@ impl<'a> ResolveDriver<'a> {
                 // overridden version) but NOT to a peer edge, so reusing the
                 // raw range here matches pnpm — verified empirically.
                 if let Some(peer_task) = self.deferred_auto_peers.pop() {
-                    if !self.try_peer_reuse(&peer_task) {
+                    if !self.try_peer_reuse(&peer_task) && !self.try_workspace_link(&peer_task) {
                         self.queue.push_back(peer_task);
+                    }
+                    continue;
+                }
+                // The edge stays while its target does. Otherwise it may be the
+                // repair going stale, for `database_peer_targets` to rebind, or a
+                // dependency the package declares, which takes its manifest to
+                // tell. Asking only here keeps an unchanged graph from fetching.
+                if let Some(edge) = self.deferred_database_edges.pop() {
+                    let target_stays = self
+                        .resolved_versions
+                        .get(&edge.name)
+                        .is_some_and(|versions| versions.contains(&edge.range));
+                    if target_stays || self.parent_declares(&edge).await? {
+                        self.queue.push_back(edge);
                     }
                     continue;
                 }
@@ -658,6 +694,86 @@ impl<'a> ResolveDriver<'a> {
 }
 
 impl<'a> ResolveDriver<'a> {
+    /// Wait for one in-flight packument fetch and record what came back.
+    async fn record_next_fetch(&mut self, fetch_name: &str) -> Result<(), Error> {
+        match self.fetcher.join_next().await {
+            Some(Ok((key, Ok((name, packument, source, trust_history))))) => {
+                if let FetchKey::Exact(exact_name, _) = &key {
+                    self.failed_fetches
+                        .remove(&FetchKey::Full(exact_name.clone()));
+                }
+                if let super::fetch::FetchSource::Primer { sparse } = source {
+                    self.fetcher
+                        .note_primer_seeded(name.clone(), super::fetch::PrimerSeed { sparse });
+                }
+                self.record_fetch_result(name, packument, trust_history);
+                self.packument_fetch_count += 1;
+            }
+            Some(Ok((key, Err(e)))) => {
+                // Store failed fetches in the side table instead
+                // of propagating immediately. pnpm parity.
+                match &e {
+                    crate::Error::Registry(_, _) => {}
+                    _ => return Err(e),
+                }
+                self.failed_fetches.insert(key, e);
+            }
+            Some(Err(join_err)) => {
+                return Err(Error::Registry("(join)".to_string(), join_err.to_string()));
+            }
+            None => {
+                // join_next returns None only when the JoinSet is
+                // empty. ensure_fetch above guarantees at least one
+                // task is in flight if the cache still doesn't
+                // hold this name, so None means the spawn failed
+                // silently. Surface it.
+                return Err(Error::Registry(
+                    fetch_name.to_string(),
+                    "packument fetch disappeared before completing".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `edge`'s package declares it, going by the published manifest after
+    /// package extensions and `readPackage`, as a fresh resolve sees it. A manifest
+    /// that cannot be read keeps the edge: a stale repair costs one package, a lost
+    /// dependency breaks one.
+    async fn parent_declares(&mut self, edge: &ResolveTask) -> Result<bool, Error> {
+        let Some(parent) = edge.parent.as_ref().and_then(|p| self.resolved.get(p)) else {
+            return Ok(true);
+        };
+        let name = parent.registry_name().to_string();
+        let version = parent.version.clone();
+        let key = FetchKey::Full(name.clone());
+        while !self.resolver.cache.contains_key(&name) && !self.failed_fetches.contains_key(&key) {
+            self.ensure_fetch(&name);
+            self.record_next_fetch(&name).await?;
+        }
+        let Some(mut manifest) = self
+            .resolver
+            .cache
+            .get(&name)
+            .and_then(|packument| packument.versions.get(&version))
+            .cloned()
+        else {
+            return Ok(true);
+        };
+        apply_package_extensions(
+            &mut manifest,
+            &self.resolver.dependency_policy.package_extensions,
+        );
+        if let Some(hook) = self.resolver.read_package_hook.as_mut() {
+            manifest = hook
+                .read_package(manifest)
+                .await
+                .map_err(|e| Error::Registry(name.clone(), format!("readPackage hook: {e}")))?;
+        }
+        Ok(manifest.dependencies.contains_key(&edge.name)
+            || manifest.optional_dependencies.contains_key(&edge.name))
+    }
+
     /// Decide whether a primer-seeded `Found` pick must be refetched
     /// live before we trust it (the always-on pick-site freshness gate).
     /// Only consulted when the pick came from the bundled primer (checked
@@ -776,7 +892,18 @@ impl<'a> ResolveDriver<'a> {
             return self.handle_local_source_task(task).await;
         }
 
-        if self.try_workspace_link(&task) {
+        // A member stands in only for what an importer declares: a package's own
+        // semver dependency on that name comes from the registry, as with pnpm's
+        // default `linkWorkspacePackagesDepth`. A local package is first-party
+        // code, so its dependency still links.
+        let parent_is_local = task
+            .parent
+            .as_ref()
+            .and_then(|parent| self.resolved.get(parent))
+            .is_some_and(|parent| parent.local_source.is_some());
+        if (task.is_root || task.range.starts_with("workspace:") || parent_is_local)
+            && self.try_workspace_link(&task)
+        {
             return Ok(());
         }
 
@@ -794,7 +921,7 @@ impl<'a> ResolveDriver<'a> {
             return Ok(());
         }
 
-        if self.try_lockfile_reuse(&task).await {
+        if self.try_lockfile_reuse(&mut task).await {
             return Ok(());
         }
 
@@ -843,43 +970,7 @@ impl<'a> ResolveDriver<'a> {
             } else {
                 self.ensure_fetch(&fetch_name);
             }
-            match self.fetcher.join_next().await {
-                Some(Ok((key, Ok((name, packument, source, trust_history))))) => {
-                    if let FetchKey::Exact(exact_name, _) = &key {
-                        self.failed_fetches
-                            .remove(&FetchKey::Full(exact_name.clone()));
-                    }
-                    if let super::fetch::FetchSource::Primer { sparse } = source {
-                        self.fetcher
-                            .note_primer_seeded(name.clone(), super::fetch::PrimerSeed { sparse });
-                    }
-                    self.record_fetch_result(name, packument, trust_history);
-                    self.packument_fetch_count += 1;
-                }
-                Some(Ok((key, Err(e)))) => {
-                    // Store failed fetches in the side table instead
-                    // of propagating immediately. pnpm parity.
-                    match &e {
-                        crate::Error::Registry(_, _) => {}
-                        _ => return Err(e),
-                    }
-                    self.failed_fetches.insert(key, e);
-                }
-                Some(Err(join_err)) => {
-                    return Err(Error::Registry("(join)".to_string(), join_err.to_string()));
-                }
-                None => {
-                    // join_next returns None only when the JoinSet is
-                    // empty. ensure_fetch above guarantees at least one
-                    // task is in flight if the cache still doesn't
-                    // hold this name, so None means the spawn failed
-                    // silently. Surface it.
-                    return Err(Error::Registry(
-                        fetch_name.clone(),
-                        "packument fetch disappeared before completing".to_string(),
-                    ));
-                }
-            }
+            self.record_next_fetch(&fetch_name).await?;
         }
         self.packument_fetch_time += wait_start.elapsed();
 
@@ -1692,11 +1783,10 @@ impl<'a> ResolveDriver<'a> {
         // optional `typescript`, …). Synthesize the same `*` so peer
         // context resolves these exactly like pnpm: an optional peer that
         // a real ancestor / the workspace root provides (typescript) gets
-        // a dep-path suffix, while one nothing on the path provides
-        // (supports-color) is left unresolved and surfaces under
-        // `transitivePeerDependencies`. The optional-peer branch in
-        // `visit_peer_context` is what keeps the graph-wide scan from
-        // binding the latter to an unrelated copy in the tree.
+        // a dep-path suffix, as does one `hoist_missing_peers` can supply
+        // from elsewhere in the graph, while one the graph does not hold
+        // (supports-color, usually) is left unresolved and surfaces under
+        // `transitivePeerDependencies`.
         let mut peer_deps = version_meta.peer_dependencies.clone();
         for name in version_meta.peer_dependencies_meta.keys() {
             peer_deps
@@ -2623,6 +2713,14 @@ impl<'a> ResolveDriver<'a> {
                 if task.is_root {
                     task.lockfile_override_specifier = Some(effective_spec.clone());
                 }
+                // Overrides are declared at the project root, so a substituted
+                // `link:`/`file:` path is project-root-relative — mark the task so
+                // the local-source branch anchors it correctly. This holds when the
+                // range already equals the override, as on a registry parent reused
+                // from the lockfile, whose stored edge is the override's value.
+                if is_non_registry_specifier(&effective_spec) {
+                    task.range_from_override = true;
+                }
                 if task.range != effective_spec {
                     if let Some((catalog_name, real_range)) = pending_pick {
                         self.catalog_picks
@@ -2636,13 +2734,6 @@ impl<'a> ResolveDriver<'a> {
                         task.range,
                         effective_spec
                     );
-                    // Overrides are declared at the project root, so
-                    // a substituted `link:`/`file:` path is
-                    // project-root-relative — mark the task so the
-                    // local-source branch anchors it correctly.
-                    if is_non_registry_specifier(&effective_spec) {
-                        task.range_from_override = true;
-                    }
                     task.range = effective_spec;
                     // If the override replaced the spec with a bare
                     // range (not itself an `npm:`/`jsr:` alias), it's
@@ -2949,7 +3040,36 @@ impl<'a> ResolveDriver<'a> {
             return false;
         }
         let ws_version = ws_version.clone();
-        self.link_to_existing_version(task, &ws_version);
+        match self.workspace_member_importers.get(&task.name).cloned() {
+            // A member is an importer and has no package entry, so a package's
+            // edge to it lands on the `link:` package pnpm records there.
+            Some(dir) if !task.is_root => {
+                let local = LocalSource::Link(dir.into());
+                let key = local.dep_path(&task.name);
+                let tail = key
+                    .strip_prefix(&format!("{}@", task.name))
+                    .unwrap_or(&key)
+                    .to_string();
+                self.resolved
+                    .entry(key.clone())
+                    .or_insert_with(|| LockedPackage {
+                        name: task.name.clone(),
+                        version: ws_version,
+                        dep_path: key,
+                        local_source: Some(local),
+                        ..Default::default()
+                    });
+                self.link_to_existing_version(task, &tail);
+            }
+            Some(dir) => {
+                self.importer_member_links
+                    .entry(task.importer.clone())
+                    .or_default()
+                    .insert(task.name.clone(), (dir, ws_version.clone()));
+                self.link_to_existing_version(task, &ws_version);
+            }
+            None => self.link_to_existing_version(task, &ws_version),
+        }
         true
     }
 
@@ -2974,7 +3094,7 @@ impl<'a> ResolveDriver<'a> {
     ///
     /// Returns true when a lockfile entry handled the task (whether
     /// fully resolved or dropped as a platform-mismatched optional).
-    async fn try_lockfile_reuse(&mut self, task: &ResolveTask) -> bool {
+    async fn try_lockfile_reuse(&mut self, task: &mut ResolveTask) -> bool {
         let Some(locked_pkg) = self.locked_index.find_satisfying(
             &task.name,
             &task.range,
@@ -3014,6 +3134,54 @@ impl<'a> ResolveDriver<'a> {
             return true;
         }
         let version = locked_pkg.version.clone();
+        // Reuse reads a registry package's dependencies back from its lockfile
+        // edges, which hold what each one resolved to, not the range it declares.
+        // A version stands in for the range. A source an override put there does
+        // not: once no override applies, the edge is stale and only the packument
+        // has the real range. Go back to it, keeping this version. A source the
+        // package declares itself is not stale. The overrides a lockfile recorded
+        // say which edges they put there, and npm, bun and yarn lockfiles keep what
+        // each package declares.
+        let stale = locked_pkg.dependencies.iter().any(|(dep_name, edge)| {
+            let edge = edge
+                .strip_prefix(dep_name.as_str())
+                .and_then(|rest| rest.strip_prefix('@'))
+                .unwrap_or(edge);
+            let edge = edge.split('(').next().unwrap_or(edge);
+            if !edge_names_a_source(edge) || self.workspace_packages.contains_key(dep_name) {
+                return false;
+            }
+            let mut ancestors = task.ancestors.to_vec();
+            ancestors.push((task.name.clone(), version.clone()));
+            if pick_override_spec(&self.resolver.override_rules, dep_name, edge, &ancestors)
+                .is_some()
+            {
+                return false;
+            }
+            if locked_pkg.peer_dependencies.contains_key(dep_name)
+                || pick_override_spec(&self.previous_override_rules, dep_name, edge, &ancestors)
+                    .is_some()
+            {
+                return true;
+            }
+            if !locked_pkg.declared_dependencies_known {
+                return false;
+            }
+            let held = self
+                .locked_index
+                .local_source(dep_name, edge)
+                .cloned()
+                .or_else(|| LocalSource::parse(edge, std::path::Path::new("")));
+            !locked_pkg
+                .declared_dependencies
+                .get(dep_name)
+                .zip(held)
+                .is_some_and(|(declared, held)| source_matches_declaration(&held, declared))
+        });
+        if stale {
+            task.range = version;
+            return false;
+        }
         let dep_path = dep_path_for(&task.name, &version);
 
         if task.is_root
@@ -3168,19 +3336,35 @@ impl<'a> ResolveDriver<'a> {
                 let prefix = format!("{dep_name}@");
                 let stripped = dep_version.strip_prefix(&prefix).unwrap_or(dep_version);
                 let canonical_version = stripped.split('(').next().unwrap_or(stripped).to_string();
+                let canonical_version = self
+                    .locked_index
+                    .local_specifier(dep_name, &canonical_version)
+                    .unwrap_or(canonical_version);
                 let dep_type = if locked_pkg.optional_dependencies.contains_key(dep_name) {
                     DepType::Optional
                 } else {
                     DepType::Production
                 };
-                self.queue.push_back(ResolveTask::transitive(
+                let edge = ResolveTask::transitive(
                     dep_name.clone(),
                     canonical_version,
                     dep_type,
                     dep_path.clone(),
                     task.importer.clone(),
                     child_ancestors.clone(),
-                ));
+                );
+                if locked_pkg.optional_dependencies.contains_key(dep_name)
+                    && crate::package_ext::is_database_peer(
+                        &self.resolver.dependency_policy.package_extensions,
+                        locked_pkg.registry_name(),
+                        &version,
+                        dep_name,
+                    )
+                {
+                    self.deferred_database_edges.push(edge);
+                } else {
+                    self.queue.push_back(edge);
+                }
             }
         }
         self.lockfile_reuse_count += 1;

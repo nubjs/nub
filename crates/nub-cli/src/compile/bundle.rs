@@ -230,6 +230,10 @@ pub struct BundleResult {
     /// Static `--external` imports with the authored importer retained for a
     /// compiled artifact's runtime hook. Empty for the generic build path.
     pub external_imports: Vec<ExternalImport>,
+    /// Each package directory the bundle placed, as its bundle-relative path and its
+    /// source path, for the runtime hook to look an external up from. Empty unless the
+    /// build has `--external`. Compile applies the payload layout to the first.
+    pub shipped_sources: Vec<(String, String)>,
     /// The public worker entry named from application code and its private
     /// bundled implementation chunk.  Compile writes a tiny public wrapper for
     /// each pair after it knows whether a runtime resolve hook is needed.
@@ -262,7 +266,7 @@ pub struct ExternalImport {
 
 #[cfg(test)]
 pub fn bundle(entry_abs: &Path, opts: &BundleOptions) -> Result<BundleResult> {
-    bundle_inner(entry_abs, opts, None)
+    bundle_inner(entry_abs, opts, None, &BTreeMap::new())
 }
 
 /// Compile's artifact hook needs the original importer, whereas `nub build`
@@ -272,13 +276,14 @@ pub fn bundle_for_compile(
     opts: &BundleOptions,
     launch_root: &Path,
 ) -> Result<BundleResult> {
-    bundle_inner(entry_abs, opts, Some(launch_root))
+    bundle_inner(entry_abs, opts, Some(launch_root), &BTreeMap::new())
 }
 
 fn bundle_inner(
     entry_abs: &Path,
     opts: &BundleOptions,
     launch_root: Option<&Path>,
+    own_installs: &BTreeMap<PathBuf, String>,
 ) -> Result<BundleResult> {
     let cwd = entry_abs
         .parent()
@@ -451,6 +456,8 @@ fn bundle_inner(
             loader_plan.claims_extension("node"),
             opts.unbundled.clone(),
             opts.bundled.clone(),
+            opts.external.clone(),
+            own_installs.clone(),
         ))
     });
     let external_plugin = launch_root
@@ -551,6 +558,20 @@ fn bundle_inner(
     // while scanning, then refuse here so the author sees the source and the
     // precise v1 boundary rather than merely a plugin name.
     new_urls.reject_unsupported_workers()?;
+
+    // Excluding a module is a resolve-time answer, and the packages that have to leave
+    // the bundle are known only once every importer has been seen, by which time their
+    // modules are in it. So the bundle runs again without them. Each run moves at least
+    // one package, and nothing has been written or reported yet. A tree that needs this
+    // pays for it; every other one finds nothing to move.
+    if let Some(plugin) = &native_plugin {
+        let moved = plugin.out_of_reach(entry_abs);
+        if !moved.is_empty() {
+            let mut own_installs = own_installs.clone();
+            own_installs.extend(moved);
+            return bundle_inner(entry_abs, opts, launch_root, &own_installs);
+        }
+    }
 
     // `preload-common.cjs` is bundled whole, and two of its functions reach a
     // preload chain through a specifier built at run time. In an artifact they are
@@ -717,15 +738,30 @@ fn bundle_inner(
     // copying starts here, after tree-shaking: a foreign optional variant whose
     // wrapper disappeared cannot affect this target's payload or fail the build.
     let planned_native = if let Some(plugin) = &native_plugin {
-        plugin.plan_survivors(&mut files, entry_abs, opts.minify, opts.keep_names)?
+        let external = external_plugin
+            .as_ref()
+            .map(|plugin| Arc::clone(plugin) as SharedPluginable);
+        plugin.plan_survivors(
+            &mut files,
+            entry_abs,
+            external.as_ref(),
+            opts.minify,
+            opts.keep_names,
+        )?
     } else {
         native::PlannedNative {
             files: Vec::new(),
             summaries: Vec::new(),
+            placed: Vec::new(),
         }
     };
     let native_files = planned_native.files;
     let native_addons = planned_native.summaries;
+    let shipped_sources = launch_root
+        .filter(|_| !opts.external.is_empty())
+        .map_or_else(Vec::new, |root| {
+            shipped_sources(&planned_native.placed, &canonicalize_for_bundler(root))
+        });
     // Reported AFTER tree-shaking so a package the program never actually reaches
     // is not named. These bundled clean — a package that finds its addon through
     // `node-gyp-build` or `bindings` never puts a `.node` in the import graph — so
@@ -801,6 +837,7 @@ fn bundle_inner(
         dynamic_import_sites,
         native_addons,
         external_imports,
+        shipped_sources,
         worker_roots: new_urls.worker_roots(),
         metafile,
     })
@@ -5171,7 +5208,7 @@ fn validate_external_packages(packages: &[String]) -> Result<()> {
 }
 
 /// Does `specifier` name `pkg` or one of its subpaths?
-fn is_package_specifier(specifier: &str, pkg: &str) -> bool {
+pub(super) fn is_package_specifier(specifier: &str, pkg: &str) -> bool {
     specifier == pkg
         || (specifier.starts_with(pkg) && specifier.as_bytes().get(pkg.len()) == Some(&b'/'))
 }
@@ -5288,6 +5325,43 @@ impl Plugin for ExternalImports {
     }
 }
 
+/// Where each package directory the bundle placed sits relative to the launch directory.
+/// A package from a store has no such place, so it counts as sitting where it was placed.
+fn shipped_sources(placed: &[(String, PathBuf)], launch_root: &Path) -> Vec<(String, String)> {
+    placed
+        .iter()
+        .filter_map(|(at, instance)| {
+            let instance = canonicalize_for_bundler(instance);
+            let source = if store_relative(&instance, launch_root).is_some() {
+                at.clone()
+            } else {
+                portable_importer(&instance.to_string_lossy(), launch_root)?
+            };
+            Some((at.clone(), source))
+        })
+        .collect()
+}
+
+/// A module's path inside its package manager's store, if that is where it lives: the
+/// install tree it hangs off is neither above nor below the launch directory, and is no
+/// project of its own.
+///
+/// Its path means nothing on another machine, and written down it would carry this
+/// one's home directory into the artifact. A sibling workspace member's tree looks the
+/// same from here but has a manifest at its root, where a store's per-package directory
+/// holds only `node_modules`, and there the relative path is real source layout.
+fn store_relative(path: &Path, launch_root: &Path) -> Option<String> {
+    let tree = native::install_tree_root(path)?;
+    if launch_root.starts_with(&tree)
+        || tree.starts_with(launch_root)
+        || tree.join("package.json").is_file()
+    {
+        return None;
+    }
+    let inner = path.strip_prefix(&tree).ok()?;
+    Some(inner.to_string_lossy().replace('\\', "/"))
+}
+
 /// Convert only a genuine file importer to a path portable from the launch cwd.
 /// Opaque virtual/data ids intentionally keep the old cwd resolution behavior.
 fn portable_importer(id: &str, launch_root: &Path) -> Option<String> {
@@ -5303,6 +5377,9 @@ fn portable_importer(id: &str, launch_root: &Path) -> Option<String> {
     };
     if path.is_relative() {
         path = launch_root.join(path);
+    }
+    if let Some(inner) = store_relative(&path, launch_root) {
+        return Some(inner);
     }
     pathdiff::diff_paths(path, launch_root)
         .map(|relative| relative.to_string_lossy().replace('\\', "/"))
@@ -11039,6 +11116,49 @@ const pkg = require("./package.json");
             Some("../sibling/index.mjs"),
             "a source outside the launch cwd must retain relocatable provenance"
         );
+    }
+
+    /// A store's path means nothing on another machine and carries this one's home
+    /// directory; everything else is layout a deployment can reproduce.
+    #[test]
+    fn an_importer_keeps_its_relative_path_unless_it_lives_in_a_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = canonicalize_for_bundler(dir.path());
+        let launch = root.join("repo/packages/app");
+        let member = root.join("repo/packages/lib");
+        std::fs::create_dir_all(&launch).unwrap();
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(member.join("package.json"), "{}").unwrap();
+        for (importer, expected) in [
+            (
+                "home/.cache/store/v1/foo@1-abc/node_modules/foo/lib/index.js",
+                "node_modules/foo/lib/index.js",
+            ),
+            (
+                "home/.cache/store/v1/foo@1-abc/node_modules/foo/node_modules/bar/index.js",
+                "node_modules/foo/node_modules/bar/index.js",
+            ),
+            ("repo/packages/lib/index.js", "../lib/index.js"),
+            (
+                "repo/packages/lib/node_modules/x/index.js",
+                "../lib/node_modules/x/index.js",
+            ),
+            (
+                "repo/node_modules/.pnpm/x@1/node_modules/x/index.js",
+                "../../node_modules/.pnpm/x@1/node_modules/x/index.js",
+            ),
+            (
+                "repo/packages/app/node_modules/.store/x@1/node_modules/x/index.js",
+                "node_modules/.store/x@1/node_modules/x/index.js",
+            ),
+        ] {
+            let id = root.join(importer);
+            assert_eq!(
+                portable_importer(&id.to_string_lossy(), &launch).as_deref(),
+                Some(expected),
+                "{importer}"
+            );
+        }
     }
 
     #[test]
