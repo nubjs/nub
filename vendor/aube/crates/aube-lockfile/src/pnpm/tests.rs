@@ -795,6 +795,169 @@ snapshots:
 }
 
 #[test]
+fn a_local_package_keeps_one_entry_per_set_of_peers() {
+    // A package with its own source, consumed with two sets of peers, is two
+    // entries, as pnpm writes it. Read as one, every consumer loads whichever peer
+    // was read last.
+    let dir = tempfile::tempdir().unwrap();
+    let lockfile_path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(
+        &lockfile_path,
+        r#"
+lockfileVersion: '9.0'
+
+importers:
+  packages/a:
+    dependencies:
+      is-number:
+        specifier: 6.0.0
+        version: 6.0.0
+      peer-dir:
+        specifier: file:../../vendor/pd
+        version: file:vendor/pd(is-number@6.0.0)
+  packages/b:
+    dependencies:
+      is-number:
+        specifier: 7.0.0
+        version: 7.0.0
+      peer-dir:
+        specifier: file:../../vendor/pd
+        version: file:vendor/pd(is-number@7.0.0)
+      uses-peer-dir:
+        specifier: 1.0.0
+        version: 1.0.0(is-number@8.0.0)
+  packages/c:
+    dependencies:
+      is-number:
+        specifier: 6.0.0
+        version: 6.0.0
+      peer-url:
+        specifier: https://example.com/peer-url.tgz
+        version: https://example.com/peer-url.tgz(is-number@6.0.0)
+  packages/d:
+    dependencies:
+      is-number:
+        specifier: 7.0.0
+        version: 7.0.0
+      peer-url:
+        specifier: https://example.com/peer-url.tgz
+        version: https://example.com/peer-url.tgz(is-number@7.0.0)
+
+packages:
+  is-number@6.0.0:
+    resolution: {integrity: sha512-six}
+  is-number@7.0.0:
+    resolution: {integrity: sha512-seven}
+  is-number@8.0.0:
+    resolution: {integrity: sha512-eight}
+  peer-dir@file:vendor/pd:
+    resolution: {directory: vendor/pd, type: directory}
+    peerDependencies:
+      is-number: '*'
+  peer-url@https://example.com/peer-url.tgz:
+    resolution: {integrity: sha512-url, tarball: https://example.com/peer-url.tgz}
+    version: 1.0.0
+    peerDependencies:
+      is-number: '*'
+  uses-peer-dir@1.0.0:
+    resolution: {integrity: sha512-parent}
+
+snapshots:
+  is-number@6.0.0: {}
+  is-number@7.0.0: {}
+  is-number@8.0.0: {}
+  peer-dir@file:vendor/pd(is-number@6.0.0):
+    dependencies:
+      is-number: 6.0.0
+  peer-dir@file:vendor/pd(is-number@7.0.0):
+    dependencies:
+      is-number: 7.0.0
+  peer-dir@file:vendor/pd(is-number@8.0.0):
+    dependencies:
+      is-number: 8.0.0
+  peer-url@https://example.com/peer-url.tgz(is-number@6.0.0):
+    dependencies:
+      is-number: 6.0.0
+  peer-url@https://example.com/peer-url.tgz(is-number@7.0.0):
+    dependencies:
+      is-number: 7.0.0
+  peer-url@https://example.com/peer-url.tgz(is-number@8.0.0):
+    dependencies:
+      is-number: 8.0.0
+  uses-peer-dir@1.0.0(is-number@8.0.0):
+    dependencies:
+      peer-dir: file:vendor/pd(is-number@8.0.0)
+      peer-url: https://example.com/peer-url.tgz(is-number@8.0.0)
+"#,
+    )
+    .unwrap();
+
+    let graph = parse(&lockfile_path).unwrap();
+    let dir_key = LocalSource::Directory("vendor/pd".into()).dep_path("peer-dir");
+    let url_key = crate::shared_local_dep_path("peer-url", "https://example.com/peer-url.tgz")
+        .expect("a URL has a shared key");
+    for (importer, name, key, peer) in [
+        ("packages/a", "peer-dir", &dir_key, "6.0.0"),
+        ("packages/b", "peer-dir", &dir_key, "7.0.0"),
+        ("packages/c", "peer-url", &url_key, "6.0.0"),
+        ("packages/d", "peer-url", &url_key, "7.0.0"),
+    ] {
+        let dep = graph.importers[importer]
+            .iter()
+            .find(|dep| dep.name == name)
+            .unwrap();
+        assert_eq!(dep.dep_path, format!("{key}(is-number@{peer})"));
+        let pkg = &graph.packages[&dep.dep_path];
+        assert_eq!(pkg.dependencies["is-number"], peer);
+        assert!(pkg.local_source.is_some());
+    }
+    // A set of peers only another package reaches is read the same way.
+    let parent = &graph.packages["uses-peer-dir@1.0.0(is-number@8.0.0)"];
+    for (name, key) in [("peer-dir", &dir_key), ("peer-url", &url_key)] {
+        let edge = crate::resolve_dep_edge(name, &parent.dependencies[name], |k| {
+            graph.packages.contains_key(k)
+        })
+        .expect("the edge reaches its own set of peers");
+        assert_eq!(edge, format!("{key}(is-number@8.0.0)"));
+        assert_eq!(graph.packages[&edge].dependencies["is-number"], "8.0.0");
+    }
+
+    let manifest = PackageJson {
+        name: Some("root".to_string()),
+        version: Some("0.0.0".to_string()),
+        ..PackageJson::default()
+    };
+    let out_path = dir.path().join("round-trip.yaml");
+    write(&out_path, &graph, &manifest).unwrap();
+    let written = std::fs::read_to_string(&out_path).unwrap();
+    for spelling in [
+        "version: file:vendor/pd(is-number@6.0.0)\n",
+        "version: file:vendor/pd(is-number@7.0.0)\n",
+        "peer-dir@file:vendor/pd(is-number@6.0.0):\n",
+        "peer-dir@file:vendor/pd(is-number@7.0.0):\n",
+        "peer-dir@file:vendor/pd(is-number@8.0.0):\n",
+        "peer-dir: file:vendor/pd(is-number@8.0.0)\n",
+        "version: https://example.com/peer-url.tgz(is-number@6.0.0)\n",
+        "peer-url@https://example.com/peer-url.tgz(is-number@8.0.0):\n",
+        "peer-url: https://example.com/peer-url.tgz(is-number@8.0.0)\n",
+    ] {
+        assert!(written.contains(spelling), "missing {spelling}: {written}");
+    }
+    assert_eq!(
+        written.matches("resolution: {directory: vendor/pd").count(),
+        1,
+        "one `packages:` entry for the source: {written}"
+    );
+    assert_eq!(
+        written
+            .matches("tarball: https://example.com/peer-url.tgz")
+            .count(),
+        1,
+        "one `packages:` entry for the URL: {written}"
+    );
+}
+
+#[test]
 fn a_snapshot_edge_to_a_root_declared_remote_tarball_keeps_its_url() {
     // Lockfile reuse enqueues a registry parent's stored edge as a resolve
     // range, so a hashed `url+<hash>` tail would be looked up on the registry.
