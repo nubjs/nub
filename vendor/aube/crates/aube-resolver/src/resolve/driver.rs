@@ -3095,12 +3095,15 @@ impl<'a> ResolveDriver<'a> {
     /// Returns true when a lockfile entry handled the task (whether
     /// fully resolved or dropped as a platform-mismatched optional).
     async fn try_lockfile_reuse(&mut self, task: &mut ResolveTask) -> bool {
-        let Some(locked_pkg) = self.locked_index.find_satisfying(
-            &task.name,
-            &task.range,
-            task.registry_name(),
-            &self.resolver.vulnerable_ranges,
-        ) else {
+        let Some(locked_pkg) = self.importer_pin(task).or_else(|| {
+            self.locked_index.find_satisfying(
+                &task.name,
+                &task.range,
+                task.registry_name(),
+                task.is_root || task.real_name.is_some(),
+                &self.resolver.vulnerable_ranges,
+            )
+        }) else {
             return false;
         };
         // Drop optional deps whose platform constraints don't match
@@ -3374,6 +3377,34 @@ impl<'a> ResolveDriver<'a> {
         true
     }
 
+    /// The package the existing lockfile binds this importer's direct
+    /// dependency to, when it still satisfies the range. `None` unless
+    /// [`keep_importer_pins`](crate::Resolver::with_keep_importer_pins) is on.
+    fn importer_pin(&self, task: &ResolveTask) -> Option<&'a LockedPackage> {
+        if !task.is_root || !self.resolver.keep_importer_pins {
+            return None;
+        }
+        let graph = self.existing?;
+        let dep = graph
+            .importers
+            .get(&task.importer)?
+            .iter()
+            .find(|dep| dep.name == task.name)?;
+        let pkg = graph.packages.get(&dep.dep_path)?;
+        // The version alone does not identify the package: a retargeted alias
+        // (`x` from `npm:old@1` to `npm:new@1`) can keep a satisfying version.
+        (!pkg.in_bundle
+            && pkg.local_source.is_none()
+            && pkg.registry_name() == task.registry_name()
+            && version_satisfies(&pkg.version, &task.range)
+            && !is_vulnerable(
+                task.registry_name(),
+                &pkg.version,
+                &self.resolver.vulnerable_ranges,
+            ))
+        .then_some(pkg)
+    }
+
     /// Try to resolve `task` against a version another task already
     /// settled on this run.
     ///
@@ -3382,11 +3413,13 @@ impl<'a> ResolveDriver<'a> {
     /// on a fetch or a lockfile scan. Returns true when a satisfying,
     /// non-vulnerable sibling version was found and wired in.
     fn try_sibling_dedupe(&mut self, task: &ResolveTask) -> bool {
+        let pin = self.importer_pin(task);
         let Some(matched_ver) = self.resolved_versions.get(&task.name).and_then(|versions| {
             versions
                 .iter()
                 .find(|v| {
-                    version_satisfies(v, &task.range)
+                    pin.is_none_or(|p| p.version == **v)
+                        && version_satisfies(v, &task.range)
                         && !is_vulnerable(task.registry_name(), v, &self.resolver.vulnerable_ranges)
                 })
                 .cloned()

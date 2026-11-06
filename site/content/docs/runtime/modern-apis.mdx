@@ -378,7 +378,7 @@ await navigator.locks.request("database-migration", async () => {
 
 ### `Worker`
 
-Nub adds a browser-style [`Worker`](https://developer.mozilla.org/en-US/docs/Web/API/Worker) global backed by `node:worker_threads`, with TypeScript entry points. Node ships no browser-style `Worker`, so Nub always adds one.
+Nub adds a browser-style [`Worker`](https://developer.mozilla.org/en-US/docs/Web/API/Worker) global backed by `node:worker_threads`, with TypeScript entry points. When Node's native Web Worker is enabled with `--experimental-web-worker` (Node 26.9+), Nub keeps it and its worker scope intact, and [a TypeScript entry file is left to Node's type stripping](/docs/runtime/workers). Nub does not enable that flag automatically.
 
 ```ts
 const worker = new Worker(new URL("./worker.ts", import.meta.url), {

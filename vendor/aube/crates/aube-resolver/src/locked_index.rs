@@ -90,16 +90,25 @@ impl<'a> LockedIndex<'a> {
     /// to the registry, here as on a fresh resolve. Otherwise a URL or git
     /// package keeps its source after the manifest entry or override that
     /// asked for it is gone, because its version still satisfies the range.
+    ///
+    /// With `exact_identity`, entries for another package are excluded as well:
+    /// an alias retargeted to a new package (`x` from `npm:old@1` to `npm:new@1`)
+    /// keeps its name and can keep a satisfying version. The caller sets it when
+    /// the task states its package. An edge from a reused parent does not: it
+    /// names an aliased child by its locked version alone, and that child is the
+    /// entry to reuse.
     pub fn find_satisfying(
         &self,
         name: &str,
         range: &str,
         registry_name: &str,
+        exact_identity: bool,
         vulnerable_ranges: &BTreeMap<String, Vec<String>>,
     ) -> Option<&'a LockedPackage> {
         self.bucket(name).iter().copied().find(|p| {
             !p.in_bundle
                 && p.local_source.is_none()
+                && (!exact_identity || p.registry_name() == registry_name)
                 && version_satisfies(&p.version, range)
                 && !is_vulnerable(registry_name, &p.version, vulnerable_ranges)
         })
@@ -127,8 +136,10 @@ impl<'a> LockedIndex<'a> {
         self.local_source(name, tail).map(LocalSource::specifier)
     }
 
-    /// The local source a hashed edge lands on, if it lands on one.
+    /// The local source a hashed edge lands on, if it lands on one. Peers do not
+    /// change the source, so a suffix on either side does not matter.
     pub fn local_source(&self, name: &str, tail: &str) -> Option<&'a LocalSource> {
+        let tail = tail.split('(').next().unwrap_or(tail);
         self.bucket(name)
             .iter()
             .copied()
@@ -136,6 +147,7 @@ impl<'a> LockedIndex<'a> {
                 pkg.dep_path
                     .strip_prefix(name)
                     .and_then(|rest| rest.strip_prefix('@'))
+                    .and_then(|rest| rest.split('(').next())
                     == Some(tail)
             })
             .and_then(|pkg| pkg.local_source.as_ref())
@@ -227,12 +239,43 @@ mod tests {
             // With no vulnerable ranges, find_satisfying matches too.
             assert_eq!(
                 index
-                    .find_satisfying(name, range, name, &vuln)
+                    .find_satisfying(name, range, name, false, &vuln)
                     .map(|p| &p.version),
                 want.map(|p| &p.version),
                 "find_satisfying diverged from linear scan for {name}@{range}",
             );
         }
+    }
+
+    /// A task that states its package only binds to that package. An edge from a
+    /// reused parent names an aliased child by its locked version alone, so without
+    /// `exact_identity` the aliased entry is the match: `h3-v2` here, which is not
+    /// a package of that name on the registry.
+    #[test]
+    fn exact_identity_separates_a_retargeted_alias_from_a_locked_edge() {
+        let aliased = LockedPackage {
+            alias_of: Some("h3".to_string()),
+            ..locked("h3-v2", "2.0.1")
+        };
+        let graph = LockfileGraph {
+            packages: BTreeMap::from([("h3-v2@2.0.1".to_string(), aliased)]),
+            ..Default::default()
+        };
+        let vuln = BTreeMap::new();
+        let index = LockedIndex::new(Some(&graph));
+        let found = |registry_name: &str, exact: bool| {
+            index
+                .find_satisfying("h3-v2", ">=2", registry_name, exact, &vuln)
+                .is_some()
+        };
+
+        assert!(found("h3", true), "the alias's own target must match");
+        assert!(!found("other", true), "a retargeted alias must not match");
+        assert!(
+            !found("h3-v2", true),
+            "a plain root must not bind to an alias"
+        );
+        assert!(found("h3-v2", false), "a locked edge must reach the alias");
     }
 
     /// `find_satisfying` skips a vulnerable first match and continues;
@@ -256,7 +299,7 @@ mod tests {
         // find_satisfying skips 1.0.0, returns 1.5.0.
         assert_eq!(
             index
-                .find_satisfying("pkg", "^1", "pkg", &vuln)
+                .find_satisfying("pkg", "^1", "pkg", false, &vuln)
                 .map(|p| p.version.as_str()),
             Some("1.5.0"),
         );
@@ -276,7 +319,7 @@ mod tests {
         let vuln = BTreeMap::new();
         assert!(
             index
-                .find_satisfying("anything", "*", "anything", &vuln)
+                .find_satisfying("anything", "*", "anything", false, &vuln)
                 .is_none()
         );
     }

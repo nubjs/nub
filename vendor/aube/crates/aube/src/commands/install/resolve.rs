@@ -12,7 +12,7 @@ use super::settings::{
     ResolverConfigInputs, configure_resolver, maybe_cleanup_unused_catalogs,
     stamp_pnpm_config_checksums,
 };
-use super::workspace::write_per_project_lockfiles;
+use super::workspace::write_per_project_lockfiles_with;
 
 pub(super) type ParsedLockfile = Option<(LockfileGraph, LockfileKind)>;
 
@@ -75,6 +75,7 @@ pub(super) struct LockfileOnlyInput<'a> {
     pub ws_package_versions: &'a HashMap<String, String>,
     pub ignore_scripts: bool,
     pub write_lockfile: bool,
+    pub rewrite_lockfile: bool,
     pub prog_ref: Option<&'a InstallProgress>,
 }
 
@@ -111,14 +112,16 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
         ws_package_versions,
         ignore_scripts,
         write_lockfile,
+        rewrite_lockfile,
         prog_ref,
     } = input;
 
-    // `--no-frozen-lockfile` means "always re-resolve", so skip the
-    // freshness check entirely in that mode. Otherwise (Prefer, Fix,
-    // or CI's auto-Frozen) a fresh lockfile is a no-op — for Fix
-    // specifically, "fresh" means "nothing to fix."
-    let force_resolve = matches!(mode, FrozenMode::No);
+    // `--no-frozen-lockfile` means "always re-resolve", and Fix re-resolves
+    // seeded with the existing pins, as it does without `--lockfile-only`: the
+    // drift check sees manifests and specifiers, so a lockfile it calls fresh
+    // can still carry entries worth fixing. Otherwise (Prefer or CI's
+    // auto-Frozen) a fresh lockfile is a no-op.
+    let force_resolve = matches!(mode, FrozenMode::No | FrozenMode::Fix);
     // Reuse the up-front pre-parse when we already have it so we
     // don't read and parse the same lockfile twice on
     // `--lockfile-only`. The borrowed form is all the freshness
@@ -299,7 +302,8 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
             ignore_scripts,
         },
         read_package_hook,
-    );
+    )
+    .with_keep_importer_pins(matches!(mode, FrozenMode::Fix));
     let mut graph = if has_workspace {
         resolver
             .resolve_workspace(manifests, existing_for_resolver, ws_package_versions)
@@ -318,6 +322,11 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
     crate::pnpmfile::ReadPackageHostChain::drain_forwarders(read_package_forwarders).await;
     crate::pnpmfile::run_after_all_resolved_chain(&pnpmfile_paths, cwd, manifest, &mut graph)
         .await?;
+    // Same metadata carry-over as the main install branch: a rewrite must not
+    // drop what the prior lockfile recorded and a packument does not repeat.
+    if let Some((prior, _)) = lockfile_pre_parse {
+        graph.overlay_metadata_from(prior);
+    }
     // Same patch-config recording as the main install branch — keeps
     // `--lockfile-only` output byte-identical to a full install's.
     crate::patches::record_patches_on_graph(cwd, &mut graph)?;
@@ -402,6 +411,7 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
             &write_graph,
             manifest,
             lo_write_kind,
+            rewrite_lockfile,
         )
         .into_diagnostic()
         .wrap_err("failed to write lockfile")?;
@@ -416,12 +426,13 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
             super::sync_package_manager_pin(lockfile_dir, network_mode).await;
         }
     } else {
-        write_per_project_lockfiles(
+        write_per_project_lockfiles_with(
             cwd,
             &write_graph,
             manifests,
             lo_write_kind,
             per_project_write_selection,
+            rewrite_lockfile,
         )?;
     }
     // Prune unused catalog entries *after* the lockfile hits disk —

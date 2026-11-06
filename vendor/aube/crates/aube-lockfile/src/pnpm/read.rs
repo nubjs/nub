@@ -287,8 +287,10 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
         // 404s. Strip it here so the URL that reaches the fetcher
         // and the dep_path hash are both peer-context-free —
         // consistent with what `parse_dep_path` does for snapshot
-        // keys downstream.
+        // keys downstream. The key keeps it: consumed with two sets of peers,
+        // the package is two entries, each linking its own.
         let classify_version = info.version.split('(').next().unwrap_or(&info.version);
+        let peer_suffix = &info.version[classify_version.len()..];
         if let Some(local) = LocalSource::parse(classify_version, Path::new("")) {
             // `Path::new("")` means tarball-vs-dir classification is
             // skipped; we default to Directory and rely on the
@@ -320,7 +322,7 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
                 }
                 other => other,
             };
-            let snapshot_key = format!("{name}@{}", local.specifier());
+            let snapshot_key = format!("{name}@{}{peer_suffix}", local.specifier());
             // pnpm anchors the two local protocols differently: a `link:`
             // version is relative to its importer, a `file:` version (directory
             // or tarball) to the lockfile directory (`fromLocal` in pnpm's
@@ -341,7 +343,7 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
             } else {
                 local
             };
-            let dep_path = local.dep_path(name);
+            let dep_path = format!("{}{peer_suffix}", local.dep_path(name));
             deps.push(DirectDep {
                 name: name.to_string(),
                 dep_path: dep_path.clone(),
@@ -684,7 +686,11 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
     let mut rekeyed: BTreeMap<String, LockedPackage> = BTreeMap::new();
     let mut local_rekeys: BTreeMap<String, String> = BTreeMap::new();
     for (old_key, mut pkg) in local_packages {
-        let new_key = pkg.local_source.as_ref().unwrap().dep_path(&pkg.name);
+        let peer_suffix = old_key.find('(').map_or("", |i| &old_key[i..]);
+        let new_key = format!(
+            "{}{peer_suffix}",
+            pkg.local_source.as_ref().unwrap().dep_path(&pkg.name)
+        );
         pkg.dep_path = new_key.clone();
         if old_key != new_key {
             local_rekeys.insert(old_key, new_key.clone());
@@ -705,6 +711,7 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
     // snapshot keys we already absorbed above.
     let mut local_canonical_keys: std::collections::HashSet<String> = local_packages
         .values()
+        .filter(|p| !p.dep_path.contains('('))
         .filter_map(|p| {
             p.local_source
                 .as_ref()
@@ -739,16 +746,6 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
         if version.starts_with("runtime:") {
             continue;
         }
-        // URL-based direct deps are absorbed into `local_packages`
-        // under the peer-stripped URL form (see `push_direct`), but the
-        // snapshot key still carries any `(peer@ver)` suffix pnpm
-        // appended. Check the peer-stripped canonical too so we don't
-        // create a duplicate entry that round-trips as a stray
-        // `packages:` block.
-        if local_canonical_keys.contains(&format!("{name}@{version}")) {
-            continue;
-        }
-
         // Look up the canonical package entry by stripping any peer suffix.
         let canonical_key = version_to_dep_path(&name, &version);
         let pkg_info = raw
@@ -975,12 +972,17 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
     // to the final hashed key the package is stored under. Needed
     // by the alias synthesis below: aliases whose target is a
     // `file:` package reference it by the canonical spelling, but
-    // `local_packages` is keyed by `LocalSource::dep_path` hashes.
+    // `local_packages` is keyed by `LocalSource::dep_path` hashes. Values carry no
+    // peer suffix: that comes from whichever edge or alias refers to the package.
+    let peerless = |key: &str| key.split('(').next().unwrap_or(key).to_string();
     let local_by_canonical: BTreeMap<String, String> = {
         let mut m = BTreeMap::new();
-        for (final_key, pkg) in &local_packages {
+        for pkg in local_packages.values() {
             if let Some(l) = &pkg.local_source {
-                m.insert(format!("{}@{}", pkg.name, l.specifier()), final_key.clone());
+                m.insert(
+                    format!("{}@{}", pkg.name, l.specifier()),
+                    l.dep_path(&pkg.name),
+                );
             }
         }
         // The snapshot keys recorded at importer-parse time cover
@@ -989,8 +991,8 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
         // `local_source`.
         for (dep_path, snapshot_key) in &local_snapshot_keys {
             let final_key = local_rekeys.get(dep_path).unwrap_or(dep_path);
-            m.entry(snapshot_key.clone())
-                .or_insert_with(|| final_key.clone());
+            m.entry(peerless(snapshot_key))
+                .or_insert_with(|| peerless(final_key));
         }
         m
     };
@@ -1033,16 +1035,18 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
         {
             continue;
         }
-        let bare_real = real_dep_path
-            .split('(')
-            .next()
-            .unwrap_or(&real_dep_path)
-            .to_string();
-        if let Some(local_key) = local_by_canonical.get(&bare_real)
-            && let Some(real_pkg) = packages.get(local_key)
+        let bare_real = peerless(&real_dep_path);
+        let real_peers = &real_dep_path[bare_real.len()..];
+        let local_target = local_by_canonical.get(&bare_real).and_then(|key| {
+            packages
+                .get(&format!("{key}{real_peers}"))
+                .map(|pkg| (pkg, real_peers))
+                .or_else(|| packages.get(key).map(|pkg| (pkg, "")))
+        });
+        if let Some((real_pkg, peer_suffix)) = local_target
             && let Some(local) = real_pkg.local_source.clone()
         {
-            let final_alias_key = local.dep_path(&alias_name);
+            let final_alias_key = format!("{}{peer_suffix}", local.dep_path(&alias_name));
             let mut aliased = real_pkg.clone();
             aliased.name = alias_name;
             aliased.dep_path = final_alias_key.clone();
@@ -1115,50 +1119,43 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
     // tail, and the writer renders it back to `file:`, so this matches both.
     // Git and remote-tarball edges keep their values: they already resolve
     // through `shared_local_dep_path`.
+    let file_source_key = |pkg: &LockedPackage| match &pkg.local_source {
+        Some(local @ (LocalSource::Directory(_) | LocalSource::Tarball(_))) => {
+            Some(local.dep_path(&pkg.name))
+        }
+        _ => None,
+    };
+    let file_sources: BTreeSet<String> = packages.values().filter_map(file_source_key).collect();
     let mut file_local_keys: BTreeMap<String, String> = local_by_canonical
         .iter()
-        .filter(|(_, key)| {
-            packages.get(*key).is_some_and(|pkg| {
-                matches!(
-                    pkg.local_source,
-                    Some(LocalSource::Directory(_) | LocalSource::Tarball(_))
-                )
-            })
-        })
+        .filter(|(_, key)| file_sources.contains(*key))
         .map(|(canonical, key)| (canonical.clone(), key.clone()))
         .collect();
     // A local package only other packages depend on, or an alias of one, reaches
     // here under its lockfile key (`b@file:./b`). A fresh resolve hashes that key
     // too, and the package's parents hash theirs from it, so without this a
     // project re-keys on every re-resolve: `dedupe --check` fails forever, and
-    // the shared store holds a second copy of each parent. A peer-suffixed key
-    // stays as read.
+    // the shared store holds a second copy of each parent.
     let transitive_local_keys: Vec<String> = packages
         .iter()
-        .filter(|(key, pkg)| {
-            !key.contains('(')
-                && matches!(
-                    &pkg.local_source,
-                    Some(local @ (LocalSource::Directory(_) | LocalSource::Tarball(_)))
-                        if local.dep_path(&pkg.name) != **key
-                )
-        })
+        .filter(|(key, pkg)| file_source_key(pkg).is_some_and(|source| peerless(key) != source))
         .map(|(key, _)| key.clone())
         .collect();
     for key in transitive_local_keys {
         let Some(mut pkg) = packages.remove(&key) else {
             continue;
         };
-        let Some(final_key) = pkg.local_source.as_ref().map(|l| l.dep_path(&pkg.name)) else {
+        let Some(source_key) = file_source_key(&pkg) else {
             continue;
         };
+        let final_key = format!("{source_key}{}", &key[peerless(&key).len()..]);
         pkg.dep_path = final_key.clone();
         for dep in importers.values_mut().flatten() {
             if dep.dep_path == key {
                 dep.dep_path.clone_from(&final_key);
             }
         }
-        file_local_keys.insert(key, final_key.clone());
+        file_local_keys.insert(peerless(&key), source_key);
         packages.entry(final_key).or_insert(pkg);
     }
     // pnpm keeps a `link:` target out of `packages:`, so the edge is its only
@@ -1171,7 +1168,7 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
             for (dep_name, value) in map.iter_mut() {
                 let bare = value.split('(').next().unwrap_or(value);
                 if let Some(key) = file_local_keys.get(&format!("{dep_name}@{bare}")) {
-                    *value = dep_path_tail(key, dep_name).to_string();
+                    *value = format!("{}{}", dep_path_tail(key, dep_name), &value[bare.len()..]);
                 } else if let Some(target) = bare.strip_prefix("link:") {
                     let local = LocalSource::Link(normalize_lexical(Path::new(target)));
                     let key = local.dep_path(dep_name);
@@ -1285,6 +1282,17 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
         let new_key = format!("{}{suffix}", local.dep_path(&pkg.name));
         (new_key != key).then_some(new_key)
     };
+    // An edge with peers lands on that set's entry, which `shared_local_dep_path`
+    // cannot name: it re-derives the bare key. The hashed tail reaches it the way a
+    // fresh resolve's edge does. An edge with no peers keeps its URL.
+    let with_peers_to_hashed = |(name, value): (String, String)| {
+        let value = rewrite_peer_suffix(&value, &spec_peer_to_hashed);
+        let hashed = value.find('(').and_then(|peers| {
+            let key = crate::shared_local_dep_path(&name, &value)?;
+            Some(format!("{}{}", dep_path_tail(&key, &name), &value[peers..]))
+        });
+        (name, hashed.unwrap_or(value))
+    };
     let has_local_source = packages.values().any(|p| {
         matches!(
             p.local_source,
@@ -1301,12 +1309,12 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
                 pkg.dependencies = pkg
                     .dependencies
                     .into_iter()
-                    .map(|(n, v)| (n, rewrite_peer_suffix(&v, &spec_peer_to_hashed)))
+                    .map(with_peers_to_hashed)
                     .collect();
                 pkg.optional_dependencies = pkg
                     .optional_dependencies
                     .into_iter()
-                    .map(|(n, v)| (n, rewrite_peer_suffix(&v, &spec_peer_to_hashed)))
+                    .map(with_peers_to_hashed)
                     .collect();
                 (new_key, pkg)
             })

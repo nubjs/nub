@@ -7,7 +7,9 @@ description: A browser-style Worker global on stock Node, covering its construct
 The browser-shape `Worker` global is typed by Nub's own types package — `@types/node` declares only `node:worker_threads`. Install `@nubjs/types` as a devDependency alongside `@types/node` 26.
 </TypesSetup>
 
-Node ships only `node:worker_threads.Worker`, a different class from the browser's `Worker`. Nub adds the browser `Worker` global, with its constructor and messaging shape.
+Nub adds a browser-style `Worker` global when one is missing. Node 26.9+ also offers an [experimental native Web Worker](https://nodejs.org/docs/latest-v26.x/api/globals.html#class-worker), enabled with `--experimental-web-worker`. With that flag, Nub preserves the native constructor, worker scope, and Blob URL handling instead of installing its fallback. The flag stays opt-in.
+
+The examples and options below describe Nub's fallback. Native workers follow Node's documented behavior, including its supported URL schemes and worker options. Node also reads a native worker's entry file itself, so Nub does not transpile that file. A `.ts` entry relies on Node's type stripping, which needs a module worker and a recent Node, and syntax such as `enum` fails. Modules the entry imports still go through Nub.
 
 ```ts
 const url = import.meta.resolve("./worker.ts");

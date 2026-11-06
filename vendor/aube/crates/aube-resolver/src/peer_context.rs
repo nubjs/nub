@@ -1871,8 +1871,8 @@ fn propagate_peer_suffixes_to_ancestors(
             continue;
         };
         // Git / remote-tarball (globally-shareable) packages keep a bare
-        // dep_path keyed solely by their content-pinned URL — pnpm never
-        // appends a `(peer@ver)` suffix to a non-registry depPath. Every
+        // dep_path keyed solely by their content-pinned URL — pnpm does not
+        // append a descendant's `(peer@ver)` to a non-registry depPath. Every
         // git/tarball key in a real pnpm-lock.yaml is bare even when its
         // subtree resolves peers: e.g. `<pkg>@<url>` sits bare above a
         // registry descendant like `<child>@6.5.1(@types/node@…)`.
