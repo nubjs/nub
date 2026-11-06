@@ -589,7 +589,17 @@ pub(super) async fn update_manifest_for_add(
         // the name when the alias equals the JSR name (matching pnpm).
         let is_jsr = spec.jsr_name.is_some();
         let needs_npm_prefix = !is_jsr && (spec.alias.is_some() || orig.starts_with("npm:"));
-        let prefix = &default_prefix;
+        // A prerelease saves exact, as in pnpm: `^7.1.0-beta` also admits
+        // `7.1.0-dev.20261105.1`, because `dev` sorts after `beta`, and the
+        // install that follows re-resolves this range, so the caret would
+        // install a nightly the user never asked for.
+        let prefix = if node_semver::Version::parse(&resolved_version)
+            .is_ok_and(|version| version.is_prerelease())
+        {
+            ""
+        } else {
+            default_prefix.as_str()
+        };
         // npm-incumbent save-prefix convention: `npm install pkg@1.2.3` applies
         // its `save-prefix` default and writes `"^1.2.3"`, whereas pnpm/bun
         // preserve the bare version. The embedder turns this on
@@ -1229,6 +1239,65 @@ mod tests {
 
         let manifest = std::fs::read_to_string(project.path().join("package.json")).unwrap();
         assert!(manifest.contains(r#""cached-only": "^1.0.0""#));
+    }
+
+    #[tokio::test]
+    async fn prerelease_dist_tag_saves_exact_so_a_later_prerelease_cannot_replace_it() {
+        let project = tempfile::tempdir().unwrap();
+        let cache_root = project.path().join("cache");
+        std::fs::write(project.path().join("package.json"), "{}\n").unwrap();
+        std::fs::write(
+            project.path().join(".npmrc"),
+            format!("cache-dir={}\n", cache_root.display()),
+        )
+        .unwrap();
+
+        // `dev` sorts after `beta`, so `^7.1.0-beta` would admit the nightly.
+        let packument: aube_registry::Packument = serde_json::from_value(serde_json::json!({
+            "name": "tagged",
+            "dist-tags": { "latest": "7.0.2", "beta": "7.1.0-beta" },
+            "versions": {
+                "7.0.2": { "name": "tagged", "version": "7.0.2" },
+                "7.1.0-beta": { "name": "tagged", "version": "7.1.0-beta" },
+                "7.1.0-dev.20261105.1": { "name": "tagged", "version": "7.1.0-dev.20261105.1" }
+            }
+        }))
+        .unwrap();
+        let cache_dir = crate::commands::packument_cache_dir_for_cwd(project.path());
+        crate::commands::make_client(project.path())
+            .seed_packument_cache("tagged", &cache_dir, &packument, None, None, true);
+
+        let add = |spec: &'static str| {
+            let dir = project.path().to_path_buf();
+            async move {
+                update_manifest_for_add(
+                    &dir,
+                    &[spec.to_string()],
+                    AddManifestOptions {
+                        save_dev: false,
+                        save_exact: false,
+                        save_optional: false,
+                        save_peer: false,
+                        network_mode: aube_registry::NetworkMode::Offline,
+                        save_catalog: None,
+                        workspace_protocol_override: None,
+                        setting_overrides: Vec::new(),
+                    },
+                    false,
+                )
+                .await
+                .unwrap();
+                std::fs::read_to_string(dir.join("package.json")).unwrap()
+            }
+        };
+
+        assert!(
+            add("tagged@beta")
+                .await
+                .contains(r#""tagged": "7.1.0-beta""#)
+        );
+        // A stable tag keeps the configured prefix.
+        assert!(add("tagged@latest").await.contains(r#""tagged": "^7.0.2""#));
     }
 
     #[tokio::test]
