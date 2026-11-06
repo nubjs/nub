@@ -18,25 +18,17 @@ switch ($Arch) {
 
 # --- Version ---
 $Version = if ($args.Count -gt 0) { $args[0] } else { "latest" }
-if ($Version -eq "canary") {
-    # The rolling canary prerelease — rebuilt nightly from main and published
-    # under the un-versioned `canary` tag, so there is no version to resolve.
-    # May be broken; `nub upgrade --stable` returns to a release.
-    $ReleaseTag = "canary"
-    $DisplayVersion = "canary"
-} else {
-    if ($Version -eq "latest") {
-        # Authenticate the GitHub API call when a token is available: CI runners share
-        # an IP and hit the 60/hr unauthenticated rate limit (403). Real users without
-        # GITHUB_TOKEN use the anonymous path unchanged.
-        $apiHeaders = @{}
-        if ($env:GITHUB_TOKEN) { $apiHeaders["Authorization"] = "token $env:GITHUB_TOKEN" }
-        $Release = Invoke-RestMethod "https://api.github.com/repos/nubjs/nub/releases/latest" -Headers $apiHeaders
-        $Version = $Release.tag_name -replace "^v", ""
-    }
-    $ReleaseTag = "v$Version"
-    $DisplayVersion = "v$Version"
+if ($Version -eq "latest") {
+    # Authenticate the GitHub API call when a token is available: CI runners share
+    # an IP and hit the 60/hr unauthenticated rate limit (403). Real users without
+    # GITHUB_TOKEN use the anonymous path unchanged.
+    $apiHeaders = @{}
+    if ($env:GITHUB_TOKEN) { $apiHeaders["Authorization"] = "token $env:GITHUB_TOKEN" }
+    $Release = Invoke-RestMethod "https://api.github.com/repos/nubjs/nub/releases/latest" -Headers $apiHeaders
+    $Version = $Release.tag_name -replace "^v", ""
 }
+$ReleaseTag = "v$Version"
+$DisplayVersion = "v$Version"
 
 Write-Host "Installing nub $DisplayVersion for $Target..." -ForegroundColor Cyan
 

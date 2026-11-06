@@ -24,9 +24,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         # Writes /tmp/gh-releases.json: array of { tag, assets: [{ name, download_count }] }
-        # Prereleases are excluded: the rolling `canary` release is deleted and
-        # recreated by every nightly canary build, so its asset counts reset and
-        # would corrupt the between-snapshot deltas.
+        # Prereleases are excluded: the old rolling `canary` release was deleted
+        # and recreated by every build, so its asset counts reset, which would
+        # corrupt the between-snapshot deltas.
         # `--slurp` folds every page into one outer array; `gh api --paginate --jq`
         # instead runs the filter per page and emits one array per line, which
         # broke the parse below the day the release list crossed 100 entries
