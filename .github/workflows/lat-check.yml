@@ -41,7 +41,7 @@ jobs:
       # to the root package.json. It brings ~185 transitive packages, and an installer
       # that exits 0 on a half-built tree leaves a green install step (see the "assert
       # root deps actually installed" guard in ci.yml). Adding that much to the root
-      # install tripped exactly that guard across the whole matrix. lat.test.mjs
+      # install tripped exactly that guard across the whole matrix. lat.test.mts
       # keeps the package-script and MCP version pins aligned.
       #
       # The Socket Firewall shim is no longer part of that story: the root is
@@ -54,7 +54,7 @@ jobs:
         run: npm run lat:check
 
       - name: Verify local search and agent integration
-        run: node --test scripts/lat.test.mjs scripts/codex-hooks.test.mjs
+        run: node --test scripts/lat.test.mts scripts/codex-hooks.test.mts
         env:
           LAT_SMOKE: "1"
 

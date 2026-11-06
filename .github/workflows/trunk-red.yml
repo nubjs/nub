@@ -16,7 +16,7 @@ name: Trunk red
 #
 # Every workflow that runs against main is listed below, because a red nobody is told about
 # stays red: Node flag drift failed every night from August to November unseen.
-# scripts/trunk-red.test.mjs fails when a workflow that runs on main is neither listed here
+# scripts/trunk-red.test.mts fails when a workflow that runs on main is neither listed here
 # nor named there as not a verdict, and when a name here matches no workflow.
 
 on:  # zizmor: ignore[dangerous-triggers] trunk-only notifier; reads CI conclusion for main, never checks out or runs PR-controlled code
