@@ -5600,6 +5600,275 @@ async fn auto_install_peers_skips_importers_own_optional_peer() {
 }
 
 #[tokio::test]
+async fn a_peer_a_workspace_member_satisfies_links_to_the_member() {
+    let mut store = make_packument("store", &["1.2.0"], "1.2.0");
+    store
+        .versions
+        .get_mut("1.2.0")
+        .unwrap()
+        .peer_dependencies
+        .insert("react".to_string(), "^18.0.0".to_string());
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:0",
+    ));
+    let mut resolver = Resolver::new(client);
+    resolver.cache.insert("store".to_string(), store);
+
+    let react = PackageJson {
+        name: Some("react".to_string()),
+        version: Some("18.2.0".to_string()),
+        ..PackageJson::default()
+    };
+    let mut web = PackageJson {
+        name: Some("web".to_string()),
+        ..PackageJson::default()
+    };
+    web.dependencies
+        .insert("store".to_string(), "1.2.0".to_string());
+    web.dependencies
+        .insert("react".to_string(), "workspace:*".to_string());
+
+    let graph = resolver
+        .resolve_workspace(
+            &[
+                (".".to_string(), PackageJson::default()),
+                ("packages/react".to_string(), react),
+                ("packages/web".to_string(), web),
+            ],
+            None,
+            &std::collections::HashMap::from([
+                ("react".to_string(), "18.2.0".to_string()),
+                ("web".to_string(), "0.0.0".to_string()),
+            ]),
+        )
+        .await
+        .expect("resolve failed");
+
+    // pnpm 10 and 12 write `store@1.2.0(react@packages+react)` with
+    // `react: link:packages/react`.
+    let store = graph
+        .packages
+        .get("store@1.2.0(react@packages+react)")
+        .unwrap_or_else(|| panic!("{:?}", graph.packages.keys().collect::<Vec<_>>()));
+    let edge = &store.dependencies["react"];
+    let target = &graph.packages[&format!("react@{edge}")];
+    assert_eq!(
+        target.local_source,
+        Some(aube_lockfile::LocalSource::Link("packages/react".into()))
+    );
+    let web_react = graph.importers["packages/web"]
+        .iter()
+        .find(|dep| dep.name == "react")
+        .unwrap();
+    assert_eq!(
+        web_react.dep_path, "react@18.2.0",
+        "the importer's own link stays the workspace linker's"
+    );
+}
+
+/// `packages/web` depends on `react` at `react_spec`, on `store` with a `react`
+/// peer, and on `uses-react` with an ordinary dependency on it. A member and the
+/// registry both have `react` at 18.2.0.
+async fn resolve_member_beside_registry_copy(react_spec: &str) -> LockfileGraph {
+    let mut store = make_packument("store", &["1.2.0"], "1.2.0");
+    store
+        .versions
+        .get_mut("1.2.0")
+        .unwrap()
+        .peer_dependencies
+        .insert("react".to_string(), "^18.0.0".to_string());
+    let mut uses_react = make_packument("uses-react", &["1.0.0"], "1.0.0");
+    uses_react
+        .versions
+        .get_mut("1.0.0")
+        .unwrap()
+        .dependencies
+        .insert("react".to_string(), "^18.0.0".to_string());
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:0",
+    ));
+    let mut resolver = Resolver::new(client);
+    resolver.cache.insert("store".to_string(), store);
+    resolver.cache.insert("uses-react".to_string(), uses_react);
+    resolver.cache.insert(
+        "react".to_string(),
+        make_packument("react", &["18.2.0"], "18.2.0"),
+    );
+
+    let react = PackageJson {
+        name: Some("react".to_string()),
+        version: Some("18.2.0".to_string()),
+        ..PackageJson::default()
+    };
+    let web = PackageJson {
+        name: Some("web".to_string()),
+        dependencies: [
+            ("store".to_string(), "1.2.0".to_string()),
+            ("uses-react".to_string(), "1.0.0".to_string()),
+            ("react".to_string(), react_spec.to_string()),
+        ]
+        .into(),
+        ..PackageJson::default()
+    };
+
+    resolver
+        .resolve_workspace(
+            &[
+                (".".to_string(), PackageJson::default()),
+                ("packages/react".to_string(), react),
+                ("packages/web".to_string(), web),
+            ],
+            None,
+            &std::collections::HashMap::from([
+                ("react".to_string(), "18.2.0".to_string()),
+                ("web".to_string(), "0.0.0".to_string()),
+            ]),
+        )
+        .await
+        .expect("resolve failed")
+}
+
+// A compatibility-database peer is repaired with an edge after the peer pass. It has
+// to land on what the importer chose, with or without a registry copy at the member's
+// version, and the member has to survive as a package for that edge to reach.
+#[tokio::test]
+async fn a_database_peer_lands_on_what_the_importer_chose() {
+    for (react_spec, with_registry_copy, lands_on_member) in [
+        ("workspace:*", false, true),
+        ("workspace:*", true, true),
+        ("latest", true, false),
+    ] {
+        let mut uses_react = make_packument("uses-react", &["1.0.0"], "1.0.0");
+        uses_react
+            .versions
+            .get_mut("1.0.0")
+            .unwrap()
+            .dependencies
+            .insert("react".to_string(), "^18.0.0".to_string());
+        let client = Arc::new(aube_registry::client::RegistryClient::new(
+            "http://127.0.0.1:0",
+        ));
+        let mut resolver = Resolver::new(client).with_dependency_policy(crate::DependencyPolicy {
+            package_extensions: vec![crate::PackageExtension {
+                selector: "repaired@*".to_string(),
+                database_peers: [("react".to_string(), "*".to_string())].into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        resolver.cache.insert(
+            "repaired".to_string(),
+            make_packument("repaired", &["1.0.0"], "1.0.0"),
+        );
+        resolver.cache.insert("uses-react".to_string(), uses_react);
+        resolver.cache.insert(
+            "react".to_string(),
+            make_packument("react", &["18.2.0"], "18.2.0"),
+        );
+
+        let mut dependencies: BTreeMap<String, String> = [
+            ("repaired".to_string(), "1.0.0".to_string()),
+            ("react".to_string(), react_spec.to_string()),
+        ]
+        .into();
+        if with_registry_copy {
+            dependencies.insert("uses-react".to_string(), "1.0.0".to_string());
+        }
+        let web = PackageJson {
+            name: Some("web".to_string()),
+            dependencies,
+            ..PackageJson::default()
+        };
+        let react = PackageJson {
+            name: Some("react".to_string()),
+            version: Some("18.2.0".to_string()),
+            ..PackageJson::default()
+        };
+        let graph = resolver
+            .resolve_workspace(
+                &[
+                    (".".to_string(), PackageJson::default()),
+                    ("packages/react".to_string(), react),
+                    ("packages/web".to_string(), web),
+                ],
+                None,
+                &std::collections::HashMap::from([
+                    ("react".to_string(), "18.2.0".to_string()),
+                    ("web".to_string(), "0.0.0".to_string()),
+                ]),
+            )
+            .await
+            .expect("resolve failed");
+
+        let repaired = &graph.packages["repaired@1.0.0"];
+        let target =
+            aube_lockfile::resolve_dep_edge("react", &repaired.dependencies["react"], |k| {
+                graph.packages.contains_key(k)
+            })
+            .unwrap_or_else(|| panic!("the repair must reach a package for {react_spec}"));
+        assert_eq!(
+            graph.packages[&target].local_source,
+            lands_on_member.then(|| LocalSource::Link("packages/react".into())),
+            "{react_spec}, registry copy: {with_registry_copy}"
+        );
+    }
+}
+
+// `workspace:*` and a registry package that happens to depend on the member's
+// exact version name one key. The importer and its peer consumer have to stay on
+// the member, and only the registry package's own dependency on the registry copy.
+#[tokio::test]
+async fn a_member_and_a_registry_package_at_one_version_stay_distinct() {
+    let graph = resolve_member_beside_registry_copy("workspace:*").await;
+
+    let member = Some(aube_lockfile::LocalSource::Link("packages/react".into()));
+    let web_react = graph.importers["packages/web"]
+        .iter()
+        .find(|dep| dep.name == "react")
+        .unwrap();
+    assert_eq!(graph.packages[&web_react.dep_path].local_source, member);
+
+    let store = graph
+        .packages
+        .get("store@1.2.0(react@packages+react)")
+        .unwrap_or_else(|| panic!("{:?}", graph.packages.keys().collect::<Vec<_>>()));
+    let peer = format!("react@{}", store.dependencies["react"]);
+    assert_eq!(graph.packages[&peer].local_source, member);
+
+    assert_eq!(
+        graph.packages["uses-react@1.0.0"].dependencies["react"],
+        "18.2.0"
+    );
+    assert!(graph.packages["react@18.2.0"].local_source.is_none());
+}
+
+// A dist-tag names a registry version, so the importer's choice has to survive the
+// member sharing that version. It decides the peer consumer's provider too.
+#[tokio::test]
+async fn a_dist_tag_at_a_members_version_stays_on_the_registry() {
+    let graph = resolve_member_beside_registry_copy("latest").await;
+
+    let web_react = graph.importers["packages/web"]
+        .iter()
+        .find(|dep| dep.name == "react")
+        .unwrap();
+    assert_eq!(web_react.dep_path, "react@18.2.0");
+    assert!(graph.packages["react@18.2.0"].local_source.is_none());
+    assert_eq!(
+        graph.packages["store@1.2.0(react@18.2.0)"].dependencies["react"],
+        "18.2.0"
+    );
+    assert!(
+        !graph
+            .packages
+            .values()
+            .any(|pkg| matches!(pkg.local_source, Some(aube_lockfile::LocalSource::Link(_)))),
+        "{:?}",
+        graph.packages.keys().collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
 async fn importer_peer_dependencies_are_seeded_as_direct_deps() {
     let zod = make_packument("zod", &["3.22.0"], "3.22.0");
 
@@ -6522,15 +6791,124 @@ async fn workspace_link_transitive_from_registry_parent_is_not_blocked_as_exotic
         graph_has_package(&graph, "@vitejs/plugin-vue", "6.0.7"),
         "plugin-vue should resolve"
     );
-    // The `vue` peer must bind to the workspace member version, not error.
+    // The `vue` edge must reach the workspace member, not error.
     let plugin = graph
         .packages
         .get("@vitejs/plugin-vue@6.0.7")
         .expect("plugin-vue in graph");
+    let vue = format!("vue@{}", plugin.dependencies["vue"]);
     assert_eq!(
-        plugin.dependencies.get("vue").map(String::as_str),
-        Some("3.5.38"),
-        "plugin-vue's vue peer must bind to the workspace member version"
+        graph.packages[&vue].local_source,
+        Some(LocalSource::Link("packages/vue".into())),
+        "plugin-vue's vue edge must land on the workspace member"
+    );
+    assert_eq!(graph.packages[&vue].version, "3.5.38");
+}
+
+// pnpm's default `linkWorkspacePackagesDepth`: a member stands in for what an
+// importer declares, not for a registry package's own dependency.
+#[tokio::test]
+async fn a_registry_packages_dependency_named_like_a_member_comes_from_the_registry() {
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:0",
+    ));
+    let mut resolver = Resolver::new(client);
+    let mut parent = make_packument("parent", &["1.0.0"], "1.0.0");
+    parent
+        .versions
+        .get_mut("1.0.0")
+        .unwrap()
+        .dependencies
+        .insert("child".to_string(), "^1.0.0".to_string());
+    resolver.cache.insert("parent".to_string(), parent);
+    resolver.cache.insert(
+        "child".to_string(),
+        make_packument("child", &["1.0.0"], "1.0.0"),
+    );
+
+    let app = PackageJson {
+        name: Some("app".to_string()),
+        version: Some("0.0.0".to_string()),
+        dependencies: [("parent".to_string(), "1.0.0".to_string())].into(),
+        ..Default::default()
+    };
+    let member = PackageJson {
+        name: Some("child".to_string()),
+        version: Some("1.0.0".to_string()),
+        ..Default::default()
+    };
+    let workspace_packages = std::collections::HashMap::from([
+        ("app".to_string(), "0.0.0".to_string()),
+        ("child".to_string(), "1.0.0".to_string()),
+    ]);
+
+    let graph = resolver
+        .resolve_workspace(
+            &[
+                ("packages/app".to_string(), app),
+                ("packages/child".to_string(), member),
+            ],
+            None,
+            &workspace_packages,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        graph.packages["parent@1.0.0"].dependencies["child"],
+        "1.0.0"
+    );
+    assert!(graph.packages["child@1.0.0"].local_source.is_none());
+}
+
+// A local package is first-party code: its dependency on a member links, and
+// the edge has to reach it.
+#[tokio::test]
+async fn a_local_packages_dependency_on_a_member_lands_on_the_member() {
+    let project = tempfile::tempdir().unwrap();
+    let vendored = project.path().join("vendor/local");
+    std::fs::create_dir_all(&vendored).unwrap();
+    std::fs::write(
+        vendored.join("package.json"),
+        r#"{ "name": "local", "version": "1.0.0", "dependencies": { "lib": "^1.0.0" } }"#,
+    )
+    .unwrap();
+
+    let client = Arc::new(aube_registry::client::RegistryClient::new(
+        "http://127.0.0.1:0",
+    ));
+    let mut resolver = Resolver::new(client).with_project_root(project.path().to_path_buf());
+
+    let root = PackageJson {
+        dependencies: [("local".to_string(), "file:./vendor/local".to_string())].into(),
+        ..Default::default()
+    };
+    let lib = PackageJson {
+        name: Some("lib".to_string()),
+        version: Some("1.0.0".to_string()),
+        ..Default::default()
+    };
+    let workspace_packages =
+        std::collections::HashMap::from([("lib".to_string(), "1.0.0".to_string())]);
+
+    let graph = resolver
+        .resolve_workspace(
+            &[(".".to_string(), root), ("packages/lib".to_string(), lib)],
+            None,
+            &workspace_packages,
+        )
+        .await
+        .expect("the member is on disk, so the registry is never asked");
+
+    let local = graph
+        .packages
+        .values()
+        .find(|pkg| pkg.name == "local")
+        .expect("the local package resolves");
+    let lib = format!("lib@{}", local.dependencies["lib"]);
+    assert_eq!(
+        graph.packages[&lib].local_source,
+        Some(LocalSource::Link("packages/lib".into()))
     );
 }
 

@@ -305,15 +305,26 @@ pub(crate) type DatabasePeerTargets = BTreeMap<String, BTreeMap<String, String>>
 /// members on different versions of the target two copies where pnpm, which has
 /// no such entry, installs one. pnpm's answer to the same import is likewise one
 /// copy resolving one hoisted target.
+///
+/// `link_members` stands in the workspace members importers chose, which the graph
+/// holds no package for yet, so a target can be one of them.
 pub(crate) fn database_peer_targets(
     graph: &LockfileGraph,
     extensions: &[PackageExtension],
     options: &PeerContextOptions,
+    link_members: impl FnOnce(&mut LockfileGraph),
 ) -> DatabasePeerTargets {
     let declared = database_peers_by_package(graph, extensions);
     if declared.is_empty() {
         return DatabasePeerTargets::new();
     }
+    let mut linked = LockfileGraph {
+        importers: graph.importers.clone(),
+        packages: graph.packages.clone(),
+        ..Default::default()
+    };
+    link_members(&mut linked);
+    let graph = &linked;
     let bound = probe_peer_pass(graph, options, |probe| {
         for (key, peers) in &declared {
             let Some(pkg) = probe.packages.get_mut(key) else {
@@ -1365,21 +1376,24 @@ fn canonical_tail(s: &str) -> &str {
     s.split('(').next().unwrap_or(s)
 }
 
-/// A peer provider's graph target and semver identity.
+/// A peer provider's graph target, semver identity and peer id.
 ///
-/// Those are normally the same tail. For linked directories, the target
-/// remains the content-addressed local dep path while peer matching and
-/// suffixes use the target manifest's version.
+/// Those are normally the same tail. For local directories, the target
+/// remains the content-addressed local dep path while peer matching uses
+/// the target manifest's version. A `link:` provider is named in the
+/// suffix by its path, as pnpm names it.
 #[derive(Debug, Clone)]
 struct PeerProvider {
     /// Tail used to find and link the package in the graph.
     target_tail: String,
-    /// Tail used for semver checks and the consumer's peer suffix.
+    /// Tail used for semver checks.
     context_tail: String,
+    /// What the consumer's peer suffix names.
+    suffix_tail: String,
 }
 
 fn peer_provider(graph: &LockfileGraph, name: &str, target_tail: &str) -> PeerProvider {
-    let context_tail =
+    let local =
         aube_lockfile::resolve_dep_edge(name, target_tail, |key| graph.packages.contains_key(key))
             .and_then(|key| graph.packages.get(&key))
             .filter(|pkg| {
@@ -1387,12 +1401,47 @@ fn peer_provider(graph: &LockfileGraph, name: &str, target_tail: &str) -> PeerPr
                     pkg.local_source,
                     Some(LocalSource::Directory(_) | LocalSource::Link(_) | LocalSource::Portal(_))
                 )
-            })
-            .map(|pkg| pkg.version.clone())
-            .unwrap_or_else(|| target_tail.to_string());
+            });
+    let context_tail = local
+        .map(|pkg| pkg.version.clone())
+        .unwrap_or_else(|| target_tail.to_string());
+    let suffix_tail = match local.and_then(|pkg| pkg.local_source.as_ref()) {
+        Some(link @ LocalSource::Link(_)) => link_path_to_peer_version(&link.path_posix()),
+        _ => context_tail.clone(),
+    };
     PeerProvider {
         target_tail: target_tail.to_string(),
         context_tail,
+        suffix_tail,
+    }
+}
+
+/// pnpm's `linkPathToPeerVersion`: the peer id of a `link:` provider is its
+/// path relative to the lockfile directory, made filename-safe the way
+/// filenamify v4 did it, so pnpm 10 and 12 write the same suffix. Leading
+/// dots are dropped and every run of `/`, `\`, `+`, a reserved filename
+/// character or a control character becomes one `+`: `packages/react` is
+/// `(react@packages+react)`. Lossy by pnpm's own choice (pnpm/pnpm#11272).
+fn link_path_to_peer_version(rel_path: &str) -> String {
+    let replaced = |c: char| (c as u32) < 32 || "\"*+/:<>?\\|".contains(c);
+    let mut out = String::with_capacity(rel_path.len());
+    let mut last_was_plus = true;
+    for c in rel_path.trim_start_matches('.').chars() {
+        if !replaced(c) {
+            out.push(c);
+            last_was_plus = false;
+        } else if !last_was_plus {
+            out.push('+');
+            last_was_plus = true;
+        }
+    }
+    let trimmed = out.trim_end_matches(['+', '.']);
+    if !trimmed.is_empty() {
+        trimmed.to_string()
+    } else if rel_path.is_empty() {
+        String::new()
+    } else {
+        "+".to_string()
     }
 }
 
@@ -2446,7 +2495,7 @@ fn visit_peer_context<'g>(
             let display_v = if cycles_back {
                 canonical_tail(&provider.context_tail).to_string()
             } else {
-                provider.context_tail.clone()
+                provider.suffix_tail.clone()
             };
             format!("({n}@{display_v})")
         })
@@ -2841,14 +2890,32 @@ mod tests {
 
         let out = apply_peer_contexts(g, &PeerContextOptions::default()).expect("peer pass");
 
+        // pnpm 10 and 12 write `plugin@1.0.0(theme@theme)`: the range is checked
+        // against the manifest version, and the suffix names the link path.
         let plugin = out
             .packages
-            .get("plugin@1.0.0(theme@4.10.0)")
+            .get("plugin@1.0.0(theme@theme)")
             .expect("linked root dependency should satisfy the peer at its manifest version");
         assert_eq!(
             plugin.dependencies.get("theme").map(String::as_str),
             Some("link+0123456789abcdef"),
-            "the peer suffix uses the manifest version while the linker keeps the local target"
+            "the linker keeps the local target"
         );
+    }
+
+    #[test]
+    fn a_link_path_becomes_the_peer_id_pnpm_writes() {
+        for (path, id) in [
+            ("packages/react", "packages+react"),
+            ("./packages/b", "packages+b"),
+            ("../packages/b", "packages+b"),
+            (".hidden/pkg", "hidden+pkg"),
+            ("react-local", "react-local"),
+            ("a//b+c/", "a+b+c"),
+            ("..", "+"),
+            ("", ""),
+        ] {
+            assert_eq!(link_path_to_peer_version(path), id, "{path}");
+        }
     }
 }

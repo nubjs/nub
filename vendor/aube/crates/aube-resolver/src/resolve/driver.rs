@@ -16,6 +16,7 @@
 //! sibling-dedupe → lockfile-reuse → fetch-and-pick) is staged for a
 //! later refactor.
 
+use super::ImporterMemberLinks;
 use super::fetch::{FetchKey, FetchScheduler, TrustHistory};
 use super::seed::seed_direct_deps;
 use super::vulnerable::{is_vulnerable, prefer_non_vulnerable_pick};
@@ -147,6 +148,12 @@ pub(crate) struct ResolveDriver<'a> {
     /// Derived from the same `manifests` slice the importer seed walks,
     /// so the two can never disagree about the member set.
     workspace_member_importers: BTreeMap<String, String>,
+
+    /// The importer dependencies that bound to a workspace member, as importer ->
+    /// dependency name -> (member directory, member version). `name@version`
+    /// alone cannot say so: `latest` can select the registry copy at the member's
+    /// own version.
+    importer_member_links: ImporterMemberLinks,
 
     /// Borrowed set of names present in the existing lockfile. Used as
     /// a prefetch gate so packuments that will hit the lockfile-reuse
@@ -398,6 +405,7 @@ impl<'a> ResolveDriver<'a> {
             existing,
             workspace_packages,
             workspace_member_importers,
+            importer_member_links: BTreeMap::new(),
             existing_names,
             locked_index,
             importer_declared_dep_names,
@@ -475,6 +483,7 @@ impl<'a> ResolveDriver<'a> {
             self.resolved_times,
             self.skipped_optional_dependencies,
             self.catalog_picks,
+            &self.importer_member_links,
         )?;
         if let Some((state, sem)) = self.packument_persist_handle {
             sem.persist(&state, "packument:default");
@@ -657,7 +666,7 @@ impl<'a> ResolveDriver<'a> {
                 // overridden version) but NOT to a peer edge, so reusing the
                 // raw range here matches pnpm — verified empirically.
                 if let Some(peer_task) = self.deferred_auto_peers.pop() {
-                    if !self.try_peer_reuse(&peer_task) {
+                    if !self.try_peer_reuse(&peer_task) && !self.try_workspace_link(&peer_task) {
                         self.queue.push_back(peer_task);
                     }
                     continue;
@@ -883,7 +892,18 @@ impl<'a> ResolveDriver<'a> {
             return self.handle_local_source_task(task).await;
         }
 
-        if self.try_workspace_link(&task) {
+        // A member stands in only for what an importer declares: a package's own
+        // semver dependency on that name comes from the registry, as with pnpm's
+        // default `linkWorkspacePackagesDepth`. A local package is first-party
+        // code, so its dependency still links.
+        let parent_is_local = task
+            .parent
+            .as_ref()
+            .and_then(|parent| self.resolved.get(parent))
+            .is_some_and(|parent| parent.local_source.is_some());
+        if (task.is_root || task.range.starts_with("workspace:") || parent_is_local)
+            && self.try_workspace_link(&task)
+        {
             return Ok(());
         }
 
@@ -3020,7 +3040,36 @@ impl<'a> ResolveDriver<'a> {
             return false;
         }
         let ws_version = ws_version.clone();
-        self.link_to_existing_version(task, &ws_version);
+        match self.workspace_member_importers.get(&task.name).cloned() {
+            // A member is an importer and has no package entry, so a package's
+            // edge to it lands on the `link:` package pnpm records there.
+            Some(dir) if !task.is_root => {
+                let local = LocalSource::Link(dir.into());
+                let key = local.dep_path(&task.name);
+                let tail = key
+                    .strip_prefix(&format!("{}@", task.name))
+                    .unwrap_or(&key)
+                    .to_string();
+                self.resolved
+                    .entry(key.clone())
+                    .or_insert_with(|| LockedPackage {
+                        name: task.name.clone(),
+                        version: ws_version,
+                        dep_path: key,
+                        local_source: Some(local),
+                        ..Default::default()
+                    });
+                self.link_to_existing_version(task, &tail);
+            }
+            Some(dir) => {
+                self.importer_member_links
+                    .entry(task.importer.clone())
+                    .or_default()
+                    .insert(task.name.clone(), (dir, ws_version.clone()));
+                self.link_to_existing_version(task, &ws_version);
+            }
+            None => self.link_to_existing_version(task, &ws_version),
+        }
         true
     }
 
