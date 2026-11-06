@@ -830,7 +830,7 @@ Two cases justify it:
 
 Bundle everything else.
 
-An externalized package must be installed on the machine that runs the binary — the executable is no longer self-contained, and that is the trade. Resolution preserves the lookup base of the source module that imported it, rather than using one launch-directory base for every external. A package that cannot be found there fails at startup, naming it:
+An externalized package must be installed on the machine that runs the binary — the executable is no longer self-contained, and that is the trade. Resolution preserves the lookup base of the source module that imported it, rather than using one launch-directory base for every external. That also applies to a package shipped unbundled, and the binary carries no copy of the external even when one is installed at build time. A package that cannot be found there fails at startup, naming it:
 
 ```console
 $ ./app

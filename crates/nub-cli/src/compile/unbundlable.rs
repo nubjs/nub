@@ -179,6 +179,10 @@ pub enum Reason {
     /// Carries the two halves of the evidence so a wrong verdict names what
     /// convinced it, rather than leaving someone to guess which file did.
     ComputedAssetRead { code: String, asset: String },
+    /// Resolves its own install of a package unbundled elsewhere, which bundled code
+    /// could not reach. Found from the whole graph rather than from this package, so
+    /// [`classify`] never returns it — see `NativeAddons::out_of_reach`.
+    OwnInstall(String),
     /// Named by the user, not by any rule.
     ///
     /// No detector reaches every package — a pure-JS package handing a worker a
@@ -203,6 +207,9 @@ impl Reason {
             Reason::ComputedAssetRead { code, asset } => format!(
                 "`{code}` builds a path at run time and it ships `{asset}`, which is not code"
             ),
+            Reason::OwnInstall(dep) => {
+                format!("it needs its own copy of `{dep}`, which bundled code cannot reach")
+            }
             Reason::Forced => "you asked for it with --unbundled".to_string(),
         }
     }

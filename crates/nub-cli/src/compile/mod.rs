@@ -279,6 +279,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     let shim_plan = external::ShimPlan {
         external: &opts.bundle.external,
         external_imports: &bundled.external_imports,
+        shipped_sources: &bundled.shipped_sources,
         dynamic: bundled.dynamic_import_sites > 0,
     };
     // Every static worker enters through a tiny generated module. When a resolver
@@ -5782,6 +5783,7 @@ mod tests {
             dynamic_import_sites: 0,
             native_addons: Vec::new(),
             external_imports: Vec::new(),
+            shipped_sources: Vec::new(),
             worker_roots: Vec::new(),
             metafile: None,
         };
@@ -5859,6 +5861,7 @@ mod tests {
             dynamic_import_sites: 0,
             native_addons: Vec::new(),
             external_imports: Vec::new(),
+            shipped_sources: Vec::new(),
             worker_roots: Vec::new(),
             metafile: None,
         };
@@ -5913,6 +5916,7 @@ mod tests {
             dynamic_import_sites: 0,
             native_addons: Vec::new(),
             external_imports: Vec::new(),
+            shipped_sources: Vec::new(),
             worker_roots: Vec::new(),
             metafile: None,
         };
@@ -5984,6 +5988,7 @@ mod tests {
             dynamic_import_sites: 0,
             native_addons: Vec::new(),
             external_imports: Vec::new(),
+            shipped_sources: Vec::new(),
             worker_roots: Vec::new(),
             metafile: None,
         };
@@ -6027,6 +6032,7 @@ mod tests {
             dynamic_import_sites: 0,
             native_addons: Vec::new(),
             external_imports: Vec::new(),
+            shipped_sources: Vec::new(),
             worker_roots: vec![bundle::WorkerRoot {
                 entry: "worker-a.mjs".into(),
                 chunk: "worker-a-code.mjs".into(),
@@ -6077,6 +6083,7 @@ mod tests {
                 dynamic_import_sites: 0,
                 native_addons: Vec::new(),
                 external_imports: Vec::new(),
+                shipped_sources: Vec::new(),
                 worker_roots: Vec::new(),
                 metafile: None,
             },
