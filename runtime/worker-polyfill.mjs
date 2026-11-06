@@ -480,7 +480,11 @@ export function installWorkerPolyfill() {
 // (verified), so the polyfill provides the whole surface. Without the inbound
 // wiring, `self.onmessage` / `self.addEventListener("message", …)` never fire
 // and a parent→worker round-trip hangs — see internal/research/worker-polyfill.md.
-if (!isMainThread && parentPort) {
+// Native Web Workers already own their scope. Ordinary worker_threads still
+// need this shim, even when the native Worker constructor is enabled.
+const nativeWorkerScope = typeof DedicatedWorkerGlobalScope === "function" &&
+  globalThis instanceof DedicatedWorkerGlobalScope;
+if (!isMainThread && parentPort && !nativeWorkerScope) {
   const scope = globalThis;
   // All of nub's worker-scope global injections below (self, addEventListener,
   // removeEventListener, dispatchEvent, postMessage, close) are defined
