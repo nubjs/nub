@@ -7,6 +7,13 @@
 // must pass the *import* conditions — otherwise a dual package (separate `import` /
 // `require` exports) resolves to its CJS build and `import { x }` fails. So we go
 // through `pnpapi.resolveRequest` (the only PnP resolver that accepts conditions).
+const {
+  JSONParse,
+  Set,
+  SetPrototypeAdd,
+  StringPrototypeEndsWith,
+} = require("./primordials.cjs");
+
 const { readFileSync } = require("node:fs");
 const { dirname, join, sep } = require("node:path");
 const { fileURLToPath, pathToFileURL } = require("node:url");
@@ -20,12 +27,12 @@ const cwdIssuer = () => process.cwd() + sep;
 // zip-patched `fs` (`.pnp.cjs` patches `fs`, so reads inside `.zip` work in both
 // realms). No pnpapi needed. Defaults to "commonjs" if detection fails.
 function formatOf(resolvedPath) {
-  if (resolvedPath.endsWith(".mjs")) return "module";
-  if (resolvedPath.endsWith(".cjs")) return "commonjs";
+  if (StringPrototypeEndsWith(resolvedPath, ".mjs")) return "module";
+  if (StringPrototypeEndsWith(resolvedPath, ".cjs")) return "commonjs";
   let dir = dirname(resolvedPath);
   for (let i = 0; i < 16; i++) {
     try {
-      const pj = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+      const pj = JSONParse(readFileSync(join(dir, "package.json"), "utf8"));
       return pj.type === "module" ? "module" : "commonjs";
     } catch {}
     const up = dirname(dir);
@@ -54,7 +61,9 @@ function pnpResolveEsm(api, specifier, context) {
     const isImport = !!context && context.importAttributes !== undefined;
     conds = isImport ? ["node", "import"] : ["node", "require"];
   }
-  const resolved = api.resolveRequest(specifier, issuer, { conditions: new Set(conds) });
+  const conditions = new Set();
+  for (const condition of conds) SetPrototypeAdd(conditions, condition);
+  const resolved = api.resolveRequest(specifier, issuer, { conditions });
   if (!resolved) return null;
   return { url: pathToFileURL(resolved).href, format: formatOf(resolved), shortCircuit: true };
 }

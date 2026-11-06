@@ -645,7 +645,32 @@ pub(super) fn write_per_project_lockfiles(
     fallback_kind: aube_lockfile::LockfileKind,
     write_selection: Option<&std::collections::BTreeSet<String>>,
 ) -> miette::Result<()> {
+    write_per_project_lockfiles_with(
+        workspace_root,
+        graph,
+        workspace_manifests,
+        fallback_kind,
+        write_selection,
+        false,
+    )
+}
+
+/// [`write_per_project_lockfiles`], where `rewrite` writes each member's file
+/// even when its resolved graph is unchanged (`--fix-lockfile`).
+pub(super) fn write_per_project_lockfiles_with(
+    workspace_root: &std::path::Path,
+    graph: &aube_lockfile::LockfileGraph,
+    workspace_manifests: &[(String, aube_manifest::PackageJson)],
+    fallback_kind: aube_lockfile::LockfileKind,
+    write_selection: Option<&std::collections::BTreeSet<String>>,
+    rewrite: bool,
+) -> miette::Result<()> {
     use miette::IntoDiagnostic;
+    let write = if rewrite {
+        aube_lockfile::rewrite_lockfile_as
+    } else {
+        aube_lockfile::write_lockfile_as
+    };
     for (importer_path, pkg_manifest) in workspace_manifests {
         // Filtered install: only (re)write the selected importers'
         // lockfiles. Without this an `aube install --filter <member>`
@@ -694,7 +719,7 @@ pub(super) fn write_per_project_lockfiles(
         // written alongside its (preserved) pnpm lockfile.
         let write_kind =
             aube_lockfile::detect_existing_lockfile_kind(&pkg_dir).unwrap_or(fallback_kind);
-        let written = aube_lockfile::write_lockfile_as(&pkg_dir, &subset, pkg_manifest, write_kind)
+        let written = write(&pkg_dir, &subset, pkg_manifest, write_kind)
             .into_diagnostic()
             .wrap_err_with(|| format!("failed to write per-project lockfile at {importer_path}"))?;
         tracing::debug!(

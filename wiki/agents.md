@@ -62,7 +62,7 @@ gh pr edit <n> --add-label ci     # requests a full run against the current head
 
 - **Ask LAST, not first.** The label is worth spending once the branch is one you would merge — after the review rounds, not before the first one. Requesting a run and then pushing three more commits rebuilds the exact churn this replaced.
 - **A pull request with no checks is UNVERIFIED, and the tooling says so.** `scripts/ci-watch.ts` and `scripts/merge-cascade.ts` both gate on the `CI gate` aggregate being present and green. A skipped check ran nothing, so it verifies nothing, and neither do the checks that arrive on their own — Vercel and the review bots are GitHub Apps rather than Actions workflows, so they still run on every pull request and still go green on one that has had no CI at all. Three green checks is not a verified branch. Never read "no checks reported" as "nothing to wait for".
-- **Every job carries the guard, and `scripts/ci-optin.test.mjs` enforces it.** A `labeled` event fires for ANY label, so a job without the `github.event.label.name == 'ci'` check would launch the matrix whenever somebody tagged a pull request `bug`. Add a job to a pull-request workflow and the guard comes with it.
+- **Every job carries the guard, and `scripts/ci-optin.test.mts` enforces it.** A `labeled` event fires for ANY label, so a job without the `github.event.label.name == 'ci'` check would launch the matrix whenever somebody tagged a pull request `bug`. Add a job to a pull-request workflow and the guard comes with it.
 - **A contributor cannot request their own run.** Labelling needs write access, so an external pull request waits for a maintainer to ask for CI — one more reason to look at fork pull requests promptly.
 
 ## Core design positions

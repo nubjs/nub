@@ -74,6 +74,7 @@ pub async fn run(args: CiArgs) -> miette::Result<()> {
         embedder_runtime: None,
         project_dir: None,
         mode: install::FrozenMode::Frozen,
+        rewrite_lockfile: false,
         dep_selection: install::DepSelection::from_flags(false, false, no_optional),
         ignore_pnpmfile: false,
         pnpmfile: None,

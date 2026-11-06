@@ -110,7 +110,10 @@ fn indexed(
     let index = LockedIndex::new(Some(graph));
     let mut hits = 0;
     for (name, range) in tasks {
-        if index.find_satisfying(name, range, name, vuln).is_some() {
+        if index
+            .find_satisfying(name, range, name, false, vuln)
+            .is_some()
+        {
             hits += 1;
         }
     }

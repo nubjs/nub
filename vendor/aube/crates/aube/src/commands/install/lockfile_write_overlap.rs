@@ -26,7 +26,7 @@
 //! cold-install diff).
 
 use super::lockfile_dir::write_lockfile_dir_remapped;
-use super::workspace::write_per_project_lockfiles;
+use super::workspace::write_per_project_lockfiles_with;
 use miette::{Context, IntoDiagnostic};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -45,6 +45,7 @@ pub(super) struct LockfileWriteInputs {
     pub shared_workspace_lockfile: bool,
     pub has_workspace: bool,
     pub per_project_write_selection: Option<BTreeSet<String>>,
+    pub rewrite_lockfile: bool,
 }
 
 pub(super) type LockfileWriteHandle = tokio::task::JoinHandle<miette::Result<()>>;
@@ -75,6 +76,7 @@ pub(super) fn write_one(
     shared_workspace_lockfile: bool,
     has_workspace: bool,
     per_project_write_selection: Option<&BTreeSet<String>>,
+    rewrite_lockfile: bool,
 ) -> miette::Result<()> {
     if shared_workspace_lockfile || !has_workspace {
         let written_path = write_lockfile_dir_remapped(
@@ -83,6 +85,7 @@ pub(super) fn write_one(
             graph,
             manifest,
             write_kind,
+            rewrite_lockfile,
         )
         .into_diagnostic()
         .wrap_err("failed to write lockfile")?;
@@ -96,12 +99,13 @@ pub(super) fn write_one(
                 .unwrap_or_else(|| written_path.display().to_string())
         );
     } else {
-        write_per_project_lockfiles(
+        write_per_project_lockfiles_with(
             cwd,
             graph,
             manifests,
             write_kind,
             per_project_write_selection,
+            rewrite_lockfile,
         )?;
     }
     Ok(())
@@ -128,6 +132,7 @@ pub(super) fn spawn(inputs: LockfileWriteInputs) -> LockfileWriteHandle {
             inputs.shared_workspace_lockfile,
             inputs.has_workspace,
             inputs.per_project_write_selection.as_ref(),
+            inputs.rewrite_lockfile,
         )
     })
 }

@@ -16,7 +16,7 @@ import { readFileSync } from 'node:fs'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-const read = (p) => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8')
+const read = (p: string) => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8')
 
 // The list feeding the `missing` filter in build.rs's gate.
 function gateRequires() {
@@ -33,24 +33,24 @@ function gateRequires() {
 
 // Each producer, keyed by how it happens to spell the list.
 const PRODUCERS = {
-  '.github/workflows/release.yml': (s) => {
+  '.github/workflows/release.yml': (s: string) => {
     const from = s.indexOf('EXPECTED_PACKAGES=(')
     assert.ok(from > 0, 'could not find EXPECTED_PACKAGES in release.yml')
     return [...s.slice(from, s.indexOf(')', from)).matchAll(/"([^"]+)"/g)].map((m) => m[1])
   },
-  'flake.nix': (s) => {
+  'flake.nix': (s: string) => {
     const from = s.indexOf('runtimeDeps = [')
     assert.ok(from > 0, 'could not find runtimeDeps in flake.nix')
     const body = s.slice(from, s.indexOf('\n          ];', from))
     return [...body.matchAll(/dest = "([^"]+)"/g)].map((m) => m[1])
   },
-  'npm/build-local.sh': (s) =>
+  'npm/build-local.sh': (s: string) =>
     [...s.matchAll(/node_modules\/((?:@[a-z0-9-]+\/)?[a-z0-9-]+)" "\$REPO_ROOT\/runtime/g)].map(
       (m) => m[1],
     ),
 }
 
-test('build.rs requires every package the release workflow vendors', () => {
+void test('build.rs requires every package the release workflow vendors', () => {
   const required = gateRequires()
   assert.ok(required.length >= 5, `parsed only ${required.length} packages from build.rs`)
   const staged = PRODUCERS['.github/workflows/release.yml'](read('.github/workflows/release.yml')).sort()
@@ -63,7 +63,7 @@ test('build.rs requires every package the release workflow vendors', () => {
   )
 })
 
-test('every producer stages at least what the gate requires', () => {
+void test('every producer stages at least what the gate requires', () => {
   const required = gateRequires()
   for (const [path, extract] of Object.entries(PRODUCERS)) {
     const staged = extract(read(path))

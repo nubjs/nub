@@ -373,15 +373,15 @@ pub fn parse(path: &Path, manifest: &aube_manifest::PackageJson) -> Result<Lockf
 
         let mut resolved: BTreeMap<String, String> = BTreeMap::new();
         let mut resolved_optional: BTreeMap<String, String> = BTreeMap::new();
-        for (dep_name, is_optional) in package_entry
+        for (dep_name, range, is_optional) in package_entry
             .dependencies
-            .keys()
-            .map(|name| (name, false))
+            .iter()
+            .map(|(name, range)| (name, range, false))
             .chain(
                 package_entry
                     .optional_dependencies
-                    .keys()
-                    .map(|name| (name, true)),
+                    .iter()
+                    .map(|(name, range)| (name, range, true)),
             )
         {
             if let Some(target_install_path) =
@@ -394,6 +394,18 @@ pub fn parse(path: &Path, manifest: &aube_manifest::PackageJson) -> Result<Lockf
                 if is_optional {
                     resolved_optional.insert(dep_name.clone(), tail);
                 }
+            } else if !is_optional
+                && !package_entry.in_bundle
+                && !package_entry.bundle_dependencies.contains(dep_name)
+                && !package_entry.optional_dependencies.contains_key(dep_name)
+            {
+                // A required child with no entry: the lockfile is broken. Keep
+                // the edge, pointing at nothing, as a pnpm lockfile missing the
+                // same entry does. A resolver seeded with this graph then fetches
+                // the child, where a dropped edge would lose the dependency from
+                // the parent on the next write. An optional child is legitimately
+                // absent, pruned for another platform.
+                resolved.insert(dep_name.clone(), range.clone());
             }
         }
         // Peers, by placement. npm records the copy of a peer each dependent

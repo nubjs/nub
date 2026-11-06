@@ -52,6 +52,7 @@
     "util/throttle.cjs",
     "util/internals.cjs",
     "pnp-util.cjs",
+    "primordials.cjs",
     "floor-builtin.mjs",
     "cache-evict.mjs",
     "fetch-serve.cjs",

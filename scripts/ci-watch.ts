@@ -467,6 +467,6 @@ const isMain = process.argv[1] !== undefined && fileURLToPath(import.meta.url) =
 if (isMain) main();
 
 // Re-export the shared classifier alongside the watcher-local symbols so existing
-// importers (scripts/ci-watch.test.mjs) keep their `from "./ci-watch.ts"` path.
+// importers (scripts/ci-watch.test.mts) keep their `from "./ci-watch.ts"` path.
 export { classifyRollup, verdictForBuckets, classifyPr, classifyRun, signatureOf, resolvePendingExit };
 export type { Buckets, Verdict, RollupItem, Timing };
