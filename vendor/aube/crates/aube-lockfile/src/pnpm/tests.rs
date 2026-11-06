@@ -604,8 +604,8 @@ snapshots:
     write(&out_path, &graph, &manifest).unwrap();
     let written = std::fs::read_to_string(&out_path).unwrap();
     assert!(
-        written.contains("    dependencies:\n      dual: file:./dual\n"),
-        "parent's edge must be written back as `file:./dual`: {written}"
+        written.contains("    dependencies:\n      dual: file:dual\n"),
+        "parent's edge must be written back as `file:dual`: {written}"
     );
 }
 
@@ -665,8 +665,8 @@ snapshots:
     write(&out_path, &graph, &manifest).unwrap();
     let written = std::fs::read_to_string(&out_path).unwrap();
     assert!(
-        written.contains("child@file:./child:") && written.contains("child: file:./child\n"),
-        "the lockfile keeps its spelling: {written}"
+        written.contains("child@file:child:") && written.contains("child: file:child\n"),
+        "the key and the edge agree: {written}"
     );
 }
 

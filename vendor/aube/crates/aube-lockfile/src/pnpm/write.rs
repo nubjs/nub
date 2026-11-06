@@ -5,7 +5,6 @@ use super::dep_path::{
 use super::format::reformat_for_pnpm_parity;
 use crate::{DepType, Error, LocalSource, LockfileGraph, link_from_importer};
 use aube_manifest::PackageJson;
-use aube_util::path::normalize_lexical;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -796,15 +795,10 @@ pub(super) fn build(
                     .get(&dp)
                     .or_else(|| graph.packages.get(&peerless_dep_path(&name, &value)));
                 let rewritten = if let Some(target) = target
-                    && let Some(LocalSource::Link(path)) = &target.local_source
-                {
-                    // Relative to the lockfile directory on every parent, where pnpm
-                    // links it from. `link:` has no `packages:` entry to record it.
-                    let path = normalize_lexical(path).to_string_lossy().replace('\\', "/");
-                    format!("link:{path}")
-                } else if let Some(target) = target
                     && let Some(ref local) = target.local_source
                 {
+                    // A `link:` path is relative to the lockfile directory on every
+                    // parent, where pnpm links it from. It has no `packages:` entry.
                     local.pnpm_specifier()
                 } else if native_pnpm_aliases
                     && let Some(target) = target

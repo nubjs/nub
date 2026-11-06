@@ -401,7 +401,7 @@ pub(crate) fn source_matches_declaration(held: &LocalSource, declared: &str) -> 
                     .filter(names_a_commit)
                     .is_none_or(|commit| git_commits_match(&held.resolved, commit))
         }
-        (None, None) => held.specifier() == declared.specifier(),
+        (None, None) => held.pnpm_specifier() == declared.pnpm_specifier(),
         _ => false,
     }
 }
@@ -854,6 +854,10 @@ mod source_match_tests {
             "https://example.com/fork.tgz"
         ));
         assert!(!source_matches_declaration(&tarball, "^1.0.0"));
+        assert!(source_matches_declaration(
+            &parse("file:vendor/a"),
+            "file:./vendor/a"
+        ));
     }
 
     #[test]
