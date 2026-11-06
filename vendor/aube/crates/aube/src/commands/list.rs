@@ -809,7 +809,7 @@ fn edge_label(graph: &LockfileGraph, dep_path: &str, tail: &str) -> String {
     graph
         .get_package(dep_path)
         .and_then(|pkg| pkg.local_source.as_ref())
-        .map(LocalSource::specifier)
+        .map(LocalSource::pnpm_specifier)
         .unwrap_or_else(|| tail.to_string())
 }
 
@@ -820,7 +820,7 @@ fn graph_needs_terminal_sanitization(graph: &LockfileGraph) -> bool {
     }) || graph.packages.values().any(|pkg| {
         aube_util::terminal::needs_inline_sanitization(&pkg.version)
             || pkg.local_source.as_ref().is_some_and(|local| {
-                aube_util::terminal::needs_inline_sanitization(&local.specifier())
+                aube_util::terminal::needs_inline_sanitization(&local.pnpm_specifier())
             })
             || pkg.dependencies.iter().any(|(name, version)| {
                 aube_util::terminal::needs_inline_sanitization(name)
