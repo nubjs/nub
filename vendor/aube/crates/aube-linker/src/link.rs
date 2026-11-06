@@ -405,6 +405,13 @@ impl Linker {
                                 // deliberately omits this dep_path from
                                 // `package_indices` on the fast path, so
                                 // do the existence check first.
+                                self.reconcile_aube_dir_entry(
+                                    &aube_dir,
+                                    dep_path,
+                                    graph,
+                                    pkg,
+                                    nested_link_targets.as_ref(),
+                                )?;
                                 local_stats.packages_cached += 1;
                                 return Ok(local_stats);
                             }
@@ -956,6 +963,13 @@ impl Linker {
                             let mut local_stats = LinkStats::default();
                             let aube_entry = aube_dir.join(self.aube_dir_entry_name(dep_path));
                             if aube_entry.exists() {
+                                self.reconcile_aube_dir_entry(
+                                    &aube_dir,
+                                    dep_path,
+                                    graph,
+                                    pkg,
+                                    nested_link_targets.as_ref(),
+                                )?;
                                 local_stats.packages_cached += 1;
                                 return Ok(local_stats);
                             }
@@ -1417,6 +1431,7 @@ impl Linker {
             let local_is_real_dir = aube_util::fs::is_real_dir(&local_aube_entry);
             if store_pkg_dir.exists() && local_is_real_dir {
                 // Both placements already correct.
+                self.reconcile_aube_dir_entry(aube_dir, dep_path, graph, pkg, nested_link_targets)?;
                 local_stats.packages_cached += 1;
                 return Ok(local_stats);
             }
@@ -1459,6 +1474,7 @@ impl Linker {
                 // still in hand here, so strip it too rather than
                 // leave the two halves of one branch inconsistent.
                 crate::quarantine::strip_cached_entry(&local_aube_entry, &pkg.name, index);
+                self.reconcile_aube_dir_entry(aube_dir, dep_path, graph, pkg, nested_link_targets)?;
                 return Ok(local_stats);
             }
             // Drop a stale shared-store symlink/junction left by
@@ -1522,7 +1538,9 @@ impl Linker {
         };
 
         if matches!(state, EntryState::Fresh) {
-            if !project_local {
+            if project_local {
+                self.reconcile_aube_dir_entry(aube_dir, dep_path, graph, pkg, nested_link_targets)?;
+            } else {
                 self.reconcile_virtual_store_entry(dep_path, pkg, nested_link_targets)?;
             }
             local_stats.packages_cached += 1;

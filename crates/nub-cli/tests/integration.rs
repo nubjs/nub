@@ -1415,6 +1415,10 @@ fn an_external_answers_from_the_launch_tree_wherever_its_importer_ships() {
     let imports_foo = "import foo from \"foo\";\nconsole.log(foo());\n";
     let imports_a =
         "import a from \"a\";\nimport top from \"pino-pretty\";\nconsole.log(a(), top());\n";
+    let guarded = "module.exports = () => {\n  try { return require(\"plugin\")(); }\n  \
+                   catch (e) { if (e.code !== \"MODULE_NOT_FOUND\") throw e; return \"no plugin\"; }\n};\n";
+    // Compile directory, and the entry's path from it.
+    const ROOT: [&str; 2] = ["", "app.mjs"];
     let unbundled_foo: &[&str] = &["--unbundled", "foo", "--external", "plugin"];
     let external_only: &[&str] = &["--external", "plugin"];
     // A package with its own install of pino-pretty, so it moves out of the bundle.
@@ -1428,14 +1432,15 @@ fn an_external_answers_from_the_launch_tree_wherever_its_importer_ships() {
         ]
         .concat()
     };
-    // Name, source tree, its symlinks, deployment tree, entry, flags, and either the
+    // Name, source tree, its symlinks, deployment tree, where the entry is and what it
+    // says, flags, and either the
     // artifact's stdout or what its failure has to say.
     type Case<'a> = (
         &'a str,
         FixtureTree,
         Vec<(&'a str, &'a str)>,
         FixtureTree,
-        &'a str,
+        ([&'a str; 2], &'a str),
         &'a [&'a str],
         Result<&'a str, &'a str>,
     );
@@ -1445,7 +1450,7 @@ fn an_external_answers_from_the_launch_tree_wherever_its_importer_ships() {
             pkg("node_modules/foo", "1.0.0", &[], calls_plugin),
             vec![],
             deployed(),
-            imports_foo,
+            (ROOT, imports_foo),
             unbundled_foo,
             Ok("plugin from deployment"),
         ),
@@ -1458,7 +1463,7 @@ fn an_external_answers_from_the_launch_tree_wherever_its_importer_ships() {
             .concat(),
             vec![],
             deployed(),
-            imports_foo,
+            (ROOT, imports_foo),
             unbundled_foo,
             Ok("plugin from deployment"),
         ),
@@ -1467,7 +1472,7 @@ fn an_external_answers_from_the_launch_tree_wherever_its_importer_ships() {
             competing(&[]),
             vec![],
             deployed(),
-            imports_a,
+            (ROOT, imports_a),
             external_only,
             Ok("pino-pretty 2.0.0 plugin from deployment pino-pretty 1.0.0"),
         ),
@@ -1476,7 +1481,7 @@ fn an_external_answers_from_the_launch_tree_wherever_its_importer_ships() {
             [competing(&["plugin"]), built()].concat(),
             vec![],
             deployed(),
-            imports_a,
+            (ROOT, imports_a),
             external_only,
             Ok("pino-pretty 2.0.0 plugin from deployment pino-pretty 1.0.0"),
         ),
@@ -1496,7 +1501,7 @@ fn an_external_answers_from_the_launch_tree_wherever_its_importer_ships() {
             .concat(),
             vec![],
             deployed(),
-            imports_foo,
+            (ROOT, imports_foo),
             unbundled_foo,
             Ok("plugin from deployment"),
         ),
@@ -1515,7 +1520,7 @@ fn an_external_answers_from_the_launch_tree_wherever_its_importer_ships() {
             ],
             vec![],
             deployed(),
-            imports_foo,
+            (ROOT, imports_foo),
             unbundled_foo,
             Ok("plugin/sub from deployment"),
         ),
@@ -1529,7 +1534,7 @@ fn an_external_answers_from_the_launch_tree_wherever_its_importer_ships() {
                 "node_modules/.store/foo@1.0.0/node_modules/plugin",
                 "the store",
             ),
-            imports_foo,
+            (ROOT, imports_foo),
             unbundled_foo,
             Ok("plugin from the store"),
         ),
@@ -1550,7 +1555,7 @@ fn an_external_answers_from_the_launch_tree_wherever_its_importer_ships() {
                 pkg("node_modules/other", "1.0.0", &[], ""),
             ]
             .concat(),
-            imports_foo,
+            (ROOT, imports_foo),
             &[
                 "--unbundled",
                 "foo",
@@ -1561,19 +1566,188 @@ fn an_external_answers_from_the_launch_tree_wherever_its_importer_ships() {
             ],
             Ok("other 2.0.0"),
         ),
-        // An optional plugin stays optional: Node's code, not one its guard never heard of.
+        // The payload puts everything under `src/` here, and the source mapping has to
+        // follow, or the lookup starts at `src/node_modules/foo` and finds the competitor.
         (
-            "a guarded optional require",
+            "an importer under an entry prefix",
+            [
+                pkg(&fixture_store("1.0.0", "foo"), "1.0.0", &[], calls_plugin),
+                vec![("asset.txt".to_string(), "data\n".to_string())],
+            ]
+            .concat(),
+            vec![("node_modules/foo", ".store/foo@1.0.0/node_modules/foo")],
+            [
+                plugin(
+                    "node_modules/.store/foo@1.0.0/node_modules/plugin",
+                    "the store",
+                ),
+                deployed(),
+            ]
+            .concat(),
+            (["", "src/app.mjs"], imports_foo),
+            &[
+                "--unbundled",
+                "foo",
+                "--external",
+                "plugin",
+                "--include",
+                "asset.txt",
+            ],
+            Ok("plugin from the store"),
+        ),
+        // A store outside the project, as nub's global one is. Its path is this machine's
+        // and leads nowhere on another, so the importer counts as installed here.
+        (
+            "a bundled package in a store outside the project",
             pkg(
-                "node_modules/foo",
+                "../store/v1/foo@1.0.0-abc/node_modules/foo",
                 "1.0.0",
                 &[],
-                "module.exports = () => {\n  try { return require(\"plugin\")(); }\n  \
-                 catch (e) { if (e.code !== \"MODULE_NOT_FOUND\") throw e; return \"no plugin\"; }\n};\n",
+                calls_plugin,
             ),
+            vec![(
+                "node_modules/foo",
+                "../../store/v1/foo@1.0.0-abc/node_modules/foo",
+            )],
+            deployed(),
+            (ROOT, imports_foo),
+            external_only,
+            Ok("plugin from deployment"),
+        ),
+        // The tree a sibling's dependency hangs off looks like a store from the launch
+        // directory, but it is real layout that a deployment reproduces.
+        (
+            "a sibling workspace member and its own dependency",
+            [
+                pkg(
+                    "packages/lib",
+                    "1.0.0",
+                    &["x"],
+                    "module.exports = () => require(\"x\")() + \" \" + require(\"plugin\")();\n",
+                ),
+                pkg("packages/lib/node_modules/x", "1.0.0", &[], calls_plugin),
+            ]
+            .concat(),
+            vec![("packages/app/node_modules/@w/lib", "../../../lib")],
+            [
+                plugin("packages/lib/node_modules/plugin", "the member"),
+                plugin("packages/app/node_modules/plugin", "the launch directory"),
+            ]
+            .concat(),
+            (
+                ["packages/app", "app.mjs"],
+                "import lib from \"@w/lib\";\nconsole.log(lib());\n",
+            ),
+            external_only,
+            Ok("plugin from the member plugin from the member"),
+        ),
+        // A chunk holds modules from several packages, so the lookup has to start at the
+        // module that made the import, not at the chunk.
+        (
+            "a module inlined into a closure chunk, with competing deployed copies",
+            [
+                pkg(
+                    "node_modules/foo",
+                    "1.0.0",
+                    &["dep"],
+                    "module.exports = () => require(\"dep\")();\n",
+                ),
+                pkg(
+                    "node_modules/dep",
+                    "1.0.0",
+                    &["inner"],
+                    "module.exports = () => require(\"inner\")();\n",
+                ),
+                pkg(
+                    "node_modules/dep/node_modules/inner",
+                    "1.0.0",
+                    &[],
+                    calls_plugin,
+                ),
+            ]
+            .concat(),
+            vec![],
+            [
+                plugin(
+                    "node_modules/dep/node_modules/inner/node_modules/plugin",
+                    "inner's copy",
+                ),
+                deployed(),
+            ]
+            .concat(),
+            (ROOT, imports_foo),
+            unbundled_foo,
+            Ok("plugin from inner's copy"),
+        ),
+        (
+            "a module in a shared closure chunk, with competing deployed copies",
+            [
+                pkg(
+                    "node_modules/foo",
+                    "1.0.0",
+                    &["dep-a", "dep-b"],
+                    "module.exports = () => require(\"dep-a\")() + \" \" + require(\"dep-b\")();\n",
+                ),
+                pkg(
+                    "node_modules/dep-a",
+                    "1.0.0",
+                    &["inner"],
+                    "module.exports = () => require(\"inner\")();\n",
+                ),
+                pkg(
+                    "node_modules/dep-b",
+                    "1.0.0",
+                    &["inner"],
+                    "module.exports = () => require(\"inner\")();\n",
+                ),
+                pkg("node_modules/inner", "1.0.0", &[], calls_plugin),
+            ]
+            .concat(),
+            vec![],
+            [
+                plugin("node_modules/inner/node_modules/plugin", "inner's copy"),
+                deployed(),
+            ]
+            .concat(),
+            (ROOT, imports_foo),
+            unbundled_foo,
+            Ok("plugin from inner's copy plugin from inner's copy"),
+        ),
+        // An optional plugin stays optional wherever the import ends up: Node's code, not
+        // one its guard never heard of.
+        (
+            "a guarded optional require in the bundle",
+            pkg("node_modules/foo", "1.0.0", &[], guarded),
             vec![],
             vec![],
-            imports_foo,
+            (ROOT, imports_foo),
+            external_only,
+            Ok("no plugin"),
+        ),
+        (
+            "a guarded optional require in a closure chunk",
+            [
+                pkg(
+                    "node_modules/foo",
+                    "1.0.0",
+                    &["dep"],
+                    "module.exports = () => require(\"dep\")();\n",
+                ),
+                pkg("node_modules/dep", "1.0.0", &[], guarded),
+            ]
+            .concat(),
+            vec![],
+            vec![],
+            (ROOT, imports_foo),
+            unbundled_foo,
+            Ok("no plugin"),
+        ),
+        (
+            "a guarded optional require",
+            pkg("node_modules/foo", "1.0.0", &[], guarded),
+            vec![],
+            vec![],
+            (ROOT, imports_foo),
             unbundled_foo,
             Ok("no plugin"),
         ),
@@ -1582,14 +1756,14 @@ fn an_external_answers_from_the_launch_tree_wherever_its_importer_ships() {
             pkg("node_modules/foo", "1.0.0", &[], calls_plugin),
             vec![],
             vec![],
-            imports_foo,
+            (ROOT, imports_foo),
             unbundled_foo,
             Err("compiled with --external plugin"),
         ),
     ];
 
     let runtime = compile_test_runtime();
-    for (case, files, links, deployment, entry, flags, expected) in cases {
+    for (case, files, links, deployment, ([cwd, entry_at], entry), flags, expected) in cases {
         let work = unique_test_cache();
         let (source, deploy) = (work.join("source"), work.join("deploy"));
         std::fs::create_dir_all(&source).unwrap();
@@ -1606,15 +1780,17 @@ fn an_external_answers_from_the_launch_tree_wherever_its_importer_ships() {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::os::unix::fs::symlink(target, path).unwrap();
         }
-        std::fs::write(source.join("app.mjs"), entry).unwrap();
+        let entry_path = source.join(cwd).join(entry_at);
+        std::fs::create_dir_all(entry_path.parent().unwrap()).unwrap();
+        std::fs::write(entry_path, entry).unwrap();
         let artifact = work.join("app");
         let compiled = Command::new(nub_binary())
             .args(["compile", "--smol", "--target", &runtime.node_target])
             .args(flags)
             .arg("--out")
             .arg(&artifact)
-            .arg("app.mjs")
-            .current_dir(&source)
+            .arg(entry_at)
+            .current_dir(source.join(cwd))
             .env("XDG_CACHE_HOME", work.join("cache"))
             .env("__NUB_LAUNCHER_TEMPLATE", &runtime.launcher)
             .output()
@@ -1625,9 +1801,12 @@ fn an_external_answers_from_the_launch_tree_wherever_its_importer_ships() {
             String::from_utf8_lossy(&compiled.stderr)
         );
         std::fs::remove_dir_all(&source).unwrap();
+        let _ = std::fs::remove_dir_all(work.join("store"));
         let extracted = work.join("run-cache");
+        std::fs::create_dir_all(deploy.join(cwd)).unwrap();
         let mut run = Command::new(&artifact);
-        run.current_dir(&deploy).env("XDG_CACHE_HOME", &extracted);
+        run.current_dir(deploy.join(cwd))
+            .env("XDG_CACHE_HOME", &extracted);
         let ran =
             run_compiled_artifact_command_with_timeout(run, std::time::Duration::from_secs(10));
         let (stdout, stderr) = (
@@ -1651,12 +1830,33 @@ fn an_external_answers_from_the_launch_tree_wherever_its_importer_ships() {
                     continue;
                 }
                 let text = std::fs::read(&path).unwrap_or_default();
+                let text = String::from_utf8_lossy(&text);
                 assert!(
                     !path.to_string_lossy().contains("/plugin/")
-                        && !String::from_utf8_lossy(&text).contains("plugin from build time"),
+                        && !text.contains("plugin from build time"),
                     "{case}: a copy of the plugin shipped at {}",
                     path.display()
                 );
+                // The hook is written at build time, so it is where this machine's own
+                // paths would reach the artifact, as in a chunk's `//#region` lines.
+                if path
+                    .file_name()
+                    .is_some_and(|name| name == "__nub_external.mjs")
+                {
+                    let mut machine_paths = vec![work.clone()];
+                    machine_paths.extend(std::env::var_os("HOME").map(PathBuf::from));
+                    for machine in machine_paths {
+                        let machine = machine.to_string_lossy().into_owned();
+                        assert!(
+                            !text.contains(&machine),
+                            "{case}: the hook names {machine}, a path on the building machine"
+                        );
+                    }
+                    assert!(
+                        !text.contains("store/v1"),
+                        "{case}: the hook names a store outside the project"
+                    );
+                }
             }
         }
         let _ = std::fs::remove_dir_all(&work);

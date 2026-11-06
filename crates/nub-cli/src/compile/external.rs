@@ -249,8 +249,6 @@ const EXTERNALS = Object.fromEntries({}.map((record) => [record.id, record]));
 
 // A file in the payload names an external by its own name rather than a synthetic id,
 // and is looked up from the same place: the source path of the package it came from.
-// `code` stays Node's for it, because such a package is plain Node code, and the
-// guarded optional require is how it would notice an absent plugin.
 const PACKAGES = {};
 const SOURCES = {};
 const shipped = (specifier, parentURL) => {{
@@ -259,7 +257,7 @@ const shipped = (specifier, parentURL) => {{
   const at = decodeURIComponent(parentURL.slice(APP.length));
   const source = SOURCES.find(([dir]) => at.startsWith(`${{dir}}/`));
   const importer = source === undefined ? at : source[1] + at.slice(source[0].length);
-  return {{ specifier, package: name, importer, plainNode: true }};
+  return {{ specifier, package: name, importer }};
 }};
 "#,
             serde_json::to_string(plan.external_imports)?,
@@ -300,7 +298,9 @@ const shipped = (specifier, parentURL) => {{
             `  Install ${external.package} there, or run this from a directory that already has it.`,
           { cause },
         );
-        err.code = external.plainNode ? cause.code : "ERR_NUB_EXTERNAL_NOT_FOUND";
+        // Node's own code, as below: a guarded optional import is how a package
+        // notices an absent plugin, and one it does not recognize becomes a crash.
+        err.code = cause.code;
         throw err;
       }
     }
@@ -682,7 +682,7 @@ mod tests {
         let ext = built(&["prettier"], false);
         let external_only = file(&ext, "__nub_external.mjs");
         assert!(
-            external_only.contains("ERR_NUB_EXTERNAL_NOT_FOUND")
+            external_only.contains("was compiled with --external")
                 && !external_only.contains("ERR_NUB_DYNAMIC_IMPORT_NOT_FOUND"),
             "external-only hook must carry only the external branch: {external_only}"
         );

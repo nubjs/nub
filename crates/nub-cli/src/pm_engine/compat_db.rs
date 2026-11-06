@@ -20,6 +20,12 @@
 //! (Yarn PnP with no fallback, pnpm with hoisting off). `ignoreCompatibilityDb`
 //! declines the whole thing, both layers together.
 //!
+//! Those optional peers are the one place the divergence stops short: nub wires
+//! each as an optional edge to the highest version on the package's paths, after
+//! the peer pass, so no entry here changes how many copies of a package pnpm would
+//! install. Other tools reading the published `@nubjs/extensions` take them as
+//! ordinary peers. The engine's `database_peer_targets` has the reasoning.
+//!
 //! # Why a snapshot rather than a fetch
 //!
 //! `nubjs/package-extensions` rebuilds daily and publishes whenever the rules

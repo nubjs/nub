@@ -40,6 +40,7 @@ use std::sync::Mutex;
 
 use anyhow::{Result, bail};
 use nub_core::compile::{TargetArch, TargetOs, TargetPlatform};
+use rolldown::plugin::__inner::SharedPluginable;
 use rolldown::plugin::{
     HookLoadArgs, HookLoadOutput, HookLoadReturn, HookResolveIdArgs, HookResolveIdOutput,
     HookResolveIdReturn, HookTransformArgs, HookTransformOutput, HookTransformOutputMap,
@@ -1073,6 +1074,7 @@ impl NativeAddons {
         &self,
         selected: &Selected,
         entry: &Path,
+        external: Option<&SharedPluginable>,
         minify: bool,
         keep_names: bool,
     ) -> Result<(Payload, super::closure::Bundled)> {
@@ -1093,10 +1095,7 @@ impl NativeAddons {
         // of them ships verbatim has to be external to the other's chunks — a
         // second copy inside a chunk would be a different module object reading a
         // different `__dirname`.
-        let mut closure = super::closure::Plan {
-            external: self.external.clone(),
-            ..Default::default()
-        };
+        let mut closure = super::closure::Plan::default();
         for root in selected.roots.keys() {
             self.materialise_root(
                 root,
@@ -1130,7 +1129,7 @@ impl NativeAddons {
             }
             self.materialise_root(&root, Some(at), &caller, &mut payload, &mut closure)?;
         }
-        let bundled = super::closure::bundle(&closure, minify, keep_names)?;
+        let bundled = super::closure::bundle(&closure, external, minify, keep_names)?;
         Ok((payload, bundled))
     }
 
@@ -1138,6 +1137,7 @@ impl NativeAddons {
         &self,
         chunks: &mut [super::bundle::BundledFile],
         entry: &Path,
+        external: Option<&SharedPluginable>,
         minify: bool,
         keep_names: bool,
     ) -> Result<PlannedNative> {
@@ -1163,7 +1163,8 @@ impl NativeAddons {
         // files, since that moves whatever it depends on. Each round adds a package,
         // and a closure with none left to add has no chunks to get wrong.
         let (mut payload, closure_files) = loop {
-            let (payload, bundled) = self.plan_closures(&selected, entry, minify, keep_names)?;
+            let (payload, bundled) =
+                self.plan_closures(&selected, entry, external, minify, keep_names)?;
             let stranded = payload.stranded_by(&bundled.imports);
             let mut known = self
                 .stranded

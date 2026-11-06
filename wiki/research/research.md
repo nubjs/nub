@@ -76,6 +76,7 @@ Install-time behavior: store layout, filter grammar, and which of pnpm's branded
 
 - [[gvs-in-ci]] — why the global virtual store stays disabled under CI
 - [[pnpm-filter-grammar]] — the pnpm filter grammar and its resolution algorithm
+- [[pnpm-peer-copies]] — what keeps pnpm's count of a package's copies low, and how the compatibility database stays out of it
 - [[npm-config-user-agent]] — what the user-agent string carries, and the scaffolder gap it opens
 - [[nub-field-write-vs-detection]] — whether a version range in the manifest survives five package-manager detectors
 
