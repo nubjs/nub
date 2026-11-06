@@ -34,8 +34,6 @@
 //     retaining tens of megabytes per object URL to serve a case that does not
 //     occur in practice.
 
-// blob: URL → the Blob's UTF-8 source bytes (a Buffer, off the V8 heap).
-// Read via blobUrlSource(); cleared by revokeObjectURL.
 const {
   ArrayBuffer,
   ArrayBufferIsView,
@@ -61,6 +59,8 @@ const BufferConcat = Buffer.concat;
 const BufferIsBuffer = Buffer.isBuffer;
 const BufferPrototypeToString = uncurryThis(Buffer.prototype.toString);
 
+// blob: URL → the Blob's UTF-8 source bytes (a Buffer, off the V8 heap).
+// Read via blobUrlSource(); cleared by revokeObjectURL.
 const blobUrlSources = new Map();
 // Per-Blob captured source bytes, so createObjectURL can assemble the entry
 // synchronously and a nested Blob part can be resolved.
@@ -80,7 +80,7 @@ function encodeParts(parts) {
   for (const p of parts ?? []) {
     let chunk;
     if (typeof p === "string") chunk = BufferFrom(p, "utf8");
-    else if (typeof Buffer !== "undefined" && BufferIsBuffer(p)) chunk = p;
+    else if (BufferIsBuffer(p)) chunk = p;
     else if (ArrayBufferIsView(p)) chunk = BufferFrom(p.buffer, p.byteOffset, p.byteLength);
     else if (p instanceof ArrayBuffer) chunk = BufferFrom(p);
     else if (typeof p === "object" && p && typeof p.size === "number") {
