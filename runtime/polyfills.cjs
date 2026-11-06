@@ -295,7 +295,9 @@ function installSyncPolyfills(preloaded) {
   // `--frozen-intrinsics`: every installer below adds a member to a built-in, and
   // defining one on a frozen object throws, which would stop the program starting.
   // The globals above are unaffected, because globalThis itself stays extensible.
-  if (ObjectIsFrozen(Object.prototype)) return;
+  // Math is the signal because a hardening preload that freezes only prototypes,
+  // Object.prototype above all, leaves it alone and these installers still work.
+  if (ObjectIsFrozen(Math)) return;
 
   installLocaleVariants();
 

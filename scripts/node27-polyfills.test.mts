@@ -125,6 +125,18 @@ void test("polyfills leave frozen intrinsics alone so the program still starts",
   assert.equal(result.status, 0, result.stderr);
 });
 
+void test("polyfills still install when a preload froze only Object.prototype", () => {
+  const script = `
+    delete Math.sumPrecise;
+    Object.freeze(Object.prototype);
+    require(${JSON.stringify(polyfills)}).installSyncPolyfills();
+    process.stdout.write(String(Math.sumPrecise([1, 2])));
+  `;
+  const result = spawnSync(process.execPath, ["-e", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "3");
+});
+
 void test("polyfills install on a Node with no Intl", () => {
   const script = `delete globalThis.Intl; require(${JSON.stringify(polyfills)}).installSyncPolyfills();`;
   const result = spawnSync(process.execPath, ["-e", script], { encoding: "utf8" });
