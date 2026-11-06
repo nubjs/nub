@@ -4,10 +4,14 @@ pub(super) fn invalidate_changed_aube_entries(
     aube_dir: &std::path::Path,
     dep_paths: &[String],
     virtual_store_dir_max_length: usize,
+    real_dirs_only: bool,
 ) -> usize {
     let mut removed = 0usize;
     for dep_path in dep_paths {
         let path = aube_dir.join(dep_path_to_filename(dep_path, virtual_store_dir_max_length));
+        if real_dirs_only && !aube_util::fs::is_real_dir(&path) {
+            continue;
+        }
         let result = std::fs::remove_dir_all(&path).or_else(|_| std::fs::remove_file(&path));
         match result {
             Ok(()) => removed += 1,

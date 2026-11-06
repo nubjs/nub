@@ -1348,6 +1348,547 @@ fn two_unbundled_packages_share_a_stub_of_their_dependency() {
     );
 }
 
+/// The files of one installed package. A dependency spelled `peer:<name>` goes in
+/// `peerDependencies`, and an empty body returns the package's name and version.
+#[cfg(all(feature = "compile", unix))]
+type FixtureTree = Vec<(String, String)>;
+
+#[cfg(all(feature = "compile", unix))]
+fn fixture_package(at: &str, version: &str, deps: &[&str], body: &str) -> FixtureTree {
+    let name = at.rsplit_once("node_modules/").map_or(at, |(_, name)| name);
+    let field = |peer: bool| {
+        let names: Vec<String> = deps
+            .iter()
+            .filter(|dep| dep.starts_with("peer:") == peer)
+            .map(|dep| format!(r#""{}":"*""#, dep.trim_start_matches("peer:")))
+            .collect();
+        names.join(",")
+    };
+    let body = if body.is_empty() {
+        format!("module.exports = () => \"{name} {version}\";\n")
+    } else {
+        body.to_string()
+    };
+    vec![
+        (
+            format!("{at}/package.json"),
+            format!(
+                r#"{{"name":"{name}","version":"{version}","main":"index.js","dependencies":{{{}}},"peerDependencies":{{{}}}}}"#,
+                field(false),
+                field(true)
+            ),
+        ),
+        (format!("{at}/index.js"), body),
+    ]
+}
+#[cfg(all(feature = "compile", unix))]
+fn fixture_store(version: &str, name: &str) -> String {
+    format!("node_modules/.store/{name}@{version}/node_modules/{name}")
+}
+
+/// `--external` holds wherever the importing module ships. The artifact runs from a
+/// deployment tree with the source tree gone, and each plugin says which copy it is.
+/// A copy installed at build time must not travel: it is the one the program would
+/// silently run instead of the deployment's.
+#[cfg(all(feature = "compile", unix))]
+#[test]
+fn an_external_answers_from_the_launch_tree_wherever_its_importer_ships() {
+    let pkg = fixture_package;
+    let plugin = |at: &str, whose: &str| {
+        let mut tree = pkg(
+            at,
+            "1.0.0",
+            &[],
+            &format!("module.exports = () => \"plugin from {whose}\";\n"),
+        );
+        tree.push((
+            format!("{at}/sub.js"),
+            format!("module.exports = () => \"plugin/sub from {whose}\";\n"),
+        ));
+        tree
+    };
+    let deployed = || plugin("node_modules/plugin", "deployment");
+    let built = || plugin("node_modules/plugin", "build time");
+    let calls_plugin = "module.exports = () => require(\"plugin\")();\n";
+    let moved =
+        "module.exports = () => require(\"pino-pretty\")() + \" \" + require(\"plugin\")();\n";
+    let imports_foo = "import foo from \"foo\";\nconsole.log(foo());\n";
+    let imports_a =
+        "import a from \"a\";\nimport top from \"pino-pretty\";\nconsole.log(a(), top());\n";
+    let guarded = "module.exports = () => {\n  try { return require(\"plugin\")(); }\n  \
+                   catch (e) { if (e.code !== \"MODULE_NOT_FOUND\") throw e; return \"no plugin\"; }\n};\n";
+    // Compile directory, and the entry's path from it.
+    const ROOT: [&str; 2] = ["", "app.mjs"];
+    let unbundled_foo: &[&str] = &["--unbundled", "foo", "--external", "plugin"];
+    let external_only: &[&str] = &["--external", "plugin"];
+    // A package with its own install of pino-pretty, so it moves out of the bundle.
+    let competing = |extra: &[&str]| {
+        let mut deps = vec!["pino-pretty"];
+        deps.extend(extra);
+        [
+            pkg("node_modules/a", "1.0.0", &deps, moved),
+            pkg("node_modules/a/node_modules/pino-pretty", "2.0.0", &[], ""),
+            pkg("node_modules/pino-pretty", "1.0.0", &[], ""),
+        ]
+        .concat()
+    };
+    // Name, source tree, its symlinks, deployment tree, where the entry is and what it
+    // says, flags, and either the
+    // artifact's stdout or what its failure has to say.
+    type Case<'a> = (
+        &'a str,
+        FixtureTree,
+        Vec<(&'a str, &'a str)>,
+        FixtureTree,
+        ([&'a str; 2], &'a str),
+        &'a [&'a str],
+        Result<&'a str, &'a str>,
+    );
+    let cases: Vec<Case> = vec![
+        (
+            "an unbundled importer, plugin absent at build time",
+            pkg("node_modules/foo", "1.0.0", &[], calls_plugin),
+            vec![],
+            deployed(),
+            (ROOT, imports_foo),
+            unbundled_foo,
+            Ok("plugin from deployment"),
+        ),
+        (
+            "an unbundled importer, plugin installed at build time",
+            [
+                pkg("node_modules/foo", "1.0.0", &["plugin"], calls_plugin),
+                built(),
+            ]
+            .concat(),
+            vec![],
+            deployed(),
+            (ROOT, imports_foo),
+            unbundled_foo,
+            Ok("plugin from deployment"),
+        ),
+        (
+            "a moved importer, plugin absent at build time",
+            competing(&[]),
+            vec![],
+            deployed(),
+            (ROOT, imports_a),
+            external_only,
+            Ok("pino-pretty 2.0.0 plugin from deployment pino-pretty 1.0.0"),
+        ),
+        (
+            "a moved importer, plugin installed at build time",
+            [competing(&["plugin"]), built()].concat(),
+            vec![],
+            deployed(),
+            (ROOT, imports_a),
+            external_only,
+            Ok("pino-pretty 2.0.0 plugin from deployment pino-pretty 1.0.0"),
+        ),
+        // Inlined into a chunk, which only the closure bundle's own externals can stop.
+        (
+            "a closure member, plugin installed at build time",
+            [
+                pkg(
+                    "node_modules/foo",
+                    "1.0.0",
+                    &["dep"],
+                    "module.exports = () => require(\"dep\")();\n",
+                ),
+                pkg("node_modules/dep", "1.0.0", &["plugin"], calls_plugin),
+                built(),
+            ]
+            .concat(),
+            vec![],
+            deployed(),
+            (ROOT, imports_foo),
+            unbundled_foo,
+            Ok("plugin from deployment"),
+        ),
+        (
+            "an ESM importer of a subpath",
+            vec![
+                (
+                    "node_modules/foo/package.json".to_string(),
+                    r#"{"name":"foo","version":"1.0.0","type":"module","exports":"./index.js"}"#
+                        .to_string(),
+                ),
+                (
+                    "node_modules/foo/index.js".to_string(),
+                    "import sub from \"plugin/sub.js\";\nexport default () => sub();\n".to_string(),
+                ),
+            ],
+            vec![],
+            deployed(),
+            (ROOT, imports_foo),
+            unbundled_foo,
+            Ok("plugin/sub from deployment"),
+        ),
+        // Only the source path reaches this one, the way a bundled importer's would:
+        // from the payload's `node_modules/foo` the store directory is out of the walk.
+        (
+            "an importer whose source path differs from its payload path",
+            pkg(&fixture_store("1.0.0", "foo"), "1.0.0", &[], calls_plugin),
+            vec![("node_modules/foo", ".store/foo@1.0.0/node_modules/foo")],
+            plugin(
+                "node_modules/.store/foo@1.0.0/node_modules/plugin",
+                "the store",
+            ),
+            (ROOT, imports_foo),
+            unbundled_foo,
+            Ok("plugin from the store"),
+        ),
+        // What the deployed plugin imports is its own business, resolved from where it
+        // is: the nested copy, which a lookup from the launch directory would miss.
+        (
+            "an external named by the deployed package",
+            pkg("node_modules/foo", "1.0.0", &[], calls_plugin),
+            vec![],
+            [
+                pkg(
+                    "node_modules/plugin",
+                    "1.0.0",
+                    &[],
+                    "module.exports = () => require(\"other\")();\n",
+                ),
+                pkg("node_modules/plugin/node_modules/other", "2.0.0", &[], ""),
+                pkg("node_modules/other", "1.0.0", &[], ""),
+            ]
+            .concat(),
+            (ROOT, imports_foo),
+            &[
+                "--unbundled",
+                "foo",
+                "--external",
+                "plugin",
+                "--external",
+                "other",
+            ],
+            Ok("other 2.0.0"),
+        ),
+        // The payload puts everything under `src/` here, and the source mapping has to
+        // follow, or the lookup starts at `src/node_modules/foo` and finds the competitor.
+        (
+            "an importer under an entry prefix",
+            [
+                pkg(&fixture_store("1.0.0", "foo"), "1.0.0", &[], calls_plugin),
+                vec![("asset.txt".to_string(), "data\n".to_string())],
+            ]
+            .concat(),
+            vec![("node_modules/foo", ".store/foo@1.0.0/node_modules/foo")],
+            [
+                plugin(
+                    "node_modules/.store/foo@1.0.0/node_modules/plugin",
+                    "the store",
+                ),
+                deployed(),
+            ]
+            .concat(),
+            (["", "src/app.mjs"], imports_foo),
+            &[
+                "--unbundled",
+                "foo",
+                "--external",
+                "plugin",
+                "--include",
+                "asset.txt",
+            ],
+            Ok("plugin from the store"),
+        ),
+        // A store outside the project, as nub's global one is. Its path is this machine's
+        // and leads nowhere on another, so the importer counts as installed here.
+        (
+            "a bundled package in a store outside the project",
+            pkg(
+                "../store/v1/foo@1.0.0-abc/node_modules/foo",
+                "1.0.0",
+                &[],
+                calls_plugin,
+            ),
+            vec![(
+                "node_modules/foo",
+                "../../store/v1/foo@1.0.0-abc/node_modules/foo",
+            )],
+            deployed(),
+            (ROOT, imports_foo),
+            external_only,
+            Ok("plugin from deployment"),
+        ),
+        // The tree a sibling's dependency hangs off looks like a store from the launch
+        // directory, but it is real layout that a deployment reproduces.
+        (
+            "a sibling workspace member and its own dependency",
+            [
+                pkg(
+                    "packages/lib",
+                    "1.0.0",
+                    &["x"],
+                    "module.exports = () => require(\"x\")() + \" \" + require(\"plugin\")();\n",
+                ),
+                pkg("packages/lib/node_modules/x", "1.0.0", &[], calls_plugin),
+            ]
+            .concat(),
+            vec![("packages/app/node_modules/@w/lib", "../../../lib")],
+            [
+                plugin("packages/lib/node_modules/plugin", "the member"),
+                plugin("packages/app/node_modules/plugin", "the launch directory"),
+            ]
+            .concat(),
+            (
+                ["packages/app", "app.mjs"],
+                "import lib from \"@w/lib\";\nconsole.log(lib());\n",
+            ),
+            external_only,
+            Ok("plugin from the member plugin from the member"),
+        ),
+        // A chunk holds modules from several packages, so the lookup has to start at the
+        // module that made the import, not at the chunk.
+        (
+            "a module inlined into a closure chunk, with competing deployed copies",
+            [
+                pkg(
+                    "node_modules/foo",
+                    "1.0.0",
+                    &["dep"],
+                    "module.exports = () => require(\"dep\")();\n",
+                ),
+                pkg(
+                    "node_modules/dep",
+                    "1.0.0",
+                    &["inner"],
+                    "module.exports = () => require(\"inner\")();\n",
+                ),
+                pkg(
+                    "node_modules/dep/node_modules/inner",
+                    "1.0.0",
+                    &[],
+                    calls_plugin,
+                ),
+            ]
+            .concat(),
+            vec![],
+            [
+                plugin(
+                    "node_modules/dep/node_modules/inner/node_modules/plugin",
+                    "inner's copy",
+                ),
+                deployed(),
+            ]
+            .concat(),
+            (ROOT, imports_foo),
+            unbundled_foo,
+            Ok("plugin from inner's copy"),
+        ),
+        (
+            "a module in a shared closure chunk, with competing deployed copies",
+            [
+                pkg(
+                    "node_modules/foo",
+                    "1.0.0",
+                    &["dep-a", "dep-b"],
+                    "module.exports = () => require(\"dep-a\")() + \" \" + require(\"dep-b\")();\n",
+                ),
+                pkg(
+                    "node_modules/dep-a",
+                    "1.0.0",
+                    &["inner"],
+                    "module.exports = () => require(\"inner\")();\n",
+                ),
+                pkg(
+                    "node_modules/dep-b",
+                    "1.0.0",
+                    &["inner"],
+                    "module.exports = () => require(\"inner\")();\n",
+                ),
+                pkg("node_modules/inner", "1.0.0", &[], calls_plugin),
+            ]
+            .concat(),
+            vec![],
+            [
+                plugin("node_modules/inner/node_modules/plugin", "inner's copy"),
+                deployed(),
+            ]
+            .concat(),
+            (ROOT, imports_foo),
+            unbundled_foo,
+            Ok("plugin from inner's copy plugin from inner's copy"),
+        ),
+        // An optional plugin stays optional wherever the import ends up: Node's code, not
+        // one its guard never heard of.
+        (
+            "a guarded optional require in the bundle",
+            pkg("node_modules/foo", "1.0.0", &[], guarded),
+            vec![],
+            vec![],
+            (ROOT, imports_foo),
+            external_only,
+            Ok("no plugin"),
+        ),
+        (
+            "a guarded optional require in a closure chunk",
+            [
+                pkg(
+                    "node_modules/foo",
+                    "1.0.0",
+                    &["dep"],
+                    "module.exports = () => require(\"dep\")();\n",
+                ),
+                pkg("node_modules/dep", "1.0.0", &[], guarded),
+            ]
+            .concat(),
+            vec![],
+            vec![],
+            (ROOT, imports_foo),
+            unbundled_foo,
+            Ok("no plugin"),
+        ),
+        (
+            "a guarded optional require",
+            pkg("node_modules/foo", "1.0.0", &[], guarded),
+            vec![],
+            vec![],
+            (ROOT, imports_foo),
+            unbundled_foo,
+            Ok("no plugin"),
+        ),
+        (
+            "a plugin the deployment does not have",
+            pkg("node_modules/foo", "1.0.0", &[], calls_plugin),
+            vec![],
+            vec![],
+            (ROOT, imports_foo),
+            unbundled_foo,
+            Err("compiled with --external plugin"),
+        ),
+    ];
+
+    let runtime = compile_test_runtime();
+    for (case, files, links, deployment, ([cwd, entry_at], entry), flags, expected) in cases {
+        let work = unique_test_cache();
+        let (source, deploy) = (work.join("source"), work.join("deploy"));
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&deploy).unwrap();
+        for (root, tree) in [(&source, files), (&deploy, deployment)] {
+            for (path, text) in tree {
+                let path = root.join(path);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, text).unwrap();
+            }
+        }
+        for (path, target) in links {
+            let path = source.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(target, path).unwrap();
+        }
+        let entry_path = source.join(cwd).join(entry_at);
+        std::fs::create_dir_all(entry_path.parent().unwrap()).unwrap();
+        std::fs::write(entry_path, entry).unwrap();
+        let artifact = work.join("app");
+        let compiled = Command::new(nub_binary())
+            .args(["compile", "--smol", "--target", &runtime.node_target])
+            .args(flags)
+            .arg("--out")
+            .arg(&artifact)
+            .arg(entry_at)
+            .current_dir(source.join(cwd))
+            .env("XDG_CACHE_HOME", work.join("cache"))
+            .env("__NUB_LAUNCHER_TEMPLATE", &runtime.launcher)
+            .output()
+            .expect("spawn nub compile");
+        assert!(
+            compiled.status.success(),
+            "{case}: compile failed: {}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        std::fs::remove_dir_all(&source).unwrap();
+        let _ = std::fs::remove_dir_all(work.join("store"));
+        let extracted = work.join("run-cache");
+        std::fs::create_dir_all(deploy.join(cwd)).unwrap();
+        let mut run = Command::new(&artifact);
+        run.current_dir(deploy.join(cwd))
+            .env("XDG_CACHE_HOME", &extracted);
+        let ran =
+            run_compiled_artifact_command_with_timeout(run, std::time::Duration::from_secs(10));
+        let (stdout, stderr) = (
+            String::from_utf8_lossy(&ran.stdout),
+            String::from_utf8_lossy(&ran.stderr),
+        );
+        match expected {
+            Ok(line) => assert_eq!(stdout.trim(), line, "{case}\nstderr: {stderr}"),
+            Err(message) => assert!(
+                !ran.status.success() && stderr.contains(message),
+                "{case}: the failure must say `{message}`\nstderr: {stderr}"
+            ),
+        }
+        // No build-time copy under any path, and none inlined into a chunk.
+        let mut dirs = vec![extracted];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    dirs.push(path);
+                    continue;
+                }
+                let text = std::fs::read(&path).unwrap_or_default();
+                let text = String::from_utf8_lossy(&text);
+                assert!(
+                    !path.to_string_lossy().contains("/plugin/")
+                        && !text.contains("plugin from build time"),
+                    "{case}: a copy of the plugin shipped at {}",
+                    path.display()
+                );
+                // The hook is written at build time, so it is where this machine's own
+                // paths would reach the artifact, as in a chunk's `//#region` lines.
+                if path
+                    .file_name()
+                    .is_some_and(|name| name == "__nub_external.mjs")
+                {
+                    let mut machine_paths = vec![work.clone()];
+                    machine_paths.extend(std::env::var_os("HOME").map(PathBuf::from));
+                    for machine in machine_paths {
+                        let machine = machine.to_string_lossy().into_owned();
+                        assert!(
+                            !text.contains(&machine),
+                            "{case}: the hook names {machine}, a path on the building machine"
+                        );
+                    }
+                    assert!(
+                        !text.contains("store/v1"),
+                        "{case}: the hook names a store outside the project"
+                    );
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    // The hook is what serves this, so a target without it is refused even when no
+    // bundled module names the plugin.
+    let work = unique_test_cache();
+    std::fs::create_dir_all(&work).unwrap();
+    for (path, text) in pkg("node_modules/foo", "1.0.0", &[], calls_plugin) {
+        let path = work.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    std::fs::write(work.join("app.mjs"), imports_foo).unwrap();
+    let refused = Command::new(nub_binary())
+        .args(["compile", "--smol", "--target", "22.14.0"])
+        .args(unbundled_foo)
+        .args(["--out", "app", "app.mjs"])
+        .current_dir(&work)
+        .env("XDG_CACHE_HOME", work.join("cache"))
+        .env("__NUB_LAUNCHER_TEMPLATE", &runtime.launcher)
+        .output()
+        .expect("spawn nub compile");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    let _ = std::fs::remove_dir_all(&work);
+    assert!(
+        !refused.status.success() && stderr.contains("needs module.registerHooks"),
+        "a target without the hook must be refused: {stderr}"
+    );
+}
+
 /// A compiled package finds its dependencies by Node walking up from where it landed,
 /// so the layout has to answer each lookup with the install that answers it uncompiled.
 /// Each package prints its own version, so every case says WHICH copy loaded, and plain
@@ -1357,37 +1898,8 @@ fn two_unbundled_packages_share_a_stub_of_their_dependency() {
 #[cfg(all(feature = "compile", unix))]
 #[test]
 fn a_compiled_closure_loads_the_installs_its_packages_resolve() {
-    type Tree = Vec<(String, String)>;
-    fn pkg(at: &str, version: &str, deps: &[&str], body: &str) -> Tree {
-        let name = at.rsplit_once("node_modules/").map_or(at, |(_, name)| name);
-        let field = |peer: bool| {
-            let names: Vec<String> = deps
-                .iter()
-                .filter(|dep| dep.starts_with("peer:") == peer)
-                .map(|dep| format!(r#""{}":"*""#, dep.trim_start_matches("peer:")))
-                .collect();
-            names.join(",")
-        };
-        let body = if body.is_empty() {
-            format!("module.exports = () => \"{name} {version}\";\n")
-        } else {
-            body.to_string()
-        };
-        vec![
-            (
-                format!("{at}/package.json"),
-                format!(
-                    r#"{{"name":"{name}","version":"{version}","main":"index.js","dependencies":{{{}}},"peerDependencies":{{{}}}}}"#,
-                    field(false),
-                    field(true)
-                ),
-            ),
-            (format!("{at}/index.js"), body),
-        ]
-    }
-    fn store(version: &str, name: &str) -> String {
-        format!("node_modules/.store/{name}@{version}/node_modules/{name}")
-    }
+    let (pkg, store) = (fixture_package, fixture_store);
+    type Tree = FixtureTree;
     // `pino` stands in for the real one: left unbundled by name, it resolves a target
     // from its caller. `pino-pretty` is unbundled by name, so it is a verbatim package
     // that needs no flag.
@@ -1408,6 +1920,8 @@ fn a_compiled_closure_loads_the_installs_its_packages_resolve() {
     let calls_mid = "module.exports = () => require(\"mid\")();\n";
     let calls_m = "module.exports = () => require(\"m\")();\n";
     let calls_pretty = "module.exports = () => require(\"pino-pretty\")();\n";
+    let imports_a_and_pretty =
+        "import a from \"a\";\nimport top from \"pino-pretty\";\nconsole.log(a(), top());\n";
     let main_two_imports =
         "import r from \"r\";\nimport top from \"pino-pretty\";\nconsole.log(r(), top());\n";
     let wrapper_and_holder = "import logger from \"logger\";\nimport holder from \"holder\";\nconsole.log(logger(), holder());\n";
@@ -1879,6 +2393,115 @@ fn a_compiled_closure_loads_the_installs_its_packages_resolve() {
              console.log(r(), top(), pino({ transport: { target } }, import.meta.url), holder());\n",
             &["--unbundled", "r", "--unbundled", "extra"],
             Ok("pino-pretty 2.0.0 pino-pretty 1.0.0 extra 1.0.0 fake-transport 2.0.0"),
+        ),
+        // A bundled package whose own install of an unbundled one is not what a bare
+        // name finds from the app root, where its code would run. The nested copy looks
+        // itself up by name, which only works from a directory that keeps its name.
+        (
+            "a bundled package's own install beside a top-level one, hoisted",
+            [
+                pkg("node_modules/a", "1.0.0", &["pino-pretty"], calls_pretty),
+                pkg(
+                    "node_modules/a/node_modules/pino-pretty",
+                    "2.0.0",
+                    &[],
+                    "module.exports = () => \"pino-pretty \" + require(\"pino-pretty/package.json\").version;\n",
+                ),
+                pkg("node_modules/pino-pretty", "1.0.0", &[], ""),
+            ]
+            .concat(),
+            vec![],
+            imports_a_and_pretty,
+            &[],
+            Ok("pino-pretty 2.0.0 pino-pretty 1.0.0"),
+        ),
+        (
+            "a bundled package's own install beside a top-level one, isolated",
+            [
+                pkg(&store("1.0.0", "a"), "1.0.0", &["pino-pretty"], calls_pretty),
+                pkg(&store("1.0.0", "pino-pretty"), "1.0.0", &[], ""),
+                pkg(&store("2.0.0", "pino-pretty"), "2.0.0", &[], ""),
+            ]
+            .concat(),
+            [
+                ("node_modules/a", ".store/a@1.0.0/node_modules/a"),
+                (
+                    "node_modules/pino-pretty",
+                    ".store/pino-pretty@1.0.0/node_modules/pino-pretty",
+                ),
+                (
+                    "node_modules/.store/a@1.0.0/node_modules/pino-pretty",
+                    "../../pino-pretty@2.0.0/node_modules/pino-pretty",
+                ),
+            ]
+            .map(|(at, to)| (at.to_string(), to.to_string()))
+            .to_vec(),
+            imports_a_and_pretty,
+            &[],
+            Ok("pino-pretty 2.0.0 pino-pretty 1.0.0"),
+        ),
+        (
+            "a bundled package's own install with nothing at the top level",
+            [
+                pkg("node_modules/a", "1.0.0", &["pino-pretty"], calls_pretty),
+                pkg("node_modules/a/node_modules/pino-pretty", "2.0.0", &[], ""),
+            ]
+            .concat(),
+            vec![],
+            "import a from \"a\";\nconsole.log(a());\n",
+            &[],
+            Ok("pino-pretty 2.0.0"),
+        ),
+        (
+            "two bundled packages with their own versions and nothing at the top level",
+            [
+                pkg("node_modules/a", "1.0.0", &["pino-pretty"], calls_pretty),
+                pkg("node_modules/a/node_modules/pino-pretty", "2.0.0", &[], ""),
+                pkg("node_modules/b", "1.0.0", &["pino-pretty"], calls_pretty),
+                pkg("node_modules/b/node_modules/pino-pretty", "3.0.0", &[], ""),
+            ]
+            .concat(),
+            vec![],
+            "import a from \"a\";\nimport b from \"b\";\nconsole.log(a(), b());\n",
+            &[],
+            Ok("pino-pretty 2.0.0 pino-pretty 3.0.0"),
+        ),
+        // Three bundles: the nested `a` leaves first, and that makes `b` the bundled
+        // package with an install the root cannot serve.
+        (
+            "a package that moves makes its own dependent move",
+            [
+                pkg("node_modules/b", "1.0.0", &["a"], "module.exports = () => require(\"a\")();\n"),
+                pkg("node_modules/b/node_modules/a", "1.0.0", &["pino-pretty"], calls_pretty),
+                pkg(
+                    "node_modules/b/node_modules/a/node_modules/pino-pretty",
+                    "2.0.0",
+                    &[],
+                    "",
+                ),
+                pkg("node_modules/a", "9.0.0", &[], ""),
+                pkg("node_modules/pino-pretty", "1.0.0", &[], ""),
+            ]
+            .concat(),
+            vec![],
+            "import b from \"b\";\nimport a from \"a\";\nimport top from \"pino-pretty\";\n\
+             console.log(b(), a(), top());\n",
+            &[],
+            Ok("pino-pretty 2.0.0 a 9.0.0 pino-pretty 1.0.0"),
+        ),
+        // The author said to keep it bundled, so nothing can serve both.
+        (
+            "a package kept bundled by --bundled",
+            [
+                pkg("node_modules/a", "1.0.0", &["pino-pretty"], calls_pretty),
+                pkg("node_modules/a/node_modules/pino-pretty", "2.0.0", &[], ""),
+                pkg("node_modules/pino-pretty", "1.0.0", &[], ""),
+            ]
+            .concat(),
+            vec![],
+            imports_a_and_pretty,
+            &["--bundled", "a"],
+            Err("two different packages would occupy node_modules/pino-pretty"),
         ),
         // A bundled package's stub under `v` sits on `v`'s own lookup path, ahead of the
         // top-level install `v` resolves.

@@ -86,7 +86,12 @@ impl<'a> LockedIndex<'a> {
     /// the real standalone entry in nested dep_path order) and fail
     /// offline. The real standalone entry, if any, is selected instead.
     ///
-    /// So are entries for another package: an alias retargeted to a new package
+    /// Packages with a source of their own are excluded too: a range binds
+    /// to the registry, here as on a fresh resolve. Otherwise a URL or git
+    /// package keeps its source after the manifest entry or override that
+    /// asked for it is gone, because its version still satisfies the range.
+    ///
+    /// Entries for another package are excluded as well: an alias retargeted to a new package
     /// (`x` from `npm:old@1` to `npm:new@1`) keeps its name and can keep a
     /// satisfying version, and has to be fetched rather than reused.
     pub fn find_satisfying(
@@ -98,6 +103,7 @@ impl<'a> LockedIndex<'a> {
     ) -> Option<&'a LockedPackage> {
         self.bucket(name).iter().copied().find(|p| {
             !p.in_bundle
+                && p.local_source.is_none()
                 && p.registry_name() == registry_name
                 && version_satisfies(&p.version, range)
                 && !is_vulnerable(registry_name, &p.version, vulnerable_ranges)
@@ -117,6 +123,27 @@ impl<'a> LockedIndex<'a> {
             .iter()
             .copied()
             .find(|p| version_satisfies(&p.version, range))
+    }
+
+    /// The specifier behind a hashed local edge (`file+<hash>`, `link+<hash>`),
+    /// which is what a reused parent's edge has to be to re-resolve. `None` for
+    /// any edge that does not land on a local package.
+    pub fn local_specifier(&self, name: &str, tail: &str) -> Option<String> {
+        self.local_source(name, tail).map(LocalSource::specifier)
+    }
+
+    /// The local source a hashed edge lands on, if it lands on one.
+    pub fn local_source(&self, name: &str, tail: &str) -> Option<&'a LocalSource> {
+        self.bucket(name)
+            .iter()
+            .copied()
+            .find(|pkg| {
+                pkg.dep_path
+                    .strip_prefix(name)
+                    .and_then(|rest| rest.strip_prefix('@'))
+                    == Some(tail)
+            })
+            .and_then(|pkg| pkg.local_source.as_ref())
     }
 
     /// Integrity of the first locked package matching `name` + a local

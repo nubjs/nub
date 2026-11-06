@@ -8,7 +8,7 @@
 //! No state changes — this is a pure read. Doesn't touch `node_modules/`,
 //! doesn't hit the network, doesn't take the project lock.
 
-use aube_lockfile::{DepType, DirectDep, LockedPackage, LockfileGraph};
+use aube_lockfile::{DepType, DirectDep, LocalSource, LockedPackage, LockfileGraph};
 use miette::{Context, IntoDiagnostic, miette};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -748,15 +748,16 @@ fn render_subtree(
         let is_last = i == last;
         let connector = if is_last { "└── " } else { "├── " };
         let dep_path = format!("{name}@{version}");
+        let label = edge_label(graph, &dep_path, version);
         let (display_name, display_version) = if sanitize_tree {
             (
                 aube_util::terminal::sanitize_inline(name),
-                aube_util::terminal::sanitize_inline(version),
+                aube_util::terminal::sanitize_inline(&label),
             )
         } else {
             (
                 std::borrow::Cow::Borrowed(name.as_str()),
-                std::borrow::Cow::Borrowed(version.as_str()),
+                std::borrow::Cow::Borrowed(label.as_str()),
             )
         };
         let extra = if args.long {
@@ -801,12 +802,26 @@ fn render_subtree(
     }
 }
 
+/// What a dependency edge prints as: its version, or for a local package the
+/// specifier it came from (`link:packages/react`), as pnpm prints it. The edge
+/// holds the package's key, a hash (`link+<16 hex>`) no reader recognizes.
+fn edge_label(graph: &LockfileGraph, dep_path: &str, tail: &str) -> String {
+    graph
+        .get_package(dep_path)
+        .and_then(|pkg| pkg.local_source.as_ref())
+        .map(LocalSource::pnpm_specifier)
+        .unwrap_or_else(|| tail.to_string())
+}
+
 fn graph_needs_terminal_sanitization(graph: &LockfileGraph) -> bool {
     graph.importers.values().flatten().any(|dep| {
         aube_util::terminal::needs_inline_sanitization(&dep.name)
             || aube_util::terminal::needs_inline_sanitization(&dep.dep_path)
     }) || graph.packages.values().any(|pkg| {
         aube_util::terminal::needs_inline_sanitization(&pkg.version)
+            || pkg.local_source.as_ref().is_some_and(|local| {
+                aube_util::terminal::needs_inline_sanitization(&local.pnpm_specifier())
+            })
             || pkg.dependencies.iter().any(|(name, version)| {
                 aube_util::terminal::needs_inline_sanitization(name)
                     || aube_util::terminal::needs_inline_sanitization(version)
@@ -942,7 +957,7 @@ fn build_json_subtree(
         let mut entry = serde_json::Map::new();
         entry.insert(
             "version".to_string(),
-            serde_json::Value::String(version.clone()),
+            serde_json::Value::String(edge_label(graph, &dep_path, version)),
         );
 
         if visited.contains(&dep_path) {
@@ -1114,6 +1129,41 @@ mod tests {
         assert!(
             a_obj.get("dependencies").is_none(),
             "cycled node should not recurse further"
+        );
+    }
+
+    #[test]
+    fn a_local_dependency_is_listed_by_its_specifier() {
+        let local = LocalSource::Link("packages/react".into());
+        let key = local.dep_path("react");
+        let tail = key.strip_prefix("react@").unwrap().to_string();
+        let store = mk_pkg("store", "1.2.0", &[("react", tail.as_str())]);
+        let mut react = mk_pkg("react", "18.2.0", &[]);
+        react.dep_path = key.clone();
+        react.local_source = Some(local);
+        let graph = LockfileGraph {
+            packages: BTreeMap::from([("store@1.2.0".to_string(), store.clone()), (key, react)]),
+            ..Default::default()
+        };
+        let args = ListArgs {
+            pattern: None,
+            dev: false,
+            prod: false,
+            global: false,
+            depth: Depth {
+                include_direct: true,
+                max: usize::MAX,
+            },
+            format: ListFormat::Json,
+            json: true,
+            long: false,
+            lockfile_only: false,
+            parseable: false,
+        };
+        let children = build_json_subtree(&graph, &store, &args, 1, &mut BTreeSet::new());
+        assert_eq!(
+            children["react"]["version"],
+            serde_json::Value::String("link:packages/react".to_string())
         );
     }
 

@@ -1,6 +1,6 @@
-use crate::PackageExtension;
-use crate::override_rule;
 use crate::semver_util::{normalize_range, strip_alias_prefix, version_satisfies};
+use crate::{FxHashMap, PackageExtension, override_rule};
+use aube_lockfile::LockfileGraph;
 use std::collections::BTreeMap;
 
 /// Find the best-matching override rule for a task and return its
@@ -121,6 +121,69 @@ pub(crate) fn apply_package_extensions_to_deps(
         }
         extend_missing(deps, &extension.dependencies);
     }
+}
+
+/// The `database_peers` each package in `graph` takes, by key: `peer -> range`.
+///
+/// A peer the package's manifest or a curated catalog already declares stays a
+/// real peer, and non-registry packages take no extensions but `dependencies`,
+/// as on the resolve path. The first matching entry wins per peer, as in
+/// [`extend_missing`].
+pub(crate) fn database_peers_by_package(
+    graph: &LockfileGraph,
+    extensions: &[PackageExtension],
+) -> BTreeMap<String, BTreeMap<String, String>> {
+    let mut by_name: FxHashMap<&str, Vec<&PackageExtension>> = FxHashMap::default();
+    for extension in extensions.iter().filter(|e| !e.database_peers.is_empty()) {
+        let selector = extension.selector.trim();
+        let name = split_package_selector(selector).map_or(selector, |(name, _)| name);
+        by_name.entry(name).or_default().push(extension);
+    }
+    let mut result = BTreeMap::new();
+    if by_name.is_empty() {
+        return result;
+    }
+    for (key, pkg) in &graph.packages {
+        if pkg.local_source.is_some() {
+            continue;
+        }
+        let Some(candidates) = by_name.get(pkg.registry_name()) else {
+            continue;
+        };
+        let mut peers: BTreeMap<String, String> = BTreeMap::new();
+        for extension in candidates {
+            if !package_selector_matches(&extension.selector, pkg.registry_name(), &pkg.version) {
+                continue;
+            }
+            for (peer, range) in &extension.database_peers {
+                if *peer != pkg.name
+                    && !pkg.dependencies.contains_key(peer)
+                    && !pkg.peer_dependencies.contains_key(peer)
+                    && !pkg.bundled_dependencies.contains(peer)
+                {
+                    peers.entry(peer.clone()).or_insert_with(|| range.clone());
+                }
+            }
+        }
+        if !peers.is_empty() {
+            result.insert(key.clone(), peers);
+        }
+    }
+    result
+}
+
+/// Whether a database entry names `dep_name` for this package, so a lockfile's
+/// optional edge to it may be that repair rather than a declared dependency.
+pub(crate) fn is_database_peer(
+    extensions: &[PackageExtension],
+    name: &str,
+    version: &str,
+    dep_name: &str,
+) -> bool {
+    extensions.iter().any(|extension| {
+        extension.database_peers.contains_key(dep_name)
+            && package_selector_matches(&extension.selector, name, version)
+    })
 }
 
 fn extend_missing<K, V>(target: &mut BTreeMap<K, V>, additions: &BTreeMap<K, V>)

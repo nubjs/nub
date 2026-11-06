@@ -994,7 +994,7 @@ fn parse_bundled_package_extensions(
     raw.into_iter()
         .filter_map(
             |(selector, value)| match parse_package_extension(selector, value) {
-                Ok(extension) => Some(extension),
+                Ok(extension) => Some(with_database_peers(extension)),
                 Err(err) => {
                     tracing::warn!(
                         code = aube_codes::warnings::WARN_AUBE_INVALID_BUNDLED_PACKAGE_EXTENSION,
@@ -1008,6 +1008,28 @@ fn parse_bundled_package_extensions(
         .collect()
 }
 
+/// Move an embedder database entry's optional peers to `database_peers`. Its
+/// required peers stay peers: those repair a package the same way the curated
+/// catalogs do, and they install something when nothing else provides them.
+fn with_database_peers(
+    mut extension: aube_resolver::PackageExtension,
+) -> aube_resolver::PackageExtension {
+    let optional: Vec<String> = extension
+        .peer_dependencies_meta
+        .iter()
+        .filter(|(_, meta)| meta.optional)
+        .map(|(name, _)| name.clone())
+        .collect();
+    for name in optional {
+        extension.peer_dependencies_meta.remove(&name);
+        let range = extension.peer_dependencies.remove(&name);
+        extension
+            .database_peers
+            .insert(name, range.unwrap_or_else(|| "*".to_string()));
+    }
+    extension
+}
+
 fn vendored_compat_extensions() -> Vec<aube_resolver::PackageExtension> {
     VENDORED_COMPAT_EXTENSIONS
         .iter()
@@ -1017,6 +1039,7 @@ fn vendored_compat_extensions() -> Vec<aube_resolver::PackageExtension> {
             optional_dependencies: bundled_string_map(extension.optional_dependencies),
             peer_dependencies: bundled_string_map(extension.peer_dependencies),
             peer_dependencies_meta: bundled_peer_meta(extension.peer_dependencies_meta),
+            database_peers: BTreeMap::new(),
         })
         .collect()
 }
@@ -1076,6 +1099,7 @@ fn parse_package_extension(
             obj.get("peerDependenciesMeta"),
             &peer_dependencies_meta_path,
         )?,
+        database_peers: BTreeMap::new(),
     })
 }
 
@@ -1596,6 +1620,23 @@ mod bundled_compat_tests {
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].selector, "valid@*");
         assert_eq!(parsed[0].dependencies["left-pad"], "^1.3.0");
+    }
+
+    #[test]
+    fn a_bundled_entrys_optional_peers_become_database_peers_and_required_ones_stay() {
+        let parsed = parse_bundled_package_extensions(vec![(
+            "host@*".to_string(),
+            serde_json::json!({
+                "peerDependencies": {"opt": "^1", "req": "^2"},
+                "peerDependenciesMeta": {"opt": {"optional": true}, "meta-only": {"optional": true}}
+            }),
+        )]);
+
+        assert_eq!(parsed[0].database_peers["opt"], "^1");
+        assert_eq!(parsed[0].database_peers["meta-only"], "*");
+        assert_eq!(parsed[0].peer_dependencies["req"], "^2");
+        assert!(!parsed[0].peer_dependencies.contains_key("opt"));
+        assert!(parsed[0].peer_dependencies_meta.is_empty());
     }
 
     #[test]

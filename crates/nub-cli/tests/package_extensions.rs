@@ -237,6 +237,73 @@ fn the_bundled_compatibility_database_repairs_a_published_phantom() {
     );
 }
 
+/// An optional peer from the bundled database must not split a package across
+/// workspace members on different versions of the target. pnpm has no such
+/// entry, so it installs `@typescript-eslint/types` once, and two copies are two
+/// module objects at run time.
+///
+/// Declaring the same peer is what does split a package, so the control is a
+/// package whose manifest declares one: `ts-api-utils` requires `typescript`.
+#[test]
+#[ignore = "network: resolves @typescript-eslint/types and two typescript versions"]
+fn a_database_peer_does_not_split_a_package_across_workspace_members() {
+    if !registry_reachable() {
+        eprintln!("skipping: registry.npmjs.org unreachable");
+        return;
+    }
+    let store = pm_tmpdir("split-store");
+    let cache = pm_tmpdir("split-cache");
+    let root = pm_tmpdir("split");
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"split","private":true}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("pnpm-workspace.yaml"),
+        "packages:\n  - packages/*\n",
+    )
+    .unwrap();
+    for (member, typescript) in [("a", "5.8.3"), ("b", "5.9.3")] {
+        let dir = root.join("packages").join(member);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            format!(
+                r#"{{"name":"{member}","private":true,"dependencies":{{
+                    "@typescript-eslint/types":"8.46.0",
+                    "ts-api-utils":"2.1.0",
+                    "typescript":"{typescript}"
+                }}}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    let (err, code) = run_install_in_store(&root, &store, &cache, &["install", "--ignore-scripts"]);
+    assert_eq!(code, 0, "install failed: {err}");
+
+    let real = |member: &str, package: &str| {
+        std::fs::canonicalize(
+            root.join("packages")
+                .join(member)
+                .join("node_modules")
+                .join(package),
+        )
+        .unwrap_or_else(|e| panic!("{member} cannot reach {package}: {e}"))
+    };
+    assert_eq!(
+        real("a", "@typescript-eslint/types"),
+        real("b", "@typescript-eslint/types"),
+        "both members must share one copy, as under pnpm"
+    );
+    assert_ne!(
+        real("a", "ts-api-utils"),
+        real("b", "ts-api-utils"),
+        "a declared peer still splits across members on different versions"
+    );
+}
+
 /// The bundled database repairs a phantom that Yarn's curated catalog does not
 /// cover, which is the whole reason nub ships the larger set.
 ///

@@ -276,9 +276,19 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     // needs it, but `--allow-dynamic-import` only earns it if a computed
     // `import()` actually survived — the flag is cheap to pass defensively and a
     // build that never uses it should ship no wrapper.
+    // In final payload coordinates, the ones the hook sees a module's parent URL in. An
+    // identity only drops out here: the entry prefix is what can make a path differ.
+    let mut shipped_sources: Vec<(String, String)> = bundled
+        .shipped_sources
+        .iter()
+        .map(|(at, source)| (layout.bundle_path(at), source.clone()))
+        .filter(|(at, source)| at != source)
+        .collect();
+    shipped_sources.sort_by_key(|(at, _)| std::cmp::Reverse(at.len()));
     let shim_plan = external::ShimPlan {
         external: &opts.bundle.external,
         external_imports: &bundled.external_imports,
+        shipped_sources: &shipped_sources,
         dynamic: bundled.dynamic_import_sites > 0,
     };
     // Every static worker enters through a tiny generated module. When a resolver
@@ -5782,6 +5792,7 @@ mod tests {
             dynamic_import_sites: 0,
             native_addons: Vec::new(),
             external_imports: Vec::new(),
+            shipped_sources: Vec::new(),
             worker_roots: Vec::new(),
             metafile: None,
         };
@@ -5859,6 +5870,7 @@ mod tests {
             dynamic_import_sites: 0,
             native_addons: Vec::new(),
             external_imports: Vec::new(),
+            shipped_sources: Vec::new(),
             worker_roots: Vec::new(),
             metafile: None,
         };
@@ -5913,6 +5925,7 @@ mod tests {
             dynamic_import_sites: 0,
             native_addons: Vec::new(),
             external_imports: Vec::new(),
+            shipped_sources: Vec::new(),
             worker_roots: Vec::new(),
             metafile: None,
         };
@@ -5984,6 +5997,7 @@ mod tests {
             dynamic_import_sites: 0,
             native_addons: Vec::new(),
             external_imports: Vec::new(),
+            shipped_sources: Vec::new(),
             worker_roots: Vec::new(),
             metafile: None,
         };
@@ -6027,6 +6041,7 @@ mod tests {
             dynamic_import_sites: 0,
             native_addons: Vec::new(),
             external_imports: Vec::new(),
+            shipped_sources: Vec::new(),
             worker_roots: vec![bundle::WorkerRoot {
                 entry: "worker-a.mjs".into(),
                 chunk: "worker-a-code.mjs".into(),
@@ -6077,6 +6092,7 @@ mod tests {
                 dynamic_import_sites: 0,
                 native_addons: Vec::new(),
                 external_imports: Vec::new(),
+                shipped_sources: Vec::new(),
                 worker_roots: Vec::new(),
                 metafile: None,
             },
