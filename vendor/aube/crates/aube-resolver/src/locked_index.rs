@@ -127,8 +127,10 @@ impl<'a> LockedIndex<'a> {
         self.local_source(name, tail).map(LocalSource::specifier)
     }
 
-    /// The local source a hashed edge lands on, if it lands on one.
+    /// The local source a hashed edge lands on, if it lands on one. Peers do not
+    /// change the source, so a suffix on either side does not matter.
     pub fn local_source(&self, name: &str, tail: &str) -> Option<&'a LocalSource> {
+        let tail = tail.split('(').next().unwrap_or(tail);
         self.bucket(name)
             .iter()
             .copied()
@@ -136,6 +138,7 @@ impl<'a> LockedIndex<'a> {
                 pkg.dep_path
                     .strip_prefix(name)
                     .and_then(|rest| rest.strip_prefix('@'))
+                    .and_then(|rest| rest.split('(').next())
                     == Some(tail)
             })
             .and_then(|pkg| pkg.local_source.as_ref())

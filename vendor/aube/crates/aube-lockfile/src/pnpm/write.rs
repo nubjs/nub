@@ -230,6 +230,22 @@ pub(super) fn build(
             _ => None,
         }
     };
+    // A package's key carries its peers, and pnpm spells them after the specifier:
+    // `file:vendor/a(react@18.2.0)`. `link:` has none.
+    let local_spelling = |local: &LocalSource, key: &str| match local {
+        LocalSource::Directory(_)
+        | LocalSource::Tarball(_)
+        | LocalSource::Git(_)
+        | LocalSource::RemoteTarball(_) => {
+            let peers = key.find('(').map_or("", |i| &key[i..]);
+            format!(
+                "{}{}",
+                local.pnpm_specifier(),
+                rewrite_peer_suffix(peers, &peer_suffix_to_spec)
+            )
+        }
+        _ => local.pnpm_specifier(),
+    };
     let mut importers = BTreeMap::new();
     let exclude_links = graph.settings.exclude_links_from_lockfile;
     for (importer_path, deps) in &graph.importers {
@@ -336,7 +352,7 @@ pub(super) fn build(
                             link_from_importer(importer_path, &local.path_posix())
                         )
                     }
-                    _ => local.pnpm_specifier(),
+                    _ => local_spelling(local, &dep.dep_path),
                 }
             } else if let Some(member_dir) = workspace_link_dir {
                 format!("link:{}", link_from_importer(importer_path, member_dir))
@@ -799,7 +815,7 @@ pub(super) fn build(
                 {
                     // A `link:` path is relative to the lockfile directory on every
                     // parent, where pnpm links it from. It has no `packages:` entry.
-                    local.pnpm_specifier()
+                    local_spelling(local, &value)
                 } else if native_pnpm_aliases
                     && let Some(target) = target
                     && let Some(real_name) = target.alias_of.as_deref()
@@ -826,7 +842,7 @@ pub(super) fn build(
         // parser lines them up with the packages entry above.
         let mut key = match pkg.local_source.as_ref() {
             Some(LocalSource::Link(_)) | Some(LocalSource::Exec(_)) => continue,
-            Some(local) => format!("{}@{}", pkg.name, local.pnpm_specifier()),
+            Some(local) => format!("{}@{}", pkg.name, local_spelling(local, dep_path)),
             None => {
                 if native_pnpm_aliases && let Some(real_name) = pkg.alias_of.as_deref() {
                     format!("{real_name}@{}", dep_path_tail(dep_path, &pkg.name))
