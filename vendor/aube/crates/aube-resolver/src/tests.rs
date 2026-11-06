@@ -6256,6 +6256,74 @@ async fn a_source_a_package_declares_itself_is_not_a_removed_override() {
     }
 }
 
+// npm stores `github:acme/child#<ref>` as an SSH URL, so a package's declaration and
+// the lockfile spell one repository differently. Reuse keeps the edge without the
+// parent's packument, which this test does not provide. The child is then blocked as
+// an exotic dependency of a registry package, which needs no network to reach.
+#[tokio::test]
+async fn an_unchanged_git_dependency_spelled_another_way_keeps_its_reused_parent() {
+    let sha = "98e8ff1da1a89f93d1397a24d7413ed15421c139";
+    for declared in [
+        format!("github:acme/child#{sha}"),
+        "github:acme/child#main".to_string(),
+    ] {
+        let client = Arc::new(aube_registry::client::RegistryClient::new(
+            "http://127.0.0.1:0",
+        ));
+        let mut resolver = Resolver::new(client);
+        let source = LocalSource::Git(aube_lockfile::GitSource {
+            url: "git+ssh://git@github.com/acme/child.git".to_string(),
+            committish: None,
+            resolved: sha.to_string(),
+            integrity: None,
+            subpath: None,
+        });
+        let child_key = source.dep_path("child");
+        let edge = child_key.strip_prefix("child@").unwrap().to_string();
+        let existing = LockfileGraph {
+            packages: BTreeMap::from([
+                (
+                    "parent@1.0.0".to_string(),
+                    LockedPackage {
+                        name: "parent".to_string(),
+                        version: "1.0.0".to_string(),
+                        dep_path: "parent@1.0.0".to_string(),
+                        dependencies: [("child".to_string(), edge)].into(),
+                        declared_dependencies: [("child".to_string(), declared.clone())].into(),
+                        declared_dependencies_known: true,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    child_key.clone(),
+                    LockedPackage {
+                        name: "child".to_string(),
+                        version: "7.0.0".to_string(),
+                        dep_path: child_key,
+                        local_source: Some(source),
+                        ..Default::default()
+                    },
+                ),
+            ]),
+            ..Default::default()
+        };
+
+        let mut manifest = PackageJson::default();
+        manifest
+            .dependencies
+            .insert("parent".to_string(), "1.0.0".to_string());
+
+        let err = resolver
+            .resolve(&manifest, Some(&existing))
+            .await
+            .expect_err("a git dependency of a registry package is blocked by default");
+        assert!(
+            matches!(&err, Error::BlockedExoticSubdep(details) if details.name == "child"),
+            "reuse must reach the child without refetching the parent, for {declared}: {err:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_range_binds_to_the_registry_and_not_a_locked_url_package() {
     let client = Arc::new(aube_registry::client::RegistryClient::new(
