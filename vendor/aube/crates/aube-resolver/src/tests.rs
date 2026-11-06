@@ -6137,11 +6137,15 @@ async fn a_removed_override_sends_a_reused_parent_back_to_its_declared_range() {
         "child".to_string(),
         "https://example.com/original.tgz".to_string(),
     )]);
+    let declares_that_source =
+        BTreeMap::from([("child".to_string(), "file:./vendor/child".to_string())]);
     // What says the edge is not the package's own: the overrides the lockfile
-    // recorded, a range or another source in the declarations an npm-style lockfile
-    // records, or a declared peer.
+    // recorded, even where the declaration reads the same (a git tag cannot be told
+    // from another tag of its repository), a range or another source in the
+    // declarations an npm-style lockfile records, or a declared peer.
     for (overrides, declared, peer) in [
-        (override_rule, None, false),
+        (override_rule.clone(), None, false),
+        (override_rule, Some(declares_that_source), false),
         (BTreeMap::new(), Some(declares_a_range), false),
         (BTreeMap::new(), Some(declares_another_source), false),
         (BTreeMap::new(), None, true),
