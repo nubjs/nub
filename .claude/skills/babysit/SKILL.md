@@ -81,7 +81,6 @@ The `Main` ruleset blocks `update` on `main`, so a plain merge fails with `the b
 ```bash
 gh pr merge <N> --squash --admin
 git -C <shared-tree> fetch origin && git -C <shared-tree> merge --ff-only origin/main  # never pull --ff-only
-make install-dev                                                                       # skip only if the diff was docs-only
 git push origin --delete <branch> && git branch -D <branch>
 git worktree remove <dir> --force
 ```
