@@ -5,10 +5,14 @@
 //! module users already pass as `node --import <pkg>/register`. Nub preloads that
 //! export for every package the governing tsconfig lists, through the same chainer
 //! as `nub.jsonc` `preload` ([`crate::cli`]'s `prepare_preload_chain`), and never
-//! runs the mapper process itself. Options stay the register's business: it reads
-//! its own entry from the tsconfig, as it must under plain Node anyway.
+//! runs the mapper process itself. An entry's `options` reach its register as JSON in
+//! [`OPTIONS_ENV`], because Node has no channel for handing options to a preload. The
+//! name is neutral and plain `node --import` can supply it by hand, so a register
+//! written for it runs the same anywhere.
 
 use std::path::{Path, PathBuf};
+
+pub(crate) const OPTIONS_ENV: &str = "CONTENT_MAPPER_OPTIONS";
 
 /// The mapper registers a run loads. Crosses to children in the runtime snapshot: a
 /// descendant keeps what it inherited and adds what its own entry's tsconfig lists.
@@ -32,6 +36,28 @@ pub(crate) struct Register {
     pub path: String,
     #[serde(default)]
     pub extensions: Vec<String>,
+    /// The entry's `options` as JSON text, spelled by [`encode_options`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<String>,
+}
+
+/// JSON text for the runtime snapshot with its `\` and `"` spelled out. Under a Windows
+/// script the snapshot passes through busybox-w32's `ash`, which rewrites `\` to `/` in
+/// every variable it imports, so any JSON escape in a value reaches the descendant
+/// corrupted, and an escaped quote breaks the snapshot's own parse.
+fn encode_options(options: &serde_json::Value) -> String {
+    options
+        .to_string()
+        .replace('%', "%25")
+        .replace('\\', "%5C")
+        .replace('"', "%22")
+}
+
+fn decode_options(encoded: &str) -> String {
+    encoded
+        .replace("%22", "\"")
+        .replace("%5C", "\\")
+        .replace("%25", "%")
 }
 
 /// One mapped extension, read by the runtime so an import Node refuses says why. It is
@@ -53,23 +79,37 @@ pub(crate) struct MappedExtension {
 
 impl Discovered {
     /// One package listed twice registers once, with the union of its extensions.
-    fn add(&mut self, path: String, extensions: &[String]) {
+    fn add(&mut self, path: String, extensions: &[String]) -> &mut Register {
         let index = match self.registers.iter().position(|r| r.path == path) {
             Some(index) => index,
             None => {
                 self.registers.push(Register {
                     path,
                     extensions: Vec::new(),
+                    options: None,
                 });
                 self.registers.len() - 1
             }
         };
-        let known = &mut self.registers[index].extensions;
+        let register = &mut self.registers[index];
         for extension in extensions {
-            if !known.contains(extension) {
-                known.push(extension.clone());
+            if !register.extensions.contains(extension) {
+                register.extensions.push(extension.clone());
             }
         }
+        register
+    }
+
+    /// Each register with options, by its real path, so an entry the user also lists
+    /// under `preload` still gets them in the slot they gave it.
+    pub(crate) fn options_by_file(&self) -> std::collections::HashMap<PathBuf, String> {
+        self.registers
+            .iter()
+            .filter_map(|register| {
+                let options = decode_options(register.options.as_deref()?);
+                Some((std::fs::canonicalize(&register.path).ok()?, options))
+            })
+            .collect()
     }
 
     /// `module.registerHooks` runs the hook registered LAST first, and TypeScript routes
@@ -102,9 +142,11 @@ impl Discovered {
         ordered
     }
 
+    /// `other` is what a descendant's own entry lists. Its config is the nearer one, so
+    /// a package it lists takes that entry's options, none included.
     pub(crate) fn merge(&mut self, other: Discovered) {
         for register in other.registers {
-            self.add(register.path, &register.extensions);
+            self.add(register.path, &register.extensions).options = register.options;
         }
         self.chain_root = self.chain_root.take().or(other.chain_root);
         for entry in other.extensions {
@@ -133,7 +175,12 @@ pub(crate) fn discover(anchor: &str, explicit: Option<&str>) -> Discovered {
             Some((dir, root)) => match register_of(&resolver, &dir) {
                 None => "no-register",
                 Some(register) => {
-                    out.add(register, &mapper.extensions);
+                    // A config's own entry comes before its references', and wins.
+                    let known = out.add(register, &mapper.extensions);
+                    known.options = known
+                        .options
+                        .take()
+                        .or_else(|| mapper.options.as_ref().map(encode_options));
                     out.chain_root = out.chain_root.take().or(root);
                     "registered"
                 }
@@ -178,11 +225,17 @@ fn register_of(resolver: &oxc_resolver::Resolver, dir: &Path) -> Option<String> 
     manifest.get("exports")?;
     let name = manifest.get("name")?.as_str()?;
     let register = resolver.resolve(dir, &format!("{name}/register")).ok()?;
-    // One spelling per file, whatever the anchor. A `nub run` anchored at a Windows 8.3
-    // path (`RUNNER~1`) and a descendant anchored at its entry's real path would
-    // otherwise see two registers in one file: two URLs, so it evaluates twice.
+    // One spelling per file, or a descendant merges a second register for it: two URLs,
+    // so it evaluates twice. Hence the real path, whatever the anchor's spelling
+    // (`RUNNER~1`), and forward slashes on Windows: under a script the snapshot passes
+    // through busybox-w32's `ash`, which rewrites `\` to `/` in every variable it imports,
+    // and JSON's `\\` comes out as `//`, which still parses. Windows only, because a
+    // backslash is a legal filename character on POSIX.
     let real = std::fs::canonicalize(register.full_path()).ok()?;
-    Some(crate::cli::strip_windows_verbatim_prefix(
-        &real.to_string_lossy(),
-    ))
+    let path = crate::cli::strip_windows_verbatim_prefix(&real.to_string_lossy());
+    Some(if cfg!(windows) {
+        path.replace('\\', "/")
+    } else {
+        path
+    })
 }

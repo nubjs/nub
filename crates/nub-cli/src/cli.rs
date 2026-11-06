@@ -4161,6 +4161,11 @@ fn prepare_preload_chain(
     }
     esm.extend(inherited_imports);
 
+    let mapper_options = runtime
+        .content_mappers
+        .as_ref()
+        .map(crate::content_mappers::Discovered::options_by_file)
+        .unwrap_or_default();
     let dir = root.join("node_modules").join(".nub");
     let write_to = |dir: &Path| -> Result<(Option<PathBuf>, Option<PathBuf>)> {
         if !cjs.is_empty() || !esm.is_empty() {
@@ -4169,8 +4174,8 @@ fn prepare_preload_chain(
             })?;
         }
         Ok((
-            write_preload_chain(dir, false, &cjs, 0)?,
-            write_preload_chain(dir, true, &esm, mapper_entries)?,
+            write_preload_chain(dir, false, &cjs, 0, &Default::default())?,
+            write_preload_chain(dir, true, &esm, mapper_entries, &mapper_options)?,
         ))
     };
     // A mapper-only chain holds nothing but absolute paths, so it works from anywhere.
@@ -4233,11 +4238,16 @@ fn continues_parent_invocation(node: &nub_core::node::discovery::ResolvedNode) -
 /// and that must not take down a file importing nothing mapped. A Node that has the
 /// API still fails with the register's own stack, as `node --import` does. The check
 /// reads the default export because a named import is a link error on those Nodes.
+///
+/// A register with tsconfig `options` sees them in its variable only while its module
+/// evaluates. Left in the inherited environment, one value could not serve two
+/// registers, and it would reach the application and every process it starts.
 fn write_preload_chain(
     dir: &Path,
     esm: bool,
     entries: &[String],
     mapper_entries: usize,
+    mapper_options: &std::collections::HashMap<PathBuf, String>,
 ) -> Result<Option<PathBuf>> {
     if entries.is_empty() {
         return Ok(None);
@@ -4251,8 +4261,12 @@ fn write_preload_chain(
         body.push_str("import nodeModule from \"node:module\";\n");
     }
     let resolver = bare_preload_resolver(esm);
+    let mut carries_options = false;
     for (index, spec) in entries.iter().enumerate() {
         let spec = resolve_bare_preload(&resolver, spec);
+        let options = std::fs::canonicalize(&spec)
+            .ok()
+            .and_then(|real| mapper_options.get(&real));
         let spec = if esm && Path::new(&spec).is_absolute() {
             nub_core::node::spawn::file_url_for(&spec)
         } else {
@@ -4266,20 +4280,33 @@ fn write_preload_chain(
             // entry before starting the next, but STATIC imports of sibling modules
             // may interleave, so an entry with top-level await would let a later one
             // land first. Sequential dynamic import reproduces the token ordering.
-            if index < mapper_entries {
-                body.push_str(&format!(
+            let load = if index < mapper_entries {
+                format!(
                     "try {{ await import({literal}); }} catch (error) \
-                     {{ if (typeof nodeModule.registerHooks === \"function\") throw error; }}\n"
+                     {{ if (typeof nodeModule.registerHooks === \"function\") throw error; }}"
+                )
+            } else {
+                format!("await import({literal});")
+            };
+            if let Some(options) = options {
+                carries_options = true;
+                let var = crate::content_mappers::OPTIONS_ENV;
+                let value = serde_json::to_string(options)?;
+                body.push_str(&format!(
+                    "{{ const ambient = process.env.{var}; process.env.{var} = {value}; \
+                     try {{ {load} }} finally {{ if (ambient === undefined) \
+                     delete process.env.{var}; else process.env.{var} = ambient; }} }}\n"
                 ));
             } else {
-                body.push_str(&format!("await import({literal});\n"));
+                body.push_str(&load);
+                body.push('\n');
             }
         } else {
             body.push_str(&format!("require({literal});\n"));
         }
     }
     let extension = if esm { "mjs" } else { "cjs" };
-    let name = if mapper_entries > 0 {
+    let name = if mapper_entries > 0 || carries_options {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         body.hash(&mut hasher);
@@ -4652,7 +4679,9 @@ pub(crate) fn runtime_node_options_with(
     // ONE synthesized chainer instead of a token per entry — see prepare_preload_chain
     // for why (vercel/next.js#96582) and where the chainer has to live.
     if let Some(injection) = prepare_preload_chain(runtime, node, fold)? {
-        options.push(injection.node_options_token());
+        // Unquoted: everything that writes this list to NODE_OPTIONS quotes each option,
+        // and quoting twice hands Node a specifier that starts with `"`.
+        options.push(format!("{}={}", injection.flag, injection.value));
     }
 
     if let Some(tsconfig) = runtime.tsconfig.as_deref()

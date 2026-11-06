@@ -3681,13 +3681,13 @@ pub fn split_inherited_preloads(value: &str) -> (String, Vec<String>, Vec<String
 fn reentrant_node_options(existing: Option<&str>, runtime_options: &[String]) -> Option<String> {
     let chain = runtime_options
         .iter()
-        .flat_map(|option| split_node_options(option))
         .find(|token| {
             token.strip_prefix("--import=").is_some_and(|value| {
                 let value = value.replace('\\', "/");
                 is_nub_preload_entry(&value) && !value.ends_with("/preload-chain.mjs")
             })
-        })?;
+        })?
+        .clone();
     let (rest, _, _) = split_inherited_preloads(existing?);
     let tokens = split_node_options(&rest);
     if tokens.contains(&chain) {
@@ -4342,6 +4342,13 @@ mod tests {
             None
         );
         assert_eq!(reentrant_node_options(Some(ours), &options(fixed)), None);
+
+        // A space in the project's path: quoted once, as one token.
+        let spaced = "--import=file:///sp ace/node_modules/.nub/preload-chain.bbbb.mjs";
+        assert_eq!(
+            reentrant_node_options(Some(ours), &options(spaced)).as_deref(),
+            Some(format!("{ours} \"{spaced}\"").as_str())
+        );
     }
 
     #[test]

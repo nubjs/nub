@@ -125,6 +125,8 @@ pub struct ContentMapper {
     /// resolves `package` from THIS file, not from the leaf config that inherited the
     /// array (microsoft/TypeScript#65105).
     pub declared_in: String,
+    /// The entry's `options` object, which TypeScript hands the mapper in `openProject`.
+    pub options: Option<Value>,
 }
 
 /// A compiled `paths` matcher (get-tsconfig's `createPathsMatcher` closure state).
@@ -788,6 +790,7 @@ fn parse_content_mappers(config: &Value) -> Vec<ContentMapper> {
                     .map(str::to_string)
                     .collect(),
                 declared_in: slash(declared_in),
+                options: entry.get("options").filter(|v| v.is_object()).cloned(),
             })
         })
         .collect()

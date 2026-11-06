@@ -124,6 +124,113 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// A package whose register prints what it was handed, tagged with its name.
+fn options_reader(root: &Path, name: &str) {
+    let dir = root.join("node_modules").join(name);
+    write(
+        dir.join("package.json"),
+        &format!(r#"{{ "name": "{name}", "exports": {{ "./register": "./register.mjs" }} }}"#),
+    );
+    write(
+        dir.join("register.mjs"),
+        &format!("console.error(\"{name}:\", process.env.CONTENT_MAPPER_OPTIONS);\n"),
+    );
+}
+
+/// Each register sees its own entry's options while it loads, and nothing else does.
+/// A plain Node user sets the same variable by hand, so the value stays theirs after.
+#[test]
+fn options_reach_only_their_own_register_while_it_loads() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    options_reader(root, "with");
+    options_reader(root, "without");
+    let options = r#"{"pattern":"q\"b\\c%5C%22"}"#;
+    write(
+        root.join("tsconfig.json"),
+        &format!(
+            r#"{{ "contentMappers": [
+                {{ "package": "with", "extensions": [".a"], "options": {options} }},
+                {{ "package": "without", "extensions": [".b"] }}
+            ] }}"#
+        ),
+    );
+    write(
+        root.join("package.json"),
+        r#"{ "scripts": { "start": "node main.mjs" } }"#,
+    );
+    write(
+        root.join("main.mjs"),
+        r#"import { spawnSync } from "node:child_process";
+console.log("app:", process.env.CONTENT_MAPPER_OPTIONS);
+const child = spawnSync(process.execPath, ["-p", "process.env.CONTENT_MAPPER_OPTIONS"], { encoding: "utf8" });
+console.log("child:", child.stdout.trim());
+"#,
+    );
+
+    let output = run(root, &["main.mjs"]);
+    assert_eq!(stdout(&output), "app: undefined\nchild: undefined");
+    let log = stderr(&output);
+    assert!(log.contains(&format!("with: {options}")), "{log}");
+    assert!(log.contains("without: undefined"), "{log}");
+
+    // A script's `node` gets them from the snapshot. Only Windows can go red on the
+    // spelling: its script shell rewrites backslashes in every variable it imports.
+    let output = run(root, &["run", "start"]);
+    assert!(stdout(&output).contains("app: undefined"));
+    assert!(
+        stderr(&output).contains(&format!("with: {options}")),
+        "{}",
+        stderr(&output)
+    );
+
+    // Listed under `preload` too, it still gets them, once, in the user's slot.
+    write(
+        root.join("nub.jsonc"),
+        r#"{ "preload": ["with/register"] }"#,
+    );
+    let log = stderr(&run(root, &["main.mjs"]));
+    assert!(log.contains(&format!("with: {options}")), "{log}");
+    assert_eq!(log.matches("with: ").count(), 1, "{log}");
+    std::fs::remove_file(root.join("nub.jsonc")).unwrap();
+
+    let output = nub(root, &["main.mjs"])
+        .env("CONTENT_MAPPER_OPTIONS", r#"{"mine":true}"#)
+        .output()
+        .unwrap();
+    assert!(
+        stdout(&output).starts_with(r#"app: {"mine":true}"#),
+        "{}",
+        stdout(&output)
+    );
+    assert!(stderr(&output).contains(&format!("with: {options}")));
+}
+
+/// A descendant's entry is the nearer config, so its options replace what it inherited.
+#[test]
+fn a_descendant_takes_options_from_its_own_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    options_reader(root, "m");
+    let entry = |from: &str| {
+        format!(
+            r#"{{ "contentMappers": [{{ "package": "m", "extensions": [".a"], "options": {{ "from": "{from}" }} }}] }}"#
+        )
+    };
+    write(root.join("tsconfig.json"), &entry("root"));
+    write(root.join("member/tsconfig.json"), &entry("member"));
+    write(root.join("member/main.mjs"), "\n");
+    write(
+        root.join("main.mjs"),
+        r#"import { spawnSync } from "node:child_process";
+process.stderr.write(spawnSync("node", ["member/main.mjs"], { encoding: "utf8", shell: true }).stderr);
+"#,
+    );
+    let log = stderr(&run(root, &["main.mjs"]));
+    assert!(log.contains(r#"m: {"from":"root"}"#), "{log}");
+    assert!(log.contains(r#"m: {"from":"member"}"#), "{log}");
+}
+
 /// The entry's own directory picks the tsconfig, and the register's hook sits above
 /// Nub's built-in `.yaml` loader, which would otherwise answer with a parsed object.
 #[test]
@@ -478,11 +585,35 @@ for (const [label, env] of [
     );
 }
 
-/// A foreign `--import` on Node 22.15-24.11 puts Nub on the async tier, where any
-/// `registerHooks` call used to make a pass-through `next()` throw on every CommonJS
-/// file. Nobody asked for the discovered register on this run, and plain
-/// `node --import` works, in the static-import form too. Passes trivially off that
-/// band; CI's 22.15 leg is the one that can go red.
+/// A space in the project's path reaches `NODE_OPTIONS` quoted once, for a `preload` line
+/// and for a mapper, directly and through a script's `node`.
+#[test]
+fn a_project_path_with_a_space_loads_preloads_and_mappers() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("sp ace");
+    write(root.join("mine.mjs"), "console.error('mine ran');\n");
+    write(root.join("nub.jsonc"), r#"{ "preload": ["./mine.mjs"] }"#);
+    write(root.join("plain.mjs"), "console.log('plain');\n");
+    let output = run(&root, &["plain.mjs"]);
+    assert_eq!(stdout(&output), "plain");
+    assert!(stderr(&output).contains("mine ran"), "{}", stderr(&output));
+
+    std::fs::remove_file(root.join("nub.jsonc")).unwrap();
+    mapper(&root, "m", ".data", "from-mapper");
+    write(root.join("tsconfig.json"), &tsconfig(&[("m", ".data")]));
+    write(
+        root.join("package.json"),
+        r#"{ "scripts": { "start": "node main.ts" } }"#,
+    );
+    entry(&root, &["a.data"]);
+    assert_eq!(stdout(&run(&root, &["main.ts"])), "from-mapper");
+    assert!(stdout(&run(&root, &["run", "start"])).contains("from-mapper"));
+}
+
+/// A foreign `--import` on Node 22.15-24.11 puts Nub on the async tier, where a discovered
+/// register must not make CommonJS files throw: nobody asked for it on this run.
+/// `foreign_register_cjs.rs` covers the rest of that tier. Passes trivially off that band;
+/// CI's 22.15 leg is the one that can go red.
 #[test]
 fn a_foreign_import_and_a_register_leave_commonjs_loading() {
     let dir = tempfile::tempdir().unwrap();
@@ -500,75 +631,6 @@ fn a_foreign_import_and_a_register_leave_commonjs_loading() {
         stdout(&run(root, &["--import", "./noop.mjs", "main.mjs"])),
         "from-cjs from-mapper"
     );
-
-    // With no mapper at all: the user's own `--import` of a register, static form.
-    write(root.join("tsconfig.json"), "{}\n");
-    write(
-        root.join("plain.mjs"),
-        "import c from './c.cjs';\nconsole.log(c);\n",
-    );
-    write(
-        root.join("mine.mjs"),
-        r#"import nodeModule from "node:module";
-if (nodeModule.registerHooks) await import("./static.mjs");
-"#,
-    );
-    write(
-        root.join("static.mjs"),
-        r#"import { registerHooks } from "node:module";
-registerHooks({ load: (url, context, next) => next(url, context) });
-"#,
-    );
-    assert_eq!(
-        stdout(&run(root, &["--import", "./mine.mjs", "plain.mjs"])),
-        "from-cjs"
-    );
-
-    // A foreign loader's invalid result is that loader's error, not a CommonJS file with
-    // no source to read from disk.
-    write(
-        root.join("foreign.mjs"),
-        r#"import nodeModule from "node:module";
-nodeModule.register("./foreign-hooks.mjs", import.meta.url);
-if (nodeModule.registerHooks) await import("./static.mjs");
-"#,
-    );
-    write(
-        root.join("foreign-hooks.mjs"),
-        r#"export async function load(url, context, next) {
-  if (url.endsWith("/rejected.cjs")) return { format: "module", source: 42, shortCircuit: true };
-  return next(url, context);
-}
-"#,
-    );
-    write(root.join("rejected.cjs"), "console.log('raw file ran');\n");
-    write(root.join("rejected.mjs"), "import './rejected.cjs';\n");
-    let output = run(root, &["--import", "./foreign.mjs", "rejected.mjs"]);
-    assert!(!output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
-    assert!(
-        stderr(&output).contains("ERR_INVALID_RETURN_PROPERTY_VALUE"),
-        "{}",
-        stderr(&output)
-    );
-
-    // The standalone runner makes the same tier decision. Unix-only: `--import` needs a
-    // URL for an absolute Windows path, and the behaviour is not platform-specific.
-    #[cfg(unix)]
-    {
-        let runner =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime/loader-register.mjs");
-        let output = Command::new("node")
-            .arg(format!("--import={}", runner.display()))
-            .args(["--import=./noop.mjs", "--import=./mine.mjs", "plain.mjs"])
-            .current_dir(root)
-            .env_remove("NODE_COMPAT")
-            .env_remove("NODE_OPTIONS")
-            .env_remove("__NUB_RUNTIME_CONFIG")
-            .output()
-            .unwrap();
-        assert_eq!(stdout(&output), "from-cjs");
-    }
 }
 
 /// A Node with `registerHooks` has no reason to excuse a register, so its failure ends
@@ -714,9 +776,18 @@ fn workspace_members_keep_their_own_mappers() {
         );
         write(dir.join("tsconfig.json"), &tsconfig(&[(member, extension)]));
         entry(&dir, &[&format!("a{extension}")]);
+        let output = run(&dir, &["run", "start"]);
         assert!(
-            stdout(&run(&dir, &["run", "start"])).contains(&format!("from-{member}")),
+            stdout(&output).contains(&format!("from-{member}")),
             "{member}"
+        );
+        // Only Windows can go red here: its script shell rewrites the snapshot's
+        // backslashes, which gave the descendant a second spelling of the register.
+        let log = stderr(&output);
+        assert_eq!(
+            log.matches(&format!("register:from-{member}")).count(),
+            1,
+            "{log}"
         );
     }
 

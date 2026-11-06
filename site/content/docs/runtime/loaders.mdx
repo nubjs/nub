@@ -54,10 +54,62 @@ There is no `--import` to pass and nothing to add to `nub.jsonc`. A mapper takes
 
 - **Which tsconfig:** the nearest to the entry file, or to the package for `nub run`. `extends` and `references` are followed, and each `package` resolves from the config that declares it.
 - **Order:** the longest extension answers first, as in TypeScript, so `.schema.jsonc` wins over `.jsonc`. A [`preload`](/docs/config#preload) entry answers before any mapper.
-- **Options:** a register reads its own `options` from the tsconfig entry. Nub passes nothing.
 - **No runtime:** a package that is not installed, has no `./register` export, or whose register needs a newer Node is skipped. Importing one of its extensions fails, and the error names the package.
 
 `--node` and `NODE_COMPAT` load no registers.
+
+### Options
+
+An entry's `options` reach its register as JSON in the `CONTENT_MAPPER_OPTIONS` environment variable.
+
+```jsonc title="tsconfig.json"
+{
+  "contentMappers": [
+    {
+      "package": "sql-mapper",
+      "extensions": [".sql"],
+      "options": { "dialect": "postgres" }
+    }
+  ]
+}
+```
+
+The variable is set only while that register's module evaluates, so it never reaches your application or the processes it starts.
+
+### Package authors
+
+A package takes part by exporting `./register` beside its content mapper. Importing that module registers the runtime hooks, and it reads its options at the top level.
+
+```json title="package.json"
+{
+  "name": "sql-mapper",
+  "exports": { "./register": "./register.mjs" },
+  "typescript": { "contentMapper": { "exec": ["node", "mapper.mjs"] } }
+}
+```
+
+```js title="register.mjs"
+import { registerHooks } from "node:module";
+import { fileURLToPath } from "node:url";
+import { compile } from "./compile.mjs";
+
+const options = JSON.parse(process.env.CONTENT_MAPPER_OPTIONS ?? "{}");
+
+registerHooks({
+  load(url, context, next) {
+    if (!url.endsWith(".sql")) return next(url, context);
+    const source = compile(fileURLToPath(url), options);
+    return { format: "module", source, shortCircuit: true };
+  },
+});
+```
+
+The same export runs under plain Node, where the variable is yours to set:
+
+```sh
+CONTENT_MAPPER_OPTIONS='{"dialect":"postgres"}' \
+  node --import sql-mapper/register main.ts
+```
 
 ## Default export
 
