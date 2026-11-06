@@ -230,6 +230,10 @@ pub struct BundleResult {
     /// Static `--external` imports with the authored importer retained for a
     /// compiled artifact's runtime hook. Empty for the generic build path.
     pub external_imports: Vec<ExternalImport>,
+    /// Package directories in the payload whose source path differs, as payload path
+    /// and source path, for the runtime hook to look an external up from. Empty unless
+    /// the build has `--external`.
+    pub shipped_sources: Vec<(String, String)>,
     /// The public worker entry named from application code and its private
     /// bundled implementation chunk.  Compile writes a tiny public wrapper for
     /// each pair after it knows whether a runtime resolve hook is needed.
@@ -452,6 +456,7 @@ fn bundle_inner(
             loader_plan.claims_extension("node"),
             opts.unbundled.clone(),
             opts.bundled.clone(),
+            opts.external.clone(),
             own_installs.clone(),
         ))
     });
@@ -738,10 +743,16 @@ fn bundle_inner(
         native::PlannedNative {
             files: Vec::new(),
             summaries: Vec::new(),
+            placed: Vec::new(),
         }
     };
     let native_files = planned_native.files;
     let native_addons = planned_native.summaries;
+    let shipped_sources = launch_root
+        .filter(|_| !opts.external.is_empty())
+        .map_or_else(Vec::new, |root| {
+            shipped_sources(&planned_native.placed, &canonicalize_for_bundler(root))
+        });
     // Reported AFTER tree-shaking so a package the program never actually reaches
     // is not named. These bundled clean — a package that finds its addon through
     // `node-gyp-build` or `bindings` never puts a `.node` in the import graph — so
@@ -817,6 +828,7 @@ fn bundle_inner(
         dynamic_import_sites,
         native_addons,
         external_imports,
+        shipped_sources,
         worker_roots: new_urls.worker_roots(),
         metafile,
     })
@@ -5187,7 +5199,7 @@ fn validate_external_packages(packages: &[String]) -> Result<()> {
 }
 
 /// Does `specifier` name `pkg` or one of its subpaths?
-fn is_package_specifier(specifier: &str, pkg: &str) -> bool {
+pub(super) fn is_package_specifier(specifier: &str, pkg: &str) -> bool {
     specifier == pkg
         || (specifier.starts_with(pkg) && specifier.as_bytes().get(pkg.len()) == Some(&b'/'))
 }
@@ -5302,6 +5314,28 @@ impl Plugin for ExternalImports {
             }))
         }
     }
+}
+
+/// Where each package directory in the payload sits relative to the launch directory,
+/// longest payload path first, so the first that matches a module is its own package.
+///
+/// A directory outside the project, which is every package in nub's global store, has
+/// no source path that means anything on another machine, so it keeps its payload path.
+fn shipped_sources(placed: &[(String, PathBuf)], launch_root: &Path) -> Vec<(String, String)> {
+    let mut sources: Vec<(String, String)> = placed
+        .iter()
+        .filter_map(|(at, instance)| {
+            let instance = canonicalize_for_bundler(instance);
+            let source = portable_importer(&instance.to_string_lossy(), launch_root)?;
+            let climbs = source.starts_with("../") || Path::new(&source).is_absolute();
+            let inside = !climbs
+                || native::install_tree_root(&instance)
+                    .is_some_and(|tree| launch_root.starts_with(tree));
+            (inside && source != *at).then(|| (at.clone(), source))
+        })
+        .collect();
+    sources.sort_by_key(|(at, _)| std::cmp::Reverse(at.len()));
+    sources
 }
 
 /// Convert only a genuine file importer to a path portable from the launch cwd.

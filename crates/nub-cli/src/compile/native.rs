@@ -98,7 +98,7 @@ fn elf_libc_is_musl(bytes: &[u8]) -> Option<bool> {
 /// fails outright.
 ///
 /// Matches `native_layout::install_anchor`, which has always taken the first.
-fn install_tree_root(package: &Path) -> Option<PathBuf> {
+pub(super) fn install_tree_root(package: &Path) -> Option<PathBuf> {
     let mut parts: Vec<&std::ffi::OsStr> = package.components().map(|c| c.as_os_str()).collect();
     let index = parts.iter().position(|part| *part == "node_modules")?;
     parts.truncate(index);
@@ -503,6 +503,9 @@ pub struct NativeAddons {
     /// Closure members shipped as files because their chunks could not reach an
     /// install they import — see [`Payload::stranded_by`].
     stranded: Mutex<BTreeSet<PathBuf>>,
+    /// `--external`: nothing shipped carries these, so a shipped package looks them up
+    /// when it runs, like the bundle does — see `external::shim`.
+    external: Vec<String>,
     /// Packages an earlier bundle found out of reach, by real directory, each with
     /// the dependency that decided it — see [`Self::out_of_reach`].
     own_installs: BTreeMap<PathBuf, String>,
@@ -517,6 +520,7 @@ impl NativeAddons {
         user_mapped: bool,
         forced_unbundled: Vec<String>,
         forced_bundled: Vec<String>,
+        external: Vec<String>,
         own_installs: BTreeMap<PathBuf, String>,
     ) -> Self {
         Self {
@@ -531,6 +535,7 @@ impl NativeAddons {
             transport_targets: Mutex::new(BTreeSet::new()),
             verbatim_members: Mutex::new(BTreeSet::new()),
             shipped_names: Mutex::new(BTreeSet::new()),
+            external,
             stranded: Mutex::new(own_installs.keys().cloned().collect()),
             own_installs,
             external_edges: Mutex::new(BTreeSet::new()),
@@ -866,6 +871,9 @@ impl NativeAddons {
                     continue;
                 };
                 for name in deps.keys() {
+                    if self.is_external(name) {
+                        continue;
+                    }
                     // Resolved from the package's REAL directory. Under an
                     // isolated install a dependency lives beside its dependent
                     // inside `.store/`, which is unreachable by walking up from
@@ -932,6 +940,12 @@ impl NativeAddons {
         }
     }
 
+    fn is_external(&self, specifier: &str) -> bool {
+        self.external
+            .iter()
+            .any(|package| super::bundle::is_package_specifier(specifier, package))
+    }
+
     /// `--unbundled` names nothing in the build reached, resolved from the entry
     /// as a top-level import of them would be.
     fn unreached_forced_roots(&self, entry: &Path) -> Vec<(PathBuf, String)> {
@@ -939,6 +953,10 @@ impl NativeAddons {
         if let Ok(mut seen) = self.forced_seen.lock() {
             for name in &self.forced_unbundled {
                 if seen.contains(name) {
+                    continue;
+                }
+                if self.is_external(name) {
+                    seen.insert(name.clone());
                     continue;
                 }
                 if let Some(root) = resolve_package_root(entry, name) {
@@ -999,7 +1017,7 @@ impl NativeAddons {
             .unwrap_or_default();
         for (importer, target) in bundled {
             let name = super::closure::package_of(&target);
-            if self.forced_bundled.iter().any(|n| n == name) {
+            if self.forced_bundled.iter().any(|n| n == name) || self.is_external(name) {
                 continue;
             }
             if let Some(root) = resolve_package_root(Path::new(&importer), name) {
@@ -1022,6 +1040,9 @@ impl NativeAddons {
                 }
                 for target in transport_targets(&text) {
                     let name = super::closure::package_of(&target);
+                    if self.is_external(name) {
+                        continue;
+                    }
                     let Some(root) = resolve_package_root(&real.join(&file), name) else {
                         continue;
                     };
@@ -1072,7 +1093,10 @@ impl NativeAddons {
         // of them ships verbatim has to be external to the other's chunks — a
         // second copy inside a chunk would be a different module object reading a
         // different `__dirname`.
-        let mut closure = super::closure::Plan::default();
+        let mut closure = super::closure::Plan {
+            external: self.external.clone(),
+            ..Default::default()
+        };
         for root in selected.roots.keys() {
             self.materialise_root(
                 root,
@@ -1199,7 +1223,13 @@ impl NativeAddons {
                 }
             }
         }
+        let placed = payload
+            .holders
+            .iter()
+            .map(|(at, holder)| (at.clone(), holder.instance.clone()))
+            .collect();
         Ok(PlannedNative {
+            placed,
             files: payload
                 .files
                 .into_iter()
@@ -1419,6 +1449,8 @@ impl NativeAddons {
 pub struct PlannedNative {
     pub files: Vec<IslandFile>,
     pub summaries: Vec<String>,
+    /// Each package directory in the payload, and the installed one it came from.
+    pub placed: Vec<(String, PathBuf)>,
 }
 
 /// Whether the package reaches the filesystem by a path it builds at run time, in
