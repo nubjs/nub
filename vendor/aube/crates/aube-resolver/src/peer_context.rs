@@ -305,15 +305,26 @@ pub(crate) type DatabasePeerTargets = BTreeMap<String, BTreeMap<String, String>>
 /// members on different versions of the target two copies where pnpm, which has
 /// no such entry, installs one. pnpm's answer to the same import is likewise one
 /// copy resolving one hoisted target.
+///
+/// `link_members` stands in the workspace members importers chose, which the graph
+/// holds no package for yet, so a target can be one of them.
 pub(crate) fn database_peer_targets(
     graph: &LockfileGraph,
     extensions: &[PackageExtension],
     options: &PeerContextOptions,
+    link_members: impl FnOnce(&mut LockfileGraph),
 ) -> DatabasePeerTargets {
     let declared = database_peers_by_package(graph, extensions);
     if declared.is_empty() {
         return DatabasePeerTargets::new();
     }
+    let mut linked = LockfileGraph {
+        importers: graph.importers.clone(),
+        packages: graph.packages.clone(),
+        ..Default::default()
+    };
+    link_members(&mut linked);
+    let graph = &linked;
     let bound = probe_peer_pass(graph, options, |probe| {
         for (key, peers) in &declared {
             let Some(pkg) = probe.packages.get_mut(key) else {

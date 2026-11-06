@@ -5728,6 +5728,92 @@ async fn resolve_member_beside_registry_copy(react_spec: &str) -> LockfileGraph 
         .expect("resolve failed")
 }
 
+// A compatibility-database peer is repaired with an edge after the peer pass. It has
+// to land on what the importer chose, with or without a registry copy at the member's
+// version, and the member has to survive as a package for that edge to reach.
+#[tokio::test]
+async fn a_database_peer_lands_on_what_the_importer_chose() {
+    for (react_spec, with_registry_copy, lands_on_member) in [
+        ("workspace:*", false, true),
+        ("workspace:*", true, true),
+        ("latest", true, false),
+    ] {
+        let mut uses_react = make_packument("uses-react", &["1.0.0"], "1.0.0");
+        uses_react
+            .versions
+            .get_mut("1.0.0")
+            .unwrap()
+            .dependencies
+            .insert("react".to_string(), "^18.0.0".to_string());
+        let client = Arc::new(aube_registry::client::RegistryClient::new(
+            "http://127.0.0.1:0",
+        ));
+        let mut resolver = Resolver::new(client).with_dependency_policy(crate::DependencyPolicy {
+            package_extensions: vec![crate::PackageExtension {
+                selector: "repaired@*".to_string(),
+                database_peers: [("react".to_string(), "*".to_string())].into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        resolver.cache.insert(
+            "repaired".to_string(),
+            make_packument("repaired", &["1.0.0"], "1.0.0"),
+        );
+        resolver.cache.insert("uses-react".to_string(), uses_react);
+        resolver.cache.insert(
+            "react".to_string(),
+            make_packument("react", &["18.2.0"], "18.2.0"),
+        );
+
+        let mut dependencies: BTreeMap<String, String> = [
+            ("repaired".to_string(), "1.0.0".to_string()),
+            ("react".to_string(), react_spec.to_string()),
+        ]
+        .into();
+        if with_registry_copy {
+            dependencies.insert("uses-react".to_string(), "1.0.0".to_string());
+        }
+        let web = PackageJson {
+            name: Some("web".to_string()),
+            dependencies,
+            ..PackageJson::default()
+        };
+        let react = PackageJson {
+            name: Some("react".to_string()),
+            version: Some("18.2.0".to_string()),
+            ..PackageJson::default()
+        };
+        let graph = resolver
+            .resolve_workspace(
+                &[
+                    (".".to_string(), PackageJson::default()),
+                    ("packages/react".to_string(), react),
+                    ("packages/web".to_string(), web),
+                ],
+                None,
+                &std::collections::HashMap::from([
+                    ("react".to_string(), "18.2.0".to_string()),
+                    ("web".to_string(), "0.0.0".to_string()),
+                ]),
+            )
+            .await
+            .expect("resolve failed");
+
+        let repaired = &graph.packages["repaired@1.0.0"];
+        let target =
+            aube_lockfile::resolve_dep_edge("react", &repaired.dependencies["react"], |k| {
+                graph.packages.contains_key(k)
+            })
+            .unwrap_or_else(|| panic!("the repair must reach a package for {react_spec}"));
+        assert_eq!(
+            graph.packages[&target].local_source,
+            lands_on_member.then(|| LocalSource::Link("packages/react".into())),
+            "{react_spec}, registry copy: {with_registry_copy}"
+        );
+    }
+}
+
 // `workspace:*` and a registry package that happens to depend on the member's
 // exact version name one key. The importer and its peer consumer have to stay on
 // the member, and only the registry package's own dependency on the registry copy.

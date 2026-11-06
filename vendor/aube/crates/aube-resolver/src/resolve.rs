@@ -210,6 +210,9 @@ impl Resolver {
             &hoisted,
             &self.dependency_policy.package_extensions,
             &peer_options,
+            |graph| {
+                link_workspace_members(graph, importer_member_links);
+            },
         );
         // Gated as pnpm gates it (`hoistPeers`): either setting asks for it.
         let mut hoisted = if self.auto_install_peers || self.dedupe_peer_dependents {
@@ -224,9 +227,10 @@ impl Resolver {
         };
         let member_links = link_workspace_members(&mut hoisted, importer_member_links);
         let mut contextualized = apply_peer_contexts(hoisted, &peer_options)?;
-        unlink_workspace_members(&mut contextualized, &member_links);
         crate::remove_auto_installed_peers(&mut contextualized, &auto_installed_peers);
         crate::peer_context::bind_database_peers(&mut contextualized, &database_peers);
+        // After the repairs, which may be all that still reaches a linked member.
+        unlink_workspace_members(&mut contextualized, &member_links);
         drop(_diag_peer);
         tracing::debug!(
             "peer-context pass produced {} contextualized packages",
