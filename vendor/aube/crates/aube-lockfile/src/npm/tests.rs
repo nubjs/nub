@@ -1599,6 +1599,80 @@ fn test_write_transitive_optional_edges_set_optional_and_dev_optional() {
     assert!(shared.get("dev").is_none() && shared.get("optional").is_none());
 }
 
+/// An optional dep of a dev dep is dev on every path and optional on
+/// every path, so it takes both flags. `npm ci` skips a platform-mismatched
+/// package only when it is flagged `optional`; written as `devOptional` it
+/// fails with EBADPLATFORM.
+#[test]
+fn test_write_optional_child_of_dev_dep_keeps_dev_and_optional() {
+    let mut graph = LockfileGraph::default();
+    graph.packages.insert(
+        "tool@1.0.0".to_string(),
+        LockedPackage {
+            name: "tool".to_string(),
+            version: "1.0.0".to_string(),
+            integrity: Some("sha512-tool".to_string()),
+            dep_path: "tool@1.0.0".to_string(),
+            dependencies: [("tool-aix".to_string(), "1.0.0".to_string())]
+                .into_iter()
+                .collect(),
+            optional_dependencies: [("tool-aix".to_string(), "1.0.0".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        },
+    );
+    graph.packages.insert(
+        "tool-aix@1.0.0".to_string(),
+        LockedPackage {
+            name: "tool-aix".to_string(),
+            version: "1.0.0".to_string(),
+            integrity: Some("sha512-tool-aix".to_string()),
+            dep_path: "tool-aix@1.0.0".to_string(),
+            ..Default::default()
+        },
+    );
+    graph.importers.insert(
+        ".".to_string(),
+        vec![DirectDep {
+            name: "tool".to_string(),
+            dep_path: "tool@1.0.0".to_string(),
+            dep_type: DepType::Dev,
+            specifier: None,
+        }],
+    );
+    let manifest = aube_manifest::PackageJson {
+        name: Some("test".to_string()),
+        version: Some("1.0.0".to_string()),
+        dev_dependencies: [("tool".to_string(), "^1.0.0".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+
+    let out = tempfile::NamedTempFile::new().unwrap();
+    write(out.path(), &graph, &manifest).unwrap();
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.path()).unwrap()).unwrap();
+
+    let child = &json["packages"]["node_modules/tool-aix"];
+    assert_eq!(child["dev"], true, "expected dev flag, got {child}");
+    assert_eq!(
+        child["optional"], true,
+        "expected optional flag, got {child}"
+    );
+    assert!(
+        child.get("devOptional").is_none(),
+        "devOptional must not replace dev and optional, got {child}",
+    );
+    let parent = &json["packages"]["node_modules/tool"];
+    assert_eq!(parent["dev"], true, "expected dev flag, got {parent}");
+    assert!(
+        parent.get("optional").is_none(),
+        "a dev dep's own entry must not be optional, got {parent}",
+    );
+}
+
 /// Regression: the npm writer must drop `dependencies` entries
 /// whose target isn't in the canonical map. Platform-filtered
 /// optionals and `ignoredOptionalDependencies` leave the parent's
