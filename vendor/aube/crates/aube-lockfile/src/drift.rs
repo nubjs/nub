@@ -459,7 +459,9 @@ impl LockfileGraph {
             let Some(pkg) = self.packages.get(dep_path) else {
                 continue;
             };
-            if pkg.in_bundle {
+            // A link target's dependencies are installed in the target, not here:
+            // npm records them on the entry and locks none of them.
+            if pkg.in_bundle || matches!(pkg.local_source, Some(LocalSource::Link(_))) {
                 continue;
             }
             for (name, tail) in &pkg.dependencies {
@@ -3300,11 +3302,14 @@ mod required_entries_tests {
         bundled.1.bundled_dependencies = vec!["gone".into()];
         let mut in_bundle = package("root-dep", &edge);
         in_bundle.1.in_bundle = true;
+        let mut link_target = package("root-dep", &edge);
+        link_target.1.local_source = Some(LocalSource::Link("../root-dep".into()));
         for (label, pkg) in [
             ("optional", optional),
             ("peer", peer),
             ("bundled", bundled),
             ("in bundle", in_bundle),
+            ("link target", link_target),
         ] {
             let g = graph(DepType::Production, vec![pkg]);
             assert!(
