@@ -14,11 +14,12 @@
 // `blobUrlSource()`. Touches only URL / Blob / Buffer — all already-realized
 // core globals — so requiring it adds nothing to the main-thread bootstrap set.
 //
-// WHAT IS RETAINED, AND WHY IT IS THE MINIMUM. This wrap is installed on EVERY
-// nub run, and the overwhelming majority of object URLs never back a Worker at
-// all (a download link, an image preview, a CSV export). Node cannot read a
-// Blob's bytes synchronously, so supporting `new Worker(blobUrl)` at all means
-// capturing SOMETHING when the Blob is built. Three properties keep that honest:
+// WHAT IS RETAINED, AND WHY IT IS THE MINIMUM. This wrap is installed on every
+// nub run without a native Worker, and the overwhelming majority of object URLs
+// never back a Worker at all (a download link, an image preview, a CSV export).
+// Node cannot read a Blob's bytes synchronously, so supporting `new Worker(blobUrl)`
+// at all means capturing SOMETHING when the Blob is built. Three properties keep
+// that honest:
 //
 //   * it is a COMPACT COPY, not the caller's parts. Holding the parts pinned
 //     whatever they referenced — `new Blob([big.subarray(0, 32)])` kept the
