@@ -1,9 +1,9 @@
 use super::dep_path::{
-    dep_path_tail, is_override_link_target, parse_dep_path, peerless_dep_path, rewrite_peer_suffix,
-    strip_patch_hash_suffix, version_to_dep_path,
+    dep_path_tail, parse_dep_path, peerless_dep_path, rewrite_peer_suffix, strip_patch_hash_suffix,
+    version_to_dep_path,
 };
 use super::format::reformat_for_pnpm_parity;
-use crate::{DepType, Error, LocalSource, LockedPackage, LockfileGraph, link_from_importer};
+use crate::{DepType, Error, LocalSource, LockfileGraph, link_from_importer};
 use aube_manifest::PackageJson;
 use aube_util::path::normalize_lexical;
 use serde::Serialize;
@@ -787,9 +787,7 @@ pub(super) fn build(
     // `file:<path>` for local). Registry deps keep their plain semver
     // values. The target package's `local_source` is authoritative:
     // the tail alone doesn't encode the URL.
-    let rewrite_local_deps = |deps: BTreeMap<String, String>,
-                              parent: &LockedPackage|
-     -> BTreeMap<String, String> {
+    let rewrite_local_deps = |deps: BTreeMap<String, String>| -> BTreeMap<String, String> {
         deps.into_iter()
             .map(|(name, value)| {
                 let dp = version_to_dep_path(&name, &value);
@@ -800,25 +798,10 @@ pub(super) fn build(
                 let rewritten = if let Some(target) = target
                     && let Some(LocalSource::Link(path)) = &target.local_source
                 {
-                    // Relative to a local parent for its own dependency, and
-                    // otherwise (a peer, an override's value) to the lockfile
-                    // directory, as pnpm writes it and the reader anchors it.
-                    // `link:` has no `packages:` entry to record it.
-                    let posix =
-                        |path: &Path| normalize_lexical(path).to_string_lossy().replace('\\', "/");
-                    let base = match &parent.local_source {
-                        Some(
-                            LocalSource::Directory(base)
-                            | LocalSource::Link(base)
-                            | LocalSource::Portal(base),
-                        ) if !parent.peer_dependencies.contains_key(&name)
-                            && !is_override_link_target(&graph.overrides, &name, path) =>
-                        {
-                            posix(base)
-                        }
-                        _ => ".".to_string(),
-                    };
-                    format!("link:{}", link_from_importer(&base, &posix(path)))
+                    // Relative to the lockfile directory on every parent, where pnpm
+                    // links it from. `link:` has no `packages:` entry to record it.
+                    let path = normalize_lexical(path).to_string_lossy().replace('\\', "/");
+                    format!("link:{path}")
                 } else if let Some(target) = target
                     && let Some(ref local) = target.local_source
                 {
@@ -863,8 +846,8 @@ pub(super) fn build(
         };
         key = decorate_patch_hash(&key, Some(pkg));
         snapshot_keys.insert(key.clone(), dep_path.clone());
-        let pkg_deps = rewrite_local_deps(pkg.dependencies.clone(), pkg);
-        let pkg_opt_deps = rewrite_local_deps(pkg.optional_dependencies.clone(), pkg);
+        let pkg_deps = rewrite_local_deps(pkg.dependencies.clone());
+        let pkg_opt_deps = rewrite_local_deps(pkg.optional_dependencies.clone());
         snapshots.insert(
             key,
             WritableSnapshot {

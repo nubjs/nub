@@ -1,5 +1,5 @@
 use crate::{Error, ResolveTask};
-use aube_lockfile::{LocalSource, LockedPackage};
+use aube_lockfile::{GitSource, LocalSource, LockedPackage, git_commits_match, parse_hosted_git};
 use aube_registry::client::RegistryClient;
 use aube_util::path::normalize_lexical;
 use std::collections::BTreeMap;
@@ -367,23 +367,42 @@ pub(crate) fn is_non_registry_specifier(s: &str) -> bool {
 }
 
 /// Whether `held`, the source a locked edge lands on, is what `declared` asks for.
-/// A git spec naming a branch or tag cannot be compared to a resolved commit, so it
-/// does not match, and the caller re-reads the package's metadata.
+/// One git repository has several spellings and can be stored as its hosted archive,
+/// so git compares by repository and commit. A branch or tag has no commit to compare,
+/// and the commit the lockfile pinned is what reuse is there to keep.
 pub(crate) fn source_matches_declaration(held: &LocalSource, declared: &str) -> bool {
-    match (held, LocalSource::parse(declared, Path::new(""))) {
-        (LocalSource::RemoteTarball(held), Some(LocalSource::RemoteTarball(declared))) => {
-            held.url == declared.url
+    fn git_source(source: &LocalSource) -> Option<GitSource> {
+        match source {
+            LocalSource::Git(git) => Some(git.clone()),
+            LocalSource::RemoteTarball(tarball) => tarball.as_hosted_git_source(),
+            _ => None,
         }
-        (LocalSource::Git(held), Some(LocalSource::Git(declared))) => {
-            held.url == declared.url
+    }
+    fn repository(url: &str) -> String {
+        parse_hosted_git(url).map_or_else(
+            || url.strip_prefix("git+").unwrap_or(url).to_string(),
+            |hosted| hosted.https_url(),
+        )
+    }
+    let Some(declared) = LocalSource::parse(declared, Path::new("")) else {
+        return false;
+    };
+    match (git_source(held), git_source(&declared)) {
+        (Some(held), Some(declared)) => {
+            let names_a_commit = |git_ref: &&str| {
+                git_ref.len() >= 7 && git_ref.bytes().all(|b| b.is_ascii_hexdigit())
+            };
+            repository(&held.url) == repository(&declared.url)
                 && held.subpath == declared.subpath
                 && declared
                     .committish
                     .as_deref()
-                    .is_none_or(|commit| held.resolved.starts_with(commit))
+                    .or(Some(declared.resolved.as_str()))
+                    .filter(names_a_commit)
+                    .is_none_or(|commit| git_commits_match(&held.resolved, commit))
         }
-        (held, Some(declared)) => held.specifier() == declared.specifier(),
-        (_, None) => false,
+        (None, None) => held.specifier() == declared.specifier(),
+        _ => false,
     }
 }
 
@@ -835,27 +854,66 @@ mod source_match_tests {
             "https://example.com/fork.tgz"
         ));
         assert!(!source_matches_declaration(&tarball, "^1.0.0"));
+    }
 
-        let LocalSource::Git(mut git) = parse("git+https://example.com/a.git") else {
-            panic!("a git spec parses as git");
+    #[test]
+    fn a_held_git_source_matches_by_repository_and_commit() {
+        let sha = "98e8ff1da1a89f93d1397a24d7413ed15421c139";
+        let git = |url: &str, subpath: Option<&str>| {
+            LocalSource::Git(GitSource {
+                url: url.to_string(),
+                committish: None,
+                resolved: sha.to_string(),
+                integrity: None,
+                subpath: subpath.map(str::to_string),
+            })
         };
-        git.resolved = "abc1234def".to_string();
-        let git = LocalSource::Git(git);
+        let cloned = git("git+ssh://git@github.com/acme/child.git", None);
+        let archived = LocalSource::parse(
+            &format!("https://codeload.github.com/acme/child/tar.gz/{sha}"),
+            Path::new(""),
+        )
+        .unwrap();
+        for held in [&cloned, &archived] {
+            for declared in [
+                format!("github:acme/child#{sha}"),
+                format!("acme/child#{sha}"),
+                format!("git+ssh://git@github.com/acme/child.git#{sha}"),
+                format!("git+https://github.com/acme/child.git#{}", &sha[..7]),
+                format!("https://codeload.github.com/acme/child/tar.gz/{sha}"),
+                "github:acme/child#main".to_string(),
+                "github:acme/child".to_string(),
+            ] {
+                assert!(
+                    source_matches_declaration(held, &declared),
+                    "{held:?} is what {declared} asks for"
+                );
+            }
+            for declared in [
+                format!("github:acme/fork#{sha}"),
+                "github:acme/child#0000000000000000000000000000000000000000".to_string(),
+                "https://example.com/child.tgz".to_string(),
+                "^1.0.0".to_string(),
+            ] {
+                assert!(
+                    !source_matches_declaration(held, &declared),
+                    "{held:?} is not what {declared} asks for"
+                );
+            }
+        }
+
+        let other_host = git("https://git.example.com/a.git", None);
         assert!(source_matches_declaration(
-            &git,
-            "git+https://example.com/a.git"
-        ));
-        assert!(source_matches_declaration(
-            &git,
-            "git+https://example.com/a.git#abc1234"
+            &other_host,
+            "git+https://git.example.com/a.git#main"
         ));
         assert!(!source_matches_declaration(
-            &git,
-            "git+https://example.com/a.git#main"
+            &other_host,
+            "git+https://git.example.com/fork.git"
         ));
         assert!(!source_matches_declaration(
-            &git,
-            "git+https://example.com/fork.git"
+            &git("https://git.example.com/a.git", Some("packages/a")),
+            "git+https://git.example.com/a.git"
         ));
     }
 }
