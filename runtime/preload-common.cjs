@@ -402,6 +402,51 @@ function shouldAutoAsyncTierAtPreload() {
   return nodeHookComposeBroken() && foreignAsyncLoaderFlagPresent();
 }
 
+// On the async tier a user's `registerHooks` call moves every load onto `#loadSync`,
+// whose default step asks the async default load, and that returns no source for
+// CommonJS (nodejs/node#57327). Node's stricter validator on the 22.15-24.11 band then
+// throws inside the register's own `next()`, so one pass-through hook breaks every CJS
+// file in a run where plain `node --import` works. Answer that one failure from disk,
+// beneath every user hook. On a `file:` URL only `commonjs` gets no source there. Plain
+// `commonjs` matches plain Node; `commonjs-sync` would give a real `require.cache` but
+// dies on a required `.cts`, because this tier has no main-thread require shim. Armed
+// at the first call rather than at tier entry, because any registered hook moves the
+// run onto `#loadSync`, which a run that never calls `registerHooks` must not pay for.
+// Only Node's own "no source" result qualifies: a user loader's wrong-typed `source`
+// names that loader's hook and surfaces as under plain Node. A loader's nullish `source`
+// on a CommonJS file reads the same and cannot be told apart. Matching the message is
+// tolerable because this validator exists only on frozen release lines, and a change
+// in its wording fails closed to the crash.
+const ASYNC_TIER_NO_SOURCE = /"source" from the "load" hook but got (undefined|null)\b/;
+function installAsyncTierCjsSource() {
+  if (typeof module_.registerHooks !== "function") return;
+  const orig = module_.registerHooks;
+  let installed = false;
+  module_.registerHooks = function (...args) {
+    if (!installed) {
+      installed = true;
+      orig.call(this, {
+        load(url, context, next) {
+          try {
+            return next(url, context);
+          } catch (err) {
+            if (err && err.code === "ERR_INVALID_RETURN_PROPERTY_VALUE" &&
+                ASYNC_TIER_NO_SOURCE.test(err.message) && context.format !== "module" &&
+                typeof url === "string" && url.startsWith("file:")) {
+              const source = getBuiltin("node:fs").readFileSync(fileURLToPath(url));
+              return { format: "commonjs", source, shortCircuit: true };
+            }
+            throw err;
+          }
+        },
+      });
+    }
+    return orig.apply(this, args);
+  };
+  // A register's `import { registerHooks } from "node:module"` reads the live binding.
+  module_.syncBuiltinESMExports();
+}
+
 // ── Internal `module.register()` without the DEP0205 leak ────────────
 // `module.register()` is the loader-WORKER registration surface (async ESM hooks in
 // a dedicated thread). nub uses it for the compat tier (18.19–22.14, where the sync
@@ -2490,6 +2535,7 @@ module.exports = {
   installVersionMarker,
   installThreadpoolPolicy,
   installWatchReporting,
+  installAsyncTierCjsSource,
   registerLoaderWorker,
   makeHooks,
   shouldAutoAsyncTierAtPreload,
