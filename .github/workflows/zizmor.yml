@@ -11,7 +11,7 @@ permissions: {}
 
 jobs:
   zizmor:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     runs-on: ubuntu-latest
     permissions:
       contents: read

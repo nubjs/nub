@@ -31,7 +31,7 @@ An index of the rules a doing-agent must not miss. Each links to its authoritati
 - Brand boundary: no public `globalThis.nub`, no `nub:*` import namespace, no `@nub/*` scope, no `"nub"` user-authored config field, no documented `NUB_*` user knob. Internals are exempt. ([The brand boundary](#the-brand-boundary--public-surfaces-only-internals-are-exempt))
 - `vendor/aube` fork-discipline no longer applies (2026-07-29) — edit the vendored engine freely, defaults included. The separate rule against upstreaming is untouched. ([The aube vendoring + upstreaming](#the-aube-vendoring--upstreaming))
 - **Builds, gates and test runs go REMOTE by default** — a CI-run test or a `remote-build` VM job, never the dev Mac, except for the warm incremental loop and macOS-native checks. ([Builds and tests go REMOTE by default](#builds-and-tests-go-remote-by-default--the-local-box-is-the-exception))
-- **PR CI is OPT-IN.** Opening a pull request and pushing to it start nothing; a run is requested with `gh pr edit <n> --add-label ci`. A pull request with no checks is unverified, never green. ([PR CI is opt-in](#pr-ci-is-opt-in--ask-for-a-run-with-the-ci-label))
+- **PR CI is OPT-IN.** Opening a pull request and pushing to it start nothing; a run is requested with `gh pr edit <n> --add-label ci`, or `ci-full` for the slower workflows too. A pull request with no checks is unverified, never green. ([PR CI is opt-in](#pr-ci-is-opt-in--ask-for-a-run-with-the-ci-label))
 - No agent co-author trailers in commits; the commit-msg hook strips them.
 - **Never cut a release without the maintainer's explicit, in-the-moment instruction.** Publishing to npm is irreversible, and a publishing dispatch of `release.yml` is what starts it. Same shape as the never-upstream rule. ([Releasing](#releasing) — and invoke the `release` skill, which carries the runbook and this gate.)
 
@@ -53,16 +53,18 @@ Mechanics live in the skills: `remote-build` (VM jobs, `--detach`/`--attach`, th
 Opening a pull request runs nothing. Pushing to one runs nothing. Every workflow that watches pull requests triggers on `labeled` alone and re-checks the label name, so CI happens when somebody asks for it:
 
 ```sh
-gh pr edit <n> --add-label ci     # requests a full run against the current head
+gh pr edit <n> --add-label ci        # requests the usual run against the current head
+gh pr edit <n> --add-label ci-full   # the same, plus seven slower workflows
 ```
 
-`ci-optin.yml` takes the label straight back off, so the label is a button rather than a state and the same command asks for the next round. Nothing else changed: `push: main` and the nightly schedules are untouched, so trunk keeps full automatic coverage and `trunk-red.yml` still reports what a skipped pull-request run would have caught.
+`ci-optin.yml` takes either label straight back off, so a label is a button rather than a state and the same command asks for the next round. Nothing else changed: `push: main` and the nightly schedules are untouched, so trunk keeps full automatic coverage and `trunk-red.yml` still reports what a skipped pull-request run would have caught.
 
 **Why:** a review round used to re-run and then cancel the whole cross-platform matrix on every push. Most of the runner pool went on runs that were superseded before they finished.
 
 - **Ask LAST, not first.** The label is worth spending once the branch is one you would merge — after the review rounds, not before the first one. Requesting a run and then pushing three more commits rebuilds the exact churn this replaced.
 - **A pull request with no checks is UNVERIFIED, and the tooling says so.** `scripts/ci-watch.ts` and `scripts/merge-cascade.ts` both gate on the `CI gate` aggregate being present and green. A skipped check ran nothing, so it verifies nothing, and neither do the checks that arrive on their own — Vercel and the review bots are GitHub Apps rather than Actions workflows, so they still run on every pull request and still go green on one that has had no CI at all. Three green checks is not a verified branch. Never read "no checks reported" as "nothing to wait for".
-- **Every job carries the guard, and `scripts/ci-optin.test.mts` enforces it.** A `labeled` event fires for ANY label, so a job without the `github.event.label.name == 'ci'` check would launch the matrix whenever somebody tagged a pull request `bug`. Add a job to a pull-request workflow and the guard comes with it.
+- **Ask for `ci-full` when a change could trip what plain `ci` leaves out.** `compile-native`, `daily-driver`, `docker-smoke`, `lockfile-roundtrip`, `npm-corpus`, `verb-dispatch` and `wpt-worker` run on `ci-full`, on `push: main` or the nightly, and not on `ci`. Over four weeks of pull requests they reported no failure that another workflow did not report too, and they took about half of PR CI's hours. Use `ci-full` for a change to resolution, the linker, the launcher's payload format, a shared type, or one of those workflows' own files or harnesses. Otherwise a regression only they would catch shows up on `main`, where `trunk-red.yml` reports it and it gets fixed forward.
+- **Every job carries the guard, and `scripts/ci-optin.test.mts` enforces it.** A `labeled` event fires for ANY label, so a job without a label-name check would launch the matrix whenever somebody tagged a pull request `bug`. Add a job to a pull-request workflow and the guard comes with it.
 - **A contributor cannot request their own run.** Labelling needs write access, so an external pull request waits for a maintainer to ask for CI — one more reason to look at fork pull requests promptly.
 
 ## Core design positions

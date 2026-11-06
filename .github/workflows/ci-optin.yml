@@ -1,14 +1,14 @@
 name: CI opt-in
 
-# The `ci` label is a BUTTON, not a state.
+# The `ci` and `ci-full` labels are BUTTONS, not states.
 #
-# Adding it to a pull request is what starts every PR-gated workflow in this repo —
+# Adding one to a pull request is what starts the PR-gated workflows in this repo —
 # they all trigger on `labeled` and guard on the label NAME (see the rationale block
 # in ci.yml). This workflow takes the label straight back off, so the pull request
 # returns to "CI not requested" and the very same `gh pr edit <n> --add-label ci`
 # asks for the next round. Two things would go wrong without the removal: a second
-# run would need a remove-then-add pair, and a leftover `ci` label would read as
-# "CI ran and passed here" long after the commit it ran against was replaced.
+# run would need a remove-then-add pair, and a leftover label would read as "CI ran
+# and passed here" long after the commit it ran against was replaced.
 on:
   pull_request:
     types: [labeled]
@@ -17,10 +17,10 @@ permissions: {}
 
 jobs:
   drop-label:
-    name: Drop the ci label
+    name: Drop the CI request label
     # A `labeled` event fires for every label, so this is scoped the same way the
     # gated workflows are — adding `bug` must not touch anything.
-    if: github.event.label.name == 'ci'
+    if: github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -34,16 +34,17 @@ jobs:
       # asked for is already running, and the only cost is that the next round needs
       # the label removed by hand. Same-repo branches — every agent-opened PR here —
       # get a writable token and the round trip works.
-      - name: Remove the ci label
+      - name: Remove the label
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
+          LABEL: ${{ github.event.label.name }}
         run: |
           set -euo pipefail
-          if gh api --method DELETE --silent "repos/${REPO}/issues/${PR}/labels/ci"; then
-            echo "ci label removed — \`gh pr edit ${PR} --add-label ci\` requests the next run"
+          if gh api --method DELETE --silent "repos/${REPO}/issues/${PR}/labels/${LABEL}"; then
+            echo "${LABEL} label removed — \`gh pr edit ${PR} --add-label ${LABEL}\` requests the next run"
           else
-            echo "::notice::could not remove the ci label (read-only token on a fork pull request?) — remove it by hand before requesting the next run"
+            echo "::notice::could not remove the ${LABEL} label (read-only token on a fork pull request?) — remove it by hand before requesting the next run"
           fi

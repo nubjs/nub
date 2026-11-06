@@ -85,7 +85,7 @@ permissions:
 jobs:
   build:
     name: Build + smoke (${{ matrix.variant }})
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:

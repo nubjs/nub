@@ -56,7 +56,7 @@ env:
 jobs:
   native-deps:
     name: Native-dep floor (ubuntu)
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     runs-on: ubuntu-latest
     # node-gyp compile (better-sqlite3) + real registry installs can be slow on cold runners.
     timeout-minutes: 30
