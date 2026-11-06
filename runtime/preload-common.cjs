@@ -41,6 +41,7 @@ const {
   SetPrototypeAdd,
   SetPrototypeHas,
   String,
+  StringPrototypeSplit,
   StringPrototypeStartsWith,
   SymbolFor,
   SymbolToStringTag,
@@ -433,27 +434,60 @@ function shouldAutoAsyncTierAtPreload() {
   return nodeHookComposeBroken() && foreignAsyncLoaderFlagPresent();
 }
 
+// Does this Node's load validator refuse a missing source for CommonJS? Measured per
+// release: every registerHooks release through 22.22.2, 23.x, and 24.x through 24.11.0.
+function nodeLoadValidatorStrict() {
+  const p = StringPrototypeSplit(String(process.versions.node), ".");
+  const maj = parseInt(p[0], 10) || 0;
+  const min = parseInt(p[1], 10) || 0;
+  const pat = parseInt(p[2], 10) || 0;
+  if (maj === 22) return min < 22 || (min === 22 && pat < 3);
+  return maj === 23 || (maj === 24 && (min < 11 || (min === 11 && pat === 0)));
+}
+
 // On the async tier a user's `registerHooks` call moves every load onto `#loadSync`,
 // whose default step asks the async default load, and that returns no source for
-// CommonJS (nodejs/node#57327). Node's stricter validator on the 22.15-24.11 band then
-// throws inside the register's own `next()`, so one pass-through hook breaks every CJS
-// file in a run where plain `node --import` works. Answer that one failure from disk,
-// beneath every user hook. On a `file:` URL only `commonjs` gets no source there. Plain
-// `commonjs` matches plain Node; `commonjs-sync` would give a real `require.cache` but
-// dies on a required `.cts`, because this tier has no main-thread require shim. This
-// hook lives exactly as long as a user load hook does, because it moves CommonJS onto
-// the translator whose `require` has no `.cache`: a run with no user load hook, whether
-// it never registered one, registered only `resolve`, or deregistered it, must keep
-// Node's own path, as plain Node does.
+// CommonJS (nodejs/node#57327). Where Node's validator is strict it then throws inside
+// the register's own `next()`, so one pass-through hook breaks every CJS file in a run
+// where plain `node --import` works. Answer that one failure from disk, beneath every
+// user hook, as `commonjs`, which matches plain Node there: `commonjs-sync` would give a
+// real `require.cache` but dies on a required `.cts`, because this tier has no
+// main-thread require shim. Where the validator is permissive the missing source passes
+// and a hook reading `source` finds nothing, so fill it in, as `commonjs-sync` because
+// plain Node keeps a real `require.cache` on those releases.
+//
+// This hook lives exactly as long as a user load hook does, because on a strict release
+// it moves CommonJS onto the translator whose `require` has no `.cache`: a run with no
+// user load hook, whether it never registered one, registered only `resolve`, or
+// deregistered it, must keep Node's own path, as plain Node does.
+//
 // Only Node's own "no source" result qualifies: a user loader's wrong-typed `source`
 // names that loader's hook and surfaces as under plain Node. A loader's nullish `source`
-// on a CommonJS file reads the same and cannot be told apart. Matching the message is
-// tolerable because this validator exists only on frozen release lines, and a change
-// in its wording fails closed to the crash.
+// on a CommonJS file reads the same and cannot be told apart on a strict release, and
+// elsewhere the only failure this message can name is a loader's, so it stays an error
+// there. Matching the message is tolerable because this validator exists only on frozen
+// release lines, and a change in its wording fails closed to the crash.
 const ASYNC_TIER_NO_SOURCE = /"source" from the "load" hook but got (undefined|null)\b/;
 function installAsyncTierCjsSource() {
   if (typeof module_.registerHooks !== "function") return;
   const orig = module_.registerHooks;
+  const strict = nodeLoadValidatorStrict();
+  const isFileUrl = (url) => typeof url === "string" && StringPrototypeStartsWith(url, "file:");
+  const readSource = (url) => getBuiltin("node:fs").readFileSync(fileURLToPath(url));
+  // A user hook expects the `commonjs` that plain Node reports, so it never sees the
+  // `commonjs-sync` beneath it, which is restored for Node on the way back out.
+  const showCommonjsFormat = (load) => function (url, context, next) {
+    let filled = false;
+    const result = ReflectApply(load, this, [url, context, (...args) => {
+      const inner = ReflectApply(next, undefined, args);
+      if (inner?.format !== "commonjs-sync") return inner;
+      filled = true;
+      return { ...inner, format: "commonjs" };
+    }]);
+    return filled && result?.format === "commonjs" && result.source != null
+      ? { ...result, format: "commonjs-sync" }
+      : result;
+  };
   let recovery = null;
   let userLoadHooks = 0;
   const release = () => {
@@ -469,22 +503,29 @@ function installAsyncTierCjsSource() {
     // sit beneath every user hook.
     recovery ??= ReflectApply(orig, this, [{
       load(url, context, next) {
+        let result;
         try {
-          return next(url, context);
+          result = next(url, context);
         } catch (err) {
-          if (err && err.code === "ERR_INVALID_RETURN_PROPERTY_VALUE" &&
-              RegExpPrototypeTest(ASYNC_TIER_NO_SOURCE, err.message) && context.format !== "module" &&
-              typeof url === "string" && StringPrototypeStartsWith(url, "file:")) {
-            const source = getBuiltin("node:fs").readFileSync(fileURLToPath(url));
-            return { format: "commonjs", source, shortCircuit: true };
+          if (strict && err && err.code === "ERR_INVALID_RETURN_PROPERTY_VALUE" &&
+              RegExpPrototypeTest(ASYNC_TIER_NO_SOURCE, err.message) && isFileUrl(url)) {
+            return { format: "commonjs", source: readSource(url), shortCircuit: true };
           }
           throw err;
         }
+        // A permissive release lets the missing source through, which leaves a user
+        // hook that reads or rewrites `source` with nothing where plain Node has bytes.
+        if (result && result.format === "commonjs" && result.source == null && isFileUrl(url)) {
+          return { ...result, format: "commonjs-sync", source: readSource(url) };
+        }
+        return result;
       },
     }]);
     let handle;
     try {
-      handle = ReflectApply(orig, this, arguments);
+      handle = strict
+        ? ReflectApply(orig, this, arguments)
+        : ReflectApply(orig, this, [{ resolve: hooks.resolve, load: showCommonjsFormat(hooks.load) }]);
     } catch (err) {
       release();
       throw err;

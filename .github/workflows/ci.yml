@@ -1201,8 +1201,9 @@ jobs:
           node-version: ${{ matrix.node }}
       # Side-install the off-matrix tier representatives for the version_tiers
       # integration test: compat 22.13, unsupported 18.18, detect-module in-band
-      # 20.11 (flag still required there), and 26.5 (carries the node:ffi/vfs/
-      # stream-iter enabler modules). actions/setup-node only manages one
+      # 20.11 (flag still required there), 26.5 (carries the node:ffi/vfs/
+      # stream-iter enabler modules), and 22.23 (the async tier with Node's permissive
+      # load validator, for foreign_register_cjs). actions/setup-node only manages one
       # PATH-active Node per job; these go into private dirs and are exposed to
       # the test via TEST_NODE_BIN_<MAJOR>_<MINOR>_<PATCH> — the env-var prefix
       # deliberately avoids `NUB_*` (brand-boundary rule applies even to test-only
@@ -1226,15 +1227,18 @@ jobs:
           dir_18_18=$(install_node 18.18.0)
           dir_20_11=$(install_node 20.11.0)
           dir_26_5=$(install_node 26.5.0)
+          dir_22_23=$(install_node 22.23.3)
           "$dir_22_13/node" --version
           "$dir_18_18/node" --version
           "$dir_20_11/node" --version
           "$dir_26_5/node" --version
+          "$dir_22_23/node" --version
           {
             echo "TEST_NODE_BIN_22_13_0=$dir_22_13"
             echo "TEST_NODE_BIN_18_18_0=$dir_18_18"
             echo "TEST_NODE_BIN_20_11_0=$dir_20_11"
             echo "TEST_NODE_BIN_26_5_0=$dir_26_5"
+            echo "TEST_NODE_BIN_22_23_3=$dir_22_23"
           } >> "$GITHUB_ENV"
       - name: pinned package managers + socket firewall
         shell: bash
