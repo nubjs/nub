@@ -1326,7 +1326,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             config
                 .runtime_node_options
                 .iter()
-                .map(|opt| node_options_token(opt)),
+                .map(|opt| node_option_token(opt)),
         );
         // Coverage-exclude nub's own runtime (R9) — via NODE_OPTIONS, not just argv.
         // The CLI-arg form at the `cmd.arg(glob)` site above only reaches the DIRECT
@@ -2331,7 +2331,7 @@ pub fn compute_augmentation_env(
     node_opts_parts.extend(
         runtime_node_options
             .iter()
-            .map(|opt| node_options_token(opt)),
+            .map(|opt| node_option_token(opt)),
     );
     // Web Storage is deliberately NOT pushed here (mirrors `spawn_node`). This env
     // is inherited by the whole script subtree, and the flag's 22.4 floor is above
@@ -3506,6 +3506,19 @@ pub fn node_options_token(value: &str) -> String {
     }
 }
 
+/// One complete option for NODE_OPTIONS, quoting its value alone: `--flag="a value"`.
+/// Node's tokenizer accepts a quote anywhere in a token, but the runtime's own scans
+/// (`anotherPreloadMayFollow`, `foreignAsyncLoaderFlagPresent`) look for `--import=` at a
+/// token's start. One they cannot see is a chainer they let the entry run ahead of.
+pub fn node_option_token(option: &str) -> String {
+    match option.split_once('=') {
+        Some((flag, value)) if flag.starts_with("--") && !value.is_empty() => {
+            format!("{flag}={}", node_options_token(value))
+        }
+        _ => node_options_token(option),
+    }
+}
+
 /// Whether a `--require` / `--import` value names one of NUB'S OWN preload entry
 /// points — the runtime preload, or a synthesized preload chainer — rather than a
 /// user's. `value` must already be slash-normalized; a `file://` prefix is
@@ -3660,7 +3673,7 @@ pub fn split_inherited_preloads(value: &str) -> (String, Vec<String>, Vec<String
     (
         passthrough
             .iter()
-            .map(|token| node_options_token(token))
+            .map(|token| node_option_token(token))
             .collect::<Vec<_>>()
             .join(" "),
         requires,
@@ -3721,7 +3734,7 @@ fn reentrant_node_options(existing: Option<&str>, runtime_options: &[String]) ->
     }
     Some(
         out.iter()
-            .map(|token| node_options_token(token))
+            .map(|token| node_option_token(token))
             .collect::<Vec<_>>()
             .join(" "),
     )
@@ -4347,7 +4360,7 @@ mod tests {
         let spaced = "--import=file:///sp ace/node_modules/.nub/preload-chain.bbbb.mjs";
         assert_eq!(
             reentrant_node_options(Some(ours), &options(spaced)).as_deref(),
-            Some(format!("{ours} \"{spaced}\"").as_str())
+            Some(format!("{ours} --import=\"{}\"", &spaced[9..]).as_str())
         );
     }
 

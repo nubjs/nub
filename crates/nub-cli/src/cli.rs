@@ -7976,7 +7976,7 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         .chain(
             runtime_node_options
                 .iter()
-                .map(|option| nub_core::node::spawn::node_options_token(option)),
+                .map(|option| nub_core::node::spawn::node_option_token(option)),
         )
         .collect();
     // With nothing left after a lift the variable is still set, to keep the inherited
