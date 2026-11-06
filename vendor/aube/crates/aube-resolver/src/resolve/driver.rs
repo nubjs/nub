@@ -3075,9 +3075,10 @@ impl<'a> ResolveDriver<'a> {
         // edges, which hold what each one resolved to, not the range it declares.
         // A version stands in for the range. A source an override put there does
         // not: once no override applies, the edge is stale and only the packument
-        // has the real range. Go back to it, keeping this version. The source the
-        // package declares itself is not stale. npm, bun and yarn lockfiles keep
-        // what it declares; pnpm's keeps the overrides that were in effect.
+        // has the real range. Go back to it, keeping this version. A source the
+        // package declares itself is not stale. The overrides a lockfile recorded
+        // say which edges they put there, and npm, bun and yarn lockfiles keep what
+        // each package declares.
         let stale = locked_pkg.dependencies.iter().any(|(dep_name, edge)| {
             let edge = edge
                 .strip_prefix(dep_name.as_str())
@@ -3094,22 +3095,25 @@ impl<'a> ResolveDriver<'a> {
             {
                 return false;
             }
-            if locked_pkg.peer_dependencies.contains_key(dep_name) {
+            if locked_pkg.peer_dependencies.contains_key(dep_name)
+                || pick_override_spec(&self.previous_override_rules, dep_name, edge, &ancestors)
+                    .is_some()
+            {
                 return true;
             }
-            if locked_pkg.declared_dependencies_known {
-                let held = self
-                    .locked_index
-                    .local_source(dep_name, edge)
-                    .cloned()
-                    .or_else(|| LocalSource::parse(edge, std::path::Path::new("")));
-                return !locked_pkg
-                    .declared_dependencies
-                    .get(dep_name)
-                    .zip(held)
-                    .is_some_and(|(declared, held)| source_matches_declaration(&held, declared));
+            if !locked_pkg.declared_dependencies_known {
+                return false;
             }
-            pick_override_spec(&self.previous_override_rules, dep_name, edge, &ancestors).is_some()
+            let held = self
+                .locked_index
+                .local_source(dep_name, edge)
+                .cloned()
+                .or_else(|| LocalSource::parse(edge, std::path::Path::new("")));
+            !locked_pkg
+                .declared_dependencies
+                .get(dep_name)
+                .zip(held)
+                .is_some_and(|(declared, held)| source_matches_declaration(&held, declared))
         });
         if stale {
             task.range = version;
