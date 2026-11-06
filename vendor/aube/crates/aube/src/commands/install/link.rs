@@ -291,13 +291,19 @@ pub(super) fn run_link_phase(input: LinkPhaseInput<'_>) -> miette::Result<LinkPh
     } else {
         (None, None)
     };
-    if !linker.uses_global_virtual_store()
-        && let Some(current_subtree_hashes) = current_subtree_hashes.as_ref()
+    if let Some(current_subtree_hashes) = current_subtree_hashes.as_ref()
         && let Some(prior_subtrees) = state::read_state_subtree_hashes(cwd)
     {
         let touched = delta::changed_subtree_roots(&prior_subtrees, current_subtree_hashes);
-        let invalidated =
-            invalidate_changed_aube_entries(aube_dir, &touched, virtual_store_dir_max_length);
+        // Under the shared store a changed package moves to a new store path, and its
+        // link is re-pointed. Only an entry materialized in the project (ejected, or
+        // `file:`) keeps its path, and its dependency links with it.
+        let invalidated = invalidate_changed_aube_entries(
+            aube_dir,
+            &touched,
+            virtual_store_dir_max_length,
+            linker.uses_global_virtual_store(),
+        );
         if invalidated > 0 {
             tracing::debug!("delta: invalidated {invalidated} changed .aube entry/entries");
         }

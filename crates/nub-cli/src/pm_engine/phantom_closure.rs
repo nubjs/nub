@@ -45,7 +45,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::{LazyLock, PoisonError, RwLock};
 
 use aube_linker::DiskMaterializePlan;
-use aube_lockfile::{LockedPackage, LockfileGraph};
+use aube_lockfile::{LocalSource, LockedPackage, LockfileGraph};
 use rayon::prelude::*;
 
 /// The SINGLE phantom-eject arm — [`crate::dynamic_phantom::enabled`] — shared
@@ -262,6 +262,13 @@ fn label_plan(
                 Reason::LegacyVite
             } else if seed_matcher.matches(name) {
                 Reason::Configured
+            } else if let Some(child) = graph
+                .packages
+                .values()
+                .filter(|pkg| pkg.name == name)
+                .find_map(|pkg| project_local_child(pkg, graph))
+            {
+                Reason::LocalDependency(child.to_string())
             } else {
                 // The closure edge: whichever declared dependency of this package
                 // is itself in the plan is why this one had to come along.
@@ -285,6 +292,32 @@ fn label_plan(
             }
         })
         .collect()
+}
+
+/// The dependency of a registry package that only ever materializes per project,
+/// if it has one.
+///
+/// The shared store links a package's siblings by global path, and a `file:`,
+/// `portal:` or `exec:` package never reaches that store
+/// ([`aube_lockfile::LocalSource::is_globally_shareable`]), so the link dangles:
+/// a clean install, then `Cannot find module` at runtime. Pointing a transitive
+/// dependency at a local copy with `overrides` is how a registry package gets such
+/// a child. Ejecting the parent puts both sides of the link in the project. `link:`
+/// needs no eject, because its sibling symlink is an absolute path to the target.
+fn project_local_child<'a>(pkg: &'a LockedPackage, graph: &LockfileGraph) -> Option<&'a str> {
+    if pkg.local_source.is_some() {
+        return None;
+    }
+    pkg.dependencies
+        .iter()
+        .chain(pkg.optional_dependencies.iter())
+        .find_map(|(name, tail)| {
+            let key =
+                aube_lockfile::resolve_dep_edge(name, tail, |k| graph.packages.contains_key(k))?;
+            let source = graph.packages.get(&key)?.local_source.as_ref()?;
+            (!source.is_globally_shareable() && !matches!(source, LocalSource::Link(_)))
+                .then_some(name.as_str())
+        })
 }
 
 /// One dynamically-flagged importer the planner may seed. Two INDEPENDENT reasons
@@ -404,13 +437,34 @@ fn plan_from_flags(
         if seed_names_set.contains(pkg.name.as_str())
             || seed_matcher.matches(&pkg.name)
             || (pkg.name == "vite" && super::vite_compat::vite_lt_8_1(&pkg.version))
+            || project_local_child(pkg, graph).is_some()
         {
             seed_dep_paths.insert(dep_path.as_str());
         }
     }
 
-    // Rung 1 — reverse-BFS ancestor-closure = the affected subtree.
-    let closure = graph.importer_closure(seed_dep_paths.iter().copied());
+    // Rung 1 — reverse-BFS ancestor-closure = the affected subtree. The executor is
+    // name-keyed, so every version of a name in the closure leaves the store, and its
+    // importers must leave with it. One left behind keeps loading that version from
+    // the store: a second module instance beside the project's copy.
+    let mut closure = graph.importer_closure(seed_dep_paths.iter().copied());
+    loop {
+        let closure_names: HashSet<&str> = closure
+            .iter()
+            .filter_map(|dep_path| graph.packages.get(dep_path))
+            .map(|pkg| pkg.name.as_str())
+            .collect();
+        let versions: Vec<&str> = graph
+            .packages
+            .iter()
+            .filter(|(_, pkg)| closure_names.contains(pkg.name.as_str()))
+            .map(|(dep_path, _)| dep_path.as_str())
+            .collect();
+        if versions.iter().all(|dep_path| closure.contains(*dep_path)) {
+            break;
+        }
+        closure = graph.importer_closure(versions);
+    }
 
     // Bounded-subtree guard: the closure must stay a small slice of the tree. A
     // closure approaching the whole tree means a foundational seed — a bug, since
@@ -778,6 +832,7 @@ mod tests {
         let names: HashSet<&str> = plan.names.iter().map(String::as_str).collect();
         assert!(names.contains("vite"), "name-keyed vite still materializes");
         assert!(names.contains("astro"), "the <8.1 framework closure ejects");
+        assert!(names.contains("app"), "the ejected >=8.1 copy brings `app`");
     }
 
     #[test]
@@ -818,6 +873,59 @@ mod tests {
             "a self-contained build is not ejected: {:?}",
             plan.names
         );
+    }
+
+    /// `parent` is a registry package whose `child` edge lands on `source`.
+    fn registry_parent_of(source: LocalSource) -> LockfileGraph {
+        let mut g = graph(&[
+            ("outer@1.0.0", "outer", &[("parent", "1.0.0")]),
+            ("parent@1.0.0", "parent", &[("child", "local")]),
+            ("child@local", "child", &[]),
+            ("unrelated@1.0.0", "unrelated", &[]),
+        ]);
+        g.packages.get_mut("child@local").unwrap().local_source = Some(source);
+        g
+    }
+
+    #[test]
+    fn registry_parent_of_a_project_local_package_ejects_with_its_importers() {
+        let g = registry_parent_of(LocalSource::Directory("vendor/child".into()));
+        let plan = plan_from_flags(&g, &[], &[]);
+        let planned: HashSet<String> = plan.names.into_iter().collect();
+        assert_eq!(planned, names(&["outer", "parent"]));
+    }
+
+    #[test]
+    fn ejecting_one_version_of_a_name_brings_the_importers_of_the_others() {
+        // Only parent@1.0.0 has the local child, but the executor ejects by name, so
+        // parent@2.0.0 moves too and has to take its own importer with it.
+        let mut g = registry_parent_of(LocalSource::Directory("vendor/child".into()));
+        g.packages.extend(
+            graph(&[
+                ("parent@2.0.0", "parent", &[]),
+                ("uses-two@1.0.0", "uses-two", &[("parent", "2.0.0")]),
+            ])
+            .packages,
+        );
+        let planned: HashSet<String> = plan_from_flags(&g, &[], &[]).names.into_iter().collect();
+        assert_eq!(planned, names(&["outer", "parent", "uses-two"]));
+    }
+
+    #[test]
+    fn a_link_child_or_a_local_parent_leaves_the_shared_store_alone() {
+        let linked = registry_parent_of(LocalSource::Link("vendor/child".into()));
+        assert!(plan_from_flags(&linked, &[], &[]).names.is_empty());
+
+        let mut local_parent = graph(&[
+            ("parent@local", "parent", &[("child", "local")]),
+            ("child@local", "child", &[]),
+        ]);
+        for pkg in local_parent.packages.values_mut() {
+            pkg.local_source = Some(LocalSource::Directory(
+                format!("vendor/{}", pkg.name).into(),
+            ));
+        }
+        assert!(plan_from_flags(&local_parent, &[], &[]).names.is_empty());
     }
 
     #[test]

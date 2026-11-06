@@ -13,7 +13,7 @@
 # logic, needs no `ci-gate` wiring, and can be deleted wholesale if the approach is dropped.
 #
 # RUNNER SELECTION. `depot-macos-26` (M4, 8 CPU / 24 GB / 400 GB) when the Depot GitHub App
-# is installed on this org, else GitHub's `macos-14`. The fallback is not cosmetic: GitHub's
+# is installed on this org, else GitHub's `macos-15`. The fallback is not cosmetic: GitHub's
 # macOS runners give only ~14 GB of disk, which a release build plus a target dir can crowd,
 # so a failure here that mentions ENOSPC means the fallback was used.
 name: mac-build
@@ -45,7 +45,7 @@ jobs:
     # Only an explicit dispatch asks for Depot. A `push` smoke-test has no inputs and must
     # NOT select depot-macos-26, or it queues forever waiting on a runner class that is not
     # yet wired up — which reads as a hang rather than a configuration gap.
-    runs-on: ${{ inputs.runner == 'depot' && 'depot-macos-26' || 'macos-14' }}
+    runs-on: ${{ inputs.runner == 'depot' && 'depot-macos-26' || 'macos-15' }}
     timeout-minutes: 60
     permissions:
       contents: read

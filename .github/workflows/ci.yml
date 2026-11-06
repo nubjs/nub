@@ -48,7 +48,7 @@ jobs:
   #                  code compiles + runs). macOS is dropped from PRs entirely — it
   #                  is the macOS-5-concurrent bottleneck.
   #   push:main / schedule (nightly) / any other event → the FULL matrix: ubuntu +
-  #                  windows-latest + macos-14 on the current Node line, plus the
+  #                  windows-latest + macos-15 on the current Node line, plus the
   #                  Linux-only tier representatives. This is where cross-OS (incl.
   #                  macOS) coverage is proven.
   # One job emitting JSON consumed via fromJSON keeps the split in a single place
@@ -186,13 +186,13 @@ jobs:
           # The Linux Node-version tier legs are common to PR and trunk (compat
           # divergences are runtime-version-specific, not OS-specific). The
           # current-line cross-OS legs differ: PR keeps ubuntu + ONE windows;
-          # trunk/nightly adds macos-14.
+          # trunk/nightly adds macos-15.
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             test_os='[{"os":"ubuntu-latest","node":"24"},{"os":"windows-latest","node":"24"}]'
             pnp_os='[{"os":"ubuntu-latest","node":"24"},{"os":"windows-latest","node":"24"}]'
           else
-            test_os='[{"os":"ubuntu-latest","node":"24"},{"os":"windows-latest","node":"24"},{"os":"macos-14","node":"24"}]'
-            pnp_os='[{"os":"ubuntu-latest","node":"24"},{"os":"windows-latest","node":"24"},{"os":"macos-14","node":"24"}]'
+            test_os='[{"os":"ubuntu-latest","node":"24"},{"os":"windows-latest","node":"24"},{"os":"macos-15","node":"24"}]'
+            pnp_os='[{"os":"ubuntu-latest","node":"24"},{"os":"windows-latest","node":"24"},{"os":"macos-15","node":"24"}]'
           fi
           # Linux-only Node-version tier representatives (same on PR and trunk).
           test_tiers='[{"os":"ubuntu-latest","node":"22.15"},{"os":"ubuntu-latest","node":"22.13"},{"os":"ubuntu-latest","node":"20.11"},{"os":"ubuntu-latest","node":"18.19"}]'
@@ -366,7 +366,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-14]
+        os: [ubuntu-latest, windows-latest, macos-15]
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
@@ -816,7 +816,7 @@ jobs:
   # cache, so it was cold on every single run. Trunk pays that cold build once per
   # Rust-relevant push; every PR after it restores. It is also gated on `run_rust` — a
   # docs- or site-only PR cannot change what this builds, yet before the gate this job
-  # was the ENTIRE wall time of such a PR's CI run (~17 min on a macos-14 runner, while
+  # was the ENTIRE wall time of such a PR's CI run (~17 min on a macos-15 runner, while
   # every Rust job around it correctly skipped).
   macos-embed-roundtrip:
     name: macOS embed round-trip (TEMPORARY, PR #175)
@@ -825,7 +825,7 @@ jobs:
       (github.event_name != 'pull_request' || github.event.label.name == 'ci') &&
       needs.matrix-plan.outputs.run_rust == 'true' &&
       (github.event_name == 'pull_request' || github.ref == 'refs/heads/main')
-    runs-on: macos-14
+    runs-on: macos-15
     permissions:
       contents: read
     # This leg now stages the vendored runtime like its Windows twin, so the binary it
@@ -1055,7 +1055,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-14]
+        os: [ubuntu-latest, windows-latest, macos-15]
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
@@ -1100,12 +1100,12 @@ jobs:
       # The matrix is computed by the matrix-plan job. On pull_request: ubuntu
       # (full Node-version tier matrix) + ONE windows-latest representative;
       # macOS is dropped from PRs (the macOS-5 concurrency bottleneck). On
-      # push:main / nightly schedule: the FULL matrix adds macos-14.
+      # push:main / nightly schedule: the FULL matrix adds macos-15.
       #
-      # macos-14 is Apple Silicon (arm64) — the primary dev platform and the
+      # macos-15 is Apple Silicon (arm64) — the primary dev platform and the
       # darwin-arm64 release target (A24). It runs on trunk/nightly only.
       # darwin-x64 is built in release.yml but not yet exercised here; add
-      # macos-13 (Intel) if x64 coverage is wanted later.
+      # macos-15-intel if x64 coverage is wanted later.
       #
       # The windows-latest leg is the ONLY place the PM-shim's cfg(windows)
       # code executes (Docker on the dev box is Linux-only): `cargo test`
@@ -1491,7 +1491,7 @@ jobs:
       # `findPnpApi` differ by OS (Windows backslashes especially), which the host
       # (macOS) + Docker (Linux) legs can't fully cover. On pull_request: ubuntu +
       # ONE windows-latest representative (the Windows-path divergence is the real
-      # cross-OS risk); macos-14 runs on push:main / nightly schedule only.
+      # cross-OS risk); macos-15 runs on push:main / nightly schedule only.
       # Plus two Linux tier representatives on PR and trunk alike: 22.15 = fast-tier
       # floor (sync registerHooks), 18.19 = compat-tier floor (async loader worker).
       # Tiers are runtime-version specific, not OS-specific, so they run on Linux
@@ -1760,7 +1760,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14]
+        os: [ubuntu-latest, macos-15]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     permissions:
@@ -1791,7 +1791,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14]
+        os: [ubuntu-latest, macos-15]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     permissions:
@@ -1817,7 +1817,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-14]
+        os: [ubuntu-latest, windows-latest, macos-15]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     permissions:
@@ -1856,7 +1856,10 @@ jobs:
           # saw `cancelled`, and failed. Since this is the sole required check, that
           # is a false red on the exact status branch protection reads. It does not
           # mask a real failure: a leg that genuinely fails reports `failure`, never
-          # `cancelled`, and the run that superseded it carries the real verdict.
+          # `cancelled`, and the run that superseded it carries the real verdict. The
+          # one exception seen so far: GitHub cancels a job on a retired runner label
+          # within a second ("The configuration ... is not supported"), which reads
+          # as green here, so a macOS leg with zero steps means the label needs moving.
           # `trunk-red.yml` already takes this position for the same reason.
           bad=$(echo "$RESULTS" | jq -r '
             to_entries

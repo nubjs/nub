@@ -1,3 +1,4 @@
+use crate::commands::install::DepSelection;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -8,6 +9,7 @@ const INSTALL_STATE_FILE_NAME: &str = "state.json";
 const FRESH_STATE_FILE_NAME: &str = "fresh.json";
 const LICENSE_STATE_FILE_NAME: &str = "licenses.json";
 const HOISTED_PLACEMENTS_FILE_NAME: &str = "hoisted-placements.json";
+const DEP_SELECTION_FILE_NAME: &str = "dep-selection.json";
 
 /// The install-state directory name, `.<name>-state`. Standalone aube:
 /// `.aube-state`.
@@ -1330,6 +1332,30 @@ pub fn write_hoisted_placements(
     aube_util::fs_atomic::atomic_write(&path, &json)
 }
 
+/// Record which dependency groups (`--prod`, `--dev`, `--no-optional`) the
+/// install linked. A sidecar, like the hoisted placements, because filtered
+/// installs leave the main state alone and a filtered `rebuild` must build
+/// only what this tree holds, as pnpm's `.modules.yaml#included` lets it.
+pub fn write_dep_selection(
+    project_dir: &Path,
+    selection: DepSelection,
+) -> Result<(), std::io::Error> {
+    let state_path = state_dir(project_dir);
+    remove_legacy_state_file(&state_path)?;
+    std::fs::create_dir_all(&state_path)?;
+    let json = serde_json::to_vec(&selection)?;
+    aube_util::fs_atomic::atomic_write(&state_path.join(DEP_SELECTION_FILE_NAME), &json)
+}
+
+/// The dependency groups the last install linked; every group when it
+/// recorded none.
+pub fn read_dep_selection(project_dir: &Path) -> DepSelection {
+    std::fs::read(state_dir(project_dir).join(DEP_SELECTION_FILE_NAME))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
 /// Read the exact linker-produced hoisted placement map. `None` means the
 /// install predates the sidecar (or it is unreadable), so callers may use the
 /// legacy planner-based reconstruction as a compatibility fallback.
@@ -2388,6 +2414,10 @@ fn hash_settings(project_dir: &Path, cli_flags: &[(String, String)]) -> String {
         }
     }
     hasher.update(b"\0");
+    // The rules `install::bin_linking` decides a shared bin name by. Bump when
+    // they change what a `.bin` holds: an upgrade would otherwise keep the old
+    // shims behind "already up to date" until something else moved this hash.
+    hasher.update(b"bin_rules=1\0");
     format!("blake3:{}", hasher.finalize().to_hex())
 }
 

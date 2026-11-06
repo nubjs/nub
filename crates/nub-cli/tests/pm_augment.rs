@@ -193,7 +193,12 @@ fn a_lifecycle_shell_change_rebuilds_a_warm_install() {
         );
     };
 
-    step("the first install", &["install", "--offline"]);
+    // The unapproved build fails the first install, once the tree is linked.
+    let (stdout, stderr, code) = run(&nub, &dir, &["install", "--offline"]);
+    assert_eq!(
+        code, 1,
+        "the first install must fail on the unapproved build\nstdout: {stdout}\nstderr: {stderr}"
+    );
     // `approve-builds` may run the approved build itself, so every count below is
     // relative to the tree after the measured install.
     step("approve-builds", &["approve-builds", "--all"]);

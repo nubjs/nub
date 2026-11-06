@@ -22,9 +22,15 @@ Add a dependency
   Writes `allowBuilds: { <pkg>: true }` into the workspace yaml (or `package.json#aube.allowBuilds`) before the install runs, so the named package's `preinstall` / `install` / `postinstall` scripts execute on this invocation. Repeatable — pass the flag once per package. Mirrors `pnpm add --allow-build=<pkg>`.
 
   Conflicts with `--no-save`, which only snapshots `package.json` and the lockfile and would leave an orphaned approval in the workspace yaml on restore. Also conflicts with `--deny-build` for the same package name.
-- **`--allow-low-downloads`** — Bypass the similar-name, new-name, and `lowDownloadThreshold` confirm prompts / refusals for this invocation.
+- **`--allow-low-downloads`** — Bypass the `lowDownloadThreshold`, similar-name, and new-name confirm prompts / refusals for this invocation.
 
-  `aube add` looks up each candidate's weekly download count and prompts (interactive) or fails (CI) when the count is below `lowDownloadThreshold`, resembles a top-100,000 npm package, or is newer than `minimumPackageAge`. The flag is intended for cases where you've already verified the package out-of-band. It does not affect the OSV malicious-package check, which remains a hard block.
+  `aube add` looks up each candidate's weekly download count and prompts (interactive) or fails (CI) when the count is below `lowDownloadThreshold`. This flag also clears the two checks that have flags of their own, `--allow-similar-name` and `--allow-new-name`. It is intended for cases where you've already verified the package out-of-band. It does not affect the OSV malicious-package check, which remains a hard block.
+- **`--allow-new-name`** — Bypass the new-name confirm prompt / refusal for this invocation.
+
+  `aube add` prompts (interactive) or fails (CI) when a name was first published within `minimumPackageAge`. The similar-name and `lowDownloadThreshold` checks still run. List the package in `allowedUnpopularPackages` to keep it allowed.
+- **`--allow-similar-name`** — Bypass the similar-name confirm prompt / refusal for this invocation.
+
+  `aube add` prompts (interactive) or fails (CI) when a name closely resembles a top-100,000 npm package. The new-name and `lowDownloadThreshold` checks still run. List the package in `allowedUnpopularPackages` to keep it allowed.
 - **`--dangerously-allow-all-builds`** — Allow every dependency's lifecycle scripts to run.
 
   Bypasses the `allowBuilds` allowlist for this invocation. Do not use in CI. Mirrors pnpm's `--dangerously-allow-all-builds`.

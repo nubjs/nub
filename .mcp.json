@@ -5,8 +5,8 @@
       "args": ["--yes", "lat.md@0.12.2", "mcp"]
     },
     "chrome-devtools": {
-      "command": "npx",
-      "args": ["-y", "chrome-devtools-mcp@latest"]
+      "command": "node",
+      "args": ["scripts/chrome-devtools-mcp.mjs"]
     }
   }
 }

@@ -162,7 +162,7 @@ pub(crate) async fn add_to_project_with_overrides(
                     supply_chain::run_cli_name_gates(
                         lock.project_dir(),
                         packages,
-                        false,
+                        Default::default(),
                         crate::commands::add_supply_chain::LowDownloadPrompt::Host(
                             options.control.clone(),
                         ),
@@ -301,18 +301,34 @@ pub struct AddArgs {
         validate_error = "The --allow-build flag is missing a package name. Please specify the package name(s) that are allowed to run installation scripts."
     )]
     pub allow_build: Vec<String>,
-    /// Bypass the similar-name, new-name, and `lowDownloadThreshold`
-    /// confirm prompts / refusals for this invocation.
+    /// Bypass the `lowDownloadThreshold`, similar-name, and new-name confirm
+    /// prompts / refusals for this invocation.
     ///
     /// `aube add` looks up each candidate's weekly download count and
     /// prompts (interactive) or fails (CI) when the count is below
-    /// `lowDownloadThreshold`, resembles a top-100,000 npm package,
-    /// or is newer than `minimumPackageAge`. The flag is intended
-    /// for cases where you've already verified the package out-of-band.
-    /// It does not affect the OSV malicious-package check, which remains
-    /// a hard block.
+    /// `lowDownloadThreshold`. This flag also clears the two checks that
+    /// have flags of their own, `--allow-similar-name` and
+    /// `--allow-new-name`. It is intended for cases where you've already
+    /// verified the package out-of-band. It does not affect the OSV
+    /// malicious-package check, which remains a hard block.
     #[usage(long)]
     pub allow_low_downloads: bool,
+    /// Bypass the new-name confirm prompt / refusal for this invocation.
+    ///
+    /// `aube add` prompts (interactive) or fails (CI) when a name was first
+    /// published within `minimumPackageAge`. The similar-name and
+    /// `lowDownloadThreshold` checks still run. List the package in
+    /// `allowedUnpopularPackages` to keep it allowed.
+    #[usage(long)]
+    pub allow_new_name: bool,
+    /// Bypass the similar-name confirm prompt / refusal for this invocation.
+    ///
+    /// `aube add` prompts (interactive) or fails (CI) when a name closely
+    /// resembles a top-100,000 npm package. The new-name and
+    /// `lowDownloadThreshold` checks still run. List the package in
+    /// `allowedUnpopularPackages` to keep it allowed.
+    #[usage(long)]
+    pub allow_similar_name: bool,
     /// Allow every dependency's lifecycle scripts to run.
     ///
     /// Bypasses the `allowBuilds` allowlist for this invocation. Do not
@@ -499,6 +515,8 @@ pub async fn run(
         save_catalog,
         save_catalog_name,
         allow_build,
+        allow_similar_name,
+        allow_new_name,
         allow_low_downloads,
         dangerously_allow_all_builds,
         deny_build,
@@ -556,6 +574,8 @@ pub async fn run(
             packages,
             global::GlobalAddOptions {
                 allow_build,
+                allow_similar_name,
+                allow_new_name,
                 allow_low_downloads,
                 dangerously_allow_all_builds,
                 deny_build,
@@ -688,7 +708,11 @@ pub async fn run(
     supply_chain::run_cli_name_gates(
         &cwd,
         packages,
-        allow_low_downloads,
+        crate::commands::add_supply_chain::ReputationOverrides {
+            similar_name: allow_similar_name,
+            new_name: allow_new_name,
+            low_downloads: allow_low_downloads,
+        },
         crate::commands::add_supply_chain::LowDownloadPrompt::Terminal,
         &[],
     )

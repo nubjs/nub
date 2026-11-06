@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 
 pub(super) struct GlobalAddOptions {
     pub(super) allow_build: Vec<String>,
+    pub(super) allow_similar_name: bool,
+    pub(super) allow_new_name: bool,
     pub(super) allow_low_downloads: bool,
     pub(super) dangerously_allow_all_builds: bool,
     pub(super) deny_build: Vec<String>,
@@ -58,7 +60,7 @@ pub(super) async fn run_global(
     // orphan install dirs or leave duplicate hash pointers behind.
     // Use `dirs::canonicalize` (not `std::fs::canonicalize`) so the
     // result on Windows is a plain drive path, not the `\\?\C:\…`
-    // verbatim form. `link_bin_entries` later concatenates this dir
+    // verbatim form. `create_bin_link` later concatenates this dir
     // into the relative bin-shim target via `%~dp0\{rel}`; a verbatim
     // prefix in `{rel}` produces a path neither `cmd.exe` nor Node can
     // resolve and surfaces as `Cannot find module '<bin>\?\<target>'`.
@@ -137,6 +139,8 @@ async fn run_global_inner(
     use crate::commands::global;
     let GlobalAddOptions {
         allow_build,
+        allow_similar_name,
+        allow_new_name,
         allow_low_downloads,
         dangerously_allow_all_builds,
         deny_build,
@@ -234,9 +238,11 @@ async fn run_global_inner(
         deny_build,
         // The synthetic inner `run()` is the one that actually fires
         // the supply-chain gate (`add` only checks once, in the main
-        // path). Forward the outer caller's `--allow-low-downloads`
-        // through so `aube add -g --allow-low-downloads <pkg>` skips
-        // the prompt as expected.
+        // path). Forward the outer caller's overrides through so
+        // `aube add -g --allow-similar-name <pkg>` skips the prompt as
+        // expected.
+        allow_similar_name,
+        allow_new_name,
         allow_low_downloads,
         // Propagate the outer caller's flag groups through so the inner
         // run()'s `install_overrides()` calls reset the global slots to the

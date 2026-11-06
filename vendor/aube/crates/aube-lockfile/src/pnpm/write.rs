@@ -5,7 +5,6 @@ use super::dep_path::{
 use super::format::reformat_for_pnpm_parity;
 use crate::{DepType, Error, LocalSource, LockfileGraph, link_from_importer};
 use aube_manifest::PackageJson;
-use aube_util::path::normalize_lexical;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -337,7 +336,7 @@ pub(super) fn build(
                             link_from_importer(importer_path, &local.path_posix())
                         )
                     }
-                    _ => local.specifier(),
+                    _ => local.pnpm_specifier(),
                 }
             } else if let Some(member_dir) = workspace_link_dir {
                 format!("link:{}", link_from_importer(importer_path, member_dir))
@@ -466,7 +465,7 @@ pub(super) fn build(
             .is_some_and(|url| parse_dep_path(&pkg.dep_path).is_some_and(|(_, v)| v == *url));
         let canonical = match pkg.local_source.as_ref() {
             Some(LocalSource::Link(_)) | Some(LocalSource::Exec(_)) => continue,
-            Some(local) => format!("{}@{}", pkg.name, local.specifier()),
+            Some(local) => format!("{}@{}", pkg.name, local.pnpm_specifier()),
             None => {
                 if native_pnpm_aliases && let Some(real_name) = pkg.alias_of.as_deref() {
                     version_to_dep_path(real_name, &pkg.version)
@@ -514,7 +513,7 @@ pub(super) fn build(
         } else {
             Some(peer_meta)
         };
-        // Always render the path through `path_posix()` so the
+        // Always render the path through `LocalSource::pnpm_path` so the
         // lockfile uses forward slashes regardless of the host OS —
         // a lockfile written on Windows must resolve identically on
         // Unix and vice versa. `Path::display()` honors the host
@@ -544,7 +543,7 @@ pub(super) fn build(
             Some(local @ LocalSource::Directory(_)) => Some(WritableResolution {
                 integrity: None,
                 git_hosted: false,
-                directory: Some(local.path_posix()),
+                directory: Some(local.pnpm_path()),
                 tarball: None,
                 commit: None,
                 repo: None,
@@ -556,7 +555,7 @@ pub(super) fn build(
                 integrity: None,
                 git_hosted: false,
                 directory: None,
-                tarball: Some(format!("file:{}", local.path_posix())),
+                tarball: Some(format!("file:{}", local.pnpm_path())),
                 commit: None,
                 repo: None,
                 type_: None,
@@ -567,7 +566,7 @@ pub(super) fn build(
             Some(local @ LocalSource::Portal(_)) => Some(WritableResolution {
                 integrity: None,
                 git_hosted: false,
-                directory: Some(local.path_posix()),
+                directory: Some(local.pnpm_path()),
                 tarball: None,
                 commit: None,
                 repo: None,
@@ -796,16 +795,11 @@ pub(super) fn build(
                     .get(&dp)
                     .or_else(|| graph.packages.get(&peerless_dep_path(&name, &value)));
                 let rewritten = if let Some(target) = target
-                    && let Some(LocalSource::Link(path)) = &target.local_source
-                {
-                    // Relative to the lockfile directory on every parent, where pnpm
-                    // links it from. `link:` has no `packages:` entry to record it.
-                    let path = normalize_lexical(path).to_string_lossy().replace('\\', "/");
-                    format!("link:{path}")
-                } else if let Some(target) = target
                     && let Some(ref local) = target.local_source
                 {
-                    local.specifier()
+                    // A `link:` path is relative to the lockfile directory on every
+                    // parent, where pnpm links it from. It has no `packages:` entry.
+                    local.pnpm_specifier()
                 } else if native_pnpm_aliases
                     && let Some(target) = target
                     && let Some(real_name) = target.alias_of.as_deref()
@@ -832,7 +826,7 @@ pub(super) fn build(
         // parser lines them up with the packages entry above.
         let mut key = match pkg.local_source.as_ref() {
             Some(LocalSource::Link(_)) | Some(LocalSource::Exec(_)) => continue,
-            Some(local) => format!("{}@{}", pkg.name, local.specifier()),
+            Some(local) => format!("{}@{}", pkg.name, local.pnpm_specifier()),
             None => {
                 if native_pnpm_aliases && let Some(real_name) = pkg.alias_of.as_deref() {
                     format!("{real_name}@{}", dep_path_tail(dep_path, &pkg.name))
@@ -1135,6 +1129,8 @@ pub(super) struct WritablePnpmLockfile {
     #[serde(skip_serializing_if = "Option::is_none")]
     time: Option<BTreeMap<String, String>>,
     importers: BTreeMap<String, WritableImporter>,
+    /// pnpm leaves `packages:` and `snapshots:` out when they are empty.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     packages: BTreeMap<String, WritablePackageInfo>,
     /// pnpm v9 emits a top-level `ignoredOptionalDependencies:` array
     /// after `packages:` and before `snapshots:` when the root
@@ -1143,6 +1139,7 @@ pub(super) struct WritablePnpmLockfile {
     /// identical to pnpm's output.
     #[serde(skip_serializing_if = "Option::is_none")]
     ignored_optional_dependencies: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     snapshots: BTreeMap<String, WritableSnapshot>,
 }
 

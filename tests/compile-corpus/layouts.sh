@@ -9,9 +9,9 @@
 # The nested case here found a real defect: two versions of one package at
 # different depths both resolved to the same payload path, one silently replaced
 # the other, and the artifact still exited 0 printing the right answer because
-# those two versions happened to be compatible. Nothing observable from outside
-# the binary would have caught it — which is why each case inspects the payload
-# rather than only running the artifact.
+# those two versions happened to be compatible. So each case inspects the payload
+# rather than only running the artifact, and the nested case also asks WHICH copy
+# answered: with both copies shipped, `holder` went on loading the top-level one.
 #
 # Usage: NUB=/path/to/nub tests/compile-corpus/layouts.sh [workdir]
 set -uo pipefail
@@ -50,12 +50,13 @@ d="$WORK/nested"; rm -rf "$d"; mkdir -p "$d"; (
   node -e 'const f="node_modules/holder/node_modules/better-sqlite3/package.json";
            const j=require("fs").readFileSync(f,"utf8");const o=JSON.parse(j);
            o.version="9.9.9-nested";require("fs").writeFileSync(f,JSON.stringify(o))'
+  printf '\nmodule.exports.__copy = "nested";\n' >> node_modules/holder/node_modules/better-sqlite3/lib/index.js
   cat > node_modules/holder/package.json <<'EOF'
 {"name":"holder","version":"1.0.0","main":"index.js","dependencies":{"better-sqlite3":"*"}}
 EOF
   cat > node_modules/holder/index.js <<'EOF'
 const D = require("better-sqlite3");
-module.exports = () => { const db = new D(":memory:"); db.exec("create table h(x)"); return db.prepare("select count(*) c from h").get().c; };
+module.exports = () => { const db = new D(":memory:"); db.exec("create table h(x)"); return db.prepare("select count(*) c from h").get().c + ":" + D.__copy; };
 EOF
   # A STATIC import. Using createRequire here would test the dynamic-require path
   # instead, and the resulting failure would be the fixture's, not nub's.
@@ -70,7 +71,7 @@ if "$NUB" compile "$d/app.mjs" --out "$d/bin" >"$d/log" 2>&1; then
   out=$(run_detached "$d" "$d/bin")
   app=$(payload_dir "$d")
   n=$(find "$app/node_modules" -name package.json -path '*better-sqlite3*' 2>/dev/null | wc -l | tr -d ' ')
-  if [ "$out" != "ok:0:0" ]; then report nested-versions FAIL "ran '$out', want ok:0:0"
+  if [ "$out" != "ok:0:0:nested" ]; then report nested-versions FAIL "ran '$out', want ok:0:0:nested"
   elif [ "$n" != 2 ]; then report nested-versions FAIL "$n copies in payload, want 2 — one overwrote the other"
   else report nested-versions PASS "both versions at distinct paths"; fi
 else report nested-versions FAIL "compile failed"; fi
@@ -199,20 +200,22 @@ d="$WORK/esm-project"; rm -rf "$d"; mkdir -p "$d/node_modules/cjsdata"; (
   cat > package.json <<'EOF'
 {"name":"esm-app","version":"1.0.0","type":"module"}
 EOF
-  # TWO ejected packages sharing one helper. One is not enough: with a single
-  # closure the helper is inlined into that package's own chunk and no shared
-  # `__nub_closure/` directory is emitted at all, so the case passes without ever
-  # reaching the code under test. Two closures force the helper into a shared
+  # TWO ejected packages reaching one helper through DIFFERENT specifiers. One
+  # chunk is not enough: a single entry inlines the helper into that chunk and no
+  # shared `__nub_closure/` directory is emitted at all, so the case passes without
+  # ever reaching the code under test — and two closures naming the SAME specifier
+  # share one chunk. Two specifiers force the helper's common module into a shared
   # chunk, which is the file whose extension decides how Node reads it.
-  for p in cjsdata cjsdata2; do
+  for pair in cjsdata:cjshelper cjsdata2:cjshelper/two; do
+    p=${pair%%:*}; spec=${pair#*:}
     mkdir -p "node_modules/$p"
     cat > "node_modules/$p/package.json" <<EOF
 {"name":"$p","version":"1.0.0","main":"index.js","dependencies":{"cjshelper":"1.0.0"}}
 EOF
     # Ejected: builds a path at run time AND ships a non-code file.
-    cat > "node_modules/$p/index.js" <<'EOF'
+    cat > "node_modules/$p/index.js" <<EOF
 const fs = require("fs"), path = require("path");
-const help = require("cjshelper");
+const help = require("$spec");
 module.exports = () => fs.readFileSync(path.join(__dirname, "t.dat"), "utf8").trim() + ":" + help();
 EOF
     printf 'DAT-OK\n' > "node_modules/$p/t.dat"
@@ -221,7 +224,9 @@ EOF
   cat > node_modules/cjshelper/package.json <<'EOF'
 {"name":"cjshelper","version":"1.0.0","main":"index.js"}
 EOF
-  echo 'module.exports = () => "helped";' > node_modules/cjshelper/index.js
+  echo 'module.exports = () => "helped";' > node_modules/cjshelper/common.js
+  echo 'module.exports = require("./common.js");' > node_modules/cjshelper/index.js
+  echo 'module.exports = require("./common.js");' > node_modules/cjshelper/two.js
   cat > app.mjs <<'EOF'
 import read from "cjsdata";
 import read2 from "cjsdata2";

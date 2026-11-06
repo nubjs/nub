@@ -12,7 +12,10 @@
 //! order it tries the two bases:
 //!
 //! - `--external` re-bases its packages unconditionally. The package was removed
-//!   from the graph, so the app dir provably cannot answer for it.
+//!   from the graph, so the app dir provably cannot answer for it. That covers a
+//!   module shipped as files as well as the bundle: its source keeps the plain name,
+//!   where the bundle's imports carry a synthetic id, and it is the parent's place in
+//!   the payload that tells the hook to act.
 //! - `--allow-dynamic-import` picks the order from the specifier's SHAPE, because
 //!   the two shapes fail in opposite directions. A PATH-LIKE specifier tries the
 //!   artifact first: its own chunk-to-chunk `import("./chunk-abc.js")` calls are
@@ -48,6 +51,9 @@ pub struct ShimPlan<'a> {
     pub external: &'a [String],
     /// Per-importer identities emitted by compile's externalization plugin.
     pub external_imports: &'a [ExternalImport],
+    /// Package directories in the payload whose source path differs from their
+    /// payload path, longest payload path first.
+    pub shipped_sources: &'a [(String, String)],
     /// `--allow-dynamic-import`, AND at least one computed `import()` actually
     /// survived into the bundle. A build that sets the flag and has nothing to
     /// use it on ships no wrapper.
@@ -240,8 +246,25 @@ const EXTERNALS = Object.fromEntries({}.map((record) => [record.id, record]));
 
 // These are source-tree-relative paths, not paths in the extracted payload. The
 // latter lives in nub's cache and has no dependency tree to search.
+
+// A file in the payload names an external by its own name rather than a synthetic id,
+// and is looked up from the same place: the source path of the package it came from.
+// `code` stays Node's for it, because such a package is plain Node code, and the
+// guarded optional require is how it would notice an absent plugin.
+const PACKAGES = {};
+const SOURCES = {};
+const shipped = (specifier, parentURL) => {{
+  const name = PACKAGES.find((pkg) => specifier === pkg || specifier.startsWith(`${{pkg}}/`));
+  if (name === undefined) return undefined;
+  const at = decodeURIComponent(parentURL.slice(APP.length));
+  const source = SOURCES.find(([dir]) => at.startsWith(`${{dir}}/`));
+  const importer = source === undefined ? at : source[1] + at.slice(source[0].length);
+  return {{ specifier, package: name, importer, plainNode: true }};
+}};
 "#,
-            serde_json::to_string(plan.external_imports)?
+            serde_json::to_string(plan.external_imports)?,
+            serde_json::to_string(plan.external)?,
+            serde_json::to_string(plan.shipped_sources)?,
         )
     };
 
@@ -249,7 +272,7 @@ const EXTERNALS = Object.fromEntries({}.map((record) => [record.id, record]));
         String::new()
     } else {
         r#"
-    const external = EXTERNALS[specifier];
+    const external = EXTERNALS[specifier] ?? shipped(specifier, context.parentURL);
     if (external !== undefined) {
       const parentURL = external.importer === null
         ? BASE
@@ -277,7 +300,7 @@ const EXTERNALS = Object.fromEntries({}.map((record) => [record.id, record]));
             `  Install ${external.package} there, or run this from a directory that already has it.`,
           { cause },
         );
-        err.code = "ERR_NUB_EXTERNAL_NOT_FOUND";
+        err.code = external.plainNode ? cause.code : "ERR_NUB_EXTERNAL_NOT_FOUND";
         throw err;
       }
     }
@@ -356,9 +379,10 @@ const {{ registerHooks{create_require} }} = record.getBuiltin("node:module");
 const {{ pathToFileURL }} = record.getBuiltin("node:url");
 const {{ join }} = record.getBuiltin("node:path");
 
-// Only the BUNDLE's imports are re-based. Once something is resolved, what IT
-// imports in turn resolves normally from its own location — re-basing those too
-// would let a package's internal subpath import land in a different copy.
+// Only imports made from the PAYLOAD are re-based. Once something outside it is
+// resolved, what IT imports in turn resolves normally from its own location —
+// re-basing those too would let a package's internal subpath import land in a
+// different copy.
 const APP = new URL("./", import.meta.url).href;
 // A directory URL, so Node's own "Cannot find package X imported from …" names
 // the directory it searched rather than a placeholder file that does not exist.
@@ -415,6 +439,7 @@ mod tests {
         ShimPlan {
             external,
             external_imports: &[],
+            shipped_sources: &[],
             dynamic,
         }
     }
@@ -441,6 +466,7 @@ mod tests {
             &ShimPlan {
                 external: &packages,
                 external_imports: &imports,
+                shipped_sources: &[],
                 dynamic,
             },
         )
@@ -730,6 +756,7 @@ mod tests {
         let plan = ShimPlan {
             external: &packages,
             external_imports: &imports,
+            shipped_sources: &[],
             dynamic: false,
         };
         let generated = shim(&app(&["app.js"]), "app.js", &plan).unwrap();
@@ -822,6 +849,7 @@ mod tests {
         let plan = ShimPlan {
             external: &packages,
             external_imports: &imports,
+            shipped_sources: &[],
             dynamic: true,
         };
         let workers = vec![WorkerRoot {

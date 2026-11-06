@@ -2,7 +2,8 @@
 /// `node_modules` tree. Collapses the `--prod` / `--dev` /
 /// `--no-optional` CLI flags (clap enforces `--prod` and `--dev`
 /// mutually exclusive) into a single, total enum — no invalid combos.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum DepSelection {
     /// Everything: prod + dev + optional. Default.
     #[default]
@@ -43,6 +44,15 @@ impl DepSelection {
     /// Drop `Dev` dep edges.
     pub fn prod_only(self) -> bool {
         matches!(self, Self::Prod | Self::ProdNoOptional)
+    }
+
+    /// Whether an importer's direct dependency `dep` is in the selection.
+    pub fn keeps(self, dep: &aube_lockfile::DirectDep) -> bool {
+        match dep.dep_type {
+            aube_lockfile::DepType::Dev => !self.prod_only(),
+            aube_lockfile::DepType::Optional if self.skip_optional() => false,
+            _ => !self.dev_only(),
+        }
     }
 
     /// Drop `Optional` dep edges.

@@ -67,11 +67,11 @@ function readAcknowledged() {
   try {
     raw = readFileSync(path, "utf8");
   } catch {
-    return { added: {}, removed: {} };
+    return { added: {}, removed: {}, changed: {} };
   }
   try {
     const j = JSON.parse(raw);
-    return { added: j.added ?? {}, removed: j.removed ?? {} };
+    return { added: j.added ?? {}, removed: j.removed ?? {}, changed: j.changed ?? {} };
   } catch (err) {
     process.stderr.write(`check-node-flag-drift: cannot parse ${path}: ${err?.message ?? err}\n`);
     process.exit(2);
@@ -130,27 +130,37 @@ const changed = Object.keys(cur)
   .sort();
 
 // Acknowledgements are directional and exact: an excused ADD never excuses a REMOVE, no name is
-// wildcarded, and a type/env CHANGE is never excusable. Anything unlisted still fails.
-const ack = current.nodeVersion === snapshot.nodeVersion ? { added: {}, removed: {} } : readAcknowledged();
+// wildcarded, and a type/env CHANGE is excused only for the exact `from` -> `to` shapes recorded,
+// because the danger is in the shape (kBoolean -> kString turns a bare injected flag into a
+// startup error). Anything unlisted, or a change to any other shape, still fails.
+const ack =
+  current.nodeVersion === snapshot.nodeVersion ? { added: {}, removed: {}, changed: {} } : readAcknowledged();
+const changeAcked = (k) =>
+  k in ack.changed && ack.changed[k]?.from === shape(snap[k]) && ack.changed[k]?.to === shape(cur[k]);
 const okAdded = added.filter((k) => k in ack.added);
 const okRemoved = removed.filter((k) => k in ack.removed);
+const okChanged = changed.filter(changeAcked);
 const liveAdded = added.filter((k) => !(k in ack.added));
 const liveRemoved = removed.filter((k) => !(k in ack.removed));
+const liveChanged = changed.filter((k) => !changeAcked(k));
+const why = (entry) => entry?.why ?? "no justification recorded";
 const excused = [
-  ...okAdded.map((k) => `  ack + ADDED    ${k} — ${ack.added[k]?.why ?? "no justification recorded"}`),
-  ...okRemoved.map((k) => `  ack - REMOVED  ${k} — ${ack.removed[k]?.why ?? "no justification recorded"}`),
+  ...okAdded.map((k) => `  ack + ADDED    ${k} — ${why(ack.added[k])}`),
+  ...okRemoved.map((k) => `  ack - REMOVED  ${k} — ${why(ack.removed[k])}`),
+  ...okChanged.map((k) => `  ack ~ CHANGED  ${k}  [${shape(snap[k])} -> ${shape(cur[k])}] — ${why(ack.changed[k])}`),
 ];
 // An acknowledgement whose drift is gone has served its purpose; say so, or the list rots into a
 // blanket suppression nobody re-reads.
 const stale = [
   ...Object.keys(ack.added).filter((k) => !added.includes(k)),
   ...Object.keys(ack.removed).filter((k) => !removed.includes(k)),
+  ...Object.keys(ack.changed).filter((k) => !changed.includes(k)),
 ];
 const staleNote = stale.length
   ? `\nAcknowledgement(s) matching no current drift — delete from ${ACK_BASENAME}: ${stale.join(", ")}\n`
   : "";
 
-if (liveAdded.length === 0 && liveRemoved.length === 0 && changed.length === 0) {
+if (liveAdded.length === 0 && liveRemoved.length === 0 && liveChanged.length === 0) {
   process.stdout.write(
     (excused.length === 0
       ? `No flag drift. ${current.nodeVersion} matches the snapshot ` +
@@ -172,13 +182,14 @@ const lines = [
 ];
 for (const k of liveAdded) lines.push(`  + ADDED    ${k}  [${shape(cur[k])}]`);
 for (const k of liveRemoved) lines.push(`  - REMOVED  ${k}  [was ${shape(snap[k])}]`);
-for (const k of changed) lines.push(`  ~ CHANGED  ${k}  [${shape(snap[k])} -> ${shape(cur[k])}]`);
+for (const k of liveChanged) lines.push(`  ~ CHANGED  ${k}  [${shape(snap[k])} -> ${shape(cur[k])}]`);
 if (excused.length) lines.push("", `already acknowledged (not the failure):`, ...excused);
 lines.push(
   "",
   "An ADDED flag is a new experimental Node capability — vet it and, if nub should enable",
   "it, hand-add a band to crates/nub-core/src/node/feature_matrix.rs. A REMOVED flag that",
-  "the matrix still injects would crash on this Node — tighten its band.",
+  "the matrix still injects would crash on this Node — tighten its band. A CHANGED flag",
+  "matters if the matrix injects it on this Node: a new type can reject the form nub passes.",
   "",
   "Once vetted, record it in the right place. Drift against a RELEASED Node means the snapshot",
   "is behind, so move the pin: node scripts/check-node-flag-drift.mjs --snapshot " + snapshotPath + " --update",

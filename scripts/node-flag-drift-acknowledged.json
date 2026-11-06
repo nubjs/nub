@@ -1,21 +1,32 @@
 {
   "appliesWhen": "The running Node is a different build from the snapshot's nodeVersion — i.e. the scheduled nightly/RC jobs only. The per-PR snapshot-check job installs the pinned version and ignores this file entirely, exemptions included.",
-  "scope": "Only the exact flags named here are excused, and only in the listed direction. Any other added or removed flag still fails the job loudly, and a type/envVarSettings change is never excusable.",
+  "scope": "Only the exact flags named here are excused, and only in the listed direction. A `changed` entry excuses only its exact `from` -> `to` shapes. Any other added, removed or changed flag still fails the job loudly.",
   "whyNotJustRefreshTheSnapshot": "snapshot-check feeds snapshot.nodeVersion straight into setup-node, so absorbing a nightly's flag set would re-pin that deterministic gate to a nightly build. The snapshot stays pinned to a released Node; pre-release deltas live here until they ship.",
   "added": {
-    "--experimental-dtls": {
-      "firstSeen": "v27.0.0-nightly202607108fec65d877",
-      "vetted": "2026-08-01",
-      "why": "New v27-only experimental capability, unreleased. crates/nub-core/src/node/feature_matrix.rs carries no band for it, so nub never injects the flag — a capability nub does not claim needs no matrix entry.",
-      "removeWhen": "The snapshot moves to a released Node that carries the flag (v27.0.0 or later); the snapshot then records it directly and this entry is inert."
+    "--experimental-strip-private-modules": {
+      "firstSeen": "v27.0.0-nightly20261020531d28fc36",
+      "vetted": "2026-11-04",
+      "why": "New experimental flag on the dev line (nodejs/node#63869): lets Node's own type stripping run on TypeScript inside node_modules for packages marked private. Off by default, and crates/nub-core/src/node/feature_matrix.rs carries no band for it, so nub never injects it.",
+      "removeWhen": "The snapshot moves to a released Node that carries the flag; the snapshot then records it directly and this entry is inert."
     }
   },
-  "removed": {
+  "removed": {},
+  "changed": {
     "--experimental-repl-await": {
-      "firstSeen": "v27.0.0-nightly202607194f844f4380",
-      "vetted": "2026-08-01",
-      "why": "Dropped on the v27 dev line only. It still exists in every RELEASED Node — the newest, v26.5.1, diffs clean against this snapshot — so recording its absence in the snapshot would be factually wrong for every Node users run today. feature_matrix.rs never injected it, so there is no band to tighten.",
-      "removeWhen": "The snapshot moves to a released Node that has dropped the flag (v27.0.0 or later)."
+      "from": "kBoolean, env=0",
+      "to": "kNoOp, env=0",
+      "firstSeen": "v27.0.0-nightly20260816d099639740",
+      "vetted": "2026-11-04",
+      "why": "Node made the flag an accepted no-op once the REPL moved onto the inspector, where top-level await is always on (nodejs/node#64986). It still parses, and feature_matrix.rs never injects it.",
+      "removeWhen": "The snapshot moves to a released Node where the flag is a no-op."
+    },
+    "--experimental-websocket": {
+      "from": "kBoolean, env=0",
+      "to": "kNoOp, env=0",
+      "firstSeen": "v27.0.0-nightly202608242dbf9d733e",
+      "vetted": "2026-11-04",
+      "why": "Node dropped the --no-experimental-websocket opt-out and left the flag as an accepted no-op (nodejs/node#65284). feature_matrix.rs injects it only on [20.10.0, 22.0.0), never on this Node, and the no-op still parses.",
+      "removeWhen": "The snapshot moves to a released Node where the flag is a no-op."
     }
   }
 }
