@@ -382,7 +382,10 @@ function installLazyEsmPolyfills() {
   // which happens before the first `new Worker`, so it cannot wait for the lazy
   // Worker load below. See runtime/worker-blob-url.cjs.
   try {
-    __require("./worker-blob-url.cjs").installBlobUrlSupport();
+    // Native Web Workers read Blob contents themselves; capture only for our shim.
+    if (typeof globalThis.Worker === "undefined") {
+      __require("./worker-blob-url.cjs").installBlobUrlSupport();
+    }
   } catch {
     // blob: worker support is best-effort; never block startup on it.
   }
