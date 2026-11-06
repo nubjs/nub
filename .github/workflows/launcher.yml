@@ -36,7 +36,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event.label.name != 'ci' && github.event.label.name != 'ci-full' && github.event.label.name || '' }}
   cancel-in-progress: true
 
 permissions:

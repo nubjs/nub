@@ -53,7 +53,7 @@ on:
 # and 34 of the last 39 push:main runs were cancelled by the next push — so the
 # nightly is the one run guaranteed to refresh every trunk-scoped cache key.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}${{ github.event.label.name != 'ci' && github.event.label.name != 'ci-full' && github.event.label.name || '' }}
   cancel-in-progress: true
 
 permissions: {}

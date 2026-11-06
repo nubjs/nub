@@ -40,8 +40,11 @@ permissions: {}
 # schedule run. rust-cache saves in a post-step that a cancelled job never reaches,
 # and 34 of the last 39 push:main runs were cancelled by the next push — so the
 # nightly is the one run guaranteed to refresh every trunk-scoped cache key.
+# The label suffix keeps a label this workflow ignores out of the group. A `labeled` run
+# whose jobs all skip still cancels the run in progress, so tagging a pull request `bug`
+# would otherwise kill its CI.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}${{ github.event.label.name != 'ci' && github.event.label.name != 'ci-full' && github.event.label.name || '' }}
   cancel-in-progress: true
 
 env:

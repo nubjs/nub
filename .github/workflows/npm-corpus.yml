@@ -59,7 +59,7 @@ permissions: {}
 # The push and schedule triggers share refs/heads/main, so a nightly cancels an in-flight
 # push run; the gate below accepts `cancelled` for exactly that reason.
 concurrency:
-  group: npm-corpus-${{ github.ref }}
+  group: npm-corpus-${{ github.ref }}${{ github.event.label.name != 'ci-full' && github.event.label.name || '' }}
   cancel-in-progress: true
 
 jobs:

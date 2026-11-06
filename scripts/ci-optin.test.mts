@@ -92,6 +92,25 @@ void test(`${MECHANISM}: scopes itself to the two request labels without gating 
   }
 });
 
+// A `labeled` run whose jobs all skip still takes its workflow's concurrency group, so
+// with cancel-in-progress any label would cancel the run in progress. Confirmed on a live
+// pull request: adding `bug` cancelled every running workflow.
+for (const file of prTriggered.filter((f) => f !== MECHANISM)) {
+  void test(`${file}: a label it ignores cannot cancel its running jobs`, () => {
+    const lines = readFileSync(`${DIR}/${file}`, "utf8").split("\n");
+    const start = lines.findIndex((l) => /^concurrency:/.test(l));
+    if (start < 0) return;
+    const block = [];
+    for (let i = start + 1; i < lines.length && /^\s/.test(lines[i]); i++) block.push(lines[i]);
+    if (!block.some((l) => /^ {2}cancel-in-progress: true/.test(l))) return;
+    const group = block.find((l) => /^ {2}group:/.test(l)) ?? "";
+    const expected = FULL_ONLY.includes(file)
+      ? "github.event.label.name != 'ci-full' && github.event.label.name || ''"
+      : "github.event.label.name != 'ci' && github.event.label.name != 'ci-full' && github.event.label.name || ''";
+    assert.ok(group.includes(expected), `${file}: its concurrency group must end with \`\${{ ${expected} }}\``);
+  });
+}
+
 // Leaving plain `ci` moves these workflows' coverage later. It must not remove it.
 for (const file of FULL_ONLY) {
   void test(`${file}: still runs without a label, on main or the nightly`, () => {

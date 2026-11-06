@@ -41,7 +41,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: node-flag-drift-${{ github.ref }}
+  group: node-flag-drift-${{ github.ref }}${{ github.event.label.name != 'ci' && github.event.label.name != 'ci-full' && github.event.label.name || '' }}
   cancel-in-progress: true
 
 jobs:
